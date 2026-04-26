@@ -760,6 +760,8 @@ listener:
   port: $DOLT_PORT
   host: $DOLT_HOST
   max_connections: 1000
+  back_log: 50
+  max_connections_timeout_millis: 5000
   read_timeout_millis: 300000
   write_timeout_millis: 300000
 
@@ -1508,6 +1510,17 @@ op_start() {
         if [ -f "$LOG_FILE" ]; then
             log_offset=$(wc -c < "$LOG_FILE" 2>/dev/null || echo 0)
         fi
+
+        # Disable Dolt's load-average auto-GC scheduler. Dolt 1.86.0+
+        # ships a loadAvgGCScheduler whose threshold formula scales
+        # inversely with CPU count (10/CPUs), so on multi-core hosts the
+        # gate is essentially always tripped and CALL DOLT_GC() is
+        # queued but never executed; auto_gc_behavior.enable: true in
+        # config.yaml has no effect. See
+        # https://github.com/dolthub/dolt/issues/10944. Users who
+        # explicitly set DOLT_GC_SCHEDULER are respected.
+        : "${DOLT_GC_SCHEDULER=NONE}"
+        export DOLT_GC_SCHEDULER
 
         # Start dolt sql-server with config file. Close the startup lock fd in
         # the child so the flock is released when this starter exits.

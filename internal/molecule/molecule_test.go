@@ -1821,6 +1821,45 @@ func TestInstantiateRejectsResidualTitleVars(t *testing.T) {
 		}
 	})
 
+	t.Run("root title override substitutes provided vars", func(t *testing.T) {
+		result, err := Instantiate(context.Background(), store, &formula.Recipe{
+			Name: "root-override-vars",
+			Steps: []formula.RecipeStep{
+				{ID: "root-override-vars", Title: "fallback", Type: "molecule", IsRoot: true},
+			},
+			Vars: map[string]*formula.VarDef{
+				"env": {Description: "Deployment environment", Required: true},
+			},
+		}, Options{
+			Title: "Deploy {{env}}",
+			Vars:  map[string]string{"env": "prod"},
+		})
+		if err != nil {
+			t.Fatalf("should succeed with substituted title override: %v", err)
+		}
+		if result.Created != 1 {
+			t.Errorf("Created = %d, want 1", result.Created)
+		}
+	})
+
+	t.Run("root title override satisfies required title var", func(t *testing.T) {
+		result, err := Instantiate(context.Background(), store, &formula.Recipe{
+			Name: "root-required-title",
+			Steps: []formula.RecipeStep{
+				{ID: "root-required-title", Title: "{{title}}", Type: "molecule", IsRoot: true},
+			},
+			Vars: map[string]*formula.VarDef{
+				"title": {Description: "Root title", Required: true},
+			},
+		}, Options{Title: "Reviewed work"})
+		if err != nil {
+			t.Fatalf("should succeed with required title override: %v", err)
+		}
+		if result.Created != 1 {
+			t.Errorf("Created = %d, want 1", result.Created)
+		}
+	})
+
 	t.Run("graph-apply path rejects unresolved vars", func(t *testing.T) {
 		gaStore := &graphApplySpyStore{MemStore: beads.NewMemStore()}
 		prev := IsGraphApplyEnabled()
@@ -1841,6 +1880,44 @@ func TestInstantiateRejectsResidualTitleVars(t *testing.T) {
 			t.Errorf("error should mention 'feature': %v", err)
 		}
 	})
+}
+
+func TestAttachReportsAllMissingRequiredVarsAtOnce(t *testing.T) {
+	store := beads.NewMemStore()
+	parent, err := store.Create(beads.Bead{Title: "Parent", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("Create(parent): %v", err)
+	}
+
+	recipe := &formula.Recipe{
+		Name: "attach-required-vars",
+		Steps: []formula.RecipeStep{
+			{ID: "attach-required-vars", Title: "Attach required vars", Type: "task", IsRoot: true},
+			{ID: "attach-required-vars.step", Title: "Do work for {{target_id}}", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "attach-required-vars.step", DependsOnID: "attach-required-vars", Type: "parent-child"},
+		},
+		Vars: map[string]*formula.VarDef{
+			"target_id": {Description: "Bead being worked on", Required: true},
+			"workspace": {Description: "Workspace path", Required: true},
+		},
+	}
+
+	_, err = Attach(context.Background(), store, recipe, parent.ID, AttachOptions{})
+	if err == nil {
+		t.Fatal("Attach should reject missing required vars")
+	}
+	errText := err.Error()
+	if !strings.Contains(errText, `variable "target_id" is required`) {
+		t.Fatalf("Attach error = %q, want missing target_id reported", errText)
+	}
+	if !strings.Contains(errText, `variable "workspace" is required`) {
+		t.Fatalf("Attach error = %q, want missing workspace reported", errText)
+	}
+	if strings.Contains(errText, "bead title contains unresolved variable(s)") {
+		t.Fatalf("Attach error = %q, want consolidated required-var validation instead of title-only failure", errText)
+	}
 }
 
 func TestInstantiateRejectsResidualTimeoutVars(t *testing.T) {

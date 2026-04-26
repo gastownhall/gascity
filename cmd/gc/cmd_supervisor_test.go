@@ -203,6 +203,10 @@ func TestRenderSupervisorLaunchdTemplate(t *testing.T) {
 		XDGRuntimeDir: "/tmp/gc-run",
 		LaunchdLabel:  defaultSupervisorLaunchdLabel,
 		Path:          "/usr/local/bin:/usr/bin:/bin",
+		ExtraEnv: []supervisorServiceEnvVar{
+			{Name: "ANTHROPIC_API_KEY", Value: `sk-&<"'>`},
+			{Name: "OPENAI_API_KEY", Value: "sk-openai-123"},
+		},
 	}
 
 	content, err := renderSupervisorTemplate(supervisorLaunchdTemplate, data)
@@ -220,6 +224,10 @@ func TestRenderSupervisorLaunchdTemplate(t *testing.T) {
 		"XDG_RUNTIME_DIR",
 		"/tmp/gc-run",
 		"<key>PATH</key>",
+		"<key>ANTHROPIC_API_KEY</key>",
+		"<string>sk-&amp;&lt;&quot;&apos;&gt;</string>",
+		"<key>OPENAI_API_KEY</key>",
+		"<string>sk-openai-123</string>",
 	} {
 		if !strings.Contains(content, check) {
 			t.Fatalf("launchd template missing %q", check)
@@ -235,6 +243,10 @@ func TestRenderSupervisorSystemdTemplate(t *testing.T) {
 		XDGRuntimeDir: "/tmp/gc-run",
 		LaunchdLabel:  defaultSupervisorLaunchdLabel,
 		Path:          "/usr/local/bin:/usr/bin:/bin",
+		ExtraEnv: []supervisorServiceEnvVar{
+			{Name: "ANTHROPIC_API_KEY", Value: `sk-"ant"\value`},
+			{Name: "OPENAI_API_KEY", Value: "sk-openai-123"},
+		},
 	}
 
 	content, err := renderSupervisorTemplate(supervisorSystemdTemplate, data)
@@ -249,11 +261,64 @@ func TestRenderSupervisorSystemdTemplate(t *testing.T) {
 		`Environment=GC_HOME="/home/user/.gc"`,
 		`Environment=XDG_RUNTIME_DIR="/tmp/gc-run"`,
 		`Environment=PATH="/usr/local/bin:/usr/bin:/bin"`,
+		`Environment=ANTHROPIC_API_KEY="sk-\"ant\"\\value"`,
+		`Environment=OPENAI_API_KEY="sk-openai-123"`,
 	} {
 		if !strings.Contains(content, check) {
 			t.Fatalf("systemd template missing %q", check)
 		}
 	}
+}
+
+func TestBuildSupervisorServiceDataIncludesProviderEnv(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("XDG_RUNTIME_DIR", "/tmp/gc-run")
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-123")
+	t.Setenv("ANTHROPIC_BASE_URL", "https://anthropic.example.test")
+	t.Setenv("OPENAI_API_KEY", "sk-openai-123")
+	t.Setenv("GEMINI_API_KEY", "gemini-123")
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "gc-project")
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(homeDir, ".claude"))
+	t.Setenv("GC_SUPERVISOR_ENV", "CUSTOM_PROVIDER_TOKEN,IGNORED_EMPTY")
+	t.Setenv("CUSTOM_PROVIDER_TOKEN", "custom-token")
+	t.Setenv("IGNORED_EMPTY", "")
+	t.Setenv("UNRELATED_SECRET", "do-not-persist")
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+
+	got := supervisorServiceEnvMap(data.ExtraEnv)
+	for key, want := range map[string]string{
+		"ANTHROPIC_API_KEY":     "sk-ant-123",
+		"ANTHROPIC_BASE_URL":    "https://anthropic.example.test",
+		"OPENAI_API_KEY":        "sk-openai-123",
+		"GEMINI_API_KEY":        "gemini-123",
+		"GOOGLE_CLOUD_PROJECT":  "gc-project",
+		"CLAUDE_CONFIG_DIR":     filepath.Join(homeDir, ".claude"),
+		"CUSTOM_PROVIDER_TOKEN": "custom-token",
+	} {
+		if got[key] != want {
+			t.Fatalf("ExtraEnv[%s] = %q, want %q (all env: %#v)", key, got[key], want, got)
+		}
+	}
+	for _, key := range []string{"GC_HOME", "PATH", "XDG_RUNTIME_DIR", "IGNORED_EMPTY", "UNRELATED_SECRET"} {
+		if _, ok := got[key]; ok {
+			t.Fatalf("ExtraEnv should not include %s: %#v", key, got)
+		}
+	}
+}
+
+func supervisorServiceEnvMap(vars []supervisorServiceEnvVar) map[string]string {
+	m := make(map[string]string, len(vars))
+	for _, item := range vars {
+		m[item.Name] = item.Value
+	}
+	return m
 }
 
 func TestBuildSupervisorServiceDataExpandsUserManagedPath(t *testing.T) {
@@ -571,6 +636,57 @@ func TestInstallSupervisorSystemdRestartsWhenUnitChangesAndServiceActive(t *test
 	}
 	if strings.Contains(joined, "--user start gascity-supervisor.service") {
 		t.Fatalf("systemctl calls = %v, should restart instead of start when unit changes under an active service", calls)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat(%q): %v", path, err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("systemd unit mode after warm upgrade = %03o, want 600", got)
+	}
+}
+
+func TestInstallSupervisorSystemdWritesPrivateUnitFile(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("systemd path only applies on linux")
+	}
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+
+	data := &supervisorServiceData{
+		GCPath:  "/tmp/gc-new",
+		LogPath: "/tmp/gc-home/supervisor.log",
+		GCHome:  "/tmp/gc-home",
+		Path:    "/usr/local/bin:/usr/bin:/bin",
+		ExtraEnv: []supervisorServiceEnvVar{
+			{Name: "OPENAI_API_KEY", Value: "sk-openai-123"},
+		},
+	}
+
+	oldRun := supervisorSystemctlRun
+	oldActive := supervisorSystemctlActive
+	supervisorSystemctlRun = func(_ ...string) error {
+		return nil
+	}
+	supervisorSystemctlActive = func(_ string) bool {
+		return false
+	}
+	t.Cleanup(func() {
+		supervisorSystemctlRun = oldRun
+		supervisorSystemctlActive = oldActive
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := installSupervisorSystemd(data, &stdout, &stderr); code != 0 {
+		t.Fatalf("installSupervisorSystemd code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	info, err := os.Stat(supervisorSystemdServicePath())
+	if err != nil {
+		t.Fatalf("Stat(%q): %v", supervisorSystemdServicePath(), err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("systemd unit mode = %03o, want 600", got)
 	}
 }
 
@@ -1187,6 +1303,13 @@ func TestInstallSupervisorSystemdRestoresPreviousCurrentUnitWhenUpdateFails(t *t
 	if !bytes.Equal(gotContent, oldContent) {
 		t.Fatalf("restored systemd unit = %q, want original %q", gotContent, oldContent)
 	}
+	info, err := os.Stat(currentPath)
+	if err != nil {
+		t.Fatalf("Stat(%q): %v", currentPath, err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("restored systemd unit mode = %03o, want 600", got)
+	}
 	if startCalls != 2 {
 		t.Fatalf("systemctl start call count = %d, want 2 (failed install + rollback restore); calls=%v", startCalls, calls)
 	}
@@ -1350,6 +1473,45 @@ func TestInstallSupervisorLaunchdRemovesMatchingLegacyDefaultPlistForIsolatedGCH
 		if !strings.Contains(joined, want) {
 			t.Fatalf("launchctl calls = %v, want %q", calls, want)
 		}
+	}
+}
+
+func TestInstallSupervisorLaunchdWritesPrivatePlist(t *testing.T) {
+	homeDir := t.TempDir()
+	gcHome := filepath.Join(t.TempDir(), "isolated-home")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", gcHome)
+
+	data := &supervisorServiceData{
+		GCPath:       "/tmp/gc-new",
+		LogPath:      filepath.Join(gcHome, "supervisor.log"),
+		GCHome:       gcHome,
+		LaunchdLabel: supervisorLaunchdLabel(),
+		Path:         "/usr/local/bin:/usr/bin:/bin",
+		ExtraEnv: []supervisorServiceEnvVar{
+			{Name: "OPENAI_API_KEY", Value: "sk-openai-123"},
+		},
+	}
+
+	oldRun := supervisorLaunchctlRun
+	supervisorLaunchctlRun = func(_ ...string) error {
+		return nil
+	}
+	t.Cleanup(func() {
+		supervisorLaunchctlRun = oldRun
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := installSupervisorLaunchd(data, &stdout, &stderr); code != 0 {
+		t.Fatalf("installSupervisorLaunchd code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	path := supervisorLaunchdPlistPath()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat(%q): %v", path, err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("launchd plist mode = %03o, want 600", got)
 	}
 }
 
@@ -1526,6 +1688,13 @@ func TestInstallSupervisorLaunchdRestoresPreviousCurrentPlistWhenUpdateFails(t *
 	}
 	if !bytes.Equal(gotContent, oldContent) {
 		t.Fatalf("restored launchd plist = %q, want original %q", gotContent, oldContent)
+	}
+	info, err := os.Stat(currentPath)
+	if err != nil {
+		t.Fatalf("Stat(%q): %v", currentPath, err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("restored launchd plist mode = %03o, want 600", got)
 	}
 	if loadCalls != 2 {
 		t.Fatalf("launchctl load call count = %d, want 2 (failed install + rollback restore); calls=%v", loadCalls, calls)

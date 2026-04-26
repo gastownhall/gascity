@@ -6,6 +6,7 @@ package sling
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -50,8 +51,11 @@ type SlingOpts struct {
 	Nudge         bool
 	Force         bool
 	DryRun        bool
-	ScopeKind     string
-	ScopeRef      string
+	// InlineText is set only by the CLI path for ad-hoc task text. API
+	// callers always provide explicit bead or formula references.
+	InlineText bool
+	ScopeKind  string
+	ScopeRef   string
 }
 
 // AgentResolver resolves an agent name to a config.Agent.
@@ -103,6 +107,9 @@ type SlingDeps struct {
 	Runner   SlingRunner
 	Store    beads.Store
 	StoreRef string
+	// ValidationQuerier overrides Store for existence checks when a caller has
+	// already resolved the bead through a narrower view.
+	ValidationQuerier BeadQuerier
 	// SourceWorkflowStores lists every bead store that may contain workflow
 	// roots for source-workflow singleton checks and recovery.
 	SourceWorkflowStores func() ([]SourceWorkflowStore, error)
@@ -185,7 +192,10 @@ type RouteOpts struct {
 	Nudge    bool
 	Force    bool
 	DryRun   bool
-	SkipPoke bool
+	// InlineText is set only by the CLI path for ad-hoc task text. API
+	// callers always provide explicit bead or formula references.
+	InlineText bool
+	SkipPoke   bool
 }
 
 // FormulaOpts holds options for formula-based operations.
@@ -213,6 +223,7 @@ func (s *Sling) RouteBead(_ context.Context, beadID string, target config.Agent,
 		Force:         opts.Force,
 		SkipPoke:      opts.SkipPoke,
 		DryRun:        opts.DryRun,
+		InlineText:    opts.InlineText,
 	}, s.deps, s.deps.Store)
 }
 
@@ -264,6 +275,7 @@ func (s *Sling) ExpandConvoy(_ context.Context, convoyID string, target config.A
 		Force:         opts.Force,
 		SkipPoke:      opts.SkipPoke,
 		DryRun:        opts.DryRun,
+		InlineText:    opts.InlineText,
 	}, s.deps, querier)
 }
 
@@ -293,6 +305,9 @@ func SlingTracef(format string, args ...any) {
 
 // FindRigByPrefix finds a rig whose effective prefix matches (case-insensitive).
 func FindRigByPrefix(cfg *config.City, prefix string) (config.Rig, bool) {
+	if cfg == nil {
+		return config.Rig{}, false
+	}
 	lp := strings.ToLower(prefix)
 	for _, r := range cfg.Rigs {
 		if strings.ToLower(r.EffectivePrefix()) == lp {
@@ -300,6 +315,12 @@ func FindRigByPrefix(cfg *config.City, prefix string) (config.Rig, bool) {
 		}
 	}
 	return config.Rig{}, false
+}
+
+// IsHQPrefix reports whether prefix matches the city's HQ bead prefix.
+func IsHQPrefix(cfg *config.City, prefix string) bool {
+	prefix = strings.TrimSpace(prefix)
+	return cfg != nil && prefix != "" && strings.EqualFold(prefix, config.EffectiveHQPrefix(cfg))
 }
 
 // RigDirForBead resolves the rig directory for a bead ID by extracting
@@ -398,50 +419,159 @@ func RigPrefixForAgent(a config.Agent, cfg *config.City) string {
 // CheckCrossRig returns a warning message if a rig-scoped agent receives
 // a bead from a different rig. Returns "" if routing is safe.
 func CheckCrossRig(beadID string, a config.Agent, cfg *config.City) string {
-	if cfg == nil || a.Dir == "" {
+	err := CrossRigRouteError(beadID, a, cfg)
+	if err == nil {
 		return ""
+	}
+	return err.Error()
+}
+
+// CrossRigError reports that a rig-scoped agent was asked to route a bead from
+// a different rig.
+type CrossRigError struct {
+	BeadID     string
+	BeadPrefix string
+	Target     string
+	RigPrefix  string
+}
+
+// Error returns the cross-rig routing diagnostic.
+func (e *CrossRigError) Error() string {
+	return fmt.Sprintf("cross-rig routing — bead %s (prefix %q) → agent %s (rig prefix %q)", e.BeadID, e.BeadPrefix, e.Target, e.RigPrefix)
+}
+
+// CrossRigRouteError returns a typed cross-rig error when routing is unsafe.
+func CrossRigRouteError(beadID string, a config.Agent, cfg *config.City) *CrossRigError {
+	if cfg == nil || a.Dir == "" {
+		return nil
 	}
 	bp := BeadPrefix(beadID)
 	if bp == "" {
-		return ""
+		return nil
 	}
 	rp := RigPrefixForAgent(a, cfg)
 	if rp == "" {
-		return ""
+		return nil
 	}
 	if strings.EqualFold(bp, rp) {
-		return ""
+		return nil
 	}
-	return fmt.Sprintf("cross-rig routing — bead %s (prefix %q) → agent %s (rig prefix %q)", beadID, bp, a.QualifiedName(), rp)
+	return &CrossRigError{
+		BeadID:     beadID,
+		BeadPrefix: bp,
+		Target:     a.QualifiedName(),
+		RigPrefix:  rp,
+	}
 }
 
-// BeadExistsInStore checks if a bead exists in the given store.
-func BeadExistsInStore(store beads.Store, id string) bool {
-	if store == nil {
-		return false
-	}
-	_, err := store.Get(id)
-	return err == nil
+// ProbeBeadInStore checks if a bead exists in the given store and surfaces
+// non-not-found lookup errors.
+func ProbeBeadInStore(store beads.Store, id string) (bool, error) {
+	return probeBeadInQuerier(store, id)
 }
 
-// LooksLikeBeadID reports whether a string looks like a bead ID.
+func probeBeadInQuerier(querier BeadQuerier, id string) (bool, error) {
+	if querier == nil {
+		return false, fmt.Errorf("store unavailable")
+	}
+	_, err := querier.Get(id)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, beads.ErrNotFound) {
+		return false, nil
+	}
+	return false, err
+}
+
+// LooksLikeBeadID reports whether a string loosely resembles a bead ID.
+//
+// Deprecated: use BeadIDParts for the stricter routing heuristic.
 func LooksLikeBeadID(s string) bool {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return false
 	}
-	// Bead IDs are typically prefix-NNN or just NNN.
-	// They don't contain spaces, slashes, or common text punctuation.
 	if strings.ContainsAny(s, " \t\n/\\") {
 		return false
 	}
-	// If it contains a digit, it's likely a bead ID.
 	for _, c := range s {
 		if c >= '0' && c <= '9' {
 			return true
 		}
 	}
 	return false
+}
+
+// BeadIDParts trims surrounding whitespace and parses a bead-like string into
+// prefix and base suffix, ignoring any hierarchical ".child" suffix. It
+// validates the structured bead-ID shape used by the CLI's stricter routing
+// heuristic.
+func BeadIDParts(s string) (prefix, baseSuffix string, ok bool) {
+	s = strings.TrimSpace(s)
+	if s == "" || strings.ContainsAny(s, " \t\n") {
+		return "", "", false
+	}
+	i := strings.Index(s, "-")
+	if i <= 0 || i == len(s)-1 || strings.Count(s, "-") != 1 {
+		return "", "", false
+	}
+	prefix = s[:i]
+	for idx, c := range prefix {
+		if idx == 0 {
+			if ('A' > c || c > 'Z') && ('a' > c || c > 'z') {
+				return "", "", false
+			}
+			continue
+		}
+		if ('0' > c || c > '9') && ('a' > c || c > 'z') && ('A' > c || c > 'Z') {
+			return "", "", false
+		}
+	}
+	suffix := s[i+1:]
+	baseSuffix = suffix
+	if dot := strings.IndexByte(suffix, '.'); dot > 0 {
+		baseSuffix = suffix[:dot]
+	}
+	if baseSuffix == "" {
+		return "", "", false
+	}
+	for _, c := range baseSuffix {
+		if ('0' > c || c > '9') && ('a' > c || c > 'z') && ('A' > c || c > 'Z') {
+			return "", "", false
+		}
+	}
+	return prefix, baseSuffix, true
+}
+
+// MissingBeadError reports that a requested bead reference did not resolve in
+// the target store.
+type MissingBeadError struct {
+	BeadID   string
+	StoreRef string
+}
+
+// Error returns the missing-bead diagnostic.
+func (e *MissingBeadError) Error() string {
+	return fmt.Sprintf("bead %q not found in store %s", e.BeadID, e.StoreRef)
+}
+
+// BeadLookupError reports an operational failure while checking whether a bead
+// exists in the target store.
+type BeadLookupError struct {
+	BeadID   string
+	StoreRef string
+	Err      error
+}
+
+// Error returns the lookup-failure diagnostic.
+func (e *BeadLookupError) Error() string {
+	return fmt.Sprintf("getting bead %q from store %s: %v", e.BeadID, e.StoreRef, e.Err)
+}
+
+// Unwrap returns the underlying lookup failure.
+func (e *BeadLookupError) Unwrap() error {
+	return e.Err
 }
 
 func normalizeSlingQuery(query string) string {
@@ -661,9 +791,13 @@ func InstantiateSlingFormula(ctx context.Context, formulaName string, searchPath
 		opts.PriorityOverride = BeadPriorityOverride(deps.Store, sourceBeadID)
 	}
 	compileStart := time.Now()
-	recipe, err := formula.Compile(ctx, formulaName, searchPaths, opts.Vars)
+	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, formulaName, searchPaths, opts.Vars)
 	if err != nil {
 		SlingTracef("instantiate compile-error formula=%s dur=%s err=%v", formulaName, time.Since(compileStart), err)
+		return nil, err
+	}
+	if err := molecule.ValidateRecipeRuntimeVars(recipe, opts); err != nil {
+		SlingTracef("instantiate validate-error formula=%s err=%v", formulaName, err)
 		return nil, err
 	}
 	SlingTracef("instantiate compiled formula=%s dur=%s steps=%d", formulaName, time.Since(compileStart), len(recipe.Steps))

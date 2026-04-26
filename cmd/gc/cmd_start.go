@@ -812,14 +812,11 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []r
 		}
 	}
 
-	// Stage Claude skills directory (if materialized).
-	skillsDir := filepath.Join(workDir, ".claude", "skills")
-	if info, err := os.Stat(skillsDir); err == nil && info.IsDir() {
-		copyFiles = append(copyFiles, runtime.CopyEntry{
-			Src: skillsDir, RelDst: path.Join(relWorkDir, ".claude", "skills"),
-			Probed: true, ContentHash: runtime.HashPathContent(skillsDir),
-		})
-	}
+	// Intentionally do not stage workDir/.claude/skills here. Stage-2 session
+	// startup may materialize skills into that path after template resolve,
+	// which would invalidate the pre-start CopyFiles hash and force a
+	// config-drift drain loop. Skill changes are tracked via
+	// FingerprintExtra["skills:*"] entries during template resolution.
 	// cityDir-based hooks: claude (.gc/settings.json).
 	// Skip if settingsArgs already added it.
 	// These are city-root relative, so no relWorkDir prefix needed.
@@ -984,7 +981,7 @@ func passthroughEnv() map[string]string {
 	} else if home := os.Getenv("HOME"); home != "" {
 		m["XDG_STATE_HOME"] = filepath.Join(home, ".local", "state")
 	}
-	// Pass through all GC_* and ANTHROPIC_* vars. Agent credentials are
+	// Pass through GC_* vars and provider credential env. Agent credentials are
 	// included in the global baseline because the SDK cannot know which
 	// agent uses which provider (zero hardcoded roles); the trust boundary
 	// is the managed session itself.
@@ -993,7 +990,7 @@ func passthroughEnv() map[string]string {
 		if !ok || val == "" {
 			continue
 		}
-		if strings.HasPrefix(key, "GC_") || strings.HasPrefix(key, "ANTHROPIC_") {
+		if strings.HasPrefix(key, "GC_") || isProviderCredentialEnv(key) {
 			m[key] = val
 		}
 	}

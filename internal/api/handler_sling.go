@@ -65,16 +65,26 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 
 	formulaName := strings.TrimSpace(body.Formula)
 	attachedBeadID := strings.TrimSpace(body.AttachedBeadID)
+	storeBeadID := slingStoreBeadID(body)
 
 	// Build deps and construct Sling instance.
-	store := s.findSlingStore(body.Rig, agentCfg)
+	store := s.findSlingStore(body.Rig, agentCfg, storeBeadID)
+	storeRef := s.slingStoreRef(body.Rig, agentCfg, storeBeadID)
+	if store == nil && allowsForceStoreFallback(body, agentCfg) {
+		store = s.findSlingStore(body.Rig, agentCfg, "")
+		storeRef = s.slingStoreRef(body.Rig, agentCfg, "")
+	}
+	if store == nil {
+		message := fmt.Sprintf("bead prefix store %s is not registered; cannot verify bead %q", storeRef, storeBeadID)
+		return nil, http.StatusBadRequest, "missing_bead", message, nil
+	}
 	deps := sling.SlingDeps{
 		CityName: s.state.CityName(),
 		CityPath: s.state.CityPath(),
 		Cfg:      s.state.Config(),
 		SP:       s.state.SessionProvider(),
 		Store:    store,
-		StoreRef: s.slingStoreRef(body.Rig, agentCfg),
+		StoreRef: storeRef,
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
 			return s.sourceWorkflowStores(), nil
 		},
@@ -145,6 +155,19 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		if errors.As(err, &conflictErr) {
 			return nil, http.StatusConflict, "conflict", err.Error(), conflictErr
 		}
+		var lookupErr *sling.BeadLookupError
+		if errors.As(err, &lookupErr) {
+			fmt.Fprintf(apiSlingStderr(), "gc api sling: %v\n", lookupErr) //nolint:errcheck
+			return nil, http.StatusInternalServerError, "internal", "sling bead lookup failed", nil
+		}
+		var missingBeadErr *sling.MissingBeadError
+		if errors.As(err, &missingBeadErr) {
+			return nil, http.StatusBadRequest, "missing_bead", err.Error(), nil
+		}
+		var crossRigErr *sling.CrossRigError
+		if errors.As(err, &crossRigErr) {
+			return nil, http.StatusBadRequest, "cross_rig", err.Error(), nil
+		}
 		return nil, http.StatusBadRequest, "invalid", err.Error(), nil
 	}
 
@@ -170,6 +193,24 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 	return resp, http.StatusCreated, "", "", nil
 }
 
+func allowsForceStoreFallback(body slingBody, agentCfg config.Agent) bool {
+	if !body.Force || strings.TrimSpace(body.Bead) == "" {
+		return false
+	}
+	if strings.TrimSpace(body.Formula) != "" || strings.TrimSpace(body.AttachedBeadID) != "" {
+		return false
+	}
+	return agentCfg.EffectiveDefaultSlingFormula() == ""
+}
+
+func slingStoreBeadID(body slingBody) string {
+	// Formula attachment validates the attached bead, not the formula name.
+	if attachedBeadID := strings.TrimSpace(body.AttachedBeadID); attachedBeadID != "" {
+		return attachedBeadID
+	}
+	return strings.TrimSpace(body.Bead)
+}
+
 // sourceWorkflowCleanupHint renders the CLI command that clears the blocking
 // source workflow. Surfaced in the conflict response body so users can fix
 // the state without grepping docs.
@@ -183,7 +224,14 @@ func sourceWorkflowCleanupHint(sourceBeadID, storeRef string) string {
 }
 
 // findSlingStore returns the bead store for sling operations.
-func (s *Server) findSlingStore(rig string, agentCfg config.Agent) beads.Store {
+func (s *Server) findSlingStore(rig string, agentCfg config.Agent, beadID string) beads.Store {
+	// Match the CLI's bead-prefix-first resolution so existence checks consult
+	// the bead's home store before any cross-rig guard runs.
+	if resolvedRig, cityScope := s.slingStoreScopeForBead(beadID); cityScope {
+		return s.state.CityBeadStore()
+	} else if resolvedRig != "" {
+		return s.state.BeadStore(resolvedRig)
+	}
 	if rig != "" {
 		if store := s.state.BeadStore(rig); store != nil {
 			return store
@@ -198,7 +246,12 @@ func (s *Server) findSlingStore(rig string, agentCfg config.Agent) beads.Store {
 }
 
 // slingStoreRef returns a store ref string for the sling context.
-func (s *Server) slingStoreRef(rig string, agentCfg config.Agent) string {
+func (s *Server) slingStoreRef(rig string, agentCfg config.Agent, beadID string) string {
+	if resolvedRig, cityScope := s.slingStoreScopeForBead(beadID); cityScope {
+		return "city:" + s.state.CityName()
+	} else if resolvedRig != "" {
+		return "rig:" + resolvedRig
+	}
 	if rig != "" {
 		return "rig:" + rig
 	}
@@ -206,6 +259,25 @@ func (s *Server) slingStoreRef(rig string, agentCfg config.Agent) string {
 		return "rig:" + agentCfg.Dir
 	}
 	return "city:" + s.state.CityName()
+}
+
+func (s *Server) slingStoreScopeForBead(beadID string) (rigName string, cityScope bool) {
+	beadID = strings.TrimSpace(beadID)
+	if beadID == "" {
+		return "", false
+	}
+	prefix := sling.BeadPrefix(beadID)
+	if prefix == "" {
+		return "", false
+	}
+	if sling.IsHQPrefix(s.state.Config(), prefix) {
+		return "", true
+	}
+	rig, ok := sling.FindRigByPrefix(s.state.Config(), prefix)
+	if !ok {
+		return "", false
+	}
+	return rig.Name, false
 }
 
 func (s *Server) sourceWorkflowStores() []sling.SourceWorkflowStore {

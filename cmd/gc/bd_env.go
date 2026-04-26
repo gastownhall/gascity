@@ -406,7 +406,7 @@ func bdRuntimeEnvForRig(cityPath string, cfg *config.City, rigPath string) map[s
 }
 
 func bdRuntimeEnv(cityPath string) map[string]string {
-	env := citylayout.CityRuntimeEnvMap(cityPath)
+	env := cityRuntimeEnvMapForCity(cityPath)
 	env["BEADS_DIR"] = filepath.Join(cityPath, ".beads")
 	env["GC_RIG"] = ""
 	env["GC_RIG_ROOT"] = ""
@@ -423,6 +423,27 @@ func bdRuntimeEnv(cityPath string) map[string]string {
 		mirrorBeadsDoltEnv(env)
 	}
 	return env
+}
+
+func cityRuntimeEnvMapForCity(cityPath string) map[string]string {
+	env := citylayout.CityRuntimeEnvMap(cityPath)
+	if runtimeDir := trustedAmbientCityRuntimeDir(cityPath); runtimeDir != "" {
+		env["GC_CITY_RUNTIME_DIR"] = runtimeDir
+	}
+	return env
+}
+
+func trustedAmbientCityRuntimeDir(cityPath string) string {
+	runtimeDir := strings.TrimSpace(os.Getenv("GC_CITY_RUNTIME_DIR"))
+	if runtimeDir == "" {
+		return ""
+	}
+	for _, key := range []string{"GC_CITY_PATH", "GC_CITY"} {
+		if samePath(strings.TrimSpace(os.Getenv(key)), cityPath) {
+			return normalizePathForCompare(runtimeDir)
+		}
+	}
+	return ""
 }
 
 func cityRuntimeProcessEnv(cityPath string) []string {
@@ -525,9 +546,16 @@ func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 		"GC_CITY_PATH",
 		"GC_CITY_RUNTIME_DIR",
 		"GC_DOLT",
+		"GC_DOLT_CONFIG_FILE",
+		"GC_DOLT_DATA_DIR",
 		"GC_DOLT_HOST",
+		"GC_DOLT_LOCK_FILE",
+		"GC_DOLT_LOG_FILE",
+		"GC_DOLT_MANAGED_LOCAL",
 		"GC_DOLT_PASSWORD",
+		"GC_DOLT_PID_FILE",
 		"GC_DOLT_PORT",
+		"GC_DOLT_STATE_FILE",
 		"GC_DOLT_USER",
 		"GC_PACK_STATE_DIR",
 		"GC_RIG",

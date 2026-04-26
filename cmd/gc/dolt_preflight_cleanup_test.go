@@ -83,6 +83,7 @@ func TestFileOpenedByAnyProcessBoundsLsof(t *testing.T) {
 }
 
 func TestRemoveStaleManagedDoltLocksWithoutLsofUsesAvailableState(t *testing.T) {
+	skipSlowCmdGCTest(t, "runs managed-dolt preflight cleanup against filesystem locks; run make test-cmd-gc-process for full coverage")
 	dataDir := t.TempDir()
 	lockFile := filepath.Join(dataDir, "hq", ".dolt", "noms", "LOCK")
 	if err := os.MkdirAll(filepath.Dir(lockFile), 0o755); err != nil {

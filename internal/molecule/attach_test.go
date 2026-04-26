@@ -619,3 +619,64 @@ func TestAttachEpochWithIdempotency(t *testing.T) {
 		t.Fatal("second should be duplicate")
 	}
 }
+
+func TestAttachIdempotentDuplicateSkipsRuntimeVarValidation(t *testing.T) {
+	store := beads.NewMemStore()
+	root := setupWorkflow(t, store)
+	control := setupWorkflowChild(t, store, root.ID, "Control")
+
+	recipe := &formula.Recipe{
+		Name: "attempt-required-vars",
+		Steps: []formula.RecipeStep{
+			{ID: "attempt-required-vars", Title: "Attempt {{target_id}}", Type: "task", IsRoot: true},
+			{ID: "attempt-required-vars.run", Title: "Run in {{workspace}}", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "attempt-required-vars.run", DependsOnID: "attempt-required-vars", Type: "parent-child"},
+		},
+		Vars: map[string]*formula.VarDef{
+			"target_id": {Description: "Bead being worked on", Required: true},
+			"workspace": {Description: "Workspace path", Required: true},
+		},
+	}
+
+	result1, err := Attach(context.Background(), store, recipe, control.ID, AttachOptions{
+		IdempotencyKey: "retry:control:attempt-required-vars:1",
+		Vars: map[string]string{
+			"target_id": control.ID,
+			"workspace": "/tmp/repro",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Attach 1: %v", err)
+	}
+	if result1.Duplicate {
+		t.Fatal("first attach should not be duplicate")
+	}
+
+	result2, err := Attach(context.Background(), store, &formula.Recipe{
+		Name: "attempt-required-vars",
+		Steps: []formula.RecipeStep{
+			{ID: "attempt-required-vars", Title: "Attempt {{target_id}}", Type: "task", IsRoot: true},
+			{ID: "attempt-required-vars.run", Title: "Run in {{workspace}}", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "attempt-required-vars.run", DependsOnID: "attempt-required-vars", Type: "parent-child"},
+		},
+		Vars: map[string]*formula.VarDef{
+			"target_id": {Description: "Bead being worked on", Required: true},
+			"workspace": {Description: "Workspace path", Required: true},
+		},
+	}, control.ID, AttachOptions{
+		IdempotencyKey: "retry:control:attempt-required-vars:1",
+	})
+	if err != nil {
+		t.Fatalf("Duplicate attach should return existing sub-DAG before re-validating vars: %v", err)
+	}
+	if !result2.Duplicate {
+		t.Fatal("second attach should be duplicate")
+	}
+	if result2.RootID != result1.RootID {
+		t.Fatalf("duplicate attach root = %q, want %q", result2.RootID, result1.RootID)
+	}
+}

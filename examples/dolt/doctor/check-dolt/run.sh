@@ -24,6 +24,61 @@ if ! command -v lsof >/dev/null 2>&1; then
     exit 2
 fi
 
-version=$(dolt version 2>/dev/null | head -1)
+timeout_bin=""
+if command -v gtimeout >/dev/null 2>&1; then
+    timeout_bin="gtimeout"
+elif command -v timeout >/dev/null 2>&1; then
+    timeout_bin="timeout"
+fi
+
+run_bounded() {
+    limit="$1"
+    shift
+    if [ -n "$timeout_bin" ]; then
+        "$timeout_bin" --kill-after=2 "$limit" "$@"
+        return $?
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$limit" "$@" <<'PY'
+import subprocess
+import sys
+
+limit = float(sys.argv[1])
+cmd = sys.argv[2:]
+try:
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=limit)
+except subprocess.TimeoutExpired as exc:
+    sys.stdout.write(exc.stdout or "")
+    sys.stderr.write(exc.stderr or "")
+    sys.exit(124)
+sys.stdout.write(proc.stdout)
+sys.stderr.write(proc.stderr)
+sys.exit(proc.returncode)
+PY
+        return $?
+    fi
+    echo "timeout/gtimeout/python3 not found; cannot run bounded command" >&2
+    return 124
+}
+
+version_output=$(run_bounded 10 dolt version 2>/dev/null)
+version_status=$?
+if [ "$version_status" -ne 0 ]; then
+    if [ "$version_status" -eq 124 ]; then
+        echo "dolt version timed out after 10s"
+        echo "retry after fixing local Dolt startup or PATH"
+        exit 1
+    fi
+    echo "unable to run dolt version"
+    echo "install dolt: https://docs.dolthub.com/introduction/installation"
+    exit 1
+fi
+version=$(printf '%s\n' "$version_output" | head -1)
+if [ -z "$version" ]; then
+    echo "unrecognized dolt version output: $version"
+    echo "install dolt: https://docs.dolthub.com/introduction/installation"
+    exit 1
+fi
+
 echo "dolt available ($version), flock ok, lsof ok"
 exit 0

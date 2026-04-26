@@ -38,8 +38,19 @@ type ExecRunner func(ctx context.Context, command, dir string, env []string) ([]
 func shellExecRunner(ctx context.Context, command, dir string, env []string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.Dir = dir
-	cmd.Env = append(cmd.Environ(), env...)
+	cmd.Env = mergeOrderExecEnv(cmd.Environ(), env)
 	return cmd.CombinedOutput()
+}
+
+func mergeOrderExecEnv(environ, env []string) []string {
+	out := mergeRuntimeEnv(environ, nil)
+	for _, entry := range env {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok {
+			out = removeEnvKey(out, key)
+		}
+	}
+	return append(out, env...)
 }
 
 func logDispatchError(stderr io.Writer, format string, args ...any) {
@@ -308,8 +319,18 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	if a.FormulaLayer != "" {
 		searchPaths = []string{a.FormulaLayer}
 	}
-	recipe, err := formula.Compile(ctx, a.Formula, searchPaths, nil)
+	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, a.Formula, searchPaths, nil)
 	if err != nil {
+		m.rec.Record(events.Event{
+			Type:    events.OrderFailed,
+			Actor:   "controller",
+			Subject: scoped,
+			Message: err.Error(),
+		})
+		store.Update(trackingID, beads.UpdateOpts{Labels: []string{"wisp", "wisp-failed"}}) //nolint:errcheck // best-effort
+		return
+	}
+	if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{}); err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
 			Actor:   "controller",

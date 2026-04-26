@@ -476,8 +476,12 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 	if a.FormulaLayer != "" {
 		searchPaths = []string{a.FormulaLayer}
 	}
-	recipe, err := formula.Compile(context.Background(), a.Formula, searchPaths, nil)
+	recipe, err := formula.CompileWithoutRuntimeVarValidation(context.Background(), a.Formula, searchPaths, nil)
 	if err != nil {
+		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{}); err != nil {
 		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -527,7 +531,11 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 
 // doOrderRunExec runs an exec order directly via shell.
 func doOrderRunExec(a orders.Order, cityPath string, cfg *config.City, stdout, stderr io.Writer) int {
-	timeout := a.TimeoutOrDefault()
+	var maxTimeout time.Duration
+	if cfg != nil {
+		maxTimeout = cfg.Orders.MaxTimeoutDuration()
+	}
+	timeout := effectiveTimeout(a, maxTimeout)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 

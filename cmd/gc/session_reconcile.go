@@ -119,10 +119,8 @@ func evaluateWakeReasons(
 		reasons = append(reasons, WakeKeepWarm)
 	}
 
-	if !waitHold && sp != nil {
-		if attached, err := workerSessionTargetAttachedWithConfig("", nil, sp, nil, name); err == nil && attached {
-			reasons = append(reasons, WakeAttached)
-		}
+	if !waitHold && sessionAttachedForWakeReason(sp, name) {
+		reasons = append(reasons, WakeAttached)
 	}
 
 	if pendingInteractionReady(sp, name) {

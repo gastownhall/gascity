@@ -138,7 +138,7 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 				node.Type = "molecule"
 			}
 			if opts.Title != "" {
-				node.Title = opts.Title
+				node.Title = formula.Substitute(opts.Title, vars)
 			}
 			if opts.ParentID != "" && step.Metadata["gc.kind"] != "workflow" {
 				node.ParentID = opts.ParentID

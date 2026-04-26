@@ -271,14 +271,17 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		lastProviderName = v
 	}
 
-	cityRoot := filepath.Dir(cr.tomlPath)
+	cityRoot := cr.cityPath
+	if cityRoot == "" && cr.tomlPath != "" {
+		cityRoot = filepath.Dir(cr.tomlPath)
+	}
 
 	// Enforce restrictive permissions on .gc/ and its subdirectories.
 	enforceGCPermissions(cr.cityPath, cr.stderr)
 
 	// Open standalone city bead store when controllerState is unavailable.
 	// When controllerState is present, it manages the cached city store.
-	if cr.cs == nil {
+	if cr.cs == nil && cityRoot != "" {
 		if store, err := openCityStoreAt(cityRoot); err != nil {
 			fmt.Fprintf(cr.stderr, "%s: city bead store: %v (auto-suspend disabled)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 		} else {

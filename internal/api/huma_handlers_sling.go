@@ -28,6 +28,7 @@ func (s *Server) humaHandleSling(ctx context.Context, input *SlingInput) (*Sling
 		Vars:           input.Body.Vars,
 		ScopeKind:      input.Body.ScopeKind,
 		ScopeRef:       input.Body.ScopeRef,
+		Force:          input.Body.Force,
 	}
 
 	if body.Target == "" {
@@ -100,7 +101,7 @@ func (s *Server) humaHandleSling(ctx context.Context, input *SlingInput) (*Sling
 		// only a string detail, so we build the Problem Details error
 		// manually with structured extensions.
 		if conflict != nil && status == http.StatusConflict {
-			storeRef := s.slingStoreRef(body.Rig, agentCfg)
+			storeRef := s.slingStoreRef(body.Rig, agentCfg, slingStoreBeadID(body))
 			hint := sourceWorkflowCleanupHint(conflict.SourceBeadID, storeRef)
 			return nil, &huma.ErrorModel{
 				Status: http.StatusConflict,
@@ -111,6 +112,25 @@ func (s *Server) humaHandleSling(ctx context.Context, input *SlingInput) (*Sling
 					{Location: "body.blocking_workflow_ids", Value: conflict.WorkflowIDs},
 					{Location: "body.hint", Value: hint},
 				},
+			}
+		}
+		if status >= http.StatusInternalServerError {
+			return nil, huma.Error500InternalServerError(message)
+		}
+		if code == "missing_bead" {
+			return nil, &huma.ErrorModel{
+				Type:   slingMissingBeadProblemType,
+				Status: http.StatusBadRequest,
+				Title:  http.StatusText(http.StatusBadRequest),
+				Detail: message,
+			}
+		}
+		if code == "cross_rig" {
+			return nil, &huma.ErrorModel{
+				Type:   slingCrossRigProblemType,
+				Status: http.StatusBadRequest,
+				Title:  http.StatusText(http.StatusBadRequest),
+				Detail: message,
 			}
 		}
 		return nil, huma.Error400BadRequest(message)

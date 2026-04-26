@@ -758,6 +758,31 @@ func TestShutdownBeadsProvider_bd_skip(t *testing.T) {
 	}
 }
 
+func TestShutdownBeadsProviderBdSkipClearsPublishedRuntimeState(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	MaterializeBuiltinPacks(dir) //nolint:errcheck
+	if err := writeDoltState(dir, doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      33123,
+		DataDir:   filepath.Join(dir, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("writeDoltState: %v", err)
+	}
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	if err := shutdownBeadsProvider(dir); err != nil {
+		t.Fatalf("shutdownBeadsProvider() error = %v", err)
+	}
+	if _, err := os.Stat(managedDoltStatePath(dir)); !os.IsNotExist(err) {
+		t.Fatalf("published dolt runtime state still present, stat err = %v", err)
+	}
+}
+
 func TestCurrentDoltPortPrefersRuntimeState(t *testing.T) {
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
@@ -3613,6 +3638,7 @@ esac
 }
 
 func TestGcBeadsBdInitBackfillsRepoIDMigrationWhenMetadataExistsWithoutProjectID(t *testing.T) {
+	skipSlowCmdGCTest(t, "runs the materialized gc-beads-bd init script with GC_BIN helper; run make test-cmd-gc-process for full coverage")
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -5967,13 +5993,36 @@ func TestGcBeadsBdStartConcurrentWaitPassesRemainingExistingManagedBudget(t *tes
 		t.Fatal(err)
 	}
 	invocationFile := filepath.Join(t.TempDir(), "gc-invocation")
+	nowFile := filepath.Join(t.TempDir(), "gc-now-ms")
 	fakeGC := filepath.Join(binDir, "gc")
 	fakeGCScript := fmt.Sprintf(`#!/bin/sh
 set -eu
 invocation_file=%q
+now_file=%q
 subcmd="$1 $2"
 shift 2
 case "$subcmd" in
+  "dolt-state now-ms")
+    if [ -f "$now_file" ]; then
+      step=$(cat "$now_file")
+    else
+      step=0
+    fi
+    case "$step" in
+      0)
+        printf '1000000\n'
+        printf '1\n' > "$now_file"
+        ;;
+      1)
+        printf '1000000\n'
+        printf '2\n' > "$now_file"
+        ;;
+      *)
+        printf '1001000\n'
+        printf '3\n' > "$now_file"
+        ;;
+    esac
+    ;;
   "dolt-state runtime-layout")
     while [ "$#" -gt 0 ]; do
       case "$1" in
@@ -6044,7 +6093,7 @@ case "$subcmd" in
     exit 64
     ;;
 esac
-`, invocationFile, layout.PackStateDir, layout.DataDir, layout.LogFile, layout.StateFile, layout.PIDFile, layout.LockFile, layout.ConfigFile)
+`, invocationFile, nowFile, layout.PackStateDir, layout.DataDir, layout.LogFile, layout.StateFile, layout.PIDFile, layout.LockFile, layout.ConfigFile)
 	if err := os.WriteFile(fakeGC, []byte(fakeGCScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -6353,6 +6402,7 @@ func TestGcBeadsBdRecoverHelperPreservesReadOnlyWarning(t *testing.T) {
 }
 
 func TestManagedDoltConfigGoWriterMatchesShellFallbackSemantics(t *testing.T) {
+	skipSlowCmdGCTest(t, "starts the materialized gc-beads-bd shell fallback; run make test-cmd-gc-process for full coverage")
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -6456,6 +6506,8 @@ type managedDoltConfigForTest struct {
 		Port               int    `yaml:"port"`
 		Host               string `yaml:"host"`
 		MaxConnections     int    `yaml:"max_connections"`
+		BackLog            int    `yaml:"back_log"`
+		MaxConnTimeoutMS   int    `yaml:"max_connections_timeout_millis"`
 		ReadTimeoutMillis  int    `yaml:"read_timeout_millis"`
 		WriteTimeoutMillis int    `yaml:"write_timeout_millis"`
 	} `yaml:"listener"`
@@ -7761,6 +7813,7 @@ func TestNormalizeCanonicalBdScopeFilesMaterializesMissingMetadata(t *testing.T)
 }
 
 func TestGcBeadsBdStartFallsBackToShellManagedConfigWriterWhenGCBinUnset(t *testing.T) {
+	skipSlowCmdGCTest(t, "starts the materialized gc-beads-bd shell fallback; run make test-cmd-gc-process for full coverage")
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)

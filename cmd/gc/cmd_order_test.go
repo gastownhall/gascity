@@ -719,6 +719,56 @@ func TestOrderRunNoPool(t *testing.T) {
 	}
 }
 
+func TestOrderRunReportsAllMissingRequiredVarsAtOnce(t *testing.T) {
+	dir := t.TempDir()
+	formulaBody := `
+formula = "order-required-vars"
+version = 1
+
+[vars.target_id]
+description = "Bead being worked on"
+required = true
+
+[vars.workspace]
+description = "Workspace path"
+required = true
+
+[[steps]]
+id = "do-work"
+title = "Do work for {{target_id}}"
+description = "Target: {{target_id}}, workspace: {{workspace}}"
+`
+	if err := os.WriteFile(filepath.Join(dir, "order-required-vars.formula.toml"), []byte(formulaBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	aa := []orders.Order{{
+		Name:         "digest",
+		Formula:      "order-required-vars",
+		Trigger:      "cooldown",
+		Interval:     "24h",
+		FormulaLayer: dir,
+	}}
+
+	store := beads.NewMemStore()
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "digest", "", "/city", store, nil, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doOrderRun = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+
+	errText := stderr.String()
+	if !strings.Contains(errText, `variable "target_id" is required`) {
+		t.Fatalf("stderr = %q, want missing target_id reported", errText)
+	}
+	if !strings.Contains(errText, `variable "workspace" is required`) {
+		t.Fatalf("stderr = %q, want missing workspace reported", errText)
+	}
+	if strings.Contains(errText, "bead title contains unresolved variable(s)") {
+		t.Fatalf("stderr = %q, want consolidated required-var validation instead of title-only failure", errText)
+	}
+}
+
 func TestOrderRunGraphWorkflowDecoratesStepRouting(t *testing.T) {
 	cityDir := t.TempDir()
 	formulaDir := t.TempDir()
@@ -883,6 +933,9 @@ func TestOrderRunExecProjectsExternalDoltTarget(t *testing.T) {
 name = "test-city"
 prefix = "ct"
 `)
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	writeFile(t, filepath.Join(cityDir, ".beads", "config.yaml"), strings.Join([]string{
 		"issue_prefix: ct",
 		"gc.endpoint_origin: city_canonical",
@@ -941,6 +994,9 @@ func TestOrderRunExecPreservesAuthOnlyOverridesForManagedLocal(t *testing.T) {
 name = "test-city"
 prefix = "ct"
 `)
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	writeFile(t, filepath.Join(cityDir, ".beads", "config.yaml"), strings.Join([]string{
 		"issue_prefix: ct",
 		"gc.endpoint_origin: managed_city",
@@ -1014,6 +1070,164 @@ prefix = "ct"
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("exec dolt env:\ngot:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+func TestOrderRunExecMarksExternalDoltTargetForManagedLocalOnlyOrders(t *testing.T) {
+	cityDir := t.TempDir()
+	t.Setenv("GC_PACK_STATE_DIR", filepath.Join(t.TempDir(), "poison-pack-state"))
+	t.Setenv("GC_DOLT_DATA_DIR", filepath.Join(t.TempDir(), "poison-dolt-data"))
+	t.Setenv("GC_DOLT_CONFIG_FILE", filepath.Join(t.TempDir(), "poison-dolt-config.yaml"))
+	t.Setenv("GC_DOLT_STATE_FILE", filepath.Join(t.TempDir(), "poison-state.json"))
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+`)
+	writeFile(t, filepath.Join(cityDir, ".beads", "config.yaml"), strings.Join([]string{
+		"issue_prefix: ct",
+		"gc.endpoint_origin: city_canonical",
+		"gc.endpoint_status: verified",
+		"dolt.auto-start: false",
+		"dolt.host: external.example.internal",
+		"dolt.port: 4406",
+		"",
+	}, "\n"))
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	outPath := filepath.Join(cityDir, "exec-managed-marker.txt")
+	a := orders.Order{
+		Name:     "dolt-gc-nudge",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     fmt.Sprintf(`printf 'managed=<%%s>\nhost=<%%s>\nport=<%%s>\npack_state=<%%s>\ndata=<%%s>\nconfig=<%%s>\nstate=<%%s>\n' "$GC_DOLT_MANAGED_LOCAL" "$GC_DOLT_HOST" "$GC_DOLT_PORT" "$GC_PACK_STATE_DIR" "$GC_DOLT_DATA_DIR" "$GC_DOLT_CONFIG_FILE" "$GC_DOLT_STATE_FILE" > %q`, outPath),
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRunExec(a, cityDir, cfg, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRunExec = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	got := strings.TrimSpace(readFileString(t, outPath))
+	externalRoot := filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt", "external-target")
+	want := strings.Join([]string{
+		"managed=<0>",
+		"host=<external.example.internal>",
+		"port=<4406>",
+		"pack_state=<>",
+		"data=<" + externalRoot + ">",
+		"config=<" + filepath.Join(externalRoot, "dolt-config.yaml") + ">",
+		"state=<" + filepath.Join(externalRoot, "dolt-state.json") + ">",
+	}, "\n")
+	if got != want {
+		t.Fatalf("order exec env:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestOrderRunExecPropagatesManagedDoltLayout(t *testing.T) {
+	cityDir := t.TempDir()
+	dataDir := filepath.Join(t.TempDir(), "managed-dolt")
+	configFile := filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+`)
+	writeFile(t, filepath.Join(cityDir, ".beads", "config.yaml"), strings.Join([]string{
+		"issue_prefix: ct",
+		"gc.endpoint_origin: managed_city",
+		"gc.endpoint_status: verified",
+		"dolt.auto-start: false",
+		"",
+	}, "\n"))
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer func() {
+		if err := listener.Close(); err != nil {
+			t.Fatalf("Close listener: %v", err)
+		}
+	}()
+	port := fmt.Sprint(listener.Addr().(*net.TCPAddr).Port)
+	stateDir := filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(stateDir, "dolt-state.json"), fmt.Sprintf(
+		`{"running":true,"pid":%d,"port":%s,"data_dir":%q}`,
+		os.Getpid(),
+		port,
+		dataDir,
+	))
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	t.Setenv("GC_DOLT_DATA_DIR", filepath.Join(t.TempDir(), "poison-dolt-data"))
+	t.Setenv("GC_DOLT_CONFIG_FILE", filepath.Join(t.TempDir(), "poison-dolt-config.yaml"))
+	t.Setenv("GC_PACK_STATE_DIR", filepath.Join(t.TempDir(), "poison-pack-state"))
+	t.Setenv("GC_DOLT_STATE_FILE", filepath.Join(t.TempDir(), "poison-state.json"))
+	outPath := filepath.Join(cityDir, "exec-managed-layout.txt")
+	a := orders.Order{
+		Name:     "dolt-gc-nudge",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     fmt.Sprintf(`printf 'managed=<%%s>\nport=<%%s>\ndata=<%%s>\nconfig=<%%s>\n' "$GC_DOLT_MANAGED_LOCAL" "$GC_DOLT_PORT" "$GC_DOLT_DATA_DIR" "$GC_DOLT_CONFIG_FILE" > %q`, outPath),
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRunExec(a, cityDir, cfg, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRunExec = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	got := strings.TrimSpace(readFileString(t, outPath))
+	want := strings.Join([]string{
+		"managed=<1>",
+		"port=<" + port + ">",
+		"data=<" + dataDir + ">",
+		"config=<" + configFile + ">",
+	}, "\n")
+	if got != want {
+		t.Fatalf("order exec env:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestOrderRunExecHonorsOrdersMaxTimeout(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{
+		Orders: config.OrdersConfig{MaxTimeout: "50ms"},
+	}
+	a := orders.Order{
+		Name:    "slow-exec",
+		Trigger: "manual",
+		Exec:    "while :; do :; done",
+		Timeout: "5s",
+	}
+
+	var stdout, stderr bytes.Buffer
+	start := time.Now()
+	code := doOrderRunExec(a, cityDir, cfg, &stdout, &stderr)
+	elapsed := time.Since(start)
+	if code == 0 {
+		t.Fatalf("doOrderRunExec = 0, want timeout failure; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if elapsed > time.Second {
+		t.Fatalf("doOrderRunExec elapsed = %s, want capped below 1s", elapsed)
+	}
+	if !strings.Contains(stderr.String(), "exec failed") {
+		t.Fatalf("stderr = %q, want exec failure", stderr.String())
 	}
 }
 

@@ -101,6 +101,7 @@ func TestEvaluatePoolNonInteger(t *testing.T) {
 }
 
 func TestEvaluatePoolDefaultScaleCheckCountsRoutedReadyWork(t *testing.T) {
+	skipSlowCmdGCTest(t, "uses real bd and jq for default scale_check coverage; run make test-cmd-gc-process for full coverage")
 	bdPath, err := findPreferredBinary("bd", "/home/ubuntu/.local/bin/bd")
 	if err != nil {
 		t.Skip("bd not installed")
@@ -144,6 +145,7 @@ func TestEvaluatePoolDefaultScaleCheckCountsRoutedReadyWork(t *testing.T) {
 }
 
 func TestEvaluatePoolDefaultScaleCheckCountsRoutedActiveUnassignedWork(t *testing.T) {
+	skipSlowCmdGCTest(t, "uses real bd and jq for default scale_check coverage; run make test-cmd-gc-process for full coverage")
 	bdPath, err := findPreferredBinary("bd", "/home/ubuntu/.local/bin/bd")
 	if err != nil {
 		t.Skip("bd not installed")

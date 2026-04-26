@@ -624,6 +624,96 @@ metadata = { "gc.kind" = "run", "gc.scope_ref" = "body" }
 	}
 }
 
+func TestFormulaPreviewRejectsMissingRequiredVars(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+
+	state := newFakeState(t)
+	state.cfg.Daemon.FormulaV2 = true
+	formulaDir := t.TempDir()
+	state.cfg.FormulaLayers.City = []string{formulaDir}
+
+	writeTestFormula(t, formulaDir, "mol-preview", `
+description = "Preview {{issue}}"
+formula = "mol-preview"
+version = 2
+
+[vars]
+[vars.issue]
+description = "Issue bead ID"
+required = true
+
+[[steps]]
+id = "prep"
+title = "Prep {{issue}}"
+`)
+
+	body := bytes.NewBufferString(`{"scope_kind":"city","scope_ref":"test-city","target":"worker","vars":{"other":"BD-123"}}`)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodPost, cityURL(state, "/formulas/mol-preview/preview"), body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GC-Request", "true")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+	var problem struct {
+		Detail string `json:"detail"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&problem); err != nil {
+		t.Fatalf("Decode(problem): %v", err)
+	}
+	if !strings.Contains(problem.Detail, `variable "issue" is required`) {
+		t.Fatalf("detail = %q, want missing issue validation error", problem.Detail)
+	}
+}
+
+func TestFormulaPreviewRejectsMissingRequiredVarsWithoutVarsBody(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+
+	state := newFakeState(t)
+	state.cfg.Daemon.FormulaV2 = true
+	formulaDir := t.TempDir()
+	state.cfg.FormulaLayers.City = []string{formulaDir}
+
+	writeTestFormula(t, formulaDir, "mol-preview", `
+description = "Preview {{issue}}"
+formula = "mol-preview"
+version = 2
+
+[vars]
+[vars.issue]
+description = "Issue bead ID"
+required = true
+
+[[steps]]
+id = "prep"
+title = "Prep {{issue}}"
+`)
+
+	body := bytes.NewBufferString(`{"scope_kind":"city","scope_ref":"test-city","target":"worker"}`)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodPost, cityURL(state, "/formulas/mol-preview/preview"), body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GC-Request", "true")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+	var problem struct {
+		Detail string `json:"detail"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&problem); err != nil {
+		t.Fatalf("Decode(problem): %v", err)
+	}
+	if !strings.Contains(problem.Detail, `variable "issue" is required`) {
+		t.Fatalf("detail = %q, want missing issue validation error", problem.Detail)
+	}
+}
+
 // TestFormulaDetailRejectsLegacyVarQueryParams pins the §3.5.1 migration
 // behavior: undeclared var.* query parameters on the GET detail endpoint
 // are now rejected with a 4xx + migration hint pointing at POST /preview.

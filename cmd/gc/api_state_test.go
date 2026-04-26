@@ -7,8 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
@@ -131,6 +133,178 @@ func TestControllerStateUpdate(t *testing.T) {
 	}
 	if cs.Config() != cfg2 {
 		t.Error("Config() not updated")
+	}
+}
+
+func TestControllerStateCreateRigPokesReconciler(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+	}
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	cs.pokeCh = make(chan struct{}, 1)
+	cs.configDirty = &atomic.Bool{}
+
+	if err := cs.CreateRig(config.Rig{Name: "rig1", Path: t.TempDir()}); err != nil {
+		t.Fatalf("CreateRig: %v", err)
+	}
+
+	select {
+	case <-cs.pokeCh:
+	default:
+		t.Fatal("CreateRig did not poke the reconciler")
+	}
+	if !cs.configDirty.Load() {
+		t.Fatal("CreateRig did not mark config dirty")
+	}
+	if got := cs.Config(); got == nil || len(got.Rigs) != 1 || got.Rigs[0].Name != "rig1" {
+		t.Fatalf("Config() rigs = %+v, want in-memory rig snapshot to include rig1", got.Rigs)
+	}
+}
+
+func TestControllerStateMutationRollsBackWhenRefreshFails(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "broken.toml"), []byte("["), 0o644); err != nil {
+		t.Fatalf("write broken include: %v", err)
+	}
+
+	original := []byte("include = [\"broken.toml\"]\n\n[workspace]\nname = \"city1\"\n")
+	tomlPath := filepath.Join(cityDir, "city.toml")
+	if err := os.WriteFile(tomlPath, original, 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+	}
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	cs.pokeCh = make(chan struct{}, 1)
+	cs.configDirty = &atomic.Bool{}
+
+	err := cs.CreateRig(config.Rig{Name: "rig1", Path: t.TempDir()})
+	if err == nil {
+		t.Fatal("CreateRig should fail when refreshing the updated snapshot fails")
+	}
+
+	restored, readErr := os.ReadFile(tomlPath)
+	if readErr != nil {
+		t.Fatalf("read restored city.toml: %v", readErr)
+	}
+	if string(restored) != string(original) {
+		t.Fatalf("city.toml = %q, want rollback to %q", restored, original)
+	}
+	if _, err := os.Stat(filepath.Join(cityDir, ".gc", "site.toml")); !os.IsNotExist(err) {
+		t.Fatalf(".gc/site.toml stat err = %v, want file removed on rollback", err)
+	}
+
+	select {
+	case <-cs.pokeCh:
+		t.Fatal("CreateRig should not poke the reconciler after rollback")
+	default:
+	}
+	if cs.configDirty.Load() {
+		t.Fatal("CreateRig should not mark config dirty after rollback")
+	}
+	if got := cs.Config(); got == nil || len(got.Rigs) != 0 {
+		t.Fatalf("Config() rigs = %+v, want rollback to preserve in-memory config", got.Rigs)
+	}
+}
+
+func TestControllerStateMutationRollsBackAgentOverrideWhenRefreshFails(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "broken.toml"), []byte("["), 0o644); err != nil {
+		t.Fatalf("write broken include: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("[pack]\nname = \"city1\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatalf("write pack.toml: %v", err)
+	}
+	agentDir := filepath.Join(cityDir, "agents", "worker")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatalf("mkdir agent dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "prompt.template.md"), []byte("You are the worker.\n"), 0o644); err != nil {
+		t.Fatalf("write prompt template: %v", err)
+	}
+
+	original := []byte("include = [\"broken.toml\"]\n\n[workspace]\nname = \"city1\"\n")
+	tomlPath := filepath.Join(cityDir, "city.toml")
+	if err := os.WriteFile(tomlPath, original, 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	cs := newControllerState(context.Background(), &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+	}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	cs.pokeCh = make(chan struct{}, 1)
+	cs.configDirty = &atomic.Bool{}
+
+	err := cs.SuspendAgent("worker")
+	if err == nil {
+		t.Fatal("SuspendAgent should fail when refreshing the updated snapshot fails")
+	}
+
+	if _, err := os.Stat(filepath.Join(agentDir, "agent.toml")); !os.IsNotExist(err) {
+		t.Fatalf("agent.toml stat err = %v, want file removed on rollback", err)
+	}
+	restored, readErr := os.ReadFile(tomlPath)
+	if readErr != nil {
+		t.Fatalf("read restored city.toml: %v", readErr)
+	}
+	if string(restored) != string(original) {
+		t.Fatalf("city.toml = %q, want rollback to %q", restored, original)
+	}
+	if cs.configDirty.Load() {
+		t.Fatal("SuspendAgent should not mark config dirty after rollback")
+	}
+}
+
+func TestControllerStateAppliesCacheReconcileBeadEventsToStores(t *testing.T) {
+	backing := beads.NewMemStore()
+	created, err := backing.Create(beads.Bead{Title: "root"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cached := beads.NewCachingStoreForTest(backing, nil)
+	if err := cached.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	updated := created
+	updated.Status = "in_progress"
+	payload, err := json.Marshal(updated)
+	if err != nil {
+		t.Fatalf("marshal updated bead: %v", err)
+	}
+	cs := &controllerState{
+		beadStores: map[string]beads.Store{"alpha": cached},
+		pokeCh:     make(chan struct{}, 1),
+	}
+
+	cs.applyBeadEventToStores(events.Event{
+		Type:    events.BeadUpdated,
+		Actor:   "cache-reconcile",
+		Subject: created.ID,
+		Payload: payload,
+	})
+
+	items, err := cached.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != created.ID {
+		t.Fatalf("cached items = %+v, want only %s", items, created.ID)
+	}
+	if items[0].Status != "in_progress" {
+		t.Fatalf("status after cache-reconcile event = %q, want in_progress", items[0].Status)
 	}
 }
 
@@ -649,6 +823,247 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "enable order",
+			mutate: func(cs *controllerState) error {
+				return cs.EnableOrder("nightly", "rig1")
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if len(cfg.Orders.Overrides) != 1 || cfg.Orders.Overrides[0].Name != "nightly" || cfg.Orders.Overrides[0].Rig != "rig1" {
+					t.Fatalf("order overrides = %+v, want nightly/rig1", cfg.Orders.Overrides)
+				}
+				if cfg.Orders.Overrides[0].Enabled == nil || !*cfg.Orders.Overrides[0].Enabled {
+					t.Fatalf("order override enabled = %v, want true", cfg.Orders.Overrides[0].Enabled)
+				}
+			},
+		},
+		{
+			name: "disable order",
+			mutate: func(cs *controllerState) error {
+				return cs.DisableOrder("nightly", "rig1")
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if len(cfg.Orders.Overrides) != 1 || cfg.Orders.Overrides[0].Enabled == nil || *cfg.Orders.Overrides[0].Enabled {
+					t.Fatalf("order overrides = %+v, want disabled nightly override", cfg.Orders.Overrides)
+				}
+			},
+		},
+		{
+			name: "create agent",
+			mutate: func(cs *controllerState) error {
+				return cs.CreateAgent(config.Agent{Name: "helper", Dir: "rig1", Provider: "codex"})
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if len(cfg.Agents) != 2 {
+					t.Fatalf("agents = %+v, want two", cfg.Agents)
+				}
+				if cfg.Agents[1].QualifiedName() != "rig1/helper" || cfg.Agents[1].Provider != "codex" {
+					t.Fatalf("created agent = %+v, want rig1/helper with codex provider", cfg.Agents[1])
+				}
+			},
+		},
+		{
+			name: "update agent",
+			mutate: func(cs *controllerState) error {
+				return cs.UpdateAgent("rig1/worker", api.AgentUpdate{Provider: "codex", Scope: "rig", Suspended: boolPtr(true)})
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if cfg.Agents[0].Provider != "codex" || cfg.Agents[0].Scope != "rig" || !cfg.Agents[0].Suspended {
+					t.Fatalf("updated agent = %+v, want provider/scope/suspended", cfg.Agents[0])
+				}
+			},
+		},
+		{
+			name: "delete agent",
+			mutate: func(cs *controllerState) error {
+				return cs.DeleteAgent("rig1/worker")
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if len(cfg.Agents) != 0 {
+					t.Fatalf("agents = %+v, want none", cfg.Agents)
+				}
+			},
+		},
+		{
+			name: "create rig",
+			mutate: func(cs *controllerState) error {
+				return cs.CreateRig(config.Rig{Name: "rig2", Path: t.TempDir(), Prefix: "r2"})
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if len(cfg.Rigs) != 2 {
+					t.Fatalf("rigs = %+v, want two", cfg.Rigs)
+				}
+				if cfg.Rigs[1].Name != "rig2" || cfg.Rigs[1].Prefix != "r2" {
+					t.Fatalf("created rig = %+v, want rig2/r2", cfg.Rigs[1])
+				}
+			},
+		},
+		{
+			name: "update rig",
+			mutate: func(cs *controllerState) error {
+				return cs.UpdateRig("rig1", api.RigUpdate{Path: t.TempDir(), Prefix: "rg", Suspended: boolPtr(true)})
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if cfg.Rigs[0].Prefix != "rg" || !cfg.Rigs[0].Suspended {
+					t.Fatalf("updated rig = %+v, want prefix/suspended", cfg.Rigs[0])
+				}
+			},
+		},
+		{
+			name: "delete rig",
+			mutate: func(cs *controllerState) error {
+				return cs.DeleteRig("rig1")
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if len(cfg.Rigs) != 0 || len(cfg.Agents) != 0 {
+					t.Fatalf("config after DeleteRig: rigs=%+v agents=%+v, want none", cfg.Rigs, cfg.Agents)
+				}
+			},
+		},
+		{
+			name: "create provider",
+			mutate: func(cs *controllerState) error {
+				return cs.CreateProvider("codex-local", config.ProviderSpec{Command: "codex", PromptMode: "arg"})
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				spec, ok := cfg.Providers["codex-local"]
+				if !ok || spec.Command != "codex" || spec.PromptMode != "arg" {
+					t.Fatalf("providers = %+v, want codex-local provider", cfg.Providers)
+				}
+			},
+		},
+		{
+			name: "update provider",
+			initial: func(cfg *config.City) {
+				cfg.Providers = map[string]config.ProviderSpec{"codex-local": {Command: "codex"}}
+			},
+			mutate: func(cs *controllerState) error {
+				return cs.UpdateProvider("codex-local", api.ProviderUpdate{
+					DisplayName:  stringPtr("Codex Local"),
+					Command:      stringPtr("codex-wrapper"),
+					Args:         []string{"--quiet"},
+					PromptMode:   stringPtr("flag"),
+					PromptFlag:   stringPtr("--prompt"),
+					ReadyDelayMs: intPtr(25),
+					Env:          map[string]string{"GC_TEST": "1"},
+				})
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				spec := cfg.Providers["codex-local"]
+				if spec.DisplayName != "Codex Local" || spec.Command != "codex-wrapper" || spec.PromptMode != "flag" || spec.PromptFlag != "--prompt" || spec.ReadyDelayMs != 25 {
+					t.Fatalf("updated provider = %+v, want scalar updates", spec)
+				}
+				if len(spec.Args) != 1 || spec.Args[0] != "--quiet" || spec.Env["GC_TEST"] != "1" {
+					t.Fatalf("updated provider args/env = args:%+v env:%+v, want replacement args and merged env", spec.Args, spec.Env)
+				}
+			},
+		},
+		{
+			name: "delete provider",
+			initial: func(cfg *config.City) {
+				cfg.Providers = map[string]config.ProviderSpec{"codex-local": {Command: "codex"}}
+			},
+			mutate: func(cs *controllerState) error {
+				return cs.DeleteProvider("codex-local")
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if len(cfg.Providers) != 0 {
+					t.Fatalf("providers = %+v, want none", cfg.Providers)
+				}
+			},
+		},
+		{
+			name: "set agent patch",
+			mutate: func(cs *controllerState) error {
+				return cs.SetAgentPatch(config.AgentPatch{Dir: "rig1", Name: "worker", Suspended: boolPtr(true)})
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if len(cfg.Patches.Agents) != 1 || cfg.Patches.Agents[0].Suspended == nil || !*cfg.Patches.Agents[0].Suspended {
+					t.Fatalf("agent patches = %+v, want suspended patch", cfg.Patches.Agents)
+				}
+			},
+		},
+		{
+			name: "delete agent patch",
+			initial: func(cfg *config.City) {
+				cfg.Patches.Agents = []config.AgentPatch{{Dir: "rig1", Name: "worker", Suspended: boolPtr(true)}}
+			},
+			mutate: func(cs *controllerState) error {
+				return cs.DeleteAgentPatch("rig1/worker")
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if len(cfg.Patches.Agents) != 0 {
+					t.Fatalf("agent patches = %+v, want none", cfg.Patches.Agents)
+				}
+			},
+		},
+		{
+			name: "set rig patch",
+			mutate: func(cs *controllerState) error {
+				return cs.SetRigPatch(config.RigPatch{Name: "rig1", Prefix: stringPtr("rp")})
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if len(cfg.Patches.Rigs) != 1 || cfg.Patches.Rigs[0].Prefix == nil || *cfg.Patches.Rigs[0].Prefix != "rp" {
+					t.Fatalf("rig patches = %+v, want prefix patch", cfg.Patches.Rigs)
+				}
+			},
+		},
+		{
+			name: "delete rig patch",
+			initial: func(cfg *config.City) {
+				cfg.Patches.Rigs = []config.RigPatch{{Name: "rig1", Prefix: stringPtr("rp")}}
+			},
+			mutate: func(cs *controllerState) error {
+				return cs.DeleteRigPatch("rig1")
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if len(cfg.Patches.Rigs) != 0 {
+					t.Fatalf("rig patches = %+v, want none", cfg.Patches.Rigs)
+				}
+			},
+		},
+		{
+			name: "set provider patch",
+			mutate: func(cs *controllerState) error {
+				return cs.SetProviderPatch(config.ProviderPatch{Name: "codex-local", Command: stringPtr("codex-wrapper")})
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if len(cfg.Patches.Providers) != 1 || cfg.Patches.Providers[0].Command == nil || *cfg.Patches.Providers[0].Command != "codex-wrapper" {
+					t.Fatalf("provider patches = %+v, want command patch", cfg.Patches.Providers)
+				}
+			},
+		},
+		{
+			name: "delete provider patch",
+			initial: func(cfg *config.City) {
+				cfg.Patches.Providers = []config.ProviderPatch{{Name: "codex-local", Command: stringPtr("codex-wrapper")}}
+			},
+			mutate: func(cs *controllerState) error {
+				return cs.DeleteProviderPatch("codex-local")
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if len(cfg.Patches.Providers) != 0 {
+					t.Fatalf("provider patches = %+v, want none", cfg.Patches.Providers)
+				}
+			},
+		},
 	}
 
 	for _, tc := range cases {
@@ -677,6 +1092,9 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 			case <-cs.pokeCh:
 			default:
 				t.Fatal("expected controller mutation to poke reconciler")
+			}
+			if cs.configDirty == nil || !cs.configDirty.Load() {
+				t.Fatal("expected controller mutation to mark config dirty")
 			}
 
 			got, err := config.Load(fsys.OSFS{}, tomlPath)
@@ -767,8 +1185,9 @@ func newControllerStateMutationHarness(t *testing.T) (*controllerState, string) 
 	}
 
 	return &controllerState{
-		editor: configedit.NewEditor(fsys.OSFS{}, tomlPath),
-		pokeCh: make(chan struct{}, 1),
+		editor:      configedit.NewEditor(fsys.OSFS{}, tomlPath),
+		pokeCh:      make(chan struct{}, 1),
+		configDirty: &atomic.Bool{},
 	}, tomlPath
 }
 

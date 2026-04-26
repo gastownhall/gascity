@@ -573,10 +573,16 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 	cfg := providerCtx.cfg
 	poolDesired := cliPoolDesired(cfg)
 
-	// Build attachment cache from worker observations so reason evaluation
-	// does not bypass the worker boundary for attachment checks.
+	// Build attachment cache. Active sessions already have Info.Attached
+	// populated by ListFullFromBeads; for inactive sessions, query the
+	// provider directly while preserving the old "running and attached"
+	// semantics. Going through workerSessionTargetAttachedWithConfig here
+	// triggered 2-3 extra bd show subprocess lookups per session.
 	attachedSet := buildAttachmentCache(sessions, func(info session.Info) (bool, error) {
-		return workerSessionTargetAttachedWithConfig("", store, sp, cfg, info.ID)
+		if info.State == session.StateActive || sp == nil {
+			return info.Attached, nil
+		}
+		return sessionAttachedForWakeReason(sp, info.SessionName), nil
 	})
 
 	if len(sessions) == 0 {
@@ -674,6 +680,22 @@ func (p *attachmentCachingProvider) Respond(name string, response runtime.Intera
 		return ip.Respond(name, response)
 	}
 	return runtime.ErrInteractionUnsupported
+}
+
+func sessionAttachedForWakeReason(sp runtime.Provider, name string) bool {
+	if sp == nil || strings.TrimSpace(name) == "" {
+		return false
+	}
+	if !sp.IsAttached(name) {
+		return false
+	}
+	// attachmentCachingProvider caches the already-vetted attachment state for
+	// the list path, so re-checking IsRunning here would just add the extra
+	// tmux probe this shortcut was introduced to avoid.
+	if _, ok := sp.(*attachmentCachingProvider); ok {
+		return true
+	}
+	return sp.IsRunning(name)
 }
 
 func buildAttachmentCache(sessions []session.Info, observe ...func(session.Info) (bool, error)) map[string]bool {

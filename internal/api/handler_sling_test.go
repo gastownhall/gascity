@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -17,6 +19,15 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
 )
+
+type getErrStore struct {
+	beads.Store
+	err error
+}
+
+func (s *getErrStore) Get(_ string) (beads.Bead, error) {
+	return beads.Bead{}, s.err
+}
 
 // newSlingTestServer creates a test handler wrapping a Server that has a
 // fake runner injected (captures commands without executing real shell
@@ -80,6 +91,317 @@ func TestSlingWithBead(t *testing.T) {
 	}
 	if resp["mode"] != "direct" {
 		t.Fatalf("mode = %q, want %q", resp["mode"], "direct")
+	}
+}
+
+func TestSlingWithMissingBeadReturnsBadRequest(t *testing.T) {
+	h, state := newSlingTestServer(t)
+
+	body := `{"target":"myrig/worker","bead":"gc-zzzzz"}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+	var problem struct {
+		Type   string `json:"type"`
+		Detail string `json:"detail"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&problem); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if problem.Type != "urn:gascity:error:sling-missing-bead" {
+		t.Fatalf("type = %q, want missing-bead discriminator", problem.Type)
+	}
+	if !strings.Contains(problem.Detail, "not found") {
+		t.Fatalf("detail = %s, want missing bead diagnostic", problem.Detail)
+	}
+	if strings.Contains(problem.Detail, "--force") {
+		t.Fatalf("detail = %s, want transport-neutral missing bead error", problem.Detail)
+	}
+}
+
+func TestSlingAttachFormulaMissingBeadReturnsBadRequest(t *testing.T) {
+	h, state := newSlingTestServer(t)
+
+	body := `{"target":"myrig/worker","formula":"code-review","attached_bead_id":"gc-zzzzz"}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+	var problem struct {
+		Type   string `json:"type"`
+		Detail string `json:"detail"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&problem); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if problem.Type != "urn:gascity:error:sling-missing-bead" {
+		t.Fatalf("type = %q, want missing-bead discriminator", problem.Type)
+	}
+	if !strings.Contains(problem.Detail, "gc-zzzzz") || !strings.Contains(problem.Detail, "not found") {
+		t.Fatalf("detail = %s, want attached missing bead diagnostic", problem.Detail)
+	}
+}
+
+func TestSlingWithLookupFailureReturnsInternalServerError(t *testing.T) {
+	h, state := newSlingTestServer(t)
+	state.stores["myrig"] = &getErrStore{
+		Store: state.stores["myrig"],
+		err:   errors.New("backend unavailable"),
+	}
+	var stderr bytes.Buffer
+	oldStderr := apiSlingStderr
+	apiSlingStderr = func() io.Writer { return &stderr }
+	t.Cleanup(func() { apiSlingStderr = oldStderr })
+
+	body := `{"target":"myrig/worker","bead":"gc-zzzzz"}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "sling bead lookup failed") {
+		t.Fatalf("body = %s, want sanitized lookup failure", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "backend unavailable") {
+		t.Fatalf("body = %s, should not expose backend failure detail", rec.Body.String())
+	}
+	if !strings.Contains(stderr.String(), "backend unavailable") {
+		t.Fatalf("stderr = %s, want backend failure detail logged", stderr.String())
+	}
+}
+
+func TestSlingWithForceBypassesMissingBeadGuard(t *testing.T) {
+	h, state := newSlingTestServer(t)
+
+	body := `{"target":"myrig/worker","bead":"gc-zzzzz","force":true}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSlingCrossRigExistingBeadReturnsCrossRigError(t *testing.T) {
+	h, state := newSlingTestServer(t)
+	state.stores["frontend"] = beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "FE-123", Title: "frontend task", Type: "task", Status: "open"},
+	}, nil)
+	state.cfg.Rigs = append(state.cfg.Rigs, config.Rig{Name: "frontend", Path: "/tmp/frontend", Prefix: "FE"})
+
+	body := `{"rig":"myrig","target":"myrig/worker","bead":"FE-123"}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+	var problem struct {
+		Type   string `json:"type"`
+		Detail string `json:"detail"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&problem); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if problem.Type != "urn:gascity:error:sling-cross-rig" {
+		t.Fatalf("type = %q, want cross-rig discriminator", problem.Type)
+	}
+	if !strings.Contains(problem.Detail, "cross-rig") {
+		t.Fatalf("detail = %s, want cross-rig diagnostic", problem.Detail)
+	}
+	if strings.Contains(problem.Detail, "not found") {
+		t.Fatalf("detail = %s, want cross-rig error instead of missing bead", problem.Detail)
+	}
+}
+
+func TestSlingCrossRigExistingCityBeadReturnsCrossRigError(t *testing.T) {
+	h, state := newSlingTestServer(t)
+	state.cfg.Workspace.Prefix = "HQ"
+	state.cityBeadStore = beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "HQ-123", Title: "city task", Type: "task", Status: "open"},
+	}, nil)
+
+	body := `{"rig":"myrig","target":"myrig/worker","bead":"HQ-123"}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+	var problem struct {
+		Type   string `json:"type"`
+		Detail string `json:"detail"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&problem); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if problem.Type != "urn:gascity:error:sling-cross-rig" {
+		t.Fatalf("type = %q, want cross-rig discriminator", problem.Type)
+	}
+	if strings.Contains(problem.Detail, "not found") {
+		t.Fatalf("detail = %s, want city bead to be found before cross-rig guard", problem.Detail)
+	}
+}
+
+func TestSlingStoreRefReportsPrefixStoreWhenPrefixStoreMissing(t *testing.T) {
+	state := newFakeMutatorState(t)
+	state.cfg.Rigs = append(state.cfg.Rigs, config.Rig{Name: "frontend", Path: "/tmp/frontend", Prefix: "FE"})
+	srv := New(state)
+	agentCfg := config.Agent{Name: "worker", Dir: "myrig"}
+
+	store := srv.findSlingStore("myrig", agentCfg, "FE-123")
+	if store != nil {
+		t.Fatalf("findSlingStore returned %T, want nil missing prefix store", store)
+	}
+	if got := srv.slingStoreRef("myrig", agentCfg, "FE-123"); got != "rig:frontend" {
+		t.Fatalf("slingStoreRef = %q, want rig:frontend", got)
+	}
+}
+
+func TestSlingPrefixStoreMissingReturnsMissingBead(t *testing.T) {
+	h, state := newSlingTestServer(t)
+	state.cfg.Rigs = append(state.cfg.Rigs, config.Rig{Name: "frontend", Path: "/tmp/frontend", Prefix: "FE"})
+
+	body := `{"target":"myrig/worker","bead":"FE-123"}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+	var problem struct {
+		Type   string `json:"type"`
+		Detail string `json:"detail"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&problem); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if problem.Type != "urn:gascity:error:sling-missing-bead" {
+		t.Fatalf("type = %q, want missing-bead discriminator", problem.Type)
+	}
+	if !strings.Contains(problem.Detail, "rig:frontend") {
+		t.Fatalf("detail = %s, want prefix store ref", problem.Detail)
+	}
+}
+
+func TestSlingForcePrefixStoreMissingFallsBackToTargetStore(t *testing.T) {
+	h, state := newSlingTestServer(t)
+	state.cfg.Rigs = append(state.cfg.Rigs, config.Rig{Name: "frontend", Path: "/tmp/frontend", Prefix: "FE"})
+
+	body := `{"target":"myrig/worker","bead":"FE-123","force":true}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSlingAttachFormulaForcePrefixStoreMissingDoesNotFallbackToTargetStore(t *testing.T) {
+	h, state := newSlingTestServer(t)
+	state.cfg.Rigs = append(state.cfg.Rigs, config.Rig{Name: "frontend", Path: "/tmp/frontend", Prefix: "FE"})
+	state.stores["myrig"] = beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "FE-123", Title: "wrong-store task", Type: "task", Status: "open"},
+	}, nil)
+
+	body := `{"target":"myrig/worker","formula":"code-review","attached_bead_id":"FE-123","force":true}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+	var problem struct {
+		Type   string `json:"type"`
+		Detail string `json:"detail"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&problem); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if problem.Type != "urn:gascity:error:sling-missing-bead" {
+		t.Fatalf("type = %q, want missing-bead discriminator; body = %s", problem.Type, rec.Body.String())
+	}
+	if !strings.Contains(problem.Detail, "rig:frontend") {
+		t.Fatalf("detail = %s, want prefix store ref", problem.Detail)
+	}
+}
+
+func TestSlingDefaultFormulaForcePrefixStoreMissingDoesNotFallbackToTargetStore(t *testing.T) {
+	h, state := newSlingTestServer(t)
+	state.cfg.Rigs = append(state.cfg.Rigs, config.Rig{Name: "frontend", Path: "/tmp/frontend", Prefix: "FE"})
+	defaultFormula := "code-review"
+	state.cfg.Agents[0].DefaultSlingFormula = &defaultFormula
+	state.stores["myrig"] = beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "FE-123", Title: "wrong-store task", Type: "task", Status: "open"},
+	}, nil)
+
+	body := `{"target":"myrig/worker","bead":"FE-123","title":"Review this","force":true}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+	var problem struct {
+		Type   string `json:"type"`
+		Detail string `json:"detail"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&problem); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if problem.Type != "urn:gascity:error:sling-missing-bead" {
+		t.Fatalf("type = %q, want missing-bead discriminator; body = %s", problem.Type, rec.Body.String())
+	}
+	if !strings.Contains(problem.Detail, "rig:frontend") {
+		t.Fatalf("detail = %s, want prefix store ref", problem.Detail)
+	}
+}
+
+func TestSlingProblemTypesDocumentedInOpenAPI(t *testing.T) {
+	spec := readCommittedOpenAPISpec(t)
+	components, err := json.Marshal(spec["components"])
+	if err != nil {
+		t.Fatalf("marshal components: %v", err)
+	}
+	for _, want := range []string{slingMissingBeadProblemType, slingCrossRigProblemType} {
+		if !bytes.Contains(components, []byte(want)) {
+			t.Fatalf("OpenAPI components missing problem type %q", want)
+		}
+	}
+}
+
+func TestDocumentProblemTypesIsIdempotent(t *testing.T) {
+	state := newFakeMutatorState(t)
+	sm := NewSupervisorMux(&stateCityResolver{state: state}, nil, false, "test", time.Now())
+	oapi := sm.humaAPI.OpenAPI()
+
+	documentProblemTypes(oapi)
+	documentProblemTypes(oapi)
+
+	errorModel := oapi.Components.Schemas.Map()["ErrorModel"]
+	if errorModel == nil || errorModel.Properties == nil {
+		t.Fatal("ErrorModel schema missing")
+	}
+	typeSchema := errorModel.Properties["type"]
+	if typeSchema == nil {
+		t.Fatal("ErrorModel.type schema missing")
+	}
+	counts := map[string]int{}
+	for _, example := range typeSchema.Examples {
+		if s, ok := example.(string); ok {
+			counts[s]++
+		}
+	}
+	for _, problemType := range documentedProblemTypes {
+		if counts[problemType] != 1 {
+			t.Fatalf("example count for %q = %d, want 1", problemType, counts[problemType])
+		}
 	}
 }
 

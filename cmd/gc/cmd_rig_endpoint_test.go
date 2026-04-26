@@ -1066,7 +1066,7 @@ func TestCanonicalValidationPasswordUsesCredentialsFileOverride(t *testing.T) {
 }
 
 func TestVerifyExternalDoltEndpointRejectsEmptyExternalDoltDatabase(t *testing.T) {
-	skipSlowCmdGCTest(t, "requires a managed external dolt endpoint; run without -short or via integration packages")
+	skipSlowCmdGCTest(t, "requires a managed external dolt endpoint; run make test-cmd-gc-process for full coverage")
 	doltPath, err := exec.LookPath("dolt")
 	if err != nil {
 		t.Skip("dolt not installed")
@@ -1167,7 +1167,7 @@ func TestVerifyExternalDoltEndpointRejectsEmptyExternalDoltDatabase(t *testing.T
 }
 
 func TestVerifyExternalDoltEndpointRejectsProjectIdentityMismatch(t *testing.T) {
-	skipSlowCmdGCTest(t, "requires a managed external dolt endpoint; run without -short or via integration packages")
+	skipSlowCmdGCTest(t, "requires a managed external dolt endpoint; run make test-cmd-gc-process for full coverage")
 	doltPath, err := exec.LookPath("dolt")
 	if err != nil {
 		t.Skip("dolt not installed")
@@ -1271,7 +1271,7 @@ func TestVerifyExternalDoltEndpointRejectsProjectIdentityMismatch(t *testing.T) 
 }
 
 func TestVerifyExternalDoltEndpointRejectsMissingLocalProjectID(t *testing.T) {
-	skipSlowCmdGCTest(t, "requires a managed external dolt endpoint; run without -short or via integration packages")
+	skipSlowCmdGCTest(t, "requires a managed external dolt endpoint; run make test-cmd-gc-process for full coverage")
 	doltPath, err := exec.LookPath("dolt")
 	if err != nil {
 		t.Skip("dolt not installed")

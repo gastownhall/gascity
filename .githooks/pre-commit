@@ -2,9 +2,10 @@
 set -euo pipefail
 
 staged_go_files=$(git diff --cached --name-only --diff-filter=ACM -- '*.go' || true)
-staged_web_src=$(git diff --cached --name-only --diff-filter=ACM -- 'cmd/gc/dashboard/web/src/' 'cmd/gc/dashboard/web/index.html' 'cmd/gc/dashboard/web/public/' 'cmd/gc/dashboard/web/package.json' 'cmd/gc/dashboard/web/vite.config.ts' 'cmd/gc/dashboard/web/tsconfig.json' || true)
+staged_web_src=$(git diff --cached --name-only --diff-filter=ACM -- 'cmd/gc/dashboard/web/src/' 'cmd/gc/dashboard/web/index.html' 'cmd/gc/dashboard/web/public/' 'cmd/gc/dashboard/web/package.json' 'cmd/gc/dashboard/web/openapi-ts.config.ts' 'cmd/gc/dashboard/web/vite.config.ts' 'cmd/gc/dashboard/web/tsconfig.json' || true)
+staged_docs=$(git diff --cached --name-only --diff-filter=ACM -- '*.md' 'docs/**' 'engdocs/**' 'plans/**' 'specs/**' 'AGENTS.md' 'CONTRIBUTING.md' 'README.md' 'TESTING.md' || true)
 
-if [ -z "$staged_go_files" ] && [ -z "$staged_web_src" ]; then
+if [ -z "$staged_go_files" ] && [ -z "$staged_web_src" ] && [ -z "$staged_docs" ]; then
   exit 0
 fi
 
@@ -22,11 +23,22 @@ if [ -n "$staged_go_files" ]; then
   go run ./cmd/genspec
   git add internal/api/openapi.json docs/schema/openapi.json docs/schema/openapi.txt
 
+  go generate ./internal/api/genclient
+  git add internal/api/genclient/client_gen.go
+
   # Regenerate the config/schema docs derived from Go structs and
   # stage every generated artifact so commits do not leave the
   # worktree dirty.
   go run ./cmd/genschema
   git add docs/schema/city-schema.json docs/schema/city-schema.txt docs/reference/config.md docs/reference/cli.md
+
+  make lint
+  make vet
+  make test
+fi
+
+if [ -n "$staged_docs" ]; then
+  make check-docs
 fi
 
 # Dashboard SPA rebuild: whenever the spec changes OR the SPA source
@@ -36,20 +48,12 @@ fi
 if command -v npm >/dev/null 2>&1; then
   spec_changed=$(git diff --cached --name-only --diff-filter=ACM -- 'internal/api/openapi.json' || true)
   if [ -n "$spec_changed" ] || [ -n "$staged_web_src" ]; then
-    (
-      cd cmd/gc/dashboard/web
-      if [ ! -d node_modules ]; then
-        npm install --silent
-      fi
-      npm run gen --silent
-      # Typecheck BEFORE build: vite's build transpiles TS to JS and
-      # silently ignores type errors. Without this step, SPA type
-      # regressions against the regenerated spec (e.g. a query param
-      # tightening from string to boolean) ship unnoticed. `tsc
-      # --noEmit` fails fast and stops the commit.
-      npm run typecheck --silent
-      npm run build --silent
-    )
+    # Typecheck BEFORE build: vite's build transpiles TS to JS and
+    # silently ignores type errors. The Makefile target also runs the
+    # Vitest suite, builds dist/, and smoke-runs the compiled SPA via
+    # Vite preview so a bundle that builds but won't serve is caught
+    # before CI.
+    make dashboard-check dashboard-smoke
     git add cmd/gc/dashboard/web/dist
   fi
 else

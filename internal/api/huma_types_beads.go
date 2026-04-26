@@ -53,13 +53,15 @@ type BeadCreateInput struct {
 	CityScope
 	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
 	Body           struct {
-		Rig         string   `json:"rig,omitempty" doc:"Rig name."`
-		Title       string   `json:"title" doc:"Bead title." minLength:"1"`
-		Type        string   `json:"type,omitempty" doc:"Bead type."`
-		Priority    *int     `json:"priority,omitempty" doc:"Bead priority."`
-		Assignee    string   `json:"assignee,omitempty" doc:"Assigned agent."`
-		Description string   `json:"description,omitempty" doc:"Bead description."`
-		Labels      []string `json:"labels,omitempty" doc:"Bead labels."`
+		Rig         string            `json:"rig,omitempty" doc:"Rig name."`
+		Title       string            `json:"title" doc:"Bead title." minLength:"1"`
+		Type        string            `json:"type,omitempty" doc:"Bead type."`
+		Priority    *int              `json:"priority,omitempty" doc:"Bead priority."`
+		Assignee    string            `json:"assignee,omitempty" doc:"Assigned agent."`
+		Description string            `json:"description,omitempty" doc:"Bead description."`
+		Labels      []string          `json:"labels,omitempty" doc:"Bead labels."`
+		Parent      string            `json:"parent,omitempty" doc:"Parent bead ID."`
+		Metadata    map[string]string `json:"metadata,omitempty" doc:"Metadata key-value pairs to set at create time."`
 	}
 }
 
@@ -92,7 +94,9 @@ type beadUpdateBody struct {
 	Description  *string           `json:"description,omitempty" doc:"Bead description."`
 	Labels       []string          `json:"labels,omitempty" doc:"Bead labels."`
 	RemoveLabels []string          `json:"remove_labels,omitempty" doc:"Labels to remove."`
+	Parent       *string           `json:"parent,omitempty" nullable:"true" doc:"Parent bead ID. Use null or an empty string to clear."`
 	Metadata     map[string]string `json:"metadata,omitempty" doc:"Metadata key-value pairs to set."`
+	parentSet    bool
 }
 
 // UnmarshalJSON rejects `"priority": null` explicitly. Standard Go JSON decoding
@@ -116,6 +120,13 @@ func (b *beadUpdateBody) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*b = beadUpdateBody(a)
+	if p, ok := raw["parent"]; ok {
+		b.parentSet = true
+		if bytes.Equal(bytes.TrimSpace(p), []byte("null")) {
+			parent := ""
+			b.Parent = &parent
+		}
+	}
 	return nil
 }
 

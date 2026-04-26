@@ -48,9 +48,12 @@ Each is provably composable from the primitives.
 
 ### Infrastructure
 
-12. **[Controller](./controller.md)** — the main loop: config watch,
+12. **[API Control Plane](./api-control-plane.md)** — CLI/API projections,
+    typed HTTP + SSE wire contract, generated clients, and event payload
+    registry
+13. **[Controller](./controller.md)** — the main loop: config watch,
     reconciliation tick, order dispatch
-13. **[Orders](./orders.md)** — trigger-conditioned formula/exec
+14. **[Orders](./orders.md)** — trigger-conditioned formula/exec
     dispatch, rig-scoped labels
 
 ### End-to-End Traces
@@ -58,9 +61,9 @@ Each is provably composable from the primitives.
 These trace a concrete operation through all layers. The most effective
 way to understand how the system fits together.
 
-14. **[Life of a Bead](./life-of-a-bead.md)** — create → hook → claim →
+15. **[Life of a Bead](./life-of-a-bead.md)** — create → hook → claim →
     execute → close
-15. **[Life of a Molecule](./life-of-a-molecule.md)** — formula parse →
+16. **[Life of a Molecule](./life-of-a-molecule.md)** — formula parse →
     dispatch → molecule create → step execution → completion
 
 ## Document Types

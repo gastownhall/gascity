@@ -5,6 +5,7 @@
 package dolt_test
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -531,6 +532,129 @@ exit 0
 	}
 }
 
+func TestHealthScriptPortableTimestampFallbacksRemainNumeric(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "bsd percent n literal", raw: "1776740122N"},
+		{name: "empty percent n output", raw: ""},
+	}
+
+	root := repoRoot(t)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			fakeBin := t.TempDir()
+
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("Listen: %v", err)
+			}
+			t.Cleanup(func() { _ = listener.Close() })
+			port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+
+			writeExecutable(t, filepath.Join(fakeBin, "lsof"), `#!/bin/sh
+exit 0
+`)
+			writeExecutable(t, filepath.Join(fakeBin, "nc"), `#!/bin/sh
+host="$2"
+probe_port="$3"
+if [ "$1" = "-z" ] && [ "$host" = "127.0.0.1" ] && [ "$probe_port" = "`+port+`" ]; then
+  exit 0
+fi
+exit 1
+`)
+			writeExecutable(t, filepath.Join(fakeBin, "dolt"), `#!/bin/sh
+exit 0
+`)
+			writeExecutable(t, filepath.Join(fakeBin, "date"), `#!/bin/sh
+case "$1" in
+  +%s%N)
+    printf '%s' "${FAKE_DATE_PERCENT_SN_RAW-}"
+    exit 0
+    ;;
+  +%s)
+    counter_file="${FAKE_DATE_SECONDS_COUNTER_FILE:?}"
+    if [ -f "$counter_file" ]; then
+      count=$(cat "$counter_file")
+    else
+      count=0
+    fi
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$counter_file"
+    case "$count" in
+      1) printf '%s\n' "${FAKE_DATE_SECONDS_FIRST-1776740122}" ;;
+      *) printf '%s\n' "${FAKE_DATE_SECONDS_SECOND-1776740123}" ;;
+    esac
+    exit 0
+    ;;
+  -u)
+    printf '%s\n' '2026-04-23T00:00:00Z'
+    exit 0
+    ;;
+esac
+exec /bin/date "$@"
+`)
+
+			counterFile := filepath.Join(t.TempDir(), "date-counter")
+			cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+			cmd.Env = append(filteredEnv(
+				"FAKE_DATE_PERCENT_SN_RAW",
+				"FAKE_DATE_SECONDS_COUNTER_FILE",
+				"FAKE_DATE_SECONDS_FIRST",
+				"FAKE_DATE_SECONDS_SECOND",
+				"GC_CITY_PATH",
+				"GC_PACK_DIR",
+				"GC_DOLT_HOST",
+				"GC_DOLT_PORT",
+				"GC_DOLT_USER",
+				"GC_DOLT_PASSWORD",
+				"GC_HEALTH_SKIP_ZOMBIE_SCAN",
+				"PATH",
+			),
+				"FAKE_DATE_PERCENT_SN_RAW="+tt.raw,
+				"FAKE_DATE_SECONDS_COUNTER_FILE="+counterFile,
+				"FAKE_DATE_SECONDS_FIRST=1776740122",
+				"FAKE_DATE_SECONDS_SECOND=1776740123",
+				"GC_CITY_PATH="+cityPath,
+				"GC_PACK_DIR="+root,
+				"GC_DOLT_HOST=127.0.0.1",
+				"GC_DOLT_PORT="+port,
+				"GC_DOLT_USER=root",
+				"GC_DOLT_PASSWORD=",
+				"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+				"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+			)
+
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("health.sh --json failed: %v\n%s", err, out)
+			}
+
+			var report struct {
+				Server struct {
+					Running   bool `json:"running"`
+					Reachable bool `json:"reachable"`
+					LatencyMS int  `json:"latency_ms"`
+				} `json:"server"`
+			}
+			if err := json.Unmarshal(out, &report); err != nil {
+				t.Fatalf("health.sh --json returned invalid JSON: %v\n%s", err, out)
+			}
+			if !report.Server.Running {
+				t.Fatalf("server.running = false, want true\n%s", out)
+			}
+			if !report.Server.Reachable {
+				t.Fatalf("server.reachable = false, want true\n%s", out)
+			}
+			if report.Server.LatencyMS != 1000 {
+				t.Fatalf("server.latency_ms = %d, want 1000 to prove seconds fallback ran\n%s", report.Server.LatencyMS, out)
+			}
+		})
+	}
+}
+
 func writeManagedRuntimeStateForScript(t *testing.T, cityPath string, port int) {
 	t.Helper()
 	writeManagedRuntimeStateForScriptWithPID(t, cityPath, port, os.Getpid())
@@ -542,11 +666,15 @@ func writeManagedRuntimeStateForScriptWithPID(t *testing.T, cityPath string, por
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	dataDir := filepath.Join(cityPath, ".beads", "dolt")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	payload := []byte(fmt.Sprintf(
 		`{"running":true,"pid":%d,"port":%d,"data_dir":%q,"started_at":"2026-04-20T00:00:00Z"}`,
 		pid,
 		port,
-		filepath.Join(cityPath, ".beads", "dolt"),
+		dataDir,
 	))
 	if err := os.WriteFile(filepath.Join(stateDir, "dolt-state.json"), payload, 0o644); err != nil {
 		t.Fatal(err)

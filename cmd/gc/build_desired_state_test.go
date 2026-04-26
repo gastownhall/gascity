@@ -536,6 +536,7 @@ func TestBuildDesiredState_RoutedQueueDoesNotCreateOneSessionPerBead(t *testing.
 }
 
 func TestBuildDesiredState_MinZeroDefaultScaleCheckRoutedWorkCreatesPoolSession(t *testing.T) {
+	skipSlowCmdGCTest(t, "uses real bd subprocesses for routed-work scale checks; run make test-cmd-gc-process for full coverage")
 	bdPath, err := findPreferredBinary("bd", "/home/ubuntu/.local/bin/bd")
 	if err != nil {
 		t.Skip("bd not installed")
@@ -2207,6 +2208,7 @@ func TestBuildDesiredState_PoolCheckUsesExplicitRigPassword(t *testing.T) {
 }
 
 func TestBuildDesiredState_PoolCheckUsesManagedCityDoltPortWhenRigHasNoOverride(t *testing.T) {
+	skipSlowCmdGCTest(t, "uses a live managed-dolt port probe for scale_check coverage; run make test-cmd-gc-process for full coverage")
 	t.Setenv("GC_BEADS", "bd")
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "myrig")

@@ -73,6 +73,7 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 		cmd.Stderr = logFile
 		cmd.Stdin = nil
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Env = doltServerEnv(os.Environ())
 		if err := cmd.Start(); err != nil {
 			_ = logFile.Close()
 			return report, fmt.Errorf("start dolt sql-server: %w", err)
@@ -207,4 +208,21 @@ func terminateManagedDoltPID(pid int) error {
 	_ = process.Signal(syscall.SIGKILL)
 	time.Sleep(250 * time.Millisecond)
 	return nil
+}
+
+// doltServerEnv augments the parent environment with overrides we need
+// applied to every managed dolt sql-server we launch. Currently it
+// disables Dolt's load-average auto-GC scheduler, which on multi-core
+// hosts (>~16 CPUs) silently prevents auto-GC from ever running. See
+// https://github.com/dolthub/dolt/issues/10944. Users who explicitly
+// set DOLT_GC_SCHEDULER are respected.
+func doltServerEnv(parent []string) []string {
+	const key = "DOLT_GC_SCHEDULER"
+	prefix := key + "="
+	for _, kv := range parent {
+		if strings.HasPrefix(kv, prefix) {
+			return parent
+		}
+	}
+	return append(append([]string(nil), parent...), prefix+"NONE")
 }

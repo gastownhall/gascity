@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Managed Dolt config now emits listener backlog and connection-timeout keys.
+  Existing managed cities may see a `dolt-config` doctor warning until
+  `gc dolt restart` or the next managed server start regenerates
+  `dolt-config.yaml`.
+
 ## [1.0.0] - 2026-04-21
 
 First stable release. Between `v0.15.1` and `v1.0.0` the project received 610

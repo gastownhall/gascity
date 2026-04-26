@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // beadHooks maps bd hook filenames to the Gas City event types they emit.
@@ -53,7 +55,7 @@ title=$(echo "$DATA" | grep -o '"title":"[^"]*"' | head -1 | cut -d'"' -f4)
 
 // installBeadHooks writes bd hook scripts into dir/.beads/hooks/ so that
 // bd mutations (create, close, update) emit events to the Gas City event
-// log. Idempotent — overwrites existing hooks. Returns nil on success.
+// log. Idempotent — leaves matching hooks in place. Returns nil on success.
 func installBeadHooks(dir string) error {
 	hooksDir := filepath.Join(dir, ".beads", "hooks")
 	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
@@ -66,7 +68,7 @@ func installBeadHooks(dir string) error {
 		if filename == "on_close" {
 			content = closeHookScript()
 		}
-		if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		if err := fsys.WriteFileIfContentOrModeChangedAtomic(fsys.OSFS{}, path, []byte(content), 0o755); err != nil {
 			return fmt.Errorf("writing hook %s: %w", filename, err)
 		}
 	}

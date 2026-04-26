@@ -23,8 +23,8 @@ becomes one configuration among many.
 has `*_test.go` files next to the code. Integration tests that need real
 infrastructure (tmux, filesystem) go in `test/` with build tags.
 
-**The spec is a reference, not a blueprint.** When the DX conflicts
-with the spec, DX wins. We update the spec to match.
+**The architecture docs are a reference, not a blueprint.** When the DX
+conflicts with the docs, DX wins. We update the docs to match.
 
 ## Architecture
 
@@ -89,9 +89,10 @@ Capabilities activate progressively via config presence.
 | 7     | Orders             |
 | 8     | Full orchestration      |
 
-## Architecture specs
+## Architecture docs
 
-Read **`specs/architecture.md`** before touching:
+Read **`engdocs/architecture/api-control-plane.md`** and
+**`engdocs/contributors/huma-usage.md`** before touching:
 
 - `internal/api/` (HTTP + SSE API layer)
 - `cmd/gc/` (CLI) — especially anything that constructs events,
@@ -104,7 +105,7 @@ Read **`specs/architecture.md`** before touching:
   `cmd/gc/dashboard/web/src/generated/`
 
 Load-bearing invariants enforced by CI (violating any fails the
-build; full rationale is in the spec):
+build; full rationale is in the architecture docs):
 
 - **Object model at the center.** `internal/{beads, mail, convoy,
   formula, agent, events, session, sling, ...}` is the canonical
@@ -113,9 +114,9 @@ build; full rationale is in the spec):
   domain logic.
 - **Typed wire.** No hand-written JSON on any HTTP or SSE wire
   path; no `map[string]any` or `json.RawMessage` on wire types
-  (two documented exceptions live in the spec). All endpoints are
-  Huma-registered; the OpenAPI spec is generated, never
-  hand-written (`TestOpenAPISpecInSync`).
+  (documented exceptions live in the API control-plane doc). All
+  endpoints are Huma-registered; the OpenAPI spec is generated,
+  never hand-written (`TestOpenAPISpecInSync`).
 - **Typed events.** Every constant in `events.KnownEventTypes`
   must have a registered payload via
   `events.RegisterPayload(constant, sample)`. Use
@@ -131,7 +132,7 @@ These decisions are final. Do not revisit them.
   `city.toml`, `.gc/` runtime state, and `rigs/` infrastructure.
 - **Fresh binary, not a Gas Town fork.** We build `gc` from scratch.
 - **TOML for config.** `pack.toml` (definition) and `city.toml` (deployment) are the config files.
-- **Tutorials win over spec.** When the spec disagrees, we update the spec.
+- **Tutorials win over architecture docs.** When the docs disagree, we update the docs.
 - **No premature abstraction.** Don't build interfaces until two
   implementations exist.
 - **Mayor is overseer, not worker.** The mayor plans; coding agents work.
@@ -218,6 +219,14 @@ Before considering any task complete:
 
 - `go test ./...` passes
 - `go vet ./...` clean
+- `.githooks/pre-commit` is active locally (`git config core.hooksPath`
+  prints `.githooks`) and has run for the staged change
+- `make dashboard-check` passes for any change touching `internal/api/`,
+  `internal/api/openapi.json`, `docs/schema/openapi.*`,
+  `cmd/gc/dashboard/`, or generated dashboard types
+- The dashboard starts locally and serves the app for dashboard/API-schema
+  changes; use `npm run preview -- --host 127.0.0.1 --port <port>` from
+  `cmd/gc/dashboard/web` after `make dashboard-check`
 - Every exported function has a doc comment
 - No premature abstractions
 - Tests cover happy path AND edge cases

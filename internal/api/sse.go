@@ -2,13 +2,9 @@ package api
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"io"
-	"mime/multipart"
 	"net/http"
-	"net/url"
 	"reflect"
 	"slices"
 	"strings"
@@ -67,6 +63,20 @@ type StringIDSender func(msg StringIDMessage) error
 // to StreamFunc.
 type StringIDStreamFunc[I any] func(hctx huma.Context, input *I, send StringIDSender)
 
+type sseEventContract struct {
+	runtimeSample any
+	schemaSample  any
+}
+
+func (c sseEventContract) sseRuntimeSample() any { return c.runtimeSample }
+
+func (c sseEventContract) sseSchemaSample() any { return c.schemaSample }
+
+type sseSchemaOverride interface {
+	sseRuntimeSample() any
+	sseSchemaSample() any
+}
+
 // registerSSE registers an SSE operation like huma's sse.Register but with a
 // precheck hook that can return an HTTP error before the response is committed.
 //
@@ -87,6 +97,7 @@ func registerSSE[I any](
 	precheck func(context.Context, *I) error,
 	stream StreamFunc[I],
 ) {
+	normalizeSSEResponseHeaders(&op)
 	typeToEvent := attachSSEResponseSchema(api, &op, eventTypeMap, huma.TypeInteger, "The event ID.")
 
 	huma.Register(api, op, func(ctx context.Context, input *I) (*huma.StreamResponse, error) {
@@ -97,22 +108,14 @@ func registerSSE[I any](
 		}
 		return &huma.StreamResponse{
 			Body: func(hctx huma.Context) {
-				// Derive a cancelable context from the request context and
-				// plumb it into hctx so stream loops checking hctx.Context()
-				// exit promptly on send-error.
-				reqCtx, cancel := context.WithCancel(hctx.Context())
-				defer cancel()
-				hctx = hctxWithCtx(reqCtx, hctx)
-
 				bw, encoder, flusher := beginSSEStream(hctx)
-				rawSend := func(msg sse.Message) error {
+				send := func(msg sse.Message) error {
 					idLine := ""
 					if msg.ID > 0 {
 						idLine = fmt.Sprintf("id: %d\n", msg.ID)
 					}
 					return writeSSEFrame(bw, encoder, flusher, typeToEvent, idLine, msg.Data)
 				}
-				send := cancelOnSendError(rawSend, cancel)
 				stream(hctx, input, send)
 			},
 		}, nil
@@ -151,6 +154,7 @@ func registerSSEStringID[I any](
 	precheck func(context.Context, *I) error,
 	stream StringIDStreamFunc[I],
 ) {
+	normalizeSSEResponseHeaders(&op)
 	typeToEvent := attachSSEResponseSchema(api, &op, eventTypeMap, huma.TypeString, "The event ID (composite cursor).")
 
 	huma.Register(api, op, func(ctx context.Context, input *I) (*huma.StreamResponse, error) {
@@ -161,88 +165,73 @@ func registerSSEStringID[I any](
 		}
 		return &huma.StreamResponse{
 			Body: func(hctx huma.Context) {
-				reqCtx, cancel := context.WithCancel(hctx.Context())
-				defer cancel()
-				hctx = hctxWithCtx(reqCtx, hctx)
-
 				bw, encoder, flusher := beginSSEStream(hctx)
-				rawSend := func(msg StringIDMessage) error {
+				send := func(msg StringIDMessage) error {
 					idLine := ""
 					if msg.ID != "" {
 						idLine = fmt.Sprintf("id: %s\n", msg.ID)
 					}
 					return writeSSEFrame(bw, encoder, flusher, typeToEvent, idLine, msg.Data)
 				}
-				send := stringIDCancelOnSendError(rawSend, cancel)
 				stream(hctx, input, send)
 			},
 		}, nil
 	})
 }
 
-// stringIDCancelOnSendError is the StringIDSender analog of cancelOnSendError.
-// On first send failure it cancels the supplied context; subsequent calls
-// short-circuit to the cached error.
-func stringIDCancelOnSendError(send StringIDSender, cancel context.CancelFunc) StringIDSender {
-	var firstErr error
-	return func(msg StringIDMessage) error {
-		if firstErr != nil {
-			return firstErr
+// sseStatusHeaders is the canonical catalog of custom response headers
+// that stream handlers may emit via hctx.SetHeader. Each entry's key is
+// the wire header name; the value is its human-readable description.
+// Callers reference headers by name (see sseResponseHeaders) — the
+// description travels with the name so a reader at the registration
+// site sees only the list of headers the operation emits and each
+// description has a single source of truth.
+var sseStatusHeaders = map[string]string{
+	"GC-Agent-Status":   "Agent runtime status at the time streaming began. Emitted as \"stopped\" when the agent is not running (the stream then serves replayed transcript from the session log).",
+	"GC-Session-State":  "Session state at the time streaming began (e.g. active, closed).",
+	"GC-Session-Status": "Runtime status at the time streaming began. Emitted as \"stopped\" when the session's underlying process is not running.",
+}
+
+// sseResponseHeaders builds a Responses map declaring the named
+// custom headers on the 200 response. Names must appear in
+// sseStatusHeaders — the function panics if a caller references an
+// undeclared header, so drift between SetHeader call sites and the
+// declared contract surfaces at startup rather than in a stale spec.
+func sseResponseHeaders(names ...string) map[string]*huma.Response {
+	headers := make(map[string]*huma.Param, len(names))
+	for _, name := range names {
+		desc, ok := sseStatusHeaders[name]
+		if !ok {
+			panic("api: sse response header not in sseStatusHeaders catalog: " + name)
 		}
-		if err := send(msg); err != nil {
-			firstErr = err
-			cancel()
-			return err
+		headers[name] = &huma.Param{
+			Description: desc,
+			Schema: &huma.Schema{
+				Type:        "string",
+				Description: desc,
+			},
 		}
-		return nil
+	}
+	return map[string]*huma.Response{
+		"200": {Headers: headers},
 	}
 }
 
-// hctxWithCtx returns a huma.Context that reports the supplied ctx from
-// its Context() method. Used by SSE registration to plumb a cancelable
-// context into stream loops that poll hctx.Context().Done().
-//
-// Note: we cannot embed huma.Context because the interface is literally
-// named Context, which collides with our override method Context(). The
-// override instead delegates every method explicitly.
-func hctxWithCtx(ctx context.Context, hctx huma.Context) huma.Context {
-	return &hctxOverride{inner: hctx, ctx: ctx}
+// normalizeSSEResponseHeaders ensures op.Responses["200"] exists with a
+// non-nil Headers map so the pre-declared stream-status headers (set by
+// the caller on the Operation literal) are preserved after
+// attachSSEResponseSchema rebuilds Content.
+func normalizeSSEResponseHeaders(op *huma.Operation) {
+	if op.Responses == nil {
+		op.Responses = map[string]*huma.Response{}
+	}
+	if op.Responses["200"] == nil {
+		op.Responses["200"] = &huma.Response{}
+	}
+	if op.Responses["200"].Headers == nil {
+		op.Responses["200"].Headers = map[string]*huma.Param{}
+	}
 }
-
-// hctxOverride wraps a huma.Context to replace only the Context() method.
-// All other methods delegate to the inner huma.Context.
-type hctxOverride struct {
-	inner huma.Context
-	ctx   context.Context
-}
-
-func (h *hctxOverride) Operation() *huma.Operation { return h.inner.Operation() }
-func (h *hctxOverride) Context() context.Context   { return h.ctx }
-func (h *hctxOverride) Method() string             { return h.inner.Method() }
-func (h *hctxOverride) Host() string               { return h.inner.Host() }
-func (h *hctxOverride) RemoteAddr() string         { return h.inner.RemoteAddr() }
-func (h *hctxOverride) URL() url.URL               { return h.inner.URL() }
-func (h *hctxOverride) Param(name string) string   { return h.inner.Param(name) }
-func (h *hctxOverride) Query(name string) string   { return h.inner.Query(name) }
-func (h *hctxOverride) Header(name string) string  { return h.inner.Header(name) }
-func (h *hctxOverride) EachHeader(cb func(name, value string)) {
-	h.inner.EachHeader(cb)
-}
-func (h *hctxOverride) BodyReader() io.Reader { return h.inner.BodyReader() }
-func (h *hctxOverride) GetMultipartForm() (*multipart.Form, error) {
-	return h.inner.GetMultipartForm()
-}
-
-func (h *hctxOverride) SetReadDeadline(deadline time.Time) error {
-	return h.inner.SetReadDeadline(deadline)
-}
-func (h *hctxOverride) SetStatus(code int)              { h.inner.SetStatus(code) }
-func (h *hctxOverride) Status() int                     { return h.inner.Status() }
-func (h *hctxOverride) AppendHeader(name, value string) { h.inner.AppendHeader(name, value) }
-func (h *hctxOverride) SetHeader(name, value string)    { h.inner.SetHeader(name, value) }
-func (h *hctxOverride) BodyWriter() io.Writer           { return h.inner.BodyWriter() }
-func (h *hctxOverride) TLS() *tls.ConnectionState       { return h.inner.TLS() }
-func (h *hctxOverride) Version() huma.ProtoVersion      { return h.inner.Version() }
 
 // attachSSEResponseSchema populates op.Responses with the text/event-stream
 // media block for the given event map. Returns the reverse-lookup map
@@ -268,8 +257,10 @@ func attachSSEResponseSchema(
 	typeToEvent := make(map[reflect.Type]string, len(eventTypeMap))
 	dataSchemas := make([]*huma.Schema, 0, len(eventTypeMap))
 	for k, v := range eventTypeMap {
-		vt := derefType(reflect.TypeOf(v))
-		typeToEvent[vt] = k
+		runtimeSample, schemaSample := sseContractSamples(v)
+		runtimeType := derefType(reflect.TypeOf(runtimeSample))
+		schemaType := derefType(reflect.TypeOf(schemaSample))
+		typeToEvent[runtimeType] = k
 		required := []string{"data"}
 		if k != "" && k != "message" {
 			required = append(required, "event")
@@ -289,7 +280,7 @@ func attachSSEResponseSchema(
 						"const": k,
 					},
 				},
-				"data": api.OpenAPI().Components.Schemas.Schema(vt, true, k),
+				"data": api.OpenAPI().Components.Schemas.Schema(schemaType, true, k),
 				"retry": {
 					Type:        huma.TypeInteger,
 					Description: "The retry time in milliseconds.",
@@ -318,6 +309,13 @@ func attachSSEResponseSchema(
 	}
 
 	return typeToEvent
+}
+
+func sseContractSamples(v any) (any, any) {
+	if override, ok := v.(sseSchemaOverride); ok {
+		return override.sseRuntimeSample(), override.sseSchemaSample()
+	}
+	return v, v
 }
 
 // beginSSEStream sets the standard SSE headers on the huma response and

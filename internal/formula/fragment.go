@@ -43,6 +43,9 @@ func CompileExpansionFragment(_ context.Context, name string, searchPaths []stri
 	}
 
 	expansionVars := ApplyDefaults(resolved, vars)
+	if err := validateCompileTimeVars(resolved, vars); err != nil {
+		return nil, fmt.Errorf("expansion %q: %w", name, err)
+	}
 	if err := MaterializeExpansionForTarget(resolved, target, expansionVars); err != nil {
 		return nil, err
 	}
@@ -52,7 +55,7 @@ func CompileExpansionFragment(_ context.Context, name string, searchPaths []stri
 	}
 	resolved.Steps = filteredSteps
 
-	controlFlowSteps, err := ApplyControlFlow(resolved.Steps, resolved.Compose)
+	controlFlowSteps, err := ApplyControlFlowWithVars(resolved.Steps, resolved.Compose, expansionVars)
 	if err != nil {
 		return nil, fmt.Errorf("applying control flow to expansion %q: %w", name, err)
 	}

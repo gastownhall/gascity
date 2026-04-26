@@ -15,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doltversion"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -467,8 +468,8 @@ var initRunVersion = func(binary string) (string, error) {
 
 // Minimum versions for beads-provider binaries.
 const (
-	doltMinVersion = "1.86.1" // sql-server features used by gc-beads-bd
-	bdMinVersion   = "1.0.0"  // BdStore shell-out interface
+	doltMinVersion = doltversion.ManagedMin // sql-server features used by gc-beads-bd
+	bdMinVersion   = "1.0.0"                // BdStore shell-out interface
 )
 
 // checkHardDependencies verifies that all required binaries are available
@@ -482,6 +483,7 @@ func checkHardDependencies(cityPath string) []missingDep {
 		installHint string
 		minVersion  string      // empty = no version check
 		condition   func() bool // if non-nil, only checked when true
+		available   func() bool // if non-nil, custom availability probe
 	}
 
 	needsBd := initNeedsBdTooling(cityPath)
@@ -517,6 +519,14 @@ func checkHardDependencies(cityPath string) []missingDep {
 			condition:   func() bool { return needsBd },
 		},
 		{
+			name:        "timeout/gtimeout/python3",
+			installHint: "install GNU coreutils timeout/gtimeout or python3",
+			condition:   func() bool { return needsBd },
+			available: func() bool {
+				return initAnyToolAvailable("timeout", "gtimeout", "python3")
+			},
+		},
+		{
 			name:        "pgrep",
 			installHint: "brew install proctools (macOS) or apt install procps (Linux)",
 		},
@@ -529,6 +539,15 @@ func checkHardDependencies(cityPath string) []missingDep {
 	var missing []missingDep
 	for _, d := range deps {
 		if d.condition != nil && !d.condition() {
+			continue
+		}
+		if d.available != nil {
+			if !d.available() {
+				missing = append(missing, missingDep{
+					name:        d.name,
+					installHint: d.installHint,
+				})
+			}
 			continue
 		}
 		if _, err := initLookPath(d.name); err != nil {
@@ -550,6 +569,15 @@ func checkHardDependencies(cityPath string) []missingDep {
 		}
 	}
 	return missing
+}
+
+func initAnyToolAvailable(names ...string) bool {
+	for _, name := range names {
+		if _, err := initLookPath(name); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func initNeedsBdTooling(cityPath string) bool {

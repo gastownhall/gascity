@@ -465,6 +465,67 @@ func TestBuildAttachmentCache_CachesWorkerObservedAttachmentState(t *testing.T) 
 	}
 }
 
+func TestBuildAttachmentCache_UsesSessionInfoForActiveSessions(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "sleeping", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	sp.SetAttached("active", false)
+	sp.SetAttached("sleeping", true)
+
+	cache := buildAttachmentCache([]session.Info{
+		{SessionName: "active", State: session.StateActive, Attached: true},
+		{SessionName: "sleeping", State: session.StateAsleep, Attached: false},
+	}, func(info session.Info) (bool, error) {
+		if info.State == session.StateActive || sp == nil {
+			return info.Attached, nil
+		}
+		return sessionAttachedForWakeReason(sp, info.SessionName), nil
+	})
+
+	if got, ok := cache["active"]; !ok || !got {
+		t.Fatalf("cache[active] = (%v, %v), want (true, true)", got, ok)
+	}
+	if got, ok := cache["sleeping"]; !ok || !got {
+		t.Fatalf("cache[sleeping] = (%v, %v), want (true, true)", got, ok)
+	}
+
+	activeCalls := 0
+	activeRunningCalls := 0
+	sleepingCalls := 0
+	sleepingRunningCalls := 0
+	for _, call := range sp.Calls {
+		switch call.Method {
+		case "IsAttached":
+			switch call.Name {
+			case "active":
+				activeCalls++
+			case "sleeping":
+				sleepingCalls++
+			}
+		case "IsRunning":
+			switch call.Name {
+			case "active":
+				activeRunningCalls++
+			case "sleeping":
+				sleepingRunningCalls++
+			}
+		}
+	}
+	if activeCalls != 0 {
+		t.Fatalf("IsAttached(active) calls = %d, want 0", activeCalls)
+	}
+	if activeRunningCalls != 0 {
+		t.Fatalf("IsRunning(active) calls = %d, want 0", activeRunningCalls)
+	}
+	if sleepingCalls != 1 {
+		t.Fatalf("IsAttached(sleeping) calls = %d, want 1", sleepingCalls)
+	}
+	if sleepingRunningCalls != 1 {
+		t.Fatalf("IsRunning(sleeping) calls = %d, want 1", sleepingRunningCalls)
+	}
+}
+
 func TestSessionListTargetPrefersAlias(t *testing.T) {
 	info := session.Info{
 		Alias:       "hal",

@@ -602,6 +602,74 @@ func TestCheckHardDependenciesTreatsExecGcBeadsBdAsBdContract(t *testing.T) {
 	}
 }
 
+func TestCheckHardDependenciesRequiresBoundedRunnerForBdContract(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	oldLookPath := initLookPath
+	initLookPath = func(name string) (string, error) {
+		switch name {
+		case "timeout", "gtimeout", "python3":
+			return "", os.ErrNotExist
+		default:
+			return "/usr/bin/" + name, nil
+		}
+	}
+	t.Cleanup(func() { initLookPath = oldLookPath })
+
+	oldRunVersion := initRunVersion
+	initRunVersion = func(binary string) (string, error) {
+		switch binary {
+		case "bd":
+			return "bd version " + bdMinVersion, nil
+		case "flock", "tmux", "jq", "git", "pgrep", "lsof":
+			return binary + " version", nil
+		default:
+			return binary + " version " + doltMinVersion, nil
+		}
+	}
+	t.Cleanup(func() { initRunVersion = oldRunVersion })
+
+	missing := checkHardDependencies(t.TempDir())
+	if len(missing) != 1 {
+		t.Fatalf("missing deps = %#v, want only bounded runner", missing)
+	}
+	if missing[0].name != "timeout/gtimeout/python3" {
+		t.Fatalf("missing dep = %#v, want timeout/gtimeout/python3", missing[0])
+	}
+}
+
+func TestCheckHardDependenciesAcceptsPythonFallbackForBdContract(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	oldLookPath := initLookPath
+	initLookPath = func(name string) (string, error) {
+		switch name {
+		case "timeout", "gtimeout":
+			return "", os.ErrNotExist
+		default:
+			return "/usr/bin/" + name, nil
+		}
+	}
+	t.Cleanup(func() { initLookPath = oldLookPath })
+
+	oldRunVersion := initRunVersion
+	initRunVersion = func(binary string) (string, error) {
+		switch binary {
+		case "bd":
+			return "bd version " + bdMinVersion, nil
+		case "flock", "tmux", "jq", "git", "pgrep", "lsof":
+			return binary + " version", nil
+		default:
+			return binary + " version " + doltMinVersion, nil
+		}
+	}
+	t.Cleanup(func() { initRunVersion = oldRunVersion })
+
+	if missing := checkHardDependencies(t.TempDir()); len(missing) != 0 {
+		t.Fatalf("missing deps = %#v, want python3 fallback to satisfy bounded runner", missing)
+	}
+}
+
 func TestCheckHardDependenciesRequiresBdToolsForBdRigUnderFileCity(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "frontend")

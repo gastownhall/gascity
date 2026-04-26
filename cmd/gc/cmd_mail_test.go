@@ -489,6 +489,11 @@ func TestResolveDefaultMailTargetsForCommand_StorelessProviderUsesFirstCandidate
 	t.Setenv("GC_ALIAS", "codeprobe-worker-1")
 	t.Setenv("GC_SESSION_ID", "codeprobe-worker-gc-1941")
 	t.Setenv("GC_AGENT", "codeprobe-worker")
+	prev := openMailTargetStore
+	openMailTargetStore = func() (beads.Store, error) {
+		return nil, fmt.Errorf("not in a city directory")
+	}
+	t.Cleanup(func() { openMailTargetStore = prev })
 
 	var stderr bytes.Buffer
 	target, ok := resolveDefaultMailTargetsForCommand(&stderr, "gc mail inbox")
@@ -568,6 +573,11 @@ func TestDefaultMailIdentityFallsBackToHumanWithoutAliasSessionOrAgent(t *testin
 
 func TestResolveMailAddressForCommand_AllowsStorelessMailProvider(t *testing.T) {
 	t.Setenv("GC_MAIL", "fake")
+	prev := openMailTargetStore
+	openMailTargetStore = func() (beads.Store, error) {
+		return nil, fmt.Errorf("not in a city directory")
+	}
+	t.Cleanup(func() { openMailTargetStore = prev })
 
 	var stderr bytes.Buffer
 	address, ok := resolveMailAddressForCommand("robot", &stderr, "gc mail inbox")

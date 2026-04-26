@@ -306,6 +306,7 @@ func TestResolveSessionLogPathFallsBackWhenSessionKeyFileMissing(t *testing.T) {
 }
 
 func TestResolveStoredSessionLogSource_UniqueWorkDirFallsBackBeyondLatestAlias(t *testing.T) {
+	skipSlowCmdGCTest(t, "probes provider transcript lookup before workdir fallback; run make test-cmd-gc-process for full coverage")
 	store := beads.NewMemStore()
 	workDir := t.TempDir()
 	searchBase := t.TempDir()

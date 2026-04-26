@@ -244,7 +244,7 @@ func (c *Client) RestartService(name string) error {
 	if err := c.requireCityScope(); err != nil {
 		return err
 	}
-	resp, err := c.cw.PostV0CityByCityNameServiceByNameRestartWithResponse(context.Background(), c.cityName, name)
+	resp, err := c.cw.PostV0CityByCityNameServiceByNameRestartWithResponse(context.Background(), c.cityName, name, nil)
 	return checkMutation(resp, err)
 }
 
@@ -258,7 +258,7 @@ func (c *Client) patchCity(suspend bool) error {
 	if err := c.requireCityScope(); err != nil {
 		return err
 	}
-	resp, err := c.cw.PatchV0CityByCityNameWithResponse(context.Background(), c.cityName, genclient.PatchV0CityByCityNameJSONRequestBody{Suspended: &suspend})
+	resp, err := c.cw.PatchV0CityByCityNameWithResponse(context.Background(), c.cityName, nil, genclient.PatchV0CityByCityNameJSONRequestBody{Suspended: &suspend})
 	return checkMutation(resp, err)
 }
 
@@ -285,12 +285,12 @@ func (c *Client) postAgentAction(name, action string) error {
 	if dir, base, ok := strings.Cut(name, "/"); ok {
 		resp, err := c.cw.PostV0CityByCityNameAgentByDirByBaseByActionWithResponse(
 			context.Background(), c.cityName, dir, base,
-			genclient.PostV0CityByCityNameAgentByDirByBaseByActionParamsAction(action))
+			genclient.PostV0CityByCityNameAgentByDirByBaseByActionParamsAction(action), nil)
 		return checkMutation(resp, err)
 	}
 	resp, err := c.cw.PostV0CityByCityNameAgentByBaseByActionWithResponse(
 		context.Background(), c.cityName, name,
-		genclient.PostV0CityByCityNameAgentByBaseByActionParamsAction(action))
+		genclient.PostV0CityByCityNameAgentByBaseByActionParamsAction(action), nil)
 	return checkMutation(resp, err)
 }
 
@@ -308,7 +308,7 @@ func (c *Client) postRigAction(name, action string) error {
 	if err := c.requireCityScope(); err != nil {
 		return err
 	}
-	resp, err := c.cw.PostV0CityByCityNameRigByNameByActionWithResponse(context.Background(), c.cityName, name, action)
+	resp, err := c.cw.PostV0CityByCityNameRigByNameByActionWithResponse(context.Background(), c.cityName, name, action, nil)
 	return checkMutation(resp, err)
 }
 
@@ -317,7 +317,7 @@ func (c *Client) KillSession(id string) error {
 	if err := c.requireCityScope(); err != nil {
 		return err
 	}
-	resp, err := c.cw.PostV0CityByCityNameSessionByIdKillWithResponse(context.Background(), c.cityName, id)
+	resp, err := c.cw.PostV0CityByCityNameSessionByIdKillWithResponse(context.Background(), c.cityName, id, nil)
 	return checkMutation(resp, err)
 }
 
@@ -329,7 +329,7 @@ func (c *Client) SendSessionMessage(id, message string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), sessionMessageTimeout)
 	defer cancel()
-	resp, err := c.cw.SendSessionMessageWithResponse(ctx, c.cityName, id, genclient.SendSessionMessageJSONRequestBody{
+	resp, err := c.cw.SendSessionMessageWithResponse(ctx, c.cityName, id, nil, genclient.SendSessionMessageJSONRequestBody{
 		Message: message,
 	})
 	return checkMutation(resp, err)
@@ -346,7 +346,7 @@ func (c *Client) SubmitSession(id, message string, intent session.SubmitIntent) 
 		i := genclient.SubmitIntent(intent)
 		body.Intent = &i
 	}
-	resp, err := c.cw.SubmitSessionWithResponse(context.Background(), c.cityName, id, body)
+	resp, err := c.cw.SubmitSessionWithResponse(context.Background(), c.cityName, id, nil, body)
 	if err != nil {
 		return SessionSubmitResponse{}, &connError{err: fmt.Errorf("request failed: %w", err)}
 	}

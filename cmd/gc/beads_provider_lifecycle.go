@@ -428,6 +428,9 @@ func ensureBeadsProvider(cityPath string) error {
 // Called by gc stop after agents have been terminated.
 // For exec providers, fires "stop". For file providers, always available.
 func shutdownBeadsProvider(cityPath string) error {
+	if cityUsesBdStoreContract(cityPath) && strings.TrimSpace(os.Getenv("GC_DOLT")) == "skip" {
+		return clearManagedDoltRuntimeStateIfOwned(cityPath)
+	}
 	provider := beadsProvider(cityPath)
 	if strings.HasPrefix(provider, "exec:") {
 		if providerUsesBdStoreContract(provider) && isExternalDolt(cityPath) {

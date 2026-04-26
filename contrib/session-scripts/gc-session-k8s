@@ -304,10 +304,8 @@ case "$op" in
     # differs from the host work_dir, keep a compatibility mount at the original
     # city path for any remaining absolute-path references in staged files.
     main_vol_mounts='[{name: "ws", mountPath: "/workspace"}, {name: "claude-config", mountPath: "/tmp/claude-secret", readOnly: true}]'
-    extra_jq_args=()
     if [ -n "$gc_city" ] && [ "$gc_city" != "$work_dir" ]; then
       main_vol_mounts='[{name: "ws", mountPath: "/workspace"}, {name: "city", mountPath: $city}, {name: "claude-config", mountPath: "/tmp/claude-secret", readOnly: true}]'
-      extra_jq_args+=(--arg city "$gc_city")
     fi
 
     if [ "$needs_staging" = "true" ]; then
@@ -334,7 +332,7 @@ case "$op" in
         --arg work_dir "$pod_work_dir" \
         --arg sa "$SERVICE_ACCOUNT" \
         --argjson env "$env_array" \
-        ${extra_jq_args[@]+"${extra_jq_args[@]}"} \
+        --arg city "$gc_city" \
         '{
           apiVersion: "v1",
           kind: "Pod",
@@ -402,7 +400,7 @@ case "$op" in
         --arg work_dir "$pod_work_dir" \
         --arg sa "$SERVICE_ACCOUNT" \
         --argjson env "$env_array" \
-        ${extra_jq_args[@]+"${extra_jq_args[@]}"} \
+        --arg city "$gc_city" \
         '{
           apiVersion: "v1",
           kind: "Pod",

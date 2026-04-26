@@ -22,6 +22,7 @@ jobs:
       packs: ${{ steps.filter.outputs.packs }}
       worker: ${{ steps.filter.outputs.worker }}
       worker_phase2: ${{ steps.filter.outputs.worker_phase2 }}
+      cmd_gc_process: ${{ steps.filter.outputs.cmd_gc_process }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3
@@ -70,6 +71,14 @@ jobs:
               - 'internal/runtime/**'
               - 'internal/config/**'
               - 'cmd/gc/**'
+            cmd_gc_process:
+              - 'go.mod'
+              - 'go.sum'
+              - '.github/workflows/**'
+              - 'Makefile'
+              - 'cmd/gc/**'
+              - 'internal/**'
+              - 'examples/gastown/packs/**'
 
   # Always runs: lint, fmt, vet, unit tests, docs, acceptance, coverage.
   check:
@@ -147,6 +156,27 @@ jobs:
           files: coverage.txt
           token: ${{ secrets.CODECOV_TOKEN }}
           verbose: true
+
+  cmd-gc-process:
+    name: cmd/gc process suite
+    needs: changes
+    if: needs.changes.outputs.cmd_gc_process == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DOLT_VERSION: "1.86.1"
+      BD_VERSION: "v1.0.0"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "true"
+      - name: Install tools
+        run: make install-tools
+      - name: Run cmd/gc process suite
+        run: make test-cmd-gc-process
 
   # Runs always, but remains non-blocking while integration/provider paths are still stabilizing.
   integration-shards:

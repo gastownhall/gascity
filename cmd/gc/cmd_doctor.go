@@ -77,6 +77,13 @@ func workspaceNeedsCityDoltCheck(cityPath string, cfg *config.City) bool {
 	return false
 }
 
+func managedDoltOpsCheckSkip(cityPath string, cfg *config.City, cfgErr error) bool {
+	if os.Getenv("GC_DOLT") == "skip" {
+		return true
+	}
+	return !doctor.ManagedLocalDoltChecksApplicableForConfig(cityPath, cfg, cfgErr)
+}
+
 type doltTopologyCheck struct {
 	cityPath string
 	cfg      *config.City
@@ -190,6 +197,15 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	}
 	skipCityDoltCheck := os.Getenv("GC_DOLT") == "skip" || (!scopeUsesManagedBdStoreContract(cityPath, cityPath) && !workspaceNeedsCityDoltCheck(cityPath, cfg))
 	d.Register(newDoctorDoltServerCheck(cityPath, skipCityDoltCheck))
+	// Managed Dolt ops checks (PR 3). Size + config drift are only
+	// meaningful when the workspace uses the managed bd/Dolt backend; rigs
+	// can inherit the city-managed server even when the city itself is not a
+	// managed bd scope. The version check follows the same gate so file-backed
+	// and external Dolt workspaces do not get irrelevant local-binary warnings.
+	skipManagedDoltCheck := managedDoltOpsCheckSkip(cityPath, cfg, cfgErr)
+	d.Register(doctor.NewDoltNomsSizeCheckForConfig(cityPath, skipManagedDoltCheck, cfg, cfgErr))
+	d.Register(doctor.NewDoltConfigCheckForConfig(cityPath, skipManagedDoltCheck, cfg, cfgErr))
+	d.Register(doctor.NewScopedDoltVersionCheckForConfig(cityPath, skipManagedDoltCheck, cfg, cfgErr))
 	d.Register(&doctor.EventsLogCheck{})
 	d.Register(doctor.NewEventLogSizeCheck())
 

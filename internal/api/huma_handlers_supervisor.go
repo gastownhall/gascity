@@ -1,14 +1,12 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -16,8 +14,8 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
+	"github.com/gastownhall/gascity/internal/cityinit"
 	"github.com/gastownhall/gascity/internal/citylayout"
-	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
@@ -79,10 +77,21 @@ type cityCreateRequest struct {
 	BootstrapProfile string `json:"bootstrap_profile,omitempty" enum:"k8s-cell,kubernetes,kubernetes-cell,single-host-compat" doc:"Optional bootstrap profile."`
 }
 
-// cityCreateResponse is the response body for POST /v0/city.
+// cityCreateResponse is the response body for POST /v0/city. This
+// endpoint is asynchronous: a 202 response means the city was
+// scaffolded on disk and registered with the supervisor, but the
+// supervisor reconciler still has to run the slow finalize work
+// (pack materialization, bead store startup, formula resolution,
+// agent validation). Clients observe completion by subscribing to
+// /v0/events/stream and waiting for a city.ready event (payload
+// CityReadyPayload.Name == this response's Name) or a
+// city.init_failed event (CityInitFailedPayload.Name == this
+// response's Name; Error field explains the failure). Polling is
+// unnecessary.
 type cityCreateResponse struct {
-	OK   bool   `json:"ok" doc:"True on success."`
-	Path string `json:"path" doc:"Resolved absolute path of the created city."`
+	OK   bool   `json:"ok" doc:"True when scaffolding + registration succeeded. Does not imply the city is ready yet; watch /v0/events/stream for city.ready."`
+	Name string `json:"name" doc:"Resolved city name as persisted in city.toml. Use this to filter the event stream for completion."`
+	Path string `json:"path" doc:"Resolved absolute path of the created city directory."`
 }
 
 // SupervisorCityCreateInput is the input for POST /v0/city.
@@ -90,9 +99,41 @@ type SupervisorCityCreateInput struct {
 	Body cityCreateRequest
 }
 
-// SupervisorCityCreateOutput is the response for POST /v0/city.
+// SupervisorCityCreateOutput is the response for POST /v0/city. The
+// Status field carries 202 Accepted to tell Huma to emit the async
+// status code; see humaHandleCityCreate for the rationale and event
+// contract.
 type SupervisorCityCreateOutput struct {
-	Body cityCreateResponse
+	Status int `json:"-"`
+	Body   cityCreateResponse
+}
+
+// cityUnregisterResponse is the response body for
+// POST /v0/city/{cityName}/unregister. This endpoint is asynchronous:
+// a 202 response means the city's registry entry was removed and the
+// supervisor was signaled to reconcile, but the city's controller is
+// not yet stopped. Clients observe completion by subscribing to
+// /v0/events/stream and waiting for a city.unregistered event (or
+// city.unregister_failed if the reconciler cannot stop the
+// controller).
+type cityUnregisterResponse struct {
+	OK   bool   `json:"ok" doc:"True when the registry entry was removed and the supervisor was signaled. Does not imply the city's controller has stopped yet; watch /v0/events/stream for city.unregistered."`
+	Name string `json:"name" doc:"Resolved registry name. Filter the event stream by this to observe completion."`
+	Path string `json:"path" doc:"Resolved absolute city directory. The directory itself is not modified; unregister only affects the supervisor's registry."`
+}
+
+// SupervisorCityUnregisterInput is the input for
+// POST /v0/city/{cityName}/unregister.
+type SupervisorCityUnregisterInput struct {
+	CityName string `path:"cityName" doc:"Supervisor-registered city name."`
+}
+
+// SupervisorCityUnregisterOutput is the response for
+// POST /v0/city/{cityName}/unregister. The Status field carries
+// 202 Accepted to tell Huma to emit the async status code.
+type SupervisorCityUnregisterOutput struct {
+	Status int `json:"-"`
+	Body   cityUnregisterResponse
 }
 
 // SupervisorEventListInput is the input for GET /v0/events (supervisor scope).
@@ -117,12 +158,6 @@ type SupervisorEventStreamInput struct {
 	AfterCursor string `query:"after_cursor" required:"false" doc:"Alternative to Last-Event-ID for browsers that can't set custom headers."`
 }
 
-// cityInitExitAlreadyInitialized mirrors initExitAlreadyInitialized in
-// cmd/gc/cmd_init.go. Duplicated here because the CLI's exit-code
-// constant is declared in the main package and not importable; the two
-// must stay in sync.
-const cityInitExitAlreadyInitialized = 2
-
 // --- Huma API setup ---
 
 // newSupervisorHumaAPI builds a huma.API attached to mux for supervisor-
@@ -139,6 +174,7 @@ func newSupervisorHumaAPI(mux *http.ServeMux, readOnly bool) huma.API {
 	// Force-register documentation-only union schemas so they appear in
 	// components.schemas even though no handler names them directly.
 	_ = SessionStreamCommonEvent{}.Schema(api.OpenAPI().Components.Schemas)
+	registerEventEnvelopeCompatibilitySchemas(api.OpenAPI().Components.Schemas)
 
 	api.UseMiddleware(humaCSRFMiddleware(api))
 	if readOnly {
@@ -178,7 +214,18 @@ func (sm *SupervisorMux) registerSupervisorRoutes() {
 	huma.Get(sm.humaAPI, "/health", sm.humaHandleHealth)
 	huma.Get(sm.humaAPI, "/v0/readiness", sm.humaHandleReadiness)
 	huma.Get(sm.humaAPI, "/v0/provider-readiness", sm.humaHandleProviderReadiness)
-	huma.Post(sm.humaAPI, "/v0/city", sm.humaHandleCityCreate)
+	// Async mutation: returns 202 Accepted after scaffold + register;
+	// completion signaled via city.ready / city.init_failed events.
+	huma.Post(sm.humaAPI, "/v0/city", sm.humaHandleCityCreate, addMutationCSRFParam, func(op *huma.Operation) {
+		op.DefaultStatus = http.StatusAccepted
+	})
+	// Async unregister: returns 202 after the registry entry is
+	// removed and the supervisor is signaled. city.unregistered /
+	// city.unregister_failed events signal completion on the event
+	// stream.
+	huma.Post(sm.humaAPI, "/v0/city/{cityName}/unregister", sm.humaHandleCityUnregister, addMutationCSRFParam, func(op *huma.Operation) {
+		op.DefaultStatus = http.StatusAccepted
+	})
 	huma.Get(sm.humaAPI, "/v0/events", sm.humaHandleEventList)
 
 	registerSSEStringID(sm.humaAPI, huma.Operation{
@@ -187,8 +234,11 @@ func (sm *SupervisorMux) registerSupervisorRoutes() {
 		Path:        "/v0/events/stream",
 		Summary:     "Stream tagged events from all running cities.",
 	}, map[string]any{
-		"tagged_event": &taggedEventStreamEnvelope{},
-		"heartbeat":    HeartbeatEvent{},
+		"tagged_event": sseEventContract{
+			runtimeSample: &taggedEventStreamEnvelope{},
+			schemaSample:  typedTaggedEventStreamEnvelopeSchema{},
+		},
+		"heartbeat": HeartbeatEvent{},
 	}, sm.precheckGlobalEventStream, sm.streamGlobalEvents)
 }
 
@@ -276,17 +326,24 @@ func (sm *SupervisorMux) humaHandleProviderReadiness(ctx context.Context, input 
 	return out, nil
 }
 
-// humaHandleCityCreate handles POST /v0/city — create a new city by
-// shelling out to `gc init`. Stateless; does not require a running city.
+// humaHandleCityCreate handles POST /v0/city asynchronously. Calls
+// Initializer.Scaffold in-process to write the on-disk shape and
+// register the city with the supervisor, then returns 202 Accepted
+// immediately. The supervisor reconciler runs the slow finalize
+// (prepareCityForSupervisor: pack materialization, bead store
+// startup, formula resolution, agent validation) on its next tick
+// and emits city.ready / city.init_failed events on the supervisor
+// event bus when done. Clients observe completion via
+// /v0/events/stream — no polling required.
+//
+// Rationale: full city init takes minutes (dolt startup,
+// provider-readiness probes, pack fetch). Blocking the HTTP request
+// until finalize completes exceeds reasonable client timeouts
+// (MC's harness hit 120s). The fast scaffold+register path takes
+// seconds; the async completion contract via SSE is the right shape
+// for a long-running operation. See engdocs/architecture/api-control-plane.md §1–§2 on
+// the object model + typed events; §4 on the event registry.
 func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *SupervisorCityCreateInput) (*SupervisorCityCreateOutput, error) {
-	// Dir/Provider emptiness is enforced by minLength:"1" tags on cityCreateRequest.
-	// BootstrapProfile membership is enforced by the enum tag.
-	// Provider membership against runtime-loaded builtins stays here —
-	// static enum can't express a runtime-loaded set.
-	if _, ok := config.BuiltinProviders()[input.Body.Provider]; !ok {
-		return nil, huma.Error422UnprocessableEntity(fmt.Sprintf("invalid: unknown provider %q", input.Body.Provider))
-	}
-
 	dir := input.Body.Dir
 	if !filepath.IsAbs(dir) {
 		home, err := os.UserHomeDir()
@@ -296,46 +353,87 @@ func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *Superv
 		dir = filepath.Join(home, dir)
 	}
 
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, huma.Error500InternalServerError(fmt.Sprintf("internal: creating directory: %v", err))
-	}
+	// Cheap pre-check that does not require an Initializer: if the
+	// target directory already looks like an initialized city on disk,
+	// return 409 before we try to scaffold. Keeps the API well-behaved
+	// in test configurations that build a SupervisorMux without an
+	// Initializer.
 	if cityDirAlreadyInitialized(dir) {
 		return nil, huma.Error409Conflict("conflict: city already initialized at " + dir)
 	}
 
-	gcBin, err := os.Executable()
-	if err != nil {
-		return nil, huma.Error500InternalServerError(fmt.Sprintf("internal: finding gc binary: %v", err))
-	}
-	args := []string{"init", dir, "--provider", input.Body.Provider}
-	if input.Body.BootstrapProfile != "" {
-		args = append(args, "--bootstrap-profile", input.Body.BootstrapProfile)
+	if sm.initializer == nil {
+		return nil, huma.Error501NotImplemented("city creation is not available in this supervisor (no initializer wired)")
 	}
 
-	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(cctx, gcBin, args...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		msg := stderr.String()
-		if msg == "" {
-			msg = err.Error()
-		}
-		// gc init exits with initExitAlreadyInitialized when the
-		// target already contains a city. Dispatch on the exit code
-		// rather than scraping stderr text.
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() == cityInitExitAlreadyInitialized {
-			return nil, huma.Error409Conflict("conflict: city already initialized at " + dir)
-		}
-		return nil, huma.Error500InternalServerError("init_failed: " + msg)
+	result, err := sm.initializer.Scaffold(ctx, cityinit.InitRequest{
+		Dir:              dir,
+		Provider:         input.Body.Provider,
+		BootstrapProfile: input.Body.BootstrapProfile,
+		// The async API defers dependency/provider blockers to the
+		// reconciler's terminal city.init_failed event instead of
+		// failing POST synchronously.
+		SkipProviderReadiness: true,
+	})
+	switch {
+	case errors.Is(err, cityinit.ErrAlreadyInitialized):
+		return nil, huma.Error409Conflict("conflict: city already initialized at " + dir)
+	case errors.Is(err, cityinit.ErrInvalidProvider),
+		errors.Is(err, cityinit.ErrInvalidBootstrapProfile):
+		return nil, huma.Error422UnprocessableEntity(err.Error())
+	case err != nil:
+		return nil, huma.Error500InternalServerError(err.Error())
 	}
 
-	out := &SupervisorCityCreateOutput{}
-	out.Body = cityCreateResponse{OK: true, Path: dir}
+	out := &SupervisorCityCreateOutput{
+		Status: http.StatusAccepted,
+	}
+	out.Body = cityCreateResponse{
+		OK:   true,
+		Name: result.CityName,
+		Path: result.CityPath,
+	}
+	return out, nil
+}
+
+// humaHandleCityUnregister handles POST /v0/city/{cityName}/unregister
+// asynchronously. Calls Initializer.Unregister in-process to remove
+// the city from the supervisor's registry and signal reconcile, then
+// returns 202 Accepted immediately. The supervisor reconciler stops
+// the city's controller on its next tick and emits city.unregistered
+// (or city.unregister_failed on stop failure) on the supervisor
+// event bus. Clients observe completion via /v0/events/stream — no
+// polling required.
+//
+// The city directory itself is not modified. Purging the directory
+// is a separate concern.
+//
+// Error mapping:
+//   - ErrNotRegistered -> 404 Not Found
+//   - any other error -> 500 Internal Server Error
+func (sm *SupervisorMux) humaHandleCityUnregister(ctx context.Context, input *SupervisorCityUnregisterInput) (*SupervisorCityUnregisterOutput, error) {
+	if sm.initializer == nil {
+		return nil, huma.Error501NotImplemented("city unregister is not available in this supervisor (no initializer wired)")
+	}
+	name := strings.TrimSpace(input.CityName)
+	if name == "" {
+		return nil, huma.Error400BadRequest("city_name is required")
+	}
+
+	result, err := sm.initializer.Unregister(ctx, cityinit.UnregisterRequest{CityName: name})
+	switch {
+	case errors.Is(err, cityinit.ErrNotRegistered):
+		return nil, huma.Error404NotFound("not_found: " + err.Error())
+	case err != nil:
+		return nil, huma.Error500InternalServerError(err.Error())
+	}
+
+	out := &SupervisorCityUnregisterOutput{Status: http.StatusAccepted}
+	out.Body = cityUnregisterResponse{
+		OK:   true,
+		Name: result.CityName,
+		Path: result.CityPath,
+	}
 	return out, nil
 }
 
@@ -380,10 +478,9 @@ func (sm *SupervisorMux) humaHandleEventList(_ context.Context, input *Superviso
 	// Total is the full match count so clients can distinguish "limit
 	// truncated" from "the server only had N events."
 	out.Body.Total = len(wires)
-	// Limit clamp: when a caller asks for limit=N, return the N most
-	// recent events (the list is already chronologically ordered, so we
-	// take the tail). Critical for `gc events --seq` which computes the
-	// head cursor from the last event only.
+	// Limit clamp: take the N most recent events (wires is already
+	// chronologically ordered). Critical for `gc events --seq` which
+	// computes the head cursor from the last event only.
 	if input.Limit > 0 && input.Limit < len(wires) {
 		wires = wires[len(wires)-input.Limit:]
 	}
@@ -393,11 +490,16 @@ func (sm *SupervisorMux) humaHandleEventList(_ context.Context, input *Superviso
 
 // --- Supervisor global events stream (Fix 3g final wiring) ---
 
-// precheckGlobalEventStream validates that the global event stream can
-// actually deliver events before committing 200 headers. Two failure
-// modes both produce 503 Problem Details instead of 200+EOF:
+// precheckGlobalEventStream validates that the global event stream
+// can actually deliver events before committing 200 headers. Two
+// failure modes both produce 503 Problem Details instead of 200+EOF:
 //
-//  1. No event providers registered at all (empty mux).
+//  1. No event providers registered at all (empty mux). In practice
+//     this only happens when zero cities are registered in the
+//     supervisor — the TransientCityEventSource resolver extension
+//     surfaces event files for every registered city (running,
+//     pending, or failed) so any POST /v0/city → subscribe flow
+//     finds the newly-registered city in the mux.
 //  2. Providers exist but none can attach a watcher right now.
 //
 // The precheck attaches a watcher and closes it immediately — a

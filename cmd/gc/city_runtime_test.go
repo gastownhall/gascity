@@ -1216,6 +1216,7 @@ func TestCityRuntimeBeadReconcileTick_SweepRespectsLiveAssignedWork(t *testing.T
 }
 
 func TestCityRuntimeTick_RefreshesManualSessionOverlayAfterSync(t *testing.T) {
+	skipSlowCmdGCTest(t, "runs a full runtime tick/reconcile path; run make test-cmd-gc-process for full coverage")
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, "prompts"), 0o755); err != nil {
 		t.Fatalf("mkdir prompts: %v", err)

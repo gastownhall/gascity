@@ -275,6 +275,9 @@ var cliStoreCache struct {
 // agents don't open the store repeatedly. Silently falls back to legacy
 // naming if the store is unavailable.
 func cliSessionName(cityPath, cityName, agentName, sessionTemplate string) string {
+	if strings.TrimSpace(cityPath) == "" {
+		return sessionName(nil, cityName, agentName, sessionTemplate)
+	}
 	cliStoreCache.mu.Lock()
 	if cliStoreCache.path != cityPath {
 		cliStoreCache.store, _ = openCityStoreAt(cityPath)

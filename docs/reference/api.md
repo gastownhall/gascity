@@ -42,6 +42,43 @@ The spec is the full reference. A brief summary of the surfaces:
 - **Config & packs.** Per-city config and pack metadata under
   `/v0/city/{cityName}/config` and `/v0/city/{cityName}/packs`.
 
+## Request and response headers
+
+Every operation's header contract appears in the OpenAPI spec — if a
+request header is required or a response header is promised, the
+spec describes it. The two cross-cutting headers every API client
+should know about:
+
+- **`X-GC-Request`** (request header, required on all mutations).
+  Anti-CSRF token required on every POST, PUT, PATCH, and DELETE.
+  Any non-empty value is accepted; the header's presence is what
+  the server checks. Requests without it are rejected with
+  `403 csrf: X-GC-Request header required on mutation endpoints`.
+  Leveraging the same-origin policy, a cross-origin attacker
+  cannot set this header on a forged request. The generated Go
+  and TypeScript clients set this header automatically; only raw
+  HTTP clients need to remember it.
+- **`X-GC-Request-Id`** (response header, every response).
+  Opaque per-response identifier the server assigns for log
+  correlation. Every response — success or error — carries this
+  header; the spec declares it via a `$ref` to
+  `components.headers.X-GC-Request-Id`. Include its value in bug
+  reports so the server's logs can be traced.
+
+SSE stream operations emit additional runtime-status headers before
+the first event frame:
+
+- **`stream-agent-output` / `stream-agent-output-qualified`**:
+  `GC-Agent-Status` — set to `stopped` when the agent is not
+  running and the stream is replaying transcript from the session
+  log instead of live output.
+- **`stream-session`**: `GC-Session-State` (e.g. `active`,
+  `closed`) and `GC-Session-Status` (`stopped` when the session's
+  underlying process is not running).
+
+Each header's schema is documented in the operation's
+`responses.200.headers` in the spec.
+
 ## Errors
 
 Every error response is an RFC 9457 Problem Details body
@@ -69,6 +106,128 @@ Fatal setup errors are returned as normal Problem Details responses
 closes immediately. For example, `GET /v0/events/stream` returns
 `503 application/problem+json` with `detail: "no_providers: ..."`
 when no running city has an event provider registered.
+
+## Creating a city (asynchronous)
+
+`POST /v0/city` is an **asynchronous** operation. The response is
+`202 Accepted` returned as soon as the city has been scaffolded on
+disk and registered with the supervisor. The slow finalize work
+(pack materialization, bead store startup, formula resolution,
+agent validation) runs on the supervisor reconciler's next tick.
+Clients observe completion via the supervisor event stream — there
+is nothing to poll.
+
+### Response
+
+```json
+{
+  "ok": true,
+  "name": "my-city",
+  "path": "/abs/path/to/my-city"
+}
+```
+
+The `name` field is the city's resolved runtime identity
+(`workspace.name` from `city.toml`, or the directory basename).
+Use it to filter the event stream for completion.
+
+### Completion events
+
+On the same `/v0/events/stream` the client will see (in order):
+
+- `city.created` (`CityCreatedPayload`) — emitted by the scaffold
+  step before `POST` returns. `subject` and payload `name` equal
+  the response's `name`.
+- `city.ready` (`CityReadyPayload`) — the reconciler finished
+  `prepareCityForSupervisor` successfully. Matching event:
+  `subject == name` and `type == "city.ready"`.
+- `city.init_failed` (`CityInitFailedPayload`) — the reconciler
+  gave up. The payload's `error` field describes why, including
+  deferred dependency or provider-readiness blockers that the async
+  API does not fail synchronously.
+
+Exactly one of `city.ready` or `city.init_failed` lands per
+successful `POST`. Clients wait for either; no polling of
+`GET /v0/cities` or `GET /v0/city/{cityName}/readiness` is
+required.
+
+### Subscribe before or after POST
+
+Either order works. The recommended flow is:
+
+1. `POST /v0/city` and wait for `202`.
+2. `GET /v0/events/stream?after_cursor=0` — request replay from
+   the start so `city.created` (and possibly `city.ready`) are
+   delivered even if they fired before subscribe.
+3. Read frames until `subject == response.name` and
+   `type ∈ {"city.ready", "city.init_failed"}`.
+
+**Empty supervisor is fine.** The event stream works even when
+no cities existed before the `POST`. `POST` writes the city to
+the supervisor registry (`cities.toml`) and creates
+`.gc/events.jsonl` synchronously before returning 202, so the
+event multiplexer finds the new city on the very next
+`buildMultiplexer` call. Subscribers do **not** need to retry on
+`503 no_providers`; if that error surfaces after a successful
+202, it's a bug.
+
+### Errors
+
+- `409 conflict: city already initialized at <path>` — the target
+  directory already has a scaffolded city.
+- `422` — invalid provider, invalid bootstrap profile, or other
+  body-validation failure.
+- `503` — a hard dependency is missing on the host, or a provider
+  the city needs is not ready.
+- `500` — unexpected scaffold failure; consult the server logs
+  via the `X-GC-Request-Id` correlation header.
+
+## Unregistering a city (asynchronous)
+
+`POST /v0/city/{cityName}/unregister` removes a city from the
+supervisor's registry and signals the supervisor to stop the city's
+controller. Like `POST /v0/city`, it is asynchronous: the response
+is `202 Accepted` returned as soon as the registry entry is gone
+and the supervisor is notified. The supervisor reconciler stops the
+controller on its next tick and emits the completion event.
+
+The city directory on disk is **not** touched. This operation only
+detaches the city from the supervisor; reattaching it later is a
+simple `gc register`.
+
+### Response
+
+```json
+{
+  "ok": true,
+  "name": "my-city",
+  "path": "/abs/path/to/my-city"
+}
+```
+
+### Completion events
+
+On `/v0/events/stream` the client will see (in order):
+
+- `city.unregister_requested`
+  (`CityUnregisterRequestedPayload`) — emitted by the handler
+  before the registry write so subscribers see the teardown start.
+- `city.unregistered` (`CityUnregisteredPayload`) — emitted by the
+  reconciler once the city's controller has stopped. Matching
+  event: `subject == name` and `type == "city.unregistered"`.
+- `city.unregister_failed` (`CityUnregisterFailedPayload`) — emitted
+  by the reconciler if the controller did not stop cleanly. The
+  payload's `error` field describes the failure.
+
+Exactly one of `city.unregistered` or `city.unregister_failed`
+lands per successful unregister. Clients wait for either.
+
+### Errors
+
+- `404 not_found: city not registered with supervisor: <name>` — no
+  entry in the registry for that name.
+- `501` — supervisor has no Initializer wired (test-only configs).
+- `500` — unexpected registry write failure.
 
 ## Event Contract
 

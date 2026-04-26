@@ -160,6 +160,7 @@ func TestMain(m *testing.M) {
 }
 
 func TestTutorial01(t *testing.T) {
+	skipSlowCmdGCTest(t, "runs tutorial testscript scenarios; run make test-cmd-gc-process for full coverage")
 	testscript.Run(t, newTestscriptParams(t))
 }
 

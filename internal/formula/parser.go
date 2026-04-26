@@ -482,25 +482,59 @@ func CheckResidualTimeoutVars(s string) []string {
 // ValidateVars checks that all required variables are provided
 // and all values pass their constraints.
 func ValidateVars(formula *Formula, values map[string]string) error {
-	return validateVarDefs(formula.Vars, values)
+	errs, _ := CollectVarValidationErrors(formula.Vars, values)
+	return formatVarValidationErrors(errs)
 }
 
 // ValidateVarDefs validates explicit var definitions against provided values.
 // This is the recipe-level equivalent of ValidateVars, used after formula
 // compilation when only the remaining VarDef map is available.
 func ValidateVarDefs(defs map[string]*VarDef, values map[string]string) error {
-	return validateVarDefs(defs, values)
+	errs, _ := CollectVarValidationErrors(defs, values)
+	return formatVarValidationErrors(errs)
 }
 
-func validateVarDefs(defs map[string]*VarDef, values map[string]string) error {
-	var errs []string
+// ValidateProvidedVarDefs validates constraints for values the caller supplied
+// without requiring every required variable to be present.
+func ValidateProvidedVarDefs(defs map[string]*VarDef, values map[string]string) error {
+	providedDefs := make(map[string]*VarDef)
+	for name := range values {
+		if def, ok := defs[name]; ok {
+			providedDefs[name] = def
+		}
+	}
+	errs, _ := collectVarValidationErrors(providedDefs, values, false)
+	return formatVarValidationErrors(errs)
+}
 
-	for name, def := range defs {
+// CollectVarValidationErrors validates explicit var definitions against the
+// provided values and returns raw error strings plus the set of missing
+// required vars. Callers that need the historical wrapped error can pass the
+// returned error strings through formatVarValidationErrors.
+func CollectVarValidationErrors(defs map[string]*VarDef, values map[string]string) ([]string, map[string]bool) {
+	return collectVarValidationErrors(defs, values, true)
+}
+
+func collectVarValidationErrors(defs map[string]*VarDef, values map[string]string, requireMissing bool) ([]string, map[string]bool) {
+	var errs []string
+	missingRequired := make(map[string]bool)
+	names := make([]string, 0, len(defs))
+	for name := range defs {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+
+	for _, name := range names {
+		def := defs[name]
+		if def == nil {
+			continue
+		}
 		val, provided := values[name]
 
 		// Check required
-		if def.Required && !provided {
+		if requireMissing && def.Required && !provided {
 			errs = append(errs, fmt.Sprintf("variable %q is required", name))
+			missingRequired[name] = true
 			continue
 		}
 
@@ -539,11 +573,17 @@ func validateVarDefs(defs map[string]*VarDef, values map[string]string) error {
 		}
 	}
 
-	if len(errs) > 0 {
-		return fmt.Errorf("variable validation failed:\n  - %s", strings.Join(errs, "\n  - "))
+	if len(missingRequired) == 0 {
+		missingRequired = nil
 	}
+	return errs, missingRequired
+}
 
-	return nil
+func formatVarValidationErrors(errs []string) error {
+	if len(errs) == 0 {
+		return nil
+	}
+	return fmt.Errorf("variable validation failed:\n  - %s", strings.Join(errs, "\n  - "))
 }
 
 // ApplyDefaults returns a new map with default values filled in.

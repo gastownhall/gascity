@@ -2,12 +2,36 @@ package api
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 )
+
+func TestCityLifecycleEventsSharePayloadTypeForOneOfValidation(t *testing.T) {
+	registered := events.RegisteredPayloadTypes()
+	cityEvents := []string{
+		events.CityCreated,
+		events.CityReady,
+		events.CityInitFailed,
+		events.CityUnregisterRequested,
+		events.CityUnregistered,
+		events.CityUnregisterFailed,
+	}
+
+	firstType := reflect.TypeOf(registered[cityEvents[0]])
+	if firstType == nil {
+		t.Fatalf("%s payload type is not registered", cityEvents[0])
+	}
+	for _, eventType := range cityEvents[1:] {
+		got := reflect.TypeOf(registered[eventType])
+		if got != firstType {
+			t.Fatalf("%s payload type = %v, want shared %v so EventPayload oneOf has a single city lifecycle branch", eventType, got, firstType)
+		}
+	}
+}
 
 func TestWorkflowEventScope(t *testing.T) {
 	info := workflowStoreInfo{ref: "rig:alpha", scopeKind: "rig", scopeRef: "alpha"}

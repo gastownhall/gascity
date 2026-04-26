@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -89,6 +90,88 @@ func TestBeadGraphReturnsRootAndChildren(t *testing.T) {
 		if !beadIDs[id] {
 			t.Errorf("beads missing ID %q", id)
 		}
+	}
+}
+
+func TestBeadGraphIncludesParentChildChildrenAndEdges(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	h := newTestCityHandler(t, state)
+
+	root, err := store.Create(beads.Bead{Title: "Root", Type: "feature"})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	child, err := store.Create(beads.Bead{Title: "Child", Type: "task", ParentID: root.ID})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	sibling, err := store.Create(beads.Bead{Title: "Sibling", Type: "bug", ParentID: root.ID})
+	if err != nil {
+		t.Fatalf("Create(sibling): %v", err)
+	}
+
+	rec, resp := getGraph(t, h, state, root.ID)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	beadIDs := map[string]bool{}
+	for _, b := range resp.Beads {
+		beadIDs[b.ID] = true
+	}
+	for _, id := range []string{root.ID, child.ID, sibling.ID} {
+		if !beadIDs[id] {
+			t.Fatalf("graph beads missing %s; got %#v", id, resp.Beads)
+		}
+	}
+
+	edges := map[string]bool{}
+	for _, dep := range resp.Deps {
+		edges[dep.From+"|"+dep.To+"|"+dep.Kind] = true
+	}
+	for _, id := range []string{child.ID, sibling.ID} {
+		key := root.ID + "|" + id + "|parent-child"
+		if !edges[key] {
+			t.Fatalf("graph deps missing %s; got %#v", key, resp.Deps)
+		}
+	}
+}
+
+func TestBeadGraphReturnsErrorWhenGraphListFails(t *testing.T) {
+	state := newFakeState(t)
+	base := state.stores["myrig"]
+	root, err := base.Create(beads.Bead{Title: "Root", Type: "feature"})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	state.stores["myrig"] = &failingBeadStore{
+		Store:   base,
+		listErr: errors.New("list failed"),
+	}
+	h := newTestCityHandler(t, state)
+
+	rec, _ := getGraph(t, h, state, root.ID)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+}
+
+func TestBeadGraphReturnsErrorWhenDepListFails(t *testing.T) {
+	state := newFakeState(t)
+	base := state.stores["myrig"]
+	root, err := base.Create(beads.Bead{Title: "Root", Type: "feature"})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	state.stores["myrig"] = depListFailStore{Store: base}
+	h := newTestCityHandler(t, state)
+
+	rec, _ := getGraph(t, h, state, root.ID)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusInternalServerError, rec.Body.String())
 	}
 }
 

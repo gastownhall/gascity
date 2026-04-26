@@ -29,6 +29,7 @@ func (s *failingSessionLookupStore) List(beads.ListQuery) ([]beads.Bead, error) 
 }
 
 func TestWorkerHandleForSessionWithConfigUsesResolvedProviderOnFirstStart(t *testing.T) {
+	skipSlowCmdGCTest(t, "waits through stale session-key detection; run make test-cmd-gc-process for full coverage")
 	cityDir := t.TempDir()
 	writePhase0InterfaceCity(t, cityDir, `[workspace]
 name = "test-city"
@@ -143,6 +144,7 @@ func TestResolvedWorkerRuntimeWithConfigUsesProviderLaunchCommand(t *testing.T) 
 }
 
 func TestWorkerHandleForSessionWithConfigUsesResolvedProviderOnResume(t *testing.T) {
+	skipSlowCmdGCTest(t, "waits through stale session-key detection; run make test-cmd-gc-process for full coverage")
 	cityDir := t.TempDir()
 	writePhase0InterfaceCity(t, cityDir, `[workspace]
 name = "test-city"

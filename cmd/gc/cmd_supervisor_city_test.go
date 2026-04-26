@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"net"
 	"os"
@@ -106,6 +107,35 @@ func TestRegisterCityWithSupervisorKeepsRegistrationWhenCityNeverBecomesReady(t 
 	}
 }
 
+func TestRegisterCityForAPIRegistersWithoutWaitingForReadiness(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"bright-lights\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := registerCityForAPI(cityPath, "api-name"); err != nil {
+		t.Fatalf("registerCityForAPI: %v", err)
+	}
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	entries, err := reg.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("registry entries = %+v, want one", entries)
+	}
+	assertSameTestPath(t, entries[0].Path, cityPath)
+	if entries[0].EffectiveName() != "api-name" {
+		t.Fatalf("effective name = %q, want api-name", entries[0].EffectiveName())
+	}
+}
+
 func TestRegisterCityWithSupervisorRetriesControllerLockInitFailure(t *testing.T) {
 	gcHome := t.TempDir()
 	t.Setenv("GC_HOME", gcHome)
@@ -185,7 +215,7 @@ func TestRegisterCityWithSupervisorRetriesControllerLockInitFailure(t *testing.T
 }
 
 func TestRegisterCityWithSupervisorKeepsRegistrationWhenReloadFails(t *testing.T) {
-	skipSlowCmdGCTest(t, "exercises supervisor registration retry behavior; run without -short for scenario coverage")
+	skipSlowCmdGCTest(t, "exercises supervisor registration retry behavior; run make test-cmd-gc-process for scenario coverage")
 	gcHome := t.TempDir()
 	t.Setenv("GC_HOME", gcHome)
 
@@ -1105,6 +1135,57 @@ func TestUnregisterCityFromSupervisorReturnsReloadFailureWhenCityDirMissing(t *t
 	}
 	if len(entries) != 0 {
 		t.Fatalf("expected empty registry after failed reload with missing city dir, got %v", entries)
+	}
+}
+
+func TestReconcileCitiesUnregisterEventUsesManagedCityName(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+
+	cityPath := filepath.Join(t.TempDir(), "basename-city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	close(done)
+	registry := newCityRegistry()
+	registry.Add(cityPath, &managedCity{
+		name:    "effective-city",
+		started: true,
+		cancel:  func() {},
+		done:    done,
+	})
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	var stdout, stderr bytes.Buffer
+	reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+
+	recorded, err := events.ReadAll(filepath.Join(cityPath, ".gc", "events.jsonl"))
+	if err != nil {
+		t.Fatalf("ReadAll(events): %v", err)
+	}
+	if len(recorded) != 1 {
+		t.Fatalf("recorded %d events, want 1", len(recorded))
+	}
+	got := recorded[0]
+	if got.Type != events.CityUnregistered {
+		t.Fatalf("event.Type = %q, want %q", got.Type, events.CityUnregistered)
+	}
+	if got.Subject != "effective-city" {
+		t.Fatalf("event.Subject = %q, want effective-city", got.Subject)
+	}
+	var payload struct {
+		Name string `json:"name"`
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(got.Payload, &payload); err != nil {
+		t.Fatalf("json.Unmarshal(payload): %v", err)
+	}
+	if payload.Name != "effective-city" {
+		t.Fatalf("payload.Name = %q, want effective-city", payload.Name)
+	}
+	if payload.Path != cityPath {
+		t.Fatalf("payload.Path = %q, want %q", payload.Path, cityPath)
 	}
 }
 

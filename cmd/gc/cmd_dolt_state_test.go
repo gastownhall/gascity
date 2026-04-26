@@ -328,6 +328,7 @@ func TestDoltStateAllocatePortCmdReusesLiveProviderState(t *testing.T) {
 }
 
 func TestStartTCPListenerProcessInDirRegistersCleanup(t *testing.T) {
+	skipSlowCmdGCTest(t, "spawns a TCP listener process and verifies cleanup; run make test-cmd-gc-process for full coverage")
 	port := reserveRandomTCPPort(t)
 	dir := t.TempDir()
 	var proc *exec.Cmd
@@ -1202,7 +1203,7 @@ func TestDoltStatePreflightCleanCmdRemovesStaleArtifacts(t *testing.T) {
 }
 
 func TestDoltStatePreflightCleanCmdPreservesLiveArtifacts(t *testing.T) {
-	skipSlowCmdGCTest(t, "spawns managed dolt holder processes; run without -short or via integration packages")
+	skipSlowCmdGCTest(t, "spawns managed dolt holder processes; run make test-cmd-gc-process for full coverage")
 	if _, err := exec.LookPath("lsof"); err != nil {
 		t.Skip("lsof not installed")
 	}
@@ -1249,6 +1250,7 @@ func TestDoltStatePreflightCleanCmdPreservesLiveArtifacts(t *testing.T) {
 
 func startTCPListenerProcessInDir(t *testing.T, port int, dir string) *exec.Cmd {
 	t.Helper()
+	skipSlowCmdGCTest(t, "spawns a TCP listener process to emulate managed dolt; run make test-cmd-gc-process for full coverage")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(%s): %v", dir, err)
 	}
@@ -1297,6 +1299,7 @@ while True:
 
 func startLockedDelayedTCPListenerProcessInDir(t *testing.T, lockFile string, port int, dir string, delay time.Duration) *exec.Cmd {
 	t.Helper()
+	skipSlowCmdGCTest(t, "spawns a delayed TCP listener process to emulate managed dolt recovery; run make test-cmd-gc-process for full coverage")
 	if err := os.MkdirAll(filepath.Dir(lockFile), 0o755); err != nil {
 		t.Fatalf("MkdirAll(%s): %v", filepath.Dir(lockFile), err)
 	}
@@ -2131,7 +2134,7 @@ func TestDoltStateStopManagedCmdDoesNotKillImposterPortHolder(t *testing.T) {
 }
 
 func TestDoltStateRecoverManagedCmdReportsReadOnlyAndRestarts(t *testing.T) {
-	skipSlowCmdGCTest(t, "spawns managed dolt recovery processes; run without -short or via integration packages")
+	skipSlowCmdGCTest(t, "spawns managed dolt recovery processes; run make test-cmd-gc-process for full coverage")
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -2488,7 +2491,7 @@ esac
 }
 
 func TestDoltStateRecoverManagedCmdClearsPublishedStateWhenPreflightCleanupFails(t *testing.T) {
-	skipSlowCmdGCTest(t, "spawns managed dolt recovery processes; run without -short or via integration packages")
+	skipSlowCmdGCTest(t, "spawns managed dolt recovery processes; run make test-cmd-gc-process for full coverage")
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -2563,7 +2566,7 @@ func TestDoltStateRecoverManagedCmdClearsPublishedStateWhenPreflightCleanupFails
 }
 
 func TestDoltStateRecoverManagedCmdFailsWhenPostStartHealthFails(t *testing.T) {
-	skipSlowCmdGCTest(t, "spawns managed dolt recovery processes; run without -short or via integration packages")
+	skipSlowCmdGCTest(t, "spawns managed dolt recovery processes; run make test-cmd-gc-process for full coverage")
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {

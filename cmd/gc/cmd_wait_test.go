@@ -72,7 +72,7 @@ func waitTestEnv(overrides map[string]string) []string {
 
 func waitTestRealBDPath(t *testing.T) string {
 	t.Helper()
-	skipSlowCmdGCTest(t, "requires a managed bd lifecycle city; run without -short or via integration packages")
+	skipSlowCmdGCTest(t, "requires a managed bd lifecycle city; run make test-cmd-gc-process for full coverage")
 	waitTestRealBDPathOnce.Do(func() {
 		for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
 			if strings.TrimSpace(dir) == "" {
@@ -1270,6 +1270,7 @@ func setupFreshManagedBdWaitTestCity(t *testing.T) (string, string) {
 
 func setupManagedBdWaitTestCity(t *testing.T) (string, string) {
 	t.Helper()
+	skipSlowCmdGCTest(t, "requires a managed bd/dolt lifecycle city; run make test-cmd-gc-process for full coverage")
 	configureIsolatedRuntimeEnv(t)
 
 	bdPath := waitTestRealBDPath(t)

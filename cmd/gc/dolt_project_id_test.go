@@ -14,7 +14,7 @@ import (
 )
 
 func TestEnsureManagedDoltProjectIDGeneratesLocalIdentityWhenMetadataAndDatabaseMissing(t *testing.T) {
-	skipSlowCmdGCTest(t, "requires a managed dolt server; run without -short or via integration packages")
+	skipSlowCmdGCTest(t, "requires a managed dolt server; run make test-cmd-gc-process for full coverage")
 	doltPath := os.Getenv("GC_DOLT_REAL_BINARY")
 	var err error
 	if doltPath == "" {
@@ -258,7 +258,7 @@ func TestManagedDoltWaitReadyWithPasswordUsesDirectQueryProbe(t *testing.T) {
 }
 
 func TestRecoverManagedDoltProcessWithPasswordUsesDirectHelpersAgainstRealServer(t *testing.T) {
-	skipSlowCmdGCTest(t, "requires a managed dolt server; run without -short or via integration packages")
+	skipSlowCmdGCTest(t, "requires a managed dolt server; run make test-cmd-gc-process for full coverage")
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -305,7 +305,7 @@ func TestRecoverManagedDoltProcessWithPasswordUsesDirectHelpersAgainstRealServer
 }
 
 func TestEnsureManagedDoltProjectIDGeneratesLocalIdentityWithPasswordedServer(t *testing.T) {
-	skipSlowCmdGCTest(t, "requires a managed dolt server; run without -short or via integration packages")
+	skipSlowCmdGCTest(t, "requires a managed dolt server; run make test-cmd-gc-process for full coverage")
 	cityDir := t.TempDir()
 	metadataPath := filepath.Join(cityDir, ".beads", "metadata.json")
 	if err := os.MkdirAll(filepath.Dir(metadataPath), 0o755); err != nil {

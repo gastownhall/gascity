@@ -12,18 +12,21 @@ else
   DOLT_STATE_DIR="$LEGACY_GC_DIR"
 fi
 
-# Data lives under .beads/dolt (gc-beads-bd canonical path).
-# Fall back to $DOLT_STATE_DIR/dolt-data for legacy cities that haven't migrated.
-DOLT_BEADS_DATA_DIR="$GC_CITY_PATH/.beads/dolt"
-if [ -d "$DOLT_BEADS_DATA_DIR" ]; then
+# Data lives under .beads/dolt (gc-beads-bd canonical path). Honor
+# GC_DOLT_DATA_DIR first so shell pack commands target the same managed data
+# directory as the Go lifecycle and doctor code.
+DOLT_BEADS_DATA_DIR="${GC_DOLT_DATA_DIR:-$GC_CITY_PATH/.beads/dolt}"
+if [ -n "${GC_DOLT_DATA_DIR:-}" ]; then
+  DOLT_DATA_DIR="$GC_DOLT_DATA_DIR"
+elif [ -d "$DOLT_BEADS_DATA_DIR" ]; then
   DOLT_DATA_DIR="$DOLT_BEADS_DATA_DIR"
 else
   DOLT_DATA_DIR="$DOLT_STATE_DIR/dolt-data"
 fi
 
-DOLT_LOG_FILE="$DOLT_STATE_DIR/dolt.log"
-DOLT_PID_FILE="$DOLT_STATE_DIR/dolt.pid"
-DOLT_STATE_FILE="$DOLT_STATE_DIR/dolt-state.json"
+DOLT_LOG_FILE="${GC_DOLT_LOG_FILE:-$DOLT_STATE_DIR/dolt.log}"
+DOLT_PID_FILE="${GC_DOLT_PID_FILE:-$DOLT_STATE_DIR/dolt.pid}"
+DOLT_STATE_FILE="${GC_DOLT_STATE_FILE:-$DOLT_STATE_DIR/dolt-state.json}"
 
 GC_BEADS_BD_SCRIPT="$GC_CITY_PATH/.gc/system/packs/bd/assets/scripts/gc-beads-bd.sh"
 
@@ -51,6 +54,30 @@ read_runtime_state_string() (
   key="$2"
   [ -f "$state_file" ] || return 0
   sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$state_file" 2>/dev/null | head -1 || true
+)
+
+canonical_path() (
+  path="$1"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$path" <<'PY'
+import os
+import sys
+
+print(os.path.realpath(sys.argv[1]))
+PY
+    return $?
+  fi
+  if command -v readlink >/dev/null 2>&1; then
+    readlink -f "$path" 2>/dev/null && return 0
+  fi
+  printf '%s\n' "$path"
+)
+
+same_path() (
+  left="$1"
+  right="$2"
+  [ "$left" = "$right" ] && return 0
+  [ "$(canonical_path "$left")" = "$(canonical_path "$right")" ]
 )
 
 pid_is_running() (
@@ -149,7 +176,11 @@ managed_runtime_port() (
   [ "$running" = "true" ] || return 0
   [ -n "$pid" ] || return 0
   [ -n "$port" ] || return 0
-  [ "$data_dir" = "$expected_data_dir" ] || return 0
+  if ! same_path "$data_dir" "$expected_data_dir"; then
+    printf 'dolt runtime: managed state data_dir=%s does not match expected data_dir=%s\n' \
+      "$data_dir" "$expected_data_dir" >&2
+    return 0
+  fi
   pid_is_running "$pid" || return 0
 
   holder_pid=$(managed_runtime_listener_pid "$port" || true)
@@ -169,7 +200,7 @@ managed_runtime_port() (
 # Resolve GC_DOLT_PORT if not already set by the caller.
 # Priority: env override > validated managed runtime state > default 3307.
 if [ -z "$GC_DOLT_PORT" ]; then
-  GC_DOLT_PORT=$(managed_runtime_port "$DOLT_STATE_FILE" "$GC_CITY_PATH/.beads/dolt")
+  GC_DOLT_PORT=$(managed_runtime_port "$DOLT_STATE_FILE" "$DOLT_DATA_DIR")
   : "${GC_DOLT_PORT:=3307}"
 fi
 
@@ -186,18 +217,38 @@ else
   TIMEOUT_BIN=""
 fi
 
+_run_bounded_warned_no_timeout=""
+
 # run_bounded SECS CMD...  — Run CMD with a wall-clock timeout. Exits
 # 124 on timeout (coreutils convention). Uses --kill-after=2 so an
 # uncooperative child that ignores SIGTERM (e.g. a dolt client stuck
 # in kernel socket wait) is escalated to SIGKILL rather than leaking
 # zombies — which is the failure mode the bounded helper exists to
-# prevent. When no timeout binary is available the command runs
-# unbounded; callers must still tolerate a non-zero status.
+# prevent. If no bounded execution mechanism is available, fail closed rather
+# than running a potentially wedged Dolt client unbounded.
 run_bounded() {
   _t="$1"; shift
   if [ -n "$TIMEOUT_BIN" ]; then
     "$TIMEOUT_BIN" --kill-after=2 "$_t" "$@"
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 - "$_t" "$@" <<'PY'
+import subprocess
+import sys
+
+limit = float(sys.argv[1])
+cmd = sys.argv[2:]
+try:
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=limit)
+except subprocess.TimeoutExpired as exc:
+    sys.stdout.write(exc.stdout or "")
+    sys.stderr.write(exc.stderr or "")
+    sys.exit(124)
+sys.stdout.write(proc.stdout)
+sys.stderr.write(proc.stderr)
+sys.exit(proc.returncode)
+PY
   else
-    "$@"
+    printf 'dolt runtime: timeout/gtimeout/python3 not found; cannot run bounded command\n' >&2
+    return 124
   fi
 }

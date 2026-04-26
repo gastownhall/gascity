@@ -194,7 +194,7 @@ func TestGenClientRoundTripConvoyCreate(t *testing.T) {
 		Title: "round-trip convoy",
 		Items: &items,
 	}
-	resp, err := client.CreateConvoyWithResponse(context.Background(), state.CityName(), body)
+	resp, err := client.CreateConvoyWithResponse(context.Background(), state.CityName(), nil, body)
 	if err != nil {
 		t.Fatalf("CreateConvoy: %v", err)
 	}

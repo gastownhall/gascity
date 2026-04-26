@@ -124,6 +124,131 @@ condition = "{{mode}} == slow"
 	}
 }
 
+func TestCompileWithoutRuntimeVarValidationReportsMissingCompileTimeRangeVar(t *testing.T) {
+	dir := t.TempDir()
+	formulaContent := `
+formula = "range-demo"
+version = 1
+
+[vars.n]
+description = "Loop count"
+required = true
+
+[[steps]]
+id = "loop"
+title = "Loop"
+
+[steps.loop]
+range = "1..{n}"
+
+[[steps.loop.body]]
+id = "work"
+title = "Work {i}"
+`
+	if err := os.WriteFile(filepath.Join(dir, "range-demo.toml"), []byte(formulaContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := CompileWithoutRuntimeVarValidation(context.Background(), "range-demo", []string{dir}, nil)
+	if err == nil {
+		t.Fatal("CompileWithoutRuntimeVarValidation should reject missing compile-time range var")
+	}
+	if !strings.Contains(err.Error(), `variable "n" is required`) {
+		t.Fatalf("error = %v, want required n", err)
+	}
+
+	recipe, err := CompileWithoutRuntimeVarValidation(context.Background(), "range-demo", []string{dir}, map[string]string{"n": "2"})
+	if err != nil {
+		t.Fatalf("CompileWithoutRuntimeVarValidation with n: %v", err)
+	}
+	if len(recipe.Steps) != 3 {
+		t.Fatalf("len(recipe.Steps) = %d, want root plus two loop iterations", len(recipe.Steps))
+	}
+}
+
+func TestCompileWithoutRuntimeVarValidationValidatesCompileTimeRangeVarDefs(t *testing.T) {
+	dir := t.TempDir()
+	formulaContent := `
+formula = "range-demo"
+version = 1
+
+[vars.n]
+description = "Loop count"
+default = "2"
+enum = ["1", "2", "3"]
+
+[[steps]]
+id = "loop"
+title = "Loop"
+
+[steps.loop]
+range = "1..{n}"
+
+[[steps.loop.body]]
+id = "work"
+title = "Work {i}"
+`
+	if err := os.WriteFile(filepath.Join(dir, "range-demo.toml"), []byte(formulaContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	recipe, err := CompileWithoutRuntimeVarValidation(context.Background(), "range-demo", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("CompileWithoutRuntimeVarValidation with default n: %v", err)
+	}
+	if len(recipe.Steps) != 3 {
+		t.Fatalf("len(recipe.Steps) = %d, want root plus two loop iterations", len(recipe.Steps))
+	}
+
+	_, err = CompileWithoutRuntimeVarValidation(context.Background(), "range-demo", []string{dir}, map[string]string{"n": "4"})
+	if err == nil {
+		t.Fatal("CompileWithoutRuntimeVarValidation should reject invalid compile-time range var")
+	}
+	if !strings.Contains(err.Error(), `variable "n": value "4" not in allowed values`) {
+		t.Fatalf("error = %v, want enum validation for n", err)
+	}
+}
+
+func TestCompileWithoutRuntimeVarValidationReportsMissingCompileTimeConditionVar(t *testing.T) {
+	dir := t.TempDir()
+	formulaContent := `
+formula = "condition-demo"
+version = 1
+
+[vars.mode]
+description = "Build mode"
+required = true
+
+[[steps]]
+id = "always"
+title = "Always"
+
+[[steps]]
+id = "slow"
+title = "Slow path"
+condition = "{{mode}} == slow"
+`
+	if err := os.WriteFile(filepath.Join(dir, "condition-demo.toml"), []byte(formulaContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := CompileWithoutRuntimeVarValidation(context.Background(), "condition-demo", []string{dir}, nil)
+	if err == nil {
+		t.Fatal("CompileWithoutRuntimeVarValidation should reject missing compile-time condition var")
+	}
+	if !strings.Contains(err.Error(), `variable "mode" is required`) {
+		t.Fatalf("error = %v, want required mode", err)
+	}
+
+	recipe, err := CompileWithoutRuntimeVarValidation(context.Background(), "condition-demo", []string{dir}, map[string]string{"mode": "slow"})
+	if err != nil {
+		t.Fatalf("CompileWithoutRuntimeVarValidation with mode: %v", err)
+	}
+	if len(recipe.Steps) != 3 {
+		t.Fatalf("len(recipe.Steps) = %d, want root plus two included steps", len(recipe.Steps))
+	}
+}
+
 func TestCompileNilVarsAppliesDefaults(t *testing.T) {
 	dir := t.TempDir()
 	formulaContent := `

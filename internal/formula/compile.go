@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"regexp"
 	"strings"
 	"sync/atomic"
 )
@@ -12,9 +13,11 @@ import (
 // The returned Recipe contains {{variable}} placeholders — substitution
 // happens at instantiation time, not compilation time.
 //
-// vars is used only for compile-time step condition filtering: steps whose
-// condition field evaluates to false given vars are excluded. Pass nil to
-// use formula-defined variable defaults for condition evaluation.
+// vars is used for compile-time template expansion and step condition
+// filtering. Passing nil or an empty map leaves required runtime vars
+// unresolved for later display/instantiation paths, but required vars used by
+// compile-time operators such as loop ranges must still be provided.
+// Passing a non-empty map validates that all required vars are present.
 //
 // The pipeline stages are:
 //  1. LoadByName — load formula TOML from search paths
@@ -29,6 +32,20 @@ import (
 //  10. ApplyRalph — expand inline Ralph run/check steps
 //  11. toRecipe — flatten step tree to Recipe
 func Compile(_ context.Context, name string, searchPaths []string, vars map[string]string) (*Recipe, error) {
+	return compileFormula(name, searchPaths, vars, true)
+}
+
+// CompileWithoutRuntimeVarValidation compiles a formula while deferring
+// required runtime-var checks to the caller. Required vars used by compile-time
+// operators are still validated during compilation. Use this for read-only
+// display surfaces and runtime paths that need recipe-level validation to
+// preserve idempotency or report residual title placeholders alongside missing
+// vars.
+func CompileWithoutRuntimeVarValidation(_ context.Context, name string, searchPaths []string, vars map[string]string) (*Recipe, error) {
+	return compileFormula(name, searchPaths, vars, false)
+}
+
+func compileFormula(name string, searchPaths []string, vars map[string]string, validateRuntimeVars bool) (*Recipe, error) {
 	parser := NewParser(searchPaths...)
 
 	// Stage 1: Load formula by name
@@ -42,14 +59,9 @@ func Compile(_ context.Context, name string, searchPaths []string, vars map[stri
 	if err != nil {
 		return nil, fmt.Errorf("resolving formula %q: %w", name, err)
 	}
-
-	// Validate required vars only when the caller explicitly provided them.
-	// nil = include-all-steps mode (order dispatch); empty = read-only display
-	// (formula show). Both skip validation. Non-empty = user-supplied vars from
-	// sling, cook, or API — validate.
-	if len(vars) > 0 {
+	if validateRuntimeVars && len(vars) > 0 {
 		if err := ValidateVars(resolved, vars); err != nil {
-			return nil, fmt.Errorf("formula %q: %w", name, err)
+			return nil, err
 		}
 	}
 
@@ -62,9 +74,12 @@ func Compile(_ context.Context, name string, searchPaths []string, vars map[stri
 	for k, v := range vars {
 		compileVars[k] = v
 	}
+	if err := validateCompileTimeVars(resolved, vars); err != nil {
+		return nil, err
+	}
 
 	// Stage 3: Apply control flow operators — loops, branches, gates
-	controlFlowSteps, err := ApplyControlFlow(resolved.Steps, resolved.Compose)
+	controlFlowSteps, err := ApplyControlFlowWithVars(resolved.Steps, resolved.Compose, compileVars)
 	if err != nil {
 		return nil, fmt.Errorf("applying control flow to %q: %w", name, err)
 	}
@@ -160,6 +175,61 @@ func Compile(_ context.Context, name string, searchPaths []string, vars map[stri
 
 	// Stage 13: Flatten to Recipe
 	return toRecipeWithGraph(resolved, graphWorkflow)
+}
+
+func validateCompileTimeVars(f *Formula, values map[string]string) error {
+	if f == nil || len(f.Vars) == 0 {
+		return nil
+	}
+	refs := make(map[string]bool)
+	collectCompileTimeVarRefs(f.Steps, refs)
+	collectCompileTimeVarRefs(f.Template, refs)
+	if len(refs) == 0 {
+		return nil
+	}
+	defs := make(map[string]*VarDef)
+	for name := range refs {
+		def := f.Vars[name]
+		if def != nil {
+			defs[name] = def
+		}
+	}
+	return ValidateVarDefs(defs, ApplyDefaults(f, values))
+}
+
+func collectCompileTimeVarRefs(steps []*Step, refs map[string]bool) {
+	for _, step := range steps {
+		if step == nil {
+			continue
+		}
+		if step.Loop != nil && step.Loop.Range != "" {
+			for _, match := range rangeVarPattern.FindAllStringSubmatch(step.Loop.Range, -1) {
+				refs[match[1]] = true
+			}
+		}
+		collectStepConditionVarRefs(step.Condition, refs)
+		collectCompileTimeVarRefs(step.Children, refs)
+		if step.Loop != nil {
+			collectCompileTimeVarRefs(step.Loop.Body, refs)
+		}
+	}
+}
+
+func collectStepConditionVarRefs(condition string, refs map[string]bool) {
+	condition = strings.TrimSpace(condition)
+	if condition == "" {
+		return
+	}
+	for _, pattern := range []*regexp.Regexp{
+		stepCondVarPattern,
+		stepCondNegatedVarPattern,
+		stepCondComparePattern,
+	} {
+		if match := pattern.FindStringSubmatch(condition); match != nil {
+			refs[match[1]] = true
+			return
+		}
+	}
 }
 
 func toRecipeWithGraph(f *Formula, graphWorkflow bool) (*Recipe, error) {

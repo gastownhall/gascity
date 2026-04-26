@@ -87,6 +87,7 @@ func TestDoBeadsCityEndpointSupportsExecGcBeadsBdProvider(t *testing.T) {
 }
 
 func TestDoBeadsCityUseExternalWritesVerifiedCityAndInheritedRigs(t *testing.T) {
+	skipSlowCmdGCTest(t, "exercises managed bd provider transition behavior; run make test-cmd-gc-process for full coverage")
 	t.Setenv("GC_BEADS", "bd")
 
 	cityDir := t.TempDir()
@@ -184,6 +185,7 @@ func TestDoBeadsCityUseExternalWritesVerifiedCityAndInheritedRigs(t *testing.T) 
 }
 
 func TestDoBeadsCityUseExternalUpdatesIncludedInheritedRigs(t *testing.T) {
+	skipSlowCmdGCTest(t, "exercises managed bd provider transition behavior; run make test-cmd-gc-process for full coverage")
 	t.Setenv("GC_BEADS", "bd")
 
 	cityDir := t.TempDir()
@@ -414,6 +416,7 @@ func TestDoBeadsCityUseExternalStopFailureKeepsExternalConfig(t *testing.T) {
 }
 
 func TestDoBeadsCityUseExternalRewritesCompatRigWithRelativePath(t *testing.T) {
+	skipSlowCmdGCTest(t, "exercises managed bd provider transition behavior; run make test-cmd-gc-process for full coverage")
 	t.Setenv("GC_BEADS", "bd")
 
 	cityDir := t.TempDir()
@@ -509,6 +512,7 @@ func TestDoBeadsCityUseExternalPreservesCompatOnlyExplicitRigs(t *testing.T) {
 }
 
 func TestDoBeadsCityUseExternalAdoptUnverifiedSkipsValidation(t *testing.T) {
+	skipSlowCmdGCTest(t, "exercises managed bd provider transition behavior; run make test-cmd-gc-process for full coverage")
 	t.Setenv("GC_BEADS", "bd")
 
 	cityDir := t.TempDir()

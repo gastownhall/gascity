@@ -15,7 +15,7 @@
 // narrow on actual runtime shape and drop malformed frames with a
 // UI error report — same discipline as the pre-migration decoder.
 //
-// See specs/architecture.md §6 "Tooling landscape" (TypeScript
+// See engdocs/architecture/api-control-plane.md §6 "Tooling landscape" (TypeScript
 // section) for why hey-api is the SSE tool even though openapi-fetch
 // still drives REST.
 

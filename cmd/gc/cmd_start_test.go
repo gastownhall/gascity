@@ -211,6 +211,32 @@ func TestPassthroughEnvIncludesClaudeAuthContext(t *testing.T) {
 	}
 }
 
+func TestPassthroughEnvIncludesProviderCredentialEnv(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-123")
+	t.Setenv("OPENAI_API_KEY", "sk-openai-123")
+	t.Setenv("OPENAI_BASE_URL", "https://openai.example.test")
+	t.Setenv("GEMINI_API_KEY", "gemini-123")
+	t.Setenv("GOOGLE_API_KEY", "google-123")
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "/tmp/google-credentials.json")
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "gc-project")
+
+	got := passthroughEnv()
+
+	for key, want := range map[string]string{
+		"ANTHROPIC_API_KEY":              "sk-ant-123",
+		"OPENAI_API_KEY":                 "sk-openai-123",
+		"OPENAI_BASE_URL":                "https://openai.example.test",
+		"GEMINI_API_KEY":                 "gemini-123",
+		"GOOGLE_API_KEY":                 "google-123",
+		"GOOGLE_APPLICATION_CREDENTIALS": "/tmp/google-credentials.json",
+		"GOOGLE_CLOUD_PROJECT":           "gc-project",
+	} {
+		if got[key] != want {
+			t.Errorf("passthroughEnv()[%s] = %q, want %q", key, got[key], want)
+		}
+	}
+}
+
 func TestPassthroughEnvXDGFallbackFromHOME(t *testing.T) {
 	t.Setenv("HOME", "/tmp/gc-home")
 	// Explicitly unset XDG vars so fallback logic fires.
@@ -405,6 +431,27 @@ func TestStageHookFilesFallsBackToLegacyClaudeHook(t *testing.T) {
 		}
 	}
 	t.Fatal("stageHookFiles() did not stage hooks/claude.json")
+}
+
+func TestStageHookFilesDoesNotStageClaudeSkillsDir(t *testing.T) {
+	cityDir := filepath.Join(t.TempDir(), "city")
+	workDir := filepath.Join(cityDir, "worker")
+	skillsDir := filepath.Join(workDir, ".claude", "skills", "plan")
+	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", skillsDir, err)
+	}
+	skillPath := filepath.Join(skillsDir, "SKILL.md")
+	if err := os.WriteFile(skillPath, []byte("---\nname: plan\n---\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", skillPath, err)
+	}
+
+	got := stageHookFiles(nil, cityDir, workDir)
+	wantRelDst := path.Join("worker", ".claude", "skills")
+	for _, entry := range got {
+		if entry.RelDst == wantRelDst {
+			t.Fatalf("stageHookFiles() staged %q at %q; want skills drift tracked via FingerprintExtra only", entry.Src, entry.RelDst)
+		}
+	}
 }
 
 func TestConfiguredRigNameMatchesRigByPathWithoutCreatingDirs(t *testing.T) {
