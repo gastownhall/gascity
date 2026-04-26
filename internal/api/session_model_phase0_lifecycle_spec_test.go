@@ -483,17 +483,17 @@ func TestPhase0ProviderCompatibility_CreateWritesManualOrigin(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusCreated, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
 
-	var resp sessionResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	result := waitForRequestResult(t, fs.eventProv, "session.create", 5*time.Second)
+	if result.Status != "succeeded" {
+		t.Fatalf("request.result status = %q, want succeeded", result.Status)
 	}
-	bead, err := fs.cityBeadStore.Get(resp.ID)
+	bead, err := fs.cityBeadStore.Get(result.ResourceID)
 	if err != nil {
-		t.Fatalf("Get(%s): %v", resp.ID, err)
+		t.Fatalf("Get(%s): %v", result.ResourceID, err)
 	}
 	if got := bead.Metadata["session_origin"]; got != "manual" {
 		t.Fatalf("session_origin = %q, want manual", got)

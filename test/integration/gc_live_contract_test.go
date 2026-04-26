@@ -91,7 +91,7 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 	}
 
 	cityBase := "/v0/city/" + url.PathEscape(cityName)
-	waitForLiveContractEvent(t, baseURL, validator, "/v0/events", cityName, "city.ready", 120*time.Second)
+	waitForLiveContractRequestResult(t, baseURL, validator, "/v0/events", cityName, "city.create", "succeeded", 120*time.Second)
 	liveContractJSON[struct {
 		Status string `json:"status"`
 	}](t, baseURL, validator, http.MethodGet, cityBase+"/health", nil, http.StatusOK)
@@ -266,7 +266,7 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 		t.Fatalf("filtered sibling parent = %q, want %q", listedSibling.ParentID, rootBead.ID)
 	}
 
-	waitForLiveContractEvent(t, baseURL, validator, cityBase+"/events", cityName, "city.ready", 10*time.Second)
+	waitForLiveContractRequestResult(t, baseURL, validator, cityBase+"/events", cityName, "city.create", "succeeded", 10*time.Second)
 	liveContractJSON[contractEventList](t, baseURL, validator, http.MethodGet, "/v0/events?limit=50", nil, http.StatusOK)
 	runLiveContractReadSweep(t, baseURL, validator, specBytes, cityName, rigName)
 
@@ -438,6 +438,44 @@ func validateLiveContractResponse(t *testing.T, v openapivalidator.Validator, re
 		}
 	}
 	t.Fatalf("%s %s response does not match OpenAPI schema:\n%sbody: %s", req.Method, req.URL.Path, details.String(), string(raw))
+}
+
+func waitForLiveContractRequestResult(t *testing.T, baseURL string, v openapivalidator.Validator, path, subject, operation, wantStatus string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		events, err := liveContractEventList(baseURL, v, path)
+		if err != nil {
+			lastErr = err
+			time.Sleep(250 * time.Millisecond)
+			continue
+		}
+		for _, event := range events.Items {
+			if event.Subject != subject || event.Type != "request.result" {
+				continue
+			}
+			var payload struct {
+				Operation string `json:"operation"`
+				Status    string `json:"status"`
+			}
+			raw, _ := json.Marshal(event.Payload)
+			if json.Unmarshal(raw, &payload) != nil {
+				continue
+			}
+			if payload.Operation != operation {
+				continue
+			}
+			if payload.Status == "failed" && wantStatus != "failed" {
+				t.Fatalf("request.result(%s) for %s failed: %+v", operation, subject, event.Payload)
+			}
+			if payload.Status == wantStatus {
+				return
+			}
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for request.result(%s, %s) for %s from %s; last error: %v", operation, wantStatus, subject, path, lastErr)
 }
 
 func waitForLiveContractEvent(t *testing.T, baseURL string, v openapivalidator.Validator, path, subject, eventType string, timeout time.Duration) {

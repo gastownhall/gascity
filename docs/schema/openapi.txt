@@ -1060,11 +1060,11 @@
         "additionalProperties": false,
         "properties": {
           "name": {
-            "description": "Resolved city name as persisted in city.toml. Use this to filter the event stream for completion.",
+            "description": "Resolved city name as persisted in city.toml.",
             "type": "string"
           },
           "ok": {
-            "description": "True when scaffolding + registration succeeded. Does not imply the city is ready yet; watch /v0/events/stream for city.ready.",
+            "description": "True when scaffolding + registration succeeded. Does not imply the city is ready yet; watch /v0/events/stream for a request.result event with this request_id.",
             "type": "boolean"
           },
           "path": {
@@ -1072,12 +1072,17 @@
             "type": "string"
           },
           "reload_warning": {
-            "description": "Non-empty when the city was created but the supervisor reload signal failed; clients should surface this warning and retry reload or observe the event stream.",
+            "description": "Non-empty when the city was created but the supervisor reload signal failed.",
+            "type": "string"
+          },
+          "request_id": {
+            "description": "Correlation ID for the async operation. Watch /v0/events/stream for a request.result event with this request_id to observe completion or failure.",
             "type": "string"
           }
         },
         "required": [
           "ok",
+          "request_id",
           "name",
           "path"
         ],
@@ -1204,11 +1209,11 @@
         "additionalProperties": false,
         "properties": {
           "name": {
-            "description": "Resolved registry name. Filter the event stream by this to observe completion.",
+            "description": "Resolved registry name.",
             "type": "string"
           },
           "ok": {
-            "description": "True when the registry entry was removed and the supervisor was signaled. Does not imply the city's controller has stopped yet; watch /v0/events/stream for city.unregistered.",
+            "description": "True when the registry entry was removed and the supervisor was signaled. Does not imply the city's controller has stopped yet; watch /v0/events/stream for a request.result event with this request_id.",
             "type": "boolean"
           },
           "path": {
@@ -1216,12 +1221,17 @@
             "type": "string"
           },
           "reload_warning": {
-            "description": "Non-empty when the registry entry was removed but the supervisor reload signal failed; clients should surface this warning and retry reload or observe the event stream.",
+            "description": "Non-empty when the registry entry was removed but the supervisor reload signal failed.",
+            "type": "string"
+          },
+          "request_id": {
+            "description": "Correlation ID for the async operation. Watch /v0/events/stream for a request.result event with this request_id to observe completion or failure.",
             "type": "string"
           }
         },
         "required": [
           "ok",
+          "request_id",
           "name",
           "path"
         ],
@@ -1982,6 +1992,9 @@
           },
           {
             "$ref": "#/components/schemas/OutboundEventPayload"
+          },
+          {
+            "$ref": "#/components/schemas/RequestResultPayload"
           },
           {
             "$ref": "#/components/schemas/UnboundEventPayload"
@@ -5158,6 +5171,41 @@
         ],
         "type": "object"
       },
+      "RequestResultPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "error_code": {
+            "description": "Machine-readable error code when status is failed.",
+            "type": "string"
+          },
+          "error_message": {
+            "description": "Human-readable error description when status is failed.",
+            "type": "string"
+          },
+          "operation": {
+            "description": "The operation that completed (city.create, city.unregister, session.create, session.message, session.submit).",
+            "type": "string"
+          },
+          "request_id": {
+            "description": "Correlation ID returned by the 202 response that started this operation.",
+            "type": "string"
+          },
+          "resource_id": {
+            "description": "ID of the created/affected resource (city name, session ID, etc.).",
+            "type": "string"
+          },
+          "status": {
+            "description": "succeeded or failed.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "operation",
+          "status"
+        ],
+        "type": "object"
+      },
       "RigActionBody": {
         "additionalProperties": false,
         "properties": {
@@ -5767,6 +5815,10 @@
             "type": "string"
           },
           "reason": {
+            "type": "string"
+          },
+          "request_id": {
+            "description": "Async correlation ID. Present on 202 responses; watch /v0/events/stream for request.result with this ID.",
             "type": "string"
           },
           "rig": {
@@ -6576,6 +6628,7 @@
             "order.failed": "#/components/schemas/TypedEventStreamEnvelopeOrderFailed",
             "order.fired": "#/components/schemas/TypedEventStreamEnvelopeOrderFired",
             "provider.swapped": "#/components/schemas/TypedEventStreamEnvelopeProviderSwapped",
+            "request.result": "#/components/schemas/TypedEventStreamEnvelopeRequestResult",
             "session.crashed": "#/components/schemas/TypedEventStreamEnvelopeSessionCrashed",
             "session.draining": "#/components/schemas/TypedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionIdleKilled",
@@ -6688,6 +6741,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeProviderSwapped"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeRequestResult"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionCrashed"
@@ -8108,6 +8164,48 @@
         "title": "TypedEventStreamEnvelope provider.swapped",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeRequestResult": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/RequestResultPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "request.result",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope request.result",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionCrashed": {
         "additionalProperties": false,
         "properties": {
@@ -8565,6 +8663,7 @@
             "order.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFailed",
             "order.fired": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFired",
             "provider.swapped": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderSwapped",
+            "request.result": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResult",
             "session.crashed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionCrashed",
             "session.draining": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionIdleKilled",
@@ -8677,6 +8776,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderSwapped"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResult"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionCrashed"
@@ -10227,6 +10329,52 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope provider.swapped",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeRequestResult": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/RequestResultPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "request.result",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope request.result",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionCrashed": {

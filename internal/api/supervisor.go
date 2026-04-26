@@ -34,6 +34,23 @@ type CityResolver interface {
 	CityState(name string) State
 }
 
+// PendingRequestStore is an optional CityResolver extension that
+// lets async handlers store correlation request IDs for later
+// retrieval by the reconciler when emitting request.result events.
+type PendingRequestStore interface {
+	StorePendingRequestID(cityPath, requestID string)
+	ConsumePendingRequestID(cityPath string) (string, bool)
+}
+
+// SupervisorEventSource is an optional CityResolver extension that
+// provides a supervisor-level event recorder for city lifecycle events
+// (create/unregister completion). These events belong on the supervisor
+// scope because the city doesn't exist during create and goes away
+// during unregister.
+type SupervisorEventSource interface {
+	SupervisorEventRecorder() events.Recorder
+}
+
 // TransientCityEventSource is an optional CityResolver extension
 // that lets the supervisor-scope event multiplexer include event
 // providers for cities that are registered but not yet (or no
@@ -304,6 +321,13 @@ func (sm *SupervisorMux) buildMultiplexer() *events.Multiplexer {
 				continue
 			}
 			mux.Add(name, ep)
+		}
+	}
+	if supSrc, ok := sm.resolver.(SupervisorEventSource); ok {
+		if rec := supSrc.SupervisorEventRecorder(); rec != nil {
+			if prov, ok := rec.(events.Provider); ok {
+				mux.Add("__supervisor__", prov)
+			}
 		}
 	}
 	return mux

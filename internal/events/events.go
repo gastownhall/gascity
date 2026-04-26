@@ -17,31 +17,35 @@ import (
 
 // Event type constants. Only types we actually emit today.
 const (
-	SessionWoke             = "session.woke"
-	SessionStopped          = "session.stopped"
-	SessionCrashed          = "session.crashed"
-	BeadCreated             = "bead.created"
-	BeadClosed              = "bead.closed"
-	BeadUpdated             = "bead.updated"
-	MailSent                = "mail.sent"
-	MailRead                = "mail.read"
-	MailArchived            = "mail.archived"
-	MailMarkedRead          = "mail.marked_read"
-	MailMarkedUnread        = "mail.marked_unread"
-	MailReplied             = "mail.replied"
-	MailDeleted             = "mail.deleted"
-	SessionDraining         = "session.draining"
-	SessionUndrained        = "session.undrained"
-	SessionQuarantined      = "session.quarantined"
-	SessionIdleKilled       = "session.idle_killed"
-	SessionSuspended        = "session.suspended"
-	SessionUpdated          = "session.updated"
-	ConvoyCreated           = "convoy.created"
-	ConvoyClosed            = "convoy.closed"
-	ControllerStarted       = "controller.started"
-	ControllerStopped       = "controller.stopped"
-	CitySuspended           = "city.suspended"
-	CityResumed             = "city.resumed"
+	SessionWoke        = "session.woke"
+	SessionStopped     = "session.stopped"
+	SessionCrashed     = "session.crashed"
+	BeadCreated        = "bead.created"
+	BeadClosed         = "bead.closed"
+	BeadUpdated        = "bead.updated"
+	MailSent           = "mail.sent"
+	MailRead           = "mail.read"
+	MailArchived       = "mail.archived"
+	MailMarkedRead     = "mail.marked_read"
+	MailMarkedUnread   = "mail.marked_unread"
+	MailReplied        = "mail.replied"
+	MailDeleted        = "mail.deleted"
+	SessionDraining    = "session.draining"
+	SessionUndrained   = "session.undrained"
+	SessionQuarantined = "session.quarantined"
+	SessionIdleKilled  = "session.idle_killed"
+	SessionSuspended   = "session.suspended"
+	SessionUpdated     = "session.updated"
+	ConvoyCreated      = "convoy.created"
+	ConvoyClosed       = "convoy.closed"
+	ControllerStarted  = "controller.started"
+	ControllerStopped  = "controller.stopped"
+	CitySuspended      = "city.suspended"
+	CityResumed        = "city.resumed"
+	RequestResult      = "request.result"
+
+	// Deprecated: being migrated to RequestResult. Remove once all
+	// emission sites are updated.
 	CityCreated             = "city.created"
 	CityReady               = "city.ready"
 	CityInitFailed          = "city.init_failed"
@@ -78,6 +82,7 @@ var KnownEventTypes = []string{
 	ConvoyCreated, ConvoyClosed,
 	ControllerStarted, ControllerStopped,
 	CitySuspended, CityResumed,
+	RequestResult,
 	CityCreated, CityReady, CityInitFailed,
 	CityUnregisterRequested, CityUnregistered, CityUnregisterFailed,
 	OrderFired, OrderCompleted, OrderFailed,

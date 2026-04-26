@@ -1,11 +1,11 @@
 package api
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Phase 0 spec coverage from engdocs/design/session-model-unification.md:
@@ -21,21 +21,18 @@ func TestPhase0ProviderCompatibility_CreateKeepsResponseKindButDoesNotPersistSpe
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusCreated, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
 
-	var resp sessionResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Kind != "provider" {
-		t.Fatalf("resp.Kind = %q, want provider", resp.Kind)
+	result := waitForRequestResult(t, fs.eventProv, "session.create", 5*time.Second)
+	if result.Status != "succeeded" {
+		t.Fatalf("request.result status = %q, want succeeded", result.Status)
 	}
 
-	bead, err := fs.cityBeadStore.Get(resp.ID)
+	bead, err := fs.cityBeadStore.Get(result.ResourceID)
 	if err != nil {
-		t.Fatalf("Get(%s): %v", resp.ID, err)
+		t.Fatalf("Get(%s): %v", result.ResourceID, err)
 	}
 	if got := bead.Metadata["mc_session_kind"]; got != "" {
 		t.Fatalf("mc_session_kind = %q, want empty", got)

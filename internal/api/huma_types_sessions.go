@@ -58,12 +58,16 @@ type SessionCreateInput struct {
 	Body sessionCreateBody
 }
 
+// asyncAcceptedBody is the response body for all async 202 responses.
+// Contains only request_id for correlation — no domain data.
+type asyncAcceptedBody struct {
+	RequestID string `json:"request_id" doc:"Correlation ID. Watch /v0/events/stream for a request.result event with this request_id."`
+}
+
 // SessionCreateOutput is the Huma output for POST /v0/sessions.
-// Status allows the handler to return different HTTP status codes:
-// 201 Created for provider sessions, 202 Accepted for agent sessions.
 type SessionCreateOutput struct {
 	Status int `json:"-"`
-	Body   sessionResponse
+	Body   asyncAcceptedBody
 }
 
 // SessionIDInput is a generic Huma input for session endpoints that only need {cityName}+{id}.
@@ -134,12 +138,7 @@ type SessionSubmitInput struct {
 
 // SessionSubmitOutput is the Huma output for POST /v0/session/{id}/submit.
 type SessionSubmitOutput struct {
-	Body struct {
-		Status string `json:"status" doc:"Operation result." example:"accepted"`
-		ID     string `json:"id" doc:"Session ID."`
-		Queued bool   `json:"queued" doc:"Whether the message was queued."`
-		Intent string `json:"intent" doc:"Resolved submit intent."`
-	}
+	Body asyncAcceptedBody
 }
 
 // SessionMessageInput is the Huma input for POST /v0/city/{cityName}/session/{id}/messages.
@@ -155,10 +154,7 @@ type SessionMessageInput struct {
 
 // SessionMessageOutput is the Huma output for POST /v0/session/{id}/messages.
 type SessionMessageOutput struct {
-	Body struct {
-		Status string `json:"status" doc:"Operation result." example:"accepted"`
-		ID     string `json:"id" doc:"Session ID."`
-	}
+	Body asyncAcceptedBody
 }
 
 // SessionRespondInput is the Huma input for POST /v0/city/{cityName}/session/{id}/respond.

@@ -144,6 +144,39 @@ func TestSupervisorCityCreateScaffoldsViaInitializer(t *testing.T) {
 	}
 }
 
+func TestSupervisorCityCreateReturnsRequestID(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cityPath := filepath.Join(home, "mc-city")
+	init := &fakeInitializer{
+		scaffoldResult: &cityinit.InitResult{
+			CityName:     "mc-city",
+			CityPath:     cityPath,
+			ProviderUsed: "codex",
+		},
+	}
+	sm := newTestSupervisorMuxWithInitializer(t, init)
+
+	req := httptest.NewRequest(http.MethodPost, "/v0/city", strings.NewReader(`{
+		"dir":"mc-city",
+		"provider":"codex",
+		"bootstrap_profile":"single-host-compat"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GC-Request", "test")
+	rec := httptest.NewRecorder()
+
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"request_id"`) {
+		t.Fatalf("response must include request_id for async correlation; body=%s", body)
+	}
+}
+
 func TestSupervisorCityCreateMapsInitializerErrors(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "mc-city")
 	tests := []struct {

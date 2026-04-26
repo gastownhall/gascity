@@ -88,11 +88,8 @@ type cityCreateRequest struct {
 // city.init_failed event (CityInitFailedPayload.Name == this
 // response's Name; Error field explains the failure). Polling is
 // unnecessary.
-type cityCreateResponse struct {
-	OK            bool   `json:"ok" doc:"True when scaffolding + registration succeeded. Does not imply the city is ready yet; watch /v0/events/stream for city.ready."`
-	Name          string `json:"name" doc:"Resolved city name as persisted in city.toml. Use this to filter the event stream for completion."`
-	Path          string `json:"path" doc:"Resolved absolute path of the created city directory."`
-	ReloadWarning string `json:"reload_warning,omitempty" doc:"Non-empty when the city was created but the supervisor reload signal failed; clients should surface this warning and retry reload or observe the event stream."`
+type asyncAcceptedResponse struct {
+	RequestID string `json:"request_id" doc:"Correlation ID. Watch /v0/events/stream for a request.result event with this request_id to observe completion or failure."`
 }
 
 // SupervisorCityCreateInput is the input for POST /v0/city.
@@ -100,13 +97,10 @@ type SupervisorCityCreateInput struct {
 	Body cityCreateRequest
 }
 
-// SupervisorCityCreateOutput is the response for POST /v0/city. The
-// Status field carries 202 Accepted to tell Huma to emit the async
-// status code; see humaHandleCityCreate for the rationale and event
-// contract.
+// SupervisorCityCreateOutput is the response for POST /v0/city.
 type SupervisorCityCreateOutput struct {
 	Status int `json:"-"`
-	Body   cityCreateResponse
+	Body   asyncAcceptedResponse
 }
 
 // cityUnregisterResponse is the response body for
@@ -117,12 +111,8 @@ type SupervisorCityCreateOutput struct {
 // /v0/events/stream and waiting for a city.unregistered event (or
 // city.unregister_failed if the reconciler cannot stop the
 // controller).
-type cityUnregisterResponse struct {
-	OK            bool   `json:"ok" doc:"True when the registry entry was removed and the supervisor was signaled. Does not imply the city's controller has stopped yet; watch /v0/events/stream for city.unregistered."`
-	Name          string `json:"name" doc:"Resolved registry name. Filter the event stream by this to observe completion."`
-	Path          string `json:"path" doc:"Resolved absolute city directory. The directory itself is not modified; unregister only affects the supervisor's registry."`
-	ReloadWarning string `json:"reload_warning,omitempty" doc:"Non-empty when the registry entry was removed but the supervisor reload signal failed; clients should surface this warning and retry reload or observe the event stream."`
-}
+// cityUnregisterResponse is the same as asyncAcceptedResponse.
+type cityUnregisterResponse = asyncAcceptedResponse
 
 // SupervisorCityUnregisterInput is the input for
 // POST /v0/city/{cityName}/unregister.
@@ -368,35 +358,35 @@ func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *Superv
 		return nil, huma.Error501NotImplemented("city creation is not available in this supervisor (no initializer wired)")
 	}
 
-	result, err := sm.initializer.Scaffold(ctx, cityinit.InitRequest{
+	reqID, err := newRequestID()
+	if err != nil {
+		return nil, huma.Error500InternalServerError(fmt.Sprintf("generating request ID: %v", err))
+	}
+	if store, ok := sm.resolver.(PendingRequestStore); ok {
+		store.StorePendingRequestID(dir, reqID)
+	}
+
+	_, scaffoldErr := sm.initializer.Scaffold(ctx, cityinit.InitRequest{
 		Dir:              dir,
 		Provider:         input.Body.Provider,
 		BootstrapProfile: input.Body.BootstrapProfile,
-		// The async API defers dependency/provider blockers to the
-		// reconciler's terminal city.init_failed event instead of
-		// failing POST synchronously.
 		SkipProviderReadiness: true,
 	})
 	switch {
-	case errors.Is(err, cityinit.ErrAlreadyInitialized):
+	case errors.Is(scaffoldErr, cityinit.ErrAlreadyInitialized):
 		return nil, huma.Error409Conflict("conflict: city already initialized at " + dir)
-	case errors.Is(err, cityinit.ErrInvalidDirectory),
-		errors.Is(err, cityinit.ErrInvalidProvider),
-		errors.Is(err, cityinit.ErrInvalidBootstrapProfile):
-		return nil, huma.Error422UnprocessableEntity(err.Error())
-	case err != nil:
-		return nil, huma.Error500InternalServerError(err.Error())
+	case errors.Is(scaffoldErr, cityinit.ErrInvalidDirectory),
+		errors.Is(scaffoldErr, cityinit.ErrInvalidProvider),
+		errors.Is(scaffoldErr, cityinit.ErrInvalidBootstrapProfile):
+		return nil, huma.Error422UnprocessableEntity(scaffoldErr.Error())
+	case scaffoldErr != nil:
+		return nil, huma.Error500InternalServerError(scaffoldErr.Error())
 	}
 
 	out := &SupervisorCityCreateOutput{
 		Status: http.StatusAccepted,
 	}
-	out.Body = cityCreateResponse{
-		OK:            true,
-		Name:          result.CityName,
-		Path:          result.CityPath,
-		ReloadWarning: result.ReloadWarning,
-	}
+	out.Body = asyncAcceptedResponse{RequestID: reqID}
 	return out, nil
 }
 
@@ -424,21 +414,45 @@ func (sm *SupervisorMux) humaHandleCityUnregister(ctx context.Context, input *Su
 		return nil, huma.Error400BadRequest("city_name is required")
 	}
 
-	result, err := sm.initializer.Unregister(ctx, cityinit.UnregisterRequest{CityName: name})
+	reqID, err := newRequestID()
+	if err != nil {
+		return nil, huma.Error500InternalServerError(fmt.Sprintf("generating request ID: %v", err))
+	}
+
+	// Store the pending request_id BEFORE Unregister triggers a
+	// reconciler reload, so the reconciler can correlate the
+	// terminal request.result event. Look up the city path from
+	// the resolver first; if the city isn't known, Unregister will
+	// return ErrNotRegistered anyway.
+	var cityPath string
+	if store, ok := sm.resolver.(PendingRequestStore); ok {
+		for _, c := range sm.resolver.ListCities() {
+			if c.Name == name {
+				cityPath = c.Path
+				break
+			}
+		}
+		if cityPath != "" {
+			store.StorePendingRequestID(cityPath, reqID)
+		}
+	}
+
+	_, unregErr := sm.initializer.Unregister(ctx, cityinit.UnregisterRequest{CityName: name})
 	switch {
-	case errors.Is(err, cityinit.ErrNotRegistered):
-		return nil, huma.Error404NotFound("not_found: " + err.Error())
-	case err != nil:
-		return nil, huma.Error500InternalServerError(err.Error())
+	case errors.Is(unregErr, cityinit.ErrNotRegistered):
+		if store, ok := sm.resolver.(PendingRequestStore); ok && cityPath != "" {
+			store.ConsumePendingRequestID(cityPath)
+		}
+		return nil, huma.Error404NotFound("not_found: " + unregErr.Error())
+	case unregErr != nil:
+		if store, ok := sm.resolver.(PendingRequestStore); ok && cityPath != "" {
+			store.ConsumePendingRequestID(cityPath)
+		}
+		return nil, huma.Error500InternalServerError(unregErr.Error())
 	}
 
 	out := &SupervisorCityUnregisterOutput{Status: http.StatusAccepted}
-	out.Body = cityUnregisterResponse{
-		OK:            true,
-		Name:          result.CityName,
-		Path:          result.CityPath,
-		ReloadWarning: result.ReloadWarning,
-	}
+	out.Body = cityUnregisterResponse{RequestID: reqID}
 	return out, nil
 }
 

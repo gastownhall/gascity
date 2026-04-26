@@ -472,6 +472,11 @@ func (s *Server) humaHandleMailDelete(_ context.Context, input *MailDeleteInput)
 		if errors.Is(err, mail.ErrNotFound) || errors.Is(err, beads.ErrNotFound) {
 			return nil, huma.Error404NotFound("message " + id + " not found")
 		}
+		if errors.Is(err, mail.ErrAlreadyArchived) {
+			resp := &OKResponse{}
+			resp.Body.Status = "deleted"
+			return resp, nil
+		}
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
 	s.recordMailEvent(events.MailDeleted, "api", id, resolvedRig, nil)

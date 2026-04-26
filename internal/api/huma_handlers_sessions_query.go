@@ -288,6 +288,13 @@ func (s *Server) humaHandleSessionPending(_ context.Context, input *SessionIDInp
 		return nil, humaResolveError(err)
 	}
 
+	if b, bErr := store.Get(id); bErr == nil && b.Metadata["state"] == "creating" {
+		return &IndexOutput[sessionPendingResponse]{
+			Index: s.latestIndex(),
+			Body:  sessionPendingResponse{Supported: false},
+		}, nil
+	}
+
 	mgr := s.sessionManager(store)
 	pending, supported, err := mgr.Pending(id)
 	if err != nil {

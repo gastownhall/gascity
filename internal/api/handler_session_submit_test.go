@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
@@ -35,24 +36,16 @@ func TestHandleSessionSubmitDefaultsToProviderDefaultBehavior(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got := resp["queued"]; got != false {
-		t.Fatalf("queued = %#v, want false", got)
+	if got := resp["queued"]; got != true {
+		t.Fatalf("queued = %#v, want true (async submit)", got)
 	}
 	if got := resp["intent"]; got != string(session.SubmitIntentDefault) {
 		t.Fatalf("intent = %#v, want %q", got, session.SubmitIntentDefault)
 	}
-	if !fs.sp.IsRunning(info.SessionName) {
-		t.Fatal("session should be running after POST /submit")
-	}
-	found := false
-	for _, call := range fs.sp.Calls {
-		if call.Method == "Nudge" && call.Name == info.SessionName && call.Message == "hello" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("calls = %#v, want Nudge(hello)", fs.sp.Calls)
+
+	result := waitForRequestResult(t, fs.eventProv, "session.submit", 5*time.Second)
+	if result.Status != "succeeded" {
+		t.Fatalf("request.result status = %q, want succeeded", result.Status)
 	}
 }
 
@@ -76,15 +69,10 @@ func TestHandleSessionSubmitUsesImmediateDefaultForCodex(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("submit status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
-	found := false
-	for _, call := range fs.sp.Calls {
-		if call.Method == "NudgeNow" && call.Name == info.SessionName && call.Message == "hello" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("calls = %#v, want NudgeNow(hello)", fs.sp.Calls)
+
+	result := waitForRequestResult(t, fs.eventProv, "session.submit", 5*time.Second)
+	if result.Status != "succeeded" {
+		t.Fatalf("request.result status = %q, want succeeded", result.Status)
 	}
 }
 
@@ -108,6 +96,12 @@ func TestHandleSessionSubmitFollowUpQueuesMessage(t *testing.T) {
 	if got := resp["queued"]; got != true {
 		t.Fatalf("queued = %#v, want true", got)
 	}
+
+	result := waitForRequestResult(t, fs.eventProv, "session.submit", 5*time.Second)
+	if result.Status != "succeeded" {
+		t.Fatalf("request.result status = %q, want succeeded", result.Status)
+	}
+
 	state, err := nudgequeue.LoadState(fs.cityPath)
 	if err != nil {
 		t.Fatalf("LoadState: %v", err)

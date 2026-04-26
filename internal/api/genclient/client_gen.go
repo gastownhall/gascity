@@ -518,17 +518,20 @@ type CityCreateRequestBootstrapProfile string
 
 // CityCreateResponse defines model for CityCreateResponse.
 type CityCreateResponse struct {
-	// Name Resolved city name as persisted in city.toml. Use this to filter the event stream for completion.
+	// Name Resolved city name as persisted in city.toml.
 	Name string `json:"name"`
 
-	// Ok True when scaffolding + registration succeeded. Does not imply the city is ready yet; watch /v0/events/stream for city.ready.
+	// Ok True when scaffolding + registration succeeded. Does not imply the city is ready yet; watch /v0/events/stream for a request.result event with this request_id.
 	Ok bool `json:"ok"`
 
 	// Path Resolved absolute path of the created city directory.
 	Path string `json:"path"`
 
-	// ReloadWarning Non-empty when the city was created but the supervisor reload signal failed; clients should surface this warning and retry reload or observe the event stream.
+	// ReloadWarning Non-empty when the city was created but the supervisor reload signal failed.
 	ReloadWarning *string `json:"reload_warning,omitempty"`
+
+	// RequestId Correlation ID for the async operation. Watch /v0/events/stream for a request.result event with this request_id to observe completion or failure.
+	RequestId string `json:"request_id"`
 }
 
 // CityGetResponse defines model for CityGetResponse.
@@ -570,17 +573,20 @@ type CityPatchInputBody struct {
 
 // CityUnregisterResponse defines model for CityUnregisterResponse.
 type CityUnregisterResponse struct {
-	// Name Resolved registry name. Filter the event stream by this to observe completion.
+	// Name Resolved registry name.
 	Name string `json:"name"`
 
-	// Ok True when the registry entry was removed and the supervisor was signaled. Does not imply the city's controller has stopped yet; watch /v0/events/stream for city.unregistered.
+	// Ok True when the registry entry was removed and the supervisor was signaled. Does not imply the city's controller has stopped yet; watch /v0/events/stream for a request.result event with this request_id.
 	Ok bool `json:"ok"`
 
 	// Path Resolved absolute city directory. The directory itself is not modified; unregister only affects the supervisor's registry.
 	Path string `json:"path"`
 
-	// ReloadWarning Non-empty when the registry entry was removed but the supervisor reload signal failed; clients should surface this warning and retry reload or observe the event stream.
+	// ReloadWarning Non-empty when the registry entry was removed but the supervisor reload signal failed.
 	ReloadWarning *string `json:"reload_warning,omitempty"`
+
+	// RequestId Correlation ID for the async operation. Watch /v0/events/stream for a request.result event with this request_id to observe completion or failure.
+	RequestId string `json:"request_id"`
 }
 
 // ConfigAgentResponse defines model for ConfigAgentResponse.
@@ -1999,6 +2005,27 @@ type ReadinessResponse struct {
 	Items map[string]ReadinessItem `json:"items"`
 }
 
+// RequestResultPayload defines model for RequestResultPayload.
+type RequestResultPayload struct {
+	// ErrorCode Machine-readable error code when status is failed.
+	ErrorCode *string `json:"error_code,omitempty"`
+
+	// ErrorMessage Human-readable error description when status is failed.
+	ErrorMessage *string `json:"error_message,omitempty"`
+
+	// Operation The operation that completed (city.create, city.unregister, session.create, session.message, session.submit).
+	Operation string `json:"operation"`
+
+	// RequestId Correlation ID returned by the 202 response that started this operation.
+	RequestId string `json:"request_id"`
+
+	// ResourceId ID of the created/affected resource (city name, session ID, etc.).
+	ResourceId *string `json:"resource_id,omitempty"`
+
+	// Status succeeded or failed.
+	Status string `json:"status"`
+}
+
 // RigActionBody defines model for RigActionBody.
 type RigActionBody struct {
 	// Action Action that was performed.
@@ -2234,25 +2261,28 @@ type SessionRespondOutputBody struct {
 
 // SessionResponse defines model for SessionResponse.
 type SessionResponse struct {
-	ActiveBead             *string                 `json:"active_bead,omitempty"`
-	Activity               *string                 `json:"activity,omitempty"`
-	Alias                  *string                 `json:"alias,omitempty"`
-	Attached               bool                    `json:"attached"`
-	ConfiguredNamedSession *bool                   `json:"configured_named_session,omitempty"`
-	ContextPct             *int64                  `json:"context_pct,omitempty"`
-	ContextWindow          *int64                  `json:"context_window,omitempty"`
-	CreatedAt              string                  `json:"created_at"`
-	DisplayName            *string                 `json:"display_name,omitempty"`
-	Id                     string                  `json:"id"`
-	Kind                   *string                 `json:"kind,omitempty"`
-	LastActive             *string                 `json:"last_active,omitempty"`
-	LastOutput             *string                 `json:"last_output,omitempty"`
-	Metadata               *map[string]string      `json:"metadata,omitempty"`
-	Model                  *string                 `json:"model,omitempty"`
-	Options                *map[string]string      `json:"options,omitempty"`
-	Pool                   *string                 `json:"pool,omitempty"`
-	Provider               string                  `json:"provider"`
-	Reason                 *string                 `json:"reason,omitempty"`
+	ActiveBead             *string            `json:"active_bead,omitempty"`
+	Activity               *string            `json:"activity,omitempty"`
+	Alias                  *string            `json:"alias,omitempty"`
+	Attached               bool               `json:"attached"`
+	ConfiguredNamedSession *bool              `json:"configured_named_session,omitempty"`
+	ContextPct             *int64             `json:"context_pct,omitempty"`
+	ContextWindow          *int64             `json:"context_window,omitempty"`
+	CreatedAt              string             `json:"created_at"`
+	DisplayName            *string            `json:"display_name,omitempty"`
+	Id                     string             `json:"id"`
+	Kind                   *string            `json:"kind,omitempty"`
+	LastActive             *string            `json:"last_active,omitempty"`
+	LastOutput             *string            `json:"last_output,omitempty"`
+	Metadata               *map[string]string `json:"metadata,omitempty"`
+	Model                  *string            `json:"model,omitempty"`
+	Options                *map[string]string `json:"options,omitempty"`
+	Pool                   *string            `json:"pool,omitempty"`
+	Provider               string             `json:"provider"`
+	Reason                 *string            `json:"reason,omitempty"`
+
+	// RequestId Async correlation ID. Present on 202 responses; watch /v0/events/stream for request.result with this ID.
+	RequestId              *string                 `json:"request_id,omitempty"`
 	Rig                    *string                 `json:"rig,omitempty"`
 	Running                bool                    `json:"running"`
 	SessionName            string                  `json:"session_name"`
@@ -2957,6 +2987,18 @@ type TypedEventStreamEnvelopeProviderSwapped struct {
 	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeRequestResult defines model for TypedEventStreamEnvelopeRequestResult.
+type TypedEventStreamEnvelopeRequestResult struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  RequestResultPayload     `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSessionCrashed defines model for TypedEventStreamEnvelopeSessionCrashed.
 type TypedEventStreamEnvelopeSessionCrashed struct {
 	Actor    string                   `json:"actor"`
@@ -3504,6 +3546,19 @@ type TypedTaggedEventStreamEnvelopeProviderSwapped struct {
 	City     string                   `json:"city"`
 	Message  *string                  `json:"message,omitempty"`
 	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeRequestResult defines model for TypedTaggedEventStreamEnvelopeRequestResult.
+type TypedTaggedEventStreamEnvelopeRequestResult struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  RequestResultPayload     `json:"payload"`
 	Seq      int64                    `json:"seq"`
 	Subject  *string                  `json:"subject,omitempty"`
 	Ts       time.Time                `json:"ts"`
@@ -5050,6 +5105,32 @@ func (t *EventPayload) MergeOutboundEventPayload(v OutboundEventPayload) error {
 	return err
 }
 
+// AsRequestResultPayload returns the union data inside the EventPayload as a RequestResultPayload
+func (t EventPayload) AsRequestResultPayload() (RequestResultPayload, error) {
+	var body RequestResultPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromRequestResultPayload overwrites any union data inside the EventPayload as the provided RequestResultPayload
+func (t *EventPayload) FromRequestResultPayload(v RequestResultPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeRequestResultPayload performs a merge with any union data inside the EventPayload, using the provided RequestResultPayload
+func (t *EventPayload) MergeRequestResultPayload(v RequestResultPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsUnboundEventPayload returns the union data inside the EventPayload as a UnboundEventPayload
 func (t EventPayload) AsUnboundEventPayload() (UnboundEventPayload, error) {
 	var body UnboundEventPayload
@@ -6124,6 +6205,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeProviderSwapped(
 	return err
 }
 
+// AsTypedEventStreamEnvelopeRequestResult returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeRequestResult
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeRequestResult() (TypedEventStreamEnvelopeRequestResult, error) {
+	var body TypedEventStreamEnvelopeRequestResult
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeRequestResult overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeRequestResult
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeRequestResult(v TypedEventStreamEnvelopeRequestResult) error {
+	v.Type = "request.result"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeRequestResult performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeRequestResult
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeRequestResult(v TypedEventStreamEnvelopeRequestResult) error {
+	v.Type = "request.result"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionCrashed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionCrashed
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionCrashed() (TypedEventStreamEnvelopeSessionCrashed, error) {
 	var body TypedEventStreamEnvelopeSessionCrashed
@@ -6484,6 +6593,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeOrderFired()
 	case "provider.swapped":
 		return t.AsTypedEventStreamEnvelopeProviderSwapped()
+	case "request.result":
+		return t.AsTypedEventStreamEnvelopeRequestResult()
 	case "session.crashed":
 		return t.AsTypedEventStreamEnvelopeSessionCrashed()
 	case "session.draining":
@@ -7443,6 +7554,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeProv
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeRequestResult returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeRequestResult
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeRequestResult() (TypedTaggedEventStreamEnvelopeRequestResult, error) {
+	var body TypedTaggedEventStreamEnvelopeRequestResult
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeRequestResult overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeRequestResult
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeRequestResult(v TypedTaggedEventStreamEnvelopeRequestResult) error {
+	v.Type = "request.result"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeRequestResult performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeRequestResult
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeRequestResult(v TypedTaggedEventStreamEnvelopeRequestResult) error {
+	v.Type = "request.result"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionCrashed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionCrashed
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionCrashed() (TypedTaggedEventStreamEnvelopeSessionCrashed, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionCrashed
@@ -7803,6 +7942,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeOrderFired()
 	case "provider.swapped":
 		return t.AsTypedTaggedEventStreamEnvelopeProviderSwapped()
+	case "request.result":
+		return t.AsTypedTaggedEventStreamEnvelopeRequestResult()
 	case "session.crashed":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionCrashed()
 	case "session.draining":

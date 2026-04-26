@@ -58,9 +58,12 @@ type cityRegistry struct {
 	snap     atomic.Pointer[citySnapshot]
 
 	// init/backoff state (co-protected by citiesMu)
-	initStatus   map[string]cityInitProgress
-	initFailures map[string]*initFailRecord
-	panicHistory map[string]*panicRecord
+	initStatus        map[string]cityInitProgress
+	initFailures      map[string]*initFailRecord
+	panicHistory      map[string]*panicRecord
+	pendingRequestIDs    map[string]string    // city path → request_id for async correlation
+	recentlyUnregistered map[string]time.Time // city path → unregister time (grace period for event delivery)
+	supervisorRecorder   events.Recorder      // supervisor-level event recorder for city lifecycle events
 
 	gen uint64 // monotonic generation counter
 }
@@ -68,10 +71,12 @@ type cityRegistry struct {
 // newCityRegistry creates a registry initialized with an empty snapshot.
 func newCityRegistry() *cityRegistry {
 	r := &cityRegistry{
-		cities:       make(map[string]*managedCity),
-		initStatus:   make(map[string]cityInitProgress),
-		initFailures: make(map[string]*initFailRecord),
-		panicHistory: make(map[string]*panicRecord),
+		cities:               make(map[string]*managedCity),
+		initStatus:           make(map[string]cityInitProgress),
+		initFailures:         make(map[string]*initFailRecord),
+		panicHistory:         make(map[string]*panicRecord),
+		pendingRequestIDs:    make(map[string]string),
+		recentlyUnregistered: make(map[string]time.Time),
 	}
 	// Initialize with empty snapshot to prevent nil-dereference panic
 	// if an API request arrives before the first reconciliation tick.
@@ -84,6 +89,47 @@ func newCityRegistry() *cityRegistry {
 	})
 	return r
 }
+
+// StorePendingRequestID stores a request_id for async correlation.
+func (r *cityRegistry) StorePendingRequestID(cityPath, requestID string) {
+	r.citiesMu.Lock()
+	defer r.citiesMu.Unlock()
+	r.pendingRequestIDs[cityPath] = requestID
+}
+
+// ConsumePendingRequestID returns and removes the pending request_id for a city path.
+func (r *cityRegistry) ConsumePendingRequestID(cityPath string) (string, bool) {
+	r.citiesMu.Lock()
+	defer r.citiesMu.Unlock()
+	id, ok := r.pendingRequestIDs[cityPath]
+	delete(r.pendingRequestIDs, cityPath)
+	return id, ok
+}
+
+// SetSupervisorRecorder installs the supervisor-level event recorder.
+func (r *cityRegistry) SetSupervisorRecorder(rec events.Recorder) {
+	r.citiesMu.Lock()
+	defer r.citiesMu.Unlock()
+	r.supervisorRecorder = rec
+}
+
+// SupervisorEventRecorder returns the supervisor-level event recorder.
+func (r *cityRegistry) SupervisorEventRecorder() events.Recorder {
+	r.citiesMu.Lock()
+	defer r.citiesMu.Unlock()
+	return r.supervisorRecorder
+}
+
+// MarkRecentlyUnregistered records a city path for transient event
+// provider inclusion so SSE clients can observe completion events
+// after the city is removed from the registry.
+func (r *cityRegistry) MarkRecentlyUnregistered(cityPath string) {
+	r.citiesMu.Lock()
+	defer r.citiesMu.Unlock()
+	r.recentlyUnregistered[cityPath] = time.Now()
+}
+
+const recentlyUnregisteredGrace = 2 * time.Minute
 
 // Add inserts or replaces a city. Caller must not hold citiesMu.
 func (r *cityRegistry) Add(path string, mc *managedCity) {
@@ -235,6 +281,26 @@ func (r *cityRegistry) TransientCityEventProviders() map[string]events.Provider 
 			paths[name] = e.Path
 		}
 	}
+
+	// Include recently-unregistered cities so SSE clients can
+	// observe completion events after the city leaves the registry.
+	r.citiesMu.Lock()
+	now := time.Now()
+	for path, ts := range r.recentlyUnregistered {
+		if now.Sub(ts) > recentlyUnregisteredGrace {
+			delete(r.recentlyUnregistered, path)
+			continue
+		}
+		name := filepath.Base(path)
+		if _, already := running[name]; already {
+			continue
+		}
+		if _, already := paths[name]; already {
+			continue
+		}
+		paths[name] = path
+	}
+	r.citiesMu.Unlock()
 
 	out := make(map[string]events.Provider, len(paths))
 	for name, path := range paths {

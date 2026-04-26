@@ -28,10 +28,36 @@ type MailEventPayload struct {
 // IsEventPayload marks MailEventPayload as an events.Payload variant.
 func (MailEventPayload) IsEventPayload() {}
 
-// CityLifecyclePayload is emitted by city lifecycle events. Keeping all
-// same-shaped city lifecycle payloads on one Go type keeps the generated
-// EventPayload oneOf unambiguous for validators that only see the payload
-// object, not the enclosing event type.
+const (
+	RequestOperationCityCreate      = "city.create"
+	RequestOperationCityUnregister  = "city.unregister"
+	RequestOperationSessionCreate   = "session.create"
+	RequestOperationSessionMessage  = "session.message"
+	RequestOperationSessionSubmit   = "session.submit"
+	RequestStatusSucceeded          = "succeeded"
+	RequestStatusFailed             = "failed"
+)
+
+// RequestResultPayload is emitted by request.result events when an
+// asynchronous API operation completes. Every long-running mutation
+// (city create, city unregister, provider session create, message
+// delivery to a suspended session) returns 202 with a request_id;
+// the completion event carries the same request_id so clients can
+// correlate responses to requests across the event stream.
+type RequestResultPayload struct {
+	RequestID    string `json:"request_id" doc:"Correlation ID returned by the 202 response that started this operation."`
+	Operation    string `json:"operation" doc:"The operation that completed (city.create, city.unregister, session.create, session.message, session.submit)."`
+	Status       string `json:"status" doc:"succeeded or failed."`
+	ResourceID   string `json:"resource_id,omitempty" doc:"ID of the created/affected resource (city name, session ID, etc.)."`
+	ErrorCode    string `json:"error_code,omitempty" doc:"Machine-readable error code when status is failed."`
+	ErrorMessage string `json:"error_message,omitempty" doc:"Human-readable error description when status is failed."`
+}
+
+// IsEventPayload marks RequestResultPayload as an events.Payload variant.
+func (RequestResultPayload) IsEventPayload() {}
+
+// CityLifecyclePayload is used by deprecated city.* events during
+// migration to request.result. Remove once all emission sites are updated.
 type CityLifecyclePayload struct {
 	Name            string   `json:"name"`
 	Path            string   `json:"path"`
@@ -39,28 +65,24 @@ type CityLifecyclePayload struct {
 	PhasesCompleted []string `json:"phases_completed,omitempty"`
 }
 
-// IsEventPayload marks CityLifecyclePayload as an events.Payload variant.
 func (CityLifecyclePayload) IsEventPayload() {}
 
-// CityCreatedPayload is emitted on city.created when the supervisor's
-// POST /v0/city handler has scaffolded and registered a new city.
+// CityCreatedPayload is deprecated; use RequestResultPayload.
 type CityCreatedPayload = CityLifecyclePayload
 
-// CityReadyPayload is emitted on city.ready when the supervisor
-// reconciler has finished preparing a city.
+// CityReadyPayload is deprecated; use RequestResultPayload.
 type CityReadyPayload = CityLifecyclePayload
 
-// CityInitFailedPayload is emitted on city.init_failed when the
-// supervisor reconciler fails to bring up a city.
+// CityInitFailedPayload is deprecated; use RequestResultPayload.
 type CityInitFailedPayload = CityLifecyclePayload
 
-// CityUnregisterRequestedPayload is emitted when unregister starts.
+// CityUnregisterRequestedPayload is deprecated; use RequestResultPayload.
 type CityUnregisterRequestedPayload = CityLifecyclePayload
 
-// CityUnregisteredPayload is emitted when unregister completes.
+// CityUnregisteredPayload is deprecated; use RequestResultPayload.
 type CityUnregisteredPayload = CityLifecyclePayload
 
-// CityUnregisterFailedPayload is emitted when unregister fails.
+// CityUnregisterFailedPayload is deprecated; use RequestResultPayload.
 type CityUnregisterFailedPayload = CityLifecyclePayload
 
 // BeadEventPayload is the shape of every bead.* event payload
@@ -132,15 +154,19 @@ func init() {
 	events.RegisterPayload(events.ControllerStopped, events.NoPayload{})
 	events.RegisterPayload(events.CitySuspended, events.NoPayload{})
 	events.RegisterPayload(events.CityResumed, events.NoPayload{})
+	events.RegisterPayload(events.RequestResult, RequestResultPayload{})
+
+	// Deprecated city.* payloads — remove as emission sites migrate.
 	events.RegisterPayload(events.CityCreated, CityCreatedPayload{})
 	events.RegisterPayload(events.CityReady, CityReadyPayload{})
 	events.RegisterPayload(events.CityInitFailed, CityInitFailedPayload{})
+	events.RegisterPayload(events.CityUnregisterRequested, CityUnregisterRequestedPayload{})
+	events.RegisterPayload(events.CityUnregistered, CityUnregisteredPayload{})
+	events.RegisterPayload(events.CityUnregisterFailed, CityUnregisterFailedPayload{})
+
 	events.RegisterPayload(events.OrderFired, events.NoPayload{})
 	events.RegisterPayload(events.OrderCompleted, events.NoPayload{})
 	events.RegisterPayload(events.OrderFailed, events.NoPayload{})
 	events.RegisterPayload(events.ProviderSwapped, events.NoPayload{})
 	events.RegisterPayload(events.WorkerOperation, WorkerOperationEventPayload{})
-	events.RegisterPayload(events.CityUnregisterRequested, CityUnregisterRequestedPayload{})
-	events.RegisterPayload(events.CityUnregistered, CityUnregisteredPayload{})
-	events.RegisterPayload(events.CityUnregisterFailed, CityUnregisterFailedPayload{})
 }

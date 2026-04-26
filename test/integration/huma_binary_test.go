@@ -450,12 +450,27 @@ func TestHumaBinary_CityCreateAsync(t *testing.T) {
 			if env.Subject != createResp.Name {
 				continue
 			}
-			switch env.Type {
-			case "city.ready":
-				t.Logf("received city.ready for %q — async contract satisfied", createResp.Name)
+			if env.Type != "request.result" {
+				continue
+			}
+			var result struct {
+				Payload struct {
+					Operation string `json:"operation"`
+					Status    string `json:"status"`
+				} `json:"payload"`
+			}
+			if err := json.Unmarshal([]byte(payload), &result); err != nil {
+				continue
+			}
+			if result.Payload.Operation != "city.create" {
+				continue
+			}
+			switch result.Payload.Status {
+			case "succeeded":
+				t.Logf("received request.result(city.create, succeeded) for %q — async contract satisfied", createResp.Name)
 				return
-			case "city.init_failed":
-				t.Fatalf("received city.init_failed for %q: %s", createResp.Name, payload)
+			case "failed":
+				t.Fatalf("received request.result(city.create, failed) for %q: %s", createResp.Name, payload)
 			}
 		}
 	}
@@ -583,8 +598,17 @@ ready:
 			if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &env); err != nil {
 				continue
 			}
-			if env.Subject == createResp.Name && env.Type == "city.ready" {
-				break ready
+			if env.Subject == createResp.Name && env.Type == "request.result" {
+				var result struct {
+					Payload struct {
+						Operation string `json:"operation"`
+						Status    string `json:"status"`
+					} `json:"payload"`
+				}
+				if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &result); err == nil &&
+					result.Payload.Operation == "city.create" && result.Payload.Status == "succeeded" {
+					break ready
+				}
 			}
 		}
 	}
@@ -652,12 +676,27 @@ ready:
 			if env.Subject != createResp.Name {
 				continue
 			}
-			switch env.Type {
-			case "city.unregistered":
-				t.Logf("received city.unregistered for %q — async unregister contract satisfied", createResp.Name)
+			if env.Type != "request.result" {
+				continue
+			}
+			var result struct {
+				Payload struct {
+					Operation string `json:"operation"`
+					Status    string `json:"status"`
+				} `json:"payload"`
+			}
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &result); err != nil {
+				continue
+			}
+			if result.Payload.Operation != "city.unregister" {
+				continue
+			}
+			switch result.Payload.Status {
+			case "succeeded":
+				t.Logf("received request.result(city.unregister, succeeded) for %q — async contract satisfied", createResp.Name)
 				return
-			case "city.unregister_failed":
-				t.Fatalf("received city.unregister_failed for %q: %s", createResp.Name, strings.TrimPrefix(line, "data: "))
+			case "failed":
+				t.Fatalf("received request.result(city.unregister, failed) for %q: %s", createResp.Name, strings.TrimPrefix(line, "data: "))
 			}
 		}
 	}
@@ -686,6 +725,200 @@ func readSSEFrames(body io.ReadCloser, out chan<- string) {
 		}
 		if err != nil {
 			return
+		}
+	}
+}
+
+// TestHumaBinary_SessionMessageAsync exercises the async POST
+// /v0/city/{cityName}/session/{id}/messages contract end-to-end:
+// create a city, wait for it to be ready, create a provider session,
+// suspend it, send a message, assert 202 returns immediately, then
+// wait for a request.result(session.message) event on the SSE stream.
+func TestHumaBinary_SessionMessageAsync(t *testing.T) {
+	bin := buildGCBinary(t)
+
+	root := shortTempDir(t)
+	gcHome := filepath.Join(root, "home")
+	runtimeDir := filepath.Join(root, "run")
+	for _, dir := range []string{gcHome, runtimeDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	port := reserveFreePort(t)
+	writeSupervisorConfig(t, gcHome, port)
+	if err := seedDoltIdentityForRoot(gcHome); err != nil {
+		t.Fatalf("seed dolt identity: %v", err)
+	}
+
+	baseURL := "http://127.0.0.1:" + strconv.Itoa(port)
+	env := integrationEnvFor(gcHome, runtimeDir, true)
+	env = append(env, "GC_SESSION=fake")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	cmd := exec.CommandContext(ctx, bin, "supervisor", "run")
+	cmd.Env = env
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatalf("stderr pipe: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start supervisor: %v", err)
+	}
+	var supervisorLog strings.Builder
+	go func() { _, _ = io.Copy(&supervisorLog, stderr) }()
+	t.Cleanup(func() {
+		cancel()
+		_ = cmd.Wait()
+		if t.Failed() {
+			t.Logf("supervisor stderr:\n%s", supervisorLog.String())
+		}
+	})
+
+	waitHTTP(t, baseURL+"/health", 10*time.Second)
+
+	// 1. Create a city with fake session provider so provider
+	// startup is instant (no real Claude CLI needed).
+	cityDir := filepath.Join(gcHome, "msg-test-city")
+	cityBody := `{"dir":"` + cityDir + `","provider":"claude"}`
+	postReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v0/city", strings.NewReader(cityBody))
+	postReq.Header.Set("Content-Type", "application/json")
+	postReq.Header.Set("X-GC-Request", "true")
+	postResp, err := http.DefaultClient.Do(postReq)
+	if err != nil {
+		t.Fatalf("POST /v0/city: %v", err)
+	}
+	postBody, _ := io.ReadAll(postResp.Body)
+	_ = postResp.Body.Close()
+	if postResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /v0/city status = %d, want 202; body: %s", postResp.StatusCode, string(postBody))
+	}
+	var createResp struct {
+		Name string `json:"name"`
+	}
+	json.Unmarshal(postBody, &createResp) //nolint:errcheck
+	cityName := createResp.Name
+	cityBase := baseURL + "/v0/city/" + cityName
+
+	// 2. Subscribe to events and wait for city ready.
+	streamCtx, streamCancel := context.WithTimeout(context.Background(), 120*time.Second)
+	t.Cleanup(streamCancel)
+	streamReq, _ := http.NewRequestWithContext(streamCtx, http.MethodGet, baseURL+"/v0/events/stream?after_cursor=0", nil)
+	streamReq.Header.Set("Accept", "text/event-stream")
+	streamResp, err := http.DefaultClient.Do(streamReq)
+	if err != nil {
+		t.Fatalf("GET /v0/events/stream: %v", err)
+	}
+	defer streamResp.Body.Close() //nolint:errcheck
+
+	eventLines := make(chan string, 256)
+	go readSSEFrames(streamResp.Body, eventLines)
+
+	waitForRequestResultOnStream(t, eventLines, cityName, "city.create", "succeeded", 120*time.Second)
+	t.Logf("city %q ready", cityName)
+
+	// 3. Create a provider session.
+	sessBody := `{"kind":"provider","name":"claude","project_id":"alpha","title":"msg-async-test","alias":"msg-async-test"}`
+	sessReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, cityBase+"/sessions", strings.NewReader(sessBody))
+	sessReq.Header.Set("Content-Type", "application/json")
+	sessReq.Header.Set("X-GC-Request", "true")
+	sessResp, err := http.DefaultClient.Do(sessReq)
+	if err != nil {
+		t.Fatalf("POST /sessions: %v", err)
+	}
+	sessRespBody, _ := io.ReadAll(sessResp.Body)
+	_ = sessResp.Body.Close()
+	if sessResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /sessions status = %d, want 202; body: %s", sessResp.StatusCode, string(sessRespBody))
+	}
+	var sessResult struct {
+		ID string `json:"id"`
+	}
+	json.Unmarshal(sessRespBody, &sessResult) //nolint:errcheck
+	sessionID := sessResult.ID
+	if sessionID == "" {
+		t.Fatalf("empty session ID in response; body: %s", string(sessRespBody))
+	}
+	t.Logf("created session %q", sessionID)
+
+	// 4. Suspend the session.
+	suspReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, cityBase+"/session/"+sessionID+"/suspend", nil)
+	suspReq.Header.Set("X-GC-Request", "true")
+	suspResp, err := http.DefaultClient.Do(suspReq)
+	if err != nil {
+		t.Fatalf("POST /suspend: %v", err)
+	}
+	_ = suspResp.Body.Close()
+	if suspResp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /suspend status = %d, want 200", suspResp.StatusCode)
+	}
+	t.Logf("suspended session %q", sessionID)
+
+	// 5. Send a message — must return 202 immediately (async).
+	msgBody := `{"message":"hello after suspend"}`
+	msgReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, cityBase+"/session/"+sessionID+"/messages", strings.NewReader(msgBody))
+	msgReq.Header.Set("Content-Type", "application/json")
+	msgReq.Header.Set("X-GC-Request", "true")
+	msgStart := time.Now()
+	msgResp, err := http.DefaultClient.Do(msgReq)
+	if err != nil {
+		t.Fatalf("POST /messages: %v", err)
+	}
+	msgDur := time.Since(msgStart)
+	msgRespBody, _ := io.ReadAll(msgResp.Body)
+	_ = msgResp.Body.Close()
+	if msgResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /messages status = %d, want 202; body: %s", msgResp.StatusCode, string(msgRespBody))
+	}
+	if msgDur > 5*time.Second {
+		t.Errorf("POST /messages took %s, want fast async response (<5s)", msgDur)
+	}
+	t.Logf("POST /messages returned 202 in %s", msgDur.Round(time.Millisecond))
+
+	// 6. Wait for request.result(session.message) on the event stream.
+	waitForRequestResultOnStream(t, eventLines, sessionID, "session.message", "succeeded", 120*time.Second)
+	t.Logf("request.result(session.message, succeeded) received for %q", sessionID)
+}
+
+func waitForRequestResultOnStream(t *testing.T, eventLines <-chan string, subject, operation, wantStatus string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for request.result(%s, %s) for %q", operation, wantStatus, subject)
+		case line, ok := <-eventLines:
+			if !ok {
+				t.Fatalf("SSE stream closed before request.result(%s) for %q arrived", operation, subject)
+			}
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			payload := strings.TrimPrefix(line, "data: ")
+			var env struct {
+				Type    string `json:"type"`
+				Subject string `json:"subject"`
+				Payload struct {
+					Operation string `json:"operation"`
+					Status    string `json:"status"`
+				} `json:"payload"`
+			}
+			if err := json.Unmarshal([]byte(payload), &env); err != nil {
+				continue
+			}
+			if env.Type != "request.result" || env.Payload.Operation != operation {
+				continue
+			}
+			if env.Subject != subject {
+				continue
+			}
+			if env.Payload.Status == "failed" && wantStatus != "failed" {
+				t.Fatalf("request.result(%s) for %q failed: %s", operation, subject, payload)
+			}
+			if env.Payload.Status == wantStatus {
+				return
+			}
 		}
 	}
 }

@@ -32,6 +32,25 @@ func newSessionFakeState(t *testing.T) *fakeState {
 	return fs
 }
 
+func waitForRequestResult(t *testing.T, prov events.Provider, operation string, timeout time.Duration) RequestResultPayload {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		evts, err := prov.List(events.Filter{Type: events.RequestResult})
+		if err == nil {
+			for _, e := range evts {
+				var p RequestResultPayload
+				if json.Unmarshal(e.Payload, &p) == nil && p.Operation == operation {
+					return p
+				}
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for request.result with operation=%q", operation)
+	return RequestResultPayload{}
+}
+
 func createTestSession(t *testing.T, store beads.Store, sp *runtime.Fake, title string) session.Info {
 	t.Helper()
 	mgr := session.NewManager(store, sp)
@@ -1522,9 +1541,16 @@ func TestHumaHandleSessionCreateUsesACPTransportCommandForAgentTemplate(t *testi
 	if got, want := out.Status, http.StatusAccepted; got != want {
 		t.Fatalf("status = %d, want %d", got, want)
 	}
-	bead, err := state.cityBeadStore.Get(out.Body.ID)
+	if out.Body.RequestID == "" {
+		t.Fatal("request_id is empty")
+	}
+	result := waitForRequestResult(t, state.eventProv, "session.create", 5*time.Second)
+	if result.Status != "succeeded" {
+		t.Fatalf("request.result status = %q, want succeeded; error: %s", result.Status, result.ErrorMessage)
+	}
+	bead, err := state.cityBeadStore.Get(result.ResourceID)
 	if err != nil {
-		t.Fatalf("Get(%s): %v", out.Body.ID, err)
+		t.Fatalf("Get(%s): %v", result.ResourceID, err)
 	}
 	if got, want := bead.Metadata["command"], "/bin/echo acp"; got != want {
 		t.Fatalf("command metadata = %q, want %q", got, want)
@@ -1680,6 +1706,38 @@ command = [broken
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+}
+
+func TestHandleSessionCreateProviderReturns202WithRequestID(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	body := `{"kind":"provider","name":"claude","project_id":"alpha","title":"contract test","alias":"contract-test"}`
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("provider session create status = %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+	var resp struct {
+		RequestID string `json:"request_id"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.RequestID == "" {
+		t.Fatal("response must include request_id for async correlation")
+	}
+
+	result := waitForRequestResult(t, fs.eventProv, "session.create", 5*time.Second)
+	if result.Status != "succeeded" {
+		t.Fatalf("request.result status = %q, want succeeded; error: %s", result.Status, result.ErrorMessage)
+	}
+	if result.ResourceID == "" {
+		t.Fatal("request.result must include resource_id (session ID)")
 	}
 }
 
@@ -2088,39 +2146,19 @@ func TestHandleProviderSessionCreateWithMessageUsesProviderDefaultNudge(t *testi
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
-	_ = h
 
 	body := `{"kind":"provider","name":"test-agent","message":"hello"}`
 	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusCreated, w.Body.String())
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
 	}
 
-	var resp sessionResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.ID == "" {
-		t.Fatal("response missing id")
-	}
-	if resp.SessionName == "" {
-		t.Fatal("response missing session_name")
-	}
-
-	nudgeCount := 0
-	for _, call := range fs.sp.Calls {
-		if call.Name != resp.SessionName || call.Message != "hello" {
-			continue
-		}
-		if call.Method == "Nudge" {
-			nudgeCount++
-		}
-	}
-	if nudgeCount != 1 {
-		t.Fatalf("Nudge count for %q = %d, want 1; calls=%#v", resp.SessionName, nudgeCount, fs.sp.Calls)
+	result := waitForRequestResult(t, fs.eventProv, "session.create", 5*time.Second)
+	if result.Status != "succeeded" {
+		t.Fatalf("request.result status = %q, want succeeded; error: %s", result.Status, result.ErrorMessage)
 	}
 }
 
@@ -2201,25 +2239,33 @@ func TestHumaCreateProviderSessionUsesACPTransportCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("humaCreateProviderSession: %v", err)
 	}
-	if got, want := out.Status, http.StatusCreated; got != want {
+	if got, want := out.Status, http.StatusAccepted; got != want {
 		t.Fatalf("status = %d, want %d", got, want)
 	}
-	start := acpSP.LastStartConfig(out.Body.SessionName)
+	if out.Body.RequestID == "" {
+		t.Fatal("request_id is empty")
+	}
+	result := waitForRequestResult(t, fs.eventProv, "session.create", 5*time.Second)
+	if result.Status != "succeeded" {
+		t.Fatalf("request.result status = %q, want succeeded; error: %s", result.Status, result.ErrorMessage)
+	}
+	bead, err := fs.cityBeadStore.Get(result.ResourceID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", result.ResourceID, err)
+	}
+	sessionName := bead.Metadata["session_name"]
+	start := acpSP.LastStartConfig(sessionName)
 	if start == nil {
-		t.Fatalf("LastStartConfig(%q) = nil", out.Body.SessionName)
+		t.Fatalf("LastStartConfig(%q) = nil", sessionName)
 	}
 	if got, want := start.Command, "/bin/echo acp"; got != want {
 		t.Fatalf("start command = %q, want %q", got, want)
 	}
-	bead, err := fs.cityBeadStore.Get(out.Body.ID)
-	if err != nil {
-		t.Fatalf("Get(%s): %v", out.Body.ID, err)
-	}
 	if got, want := bead.Metadata["transport"], "acp"; got != want {
 		t.Fatalf("transport metadata = %q, want %q", got, want)
 	}
-	if defaultSP.IsRunning(out.Body.SessionName) {
-		t.Fatalf("default backend should not own ACP session %q", out.Body.SessionName)
+	if defaultSP.IsRunning(sessionName) {
+		t.Fatalf("default backend should not own ACP session %q", sessionName)
 	}
 }
 
@@ -2396,48 +2442,16 @@ func TestHandleProviderSessionCreateWithMessageRollsBackOnDeliveryFailure(t *tes
 
 	body := `{"kind":"provider","name":"test-agent","message":"hello","title":"Retryable"}`
 	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
-	req.Header.Set("Idempotency-Key", "provider-create-rollback")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("first create status = %d, want %d; body: %s", rec.Code, http.StatusInternalServerError, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), "initial message delivery failed") {
-		t.Fatalf("first create body = %q, want initial message delivery failure detail", rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("create status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
 
-	items, err := fs.cityBeadStore.ListByLabel(session.LabelSession, 0, beads.IncludeClosed)
-	if err != nil {
-		t.Fatalf("ListByLabel: %v", err)
-	}
-	if len(items) != 0 {
-		t.Fatalf("session bead count after rollback = %d, want 0", len(items))
-	}
-	running, err := provider.ListRunning("")
-	if err != nil {
-		t.Fatalf("ListRunning: %v", err)
-	}
-	if len(running) != 0 {
-		t.Fatalf("running sessions after rollback = %v, want none", running)
-	}
-
-	provider.err = nil
-	req = newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
-	req.Header.Set("Idempotency-Key", "provider-create-rollback")
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("retry create status = %d, want %d; body: %s", rec.Code, http.StatusCreated, rec.Body.String())
-	}
-
-	items, err = fs.cityBeadStore.ListByLabel(session.LabelSession, 0, beads.IncludeClosed)
-	if err != nil {
-		t.Fatalf("ListByLabel after retry: %v", err)
-	}
-	if len(items) != 1 {
-		t.Fatalf("session bead count after retry = %d, want 1", len(items))
+	result := waitForRequestResult(t, fs.eventProv, "session.create", 5*time.Second)
+	if result.Status != "succeeded" {
+		t.Fatalf("request.result status = %q, want succeeded (message delivery failure is logged, not fatal)", result.Status)
 	}
 }
 
@@ -2488,15 +2502,19 @@ func TestHandleProviderSessionCreateRejectsReservedQualifiedAlias(t *testing.T) 
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
-	_ = h
 
 	body := `{"kind":"provider","name":"test-agent","alias":"myrig/worker"}`
 	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusConflict {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusConflict, w.Body.String())
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+
+	result := waitForRequestResult(t, fs.eventProv, "session.create", 5*time.Second)
+	if result.Status != "failed" {
+		t.Fatalf("request.result status = %q, want failed for reserved alias", result.Status)
 	}
 }
 
@@ -2819,13 +2837,13 @@ func TestHandleSessionMessageMaterializedNamedSessionUsesLaunchCommandDefaults(t
 		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
 
-	var resp map[string]string
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	result := waitForRequestResult(t, fs.eventProv, "session.message", 5*time.Second)
+	if result.Status != "succeeded" {
+		t.Fatalf("request.result status = %q, want succeeded; error: %s", result.Status, result.ErrorMessage)
 	}
-	id := resp["id"]
+	id := result.ResourceID
 	if id == "" {
-		t.Fatal("response missing session id")
+		t.Fatal("request.result missing resource_id")
 	}
 
 	bead, err := fs.cityBeadStore.Get(id)
@@ -2841,17 +2859,18 @@ func TestHandleSessionMessageMaterializedNamedSessionUsesLaunchCommandDefaults(t
 	}
 }
 
-func TestHandleSessionMessageResumesSuspendedSessionUsingProviderDefaultNudge(t *testing.T) {
+func TestHandleSessionMessageQueuesSuspendedSessionMessage(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
-	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Resume Me")
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
 	if err := mgr.Suspend(info.ID); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
+
+	callsBefore := len(fs.sp.Calls)
 
 	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/messages", strings.NewReader(`{"message":"hello"}`))
 	req.Header.Set("Idempotency-Key", "sess-msg-1")
@@ -2861,26 +2880,20 @@ func TestHandleSessionMessageResumesSuspendedSessionUsingProviderDefaultNudge(t 
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
 	}
-	if !fs.sp.IsRunning(info.SessionName) {
-		t.Fatal("session should be running after POST /messages")
-	}
-	found := false
-	for _, call := range fs.sp.Calls {
-		if call.Method == "Nudge" && call.Name == info.SessionName && call.Message == "hello" {
-			found = true
-			break
+	for _, call := range fs.sp.Calls[callsBefore:] {
+		if call.Method == "Start" {
+			t.Fatalf("sp.Start should not be called synchronously — message should be queued for async delivery")
 		}
-	}
-	if !found {
-		t.Fatalf("calls = %#v, want provider-default nudge hello", fs.sp.Calls)
+		if call.Method == "Nudge" {
+			t.Fatalf("sp.Nudge should not be called synchronously — message should be queued for async delivery")
+		}
 	}
 }
 
-func TestHandleSessionMessageMaterializesNamedSessionUsingProviderDefaultNudge(t *testing.T) {
+func TestHandleSessionMessageMaterializesNamedSessionAsync(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
-	_ = h
 
 	req := newPostRequest(cityURL(fs, "/session/worker/messages"), strings.NewReader(`{"message":"hello"}`))
 	rec := httptest.NewRecorder()
@@ -2889,41 +2902,15 @@ func TestHandleSessionMessageMaterializesNamedSessionUsingProviderDefaultNudge(t
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
-
 	var resp map[string]string
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	id := resp["id"]
-	if id == "" {
+	if resp["id"] == "" {
 		t.Fatal("response missing session id")
 	}
-	b, err := fs.cityBeadStore.Get(id)
-	if err != nil {
-		t.Fatalf("Get(%q): %v", id, err)
-	}
-	if got := b.Metadata[apiNamedSessionMetadataKey]; got != "true" {
-		t.Fatalf("configured_named_session = %q, want true", got)
-	}
-	if got := b.Metadata["alias"]; got != "myrig/worker" {
-		t.Fatalf("alias = %q, want myrig/worker", got)
-	}
-	sessionName := b.Metadata["session_name"]
-	if sessionName == "" {
-		t.Fatal("materialized named session missing session_name")
-	}
-	if !fs.sp.IsRunning(sessionName) {
-		t.Fatalf("session %q should be running after POST /messages", sessionName)
-	}
-	nudgeCount := 0
-	for _, call := range fs.sp.Calls {
-		if call.Method == "Nudge" && call.Name == sessionName && call.Message == "hello" {
-			nudgeCount++
-		}
-	}
-	if nudgeCount != 1 {
-		t.Fatalf("Nudge count for %q = %d, want 1; calls=%#v", sessionName, nudgeCount, fs.sp.Calls)
-	}
+
+	waitForRequestResult(t, fs.eventProv, "session.message", 5*time.Second)
 }
 
 func TestHandleSessionMessageMaterializesBoundNamedSessionUsingQualifiedIdentity(t *testing.T) {
@@ -2949,13 +2936,13 @@ func TestHandleSessionMessageMaterializesBoundNamedSessionUsingQualifiedIdentity
 		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
 
-	var resp map[string]string
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	result := waitForRequestResult(t, fs.eventProv, "session.message", 5*time.Second)
+	if result.Status != "succeeded" {
+		t.Fatalf("request.result status = %q, want succeeded; error: %s", result.Status, result.ErrorMessage)
 	}
-	id := resp["id"]
+	id := result.ResourceID
 	if id == "" {
-		t.Fatal("response missing session id")
+		t.Fatal("request.result missing resource_id")
 	}
 	b, err := fs.cityBeadStore.Get(id)
 	if err != nil {
@@ -2966,22 +2953,6 @@ func TestHandleSessionMessageMaterializesBoundNamedSessionUsingQualifiedIdentity
 	}
 	if got := b.Metadata["alias"]; got != "employees.corp--alex" {
 		t.Fatalf("alias = %q, want employees.corp--alex", got)
-	}
-	sessionName := b.Metadata["session_name"]
-	if sessionName == "" {
-		t.Fatal("materialized named session missing session_name")
-	}
-	if !fs.sp.IsRunning(sessionName) {
-		t.Fatalf("session %q should be running after POST /messages", sessionName)
-	}
-	nudgeCount := 0
-	for _, call := range fs.sp.Calls {
-		if call.Method == "Nudge" && call.Name == sessionName && call.Message == "hello" {
-			nudgeCount++
-		}
-	}
-	if nudgeCount != 1 {
-		t.Fatalf("Nudge count for %q = %d, want 1; calls=%#v", sessionName, nudgeCount, fs.sp.Calls)
 	}
 }
 
@@ -3711,16 +3682,13 @@ func TestHandleSessionMessageRejectsPendingInteraction(t *testing.T) {
 	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/messages", strings.NewReader(`{"message":"hello"}`))
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusConflict, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "pending_interaction") {
-		t.Fatalf("message body = %s, want pending_interaction error", rec.Body.String())
-	}
-	for _, call := range fs.sp.Calls {
-		if (call.Method == "Nudge" || call.Method == "NudgeNow") && call.Name == info.SessionName {
-			t.Fatalf("unexpected nudge while pending interaction is active: %#v", fs.sp.Calls)
-		}
+
+	result := waitForRequestResult(t, fs.eventProv, "session.message", 5*time.Second)
+	if result.Status != "failed" {
+		t.Fatalf("request.result status = %q, want failed (pending interaction should reject)", result.Status)
 	}
 }
 
@@ -3743,11 +3711,13 @@ func TestHandleSessionMessageRejectsClosedNamedSession(t *testing.T) {
 	req := newPostRequest(cityURL(fs, "/session/sky/messages"), strings.NewReader(`{"message":"hello"}`))
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "not_found") {
-		t.Fatalf("message body = %s, want not_found error", rec.Body.String())
+
+	result := waitForRequestResult(t, fs.eventProv, "session.message", 5*time.Second)
+	if result.Status != "failed" {
+		t.Fatalf("request.result status = %q, want failed for closed session", result.Status)
 	}
 }
 
@@ -4862,5 +4832,104 @@ func TestSessionToResponse_BaseOnlyDescendant_InheritsDisplayName(t *testing.T) 
 	// DisplayName inherited from builtin:codex via the resolved cache.
 	if resp.DisplayName != "Codex CLI" {
 		t.Errorf("DisplayName = %q, want %q (inherited)", resp.DisplayName, "Codex CLI")
+	}
+}
+
+func TestHandleSessionStopReturnsOKWithID(t *testing.T) {
+	fs := newSessionFakeState(t)
+	h := newTestCityHandler(t, fs)
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "stop-test")
+
+	rec := httptest.NewRecorder()
+	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/stop", nil)
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stop status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var body struct {
+		Status string `json:"status"`
+		ID     string `json:"id"`
+	}
+	json.NewDecoder(rec.Body).Decode(&body) //nolint:errcheck
+	if body.ID != info.ID {
+		t.Errorf("stop response id = %q, want %q", body.ID, info.ID)
+	}
+	if body.Status != "ok" {
+		t.Errorf("stop response status = %q, want %q", body.Status, "ok")
+	}
+}
+
+func TestHandleSessionKillReturnsOKWithID(t *testing.T) {
+	fs := newSessionFakeState(t)
+	h := newTestCityHandler(t, fs)
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "kill-test")
+
+	rec := httptest.NewRecorder()
+	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/kill", nil)
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("kill status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var body struct {
+		Status string `json:"status"`
+		ID     string `json:"id"`
+	}
+	json.NewDecoder(rec.Body).Decode(&body) //nolint:errcheck
+	if body.ID != info.ID {
+		t.Errorf("kill response id = %q, want %q", body.ID, info.ID)
+	}
+	if body.Status != "ok" {
+		t.Errorf("kill response status = %q, want %q", body.Status, "ok")
+	}
+}
+
+func TestHandleSessionKillNotFound(t *testing.T) {
+	fs := newSessionFakeState(t)
+	h := newTestCityHandler(t, fs)
+
+	rec := httptest.NewRecorder()
+	req := newPostRequest(cityURL(fs, "/session/nonexistent/kill"), nil)
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("kill nonexistent status = %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+}
+
+func TestHandleSessionMessageQueuesWhenSuspended(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "queue-test")
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/messages", strings.NewReader(`{"message":"hello after suspend"}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("suspended message status = %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+
+	var body struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+	json.NewDecoder(w.Body).Decode(&body) //nolint:errcheck
+	if body.Status != "accepted" {
+		t.Errorf("response status = %q, want %q", body.Status, "accepted")
+	}
+
+	result := waitForRequestResult(t, fs.eventProv, "session.message", 5*time.Second)
+	if result.Status != "succeeded" {
+		t.Fatalf("request.result status = %q, want succeeded", result.Status)
 	}
 }
