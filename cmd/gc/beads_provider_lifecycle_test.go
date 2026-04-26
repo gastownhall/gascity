@@ -2878,6 +2878,118 @@ func TestGcBeadsBdStartUsesRootBeadsDataDir(t *testing.T) {
 	}
 }
 
+func TestGcBeadsBdStartRetriesAutoPortBindConflict(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
+	}
+	script := gcBeadsBdScriptPath(cityPath)
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := t.TempDir()
+	attemptsFile := filepath.Join(stateDir, "attempts")
+	portsFile := filepath.Join(stateDir, "ports")
+
+	fakeDolt := filepath.Join(binDir, "dolt")
+	fakeDoltScript := fmt.Sprintf(`#!/bin/sh
+set -eu
+attempts_file=%q
+ports_file=%q
+cmd="${1:-}"
+case "$cmd" in
+  config)
+    exit 0
+    ;;
+  --host)
+    exit 0
+    ;;
+  sql-server)
+    config_file=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --config)
+          shift
+          config_file="$1"
+          ;;
+      esac
+      shift || true
+    done
+    port=$(awk '/^[[:space:]]*port:/{print $2; exit}' "$config_file")
+    printf '%%s\n' "$port" >> "$ports_file"
+    count=0
+    if [ -f "$attempts_file" ]; then
+      count=$(cat "$attempts_file")
+    fi
+    count=$((count + 1))
+    printf '%%s\n' "$count" > "$attempts_file"
+    if [ "$count" -eq 1 ]; then
+      echo "Starting server with Config HP=\"0.0.0.0:${port}\"|T=\"300000\"|R=\"false\"|L=\"warning\""
+      echo "listen tcp 0.0.0.0:${port}: bind: address already in use"
+      exit 1
+    fi
+    sleep 60
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, attemptsFile, portsFile)
+	if err := os.WriteFile(fakeDolt, []byte(fakeDoltScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeNC := filepath.Join(binDir, "nc")
+	if err := os.WriteFile(fakeNC, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	scriptEnv := sanitizedBaseEnv(
+		"GC_CITY_PATH="+cityPath,
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)
+	t.Cleanup(func() {
+		cmd := exec.Command(script, "stop")
+		cmd.Env = scriptEnv
+		_ = cmd.Run()
+	})
+
+	cmd := exec.Command(script, "start")
+	cmd.Env = scriptEnv
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("start: %v\n%s", err, out)
+	}
+
+	data, err := os.ReadFile(portsFile)
+	if err != nil {
+		t.Fatalf("read attempted ports: %v", err)
+	}
+	ports := strings.Fields(string(data))
+	if len(ports) != 2 {
+		t.Fatalf("attempted ports = %v, want two startup attempts", ports)
+	}
+	if ports[0] == ports[1] {
+		t.Fatalf("retry reused busy port %s", ports[0])
+	}
+
+	state, err := readDoltRuntimeStateFile(providerManagedDoltStatePath(cityPath))
+	if err != nil {
+		t.Fatalf("read provider state: %v", err)
+	}
+	if got := strconv.Itoa(state.Port); got != ports[1] {
+		t.Fatalf("provider state port = %q, want retry port %q", got, ports[1])
+	}
+}
+
 func TestGcBeadsBdInitRetriesRootStoreVerification(t *testing.T) {
 	cityPath := t.TempDir()
 	writeMinimalCityToml(t, cityPath)
