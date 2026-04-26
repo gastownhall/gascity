@@ -358,6 +358,38 @@ func reconcileSessionBeadsTraced(
 				}
 				continue
 			default:
+				if dops != nil {
+					if acked, _ := dops.isDrainAcked(name); acked {
+						stopped := !providerAlive
+						if providerAlive {
+							if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
+								fmt.Fprintf(stderr, "session reconciler: stopping drain-acked %s: %v\n", name, err) //nolint:errcheck
+							} else {
+								stopped = true
+								fmt.Fprintf(stdout, "Stopped drain-acked session '%s'\n", name) //nolint:errcheck
+							}
+						}
+						if stopped {
+							_ = dops.clearDrain(name)
+							if dt != nil {
+								dt.clearIdleProbe(session.ID)
+								dt.remove(session.ID)
+							}
+							template := normalizedSessionTemplate(*session, cfg)
+							if template == "" {
+								template = session.Metadata["template"]
+							}
+							rec.Record(events.Event{
+								Type:    events.SessionStopped,
+								Actor:   "gc",
+								Subject: template,
+								Message: "drain acknowledged by agent",
+							})
+							closeSessionBeadIfUnassigned(store, rigStores, *session, "drained", clk.Now().UTC(), stderr)
+						}
+						continue
+					}
+				}
 				if providerAlive {
 					// When a store query failed (partial results),
 					// skip drain — the session may have work that we
