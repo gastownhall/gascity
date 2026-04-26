@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -485,6 +486,59 @@ func TestDoRuntimeRequestRestartError(t *testing.T) {
 	}
 	if got := stderr.String(); got != "gc runtime request-restart: tmux borked\n" {
 		t.Errorf("stderr = %q", got)
+	}
+}
+
+// TestDoRuntimeRequestRestartBlocksUntilSignal exercises the block path:
+// after setting the restart flag, the function must block until SIGTERM
+// (or SIGINT/SIGHUP) is delivered, then return 0. Pre-fix this path was
+// `select {}` which Go's runtime deadlock detector treats as a panic
+// when no other goroutine could wake the main one.
+func TestDoRuntimeRequestRestartBlocksUntilSignal(t *testing.T) {
+	dops := newFakeDrainOps()
+	var stdout, stderr bytes.Buffer
+
+	done := make(chan int, 1)
+	go func() {
+		done <- doRuntimeRequestRestart(dops, nil, events.Discard, "worker", "worker", &stdout, &stderr)
+	}()
+
+	// Give the goroutine a moment to install its signal.Notify handler.
+	// signal.Notify must be in place before SIGTERM fires, otherwise the
+	// runtime's default SIGTERM handler kills the test process.
+	time.Sleep(100 * time.Millisecond)
+
+	// Sanity check: the function must still be blocking. If it returned,
+	// either the block path is broken or the signal handler fired before
+	// we sent anything.
+	select {
+	case code := <-done:
+		t.Fatalf("returned prematurely with code %d (block path broken?)", code)
+	default:
+	}
+
+	// Send SIGTERM to ourselves. The function's signal.Notify handler
+	// captures it before the runtime's default handler runs.
+	p, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatalf("FindProcess: %v", err)
+	}
+	if err := p.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("Signal: %v", err)
+	}
+
+	// The function should observe the signal and return 0 promptly.
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not return within 2s of SIGTERM")
+	}
+
+	if !strings.Contains(stdout.String(), "Restart requested") {
+		t.Errorf("stdout = %q, want 'Restart requested' message", stdout.String())
 	}
 }
 
