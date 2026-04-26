@@ -148,6 +148,29 @@ func ApplyGraphRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding)
 	step.Assignee = binding.SessionName
 }
 
+// ApplyGraphControlRouteBinding routes control steps directly to the
+// control-dispatcher session when possible. gc.routed_to intentionally means
+// "work for this config queue"; using it for a named dispatcher would create
+// config-routed work instead of delivering to the known dispatcher session.
+func ApplyGraphControlRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding) {
+	if binding.DirectSessionID != "" {
+		delete(step.Metadata, "gc.routed_to")
+		step.Assignee = binding.DirectSessionID
+		return
+	}
+	if binding.SessionName != "" {
+		delete(step.Metadata, "gc.routed_to")
+		step.Assignee = binding.SessionName
+		return
+	}
+	if binding.QualifiedName != "" {
+		step.Metadata["gc.routed_to"] = binding.QualifiedName
+	} else {
+		delete(step.Metadata, "gc.routed_to")
+	}
+	step.Assignee = ""
+}
+
 // AssignGraphStepRoute applies routing to a step, optionally diverting
 // control steps to the control dispatcher.
 func AssignGraphStepRoute(step *formula.RecipeStep, executionBinding GraphRouteBinding, controlBinding *GraphRouteBinding) {
@@ -157,7 +180,7 @@ func AssignGraphStepRoute(step *formula.RecipeStep, executionBinding GraphRouteB
 		} else {
 			delete(step.Metadata, GraphExecutionRouteMetaKey)
 		}
-		ApplyGraphRouteBinding(step, *controlBinding)
+		ApplyGraphControlRouteBinding(step, *controlBinding)
 		return
 	}
 	delete(step.Metadata, GraphExecutionRouteMetaKey)

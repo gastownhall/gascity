@@ -185,8 +185,8 @@ func TestDecorateDynamicFragmentRecipeSupportsExplicitPerStepAgents(t *testing.T
 	if control.Assignee != config.ControlDispatcherAgentName {
 		t.Fatalf("review scope-check assignee = %q, want %q", control.Assignee, config.ControlDispatcherAgentName)
 	}
-	if control.Metadata["gc.routed_to"] != config.ControlDispatcherAgentName {
-		t.Fatalf("review scope-check gc.routed_to = %q, want %q", control.Metadata["gc.routed_to"], config.ControlDispatcherAgentName)
+	if got := control.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("review scope-check gc.routed_to = %q, want empty direct dispatcher assignee", got)
 	}
 	if control.Metadata[graphExecutionRouteMetaKey] != "reviewer" {
 		t.Fatalf("review scope-check execution route = %q, want reviewer", control.Metadata[graphExecutionRouteMetaKey])
@@ -802,8 +802,11 @@ func TestDecorateDynamicFragmentRecipePreservesPoolFallbackAndScopeMetadata(t *t
 	if control.Metadata["gc.scope_role"] != "control" {
 		t.Fatalf("control gc.scope_role = %q, want control", control.Metadata["gc.scope_role"])
 	}
-	if control.Metadata["gc.routed_to"] != config.ControlDispatcherAgentName {
-		t.Fatalf("control gc.routed_to = %q, want %q", control.Metadata["gc.routed_to"], config.ControlDispatcherAgentName)
+	if control.Assignee != config.ControlDispatcherAgentName {
+		t.Fatalf("control assignee = %q, want %q", control.Assignee, config.ControlDispatcherAgentName)
+	}
+	if got := control.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("control gc.routed_to = %q, want empty direct dispatcher assignee", got)
 	}
 	if control.Metadata[graphExecutionRouteMetaKey] != "frontend/reviewer" {
 		t.Fatalf("control execution route = %q, want frontend/reviewer", control.Metadata[graphExecutionRouteMetaKey])
@@ -1481,8 +1484,11 @@ func TestDecorateDynamicFragmentRecipeSynthesizesInheritedScopeChecks(t *testing
 	if control.Metadata["gc.scope_ref"] != "body" {
 		t.Fatalf("review scope-check gc.scope_ref = %q, want body", control.Metadata["gc.scope_ref"])
 	}
-	if control.Metadata["gc.routed_to"] != config.ControlDispatcherAgentName {
-		t.Fatalf("review scope-check gc.routed_to = %q, want %q", control.Metadata["gc.routed_to"], config.ControlDispatcherAgentName)
+	if control.Assignee != config.ControlDispatcherAgentName {
+		t.Fatalf("review scope-check assignee = %q, want %q", control.Assignee, config.ControlDispatcherAgentName)
+	}
+	if got := control.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("review scope-check gc.routed_to = %q, want empty direct dispatcher assignee", got)
 	}
 	if control.Metadata[graphExecutionRouteMetaKey] != "reviewer" {
 		t.Fatalf("review scope-check execution route = %q, want reviewer", control.Metadata[graphExecutionRouteMetaKey])

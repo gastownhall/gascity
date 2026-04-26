@@ -367,6 +367,34 @@ func TestControlDispatcherBinding_NilResolver(t *testing.T) {
 	}
 }
 
+func TestAssignGraphStepRoute_ControlBindingUsesDirectAssigneeWithoutRoutedTo(t *testing.T) {
+	step := &formula.RecipeStep{
+		Metadata: map[string]string{
+			"gc.routed_to": "stale-control-route",
+		},
+	}
+	execution := GraphRouteBinding{
+		QualifiedName: "gascity/claude",
+		MetadataOnly:  true,
+	}
+	control := GraphRouteBinding{
+		QualifiedName: "gascity/control-dispatcher",
+		SessionName:   "gascity--control-dispatcher",
+	}
+
+	AssignGraphStepRoute(step, execution, &control)
+
+	if step.Assignee != "gascity--control-dispatcher" {
+		t.Fatalf("control assignee = %q, want gascity--control-dispatcher", step.Assignee)
+	}
+	if got := step.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("control gc.routed_to = %q, want empty direct assignee", got)
+	}
+	if got := step.Metadata[GraphExecutionRouteMetaKey]; got != "gascity/claude" {
+		t.Fatalf("control execution route = %q, want gascity/claude", got)
+	}
+}
+
 func TestWorkflowExecutionRoute(t *testing.T) {
 	b := beads.Bead{Metadata: map[string]string{"gc.routed_to": "myrig/worker"}}
 	if got := WorkflowExecutionRoute(b); got != "myrig/worker" {

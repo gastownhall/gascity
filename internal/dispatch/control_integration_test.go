@@ -593,6 +593,11 @@ dir = "gascity"
 [agent.pool]
 min = 0
 max = -1
+
+[[agent]]
+name = "control-dispatcher"
+dir = "gascity"
+max_active_sessions = 1
 `), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
@@ -671,8 +676,8 @@ max = -1
 	if claude.ID == "" {
 		t.Fatal("review-claude child not created")
 	}
-	if claude.Metadata["gc.routed_to"] != config.ControlDispatcherAgentName {
-		t.Fatalf("review-claude gc.routed_to = %q, want %q", claude.Metadata["gc.routed_to"], config.ControlDispatcherAgentName)
+	if got := claude.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("review-claude gc.routed_to = %q, want empty direct dispatcher assignee", got)
 	}
 	if claude.Metadata["gc.execution_routed_to"] != "gascity/claude" {
 		t.Fatalf("review-claude gc.execution_routed_to = %q, want gascity/claude", claude.Metadata["gc.execution_routed_to"])
@@ -680,16 +685,16 @@ max = -1
 	if containsString(claude.Labels, "pool:gascity/claude") {
 		t.Fatalf("review-claude labels = %v, should not contain legacy pool label", claude.Labels)
 	}
-	if claude.Assignee != "" {
-		t.Fatalf("review-claude assignee = %q, want empty metadata-only control route", claude.Assignee)
+	if claude.Assignee != "gascity--control-dispatcher" {
+		t.Fatalf("review-claude assignee = %q, want gascity--control-dispatcher", claude.Assignee)
 	}
 
 	codex := findAttemptByRef(t, store, root.ID, "mol-adopt-pr-v2.review-loop.iteration.2.review-codex")
 	if codex.ID == "" {
 		t.Fatal("review-codex child not created")
 	}
-	if codex.Metadata["gc.routed_to"] != config.ControlDispatcherAgentName {
-		t.Fatalf("review-codex gc.routed_to = %q, want %q", codex.Metadata["gc.routed_to"], config.ControlDispatcherAgentName)
+	if got := codex.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("review-codex gc.routed_to = %q, want empty direct dispatcher assignee", got)
 	}
 	if codex.Metadata["gc.execution_routed_to"] != "gascity/codex" {
 		t.Fatalf("review-codex gc.execution_routed_to = %q, want gascity/codex", codex.Metadata["gc.execution_routed_to"])
@@ -700,8 +705,8 @@ max = -1
 	if containsString(codex.Labels, "pool:gascity/claude") {
 		t.Fatalf("review-codex labels = %v, should not contain pool:gascity/claude", codex.Labels)
 	}
-	if codex.Assignee != "" {
-		t.Fatalf("review-codex assignee = %q, want empty metadata-only control route", codex.Assignee)
+	if codex.Assignee != "gascity--control-dispatcher" {
+		t.Fatalf("review-codex assignee = %q, want gascity--control-dispatcher", codex.Assignee)
 	}
 
 	synthesize := findAttemptByRef(t, store, root.ID, "mol-adopt-pr-v2.review-loop.iteration.2.synthesize")

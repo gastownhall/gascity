@@ -615,23 +615,37 @@ func applyAttemptControlStepRoute(step *formula.RecipeStep, executionTarget stri
 	}
 	step.Labels = removeAttemptPoolLabels(step.Labels)
 
-	controlTarget := config.ControlDispatcherAgentName
+	controlTarget := controlDispatcherTargetForExecutionTarget(executionTarget)
 	if binding, ok := resolveAttemptRouteBinding(controlTarget, cfg, store); ok {
-		step.Metadata["gc.routed_to"] = controlTarget
 		if binding.directSessionID != "" {
+			delete(step.Metadata, "gc.routed_to")
 			step.Assignee = binding.directSessionID
 			return
 		}
-		if binding.metadataOnly {
-			step.Assignee = ""
+		if binding.sessionName != "" {
+			delete(step.Metadata, "gc.routed_to")
+			step.Assignee = binding.sessionName
 			return
 		}
-		step.Assignee = binding.sessionName
+		if binding.qualifiedName != "" {
+			step.Metadata["gc.routed_to"] = binding.qualifiedName
+		} else {
+			delete(step.Metadata, "gc.routed_to")
+		}
+		step.Assignee = ""
 		return
 	}
 
 	step.Metadata["gc.routed_to"] = controlTarget
 	step.Assignee = ""
+}
+
+func controlDispatcherTargetForExecutionTarget(executionTarget string) string {
+	executionTarget = strings.TrimSpace(executionTarget)
+	if slash := strings.IndexByte(executionTarget, '/'); slash > 0 {
+		return executionTarget[:slash] + "/" + config.ControlDispatcherAgentName
+	}
+	return config.ControlDispatcherAgentName
 }
 
 func isAttemptControlKind(kind string) bool {
