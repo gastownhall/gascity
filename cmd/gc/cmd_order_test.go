@@ -599,6 +599,37 @@ func TestOrderCheckWithStoresResolverUsesLegacyCityStore(t *testing.T) {
 	}
 }
 
+func TestOrderCheckConditionUsesCityScope(t *testing.T) {
+	cityDir := t.TempDir()
+	orderDir := filepath.Join(cityDir, "packs", "workflows", "orders")
+	check := fmt.Sprintf(
+		`test "$GC_CITY_PATH" = '%s' && test "$GC_STORE_ROOT" = '%s' && test "$GC_STORE_SCOPE" = city && test "$ORDER_DIR" = '%s'`,
+		cityDir,
+		cityDir,
+		orderDir,
+	)
+	aa := []orders.Order{{
+		Name:    "pr-review-router",
+		Trigger: "condition",
+		Check:   check,
+		Formula: "mol-pr-review-router",
+		Pool:    "workflows.pr-review-router",
+		Source:  filepath.Join(orderDir, "pr-review-router.toml"),
+	}}
+	resolver := func(orders.Order) ([]beads.Store, error) {
+		return []beads.Store{beads.NewMemStore()}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderCheckWithStoresResolverScoped(cityDir, &config.City{}, aa, time.Now(), nil, resolver, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderCheckWithStoresResolverScoped = %d, want 0; stderr: %s; stdout: %s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "yes") {
+		t.Fatalf("stdout missing due row:\n%s", stdout.String())
+	}
+}
+
 func TestOrderCheckWithStoresResolverFailsWhenLegacyEventCursorReadFails(t *testing.T) {
 	rigStore := beads.NewMemStore()
 	legacyStore := labelFailListStore{

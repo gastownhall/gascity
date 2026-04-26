@@ -97,6 +97,26 @@ func TestCheckTriggerCondition(t *testing.T) {
 	}
 }
 
+func TestCheckTriggerConditionUsesOptions(t *testing.T) {
+	dir := t.TempDir()
+	a := Order{
+		Name:    "check",
+		Trigger: "condition",
+		Check:   `test "$GC_CITY_PATH" = "$EXPECT_CITY" && test "$(pwd)" = "$EXPECT_CITY"`,
+	}
+	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
+	result := CheckTriggerWithOptions(a, now, neverRan, nil, nil, TriggerOptions{
+		ConditionDir: dir,
+		ConditionEnv: []string{
+			"EXPECT_CITY=" + dir,
+			"GC_CITY_PATH=" + dir,
+		},
+	})
+	if !result.Due {
+		t.Errorf("Due = false, want true with condition cwd/env: %s", result.Reason)
+	}
+}
+
 func TestCheckTriggerConditionFails(t *testing.T) {
 	a := Order{Name: "check", Trigger: "condition", Check: "false"}
 	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)

@@ -184,7 +184,8 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 				return cursor
 			}
 		}
-		result := orders.CheckTrigger(a, now, lastRunFn, m.ep, cursorFn)
+		triggerOpts := orderTriggerOptionsForTarget(cityPath, m.cfg, target, a)
+		result := orders.CheckTriggerWithOptions(a, now, lastRunFn, m.ep, cursorFn, triggerOpts)
 		if lastRunErr != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: reading last run for %s: %v", a.ScopedName(), lastRunErr)
 			continue

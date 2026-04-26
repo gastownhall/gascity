@@ -2173,6 +2173,11 @@ func TestOrderDispatchSkipsRigEventWhenLegacyCursorReadFails(t *testing.T) {
 }
 
 func TestOrderDispatchSkipsRigConditionWhenLegacyOpenWorkReadFails(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	rigStore := beads.NewMemStore()
 	legacyStore := labelFailListStore{
 		Store:     beads.NewMemStore(),
@@ -2202,12 +2207,12 @@ func TestOrderDispatchSkipsRigConditionWhenLegacyOpenWorkReadFails(t *testing.T)
 		cfg: &config.City{
 			Rigs: []config.Rig{{
 				Name: "frontend",
-				Path: "frontend",
+				Path: rigDir,
 			}},
 		},
 	}
 
-	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	m.dispatch(context.Background(), cityDir, time.Now())
 	time.Sleep(50 * time.Millisecond)
 
 	rigRuns := trackingBeads(t, rigStore, "order-run:rig-digest:rig:frontend")
@@ -2216,6 +2221,37 @@ func TestOrderDispatchSkipsRigConditionWhenLegacyOpenWorkReadFails(t *testing.T)
 	}
 	if !strings.Contains(stderr.String(), "open work") {
 		t.Fatalf("stderr missing open-work error:\n%s", stderr.String())
+	}
+}
+
+func TestOrderDispatchConditionUsesScopedEnv(t *testing.T) {
+	cityDir := t.TempDir()
+	store := beads.NewMemStore()
+	check := fmt.Sprintf(
+		`test "$GC_CITY_PATH" = '%s' && test "$GC_STORE_ROOT" = '%s' && test "$GC_STORE_SCOPE" = city && test "$(pwd)" = '%s'`,
+		cityDir,
+		cityDir,
+		cityDir,
+	)
+	ran := make(chan struct{}, 1)
+	fakeExec := func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
+		ran <- struct{}{}
+		return nil, nil
+	}
+	aa := []orders.Order{{
+		Name:    "scoped-check",
+		Trigger: "condition",
+		Check:   check,
+		Exec:    "true",
+	}}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
+
+	ad.dispatch(context.Background(), cityDir, time.Now())
+
+	select {
+	case <-ran:
+	case <-time.After(2 * time.Second):
+		t.Fatal("condition order did not dispatch with scoped cwd/env")
 	}
 }
 
