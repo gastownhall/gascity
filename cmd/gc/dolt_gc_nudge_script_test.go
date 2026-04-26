@@ -228,6 +228,59 @@ func TestDoltGCNudgePassesPasswordThroughEnvironment(t *testing.T) {
 	}
 }
 
+// TestDoltGCNudgeSelectsDatabaseViaUseStatement guards against a regression
+// where the script invoked `dolt sql --database <db> -q "CALL DOLT_GC()"`.
+// `dolt sql` does not accept a `--database` flag in dolt 1.86.x (the floor
+// enforced by Gas City's managed-Dolt tooling), so that form fails at
+// runtime with `error: unknown option 'database'`. The fix selects the
+// database via a `USE` statement inside the SQL query instead.
+//
+// The existing fake-dolt tests don't validate flag names, so a real-binary
+// regression is invisible to them. This test asserts the captured argv
+// uses the SQL-side selection and never the CLI flag.
+func TestDoltGCNudgeSelectsDatabaseViaUseStatement(t *testing.T) {
+	cityPath := writeDoltGCNudgeCity(t)
+	captureDir := t.TempDir()
+	binDir := doltGCNudgeToolPath(t, true, map[string]string{
+		"dolt": "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$DOLT_ARGV_CAPTURE\"\nexit 0\n",
+	})
+
+	cmd := doltGCNudgeCommand(t, cityPath, binDir,
+		"GC_DOLT_PORT=3307",
+		"GC_DOLT_GC_THRESHOLD_BYTES=0",
+		"DOLT_ARGV_CAPTURE="+filepath.Join(captureDir, "argv"),
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("gc-nudge with fake dolt failed: %v\n%s", err, out)
+	}
+
+	argv := readFileString(t, filepath.Join(captureDir, "argv"))
+	if argv == "" {
+		t.Fatalf("dolt was not invoked; gc-nudge output:\n%s", out)
+	}
+	// At least one captured invocation must be the SQL CALL. Each line in
+	// argv is one invocation's arg-string. The size-probe uses --version
+	// or `dolt status` and exits before the CALL is wired up; the GC call
+	// is the line containing CALL DOLT_GC().
+	var gcInvocation string
+	for _, line := range strings.Split(strings.TrimSpace(argv), "\n") {
+		if strings.Contains(line, "CALL DOLT_GC()") {
+			gcInvocation = line
+			break
+		}
+	}
+	if gcInvocation == "" {
+		t.Fatalf("no CALL DOLT_GC() invocation captured; argv:\n%s", argv)
+	}
+	if strings.Contains(gcInvocation, "--database") {
+		t.Errorf("dolt argv passes --database flag (rejected by dolt 1.86.x); argv = %q", gcInvocation)
+	}
+	if !strings.Contains(gcInvocation, "USE ") {
+		t.Errorf("dolt argv does not use SQL-side database selection (USE statement); argv = %q", gcInvocation)
+	}
+}
+
 func TestDoltGCNudgeFailsIfAnyDatabaseGCFails(t *testing.T) {
 	cityPath := writeDoltGCNudgeCity(t)
 	rigMeta := filepath.Join(cityPath, "rigs", "demo", ".beads", "metadata.json")
@@ -597,10 +650,10 @@ func TestDoltGCNudgeSkipsExternalRigDatabaseWithoutLocalData(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("dolt argv lines = %d, want 1 for local managed db only:\n%s", len(lines), argv)
 	}
-	if !strings.Contains(lines[0], "--database testdb") {
+	if !strings.Contains(lines[0], "USE `testdb`") {
 		t.Fatalf("dolt argv = %q, want local managed testdb", lines[0])
 	}
-	if strings.Contains(argv, "--database extdb") {
+	if strings.Contains(argv, "USE `extdb`") {
 		t.Fatalf("dolt argv should not target external rig db:\n%s", argv)
 	}
 }
@@ -634,7 +687,7 @@ func TestDoltGCNudgeDefaultsMissingDatabaseMetadataToBeads(t *testing.T) {
 	}
 
 	argv := strings.TrimSpace(readFileString(t, argvCapture))
-	if !strings.Contains(argv, "--database beads") {
+	if !strings.Contains(argv, "USE `beads`") {
 		t.Fatalf("dolt argv = %q, want default beads database", argv)
 	}
 }
@@ -673,10 +726,10 @@ func TestDoltGCNudgeSkipsInvalidDatabaseMetadata(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("dolt argv lines = %d, want 1 valid database:\n%s", len(lines), argv)
 	}
-	if !strings.Contains(lines[0], "--database testdb") {
+	if !strings.Contains(lines[0], "USE `testdb`") {
 		t.Fatalf("dolt argv = %q, want local managed testdb", lines[0])
 	}
-	if strings.Contains(argv, "--database --help") {
+	if strings.Contains(argv, "USE `--help`") {
 		t.Fatalf("dolt argv should not target invalid database:\n%s", argv)
 	}
 }
@@ -714,10 +767,10 @@ func TestDoltGCNudgeSkipsSystemDatabaseMetadata(t *testing.T) {
 	}
 
 	argv := strings.TrimSpace(readFileString(t, argvCapture))
-	if strings.Contains(argv, "--database mysql") {
+	if strings.Contains(argv, "USE `mysql`") {
 		t.Fatalf("dolt argv should not target system database:\n%s", argv)
 	}
-	if !strings.Contains(argv, "--database testdb") {
+	if !strings.Contains(argv, "USE `testdb`") {
 		t.Fatalf("dolt argv = %q, want valid testdb", argv)
 	}
 }
@@ -751,7 +804,7 @@ func TestDoltGCNudgeAllowsHyphenatedDatabaseMetadata(t *testing.T) {
 	}
 
 	argv := strings.TrimSpace(readFileString(t, argvCapture))
-	if !strings.Contains(argv, "--database frontend-db") {
+	if !strings.Contains(argv, "USE `frontend-db`") {
 		t.Fatalf("dolt argv = %q, want hyphenated database", argv)
 	}
 }
@@ -790,7 +843,7 @@ func TestDoltGCNudgeHonorsDataDirOverride(t *testing.T) {
 	}
 
 	argv := strings.TrimSpace(readFileString(t, argvCapture))
-	if !strings.Contains(argv, "--database testdb") {
+	if !strings.Contains(argv, "USE `testdb`") {
 		t.Fatalf("dolt argv = %q, want override-backed testdb", argv)
 	}
 }
@@ -821,7 +874,7 @@ func TestDoltGCNudgeDiscoversOrphanDatabaseDirs(t *testing.T) {
 	}
 
 	argv := strings.TrimSpace(readFileString(t, argvCapture))
-	if !strings.Contains(argv, "--database orphan-db") {
+	if !strings.Contains(argv, "USE `orphan-db`") {
 		t.Fatalf("dolt argv = %q, want orphan database", argv)
 	}
 }
@@ -873,7 +926,7 @@ func TestDoltGCNudgeAggregateThresholdTriggersSubthresholdDatabases(t *testing.T
 	}
 
 	argv := strings.TrimSpace(readFileString(t, argvCapture))
-	if !strings.Contains(argv, "--database testdb") || !strings.Contains(argv, "--database rigdb") {
+	if !strings.Contains(argv, "USE `testdb`") || !strings.Contains(argv, "USE `rigdb`") {
 		t.Fatalf("dolt argv = %q, want both subthreshold databases under aggregate trigger", argv)
 	}
 }
@@ -915,10 +968,10 @@ func TestDoltGCNudgeFallbackFindsLocalRigOutsideRigsDir(t *testing.T) {
 	if len(lines) != 2 {
 		t.Fatalf("dolt argv lines = %d, want 2 databases from fallback scan:\n%s", len(lines), argv)
 	}
-	if !strings.Contains(argv, "--database testdb") {
+	if !strings.Contains(argv, "USE `testdb`") {
 		t.Fatalf("dolt argv = %q, want city database", argv)
 	}
-	if !strings.Contains(argv, "--database frontenddb") {
+	if !strings.Contains(argv, "USE `frontenddb`") {
 		t.Fatalf("dolt argv = %q, want rig database outside rigs/ dir", argv)
 	}
 }
@@ -944,7 +997,7 @@ func TestDoltGCNudgeWarnsWhenRigListFailsBeforeFallback(t *testing.T) {
 	if !strings.Contains(string(out), "gc rig list failed rc=7") {
 		t.Fatalf("gc-nudge output = %q, want rig-list failure warning", out)
 	}
-	if !strings.Contains(readFileString(t, argvCapture), "--database testdb") {
+	if !strings.Contains(readFileString(t, argvCapture), "USE `testdb`") {
 		t.Fatalf("gc-nudge did not fall back to local metadata scan; output:\n%s", out)
 	}
 }

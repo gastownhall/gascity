@@ -292,11 +292,16 @@ run_dolt_gc_for_db() {
   # CALL DOLT_GC() is disruptive on pre-1.75 Dolt; the dolt CLI shells
   # out to a fresh connection per invocation, so connection churn is
   # bounded to this one call. Server-side auto-GC is unaffected.
+  #
+  # Database selection happens via a `USE` statement rather than a CLI
+  # flag — `dolt sql` does not accept `--database` in 1.86.x (the floor
+  # enforced by the managed-Dolt tooling). Backticks defend against
+  # database names that collide with SQL keywords.
   export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
   run_bounded "$gc_call_timeout" \
     dolt --host "$host" --port "$GC_DOLT_PORT" \
     --user "$GC_DOLT_USER" --no-tls \
-    sql --database "$db" -q "CALL DOLT_GC()" || cmd_rc=$?
+    sql -q "USE \`$db\`; CALL DOLT_GC()" || cmd_rc=$?
   elapsed=$(( $(date +%s) - start ))
 
   after=$(dir_bytes "$db_dir")
