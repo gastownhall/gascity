@@ -2711,3 +2711,48 @@ func TestCommitStartResult_PersistsMCPIdentityForACPStart(t *testing.T) {
 		t.Fatal("mcp_servers_snapshot = empty, want persisted snapshot")
 	}
 }
+
+func TestStopTargetThroughWorkerBoundary_CityStopLeavesSessionAsleep(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	session, err := store.Create(beads.Bead{
+		Title:  "control-dispatcher",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "control-dispatcher",
+			"template":     "control-dispatcher",
+			"state":        "active",
+			"sleep_reason": sleepReasonCityStop,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := sp.Start(context.Background(), "control-dispatcher", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	err = stopTargetThroughWorkerBoundary(stopTarget{
+		sessionID: session.ID,
+		name:      "control-dispatcher",
+		resolved:  true,
+	}, store, sp, &config.City{})
+	if err != nil {
+		t.Fatalf("stopTargetThroughWorkerBoundary: %v", err)
+	}
+
+	got, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Metadata["state"] != string(sessionpkg.StateAsleep) {
+		t.Fatalf("state = %q, want %q", got.Metadata["state"], sessionpkg.StateAsleep)
+	}
+	if got.Metadata["sleep_reason"] != sleepReasonCityStop {
+		t.Fatalf("sleep_reason = %q, want %q", got.Metadata["sleep_reason"], sleepReasonCityStop)
+	}
+	if got.Metadata["suspended_at"] != "" {
+		t.Fatalf("suspended_at = %q, want empty", got.Metadata["suspended_at"])
+	}
+}

@@ -1237,7 +1237,35 @@ func stopTargetThroughWorkerBoundary(target stopTarget, store beads.Store, sp ru
 	if targetID == "" {
 		targetID = strings.TrimSpace(target.name)
 	}
+	if cityStopSessionMarked(store, target.sessionID) {
+		if err := workerKillSessionTargetWithConfig("", store, sp, cfg, targetID); err != nil {
+			return err
+		}
+		markCityStopSessionAsAsleep(store, target.sessionID, nil)
+		return nil
+	}
 	return workerStopSessionTargetWithConfig("", store, sp, cfg, targetID)
+}
+
+func cityStopSessionMarked(store beads.Store, sessionID string) bool {
+	if store == nil || strings.TrimSpace(sessionID) == "" {
+		return false
+	}
+	b, err := store.Get(sessionID)
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(b.Metadata["sleep_reason"]) == sleepReasonCityStop
+}
+
+func markCityStopSessionAsAsleep(store beads.Store, sessionID string, stderr io.Writer) {
+	if store == nil || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	batch := sessionpkg.SleepPatch(time.Now().UTC(), sleepReasonCityStop)
+	if err := store.SetMetadataBatch(sessionID, batch); err != nil && stderr != nil {
+		fmt.Fprintf(stderr, "gc stop: marking session %s asleep: %v\n", sessionID, err) //nolint:errcheck
+	}
 }
 
 func interruptTargetsBounded(targets []stopTarget, cfg *config.City, store beads.Store, sp runtime.Provider, stderr io.Writer) int {

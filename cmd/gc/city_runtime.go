@@ -1810,6 +1810,8 @@ func (cr *CityRuntime) shutdown() {
 				fmt.Fprintf(cr.stderr, "%s: shutdown session listing failed: %v\n", cr.logPrefix, listErr) //nolint:errcheck // best-effort stderr
 			}
 		}
-		gracefulStopAll(running, cr.sp, timeout, cr.rec, cr.cfg, cr.cityBeadStore(), cr.stdout, cr.stderr)
+		store := cr.cityBeadStore()
+		markCityStopSessionSleepReason(store, cr.stderr)
+		gracefulStopAll(running, cr.sp, timeout, cr.rec, cr.cfg, store, cr.stdout, cr.stderr)
 	})
 }
