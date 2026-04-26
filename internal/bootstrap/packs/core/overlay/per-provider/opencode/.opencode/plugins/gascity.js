@@ -4,11 +4,14 @@
 // OpenCode's plugin API is ESM and hook-oriented:
 //   - event() is side-effect-only (no prompt injection)
 //   - experimental.chat.system.transform mutates output.system
+//   - experimental.session.compacting → inject context before compaction
 //
 // Gas City uses:
 //   - session.created / session.compacted → gc prime --hook (side effects such
 //     as session-id persistence and poller bootstrap)
 //   - session.deleted → gc hook --inject (pick up newly queued work on exit)
+//   - experimental.session.compacting → gc handoff "context cycle" (preserve
+//     context across compaction by sending handoff mail and restarting)
 //   - experimental.chat.system.transform → inject gc prime --hook, queued
 //     nudges, and unread mail into the system prompt for each turn
 
@@ -85,6 +88,16 @@ export default async function gascityPlugin({ directory }) {
           output.system.unshift(prefix);
         }
       }
+    },
+
+    // Pre-compaction hook: send handoff mail and request restart to preserve
+    // context across compaction. This mirrors Claude's PreCompact behavior.
+    "experimental.session.compacting": async (_input, _output) => {
+      // Run gc handoff which sends mail to self and requests restart.
+      // The handoff mail preserves context that would otherwise be lost
+      // during compaction. The restart ensures the session gets fresh
+      // context with the handoff mail injected.
+      await run(directory, "handoff", "context cycle");
     },
   };
 }
