@@ -10,7 +10,41 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pricing"
 )
+
+// mergePricingByKey merges base and override pricing slices keyed by
+// (provider, model). When the same key appears in both, the override entry
+// wins. The returned slice preserves base order followed by override-only
+// entries in their original order. Used to compose pack→city pricing layers
+// during config load.
+func mergePricingByKey(base, override []pricing.ModelPricing) []pricing.ModelPricing {
+	if len(base) == 0 {
+		out := make([]pricing.ModelPricing, len(override))
+		copy(out, override)
+		return out
+	}
+	overrideIdx := make(map[string]int, len(override))
+	for i, p := range override {
+		overrideIdx[pricing.Key(p.Provider, p.Model)] = i
+	}
+	out := make([]pricing.ModelPricing, 0, len(base)+len(override))
+	usedOverride := make(map[int]bool, len(override))
+	for _, b := range base {
+		if i, ok := overrideIdx[pricing.Key(b.Provider, b.Model)]; ok {
+			out = append(out, override[i])
+			usedOverride[i] = true
+			continue
+		}
+		out = append(out, b)
+	}
+	for i, o := range override {
+		if !usedOverride[i] {
+			out = append(out, o)
+		}
+	}
+	return out
+}
 
 // Provenance tracks where each configuration element originated during
 // composition. Built into the merge API from the start — retrofitting
@@ -140,6 +174,10 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 					root.Providers[name] = spec
 				}
 			}
+		}
+		// Merge pack.toml pricing (pack is base, city wins by (provider, model) key).
+		if len(pc.Pricing) > 0 {
+			root.Pricing = mergePricingByKey(pc.Pricing, root.Pricing)
 		}
 		// Merge named sessions.
 		root.NamedSessions = append(pc.NamedSessions, root.NamedSessions...)

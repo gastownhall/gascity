@@ -273,6 +273,17 @@ type InterruptBoundaryWaitProvider interface {
 	WaitForInterruptBoundary(ctx context.Context, name string, since time.Time, timeout time.Duration) error
 }
 
+// PricingProvider is the named policy seam for per-model cost estimation,
+// defined as an optional interface in [github.com/gastownhall/gascity/internal/pricing].
+// Mirrors the optional-interface pattern of IdleWaitProvider, DialogProvider
+// above. Introduced by issue #1255 (1d).
+//
+// Consumers (worker, telemetry recorder) type-assert to
+// pricing.PricingProvider directly when discovering provider-shipped rates.
+// The seam is documented here so future provider authors find it next to the
+// other optional capabilities; the interface itself lives in internal/pricing
+// to keep runtime.go free of pricing-specific types.
+
 // CopyEntry describes a file or directory to stage in the session's
 // working directory before the agent command starts.
 type CopyEntry struct {

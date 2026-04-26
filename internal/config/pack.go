@@ -14,6 +14,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/pricing"
 )
 
 // packFile is the expected filename inside a pack directory.
@@ -39,6 +40,7 @@ type packConfig struct {
 	Doctor         []PackDoctorEntry       `toml:"doctor,omitempty"`
 	Commands       []PackCommandEntry      `toml:"commands,omitempty"`
 	Global         PackGlobal              `toml:"global,omitempty"`
+	Pricing        []pricing.ModelPricing  `toml:"pricing,omitempty"`
 }
 
 type packDefaults struct {
