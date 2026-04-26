@@ -118,6 +118,34 @@ func TestResolveOptions_EffectiveDefaultsOverrideSchemaDefaults(t *testing.T) {
 	}
 }
 
+func TestReplaceSchemaFlagsStripsCodexAliases(t *testing.T) {
+	codex := BuiltinProviders()["codex"]
+	defaultArgs := []string{
+		"--dangerously-bypass-approvals-and-sandbox",
+		"--model", "gpt-5.5",
+		"-c", "model_reasoning_effort=xhigh",
+	}
+
+	got := ReplaceSchemaFlags(
+		`aimux run codex -- -m gpt-5.5 -c 'model_reasoning_effort="xhigh"'`,
+		codex.OptionsSchema,
+		defaultArgs,
+	)
+
+	if strings.Count(got, "gpt-5.5") != 1 {
+		t.Fatalf("ReplaceSchemaFlags() = %q, want one model flag", got)
+	}
+	if strings.Count(got, "model_reasoning_effort") != 1 {
+		t.Fatalf("ReplaceSchemaFlags() = %q, want one effort flag", got)
+	}
+	if !strings.Contains(got, "--model gpt-5.5") {
+		t.Fatalf("ReplaceSchemaFlags() = %q, want canonical model flag", got)
+	}
+	if strings.Contains(got, "-m gpt-5.5") || strings.Contains(got, `model_reasoning_effort=\"xhigh\"`) {
+		t.Fatalf("ReplaceSchemaFlags() = %q, retained non-canonical schema flag", got)
+	}
+}
+
 func TestResolveOptions_UserOptionOverridesEffectiveDefault(t *testing.T) {
 	schema := []ProviderOption{
 		{

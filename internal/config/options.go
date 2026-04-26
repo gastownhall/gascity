@@ -160,14 +160,71 @@ func ReplaceSchemaFlags(command string, schema []ProviderOption, overrideArgs []
 // independent flag group can be matched separately during stripping.
 func CollectAllSchemaFlags(schema []ProviderOption) [][]string {
 	var flags [][]string
+	seen := make(map[string]bool)
 	for _, opt := range schema {
 		for _, choice := range opt.Choices {
 			if len(choice.FlagArgs) > 0 {
-				flags = append(flags, splitFlagArgs(choice.FlagArgs)...)
+				for _, seq := range splitFlagArgs(choice.FlagArgs) {
+					for _, expanded := range expandEquivalentFlagSequences(seq) {
+						key := strings.Join(expanded, "\x00")
+						if seen[key] {
+							continue
+						}
+						seen[key] = true
+						flags = append(flags, expanded)
+					}
+				}
 			}
 		}
 	}
 	return flags
+}
+
+func expandEquivalentFlagSequences(seq []string) [][]string {
+	if len(seq) == 0 {
+		return nil
+	}
+	var out [][]string
+	add := func(candidate []string) {
+		copied := make([]string, len(candidate))
+		copy(copied, candidate)
+		out = append(out, copied)
+	}
+	add(seq)
+	if len(seq) == 2 && seq[0] == "--model" {
+		add([]string{"-m", seq[1]})
+	}
+	if len(seq) == 2 && seq[0] == "-m" {
+		add([]string{"--model", seq[1]})
+	}
+	if len(seq) == 2 && seq[0] == "-c" {
+		if quoted, ok := quoteAssignmentValue(seq[1]); ok {
+			add([]string{seq[0], quoted})
+		}
+		if unquoted, ok := unquoteAssignmentValue(seq[1]); ok {
+			add([]string{seq[0], unquoted})
+		}
+	}
+	return out
+}
+
+func quoteAssignmentValue(value string) (string, bool) {
+	key, val, ok := strings.Cut(value, "=")
+	if !ok || key == "" || val == "" || strings.HasPrefix(val, "\"") {
+		return "", false
+	}
+	return key + "=\"" + val + "\"", true
+}
+
+func unquoteAssignmentValue(value string) (string, bool) {
+	key, val, ok := strings.Cut(value, "=")
+	if !ok || key == "" || len(val) < 2 {
+		return "", false
+	}
+	if !strings.HasPrefix(val, "\"") || !strings.HasSuffix(val, "\"") {
+		return "", false
+	}
+	return key + "=" + strings.Trim(val, "\""), true
 }
 
 // splitFlagArgs splits a FlagArgs slice into independent flag groups at
@@ -290,12 +347,37 @@ func inferChoiceFromFlags(schema []ProviderOption, flagSeq []string, defaults ma
 			continue
 		}
 		for _, choice := range opt.Choices {
-			if flagsEqual(choice.FlagArgs, flagSeq) {
+			if flagsEquivalent(choice.FlagArgs, flagSeq) {
 				defaults[opt.Key] = choice.Value
 				return
 			}
 		}
 	}
+}
+
+func flagsEquivalent(a, b []string) bool {
+	if flagsEqual(a, b) {
+		return true
+	}
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if normalizeFlagToken(a[i]) != normalizeFlagToken(b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeFlagToken(token string) string {
+	if token == "-m" {
+		return "--model"
+	}
+	if normalized, ok := unquoteAssignmentValue(token); ok {
+		return normalized
+	}
+	return token
 }
 
 func flagsEqual(a, b []string) bool {
