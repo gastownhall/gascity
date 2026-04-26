@@ -136,6 +136,65 @@ func TestConditionEnvEnvironPreservesIntegrationRealBD(t *testing.T) {
 	}
 }
 
+func TestConditionEnvEnvironUsesStorePathForBeadsDir(t *testing.T) {
+	env := ConditionEnv{
+		BeadID:    "bead-store",
+		Iteration: 1,
+		CityPath:  "/city",
+		StorePath: "/rig",
+	}
+
+	vars := env.Environ()
+	lookup := make(map[string]string)
+	for _, v := range vars {
+		parts := strings.SplitN(v, "=", 2)
+		if len(parts) == 2 {
+			lookup[parts[0]] = parts[1]
+		}
+	}
+
+	if got := lookup["BEADS_DIR"]; got != filepath.Join("/rig", ".beads") {
+		t.Fatalf("BEADS_DIR = %q, want rig beads dir", got)
+	}
+	if got := lookup["GC_STORE_PATH"]; got != "/rig" {
+		t.Fatalf("GC_STORE_PATH = %q, want /rig", got)
+	}
+	if got := lookup["GC_CITY"]; got != "/city" {
+		t.Fatalf("GC_CITY = %q, want /city", got)
+	}
+}
+
+func TestConditionEnvEnvironPreservesDoltConnection(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "33061")
+	t.Setenv("GC_DOLT_HOST", "127.0.0.1")
+	t.Setenv("GC_DOLT_PASSWORD", "secret")
+
+	env := ConditionEnv{
+		BeadID:    "bead-dolt",
+		Iteration: 1,
+		CityPath:  "/city",
+	}
+
+	vars := env.Environ()
+	lookup := make(map[string]string)
+	for _, v := range vars {
+		parts := strings.SplitN(v, "=", 2)
+		if len(parts) == 2 {
+			lookup[parts[0]] = parts[1]
+		}
+	}
+
+	for key, want := range map[string]string{
+		"BEADS_DOLT_SERVER_PORT": "33061",
+		"GC_DOLT_HOST":           "127.0.0.1",
+		"GC_DOLT_PASSWORD":       "secret",
+	} {
+		if got := lookup[key]; got != want {
+			t.Fatalf("%s = %q, want %q", key, got, want)
+		}
+	}
+}
+
 func TestResolveConditionPath(t *testing.T) {
 	t.Run("absolute path", func(t *testing.T) {
 		dir := t.TempDir()
@@ -307,6 +366,40 @@ func TestRunConditionUsesWorkDir(t *testing.T) {
 		t.Errorf("Stdout = %q, want to contain workdir %q", result.Stdout, workDir)
 	}
 	wantBeadsDir := filepath.Join(cityDir, ".beads")
+	if !strings.Contains(result.Stdout, wantBeadsDir) {
+		t.Errorf("Stdout = %q, want to contain BEADS_DIR %q", result.Stdout, wantBeadsDir)
+	}
+	if !strings.Contains(result.Stdout, "ok") {
+		t.Errorf("Stdout = %q, want to contain file contents", result.Stdout)
+	}
+}
+
+func TestRunConditionUsesStorePathAsDefaultWorkDir(t *testing.T) {
+	cityDir := t.TempDir()
+	storeDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(storeDir, "target.txt"), []byte("ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	script := filepath.Join(cityDir, "check-store.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\npwd\nprintf '%s\\n' \"$BEADS_DIR\"\ncat target.txt\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	env := ConditionEnv{
+		BeadID:    "b-store",
+		CityPath:  cityDir,
+		StorePath: storeDir,
+	}
+
+	result := RunCondition(context.Background(), script, env, 5*time.Second, 0)
+	if result.Outcome != GatePass {
+		t.Fatalf("Outcome = %q, want %q (stderr=%q)", result.Outcome, GatePass, result.Stderr)
+	}
+	if !strings.Contains(result.Stdout, storeDir) {
+		t.Errorf("Stdout = %q, want to contain store dir %q", result.Stdout, storeDir)
+	}
+	wantBeadsDir := filepath.Join(storeDir, ".beads")
 	if !strings.Contains(result.Stdout, wantBeadsDir) {
 		t.Errorf("Stdout = %q, want to contain BEADS_DIR %q", result.Stdout, wantBeadsDir)
 	}

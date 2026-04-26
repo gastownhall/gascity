@@ -1075,8 +1075,8 @@ func TestApplyAttemptControlStepRoute_KeepsControlBeadsOnDispatcherForNamedExecu
 	if got := step.Metadata["gc.execution_routed_to"]; got != "worker" {
 		t.Fatalf("gc.execution_routed_to = %q, want worker", got)
 	}
-	if got := step.Metadata["gc.routed_to"]; got != config.ControlDispatcherAgentName {
-		t.Fatalf("gc.routed_to = %q, want %q", got, config.ControlDispatcherAgentName)
+	if got := step.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("gc.routed_to = %q, want empty for concrete control-dispatcher assignee", got)
 	}
 	if step.Assignee != dispatcher.ID {
 		t.Fatalf("assignee = %q, want canonical control-dispatcher bead %q", step.Assignee, dispatcher.ID)

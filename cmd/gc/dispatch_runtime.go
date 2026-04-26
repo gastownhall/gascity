@@ -65,7 +65,7 @@ func applyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string,
 
 var (
 	workflowServeList               = nextWorkflowServeBeads
-	controlDispatcherServe          = runControlDispatcher
+	controlDispatcherServe          = runControlDispatcherInStore
 	workflowServeOpenEventsProvider = func(stderr io.Writer) (events.Provider, error) {
 		ep, code := openCityEventsProvider(stderr, "gc convoy control --serve")
 		if ep == nil {
@@ -194,10 +194,10 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 	workQuery := expandAgentCommandTemplate(cityPath, loadedCityName(cfg, cityPath), &agentCfg, cfg.Rigs, "work_query", agentCfg.EffectiveWorkQuery(), stderr)
 	workflowTracef("serve start agent=%s city=%s dir=%s", agentCfg.QualifiedName(), cityPath, workDir)
 	if !follow {
-		_, err := drainWorkflowServeWork(agentCfg, workQuery, workDir, workEnv, stderr)
+		_, err := drainWorkflowServeWork(agentCfg, cityPath, workDir, workQuery, workEnv, stderr)
 		return err
 	}
-	return runWorkflowServeFollow(agentCfg, workQuery, workDir, workEnv, stderr)
+	return runWorkflowServeFollow(agentCfg, cityPath, workDir, workQuery, workEnv, stderr)
 }
 
 type workflowServeDrainResult struct {
@@ -209,11 +209,11 @@ type workflowServeDrainResult struct {
 // for a single invocation. Returns whether it advanced a control bead and
 // whether the queue still contains only pending work so the --follow caller
 // can distinguish blocked work from genuine idle.
-func drainWorkflowServeWork(agentCfg config.Agent, workQuery string, workDir string, workEnv map[string]string, stderr io.Writer) (workflowServeDrainResult, error) {
+func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuery string, workEnv map[string]string, stderr io.Writer) (workflowServeDrainResult, error) {
 	result := workflowServeDrainResult{}
 	idlePolls := 0
 	for {
-		queue, err := workflowServeList(workflowServeQuery(workQuery), workDir, workEnv)
+		queue, err := workflowServeList(workflowServeQuery(workQuery), storePath, workEnv)
 		if err != nil {
 			workflowTracef("serve query-error agent=%s err=%v", agentCfg.QualifiedName(), err)
 			return result, fmt.Errorf("querying control work for %s: %w", agentCfg.QualifiedName(), err)
@@ -238,7 +238,7 @@ func drainWorkflowServeWork(agentCfg config.Agent, workQuery string, workDir str
 				workflowTracef("serve unexpected-kind bead=%s kind=%s", beadID, kind)
 				return result, fmt.Errorf("bead %s has unexpected non-control kind %q", beadID, kind)
 			}
-			workflowTracef("serve process bead=%s kind=%s", beadID, kind)
+			workflowTracef("serve process bead=%s kind=%s store=%s", beadID, kind, storePath)
 			// controlDispatcherServe currently returns nil both when it
 			// successfully advanced a control bead AND when ProcessControl
 			// chose to no-op (e.g., status != "open"). The caller cannot
@@ -248,7 +248,7 @@ func drainWorkflowServeWork(agentCfg config.Agent, workQuery string, workDir str
 			// control ga-fw2fm. The silent no-op now emits a separate
 			// `process-control ... skip reason=bead_not_open` line inside
 			// ProcessControl itself; see runtime.go.
-			if err := controlDispatcherServe(beadID, io.Discard, stderr); err != nil {
+			if err := controlDispatcherServe(cityPath, storePath, beadID, io.Discard, stderr); err != nil {
 				if errors.Is(err, dispatch.ErrControlPending) {
 					pendingCount++
 					result.pendingAny = true
@@ -273,7 +273,7 @@ func drainWorkflowServeWork(agentCfg config.Agent, workQuery string, workDir str
 	}
 }
 
-func runWorkflowServeFollow(agentCfg config.Agent, workQuery string, workDir string, workEnv map[string]string, stderr io.Writer) error {
+func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuery string, workEnv map[string]string, stderr io.Writer) error {
 	ep, err := workflowServeOpenEventsProvider(stderr)
 	if err != nil {
 		return err
@@ -297,7 +297,7 @@ func runWorkflowServeFollow(agentCfg config.Agent, workQuery string, workDir str
 
 	idleSweeps := 0
 	for {
-		drainResult, err := drainWorkflowServeWork(agentCfg, workQuery, workDir, workEnv, stderr)
+		drainResult, err := drainWorkflowServeWork(agentCfg, cityPath, storePath, workQuery, workEnv, stderr)
 		if err != nil {
 			return err
 		}

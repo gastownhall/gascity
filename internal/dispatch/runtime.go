@@ -22,6 +22,7 @@ type ControlResult struct {
 // ProcessOptions provides control-dispatcher execution context.
 type ProcessOptions struct {
 	CityPath           string
+	StorePath          string
 	FormulaSearchPaths []string
 	PrepareFragment    func(*formula.FragmentRecipe, beads.Bead) error
 	RecycleSession     func(beads.Bead) error
