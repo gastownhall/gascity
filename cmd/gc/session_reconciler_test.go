@@ -2175,6 +2175,44 @@ func TestReconcileSessionBeads_StableClearsFailures(t *testing.T) {
 	}
 }
 
+func TestReconcileSessionBeads_StableAlreadyClearDoesNotWriteMetadata(t *testing.T) {
+	env := newReconcilerTestEnv()
+	countingStore := newCountingMetadataStore()
+	env.store = countingStore
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	stableWake := env.clk.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339)
+	env.setSessionMetadata(&session, map[string]string{
+		"state":             "active",
+		"wake_attempts":     "3",
+		"last_woke_at":      stableWake,
+		"quarantined_until": "",
+	})
+
+	countingStore.singleCalls = 0
+	countingStore.batchCalls = 0
+	env.reconcile([]beads.Bead{session})
+	if countingStore.batchCalls == 0 {
+		t.Fatal("first stable tick should write metadata to clear wake failures")
+	}
+
+	cleared, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("getting session bead: %v", err)
+	}
+	if cleared.Metadata["wake_attempts"] != "0" {
+		t.Fatalf("wake_attempts after first tick = %q, want 0", cleared.Metadata["wake_attempts"])
+	}
+
+	countingStore.singleCalls = 0
+	countingStore.batchCalls = 0
+	env.reconcile([]beads.Bead{cleared})
+	if got := countingStore.singleCalls + countingStore.batchCalls; got != 0 {
+		t.Fatalf("second stable tick performed %d metadata write(s), want 0", got)
+	}
+}
+
 func TestReconcileSessionBeads_NoAgentNotWoken(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{}
