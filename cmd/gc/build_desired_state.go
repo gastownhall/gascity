@@ -690,10 +690,11 @@ func discoverSessionBeadsWithRoots(
 		if isEphemeralSessionBeadForAgent(b, cfgAgent) {
 			manualSession := isManualSessionBeadForAgent(b, cfgAgent)
 			creating := b.Metadata["state"] == "creating"
-			if isPoolManagedSessionBead(b) && !manualSession && !isNamedSessionBead(b) && !creating {
+			pendingCreate := isPendingPoolCreate(b)
+			if isPoolManagedSessionBead(b) && !manualSession && !isNamedSessionBead(b) && !creating && !pendingCreate {
 				continue
 			}
-			if !manualSession && !desiredHasTemplate(desired, template) {
+			if !manualSession && !desiredHasTemplate(desired, template) && !pendingCreate {
 				continue
 			}
 		}
@@ -754,6 +755,16 @@ func discoverSessionBeadsWithRoots(
 		desired[sn] = tp
 	}
 	return roots
+}
+
+func isPendingPoolCreate(b beads.Bead) bool {
+	if !isPoolManagedSessionBead(b) || strings.TrimSpace(b.Metadata["pending_create_claim"]) != boolMetadata(true) {
+		return false
+	}
+	if strings.TrimSpace(b.Metadata["state"]) != "creating" {
+		return false
+	}
+	return true
 }
 
 func realizeDependencyFloors(
