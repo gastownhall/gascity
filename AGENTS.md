@@ -369,3 +369,7 @@ These apply to all code in this project — frontend and server:
   through the system and subvert the type system.
 - **Prefer Well-Known, High Quality OSS Libraries** instead of hand-rolling your
   own behavior to get more robust, better maintained and better tested results.
+- **Treat Static Warnings And Info As Errors To Be Fixed**. The whole point of
+  static checking (linting, compilers, etc) is that they surface issues at
+  build-time so that they can be fixed now instead of lead to errors at runtime.
+  Take advantage of that feedback to fix those errors!

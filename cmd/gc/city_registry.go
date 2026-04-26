@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
@@ -58,9 +59,9 @@ type cityRegistry struct {
 	snap     atomic.Pointer[citySnapshot]
 
 	// init/backoff state (co-protected by citiesMu)
-	initStatus        map[string]cityInitProgress
-	initFailures      map[string]*initFailRecord
-	panicHistory      map[string]*panicRecord
+	initStatus           map[string]cityInitProgress
+	initFailures         map[string]*initFailRecord
+	panicHistory         map[string]*panicRecord
 	pendingRequestIDs    map[string]string    // city path → request_id for async correlation
 	recentlyUnregistered map[string]time.Time // city path → unregister time (grace period for event delivery)
 	supervisorRecorder   events.Recorder      // supervisor-level event recorder for city lifecycle events
@@ -91,19 +92,43 @@ func newCityRegistry() *cityRegistry {
 }
 
 // StorePendingRequestID stores a request_id for async correlation.
-func (r *cityRegistry) StorePendingRequestID(cityPath, requestID string) {
+func (r *cityRegistry) StorePendingRequestID(cityPath, requestID string) error {
+	key := pendingRequestKey(cityPath)
+	if err := supervisor.NewRegistry(supervisor.RegistryPath()).StorePendingCityRequestID(key, requestID); err != nil {
+		return err
+	}
+
 	r.citiesMu.Lock()
-	defer r.citiesMu.Unlock()
-	r.pendingRequestIDs[cityPath] = requestID
+	r.pendingRequestIDs[key] = requestID
+	r.citiesMu.Unlock()
+	return nil
 }
 
 // ConsumePendingRequestID returns and removes the pending request_id for a city path.
-func (r *cityRegistry) ConsumePendingRequestID(cityPath string) (string, bool) {
+func (r *cityRegistry) ConsumePendingRequestID(cityPath string) (string, bool, error) {
+	key := pendingRequestKey(cityPath)
 	r.citiesMu.Lock()
-	defer r.citiesMu.Unlock()
-	id, ok := r.pendingRequestIDs[cityPath]
-	delete(r.pendingRequestIDs, cityPath)
-	return id, ok
+	id, ok := r.pendingRequestIDs[key]
+	if ok {
+		if _, _, err := supervisor.NewRegistry(supervisor.RegistryPath()).ConsumePendingCityRequestID(key); err != nil {
+			r.citiesMu.Unlock()
+			return id, true, err
+		}
+		delete(r.pendingRequestIDs, key)
+		r.citiesMu.Unlock()
+		return id, true, nil
+	}
+	r.citiesMu.Unlock()
+
+	id, ok, err := supervisor.NewRegistry(supervisor.RegistryPath()).ConsumePendingCityRequestID(key)
+	if err != nil {
+		return "", false, err
+	}
+	return id, ok, nil
+}
+
+func pendingRequestKey(cityPath string) string {
+	return pathutil.NormalizePathForCompare(cityPath)
 }
 
 // SetSupervisorRecorder installs the supervisor-level event recorder.

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -60,7 +61,21 @@ func (r *FileRecorder) Record(e Event) {
 	if r.closed {
 		return
 	}
+	if err := syscall.Flock(int(r.file.Fd()), syscall.LOCK_EX); err != nil {
+		fmt.Fprintf(r.stderr, "events: lock: %v\n", err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	defer func() {
+		if err := syscall.Flock(int(r.file.Fd()), syscall.LOCK_UN); err != nil {
+			fmt.Fprintf(r.stderr, "events: unlock: %v\n", err) //nolint:errcheck // best-effort stderr
+		}
+	}()
 
+	if latest, err := ReadLatestSeq(r.path); err == nil && latest > r.seq {
+		r.seq = latest
+	} else if err != nil {
+		fmt.Fprintf(r.stderr, "events: latest seq: %v\n", err) //nolint:errcheck // best-effort stderr
+	}
 	r.seq++
 	e.Seq = r.seq
 	if e.Ts.IsZero() {

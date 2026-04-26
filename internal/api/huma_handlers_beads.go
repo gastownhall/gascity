@@ -358,7 +358,6 @@ func (s *Server) humaHandleBeadClose(_ context.Context, input *BeadCloseInput) (
 // humaHandleBeadReopen is the Huma-typed handler for POST /v0/bead/{id}/reopen.
 func (s *Server) humaHandleBeadReopen(_ context.Context, input *BeadReopenInput) (*OKResponse, error) {
 	id := input.ID
-	status := "open"
 
 	for _, store := range s.beadStoresForID(id) {
 		b, err := store.Get(id)
@@ -371,7 +370,7 @@ func (s *Server) humaHandleBeadReopen(_ context.Context, input *BeadReopenInput)
 		if b.Status != "closed" {
 			return nil, huma.Error409Conflict("conflict: bead " + id + " is not closed (status: " + b.Status + ")")
 		}
-		if err := store.Update(id, beads.UpdateOpts{Status: &status}); err != nil {
+		if err := store.Reopen(id); err != nil {
 			return nil, huma.Error500InternalServerError(err.Error())
 		}
 		resp := &OKResponse{}

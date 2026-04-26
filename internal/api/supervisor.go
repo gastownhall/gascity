@@ -38,8 +38,8 @@ type CityResolver interface {
 // lets async handlers store correlation request IDs for later
 // retrieval by the reconciler when emitting request.result events.
 type PendingRequestStore interface {
-	StorePendingRequestID(cityPath, requestID string)
-	ConsumePendingRequestID(cityPath string) (string, bool)
+	StorePendingRequestID(cityPath, requestID string) error
+	ConsumePendingRequestID(cityPath string) (string, bool, error)
 }
 
 // SupervisorEventSource is an optional CityResolver extension that
@@ -57,9 +57,9 @@ type SupervisorEventSource interface {
 // longer) in the Running set — newly scaffolded cities whose
 // reconciler hasn't picked them up, cities currently running
 // prepareCityForSupervisor, and cities whose init failed. Without
-// this, /v0/events/stream subscribers can't observe city.created,
-// city.ready, or city.init_failed for cities that aren't yet
-// reporting Running=true through ListCities.
+// this, /v0/events/stream subscribers can't observe diagnostic
+// city.created/city.unregister_requested events for cities that aren't
+// yet reporting Running=true through ListCities.
 //
 // Resolvers that implement this return one entry per transient
 // city; the key is the city name, the value is an event provider
@@ -293,11 +293,10 @@ func (sm *SupervisorMux) getCityServer(name string, state State) *Server {
 // buildMultiplexer creates a Multiplexer from all running cities'
 // event providers plus any transient-city providers surfaced by a
 // resolver that implements TransientCityEventSource. Including
-// transient (pending init, in-progress, or failed) cities matters
-// for clients that POST /v0/city and wait for city.created /
-// city.ready / city.init_failed events on /v0/events/stream without
-// polling — the city's own events.jsonl exists from Scaffold
-// onward, but the city isn't in Running=true yet.
+// transient (pending init, in-progress, or failed) cities matters for
+// clients that POST /v0/city and watch diagnostics on
+// /v0/events/stream without polling — the city's own events.jsonl
+// exists from Scaffold onward, but the city isn't in Running=true yet.
 func (sm *SupervisorMux) buildMultiplexer() *events.Multiplexer {
 	mux := events.NewMultiplexer()
 	cities := sm.resolver.ListCities()

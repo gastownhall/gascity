@@ -704,7 +704,7 @@ func (s *BdStore) CloseAll(ids []string, metadata map[string]string) (int, error
 	}
 
 	// Batch close: bd close id1 id2 id3 ...
-	args := append([]string{"close", "--json"}, ids...)
+	args := append([]string{"close", "--force", "--json"}, ids...)
 	_, err := s.runner(s.dir, "bd", args...)
 	if err != nil {
 		// Fall back to individual closes on batch failure.
@@ -728,7 +728,7 @@ func (s *BdStore) CloseAll(ids []string, metadata map[string]string) (int, error
 // Close sets a bead's status to closed via bd close.
 // Idempotent: closing an already-closed bead returns nil.
 func (s *BdStore) Close(id string) error {
-	_, err := s.runner(s.dir, "bd", "close", "--json", id)
+	_, err := s.runner(s.dir, "bd", "close", "--force", "--json", id)
 	if err != nil {
 		// Some bd error paths collapse to a bare exit status without a helpful
 		// not-found string. Re-read the bead to distinguish "already closed" from
@@ -739,6 +739,18 @@ func (s *BdStore) Close(id string) error {
 			return fmt.Errorf("closing bead %q: %w", id, ErrNotFound)
 		}
 		return fmt.Errorf("closing bead %q: %w", id, err)
+	}
+	return nil
+}
+
+// Reopen sets a closed bead's status to open via bd reopen.
+func (s *BdStore) Reopen(id string) error {
+	_, err := s.runner(s.dir, "bd", "reopen", "--json", id)
+	if err != nil {
+		if isBdNotFound(err) {
+			return fmt.Errorf("reopening bead %q: %w", id, ErrNotFound)
+		}
+		return fmt.Errorf("reopening bead %q: %w", id, err)
 	}
 	return nil
 }

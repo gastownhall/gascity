@@ -104,6 +104,48 @@ func (c *CachingStore) Close(id string) error {
 	return nil
 }
 
+// Reopen marks a bead as open in the backing store and cache.
+func (c *CachingStore) Reopen(id string) error {
+	if err := c.backing.Reopen(id); err != nil {
+		return err
+	}
+
+	var reopened Bead
+	var found bool
+	if fresh, err := c.backing.Get(id); err == nil {
+		reopened = fresh
+		reopened.Status = "open"
+		found = true
+	} else if !errors.Is(err, ErrNotFound) {
+		c.recordProblem("refresh bead after reopen", fmt.Errorf("%s: %w", id, err))
+	}
+
+	c.mu.Lock()
+	c.noteMutationLocked(id)
+	if b, ok := c.beads[id]; ok {
+		b.Status = "open"
+		c.beads[id] = b
+		delete(c.dirty, id)
+		delete(c.deletedSeq, id)
+		reopened = cloneBead(b)
+		found = true
+		c.markFreshLocked(time.Now())
+		c.updateStatsLocked()
+	} else if found {
+		c.beads[id] = cloneBead(reopened)
+		delete(c.dirty, id)
+		delete(c.deletedSeq, id)
+		c.markFreshLocked(time.Now())
+		c.updateStatsLocked()
+	}
+	c.mu.Unlock()
+
+	if found {
+		c.notifyChange("bead.updated", reopened)
+	}
+	return nil
+}
+
 // CloseAll closes multiple beads and sets metadata on each.
 func (c *CachingStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
 	n, err := c.backing.CloseAll(ids, metadata)

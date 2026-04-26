@@ -229,6 +229,40 @@ func TestFileRecorderResumesSeq(t *testing.T) {
 	}
 }
 
+func TestFileRecorderCoordinatesSeqAcrossStaleRecorders(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+
+	rec1, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec1.Close() //nolint:errcheck // test cleanup
+	rec2, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec2.Close() //nolint:errcheck // test cleanup
+
+	rec1.Record(Event{Type: BeadCreated, Actor: "rec1"})
+	rec2.Record(Event{Type: BeadUpdated, Actor: "rec2"})
+
+	events, err := ReadAll(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("got %d events, want 2", len(events))
+	}
+	for i, event := range events {
+		want := uint64(i + 1)
+		if event.Seq != want {
+			t.Fatalf("events[%d].Seq = %d, want %d; events=%+v", i, event.Seq, want, events)
+		}
+	}
+}
+
 func TestFileRecorderFillsTimestamp(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "events.jsonl")

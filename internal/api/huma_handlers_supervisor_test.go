@@ -136,11 +136,45 @@ func TestSupervisorCityCreateScaffoldsViaInitializer(t *testing.T) {
 	if !init.scaffoldReq.SkipProviderReadiness {
 		t.Fatal("Scaffold request should skip provider readiness for API callers")
 	}
-	if body := rec.Body.String(); !strings.Contains(body, `"name":"mc-city"`) || !strings.Contains(body, `"path":"`+cityPath+`"`) {
-		t.Fatalf("body = %s, want name and path", body)
+	if body := rec.Body.String(); !strings.Contains(body, `"request_id"`) {
+		t.Fatalf("body = %s, want request_id", body)
 	}
-	if body := rec.Body.String(); !strings.Contains(body, `"reload_warning":"reload failed"`) {
-		t.Fatalf("body = %s, want reload warning", body)
+}
+
+func TestSupervisorCityCreateScaffoldsWithStartCommand(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cityPath := filepath.Join(home, "mc-city")
+	init := &fakeInitializer{
+		scaffoldResult: &cityinit.InitResult{
+			CityName:     "mc-city",
+			CityPath:     cityPath,
+			ProviderUsed: "",
+		},
+	}
+	sm := newTestSupervisorMuxWithInitializer(t, init)
+
+	req := httptest.NewRequest(http.MethodPost, "/v0/city", strings.NewReader(`{
+		"dir":"mc-city",
+		"start_command":"bash /tmp/hermetic-agent.sh"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GC-Request", "test")
+	rec := httptest.NewRecorder()
+
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	if init.scaffoldReq.Dir != cityPath {
+		t.Fatalf("Scaffold Dir = %q, want %q", init.scaffoldReq.Dir, cityPath)
+	}
+	if init.scaffoldReq.Provider != "" || init.scaffoldReq.StartCommand != "bash /tmp/hermetic-agent.sh" {
+		t.Fatalf("Scaffold request = %+v, want start_command without provider", init.scaffoldReq)
+	}
+	if !init.scaffoldReq.SkipProviderReadiness {
+		t.Fatal("Scaffold request should skip provider readiness for API callers")
 	}
 }
 
@@ -209,6 +243,28 @@ func TestSupervisorCityCreateMapsInitializerErrors(t *testing.T) {
 	}
 }
 
+func TestSupervisorCityCreateClearsPendingRequestOnScaffoldError(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "mc-city")
+	resolver := &fakeCityResolver{cities: map[string]*fakeState{}}
+	init := &fakeInitializer{scaffoldErr: errors.New("scaffold failed")}
+	sm := NewSupervisorMux(resolver, init, false, "test", time.Now())
+	req := httptest.NewRequest(http.MethodPost, "/v0/city", strings.NewReader(`{"dir":"`+cityPath+`","provider":"codex"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GC-Request", "test")
+	rec := httptest.NewRecorder()
+
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	if _, ok, err := resolver.ConsumePendingRequestID(cityPath); err != nil {
+		t.Fatal(err)
+	} else if ok {
+		t.Fatalf("pending request_id for %q survived synchronous scaffold failure", cityPath)
+	}
+}
+
 func TestSupervisorCityCreateWithoutInitializerReturns501(t *testing.T) {
 	sm := newTestSupervisorMux(t, map[string]*fakeState{})
 	cityPath := filepath.Join(t.TempDir(), "mc-city")
@@ -245,11 +301,8 @@ func TestSupervisorCityUnregisterUsesInitializer(t *testing.T) {
 	if init.unregisterReq.CityName != "mc-city" {
 		t.Fatalf("Unregister CityName = %q, want mc-city", init.unregisterReq.CityName)
 	}
-	if body := rec.Body.String(); !strings.Contains(body, `"name":"mc-city"`) || !strings.Contains(body, `"path":"/tmp/mc-city"`) {
-		t.Fatalf("body = %s, want name and path", body)
-	}
-	if body := rec.Body.String(); !strings.Contains(body, `"reload_warning":"reload failed"`) {
-		t.Fatalf("body = %s, want reload warning", body)
+	if body := rec.Body.String(); !strings.Contains(body, `"request_id"`) {
+		t.Fatalf("body = %s, want request_id", body)
 	}
 }
 

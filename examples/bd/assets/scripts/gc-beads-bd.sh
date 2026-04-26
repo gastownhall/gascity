@@ -2352,7 +2352,7 @@ case "$op" in
     start)        op_start ;;
     ensure-ready) op_ensure_ready ;;
     init)         op_init "$@" ;;
-    create|get|update|close|list|ready|children|list-by-label|set-metadata|delete|dep-add|dep-remove|dep-list)
+    create|get|update|close|reopen|list|ready|children|list-by-label|set-metadata|delete|dep-add|dep-remove|dep-list)
                   op_store_bridge "$op" "$@" ;;
     health)       op_health ;;
     probe)        op_probe ;;

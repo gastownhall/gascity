@@ -59,6 +59,8 @@ type controllerState struct {
 	configMutationPending atomic.Bool
 }
 
+var controllerStateInitRigDirIfReady = initDirIfReady
+
 type configMutationSnapshot struct {
 	cityPath   string
 	files      map[string][]byte

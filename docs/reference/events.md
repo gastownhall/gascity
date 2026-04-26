@@ -21,6 +21,8 @@ The underlying DTOs come from the published OpenAPI document:
 
 - `WireEvent`
 - `WireTaggedEvent`
+- `TypedEventStreamEnvelope`
+- `TypedTaggedEventStreamEnvelope`
 - `EventStreamEnvelope`
 - `TaggedEventStreamEnvelope`
 - `HeartbeatEvent`
@@ -50,8 +52,8 @@ There is one exception:
 
 #### City Scope
 
-When a city is in scope, each output line is one `WireEvent` object from
-`GET /v0/city/{cityName}/events`.
+When a city is in scope, each output line is one `TypedEventStreamEnvelope`
+object from `GET /v0/city/{cityName}/events`.
 
 Example:
 
@@ -62,7 +64,7 @@ Example:
 #### Supervisor Scope
 
 When no city is in scope and the supervisor API is being used, each output line
-is one `WireTaggedEvent` object from `GET /v0/events`.
+is one `TypedTaggedEventStreamEnvelope` object from `GET /v0/events`.
 
 Example:
 
@@ -151,8 +153,8 @@ The downloadable <a href="/schema/events.txt" download="events.json">events.json
 schema validates one JSON object line from list, watch, or follow mode. It
 contains only framing metadata and `$ref`s into `openapi.json`:
 
-- City list lines use `WireEvent`.
-- Supervisor list lines use `WireTaggedEvent`.
+- City list lines use `TypedEventStreamEnvelope`.
+- Supervisor list lines use `TypedTaggedEventStreamEnvelope`.
 - City stream lines use `EventStreamEnvelope`.
 - Supervisor stream lines use `TaggedEventStreamEnvelope`.
 
@@ -186,8 +188,9 @@ non-zero exit status. Examples include:
 
 The CLI does not define independent event DTOs. Its stability contract is:
 
-- the published supervisor OpenAPI schemas for `WireEvent`,
-  `WireTaggedEvent`, `EventStreamEnvelope`, and `TaggedEventStreamEnvelope`
+- the published supervisor OpenAPI schemas for `TypedEventStreamEnvelope`,
+  `TypedTaggedEventStreamEnvelope`, `EventStreamEnvelope`, and
+  `TaggedEventStreamEnvelope`
 - the explicit CLI framing rules on this page:
   JSONL for list and stream modes, plain text for `--seq`, empty stdout for
   no-match list queries, and heartbeat suppression in stream mode

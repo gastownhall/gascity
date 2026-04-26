@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -940,31 +939,26 @@ func reconcileCities(
 		// subscribers see the event via the running-provider path.
 		// Best-effort: a failure to open the recorder just means
 		// subscribers learn via GET /v0/cities instead.
-		reqID, hasReqID := cr.ConsumePendingRequestID(path)
+		reqID, hasReqID, consumeErr := cr.ConsumePendingRequestID(path)
+		if consumeErr != nil {
+			fmt.Fprintf(stderr, "gc supervisor: city '%s': consume pending request_id for city.unregister completion event failed (path=%s): %v\n", cityName, path, consumeErr) //nolint:errcheck
+		}
 		if !hasReqID {
 			fmt.Fprintf(stderr, "gc supervisor: city '%s': no pending request_id for city.unregister completion event (path=%s)\n", cityName, path) //nolint:errcheck
 		}
-		resultPayload := api.RequestResultPayload{
-			RequestID:  reqID,
-			Operation:  api.RequestOperationCityUnregister,
-			ResourceID: cityName,
-		}
-		if stopErr == nil {
+		if supRec := cr.SupervisorEventRecorder(); supRec != nil && hasReqID {
+			if stopErr == nil {
+				fmt.Fprintf(stdout, "City '%s' stopped.\n", cityName) //nolint:errcheck
+				api.EmitTypedEvent(supRec, events.RequestResultCityUnregister, cityName, api.CityUnregisterSucceededPayload{
+					RequestID: reqID,
+					Name:      cityName,
+					Path:      path,
+				})
+			} else {
+				api.EmitRequestFailed(supRec, reqID, api.RequestOperationCityUnregister, "city_unregister_failed", stopErr.Error())
+			}
+		} else if stopErr == nil {
 			fmt.Fprintf(stdout, "City '%s' stopped.\n", cityName) //nolint:errcheck
-			resultPayload.Status = api.RequestStatusSucceeded
-		} else {
-			resultPayload.Status = api.RequestStatusFailed
-			resultPayload.ErrorCode = "city_unregister_failed"
-			resultPayload.ErrorMessage = stopErr.Error()
-		}
-		payload, _ := json.Marshal(resultPayload)
-		if supRec := cr.SupervisorEventRecorder(); supRec != nil {
-			supRec.Record(events.Event{
-				Type:    events.RequestResult,
-				Actor:   "gc",
-				Subject: cityName,
-				Payload: payload,
-			})
 		}
 	}
 
@@ -1218,26 +1212,15 @@ func reconcileCities(
 			) {
 				delete(initStatus, path)
 			})
-			reqID, hasReqID := cr.ConsumePendingRequestID(path)
+			reqID, hasReqID, consumeErr := cr.ConsumePendingRequestID(path)
+			if consumeErr != nil {
+				fmt.Fprintf(stderr, "gc supervisor: city '%s': consume pending request_id for city.create failure event failed (path=%s): %v\n", cityName, path, consumeErr) //nolint:errcheck
+			}
 			if !hasReqID {
 				fmt.Fprintf(stderr, "gc supervisor: city '%s': no pending request_id for city.create failure event (path=%s)\n", cityName, path) //nolint:errcheck
 			}
-			if supRec := cr.SupervisorEventRecorder(); supRec != nil {
-				if payload, mErr := json.Marshal(api.RequestResultPayload{
-					RequestID:    reqID,
-					Operation:    api.RequestOperationCityCreate,
-					Status:       api.RequestStatusFailed,
-					ResourceID:   cityName,
-					ErrorCode:    "city_init_failed",
-					ErrorMessage: err.Error(),
-				}); mErr == nil {
-					supRec.Record(events.Event{
-						Type:    events.RequestResult,
-						Actor:   "gc",
-						Subject: cityName,
-						Payload: payload,
-					})
-				}
+			if supRec := cr.SupervisorEventRecorder(); supRec != nil && hasReqID {
+				api.EmitRequestFailed(supRec, reqID, api.RequestOperationCityCreate, "city_init_failed", err.Error())
 			}
 			recordInitFailure(cityName, fmt.Sprintf("init: %v", err))
 			continue
@@ -1534,6 +1517,15 @@ func reconcileCities(
 			defer func() {
 				if r := recover(); r != nil {
 					fmt.Fprintf(stderr, "gc supervisor: city '%s' panicked: %v\n", n, r) //nolint:errcheck
+					reqID, hasReqID, consumeErr := cr.ConsumePendingRequestID(p)
+					if consumeErr != nil {
+						fmt.Fprintf(stderr, "gc supervisor: city '%s': consume pending request_id for city.create panic event failed (path=%s): %v\n", n, p, consumeErr) //nolint:errcheck
+					}
+					if hasReqID {
+						if supRec := cr.SupervisorEventRecorder(); supRec != nil {
+							api.EmitRequestFailed(supRec, reqID, api.RequestOperationCityCreate, "internal_error", fmt.Sprintf("panic: %v", r))
+						}
+					}
 					// Gracefully stop agents so they aren't orphaned.
 					// Wrap in recovery to prevent nested panic from crashing
 					// the entire supervisor.
@@ -1616,24 +1608,19 @@ func reconcileCities(
 		}(cityName, path, fr, lis, sockPath, sockInfo, lock)
 
 		rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
-		reqID, hasReqID := cr.ConsumePendingRequestID(path)
+		reqID, hasReqID, consumeErr := cr.ConsumePendingRequestID(path)
+		if consumeErr != nil {
+			fmt.Fprintf(stderr, "gc supervisor: city '%s': consume pending request_id for city.create completion event failed (path=%s): %v\n", cityName, path, consumeErr) //nolint:errcheck
+		}
 		if !hasReqID {
 			fmt.Fprintf(stderr, "gc supervisor: city '%s': no pending request_id for city.create completion event (path=%s)\n", cityName, path) //nolint:errcheck
 		}
-		if resultPayload, mErr := json.Marshal(api.RequestResultPayload{
-			RequestID:  reqID,
-			Operation:  api.RequestOperationCityCreate,
-			Status:     api.RequestStatusSucceeded,
-			ResourceID: cityName,
-		}); mErr == nil {
-			if supRec := cr.SupervisorEventRecorder(); supRec != nil {
-				supRec.Record(events.Event{
-					Type:    events.RequestResult,
-					Actor:   "gc",
-					Subject: cityName,
-					Payload: resultPayload,
-				})
-			}
+		if supRec := cr.SupervisorEventRecorder(); supRec != nil && hasReqID {
+			api.EmitTypedEvent(supRec, events.RequestResultCityCreate, cityName, api.CityCreateSucceededPayload{
+				RequestID: reqID,
+				Name:      cityName,
+				Path:      path,
+			})
 		}
 		telemetry.RecordControllerLifecycle(context.Background(), "started")
 		fmt.Fprintf(stdout, "Launching city '%s' (%s)\n", cityName, path) //nolint:errcheck

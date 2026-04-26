@@ -73,7 +73,8 @@ type SupervisorProviderReadinessOutput struct {
 // cityCreateRequest is the body for POST /v0/city.
 type cityCreateRequest struct {
 	Dir              string `json:"dir" minLength:"1" doc:"Directory to create the city in. Absolute or relative to $HOME."`
-	Provider         string `json:"provider" minLength:"1" doc:"Provider name for the city's default session template."`
+	Provider         string `json:"provider,omitempty" minLength:"1" doc:"Provider name for the city's default session template. Mutually exclusive with start_command."`
+	StartCommand     string `json:"start_command,omitempty" doc:"Custom workspace start command for the city's default session template. Mutually exclusive with provider."`
 	BootstrapProfile string `json:"bootstrap_profile,omitempty" enum:"k8s-cell,kubernetes,kubernetes-cell,single-host-compat" doc:"Optional bootstrap profile."`
 }
 
@@ -83,13 +84,10 @@ type cityCreateRequest struct {
 // supervisor reconciler still has to run the slow finalize work
 // (pack materialization, bead store startup, formula resolution,
 // agent validation). Clients observe completion by subscribing to
-// /v0/events/stream and waiting for a city.ready event (payload
-// CityReadyPayload.Name == this response's Name) or a
-// city.init_failed event (CityInitFailedPayload.Name == this
-// response's Name; Error field explains the failure). Polling is
-// unnecessary.
+// /v0/events/stream and waiting for request.result.city.create or
+// request.failed with the returned request_id. Polling is unnecessary.
 type asyncAcceptedResponse struct {
-	RequestID string `json:"request_id" doc:"Correlation ID. Watch /v0/events/stream for a request.result event with this request_id to observe completion or failure."`
+	RequestID string `json:"request_id" doc:"Correlation ID. Watch /v0/events/stream for request.result.city.create, request.result.city.unregister, or request.failed with this request_id."`
 }
 
 // SupervisorCityCreateInput is the input for POST /v0/city.
@@ -108,9 +106,8 @@ type SupervisorCityCreateOutput struct {
 // a 202 response means the city's registry entry was removed and the
 // supervisor was signaled to reconcile, but the city's controller is
 // not yet stopped. Clients observe completion by subscribing to
-// /v0/events/stream and waiting for a city.unregistered event (or
-// city.unregister_failed if the reconciler cannot stop the
-// controller).
+// /v0/events/stream and waiting for request.result.city.unregister or
+// request.failed with the returned request_id.
 // cityUnregisterResponse is the same as asyncAcceptedResponse.
 type cityUnregisterResponse = asyncAcceptedResponse
 
@@ -207,14 +204,13 @@ func (sm *SupervisorMux) registerSupervisorRoutes() {
 	huma.Get(sm.humaAPI, "/v0/readiness", sm.humaHandleReadiness)
 	huma.Get(sm.humaAPI, "/v0/provider-readiness", sm.humaHandleProviderReadiness)
 	// Async mutation: returns 202 Accepted after scaffold + register;
-	// completion signaled via city.ready / city.init_failed events.
+	// completion is signaled via request.result.city.create or request.failed.
 	huma.Post(sm.humaAPI, "/v0/city", sm.humaHandleCityCreate, addMutationCSRFParam, func(op *huma.Operation) {
 		op.DefaultStatus = http.StatusAccepted
 	})
-	// Async unregister: returns 202 after the registry entry is
-	// removed and the supervisor is signaled. city.unregistered /
-	// city.unregister_failed events signal completion on the event
-	// stream.
+	// Async unregister: returns 202 after the registry entry is removed
+	// and the supervisor is signaled. request.result.city.unregister or
+	// request.failed signals completion on the event stream.
 	huma.Post(sm.humaAPI, "/v0/city/{cityName}/unregister", sm.humaHandleCityUnregister, addMutationCSRFParam, func(op *huma.Operation) {
 		op.DefaultStatus = http.StatusAccepted
 	})
@@ -324,8 +320,8 @@ func (sm *SupervisorMux) humaHandleProviderReadiness(ctx context.Context, input 
 // immediately. The supervisor reconciler runs the slow finalize
 // (prepareCityForSupervisor: pack materialization, bead store
 // startup, formula resolution, agent validation) on its next tick
-// and emits city.ready / city.init_failed events on the supervisor
-// event bus when done. Clients observe completion via
+// and emits request.result.city.create or request.failed on the
+// supervisor event bus when done. Clients observe completion via
 // /v0/events/stream — no polling required.
 //
 // Rationale: full city init takes minutes (dolt startup,
@@ -363,23 +359,36 @@ func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *Superv
 		return nil, huma.Error500InternalServerError(fmt.Sprintf("generating request ID: %v", err))
 	}
 	if store, ok := sm.resolver.(PendingRequestStore); ok {
-		store.StorePendingRequestID(dir, reqID)
+		if err := store.StorePendingRequestID(dir, reqID); err != nil {
+			return nil, huma.Error500InternalServerError(fmt.Sprintf("storing pending request ID: %v", err))
+		}
+	}
+	cleanupPending := func() {
+		if store, ok := sm.resolver.(PendingRequestStore); ok {
+			if _, _, err := store.ConsumePendingRequestID(dir); err != nil {
+				log.Printf("api: consume pending city create request ID for %s: %v", dir, err)
+			}
+		}
 	}
 
 	_, scaffoldErr := sm.initializer.Scaffold(ctx, cityinit.InitRequest{
-		Dir:              dir,
-		Provider:         input.Body.Provider,
-		BootstrapProfile: input.Body.BootstrapProfile,
+		Dir:                   dir,
+		Provider:              input.Body.Provider,
+		StartCommand:          input.Body.StartCommand,
+		BootstrapProfile:      input.Body.BootstrapProfile,
 		SkipProviderReadiness: true,
 	})
 	switch {
 	case errors.Is(scaffoldErr, cityinit.ErrAlreadyInitialized):
+		cleanupPending()
 		return nil, huma.Error409Conflict("conflict: city already initialized at " + dir)
 	case errors.Is(scaffoldErr, cityinit.ErrInvalidDirectory),
 		errors.Is(scaffoldErr, cityinit.ErrInvalidProvider),
 		errors.Is(scaffoldErr, cityinit.ErrInvalidBootstrapProfile):
+		cleanupPending()
 		return nil, huma.Error422UnprocessableEntity(scaffoldErr.Error())
 	case scaffoldErr != nil:
+		cleanupPending()
 		return nil, huma.Error500InternalServerError(scaffoldErr.Error())
 	}
 
@@ -394,8 +403,8 @@ func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *Superv
 // asynchronously. Calls the city initializer in-process to remove
 // the city from the supervisor's registry and signal reconcile, then
 // returns 202 Accepted immediately. The supervisor reconciler stops
-// the city's controller on its next tick and emits city.unregistered
-// (or city.unregister_failed on stop failure) on the supervisor
+// the city's controller on its next tick and emits
+// request.result.city.unregister or request.failed on the supervisor
 // event bus. Clients observe completion via /v0/events/stream — no
 // polling required.
 //
@@ -433,7 +442,9 @@ func (sm *SupervisorMux) humaHandleCityUnregister(ctx context.Context, input *Su
 			}
 		}
 		if cityPath != "" {
-			store.StorePendingRequestID(cityPath, reqID)
+			if err := store.StorePendingRequestID(cityPath, reqID); err != nil {
+				return nil, huma.Error500InternalServerError(fmt.Sprintf("storing pending request ID: %v", err))
+			}
 		}
 	}
 
@@ -441,12 +452,16 @@ func (sm *SupervisorMux) humaHandleCityUnregister(ctx context.Context, input *Su
 	switch {
 	case errors.Is(unregErr, cityinit.ErrNotRegistered):
 		if store, ok := sm.resolver.(PendingRequestStore); ok && cityPath != "" {
-			store.ConsumePendingRequestID(cityPath)
+			if _, _, err := store.ConsumePendingRequestID(cityPath); err != nil {
+				log.Printf("api: consume pending city unregister request ID for %s: %v", cityPath, err)
+			}
 		}
 		return nil, huma.Error404NotFound("not_found: " + unregErr.Error())
 	case unregErr != nil:
 		if store, ok := sm.resolver.(PendingRequestStore); ok && cityPath != "" {
-			store.ConsumePendingRequestID(cityPath)
+			if _, _, err := store.ConsumePendingRequestID(cityPath); err != nil {
+				log.Printf("api: consume pending city unregister request ID for %s: %v", cityPath, err)
+			}
 		}
 		return nil, huma.Error500InternalServerError(unregErr.Error())
 	}

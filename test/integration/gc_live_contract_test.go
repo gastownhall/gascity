@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -24,11 +25,11 @@ import (
 )
 
 // TestGCLiveContract_BeadsAndEvents ports the MC live GC contract's
-// API-only coverage into this repo. It boots a real supervisor, creates an
-// isolated city and rig through the HTTP API, validates responses against the
-// live OpenAPI document, exercises the bead lifecycle MC depends on, validates
-// city and supervisor event list schemas, and unregisters the city through the
-// API.
+// API-only coverage into this repo. It boots a real supervisor with isolated
+// state, creates an isolated city and rig through the HTTP API, validates
+// responses against the live OpenAPI document, exercises real Dolt-backed
+// beads, mail, events, and subprocess agent sessions, and unregisters the city
+// through the API.
 func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 	bin := buildGCBinary(t)
 
@@ -47,7 +48,7 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 	writeSupervisorConfig(t, gcHome, port)
 
 	baseURL := "http://127.0.0.1:" + strconv.Itoa(port)
-	env := integrationEnvFor(gcHome, runtimeDir, true)
+	env := append(integrationEnvFor(gcHome, runtimeDir, true), "GC_SESSION=subprocess")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -74,24 +75,27 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 
 	specBytes := liveContractRequest(t, baseURL, nil, http.MethodGet, "/openapi.json", nil, http.StatusOK)
 	assertLiveContractSpec(t, specBytes)
+	assertLiveContractRequiredOperations(t, specBytes)
 	validator := liveContractValidator(t, specBytes)
 
 	cityName := "mc-live-contract-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	cityDir := filepath.Join(root, "cities", cityName)
 	createCity := liveContractJSON[struct {
-		OK   bool   `json:"ok"`
-		Name string `json:"name"`
-		Path string `json:"path"`
+		RequestID string `json:"request_id"`
 	}](t, baseURL, validator, http.MethodPost, "/v0/city", map[string]string{
-		"dir":      cityDir,
-		"provider": "claude",
+		"dir":           cityDir,
+		"start_command": "bash " + agentScript("stuck-agent.sh"),
 	}, http.StatusAccepted)
-	if !createCity.OK || createCity.Name != cityName || createCity.Path != cityDir {
-		t.Fatalf("city create response = %+v, want ok=true name=%q path=%q", createCity, cityName, cityDir)
+	if createCity.RequestID == "" {
+		t.Fatalf("city create response missing request_id")
 	}
 
 	cityBase := "/v0/city/" + url.PathEscape(cityName)
-	waitForLiveContractRequestResult(t, baseURL, validator, "/v0/events", cityName, "city.create", "succeeded", 120*time.Second)
+	waitForLiveContractRequestID[struct {
+		RequestID string `json:"request_id"`
+		Name      string `json:"name"`
+		Path      string `json:"path"`
+	}](t, baseURL, validator, "/v0/events", createCity.RequestID, "request.result.city.create", 120*time.Second)
 	liveContractJSON[struct {
 		Status string `json:"status"`
 	}](t, baseURL, validator, http.MethodGet, cityBase+"/health", nil, http.StatusOK)
@@ -109,11 +113,51 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 	}](t, baseURL, validator, http.MethodPost, cityBase+"/rigs", map[string]string{
 		"name":   rigName,
 		"path":   rigDir,
-		"prefix": "mc-" + strconv.FormatInt(time.Now().UnixNano(), 36),
+		"prefix": "mc" + strconv.FormatInt(time.Now().UnixNano(), 36),
 	}, http.StatusCreated)
 	waitForLiveContractRig(t, baseURL, validator, cityBase, rigName, rigDir, 30*time.Second)
 
+	liveContractJSON[struct {
+		Status   string `json:"status"`
+		Provider string `json:"provider"`
+	}](t, baseURL, validator, http.MethodPost, cityBase+"/providers", map[string]any{
+		"name":        "contract-agent",
+		"command":     "bash",
+		"args":        []string{agentScript("stuck-agent.sh")},
+		"prompt_mode": "none",
+	}, http.StatusCreated)
+	liveContractJSON[struct {
+		Status string `json:"status"`
+		Agent  string `json:"agent"`
+	}](t, baseURL, validator, http.MethodPost, cityBase+"/agents", map[string]string{
+		"name":     "worker",
+		"dir":      rigName,
+		"provider": "contract-agent",
+	}, http.StatusCreated)
+	targetAgent := rigName + "/worker"
+
+	publicProviders := liveContractJSON[struct {
+		Items []struct {
+			Name string `json:"name"`
+		} `json:"items"`
+	}](t, baseURL, validator, http.MethodGet, cityBase+"/providers/public", nil, http.StatusOK)
+	if len(publicProviders.Items) == 0 {
+		t.Fatal("GET providers/public returned no providers")
+	}
+	liveContractJSON[map[string]any](t, baseURL, validator, http.MethodGet, cityBase+"/readiness?fresh=false", nil, http.StatusOK)
+	liveContractJSON[map[string]any](t, baseURL, validator, http.MethodGet, cityBase+"/provider-readiness?fresh=false", nil, http.StatusOK)
+	cfg := liveContractJSON[struct {
+		Agents []struct {
+			Name string `json:"name"`
+			Dir  string `json:"dir"`
+		} `json:"agents"`
+	}](t, baseURL, validator, http.MethodGet, cityBase+"/config", nil, http.StatusOK)
+	if len(cfg.Agents) == 0 {
+		t.Fatal("GET config returned no agents after creating test agent")
+	}
+
 	runID := strconv.FormatInt(time.Now().UnixNano(), 36)
+	sessionID := createLiveContractAgentSession(t, baseURL, validator, cityBase, targetAgent, rigName, "mail-"+runID)
 	rootBead := liveContractJSON[beads.Bead](t, baseURL, validator, http.MethodPost, cityBase+"/beads", map[string]any{
 		"description": "Root fixture created by TestGCLiveContract_BeadsAndEvents",
 		"labels":      []string{"mc-live-contract", "root"},
@@ -132,10 +176,95 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 	if rootBead.Metadata["mc.contract.run_id"] != runID {
 		t.Fatalf("root metadata = %#v, want run_id=%q", rootBead.Metadata, runID)
 	}
+	idempotentKey := "mc-live-contract-idempotent-" + runID
+	idempotentBody := map[string]any{
+		"description": "Idempotency fixture created by TestGCLiveContract_BeadsAndEvents",
+		"labels":      []string{"mc-live-contract", "idempotency"},
+		"rig":         rigName,
+		"title":       "MC live contract idempotent " + runID,
+		"type":        "task",
+	}
+	firstReplay := liveContractRequestWithHeaders(t, baseURL, validator, http.MethodPost, cityBase+"/beads", idempotentBody, http.StatusCreated, map[string]string{
+		"Idempotency-Key": idempotentKey,
+	})
+	secondReplay := liveContractRequestWithHeaders(t, baseURL, validator, http.MethodPost, cityBase+"/beads", idempotentBody, http.StatusCreated, map[string]string{
+		"Idempotency-Key": idempotentKey,
+	})
+	if !bytes.Equal(firstReplay, secondReplay) {
+		t.Fatalf("idempotent mutation replay body changed:\nfirst:  %s\nsecond: %s", string(firstReplay), string(secondReplay))
+	}
+	var idempotentBead beads.Bead
+	if err := json.Unmarshal(firstReplay, &idempotentBead); err != nil {
+		t.Fatalf("decode idempotent bead: %v", err)
+	}
 
 	liveContractJSON[struct {
 		Status string `json:"status"`
-	}](t, baseURL, validator, http.MethodPost, cityBase+"/bead/"+url.PathEscape(rootBead.ID)+"/update", map[string]any{
+		Target string `json:"target"`
+		Bead   string `json:"bead"`
+		Mode   string `json:"mode"`
+	}](t, baseURL, validator, http.MethodPost, cityBase+"/sling", map[string]any{
+		"rig":    rigName,
+		"target": targetAgent,
+		"bead":   rootBead.ID,
+		"force":  true,
+	}, http.StatusOK)
+	formulaName := "mc-live-contract-work"
+	formulaDir := filepath.Join(cityDir, "formulas")
+	if err := os.MkdirAll(formulaDir, 0o755); err != nil {
+		t.Fatalf("mkdir formula dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(formulaDir, formulaName+".toml"), []byte(`
+formula = "mc-live-contract-work"
+version = 1
+description = "Live contract preview fixture."
+
+[vars]
+[vars.issue]
+description = "Work bead ID"
+required = true
+
+[[steps]]
+id = "do-work"
+title = "Do {{issue}}"
+description = "Read and complete {{issue}}."
+`), 0o644); err != nil {
+		t.Fatalf("write formula fixture: %v", err)
+	}
+	liveContractJSON[struct {
+		Name    string `json:"name"`
+		Preview struct {
+			Nodes []struct {
+				ID string `json:"id"`
+			} `json:"nodes"`
+		} `json:"preview"`
+	}](t, baseURL, validator, http.MethodPost, cityBase+"/formulas/"+url.PathEscape(formulaName)+"/preview", map[string]any{
+		"scope_kind": "city",
+		"scope_ref":  cityName,
+		"target":     targetAgent,
+		"vars":       map[string]string{"issue": rootBead.ID},
+	}, http.StatusOK)
+	exerciseLiveContractFormulasAndWorkflows(t, baseURL, validator, cityBase, formulaName, targetAgent, rigName, rootBead.ID, runID)
+	exerciseLiveContractOrders(t, baseURL, validator, cityBase, rigName, rootBead.ID, runID)
+
+	lifecycleBead := liveContractJSON[beads.Bead](t, baseURL, validator, http.MethodPost, cityBase+"/beads", map[string]any{
+		"description": "Lifecycle fixture created by TestGCLiveContract_BeadsAndEvents",
+		"labels":      []string{"mc-live-contract", "lifecycle"},
+		"metadata": map[string]string{
+			"mc.contract.role":   "lifecycle",
+			"mc.contract.run_id": runID,
+		},
+		"rig":   rigName,
+		"title": "MC live contract lifecycle " + runID,
+		"type":  "task",
+	}, http.StatusCreated)
+	if lifecycleBead.ID == "" {
+		t.Fatal("lifecycle bead missing id")
+	}
+
+	liveContractJSON[struct {
+		Status string `json:"status"`
+	}](t, baseURL, validator, http.MethodPost, cityBase+"/bead/"+url.PathEscape(lifecycleBead.ID)+"/update", map[string]any{
 		"metadata": map[string]string{
 			"mc.contract.metadata_update": "true",
 			"mc_permission_mode":          "default",
@@ -143,24 +272,24 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 		},
 		"status": "in_progress",
 	}, http.StatusOK)
-	updatedRoot := liveContractJSON[beads.Bead](t, baseURL, validator, http.MethodGet, cityBase+"/bead/"+url.PathEscape(rootBead.ID), nil, http.StatusOK)
-	if updatedRoot.Status != "in_progress" || updatedRoot.Metadata["mc.contract.metadata_update"] != "true" {
-		t.Fatalf("updated root = %+v, want in_progress plus metadata update", updatedRoot)
+	updatedLifecycle := liveContractJSON[beads.Bead](t, baseURL, validator, http.MethodGet, cityBase+"/bead/"+url.PathEscape(lifecycleBead.ID), nil, http.StatusOK)
+	if updatedLifecycle.Status != "in_progress" || updatedLifecycle.Metadata["mc.contract.metadata_update"] != "true" {
+		t.Fatalf("updated lifecycle bead = %+v, want in_progress plus metadata update", updatedLifecycle)
 	}
 
 	liveContractJSON[struct {
 		Status string `json:"status"`
-	}](t, baseURL, validator, http.MethodPost, cityBase+"/bead/"+url.PathEscape(rootBead.ID)+"/close", nil, http.StatusOK)
-	closedRoot := liveContractJSON[beads.Bead](t, baseURL, validator, http.MethodGet, cityBase+"/bead/"+url.PathEscape(rootBead.ID), nil, http.StatusOK)
-	if closedRoot.Status != "closed" {
-		t.Fatalf("closed root status = %q, want closed", closedRoot.Status)
+	}](t, baseURL, validator, http.MethodPost, cityBase+"/bead/"+url.PathEscape(lifecycleBead.ID)+"/close", nil, http.StatusOK)
+	closedLifecycle := liveContractJSON[beads.Bead](t, baseURL, validator, http.MethodGet, cityBase+"/bead/"+url.PathEscape(lifecycleBead.ID), nil, http.StatusOK)
+	if closedLifecycle.Status != "closed" {
+		t.Fatalf("closed lifecycle bead status = %q, want closed", closedLifecycle.Status)
 	}
 	liveContractJSON[struct {
 		Status string `json:"status"`
-	}](t, baseURL, validator, http.MethodPost, cityBase+"/bead/"+url.PathEscape(rootBead.ID)+"/reopen", nil, http.StatusOK)
-	reopenedRoot := liveContractJSON[beads.Bead](t, baseURL, validator, http.MethodGet, cityBase+"/bead/"+url.PathEscape(rootBead.ID), nil, http.StatusOK)
-	if reopenedRoot.Status != "open" {
-		t.Fatalf("reopened root status = %q, want open", reopenedRoot.Status)
+	}](t, baseURL, validator, http.MethodPost, cityBase+"/bead/"+url.PathEscape(lifecycleBead.ID)+"/reopen", nil, http.StatusOK)
+	reopenedLifecycle := liveContractJSON[beads.Bead](t, baseURL, validator, http.MethodGet, cityBase+"/bead/"+url.PathEscape(lifecycleBead.ID), nil, http.StatusOK)
+	if reopenedLifecycle.Status != "open" {
+		t.Fatalf("reopened lifecycle bead status = %q, want open", reopenedLifecycle.Status)
 	}
 
 	childBead := liveContractJSON[beads.Bead](t, baseURL, validator, http.MethodPost, cityBase+"/beads", map[string]any{
@@ -266,26 +395,92 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 		t.Fatalf("filtered sibling parent = %q, want %q", listedSibling.ParentID, rootBead.ID)
 	}
 
-	waitForLiveContractRequestResult(t, baseURL, validator, cityBase+"/events", cityName, "city.create", "succeeded", 10*time.Second)
-	liveContractJSON[contractEventList](t, baseURL, validator, http.MethodGet, "/v0/events?limit=50", nil, http.StatusOK)
+	message := liveContractJSON[struct {
+		ID       string `json:"id"`
+		ThreadID string `json:"thread_id"`
+		Rig      string `json:"rig"`
+	}](t, baseURL, validator, http.MethodPost, cityBase+"/mail", map[string]string{
+		"rig":     rigName,
+		"from":    "mc-live-contract",
+		"to":      sessionID,
+		"subject": "MC live contract mail " + runID,
+		"body":    "Exercise the typed mail API contract.",
+	}, http.StatusCreated)
+	if message.ID == "" {
+		t.Fatalf("mail send response missing id: %+v", message)
+	}
+	mailPath := cityBase + "/mail/" + url.PathEscape(message.ID)
+	mailRigQuery := "?rig=" + url.QueryEscape(rigName)
+	liveContractJSON[struct {
+		Status string `json:"status"`
+	}](t, baseURL, validator, http.MethodPost, mailPath+"/read"+mailRigQuery, nil, http.StatusOK)
+	liveContractJSON[struct {
+		Status string `json:"status"`
+	}](t, baseURL, validator, http.MethodPost, mailPath+"/mark-unread"+mailRigQuery, nil, http.StatusOK)
+	reply := liveContractJSON[struct {
+		ID string `json:"id"`
+	}](t, baseURL, validator, http.MethodPost, mailPath+"/reply"+mailRigQuery, map[string]string{
+		"from":    targetAgent,
+		"subject": "Re: MC live contract mail " + runID,
+		"body":    "Reply from live contract coverage.",
+	}, http.StatusCreated)
+	if reply.ID == "" {
+		t.Fatalf("mail reply response missing id: %+v", reply)
+	}
+	if message.ThreadID == "" {
+		t.Fatalf("mail send response missing thread_id: %+v", message)
+	}
+	liveContractJSON[struct {
+		Items []struct {
+			ID string `json:"id"`
+		} `json:"items"`
+		Total int `json:"total"`
+	}](t, baseURL, validator, http.MethodGet, cityBase+"/mail/thread/"+url.PathEscape(message.ThreadID)+"?rig="+url.QueryEscape(rigName), nil, http.StatusOK)
+	liveContractJSON[struct {
+		Status string `json:"status"`
+	}](t, baseURL, validator, http.MethodPost, mailPath+"/archive"+mailRigQuery, nil, http.StatusOK)
+	liveContractJSON[struct {
+		Status string `json:"status"`
+	}](t, baseURL, validator, http.MethodDelete, mailPath+mailRigQuery, nil, http.StatusOK)
+
+	exerciseLiveContractSessionLifecycle(t, baseURL, validator, cityBase, targetAgent, rigName, runID)
+
+	events, err := liveContractEventList(baseURL, validator, "/v0/events?limit=50")
+	if err != nil {
+		t.Fatalf("GET /v0/events?limit=50: %v", err)
+	}
+	if events.Total == 0 {
+		t.Fatal("GET /v0/events?limit=50 returned no events")
+	}
+	cityEvents, err := liveContractEventList(baseURL, validator, cityBase+"/events?limit=50")
+	if err != nil {
+		t.Fatalf("GET %s/events?limit=50: %v", cityBase, err)
+	}
+	if cityEvents.Total == 0 {
+		t.Fatalf("GET %s/events?limit=50 returned no events", cityBase)
+	}
 	runLiveContractReadSweep(t, baseURL, validator, specBytes, cityName, rigName)
 
-	for _, id := range []string{siblingBead.ID, childBead.ID, rootBead.ID} {
+	for _, id := range []string{idempotentBead.ID, lifecycleBead.ID, siblingBead.ID, childBead.ID, rootBead.ID} {
 		liveContractJSON[struct {
 			Status string `json:"status"`
 		}](t, baseURL, validator, http.MethodDelete, cityBase+"/bead/"+url.PathEscape(id), nil, http.StatusOK)
 	}
 	liveContractJSON[struct {
 		Status string `json:"status"`
+	}](t, baseURL, validator, http.MethodPatch, cityBase, map[string]bool{"suspended": true}, http.StatusOK)
+	liveContractJSON[struct {
+		Status string `json:"status"`
+	}](t, baseURL, validator, http.MethodPatch, cityBase, map[string]bool{"suspended": false}, http.StatusOK)
+	liveContractJSON[struct {
+		Status string `json:"status"`
 	}](t, baseURL, validator, http.MethodDelete, cityBase+"/rig/"+url.PathEscape(rigName), nil, http.StatusOK)
 
 	unregister := liveContractJSON[struct {
-		OK   bool   `json:"ok"`
-		Name string `json:"name"`
-		Path string `json:"path"`
+		RequestID string `json:"request_id"`
 	}](t, baseURL, validator, http.MethodPost, cityBase+"/unregister", nil, http.StatusAccepted)
-	if !unregister.OK || unregister.Name != cityName {
-		t.Fatalf("unregister response = %+v, want ok=true name=%q", unregister, cityName)
+	if unregister.RequestID == "" {
+		t.Fatalf("unregister response missing request_id")
 	}
 	waitForCityAbsent(t, baseURL, validator, cityName, 45*time.Second)
 }
@@ -296,14 +491,80 @@ type contractEventList struct {
 }
 
 type contractEvent struct {
-	Type    string `json:"type"`
-	Subject string `json:"subject"`
-	City    string `json:"city"`
-	Payload struct {
-		Name  string `json:"name"`
-		Path  string `json:"path"`
-		Error string `json:"error"`
-	} `json:"payload"`
+	Type    string          `json:"type"`
+	Subject string          `json:"subject"`
+	City    string          `json:"city"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+type liveContractRequiredOperation struct {
+	Method       string
+	OperationID  string
+	PathTemplate string
+}
+
+var liveContractRequiredOperations = []liveContractRequiredOperation{
+	{Method: http.MethodGet, OperationID: "get-v0-cities", PathTemplate: "/v0/cities"},
+	{Method: http.MethodGet, OperationID: "get-health", PathTemplate: "/health"},
+	{Method: http.MethodPost, OperationID: "post-v0-city", PathTemplate: "/v0/city"},
+	{Method: http.MethodPost, OperationID: "post-v0-city-by-city-name-unregister", PathTemplate: "/v0/city/{cityName}/unregister"},
+	{Method: http.MethodGet, OperationID: "get-v0-city-by-city-name-agents", PathTemplate: "/v0/city/{cityName}/agents"},
+	{Method: http.MethodGet, OperationID: "get-v0-city-by-city-name-config", PathTemplate: "/v0/city/{cityName}/config"},
+	{Method: http.MethodGet, OperationID: "get-v0-city-by-city-name-health", PathTemplate: "/v0/city/{cityName}/health"},
+	{Method: http.MethodGet, OperationID: "get-v0-city-by-city-name-providers", PathTemplate: "/v0/city/{cityName}/providers"},
+	{Method: http.MethodGet, OperationID: "get-v0-city-by-city-name-providers-public", PathTemplate: "/v0/city/{cityName}/providers/public"},
+	{Method: http.MethodGet, OperationID: "get-v0-city-by-city-name-readiness", PathTemplate: "/v0/city/{cityName}/readiness"},
+	{Method: http.MethodGet, OperationID: "get-v0-city-by-city-name-rigs", PathTemplate: "/v0/city/{cityName}/rigs"},
+	{Method: http.MethodPost, OperationID: "create-rig", PathTemplate: "/v0/city/{cityName}/rigs"},
+	{Method: http.MethodGet, OperationID: "get-v0-city-by-city-name-sessions", PathTemplate: "/v0/city/{cityName}/sessions"},
+	{Method: http.MethodPost, OperationID: "create-session", PathTemplate: "/v0/city/{cityName}/sessions"},
+	{Method: http.MethodGet, OperationID: "get-v0-city-by-city-name-session-by-id", PathTemplate: "/v0/city/{cityName}/session/{id}"},
+	{Method: http.MethodPatch, OperationID: "patch-v0-city-by-city-name-session-by-id", PathTemplate: "/v0/city/{cityName}/session/{id}"},
+	{Method: http.MethodGet, OperationID: "get-v0-city-by-city-name-session-by-id-agents", PathTemplate: "/v0/city/{cityName}/session/{id}/agents"},
+	{Method: http.MethodGet, OperationID: "get-v0-city-by-city-name-session-by-id-agents-by-agent-id", PathTemplate: "/v0/city/{cityName}/session/{id}/agents/{agentId}"},
+	{Method: http.MethodPost, OperationID: "post-v0-city-by-city-name-session-by-id-close", PathTemplate: "/v0/city/{cityName}/session/{id}/close"},
+	{Method: http.MethodPost, OperationID: "post-v0-city-by-city-name-session-by-id-kill", PathTemplate: "/v0/city/{cityName}/session/{id}/kill"},
+	{Method: http.MethodPost, OperationID: "send-session-message", PathTemplate: "/v0/city/{cityName}/session/{id}/messages"},
+	{Method: http.MethodGet, OperationID: "get-v0-city-by-city-name-session-by-id-pending", PathTemplate: "/v0/city/{cityName}/session/{id}/pending"},
+	{Method: http.MethodPost, OperationID: "post-v0-city-by-city-name-session-by-id-rename", PathTemplate: "/v0/city/{cityName}/session/{id}/rename"},
+	{Method: http.MethodPost, OperationID: "respond-session", PathTemplate: "/v0/city/{cityName}/session/{id}/respond"},
+	{Method: http.MethodPost, OperationID: "post-v0-city-by-city-name-session-by-id-stop", PathTemplate: "/v0/city/{cityName}/session/{id}/stop"},
+	{Method: http.MethodGet, OperationID: "stream-session", PathTemplate: "/v0/city/{cityName}/session/{id}/stream"},
+	{Method: http.MethodPost, OperationID: "post-v0-city-by-city-name-session-by-id-suspend", PathTemplate: "/v0/city/{cityName}/session/{id}/suspend"},
+	{Method: http.MethodGet, OperationID: "get-v0-city-by-city-name-session-by-id-transcript", PathTemplate: "/v0/city/{cityName}/session/{id}/transcript"},
+	{Method: http.MethodPost, OperationID: "post-v0-city-by-city-name-session-by-id-wake", PathTemplate: "/v0/city/{cityName}/session/{id}/wake"},
+	{Method: http.MethodGet, OperationID: "get-v0-city-by-city-name-beads", PathTemplate: "/v0/city/{cityName}/beads"},
+	{Method: http.MethodPost, OperationID: "create-bead", PathTemplate: "/v0/city/{cityName}/beads"},
+	{Method: http.MethodGet, OperationID: "get-v0-city-by-city-name-bead-by-id", PathTemplate: "/v0/city/{cityName}/bead/{id}"},
+	{Method: http.MethodPost, OperationID: "post-v0-city-by-city-name-bead-by-id-close", PathTemplate: "/v0/city/{cityName}/bead/{id}/close"},
+	{Method: http.MethodGet, OperationID: "get-v0-city-by-city-name-bead-by-id-deps", PathTemplate: "/v0/city/{cityName}/bead/{id}/deps"},
+	{Method: http.MethodPost, OperationID: "post-v0-city-by-city-name-bead-by-id-reopen", PathTemplate: "/v0/city/{cityName}/bead/{id}/reopen"},
+	{Method: http.MethodPost, OperationID: "post-v0-city-by-city-name-bead-by-id-update", PathTemplate: "/v0/city/{cityName}/bead/{id}/update"},
+	{Method: http.MethodGet, OperationID: "get-v0-city-by-city-name-beads-graph-by-root-id", PathTemplate: "/v0/city/{cityName}/beads/graph/{rootID}"},
+	{Method: http.MethodGet, OperationID: "get-v0-city-by-city-name-mail", PathTemplate: "/v0/city/{cityName}/mail"},
+	{Method: http.MethodPost, OperationID: "send-mail", PathTemplate: "/v0/city/{cityName}/mail"},
+	{Method: http.MethodGet, OperationID: "get-v0-city-by-city-name-mail-by-id", PathTemplate: "/v0/city/{cityName}/mail/{id}"},
+	{Method: http.MethodPost, OperationID: "post-v0-city-by-city-name-mail-by-id-archive", PathTemplate: "/v0/city/{cityName}/mail/{id}/archive"},
+	{Method: http.MethodPost, OperationID: "post-v0-city-by-city-name-mail-by-id-mark-unread", PathTemplate: "/v0/city/{cityName}/mail/{id}/mark-unread"},
+	{Method: http.MethodPost, OperationID: "post-v0-city-by-city-name-mail-by-id-read", PathTemplate: "/v0/city/{cityName}/mail/{id}/read"},
+	{Method: http.MethodPost, OperationID: "reply-mail", PathTemplate: "/v0/city/{cityName}/mail/{id}/reply"},
+	{Method: http.MethodGet, OperationID: "get-v0-city-by-city-name-mail-thread-by-id", PathTemplate: "/v0/city/{cityName}/mail/thread/{id}"},
+	{Method: http.MethodGet, OperationID: "get-v0-city-by-city-name-formulas", PathTemplate: "/v0/city/{cityName}/formulas"},
+	{Method: http.MethodGet, OperationID: "get-v0-city-by-city-name-formulas-feed", PathTemplate: "/v0/city/{cityName}/formulas/feed"},
+	{Method: http.MethodGet, OperationID: "get-v0-city-by-city-name-formulas-by-name", PathTemplate: "/v0/city/{cityName}/formulas/{name}"},
+	{Method: http.MethodPost, OperationID: "post-v0-city-by-city-name-formulas-by-name-preview", PathTemplate: "/v0/city/{cityName}/formulas/{name}/preview"},
+	{Method: http.MethodGet, OperationID: "get-v0-city-by-city-name-formulas-by-name-runs", PathTemplate: "/v0/city/{cityName}/formulas/{name}/runs"},
+	{Method: http.MethodGet, OperationID: "get-v0-city-by-city-name-orders", PathTemplate: "/v0/city/{cityName}/orders"},
+	{Method: http.MethodGet, OperationID: "get-v0-city-by-city-name-orders-check", PathTemplate: "/v0/city/{cityName}/orders/check"},
+	{Method: http.MethodGet, OperationID: "get-v0-city-by-city-name-orders-feed", PathTemplate: "/v0/city/{cityName}/orders/feed"},
+	{Method: http.MethodGet, OperationID: "get-v0-city-by-city-name-orders-history", PathTemplate: "/v0/city/{cityName}/orders/history"},
+	{Method: http.MethodGet, OperationID: "get-v0-city-by-city-name-order-history-by-bead-id", PathTemplate: "/v0/city/{cityName}/order/history/{bead_id}"},
+	{Method: http.MethodPost, OperationID: "post-v0-city-by-city-name-sling", PathTemplate: "/v0/city/{cityName}/sling"},
+	{Method: http.MethodGet, OperationID: "get-v0-city-by-city-name-convoy-by-id", PathTemplate: "/v0/city/{cityName}/convoy/{id}"},
+	{Method: http.MethodDelete, OperationID: "delete-v0-city-by-city-name-convoy-by-id", PathTemplate: "/v0/city/{cityName}/convoy/{id}"},
+	{Method: http.MethodGet, OperationID: "get-v0-city-by-city-name-workflow-by-workflow-id", PathTemplate: "/v0/city/{cityName}/workflow/{workflow_id}"},
+	{Method: http.MethodGet, OperationID: "get-v0-events", PathTemplate: "/v0/events"},
+	{Method: http.MethodGet, OperationID: "stream-supervisor-events", PathTemplate: "/v0/events/stream"},
 }
 
 type liveContractReadProbe struct {
@@ -326,6 +587,283 @@ type contractGraphDep struct {
 	From string `json:"from"`
 	To   string `json:"to"`
 	Kind string `json:"kind"`
+}
+
+func createLiveContractAgentSession(t *testing.T, baseURL string, v openapivalidator.Validator, cityBase, targetAgent, rigName, label string) string {
+	t.Helper()
+	create := liveContractJSON[struct {
+		RequestID string `json:"request_id"`
+		Status    string `json:"status"`
+	}](t, baseURL, v, http.MethodPost, cityBase+"/sessions", map[string]any{
+		"alias":      "mc-" + label,
+		"async":      true,
+		"kind":       "agent",
+		"name":       targetAgent,
+		"project_id": rigName,
+		"title":      "MC live contract " + label,
+	}, http.StatusAccepted)
+	if create.RequestID == "" {
+		t.Fatalf("%s session create response missing request_id", label)
+	}
+	result := waitForLiveContractRequestID[struct {
+		RequestID string `json:"request_id"`
+		Session   struct {
+			ID    string `json:"id"`
+			Title string `json:"title"`
+			Alias string `json:"alias"`
+			Rig   string `json:"rig"`
+		} `json:"session"`
+	}](t, baseURL, v, "/v0/events", create.RequestID, "request.result.session.create", 120*time.Second)
+	if result.Session.ID == "" {
+		t.Fatalf("%s session create result missing session.id", label)
+	}
+	if result.Session.Title != "MC live contract "+label {
+		t.Fatalf("%s session title = %q", label, result.Session.Title)
+	}
+	if result.Session.Rig != rigName {
+		t.Fatalf("%s session rig = %q, want %q", label, result.Session.Rig, rigName)
+	}
+	if result.Session.Alias == "" {
+		t.Fatalf("%s session missing controller-managed alias", label)
+	}
+	return result.Session.ID
+}
+
+func exerciseLiveContractSessionLifecycle(t *testing.T, baseURL string, v openapivalidator.Validator, cityBase, targetAgent, rigName, runID string) {
+	t.Helper()
+	id := createLiveContractAgentSession(t, baseURL, v, cityBase, targetAgent, rigName, "lifecycle-"+runID)
+	sessionPath := cityBase + "/session/" + url.PathEscape(id)
+
+	detail := liveContractJSON[struct {
+		ID string `json:"id"`
+	}](t, baseURL, v, http.MethodGet, sessionPath, nil, http.StatusOK)
+	if detail.ID != id {
+		t.Fatalf("session detail id = %q, want %q", detail.ID, id)
+	}
+
+	patchedTitle := "MC live contract patched " + runID
+	patched := liveContractJSON[struct {
+		ID    string `json:"id"`
+		Title string `json:"title"`
+		Alias string `json:"alias"`
+	}](t, baseURL, v, http.MethodPatch, sessionPath, map[string]string{"title": patchedTitle}, http.StatusOK)
+	if patched.ID != id || patched.Title != patchedTitle || patched.Alias == "" {
+		t.Fatalf("patched session = %+v, want id=%q title=%q with alias", patched, id, patchedTitle)
+	}
+
+	renamedTitle := "MC live contract renamed " + runID
+	renamed := liveContractJSON[struct {
+		ID    string `json:"id"`
+		Title string `json:"title"`
+	}](t, baseURL, v, http.MethodPost, sessionPath+"/rename", map[string]string{"title": renamedTitle}, http.StatusOK)
+	if renamed.ID != id || renamed.Title != renamedTitle {
+		t.Fatalf("renamed session = %+v, want id=%q title=%q", renamed, id, renamedTitle)
+	}
+
+	liveContractJSON[struct {
+		Status string `json:"status"`
+	}](t, baseURL, v, http.MethodPost, sessionPath+"/suspend", nil, http.StatusOK)
+	waitForLiveContractSessionState(t, baseURL, v, sessionPath, "suspended", 30*time.Second)
+
+	wake := liveContractJSON[struct {
+		ID string `json:"id"`
+	}](t, baseURL, v, http.MethodPost, sessionPath+"/wake", nil, http.StatusOK)
+	if wake.ID != id {
+		t.Fatalf("wake id = %q, want %q", wake.ID, id)
+	}
+
+	msg := liveContractJSON[struct {
+		RequestID string `json:"request_id"`
+	}](t, baseURL, v, http.MethodPost, sessionPath+"/messages", map[string]string{
+		"message": "MC live contract message " + runID,
+	}, http.StatusAccepted)
+	if msg.RequestID == "" || msg.RequestID == id {
+		t.Fatalf("message response = %+v, want request_id distinct from session id %q", msg, id)
+	}
+	waitForLiveContractRequestID[struct {
+		RequestID string `json:"request_id"`
+	}](t, baseURL, v, "/v0/events", msg.RequestID, "request.result.session.message", 120*time.Second)
+
+	liveContractJSON[map[string]any](t, baseURL, v, http.MethodGet, sessionPath+"/pending", nil, http.StatusOK)
+	liveContractRequestOneOf(t, baseURL, v, http.MethodPost, sessionPath+"/respond", map[string]string{
+		"action": "deny",
+		"text":   "MC live contract no-pending response " + runID,
+	}, []int{http.StatusConflict, http.StatusNotImplemented})
+	transcript := liveContractJSON[struct {
+		ID     string `json:"id"`
+		Format string `json:"format"`
+	}](t, baseURL, v, http.MethodGet, sessionPath+"/transcript?format=raw&tail=1", nil, http.StatusOK)
+	if transcript.ID != id || transcript.Format != "raw" {
+		t.Fatalf("raw transcript = %+v, want id=%q format=raw", transcript, id)
+	}
+
+	agents := liveContractJSON[struct {
+		Agents []struct {
+			AgentID string `json:"agent_id"`
+			ID      string `json:"id"`
+		} `json:"agents"`
+	}](t, baseURL, v, http.MethodGet, sessionPath+"/agents", nil, http.StatusOK)
+	for _, agent := range agents.Agents {
+		agentID := agent.AgentID
+		if agentID == "" {
+			agentID = agent.ID
+		}
+		if agentID != "" {
+			liveContractJSON[map[string]any](t, baseURL, v, http.MethodGet, sessionPath+"/agents/"+url.PathEscape(agentID), nil, http.StatusOK)
+			break
+		}
+	}
+
+	stopped := liveContractJSON[struct {
+		ID string `json:"id"`
+	}](t, baseURL, v, http.MethodPost, sessionPath+"/stop", nil, http.StatusOK)
+	if stopped.ID != id {
+		t.Fatalf("stop id = %q, want %q", stopped.ID, id)
+	}
+	liveContractJSON[struct {
+		Status string `json:"status"`
+	}](t, baseURL, v, http.MethodPost, sessionPath+"/close?delete=true", nil, http.StatusOK)
+
+	killID := createLiveContractAgentSession(t, baseURL, v, cityBase, targetAgent, rigName, "kill-"+runID)
+	killed := liveContractJSON[struct {
+		ID string `json:"id"`
+	}](t, baseURL, v, http.MethodPost, cityBase+"/session/"+url.PathEscape(killID)+"/kill", nil, http.StatusOK)
+	if killed.ID != killID {
+		t.Fatalf("kill id = %q, want %q", killed.ID, killID)
+	}
+}
+
+func waitForLiveContractSessionState(t *testing.T, baseURL string, v openapivalidator.Validator, sessionPath, want string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		session := liveContractJSON[struct {
+			State string `json:"state"`
+		}](t, baseURL, v, http.MethodGet, sessionPath, nil, http.StatusOK)
+		if session.State == want {
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s state at %s", want, sessionPath)
+}
+
+func exerciseLiveContractFormulasAndWorkflows(t *testing.T, baseURL string, v openapivalidator.Validator, cityBase, formulaName, targetAgent, rigName, rootBeadID, runID string) {
+	t.Helper()
+	formulas := liveContractJSON[struct {
+		Items []struct {
+			Name string `json:"name"`
+		} `json:"items"`
+		Total int `json:"total"`
+	}](t, baseURL, v, http.MethodGet, cityBase+"/formulas?scope_kind=rig&scope_ref="+url.QueryEscape(rigName), nil, http.StatusOK)
+	if formulas.Total < len(formulas.Items) || formulas.Total == 0 || !formulaListContains(formulas.Items, formulaName) {
+		t.Fatalf("formula list = %+v, want %q", formulas, formulaName)
+	}
+	liveContractJSON[map[string]any](t, baseURL, v, http.MethodGet, cityBase+"/formulas/feed?scope_kind=rig&scope_ref="+url.QueryEscape(rigName), nil, http.StatusOK)
+	liveContractJSON[map[string]any](t, baseURL, v, http.MethodGet, cityBase+"/formulas/"+url.PathEscape(formulaName)+"?scope_kind=rig&scope_ref="+url.QueryEscape(rigName)+"&target="+url.QueryEscape(targetAgent), nil, http.StatusOK)
+	liveContractJSON[map[string]any](t, baseURL, v, http.MethodPost, cityBase+"/formulas/"+url.PathEscape(formulaName)+"/preview", map[string]any{
+		"scope_kind": "rig",
+		"scope_ref":  rigName,
+		"target":     targetAgent,
+		"vars":       map[string]string{"issue": rootBeadID},
+	}, http.StatusOK)
+	liveContractJSON[map[string]any](t, baseURL, v, http.MethodGet, cityBase+"/formulas/"+url.PathEscape(formulaName)+"/runs?limit=5&scope_kind=rig&scope_ref="+url.QueryEscape(rigName), nil, http.StatusOK)
+	liveContractRequestOneOf(t, baseURL, v, http.MethodPost, cityBase+"/sling", map[string]any{
+		"target": targetAgent,
+	}, []int{http.StatusOK, http.StatusBadRequest, http.StatusUnprocessableEntity, http.StatusNotFound})
+	workflow := liveContractJSON[beads.Bead](t, baseURL, v, http.MethodPost, cityBase+"/beads", map[string]any{
+		"description": "Workflow fixture created by TestGCLiveContract_BeadsAndEvents",
+		"labels":      []string{"mc-live-contract", "workflow"},
+		"metadata": map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula":          formulaName,
+			"gc.formula_contract": "graph.v2",
+			"gc.workflow_id":      "mc-workflow-" + runID,
+		},
+		"rig":   rigName,
+		"title": "MC live contract workflow " + runID,
+		"type":  "convoy",
+	}, http.StatusCreated)
+	workflowID := workflow.ID
+	liveContractJSON[map[string]any](t, baseURL, v, http.MethodGet, cityBase+"/workflow/"+url.PathEscape(workflowID)+"?scope_kind=rig&scope_ref="+url.QueryEscape(rigName), nil, http.StatusOK)
+	liveContractJSON[struct {
+		Status string `json:"status"`
+	}](t, baseURL, v, http.MethodDelete, cityBase+"/workflow/"+url.PathEscape(workflowID)+"?scope_kind=rig&scope_ref="+url.QueryEscape(rigName), nil, http.StatusOK)
+
+	convoyItem := liveContractJSON[beads.Bead](t, baseURL, v, http.MethodPost, cityBase+"/beads", map[string]any{
+		"description": "Disposable convoy item fixture created by TestGCLiveContract_BeadsAndEvents",
+		"labels":      []string{"mc-live-contract", "convoy-item"},
+		"rig":         rigName,
+		"title":       "MC live contract convoy item " + runID,
+		"type":        "task",
+	}, http.StatusCreated)
+	convoy := liveContractJSON[beads.Bead](t, baseURL, v, http.MethodPost, cityBase+"/convoys", map[string]any{
+		"rig":   rigName,
+		"title": "MC live contract convoy " + runID,
+		"items": []string{convoyItem.ID},
+	}, http.StatusCreated)
+	if convoy.ID == "" {
+		t.Fatalf("convoy create response missing id: %+v", convoy)
+	}
+	liveContractJSON[map[string]any](t, baseURL, v, http.MethodGet, cityBase+"/convoy/"+url.PathEscape(convoy.ID), nil, http.StatusOK)
+	liveContractJSON[struct {
+		Status string `json:"status"`
+	}](t, baseURL, v, http.MethodDelete, cityBase+"/convoy/"+url.PathEscape(convoy.ID), nil, http.StatusOK)
+}
+
+func exerciseLiveContractOrders(t *testing.T, baseURL string, v openapivalidator.Validator, cityBase, rigName, rootBeadID, runID string) {
+	t.Helper()
+	scopedName := "mc-live-contract-" + runID + ":rig:" + rigName
+	orderRun := liveContractJSON[beads.Bead](t, baseURL, v, http.MethodPost, cityBase+"/beads", map[string]any{
+		"description": "Order history fixture created by TestGCLiveContract_BeadsAndEvents",
+		"labels":      []string{"order-run:" + scopedName, "mc-live-contract"},
+		"metadata": map[string]string{
+			"convergence.gate_stdout": "hello from live contract",
+		},
+		"rig":   rigName,
+		"title": "MC live contract order history " + runID,
+		"type":  "task",
+	}, http.StatusCreated)
+	defer liveContractJSON[struct {
+		Status string `json:"status"`
+	}](t, baseURL, v, http.MethodDelete, cityBase+"/bead/"+url.PathEscape(orderRun.ID), nil, http.StatusOK)
+
+	liveContractJSON[map[string]any](t, baseURL, v, http.MethodGet, cityBase+"/orders", nil, http.StatusOK)
+	liveContractJSON[map[string]any](t, baseURL, v, http.MethodGet, cityBase+"/orders/check", nil, http.StatusOK)
+	liveContractJSON[map[string]any](t, baseURL, v, http.MethodGet, cityBase+"/orders/feed?scope_kind=rig&scope_ref="+url.QueryEscape(rigName)+"&limit=25", nil, http.StatusOK)
+	history := liveContractJSON[struct {
+		Entries []struct {
+			BeadID    string `json:"bead_id"`
+			StoreRef  string `json:"store_ref"`
+			HasOutput bool   `json:"has_output"`
+		} `json:"entries"`
+	}](t, baseURL, v, http.MethodGet, cityBase+"/orders/history?scoped_name="+url.QueryEscape(scopedName)+"&limit=20", nil, http.StatusOK)
+	if len(history.Entries) == 0 || history.Entries[0].BeadID != orderRun.ID {
+		t.Fatalf("order history = %+v, want entry for %q", history, orderRun.ID)
+	}
+	detailPath := cityBase + "/order/history/" + url.PathEscape(history.Entries[0].BeadID)
+	if history.Entries[0].StoreRef != "" {
+		detailPath += "?store_ref=" + url.QueryEscape(history.Entries[0].StoreRef)
+	}
+	detail := liveContractJSON[struct {
+		BeadID string `json:"bead_id"`
+		Output string `json:"output"`
+	}](t, baseURL, v, http.MethodGet, detailPath, nil, http.StatusOK)
+	if detail.BeadID != orderRun.ID || !strings.Contains(detail.Output, "hello from live contract") {
+		t.Fatalf("order history detail = %+v, want output for %q", detail, orderRun.ID)
+	}
+}
+
+func formulaListContains(items []struct {
+	Name string `json:"name"`
+}, want string,
+) bool {
+	for _, item := range items {
+		if item.Name == want {
+			return true
+		}
+	}
+	return false
 }
 
 func liveContractValidator(t *testing.T, specBytes []byte) openapivalidator.Validator {
@@ -353,9 +891,17 @@ func liveContractJSON[T any](t *testing.T, baseURL string, v openapivalidator.Va
 
 func liveContractRequest(t *testing.T, baseURL string, v openapivalidator.Validator, method, path string, body any, wantStatus int) []byte {
 	t.Helper()
+	return liveContractRequestWithHeaders(t, baseURL, v, method, path, body, wantStatus, nil)
+}
+
+func liveContractRequestWithHeaders(t *testing.T, baseURL string, v openapivalidator.Validator, method, path string, body any, wantStatus int, headers map[string]string) []byte {
+	t.Helper()
 	req, err := liveContractHTTPRequest(baseURL, method, path, body)
 	if err != nil {
 		t.Fatalf("%s %s build request: %v", method, path, err)
+	}
+	for name, value := range headers {
+		req.Header.Set(name, value)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -373,6 +919,39 @@ func liveContractRequest(t *testing.T, baseURL string, v openapivalidator.Valida
 		validateLiveContractResponse(t, v, req, resp, raw)
 	}
 	return raw
+}
+
+func liveContractRequestOneOf(t *testing.T, baseURL string, v openapivalidator.Validator, method, path string, body any, wantStatuses []int) []byte {
+	t.Helper()
+	req, err := liveContractHTTPRequest(baseURL, method, path, body)
+	if err != nil {
+		t.Fatalf("%s %s build request: %v", method, path, err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("%s %s read response: %v", method, path, err)
+	}
+	if !intListContains(wantStatuses, resp.StatusCode) {
+		t.Fatalf("%s %s status = %d, want one of %v; body: %s", method, path, resp.StatusCode, wantStatuses, string(raw))
+	}
+	if v != nil {
+		validateLiveContractResponse(t, v, req, resp, raw)
+	}
+	return raw
+}
+
+func intListContains(items []int, want int) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
 }
 
 func liveContractHTTPRequest(baseURL, method, path string, body any) (*http.Request, error) {
@@ -440,42 +1019,118 @@ func validateLiveContractResponse(t *testing.T, v openapivalidator.Validator, re
 	t.Fatalf("%s %s response does not match OpenAPI schema:\n%sbody: %s", req.Method, req.URL.Path, details.String(), string(raw))
 }
 
-func waitForLiveContractRequestResult(t *testing.T, baseURL string, v openapivalidator.Validator, path, subject, operation, wantStatus string, timeout time.Duration) {
+func waitForLiveContractRequestID[T any](t *testing.T, baseURL string, v openapivalidator.Validator, path, requestID, successType string, timeout time.Duration) T {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	var lastErr error
-	for time.Now().Before(deadline) {
-		events, err := liveContractEventList(baseURL, v, path)
-		if err != nil {
-			lastErr = err
-			time.Sleep(250 * time.Millisecond)
-			continue
-		}
-		for _, event := range events.Items {
-			if event.Subject != subject || event.Type != "request.result" {
-				continue
-			}
-			var payload struct {
-				Operation string `json:"operation"`
-				Status    string `json:"status"`
-			}
-			raw, _ := json.Marshal(event.Payload)
-			if json.Unmarshal(raw, &payload) != nil {
-				continue
-			}
-			if payload.Operation != operation {
-				continue
-			}
-			if payload.Status == "failed" && wantStatus != "failed" {
-				t.Fatalf("request.result(%s) for %s failed: %+v", operation, subject, event.Payload)
-			}
-			if payload.Status == wantStatus {
-				return
-			}
-		}
-		time.Sleep(250 * time.Millisecond)
+	env := waitForLiveContractRequestEvent(t, baseURL, path, requestID, successType, timeout)
+	var payload T
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("%s payload for request_id=%s did not decode: %v\npayload: %s", successType, requestID, err, string(env.Payload))
 	}
-	t.Fatalf("timed out waiting for request.result(%s, %s) for %s from %s; last error: %v", operation, wantStatus, subject, path, lastErr)
+	return payload
+}
+
+func waitForLiveContractRequestEvent(t *testing.T, baseURL, path, requestID, successType string, timeout time.Duration) contractEvent {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	streamPath := path
+	if strings.HasSuffix(streamPath, "/events") {
+		streamPath += "/stream?after_seq=0"
+	} else {
+		streamPath = strings.TrimSuffix(streamPath, "/") + "/stream?after_cursor=0"
+	}
+	if path == "/v0/events" {
+		streamPath = "/v0/events/stream?after_cursor=0"
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+streamPath, nil)
+	if err != nil {
+		t.Fatalf("build SSE request %s: %v", streamPath, err)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("X-GC-Request", "live-contract")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s SSE: %v", streamPath, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		t.Fatalf("GET %s SSE status = %d, want 200; body: %s", streamPath, resp.StatusCode, string(raw))
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	var data strings.Builder
+	observed := 0
+	var recent []string
+	remember := func(event contractEvent) {
+		observed++
+		req := liveContractEventPayloadRequestID(event.Payload)
+		desc := event.Type
+		if event.City != "" {
+			desc += " city=" + event.City
+		}
+		if event.Subject != "" {
+			desc += " subject=" + event.Subject
+		}
+		if req != "" {
+			desc += " request_id=" + req
+		}
+		recent = append(recent, desc)
+		if len(recent) > 8 {
+			recent = recent[1:]
+		}
+	}
+	for scanner.Scan() {
+		line := scanner.Text()
+		switch {
+		case strings.HasPrefix(line, "data:"):
+			value := strings.TrimPrefix(line, "data:")
+			value = strings.TrimPrefix(value, " ")
+			if data.Len() > 0 {
+				data.WriteByte('\n')
+			}
+			data.WriteString(value)
+		case line == "":
+			if data.Len() == 0 {
+				continue
+			}
+			var event contractEvent
+			if err := json.Unmarshal([]byte(data.String()), &event); err != nil {
+				t.Fatalf("decode SSE event from %s: %v; data=%s", streamPath, err, data.String())
+			}
+			data.Reset()
+			remember(event)
+			if event.Type == successType && liveContractEventPayloadRequestID(event.Payload) == requestID {
+				return event
+			}
+			if event.Type == "request.failed" && liveContractEventPayloadRequestID(event.Payload) == requestID {
+				var payload struct {
+					ErrorCode    string `json:"error_code"`
+					ErrorMessage string `json:"error_message"`
+				}
+				_ = json.Unmarshal(event.Payload, &payload)
+				t.Fatalf("request.failed for request_id=%s: %s: %s", requestID, payload.ErrorCode, payload.ErrorMessage)
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil && ctx.Err() == nil {
+		t.Fatalf("scan SSE %s: %v", streamPath, err)
+	}
+	t.Fatalf("timed out waiting for %s for request_id=%s from %s after observing %d SSE data frames; recent=%v", successType, requestID, streamPath, observed, recent)
+	return contractEvent{}
+}
+
+func liveContractEventPayloadRequestID(raw json.RawMessage) string {
+	var payload struct {
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return ""
+	}
+	return payload.RequestID
 }
 
 func waitForLiveContractEvent(t *testing.T, baseURL string, v openapivalidator.Validator, path, subject, eventType string, timeout time.Duration) {
@@ -494,7 +1149,7 @@ func waitForLiveContractEvent(t *testing.T, baseURL string, v openapivalidator.V
 				return
 			}
 			if event.Subject == subject && strings.HasSuffix(event.Type, "_failed") {
-				t.Fatalf("event %s for %s failed: %+v", event.Type, subject, event.Payload)
+				t.Fatalf("event %s for %s failed: %s", event.Type, subject, string(event.Payload))
 			}
 		}
 		time.Sleep(250 * time.Millisecond)
@@ -730,9 +1385,59 @@ func assertLiveContractSpec(t *testing.T, specBytes []byte) {
 			cityPayloadRefs = append(cityPayloadRefs, ref)
 		}
 	}
-	if len(cityPayloadRefs) != 1 || !strings.Contains(cityPayloadRefs[0], "CityLifecyclePayload") {
-		t.Fatalf("EventPayload city lifecycle branches = %#v, want exactly CityLifecyclePayload", cityPayloadRefs)
+	for _, want := range []string{"CityLifecyclePayload", "CityCreateSucceededPayload", "CityUnregisterSucceededPayload"} {
+		if !refListContainsSchema(cityPayloadRefs, want) {
+			t.Fatalf("EventPayload city branches = %#v, missing %s", cityPayloadRefs, want)
+		}
 	}
+}
+
+func assertLiveContractRequiredOperations(t *testing.T, specBytes []byte) {
+	t.Helper()
+	var spec struct {
+		Paths map[string]map[string]struct {
+			OperationID string `json:"operationId"`
+		} `json:"paths"`
+	}
+	if err := json.Unmarshal(specBytes, &spec); err != nil {
+		t.Fatalf("decode OpenAPI paths: %v", err)
+	}
+
+	type operationShape struct {
+		Method       string
+		PathTemplate string
+	}
+	operations := make(map[string]operationShape)
+	for pathTemplate, pathItem := range spec.Paths {
+		for method, operation := range pathItem {
+			if operation.OperationID == "" {
+				continue
+			}
+			operations[operation.OperationID] = operationShape{
+				Method:       strings.ToUpper(method),
+				PathTemplate: pathTemplate,
+			}
+		}
+	}
+
+	for _, required := range liveContractRequiredOperations {
+		found, ok := operations[required.OperationID]
+		if !ok {
+			t.Fatalf("OpenAPI missing required MC GC operation %s (%s %s)", required.OperationID, required.Method, required.PathTemplate)
+		}
+		if found.Method != required.Method || found.PathTemplate != required.PathTemplate {
+			t.Fatalf("OpenAPI operation %s = %s %s, want %s %s", required.OperationID, found.Method, found.PathTemplate, required.Method, required.PathTemplate)
+		}
+	}
+}
+
+func refListContainsSchema(refs []string, schema string) bool {
+	for _, ref := range refs {
+		if strings.HasSuffix(ref, "/"+schema) {
+			return true
+		}
+	}
+	return false
 }
 
 func containsString(items []string, want string) bool {

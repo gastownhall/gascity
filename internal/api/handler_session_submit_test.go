@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
@@ -32,20 +31,24 @@ func TestHandleSessionSubmitDefaultsToProviderDefaultBehavior(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("submit status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
-	var resp map[string]any
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+	var accepted asyncAcceptedBody
+	if err := json.NewDecoder(rec.Body).Decode(&accepted); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got := resp["queued"]; got != true {
-		t.Fatalf("queued = %#v, want true (async submit)", got)
-	}
-	if got := resp["intent"]; got != string(session.SubmitIntentDefault) {
-		t.Fatalf("intent = %#v, want %q", got, session.SubmitIntentDefault)
+	if accepted.RequestID == "" {
+		t.Fatal("missing request_id")
 	}
 
-	result := waitForRequestResult(t, fs.eventProv, "session.submit", 5*time.Second)
-	if result.Status != "succeeded" {
-		t.Fatalf("request.result status = %q, want succeeded", result.Status)
+	success, failure := waitForSessionSubmitResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session submit failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
+	}
+	// Default intent on a suspended session resumes immediately (not queued).
+	if success.Queued {
+		t.Fatalf("queued = true, want false (default intent resumes)")
+	}
+	if success.Intent != string(session.SubmitIntentDefault) {
+		t.Fatalf("intent = %q, want %q", success.Intent, session.SubmitIntentDefault)
 	}
 }
 
@@ -69,10 +72,17 @@ func TestHandleSessionSubmitUsesImmediateDefaultForCodex(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("submit status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
+	var accepted asyncAcceptedBody
+	if err := json.NewDecoder(rec.Body).Decode(&accepted); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if accepted.RequestID == "" {
+		t.Fatal("missing request_id")
+	}
 
-	result := waitForRequestResult(t, fs.eventProv, "session.submit", 5*time.Second)
-	if result.Status != "succeeded" {
-		t.Fatalf("request.result status = %q, want succeeded", result.Status)
+	success, failure := waitForSessionSubmitResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session submit failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
 	}
 }
 
@@ -89,17 +99,17 @@ func TestHandleSessionSubmitFollowUpQueuesMessage(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("submit status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
-	var resp map[string]any
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+	var accepted asyncAcceptedBody
+	if err := json.NewDecoder(rec.Body).Decode(&accepted); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got := resp["queued"]; got != true {
-		t.Fatalf("queued = %#v, want true", got)
+	if accepted.RequestID == "" {
+		t.Fatal("missing request_id")
 	}
 
-	result := waitForRequestResult(t, fs.eventProv, "session.submit", 5*time.Second)
-	if result.Status != "succeeded" {
-		t.Fatalf("request.result status = %q, want succeeded", result.Status)
+	success, failure := waitForSessionSubmitResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session submit failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
 	}
 
 	state, err := nudgequeue.LoadState(fs.cityPath)

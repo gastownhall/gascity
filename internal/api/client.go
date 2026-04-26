@@ -12,15 +12,19 @@
 package api
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"reflect"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/genclient"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
@@ -85,27 +89,145 @@ func ShouldFallback(err error) bool {
 // when a controller is running.
 type Client struct {
 	cw       *genclient.ClientWithResponses
+	baseURL  string // stored for SSE stream connections
 	cityName string // non-empty for city-scoped clients; passed to every per-city call
 	initErr  error  // set when NewClient failed to build the transport (malformed baseURL, etc.)
 }
 
 const sessionMessageTimeout = 4 * time.Minute
 
-// SessionSubmitResponse is the domain-facing shape of POST
-// /v0/city/{cityName}/session/{id}/submit's 202 body. It intentionally
-// shadows genclient.SessionSubmitOutputBody instead of re-exporting it
-// so callers in cmd/gc do not depend on the generated-client package:
-//
-//  1. regenerating the client (different tool, renamed field) would
-//     otherwise force a cascading edit across every CLI command; and
-//  2. the wire uses a string for Intent but the domain uses the typed
-//     session.SubmitIntent — this wrapper does the conversion in one
-//     place and lets callers work with the strong type.
+// SessionSubmitResponse is the domain-facing shape of a session submit result.
 type SessionSubmitResponse struct {
 	Status string               `json:"status"`
 	ID     string               `json:"id"`
 	Queued bool                 `json:"queued"`
 	Intent session.SubmitIntent `json:"intent"`
+}
+
+// sseEvent is a parsed SSE frame from the event stream.
+type sseEvent struct {
+	Event string
+	Data  string
+}
+
+// sseEnvelope is the JSON envelope of a typed event on the stream.
+type sseEnvelope struct {
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+// waitForEvent connects to the appropriate SSE stream, reads frames
+// until it finds an event matching the given request_id (in success or
+// failure payloads), and returns the envelope. The caller decodes the
+// typed payload.
+func (c *Client) waitForEvent(ctx context.Context, requestID string, successType, failOp string) (*sseEnvelope, error) {
+	streamURL := c.baseURL + "/v0/events/stream"
+	if c.cityName != "" {
+		streamURL = c.baseURL + "/v0/city/" + c.cityName + "/events/stream?after_seq=0"
+	} else {
+		streamURL += "?after_cursor=0"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, streamURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build SSE request: %w", err)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("X-GC-Request", "true")
+
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, fmt.Errorf("SSE connect: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		detail := strings.TrimSpace(string(body))
+		if detail == "" {
+			detail = resp.Status
+		}
+		return nil, fmt.Errorf("SSE connect failed: %s: %s", resp.Status, detail)
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	var current sseEvent
+	for scanner.Scan() {
+		line := scanner.Text()
+		switch {
+		case strings.HasPrefix(line, "event: "):
+			current.Event = strings.TrimPrefix(line, "event: ")
+		case strings.HasPrefix(line, "data:"):
+			data := strings.TrimPrefix(line, "data:")
+			data = strings.TrimPrefix(data, " ")
+			if current.Data == "" {
+				current.Data = data
+			} else {
+				current.Data += "\n" + data
+			}
+		case line == "":
+			if current.Data == "" {
+				current = sseEvent{}
+				continue
+			}
+			var env sseEnvelope
+			if err := json.Unmarshal([]byte(current.Data), &env); err != nil {
+				return nil, fmt.Errorf("decode SSE event: %w", err)
+			}
+			if env.Type == successType {
+				matches, err := payloadContainsRequestID(env.Payload, requestID)
+				if err != nil {
+					return nil, fmt.Errorf("decode %s payload: %w", successType, err)
+				}
+				if matches {
+					return &env, nil
+				}
+			}
+			if env.Type == events.RequestFailed {
+				matches, err := payloadMatchesRequest(env.Payload, requestID, failOp)
+				if err != nil {
+					return nil, fmt.Errorf("decode %s payload: %w", events.RequestFailed, err)
+				}
+				if matches {
+					return &env, nil
+				}
+			}
+			current = sseEvent{}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, fmt.Errorf("SSE scan: %w", err)
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
+	return nil, fmt.Errorf("SSE stream closed before event for %s arrived", requestID)
+}
+
+func payloadContainsRequestID(raw json.RawMessage, requestID string) (bool, error) {
+	var p struct {
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return false, err
+	}
+	return p.RequestID == requestID, nil
+}
+
+func payloadMatchesRequest(raw json.RawMessage, requestID, operation string) (bool, error) {
+	var p struct {
+		RequestID string `json:"request_id"`
+		Operation string `json:"operation"`
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return false, err
+	}
+	return p.RequestID == requestID && p.Operation == operation, nil
 }
 
 // NewClient creates a new supervisor-scope API client targeting the
@@ -139,7 +261,7 @@ func newClient(baseURL, cityName string) *Client {
 		// every method rather than panicking.
 		return &Client{initErr: &clientInitError{err: err}}
 	}
-	return &Client{cw: cw, cityName: cityName}
+	return &Client{cw: cw, baseURL: baseURL, cityName: cityName}
 }
 
 // requireCityScope reports an error if the client was constructed as a
@@ -321,8 +443,9 @@ func (c *Client) KillSession(id string) error {
 	return checkMutation(resp, err)
 }
 
-// SendSessionMessage delivers a message to a session via the compatibility
-// POST /v0/city/{cityName}/session/{id}/messages endpoint.
+// SendSessionMessage delivers a message to a session via the async
+// POST /v0/city/{cityName}/session/{id}/messages endpoint. Internally
+// handles the async protocol: POST → 202 + request_id → SSE event.
 func (c *Client) SendSessionMessage(id, message string) error {
 	if err := c.requireCityScope(); err != nil {
 		return err
@@ -332,11 +455,34 @@ func (c *Client) SendSessionMessage(id, message string) error {
 	resp, err := c.cw.SendSessionMessageWithResponse(ctx, c.cityName, id, nil, genclient.SendSessionMessageJSONRequestBody{
 		Message: message,
 	})
-	return checkMutation(resp, err)
+	if err != nil {
+		return &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if err := checkMutation(resp, err); err != nil {
+		return err
+	}
+	if resp.JSON202 == nil {
+		return fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	requestID := resp.JSON202.RequestId
+
+	env, err := c.waitForEvent(ctx, requestID, events.RequestResultSessionMessage, RequestOperationSessionMessage)
+	if err != nil {
+		return err
+	}
+	if env.Type == events.RequestFailed {
+		var p RequestFailedPayload
+		if err := json.Unmarshal(env.Payload, &p); err != nil {
+			return fmt.Errorf("decode message failure: %w", err)
+		}
+		return fmt.Errorf("message failed: %s: %s", p.ErrorCode, p.ErrorMessage)
+	}
+	return nil
 }
 
 // SubmitSession sends a semantic submit request to a session. The id may
-// be either a bead ID or a resolvable session alias/name.
+// be either a bead ID or a resolvable session alias/name. Internally
+// handles the async protocol: POST → 202 + request_id → SSE event.
 func (c *Client) SubmitSession(id, message string, intent session.SubmitIntent) (SessionSubmitResponse, error) {
 	if err := c.requireCityScope(); err != nil {
 		return SessionSubmitResponse{}, err
@@ -356,19 +502,34 @@ func (c *Client) SubmitSession(id, message string, intent session.SubmitIntent) 
 	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
 		return SessionSubmitResponse{}, err
 	}
-	// SubmitSession returns 202 Accepted on success.
 	if resp.JSON202 == nil {
 		return SessionSubmitResponse{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
 	}
-	out := SessionSubmitResponse{
-		Status: resp.JSON202.Status,
-		ID:     resp.JSON202.Id,
-		Queued: resp.JSON202.Queued,
+	requestID := resp.JSON202.RequestId
+
+	ctx, cancel := context.WithTimeout(context.Background(), sessionMessageTimeout)
+	defer cancel()
+	env, err := c.waitForEvent(ctx, requestID, events.RequestResultSessionSubmit, RequestOperationSessionSubmit)
+	if err != nil {
+		return SessionSubmitResponse{}, err
 	}
-	if resp.JSON202.Intent != "" {
-		out.Intent = session.SubmitIntent(resp.JSON202.Intent)
+	if env.Type == events.RequestFailed {
+		var p RequestFailedPayload
+		if err := json.Unmarshal(env.Payload, &p); err != nil {
+			return SessionSubmitResponse{}, fmt.Errorf("decode submit failure: %w", err)
+		}
+		return SessionSubmitResponse{}, fmt.Errorf("submit failed: %s: %s", p.ErrorCode, p.ErrorMessage)
 	}
-	return out, nil
+	var p SessionSubmitSucceededPayload
+	if err := json.Unmarshal(env.Payload, &p); err != nil {
+		return SessionSubmitResponse{}, fmt.Errorf("decode submit result: %w", err)
+	}
+	return SessionSubmitResponse{
+		Status: "accepted",
+		ID:     p.SessionID,
+		Queued: p.Queued,
+		Intent: session.SubmitIntent(p.Intent),
+	}, nil
 }
 
 var errClientUninitialized = errors.New("api client not initialized")

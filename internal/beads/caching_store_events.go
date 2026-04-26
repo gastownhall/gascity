@@ -32,8 +32,13 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 		c.mu.RUnlock()
 		return
 	}
-	_, cached := c.beads[patch.ID]
+	current, cached := c.beads[patch.ID]
+	_, locallyMutated := c.beadSeq[patch.ID]
 	c.mu.RUnlock()
+
+	if eventType != "bead.closed" && cached && locallyMutated && cacheEventConflictsCurrent(current, patch, fields) {
+		return
+	}
 
 	b := patch
 	if !cached {
@@ -149,6 +154,42 @@ func mergeCacheEventPatch(base, patch Bead, fields map[string]json.RawMessage) B
 		merged.Dependencies = slices.Clone(patch.Dependencies)
 	}
 	return merged
+}
+
+func cacheEventConflictsCurrent(current, patch Bead, fields map[string]json.RawMessage) bool {
+	if hasCacheEventField(fields, "title") && current.Title != patch.Title {
+		return true
+	}
+	if hasCacheEventField(fields, "status") && current.Status != patch.Status {
+		return true
+	}
+	if (hasCacheEventField(fields, "issue_type") || hasCacheEventField(fields, "type")) && current.Type != patch.Type {
+		return true
+	}
+	if hasCacheEventField(fields, "priority") {
+		if (current.Priority == nil) != (patch.Priority == nil) {
+			return true
+		}
+		if current.Priority != nil && patch.Priority != nil && *current.Priority != *patch.Priority {
+			return true
+		}
+	}
+	if hasCacheEventField(fields, "assignee") && current.Assignee != patch.Assignee {
+		return true
+	}
+	if hasCacheEventField(fields, "description") && current.Description != patch.Description {
+		return true
+	}
+	if hasCacheEventField(fields, "parent") && current.ParentID != patch.ParentID {
+		return true
+	}
+	if hasCacheEventField(fields, "parent_id") && current.ParentID != patch.ParentID {
+		return true
+	}
+	if hasCacheEventField(fields, "metadata") && !maps.Equal(current.Metadata, patch.Metadata) {
+		return true
+	}
+	return false
 }
 
 func hasCacheEventField(fields map[string]json.RawMessage, name string) bool {

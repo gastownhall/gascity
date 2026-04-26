@@ -8,6 +8,7 @@ import (
 	"io"
 	"path/filepath"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/cityinit"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/events"
@@ -62,11 +63,6 @@ type cityInitLifecycleEvents struct {
 	stderr io.Writer
 }
 
-type cityInitLifecyclePayload struct {
-	Name string `json:"name"`
-	Path string `json:"path"`
-}
-
 func (e cityInitLifecycleEvents) EnsureCityLog(cityPath string) error {
 	fr, err := events.NewFileRecorder(filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl"), e.stderrOrDiscard())
 	if err != nil {
@@ -79,14 +75,14 @@ func (e cityInitLifecycleEvents) EnsureCityLog(cityPath string) error {
 }
 
 func (e cityInitLifecycleEvents) CityCreated(cityPath, name string) error {
-	return e.record(cityPath, events.CityCreated, name, cityInitLifecyclePayload{Name: name, Path: cityPath})
+	return e.record(cityPath, events.CityCreated, name, api.CityLifecyclePayload{Name: name, Path: cityPath})
 }
 
 func (e cityInitLifecycleEvents) CityUnregisterRequested(city cityinit.RegisteredCity) error {
-	return e.record(city.Path, events.CityUnregisterRequested, city.Name, cityInitLifecyclePayload{Name: city.Name, Path: city.Path})
+	return e.record(city.Path, events.CityUnregisterRequested, city.Name, api.CityLifecyclePayload{Name: city.Name, Path: city.Path})
 }
 
-func (e cityInitLifecycleEvents) record(cityPath, eventType, subject string, payload cityInitLifecyclePayload) error {
+func (e cityInitLifecycleEvents) record(cityPath, eventType, subject string, payload api.CityLifecyclePayload) error {
 	fr, err := events.NewFileRecorder(filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl"), e.stderrOrDiscard())
 	if err != nil {
 		return err

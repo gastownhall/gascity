@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -32,23 +33,154 @@ func newSessionFakeState(t *testing.T) *fakeState {
 	return fs
 }
 
-func waitForRequestResult(t *testing.T, prov events.Provider, operation string, timeout time.Duration) RequestResultPayload {
+const testEventTimeout = 5 * time.Second
+
+func decodeAsyncAccepted(t *testing.T, body io.Reader) asyncAcceptedBody {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
+
+	var accepted asyncAcceptedBody
+	if err := json.NewDecoder(body).Decode(&accepted); err != nil {
+		t.Fatalf("decode async accepted body: %v", err)
+	}
+	if accepted.RequestID == "" {
+		t.Fatal("async accepted body missing request_id")
+	}
+	return accepted
+}
+
+// waitForSessionCreateResult waits for either a session create success or a request.failed event
+// matching session.create and requestID. Returns the success payload and true, or the failure payload and false.
+func waitForSessionCreateResult(t *testing.T, prov events.Provider, requestID string) (*SessionCreateSucceededPayload, *RequestFailedPayload) {
+	t.Helper()
+	deadline := time.Now().Add(testEventTimeout)
 	for time.Now().Before(deadline) {
-		evts, err := prov.List(events.Filter{Type: events.RequestResult})
-		if err == nil {
-			for _, e := range evts {
-				var p RequestResultPayload
-				if json.Unmarshal(e.Payload, &p) == nil && p.Operation == operation {
-					return p
-				}
+		successEvents, _ := prov.List(events.Filter{Type: events.RequestResultSessionCreate})
+		for _, e := range successEvents {
+			var p SessionCreateSucceededPayload
+			if err := json.Unmarshal(e.Payload, &p); err == nil && requestIDMatches(p.RequestID, requestID) {
+				return &p, nil
+			}
+		}
+		failedEvents, _ := prov.List(events.Filter{Type: events.RequestFailed})
+		for _, e := range failedEvents {
+			var p RequestFailedPayload
+			if json.Unmarshal(e.Payload, &p) == nil && p.Operation == RequestOperationSessionCreate && requestIDMatches(p.RequestID, requestID) {
+				return nil, &p
 			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for request.result with operation=%q", operation)
-	return RequestResultPayload{}
+	t.Fatalf("timed out waiting for session create result")
+	return nil, nil
+}
+
+func TestWaitForSessionCreateResultMatchesRequestID(t *testing.T) {
+	prov := events.NewFake()
+	first, err := json.Marshal(SessionCreateSucceededPayload{RequestID: "req-old"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := json.Marshal(SessionCreateSucceededPayload{RequestID: "req-want"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prov.Record(events.Event{Type: events.RequestResultSessionCreate, Payload: first})
+	prov.Record(events.Event{Type: events.RequestResultSessionCreate, Payload: second})
+
+	success, failure := waitForSessionCreateResult(t, prov, "req-want")
+	if failure != nil {
+		t.Fatalf("unexpected failure: %+v", failure)
+	}
+	if success == nil || success.RequestID != "req-want" {
+		t.Fatalf("success = %+v, want request_id req-want", success)
+	}
+}
+
+// waitForSessionMessageResult waits for session message success or failure.
+func waitForSessionMessageResult(t *testing.T, prov events.Provider, requestID string) (*SessionMessageSucceededPayload, *RequestFailedPayload) {
+	t.Helper()
+	deadline := time.Now().Add(testEventTimeout)
+	for time.Now().Before(deadline) {
+		successEvents, _ := prov.List(events.Filter{Type: events.RequestResultSessionMessage})
+		for _, e := range successEvents {
+			var p SessionMessageSucceededPayload
+			if err := json.Unmarshal(e.Payload, &p); err == nil && requestIDMatches(p.RequestID, requestID) {
+				return &p, nil
+			}
+		}
+		failedEvents, _ := prov.List(events.Filter{Type: events.RequestFailed})
+		for _, e := range failedEvents {
+			var p RequestFailedPayload
+			if json.Unmarshal(e.Payload, &p) == nil && p.Operation == RequestOperationSessionMessage && requestIDMatches(p.RequestID, requestID) {
+				return nil, &p
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for session message result")
+	return nil, nil
+}
+
+// waitForSessionSubmitResult waits for session submit success or failure.
+func waitForSessionSubmitResult(t *testing.T, prov events.Provider, requestID string) (*SessionSubmitSucceededPayload, *RequestFailedPayload) {
+	t.Helper()
+	deadline := time.Now().Add(testEventTimeout)
+	for time.Now().Before(deadline) {
+		successEvents, _ := prov.List(events.Filter{Type: events.RequestResultSessionSubmit})
+		for _, e := range successEvents {
+			var p SessionSubmitSucceededPayload
+			if err := json.Unmarshal(e.Payload, &p); err == nil && requestIDMatches(p.RequestID, requestID) {
+				return &p, nil
+			}
+		}
+		failedEvents, _ := prov.List(events.Filter{Type: events.RequestFailed})
+		for _, e := range failedEvents {
+			var p RequestFailedPayload
+			if json.Unmarshal(e.Payload, &p) == nil && p.Operation == RequestOperationSessionSubmit && requestIDMatches(p.RequestID, requestID) {
+				return nil, &p
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for session submit result")
+	return nil, nil
+}
+
+func requestIDMatches(got, want string) bool {
+	return got == want
+}
+
+// waitForRequestFailed polls for a request.failed event with the given request_id.
+func waitForRequestFailed(t *testing.T, prov events.Provider, requestID string, timeout time.Duration) *RequestFailedPayload {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		failedEvents, _ := prov.List(events.Filter{Type: events.RequestFailed})
+		for _, e := range failedEvents {
+			var p RequestFailedPayload
+			if json.Unmarshal(e.Payload, &p) == nil && p.RequestID == requestID {
+				return &p
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for request.failed with request_id=%q", requestID)
+	return nil
+}
+
+// waitForNSessionCreateEvents waits until at least n session create success events have been published.
+func waitForNSessionCreateEvents(t *testing.T, prov events.Provider, n int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		evts, _ := prov.List(events.Filter{Type: events.RequestResultSessionCreate})
+		if len(evts) >= n {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	evts, _ := prov.List(events.Filter{Type: events.RequestResultSessionCreate})
+	t.Fatalf("timed out waiting for %d session create events (got %d)", n, len(evts))
 }
 
 func createTestSession(t *testing.T, store beads.Store, sp *runtime.Fake, title string) session.Info {
@@ -1436,10 +1568,19 @@ func TestHandleSessionCreate(t *testing.T) {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
 	}
 
-	var resp sessionResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+	var accepted asyncAcceptedBody
+	if err := json.NewDecoder(w.Body).Decode(&accepted); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
+	if accepted.RequestID == "" {
+		t.Fatal("response must include request_id")
+	}
+
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
+	}
+	resp := success.Session
 	if resp.Template != "myrig/worker" {
 		t.Errorf("Template = %q, want %q", resp.Template, "myrig/worker")
 	}
@@ -1544,13 +1685,13 @@ func TestHumaHandleSessionCreateUsesACPTransportCommandForAgentTemplate(t *testi
 	if out.Body.RequestID == "" {
 		t.Fatal("request_id is empty")
 	}
-	result := waitForRequestResult(t, state.eventProv, "session.create", 5*time.Second)
-	if result.Status != "succeeded" {
-		t.Fatalf("request.result status = %q, want succeeded; error: %s", result.Status, result.ErrorMessage)
+	success, failure := waitForSessionCreateResult(t, state.eventProv, out.Body.RequestID)
+	if success == nil {
+		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
 	}
-	bead, err := state.cityBeadStore.Get(result.ResourceID)
+	bead, err := state.cityBeadStore.Get(success.Session.ID)
 	if err != nil {
-		t.Fatalf("Get(%s): %v", result.ResourceID, err)
+		t.Fatalf("Get(%s): %v", success.Session.ID, err)
 	}
 	if got, want := bead.Metadata["command"], "/bin/echo acp"; got != want {
 		t.Fatalf("command metadata = %q, want %q", got, want)
@@ -1732,12 +1873,12 @@ func TestHandleSessionCreateProviderReturns202WithRequestID(t *testing.T) {
 		t.Fatal("response must include request_id for async correlation")
 	}
 
-	result := waitForRequestResult(t, fs.eventProv, "session.create", 5*time.Second)
-	if result.Status != "succeeded" {
-		t.Fatalf("request.result status = %q, want succeeded; error: %s", result.Status, result.ErrorMessage)
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, resp.RequestID)
+	if success == nil {
+		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
 	}
-	if result.ResourceID == "" {
-		t.Fatal("request.result must include resource_id (session ID)")
+	if success.Session.ID == "" {
+		t.Fatal("session create event must include session.id")
 	}
 }
 
@@ -1756,21 +1897,25 @@ func TestHandleSessionCreateAsync(t *testing.T) {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
 	}
 
-	var resp sessionResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+	var accepted asyncAcceptedBody
+	if err := json.NewDecoder(w.Body).Decode(&accepted); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp.State != "creating" {
-		t.Fatalf("State = %q, want %q", resp.State, "creating")
+	if accepted.RequestID == "" {
+		t.Fatal("response must include request_id")
 	}
-	if resp.Running {
-		t.Fatalf("Running = true, want false for async create")
+
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
 	}
-	if resp.Alias != "sky" {
-		t.Fatalf("Alias = %q, want %q", resp.Alias, "sky")
+	if success.Session.Alias != "sky" {
+		t.Fatalf("Alias = %q, want %q", success.Session.Alias, "sky")
 	}
-	if fs.pokeCount != 1 {
-		t.Fatalf("pokeCount = %d, want 1", fs.pokeCount)
+	// The Huma handler starts the session directly in the goroutine (no
+	// deferred creation), so Poke is not called.
+	if fs.pokeCount != 0 {
+		t.Fatalf("pokeCount = %d, want 0 (Huma handler starts directly)", fs.pokeCount)
 	}
 }
 
@@ -1814,6 +1959,9 @@ func TestHandleSessionCreateAsync_PoolTemplateWithoutAliasUsesGeneratedWorkDirId
 		if rec.Code != http.StatusAccepted {
 			t.Fatalf("create #%d status = %d, want %d; body: %s", i+1, rec.Code, http.StatusAccepted, rec.Body.String())
 		}
+		// Wait for the async goroutine to finish before issuing the next create,
+		// so the lock/uniqueness checks see the previous session.
+		waitForNSessionCreateEvents(t, fs.eventProv, i+1, 5*time.Second)
 	}
 
 	items, err := fs.cityBeadStore.ListByLabel(session.LabelSession, 0)
@@ -1930,20 +2078,27 @@ func TestHandleSessionCreateAsync_PoolTemplateCanonicalizesAliasCollisions(t *te
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("first create status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
-	var resp sessionResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	accepted := decodeAsyncAccepted(t, rec.Body)
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("first create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
 	}
-	if resp.Alias != "myrig/ant-fenrir" {
-		t.Fatalf("Alias = %q, want canonical qualified alias", resp.Alias)
+	if success.Session.Alias != "myrig/ant-fenrir" {
+		t.Fatalf("Alias = %q, want canonical qualified alias", success.Session.Alias)
 	}
 
 	req = newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"agent","name":"myrig/ant","alias":"myrig/ant-fenrir"}`))
 	req.Header.Set("Idempotency-Key", "pool-alias-2")
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("second create status = %d, want %d; body: %s", rec.Code, http.StatusConflict, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("second create status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	accepted2 := decodeAsyncAccepted(t, rec.Body)
+	// The second create should fail asynchronously due to alias collision.
+	failure2 := waitForRequestFailed(t, fs.eventProv, accepted2.RequestID, 5*time.Second)
+	if failure2 == nil {
+		t.Fatal("expected second create to fail due to alias collision")
 	}
 }
 
@@ -2156,9 +2311,10 @@ func TestHandleProviderSessionCreateWithMessageUsesProviderDefaultNudge(t *testi
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
 	}
 
-	result := waitForRequestResult(t, fs.eventProv, "session.create", 5*time.Second)
-	if result.Status != "succeeded" {
-		t.Fatalf("request.result status = %q, want succeeded; error: %s", result.Status, result.ErrorMessage)
+	accepted := decodeAsyncAccepted(t, w.Body)
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
 	}
 }
 
@@ -2245,13 +2401,13 @@ func TestHumaCreateProviderSessionUsesACPTransportCommand(t *testing.T) {
 	if out.Body.RequestID == "" {
 		t.Fatal("request_id is empty")
 	}
-	result := waitForRequestResult(t, fs.eventProv, "session.create", 5*time.Second)
-	if result.Status != "succeeded" {
-		t.Fatalf("request.result status = %q, want succeeded; error: %s", result.Status, result.ErrorMessage)
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, out.Body.RequestID)
+	if success == nil {
+		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
 	}
-	bead, err := fs.cityBeadStore.Get(result.ResourceID)
+	bead, err := fs.cityBeadStore.Get(success.Session.ID)
 	if err != nil {
-		t.Fatalf("Get(%s): %v", result.ResourceID, err)
+		t.Fatalf("Get(%s): %v", success.Session.ID, err)
 	}
 	sessionName := bead.Metadata["session_name"]
 	start := acpSP.LastStartConfig(sessionName)
@@ -2449,9 +2605,24 @@ func TestHandleProviderSessionCreateWithMessageRollsBackOnDeliveryFailure(t *tes
 		t.Fatalf("create status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
 
-	result := waitForRequestResult(t, fs.eventProv, "session.create", 5*time.Second)
-	if result.Status != "succeeded" {
-		t.Fatalf("request.result status = %q, want succeeded (message delivery failure is logged, not fatal)", result.Status)
+	accepted := decodeAsyncAccepted(t, rec.Body)
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if success != nil {
+		t.Fatalf("session create succeeded unexpectedly: %+v", success)
+	}
+	if failure == nil {
+		t.Fatal("expected session create failure event")
+	}
+	if failure.ErrorCode != "message_delivery_failed" {
+		t.Fatalf("failure error_code = %q, want message_delivery_failed; message=%s", failure.ErrorCode, failure.ErrorMessage)
+	}
+	mgr := session.NewManager(fs.cityBeadStore, provider)
+	sessions, err := mgr.List("", "")
+	if err != nil {
+		t.Fatalf("list sessions after rollback: %v", err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("got %d sessions after rollback, want 0: %+v", len(sessions), sessions)
 	}
 }
 
@@ -2470,10 +2641,12 @@ func TestHandleSessionCreatePersistsAlias(t *testing.T) {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
 	}
 
-	var resp sessionResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	accepted := decodeAsyncAccepted(t, w.Body)
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
 	}
+	resp := success.Session
 	if resp.Alias != "sky" {
 		t.Fatalf("Alias = %q, want sky", resp.Alias)
 	}
@@ -2493,8 +2666,16 @@ func TestHandleSessionCreateRejectsReservedQualifiedAlias(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusConflict {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusConflict, w.Body.String())
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+	var accepted asyncAcceptedBody
+	if err := json.NewDecoder(w.Body).Decode(&accepted); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	_, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if failure == nil {
+		t.Fatal("expected session create to fail for reserved alias")
 	}
 }
 
@@ -2512,9 +2693,10 @@ func TestHandleProviderSessionCreateRejectsReservedQualifiedAlias(t *testing.T) 
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
 	}
 
-	result := waitForRequestResult(t, fs.eventProv, "session.create", 5*time.Second)
-	if result.Status != "failed" {
-		t.Fatalf("request.result status = %q, want failed for reserved alias", result.Status)
+	accepted := decodeAsyncAccepted(t, w.Body)
+	_, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if failure == nil {
+		t.Fatalf("expected session create to fail for reserved alias, got success")
 	}
 }
 
@@ -2584,13 +2766,30 @@ func TestHandleSessionCreateRejectsDuplicateAlias(t *testing.T) {
 	if firstW.Code != http.StatusAccepted {
 		t.Fatalf("first create status %d, want %d; body: %s", firstW.Code, http.StatusAccepted, firstW.Body.String())
 	}
+	var accepted asyncAcceptedBody
+	if err := json.NewDecoder(firstW.Body).Decode(&accepted); err != nil {
+		t.Fatalf("decode first 202: %v", err)
+	}
+	// Wait for the first create to finish so the alias is persisted.
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("first create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
+	}
 
 	second := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"agent","name":"myrig/worker","alias":"sky"}`))
 	secondW := httptest.NewRecorder()
 	h.ServeHTTP(secondW, second)
 
-	if secondW.Code != http.StatusConflict {
-		t.Fatalf("got status %d, want %d; body: %s", secondW.Code, http.StatusConflict, secondW.Body.String())
+	if secondW.Code != http.StatusAccepted {
+		t.Fatalf("second create status = %d, want %d; body: %s", secondW.Code, http.StatusAccepted, secondW.Body.String())
+	}
+	var accepted2 asyncAcceptedBody
+	if err := json.NewDecoder(secondW.Body).Decode(&accepted2); err != nil {
+		t.Fatalf("decode second 202: %v", err)
+	}
+	failure2 := waitForRequestFailed(t, fs.eventProv, accepted2.RequestID, 5*time.Second)
+	if failure2 == nil {
+		t.Fatal("expected second create to fail due to duplicate alias")
 	}
 }
 
@@ -2608,10 +2807,18 @@ func TestHandleSessionCreateCanonicalizesBareTemplate(t *testing.T) {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
 	}
 
-	var resp sessionResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+	var accepted asyncAcceptedBody
+	if err := json.NewDecoder(w.Body).Decode(&accepted); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
+	if accepted.RequestID == "" {
+		t.Fatal("missing request_id")
+	}
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
+	}
+	resp := success.Session
 	if resp.Template != "myrig/worker" {
 		t.Errorf("Template = %q, want %q", resp.Template, "myrig/worker")
 	}
@@ -2675,12 +2882,13 @@ func TestHandleSessionCreateDoesNotApplyProviderDefaultsToAgentCommand(t *testin
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
 	}
 
-	var resp sessionResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	accepted := decodeAsyncAccepted(t, w.Body)
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
 	}
 
-	b, err := fs.cityBeadStore.Get(resp.ID)
+	b, err := fs.cityBeadStore.Get(success.Session.ID)
 	if err != nil {
 		t.Fatalf("get bead: %v", err)
 	}
@@ -2708,12 +2916,13 @@ func TestHandleSessionCreateStoresExplicitOverridesWithoutCommandRewrite(t *test
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
 	}
 
-	var resp sessionResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	accepted := decodeAsyncAccepted(t, w.Body)
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
 	}
 
-	b, err := fs.cityBeadStore.Get(resp.ID)
+	b, err := fs.cityBeadStore.Get(success.Session.ID)
 	if err != nil {
 		t.Fatalf("get bead: %v", err)
 	}
@@ -2752,12 +2961,13 @@ func TestHandleSessionCreatePersistsExplicitOptionsInTemplateOverrides(t *testin
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
 	}
 
-	var resp sessionResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	accepted := decodeAsyncAccepted(t, w.Body)
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
 	}
 
-	b, err := fs.cityBeadStore.Get(resp.ID)
+	b, err := fs.cityBeadStore.Get(success.Session.ID)
 	if err != nil {
 		t.Fatalf("get bead: %v", err)
 	}
@@ -2799,12 +3009,13 @@ func TestHandleSessionCreatePreservesInitialMessageWithOptions(t *testing.T) {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
 	}
 
-	var resp sessionResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	accepted := decodeAsyncAccepted(t, w.Body)
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
 	}
 
-	b, err := fs.cityBeadStore.Get(resp.ID)
+	b, err := fs.cityBeadStore.Get(success.Session.ID)
 	if err != nil {
 		t.Fatalf("get bead: %v", err)
 	}
@@ -2836,14 +3047,18 @@ func TestHandleSessionMessageMaterializedNamedSessionUsesLaunchCommandDefaults(t
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
-
-	result := waitForRequestResult(t, fs.eventProv, "session.message", 5*time.Second)
-	if result.Status != "succeeded" {
-		t.Fatalf("request.result status = %q, want succeeded; error: %s", result.Status, result.ErrorMessage)
+	var resp asyncAcceptedBody
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
 	}
-	id := result.ResourceID
+
+	success, failure := waitForSessionMessageResult(t, fs.eventProv, resp.RequestID)
+	if success == nil {
+		t.Fatalf("session message failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
+	}
+	id := success.SessionID
 	if id == "" {
-		t.Fatal("request.result missing resource_id")
+		t.Fatal("session message event missing session_id")
 	}
 
 	bead, err := fs.cityBeadStore.Get(id)
@@ -2902,15 +3117,21 @@ func TestHandleSessionMessageMaterializesNamedSessionAsync(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
-	var resp map[string]string
+	var resp asyncAcceptedBody
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp["id"] == "" {
-		t.Fatal("response missing session id")
+	if resp.RequestID == "" {
+		t.Fatal("response missing request_id")
 	}
 
-	waitForRequestResult(t, fs.eventProv, "session.message", 5*time.Second)
+	success, failure := waitForSessionMessageResult(t, fs.eventProv, resp.RequestID)
+	if success == nil {
+		t.Fatalf("session message failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
+	}
+	if success.SessionID == "" {
+		t.Fatal("event missing session_id")
+	}
 }
 
 func TestHandleSessionMessageMaterializesBoundNamedSessionUsingQualifiedIdentity(t *testing.T) {
@@ -2936,13 +3157,14 @@ func TestHandleSessionMessageMaterializesBoundNamedSessionUsingQualifiedIdentity
 		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
 
-	result := waitForRequestResult(t, fs.eventProv, "session.message", 5*time.Second)
-	if result.Status != "succeeded" {
-		t.Fatalf("request.result status = %q, want succeeded; error: %s", result.Status, result.ErrorMessage)
+	accepted := decodeAsyncAccepted(t, rec.Body)
+	success, failure := waitForSessionMessageResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session message failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
 	}
-	id := result.ResourceID
+	id := success.SessionID
 	if id == "" {
-		t.Fatal("request.result missing resource_id")
+		t.Fatal("session message event missing session_id")
 	}
 	b, err := fs.cityBeadStore.Get(id)
 	if err != nil {
@@ -3686,9 +3908,10 @@ func TestHandleSessionMessageRejectsPendingInteraction(t *testing.T) {
 		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
 
-	result := waitForRequestResult(t, fs.eventProv, "session.message", 5*time.Second)
-	if result.Status != "failed" {
-		t.Fatalf("request.result status = %q, want failed (pending interaction should reject)", result.Status)
+	accepted := decodeAsyncAccepted(t, rec.Body)
+	_, failure := waitForSessionMessageResult(t, fs.eventProv, accepted.RequestID)
+	if failure == nil {
+		t.Fatalf("expected session message to fail (pending interaction should reject), got success")
 	}
 }
 
@@ -3715,9 +3938,10 @@ func TestHandleSessionMessageRejectsClosedNamedSession(t *testing.T) {
 		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
 
-	result := waitForRequestResult(t, fs.eventProv, "session.message", 5*time.Second)
-	if result.Status != "failed" {
-		t.Fatalf("request.result status = %q, want failed for closed session", result.Status)
+	accepted := decodeAsyncAccepted(t, rec.Body)
+	_, failure := waitForSessionMessageResult(t, fs.eventProv, accepted.RequestID)
+	if failure == nil {
+		t.Fatalf("expected session message to fail for closed session, got success")
 	}
 }
 
@@ -4919,17 +5143,10 @@ func TestHandleSessionMessageQueuesWhenSuspended(t *testing.T) {
 		t.Fatalf("suspended message status = %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
 	}
 
-	var body struct {
-		ID     string `json:"id"`
-		Status string `json:"status"`
-	}
-	json.NewDecoder(w.Body).Decode(&body) //nolint:errcheck
-	if body.Status != "accepted" {
-		t.Errorf("response status = %q, want %q", body.Status, "accepted")
-	}
+	body := decodeAsyncAccepted(t, w.Body)
 
-	result := waitForRequestResult(t, fs.eventProv, "session.message", 5*time.Second)
-	if result.Status != "succeeded" {
-		t.Fatalf("request.result status = %q, want succeeded", result.Status)
+	success, failure := waitForSessionMessageResult(t, fs.eventProv, body.RequestID)
+	if success == nil {
+		t.Fatalf("session message failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
 	}
 }

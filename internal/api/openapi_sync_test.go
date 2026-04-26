@@ -95,8 +95,8 @@ func TestEventsSchemaPublished(t *testing.T) {
 	}
 
 	wantRefs := []string{
-		"openapi.json#/components/schemas/WireEvent",
-		"openapi.json#/components/schemas/WireTaggedEvent",
+		"openapi.json#/components/schemas/TypedEventStreamEnvelope",
+		"openapi.json#/components/schemas/TypedTaggedEventStreamEnvelope",
 		"openapi.json#/components/schemas/EventStreamEnvelope",
 		"openapi.json#/components/schemas/TaggedEventStreamEnvelope",
 	}
@@ -125,11 +125,47 @@ func TestEventsSchemaPublished(t *testing.T) {
 	if err := json.Unmarshal(openAPIData, &openAPI); err != nil {
 		t.Fatalf("parse openapi.json: %v", err)
 	}
-	for _, component := range []string{"WireEvent", "WireTaggedEvent", "EventStreamEnvelope", "TaggedEventStreamEnvelope"} {
+	for _, component := range []string{"TypedEventStreamEnvelope", "TypedTaggedEventStreamEnvelope", "EventStreamEnvelope", "TaggedEventStreamEnvelope"} {
 		if _, ok := openAPI.Components.Schemas[component]; !ok {
 			t.Errorf("events schema references missing OpenAPI component %q", component)
 		}
 	}
+}
+
+func TestAsyncAcceptedRequestIDDescriptionsNameTypedResultEvents(t *testing.T) {
+	sm := api.NewSupervisorMux(emptyTestResolver{}, nil, false, "", time.Time{})
+	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
+	rec := httptest.NewRecorder()
+	sm.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /openapi.json returned %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var openAPI struct {
+		Components struct {
+			Schemas map[string]struct {
+				Properties map[string]struct {
+					Description string `json:"description"`
+				} `json:"properties"`
+			} `json:"schemas"`
+		} `json:"components"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &openAPI); err != nil {
+		t.Fatalf("parse openapi: %v", err)
+	}
+
+	assertDescription := func(schema, want string) {
+		t.Helper()
+		got := openAPI.Components.Schemas[schema].Properties["request_id"].Description
+		if !bytes.Contains([]byte(got), []byte(want)) {
+			t.Fatalf("%s request_id description = %q, want to mention %q", schema, got, want)
+		}
+	}
+	assertDescription("AsyncAcceptedBody", "request.result.session.create")
+	assertDescription("AsyncAcceptedBody", "request.result.session.message")
+	assertDescription("AsyncAcceptedBody", "request.result.session.submit")
+	assertDescription("AsyncAcceptedResponse", "request.result.city.create")
+	assertDescription("AsyncAcceptedResponse", "request.result.city.unregister")
 }
 
 func TestOrderResponseSchemaKeepsMigrationFieldsOptional(t *testing.T) {

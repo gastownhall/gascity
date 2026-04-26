@@ -318,13 +318,28 @@ func TestBdStoreClose(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd close --json bd-abc-123`: {
+		`bd close --force --json bd-abc-123`: {
 			out: []byte(`[{"id":"bd-abc-123","title":"test","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`),
 		},
 	})
 	s := beads.NewBdStore("/city", runner)
 	if err := s.Close("bd-abc-123"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestBdStoreReopenUsesReopenCommand(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd reopen --json bd-abc-123`: {
+			out: []byte(`{"id":"bd-abc-123","status":"open"}`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	if err := s.Reopen("bd-abc-123"); err != nil {
+		t.Fatalf("Reopen() error = %v", err)
 	}
 }
 
@@ -431,7 +446,7 @@ func TestBdStoreCloseAllReturnsMetadataWriteFailure(t *testing.T) {
 		`bd update --json bd-abc-123 --set-metadata source=wave1`: {
 			err: metadataErr,
 		},
-		`bd close --json bd-abc-123`: {
+		`bd close --force --json bd-abc-123`: {
 			out: []byte(`[{"id":"bd-abc-123","title":"test","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`),
 		},
 	})
@@ -459,13 +474,13 @@ func TestBdStoreCloseAllReturnsPartialCountAndErrorOnFallbackFailure(t *testing.
 		out []byte
 		err error
 	}{
-		`bd close --json bd-1 bd-2`: {
+		`bd close --force --json bd-1 bd-2`: {
 			err: batchErr,
 		},
-		`bd close --json bd-1`: {
+		`bd close --force --json bd-1`: {
 			out: []byte(`[{"id":"bd-1","title":"one","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`),
 		},
-		`bd close --json bd-2`: {
+		`bd close --force --json bd-2`: {
 			err: individualErr,
 		},
 		`bd show --json bd-2`: {
@@ -498,13 +513,13 @@ func TestBdStoreCloseAllFallbackSuccessReturnsNil(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd close --json bd-1 bd-2`: {
+		`bd close --force --json bd-1 bd-2`: {
 			err: batchErr,
 		},
-		`bd close --json bd-1`: {
+		`bd close --force --json bd-1`: {
 			out: []byte(`[{"id":"bd-1","title":"one","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`),
 		},
-		`bd close --json bd-2`: {
+		`bd close --force --json bd-2`: {
 			out: []byte(`[{"id":"bd-2","title":"two","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`),
 		},
 	})

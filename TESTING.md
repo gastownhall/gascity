@@ -168,6 +168,49 @@ listener bootstrap, socket paths — wires end-to-end through a real
 binary. Run with `make test-integration-huma` or
 `go test -tags integration -run TestHumaBinary ./test/integration/`.
 
+**Supervisor API contract tests** (`test/integration/gc_live_contract_test.go`
+and focused cases in `test/integration/huma_binary_test.go`): build the real
+`gc` binary, start `gc supervisor run` against an isolated `GC_HOME` and
+runtime dir, then exercise the HTTP API as a client would. These tests are
+not handler unit tests and are not CLI tutorial tests; they prove that the
+published API contract survives the full control plane: Huma registration,
+OpenAPI generation, supervisor routing, city lifecycle, event publication,
+storage providers, and asynchronous request completion.
+
+The live API contract test has a few load-bearing rules:
+
+- Validate responses against the supervisor's live `/openapi.json`. If the
+  server says a route returns a schema, the integration test should prove the
+  real response matches that schema.
+- Exercise API mutations through HTTP only. Set `X-GC-Request` for mutating
+  calls and observe durable results through API reads or events, not by
+  reaching into internal Go state.
+- Treat asynchronous operations as two-step contracts: the HTTP call returns
+  quickly with `202 Accepted` and a `request_id`, then a `request.result.*`
+  or `request.failed` event appears. Focused Huma binary tests should use
+  `/v0/events/stream` for the critical async paths; broader coverage may poll
+  event-list endpoints when the thing being tested is the API surface rather
+  than SSE framing.
+- Prefer self-provisioned fixtures. The test should create its own city, rig,
+  provider/agent/session, beads, mail, formulas, convoys, and order-history
+  fixtures where practical, then clean them up through the API.
+- Keep the test hermetic. It must not depend on the developer's machine-wide
+  supervisor, personal `~/.gc`, default tmux server, or a pre-existing city.
+  Use isolated `GC_HOME`, runtime dir, ports, and process cleanup.
+- Lock compatibility surfaces explicitly. If generated clients rely on an
+  operation ID, method, path template, status code, or response schema, add an
+  assertion for that contract rather than relying only on incidental behavior.
+- Keep generated-read sweeps read-only. A sweep over OpenAPI GET routes is
+  useful for schema and routing drift, but any GET route with unbound identity
+  parameters still needs an explicit fixture-backed test.
+
+Use supervisor API contract tests for externally visible behavior that only
+exists when the real supervisor process is running: async city/session request
+results, event streams, OpenAPI/response agreement, cross-route lifecycle
+coherence, and end-to-end provider wiring. Do not put low-level edge cases
+here. Corrupt files, exact parser failures, request validation branches, and
+single handler error cases belong in unit tests next to the implementation.
+
 #### Live worker inference tests (`//go:build acceptance_c`)
 
 `test/acceptance/worker_inference` runs live Claude/Codex/Gemini CLI

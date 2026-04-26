@@ -369,13 +369,17 @@ func mergeWorkflowDeps(primary, extra []workflowDepResponse) []workflowDepRespon
 	return primary
 }
 
-// beadPrefix extracts the alphabetic prefix from a bead ID (e.g., "ga" from "ga-5b8i").
+// beadPrefix extracts the configured prefix from a bead ID (e.g., "ga" from
+// "ga-5b8i"). bd prefixes may contain digits after the first character.
 func beadPrefix(id string) string {
 	for i, c := range id {
 		if c == '-' {
 			return id[:i]
 		}
 		if c < 'a' || c > 'z' {
+			if i > 0 && c >= '0' && c <= '9' {
+				continue
+			}
 			return ""
 		}
 	}

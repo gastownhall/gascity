@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
@@ -19,30 +18,111 @@ func newRequestID() (string, error) {
 	return "req-" + hex.EncodeToString(b), nil
 }
 
-// emitRequestResult records a request.result event to the city's event
-// provider.
-func (s *Server) emitRequestResult(_ beads.Store, requestID, operation, status, resourceID, errorCode, errorMessage string) {
-	payload, err := json.Marshal(RequestResultPayload{
-		RequestID:    requestID,
-		Operation:    operation,
-		Status:       status,
-		ResourceID:   resourceID,
-		ErrorCode:    errorCode,
-		ErrorMessage: errorMessage,
-	})
+// EmitTypedEvent records a typed async result event to the given recorder.
+func EmitTypedEvent(rec events.Recorder, eventType, subject string, payload events.Payload) {
+	raw, err := json.Marshal(payload)
 	if err != nil {
-		log.Printf("api: marshal request.result: %v", err)
-		return
-	}
-	rec := s.state.EventProvider()
-	if rec == nil {
-		log.Printf("api: no event provider for request.result %s", requestID)
+		log.Printf("api: marshal %s: %v", eventType, err)
 		return
 	}
 	rec.Record(events.Event{
-		Type:    events.RequestResult,
+		Type:    eventType,
 		Actor:   "api",
-		Subject: resourceID,
-		Payload: payload,
+		Subject: subject,
+		Payload: raw,
 	})
+}
+
+// EmitRequestFailed records a request.failed event to the given recorder.
+func EmitRequestFailed(rec events.Recorder, requestID, operation, errorCode, errorMessage string) {
+	EmitTypedEvent(rec, events.RequestFailed, "", RequestFailedPayload{
+		RequestID:    requestID,
+		Operation:    operation,
+		ErrorCode:    errorCode,
+		ErrorMessage: errorMessage,
+	})
+}
+
+func (s *Server) emitAsyncResult(eventType, subject string, payload events.Payload) {
+	rec := s.state.EventProvider()
+	if rec == nil {
+		log.Printf("api: no event provider for %s result %s", eventType, requestIDFromPayload(payload))
+		return
+	}
+	EmitTypedEvent(rec, eventType, subject, payload)
+}
+
+func (s *Server) emitRequestFailed(requestID, operation, errorCode, errorMessage string) {
+	s.emitAsyncResult(events.RequestFailed, "", RequestFailedPayload{
+		RequestID:    requestID,
+		Operation:    operation,
+		ErrorCode:    errorCode,
+		ErrorMessage: errorMessage,
+	})
+}
+
+func (s *Server) recoverAsRequestFailed(requestID, operation string) {
+	if r := recover(); r != nil {
+		s.emitRequestFailed(requestID, operation, "internal_error", fmt.Sprintf("panic: %v", r))
+	}
+}
+
+func requestIDFromPayload(payload events.Payload) string {
+	switch p := payload.(type) {
+	case CityCreateSucceededPayload:
+		return p.RequestID
+	case CityUnregisterSucceededPayload:
+		return p.RequestID
+	case SessionCreateSucceededPayload:
+		return p.RequestID
+	case SessionMessageSucceededPayload:
+		return p.RequestID
+	case SessionSubmitSucceededPayload:
+		return p.RequestID
+	case RequestFailedPayload:
+		return p.RequestID
+	default:
+		return ""
+	}
+}
+
+// emitSessionCreateSucceeded records a request.result.session.create event.
+func (s *Server) emitSessionCreateSucceeded(requestID string, resp sessionResponse) {
+	s.emitAsyncResult(events.RequestResultSessionCreate, resp.ID, SessionCreateSucceededPayload{
+		RequestID: requestID,
+		Session:   resp,
+	})
+}
+
+// emitSessionCreateFailed records a request.failed event for session.create.
+func (s *Server) emitSessionCreateFailed(requestID, errorCode, errorMessage string) {
+	s.emitRequestFailed(requestID, RequestOperationSessionCreate, errorCode, errorMessage)
+}
+
+// emitSessionMessageSucceeded records a request.result.session.message event.
+func (s *Server) emitSessionMessageSucceeded(requestID, sessionID string) {
+	s.emitAsyncResult(events.RequestResultSessionMessage, sessionID, SessionMessageSucceededPayload{
+		RequestID: requestID,
+		SessionID: sessionID,
+	})
+}
+
+// emitSessionMessageFailed records a request.failed event for session.message.
+func (s *Server) emitSessionMessageFailed(requestID, errorCode, errorMessage string) {
+	s.emitRequestFailed(requestID, RequestOperationSessionMessage, errorCode, errorMessage)
+}
+
+// emitSessionSubmitSucceeded records a request.result.session.submit event.
+func (s *Server) emitSessionSubmitSucceeded(requestID, sessionID string, queued bool, intent string) {
+	s.emitAsyncResult(events.RequestResultSessionSubmit, sessionID, SessionSubmitSucceededPayload{
+		RequestID: requestID,
+		SessionID: sessionID,
+		Queued:    queued,
+		Intent:    intent,
+	})
+}
+
+// emitSessionSubmitFailed records a request.failed event for session.submit.
+func (s *Server) emitSessionSubmitFailed(requestID, errorCode, errorMessage string) {
+	s.emitRequestFailed(requestID, RequestOperationSessionSubmit, errorCode, errorMessage)
 }

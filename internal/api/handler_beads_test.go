@@ -22,6 +22,7 @@ type prefixedAliasStore struct {
 	getCalls      int
 	updateCalls   int
 	closeCalls    int
+	reopenCalls   int
 	childrenCalls int
 }
 
@@ -138,6 +139,11 @@ func (s *prefixedAliasStore) Update(id string, opts beads.UpdateOpts) error {
 func (s *prefixedAliasStore) Close(id string) error {
 	s.closeCalls++
 	return s.base.Close(s.aliasToBase(id))
+}
+
+func (s *prefixedAliasStore) Reopen(id string) error {
+	s.reopenCalls++
+	return s.base.Reopen(s.aliasToBase(id))
 }
 
 func (s *prefixedAliasStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
@@ -316,6 +322,12 @@ func configureBeadRouteState(t *testing.T) (*fakeState, *prefixedAliasStore, *pr
 	}
 
 	return state, alphaStore, betaStore
+}
+
+func TestBeadPrefixAllowsAlphanumericPrefixes(t *testing.T) {
+	if got := beadPrefix("mcdi3bsyeryols-yyn"); got != "mcdi3bsyeryols" {
+		t.Fatalf("beadPrefix() = %q, want alphanumeric prefix", got)
+	}
 }
 
 func TestBeadCRUD(t *testing.T) {
@@ -601,6 +613,27 @@ func TestBeadUpdate(t *testing.T) {
 	}
 	if len(got.Labels) != 1 || got.Labels[0] != "new-label" {
 		t.Errorf("Labels = %v, want [new-label]", got.Labels)
+	}
+}
+
+func TestBeadUpdateStatusAndMetadata(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	b, _ := store.Create(beads.Bead{Title: "Test"})
+	h := newTestCityHandler(t, state)
+
+	body := `{"status":"in_progress","metadata":{"verified":"true"}}`
+	req := newPostRequest(cityURL(state, "/bead/")+b.ID+"/update", bytes.NewBufferString(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	got, _ := store.Get(b.ID)
+	if got.Status != "in_progress" || got.Metadata["verified"] != "true" {
+		t.Fatalf("bead = %+v, want in_progress plus metadata", got)
 	}
 }
 
@@ -942,7 +975,8 @@ func TestBeadUpdateNullPriorityRejected(t *testing.T) {
 
 func TestBeadReopen(t *testing.T) {
 	state := newFakeState(t)
-	store := state.stores["myrig"]
+	store := newPrefixedAliasStore("myrig-")
+	state.stores["myrig"] = store
 	b, _ := store.Create(beads.Bead{Title: "Closed task"})
 	store.Close(b.ID) //nolint:errcheck
 	h := newTestCityHandler(t, state)
@@ -960,6 +994,12 @@ func TestBeadReopen(t *testing.T) {
 	got, _ := store.Get(b.ID)
 	if got.Status != "open" {
 		t.Errorf("Status = %q, want %q", got.Status, "open")
+	}
+	if store.reopenCalls != 1 {
+		t.Fatalf("reopen calls = %d, want 1", store.reopenCalls)
+	}
+	if store.updateCalls != 0 {
+		t.Fatalf("update calls = %d, want 0; reopen must not use generic update", store.updateCalls)
 	}
 }
 

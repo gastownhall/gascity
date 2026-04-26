@@ -42,16 +42,19 @@ const (
 	ControllerStopped  = "controller.stopped"
 	CitySuspended      = "city.suspended"
 	CityResumed        = "city.resumed"
-	RequestResult      = "request.result"
+	// Typed async request result events. 5 success types (one per
+	// operation, fully typed payload) + 1 shared failure type.
+	RequestResultCityCreate     = "request.result.city.create"
+	RequestResultCityUnregister = "request.result.city.unregister"
+	RequestResultSessionCreate  = "request.result.session.create"
+	RequestResultSessionMessage = "request.result.session.message"
+	RequestResultSessionSubmit  = "request.result.session.submit"
+	RequestFailed               = "request.failed"
 
-	// Deprecated: being migrated to RequestResult. Remove once all
-	// emission sites are updated.
+	// Non-terminal city lifecycle events recorded in the per-city
+	// event log during init/unregister for diagnostics.
 	CityCreated             = "city.created"
-	CityReady               = "city.ready"
-	CityInitFailed          = "city.init_failed"
 	CityUnregisterRequested = "city.unregister_requested"
-	CityUnregistered        = "city.unregistered"
-	CityUnregisterFailed    = "city.unregister_failed"
 	OrderFired              = "order.fired"
 	OrderCompleted          = "order.completed"
 	OrderFailed             = "order.failed"
@@ -82,9 +85,10 @@ var KnownEventTypes = []string{
 	ConvoyCreated, ConvoyClosed,
 	ControllerStarted, ControllerStopped,
 	CitySuspended, CityResumed,
-	RequestResult,
-	CityCreated, CityReady, CityInitFailed,
-	CityUnregisterRequested, CityUnregistered, CityUnregisterFailed,
+	RequestResultCityCreate, RequestResultCityUnregister,
+	RequestResultSessionCreate, RequestResultSessionMessage,
+	RequestResultSessionSubmit, RequestFailed,
+	CityCreated, CityUnregisterRequested,
 	OrderFired, OrderCompleted, OrderFailed,
 	ProviderSwapped, WorkerOperation,
 	ExtMsgBound, ExtMsgUnbound, ExtMsgGroupCreated,

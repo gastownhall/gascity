@@ -58,11 +58,24 @@ type WireEvent struct {
 	Payload EventPayloadUnion `json:"payload,omitempty"`
 }
 
+// Schema makes list endpoints use the same envelope-discriminated schema as
+// the city event stream. Runtime JSON stays the struct shape above; the
+// OpenAPI contract tells clients to select payload type from envelope.type.
+func (WireEvent) Schema(r huma.Registry) *huma.Schema {
+	return typedEventStreamEnvelopeSchema{}.Schema(r)
+}
+
 // WireTaggedEvent is the supervisor-scope list wire shape for
 // GET /v0/events, carrying the City the event originated from.
 type WireTaggedEvent struct {
 	WireEvent
 	City string `json:"city"`
+}
+
+// Schema makes supervisor event lists use the same envelope-discriminated
+// schema as the supervisor event stream.
+func (WireTaggedEvent) Schema(r huma.Registry) *huma.Schema {
+	return typedTaggedEventStreamEnvelopeSchema{}.Schema(r)
 }
 
 // toWireEvent decodes the bus's opaque Payload into the registered

@@ -61,7 +61,7 @@ type SessionCreateInput struct {
 // asyncAcceptedBody is the response body for all async 202 responses.
 // Contains only request_id for correlation — no domain data.
 type asyncAcceptedBody struct {
-	RequestID string `json:"request_id" doc:"Correlation ID. Watch /v0/events/stream for a request.result event with this request_id."`
+	RequestID string `json:"request_id" doc:"Correlation ID. Watch the city event stream for request.result.session.create, request.result.session.message, request.result.session.submit, or request.failed with this request_id."`
 }
 
 // SessionCreateOutput is the Huma output for POST /v0/sessions.

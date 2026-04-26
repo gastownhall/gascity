@@ -1,9 +1,13 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -34,6 +38,152 @@ func TestClientSuspendCity(t *testing.T) {
 	}
 	if gotBody["suspended"] != true {
 		t.Errorf("body suspended = %v, want true", gotBody["suspended"])
+	}
+}
+
+func TestClientWaitForEventRequestsReplayCursorForCityStream(t *testing.T) {
+	seen := make(chan url.Values, 1)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/city/alpha/events/stream" {
+			t.Fatalf("path = %q, want /v0/city/alpha/events/stream", r.URL.Path)
+		}
+		seen <- r.URL.Query()
+		w.Header().Set("Content-Type", "text/event-stream")
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	_, _ = c.waitForEvent(t.Context(), "req-never", "request.result.session.message", RequestOperationSessionMessage)
+
+	query := <-seen
+	if got := query.Get("after_seq"); got != "0" {
+		t.Fatalf("after_seq = %q, want 0", got)
+	}
+}
+
+func TestClientWaitForEventRequestsReplayCursorForSupervisorStream(t *testing.T) {
+	seen := make(chan url.Values, 1)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/events/stream" {
+			t.Fatalf("path = %q, want /v0/events/stream", r.URL.Path)
+		}
+		seen <- r.URL.Query()
+		w.Header().Set("Content-Type", "text/event-stream")
+	}))
+	defer ts.Close()
+
+	c := NewClient(ts.URL)
+	_, _ = c.waitForEvent(t.Context(), "req-never", "request.result.city.create", RequestOperationCityCreate)
+
+	query := <-seen
+	if got := query.Get("after_cursor"); got != "0" {
+		t.Fatalf("after_cursor = %q, want 0", got)
+	}
+}
+
+func TestClientWaitForEventReportsNonOKSSEStatus(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"detail":"stream unavailable"}`, http.StatusServiceUnavailable)
+	}))
+	defer ts.Close()
+
+	c := NewClient(ts.URL)
+	_, err := c.waitForEvent(t.Context(), "req-never", "request.result.city.create", RequestOperationCityCreate)
+	if err == nil {
+		t.Fatal("waitForEvent succeeded for non-OK SSE response")
+	}
+	if !strings.Contains(err.Error(), "503") || !strings.Contains(err.Error(), "stream unavailable") {
+		t.Fatalf("error = %q, want status and response detail", err.Error())
+	}
+}
+
+func TestClientWaitForEventReportsScannerError(t *testing.T) {
+	largePayload := strings.Repeat("x", 5*1024*1024)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: " + largePayload + "\n\n"))
+	}))
+	defer ts.Close()
+
+	c := NewClient(ts.URL)
+	_, err := c.waitForEvent(t.Context(), "req-never", "request.result.city.create", RequestOperationCityCreate)
+	if err == nil {
+		t.Fatal("waitForEvent succeeded after scanner failure")
+	}
+	if !strings.Contains(err.Error(), "SSE scan") {
+		t.Fatalf("error = %q, want scanner error context", err.Error())
+	}
+}
+
+func TestClientWaitForEventHandlesMultiLineDataFrames(t *testing.T) {
+	frame := "event: tagged_event\n" +
+		`data: {"type":"request.result.session.message","payload":` + "\n" +
+		`data: {"request_id":"req-1","session_id":"gc-1"}}` + "\n\n"
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(frame))
+	}))
+	defer ts.Close()
+
+	c := NewClient(ts.URL)
+	env, err := c.waitForEvent(t.Context(), "req-1", "request.result.session.message", RequestOperationSessionMessage)
+	if err != nil {
+		t.Fatalf("waitForEvent: %v", err)
+	}
+	if env.Type != "request.result.session.message" {
+		t.Fatalf("event type = %q, want request.result.session.message", env.Type)
+	}
+}
+
+func TestClientWaitForEventReportsMalformedMatchingSuccessPayload(t *testing.T) {
+	frame := `data: {"type":"request.result.session.message","payload":"not an object"}` + "\n\n"
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(frame))
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	_, err := c.waitForEvent(t.Context(), "req-1", "request.result.session.message", RequestOperationSessionMessage)
+	if err == nil {
+		t.Fatal("waitForEvent succeeded with malformed matching success payload")
+	}
+	if !strings.Contains(err.Error(), "decode request.result.session.message payload") {
+		t.Fatalf("error = %q, want malformed success payload context", err.Error())
+	}
+}
+
+func TestClientWaitForEventReportsMalformedRequestFailedPayload(t *testing.T) {
+	frame := `data: {"type":"request.failed","payload":"not an object"}` + "\n\n"
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(frame))
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	_, err := c.waitForEvent(t.Context(), "req-1", "request.result.session.message", RequestOperationSessionMessage)
+	if err == nil {
+		t.Fatal("waitForEvent succeeded with malformed request.failed payload")
+	}
+	if !strings.Contains(err.Error(), "decode request.failed payload") {
+		t.Fatalf("error = %q, want malformed failure payload context", err.Error())
+	}
+}
+
+func TestClientWaitForEventHonorsContextCancellation(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		<-r.Context().Done()
+	}))
+	defer ts.Close()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	c := NewClient(ts.URL)
+	_, err := c.waitForEvent(ctx, "req-never", "request.result.city.create", RequestOperationCityCreate)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
 	}
 }
 

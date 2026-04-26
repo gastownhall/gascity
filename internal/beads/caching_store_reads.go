@@ -152,6 +152,11 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 				refreshed = append(refreshed, cloneBead(current))
 			}
 			continue
+		case c.beadSeq[item.ID] == startSeq:
+			current, ok := c.beads[item.ID]
+			if ok && current.Status == "closed" && item.Status != "closed" {
+				continue
+			}
 		}
 		c.beads[item.ID] = cloneBead(item)
 		delete(c.dirty, item.ID)
@@ -226,6 +231,18 @@ func (c *CachingStore) ListOpen(status ...string) ([]Bead, error) {
 // Get returns a single bead by ID from the cache or backing store.
 func (c *CachingStore) Get(id string) (Bead, error) {
 	c.mu.RLock()
+	if _, deleted := c.deletedSeq[id]; deleted {
+		c.mu.RUnlock()
+		return Bead{}, ErrNotFound
+	}
+	if _, mutated := c.beadSeq[id]; mutated {
+		if _, dirty := c.dirty[id]; !dirty {
+			if b, ok := c.beads[id]; ok {
+				c.mu.RUnlock()
+				return cloneBead(b), nil
+			}
+		}
+	}
 	if c.state == cacheLive || c.state == cachePartial {
 		if _, ok := c.dirty[id]; ok {
 			startSeq := c.mutationSeq

@@ -143,7 +143,7 @@ export function invalidateForEventType(type: string): void {
     invalidate("status", "convoys");
     return;
   }
-  if (type.startsWith("city.") || type === "request.result") {
+  if (type.startsWith("city.") || type.startsWith("request.result.") || type === "request.failed") {
     invalidate("cities", "status", "supervisor");
     return;
   }

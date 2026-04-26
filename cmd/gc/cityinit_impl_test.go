@@ -99,7 +99,7 @@ func TestCityInitServiceScaffoldCreatesCityRegistersAndEmitsCreated(t *testing.T
 	if len(evts) != 1 {
 		t.Fatalf("city.created events = %d, want 1: %+v", len(evts), evts)
 	}
-	var payload api.CityCreatedPayload
+	var payload api.CityLifecyclePayload
 	if err := json.Unmarshal(evts[0].Payload, &payload); err != nil {
 		t.Fatalf("unmarshal city.created payload: %v", err)
 	}
@@ -326,7 +326,7 @@ func TestCityInitServiceUnregisterRemovesRegistryAndEmitsEvent(t *testing.T) {
 	if evts[0].Actor != "gc" || evts[0].Subject != "bright-lights" {
 		t.Fatalf("event actor/subject = %q/%q, want gc/bright-lights", evts[0].Actor, evts[0].Subject)
 	}
-	var payload api.CityUnregisterRequestedPayload
+	var payload api.CityLifecyclePayload
 	if err := json.Unmarshal(evts[0].Payload, &payload); err != nil {
 		t.Fatalf("unmarshal payload: %v", err)
 	}

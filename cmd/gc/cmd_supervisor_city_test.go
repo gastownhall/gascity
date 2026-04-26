@@ -1152,6 +1152,9 @@ func TestReconcileCitiesUnregisterEventUsesManagedCityName(t *testing.T) {
 	supRec := events.NewFake()
 	registry := newCityRegistry()
 	registry.SetSupervisorRecorder(supRec)
+	if err := registry.StorePendingRequestID(cityPath, "req-test-unregister"); err != nil {
+		t.Fatal(err)
+	}
 	registry.Add(cityPath, &managedCity{
 		name:    "effective-city",
 		started: true,
@@ -1168,21 +1171,50 @@ func TestReconcileCitiesUnregisterEventUsesManagedCityName(t *testing.T) {
 		t.Fatalf("recorded %d supervisor events, want 1", len(recorded))
 	}
 	got := recorded[0]
-	if got.Type != events.RequestResult {
-		t.Fatalf("event.Type = %q, want %q", got.Type, events.RequestResult)
+	if got.Type != events.RequestResultCityUnregister {
+		t.Fatalf("event.Type = %q, want %q", got.Type, events.RequestResultCityUnregister)
 	}
 	if got.Subject != "effective-city" {
 		t.Fatalf("event.Subject = %q, want effective-city", got.Subject)
 	}
-	var payload api.RequestResultPayload
+	var payload api.CityUnregisterSucceededPayload
 	if err := json.Unmarshal(got.Payload, &payload); err != nil {
 		t.Fatalf("json.Unmarshal(payload): %v", err)
 	}
-	if payload.Operation != "city.unregister" {
-		t.Fatalf("payload.Operation = %q, want city.unregister", payload.Operation)
+	if payload.Name != "effective-city" {
+		t.Fatalf("payload.Name = %q, want effective-city", payload.Name)
 	}
-	if payload.ResourceID != "effective-city" {
-		t.Fatalf("payload.ResourceID = %q, want effective-city", payload.ResourceID)
+	if payload.RequestID != "req-test-unregister" {
+		t.Fatalf("payload.RequestID = %q, want req-test-unregister", payload.RequestID)
+	}
+}
+
+func TestReconcileCitiesUnregisterSkipsRequestResultWithoutPendingRequestID(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+
+	cityPath := filepath.Join(t.TempDir(), "basename-city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	close(done)
+	supRec := events.NewFake()
+	registry := newCityRegistry()
+	registry.SetSupervisorRecorder(supRec)
+	registry.Add(cityPath, &managedCity{
+		name:    "effective-city",
+		started: true,
+		cancel:  func() {},
+		done:    done,
+	})
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	var stdout, stderr bytes.Buffer
+	reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+
+	if len(supRec.Events) != 0 {
+		t.Fatalf("recorded %d supervisor events without pending request_id, want 0: %#v", len(supRec.Events), supRec.Events)
 	}
 }
 
