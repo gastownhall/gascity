@@ -1072,6 +1072,51 @@ func TestClearWakeFailures(t *testing.T) {
 	}
 }
 
+// TestClearWakeFailures_NoopWhenCleared verifies the idempotency guard:
+// when wake_attempts and quarantined_until are already at their cleared
+// targets, clearWakeFailures must not write to the store. Without the
+// guard, every reconciler tick on a stable session emits a redundant
+// bd.update which self-pokes the reconciler via applyBeadEventToStores
+// — see #1205.
+func TestClearWakeFailures_NoopWhenCleared(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata map[string]string
+	}{
+		{
+			name: "explicitly cleared values",
+			metadata: map[string]string{
+				"wake_attempts":     "0",
+				"quarantined_until": "",
+			},
+		},
+		{
+			name:     "fields absent",
+			metadata: map[string]string{},
+		},
+		{
+			name: "wake_attempts absent, quarantined_until empty",
+			metadata: map[string]string{
+				"quarantined_until": "",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newTestStore()
+			session := makeBead("b1", tt.metadata)
+
+			clearWakeFailures(&session, store)
+
+			// Should not have written to store (no-op).
+			if _, ok := store.metadata["b1"]; ok {
+				t.Error("clearWakeFailures should be a no-op when values are already cleared")
+			}
+		})
+	}
+}
+
 func TestStableLongEnough(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}

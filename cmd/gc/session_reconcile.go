@@ -569,6 +569,12 @@ func recordWakeFailure(session *beads.Bead, store beads.Store, clk clock.Clock) 
 
 // clearWakeFailures resets crash counter and quarantine for a stable session.
 func clearWakeFailures(session *beads.Bead, store beads.Store) {
+	// Idempotent: writing here would form a self-poke loop via
+	// applyBeadEventToStores. See #1205. Mirrors clearChurn below.
+	wa := session.Metadata["wake_attempts"]
+	if (wa == "" || wa == "0") && session.Metadata["quarantined_until"] == "" {
+		return
+	}
 	batch := map[string]string{
 		"wake_attempts":     "0",
 		"quarantined_until": "",
