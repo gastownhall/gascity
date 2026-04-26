@@ -150,8 +150,34 @@ func installOverlayManaged(fs fsys.FS, workDir, provider string) error {
 			return fmt.Errorf("reading %s: %w", name, err)
 		}
 		dst := filepath.Join(workDir, filepath.FromSlash(rel))
-		return writeEmbeddedManaged(fs, dst, data, nil)
+		return writeEmbeddedManaged(fs, dst, data, overlayManagedNeedsUpgrade(provider, rel))
 	})
+}
+
+func overlayManagedNeedsUpgrade(provider, rel string) func([]byte) bool {
+	if provider == "pi" && rel == path.Join(".pi", "extensions", "gc-hooks.js") {
+		return piHookNeedsUpgrade
+	}
+	return nil
+}
+
+func piHookNeedsUpgrade(existing []byte) bool {
+	content := string(existing)
+	if !strings.Contains(content, "Gas City hooks for Pi Coding Agent") {
+		return false
+	}
+	for _, marker := range []string{
+		"module.exports = {",
+		`"session.created"`,
+		`"session.compacted"`,
+		`"session.deleted"`,
+		`"experimental.chat.system.transform"`,
+	} {
+		if strings.Contains(content, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // installClaude writes the runtime settings file (.gc/settings.json) in the
