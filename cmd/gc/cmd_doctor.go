@@ -212,6 +212,24 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	// Custom types check — city store.
 	d.Register(doctor.NewCustomTypesCheck(cityPath, "city"))
 
+	// Issue-prefix drift check — city store. Detects #1232: bd 1.0.3
+	// rejected `bd config set issue_prefix`, the lifecycle script
+	// swallowed the failure, and the resulting cities have a missing
+	// row that breaks every `bd create`.
+	if cfgErr == nil {
+		hqPrefix := config.EffectiveHQPrefix(cfg)
+		d.Register(doctor.NewIssuePrefixConfigCheck(
+			"city",
+			hqPrefix,
+			canonicalScopeDoltDatabase(cityPath, cityPath, hqPrefix),
+			"127.0.0.1",
+			currentManagedDoltPort(cityPath),
+			"root",
+			os.Getenv("GC_DOLT_PASSWORD"),
+			skipManagedDoltCheck,
+		))
+	}
+
 	// Per-rig checks. Skip suspended rigs — opening their bead store
 	// triggers bd auto-start of orphan Dolt servers (ga-wzk).
 	if cfgErr == nil {
@@ -229,6 +247,18 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 			d.Register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || os.Getenv("GC_DOLT") == "skip"))
 			// Custom types check — rig store.
 			d.Register(doctor.NewCustomTypesCheck(rig.Path, rig.Name))
+			// Issue-prefix drift check — rig store. See #1232.
+			rigPrefix := rig.EffectivePrefix()
+			d.Register(doctor.NewIssuePrefixConfigCheck(
+				rig.Name,
+				rigPrefix,
+				canonicalScopeDoltDatabase(cityPath, rig.Path, rigPrefix),
+				"127.0.0.1",
+				currentManagedDoltPort(cityPath),
+				"root",
+				os.Getenv("GC_DOLT_PASSWORD"),
+				!rigUsesManagedBdStoreContract(cityPath, rig) || os.Getenv("GC_DOLT") == "skip",
+			))
 		}
 	}
 

@@ -1613,6 +1613,78 @@ op_ensure_ready() {
     op_start
 }
 
+# set_issue_prefix_in_dolt_config writes the issue_prefix row into a Dolt
+# database's `config` table when `bd config set issue_prefix` is rejected
+# by the bd CLI.
+#
+# Background (#1232): bd 1.0.3+ refuses `bd config set issue_prefix` with
+# "issue_prefix is reserved for setup", but `bd create` reads the value
+# from the config table at runtime and fails with
+# "database not initialized: issue_prefix config is missing" when the row
+# is absent. The previous lifecycle script swallowed bd's rejection with
+# `2>/dev/null || true`, leaving the row missing and breaking every
+# downstream `bd create` (gc session attach, gc convoy create, gc sling,
+# gc rig add, order dispatch, etc.).
+#
+# This helper is the workaround. It tries the bd CLI first so that future
+# bd versions which re-allow the call continue to work, then falls back
+# to a direct SQL write through the same Dolt server bd would have used.
+# A SELECT verifies the row landed; failure dies loudly rather than
+# returning success with a missing row.
+#
+# Args: <dir> <dolt_database> <prefix>
+set_issue_prefix_in_dolt_config() {
+    local dir="$1"
+    local dolt_database="$2"
+    local prefix="$3"
+
+    if [ -z "$dir" ] || [ -z "$dolt_database" ] || [ -z "$prefix" ]; then
+        die "set_issue_prefix_in_dolt_config: missing arguments (dir=$dir db=$dolt_database prefix=$prefix)"
+    fi
+    if ! valid_sql_name "$dolt_database"; then
+        die "set_issue_prefix_in_dolt_config: invalid dolt database name: $dolt_database"
+    fi
+    if ! valid_sql_name "$prefix"; then
+        die "set_issue_prefix_in_dolt_config: invalid beads prefix: $prefix"
+    fi
+
+    # Preferred path: bd CLI. If a future bd release lifts the reserved-key
+    # restriction this works without a fallback. Output is captured so the
+    # rejection message doesn't pollute stderr on the common (rejected)
+    # path. The `if` form is used (rather than capture-then-check $?) so a
+    # nonzero exit doesn't trip the script's surrounding `set -e`.
+    local bd_out
+    if bd_out=$(run_bd_pinned "$dir" config set issue_prefix "$prefix" 2>&1); then
+        return 0
+    fi
+
+    # Fallback: write the row directly through the running Dolt server.
+    # The escaped backticks around `key` are required because key is a
+    # reserved word in MySQL/Dolt grammar.
+    local sql sql_err
+    sql="USE \`$dolt_database\`; INSERT INTO config (\`key\`, value) VALUES ('issue_prefix', '$prefix') ON DUPLICATE KEY UPDATE value='$prefix'; CALL DOLT_COMMIT('-Am', 'set issue_prefix=$prefix');"
+    if ! sql_err=$(server_sql_retry "$sql" 2>&1); then
+        # If the config table itself doesn't exist, bd schema is incomplete —
+        # surface that as a hard error rather than masking it.
+        echo "error: failed to write issue_prefix into $dolt_database via SQL fallback after bd CLI rejected the call:" >&2
+        echo "  bd CLI output: $bd_out" >&2
+        echo "  SQL fallback output: $sql_err" >&2
+        return 1
+    fi
+
+    # Verify the row landed. A successful INSERT that doesn't actually
+    # commit (server quirk, transaction rollback) would silently leave
+    # the next bd create failing the same way.
+    local verify verify_status
+    verify=$(server_sql "USE \`$dolt_database\`; SELECT value FROM config WHERE \`key\`='issue_prefix';" 2>&1) || verify_status=$?
+    verify_status=${verify_status:-0}
+    if [ "$verify_status" -ne 0 ] || ! printf '%s\n' "$verify" | grep -q "^$prefix$"; then
+        echo "error: issue_prefix verification failed in $dolt_database (expected $prefix, got: $verify)" >&2
+        return 1
+    fi
+    return 0
+}
+
 # run_bd_pinned executes bd against the already-selected Dolt backend for this
 # provider operation. Without these exports, plain bd commands can rediscover
 # or auto-start a different local server mid-init.
@@ -1746,7 +1818,7 @@ op_init() {
             # and bd-specific bootstrap only.
             ensure_beads_dir_permissions "$dir"
             normalize_scope_after_init "$dir" "$prefix" "$dolt_database"
-            run_bd_pinned "$dir" config set issue_prefix "$prefix" 2>/dev/null || true
+            set_issue_prefix_in_dolt_config "$dir" "$dolt_database" "$prefix" || die "failed to set issue_prefix=$prefix in $dolt_database (see #1232)"
             run_bd_pinned "$dir" config set types.custom "$custom_types" 2>/dev/null || true
             backfill_project_id_if_missing "$dir"
             exit 0
@@ -1791,7 +1863,9 @@ op_init() {
 
     # Keep bd's runtime config in sync with GC's canonical prefix. This is
     # compatibility state for raw bd operations, not a second GC authority.
-    run_bd_pinned "$dir" config set issue_prefix "$prefix" 2>/dev/null || true
+    # See #1232 — bd 1.0.3 rejects this set, so the helper falls back to
+    # a direct SQL write through the running Dolt server.
+    set_issue_prefix_in_dolt_config "$dir" "$dolt_database" "$prefix" || die "failed to set issue_prefix=$prefix in $dolt_database (see #1232)"
 
     # Configure custom bead types (required since beads v0.46.0).
     run_bd_pinned "$dir" config set types.custom "$custom_types" 2>/dev/null || true
@@ -2050,6 +2124,12 @@ op_shutdown() {
 }
 
 # --- Main ---
+
+# Test hook: when sourced from a unit test, skip the dispatch below so
+# tests can exercise individual helpers without the full op flow.
+if [ -n "${__BD_SCRIPT_TEST_SOURCE:-}" ]; then
+    return 0 2>/dev/null || exit 0
+fi
 
 # GC_DOLT=skip → no-op for all operations.
 if [ "$GC_DOLT" = "skip" ]; then

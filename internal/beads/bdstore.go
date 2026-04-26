@@ -491,7 +491,7 @@ func (s *BdStore) Create(b Bead) (Bead, error) {
 	}
 	out, err := s.runner(s.dir, "bd", args...)
 	if err != nil {
-		return Bead{}, fmt.Errorf("bd create: %w", err)
+		return Bead{}, fmt.Errorf("bd create: %w", translateBdError(err))
 	}
 	var issue bdIssue
 	if err := json.Unmarshal(extractJSON(out), &issue); err != nil {
