@@ -1263,6 +1263,13 @@ func reapStaleSessionBeads(
 		if dt != nil && dt.get(b.ID) != nil {
 			continue
 		}
+		// Configured named-session beads are controller-owned identities.
+		// They may legitimately be stopped between supervisor restarts; the
+		// named-session reconciler is responsible for preserving, waking, or
+		// retiring them after desired state is rebuilt from config.
+		if isNamedSessionBead(b) {
+			continue
+		}
 		// Session is alive — nothing to reap.
 		if sp.IsRunning(sn) {
 			continue

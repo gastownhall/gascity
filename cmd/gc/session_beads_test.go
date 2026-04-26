@@ -3021,6 +3021,26 @@ func TestReapStaleSessionBeads(t *testing.T) {
 			wantOpen:   1,
 		},
 		{
+			name: "configured_named_session_skipped",
+			beads: []beads.Bead{{
+				Title:  "gascity/control-dispatcher",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name":              "gascity--control-dispatcher",
+					"template":                  "gascity/control-dispatcher",
+					"state":                     "active",
+					"configured_named_session":  "true",
+					"configured_named_identity": "gascity/control-dispatcher",
+					"configured_named_mode":     "always",
+				},
+			}},
+			running:    nil,
+			clock:      clockPastGrace,
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
 			name: "multiple_stale_reaped",
 			beads: []beads.Bead{
 				{
