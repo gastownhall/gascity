@@ -911,6 +911,63 @@ func TestCachingStoreCloseNotifiesWhenBeadIsMissingFromCache(t *testing.T) {
 	}
 }
 
+func TestCachingStoreListByLabelSeesCreatedBeadAfterMetadataWrite(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		prime func(*beads.CachingStore) error
+	}{
+		{
+			name:  "partial",
+			prime: func(cs *beads.CachingStore) error { return cs.PrimeActive() },
+		},
+		{
+			name:  "live",
+			prime: func(cs *beads.CachingStore) error { return cs.Prime(context.Background()) },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			mem := beads.NewMemStore()
+			cs := beads.NewCachingStoreForTest(mem, nil)
+			if err := tc.prime(cs); err != nil {
+				t.Fatalf("prime: %v", err)
+			}
+
+			created, err := cs.Create(beads.Bead{
+				Title:  "worker",
+				Type:   "session",
+				Labels: []string{"gc.session", "agent:worker"},
+			})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if err := cs.SetMetadata(created.ID, "session_name", "s-"+created.ID); err != nil {
+				t.Fatalf("SetMetadata(session_name): %v", err)
+			}
+
+			got, err := cs.List(beads.ListQuery{
+				Label: "gc.session",
+				Sort:  beads.SortCreatedAsc,
+			})
+			if err != nil {
+				t.Fatalf("List(label): %v", err)
+			}
+			if len(got) != 1 {
+				t.Fatalf("List(label) len = %d, want 1", len(got))
+			}
+			if got[0].ID != created.ID {
+				t.Fatalf("List(label) ID = %q, want %q", got[0].ID, created.ID)
+			}
+			if got[0].Metadata["session_name"] != "s-"+created.ID {
+				t.Fatalf("session_name = %q, want %q", got[0].Metadata["session_name"], "s-"+created.ID)
+			}
+		})
+	}
+}
+
 func TestCachingStoreApplyEvent(t *testing.T) {
 	t.Parallel()
 	mem := beads.NewMemStore()
