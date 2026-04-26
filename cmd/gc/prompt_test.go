@@ -185,6 +185,37 @@ append_fragments = ["footer"]
 	}
 }
 
+// TestRenderPromptCityPackTemplateFragmentsLoad pins the contract from
+// docs/packv2/doc-pack-v2.md (line 50, 325, 394) and doc-directory-conventions.md
+// (line 429): the city pack's own top-level template-fragments/ directory is a
+// convention-discovered, pack-wide source of fragments. Without this scan,
+// fragments at <cityRoot>/template-fragments/ load only when the city itself is
+// imported as a pack — which is not how city packs work in V2 (they are the
+// root of composition, not an import target).
+func TestRenderPromptCityPackTemplateFragmentsLoad(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/agents/mayor/prompt.template.md"] = []byte("Hello")
+	f.Files["/city/template-fragments/footer.template.md"] = []byte(`{{ define "footer" }}Goodbye{{ end }}`)
+	got := renderPrompt(f, "/city", "", "agents/mayor/prompt.template.md", PromptContext{}, "", io.Discard, nil, []string{"footer"}, nil)
+	if got != "Hello\n\nGoodbye" {
+		t.Errorf("renderPrompt(city template-fragments) = %q, want %q", got, "Hello\n\nGoodbye")
+	}
+}
+
+// TestRenderPromptCityPackFragmentsBeatImports pins the precedence from
+// doc-pack-v2.md line 352: "the importing pack always wins over its imports".
+// City pack's template-fragments override imported pack fragments by name.
+func TestRenderPromptCityPackFragmentsBeatImports(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/agents/mayor/prompt.template.md"] = []byte("Hello")
+	f.Files["/city/imports/pkg/template-fragments/footer.template.md"] = []byte(`{{ define "footer" }}from-import{{ end }}`)
+	f.Files["/city/template-fragments/footer.template.md"] = []byte(`{{ define "footer" }}from-city{{ end }}`)
+	got := renderPrompt(f, "/city", "", "agents/mayor/prompt.template.md", PromptContext{}, "", io.Discard, []string{"/city/imports/pkg"}, []string{"footer"}, nil)
+	if got != "Hello\n\nfrom-city" {
+		t.Errorf("renderPrompt(city beats import) = %q, want %q", got, "Hello\n\nfrom-city")
+	}
+}
+
 func TestRenderPromptPatchedTemplateSuffixRenders(t *testing.T) {
 	f := fsys.NewFake()
 	f.Files["/city/patches/gastown-mayor-prompt.template.md"] = []byte("Hello {{ .AgentName }}")

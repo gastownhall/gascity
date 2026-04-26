@@ -110,6 +110,13 @@ func renderPromptWithMeta(fs fsys.FS, cityPath, cityName, templatePath string, c
 		loadSharedTemplates(fs, tmpl, fragDir, stderr)
 	}
 
+	// V2: city pack's own template-fragments/. The city pack is the root of
+	// composition (per docs/packv2/doc-pack-v2.md) and its convention-discovered
+	// dirs apply pack-wide. The city pack wins over its imports but is
+	// overridden by per-agent fragments scanned below.
+	cityFragDir := filepath.Join(cityPath, "template-fragments")
+	loadSharedTemplates(fs, tmpl, cityFragDir, stderr)
+
 	// Load shared templates from sibling shared/ directory (highest priority —
 	// wins on name collision with cross-pack templates).
 	sharedDir := filepath.Join(filepath.Dir(sourcePath), "shared")
