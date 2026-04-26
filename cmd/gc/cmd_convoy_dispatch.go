@@ -459,14 +459,14 @@ func newConvoyDeleteCmd(stdout, stderr io.Writer) *cobra.Command {
 	var deleteBeads bool
 	cmd := &cobra.Command{
 		Use:   "delete <convoy-id>",
-		Short: "Close and optionally delete a convoy and all its beads",
-		Long: `Close all open beads in a convoy, then optionally delete them.
+		Short: "Close or delete a convoy and all its beads",
+		Long: `Close all open beads in a convoy, or delete them.
 
 Searches all stores (city + rigs) for the convoy root and all beads
 with matching gc.root_bead_id. Without --force, shows a preview.
 
 By default, beads are closed with gc.outcome=skipped. Use --delete to
-also remove them from the store after closing.`,
+remove them from the store via bd delete --cascade --force.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdWorkflowDelete(args[0], force, deleteBeads, stdout, stderr) != 0 {
@@ -476,7 +476,7 @@ also remove them from the store after closing.`,
 		},
 	}
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "Actually close/delete (without this, shows preview)")
-	cmd.Flags().BoolVar(&deleteBeads, "delete", false, "Also delete beads from the store after closing")
+	cmd.Flags().BoolVar(&deleteBeads, "delete", false, "Delete beads from the store instead of closing")
 	return cmd
 }
 
@@ -533,6 +533,14 @@ func newConvoyReopenSourceCmd(stdout, stderr io.Writer) *cobra.Command {
 	return cmd
 }
 
+type workflowStoreMatch struct {
+	store  beads.Store
+	beads  []beads.Bead
+	label  string
+	path   string
+	runner beads.CommandRunner
+}
+
 func cmdWorkflowDelete(workflowID string, force, deleteBeads bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
@@ -544,16 +552,12 @@ func cmdWorkflowDelete(workflowID string, force, deleteBeads bool, stdout, stder
 		fmt.Fprintf(stderr, "gc workflow delete: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	resolveRigPaths(cityPath, cfg.Rigs)
 
-	type storeMatch struct {
-		store beads.Store
-		beads []beads.Bead
-		label string
-	}
-	var matches []storeMatch
+	var matches []workflowStoreMatch
 
 	stores, err := openConvoyStores(cfg, cityPath, workflowID, func(dir string) (beads.Store, error) {
-		return openStoreAtForCity(dir, cityPath)
+		return openControlStoreAtForCity(dir, cityPath, cfg)
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc workflow delete: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -564,10 +568,12 @@ func cmdWorkflowDelete(workflowID string, force, deleteBeads bool, stdout, stder
 		if len(found) == 0 {
 			continue
 		}
-		matches = append(matches, storeMatch{
-			store: info.store,
-			beads: found,
-			label: workflowDeleteStoreLabel(cfg, cityPath, info.path),
+		matches = append(matches, workflowStoreMatch{
+			store:  info.store,
+			beads:  found,
+			label:  workflowDeleteStoreLabel(cfg, cityPath, info.path),
+			path:   info.path,
+			runner: workflowDeleteRunnerForPath(cfg, cityPath, info.path),
 		})
 	}
 
@@ -600,34 +606,53 @@ func cmdWorkflowDelete(workflowID string, force, deleteBeads bool, stdout, stder
 		return 0
 	}
 
-	// Phase 1: Batch close all open beads with gc.outcome=skipped.
+	if deleteBeads {
+		deleted, err := deleteWorkflowMatches(matches)
+		if err != nil {
+			fmt.Fprintf(stderr, "  batch delete: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		fmt.Fprintf(stdout, "Deleted %d beads\n", deleted) //nolint:errcheck // best-effort stdout
+		return 0
+	}
+
+	closed := closeWorkflowMatches(matches)
+	fmt.Fprintf(stdout, "Closed %d open beads\n", closed) //nolint:errcheck // best-effort stdout
+	return 0
+}
+
+func closeWorkflowMatches(matches []workflowStoreMatch) int {
 	closed := 0
 	for _, m := range matches {
 		ids := workflowBeadIDs(m.beads)
 		n, _ := m.store.CloseAll(ids, map[string]string{"gc.outcome": "skipped"})
 		closed += n
 	}
-	fmt.Fprintf(stdout, "Closed %d open beads\n", closed) //nolint:errcheck // best-effort stdout
+	return closed
+}
 
-	if !deleteBeads {
-		return 0
+func workflowDeleteRunnerForPath(cfg *config.City, cityPath, scopePath string) beads.CommandRunner {
+	if samePath(scopePath, cityPath) {
+		return bdCommandRunnerForCity(cityPath)
 	}
+	return bdCommandRunnerForRig(cityPath, cfg, scopePath)
+}
 
+func deleteWorkflowMatches(matches []workflowStoreMatch) (int, error) {
 	deleted := 0
-	deleteFailed := false
 	for _, m := range matches {
-		count, errs := deleteWorkflowBeads(m.store, workflowBeadIDs(m.beads))
-		deleted += count
-		for _, err := range errs {
-			deleteFailed = true
-			fmt.Fprintf(stderr, "  delete %s: %v\n", m.label, err) //nolint:errcheck // best-effort stderr
+		if m.runner == nil {
+			return deleted, fmt.Errorf("%s: delete runner missing", m.label)
 		}
+		ids := workflowBeadIDs(m.beads)
+		args := append([]string{"delete"}, ids...)
+		args = append(args, "--cascade", "--force")
+		if _, err := m.runner(m.path, "bd", args...); err != nil {
+			return deleted, fmt.Errorf("%s: %w", m.label, err)
+		}
+		deleted += len(ids)
 	}
-	fmt.Fprintf(stdout, "Deleted %d beads\n", deleted) //nolint:errcheck // best-effort stdout
-	if deleteFailed {
-		return 1
-	}
-	return 0
+	return deleted, nil
 }
 
 type sourceWorkflowStoreMatch struct {

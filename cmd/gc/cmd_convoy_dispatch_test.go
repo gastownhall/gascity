@@ -313,6 +313,104 @@ func TestFindWorkflowBeadsResolvesLogicalWorkflowID(t *testing.T) {
 	}
 }
 
+func TestDeleteWorkflowMatchesUsesCascadeWithoutPreClose(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title: "Workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind": "workflow",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	child, err := store.Create(beads.Bead{
+		Title: "Child",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+
+	var gotDir, gotName string
+	var gotArgs []string
+	deleted, err := deleteWorkflowMatches([]workflowStoreMatch{{
+		store: store,
+		beads: []beads.Bead{root, child},
+		label: "city",
+		path:  "/city",
+		runner: func(dir, name string, args ...string) ([]byte, error) {
+			gotDir = dir
+			gotName = name
+			gotArgs = append([]string(nil), args...)
+			return nil, nil
+		},
+	}})
+	if err != nil {
+		t.Fatalf("deleteWorkflowMatches: %v", err)
+	}
+	if deleted != 2 {
+		t.Fatalf("deleted = %d, want 2", deleted)
+	}
+	if gotDir != "/city" || gotName != "bd" {
+		t.Fatalf("runner target = (%q, %q), want (/city, bd)", gotDir, gotName)
+	}
+	wantArgs := []string{"delete", root.ID, child.ID, "--cascade", "--force"}
+	if !slices.Equal(gotArgs, wantArgs) {
+		t.Fatalf("delete args = %#v, want %#v", gotArgs, wantArgs)
+	}
+	for _, id := range []string{root.ID, child.ID} {
+		after, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if after.Status != "open" || after.Metadata["gc.outcome"] == "skipped" {
+			t.Fatalf("bead %s mutated before delete: status=%q metadata=%#v", id, after.Status, after.Metadata)
+		}
+	}
+}
+
+func TestDeleteWorkflowMatchesFailureDoesNotCloseBeads(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title: "Workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind": "workflow",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+
+	deleted, err := deleteWorkflowMatches([]workflowStoreMatch{{
+		store: store,
+		beads: []beads.Bead{root},
+		label: "city",
+		path:  "/city",
+		runner: func(string, string, ...string) ([]byte, error) {
+			return nil, fmt.Errorf("delete failed")
+		},
+	}})
+	if err == nil {
+		t.Fatal("deleteWorkflowMatches returned nil error, want delete failure")
+	}
+	if deleted != 0 {
+		t.Fatalf("deleted = %d, want 0 after failed delete", deleted)
+	}
+	after, err := store.Get(root.ID)
+	if err != nil {
+		t.Fatalf("Get(root): %v", err)
+	}
+	if after.Status != "open" || after.Metadata["gc.outcome"] == "skipped" {
+		t.Fatalf("root mutated after failed delete: status=%q metadata=%#v", after.Status, after.Metadata)
+	}
+}
+
 func TestCmdWorkflowDeleteSourceClosesMatchedRootsAndClearsWorkflowID(t *testing.T) {
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {

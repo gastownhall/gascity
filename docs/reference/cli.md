@@ -643,7 +643,7 @@ gc convoy
 | [gc convoy close](#gc-convoy-close) | Close a convoy |
 | [gc convoy control](#gc-convoy-control) | Execute control beads or run the control-dispatcher loop |
 | [gc convoy create](#gc-convoy-create) | Create a convoy and optionally track issues |
-| [gc convoy delete](#gc-convoy-delete) | Close and optionally delete a convoy and all its beads |
+| [gc convoy delete](#gc-convoy-delete) | Close or delete a convoy and all its beads |
 | [gc convoy delete-source](#gc-convoy-delete-source) | Close workflows sourced from a bead |
 | [gc convoy land](#gc-convoy-land) | Land an owned convoy (terminate + cleanup) |
 | [gc convoy list](#gc-convoy-list) | List open convoys with progress |
@@ -730,13 +730,13 @@ gc convoy create sprint-42
 
 ## gc convoy delete
 
-Close all open beads in a convoy, then optionally delete them.
+Close all open beads in a convoy, or delete them.
 
 Searches all stores (city + rigs) for the convoy root and all beads
 with matching gc.root_bead_id. Without --force, shows a preview.
 
 By default, beads are closed with gc.outcome=skipped. Use --delete to
-also remove them from the store after closing.
+remove them from the store via bd delete --cascade --force.
 
 ```
 gc convoy delete <convoy-id> [flags]
@@ -744,7 +744,7 @@ gc convoy delete <convoy-id> [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--delete` | bool |  | Also delete beads from the store after closing |
+| `--delete` | bool |  | Delete beads from the store instead of closing |
 | `-f`, `--force` | bool |  | Actually close/delete (without this, shows preview) |
 
 ## gc convoy delete-source
