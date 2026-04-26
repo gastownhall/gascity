@@ -1522,7 +1522,7 @@ func TestBuildDesiredState_ManualImplicitPoolSessionsStayDesired(t *testing.T) {
 			Labels: []string{sessionBeadLabel, "template:helper"},
 			Metadata: map[string]string{
 				"template":             "helper",
-				"session_name":         "s-mc-4wq",
+				"session_name":         "s-real-world-app-4wq",
 				"state":                "creating",
 				"manual_session":       "true",
 				"pending_create_claim": "true",
@@ -1534,7 +1534,7 @@ func TestBuildDesiredState_ManualImplicitPoolSessionsStayDesired(t *testing.T) {
 			Labels: []string{sessionBeadLabel, "template:helper"},
 			Metadata: map[string]string{
 				"template":             "helper",
-				"session_name":         "s-mc-bmr",
+				"session_name":         "s-real-world-app-bmr",
 				"alias":                "hal",
 				"state":                "suspended",
 				"manual_session":       "true",
@@ -1572,7 +1572,7 @@ func TestBuildDesiredState_ManualImplicitPoolSessionsStayDesired(t *testing.T) {
 
 	dsResult := buildDesiredState("my-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
 	desired := dsResult.State
-	for _, sn := range []string{"s-mc-4wq", "s-mc-bmr"} {
+	for _, sn := range []string{"s-real-world-app-4wq", "s-real-world-app-bmr"} {
 		tp, ok := desired[sn]
 		if !ok {
 			t.Fatalf("expected manual helper session %q in desired state, got keys %v", sn, mapKeys(desired))
@@ -1584,8 +1584,8 @@ func TestBuildDesiredState_ManualImplicitPoolSessionsStayDesired(t *testing.T) {
 			t.Fatalf("desired[%q].ManualSession = false, want true", sn)
 		}
 	}
-	if got := desired["s-mc-bmr"].Alias; got != "hal" {
-		t.Fatalf("desired[s-mc-bmr].Alias = %q, want hal", got)
+	if got := desired["s-real-world-app-bmr"].Alias; got != "hal" {
+		t.Fatalf("desired[s-real-world-app-bmr].Alias = %q, want hal", got)
 	}
 }
 
@@ -2612,7 +2612,7 @@ func TestSelectOrCreatePoolSessionBead_SkipsAsleepBeads(t *testing.T) {
 		Labels: []string{sessionBeadLabel, "template:polecat"},
 		Metadata: map[string]string{
 			"template":     "polecat",
-			"session_name": "polecat-mc-old",
+			"session_name": "polecat-real-world-app-old",
 			"state":        "asleep",
 			"pool_managed": "true",
 		},
@@ -2648,7 +2648,7 @@ func TestSelectOrCreatePoolSessionBead_ReusesActiveBeforeCreatingNew(t *testing.
 		Labels: []string{sessionBeadLabel, "template:polecat"},
 		Metadata: map[string]string{
 			"template":     "polecat",
-			"session_name": "polecat-mc-live",
+			"session_name": "polecat-real-world-app-live",
 			"state":        "active",
 			"pool_managed": "true",
 		},
@@ -2684,7 +2684,7 @@ func TestSelectOrCreatePoolSessionBead_ReusesCreatingBeforeCreatingNew(t *testin
 		Labels: []string{sessionBeadLabel, "template:polecat"},
 		Metadata: map[string]string{
 			"template":     "polecat",
-			"session_name": "polecat-mc-new",
+			"session_name": "polecat-real-world-app-new",
 			"state":        "creating",
 			"pool_managed": "true",
 		},
@@ -2721,7 +2721,7 @@ func TestSelectOrCreatePoolSessionBead_SkipsAsleepButReusesActive(t *testing.T) 
 		Labels: []string{sessionBeadLabel, "template:polecat"},
 		Metadata: map[string]string{
 			"template":     "polecat",
-			"session_name": "polecat-mc-old",
+			"session_name": "polecat-real-world-app-old",
 			"state":        "asleep",
 			"pool_managed": "true",
 		},
@@ -2735,7 +2735,7 @@ func TestSelectOrCreatePoolSessionBead_SkipsAsleepButReusesActive(t *testing.T) 
 		Labels: []string{sessionBeadLabel, "template:polecat"},
 		Metadata: map[string]string{
 			"template":     "polecat",
-			"session_name": "polecat-mc-live",
+			"session_name": "polecat-real-world-app-live",
 			"state":        "active",
 			"pool_managed": "true",
 		},

@@ -138,7 +138,10 @@ func (p *Provider) Read(id string) (mail.Message, error) {
 		return mail.Message{}, fmt.Errorf("beadmail read: %w", err)
 	}
 	if !hasLabel(b.Labels, "read") {
-		if err := p.store.Update(id, beads.UpdateOpts{Labels: []string{"read"}}); err != nil {
+		if err := p.store.Update(id, beads.UpdateOpts{
+			Labels:   []string{"read"},
+			Metadata: map[string]string{"mail.read": "true"},
+		}); err != nil {
 			return mail.Message{}, fmt.Errorf("beadmail read: marking as read: %w", err)
 		}
 	}
@@ -152,7 +155,10 @@ func (p *Provider) MarkRead(id string) error {
 	if _, err := p.store.Get(id); err != nil {
 		return fmt.Errorf("beadmail mark-read: %w", err)
 	}
-	return p.store.Update(id, beads.UpdateOpts{Labels: []string{"read"}})
+	return p.store.Update(id, beads.UpdateOpts{
+		Labels:   []string{"read"},
+		Metadata: map[string]string{"mail.read": "true"},
+	})
 }
 
 // MarkUnread marks a message as unread (removes "read" label).
@@ -160,7 +166,10 @@ func (p *Provider) MarkUnread(id string) error {
 	if _, err := p.store.Get(id); err != nil {
 		return fmt.Errorf("beadmail mark-unread: %w", err)
 	}
-	return p.store.Update(id, beads.UpdateOpts{RemoveLabels: []string{"read"}})
+	return p.store.Update(id, beads.UpdateOpts{
+		RemoveLabels: []string{"read"},
+		Metadata:     map[string]string{"mail.read": "false"},
+	})
 }
 
 // Archive closes a message bead without reading it.
@@ -524,6 +533,13 @@ func beadToMessage(b beads.Bead) mail.Message {
 	if display := strings.TrimSpace(b.Metadata[toDisplayMetadataKey]); display != "" {
 		to = display
 	}
+	read := hasLabel(b.Labels, "read")
+	switch b.Metadata["mail.read"] {
+	case "true":
+		read = true
+	case "false":
+		read = false
+	}
 	return mail.Message{
 		ID:        b.ID,
 		From:      from,
@@ -531,7 +547,7 @@ func beadToMessage(b beads.Bead) mail.Message {
 		Subject:   b.Title,
 		Body:      b.Description,
 		CreatedAt: b.CreatedAt,
-		Read:      hasLabel(b.Labels, "read"),
+		Read:      read,
 		ThreadID:  extractLabel(b.Labels, "thread:"),
 		ReplyTo:   extractLabel(b.Labels, "reply-to:"),
 		Priority:  extractPriority(b.Labels),

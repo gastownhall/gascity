@@ -34,7 +34,7 @@ func TestPhase0ProviderCompatibility_CreateKeepsResponseKindButDoesNotPersistSpe
 	if err != nil {
 		t.Fatalf("Get(%s): %v", success.Session.ID, err)
 	}
-	if got := bead.Metadata["mc_session_kind"]; got != "" {
-		t.Fatalf("mc_session_kind = %q, want empty", got)
+	if got := bead.Metadata["real_world_app_session_kind"]; got != "" {
+		t.Fatalf("real_world_app_session_kind = %q, want empty", got)
 	}
 }

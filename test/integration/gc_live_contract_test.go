@@ -24,8 +24,8 @@ import (
 	openapivalidator "github.com/pb33f/libopenapi-validator"
 )
 
-// TestGCLiveContract_BeadsAndEvents ports the MC live GC contract's
-// API-only coverage into this repo. It boots a real supervisor with isolated
+// TestGCLiveContract_BeadsAndEvents covers real-world app API usage directly
+// in this repo. It boots a real supervisor with isolated
 // state, creates an isolated city and rig through the HTTP API, validates
 // responses against the live OpenAPI document, exercises real Dolt-backed
 // beads, mail, events, and subprocess agent sessions, and unregisters the city
@@ -78,7 +78,7 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 	assertLiveContractRequiredOperations(t, specBytes)
 	validator := liveContractValidator(t, specBytes)
 
-	cityName := "mc-live-contract-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	cityName := "real-world-app-contract-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	cityDir := filepath.Join(root, "cities", cityName)
 	createCity := liveContractJSON[struct {
 		RequestID string `json:"request_id"`
@@ -113,7 +113,7 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 	}](t, baseURL, validator, http.MethodPost, cityBase+"/rigs", map[string]string{
 		"name":   rigName,
 		"path":   rigDir,
-		"prefix": "mc" + strconv.FormatInt(time.Now().UnixNano(), 36),
+		"prefix": "rw" + strconv.FormatInt(time.Now().UnixNano(), 36),
 	}, http.StatusCreated)
 	waitForLiveContractRig(t, baseURL, validator, cityBase, rigName, rigDir, 30*time.Second)
 
@@ -160,28 +160,28 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 	sessionID := createLiveContractAgentSession(t, baseURL, validator, cityBase, targetAgent, rigName, "mail-"+runID)
 	rootBead := liveContractJSON[beads.Bead](t, baseURL, validator, http.MethodPost, cityBase+"/beads", map[string]any{
 		"description": "Root fixture created by TestGCLiveContract_BeadsAndEvents",
-		"labels":      []string{"mc-live-contract", "root"},
+		"labels":      []string{"real-world-app-contract", "root"},
 		"metadata": map[string]string{
-			"mc.contract.role":   "root",
-			"mc.contract.run_id": runID,
+			"real_world_app.contract.role":   "root",
+			"real_world_app.contract.run_id": runID,
 		},
 		"priority": 2,
 		"rig":      rigName,
-		"title":    "MC live contract root " + runID,
+		"title":    "real-world app contract root " + runID,
 		"type":     "feature",
 	}, http.StatusCreated)
 	if rootBead.ID == "" || rootBead.Status != "open" || rootBead.Type != "feature" {
 		t.Fatalf("root bead = %+v, want id, open status, feature type", rootBead)
 	}
-	if rootBead.Metadata["mc.contract.run_id"] != runID {
+	if rootBead.Metadata["real_world_app.contract.run_id"] != runID {
 		t.Fatalf("root metadata = %#v, want run_id=%q", rootBead.Metadata, runID)
 	}
-	idempotentKey := "mc-live-contract-idempotent-" + runID
+	idempotentKey := "real-world-app-contract-idempotent-" + runID
 	idempotentBody := map[string]any{
 		"description": "Idempotency fixture created by TestGCLiveContract_BeadsAndEvents",
-		"labels":      []string{"mc-live-contract", "idempotency"},
+		"labels":      []string{"real-world-app-contract", "idempotency"},
 		"rig":         rigName,
-		"title":       "MC live contract idempotent " + runID,
+		"title":       "real-world app contract idempotent " + runID,
 		"type":        "task",
 	}
 	firstReplay := liveContractRequestWithHeaders(t, baseURL, validator, http.MethodPost, cityBase+"/beads", idempotentBody, http.StatusCreated, map[string]string{
@@ -209,13 +209,13 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 		"bead":   rootBead.ID,
 		"force":  true,
 	}, http.StatusOK)
-	formulaName := "mc-live-contract-work"
+	formulaName := "real-world-app-contract-work"
 	formulaDir := filepath.Join(cityDir, "formulas")
 	if err := os.MkdirAll(formulaDir, 0o755); err != nil {
 		t.Fatalf("mkdir formula dir: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(formulaDir, formulaName+".toml"), []byte(`
-formula = "mc-live-contract-work"
+formula = "real-world-app-contract-work"
 version = 1
 description = "Live contract preview fixture."
 
@@ -249,13 +249,13 @@ description = "Read and complete {{issue}}."
 
 	lifecycleBead := liveContractJSON[beads.Bead](t, baseURL, validator, http.MethodPost, cityBase+"/beads", map[string]any{
 		"description": "Lifecycle fixture created by TestGCLiveContract_BeadsAndEvents",
-		"labels":      []string{"mc-live-contract", "lifecycle"},
+		"labels":      []string{"real-world-app-contract", "lifecycle"},
 		"metadata": map[string]string{
-			"mc.contract.role":   "lifecycle",
-			"mc.contract.run_id": runID,
+			"real_world_app.contract.role":   "lifecycle",
+			"real_world_app.contract.run_id": runID,
 		},
 		"rig":   rigName,
-		"title": "MC live contract lifecycle " + runID,
+		"title": "real-world app contract lifecycle " + runID,
 		"type":  "task",
 	}, http.StatusCreated)
 	if lifecycleBead.ID == "" {
@@ -266,14 +266,14 @@ description = "Read and complete {{issue}}."
 		Status string `json:"status"`
 	}](t, baseURL, validator, http.MethodPost, cityBase+"/bead/"+url.PathEscape(lifecycleBead.ID)+"/update", map[string]any{
 		"metadata": map[string]string{
-			"mc.contract.metadata_update": "true",
-			"mc_permission_mode":          "default",
-			"mc_starred":                  "true",
+			"real_world_app.contract.metadata_update": "true",
+			"real_world_app.permission_mode":          "default",
+			"real_world_app.starred":                  "true",
 		},
 		"status": "in_progress",
 	}, http.StatusOK)
 	updatedLifecycle := liveContractJSON[beads.Bead](t, baseURL, validator, http.MethodGet, cityBase+"/bead/"+url.PathEscape(lifecycleBead.ID), nil, http.StatusOK)
-	if updatedLifecycle.Status != "in_progress" || updatedLifecycle.Metadata["mc.contract.metadata_update"] != "true" {
+	if updatedLifecycle.Status != "in_progress" || updatedLifecycle.Metadata["real_world_app.contract.metadata_update"] != "true" {
 		t.Fatalf("updated lifecycle bead = %+v, want in_progress plus metadata update", updatedLifecycle)
 	}
 
@@ -294,28 +294,28 @@ description = "Read and complete {{issue}}."
 
 	childBead := liveContractJSON[beads.Bead](t, baseURL, validator, http.MethodPost, cityBase+"/beads", map[string]any{
 		"description": "Child fixture that exercises parent and update semantics",
-		"labels":      []string{"mc-live-contract", "child", "needs-update"},
+		"labels":      []string{"real-world-app-contract", "child", "needs-update"},
 		"metadata": map[string]string{
-			"mc.contract.role":   "child",
-			"mc.contract.run_id": runID,
+			"real_world_app.contract.role":   "child",
+			"real_world_app.contract.run_id": runID,
 		},
 		"parent":   rootBead.ID,
 		"priority": 1,
 		"rig":      rigName,
-		"title":    "MC live contract child " + runID,
+		"title":    "real-world app contract child " + runID,
 		"type":     "task",
 	}, http.StatusCreated)
 	siblingBead := liveContractJSON[beads.Bead](t, baseURL, validator, http.MethodPost, cityBase+"/beads", map[string]any{
 		"description": "Sibling fixture for list and filter coverage",
-		"labels":      []string{"mc-live-contract", "sibling"},
+		"labels":      []string{"real-world-app-contract", "sibling"},
 		"metadata": map[string]string{
-			"mc.contract.role":   "sibling",
-			"mc.contract.run_id": runID,
+			"real_world_app.contract.role":   "sibling",
+			"real_world_app.contract.run_id": runID,
 		},
 		"parent":   rootBead.ID,
 		"priority": 3,
 		"rig":      rigName,
-		"title":    "MC live contract sibling " + runID,
+		"title":    "real-world app contract sibling " + runID,
 		"type":     "bug",
 	}, http.StatusCreated)
 	if childBead.ParentID != rootBead.ID || childBead.Type != "task" {
@@ -330,12 +330,12 @@ description = "Read and complete {{issue}}."
 	}](t, baseURL, validator, http.MethodPost, cityBase+"/bead/"+url.PathEscape(childBead.ID)+"/update", map[string]any{
 		"description":   "Updated child fixture",
 		"labels":        []string{"verified"},
-		"metadata":      map[string]string{"mc.contract.updated": "true"},
+		"metadata":      map[string]string{"real_world_app.contract.updated": "true"},
 		"parent":        "",
 		"priority":      4,
 		"remove_labels": []string{"needs-update"},
 		"status":        "in_progress",
-		"title":         "MC live contract child updated " + runID,
+		"title":         "real-world app contract child updated " + runID,
 		"type":          "bug",
 	}, http.StatusOK)
 	updatedChild := liveContractJSON[beads.Bead](t, baseURL, validator, http.MethodGet, cityBase+"/bead/"+url.PathEscape(childBead.ID), nil, http.StatusOK)
@@ -345,14 +345,14 @@ description = "Read and complete {{issue}}."
 	if !containsString(updatedChild.Labels, "verified") || containsString(updatedChild.Labels, "needs-update") {
 		t.Fatalf("updated child labels = %#v, want verified without needs-update", updatedChild.Labels)
 	}
-	if updatedChild.Metadata["mc.contract.updated"] != "true" {
-		t.Fatalf("updated child metadata = %#v, want mc.contract.updated=true", updatedChild.Metadata)
+	if updatedChild.Metadata["real_world_app.contract.updated"] != "true" {
+		t.Fatalf("updated child metadata = %#v, want real_world_app.contract.updated=true", updatedChild.Metadata)
 	}
 
 	liveContractJSON[struct {
 		Status string `json:"status"`
 	}](t, baseURL, validator, http.MethodPost, cityBase+"/bead/"+url.PathEscape(childBead.ID)+"/update", map[string]any{
-		"metadata": map[string]string{"mc.contract.parent_restored": "true"},
+		"metadata": map[string]string{"real_world_app.contract.parent_restored": "true"},
 		"parent":   rootBead.ID,
 	}, http.StatusOK)
 	restoredChild := liveContractJSON[beads.Bead](t, baseURL, validator, http.MethodGet, cityBase+"/bead/"+url.PathEscape(childBead.ID), nil, http.StatusOK)
@@ -387,7 +387,7 @@ description = "Read and complete {{issue}}."
 	list := liveContractJSON[struct {
 		Items []beads.Bead `json:"items"`
 		Total int          `json:"total"`
-	}](t, baseURL, validator, http.MethodGet, cityBase+"/beads?label=mc-live-contract&limit=50&rig="+url.QueryEscape(rigName), nil, http.StatusOK)
+	}](t, baseURL, validator, http.MethodGet, cityBase+"/beads?label=real-world-app-contract&limit=50&rig="+url.QueryEscape(rigName), nil, http.StatusOK)
 	if list.Total < 3 || !beadListContains(list.Items, rootBead.ID) || !beadListContains(list.Items, siblingBead.ID) {
 		t.Fatalf("filtered beads = %+v, want root and sibling", list)
 	}
@@ -401,9 +401,9 @@ description = "Read and complete {{issue}}."
 		Rig      string `json:"rig"`
 	}](t, baseURL, validator, http.MethodPost, cityBase+"/mail", map[string]string{
 		"rig":     rigName,
-		"from":    "mc-live-contract",
+		"from":    "real-world-app-contract",
 		"to":      sessionID,
-		"subject": "MC live contract mail " + runID,
+		"subject": "real-world app contract mail " + runID,
 		"body":    "Exercise the typed mail API contract.",
 	}, http.StatusCreated)
 	if message.ID == "" {
@@ -414,14 +414,28 @@ description = "Read and complete {{issue}}."
 	liveContractJSON[struct {
 		Status string `json:"status"`
 	}](t, baseURL, validator, http.MethodPost, mailPath+"/read"+mailRigQuery, nil, http.StatusOK)
+	readMessage := liveContractJSON[struct {
+		ID   string `json:"id"`
+		Read bool   `json:"read"`
+	}](t, baseURL, validator, http.MethodGet, mailPath+"?rig="+url.QueryEscape(rigName), nil, http.StatusOK)
+	if readMessage.ID != message.ID || !readMessage.Read {
+		t.Fatalf("mail read state after read = %+v, want id=%q read=true", readMessage, message.ID)
+	}
 	liveContractJSON[struct {
 		Status string `json:"status"`
 	}](t, baseURL, validator, http.MethodPost, mailPath+"/mark-unread"+mailRigQuery, nil, http.StatusOK)
+	unreadMessage := liveContractJSON[struct {
+		ID   string `json:"id"`
+		Read bool   `json:"read"`
+	}](t, baseURL, validator, http.MethodGet, mailPath+"?rig="+url.QueryEscape(rigName), nil, http.StatusOK)
+	if unreadMessage.ID != message.ID || unreadMessage.Read {
+		t.Fatalf("mail read state after mark-unread = %+v, want id=%q read=false", unreadMessage, message.ID)
+	}
 	reply := liveContractJSON[struct {
 		ID string `json:"id"`
 	}](t, baseURL, validator, http.MethodPost, mailPath+"/reply"+mailRigQuery, map[string]string{
 		"from":    targetAgent,
-		"subject": "Re: MC live contract mail " + runID,
+		"subject": "Re: real-world app contract mail " + runID,
 		"body":    "Reply from live contract coverage.",
 	}, http.StatusCreated)
 	if reply.ID == "" {
@@ -595,12 +609,12 @@ func createLiveContractAgentSession(t *testing.T, baseURL string, v openapivalid
 		RequestID string `json:"request_id"`
 		Status    string `json:"status"`
 	}](t, baseURL, v, http.MethodPost, cityBase+"/sessions", map[string]any{
-		"alias":      "mc-" + label,
+		"alias":      "rw-" + label,
 		"async":      true,
 		"kind":       "agent",
 		"name":       targetAgent,
 		"project_id": rigName,
-		"title":      "MC live contract " + label,
+		"title":      "real-world app contract " + label,
 	}, http.StatusAccepted)
 	if create.RequestID == "" {
 		t.Fatalf("%s session create response missing request_id", label)
@@ -617,7 +631,7 @@ func createLiveContractAgentSession(t *testing.T, baseURL string, v openapivalid
 	if result.Session.ID == "" {
 		t.Fatalf("%s session create result missing session.id", label)
 	}
-	if result.Session.Title != "MC live contract "+label {
+	if result.Session.Title != "real-world app contract "+label {
 		t.Fatalf("%s session title = %q", label, result.Session.Title)
 	}
 	if result.Session.Rig != rigName {
@@ -641,7 +655,7 @@ func exerciseLiveContractSessionLifecycle(t *testing.T, baseURL string, v openap
 		t.Fatalf("session detail id = %q, want %q", detail.ID, id)
 	}
 
-	patchedTitle := "MC live contract patched " + runID
+	patchedTitle := "real-world app contract patched " + runID
 	patched := liveContractJSON[struct {
 		ID    string `json:"id"`
 		Title string `json:"title"`
@@ -651,7 +665,7 @@ func exerciseLiveContractSessionLifecycle(t *testing.T, baseURL string, v openap
 		t.Fatalf("patched session = %+v, want id=%q title=%q with alias", patched, id, patchedTitle)
 	}
 
-	renamedTitle := "MC live contract renamed " + runID
+	renamedTitle := "real-world app contract renamed " + runID
 	renamed := liveContractJSON[struct {
 		ID    string `json:"id"`
 		Title string `json:"title"`
@@ -675,7 +689,7 @@ func exerciseLiveContractSessionLifecycle(t *testing.T, baseURL string, v openap
 	msg := liveContractJSON[struct {
 		RequestID string `json:"request_id"`
 	}](t, baseURL, v, http.MethodPost, sessionPath+"/messages", map[string]string{
-		"message": "MC live contract message " + runID,
+		"message": "real-world app contract message " + runID,
 	}, http.StatusAccepted)
 	if msg.RequestID == "" || msg.RequestID == id {
 		t.Fatalf("message response = %+v, want request_id distinct from session id %q", msg, id)
@@ -687,7 +701,7 @@ func exerciseLiveContractSessionLifecycle(t *testing.T, baseURL string, v openap
 	liveContractJSON[map[string]any](t, baseURL, v, http.MethodGet, sessionPath+"/pending", nil, http.StatusOK)
 	liveContractRequestOneOf(t, baseURL, v, http.MethodPost, sessionPath+"/respond", map[string]string{
 		"action": "deny",
-		"text":   "MC live contract no-pending response " + runID,
+		"text":   "real-world app contract no-pending response " + runID,
 	}, []int{http.StatusConflict, http.StatusNotImplemented})
 	transcript := liveContractJSON[struct {
 		ID     string `json:"id"`
@@ -696,6 +710,7 @@ func exerciseLiveContractSessionLifecycle(t *testing.T, baseURL string, v openap
 	if transcript.ID != id || transcript.Format != "raw" {
 		t.Fatalf("raw transcript = %+v, want id=%q format=raw", transcript, id)
 	}
+	assertLiveContractStreamOpens(t, baseURL, sessionPath+"/stream?format=raw")
 
 	agents := liveContractJSON[struct {
 		Agents []struct {
@@ -773,15 +788,15 @@ func exerciseLiveContractFormulasAndWorkflows(t *testing.T, baseURL string, v op
 	}, []int{http.StatusOK, http.StatusBadRequest, http.StatusUnprocessableEntity, http.StatusNotFound})
 	workflow := liveContractJSON[beads.Bead](t, baseURL, v, http.MethodPost, cityBase+"/beads", map[string]any{
 		"description": "Workflow fixture created by TestGCLiveContract_BeadsAndEvents",
-		"labels":      []string{"mc-live-contract", "workflow"},
+		"labels":      []string{"real-world-app-contract", "workflow"},
 		"metadata": map[string]string{
 			"gc.kind":             "workflow",
 			"gc.formula":          formulaName,
 			"gc.formula_contract": "graph.v2",
-			"gc.workflow_id":      "mc-workflow-" + runID,
+			"gc.workflow_id":      "real-world-app-workflow-" + runID,
 		},
 		"rig":   rigName,
-		"title": "MC live contract workflow " + runID,
+		"title": "real-world app contract workflow " + runID,
 		"type":  "convoy",
 	}, http.StatusCreated)
 	workflowID := workflow.ID
@@ -792,14 +807,14 @@ func exerciseLiveContractFormulasAndWorkflows(t *testing.T, baseURL string, v op
 
 	convoyItem := liveContractJSON[beads.Bead](t, baseURL, v, http.MethodPost, cityBase+"/beads", map[string]any{
 		"description": "Disposable convoy item fixture created by TestGCLiveContract_BeadsAndEvents",
-		"labels":      []string{"mc-live-contract", "convoy-item"},
+		"labels":      []string{"real-world-app-contract", "convoy-item"},
 		"rig":         rigName,
-		"title":       "MC live contract convoy item " + runID,
+		"title":       "real-world app contract convoy item " + runID,
 		"type":        "task",
 	}, http.StatusCreated)
 	convoy := liveContractJSON[beads.Bead](t, baseURL, v, http.MethodPost, cityBase+"/convoys", map[string]any{
 		"rig":   rigName,
-		"title": "MC live contract convoy " + runID,
+		"title": "real-world app contract convoy " + runID,
 		"items": []string{convoyItem.ID},
 	}, http.StatusCreated)
 	if convoy.ID == "" {
@@ -813,15 +828,15 @@ func exerciseLiveContractFormulasAndWorkflows(t *testing.T, baseURL string, v op
 
 func exerciseLiveContractOrders(t *testing.T, baseURL string, v openapivalidator.Validator, cityBase, rigName, rootBeadID, runID string) {
 	t.Helper()
-	scopedName := "mc-live-contract-" + runID + ":rig:" + rigName
+	scopedName := "real-world-app-contract-" + runID + ":rig:" + rigName
 	orderRun := liveContractJSON[beads.Bead](t, baseURL, v, http.MethodPost, cityBase+"/beads", map[string]any{
 		"description": "Order history fixture created by TestGCLiveContract_BeadsAndEvents",
-		"labels":      []string{"order-run:" + scopedName, "mc-live-contract"},
+		"labels":      []string{"order-run:" + scopedName, "real-world-app-contract"},
 		"metadata": map[string]string{
 			"convergence.gate_stdout": "hello from live contract",
 		},
 		"rig":   rigName,
-		"title": "MC live contract order history " + runID,
+		"title": "real-world app contract order history " + runID,
 		"type":  "task",
 	}, http.StatusCreated)
 	defer liveContractJSON[struct {
@@ -1423,7 +1438,7 @@ func assertLiveContractRequiredOperations(t *testing.T, specBytes []byte) {
 	for _, required := range liveContractRequiredOperations {
 		found, ok := operations[required.OperationID]
 		if !ok {
-			t.Fatalf("OpenAPI missing required MC GC operation %s (%s %s)", required.OperationID, required.Method, required.PathTemplate)
+			t.Fatalf("OpenAPI missing required real-world app GC operation %s (%s %s)", required.OperationID, required.Method, required.PathTemplate)
 		}
 		if found.Method != required.Method || found.PathTemplate != required.PathTemplate {
 			t.Fatalf("OpenAPI operation %s = %s %s, want %s %s", required.OperationID, found.Method, found.PathTemplate, required.Method, required.PathTemplate)

@@ -4646,6 +4646,44 @@ func TestHandleSessionStreamRawStallEmitsPendingEventOnCityRoute(t *testing.T) {
 	}
 }
 
+func TestHandleSessionStreamRawRunningSessionWithoutTranscriptOpensImmediately(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/stream?format=raw", nil).WithContext(ctx)
+	rec := newSyncResponseRecorder()
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	body := waitForRecorderSubstring(t, rec, `"messages":[]`, time.Second)
+	cancel()
+	<-done
+
+	if !strings.Contains(body, `"messages":[]`) {
+		t.Fatalf("raw stream body missing initial empty message payload: %s", body)
+	}
+	if !strings.Contains(body, `"format":"raw"`) {
+		t.Fatalf("raw stream body missing raw format payload: %s", body)
+	}
+}
+
 func TestHandleSessionStreamTranscriptWriteWakesWithoutPolling(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
@@ -4921,7 +4959,7 @@ func TestHandleSessionGetActivity(t *testing.T) {
 	}
 }
 
-func TestFilterMetadataAllowlistsMCPrefix(t *testing.T) {
+func TestFilterMetadataAllowlistsRealWorldAppPrefix(t *testing.T) {
 	tests := []struct {
 		name string
 		in   map[string]string
@@ -4938,14 +4976,14 @@ func TestFilterMetadataAllowlistsMCPrefix(t *testing.T) {
 			want: nil,
 		},
 		{
-			name: "mc_ keys preserved",
-			in:   map[string]string{"mc_session_kind": "agent", "mc_permission_mode": "plan", "session_key": "secret"},
-			want: map[string]string{"mc_session_kind": "agent", "mc_permission_mode": "plan"},
+			name: "real_world_app_ keys preserved",
+			in:   map[string]string{"real_world_app_session_kind": "agent", "real_world_app_permission_mode": "plan", "session_key": "secret"},
+			want: map[string]string{"real_world_app_session_kind": "agent", "real_world_app_permission_mode": "plan"},
 		},
 		{
 			name: "mixed keys",
-			in:   map[string]string{"mc_project_id": "proj-1", "quarantined_until": "2025-01-01", "held_until": "2025-01-02"},
-			want: map[string]string{"mc_project_id": "proj-1"},
+			in:   map[string]string{"real_world_app_project_id": "proj-1", "quarantined_until": "2025-01-01", "held_until": "2025-01-02"},
+			want: map[string]string{"real_world_app_project_id": "proj-1"},
 		},
 	}
 
@@ -4979,14 +5017,14 @@ func TestHandleSessionGetMetadataFiltered(t *testing.T) {
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Test")
 
-	// Set metadata with both mc_ and internal keys.
+	// Set metadata with both real_world_app_ and internal keys.
 	if err := fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{
-		"mc_project_id":  "proj-1",
-		"session_key":    "secret-key",
-		"command":        "claude --skip",
-		"work_dir":       "/private/dir",
-		"sleep_reason":   "",
-		"mc_custom_mode": "plan",
+		"real_world_app_project_id":  "proj-1",
+		"session_key":                "secret-key",
+		"command":                    "claude --skip",
+		"work_dir":                   "/private/dir",
+		"sleep_reason":               "",
+		"real_world_app_custom_mode": "plan",
 	}); err != nil {
 		t.Fatalf("set metadata: %v", err)
 	}
@@ -5004,15 +5042,15 @@ func TestHandleSessionGetMetadataFiltered(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 
-	// Only mc_ prefixed keys should be present.
+	// Only real_world_app_ prefixed keys should be present.
 	if len(resp.Metadata) != 2 {
 		t.Fatalf("got %d metadata keys, want 2: %v", len(resp.Metadata), resp.Metadata)
 	}
-	if resp.Metadata["mc_project_id"] != "proj-1" {
-		t.Errorf("mc_project_id = %q, want %q", resp.Metadata["mc_project_id"], "proj-1")
+	if resp.Metadata["real_world_app_project_id"] != "proj-1" {
+		t.Errorf("real_world_app_project_id = %q, want %q", resp.Metadata["real_world_app_project_id"], "proj-1")
 	}
-	if resp.Metadata["mc_custom_mode"] != "plan" {
-		t.Errorf("mc_custom_mode = %q, want %q", resp.Metadata["mc_custom_mode"], "plan")
+	if resp.Metadata["real_world_app_custom_mode"] != "plan" {
+		t.Errorf("real_world_app_custom_mode = %q, want %q", resp.Metadata["real_world_app_custom_mode"], "plan")
 	}
 	// Internal keys must NOT be present.
 	if _, ok := resp.Metadata["session_key"]; ok {

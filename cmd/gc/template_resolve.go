@@ -193,7 +193,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 
 	// Step 7: Resolve session bead ID for traceability.
 	// Look up the session bead by session_name to get the bead ID (e.g., mc-cnf).
-	// This is what MC uses to link beads → session logs.
+	// This is what real-world apps use to link beads to session logs.
 	sessionBeadID := ""
 	if p.sessionBeads != nil {
 		for _, b := range p.sessionBeads.Open() {

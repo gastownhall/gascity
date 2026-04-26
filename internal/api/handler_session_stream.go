@@ -130,6 +130,16 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	format := r.URL.Query().Get("format")
+	if format == "raw" && !info.Closed {
+		data, _ := json.Marshal(SessionStreamRawMessageEvent{
+			ID:       info.ID,
+			Template: info.Template,
+			Provider: info.Provider,
+			Format:   "raw",
+			Messages: []SessionRawMessageFrame{},
+		})
+		writeSSE(w, "message", 0, data)
+	}
 	if info.Closed {
 		if format == "raw" {
 			s.emitClosedSessionSnapshotRaw(w, info, history)
@@ -147,7 +157,7 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 		}
 	case format == "raw":
 		// No log file yet. If the session is running, poll tmux pane content
-		// and wrap it as a fake raw JSONL assistant message so MC's existing
+		// and wrap it as a fake raw JSONL assistant message so a real-world app's existing
 		// rendering pipeline shows terminal output (e.g. OAuth prompts).
 		if running {
 			s.streamSessionPeekRaw(ctx, w, info, handle)
@@ -505,7 +515,7 @@ func (s *Server) streamSessionTranscriptHistory(ctx context.Context, w http.Resp
 }
 
 // streamSessionPeekRaw polls tmux pane content and wraps it as format=raw
-// messages so MC's JSONL rendering pipeline can display terminal output
+// messages so a real-world app's JSONL rendering pipeline can display terminal output
 // (e.g. OAuth prompts, startup screens) when no transcript log exists yet.
 func (s *Server) streamSessionPeekRaw(ctx context.Context, w http.ResponseWriter, info session.Info, handle interface {
 	worker.PeekHandle

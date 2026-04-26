@@ -1488,7 +1488,7 @@ func normalizeAgentDefaultsAlias(cfg *City, meta toml.MetaData) {
 type Agent struct {
 	// Name is the unique identifier for this agent.
 	Name string `toml:"name" jsonschema:"required"`
-	// Description is a human-readable description shown in MC's session creation UI.
+	// Description is a human-readable description shown in a real-world app's session creation UI.
 	Description string `toml:"description,omitempty"`
 	// Dir is the identity prefix for rig-scoped agents and the default
 	// working directory when WorkDir is not set.

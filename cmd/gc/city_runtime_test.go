@@ -1407,7 +1407,7 @@ func TestCityRuntimeBeadReconcileTick_KeepsAssignedPoolWorkerAwake(t *testing.T)
 		Status: "open",
 		Labels: []string{sessionBeadLabel, "agent:gascity/claude"},
 		Metadata: map[string]string{
-			"session_name":         "claude-mc-live",
+			"session_name":         "claude-real-world-app-live",
 			"template":             "gascity/claude",
 			"agent_name":           "gascity/claude",
 			"pool_slot":            "1",
@@ -1422,7 +1422,7 @@ func TestCityRuntimeBeadReconcileTick_KeepsAssignedPoolWorkerAwake(t *testing.T)
 	}
 
 	sp := runtime.NewFake()
-	if err := sp.Start(context.Background(), "claude-mc-live", runtime.Config{}); err != nil {
+	if err := sp.Start(context.Background(), "claude-real-world-app-live", runtime.Config{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -1442,7 +1442,7 @@ func TestCityRuntimeBeadReconcileTick_KeepsAssignedPoolWorkerAwake(t *testing.T)
 		State:            map[string]TemplateParams{},
 		ScaleCheckCounts: map[string]int{"gascity/claude": 0},
 		AssignedWorkBeads: []beads.Bead{
-			workBead("ga-live", "gascity/claude", "claude-mc-live", "in_progress", 5),
+			workBead("ga-live", "gascity/claude", "claude-real-world-app-live", "in_progress", 5),
 		},
 	}
 
@@ -1459,7 +1459,7 @@ func TestCityRuntimeBeadReconcileTick_KeepsAssignedPoolWorkerAwake(t *testing.T)
 	if state := got.Metadata["state"]; state == "drained" || state == "asleep" {
 		t.Fatalf("assigned pool worker state = %q, want active/awake", state)
 	}
-	if !sp.IsRunning("claude-mc-live") {
+	if !sp.IsRunning("claude-real-world-app-live") {
 		t.Fatal("assigned pool worker should still be running")
 	}
 }
@@ -1472,7 +1472,7 @@ func TestCityRuntimeBeadReconcileTick_SweepRespectsLiveAssignedWork(t *testing.T
 		Status: "open",
 		Labels: []string{sessionBeadLabel, "agent:worker"},
 		Metadata: map[string]string{
-			"session_name":         "worker-mc-live",
+			"session_name":         "worker-real-world-app-live",
 			"template":             "worker",
 			"agent_name":           "worker",
 			"pool_slot":            "1",
@@ -1495,7 +1495,7 @@ func TestCityRuntimeBeadReconcileTick_SweepRespectsLiveAssignedWork(t *testing.T
 		Title:    "future work",
 		Type:     "task",
 		Status:   "open",
-		Assignee: "worker-mc-live",
+		Assignee: "worker-real-world-app-live",
 		Metadata: map[string]string{"gc.routed_to": "worker"},
 	}); err != nil {
 		t.Fatalf("Create work bead: %v", err)

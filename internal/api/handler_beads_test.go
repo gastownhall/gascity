@@ -652,8 +652,8 @@ func TestBeadCreatePersistsMetadataAndParent(t *testing.T) {
 		"type":"feature",
 		"parent":"` + parent.ID + `",
 		"metadata":{
-			"mc.contract.role":"child",
-			"mc.contract.run_id":"run-1"
+			"real_world_app.contract.role":"child",
+			"real_world_app.contract.run_id":"run-1"
 		}
 	}`
 	req := newPostRequest(cityURL(state, "/beads"), bytes.NewBufferString(body))
@@ -671,8 +671,8 @@ func TestBeadCreatePersistsMetadataAndParent(t *testing.T) {
 	if created.ParentID != parent.ID {
 		t.Fatalf("response parent = %q, want %q", created.ParentID, parent.ID)
 	}
-	if created.Metadata["mc.contract.run_id"] != "run-1" {
-		t.Fatalf("response metadata = %#v, want mc.contract.run_id=run-1", created.Metadata)
+	if created.Metadata["real_world_app.contract.run_id"] != "run-1" {
+		t.Fatalf("response metadata = %#v, want real_world_app.contract.run_id=run-1", created.Metadata)
 	}
 
 	got, err := store.Get(created.ID)
@@ -682,8 +682,8 @@ func TestBeadCreatePersistsMetadataAndParent(t *testing.T) {
 	if got.ParentID != parent.ID {
 		t.Fatalf("stored parent = %q, want %q", got.ParentID, parent.ID)
 	}
-	if got.Metadata["mc.contract.role"] != "child" || got.Metadata["mc.contract.run_id"] != "run-1" {
-		t.Fatalf("stored metadata = %#v, want MC metadata", got.Metadata)
+	if got.Metadata["real_world_app.contract.role"] != "child" || got.Metadata["real_world_app.contract.run_id"] != "run-1" {
+		t.Fatalf("stored metadata = %#v, want real-world app metadata", got.Metadata)
 	}
 }
 
@@ -703,7 +703,7 @@ func TestBeadCreateResponseUsesAuthoritativeStoredBead(t *testing.T) {
 		"type":"feature",
 		"parent":"` + parent.ID + `",
 		"labels":["urgent"],
-		"metadata":{"mc.contract.run_id":"run-1"}
+		"metadata":{"real_world_app.contract.run_id":"run-1"}
 	}`
 	req := newPostRequest(cityURL(state, "/beads"), bytes.NewBufferString(body))
 	rec := httptest.NewRecorder()
@@ -723,8 +723,8 @@ func TestBeadCreateResponseUsesAuthoritativeStoredBead(t *testing.T) {
 	if len(created.Labels) != 1 || created.Labels[0] != "urgent" {
 		t.Fatalf("response labels = %#v, want [urgent]", created.Labels)
 	}
-	if created.Metadata["mc.contract.run_id"] != "run-1" {
-		t.Fatalf("response metadata = %#v, want mc.contract.run_id=run-1", created.Metadata)
+	if created.Metadata["real_world_app.contract.run_id"] != "run-1" {
+		t.Fatalf("response metadata = %#v, want real_world_app.contract.run_id=run-1", created.Metadata)
 	}
 }
 

@@ -327,7 +327,7 @@ func (sm *SupervisorMux) humaHandleProviderReadiness(ctx context.Context, input 
 // Rationale: full city init takes minutes (dolt startup,
 // provider-readiness probes, pack fetch). Blocking the HTTP request
 // until finalize completes exceeds reasonable client timeouts
-// (MC's harness hit 120s). The fast scaffold+register path takes
+// (a real-world app's harness hit 120s). The fast scaffold+register path takes
 // seconds; the async completion contract via SSE is the right shape
 // for a long-running operation. See engdocs/architecture/api-control-plane.md §1–§2 on
 // the object model + typed events; §4 on the event registry.

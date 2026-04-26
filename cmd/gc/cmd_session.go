@@ -1022,7 +1022,7 @@ func cmdSessionAttach(args []string, stdout, stderr io.Writer) int {
 //
 // stderr receives projection errors (use io.Discard to ignore).
 //
-// sessionKind mirrors the mc_session_kind bead metadata: "provider" means
+// sessionKind mirrors the real_world_app_session_kind bead metadata: "provider" means
 // the session was created from a bare provider name (not an agent template),
 // so the agent-template lookup should be skipped. This matches the guard in
 // the API handler (handler_session_chat.go).

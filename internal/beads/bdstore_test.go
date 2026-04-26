@@ -1257,7 +1257,7 @@ func TestBdStoreListInfersParentFromParentChildDependency(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd list --json --label=mc-live-contract --include-infra --include-gates --limit 50`: {
+		`bd list --json --label=real-world-app-contract --include-infra --include-gates --limit 50`: {
 			out: []byte(`[
 				{
 					"id":"bd-child",
@@ -1265,7 +1265,7 @@ func TestBdStoreListInfersParentFromParentChildDependency(t *testing.T) {
 					"status":"open",
 					"issue_type":"task",
 					"created_at":"2025-01-15T10:30:00Z",
-					"labels":["mc-live-contract"],
+					"labels":["real-world-app-contract"],
 					"dependencies":[
 						{
 							"issue_id":"bd-child",
@@ -1279,7 +1279,7 @@ func TestBdStoreListInfersParentFromParentChildDependency(t *testing.T) {
 	})
 	s := beads.NewBdStore("/city", runner)
 
-	got, err := s.List(beads.ListQuery{Label: "mc-live-contract", Limit: 50})
+	got, err := s.List(beads.ListQuery{Label: "real-world-app-contract", Limit: 50})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}

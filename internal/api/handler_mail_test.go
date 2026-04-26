@@ -76,6 +76,11 @@ func TestMailLifecycle(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("get status = %d, want %d", rec.Code, http.StatusOK)
 	}
+	var readMsg mail.Message
+	json.NewDecoder(rec.Body).Decode(&readMsg) //nolint:errcheck
+	if !readMsg.Read {
+		t.Fatalf("get after read: Read = false, want true")
+	}
 
 	// Archive.
 	req = newPostRequest(cityURL(state, "/mail/")+sent.ID+"/archive", nil)
@@ -121,6 +126,13 @@ func TestMailMarkUnread(t *testing.T) {
 	json.NewDecoder(rec.Body).Decode(&inbox) //nolint:errcheck
 	if inbox.Total != 1 {
 		t.Fatalf("inbox after mark-unread: Total = %d, want 1 (message should reappear)", inbox.Total)
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/mail/")+sent.ID, nil))
+	var unread mail.Message
+	json.NewDecoder(rec.Body).Decode(&unread) //nolint:errcheck
+	if unread.Read {
+		t.Fatalf("get after mark-unread: Read = true, want false")
 	}
 }
 

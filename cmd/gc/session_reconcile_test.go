@@ -693,7 +693,7 @@ func TestComputeWorkSet_ResolvesRigDir(t *testing.T) {
 	runner := func(_ string, dir string, _ map[string]string) (string, error) {
 		// The dir must be the resolved absolute path, not the relative "myrig".
 		if dir == rigDir {
-			return "MC-1\n", nil
+			return "real-world app-1\n", nil
 		}
 		return "", fmt.Errorf("unexpected dir %q, want %q", dir, rigDir)
 	}
@@ -717,7 +717,7 @@ func TestComputeWorkSet_UsesConfiguredRigRoot(t *testing.T) {
 
 	runner := func(_ string, dir string, _ map[string]string) (string, error) {
 		if dir == rigDir {
-			return "MC-1\n", nil
+			return "real-world app-1\n", nil
 		}
 		return "", fmt.Errorf("unexpected dir %q, want %q", dir, rigDir)
 	}

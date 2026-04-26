@@ -295,7 +295,7 @@ func waitHTTP(t *testing.T, url string, deadline time.Duration) {
 // contract end-to-end against a live supervisor: subscribe to
 // /v0/events/stream, POST /v0/city, verify the handler returns 202
 // immediately with {request_id}, then assert a request.result.city.create event
-// for that city name arrives on the SSE stream. This is the test MC's
+// for that city name arrives on the SSE stream. This is the test a real-world app's
 // live contract harness implicitly needs — without it, any
 // regression in Scaffold, the reconciler's city create completion emission, or
 // the supervisor event multiplexer would ship unnoticed.
@@ -418,7 +418,7 @@ func TestHumaBinary_CityCreateAsync(t *testing.T) {
 
 	// 3. Wait for request.result.city.create (or request.failed with
 	// operation=city.create) on the SSE stream whose envelope Subject
-	// == cityName. This is the async completion contract the MC live
+	// == cityName. This is the async completion contract the real-world app live
 	// harness relies on.
 	deadline := time.After(120 * time.Second)
 	for {

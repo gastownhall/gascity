@@ -62,7 +62,7 @@ type sessionResponse struct {
 	// template_overrides bead metadata (e.g., {"permission_mode":"unrestricted"}).
 	Options map[string]string `json:"options,omitempty"`
 
-	// Metadata exposes mc_-prefixed bead metadata for external consumers.
+	// Metadata exposes real_world_app_-prefixed bead metadata for external consumers.
 	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
@@ -142,24 +142,24 @@ func sessionResponseWithReason(info session.Info, b *beads.Bead, cfg *config.Cit
 		return r
 	}
 	// Populate kind from persisted metadata.
-	if k := b.Metadata["mc_session_kind"]; k != "" {
+	if k := b.Metadata["real_world_app_session_kind"]; k != "" {
 		r.Kind = k
 	}
 	r.Reason = session.LifecycleDisplayReason(b.Status, b.Metadata, time.Now().UTC())
 	r.ConfiguredNamedSession = strings.TrimSpace(b.Metadata[apiNamedSessionMetadataKey]) == "true"
 	r.SubmissionCapabilities = session.SubmissionCapabilitiesForMetadata(b.Metadata, hasDeferredQueue)
-	// Expose only mc_* prefixed metadata keys to API consumers.
+	// Expose only real_world_app_* prefixed metadata keys to API consumers.
 	// Internal fields (session_key, command, work_dir, etc.) are redacted.
 	r.Metadata = filterMetadata(b.Metadata)
 	return r
 }
 
-// filterMetadataAllowedKeys lists non-mc_ metadata keys that are safe to expose.
+// filterMetadataAllowedKeys lists non-real_world_app_ metadata keys that are safe to expose.
 var filterMetadataAllowedKeys = map[string]bool{
 	"template_overrides": true,
 }
 
-// filterMetadata returns only metadata keys with the "mc_" prefix plus
+// filterMetadata returns only metadata keys with the "real_world_app_" prefix plus
 // explicitly allowlisted keys. This prevents leaking internal bead fields
 // (session_key, command, work_dir, quarantine state) to API consumers.
 func filterMetadata(m map[string]string) map[string]string {
@@ -168,7 +168,7 @@ func filterMetadata(m map[string]string) map[string]string {
 	}
 	filtered := make(map[string]string)
 	for k, v := range m {
-		if strings.HasPrefix(k, "mc_") || filterMetadataAllowedKeys[k] {
+		if strings.HasPrefix(k, "real_world_app_") || filterMetadataAllowedKeys[k] {
 			filtered[k] = v
 		}
 	}
