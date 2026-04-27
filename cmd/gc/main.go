@@ -451,6 +451,15 @@ func validateCityPath(p string) (string, error) {
 
 // resolveRigToContext resolves a rig name or path to a full context by scanning
 // registered cities and their machine-local .gc/site.toml rig bindings.
+//
+// Resolution order:
+//  1. Match against rig names in any registered city's [[rigs]] table.
+//  2. Match against the absolute path of any registered rig.
+//  3. Match against the HQ name of any registered city. The HQ is the
+//     city itself; matching it returns a context with empty RigName,
+//     mirroring how `cwd discovery from the city root` resolves. This
+//     closes #1242 — `gc rig list` shows HQ identically to other rigs,
+//     so addressability via `--rig <hq-name>` should work too.
 func resolveRigToContext(nameOrPath string) (resolvedContext, error) {
 	if matches, err := registeredRigBindingsByName(nameOrPath, true); err != nil {
 		return resolvedContext{}, err
@@ -468,7 +477,95 @@ func resolveRigToContext(nameOrPath string) (resolvedContext, error) {
 		return resolveRigBindingMatches(abs, matches)
 	}
 
+	if matches, err := registeredHQByName(nameOrPath, true); err != nil {
+		return resolvedContext{}, err
+	} else if len(matches) > 0 {
+		return resolveHQBindingMatches(nameOrPath, matches)
+	}
+
 	return resolvedContext{}, fmt.Errorf("rig %q is not registered in any city", nameOrPath)
+}
+
+// registeredHQBinding identifies a registered city by HQ name match.
+// Distinct from registeredRigBinding so the two name-spaces stay
+// independent — a rig and an HQ may coincidentally share a name in
+// different cities.
+type registeredHQBinding struct {
+	City supervisor.CityEntry
+}
+
+// registeredHQByName returns the registered cities whose HQ name matches
+// name. The HQ name is sourced from two places, both compared to name:
+//
+//   - The registry entry's stored EffectiveName (what `gc cities list`
+//     displays).
+//   - The live workspace name from city.toml (what `gc rig list` shows
+//     under "(HQ)").
+//
+// Comparing both protects against drift between the registry record
+// and the on-disk config (e.g., after editing workspace.name without
+// re-registering).
+//
+// failOnLoadError mirrors the rig-binding helper's contract: load
+// failures bubble up only when at least one match was found or the
+// caller demands loud failures, so name lookups don't break just
+// because an unrelated city's config is malformed.
+func registeredHQByName(name string, failOnLoadError bool) ([]registeredHQBinding, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, nil
+	}
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	cities, err := reg.List()
+	if err != nil {
+		return nil, err
+	}
+	var matched []registeredHQBinding
+	var loadErrors []string
+	seen := make(map[string]struct{}, len(cities))
+	for _, c := range cities {
+		if c.EffectiveName() == name {
+			if _, dup := seen[c.Path]; !dup {
+				matched = append(matched, registeredHQBinding{City: c})
+				seen[c.Path] = struct{}{}
+			}
+			continue
+		}
+		cfg, err := loadCityConfigSuppressDeprecatedOrderWarnings(c.Path, io.Discard)
+		if err != nil {
+			loadErrors = append(loadErrors, fmt.Sprintf("%s: %v", registeredCityLabel(c), err))
+			continue
+		}
+		if loadedCityName(cfg, c.Path) == name {
+			if _, dup := seen[c.Path]; !dup {
+				matched = append(matched, registeredHQBinding{City: c})
+				seen[c.Path] = struct{}{}
+			}
+		}
+	}
+	if len(loadErrors) > 0 && (failOnLoadError || len(matched) > 0) {
+		return nil, fmt.Errorf("loading registered city HQ names: %s", strings.Join(loadErrors, "; "))
+	}
+	return matched, nil
+}
+
+// resolveHQBindingMatches collapses one or more HQ matches into a
+// resolvedContext. The RigName is intentionally empty — the HQ has no
+// rig identity; commands operating against it see the city scope, the
+// same context cwd discovery from the city root produces.
+func resolveHQBindingMatches(value string, matches []registeredHQBinding) (resolvedContext, error) {
+	if len(matches) == 1 {
+		return resolvedContext{CityPath: matches[0].City.Path, RigName: ""}, nil
+	}
+	cityNames := make([]string, 0, len(matches))
+	for _, m := range matches {
+		cityNames = append(cityNames, registeredCityLabel(m.City))
+	}
+	sort.Strings(cityNames)
+	return resolvedContext{}, fmt.Errorf(
+		"HQ name %q is registered for multiple cities: %s\n  Specify by path:  gc --city <path> <command>",
+		value,
+		strings.Join(cityNames, ", "))
 }
 
 func resolveRigPathToContext(dir string) (resolvedContext, bool, error) {
