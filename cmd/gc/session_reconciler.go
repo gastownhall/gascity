@@ -370,11 +370,6 @@ func reconcileSessionBeadsTraced(
 							}
 						}
 						if stopped {
-							_ = dops.clearDrain(name)
-							if dt != nil {
-								dt.clearIdleProbe(session.ID)
-								dt.remove(session.ID)
-							}
 							template := normalizedSessionTemplate(*session, cfg)
 							if template == "" {
 								template = session.Metadata["template"]
@@ -385,6 +380,32 @@ func reconcileSessionBeadsTraced(
 								Subject: template,
 								Message: "drain acknowledged by agent",
 							})
+							hasAssignedWork, assignedErr := sessionHasOpenAssignedWork(store, rigStores, *session)
+							if assignedErr != nil {
+								fmt.Fprintf(stderr, "session reconciler: checking assigned work for drain-acked %s: %v\n", name, assignedErr) //nolint:errcheck
+								hasAssignedWork = true
+							}
+							if hasAssignedWork {
+								batch := sessionpkg.CompleteDrainPatch(clk.Now().UTC(), "idle", session.Metadata["wake_mode"] == "fresh")
+								_ = store.SetMetadataBatch(session.ID, batch)
+								if session.Metadata == nil {
+									session.Metadata = make(map[string]string, len(batch))
+								}
+								for key, value := range batch {
+									session.Metadata[key] = value
+								}
+								_ = dops.clearDrain(name)
+								if dt != nil {
+									dt.clearIdleProbe(session.ID)
+									dt.remove(session.ID)
+								}
+								continue
+							}
+							_ = dops.clearDrain(name)
+							if dt != nil {
+								dt.clearIdleProbe(session.ID)
+								dt.remove(session.ID)
+							}
 							closeSessionBeadIfUnassigned(store, rigStores, *session, "drained", clk.Now().UTC(), stderr)
 						}
 						continue
