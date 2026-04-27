@@ -166,9 +166,10 @@ type City struct {
 	Services []Service `toml:"service,omitempty"`
 	// AgentDefaults provides city-level defaults for agents that don't
 	// override them (canonical TOML key: agent_defaults). The runtime
-	// currently applies default_sling_formula and append_fragments; the
-	// attachment-list fields remain tombstones, and the other fields are
-	// parsed/composed but not yet inherited automatically.
+	// currently applies provider, default_sling_formula, and
+	// append_fragments; the attachment-list fields remain tombstones, and
+	// the other fields are parsed/composed but not yet inherited
+	// automatically.
 	AgentDefaults AgentDefaults `toml:"agent_defaults,omitempty"`
 	// AgentsDefaults is a temporary compatibility alias for [agent_defaults].
 	// Parse/load normalize it into AgentDefaults and prefer [agent_defaults]
@@ -1391,14 +1392,20 @@ func (c *City) FormulasDir() string {
 }
 
 // AgentDefaults provides city-level agent defaults declared via
-// [agent_defaults] in city.toml. The runtime currently applies
-// default_sling_formula and append_fragments; the remaining fields are
+// [agent_defaults] in city.toml. The runtime applies provider,
+// default_sling_formula, and append_fragments; the remaining fields are
 // parsed and composed but are not yet inherited onto agents automatically.
 type AgentDefaults struct {
 	// Model is the parsed/composed default model name for agents
 	// (e.g., "claude-sonnet-4-6"), but it is not yet auto-applied at
 	// runtime. Agents with their own model override would take precedence.
 	Model string `toml:"model,omitempty"`
+	// Provider is the city-level default provider name applied to agents
+	// that don't set their own provider. Unlike workspace.provider, this
+	// does NOT trigger InjectImplicitAgents — it only fills in
+	// agent.provider on declared agents. Combine with workspace.provider
+	// or [providers.X] to also synthesize an implicit fallback agent.
+	Provider string `toml:"provider,omitempty"`
 	// WakeMode is the parsed/composed default wake mode ("resume" or
 	// "fresh"), but it is not yet auto-applied at runtime.
 	WakeMode string `toml:"wake_mode,omitempty" jsonschema:"enum=resume,enum=fresh"`
@@ -1435,6 +1442,9 @@ type AgentDefaults struct {
 func mergeAgentDefaultsAliasPreferCanonical(dst *AgentDefaults, src AgentDefaults, meta toml.MetaData) {
 	if !meta.IsDefined("agent_defaults", "model") {
 		dst.Model = src.Model
+	}
+	if !meta.IsDefined("agent_defaults", "provider") {
+		dst.Provider = src.Provider
 	}
 	if !meta.IsDefined("agent_defaults", "wake_mode") {
 		dst.WakeMode = src.WakeMode
@@ -2137,6 +2147,17 @@ func ApplyAgentDefaults(cfg *City) {
 			}
 		}
 	}
+
+	if provider := cfg.AgentDefaults.Provider; provider != "" {
+		for i := range cfg.Agents {
+			if cfg.Agents[i].Name == ControlDispatcherAgentName {
+				continue
+			}
+			if cfg.Agents[i].Provider == "" {
+				cfg.Agents[i].Provider = provider
+			}
+		}
+	}
 }
 
 // applyAgentSharedAttachmentDefaults preserves legacy derived attachment-list
@@ -2218,6 +2239,12 @@ func mergeAgentDefaults(dst *AgentDefaults, src AgentDefaults, label string, pro
 			prov.Warnings = append(prov.Warnings, fmt.Sprintf("agent_defaults.model redefined by %q", label))
 		}
 		dst.Model = src.Model
+	}
+	if src.Provider != "" {
+		if prov != nil && dst.Provider != "" && dst.Provider != src.Provider {
+			prov.Warnings = append(prov.Warnings, fmt.Sprintf("agent_defaults.provider redefined by %q", label))
+		}
+		dst.Provider = src.Provider
 	}
 	if src.WakeMode != "" {
 		if prov != nil && dst.WakeMode != "" && dst.WakeMode != src.WakeMode {

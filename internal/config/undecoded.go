@@ -14,6 +14,7 @@ const agentsAliasWarning = "[agents] is a deprecated compatibility alias for [ag
 
 var agentDefaultsCompatibilityOverlapKeys = []string{
 	"model",
+	"provider",
 	"wake_mode",
 	"default_sling_formula",
 	"allow_overlay",
@@ -97,11 +98,6 @@ func agentDefaultsTablesOverlap(md toml.MetaData) bool {
 func specializedUndecodedWarning(source, key string) (string, bool) {
 	isPackSource := filepath.Base(source) == "pack.toml"
 	switch key {
-	case "agent_defaults.provider", "agents.provider":
-		if isPackSource {
-			return fmt.Sprintf("%s: %q is not supported in this release wave; keep setting provider per agent in agents/<name>/agent.toml", source, key), true
-		}
-		return fmt.Sprintf("%s: %q is not supported in this release wave; keep using workspace.provider (or set provider per agent in agents/<name>/agent.toml)", source, key), true
 	case "agent_defaults.scope", "agents.scope":
 		return fmt.Sprintf("%s: %q is not supported in this release wave; keep setting scope per agent in agents/<name>/agent.toml", source, key), true
 	case "agent_defaults.install_agent_hooks", "agents.install_agent_hooks":

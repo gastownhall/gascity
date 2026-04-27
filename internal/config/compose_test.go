@@ -316,7 +316,7 @@ name = "rigpack"
 schema = 2
 
 [agent_defaults]
-provider = "claude"
+scope = "rig"
 
 [[agent]]
 name = "worker"
@@ -334,7 +334,7 @@ scope = "rig"
 	if !strings.Contains(warnings, "/city/pack.toml: "+agentsAliasWarning) {
 		t.Fatalf("expected root pack alias warning, got: %v", prov.Warnings)
 	}
-	if !strings.Contains(warnings, `/city/packs/rigpack/pack.toml: "agent_defaults.provider" is not supported`) {
+	if !strings.Contains(warnings, `/city/packs/rigpack/pack.toml: "agent_defaults.scope" is not supported`) {
 		t.Fatalf("expected rig pack migration warning, got: %v", prov.Warnings)
 	}
 }

@@ -302,10 +302,10 @@ func TestParseWithMetaSkipsMixedTableWarningWhenOverlapIsOnlyUnsupportedFutureKe
 name = "test"
 
 [agent_defaults]
-provider = "claude"
+scope = "rig"
 
 [agents]
-provider = "codex"
+scope = "city"
 `
 	_, _, warnings, err := parseWithMeta([]byte(input), "test.toml")
 	if err != nil {
@@ -319,7 +319,7 @@ provider = "codex"
 	foundUnsupported := false
 	foundAlias := false
 	for _, w := range warnings {
-		if strings.Contains(w, `keep using workspace.provider`) {
+		if strings.Contains(w, `keep setting scope per agent`) {
 			foundUnsupported = true
 		}
 		if strings.Contains(w, agentsAliasWarning) {
@@ -340,17 +340,6 @@ func TestParseWithMetaWarnsOnUnsupportedAgentDefaultsMigrationKeys(t *testing.T)
 		input string
 		want  string
 	}{
-		{
-			name: "provider",
-			input: `
-[workspace]
-name = "test"
-
-[agent_defaults]
-provider = "claude"
-`,
-			want: `keep using workspace.provider`,
-		},
 		{
 			name: "scope",
 			input: `
@@ -407,18 +396,6 @@ func TestParsePackConfigWithMetaWarnsOnPackLocalUnsupportedAgentDefaultsKeys(t *
 		want  string
 	}{
 		{
-			name: "provider",
-			input: `
-[pack]
-name = "test"
-schema = 2
-
-[agent_defaults]
-provider = "claude"
-`,
-			want: `keep setting provider per agent in agents/<name>/agent.toml`,
-		},
-		{
 			name: "install_agent_hooks",
 			input: `
 [pack]
@@ -454,6 +431,30 @@ install_agent_hooks = ["hooks/gascity.json"]
 				t.Fatalf("expected warning containing %q, got: %v", tt.want, warnings)
 			}
 		})
+	}
+}
+
+func TestParseWithMetaNoWarningOnSupportedAgentDefaultsProvider(t *testing.T) {
+	// agent_defaults.provider is now a first-class field; it must not
+	// trigger an unknown-field or migration warning.
+	input := `
+[workspace]
+name = "test"
+
+[agent_defaults]
+provider = "claude"
+`
+	_, _, warnings, err := parseWithMeta([]byte(input), "test.toml")
+	if err != nil {
+		t.Fatalf("parseWithMeta: %v", err)
+	}
+	for _, w := range warnings {
+		if strings.Contains(w, `"agent_defaults.provider"`) {
+			t.Errorf("unexpected provider warning: %q", w)
+		}
+		if strings.Contains(w, "unknown field") {
+			t.Errorf("unexpected unknown-field warning: %q", w)
+		}
 	}
 }
 

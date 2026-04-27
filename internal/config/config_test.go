@@ -4316,6 +4316,181 @@ func TestAgentDefaultsSlingFormula_ControlDispatcherSkipped(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// agent_defaults.provider
+// ---------------------------------------------------------------------------
+
+func TestAgentDefaultsProvider_ExplicitAgentInherits(t *testing.T) {
+	// Explicit agents without their own provider should inherit
+	// agent_defaults.provider.
+	cfg := &City{
+		Agents: []Agent{
+			{Name: "worker"},
+		},
+		AgentDefaults: AgentDefaults{
+			Provider: "claude",
+		},
+	}
+	InjectImplicitAgents(cfg)
+	ApplyAgentDefaults(cfg)
+
+	if cfg.Agents[0].Provider != "claude" {
+		t.Errorf("worker.Provider = %q, want %q", cfg.Agents[0].Provider, "claude")
+	}
+}
+
+func TestAgentDefaultsProvider_ExplicitOverrideWins(t *testing.T) {
+	// An agent with its own provider keeps it; the city default does not
+	// clobber explicit declarations.
+	cfg := &City{
+		Agents: []Agent{
+			{Name: "worker", Provider: "codex"},
+		},
+		AgentDefaults: AgentDefaults{
+			Provider: "claude",
+		},
+	}
+	ApplyAgentDefaults(cfg)
+
+	if cfg.Agents[0].Provider != "codex" {
+		t.Errorf("worker.Provider = %q, want %q (explicit override)",
+			cfg.Agents[0].Provider, "codex")
+	}
+}
+
+func TestAgentDefaultsProvider_DoesNotTriggerImplicitAgents(t *testing.T) {
+	// agent_defaults.provider must NOT cause InjectImplicitAgents to
+	// synthesize an implicit "claude" agent. That synthesis path is
+	// reserved for workspace.provider / [providers.X].
+	cfg := &City{
+		Agents: []Agent{
+			{Name: "worker"},
+		},
+		AgentDefaults: AgentDefaults{
+			Provider: "claude",
+		},
+	}
+	InjectImplicitAgents(cfg)
+	ApplyAgentDefaults(cfg)
+
+	if got := len(cfg.Agents); got != 1 {
+		t.Fatalf("len(Agents) = %d, want 1; got: %+v", got, cfg.Agents)
+	}
+	if cfg.Agents[0].Name != "worker" {
+		t.Errorf("Agents[0].Name = %q, want %q", cfg.Agents[0].Name, "worker")
+	}
+	if cfg.Agents[0].Implicit {
+		t.Errorf("worker should not be marked Implicit")
+	}
+}
+
+func TestAgentDefaultsProvider_DoesNotShadowExplicitAgent(t *testing.T) {
+	// Regression: workspace.provider triggers InjectImplicitAgents, which
+	// historically shadowed an explicit agent named after the provider.
+	// agent_defaults.provider must not — the explicit agent keeps its
+	// configuration.
+	customNudge := "explicit-nudge"
+	cfg := &City{
+		Agents: []Agent{
+			{Name: "claude", Nudge: customNudge},
+		},
+		AgentDefaults: AgentDefaults{
+			Provider: "claude",
+		},
+	}
+	InjectImplicitAgents(cfg)
+	ApplyAgentDefaults(cfg)
+
+	if got := len(cfg.Agents); got != 1 {
+		t.Fatalf("len(Agents) = %d, want 1 (explicit, no implicit shadow); got: %+v", got, cfg.Agents)
+	}
+	if cfg.Agents[0].Implicit {
+		t.Errorf("explicit agent 'claude' was marked Implicit — synthesis path fired by mistake")
+	}
+	if cfg.Agents[0].Nudge != customNudge {
+		t.Errorf("Nudge = %q, want %q (explicit config preserved)", cfg.Agents[0].Nudge, customNudge)
+	}
+	if cfg.Agents[0].Provider != "claude" {
+		t.Errorf("Provider = %q, want %q (already set, default still resolves to same value)",
+			cfg.Agents[0].Provider, "claude")
+	}
+}
+
+func TestAgentDefaultsProvider_ControlDispatcherSkipped(t *testing.T) {
+	// Control-dispatcher agents are infrastructure and must not receive
+	// the city default provider.
+	cfg := &City{
+		Agents: []Agent{
+			{Name: ControlDispatcherAgentName, Implicit: true},
+		},
+		AgentDefaults: AgentDefaults{
+			Provider: "claude",
+		},
+	}
+	ApplyAgentDefaults(cfg)
+
+	if cfg.Agents[0].Provider != "" {
+		t.Errorf("control-dispatcher.Provider = %q, want \"\"", cfg.Agents[0].Provider)
+	}
+}
+
+func TestAgentDefaultsProvider_ImplicitAgentsKeepOwnProvider(t *testing.T) {
+	// When workspace.provider triggers implicit-agent synthesis, the
+	// implicit agent's own Provider field is set in InjectImplicitAgents
+	// and must not be clobbered by agent_defaults.provider.
+	cfg := &City{
+		Workspace: Workspace{Provider: "codex"},
+		AgentDefaults: AgentDefaults{
+			Provider: "claude",
+		},
+	}
+	InjectImplicitAgents(cfg)
+	ApplyAgentDefaults(cfg)
+
+	for _, a := range cfg.Agents {
+		if a.Implicit && a.Name == "codex" && a.Provider != "codex" {
+			t.Errorf("implicit codex agent: Provider = %q, want %q", a.Provider, "codex")
+		}
+	}
+}
+
+func TestParseAgentDefaultsProvider(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test-city"
+
+[agent_defaults]
+provider = "claude"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.AgentDefaults.Provider != "claude" {
+		t.Errorf("AgentDefaults.Provider = %q, want %q", cfg.AgentDefaults.Provider, "claude")
+	}
+}
+
+func TestParseAgentDefaultsProvider_LegacyAgentsAlias(t *testing.T) {
+	// The deprecated [agents] alias should also accept provider so
+	// existing configs migrate without breaking.
+	data := []byte(`
+[workspace]
+name = "test-city"
+
+[agents]
+provider = "claude"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.AgentDefaults.Provider != "claude" {
+		t.Errorf("AgentDefaults.Provider = %q, want %q (alias normalization)",
+			cfg.AgentDefaults.Provider, "claude")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // max_active_sessions / min_active_sessions / scale_check
 // ---------------------------------------------------------------------------
 

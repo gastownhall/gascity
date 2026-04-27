@@ -314,6 +314,10 @@
           "type": "string",
           "description": "Model is the parsed/composed default model name for agents\n(e.g., \"claude-sonnet-4-6\"), but it is not yet auto-applied at\nruntime. Agents with their own model override would take precedence."
         },
+        "provider": {
+          "type": "string",
+          "description": "Provider is the city-level default provider name applied to agents\nthat don't set their own provider. Unlike workspace.provider, this\ndoes NOT trigger InjectImplicitAgents — it only fills in\nagent.provider on declared agents. Combine with workspace.provider\nor [providers.X] to also synthesize an implicit fallback agent."
+        },
         "wake_mode": {
           "type": "string",
           "enum": [
@@ -992,7 +996,7 @@
         },
         "agent_defaults": {
           "$ref": "#/$defs/AgentDefaults",
-          "description": "AgentDefaults provides city-level defaults for agents that don't\noverride them (canonical TOML key: agent_defaults). The runtime\ncurrently applies default_sling_formula and append_fragments; the\nattachment-list fields remain tombstones, and the other fields are\nparsed/composed but not yet inherited automatically."
+          "description": "AgentDefaults provides city-level defaults for agents that don't\noverride them (canonical TOML key: agent_defaults). The runtime\ncurrently applies provider, default_sling_formula, and\nappend_fragments; the attachment-list fields remain tombstones, and\nthe other fields are parsed/composed but not yet inherited\nautomatically."
         }
       },
       "additionalProperties": false,

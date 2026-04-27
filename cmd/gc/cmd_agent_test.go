@@ -201,7 +201,7 @@ func TestEmitLoadCityConfigWarningsFiltersNonMigrationWarnings(t *testing.T) {
 			`workspace.name redefined by "/city/defaults.toml"`,
 			`/city/pack.toml: [agents] is a deprecated compatibility alias for [agent_defaults]; rewrite the table name to [agent_defaults]`,
 			`/city/pack.toml: both [agent_defaults] and [agents] are present; [agent_defaults] wins on overlapping keys and [agents] only fills gaps`,
-			`/city/pack.toml: "agent_defaults.provider" is not supported in [agent_defaults]; keep using workspace.provider or set provider per agent in agents/<name>/agent.toml`,
+			`/city/pack.toml: "agent_defaults.scope" is not supported in this release wave; keep setting scope per agent in agents/<name>/agent.toml`,
 			`gc: warning: attachment-list fields (` + "`skills`, `mcp`, `skills_append`, `mcp_append`, `shared_skills`" + `) are deprecated as of v0.15.1 and ignored.`,
 		},
 	})
@@ -216,7 +216,7 @@ func TestEmitLoadCityConfigWarningsFiltersNonMigrationWarnings(t *testing.T) {
 	if !strings.Contains(output, `both [agent_defaults] and [agents] are present`) {
 		t.Fatalf("expected mixed-table warning, got %q", output)
 	}
-	if !strings.Contains(output, `"agent_defaults.provider" is not supported`) {
+	if !strings.Contains(output, `"agent_defaults.scope" is not supported`) {
 		t.Fatalf("expected unsupported-key warning, got %q", output)
 	}
 	if !strings.Contains(output, "attachment-list fields") {
@@ -405,7 +405,7 @@ func TestStrictFatalLoadConfigWarningsKeepsMixedTableWarningsFatal(t *testing.T)
 	warnings := []string{
 		`/city/pack.toml: [agents] is a deprecated compatibility alias for [agent_defaults]; rewrite the table name to [agent_defaults]`,
 		`/city/pack.toml: both [agent_defaults] and [agents] are present; [agent_defaults] wins on overlapping keys and [agents] only fills gaps`,
-		`/city/pack.toml: "agent_defaults.provider" is not supported in [agent_defaults]; keep using workspace.provider or set provider per agent in agents/<name>/agent.toml`,
+		`/city/pack.toml: "agent_defaults.scope" is not supported in this release wave; keep setting scope per agent in agents/<name>/agent.toml`,
 		`workspace.name redefined by "/city/defaults.toml"`,
 	}
 
