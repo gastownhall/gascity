@@ -1754,6 +1754,12 @@ op_init() {
     # If already initialized on disk, ensure the database is also registered
     # with the running server. This covers the case where bd init created the
     # directory but the server was restarted (or the database was quarantined).
+    #
+    # NOTE: metadata.json is written by seedDeferredManagedBeadsBeforeProviderReadiness
+    # during gc init *before* Dolt starts, so on a fresh city this path is reached
+    # with an empty (schema-less) database. We detect that by checking whether
+    # `bd config set issue_prefix` succeeds — it fails when no beads schema exists.
+    # On failure we fall through to the full bd init path below.
     if [ -f "$dir/.beads/metadata.json" ]; then
         if ensure_database_registered "$dolt_database"; then
             # GC owns canonical metadata/config normalization after this backend
@@ -1761,13 +1767,19 @@ op_init() {
             # and bd-specific bootstrap only.
             ensure_beads_dir_permissions "$dir"
             normalize_scope_after_init "$dir" "$prefix" "$dolt_database"
-            run_bd_pinned "$dir" config set issue_prefix "$prefix" 2>/dev/null || true
-            run_bd_pinned "$dir" config set types.custom "$custom_types" 2>/dev/null || true
-            backfill_project_id_if_missing "$dir"
-            exit 0
+            if run_bd_pinned "$dir" config set issue_prefix "$prefix" 2>/dev/null; then
+                run_bd_pinned "$dir" config set types.custom "$custom_types" 2>/dev/null || true
+                backfill_project_id_if_missing "$dir"
+                exit 0
+            fi
+            # bd config set failed — beads schema not yet initialized in this
+            # database (fresh empty db from ensure_database_registered). Fall
+            # through to bd init below to create the schema.
+            echo "warning: beads schema not initialized in '$dolt_database'; running bd init" >&2
+        else
+            # Database registration failed — fall through to full init.
+            echo "warning: database '$dolt_database' not registered; re-initializing" >&2
         fi
-        # Database registration failed — fall through to full init.
-        echo "warning: database '$dolt_database' not registered; re-initializing" >&2
     fi
 
     local host
