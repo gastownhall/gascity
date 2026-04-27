@@ -554,7 +554,7 @@ func shouldUseLocalCityEventsFallback(scope eventsAPIScope, apiErr error) bool {
 func printStreamingCityAPIRequirement(mode string, stderr io.Writer) {
 	_, _ = fmt.Fprintf(
 		stderr,
-		"gc events: %s requires a running city API; local fallback only supports `gc events` and `gc events --seq` when the city is stopped\n",
+		cmdName("events")+": %s requires a running city API; local fallback only supports `"+cmdName("events")+"` and `"+cmdName("events")+" --seq` when the city is stopped\n",
 		mode,
 	)
 }
@@ -621,7 +621,7 @@ func localWireEvent(e events.Event, warningWriter io.Writer) genclient.WireEvent
 		if err := payload.UnmarshalJSON(e.Payload); err == nil {
 			item.Payload = &payload
 		} else if warningWriter != nil {
-			fmt.Fprintf(warningWriter, "gc events: warning: decoding local event payload for seq %d type %s: %v\n", e.Seq, e.Type, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(warningWriter, "%s: warning: decoding local event payload for seq %d type %s: %v\n", cmdName("events"), e.Seq, e.Type, err) //nolint:errcheck // best-effort stderr
 		}
 	}
 	return item

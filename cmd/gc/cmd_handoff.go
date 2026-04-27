@@ -71,7 +71,7 @@ func cmdHandoff(args []string, target string, stdout, stderr io.Writer) int {
 	store, err := openCityStoreAt(current.cityPath)
 	if err != nil {
 		cmdErr(stderr, "handoff", err)
-		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "hint: run %q for diagnostics\n", cmdName("doctor")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	sp := newSessionProvider()

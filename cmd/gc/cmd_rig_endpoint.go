@@ -96,7 +96,7 @@ func doRigSetEndpoint(fs fsys.FS, cityPath, rigName string, opts rigEndpointOpti
 
 	rig, ok := rigByName(cfg, rigName)
 	if !ok {
-		fmt.Fprintln(stderr, rigNotFoundMsg("gc rig set-endpoint", rigName, cfg)) //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, rigNotFoundMsg(cmdName("rig set-endpoint"), rigName, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if strings.TrimSpace(rig.Path) == "" {

@@ -450,7 +450,7 @@ func doAgentAdd(fs fsys.FS, cityPath, name, promptTemplate, dir string, suspende
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	packPath := filepath.Join(cityPath, "pack.toml")
 	if _, err := fs.Stat(packPath); err != nil {
-		fmt.Fprintf(stderr, "%s: this command requires a city directory with pack.toml; run \"gc doctor\" or \"gc doctor --fix\" to migrate this city first\n", cmdName("agent add")) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: this command requires a city directory with pack.toml; run %q or \"%s\" to migrate this city first\n", cmdName("agent add"), cmdName("doctor"), cmdName("doctor")+" --fix") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 

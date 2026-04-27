@@ -111,7 +111,7 @@ func cmdRigRestart(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if !found {
-		fmt.Fprintln(stderr, rigNotFoundMsg("gc rig restart", rigName, cfg)) //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, rigNotFoundMsg(cmdName("rig restart"), rigName, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 

@@ -152,7 +152,7 @@ func materializeSkillsIntoWorkdir(cfg *config.City, agent *config.Agent, workdir
 		// cursor, pi, omp, or an unknown provider) have no sink.
 		// Log once per session spawn per the spec and exit
 		// successfully — this is not an error condition.
-		fmt.Fprintf(stdout, "gc internal materialize-skills: provider %q has no skill sink in v0.15.1; skipping\n", provider) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(stdout, "%s: provider %q has no skill sink in v0.15.1; skipping\n", cmdName("internal materialize-skills"), provider) //nolint:errcheck // best-effort stdout
 		return nil
 	}
 

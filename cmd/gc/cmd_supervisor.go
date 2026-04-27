@@ -226,7 +226,7 @@ func startSupervisorSocket(sockPath string, cancelFn context.CancelFunc, reconci
 					return
 				}
 				// Transient error — log and continue.
-				fmt.Fprintf(os.Stderr, "gc supervisor: socket accept: %v\n", err) //nolint:errcheck
+				fmt.Fprintf(os.Stderr, "%s: socket accept: %v\n", cmdName("supervisor"), err) //nolint:errcheck
 				continue
 			}
 			go handleSupervisorConn(conn, cancelFn, reconcileCh, shut)

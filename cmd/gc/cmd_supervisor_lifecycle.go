@@ -186,7 +186,7 @@ func waitForSupervisorReady(stderr io.Writer) int {
 	if waitForSupervisorPID() != 0 {
 		return 0
 	}
-	fmt.Fprintf(stderr, "gc: supervisor did not become ready; see %s\n", supervisorLogPath()) //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, prog()+": supervisor did not become ready; see %s\n", supervisorLogPath()) //nolint:errcheck // best-effort stderr
 	return 1
 }
 

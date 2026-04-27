@@ -241,7 +241,7 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 
 	a, ok := resolveAgentIdentity(cfg, target, currentRigContext(cfg))
 	if !ok {
-		fmt.Fprintln(stderr, agentNotFoundMsg("gc sling", target, cfg)) //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, agentNotFoundMsg(cmdName("sling"), target, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -796,13 +796,13 @@ func printSourceWorkflowConflict(stderr io.Writer, conflictErr *sourceworkflow.C
 	}
 	_, _ = fmt.Fprintf(
 		stderr,
-		"gc sling: source bead %s already has live workflow(s): %s\n",
+		cmdName("sling")+": source bead %s already has live workflow(s): %s\n",
 		conflictErr.SourceBeadID,
 		strings.Join(conflictErr.WorkflowIDs, ","),
 	)
 	_, _ = fmt.Fprintf(
 		stderr,
-		"gc sling: use --force to override, or %s to clean up\n",
+		cmdName("sling")+": use --force to override, or %s to clean up\n",
 		sourceWorkflowCleanupCommand(conflictErr.SourceBeadID, storeRef),
 	)
 }

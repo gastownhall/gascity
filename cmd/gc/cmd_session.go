@@ -160,7 +160,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 	// not concrete pool member names like worker-2.
 	found, ok := resolveSessionTemplate(cfg, templateName, currentRigContext(cfg))
 	if !ok {
-		fmt.Fprintln(stderr, agentNotFoundMsg("gc session new", templateName, cfg)) //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, agentNotFoundMsg(cmdName("session new"), templateName, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 

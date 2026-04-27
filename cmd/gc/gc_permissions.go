@@ -37,6 +37,6 @@ func chmodIfExists(path string, perm os.FileMode, stderr io.Writer) {
 		return // already correct
 	}
 	if err := os.Chmod(path, perm); err != nil {
-		fmt.Fprintf(stderr, "gc: chmod %s to %o: %v\n", path, perm, err) //nolint:errcheck
+		fmt.Fprintf(stderr, prog()+": chmod %s to %o: %v\n", path, perm, err) //nolint:errcheck
 	}
 }

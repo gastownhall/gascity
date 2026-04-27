@@ -76,7 +76,7 @@ func openRigAwareStore(args []string, stderr io.Writer) (beads.Store, int) {
 				store, err := openStoreAtForCity(storeDir, cityPath)
 				if err != nil {
 					cmdErr(stderr, "graph", err)
-					fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
+					fmt.Fprintf(stderr, "hint: run %q for diagnostics\n", cmdName("doctor")) //nolint:errcheck // best-effort stderr
 					return nil, 1
 				}
 				return store, 0
@@ -87,7 +87,7 @@ func openRigAwareStore(args []string, stderr io.Writer) (beads.Store, int) {
 	store, err := openStoreAtForCity(cityPath, cityPath)
 	if err != nil {
 		cmdErr(stderr, "graph", err)
-		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "hint: run %q for diagnostics\n", cmdName("doctor")) //nolint:errcheck // best-effort stderr
 		return nil, 1
 	}
 	return store, 0

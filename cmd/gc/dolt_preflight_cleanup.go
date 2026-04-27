@@ -128,7 +128,7 @@ func quarantinePhantomManagedDoltDatabases(dataDir string, now time.Time) error 
 		if err := os.Rename(dbDir, dest); err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "gc dolt preflight: quarantined phantom database %s -> %s\n", dbDir, dest) //nolint:errcheck // best-effort warning
+		fmt.Fprintf(os.Stderr, "%s: quarantined phantom database %s -> %s\n", cmdName("dolt preflight"), dbDir, dest) //nolint:errcheck // best-effort warning
 	}
 	return nil
 }

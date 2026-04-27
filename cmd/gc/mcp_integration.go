@@ -109,7 +109,7 @@ func ensureMCPGitignoreBestEffort(root string, stderr io.Writer) {
 		return
 	}
 	if err := ensureGitignoreEntries(fsys.OSFS{}, root, managedMCPGitignoreEntries); err != nil && stderr != nil {
-		fmt.Fprintf(stderr, "gc: warning: updating %s/.gitignore for MCP: %v\n", root, err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+": warning: updating %s/.gitignore for MCP: %v\n", root, err) //nolint:errcheck // best-effort stderr
 	}
 }
 
@@ -289,7 +289,7 @@ func cleanupOrphansAtRoot(root string, desired map[string]bool, stderr io.Writer
 			return fmt.Errorf("cleaning up orphan %s marker at %s: %w", provider, root, err)
 		}
 		if stderr != nil {
-			fmt.Fprintf(stderr, "gc: cleaned up orphan MCP marker %s at %s\n", provider, root) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, prog()+": cleaned up orphan MCP marker %s at %s\n", provider, root) //nolint:errcheck // best-effort stderr
 		}
 	}
 	return nil

@@ -386,7 +386,7 @@ func openAllConvoyStores(stderr io.Writer, cmdName string) ([]convoyStoreView, i
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck // best-effort stderr
-		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "hint: run %q for diagnostics\n", prog()+" doctor") //nolint:errcheck // best-effort stderr
 		return nil, 1
 	}
 	return stores, 0
@@ -434,7 +434,7 @@ func openConvoyStoreByID(convoyID string, stderr io.Writer, cmdName string) (bea
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck // best-effort stderr
-		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "hint: run %q for diagnostics\n", prog()+" doctor") //nolint:errcheck // best-effort stderr
 		return nil, 1
 	}
 	return store, 0

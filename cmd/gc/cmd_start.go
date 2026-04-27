@@ -361,7 +361,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 			return 1
 		}
 		if registered {
-			fmt.Fprintf(stderr, "%s: city is registered with the supervisor; run \"gc unregister %s\" before using --foreground\n", cmdName("start"), cityPath) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: city is registered with the supervisor; run \"%s %s\" before using --foreground\n", cmdName("start"), cmdName("unregister"), cityPath) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	}
@@ -376,7 +376,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	cfg, prov, err := loadStartCityConfig(cityPath)
 	if err != nil {
 		cmdErr(stderr, "start", err)
-		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "hint: run %q for diagnostics\n", cmdName("doctor")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	applyFeatureFlags(cfg)
@@ -419,7 +419,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	resolveRigPaths(cityPath, cfg.Rigs)
 	if err := startBeadsLifecycle(cityPath, cityName, cfg, stderr); err != nil {
 		cmdErr(stderr, "start", err)
-		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "hint: run %q for diagnostics\n", cmdName("doctor")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 

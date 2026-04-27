@@ -83,12 +83,12 @@ type memoryOrderDispatcher struct {
 func buildOrderDispatcher(cityPath string, cfg *config.City, rec events.Recorder, stderr io.Writer) orderDispatcher {
 	allAA, err := scanAllOrders(cityPath, cfg, stderr, cmdName("start: order scan"))
 	if err != nil {
-		logDispatchError(stderr, "gc start: order scan: %v", err)
+		logDispatchError(stderr, cmdName("start")+": order scan: %v", err)
 		return nil
 	}
 	if len(cfg.Orders.Overrides) > 0 {
 		if err := orders.ApplyOverrides(allAA, convertOverrides(cfg.Orders.Overrides)); err != nil {
-			logDispatchError(stderr, "gc start: order overrides: %v", err)
+			logDispatchError(stderr, cmdName("start")+": order overrides: %v", err)
 		}
 	}
 
@@ -141,7 +141,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 
 		target, err := resolveOrderStoreTarget(cityPath, m.cfg, a)
 		if err != nil {
-			logDispatchError(m.stderr, "gc: order dispatch: resolving target for %s: %v", a.ScopedName(), err)
+			logDispatchError(m.stderr, prog()+": order dispatch: resolving target for %s: %v", a.ScopedName(), err)
 			continue
 		}
 
@@ -150,7 +150,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		if !ok {
 			store, err = m.storeFn(target)
 			if err != nil {
-				logDispatchError(m.stderr, "gc: order dispatch: opening %s store for %s: %v", target.ScopeKind, a.ScopedName(), err)
+				logDispatchError(m.stderr, prog()+": order dispatch: opening %s store for %s: %v", target.ScopeKind, a.ScopedName(), err)
 				continue
 			}
 			stores[storeKey] = store
@@ -177,7 +177,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		if a.Trigger == "event" {
 			cursor, err := bdCursorAcrossStores(a.ScopedName(), storesForGate...)
 			if err != nil {
-				logDispatchError(m.stderr, "gc: order dispatch: reading event cursor for %s: %v", a.ScopedName(), err)
+				logDispatchError(m.stderr, prog()+": order dispatch: reading event cursor for %s: %v", a.ScopedName(), err)
 				continue
 			}
 			cursorFn = func(string) uint64 {
@@ -186,7 +186,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		}
 		result := orders.CheckTrigger(a, now, lastRunFn, m.ep, cursorFn)
 		if lastRunErr != nil {
-			logDispatchError(m.stderr, "gc: order dispatch: reading last run for %s: %v", a.ScopedName(), lastRunErr)
+			logDispatchError(m.stderr, prog()+": order dispatch: reading last run for %s: %v", a.ScopedName(), lastRunErr)
 			continue
 		}
 		if !result.Due {
@@ -197,7 +197,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		scoped := a.ScopedName()
 		hasOpenWork, err := m.hasOpenWorkInStoresStrict(storesForGate, scoped)
 		if err != nil {
-			logDispatchError(m.stderr, "gc: order dispatch: checking open work for %s: %v", scoped, err)
+			logDispatchError(m.stderr, prog()+": order dispatch: checking open work for %s: %v", scoped, err)
 			continue
 		}
 		if hasOpenWork {
@@ -211,7 +211,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			Labels: []string{"order-run:" + scoped, labelOrderTracking},
 		})
 		if err != nil {
-			logDispatchError(m.stderr, "gc: order dispatch: creating tracking bead for %s: %v", scoped, err)
+			logDispatchError(m.stderr, prog()+": order dispatch: creating tracking bead for %s: %v", scoped, err)
 			continue
 		}
 
@@ -232,7 +232,7 @@ func (m *memoryOrderDispatcher) legacyCityStoreForTarget(cityPath string, target
 	}
 	store, err := m.storeFn(legacyTarget)
 	if err != nil {
-		logDispatchError(m.stderr, "gc: order dispatch: opening legacy city store for rig order fallback: %v", err)
+		logDispatchError(m.stderr, prog()+": order dispatch: opening legacy city store for rig order fallback: %v", err)
 		return nil, false
 	}
 	stores[key] = store
@@ -272,9 +272,9 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.St
 	output, err := m.execRun(ctx, a.Exec, target.ScopeRoot, env)
 	if err != nil {
 		labels = append(labels, "exec-failed")
-		logDispatchError(m.stderr, "gc: order exec %s failed: %v", scoped, err)
+		logDispatchError(m.stderr, prog()+": order exec %s failed: %v", scoped, err)
 		if len(output) > 0 {
-			logDispatchError(m.stderr, "gc: order exec %s output: %s", scoped, output)
+			logDispatchError(m.stderr, prog()+": order exec %s output: %s", scoped, output)
 		}
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
@@ -346,7 +346,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	if a.Pool != "" {
 		pool := qualifyPool(a.Pool, a.Rig)
 		if err := applyGraphRouting(recipe, nil, pool, nil, "", "", "", "", store, m.cityName, cityPath, m.cfg); err != nil {
-			logDispatchError(m.stderr, "gc: order %s: routing decoration failed: %v", scoped, err)
+			logDispatchError(m.stderr, prog()+": order %s: routing decoration failed: %v", scoped, err)
 			// Non-fatal — molecule still works, just without step-level routing.
 		}
 	}
@@ -380,7 +380,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	if err := store.Update(rootID, update); err != nil {
 		// Label failure is critical for duplicate-dispatch prevention.
 		// Log and emit an event so operators can investigate.
-		logDispatchError(m.stderr, "gc: order %s: failed to label wisp %s: %v", scoped, rootID, err)
+		logDispatchError(m.stderr, prog()+": order %s: failed to label wisp %s: %v", scoped, rootID, err)
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
 			Actor:   "controller",

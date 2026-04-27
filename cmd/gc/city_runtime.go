@@ -165,11 +165,11 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 	// Retry with backoff as defense-in-depth against transient store
 	// errors immediately after ensureBeadsProvider returns (#753).
 	if sweepStore, err := openStoreAtForCity(p.CityPath, p.CityPath); err != nil {
-		fmt.Fprintf(p.Stderr, "gc start: order tracking sweep: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(p.Stderr, "%s: order tracking sweep: %v\n", cmdName("start"), err) //nolint:errcheck // best-effort stderr
 	} else if n, err := sweepOrphanedOrderTrackingRetry(sweepStore, 3, time.Second); err != nil {
-		fmt.Fprintf(p.Stderr, "gc start: order tracking sweep (closed %d): %v\n", n, err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(p.Stderr, "%s: order tracking sweep (closed %d): %v\n", cmdName("start"), n, err) //nolint:errcheck // best-effort stderr
 	} else if n > 0 {
-		fmt.Fprintf(p.Stderr, "gc start: closed %d orphaned order-tracking beads\n", n) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(p.Stderr, "%s: closed %d orphaned order-tracking beads\n", cmdName("start"), n) //nolint:errcheck // best-effort stderr
 	}
 
 	od := buildOrderDispatcher(p.CityPath, p.Cfg, p.Rec, p.Stderr)

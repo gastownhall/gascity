@@ -816,7 +816,7 @@ func doRigSuspend(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer
 		}
 	}
 	if !found {
-		fmt.Fprintln(stderr, rigNotFoundMsg("gc rig suspend", rigName, cfg)) //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, rigNotFoundMsg(cmdName("rig suspend"), rigName, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -896,7 +896,7 @@ func doRigResume(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer)
 		}
 	}
 	if !found {
-		fmt.Fprintln(stderr, rigNotFoundMsg("gc rig resume", rigName, cfg)) //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, rigNotFoundMsg(cmdName("rig resume"), rigName, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -954,7 +954,7 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 		filtered = append(filtered, r)
 	}
 	if !found {
-		fmt.Fprintln(stderr, rigNotFoundMsg("gc rig remove", rigName, cfg)) //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, rigNotFoundMsg(cmdName("rig remove"), rigName, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	cfg.Rigs = filtered

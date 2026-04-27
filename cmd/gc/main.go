@@ -98,7 +98,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// Initialize OTel telemetry (opt-in via GC_OTEL_METRICS_URL / GC_OTEL_LOGS_URL).
 	provider, err := telemetry.Init(context.Background(), "gascity", version)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc: telemetry init: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: telemetry init: %v\n", prog(), err) //nolint:errcheck // best-effort stderr
 	}
 	if provider != nil {
 		defer func() {
@@ -704,7 +704,7 @@ func openCityStore(stderr io.Writer, cmdName string) (beads.Store, int) {
 	store, err := openCityStoreAt(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck // best-effort stderr
-		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "hint: run %q for diagnostics\n", prog()+" doctor") //nolint:errcheck // best-effort stderr
 		return nil, 1
 	}
 	return store, 0

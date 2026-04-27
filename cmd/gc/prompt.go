@@ -94,14 +94,14 @@ func renderPrompt(fs fsys.FS, cityPath, cityName, templatePath string, ctx Promp
 	// Parse main template last — its body becomes the "prompt" template.
 	tmpl, err = tmpl.Parse(raw)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc: prompt template %q: %v\n", templatePath, err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+": prompt template %q: %v\n", templatePath, err) //nolint:errcheck // best-effort stderr
 		return raw
 	}
 
 	td := buildTemplateData(ctx)
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, td); err != nil {
-		fmt.Fprintf(stderr, "gc: prompt template %q: %v\n", templatePath, err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, prog()+": prompt template %q: %v\n", templatePath, err) //nolint:errcheck // best-effort stderr
 		return raw
 	}
 
@@ -109,12 +109,12 @@ func renderPrompt(fs fsys.FS, cityPath, cityName, templatePath string, ctx Promp
 	for _, name := range injectFragments {
 		frag := tmpl.Lookup(name)
 		if frag == nil {
-			fmt.Fprintf(stderr, "gc: inject_fragment %q: template not found\n", name) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, prog()+": inject_fragment %q: template not found\n", name) //nolint:errcheck // best-effort stderr
 			continue
 		}
 		var fbuf bytes.Buffer
 		if err := frag.Execute(&fbuf, td); err != nil {
-			fmt.Fprintf(stderr, "gc: inject_fragment %q: %v\n", name, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, prog()+": inject_fragment %q: %v\n", name, err) //nolint:errcheck // best-effort stderr
 			continue
 		}
 		buf.WriteString("\n\n")
@@ -173,7 +173,7 @@ func loadSharedTemplates(fs fsys.FS, tmpl *template.Template, dir string, stderr
 	for _, name := range sharedTemplateFileNames(entries) {
 		if sdata, err := fs.ReadFile(filepath.Join(dir, name)); err == nil {
 			if _, err := tmpl.Parse(string(sdata)); err != nil {
-				fmt.Fprintf(stderr, "gc: shared template %q: %v\n", name, err) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, prog()+": shared template %q: %v\n", name, err) //nolint:errcheck // best-effort stderr
 			}
 		}
 	}
