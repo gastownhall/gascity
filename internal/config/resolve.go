@@ -507,6 +507,9 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 						rp.OptionsSchema[i].Choices[j].FlagArgs = make([]string, len(c.FlagArgs))
 						copy(rp.OptionsSchema[i].Choices[j].FlagArgs, c.FlagArgs)
 					}
+					if len(c.FlagAliases) > 0 {
+						rp.OptionsSchema[i].Choices[j].FlagAliases = cloneStringSlices(c.FlagAliases)
+					}
 				}
 			}
 		}
@@ -734,7 +737,7 @@ func resolvedChainToSpec(r ResolvedProvider, leaf ProviderSpec) ProviderSpec {
 		}
 	}
 	if r.OptionsSchema != nil {
-		out.OptionsSchema = append([]ProviderOption(nil), r.OptionsSchema...)
+		out.OptionsSchema = deepCopyProviderOptions(r.OptionsSchema)
 	}
 	// EffectiveDefaults on ResolvedProvider is the merged defaults; fold
 	// into OptionDefaults on the spec so downstream specToResolved picks

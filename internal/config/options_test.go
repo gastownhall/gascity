@@ -1,6 +1,7 @@
 package config
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -143,6 +144,73 @@ func TestReplaceSchemaFlagsStripsCodexAliases(t *testing.T) {
 	}
 	if strings.Contains(got, "-m gpt-5.5") || strings.Contains(got, `model_reasoning_effort=\"xhigh\"`) {
 		t.Fatalf("ReplaceSchemaFlags() = %q, retained non-canonical schema flag", got)
+	}
+}
+
+func TestCollectAllSchemaFlagsUsesDeclaredFlagAliases(t *testing.T) {
+	schema := []ProviderOption{
+		{
+			Key: "model",
+			Choices: []OptionChoice{
+				{
+					Value:       "opus",
+					FlagArgs:    []string{"--model", "opus"},
+					FlagAliases: [][]string{{"-m", "opus"}},
+				},
+			},
+		},
+	}
+
+	flags := CollectAllSchemaFlags(schema)
+	got := StripFlags("agent -m opus --other", flags)
+
+	if got != "agent --other" {
+		t.Fatalf("StripFlags() = %q, want alias stripped", got)
+	}
+}
+
+func TestCollectAllSchemaFlagsDoesNotInferUndeclaredProviderAliases(t *testing.T) {
+	schema := []ProviderOption{
+		{
+			Key: "model",
+			Choices: []OptionChoice{
+				{Value: "opus", FlagArgs: []string{"--model", "opus"}},
+			},
+		},
+	}
+
+	flags := CollectAllSchemaFlags(schema)
+	got := StripFlags("agent -m opus --other", flags)
+
+	if got != "agent -m opus --other" {
+		t.Fatalf("StripFlags() = %q, want undeclared alias preserved", got)
+	}
+}
+
+func TestStripArgsSliceInfersChoiceFromDeclaredAlias(t *testing.T) {
+	schema := []ProviderOption{
+		{
+			Key: "model",
+			Choices: []OptionChoice{
+				{
+					Value:       "opus",
+					FlagArgs:    []string{"--model", "opus"},
+					FlagAliases: [][]string{{"-m", "opus"}},
+				},
+			},
+		},
+	}
+	flags := CollectAllSchemaFlags(schema)
+	inferred := make(map[string]string)
+
+	got := stripArgsSlice([]string{"run", "-m", "opus", "--other"}, flags, schema, inferred)
+
+	want := []string{"run", "--other"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("stripArgsSlice() = %v, want %v", got, want)
+	}
+	if inferred["model"] != "opus" {
+		t.Fatalf("inferred model = %q, want opus", inferred["model"])
 	}
 }
 

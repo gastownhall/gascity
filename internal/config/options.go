@@ -155,76 +155,34 @@ func ReplaceSchemaFlags(command string, schema []ProviderOption, overrideArgs []
 	return stripped
 }
 
-// CollectAllSchemaFlags gathers all FlagArgs from all choices across all options.
-// Multi-flag FlagArgs sequences are split at "--" boundaries so that each
-// independent flag group can be matched separately during stripping.
+// CollectAllSchemaFlags gathers all FlagArgs and FlagAliases from all choices
+// across all options. Multi-flag sequences are split at "--" boundaries so that
+// each independent flag group can be matched separately during stripping.
 func CollectAllSchemaFlags(schema []ProviderOption) [][]string {
 	var flags [][]string
 	seen := make(map[string]bool)
 	for _, opt := range schema {
 		for _, choice := range opt.Choices {
-			if len(choice.FlagArgs) > 0 {
-				for _, seq := range splitFlagArgs(choice.FlagArgs) {
-					for _, expanded := range expandEquivalentFlagSequences(seq) {
-						key := strings.Join(expanded, "\x00")
-						if seen[key] {
-							continue
-						}
-						seen[key] = true
-						flags = append(flags, expanded)
-					}
+			for _, seq := range choiceFlagSequences(choice) {
+				key := strings.Join(seq, "\x00")
+				if seen[key] {
+					continue
 				}
+				seen[key] = true
+				flags = append(flags, cloneStrings(seq))
 			}
 		}
 	}
 	return flags
 }
 
-func expandEquivalentFlagSequences(seq []string) [][]string {
-	if len(seq) == 0 {
-		return nil
+func choiceFlagSequences(choice OptionChoice) [][]string {
+	var sequences [][]string
+	sequences = append(sequences, splitFlagArgs(choice.FlagArgs)...)
+	for _, alias := range choice.FlagAliases {
+		sequences = append(sequences, splitFlagArgs(alias)...)
 	}
-	var out [][]string
-	add := func(candidate []string) {
-		copied := make([]string, len(candidate))
-		copy(copied, candidate)
-		out = append(out, copied)
-	}
-	add(seq)
-	if len(seq) == 2 && seq[0] == "--model" {
-		add([]string{"-m", seq[1]})
-	}
-	if len(seq) == 2 && seq[0] == "-m" {
-		add([]string{"--model", seq[1]})
-	}
-	if len(seq) == 2 && seq[0] == "-c" {
-		if quoted, ok := quoteAssignmentValue(seq[1]); ok {
-			add([]string{seq[0], quoted})
-		}
-		if unquoted, ok := unquoteAssignmentValue(seq[1]); ok {
-			add([]string{seq[0], unquoted})
-		}
-	}
-	return out
-}
-
-func quoteAssignmentValue(value string) (string, bool) {
-	key, val, ok := strings.Cut(value, "=")
-	if !ok || key == "" || val == "" || strings.HasPrefix(val, "\"") {
-		return "", false
-	}
-	return key + "=\"" + val + "\"", true
-}
-
-func unquoteAssignmentValue(value string) (string, bool) {
-	key, val, ok := strings.Cut(value, "=")
-	if !ok || key == "" || len(val) < 2 {
-		return "", false
-	}
-	if !strings.HasPrefix(val, "\"") || !strings.HasSuffix(val, "\"") {
-		return "", false
-	}
-	return key + "=" + strings.Trim(val, "\""), true
+	return sequences
 }
 
 // splitFlagArgs splits a FlagArgs slice into independent flag groups at
@@ -337,9 +295,9 @@ func stripArgsSlice(args []string, flags [][]string, schema []ProviderOption, in
 	return result
 }
 
-// inferChoiceFromFlags finds which schema option+choice produced the given
-// flag sequence and, if the key is not already present in defaults, sets
-// the inferred value. Only infers from exact full-FlagArgs matches to
+// inferChoiceFromFlags finds which schema option+choice produced the given flag
+// sequence and, if the key is not already present in defaults, sets the
+// inferred value. Only infers from exact full FlagArgs or FlagAliases matches to
 // avoid ambiguity with partial multi-flag matches.
 func inferChoiceFromFlags(schema []ProviderOption, flagSeq []string, defaults map[string]string) {
 	for _, opt := range schema {
@@ -347,7 +305,7 @@ func inferChoiceFromFlags(schema []ProviderOption, flagSeq []string, defaults ma
 			continue
 		}
 		for _, choice := range opt.Choices {
-			if flagsEquivalent(choice.FlagArgs, flagSeq) {
+			if choiceHasFlagSequence(choice, flagSeq) {
 				defaults[opt.Key] = choice.Value
 				return
 			}
@@ -355,29 +313,26 @@ func inferChoiceFromFlags(schema []ProviderOption, flagSeq []string, defaults ma
 	}
 }
 
-func flagsEquivalent(a, b []string) bool {
-	if flagsEqual(a, b) {
-		return true
-	}
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if normalizeFlagToken(a[i]) != normalizeFlagToken(b[i]) {
-			return false
+func choiceHasFlagSequence(choice OptionChoice, flagSeq []string) bool {
+	for _, seq := range choiceFullFlagSequences(choice) {
+		if flagsEqual(seq, flagSeq) {
+			return true
 		}
 	}
-	return true
+	return false
 }
 
-func normalizeFlagToken(token string) string {
-	if token == "-m" {
-		return "--model"
+func choiceFullFlagSequences(choice OptionChoice) [][]string {
+	var sequences [][]string
+	if len(choice.FlagArgs) > 0 {
+		sequences = append(sequences, choice.FlagArgs)
 	}
-	if normalized, ok := unquoteAssignmentValue(token); ok {
-		return normalized
+	for _, alias := range choice.FlagAliases {
+		if len(alias) > 0 {
+			sequences = append(sequences, alias)
+		}
 	}
-	return token
+	return sequences
 }
 
 func flagsEqual(a, b []string) bool {
