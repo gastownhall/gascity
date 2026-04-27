@@ -256,6 +256,7 @@ func TestRenderSupervisorSystemdTemplate(t *testing.T) {
 
 	for _, check := range []string{
 		"[Service]",
+		`KillMode=process`,
 		`ExecStart=/usr/local/bin/gc supervisor run`,
 		`StandardOutput=append:/home/user/.gc/supervisor.log`,
 		`Environment=GC_HOME="/home/user/.gc"`,

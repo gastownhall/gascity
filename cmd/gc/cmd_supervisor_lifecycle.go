@@ -557,6 +557,13 @@ Description=Gas City machine supervisor
 
 [Service]
 Type=simple
+# Signal only the main supervisor PID on stop. tmux servers spawned by
+# 'gc supervisor run' live in this service's cgroup; the systemd default
+# (control-group) cascades SIGTERM through the cgroup on every stop, which
+# wipes one-per-bead dev/polecat session conversation history. The
+# supervisor reconciler re-adopts tmux state on start, so leaving tmux
+# alone here matches Gas City's existing lifecycle semantics. See #1174.
+KillMode=process
 ExecStart={{.GCPath}} supervisor run
 Restart=always
 RestartSec=5s
