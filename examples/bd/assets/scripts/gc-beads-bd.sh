@@ -1290,6 +1290,20 @@ clean_stale_sockets() {
     done
 }
 
+# ensure_beads_role ensures beads.role is set in global git config.
+# bd exits non-zero with "beads.role not configured" (gastownhall/beads#2950)
+# when this key is absent. That non-zero exit causes the `run_bd_pinned … ||
+# true` calls in op_init to fail silently, leaving issue_prefix and
+# types.custom unset in the Dolt database and making every subsequent
+# bd-create call fail with "database not initialized". Defaulting to
+# "maintainer" matches the role that gc-managed agents use to create beads.
+ensure_beads_role() {
+    if git config --global beads.role >/dev/null 2>&1; then
+        return 0
+    fi
+    git config --global beads.role maintainer || die "failed to set git config beads.role"
+}
+
 # ensure_dolt_identity ensures dolt has user.name and user.email configured.
 ensure_dolt_identity() {
     # Check if already configured.
@@ -1703,6 +1717,7 @@ op_init() {
     unset BEADS_DIR
     export BEADS_DIR="$beads_dir"
     ensure_beads_dir_permissions "$dir"
+    ensure_beads_role
 
     if [ -z "$dolt_database" ]; then
         # Compatibility fallback for direct gc-beads-bd invocations.

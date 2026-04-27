@@ -209,6 +209,11 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	d.Register(&doctor.EventsLogCheck{})
 	d.Register(doctor.NewEventLogSizeCheck())
 
+	// beads.role check — only relevant when bd tooling is in use.
+	if initNeedsBdTooling(cityPath) {
+		d.Register(&doctor.BeadsRoleCheck{})
+	}
+
 	// Custom types check — city store.
 	d.Register(doctor.NewCustomTypesCheck(cityPath, "city"))
 

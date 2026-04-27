@@ -2622,6 +2622,7 @@ esac
 		t.Fatal(err)
 	}
 
+	configureTestDoltIdentityEnv(t)
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
 	if err := initBeadsForDir(cityDir, cityDir, "gc", "hq"); err != nil {
@@ -2676,6 +2677,7 @@ esac
 		t.Fatal(err)
 	}
 
+	configureTestDoltIdentityEnv(t)
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
 	t.Setenv("GC_CITY_PATH", "/wrong-city")
@@ -2958,6 +2960,7 @@ esac
 		t.Fatal(err)
 	}
 
+	configureTestDoltIdentityEnv(t)
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
 
@@ -3604,10 +3607,10 @@ esac
 			}
 
 			cmd := exec.Command(script, "init", cityPath, "gc", "gascity")
-			cmd.Env = sanitizedBaseEnv(
+			cmd.Env = sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
 				"GC_CITY_PATH="+cityPath,
 				"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
-			)
+			)...)
 			out, err := cmd.CombinedOutput()
 			if err != nil {
 				t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
@@ -3770,6 +3773,7 @@ esac
 		t.Fatal(err)
 	}
 
+	configureTestDoltIdentityEnv(t)
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
 	t.Setenv("GC_DOLT_HOST", "rig-db.example.com")
@@ -4007,11 +4011,11 @@ esac
 	}
 
 	cmd := exec.Command(script, "init", cityPath, "gc", "gascity")
-	cmd.Env = sanitizedBaseEnv(
+	cmd.Env = sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
 		"GC_CITY_PATH="+cityPath,
 		"GC_BIN="+fakeGC,
 		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
-	)
+	)...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
@@ -4096,11 +4100,11 @@ esac
 	}
 
 	cmd := exec.Command(script, "init", cityPath, "gc", "gascity")
-	cmd.Env = sanitizedBaseEnv(
+	cmd.Env = sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
 		"GC_CITY_PATH="+cityPath,
 		"GC_BIN="+currentGCBinaryForTests(t),
 		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
-	)
+	)...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
@@ -4160,10 +4164,10 @@ exit 0
 	}
 
 	cmd := exec.Command(script, "init", cityPath, "gc", "gascity")
-	cmd.Env = sanitizedBaseEnv(
+	cmd.Env = sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
 		"GC_CITY_PATH="+cityPath,
 		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
-	)
+	)...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
@@ -4286,11 +4290,11 @@ esac
 	}
 
 	cmd := exec.Command(script, "init", cityPath, "gc", "gascity")
-	cmd.Env = sanitizedBaseEnv(
+	cmd.Env = sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
 		"GC_CITY_PATH="+cityPath,
 		"GC_BIN="+fakeGC,
 		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
-	)
+	)...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
@@ -4430,11 +4434,11 @@ esac
 	}
 
 	cmd := exec.Command(script, "init", cityPath, "gc", strings.ToUpper(managedDoltProbeDatabase))
-	cmd.Env = sanitizedBaseEnv(
+	cmd.Env = sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
 		"GC_CITY_PATH="+cityPath,
 		"GC_BIN="+fakeGC,
 		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
-	)
+	)...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
@@ -4611,10 +4615,10 @@ esac
 	}
 
 	cmd := exec.Command(script, "init", cityPath, "gc")
-	cmd.Env = sanitizedBaseEnv(
+	cmd.Env = sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
 		"GC_CITY_PATH="+cityPath,
 		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
-	)
+	)...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)

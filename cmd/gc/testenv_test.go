@@ -59,8 +59,28 @@ func installTestProviderStubs() (string, error) {
 
 func writeTestGitIdentity(homeDir string) error {
 	gitConfig := filepath.Join(homeDir, ".gitconfig")
-	data := []byte("[user]\n\tname = gc-test\n\temail = gc-test@test.local\n")
+	data := []byte("[user]\n\tname = gc-test\n\temail = gc-test@test.local\n[beads]\n\trole = maintainer\n")
 	return os.WriteFile(gitConfig, data, 0o644)
+}
+
+// gcBeadsBdTestHomeEnv creates a temp HOME with a .gitconfig containing user
+// identity and beads.role = maintainer, then returns extra env entries suitable
+// for appending to sanitizedBaseEnv. Use this for any test that runs the real
+// gc-beads-bd.sh op_init, which calls ensure_beads_role and requires a writable
+// global git config.
+func gcBeadsBdTestHomeEnv(t *testing.T) []string {
+	t.Helper()
+	homeDir := filepath.Join(t.TempDir(), "home")
+	if err := os.MkdirAll(homeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(beads-bd test home): %v", err)
+	}
+	if err := writeTestGitIdentity(homeDir); err != nil {
+		t.Fatalf("write test git identity for beads-bd: %v", err)
+	}
+	return []string{
+		"HOME=" + homeDir,
+		"GIT_CONFIG_GLOBAL=" + filepath.Join(homeDir, ".gitconfig"),
+	}
 }
 
 func writeTestDoltIdentity(homeDir string) error {
