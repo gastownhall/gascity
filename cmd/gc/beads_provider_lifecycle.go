@@ -1377,7 +1377,7 @@ func runProviderOpWithEnv(script string, environ []string, args ...string) error
 		}
 		// Detect missing script or missing dolt binary.
 		if errors.Is(err, exec.ErrNotFound) {
-			return fmt.Errorf("exec beads %s: provider script not found (%s); run \"gc doctor\" for diagnostics", args[0], script)
+			return fmt.Errorf("exec beads %s: provider script not found (%s); run \"%s\" for diagnostics", args[0], script, cmdName("doctor"))
 		}
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {

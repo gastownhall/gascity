@@ -325,13 +325,13 @@ func requireBootstrappedCity(dir string) (string, error) {
 	if err != nil {
 		absDir, absErr := filepath.Abs(dir)
 		if absErr == nil {
-			return "", fmt.Errorf("%w; run \"gc init %s\" first", err, absDir)
+			return "", fmt.Errorf("%w; run \"%s %s\" first", err, cmdName("init"), absDir)
 		}
-		return "", fmt.Errorf("%w; run \"gc init\" first", err)
+		return "", fmt.Errorf("%w; run \"%s\" first", err, cmdName("init"))
 	}
 	cityPath := ctx.CityPath
 	if !citylayout.HasRuntimeRoot(cityPath) {
-		return "", fmt.Errorf("city runtime not bootstrapped at %s; run \"gc init %s\" first", cityPath, cityPath)
+		return "", fmt.Errorf("city runtime not bootstrapped at %s; run \"%s %s\" first", cityPath, cmdName("init"), cityPath)
 	}
 	return cityPath, nil
 }

@@ -32,7 +32,7 @@ func (c *importStateDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult
 	if err != nil {
 		r.Status = doctor.StatusError
 		r.Message = fmt.Sprintf("checking import state: %v", err)
-		r.FixHint = `run "gc import install"`
+		r.FixHint = fmt.Sprintf("run %q", cmdName("import install"))
 		return r
 	}
 	if !report.HasIssues() {
@@ -43,7 +43,7 @@ func (c *importStateDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult
 
 	r.Status = doctor.StatusError
 	r.Message = fmt.Sprintf("%d import state issue(s)", len(report.Issues))
-	r.FixHint = `run "gc import install"`
+	r.FixHint = fmt.Sprintf("run %q", cmdName("import install"))
 	for _, issue := range report.Issues {
 		r.Details = append(r.Details, formatImportStateDoctorDetail(issue))
 	}
