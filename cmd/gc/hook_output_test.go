@@ -34,6 +34,28 @@ func TestWriteProviderHookContextCodex(t *testing.T) {
 	}
 
 	var payload struct {
+		Decision string `json:"decision"`
+		Reason   string `json:"reason"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal output: %v\n%s", err, out.String())
+	}
+	if got, want := payload.Decision, "block"; got != want {
+		t.Fatalf("decision = %q, want %q", got, want)
+	}
+	if got, want := payload.Reason, "<system-reminder>\nhello\n</system-reminder>"; got != want {
+		t.Fatalf("reason = %q, want %q", got, want)
+	}
+}
+
+func TestWriteProviderHookContextCodexAdditionalContext(t *testing.T) {
+	var out bytes.Buffer
+	err := writeProviderHookContextForEvent(&out, "codex", "UserPromptSubmit", "<system-reminder>\nhello\n</system-reminder>\n")
+	if err != nil {
+		t.Fatalf("writeProviderHookContextForEvent: %v", err)
+	}
+
+	var payload struct {
 		HookSpecificOutput struct {
 			HookEventName     string `json:"hookEventName"`
 			AdditionalContext string `json:"additionalContext"`
@@ -42,7 +64,7 @@ func TestWriteProviderHookContextCodex(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
 		t.Fatalf("unmarshal output: %v\n%s", err, out.String())
 	}
-	if got, want := payload.HookSpecificOutput.HookEventName, "Stop"; got != want {
+	if got, want := payload.HookSpecificOutput.HookEventName, "UserPromptSubmit"; got != want {
 		t.Fatalf("hookEventName = %q, want %q", got, want)
 	}
 	if got, want := payload.HookSpecificOutput.AdditionalContext, "<system-reminder>\nhello\n</system-reminder>"; got != want {

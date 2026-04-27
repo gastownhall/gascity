@@ -21,12 +21,22 @@ func writeProviderHookContextForEvent(stdout io.Writer, format, eventName, conte
 	}
 	switch strings.ToLower(strings.TrimSpace(format)) {
 	case hookOutputFormatCodex:
-		return json.NewEncoder(stdout).Encode(codexHookAdditionalContext(eventName, content))
+		return json.NewEncoder(stdout).Encode(codexHookOutput(eventName, content))
 	case hookOutputFormatGemini:
 		return json.NewEncoder(stdout).Encode(geminiHookAdditionalContext(content))
 	}
 	_, err := io.WriteString(stdout, content)
 	return err
+}
+
+func codexHookOutput(eventName, content string) map[string]any {
+	if strings.EqualFold(strings.TrimSpace(eventName), "Stop") {
+		return map[string]any{
+			"decision": "block",
+			"reason":   strings.TrimRight(content, "\n"),
+		}
+	}
+	return codexHookAdditionalContext(eventName, content)
 }
 
 func codexHookAdditionalContext(eventName, content string) map[string]any {
