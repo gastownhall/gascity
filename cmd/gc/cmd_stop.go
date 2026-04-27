@@ -129,7 +129,7 @@ func markCityStopSessionSleepReason(store beads.Store, stderr io.Writer) {
 	if store == nil {
 		return
 	}
-	sessions, err := store.ListByLabel("gc:session", 0)
+	sessions, err := store.ListByLabel(sessionBeadLabel, 0)
 	if err != nil {
 		cmdErr(stderr, "stop: marking sessions", err)
 		return

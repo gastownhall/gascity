@@ -11,10 +11,9 @@ import (
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 )
 
-const (
-	nudgeBeadType  = "chore"
-	nudgeBeadLabel = "gc:nudge"
-)
+const nudgeBeadType = "chore"
+
+var nudgeBeadLabel = prog() + ":nudge"
 
 type nudgeReference = nudgequeue.Reference
 

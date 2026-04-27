@@ -82,7 +82,7 @@ type CityRuntime struct {
 	onStatus            func(string)
 
 	shutdownOnce   sync.Once
-	logPrefix      string // "gc start" or "gc supervisor"
+	logPrefix      string // cmdName("start") or cmdName("supervisor")
 	stdout, stderr io.Writer
 }
 
@@ -124,7 +124,7 @@ type CityRuntimeParams struct {
 	OnStarted           func()                  // called after initial reconciliation succeeds
 	OnStatus            func(string)            // called when init status changes
 
-	LogPrefix      string // "gc start" or "gc supervisor"; defaults to "gc start"
+	LogPrefix      string // cmdName("start") or cmdName("supervisor"); defaults to cmdName("start")
 	Stdout, Stderr io.Writer
 }
 

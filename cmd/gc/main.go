@@ -628,9 +628,10 @@ func resolveRigBindingMatches(value string, matches []registeredRigBinding) (res
 		return resolvedContext{CityPath: matches[0].City.Path, RigName: matches[0].Rig.Name}, nil
 	}
 	return resolvedContext{}, fmt.Errorf(
-		"rig %q is registered in multiple cities: %s\n  Specify now:  gc --city <name> <command>",
+		"rig %q is registered in multiple cities: %s\n  Specify now:  %s --city <name> <command>",
 		value,
-		strings.Join(registeredRigBindingCityNames(matches), ", "))
+		strings.Join(registeredRigBindingCityNames(matches), ", "),
+		prog())
 }
 
 func registeredRigBindingCityNames(matches []registeredRigBinding) []string {
