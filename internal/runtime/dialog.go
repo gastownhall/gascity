@@ -30,9 +30,10 @@ func StartupDialogTimeout() time.Duration {
 
 // AcceptStartupDialogs dismisses startup dialogs that can block automated
 // sessions. Handles (in order):
-//  1. Workspace trust dialog (Claude "Quick safety check", Codex "Do you trust the contents of this directory?")
-//  2. Bypass permissions warning ("Bypass Permissions mode") — requires Down+Enter
-//  3. Claude custom API key confirmation — requires Up+Enter to select "Yes"
+//  1. Codex update dialog ("Update available") — requires Down+Enter to skip
+//  2. Workspace trust dialog (Claude "Quick safety check", Codex "Do you trust the contents of this directory?")
+//  3. Bypass permissions warning ("Bypass Permissions mode") — requires Down+Enter
+//  4. Claude custom API key confirmation — requires Up+Enter to select "Yes"
 //
 // The peek function should return the last N lines of the session's terminal output.
 // The sendKeys function should send bare tmux-style keystrokes (e.g., "Enter", "Down").
@@ -136,6 +137,12 @@ func AcceptStartupDialogsWithTimeout(
 	peek func(lines int) (string, error),
 	sendKeys func(keys ...string) error,
 ) error {
+	if err := acceptCodexUpdateDialog(ctx, timeout, peek, sendKeys); err != nil {
+		return fmt.Errorf("codex update dialog: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := acceptWorkspaceTrustDialog(ctx, timeout, peek, sendKeys); err != nil {
 		return fmt.Errorf("workspace trust dialog: %w", err)
 	}
@@ -158,6 +165,52 @@ func AcceptStartupDialogsWithTimeout(
 		return fmt.Errorf("rate limit dialog: %w", err)
 	}
 	return nil
+}
+
+// acceptCodexUpdateDialog skips Codex's interactive update prompt. The default
+// selection is "Update now", so automated sessions must move down to "Skip".
+func acceptCodexUpdateDialog(
+	ctx context.Context,
+	timeout time.Duration,
+	peek func(lines int) (string, error),
+	sendKeys func(keys ...string) error,
+) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		content, err := peek(startupDialogPeekLines)
+		if err != nil {
+			return err
+		}
+
+		if containsCodexUpdateDialog(content) {
+			if err := sendKeys("Down"); err != nil {
+				return err
+			}
+			sleep(ctx, bypassDialogConfirmDelay)
+			return sendKeys("Enter")
+		}
+
+		if containsPromptIndicator(content) ||
+			containsWorkspaceTrustDialog(content) ||
+			strings.Contains(content, "Bypass Permissions mode") ||
+			containsCustomAPIKeyDialog(content) ||
+			containsRateLimitDialog(content) {
+			return nil
+		}
+
+		sleep(ctx, dialogPollInterval)
+	}
+	return nil
+}
+
+func containsCodexUpdateDialog(content string) bool {
+	return strings.Contains(content, "Update available!") &&
+		strings.Contains(content, "Skip until next version") &&
+		strings.Contains(content, "Press enter to continue")
 }
 
 // acceptWorkspaceTrustDialog dismisses workspace trust dialogs for supported
@@ -638,9 +691,10 @@ func containsRateLimitDialog(content string) bool {
 		strings.Contains(content, "Rate limit")
 }
 
-// containsPromptIndicator checks whether any line in the content ends with
-// a common shell or REPL prompt suffix, indicating the session is ready
-// and no dialog is present.
+// containsPromptIndicator checks whether any line in the content looks like a
+// common shell or agent prompt, indicating the session is ready and no dialog is
+// present. Full-screen agent UIs often render placeholder input after the prompt
+// glyph, so Claude/Codex prompts are accepted as prefixes too.
 func containsPromptIndicator(content string) bool {
 	for _, line := range strings.Split(content, "\n") {
 		trimmed := strings.ReplaceAll(line, "\u00a0", " ")
@@ -648,7 +702,12 @@ func containsPromptIndicator(content string) bool {
 		if trimmed == "" {
 			continue
 		}
-		for _, suffix := range []string{">", "$", "%", "#", "\u276f"} {
+		for _, prefix := range []string{"\u276f", "\u203a"} {
+			if trimmed == prefix || strings.HasPrefix(trimmed, prefix+" ") {
+				return true
+			}
+		}
+		for _, suffix := range []string{">", "$", "%", "#", "\u276f", "\u203a"} {
 			if strings.HasSuffix(trimmed, suffix) {
 				return true
 			}

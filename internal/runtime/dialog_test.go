@@ -79,12 +79,10 @@ func TestAcceptStartupDialogsAcceptsCodexTrustDialog(t *testing.T) {
 	dialogPollTimeout = time.Second
 
 	var sent []string
-	peekCall := 0
 	err := AcceptStartupDialogs(
 		context.Background(),
 		func(_ int) (string, error) {
-			peekCall++
-			if peekCall == 1 {
+			if len(sent) == 0 {
 				return "Do you trust the contents of this directory?", nil
 			}
 			return "user@host $", nil
@@ -107,12 +105,10 @@ func TestAcceptStartupDialogsAcceptsGeminiTrustDialog(t *testing.T) {
 	dialogPollTimeout = time.Second
 
 	var sent []string
-	peekCall := 0
 	err := AcceptStartupDialogs(
 		context.Background(),
 		func(_ int) (string, error) {
-			peekCall++
-			if peekCall == 1 {
+			if len(sent) == 0 {
 				return "Do you trust the files in this folder?\n● 1. Trust folder (city)\n  2. Trust parent folder\n  3. Don't trust", nil
 			}
 			return "Type your message or @path/to/file", nil
@@ -153,6 +149,36 @@ func TestAcceptStartupDialogsPeeksDeepEnoughForLateTrustDialog(t *testing.T) {
 	}
 	if !reflect.DeepEqual(sent, []string{"Enter"}) {
 		t.Fatalf("sent keys = %v, want [Enter]", sent)
+	}
+}
+
+func TestAcceptStartupDialogsSkipsCodexUpdateDialog(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = time.Second
+
+	var sent []string
+	err := AcceptStartupDialogs(
+		context.Background(),
+		func(lines int) (string, error) {
+			if lines < 100 {
+				return "loading...", nil
+			}
+			return "✨ Update available! 0.124.0 -> 0.125.0\n" +
+				"› 1. Update now (runs `bun install -g @openai/codex`)\n" +
+				"  2. Skip\n" +
+				"  3. Skip until next version\n" +
+				"Press enter to continue", nil
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogs returned error: %v", err)
+	}
+	if got, want := strings.Join(sent, ","), "Down,Enter"; got != want {
+		t.Fatalf("sent keys = %q, want %q", got, want)
 	}
 }
 
@@ -485,6 +511,10 @@ func TestContainsPromptIndicator(t *testing.T) {
 		{name: "angle prompt", content: "claude >", want: true},
 		{name: "powerline prompt", content: "dir \u276f", want: true},
 		{name: "claude nbsp prompt", content: "❯\u00a0", want: true},
+		{name: "codex prompt", content: "›", want: true},
+		{name: "codex prompt with nbsp", content: "›\u00a0", want: true},
+		{name: "codex prompt with placeholder", content: "› Improve documentation in @filename", want: true},
+		{name: "claude prompt with text", content: "❯ run tests", want: true},
 		{name: "empty content", content: "", want: false},
 		{name: "no prompt", content: "loading...", want: false},
 		{name: "blank lines only", content: "\n\n", want: false},
