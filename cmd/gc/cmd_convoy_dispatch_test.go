@@ -1104,11 +1104,13 @@ func TestWorkflowServeControlReadyQueryUsesControlTiers(t *testing.T) {
 	if strings.Contains(query, "GC_SESSION_ORIGIN") {
 		t.Fatalf("workflowServeControlReadyQuery should not gate legacy routes on session origin: %q", query)
 	}
+	if strings.Contains(query, "bd list --status in_progress") {
+		t.Fatalf("workflowServeControlReadyQuery should not return in-progress control beads: %q", query)
+	}
 	for _, want := range []string{
-		`bd list --status in_progress --assignee="$cand"`,
 		`bd ready --assignee="$cand"`,
-		`bd ready --metadata-field gc.routed_to=control-dispatcher --unassigned`,
-		`bd ready --metadata-field gc.routed_to=workflow-control --unassigned`,
+		`bd ready --metadata-field "gc.routed_to=$GC_CONTROL_TARGET" --unassigned`,
+		`bd ready --metadata-field "gc.routed_to=$GC_CONTROL_LEGACY_TARGET" --unassigned`,
 	} {
 		if !strings.Contains(query, want) {
 			t.Fatalf("workflowServeControlReadyQuery missing %q in %q", want, query)
@@ -1119,7 +1121,7 @@ func TestWorkflowServeControlReadyQueryUsesControlTiers(t *testing.T) {
 	}
 }
 
-func TestWorkflowServeControlReadyQueryPrefersInProgressAssigned(t *testing.T) {
+func TestWorkflowServeControlReadyQueryIgnoresInProgressAssigned(t *testing.T) {
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
 	out := runWorkflowServeShellQueryForTest(t, query, map[string]string{
 		"GC_SESSION_NAME":   "gascity--control-dispatcher",
@@ -1142,7 +1144,25 @@ case "$*" in
     ;;
 esac
 `)
-	if got, want := strings.TrimSpace(out), `[{"id":"ga-in-progress"}]`; got != want {
+	if got, want := strings.TrimSpace(out), `[{"id":"ga-ready"}]`; got != want {
+		t.Fatalf("control query output = %q, want %q", got, want)
+	}
+}
+
+func TestWorkflowServeControlReadyQueryQuotesMetadataFallbackTarget(t *testing.T) {
+	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "my rig"})
+	out := runWorkflowServeShellQueryForTest(t, query, map[string]string{}, `#!/bin/sh
+set -eu
+case "$1|$2|$3|$4|$5|$6" in
+  "ready|--metadata-field|gc.routed_to=my rig/control-dispatcher|--unassigned|--json|--limit=20")
+    printf '[{"id":"ga-routed"}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if got, want := strings.TrimSpace(out), `[{"id":"ga-routed"}]`; got != want {
 		t.Fatalf("control query output = %q, want %q", got, want)
 	}
 }

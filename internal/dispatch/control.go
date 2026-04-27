@@ -273,7 +273,7 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 	// Attach bypasses graph compile routing, so spawned attempts need their
 	// execution lane restored manually. Prefer each step's explicit target when
 	// available, and only inherit the parent execution lane as a fallback.
-	executionRoute := control.Metadata["gc.execution_routed_to"]
+	executionRoute := strings.TrimSpace(control.Metadata["gc.execution_routed_to"])
 	routeCfg := loadAttemptRouteConfig(opts.CityPath)
 	for i := range recipe.Steps {
 		if recipe.Steps[i].Metadata["gc.kind"] == "spec" {
@@ -288,6 +288,8 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 		}
 		if target == "" {
 			target = executionRoute
+		} else {
+			target = qualifyAttemptTargetWithSourceRoute(target, executionRoute, routeCfg)
 		}
 		if isAttemptControlKind(recipe.Steps[i].Metadata["gc.kind"]) {
 			applyAttemptControlStepRoute(&recipe.Steps[i], target, routeCfg, store)
@@ -315,6 +317,23 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 		return err
 	}
 	return nil
+}
+
+func qualifyAttemptTargetWithSourceRoute(target, sourceRoute string, cfg *config.City) string {
+	target = strings.TrimSpace(target)
+	if target == "" || strings.Contains(target, "/") || cfg == nil {
+		return target
+	}
+	sourceRoute = strings.TrimSpace(sourceRoute)
+	slash := strings.IndexByte(sourceRoute, '/')
+	if slash <= 0 {
+		return target
+	}
+	candidate := sourceRoute[:slash] + "/" + target
+	if config.FindAgent(cfg, candidate) != nil || config.FindNamedSession(cfg, candidate) != nil {
+		return candidate
+	}
+	return target
 }
 
 // buildAttemptRecipe constructs a minimal formula.Recipe for one attempt
@@ -604,9 +623,11 @@ func applyAttemptControlStepRoute(step *formula.RecipeStep, executionTarget stri
 	if step.Metadata == nil {
 		step.Metadata = make(map[string]string)
 	}
+	resolvedExecutionTarget := strings.TrimSpace(executionTarget)
 	if binding, ok := resolveAttemptRouteBinding(executionTarget, cfg, store); ok {
 		switch {
 		case binding.qualifiedName != "":
+			resolvedExecutionTarget = binding.qualifiedName
 			step.Metadata["gc.execution_routed_to"] = binding.qualifiedName
 		case executionTarget != "":
 			// Direct session delivery still executes via the named/session target,
@@ -622,7 +643,7 @@ func applyAttemptControlStepRoute(step *formula.RecipeStep, executionTarget stri
 	}
 	step.Labels = removeAttemptPoolLabels(step.Labels)
 
-	controlTarget := controlDispatcherTargetForExecutionTarget(executionTarget)
+	controlTarget := controlDispatcherTargetForExecutionTarget(resolvedExecutionTarget)
 	if assignee, ok := resolveAttemptControlAssignee(controlTarget, cfg, store); ok {
 		delete(step.Metadata, "gc.routed_to")
 		step.Assignee = assignee

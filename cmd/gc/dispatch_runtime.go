@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/sling"
 )
 
@@ -443,17 +444,12 @@ func workflowServeControlReadyQuery(agentCfg config.Agent) string {
 		target = config.ControlDispatcherAgentName
 	}
 	limit := fmt.Sprintf("%d", workflowServeScanLimit)
-	query := `sh -c '` +
-		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS" "` + target + `"; do ` +
-		`[ -z "$id" ] && continue; ` +
-		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
-		`for cand in "$id" "$legacy"; do ` +
-		`[ -z "$cand" ] && continue; ` +
-		`r=$(bd list --status in_progress --assignee="$cand" --json --limit=` + limit + ` 2>/dev/null); ` +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		`done; ` +
-		`done; ` +
-		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS" "` + target + `"; do ` +
+	queryPrefix := `GC_CONTROL_TARGET=` + shellquote.Quote(target)
+	if legacy := workflowServeLegacyControlRoute(target); legacy != "" {
+		queryPrefix += ` GC_CONTROL_LEGACY_TARGET=` + shellquote.Quote(legacy)
+	}
+	query := queryPrefix + ` sh -c '` +
+		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS" "$GC_CONTROL_TARGET"; do ` +
 		`[ -z "$id" ] && continue; ` +
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
@@ -462,12 +458,10 @@ func workflowServeControlReadyQuery(agentCfg config.Agent) string {
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`done; ` +
 		`done; ` +
-		`r=$(bd ready --metadata-field gc.routed_to=` + target +
-		` --unassigned --json --limit=` + limit + ` 2>/dev/null); ` +
+		`r=$(bd ready --metadata-field "gc.routed_to=$GC_CONTROL_TARGET" --unassigned --json --limit=` + limit + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `
 	if legacy := workflowServeLegacyControlRoute(target); legacy != "" {
-		query += `bd ready --metadata-field gc.routed_to=` + legacy +
-			` --unassigned --json --limit=` + limit + ` 2>/dev/null'`
+		query += `bd ready --metadata-field "gc.routed_to=$GC_CONTROL_LEGACY_TARGET" --unassigned --json --limit=` + limit + ` 2>/dev/null'`
 	} else {
 		query += `printf "[]"` + `'`
 	}

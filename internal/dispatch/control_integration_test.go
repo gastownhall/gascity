@@ -981,6 +981,105 @@ func TestApplyAttemptControlStepRoute_ImplicitControlDispatcherUsesConcreteAssig
 	}
 }
 
+func TestSpawnNextAttemptUsesSourceRigForBareChildControlRoute(t *testing.T) {
+	t.Parallel()
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`
+[workspace]
+name = "maintainer-city"
+
+[daemon]
+formula_v2 = true
+
+[[rigs]]
+name = "frontend"
+path = "/tmp/frontend"
+
+[[rigs]]
+name = "backend"
+path = "/tmp/backend"
+
+[[agent]]
+name = "reviewer"
+dir = "frontend"
+
+[[agent]]
+name = "control-dispatcher"
+dir = "frontend"
+max_active_sessions = 1
+
+[[agent]]
+name = "reviewer"
+dir = "backend"
+
+[[agent]]
+name = "control-dispatcher"
+dir = "backend"
+max_active_sessions = 1
+`), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	spec := &formula.Step{
+		ID:    "review-loop",
+		Title: "Review loop",
+		Type:  "task",
+		Ralph: &formula.RalphSpec{MaxAttempts: 3},
+		Children: []*formula.Step{
+			{
+				ID:    "review",
+				Title: "Review",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.run_target": "reviewer",
+				},
+				Retry: &formula.RetrySpec{MaxAttempts: 2},
+			},
+		},
+	}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal step spec: %v", err)
+	}
+
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review-loop",
+		Metadata: map[string]string{
+			"gc.kind":                "ralph",
+			"gc.root_bead_id":        root.ID,
+			"gc.step_ref":            "mol-adopt-pr-v2.review-loop",
+			"gc.step_id":             "review-loop",
+			"gc.source_step_spec":    string(specJSON),
+			"gc.control_epoch":       "1",
+			"gc.execution_routed_to": "frontend/reviewer",
+		},
+	})
+
+	if err := spawnNextAttempt(t.Context(), store, control, 2, ProcessOptions{CityPath: cityPath}); err != nil {
+		t.Fatalf("spawnNextAttempt: %v", err)
+	}
+
+	review := findAttemptByRef(t, store, root.ID, "mol-adopt-pr-v2.review-loop.iteration.2.review")
+	if review.ID == "" {
+		t.Fatal("review child not created")
+	}
+	if got := review.Metadata["gc.execution_routed_to"]; got != "frontend/reviewer" {
+		t.Fatalf("review gc.execution_routed_to = %q, want frontend/reviewer", got)
+	}
+	if got := review.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("review gc.routed_to = %q, want empty direct dispatcher assignee", got)
+	}
+	if review.Assignee != "frontend--control-dispatcher" {
+		t.Fatalf("review assignee = %q, want frontend--control-dispatcher", review.Assignee)
+	}
+}
+
 func TestApplyAttemptControlStepRoute_ConfiguredControlDispatcherNeverUsesMetadataRoute(t *testing.T) {
 	t.Parallel()
 
