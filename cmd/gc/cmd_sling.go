@@ -215,7 +215,7 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 			fmt.Fprintf(stderr, "gc sling: inline text requires explicit target\n  usage: gc sling <target> %q\n", beadOrFormula) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		bp := sling.BeadPrefix(beadOrFormula)
+		bp := sling.BeadPrefixForCity(cfg, beadOrFormula)
 		if bp == "" {
 			fmt.Fprintf(stderr, "gc sling: cannot derive rig from bead %q (no prefix)\n", beadOrFormula) //nolint:errcheck // best-effort stderr
 			return 1
@@ -362,8 +362,13 @@ func findRigByPrefix(cfg *config.City, prefix string) (config.Rig, bool) {
 	return sling.FindRigByPrefix(cfg, prefix)
 }
 
-func beadPrefix(beadID string) string {
-	return sling.BeadPrefix(beadID)
+// beadPrefix returns the rig prefix for beadID, preferring the longest
+// configured prefix when cfg is non-nil. Pass cfg whenever the caller
+// needs hyphenated rig prefixes (e.g. "agent-diagnostics-hnn") to
+// resolve correctly; otherwise the underlying sling.BeadPrefix's
+// first-dash split is used.
+func beadPrefix(cfg *config.City, beadID string) string {
+	return sling.BeadPrefixForCity(cfg, beadID)
 }
 
 func rigDirForBead(cfg *config.City, beadID string) string {
@@ -391,7 +396,7 @@ func resolveSlingStoreRoot(cfg *config.City, cityPath, beadOrFormula string, a c
 	// resolveStoreScopeRoot would silently alias them to the city
 	// scope. Skip them so sling falls back to the agent's rig_dir or
 	// the city store instead of operating on the wrong store.
-	if bp := beadPrefix(beadOrFormula); bp != "" && !looksLikeInlineText(cfg, beadOrFormula) {
+	if bp := beadPrefix(cfg, beadOrFormula); bp != "" && !looksLikeInlineText(cfg, beadOrFormula) {
 		if sling.IsHQPrefix(cfg, bp) {
 			return storeDir
 		}
@@ -957,7 +962,7 @@ func formatBeadLabel(id, title string) string {
 // printCrossRigSection prints the Cross-rig dry-run section if applicable.
 func printCrossRigSection(w func(string), beadID string, a config.Agent, cfg *config.City) {
 	if msg := checkCrossRig(beadID, a, cfg); msg != "" {
-		bp := sling.BeadPrefix(beadID)
+		bp := sling.BeadPrefixForCity(cfg, beadID)
 		rp := rigPrefixForAgent(a, cfg)
 		w("Cross-rig:")
 		w(fmt.Sprintf("  Bead %s (prefix %q) targets %s (rig prefix %q).", beadID, bp, a.QualifiedName(), rp))
@@ -1481,28 +1486,32 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 		w("  The wisp root bead (not the formula name) is routed to the agent.")
 		w("")
 	} else {
-		// Work section (bead info).
-		printBeadInfo(w, querier, opts.BeadOrFormula)
-
-		// Cross-rig section.
-		printCrossRigSection(w, opts.BeadOrFormula, a, deps.Cfg)
-
-		// Idempotency section -- use preflight result instead of re-querying.
-		check := sling.CheckBeadState(querier, opts.BeadOrFormula, a, deps)
-		if check.Idempotent {
-			w("Idempotency:")
-			w("  Bead " + opts.BeadOrFormula + " is already routed to " + a.QualifiedName() + ".")
-			w("  Without --force, sling would skip routing (exit 0).")
+		if opts.InlineText {
+			w("Work:")
+			w("  Would create new task bead with title=" + fmt.Sprintf("%q", opts.BeadOrFormula))
 			w("")
+		} else {
+			printBeadInfo(w, querier, opts.BeadOrFormula)
+			printCrossRigSection(w, opts.BeadOrFormula, a, deps.Cfg)
+
+			check := sling.CheckBeadState(querier, opts.BeadOrFormula, a, deps)
+			if check.Idempotent {
+				w("Idempotency:")
+				w("  Bead " + opts.BeadOrFormula + " is already routed to " + a.QualifiedName() + ".")
+				w("  Without --force, sling would skip routing (exit 0).")
+				w("")
+			}
 		}
 
-		// Attach formula section (--on or default).
-		// Dry-run does NOT auto-burn molecules (no mutations).
+		// Inline-text previews skip the molecule pre-check: the bead
+		// does not exist yet, so the "no existing children" claim
+		// would be vacuously true and misleading.
+		preCheck := !opts.InlineText
 		if opts.OnFormula != "" {
-			// Read-only check: does the bead already have an attached molecule?
-			if label, id := sling.FindBlockingMolecule(querier, opts.BeadOrFormula, deps.Store); label != "" {
-				fmt.Fprintf(stderr, "gc sling: bead %s already has attached %s %s\n", opts.BeadOrFormula, label, id) //nolint:errcheck
-				return 1
+			if preCheck {
+				if rc := dryRunReportBlockingMolecule(opts, deps, querier, stderr); rc != 0 {
+					return rc
+				}
 			}
 			w("Attach formula:")
 			w("  Formula: " + opts.OnFormula)
@@ -1515,12 +1524,15 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 				cookCmd += fmt.Sprintf(" --title=%s", opts.Title)
 			}
 			w("  Would run: " + cookCmd)
-			w("  Pre-check: " + opts.BeadOrFormula + " has no existing molecule/wisp children ✓")
+			if preCheck {
+				w("  Pre-check: " + opts.BeadOrFormula + " has no existing molecule/wisp children ✓")
+			}
 			w("")
 		} else if !opts.NoFormula && a.EffectiveDefaultSlingFormula() != "" {
-			if label, id := sling.FindBlockingMolecule(querier, opts.BeadOrFormula, deps.Store); label != "" {
-				fmt.Fprintf(stderr, "gc sling: bead %s already has attached %s %s\n", opts.BeadOrFormula, label, id) //nolint:errcheck
-				return 1
+			if preCheck {
+				if rc := dryRunReportBlockingMolecule(opts, deps, querier, stderr); rc != 0 {
+					return rc
+				}
 			}
 			w("Default formula:")
 			w("  Formula: " + a.EffectiveDefaultSlingFormula())
@@ -1532,7 +1544,9 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 				cookCmd += fmt.Sprintf(" --title=%s", opts.Title)
 			}
 			w("  Would run: " + cookCmd)
-			w("  Pre-check: " + opts.BeadOrFormula + " has no existing molecule/wisp children ✓")
+			if preCheck {
+				w("  Pre-check: " + opts.BeadOrFormula + " has no existing molecule/wisp children ✓")
+			}
 			w("")
 		}
 
@@ -1698,6 +1712,18 @@ func printBeadInfo(w func(string), q BeadQuerier, beadID string) {
 	w("")
 }
 
+// dryRunReportBlockingMolecule returns 1 (and emits a stderr diagnostic)
+// when the bead already has an attached molecule that would block
+// formula attachment, otherwise 0.
+func dryRunReportBlockingMolecule(opts slingOpts, deps slingDeps, querier BeadQuerier, stderr io.Writer) int {
+	label, id := sling.FindBlockingMolecule(querier, opts.BeadOrFormula, deps.Store)
+	if label == "" {
+		return 0
+	}
+	fmt.Fprintf(stderr, "gc sling: bead %s already has attached %s %s\n", opts.BeadOrFormula, label, id) //nolint:errcheck // best-effort stderr
+	return 1
+}
+
 // printNudgePreview prints the Nudge section for dry-run output.
 func printNudgePreview(w func(string), a config.Agent, cityName string,
 	sp runtime.Provider, store beads.Store, cfg *config.City,
@@ -1727,8 +1753,11 @@ func isCustomSlingQuery(a config.Agent) bool {
 // "gc-r5sr6bm"). Short suffixes (1-4 chars) are accepted
 // unconditionally. Longer suffixes (5-8 chars) must contain at least
 // one digit to distinguish base36 hashes from English words like
-// "hello-world". Strings with spaces or multiple dashes (like
-// "code-review") are treated as inline text for ad-hoc bead creation.
+// "hello-world". This is the cfg-free heuristic and rejects bead IDs
+// whose rig prefix contains a hyphen ("agent-diagnostics-hnn"); those
+// are accepted by looksLikeConfiguredBeadID, which consults cfg.Rigs.
+// Multi-dash strings with no matching configured rig prefix are
+// treated as inline text for ad-hoc bead creation.
 func looksLikeBeadID(s string) bool {
 	_, baseSuffix, ok := sling.BeadIDParts(s)
 	if !ok || len(baseSuffix) > 8 {
@@ -1765,22 +1794,7 @@ func looksLikeInlineText(cfg *config.City, beadOrFormula string) bool {
 }
 
 func looksLikeConfiguredBeadID(cfg *config.City, s string) bool {
-	prefix, baseSuffix, ok := sling.BeadIDParts(s)
-	if !ok || len(baseSuffix) > 8 {
-		return false
-	}
-	if cfg == nil {
-		return false
-	}
-	if strings.EqualFold(prefix, config.EffectiveHQPrefix(cfg)) {
-		return true
-	}
-	for i := range cfg.Rigs {
-		if strings.EqualFold(prefix, cfg.Rigs[i].EffectivePrefix()) {
-			return true
-		}
-	}
-	return false
+	return sling.LooksLikeConfiguredBeadID(cfg, s)
 }
 
 // rigPrefixForAgent returns the effective bead prefix for the rig that an
@@ -1802,7 +1816,7 @@ func rigPrefixForAgent(a config.Agent, cfg *config.City) string {
 // doesn't match the target agent's rig prefix. Returns "" when the check
 // passes or can't be performed (missing prefix, city-wide agent, no rig).
 func checkCrossRig(beadID string, a config.Agent, cfg *config.City) string {
-	bp := sling.BeadPrefix(beadID)
+	bp := sling.BeadPrefixForCity(cfg, beadID)
 	if bp == "" {
 		return ""
 	}

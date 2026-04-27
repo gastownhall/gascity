@@ -324,9 +324,10 @@ func IsHQPrefix(cfg *config.City, prefix string) bool {
 }
 
 // RigDirForBead resolves the rig directory for a bead ID by extracting
-// the bead prefix and looking up the rig path.
+// the bead prefix and looking up the rig path. Honors hyphenated rig
+// prefixes via BeadPrefixForCity.
 func RigDirForBead(cfg *config.City, beadID string) string {
-	bp := BeadPrefix(beadID)
+	bp := BeadPrefixForCity(cfg, beadID)
 	if bp == "" {
 		return ""
 	}
@@ -395,12 +396,114 @@ func FormatBeadLabel(id, title string) string {
 // BeadPrefix extracts the rig prefix from a bead ID by taking the lowercase
 // letters before the first dash. "HW-7" → "hw", "FE-123" → "fe".
 // Returns "" if the ID has no dash (can't determine prefix).
+//
+// This is a config-free heuristic. For inputs whose rig prefix may itself
+// contain hyphens ("agent-diagnostics-hnn" routed to rig "agent-diagnostics"),
+// callers must use BeadPrefixForCity, which resolves the longest matching
+// configured prefix.
 func BeadPrefix(beadID string) string {
 	i := strings.Index(beadID, "-")
 	if i <= 0 {
 		return ""
 	}
 	return strings.ToLower(beadID[:i])
+}
+
+// BeadPrefixForCity returns the configured rig (or HQ) prefix that beadID
+// belongs to, preferring the longest match so hyphenated rig prefixes
+// resolve correctly. Falls back to BeadPrefix when no configured prefix
+// matches. Returns "" if the bead has no dash and no configured-prefix
+// match.
+func BeadPrefixForCity(cfg *config.City, beadID string) string {
+	if p := matchConfiguredBeadPrefix(cfg, beadID); p != "" {
+		return p
+	}
+	return BeadPrefix(beadID)
+}
+
+// LooksLikeConfiguredBeadID reports whether s parses as a bead ID whose
+// prefix matches the city's HQ prefix or any configured rig's effective
+// prefix. Unlike BeadIDParts, it accepts hyphenated rig prefixes
+// (e.g. "agent-diagnostics-hnn" with rig "agent-diagnostics"). The
+// trailing suffix must be alphanumeric (allowing an optional ".child"
+// hierarchical part) and at most 8 characters long.
+func LooksLikeConfiguredBeadID(cfg *config.City, s string) bool {
+	return matchConfiguredBeadPrefix(cfg, s) != ""
+}
+
+// matchConfiguredBeadPrefix returns the longest configured prefix
+// (HQ or rig) that beadID begins with, provided the trailing suffix
+// passes the bead-suffix shape gate. Match is case-insensitive on the
+// prefix; the returned value is the lower-cased configured prefix.
+// Returns "" if no configured prefix matches.
+func matchConfiguredBeadPrefix(cfg *config.City, beadID string) string {
+	beadID = strings.TrimSpace(beadID)
+	if cfg == nil || beadID == "" || strings.ContainsAny(beadID, " \t\n") {
+		return ""
+	}
+	candidates := configuredBeadPrefixes(cfg)
+	// Track the longest matching prefix; equal-length ties keep the first
+	// match, matching the order semantics of FindRigByPrefix.
+	best := ""
+	bestLen := 0
+	lower := strings.ToLower(beadID)
+	for _, p := range candidates {
+		lp := strings.ToLower(p)
+		if len(lp) <= bestLen {
+			continue
+		}
+		if !strings.HasPrefix(lower, lp+"-") {
+			continue
+		}
+		suffix := beadID[len(lp)+1:]
+		if !validBeadSuffix(suffix) {
+			continue
+		}
+		best = lp
+		bestLen = len(lp)
+	}
+	return best
+}
+
+// configuredBeadPrefixes returns every prefix the city accepts for bead
+// IDs: the city's HQ prefix plus each rig's effective prefix. Empty
+// entries are skipped. Order is not significant — the caller picks the
+// longest match.
+func configuredBeadPrefixes(cfg *config.City) []string {
+	if cfg == nil {
+		return nil
+	}
+	out := make([]string, 0, len(cfg.Rigs)+1)
+	if hq := config.EffectiveHQPrefix(cfg); hq != "" {
+		out = append(out, hq)
+	}
+	for i := range cfg.Rigs {
+		if p := cfg.Rigs[i].EffectivePrefix(); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// validBeadSuffix reports whether suffix is a plausible bead-ID suffix:
+// a non-empty alphanumeric base of at most 8 characters, optionally
+// followed by ".child" hierarchical parts. The hierarchical portion is
+// not validated, matching BeadIDParts which truncates at the first dot
+// before validating the base.
+func validBeadSuffix(suffix string) bool {
+	base := suffix
+	if dot := strings.IndexByte(suffix, '.'); dot > 0 {
+		base = suffix[:dot]
+	}
+	if base == "" || len(base) > 8 {
+		return false
+	}
+	for _, c := range base {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
+			return false
+		}
+	}
+	return true
 }
 
 // RigPrefixForAgent returns the rig prefix that an agent's rig uses for bead IDs.
@@ -445,7 +548,7 @@ func CrossRigRouteError(beadID string, a config.Agent, cfg *config.City) *CrossR
 	if cfg == nil || a.Dir == "" {
 		return nil
 	}
-	bp := BeadPrefix(beadID)
+	bp := BeadPrefixForCity(cfg, beadID)
 	if bp == "" {
 		return nil
 	}

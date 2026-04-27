@@ -114,12 +114,58 @@ func (s *slingTestStore) Get(id string) (beads.Bead, error) {
 	}
 	b, ok := s.synthetic[id]
 	if !ok {
-		if _, _, looksLikeBead := sling.BeadIDParts(id); !looksLikeBead {
+		if !slingTestLooksLikeBeadID(id) {
 			return beads.Bead{}, err
 		}
 		return s.ensureSynthetic(id), nil
 	}
 	return b, nil
+}
+
+// slingTestLooksLikeBeadID accepts the same single-dash shapes as
+// sling.BeadIDParts plus multi-dash shapes whose trailing token has the
+// bead-suffix shape: alphanumeric, ≤8 chars, and either ≤4 chars long
+// or containing at least one digit. The digit-or-≤4 rule mirrors
+// looksLikeBeadIDSuffix and prevents prose like "code-review-please"
+// (suffix "please" — 6 chars, no digit) from being silently fabricated
+// as a synthetic bead and masking the auto-create-text-bead branch in
+// tests. Tests that rely on multi-dash bead IDs whose suffix violates
+// this shape must seed beads explicitly.
+func slingTestLooksLikeBeadID(id string) bool {
+	if _, _, ok := sling.BeadIDParts(id); ok {
+		return true
+	}
+	id = strings.TrimSpace(id)
+	if id == "" || strings.ContainsAny(id, " \t\n") {
+		return false
+	}
+	last := strings.LastIndex(id, "-")
+	if last <= 0 || last == len(id)-1 {
+		return false
+	}
+	suffix := id[last+1:]
+	base := suffix
+	if dot := strings.IndexByte(suffix, '.'); dot > 0 {
+		base = suffix[:dot]
+	}
+	if base == "" || len(base) > 8 {
+		return false
+	}
+	hasDigit := false
+	for _, c := range base {
+		switch {
+		case c >= '0' && c <= '9':
+			hasDigit = true
+		case c >= 'a' && c <= 'z':
+		case c >= 'A' && c <= 'Z':
+		default:
+			return false
+		}
+	}
+	if len(base) > 4 && !hasDigit {
+		return false
+	}
+	return true
 }
 
 func (s *slingTestStore) SetMetadata(id, key, value string) error {
@@ -1163,6 +1209,54 @@ func TestCmdSlingDryRunPreviewsInlineText(t *testing.T) {
 	}
 }
 
+// TestCmdSlingDryRunInlineTextHasNoFalsePositivePreCheck verifies that
+// inline-text dry-runs print a "Would create new task bead" hint and
+// suppress the Pre-check ✓ line (which would be vacuously true for a
+// bead that does not exist yet).
+func TestCmdSlingDryRunInlineTextHasNoFalsePositivePreCheck(t *testing.T) {
+	cityDir := setupCmdSlingBeadExistsFixture(t)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSling(
+		[]string{"frontend/worker", "write docs"},
+		false, false, false,
+		"", nil, "",
+		true, false, "",
+		false, false, true,
+		"", "",
+		&stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("cmdSling dry-run returned %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	out := stdout.String()
+	if strings.Contains(out, "has no existing molecule/wisp children ✓") {
+		t.Fatalf("dry-run stdout still emits false-positive Pre-check ✓ for inline text:\n%s", out)
+	}
+	if !strings.Contains(out, "Would create new task bead") {
+		t.Fatalf("dry-run stdout missing inline-text creation hint:\n%s", out)
+	}
+	// Pre-existing footer must still be present.
+	if !strings.Contains(out, "No side effects executed (--dry-run).") {
+		t.Fatalf("dry-run stdout missing dry-run footer:\n%s", out)
+	}
+
+	// Sanity: city/frontend stores must remain empty (no bead created).
+	for _, dir := range []string{cityDir, filepath.Join(cityDir, "frontend")} {
+		store, err := openStoreAtForCity(dir, cityDir)
+		if err != nil {
+			t.Fatalf("openStoreAtForCity(%s): %v", dir, err)
+		}
+		bs, err := store.List(beads.ListQuery{AllowScan: true})
+		if err != nil {
+			t.Fatalf("List(%s): %v", dir, err)
+		}
+		if len(bs) != 0 {
+			t.Fatalf("store %s has %d beads after dry-run, want 0: %#v", dir, len(bs), bs)
+		}
+	}
+}
+
 func TestResolveInlineBeadActionDryRunInlineTextDoesNotProbeStore(t *testing.T) {
 	create, inlineText := resolveInlineBeadAction(&config.City{}, "write docs", true)
 	if create {
@@ -1200,6 +1294,49 @@ func TestResolveInlineBeadActionBeadIDDoesNotProbeStore(t *testing.T) {
 	}
 	if inlineText {
 		t.Fatal("inlineText = true, want false")
+	}
+}
+
+func TestResolveInlineBeadActionHyphenatedRigPrefixIsBeadID(t *testing.T) {
+	// Bead IDs whose configured rig prefix contains a hyphen
+	// (agent-diagnostics-hnn from rig "agent-diagnostics") must
+	// classify as bead IDs, not inline text.
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "agent-diagnostics", Path: "/tmp/agent-diag", Prefix: "agent-diagnostics"},
+		},
+	}
+
+	create, inlineText := resolveInlineBeadAction(cfg, "agent-diagnostics-hnn", false)
+	if create {
+		t.Fatal("create = true, want false for configured hyphenated bead ID")
+	}
+	if inlineText {
+		t.Fatal("inlineText = true, want false outside dry-run")
+	}
+
+	create, inlineText = resolveInlineBeadAction(cfg, "agent-diagnostics-hnn", true)
+	if create {
+		t.Fatal("create = true, want false during dry-run")
+	}
+	if inlineText {
+		t.Fatal("inlineText = true, want false for configured bead ID even in dry-run")
+	}
+}
+
+func TestResolveInlineBeadActionUnknownHyphenatedTextStillCreates(t *testing.T) {
+	// Inline text shaped like "<unknown-prefix>-<word>" must still create
+	// an inline task bead. Only inputs that match a CONFIGURED rig prefix
+	// are protected from the auto-create branch.
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "fe", Path: "/fe", Prefix: "fe"}},
+	}
+	create, inlineText := resolveInlineBeadAction(cfg, "code-review-please", false)
+	if !create {
+		t.Fatal("create = false, want true for non-configured hyphenated text")
+	}
+	if inlineText {
+		t.Fatal("inlineText = true, want false outside dry-run")
 	}
 }
 
@@ -1314,6 +1451,106 @@ dir = "orders"
 	}
 	if len(ordersBeads) != 0 {
 		t.Fatalf("orders store bead count = %d, want 0: %#v", len(ordersBeads), ordersBeads)
+	}
+}
+
+// TestCmdSlingHyphenatedRigPrefixExistingBeadDoesNotOrphan verifies
+// that an existing bead in a rig whose configured prefix contains a
+// hyphen ("agent-diagnostics-hnn" in rig "agent-diagnostics") routes
+// to the rig store without auto-creating a city orphan.
+func TestCmdSlingHyphenatedRigPrefixExistingBeadDoesNotOrphan(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "agent-diagnostics")
+	otherDir := filepath.Join(cityDir, "other")
+	for _, dir := range []string{rigDir, otherDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", dir, err)
+		}
+	}
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatalf("ensureScopedFileStoreLayout: %v", err)
+	}
+	for _, dir := range []string{cityDir, rigDir, otherDir} {
+		if err := ensurePersistedScopeLocalFileStore(dir); err != nil {
+			t.Fatalf("ensurePersistedScopeLocalFileStore(%s): %v", dir, err)
+		}
+	}
+	writeTestFileStoreBeads(t, rigDir, []beads.Bead{{
+		ID:       "agent-diagnostics-hnn",
+		Title:    "existing diagnostics work",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{},
+	}})
+	cityToml := `[workspace]
+name = "demo"
+
+[[rigs]]
+name = "agent-diagnostics"
+path = "agent-diagnostics"
+prefix = "agent-diagnostics"
+
+[[rigs]]
+name = "other"
+path = "other"
+prefix = "OT"
+
+[[agent]]
+name = "worker"
+dir = "agent-diagnostics"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Chdir(cityDir)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSling(
+		[]string{"agent-diagnostics/worker", "agent-diagnostics-hnn"},
+		false, false, true,
+		"", nil, "",
+		true, false, "",
+		true, false, false,
+		"", "",
+		&stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("cmdSling returned %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	// The pre-fix bug printed a "Created gc-NNN — \"agent-diagnostics-hnn\""
+	// line because the live path took the auto-create-text-bead branch.
+	if strings.Contains(stdout.String(), "Created ") {
+		t.Fatalf("orphan auto-create regression: stdout = %q", stdout.String())
+	}
+
+	rigStore, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig): %v", err)
+	}
+	routed, err := rigStore.Get("agent-diagnostics-hnn")
+	if err != nil {
+		t.Fatalf("rigStore.Get(agent-diagnostics-hnn): %v", err)
+	}
+	if routed.Metadata["gc.routed_to"] != "agent-diagnostics/worker" {
+		t.Fatalf("rig bead gc.routed_to = %q, want agent-diagnostics/worker (routing must land on the existing bead, not an orphan)", routed.Metadata["gc.routed_to"])
+	}
+
+	// City store must NOT contain a stray bead from the auto-create path.
+	cityStore, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(city): %v", err)
+	}
+	cityBeads, err := cityStore.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("cityStore.List: %v", err)
+	}
+	for _, b := range cityBeads {
+		if b.Title == "agent-diagnostics-hnn" {
+			t.Fatalf("city store has orphan bead %q (title %q): inline-text auto-create fired for a known-rig bead ID", b.ID, b.Title)
+		}
 	}
 }
 
@@ -2898,6 +3135,33 @@ func TestResolveSlingStoreRootUsesPrefixRigForConfiguredAllAlphaBeadID(t *testin
 	want := filepath.Join(cityPath, "rigs", "frontend")
 	if got != want {
 		t.Fatalf("resolveSlingStoreRoot() = %q, want %q", got, want)
+	}
+}
+
+func TestResolveSlingStoreRootHonorsHyphenatedRigPrefix(t *testing.T) {
+	// A rig whose configured prefix itself contains a hyphen must
+	// receive its own beads — the longest configured prefix wins
+	// over a shorter prefix that also matches the bead-ID head.
+	cityPath := filepath.Join(t.TempDir(), "city")
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "agent", Path: filepath.Join("rigs", "agent"), Prefix: "agent"},
+			{Name: "agent-diagnostics", Path: filepath.Join("rigs", "agent-diag"), Prefix: "agent-diagnostics"},
+		},
+	}
+
+	got := resolveSlingStoreRoot(cfg, cityPath, "agent-diagnostics-hnn", config.Agent{Dir: "agent"})
+	want := filepath.Join(cityPath, "rigs", "agent-diag")
+	if got != want {
+		t.Fatalf("resolveSlingStoreRoot(agent-diagnostics-hnn) = %q, want %q (longest configured prefix should win)", got, want)
+	}
+
+	// Sanity check: a bead under the shorter "agent" prefix still resolves
+	// to that rig.
+	got = resolveSlingStoreRoot(cfg, cityPath, "agent-x1", config.Agent{Dir: "agent-diagnostics"})
+	want = filepath.Join(cityPath, "rigs", "agent")
+	if got != want {
+		t.Fatalf("resolveSlingStoreRoot(agent-x1) = %q, want %q", got, want)
 	}
 }
 

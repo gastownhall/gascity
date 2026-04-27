@@ -311,6 +311,156 @@ func TestBeadPrefixSling(t *testing.T) {
 	}
 }
 
+func TestBeadPrefixForCityLongestMatch(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "agent", Path: "/agent", Prefix: "agent"},
+			{Name: "agent-diagnostics", Path: "/ad", Prefix: "agent-diagnostics"},
+			{Name: "fe", Path: "/fe", Prefix: "fe"},
+		},
+	}
+	tests := []struct {
+		id   string
+		want string
+	}{
+		{"agent-diagnostics-hnn", "agent-diagnostics"},
+		{"agent-x1", "agent"},
+		{"fe-42", "fe"},
+		{"unknown-7", "unknown"}, // falls back to BeadPrefix.
+		{"", ""},
+	}
+	for _, tt := range tests {
+		got := BeadPrefixForCity(cfg, tt.id)
+		if got != tt.want {
+			t.Errorf("BeadPrefixForCity(%q) = %q, want %q", tt.id, got, tt.want)
+		}
+	}
+}
+
+func TestBeadPrefixForCityFallsBackToBeadPrefix(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "fe", Path: "/fe", Prefix: "fe"}},
+	}
+	// Unknown prefix → fall back to BeadPrefix's first-dash split.
+	if got := BeadPrefixForCity(cfg, "unknown-7"); got != "unknown" {
+		t.Errorf("BeadPrefixForCity(unknown-7) = %q, want unknown", got)
+	}
+	// Nil cfg → fall back to BeadPrefix.
+	if got := BeadPrefixForCity(nil, "fe-42"); got != "fe" {
+		t.Errorf("BeadPrefixForCity(nil, fe-42) = %q, want fe", got)
+	}
+}
+
+func TestLooksLikeConfiguredBeadIDAcceptsHyphenatedPrefix(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "agent-diagnostics", Path: "/ad", Prefix: "agent-diagnostics"},
+		},
+	}
+	tests := []struct {
+		id   string
+		want bool
+	}{
+		{"agent-diagnostics-hnn", true},
+		{"agent-diagnostics-h1", true},
+		{"agent-diagnostics-12345678", true},   // 8-char numeric suffix.
+		{"agent-diagnostics-123456789", false}, // 9-char suffix exceeds cap.
+		{"agent-diagnostics-", false},          // empty suffix.
+		{"agent-diagnostics-h.1", true},        // hierarchical .child.
+		{"agent-diagnostics-h.x", true},
+		{"agent-diagnostics-h.", true}, // trailing dot accepted (matches BeadIDParts).
+		{"agent-diagnostics", false},   // no suffix dash.
+	}
+	for _, tt := range tests {
+		got := LooksLikeConfiguredBeadID(cfg, tt.id)
+		if got != tt.want {
+			t.Errorf("LooksLikeConfiguredBeadID(%q) = %v, want %v", tt.id, got, tt.want)
+		}
+	}
+}
+
+func TestLooksLikeConfiguredBeadIDPrefersLongestPrefix(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "agent", Path: "/agent", Prefix: "agent"},
+			{Name: "agent-diagnostics", Path: "/ad", Prefix: "agent-diagnostics"},
+		},
+	}
+	// Both prefixes can match "agent-diagnostics-h1" via the prefix-then-validate
+	// rule, but matchConfiguredBeadPrefix must pick the longest.
+	if !LooksLikeConfiguredBeadID(cfg, "agent-diagnostics-h1") {
+		t.Fatal("LooksLikeConfiguredBeadID(agent-diagnostics-h1) = false, want true")
+	}
+	// "agent-x1" only matches the shorter "agent" prefix.
+	if !LooksLikeConfiguredBeadID(cfg, "agent-x1") {
+		t.Fatal("LooksLikeConfiguredBeadID(agent-x1) = false, want true")
+	}
+}
+
+func TestLooksLikeConfiguredBeadIDRejectsUnknownPrefix(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "fe", Path: "/fe", Prefix: "fe"}},
+	}
+	cases := []string{
+		"unknown-42",
+		"code-review-please", // no rig "code" or "code-review" configured.
+		"hello-world",
+		"",
+		"   ",
+		"fe foo",  // whitespace.
+		"fe-foo!", // non-alphanumeric suffix char.
+	}
+	for _, c := range cases {
+		if LooksLikeConfiguredBeadID(cfg, c) {
+			t.Errorf("LooksLikeConfiguredBeadID(%q) = true, want false", c)
+		}
+	}
+}
+
+func TestLooksLikeConfiguredBeadIDAcceptsHQPrefix(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test", Prefix: "HQ"},
+	}
+	if !LooksLikeConfiguredBeadID(cfg, "HQ-42") {
+		t.Fatal("HQ-42 should be a configured bead ID")
+	}
+	if !LooksLikeConfiguredBeadID(cfg, "hq-abc") {
+		t.Fatal("hq-abc should match HQ prefix case-insensitively")
+	}
+}
+
+func TestRigDirForBeadHonorsHyphenatedPrefix(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "agent", Path: "/agent", Prefix: "agent"},
+			{Name: "agent-diagnostics", Path: "/agent-diag", Prefix: "agent-diagnostics"},
+		},
+	}
+	if got := RigDirForBead(cfg, "agent-diagnostics-hnn"); got != "/agent-diag" {
+		t.Errorf("RigDirForBead = %q, want /agent-diag (longest configured prefix)", got)
+	}
+	if got := RigDirForBead(cfg, "agent-x1"); got != "/agent" {
+		t.Errorf("RigDirForBead = %q, want /agent", got)
+	}
+}
+
+func TestCheckCrossRigDetectsHyphenatedPrefixMismatch(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "agent", Path: "/agent", Prefix: "agent"},
+			{Name: "agent-diagnostics", Path: "/ad", Prefix: "agent-diagnostics"},
+		},
+	}
+	// First-dash BeadPrefix yields "agent" for "agent-diagnostics-hnn",
+	// which falsely matches a worker in rig "agent" and lets cross-rig
+	// routing through silently. The longest-prefix resolver returns
+	// "agent-diagnostics", so the guard fires correctly.
+	a := config.Agent{Name: "worker", Dir: "agent"}
+	if msg := CheckCrossRig("agent-diagnostics-hnn", a, cfg); msg == "" {
+		t.Error("expected cross-rig warning: bead in rig 'agent-diagnostics' routed to worker in rig 'agent' must not be silently permitted")
+	}
+}
+
 func TestCheckCrossRigSling(t *testing.T) {
 	cfg := &config.City{
 		Rigs: []config.Rig{

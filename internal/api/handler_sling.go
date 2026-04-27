@@ -267,14 +267,15 @@ func (s *Server) slingStoreScopeForBead(beadID string) (rigName string, cityScop
 	if beadID == "" {
 		return "", false
 	}
-	prefix := sling.BeadPrefix(beadID)
+	cfg := s.state.Config()
+	prefix := sling.BeadPrefixForCity(cfg, beadID)
 	if prefix == "" {
 		return "", false
 	}
-	if sling.IsHQPrefix(s.state.Config(), prefix) {
+	if sling.IsHQPrefix(cfg, prefix) {
 		return "", true
 	}
-	rig, ok := sling.FindRigByPrefix(s.state.Config(), prefix)
+	rig, ok := sling.FindRigByPrefix(cfg, prefix)
 	if !ok {
 		return "", false
 	}
