@@ -2312,8 +2312,8 @@ provider = "kiro"
 	if rp.Name != "kiro" {
 		t.Errorf("Name = %q, want kiro", rp.Name)
 	}
-	if rp.BuiltinAncestor != "" {
-		t.Errorf("BuiltinAncestor = %q, want empty (standalone)", rp.BuiltinAncestor)
+	if rp.BuiltinAncestor != "kiro" {
+		t.Errorf("BuiltinAncestor = %q, want \"kiro\"", rp.BuiltinAncestor)
 	}
 	if rp.CommandString() != "kiro --autonomous" {
 		t.Errorf("CommandString() = %q, want kiro --autonomous", rp.CommandString())

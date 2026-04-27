@@ -293,17 +293,17 @@ func TestResolveProviderChain_SharedAncestorDAG(t *testing.T) {
 func TestResolveProviderChain_KiroStandaloneNoBase(t *testing.T) {
 	custom := map[string]ProviderSpec{
 		"kiro": {
-			Command:         "kiro",
-			Args:            []string{"--autonomous"},
-			PromptMode:      "arg",
-			ReadyDelayMs:    5000,
-			ProcessNames:    []string{"kiro", "node"},
-			SupportsHooks:   boolPtr(true),
+			Command:          "kiro",
+			Args:             []string{"--autonomous"},
+			PromptMode:       "arg",
+			ReadyDelayMs:     5000,
+			ProcessNames:     []string{"kiro", "node"},
+			SupportsHooks:    boolPtr(true),
 			InstructionsFile: "AGENTS.md",
-			ResumeFlag:      "--resume",
-			ResumeStyle:     "flag",
-			Env:             map[string]string{"KIRO_AGENT_MODE": "headless"},
-			PermissionModes: map[string]string{"unrestricted": "--trust-mode full"},
+			ResumeFlag:       "--resume",
+			ResumeStyle:      "flag",
+			Env:              map[string]string{"KIRO_AGENT_MODE": "headless"},
+			PermissionModes:  map[string]string{"unrestricted": "--trust-mode full"},
 		},
 	}
 	r, err := ResolveProviderChain("kiro", custom["kiro"], customs(custom))

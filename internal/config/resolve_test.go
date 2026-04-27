@@ -270,17 +270,17 @@ func TestResolveProviderUserDefinedProvider(t *testing.T) {
 	agent := &Agent{Name: "scout", Provider: "kiro"}
 	cityProviders := map[string]ProviderSpec{
 		"kiro": {
-			Command:           "kiro",
-			Args:              []string{"--autonomous"},
-			PromptMode:        "arg",
-			ReadyDelayMs:      5000,
-			ProcessNames:      []string{"kiro", "node"},
-			SupportsHooks:     boolPtr(true),
-			InstructionsFile:  "AGENTS.md",
-			ResumeFlag:        "--resume",
-			ResumeStyle:       "flag",
-			Env:               map[string]string{"KIRO_AGENT_MODE": "headless"},
-			PermissionModes:   map[string]string{"unrestricted": "--trust-mode full"},
+			Command:          "kiro",
+			Args:             []string{"--autonomous"},
+			PromptMode:       "arg",
+			ReadyDelayMs:     5000,
+			ProcessNames:     []string{"kiro", "node"},
+			SupportsHooks:    boolPtr(true),
+			InstructionsFile: "AGENTS.md",
+			ResumeFlag:       "--resume",
+			ResumeStyle:      "flag",
+			Env:              map[string]string{"KIRO_AGENT_MODE": "headless"},
+			PermissionModes:  map[string]string{"unrestricted": "--trust-mode full"},
 		},
 	}
 	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro"))
@@ -523,10 +523,10 @@ func TestAgentHasHooks_KiroExplicitOverride(t *testing.T) {
 	}
 }
 
-func TestBuiltinFamilyKiroIsEmpty(t *testing.T) {
+func TestBuiltinFamilyKiroIsKiro(t *testing.T) {
 	family := BuiltinFamily("kiro", nil)
-	if family != "" {
-		t.Errorf("BuiltinFamily(kiro, nil) = %q, want empty (kiro is not a builtin)", family)
+	if family != "kiro" {
+		t.Errorf("BuiltinFamily(kiro, nil) = %q, want \"kiro\"", family)
 	}
 }
 
@@ -535,8 +535,8 @@ func TestBuiltinFamilyKiroWithCityProviders(t *testing.T) {
 		"kiro": {Command: "kiro"},
 	}
 	family := BuiltinFamily("kiro", cityProviders)
-	if family != "" {
-		t.Errorf("BuiltinFamily(kiro, city) = %q, want empty (kiro has no builtin ancestor)", family)
+	if family != "kiro" {
+		t.Errorf("BuiltinFamily(kiro, city) = %q, want \"kiro\"", family)
 	}
 }
 
