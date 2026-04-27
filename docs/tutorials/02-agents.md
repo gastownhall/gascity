@@ -145,14 +145,14 @@ No findings.
 This is handy for fire-and-forget kind of work. However, if you'd like to see
 the agent in action or even talk to one directly, you're going to need a
 session. And for that, you'll want to check in on [the next
-tutorial](/tutorials/03-sessions).
+tutorial](03-sessions).
 
 ## What's next
 
 You've defined agents with custom prompts, interacted with them through
 sessions and configured different agents with different providers. From here:
 
-- **[Sessions](/tutorials/03-sessions)** — session lifecycle, sleep/wake,
+- **[Sessions](03-sessions)** — session lifecycle, sleep/wake,
   suspension, named sessions
 - **[Formulas](/tutorials/05-formulas)** — multi-step workflow templates with
   dependencies and variables
