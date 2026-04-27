@@ -110,6 +110,7 @@
           "reference/index",
           "reference/cli",
           "reference/config",
+          "reference/provider-overrides",
           "reference/formula",
           "reference/api",
           "reference/events",

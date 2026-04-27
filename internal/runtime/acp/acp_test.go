@@ -673,21 +673,21 @@ func TestListRunning_FindsSessions(t *testing.T) {
 }
 
 func TestStartLongSocketPathUsesShortSocketName(t *testing.T) {
-	root, err := os.MkdirTemp("", "gc-acp-sock-")
+	root, err := os.MkdirTemp("/tmp", "gc-acp-sock-")
 	if err != nil {
 		t.Fatalf("MkdirTemp: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	const name = "control-dispatcher"
 	longDir := ""
-	for i := 1; i <= 32; i++ {
-		candidate := filepath.Join(root, strings.Repeat("deep-path-", i), "acp")
+	for i := 1; i <= 200; i++ {
+		candidate := filepath.Join(root, strings.Repeat("p", i), "acp")
 		p := NewProviderWithDir(candidate, Config{
 			HandshakeTimeout:  5 * time.Second,
 			NudgeBusyTimeout:  2 * time.Second,
 			OutputBufferLines: 100,
 		})
-		if len(p.legacySockPath(name)) > 108 && len(p.sockPath(name)) < 108 {
+		if len(p.legacySockPath(name)) > socketPathLimit && len(p.sockPath(name)) < socketPathLimit {
 			longDir = candidate
 			break
 		}
@@ -720,6 +720,60 @@ func TestStartLongSocketPathUsesShortSocketName(t *testing.T) {
 	}
 	if len(p.sockPath(name)) >= len(p.legacySockPath(name)) {
 		t.Fatalf("short socket path = %q, legacy = %q; want shorter path", p.sockPath(name), p.legacySockPath(name))
+	}
+}
+
+func TestStartVeryLongSocketDirFallsBackToTempDir(t *testing.T) {
+	root, err := os.MkdirTemp("/tmp", "gc-acp-sock-fallback-")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+
+	longDir := filepath.Join(root, strings.Repeat("p", 120), "runtime", "gc", "acp", "hash")
+	if err := os.MkdirAll(longDir, 0o755); err != nil {
+		t.Fatalf("mkdir longDir: %v", err)
+	}
+
+	p := NewProviderWithDir(longDir, Config{
+		HandshakeTimeout:  5 * time.Second,
+		NudgeBusyTimeout:  2 * time.Second,
+		OutputBufferLines: 100,
+	})
+	name := "dog-gc-112"
+	localShort := filepath.Join(longDir, p.sockKey(name)+".sock")
+	if len(localShort) <= socketPathLimit {
+		t.Fatalf("test setup failed: %q does not exceed socket path limit", localShort)
+	}
+	if !strings.HasPrefix(p.sockPath(name), os.TempDir()) {
+		t.Fatalf("sockPath(%q) = %q, want temp-dir fallback", name, p.sockPath(name))
+	}
+	if len(p.sockPath(name)) > socketPathLimit {
+		t.Fatalf("sockPath(%q) = %q exceeds limit %d", name, p.sockPath(name), socketPathLimit)
+	}
+
+	if err := p.Start(context.Background(), name, runtime.Config{
+		Command: fakeACPShellCommand(),
+		WorkDir: t.TempDir(),
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Stop(name) })
+
+	p2 := NewProviderWithDir(longDir, Config{
+		HandshakeTimeout:  5 * time.Second,
+		NudgeBusyTimeout:  2 * time.Second,
+		OutputBufferLines: 100,
+	})
+	if !p2.socketAlive(name) {
+		t.Fatalf("fallback socket for %q should be visible cross-process", name)
+	}
+	got, err := p2.ListRunning("")
+	if err != nil {
+		t.Fatalf("ListRunning: %v", err)
+	}
+	if len(got) != 1 || got[0] != name {
+		t.Fatalf("ListRunning = %#v, want [%q]", got, name)
 	}
 }
 
