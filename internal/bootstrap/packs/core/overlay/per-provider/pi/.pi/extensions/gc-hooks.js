@@ -9,10 +9,11 @@
 //   session_start    → gc prime --hook (load context side effects)
 //   session_compact  → gc prime --hook (reload after compaction)
 //   session_shutdown → gc hook --inject on process quit
-//   before_agent_start → gc nudge drain --inject + gc mail check --inject
+//   before_agent_start → gc nudge drain --inject + gc mail check --inject + gc hook --inject
 
 const { execFileSync } = require("node:child_process");
 
+const GC_PI_HOOK_VERSION = 2;
 const PATH_PREFIX = `${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`;
 
 function run(args, cwd) {
@@ -54,7 +55,8 @@ module.exports = function gascityPiExtension(pi) {
   pi.on("before_agent_start", (event, ctx) => {
     const nudges = run(["nudge", "drain", "--inject"], ctx.cwd);
     const mail = run(["mail", "check", "--inject"], ctx.cwd);
-    const systemPrompt = appendSystemPrompt(event.systemPrompt, [nudges, mail]);
+    const work = run(["hook", "--inject"], ctx.cwd);
+    const systemPrompt = appendSystemPrompt(event.systemPrompt, [nudges, mail, work]);
     if (systemPrompt !== event.systemPrompt) {
       return { systemPrompt };
     }
