@@ -97,8 +97,8 @@ func newEventsCmd(stdout, stderr io.Writer) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "events",
-		Short: "Show events from the GC API",
-		Long: `Show events from the GC API with optional filtering.
+		Short: fmt.Sprintf("Show events from the %s API", prog()),
+		Long: fmt.Sprintf(`Show events from the %s API with optional filtering.
 
 The API is the source of truth for both city-scoped and supervisor-scoped
 events. In a city directory (or with --city), this command reflects the
@@ -106,13 +106,13 @@ city's /v0/city/{cityName}/events and /stream endpoints. Without a city in
 scope, it reflects the supervisor's /v0/events and /stream endpoints.
 
 List, watch, and follow output are always JSON Lines. Each line is one API
-DTO or SSE envelope.`,
-		Example: `  gc events
-  gc events --type bead.created --since 1h
-  gc events --watch --type convoy.closed --timeout 5m
-  gc events --follow
-  gc events --seq
-  gc events --follow --after-cursor city-a:12,city-b:9`,
+DTO or SSE envelope.`, prog()),
+		Example: fmt.Sprintf(`  %[1]s events
+  %[1]s events --type bead.created --since 1h
+  %[1]s events --watch --type convoy.closed --timeout 5m
+  %[1]s events --follow
+  %[1]s events --seq
+  %[1]s events --follow --after-cursor city-a:12,city-b:9`, prog()),
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if afterFlag > 0 && strings.TrimSpace(afterCursor) != "" {
@@ -143,7 +143,7 @@ DTO or SSE envelope.`,
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&apiURL, "api", "", "GC API server URL override (auto-discovered by default)")
+	cmd.Flags().StringVar(&apiURL, "api", "", fmt.Sprintf("%s API server URL override (auto-discovered by default)", prog()))
 	cmd.Flags().StringVar(&typeFilter, "type", "", "Filter by event type (e.g. bead.created)")
 	cmd.Flags().StringVar(&sinceFlag, "since", "", "Show events since duration ago (e.g. 1h, 30m)")
 	cmd.Flags().BoolVar(&watchFlag, "watch", false, "Block until matching events arrive (exits after first match or buffered replay)")
