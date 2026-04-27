@@ -25,6 +25,11 @@ import (
 // Errors are non-fatal.
 type nudgeFunc func(recipient string) error
 
+const (
+	mailInjectMaxMessages     = 3
+	mailInjectBodyPreviewSize = 240
+)
+
 func newMailNudgeFunc(sender string) nudgeFunc {
 	return func(recipient string) error {
 		target, err := resolveNudgeTarget(recipient, io.Discard)
@@ -232,18 +237,45 @@ func formatInjectOutput(messages []mail.Message) string {
 	var sb strings.Builder
 	sb.WriteString("<system-reminder>\n")
 	fmt.Fprintf(&sb, "You have %d unread message(s).\n\n", len(messages))
-	for _, m := range messages {
+	limit := len(messages)
+	if limit > mailInjectMaxMessages {
+		limit = mailInjectMaxMessages
+		fmt.Fprintf(&sb, "Showing the first %d message(s) here; run 'gc mail inbox' for the full list.\n\n", limit)
+	}
+	for _, m := range messages[:limit] {
 		subject := strings.TrimSpace(m.Subject)
-		body := strings.TrimSpace(m.Body)
+		body, truncated := mailInjectBodyPreview(m.Body)
 		if subject != "" && subject != body {
-			fmt.Fprintf(&sb, "- %s from %s [%s]: %s\n", m.ID, m.From, m.Subject, m.Body)
+			fmt.Fprintf(&sb, "- %s from %s [%s]: %s", m.ID, m.From, subject, body)
 		} else {
-			fmt.Fprintf(&sb, "- %s from %s: %s\n", m.ID, m.From, m.Body)
+			fmt.Fprintf(&sb, "- %s from %s: %s", m.ID, m.From, body)
 		}
+		if truncated {
+			sb.WriteString(" ... [preview truncated]")
+		}
+		sb.WriteByte('\n')
 	}
 	sb.WriteString("\nRun 'gc mail read <id>' for full details, or 'gc mail inbox' to see all.\n")
 	sb.WriteString("</system-reminder>\n")
 	return sb.String()
+}
+
+func mailInjectBodyPreview(body string) (string, bool) {
+	compact := strings.Join(strings.Fields(body), " ")
+	if len(compact) <= mailInjectBodyPreviewSize {
+		return compact, false
+	}
+	cut := 0
+	for i := range compact {
+		if i > mailInjectBodyPreviewSize {
+			break
+		}
+		cut = i
+	}
+	if cut <= 0 {
+		cut = mailInjectBodyPreviewSize
+	}
+	return strings.TrimSpace(compact[:cut]), true
 }
 
 func defaultMailIdentity() string {
