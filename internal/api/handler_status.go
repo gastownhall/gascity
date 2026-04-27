@@ -195,6 +195,7 @@ func (s *Server) statusSessionSnapshot() statusSessionSnapshot {
 		return snapshot
 	}
 
+	seenSessionName := make(map[string]bool, len(rows))
 	for _, b := range rows {
 		if b.Status == "closed" {
 			continue
@@ -207,6 +208,13 @@ func (s *Server) statusSessionSnapshot() statusSessionSnapshot {
 		if info.sessionName == "" {
 			continue
 		}
+		if info.state == session.StateArchived {
+			continue
+		}
+		if seenSessionName[info.sessionName] {
+			continue
+		}
+		seenSessionName[info.sessionName] = true
 		snapshot.bySessionName[info.sessionName] = info
 		if info.template != "" {
 			snapshot.byTemplate[info.template] = append(snapshot.byTemplate[info.template], info)
