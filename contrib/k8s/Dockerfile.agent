@@ -26,7 +26,7 @@ COPY bd /usr/local/bin/bd
 COPY br /usr/local/bin/br
 
 # gc binary — copied from build context.
-COPY gc /usr/local/bin/gc
+COPY ${BINARY} /usr/local/bin/${BINARY}
 
 # gc-beads-br script for the exec:beads protocol.
 COPY contrib/beads-scripts/gc-beads-br /usr/local/bin/gc-beads-br
