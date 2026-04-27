@@ -101,7 +101,7 @@ func cmdHandoffRemote(args []string, target string, stdout, stderr io.Writer) in
 		return 1
 	}
 
-	store, code := openCityStore(stderr, "gc handoff")
+	store, code := openCityStore(stderr, cmdName("handoff"))
 	if store == nil {
 		return code
 	}
@@ -111,7 +111,7 @@ func cmdHandoffRemote(args []string, target string, stdout, stderr io.Writer) in
 		return 1
 	}
 	cfg, _ := loadCityConfig(cityPath, stderr)
-	sender, ok := resolveDefaultMailSenderForCommand(cityPath, cfg, store, stderr, "gc handoff")
+	sender, ok := resolveDefaultMailSenderForCommand(cityPath, cfg, store, stderr, cmdName("handoff"))
 	if !ok {
 		return 1
 	}

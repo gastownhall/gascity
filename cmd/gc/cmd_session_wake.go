@@ -36,7 +36,7 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 
 // cmdSessionWake is the CLI entry point for "gc session wake".
 func cmdSessionWake(args []string, stdout, stderr io.Writer) int {
-	store, code := openCityStore(stderr, "gc session wake")
+	store, code := openCityStore(stderr, cmdName("session wake"))
 	if store == nil {
 		return code
 	}

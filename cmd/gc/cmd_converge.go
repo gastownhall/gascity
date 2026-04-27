@@ -127,7 +127,7 @@ func newConvergeStatusCmd(stdout, stderr io.Writer) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			beadID := args[0]
-			store, code := openCityStore(stderr, "gc converge status")
+			store, code := openCityStore(stderr, cmdName("converge status"))
 			if code != 0 {
 				return errExit
 			}
@@ -232,7 +232,7 @@ func newConvergeListCmd(stdout, stderr io.Writer) *cobra.Command {
 		Use:   "list",
 		Short: "List convergence loops",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			store, code := openCityStore(stderr, "gc converge list")
+			store, code := openCityStore(stderr, cmdName("converge list"))
 			if code != 0 {
 				return errExit
 			}
@@ -312,7 +312,7 @@ func newConvergeTestGateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			beadID := args[0]
-			store, code := openCityStore(stderr, "gc converge test-gate")
+			store, code := openCityStore(stderr, cmdName("converge test-gate"))
 			if code != 0 {
 				return errExit
 			}

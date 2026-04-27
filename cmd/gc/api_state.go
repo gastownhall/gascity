@@ -442,7 +442,7 @@ func (cs *controllerState) Orders() []orders.Order {
 	cfg := cs.cfg
 	cs.mu.RUnlock()
 
-	allAA, err := scanAllOrders(cs.cityPath, cfg, io.Discard, "gc api: order scan")
+	allAA, err := scanAllOrders(cs.cityPath, cfg, io.Discard, cmdName("api: order scan"))
 	if err != nil {
 		return nil
 	}

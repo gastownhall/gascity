@@ -59,7 +59,7 @@ func cmdSessionSetPin(args []string, pinned bool, stdout, stderr io.Writer) int 
 	if pinned {
 		action = "pin"
 	}
-	store, code := openCityStore(stderr, "gc session "+action)
+	store, code := openCityStore(stderr, cmdName("session ")+action)
 	if store == nil {
 		return code
 	}

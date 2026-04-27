@@ -302,7 +302,7 @@ func doStartWithNameOverride(args []string, controllerMode bool, stdout, stderr 
 		fmt.Fprintf(stderr, "%s: install the missing dependencies, then try again\n", cmdName("start")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if code := registerCityWithSupervisorNamed(cityPath, nameOverride, stdout, stderr, "gc start", true); code != 0 {
+	if code := registerCityWithSupervisorNamed(cityPath, nameOverride, stdout, stderr, cmdName("start"), true); code != 0 {
 		return code
 	}
 	fmt.Fprintln(stdout, "City started under supervisor.") //nolint:errcheck // best-effort stdout
@@ -412,7 +412,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		return 1
 	}
 
-	ensureInitArtifacts(cityPath, stderr, "gc start")
+	ensureInitArtifacts(cityPath, stderr, cmdName("start"))
 
 	// Resolve rig paths and run the full bead store lifecycle:
 	// probe → init+hooks(city) → init+hooks(rigs) → routes.

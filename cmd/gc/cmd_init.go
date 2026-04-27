@@ -311,7 +311,7 @@ func cmdInitWithOptions(args []string, providerFlag, bootstrapProfileFlag, nameO
 			return 1
 		}
 	}
-	if handled, code := resumeExistingInitIfPossible(fsys.OSFS{}, cityPath, stdout, stderr, "gc init", true, skipProviderReadiness); handled {
+	if handled, code := resumeExistingInitIfPossible(fsys.OSFS{}, cityPath, stdout, stderr, cmdName("init"), true, skipProviderReadiness); handled {
 		return code
 	}
 	var wiz wizardConfig

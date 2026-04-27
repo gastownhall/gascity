@@ -110,7 +110,7 @@ func collectCityStatusSnapshot(sp runtime.Provider, cfg *config.City, cityPath s
 			headerShown := false
 			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, snapshot.CityName, cfg.Workspace.SessionTemplate, sp) {
 				sn := cliSessionName(cityPath, snapshot.CityName, qualifiedInstance, cfg.Workspace.SessionTemplate)
-				obs := observeSessionTargetWithWarning("gc status", cityPath, store, sp, cfg, sn, stderr)
+				obs := observeSessionTargetWithWarning(cmdName("status"), cityPath, store, sp, cfg, sn, stderr)
 				_, instanceName := config.ParseQualifiedName(qualifiedInstance)
 				row := cityStatusAgentRow{
 					Agent: StatusAgentJSON{
@@ -140,7 +140,7 @@ func collectCityStatusSnapshot(sp runtime.Provider, cfg *config.City, cityPath s
 		}
 
 		sn := cliSessionName(cityPath, snapshot.CityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
-		obs := observeSessionTargetWithWarning("gc status", cityPath, store, sp, cfg, sn, stderr)
+		obs := observeSessionTargetWithWarning(cmdName("status"), cityPath, store, sp, cfg, sn, stderr)
 		snapshot.Agents = append(snapshot.Agents, cityStatusAgentRow{
 			Agent: StatusAgentJSON{
 				Name:          a.Name,

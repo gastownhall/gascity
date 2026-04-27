@@ -36,7 +36,7 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 // the fresh restart lifecycle, including key rotation and immediate restart of
 // already-desired sessions.
 func cmdSessionReset(args []string, stdout, stderr io.Writer) int {
-	store, code := openCityStore(stderr, "gc session reset")
+	store, code := openCityStore(stderr, cmdName("session reset"))
 	if store == nil {
 		return code
 	}

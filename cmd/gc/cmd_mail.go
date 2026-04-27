@@ -91,7 +91,7 @@ as closed and will no longer appear in mail check or inbox results.`,
 
 // cmdMailArchive is the CLI entry point for archiving a message.
 func cmdMailArchive(args []string, stdout, stderr io.Writer) int {
-	mp, code := openCityMailProvider(stderr, "gc mail archive")
+	mp, code := openCityMailProvider(stderr, cmdName("mail archive"))
 	if mp == nil {
 		return code
 	}
@@ -170,7 +170,7 @@ func cmdMailCheckWithFormat(args []string, inject bool, hookFormat string, stdou
 		}
 	}
 
-	mp, code := openCityMailProvider(stderr, "gc mail check")
+	mp, code := openCityMailProvider(stderr, cmdName("mail check"))
 	if mp == nil {
 		if inject {
 			return 0 // --inject always exits 0
@@ -178,7 +178,7 @@ func cmdMailCheckWithFormat(args []string, inject bool, hookFormat string, stdou
 		return code
 	}
 
-	target, ok := resolveMailTargetFromArgs(args, stderr, "gc mail check")
+	target, ok := resolveMailTargetFromArgs(args, stderr, cmdName("mail check"))
 	if !ok {
 		if inject {
 			return 0
@@ -891,7 +891,7 @@ The recipient defaults to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human".`,
 // resolves session mailbox identities, and delegates to doMailSend.
 // The to parameter is the --to flag value (empty if not set).
 func cmdMailSend(args []string, notify bool, all bool, from string, to string, subject string, message string, stdout, stderr io.Writer) int {
-	mp, code := openCityMailProvider(stderr, "gc mail send")
+	mp, code := openCityMailProvider(stderr, cmdName("mail send"))
 	if mp == nil {
 		return code
 	}
@@ -925,7 +925,7 @@ func cmdMailSend(args []string, notify bool, all bool, from string, to string, s
 	if sender == "" {
 		if store != nil {
 			var ok bool
-			sender, ok = resolveDefaultMailSenderForCommand(cityPath, cfg, store, stderr, "gc mail send")
+			sender, ok = resolveDefaultMailSenderForCommand(cityPath, cfg, store, stderr, cmdName("mail send"))
 			if !ok {
 				return 1
 			}
@@ -1089,12 +1089,12 @@ func doMailSendAll(mp mail.Provider, rec events.Recorder, validRecipients map[st
 
 // cmdMailInbox is the CLI entry point for checking the inbox.
 func cmdMailInbox(args []string, stdout, stderr io.Writer) int {
-	mp, code := openCityMailProvider(stderr, "gc mail inbox")
+	mp, code := openCityMailProvider(stderr, cmdName("mail inbox"))
 	if mp == nil {
 		return code
 	}
 
-	target, ok := resolveMailTargetFromArgs(args, stderr, "gc mail inbox")
+	target, ok := resolveMailTargetFromArgs(args, stderr, cmdName("mail inbox"))
 	if !ok {
 		return 1
 	}
@@ -1130,7 +1130,7 @@ func doMailInboxTarget(mp mail.Provider, target resolvedMailTarget, stdout, stde
 
 // cmdMailRead is the CLI entry point for reading a message.
 func cmdMailRead(args []string, stdout, stderr io.Writer) int {
-	mp, code := openCityMailProvider(stderr, "gc mail read")
+	mp, code := openCityMailProvider(stderr, cmdName("mail read"))
 	if mp == nil {
 		return code
 	}
@@ -1167,7 +1167,7 @@ func doMailRead(mp mail.Provider, rec events.Recorder, args []string, stdout, st
 
 // cmdMailPeek shows a message without marking it as read.
 func cmdMailPeek(args []string, stdout, stderr io.Writer) int {
-	mp, code := openCityMailProvider(stderr, "gc mail peek")
+	mp, code := openCityMailProvider(stderr, cmdName("mail peek"))
 	if mp == nil {
 		return code
 	}
@@ -1199,7 +1199,7 @@ func cmdMailReply(args []string, subject, message string, notify bool, stdout, s
 		return 1
 	}
 
-	mp, code := openCityMailProvider(stderr, "gc mail reply")
+	mp, code := openCityMailProvider(stderr, cmdName("mail reply"))
 	if mp == nil {
 		return code
 	}
@@ -1210,7 +1210,7 @@ func cmdMailReply(args []string, subject, message string, notify bool, stdout, s
 	if sender != "human" {
 		if !isStorelessMailProvider() {
 			hasStore = true
-			store, storeCode := openCityStore(stderr, "gc mail reply")
+			store, storeCode := openCityStore(stderr, cmdName("mail reply"))
 			if store == nil {
 				return storeCode
 			}
@@ -1220,7 +1220,7 @@ func cmdMailReply(args []string, subject, message string, notify bool, stdout, s
 				return 1
 			}
 			cfg, _ := loadCityConfig(cityPath, stderr)
-			resolved, ok := resolveDefaultMailSenderForCommand(cityPath, cfg, store, stderr, "gc mail reply")
+			resolved, ok := resolveDefaultMailSenderForCommand(cityPath, cfg, store, stderr, cmdName("mail reply"))
 			if !ok {
 				return 1
 			}
@@ -1269,7 +1269,7 @@ func doMailReply(mp mail.Provider, rec events.Recorder, id, sender, subject, bod
 
 // cmdMailMarkRead marks a message as read.
 func cmdMailMarkRead(args []string, stdout, stderr io.Writer) int {
-	mp, code := openCityMailProvider(stderr, "gc mail mark-read")
+	mp, code := openCityMailProvider(stderr, cmdName("mail mark-read"))
 	if mp == nil {
 		return code
 	}
@@ -1302,7 +1302,7 @@ func doMailMarkRead(mp mail.Provider, rec events.Recorder, args []string, stdout
 
 // cmdMailMarkUnread marks a message as unread.
 func cmdMailMarkUnread(args []string, stdout, stderr io.Writer) int {
-	mp, code := openCityMailProvider(stderr, "gc mail mark-unread")
+	mp, code := openCityMailProvider(stderr, cmdName("mail mark-unread"))
 	if mp == nil {
 		return code
 	}
@@ -1335,7 +1335,7 @@ func doMailMarkUnread(mp mail.Provider, rec events.Recorder, args []string, stdo
 
 // cmdMailDelete deletes a message.
 func cmdMailDelete(args []string, stdout, stderr io.Writer) int {
-	mp, code := openCityMailProvider(stderr, "gc mail delete")
+	mp, code := openCityMailProvider(stderr, cmdName("mail delete"))
 	if mp == nil {
 		return code
 	}
@@ -1372,7 +1372,7 @@ func doMailDelete(mp mail.Provider, rec events.Recorder, args []string, stdout, 
 
 // cmdMailThread lists messages in a thread.
 func cmdMailThread(args []string, stdout, stderr io.Writer) int {
-	mp, code := openCityMailProvider(stderr, "gc mail thread")
+	mp, code := openCityMailProvider(stderr, cmdName("mail thread"))
 	if mp == nil {
 		return code
 	}
@@ -1414,12 +1414,12 @@ func doMailThread(mp mail.Provider, args []string, stdout, stderr io.Writer) int
 
 // cmdMailCount shows total/unread count.
 func cmdMailCount(args []string, stdout, stderr io.Writer) int {
-	mp, code := openCityMailProvider(stderr, "gc mail count")
+	mp, code := openCityMailProvider(stderr, cmdName("mail count"))
 	if mp == nil {
 		return code
 	}
 
-	target, ok := resolveMailTargetFromArgs(args, stderr, "gc mail count")
+	target, ok := resolveMailTargetFromArgs(args, stderr, cmdName("mail count"))
 	if !ok {
 		return 1
 	}

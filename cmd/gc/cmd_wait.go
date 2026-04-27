@@ -139,7 +139,7 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 		fmt.Fprintf(stderr, "%s: --note is required\n", cmdName("session wait")) //nolint:errcheck
 		return 1
 	}
-	store, code := openCityStore(stderr, "gc session wait")
+	store, code := openCityStore(stderr, cmdName("session wait"))
 	if store == nil {
 		return code
 	}
@@ -261,7 +261,7 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 }
 
 func cmdWaitList(stateFilter, sessionFilter string, stdout, stderr io.Writer) int {
-	store, code := openCityStore(stderr, "gc wait list")
+	store, code := openCityStore(stderr, cmdName("wait list"))
 	if store == nil {
 		return code
 	}
@@ -291,7 +291,7 @@ func cmdWaitList(stateFilter, sessionFilter string, stdout, stderr io.Writer) in
 }
 
 func cmdWaitInspect(waitID string, stdout, stderr io.Writer) int {
-	store, code := openCityStore(stderr, "gc wait inspect")
+	store, code := openCityStore(stderr, cmdName("wait inspect"))
 	if store == nil {
 		return code
 	}
@@ -317,7 +317,7 @@ func cmdWaitInspect(waitID string, stdout, stderr io.Writer) int {
 }
 
 func cmdWaitSetState(waitID, state string, stdout, stderr io.Writer) int {
-	store, code := openCityStore(stderr, "gc wait")
+	store, code := openCityStore(stderr, cmdName("wait"))
 	if store == nil {
 		return code
 	}

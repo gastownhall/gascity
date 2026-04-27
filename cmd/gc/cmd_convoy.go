@@ -254,7 +254,7 @@ child issues.`,
 
 // cmdConvoyList is the CLI entry point for listing convoys.
 func cmdConvoyList(stdout, stderr io.Writer) int {
-	stores, code := openAllConvoyStores(stderr, "gc convoy list")
+	stores, code := openAllConvoyStores(stderr, cmdName("convoy list"))
 	if stores == nil {
 		return code
 	}
@@ -512,7 +512,7 @@ func cmdConvoyStatus(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 {
 		convoyID = args[0]
 	}
-	store, code := openConvoyStoreByID(convoyID, stderr, "gc convoy status")
+	store, code := openConvoyStoreByID(convoyID, stderr, cmdName("convoy status"))
 	if store == nil {
 		return code
 	}
@@ -614,7 +614,7 @@ func cmdConvoyTarget(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 {
 		convoyID = args[0]
 	}
-	store, code := openConvoyStoreByID(convoyID, stderr, "gc convoy target")
+	store, code := openConvoyStoreByID(convoyID, stderr, cmdName("convoy target"))
 	if store == nil {
 		return code
 	}
@@ -678,7 +678,7 @@ func cmdConvoyAdd(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 {
 		convoyID = args[0]
 	}
-	store, code := openConvoyStoreByID(convoyID, stderr, "gc convoy add")
+	store, code := openConvoyStoreByID(convoyID, stderr, cmdName("convoy add"))
 	if store == nil {
 		return code
 	}
@@ -745,7 +745,7 @@ func cmdConvoyClose(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 {
 		convoyID = args[0]
 	}
-	store, code := openConvoyStoreByID(convoyID, stderr, "gc convoy close")
+	store, code := openConvoyStoreByID(convoyID, stderr, cmdName("convoy close"))
 	if store == nil {
 		return code
 	}
@@ -806,7 +806,7 @@ Evaluates each open convoy's children. If all children have status
 
 // cmdConvoyCheck is the CLI entry point for auto-closing completed convoys.
 func cmdConvoyCheck(stdout, stderr io.Writer) int {
-	stores, code := openAllConvoyStores(stderr, "gc convoy check")
+	stores, code := openAllConvoyStores(stderr, cmdName("convoy check"))
 	if stores == nil {
 		return code
 	}
@@ -897,7 +897,7 @@ Useful for identifying bottlenecks in convoy processing.`,
 
 // cmdConvoyStranded is the CLI entry point for finding stranded convoys.
 func cmdConvoyStranded(stdout, stderr io.Writer) int {
-	stores, code := openAllConvoyStores(stderr, "gc convoy stranded")
+	stores, code := openAllConvoyStores(stderr, cmdName("convoy stranded"))
 	if stores == nil {
 		return code
 	}
@@ -996,7 +996,7 @@ func cmdConvoyLand(args []string, opts landOpts, stdout, stderr io.Writer) int {
 	if len(args) > 0 {
 		convoyID = args[0]
 	}
-	store, code := openConvoyStoreByID(convoyID, stderr, "gc convoy land")
+	store, code := openConvoyStoreByID(convoyID, stderr, cmdName("convoy land"))
 	if store == nil {
 		return code
 	}

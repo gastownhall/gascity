@@ -81,7 +81,7 @@ type memoryOrderDispatcher struct {
 // Scans both city-level and per-rig orders. Rig orders get their Rig
 // field stamped so they use independent scoped labels.
 func buildOrderDispatcher(cityPath string, cfg *config.City, rec events.Recorder, stderr io.Writer) orderDispatcher {
-	allAA, err := scanAllOrders(cityPath, cfg, stderr, "gc start: order scan")
+	allAA, err := scanAllOrders(cityPath, cfg, stderr, cmdName("start: order scan"))
 	if err != nil {
 		logDispatchError(stderr, "gc start: order scan: %v", err)
 		return nil

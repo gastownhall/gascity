@@ -187,7 +187,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 	}
 
 	// Open the bead store.
-	store, code := openCityStore(stderr, "gc session new")
+	store, code := openCityStore(stderr, cmdName("session new"))
 	if store == nil {
 		return code
 	}
@@ -617,7 +617,7 @@ func newSessionListCmd(stdout, stderr io.Writer) *cobra.Command {
 
 // cmdSessionList is the CLI entry point for "gc session list".
 func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
-	store, code := openCityStore(stderr, "gc session list")
+	store, code := openCityStore(stderr, cmdName("session list"))
 	if store == nil {
 		return code
 	}
@@ -971,7 +971,7 @@ func cmdSessionAttach(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	store, code := openCityStore(stderr, "gc session attach")
+	store, code := openCityStore(stderr, cmdName("session attach"))
 	if store == nil {
 		return code
 	}
@@ -1124,7 +1124,7 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 // controller. The reconciler handles the actual process stop. Falls back
 // to direct suspend via the session manager if the controller isn't running.
 func cmdSessionSuspend(args []string, stdout, stderr io.Writer) int {
-	store, code := openCityStore(stderr, "gc session suspend")
+	store, code := openCityStore(stderr, cmdName("session suspend"))
 	if store == nil {
 		return code
 	}
@@ -1200,7 +1200,7 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 
 // cmdSessionClose is the CLI entry point for "gc session close".
 func cmdSessionClose(args []string, stdout, stderr io.Writer) int {
-	store, code := openCityStore(stderr, "gc session close")
+	store, code := openCityStore(stderr, cmdName("session close"))
 	if store == nil {
 		return code
 	}
@@ -1260,7 +1260,7 @@ func newSessionRenameCmd(stdout, stderr io.Writer) *cobra.Command {
 func cmdSessionRename(args []string, stdout, stderr io.Writer) int {
 	title := args[1]
 
-	store, code := openCityStore(stderr, "gc session rename")
+	store, code := openCityStore(stderr, cmdName("session rename"))
 	if store == nil {
 		return code
 	}
@@ -1321,7 +1321,7 @@ func cmdSessionPrune(beforeStr string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	store, code := openCityStore(stderr, "gc session prune")
+	store, code := openCityStore(stderr, cmdName("session prune"))
 	if store == nil {
 		return code
 	}
@@ -1401,7 +1401,7 @@ func newSessionPeekCmd(stdout, stderr io.Writer) *cobra.Command {
 
 // cmdSessionPeek is the CLI entry point for "gc session peek".
 func cmdSessionPeek(args []string, lines int, stdout, stderr io.Writer) int {
-	store, code := openCityStore(stderr, "gc session peek")
+	store, code := openCityStore(stderr, cmdName("session peek"))
 	if store == nil {
 		return code
 	}
@@ -1461,7 +1461,7 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 
 // cmdSessionKill is the CLI entry point for "gc session kill".
 func cmdSessionKill(args []string, stdout, stderr io.Writer) int {
-	store, code := openCityStore(stderr, "gc session kill")
+	store, code := openCityStore(stderr, cmdName("session kill"))
 	if store == nil {
 		return code
 	}
@@ -1574,7 +1574,7 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, stdout, stderr
 		cmdErr(stderr, "session submit", err)
 		return 1
 	}
-	store, code := openCityStore(stderr, "gc session submit")
+	store, code := openCityStore(stderr, cmdName("session submit"))
 	if store == nil {
 		return code
 	}

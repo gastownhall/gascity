@@ -28,7 +28,7 @@ city tabs. From a city directory or with --city, city-specific panels and action
 forms are enabled for that city.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if runDashboardServe("gc dashboard", port, apiURL, stderr) != nil {
+			if runDashboardServe(cmdName("dashboard"), port, apiURL, stderr) != nil {
 				return errExit
 			}
 			return nil
@@ -53,7 +53,7 @@ city tabs. From a city directory or with --city, city-specific panels and action
 forms are enabled for that city.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if runDashboardServe("gc dashboard serve", port, apiURL, stderr) != nil {
+			if runDashboardServe(cmdName("dashboard serve"), port, apiURL, stderr) != nil {
 				return errExit
 			}
 			return nil

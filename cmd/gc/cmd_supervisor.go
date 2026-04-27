@@ -1666,7 +1666,7 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 	}
 
 	// Install local agent hooks after builtin packs are refreshed.
-	ensureInitArtifacts(cityPath, stderr, "gc supervisor")
+	ensureInitArtifacts(cityPath, stderr, cmdName("supervisor"))
 
 	// Resolve rig paths and start bead store lifecycle.
 	resolveRigPaths(cityPath, cfg.Rigs)

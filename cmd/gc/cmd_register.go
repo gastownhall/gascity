@@ -68,7 +68,7 @@ func doRegisterWithOptions(args []string, nameOverride string, stdout, stderr io
 		cmdErr(stderr, "register", err)
 		return 1
 	}
-	return registerCityWithSupervisorNamed(cityPath, registerName, stdout, stderr, "gc register", true)
+	return registerCityWithSupervisorNamed(cityPath, registerName, stdout, stderr, cmdName("register"), true)
 }
 
 // resolveRegistrationName returns the machine-local alias to store in the
@@ -120,7 +120,7 @@ func doUnregister(args []string, stdout, stderr io.Writer) int {
 		cmdErr(stderr, "unregister", err)
 		return 1
 	}
-	_, code := unregisterCityFromSupervisor(cityPath, stdout, stderr, "gc unregister")
+	_, code := unregisterCityFromSupervisor(cityPath, stdout, stderr, cmdName("unregister"))
 	return code
 }
 

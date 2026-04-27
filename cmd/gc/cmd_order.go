@@ -290,7 +290,7 @@ func rigOrderRoots(_ string, _ *config.City, formulaLayers []string) []orders.Sc
 // --- gc order list ---
 
 func cmdOrderList(stdout, stderr io.Writer) int {
-	aa, code := loadOrders(stderr, "gc order list")
+	aa, code := loadOrders(stderr, cmdName("order list"))
 	if code != 0 {
 		return code
 	}
@@ -355,7 +355,7 @@ func anyOrderHasRig(aa []orders.Order) bool {
 // --- gc order show ---
 
 func cmdOrderShow(name, rig string, stdout, stderr io.Writer) int {
-	aa, code := loadOrders(stderr, "gc order show")
+	aa, code := loadOrders(stderr, cmdName("order show"))
 	if code != 0 {
 		return code
 	}
@@ -406,7 +406,7 @@ func doOrderShow(aa []orders.Order, name, rig string, stdout, stderr io.Writer) 
 // --- gc order run ---
 
 func cmdOrderRun(name, rig string, stdout, stderr io.Writer) int {
-	cityPath, cfg, aa, code := loadOrdersWithCity(stderr, "gc order run")
+	cityPath, cfg, aa, code := loadOrdersWithCity(stderr, cmdName("order run"))
 	if code != 0 {
 		return code
 	}
@@ -418,12 +418,12 @@ func cmdOrderRun(name, rig string, stdout, stderr io.Writer) int {
 	if a.IsExec() {
 		return doOrderRunExec(a, cityPath, cfg, stdout, stderr)
 	}
-	store, storeCode := openOrderStoreForOrder(cityPath, cfg, a, stderr, "gc order run")
+	store, storeCode := openOrderStoreForOrder(cityPath, cfg, a, stderr, cmdName("order run"))
 	if store == nil {
 		return storeCode
 	}
 
-	ep, epCode := openCityEventsProvider(stderr, "gc order run")
+	ep, epCode := openCityEventsProvider(stderr, cmdName("order run"))
 	if ep == nil {
 		return epCode
 	}
@@ -564,12 +564,12 @@ func doOrderRunExec(a orders.Order, cityPath string, cfg *config.City, stdout, s
 // --- gc order check ---
 
 func cmdOrderCheck(stdout, stderr io.Writer) int {
-	cityPath, cfg, aa, code := loadOrdersWithCity(stderr, "gc order check")
+	cityPath, cfg, aa, code := loadOrdersWithCity(stderr, cmdName("order check"))
 	if code != 0 {
 		return code
 	}
 
-	ep, epCode := openCityEventsProvider(stderr, "gc order check")
+	ep, epCode := openCityEventsProvider(stderr, cmdName("order check"))
 	if ep == nil {
 		return epCode
 	}
@@ -706,7 +706,7 @@ func doOrderCheckWithStoresResolver(aa []orders.Order, now time.Time, ep events.
 // --- gc order history ---
 
 func cmdOrderHistory(name, rig string, stdout, stderr io.Writer) int {
-	cityPath, cfg, aa, code := loadOrdersWithCity(stderr, "gc order history")
+	cityPath, cfg, aa, code := loadOrdersWithCity(stderr, cmdName("order history"))
 	if code != 0 {
 		return code
 	}

@@ -56,7 +56,7 @@ func cmdStop(args []string, stdout, stderr io.Writer) int {
 	}
 	cityName := loadedCityName(cfg, cityPath)
 
-	if handled, code := unregisterCityFromSupervisor(cityPath, stdout, stderr, "gc stop"); handled {
+	if handled, code := unregisterCityFromSupervisor(cityPath, stdout, stderr, cmdName("stop")); handled {
 		if code != 0 {
 			return code
 		}
