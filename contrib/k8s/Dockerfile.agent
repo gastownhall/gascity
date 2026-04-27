@@ -17,6 +17,8 @@
 ARG BASE_IMAGE=gc-agent-base:latest
 FROM ${BASE_IMAGE}
 
+ARG BINARY=gc
+
 # bd (beads) CLI — copied from build context.
 # Build with: cp $(which bd) . && docker build ...
 COPY bd /usr/local/bin/bd
