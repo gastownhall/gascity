@@ -2,4 +2,4 @@
 description = "Push dolt databases to configured remotes"
 trigger = "cooldown"
 interval = "15m"
-exec = "gc dolt sync"
+exec = "${GC_BIN:-gc} dolt sync"
