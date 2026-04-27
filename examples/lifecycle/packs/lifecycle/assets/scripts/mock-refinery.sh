@@ -11,6 +11,7 @@
 #   GC_DIR   — working directory (rig repo path)
 
 set -euo pipefail
+GC_BIN="${GC_BIN:-gc}"
 
 cd "$GC_DIR"
 
@@ -55,7 +56,7 @@ while true; do
 
             echo "[$AGENT_SHORT] Found merge-ready: $BRANCH ($BTITLE)"
 
-            gc mail send --all "MERGING: $BRANCH ($BTITLE)" 2>/dev/null || true
+            "$GC_BIN" mail send --all "MERGING: $BRANCH ($BTITLE)" 2>/dev/null || true
 
             # Merge the branch into main.
             if git merge "$BRANCH" -m "merge: $BTITLE ($BID)" 2>/dev/null; then
@@ -75,11 +76,11 @@ while true; do
                 git branch -d "$BRANCH" 2>/dev/null || git branch -D "$BRANCH" 2>/dev/null || true
                 git push origin --delete "$BRANCH" 2>/dev/null || true
 
-                gc mail send --all "MERGED: $BRANCH landed on main ($BTITLE)" 2>/dev/null || true
+                "$GC_BIN" mail send --all "MERGED: $BRANCH landed on main ($BTITLE)" 2>/dev/null || true
             else
                 echo "[$AGENT_SHORT] Merge failed for $BRANCH — aborting merge"
                 git merge --abort 2>/dev/null || true
-                gc mail send --all "MERGE FAILED: $BRANCH ($BTITLE)" 2>/dev/null || true
+                "$GC_BIN" mail send --all "MERGE FAILED: $BRANCH ($BTITLE)" 2>/dev/null || true
             fi
         done
     fi

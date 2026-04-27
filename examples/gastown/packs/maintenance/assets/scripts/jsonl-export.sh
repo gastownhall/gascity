@@ -7,6 +7,7 @@
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
+GC_BIN="${GC_BIN:-gc}"
 
 CITY="${GC_CITY:-.}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -104,7 +105,7 @@ for DB in $DATABASES; do
                 DELTA=$(( -DELTA ))
             fi
             if [ "$DELTA" -gt "$SPIKE_THRESHOLD" ]; then
-                gc mail send mayor/ -s "ESCALATION: JSONL spike detected [HIGH]" \
+                "$GC_BIN" mail send mayor/ -s "ESCALATION: JSONL spike detected [HIGH]" \
                     -m "Database: $DB, prev: $PREV_COUNT, current: $FILTERED_COUNT, delta: ${DELTA}%, threshold: ${SPIKE_THRESHOLD}%" \
                     2>/dev/null || true
                 HALTED=1
@@ -116,7 +117,7 @@ for DB in $DATABASES; do
 done
 
 if [ "$HALTED" -eq 1 ]; then
-    gc nudge deacon/ "DOG_DONE: jsonl — HALTED on spike detection" 2>/dev/null || true
+    "$GC_BIN" nudge deacon/ "DOG_DONE: jsonl — HALTED on spike detection" 2>/dev/null || true
     exit 0
 fi
 
@@ -126,7 +127,7 @@ git add -A *.jsonl */ 2>/dev/null || true
 
 if git diff --cached --quiet 2>/dev/null; then
     # No changes.
-    gc nudge deacon/ "DOG_DONE: jsonl — no changes" 2>/dev/null || true
+    "$GC_BIN" nudge deacon/ "DOG_DONE: jsonl — no changes" 2>/dev/null || true
     exit 0
 fi
 
@@ -147,7 +148,7 @@ if ! git push origin main -q 2>/dev/null; then
     echo "{\"consecutive_push_failures\": $CONSECUTIVE}" > "$STATE_FILE"
 
     if [ "$CONSECUTIVE" -ge "$MAX_PUSH_FAILURES" ]; then
-        gc mail send mayor/ -s "ESCALATION: JSONL push failed [HIGH]" \
+        "$GC_BIN" mail send mayor/ -s "ESCALATION: JSONL push failed [HIGH]" \
             -m "Consecutive failures: $CONSECUTIVE (threshold: $MAX_PUSH_FAILURES)" \
             2>/dev/null || true
     fi
@@ -163,5 +164,5 @@ if [ -n "$FAILED_DBS" ]; then
     SUMMARY="$SUMMARY, failed: $FAILED_DBS"
 fi
 
-gc nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
+"$GC_BIN" nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
 echo "jsonl-export: $SUMMARY"

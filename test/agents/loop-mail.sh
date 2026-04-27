@@ -9,11 +9,12 @@
 #   PATH     — must include gc binary
 
 set -euo pipefail
+GC_BIN="${GC_BIN:-gc}"
 cd "$GC_CITY"
 
 while true; do
     # Step 1: Check inbox
-    inbox=$(gc mail inbox "$GC_AGENT" 2>/dev/null || true)
+    inbox=$("$GC_BIN" mail inbox "$GC_AGENT" 2>/dev/null || true)
 
     # Step 2: Process each unread message
     if echo "$inbox" | grep -q "^gc-"; then
@@ -21,12 +22,12 @@ while true; do
             id=$(echo "$line" | awk '{print $1}')
 
             # Read the message
-            msg=$(gc mail read "$id" 2>/dev/null || true)
+            msg=$("$GC_BIN" mail read "$id" 2>/dev/null || true)
             from=$(echo "$msg" | grep "^From:" | awk '{print $2}')
 
             # Reply to sender
             if [ -n "$from" ]; then
-                gc mail send "$from" "ack from $GC_AGENT" 2>/dev/null || true
+                "$GC_BIN" mail send "$from" "ack from $GC_AGENT" 2>/dev/null || true
             fi
         done
     fi

@@ -7,6 +7,7 @@
 #
 # Environment: GC_CITY_PATH, GC_DOLT_PORT, GC_DOLT_USER, GC_DOLT_PASSWORD
 set -e
+GC_BIN="${GC_BIN:-gc}"
 
 : "${GC_DOLT_USER:=root}"
 PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)}"
@@ -57,8 +58,8 @@ is_running() {
 routes_files() {
   printf '%s\n' "$GC_CITY_PATH/.beads/routes.jsonl"
 
-  if command -v gc >/dev/null 2>&1; then
-    rig_paths=$(gc rig list --json 2>/dev/null \
+  if command -v "$GC_BIN" >/dev/null 2>&1; then
+    rig_paths=$("$GC_BIN" rig list --json 2>/dev/null \
       | if command -v jq >/dev/null 2>&1; then
           jq -r '.rigs[].path' 2>/dev/null
         else

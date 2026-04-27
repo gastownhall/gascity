@@ -10,6 +10,7 @@
 #   GC_DIR   — working directory (rig repo path)
 
 set -euo pipefail
+GC_BIN="${GC_BIN:-gc}"
 
 cd "$GC_DIR"
 
@@ -90,7 +91,7 @@ fi
 
 # ── Step 2: Notify ────────────────────────────────────────────────────────
 
-gc mail send --all "CLAIMED: $BEAD_TITLE ($BEAD_ID)" 2>/dev/null || true
+"$GC_BIN" mail send --all "CLAIMED: $BEAD_TITLE ($BEAD_ID)" 2>/dev/null || true
 echo "[$AGENT_SHORT] Sent mail: CLAIMED $BEAD_TITLE"
 
 # ── Step 3: Create worktree + branch ─────────────────────────────────────
@@ -161,7 +162,7 @@ echo "[$AGENT_SHORT] Worktree cleaned up. Branch $BRANCH persists."
 REFINERY="${GC_AGENT%/*}/refinery"
 bd update "$BEAD_ID" --metadata "{\"branch\":\"$BRANCH\"}" --assignee="$REFINERY" 2>/dev/null || true
 
-gc mail send --all "READY FOR MERGE: $BRANCH ($BEAD_TITLE) → $REFINERY" 2>/dev/null || true
+"$GC_BIN" mail send --all "READY FOR MERGE: $BRANCH ($BEAD_TITLE) → $REFINERY" 2>/dev/null || true
 
 echo "[$AGENT_SHORT] Handed off to refinery. Done."
 

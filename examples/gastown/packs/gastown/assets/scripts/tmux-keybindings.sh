@@ -1,6 +1,7 @@
 #!/bin/sh
 # tmux-keybindings.sh — Gas Town navigation keybindings (n/p/g/a + mail click)
 # Usage: tmux-keybindings.sh <config-dir>
+GC_BIN="${GC_BIN:-gc}"
 CONFIGDIR="$1"
 
 # Socket-aware tmux command (uses GC_TMUX_SOCKET when set).
@@ -15,7 +16,7 @@ gcmux() { tmux ${GC_TMUX_SOCKET:+-L "$GC_TMUX_SOCKET"} "$@"; }
 # Shows unread mail preview in a popup when clicking the status-right area.
 guard="tmux ${GC_TMUX_SOCKET:+-L $GC_TMUX_SOCKET} show-environment -t '#{session_name}' GC_AGENT >/dev/null 2>&1"
 existing=$(gcmux list-keys -T root MouseDown1StatusRight 2>/dev/null || true)
-if ! printf '%s' "$existing" | grep -q 'gc mail'; then
+if ! printf '%s' "$existing" | grep -q 'mail'; then
     fallback=""
     if [ -n "$existing" ]; then
         fallback=$(printf '%s' "$existing" | head -1 | awk '
@@ -29,6 +30,6 @@ if ! printf '%s' "$existing" | grep -q 'gc mail'; then
     [ -z "$fallback" ] && fallback=":"
     gcmux bind-key -T root MouseDown1StatusRight \
         if-shell "$guard" \
-        "display-popup -E -w 60 -h 15 'gc mail peek || echo No unread mail'" \
+        "display-popup -E -w 60 -h 15 '$GC_BIN mail peek || echo No unread mail'" \
         "$fallback"
 fi

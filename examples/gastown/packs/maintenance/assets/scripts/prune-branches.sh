@@ -7,12 +7,13 @@
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
+GC_BIN="${GC_BIN:-gc}"
 
 CITY="${GC_CITY:-.}"
 PRUNED=0
 
 # Get all rig paths.
-RIGS=$(gc rig list --json 2>/dev/null | jq -r '.[].path' 2>/dev/null) || exit 0
+RIGS=$("$GC_BIN" rig list --json 2>/dev/null | jq -r '.[].path' 2>/dev/null) || exit 0
 if [ -z "$RIGS" ]; then
     exit 0
 fi

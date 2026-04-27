@@ -9,15 +9,16 @@
 #   PATH     — must include gc and bd binaries
 
 set -euo pipefail
+GC_BIN="${GC_BIN:-gc}"
 cd "$GC_CITY"
 
 while true; do
     # Check inbox for instructions
-    inbox=$(gc mail inbox "$GC_AGENT" 2>/dev/null || true)
+    inbox=$("$GC_BIN" mail inbox "$GC_AGENT" 2>/dev/null || true)
     if echo "$inbox" | grep -q "^gc-"; then
         echo "$inbox" | grep "^gc-" | while read -r line; do
             id=$(echo "$line" | awk '{print $1}')
-            gc mail read "$id" 2>/dev/null || true
+            "$GC_BIN" mail read "$id" 2>/dev/null || true
         done
     fi
 
@@ -27,7 +28,7 @@ while true; do
         echo "$ready" | grep "^gc-" | while read -r line; do
             id=$(echo "$line" | awk '{print $1}')
             # Signal recovery by sending mail to mayor
-            gc mail send mayor "Orphaned bead $id detected" 2>/dev/null || true
+            "$GC_BIN" mail send mayor "Orphaned bead $id detected" 2>/dev/null || true
         done
     fi
 

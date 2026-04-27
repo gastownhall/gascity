@@ -10,6 +10,7 @@
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
+GC_BIN="${GC_BIN:-gc}"
 
 CITY="${GC_CITY:-.}"
 PACK_STATE_DIR="${GC_PACK_STATE_DIR:-${GC_CITY_RUNTIME_DIR:-$CITY/.gc/runtime}/packs/maintenance}"
@@ -51,7 +52,7 @@ while IFS= read -r bead_id; do
     if [ "$NEW" -ge "$THRESHOLD" ]; then
         TITLE_JSON=$(bd show "$bead_id" --json 2>/dev/null || true)
         TITLE=$(echo "$TITLE_JSON" | jq -r 'if type == "array" then (.[0].title // "unknown") else "unknown" end' 2>/dev/null || echo "unknown")
-        gc mail send mayor/ \
+        "$GC_BIN" mail send mayor/ \
             -s "SPAWN_STORM: bead $bead_id reset ${NEW}x" \
             -m "Bead $bead_id ($TITLE) has been reset to pool $NEW times (threshold: $THRESHOLD).
 This likely indicates a polecat crash loop on this specific work.

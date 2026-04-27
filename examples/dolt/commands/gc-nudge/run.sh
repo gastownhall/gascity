@@ -30,7 +30,8 @@
 #     (default: 1800) — wall-clock bound for one `CALL DOLT_GC()` invocation.
 #   GC_DOLT_GC_DRY_RUN   (optional) — when set, prints what would happen
 #                        but does not execute CALL DOLT_GC().
-set -eu
+set -e
+GC_BIN="${GC_BIN:-gc}"u
 
 : "${GC_CITY_PATH:?GC_CITY_PATH must be set}"
 : "${GC_DOLT_PORT:=}"
@@ -139,12 +140,12 @@ lock_cleanup=""
 # fall back to filesystem scan when gc is unavailable.
 metadata_files() {
   printf '%s\n' "$GC_CITY_PATH/.beads/metadata.json"
-  if command -v gc >/dev/null 2>&1; then
+  if command -v "$GC_BIN" >/dev/null 2>&1; then
     # Bound the gc rig list call: if gc itself is wedged (we've seen this
     # during reconciler incidents) we must not block the nudge for the
     # full 35m order timeout. Degrade to the filesystem fallback below.
     # Matches the pattern in examples/dolt/commands/health/run.sh:22.
-    if rig_json=$(run_bounded 5 gc rig list --json 2>/dev/null); then
+    if rig_json=$(run_bounded 5 "$GC_BIN" rig list --json 2>/dev/null); then
       rig_paths=$(printf '%s\n' "$rig_json" \
         | if command -v jq >/dev/null 2>&1; then
             jq -r '.rigs[].path' 2>/dev/null

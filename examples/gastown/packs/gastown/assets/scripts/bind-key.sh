@@ -23,7 +23,8 @@ guard_pattern="${3:-GC_AGENT}"
 
 # Check if already a GC binding (idempotent).
 existing=$(gcmux list-keys -T prefix "$key" 2>/dev/null || true)
-if printf '%s' "$existing" | grep -q 'if-shell' && printf '%s' "$existing" | grep -q 'gc '; then
+GC_BIN="${GC_BIN:-gc}"
+if printf '%s' "$existing" | grep -q 'if-shell' && printf '%s' "$existing" | grep -q "$GC_BIN "; then
     exit 0
 fi
 

@@ -7,6 +7,7 @@
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
+GC_BIN="${GC_BIN:-gc}"
 
 CITY="${GC_CITY:-.}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -148,7 +149,7 @@ done
 
 # Report.
 if [ -n "$ANOMALIES" ]; then
-    gc mail send mayor/ -s "ESCALATION: Reaper anomalies detected [MEDIUM]" \
+    "$GC_BIN" mail send mayor/ -s "ESCALATION: Reaper anomalies detected [MEDIUM]" \
         -m "$(echo -e "$ANOMALIES")" 2>/dev/null || true
 fi
 
@@ -157,5 +158,5 @@ if [ -n "$DRY_RUN" ]; then
     SUMMARY="$SUMMARY (dry run)"
 fi
 
-gc nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
+"$GC_BIN" nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
 echo "reaper: $SUMMARY"

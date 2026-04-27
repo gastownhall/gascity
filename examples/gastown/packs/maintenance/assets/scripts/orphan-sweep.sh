@@ -10,6 +10,7 @@
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
+GC_BIN="${GC_BIN:-gc}"
 
 CITY="${GC_CITY:-.}"
 
@@ -20,7 +21,7 @@ if [ -z "$IN_PROGRESS" ] || [ "$IN_PROGRESS" = "[]" ]; then
 fi
 
 # Step 2: Get all known agent names (from config, scoped to [[agent]] blocks).
-AGENTS=$(gc config show 2>/dev/null | awk '/^\[\[agent\]\]/{a=1} a && /^\s*name\s*=/{print; a=0}' | sed 's/.*=\s*"\(.*\)"/\1/') || exit 0
+AGENTS=$("$GC_BIN" config show 2>/dev/null | awk '/^\[\[agent\]\]/{a=1} a && /^\s*name\s*=/{print; a=0}' | sed 's/.*=\s*"\(.*\)"/\1/') || exit 0
 if [ -z "$AGENTS" ]; then
     exit 0
 fi
