@@ -76,7 +76,18 @@ func AcceptStartupDialogsFromStreamWithStatus(
 		return sendKeys(keys...)
 	}
 
-	phaseObserved, err := acceptWorkspaceTrustDialogFromStream(ctx, timeout, stream, trackingSendKeys)
+	phaseObserved, err := acceptCodexUpdateDialogFromStream(ctx, timeout, stream, trackingSendKeys)
+	if err != nil {
+		return observed, fmt.Errorf("codex update dialog: %w", err)
+	}
+	observed = observed || phaseObserved
+	if !phaseObserved && !observed {
+		return false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return observed, err
+	}
+	phaseObserved, err = acceptWorkspaceTrustDialogFromStream(ctx, timeout, stream, trackingSendKeys)
 	if err != nil {
 		return observed, fmt.Errorf("workspace trust dialog: %w", err)
 	}
@@ -211,6 +222,28 @@ func containsCodexUpdateDialog(content string) bool {
 	return strings.Contains(content, "Update available!") &&
 		strings.Contains(content, "Skip until next version") &&
 		strings.Contains(content, "Press enter to continue")
+}
+
+func acceptCodexUpdateDialogFromStream(
+	ctx context.Context,
+	timeout time.Duration,
+	snapshots *replayableSnapshotCursor,
+	sendKeys func(keys ...string) error,
+) (bool, error) {
+	return acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
+		match:       containsCodexUpdateDialog,
+		matchKeys:   []string{"Down", "Enter"},
+		matchDelay:  bypassDialogConfirmDelay,
+		ready:       containsPromptIndicator,
+		readyOrNext: containsPostUpdateStartupDialog,
+	})
+}
+
+func containsPostUpdateStartupDialog(content string) bool {
+	return containsWorkspaceTrustDialog(content) ||
+		strings.Contains(content, "Bypass Permissions mode") ||
+		containsCustomAPIKeyDialog(content) ||
+		containsRateLimitDialog(content)
 }
 
 // acceptWorkspaceTrustDialog dismisses workspace trust dialogs for supported
@@ -703,7 +736,8 @@ func containsPromptIndicator(content string) bool {
 			continue
 		}
 		for _, prefix := range []string{"\u276f", "\u203a"} {
-			if trimmed == prefix || strings.HasPrefix(trimmed, prefix+" ") {
+			rest, ok := strings.CutPrefix(trimmed, prefix+" ")
+			if trimmed == prefix || (ok && !isNumberedMenuRow(rest)) {
 				return true
 			}
 		}
@@ -714,6 +748,14 @@ func containsPromptIndicator(content string) bool {
 		}
 	}
 	return false
+}
+
+func isNumberedMenuRow(content string) bool {
+	digits := 0
+	for digits < len(content) && content[digits] >= '0' && content[digits] <= '9' {
+		digits++
+	}
+	return digits > 0 && digits < len(content) && content[digits] == '.'
 }
 
 // sleep waits for the given duration or until ctx is canceled.

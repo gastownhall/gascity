@@ -182,6 +182,67 @@ func TestAcceptStartupDialogsSkipsCodexUpdateDialog(t *testing.T) {
 	}
 }
 
+func TestAcceptStartupDialogsSkipsUpdateThenHandlesTrustDialog(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = time.Second
+
+	var sent []string
+	staleUpdateReturned := false
+	err := AcceptStartupDialogs(
+		context.Background(),
+		func(lines int) (string, error) {
+			if lines < 100 {
+				return "loading...", nil
+			}
+			switch {
+			case len(sent) < 2:
+				return codexUpdateDialogFixture(), nil
+			case !staleUpdateReturned:
+				staleUpdateReturned = true
+				return codexUpdateDialogFixture(), nil
+			case len(sent) == 2:
+				return "Do you trust the contents of this directory?", nil
+			default:
+				return "› Implement {feature}", nil
+			}
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogs returned error: %v", err)
+	}
+	if got, want := strings.Join(sent, ","), "Down,Enter,Enter"; got != want {
+		t.Fatalf("sent keys = %q, want %q", got, want)
+	}
+}
+
+func TestAcceptStartupDialogsFromStreamSkipsCodexUpdateDialog(t *testing.T) {
+	var sent []string
+	snapshots := make(chan string, 2)
+	snapshots <- codexUpdateDialogFixture()
+	snapshots <- "› Implement {feature}"
+	close(snapshots)
+
+	err := AcceptStartupDialogsFromStream(
+		context.Background(),
+		time.Second,
+		snapshots,
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogsFromStream() error = %v", err)
+	}
+	if got, want := strings.Join(sent, ","), "Down,Enter"; got != want {
+		t.Fatalf("sent keys = %q, want %q", got, want)
+	}
+}
+
 func TestAcceptStartupDialogsAcceptsBypassPermissionsWarning(t *testing.T) {
 	withZeroDialogTimings(t)
 	dialogPollTimeout = time.Second
@@ -515,6 +576,7 @@ func TestContainsPromptIndicator(t *testing.T) {
 		{name: "codex prompt with nbsp", content: "›\u00a0", want: true},
 		{name: "codex prompt with placeholder", content: "› Improve documentation in @filename", want: true},
 		{name: "claude prompt with text", content: "❯ run tests", want: true},
+		{name: "codex numbered menu row", content: "› 1. Update now (runs `bun install -g @openai/codex`)", want: false},
 		{name: "empty content", content: "", want: false},
 		{name: "no prompt", content: "loading...", want: false},
 		{name: "blank lines only", content: "\n\n", want: false},
@@ -529,6 +591,14 @@ func TestContainsPromptIndicator(t *testing.T) {
 			}
 		})
 	}
+}
+
+func codexUpdateDialogFixture() string {
+	return "✨ Update available! 0.124.0 -> 0.125.0\n" +
+		"› 1. Update now (runs `bun install -g @openai/codex`)\n" +
+		"  2. Skip\n" +
+		"  3. Skip until next version\n" +
+		"Press enter to continue"
 }
 
 func TestExitsEarlyOnPrompt(t *testing.T) {

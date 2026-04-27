@@ -2178,6 +2178,7 @@ func TestInitBeadsForDirExecWithoutCityPathPreservesAmbientEnv(t *testing.T) {
 }
 
 func TestInitBeadsForDirExecPreventsStrayGitInit(t *testing.T) {
+	skipSlowCmdGCTest(t, "uses real bd init process behavior; run make test-cmd-gc-process for full coverage")
 	configureTestDoltIdentityEnv(t)
 
 	findRealBD := func() string {
