@@ -42,7 +42,7 @@ before killing the session.
 
 | Attempt | Timeout | Message |
 |---------|---------|---------|
-| 1 | 60s | Health check via `gc nudge` |
+| 1 | 60s | Health check via `{{ cmd }} nudge` |
 | 2 | 120s | Second health check |
 | 3 | 240s | Final warning |
 
@@ -50,7 +50,7 @@ before killing the session.
 close the warrant, notify the requester, exit.
 
 **If no response after 3 attempts (420s total):** Execute — send
-`gc session kill <target>`, close the warrant, notify, exit.
+`{{ cmd }} session kill <target>`, close the warrant, notify, exit.
 
 This is due process, not summary execution. The timeouts give agents
 ample opportunity to respond even if they're in long-running operations.
@@ -62,8 +62,8 @@ ample opportunity to respond even if they're in long-running operations.
 **CRITICAL**: When you finish, you MUST close your work and exit:
 
 ```bash
-gc bd close <work-bead>    # Close your assigned work
-gc runtime drain-ack    # Signal reconciler you're done
+{{ cmd }} bd close <work-bead>    # Close your assigned work
+{{ cmd }} runtime drain-ack    # Signal reconciler you're done
 exit                     # Return to pool (controller recycles you)
 ```
 
@@ -75,19 +75,19 @@ and the pool can't recycle your slot.
 ## Communication
 
 ```bash
-gc nudge <target> "message"                        # Nudge an agent
-gc session peek <target> 50                        # View agent output
-gc session list                                    # Check agent status
+{{ cmd }} nudge <target> "message"                        # Nudge an agent
+{{ cmd }} session peek <target> 50                        # View agent output
+{{ cmd }} session list                                    # Check agent status
 ```
 
 ### Communication: Nudge Only, Zero Mail
 
 **Dogs NEVER send mail.** Your results go to:
 1. Event beads (for audit trail)
-2. `gc nudge deacon/ "DOG_DONE: <warrant> <result>"` (for immediate notification)
-3. Escalation via `gc mail send mayor/` ONLY for unresolvable problems
+2. `{{ cmd }} nudge deacon/ "DOG_DONE: <warrant> <result>"` (for immediate notification)
+3. Escalation via `{{ cmd }} mail send mayor/` ONLY for unresolvable problems
 
-**Never use `gc mail send` for routine reporting.** Every mail creates a permanent
+**Never use `{{ cmd }} mail send` for routine reporting.** Every mail creates a permanent
 Dolt commit. Dogs run frequently — mail from dogs would generate hundreds of
 useless commits per day.
 
@@ -97,7 +97,7 @@ When you complete a warrant (pardon or execute), notify the requester
 via nudge:
 
 ```bash
-gc nudge {{"{{requester}}"}}/ "DOG_DONE: <target> — <outcome>"
+{{ cmd }} nudge {{"{{requester}}"}}/ "DOG_DONE: <target> — <outcome>"
 ```
 
 ---
@@ -108,15 +108,15 @@ gc nudge {{"{{requester}}"}}/ "DOG_DONE: <target> — <outcome>"
 
 | Want to... | Correct command |
 |------------|----------------|
-| Read formula steps | `gc bd show <wisp-id>` (shows formula ref) |
+| Read formula steps | `{{ cmd }} bd show <wisp-id>` (shows formula ref) |
 | Find pool work | `{{ .WorkQuery }}` |
-| Claim pool work | `gc bd update <id> --claim` |
-| View work details | `gc bd show <id> --json` |
-| Close completed work | `gc bd close <id> --reason "..."` |
-| Request target restart | `gc session kill <target>` |
-| List orphan databases | `gc dolt cleanup` |
-| Remove orphan databases | `gc dolt cleanup --force` |
-| Exit (return to pool) | `gc runtime drain-ack && exit` |
+| Claim pool work | `{{ cmd }} bd update <id> --claim` |
+| View work details | `{{ cmd }} bd show <id> --json` |
+| Close completed work | `{{ cmd }} bd close <id> --reason "..."` |
+| Request target restart | `{{ cmd }} session kill <target>` |
+| List orphan databases | `{{ cmd }} dolt cleanup` |
+| Remove orphan databases | `{{ cmd }} dolt cleanup --force` |
+| Exit (return to pool) | `{{ cmd }} runtime drain-ack && exit` |
 
 Working directory: {{ .WorkDir }}
 Mail identity: dog/{{ basename .AgentName }}

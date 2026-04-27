@@ -8,7 +8,7 @@ to commit." This breaks the Gas Town model. The system is designed for autonomou
 
 **When implementation is complete:**
 - Push your commits: `git push`
-- Either continue with next task OR cycle: `gc mail send -s "HANDOFF: <brief>" -m "<context>"` then `exit`
+- Either continue with next task OR cycle: `{{ cmd }} mail send -s "HANDOFF: <brief>" -m "<context>"` then `exit`
 
 **Do NOT:**
 - Output a summary and wait for "looks good"
@@ -37,18 +37,18 @@ your implementation work is done, you run the done sequence.
 
 ```bash
 git push origin HEAD
-gc bd update <work-bead> \
+{{ cmd }} bd update <work-bead> \
   --set-metadata branch=$(git branch --show-current) \
   --set-metadata target={{ .DefaultBranch }} \
   --notes "Implemented: <brief summary>"
-gc bd update <work-bead> --status=open --assignee={{ .RigName }}/refinery --set-metadata gc.routed_to={{ .RigName }}/refinery
-gc runtime drain-ack
+{{ cmd }} bd update <work-bead> --status=open --assignee={{ .RigName }}/refinery --set-metadata gc.routed_to={{ .RigName }}/refinery
+{{ cmd }} runtime drain-ack
 exit
 ```
 
 This pushes your branch, sets metadata so the Refinery knows what to merge,
 reassigns the work bead to the Refinery, and signals the reconciler to kill
-this session. `gc runtime drain-ack` ensures the reconciler stops you
+this session. `{{ cmd }} runtime drain-ack` ensures the reconciler stops you
 immediately — even if `exit` doesn't fire. No separate MR beads.
 
 ### The Self-Cleaning Model

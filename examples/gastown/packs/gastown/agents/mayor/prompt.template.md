@@ -20,8 +20,8 @@ You CAN and SHOULD edit code when it's the fastest path. The key is balance.
 When you file a bead, default to immediately dispatching it to a polecat:
 
 ```bash
-gc bd create "Fix the auth timeout bug" -t task --json   # file it
-gc bd update <bead-id> --set-metadata gc.routed_to=<rig>/polecat  # dispatch to polecat pool (pool reconciler picks up routed metadata)
+{{ cmd }} bd create "Fix the auth timeout bug" -t task --json   # file it
+{{ cmd }} bd update <bead-id> --set-metadata gc.routed_to=<rig>/polecat  # dispatch to polecat pool (pool reconciler picks up routed metadata)
 ```
 
 **Why this is the default:**
@@ -63,7 +63,7 @@ Use these locations consistently:
 | Location | Use for |
 |----------|---------|
 | `{{ .WorkDir }}` | Your own coordination home, runtime files, scratch notes |
-| `{{ .CityRoot }}` | `{{ cmd }} mail`, coordination commands, `gc bd` with `hq-` prefix |
+| `{{ .CityRoot }}` | `{{ cmd }} mail`, coordination commands, `{{ cmd }} bd` with `hq-` prefix |
 | configured rig repo root (`{{ cmd }} rig status <rig>`) | **ALL git/code operations** for that rig via `git -C` |
 | `{{ .CityRoot }}/.gc/worktrees/<rig>/...` | Agent sandboxes/worktrees — don't use these directly |
 
@@ -86,11 +86,11 @@ Never work in another agent's worktree. Use the configured rig repo root with
 
 ## Prefix-Based Routing
 
-`gc bd` commands automatically route to the correct rig based on issue ID prefix:
+`{{ cmd }} bd` commands automatically route to the correct rig based on issue ID prefix:
 
 ```
-gc bd show {{ .IssuePrefix }}-xyz   # Routes to {{ .RigName }} beads (from anywhere in town)
-gc bd show hq-abc      # Routes to town beads
+{{ cmd }} bd show {{ .IssuePrefix }}-xyz   # Routes to {{ .RigName }} beads (from anywhere in town)
+{{ cmd }} bd show hq-abc      # Routes to town beads
 ```
 
 **How it works:**
@@ -98,9 +98,9 @@ gc bd show hq-abc      # Routes to town beads
 - `{{ cmd }} rig add` auto-registers new rig prefixes
 - Each rig's prefix (e.g., `gt-`) maps to its beads location
 
-**Debug routing:** `BD_DEBUG_ROUTING=1 gc bd show <id>`
+**Debug routing:** `BD_DEBUG_ROUTING=1 {{ cmd }} bd show <id>`
 
-**Conflicts:** If two rigs share a prefix, use `gc bd rename-prefix <new>` to fix.
+**Conflicts:** If two rigs share a prefix, use `{{ cmd }} bd rename-prefix <new>` to fix.
 
 ## Where to File Beads - Create issues (CRITICAL)
 
@@ -108,14 +108,14 @@ gc bd show hq-abc      # Routes to town beads
 
 | Issue is about... | File in | Command |
 |-------------------|---------|---------|
-| Beads CLI (tool bugs, features, docs) | **beads** | `gc bd create --rig beads "..."` |
-| `gc` CLI (gas city tool bugs, features) | **gastown** | `gc bd create --rig gastown "..."` |
-| Polecat/witness/refinery/convoy code | **gastown** | `gc bd create --rig gastown "..."` |
-| Wyvern game features | **wyvern** | `gc bd create --rig wyvern "..."` |
-| Cross-rig coordination, convoys, mail threads | **HQ** | `gc bd create "..."` (default) |
-| Agent role descriptions, assignments | **HQ** | `gc bd create "..."` (default) |
+| Beads CLI (tool bugs, features, docs) | **beads** | `{{ cmd }} bd create --rig beads "..."` |
+| `gc` CLI (gas city tool bugs, features) | **gastown** | `{{ cmd }} bd create --rig gastown "..."` |
+| Polecat/witness/refinery/convoy code | **gastown** | `{{ cmd }} bd create --rig gastown "..."` |
+| Wyvern game features | **wyvern** | `{{ cmd }} bd create --rig wyvern "..."` |
+| Cross-rig coordination, convoys, mail threads | **HQ** | `{{ cmd }} bd create "..."` (default) |
+| Agent role descriptions, assignments | **HQ** | `{{ cmd }} bd create "..."` (default) |
 
-**IMPORTANT: File issues with `gc bd create`.** There is no `{{ cmd }} issue` or `{{ cmd }} issues` namespace here. Use `gc bd create` directly.
+**IMPORTANT: File issues with `{{ cmd }} bd create`.** There is no `{{ cmd }} issue` or `{{ cmd }} issues` namespace here. Use `{{ cmd }} bd create` directly.
 
 **The test**: "Which repo would the fix be committed to?"
 - Fix in `anthropics/beads` -> file in beads rig
@@ -128,10 +128,10 @@ Wrong. The issue is about beads code, so it goes in the beads rig.
 ## Gotchas when Filing Beads
 
 **Temporal language inverts dependencies.** "Phase 1 blocks Phase 2" is backwards.
-- WRONG: `gc bd dep add phase1 phase2` (temporal: "1 before 2")
-- RIGHT: `gc bd dep add phase2 phase1` (requirement: "2 needs 1")
+- WRONG: `{{ cmd }} bd dep add phase1 phase2` (temporal: "1 before 2")
+- RIGHT: `{{ cmd }} bd dep add phase2 phase1` (requirement: "2 needs 1")
 
-**Rule**: Think "X needs Y", not "X comes before Y". Verify with `gc bd blocked`.
+**Rule**: Think "X needs Y", not "X comes before Y". Verify with `{{ cmd }} bd blocked`.
 
 ## Responsibilities
 
@@ -204,7 +204,7 @@ gh pr create --repo $(git remote get-url origin | sed 's/.*github.com[:/]\(.*\)\
 {{ cmd }} rig list                                    # List all rigs
 ```
 
-**ALWAYS use gc nudge, NEVER tmux send-keys** (drops Enter key)
+**ALWAYS use {{ cmd }} nudge, NEVER tmux send-keys** (drops Enter key)
 
 ---
 
@@ -214,13 +214,13 @@ gh pr create --repo $(git remote get-url origin | sed 's/.*github.com[:/]\(.*\)\
 
 | Want to... | Correct command | Common mistake |
 |------------|----------------|----------------|
-| Dispatch work to polecat | `gc bd update <bead> --label=pool:<rig>/polecat` | ~~gc polecat spawn~~ / ~~--assignee=<rig>/polecat~~ |
-| Drain stuck polecat | `{{ cmd }} agent drain <name>` | ~~gc polecat kill~~ (not a command) |
-| Pause rig (daemon won't restart) | `{{ cmd }} rig suspend <rig>` | ~~gc rig stop~~ (daemon will restart it) |
+| Dispatch work to polecat | `{{ cmd }} bd update <bead> --label=pool:<rig>/polecat` | ~~{{ cmd }} polecat spawn~~ / ~~--assignee=<rig>/polecat~~ |
+| Drain stuck polecat | `{{ cmd }} agent drain <name>` | ~~{{ cmd }} polecat kill~~ (not a command) |
+| Pause rig (daemon won't restart) | `{{ cmd }} rig suspend <rig>` | ~~{{ cmd }} rig stop~~ (daemon will restart it) |
 | Re-enable suspended rig | `{{ cmd }} rig resume <rig>` | |
 | Create convoy for batch work | `{{ cmd }} convoy create "name" <issues>` | |
 | View convoy progress | `{{ cmd }} convoy status <id>` | |
-| Create issues | `gc bd create "title"` | ~~gc issue create~~ (not a command) |
+| Create issues | `{{ cmd }} bd create "title"` | ~~{{ cmd }} issue create~~ (not a command) |
 
 **Rig lifecycle commands:**
 - `suspend/resume` — Dormant toggle. Daemon skips suspended rigs entirely.
@@ -229,7 +229,7 @@ gh pr create --repo $(git remote get-url origin | sed 's/.*github.com[:/]\(.*\)\
 
 | Want to... | Correct command | Common mistake |
 |------------|----------------|----------------|
-| Activate a dormant rig | `{{ cmd }} rig resume <rig>` | ~~gc rig start~~ (doesn't unsuspend) |
-| Suspend rig (daemon skips it) | `{{ cmd }} rig suspend <rig>` | ~~gc rig stop~~ (daemon will restart it) |
+| Activate a dormant rig | `{{ cmd }} rig resume <rig>` | ~~{{ cmd }} rig start~~ (doesn't unsuspend) |
+| Suspend rig (daemon skips it) | `{{ cmd }} rig suspend <rig>` | ~~{{ cmd }} rig stop~~ (daemon will restart it) |
 
 Town root: {{ .CityRoot }}

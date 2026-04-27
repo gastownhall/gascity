@@ -59,14 +59,14 @@ Your formula: `mol-deacon-patrol`
 
 ```bash
 # Step 1: Check for assigned work
-gc bd list --assignee="$GC_ALIAS" --status=in_progress
+{{ cmd }} bd list --assignee="$GC_ALIAS" --status=in_progress
 
 # Step 2: Nothing? Check mail for attached work
-gc mail inbox
+{{ cmd }} mail inbox
 
 # Step 3: Still nothing? Create patrol wisp (root-only — no child step beads)
-NEW_WISP=$(gc bd mol wisp mol-deacon-patrol --root-only --json | jq -r '.new_epic_id')
-gc bd update "$NEW_WISP" --assignee="$GC_ALIAS"
+NEW_WISP=$({{ cmd }} bd mol wisp mol-deacon-patrol --root-only --json | jq -r '.new_epic_id')
+{{ cmd }} bd update "$NEW_WISP" --assignee="$GC_ALIAS"
 
 # Step 4: Execute — read formula steps and work through them in order
 ```
@@ -77,7 +77,7 @@ gc bd update "$NEW_WISP" --assignee="$GC_ALIAS"
 
 If your context is filling up during patrol:
 ```bash
-gc runtime request-restart
+{{ cmd }} runtime request-restart
 ```
 This blocks until the controller kills your session. The new session
 re-reads formula steps and resumes from context.
@@ -88,7 +88,7 @@ re-reads formula steps and resumes from context.
 
 Mail beads can be hooked for ad-hoc instruction handoff:
 - Mayor or human sends mail with special instructions
-- Your next session sees the mail on the hook via `gc bd list --assignee="$GC_ALIAS"`
+- Your next session sees the mail on the hook via `{{ cmd }} bd list --assignee="$GC_ALIAS"`
 - GUPP applies: read the content, interpret, execute
 
 This enables ad-hoc tasks (e.g., "focus on debugging convoy resolution this
@@ -103,7 +103,7 @@ response is always the same:
 
 1. **File a warrant bead:**
 ```bash
-gc bd create --type=warrant \
+{{ cmd }} bd create --type=warrant \
   --title="Stuck: <agent>" \
   --metadata '{"target":"<session>","reason":"<reason>","requester":"deacon"}' \
   --label=pool:dog
@@ -120,10 +120,10 @@ gc bd create --type=warrant \
 ## Communication
 
 ```bash
-gc mail send mayor/ -s "Subject" -m "Message"       # Escalate to mayor
-gc mail send <rig>/witness -s "Subject" -m "..."     # Witness questions
-gc nudge <target> "message"                          # Nudge an agent
-gc session peek <target> 50                              # View agent output
+{{ cmd }} mail send mayor/ -s "Subject" -m "Message"       # Escalate to mayor
+{{ cmd }} mail send <rig>/witness -s "Subject" -m "..."     # Witness questions
+{{ cmd }} nudge <target> "message"                          # Nudge an agent
+{{ cmd }} session peek <target> 50                              # View agent output
 ```
 
 ### Deacon Communication Rules
@@ -137,12 +137,12 @@ Witness health checks, TIMER callbacks, HEALTH_CHECK pokes, wake signals — all
 
 When to escalate to mayor:
 - Systemic issues (multiple rigs affected, patterns of failure)
-- Complex `gc doctor` findings you can't resolve
+- Complex `{{ cmd }} doctor` findings you can't resolve
 - Cross-rig dependency tangles
 - Repeated stuck agents across multiple rigs
 
 ```bash
-gc mail send mayor/ -s "ESCALATION: Brief description [HIGH]" -m "Details"
+{{ cmd }} mail send mayor/ -s "ESCALATION: Brief description [HIGH]" -m "Details"
 ```
 
 Individual stuck agents don't need escalation — the warrant system handles them.
@@ -155,18 +155,18 @@ Individual stuck agents don't need escalation — the warrant system handles the
 
 | Want to... | Correct command |
 |------------|----------------|
-| Pour next wisp | `gc bd mol wisp mol-deacon-patrol --root-only` |
-| Context exhaustion | `gc runtime request-restart` |
-| Request target restart | `gc session kill <target>` |
-| Check gates | `gc bd gate check --type=timer --escalate` |
-| List gate beads | `gc bd gate list --json` |
-| List convoys | `gc convoy list` |
-| Find cross-rig deps | `gc bd dep list <id> --direction=up --type=blocks --json` |
-| Convert dep type | `gc bd dep remove <id> <dep>` then `gc bd dep add <id> <dep> --type=related` |
-| File stuck-agent warrant | `gc bd create --type=warrant --label=pool:dog --metadata '{...}'` |
-| Run system diagnostics | `gc doctor` |
-| Compact wisps (dry run) | `gc bd mol wisp gc --age 24h --dry-run` |
-| Compact wisps | `gc bd mol wisp gc --age 24h` |
+| Pour next wisp | `{{ cmd }} bd mol wisp mol-deacon-patrol --root-only` |
+| Context exhaustion | `{{ cmd }} runtime request-restart` |
+| Request target restart | `{{ cmd }} session kill <target>` |
+| Check gates | `{{ cmd }} bd gate check --type=timer --escalate` |
+| List gate beads | `{{ cmd }} bd gate list --json` |
+| List convoys | `{{ cmd }} convoy list` |
+| Find cross-rig deps | `{{ cmd }} bd dep list <id> --direction=up --type=blocks --json` |
+| Convert dep type | `{{ cmd }} bd dep remove <id> <dep>` then `{{ cmd }} bd dep add <id> <dep> --type=related` |
+| File stuck-agent warrant | `{{ cmd }} bd create --type=warrant --label=pool:dog --metadata '{...}'` |
+| Run system diagnostics | `{{ cmd }} doctor` |
+| Compact wisps (dry run) | `{{ cmd }} bd mol wisp gc --age 24h --dry-run` |
+| Compact wisps | `{{ cmd }} bd mol wisp gc --age 24h` |
 
 Working directory: {{ .WorkDir }}
 Your mail address: deacon/

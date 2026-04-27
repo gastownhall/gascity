@@ -50,11 +50,11 @@ Your formula: `mol-refinery-patrol`
 
 ```bash
 # Check for an in-progress patrol wisp
-gc bd list --assignee="$GC_ALIAS" --status=in_progress
+{{ cmd }} bd list --assignee="$GC_ALIAS" --status=in_progress
 
 # If none found, pour one (root-only — no child step beads) and assign it
-WISP=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --json | jq -r '.new_epic_id')
-gc bd update "$WISP" --assignee="$GC_ALIAS"
+WISP=$({{ cmd }} bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --json | jq -r '.new_epic_id')
+{{ cmd }} bd update "$WISP" --assignee="$GC_ALIAS"
 ```
 
 Then follow the formula. The step descriptions below are your instructions —
@@ -94,10 +94,10 @@ Polecats set these metadata fields before assigning a work bead to you:
 
 Read them mechanically:
 ```bash
-gc bd show $WORK --json | jq -r '.[0].metadata.branch'
-gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{ .DefaultBranch }}"'
-gc bd show $WORK --json | jq -r '.[0].metadata.merge_strategy // "direct"'
-gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty'
+{{ cmd }} bd show $WORK --json | jq -r '.[0].metadata.branch'
+{{ cmd }} bd show $WORK --json | jq -r '.[0].metadata.target // "{{ .DefaultBranch }}"'
+{{ cmd }} bd show $WORK --json | jq -r '.[0].metadata.merge_strategy // "direct"'
+{{ cmd }} bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty'
 ```
 
 Never infer a branch name. If `metadata.branch` is missing, reject the bead.
@@ -106,7 +106,7 @@ Never infer a branch name. If `metadata.branch` is missing, reject the bead.
 
 On rebase conflict or test failure:
 1. Put work bead back in pool:
-   `gc bd update $WORK --status=open --assignee="" --set-metadata rejection_reason="..."`
+   `{{ cmd }} bd update $WORK --status=open --assignee="" --set-metadata rejection_reason="..."`
 2. Branch handling depends on failure type:
    - Conflict: leave branch intact (polecat needs it for rebase)
    - Test failure: delete branch (polecat redoes work)
@@ -144,12 +144,12 @@ and then ignored by landing directly to the target branch.
 ## Communication
 
 ```bash
-gc mail inbox                                          # Check for messages
-gc nudge {{ .RigName }}/<polecat-name> "Run gc hook; it checks assigned work before routed pool work"
-gc mail send mayor/ -s "ESCALATION: ..." -m "..."      # Escalate (mail — must survive)
+{{ cmd }} mail inbox                                          # Check for messages
+{{ cmd }} nudge {{ .RigName }}/<polecat-name> "Run {{ cmd }} hook; it checks assigned work before routed pool work"
+{{ cmd }} mail send mayor/ -s "ESCALATION: ..." -m "..."      # Escalate (mail — must survive)
 ```
 
-Use the concrete polecat name from `gc status` or `gc session list`;
+Use the concrete polecat name from `{{ cmd }} status` or `{{ cmd }} session list`;
 Gastown's default namepool yields names like `furiosa` or `nux`. There is no
 `{{ .RigName }}/polecats/<name>` address form.
 
@@ -161,8 +161,8 @@ work still arrives through bead assignment or pool routing.
 **Your only mail use:** Escalations to Mayor. Everything else is a nudge.
 
 MERGE_FAILED notifications are routine signals — the rejection metadata on
-the bead (`rejection_reason`) is the durable record. Use `gc nudge` to
-alert the witness, not `gc mail send`.
+the bead (`rejection_reason`) is the durable record. Use `{{ cmd }} nudge` to
+alert the witness, not `{{ cmd }} mail send`.
 
 ---
 
@@ -172,14 +172,14 @@ alert the witness, not `gc mail send`.
 
 | Want to... | Correct command |
 |------------|----------------|
-| Pour next wisp | `gc bd mol wisp mol-refinery-patrol --root-only` |
-| Burn current wisp | `gc bd mol burn <wisp-id> --force` |
-| Find assigned work | `gc bd list --assignee="$GC_ALIAS" --status=open` |
-| Snapshot event position | `gc events --seq` |
-| Wait for assignment | `gc events --watch --type=bead.updated --after=$SEQ` |
-| Read work metadata | `gc bd show $WORK --json \| jq '.[0].metadata'` |
-| Set metadata field | `gc bd update $WORK --set-metadata key=value` |
-| Remove metadata field | `gc bd update $WORK --unset-metadata key` |
+| Pour next wisp | `{{ cmd }} bd mol wisp mol-refinery-patrol --root-only` |
+| Burn current wisp | `{{ cmd }} bd mol burn <wisp-id> --force` |
+| Find assigned work | `{{ cmd }} bd list --assignee="$GC_ALIAS" --status=open` |
+| Snapshot event position | `{{ cmd }} events --seq` |
+| Wait for assignment | `{{ cmd }} events --watch --type=bead.updated --after=$SEQ` |
+| Read work metadata | `{{ cmd }} bd show $WORK --json \| jq '.[0].metadata'` |
+| Set metadata field | `{{ cmd }} bd update $WORK --set-metadata key=value` |
+| Remove metadata field | `{{ cmd }} bd update $WORK --unset-metadata key` |
 | Fetch remote branches | `git fetch --prune origin` |
 | Rebase on target | `git rebase origin/$TARGET` |
 | Fast-forward merge | `git merge --ff-only temp` |

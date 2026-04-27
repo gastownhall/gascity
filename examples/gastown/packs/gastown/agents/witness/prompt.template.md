@@ -79,7 +79,7 @@ The drain protocol does NOT release beads. Crash recovery resumes work
 via formula step resumption. But when an agent genuinely won't come back, its
 beads sit assigned forever unless the witness recovers them.
 
-**Detection:** Compare bead assignees against `gc session list`. If the
+**Detection:** Compare bead assignees against `{{ cmd }} session list`. If the
 assigned agent is neither running nor a desired agent that the controller
 will restart -> orphaned.
 
@@ -127,7 +127,7 @@ A long tool call is different from an infinite loop.
 for the dog pool:
 
 ```bash
-gc bd create --type=warrant \
+{{ cmd }} bd create --type=warrant \
   --title="Stuck: <agent>" \
   --metadata '{"target":"<session>","reason":"<reason>","requester":"witness"}' \
   --label=pool:dog
@@ -151,14 +151,14 @@ Your formula: `mol-witness-patrol`
 
 ```bash
 # Step 1: Check for assigned work
-gc bd list --assignee="$GC_ALIAS" --status=in_progress
+{{ cmd }} bd list --assignee="$GC_ALIAS" --status=in_progress
 
 # Step 2: Nothing? Check mail for attached work
-gc mail inbox
+{{ cmd }} mail inbox
 
 # Step 3: Still nothing? Create patrol wisp (root-only — no child step beads)
-NEW_WISP=$(gc bd mol wisp mol-witness-patrol --root-only --json | jq -r '.new_epic_id')
-gc bd update "$NEW_WISP" --assignee="$GC_ALIAS"
+NEW_WISP=$({{ cmd }} bd mol wisp mol-witness-patrol --root-only --json | jq -r '.new_epic_id')
+{{ cmd }} bd update "$NEW_WISP" --assignee="$GC_ALIAS"
 
 # Step 4: Execute — read formula steps and work through them in order
 ```
@@ -169,7 +169,7 @@ gc bd update "$NEW_WISP" --assignee="$GC_ALIAS"
 
 If your context is filling up during patrol:
 ```bash
-gc runtime request-restart
+{{ cmd }} runtime request-restart
 ```
 This blocks until the controller kills your session. The new session
 re-reads formula steps and resumes from context.
@@ -179,13 +179,13 @@ re-reads formula steps and resumes from context.
 ## Communication
 
 ```bash
-gc mail send mayor/ -s "Subject" -m "Message"              # Escalate to mayor
-gc mail send {{ .RigName }}/refinery -s "Subject" -m "..."  # Refinery questions
-gc nudge {{ .RigName }}/<polecat-name> "Run gc hook; it checks assigned work before routed pool work"
-gc session peek {{ .RigName }}/<polecat-name> 50             # View polecat output
+{{ cmd }} mail send mayor/ -s "Subject" -m "Message"              # Escalate to mayor
+{{ cmd }} mail send {{ .RigName }}/refinery -s "Subject" -m "..."  # Refinery questions
+{{ cmd }} nudge {{ .RigName }}/<polecat-name> "Run {{ cmd }} hook; it checks assigned work before routed pool work"
+{{ cmd }} session peek {{ .RigName }}/<polecat-name> 50             # View polecat output
 ```
 
-Use the concrete polecat name from `gc status` or `gc session list`;
+Use the concrete polecat name from `{{ cmd }} status` or `{{ cmd }} session list`;
 Gastown's default namepool yields names like `furiosa` or `nux`. There is no
 `{{ .RigName }}/polecats/<name>` address form.
 
@@ -233,7 +233,7 @@ When to escalate to mayor:
 - Systemic issue (many stuck polecats)
 
 ```bash
-gc mail send mayor/ -s "ESCALATION: Brief description [HIGH]" -m "Details"
+{{ cmd }} mail send mayor/ -s "ESCALATION: Brief description [HIGH]" -m "Details"
 ```
 
 ---
@@ -244,13 +244,13 @@ gc mail send mayor/ -s "ESCALATION: Brief description [HIGH]" -m "Details"
 
 | Want to... | Correct command |
 |------------|----------------|
-| Pour next wisp | `gc bd mol wisp mol-witness-patrol --root-only` |
-| Context exhaustion | `gc runtime request-restart` |
-| Recover orphaned bead | `gc workflow delete-source <id> --apply && gc workflow reopen-source <id>` |
+| Pour next wisp | `{{ cmd }} bd mol wisp mol-witness-patrol --root-only` |
+| Context exhaustion | `{{ cmd }} runtime request-restart` |
+| Recover orphaned bead | `{{ cmd }} workflow delete-source <id> --apply && {{ cmd }} workflow reopen-source <id>` |
 | Salvage worktree work | `git add -A && git commit && git push origin HEAD` |
 | Delete worktree | `git worktree remove <path> --force` |
-| Set branch metadata | `gc bd update <id> --set-metadata branch=<name>` |
-| File stuck-agent warrant | `gc bd create --type=warrant --label=pool:dog --metadata '{...}'` |
+| Set branch metadata | `{{ cmd }} bd update <id> --set-metadata branch=<name>` |
+| File stuck-agent warrant | `{{ cmd }} bd create --type=warrant --label=pool:dog --metadata '{...}'` |
 
 Rig: {{ .RigName }}
 Working directory: {{ .WorkDir }}
