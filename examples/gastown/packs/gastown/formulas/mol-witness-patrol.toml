@@ -1,61 +1,26 @@
 description = """
-Witness patrol loop. Poured as a root-only wisp on startup:
+Witness patrol loop. Each wisp is one iteration:
 
   gc bd mol wisp mol-witness-patrol --root-only
   gc bd update $WISP --assignee=$GC_AGENT
 
-Each wisp is ONE iteration: check for work, patrol, pour the next
-iteration. On crash, re-read the formula steps and determine where
-you left off from context (bead state, mail state, last action).
+Steps are not materialized as child beads. Work through them in order.
+Every exit path pours the next wisp before burning this one.
 
-Formula steps are NOT materialized as child beads. Read the step
-descriptions below and work through them in order.
+Role: monitor the rig's WORK layer. Do not manage processes, implement code,
+run gate checks, or finish convoys. The controller handles process health; the
+deacon handles town-wide completion. The witness handles:
 
-The loop mechanism: every exit path (happy or early) pours the next
-wisp before burning this one. The prompt only bootstraps the first wisp.
+- orphaned bead recovery when an assigned agent will not return
+- refinery queue health
+- stuck-but-live polecat detection via dog-pool warrants
+- HELP/escalation mail
 
-## Witness Role
-
-The witness is the rig's work-health monitor. It does NOT manage processes
-(the controller handles start/stop/restart/zombie detection). The witness
-monitors the WORK layer:
-
-1. **Orphaned bead recovery** — beads assigned to agents that won't spawn
-   (pool max changed, agent removed from config). This is the core job.
-2. **Refinery queue health** — work beads assigned to refinery, staleness.
-3. **Polecat health** — detect stuck polecats, file warrants for dog pool.
-4. **Help mail** — triage HELP/escalation requests from polecats.
-
-Gate checks and convoy/swarm completion are town-wide concerns handled by
-the deacon, not the per-rig witness.
-
-## Canonical Work Chain
-
-```
-worktree → (push) → branch → (merge) → target branch
-```
-
-Each transition moves the canonical location of the work. Once moved,
-the previous location is disposable:
-- After push: worktree disposable (branch is canonical)
-- After merge: branch disposable (target is canonical)
-
-The witness's core recovery job: when a bead is orphaned (agent won't
-come back), ensure the work reaches the branch (push), then clean up
-the worktree. This makes the work schedulable again.
-
-## What the witness does NOT do
-
-- Zombie detection (controller reconcile loop handles this)
-- Process start/stop (controller handles this)
-- Code implementation (polecats do this)
-- Gate checks (deacon handles town-wide)
-- Convoy/swarm completion (deacon handles cross-rig)
-- Kill stuck agents directly (files warrant, dog pool runs shutdown dance)
-
-Read each step's description before acting — Config values override defaults."""
+Canonical chain: worktree -> branch -> target branch. If an orphaned bead has
+work in a disposable worktree, push it to a branch first; then clean up and
+return the bead to schedulable state."""
 formula = "mol-witness-patrol"
-version = 7
+version = 8
 
 [vars]
 [vars.event_timeout]
@@ -66,7 +31,7 @@ default = "30"
 id = "check-inbox"
 title = "Context check, then mail"
 description = """
-**1. Context check (FIRST — before any work):**
+**1. Context check before work:**
 ```bash
 RSS=$(ps -o rss= -p $$ | tr -d ' ')
 RSS_MB=$((RSS / 1024))
@@ -76,226 +41,112 @@ If RSS > 1500 MB or context feels heavy, request a restart:
 ```bash
 gc runtime request-restart
 ```
-This sets `GC_RESTART_REQUESTED` metadata on the session and blocks
-forever. The controller will kill and restart the session on the next
-reconcile tick. The current wisp stays assigned and the new session
-the new session re-reads formula steps and resumes from context.
 
-**2. Check mail:**
+The current wisp stays assigned; the new session resumes from bead/mail state.
+
+**2. Process mail:**
 ```bash
 gc mail inbox
 ```
 
-Handle each message type:
+- Emergency keywords (crash, data loss, corruption, security): mail mayor [HIGH].
+- Failed/error/blocking messages: investigate; escalate only if unresolvable.
+- Decisions/general help: answer if local; escalate only architectural questions.
+- Lifecycle/info/HANDOFF: acknowledge or absorb context.
 
-**HELP / Blocked:**
-Classify by keyword, then act based on severity:
-
-| Category | Keywords | Severity | Action |
-|----------|----------|----------|--------|
-| Emergency | crash, data loss, corruption, security | Critical | Mail mayor immediately [HIGH] |
-| Failed | failed, error, cannot, broken, exception | High | Investigate; mail mayor if unresolvable |
-| Blocked | blocked, waiting, depends on, need access | Medium | Try to unblock (point to docs, suggest approach); escalate if you can't |
-| Decision | should I, which approach, trade-off, design | Low | Answer if you can; escalate only if architectural |
-| Lifecycle | done, finished, idle, restarting | Info | Acknowledge; no escalation needed |
-| General help | help, stuck, confused, how do I | Low | Point to docs/suggest approach; escalate only if truly stuck |
-
-For escalations:
+Escalation shape:
 ```bash
 gc mail send mayor/ -s "ESCALATION: <polecat> needs help [HIGH|MED|LOW]" -m "<category>: <details>"
 ```
-Do NOT escalate routine blocks or lifecycle messages — handle them yourself.
-Archive after handling.
 
-**HANDOFF:**
-Read predecessor context. Continue from where they left off.
-Archive after absorbing context.
-
-**Other / informational:**
-Archive after reading.
-
-**Hygiene principle**: Archive messages after they're fully processed.
-Inbox should be near-empty after this step.
-
-Close this step and proceed."""
+Archive every processed message. Close this step with the inbox near empty."""
 
 [[steps]]
 id = "recover-orphaned-beads"
 title = "Recover orphaned work beads"
 needs = ["check-inbox"]
 description = """
-**This is the witness's core job.**
+Find work assigned to polecats that will not return, salvage unpublished work,
+and return the bead to the pool.
 
-Find beads assigned to agents that will never process them, salvage any
-unpublished work from the worktree, and return beads to the pool.
-
-This happens when:
-- Pool max was reduced (agents that won't spawn anymore)
-- An agent was removed from config
-- An agent crashed and the controller decided not to restart it (quarantine)
-
-**Step 1: Find orphaned beads.**
-
-List beads assigned to agents in YOUR rig:
+**1. Find candidate beads in this rig:**
 ```bash
 gc bd list --status=in_progress --json --limit=0
 gc bd list --status=open --json --limit=0
 ```
 
-Filter for beads assigned to polecat-pattern agents (e.g., `<rig>/polecats/<name>`).
-
-Cross-reference against running sessions and configured (desired) agents:
+Filter for polecat assignees, then compare with:
 ```bash
-gc session list --json   # running sessions
-gc config show           # configured agents (includes pool templates)
+gc session list --json
+gc config show
 ```
 
-For each bead with a polecat assignee:
-- If the assigned agent has a running session → not orphaned, skip
-- If the assigned agent matches a configured agent name (or is a pool
-  instance like worker-3 matching template worker) → controller will
-  restart it, skip
-- If the agent is neither running nor configured → **orphaned bead**
+Skip agents that are running, configured, or normal pool instances the
+controller can restart. Recover only agents that genuinely will not come back.
 
-**Important**: Do NOT recover beads assigned to agents that are simply
-restarting (crash recovery). The controller restarts crashed agents,
-and the fresh session resumes work from context. Only recover
-beads when the agent genuinely won't come back.
-
-**Step 2: For each orphaned bead, salvage work from the worktree.**
-
-The canonical work chain: `worktree → (push) → branch → (merge) → target`.
-Our job is to ensure work reaches the branch so it's schedulable.
-
-Read the bead metadata to find the worktree and branch:
+**2. For each orphan, inspect metadata:**
 ```bash
 META=$(gc bd show <bead> --json | jq '.[0].metadata')
 WORKTREE=$(echo "$META" | jq -r '.worktree // empty')
 BRANCH=$(echo "$META" | jq -r '.branch // empty')
 ```
 
-Check the bead and worktree state, then act:
-
-**Case A: Branch exists on origin (work already published).**
-Worktree is disposable — canonical work is on the branch.
+If `$BRANCH` exists on origin, work is already canonical:
 ```bash
-git ls-remote --heads origin $BRANCH  # Verify branch exists on remote
-```
-If branch exists on origin → skip to Step 3 (cleanup).
-
-**Case B: Worktree exists, branch pushed but not on origin yet.**
-Branch is recorded in metadata but polecat may have crashed before push.
-```bash
-cd "$WORKTREE"
 git ls-remote --heads origin $BRANCH
 ```
-If branch IS on origin → skip to Step 3.
-If branch is NOT on origin → fall through to Case C.
 
-**Case C: Worktree exists with unpushed commits.**
-Work is committed locally but never pushed. Branch is not yet canonical.
+If a worktree exists and the branch is not on origin, commit any remaining
+changes, push the current branch, and record it:
 ```bash
 cd "$WORKTREE"
 BRANCH=$(git branch --show-current)
-git log origin/main..HEAD --oneline  # Shows unpushed commits
-```
-Commit any remaining uncommitted/untracked work first (safeguard):
-```bash
-git status --porcelain
-# If any output:
-git add -A
-git commit -m "witness: salvage uncommitted work (<bead>)"
-```
-Publish the work to make branch canonical:
-```bash
+if [ -n "$(git status --porcelain)" ]; then
+  git add -A
+  git commit -m "witness: salvage uncommitted work (<bead>)"
+fi
 git push origin HEAD
 gc bd update <bead> --set-metadata branch=$BRANCH
 ```
-Skip to Step 3 (cleanup).
 
-**Case D: Worktree exists with ONLY uncommitted/untracked changes (no commits).**
-Same resolution as Case C. All work is useful work — never discard.
+If no branch and no worktree exist, there is nothing to salvage.
+
+**3. Close already-merged work, otherwise reopen for dispatch.**
+If `$BRANCH` is non-empty, check whether the branch is already on main:
 ```bash
-cd "$WORKTREE"
-git add -A
-git commit -m "witness: salvage work from orphaned agent (<bead>)"
-BRANCH=$(git branch --show-current)
-git push origin HEAD
-gc bd update <bead> --set-metadata branch=$BRANCH
-```
-Skip to Step 3 (cleanup).
-
-**Case E: No worktree exists (`metadata.work_dir` missing or directory gone),
-no branch on origin.**
-Nothing to salvage. The bead goes back to pool and a new polecat
-starts fresh.
-
-**Step 3: Verify work on main before resetting.**
-
-Before resetting the bead to pool, check if the branch was already merged
-to main (polecat finished, pushed, but crashed before closing the bead):
-```bash
-git log main --oneline | grep -q "$BRANCH"
-# Or check if branch commits are reachable from main:
 git merge-base --is-ancestor origin/$BRANCH origin/main
 ```
 
 If the work is already on main:
-- **Close the bead** (work is done, don't re-dispatch):
 ```bash
 gc bd close <bead>
 gc mail send mayor/ -s "ORPHAN_CLOSED: <bead> already merged" \
   -m "Branch $BRANCH already on main. Closed instead of resetting."
 ```
-- Clean up worktree and skip to Step 4.
 
-If the work is NOT on main, proceed with reset:
-
-**Step 3b: Clean up worktree and return bead to pool.**
-
-Once the branch is canonical (on origin), the worktree is disposable:
+If no branch is available, or the branch is not on main, clean up any
+disposable worktree and reopen the source bead:
 ```bash
-# Delete worktree if it exists
 cd <rig-root>
 git worktree remove <worktree-path> --force 2>/dev/null
-rm -rf <worktree-path> 2>/dev/null  # Fallback
+rm -rf <worktree-path> 2>/dev/null
 git worktree prune
-```
-
-Close any orphaned workflow subtree, then return the bead to pool:
-```bash
 gc workflow delete-source <bead> --apply && gc workflow reopen-source <bead>
 ```
 
-**Step 4: Assess and notify.**
-
-Always log each recovery as an event. Mail the mayor only when the
-recovery is unexpected or concerning — use your judgment:
-
-| Situation | Action |
-|-----------|--------|
-| Pool resize / config change removed agent | Log only. Routine. |
-| Agent crashed mid-work, branch already on origin | Log + nudge mayor. Low urgency. |
-| Work salvaged from worktree (data was at risk) | Log + mail mayor. Work was nearly lost. |
-| Same bead recovered before (check `metadata.recovered`) | Log + mail mayor. Possible crash loop. |
-
-When you do mail:
+Mark recovered beads. Mail mayor only for risky salvage, repeated recovery, or
+unexpected patterns:
 ```bash
+gc bd update <bead> --set-metadata recovered=true
 gc mail send mayor/ -s "ORPHAN_RECOVERED: <bead>" \
   -m "Bead <bead> was assigned to <agent> which is no longer active.
-Recovery: <what was done — branch pushed / metadata set / work salvaged / nothing to salvage>
+Recovery: <branch pushed / metadata set / work salvaged / nothing to salvage>
 Branch: <branch name or 'none'>
 Status: Reset to open pool for re-dispatch.
 Concern: <why this one warrants attention>"
 ```
 
-Mark recovered beads so spawn storm detection can track patterns:
-```bash
-gc bd update <bead> --set-metadata recovered=true
-```
-
-**Exit criteria:** All orphaned beads recovered, worktrees cleaned.
-Or no orphans found."""
+**Exit criteria:** all orphans recovered and worktrees cleaned, or no orphans found."""
 
 [[steps]]
 id = "check-refinery"
@@ -304,32 +155,21 @@ needs = ["recover-orphaned-beads"]
 description = """
 Ensure the refinery is processing work and the queue is healthy.
 
-**Step 1: Check work beads assigned to refinery:**
+Check work beads assigned to this rig's refinery:
 ```bash
 gc bd list --assignee=<rig>/refinery --status=open --json
 ```
 
 These are work beads with `metadata.branch` and `metadata.target` that
-polecats have submitted for merging. Look for:
+polecats submitted for merging. Look for stale `UpdatedAt`, excessive queue
+depth, or refinery patrol staleness while work is waiting.
 
-- **Stale beads**: Assigned to refinery but old `UpdatedAt`. The refinery
-  may be stuck or the bead may have been missed.
-- **Queue depth**: Many beads waiting may indicate the refinery is
-  overwhelmed or down.
-- **Empty queue**: No work assigned — refinery is idle, which is fine.
-
-**Step 2: Assess refinery wisp freshness:**
-
-Check when the refinery last completed a patrol cycle by looking at
-recent burned wisps. If the refinery has work assigned but its last
-wisp is stale, the refinery may be stuck.
-
-**Step 3: Nudge if needed:**
+Nudge first:
 ```bash
 gc nudge <rig>/refinery "Work beads waiting for merge. Please check queue."
 ```
 
-**Step 4: Escalate if needed:**
+Escalate only if the queue appears stuck or systemic:
 ```bash
 gc mail send mayor/ -s "QUEUE_HEALTH: <summary>" \
   -m "Work bead IDs: <ids>
@@ -337,42 +177,29 @@ Observation: <what you found>
 Recommendation: <what should happen>"
 ```
 
-Close this step after assessment."""
+Close after assessment."""
 
 [[steps]]
 id = "check-polecat-health"
 title = "Check polecat work progress"
 needs = ["check-refinery"]
 description = """
-Detect polecats that are alive but not making progress on their work.
+Detect live polecats that are not making work progress. The controller handles
+dead agents; the witness handles work-layer judgment.
 
-The controller detects dead agents and restarts them. But a polecat can
-be alive and stuck — infinite loop, blocked on something, or just not
-progressing. The controller can't detect this; it's a work-layer judgment.
-
-**Step 1: Find active polecat work beads:**
+Find active polecat work beads in this rig:
 ```bash
 gc bd list --status=in_progress --json --limit=0
 ```
-Filter for beads assigned to polecat-pattern agents in YOUR rig.
 
-**Step 2: For each, assess progress:**
+Assess each bead's `UpdatedAt`, recent wisp activity, and tool-call state:
 
-Check the work bead's `UpdatedAt` timestamp and the polecat's molecule
-wisp freshness. Consider:
+- Recently updated: skip.
+- Stale but in a long tool call: usually wait.
+- Very stale with no wisp progress: likely stuck.
 
-- **Recently updated** → making progress, skip
-- **Stale but agent is in a long tool call** → might be fine, use judgment
-- **Very stale, no wisp progress** → likely stuck
-
-There are no hardcoded thresholds. Consider the nature of the work, the
-time elapsed, and whether the agent shows any signs of activity. This is
-judgment work — exactly why an LLM does it, not Go code.
-
-**Step 3: For stuck polecats, file a warrant:**
-
-Do NOT kill the agent directly. File a warrant bead and let the dog pool
-handle the shutdown dance (multi-stage interrogation with due process):
+Do not kill agents directly. For stuck polecats, file a warrant for the dog
+pool:
 
 ```bash
 gc bd create --type=warrant \
@@ -381,18 +208,10 @@ gc bd create --type=warrant \
   --label=pool:dog
 ```
 
-The dog pool picks up the warrant and runs `mol-shutdown-dance`, which
-gives the polecat 3 chances to prove it's alive before killing it.
+Log what you checked. Do not mail mayor for one stuck polecat; the warrant
+system handles it. Escalate only for patterns or systemic failures.
 
-**Step 4: Log assessment:**
-
-Note which polecats were checked and their status for observability.
-Don't escalate to mayor for individual stuck polecats — the warrant
-system handles it. Only escalate if you see a pattern (many stuck
-polecats, systemic issue).
-
-**Exit criteria:** All active polecat work beads assessed. Warrants
-filed for stuck agents. Or no stuck polecats found."""
+**Exit criteria:** active polecat beads assessed; warrants filed where needed."""
 
 [[steps]]
 id = "next-iteration"
@@ -400,8 +219,6 @@ title = "Pour next iteration and loop"
 needs = ["check-polecat-health"]
 description = """
 **Config: event_timeout = {{event_timeout}}**
-
-End of patrol cycle. Pour the next iteration, then wait or exit.
 
 **1. Context check:**
 
@@ -412,7 +229,7 @@ gc runtime request-restart
 This blocks forever. The controller restarts you. The next wisp
 is already assigned — the new session resumes from context.
 
-**2. Pour next iteration BEFORE burning:**
+**2. Pour next iteration before burning:**
 ```bash
 NEXT=$(gc bd mol wisp mol-witness-patrol --root-only --json | jq -r '.new_epic_id')
 gc bd update "$NEXT" --assignee=$GC_AGENT
@@ -432,8 +249,5 @@ On timeout: double the timeout (cap 300s) and proceed anyway.
 ```bash
 gc bd mol burn <this-wisp-id> --force
 ```
-
-The new wisp is ready. Re-read formula steps to start
-the next patrol cycle.
 
 **Exit criteria:** Next wisp poured, this wisp burned."""
