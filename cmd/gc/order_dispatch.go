@@ -7,6 +7,7 @@ import (
 	"log"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -74,6 +75,9 @@ type memoryOrderDispatcher struct {
 	maxTimeout time.Duration
 	cfg        *config.City
 	cityName   string
+
+	cacheMu      sync.Mutex
+	lastRunCache map[string]time.Time
 }
 
 // buildOrderDispatcher scans formula layers for orders and returns a
@@ -164,10 +168,14 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		if legacyStore != nil {
 			storesForGate = append(storesForGate, legacyStore)
 		}
+		storeKeysForGate := []string{storeKey}
+		if legacyStore != nil {
+			storeKeysForGate = append(storeKeysForGate, orderStoreTargetKey(legacyOrderCityTarget(cityPath, m.cfg)))
+		}
 		baseLastRunFn := orders.LastRunAcrossStores(storesForGate...)
 		var lastRunErr error
 		lastRunFn := func(orderName string) (time.Time, error) {
-			last, err := baseLastRunFn(orderName)
+			last, err := m.cachedLastRun(orderName, storeKeysForGate, baseLastRunFn)
 			if err != nil {
 				lastRunErr = err
 			}
@@ -215,6 +223,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			logDispatchError(m.stderr, "gc: order dispatch: creating tracking bead for %s: %v", scoped, err)
 			continue
 		}
+		m.rememberLastRun(scoped, storeKeysForGate, trackingBead.CreatedAt)
 
 		// Fire and forget with timeout.
 		a := a // capture loop variable
@@ -238,6 +247,41 @@ func (m *memoryOrderDispatcher) legacyCityStoreForTarget(cityPath string, target
 	}
 	stores[key] = store
 	return store, true
+}
+
+func (m *memoryOrderDispatcher) cachedLastRun(orderName string, storeKeys []string, read orders.LastRunFunc) (time.Time, error) {
+	key := orderHistoryCacheKey(orderName, storeKeys)
+	m.cacheMu.Lock()
+	if m.lastRunCache != nil {
+		if last, ok := m.lastRunCache[key]; ok {
+			m.cacheMu.Unlock()
+			return last, nil
+		}
+	}
+	m.cacheMu.Unlock()
+
+	last, err := read(orderName)
+	if err != nil {
+		return time.Time{}, err
+	}
+	m.rememberLastRun(orderName, storeKeys, last)
+	return last, nil
+}
+
+func (m *memoryOrderDispatcher) rememberLastRun(orderName string, storeKeys []string, last time.Time) {
+	key := orderHistoryCacheKey(orderName, storeKeys)
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	if m.lastRunCache == nil {
+		m.lastRunCache = make(map[string]time.Time)
+	}
+	if existing, ok := m.lastRunCache[key]; !ok || existing.IsZero() || last.After(existing) {
+		m.lastRunCache[key] = last
+	}
+}
+
+func orderHistoryCacheKey(orderName string, storeKeys []string) string {
+	return orderName + "\x00" + strings.Join(storeKeys, "\x00")
 }
 
 // dispatchOne runs a single order dispatch in its own goroutine.

@@ -42,6 +42,12 @@ type selectiveUpdateFailStore struct {
 	beads.Store
 }
 
+type countingListStore struct {
+	beads.Store
+
+	includeClosedLists int
+}
+
 func (s selectiveUpdateFailStore) Update(id string, opts beads.UpdateOpts) error {
 	for _, label := range opts.Labels {
 		if strings.HasPrefix(label, "order-run:") {
@@ -49,6 +55,17 @@ func (s selectiveUpdateFailStore) Update(id string, opts beads.UpdateOpts) error
 		}
 	}
 	return s.Store.Update(id, opts)
+}
+
+func (s *countingListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.IncludeClosed || query.Status == "closed" {
+		s.includeClosedLists++
+	}
+	return s.Store.List(query)
+}
+
+func (s *countingListStore) reset() {
+	s.includeClosedLists = 0
 }
 
 func TestOrderDispatcherNil(t *testing.T) {
@@ -198,6 +215,46 @@ func TestOrderDispatchMultiple(t *testing.T) {
 	}
 	if trackingCount != 1 {
 		t.Errorf("expected 1 tracking bead for order-a, got %d", trackingCount)
+	}
+}
+
+func TestOrderDispatchCachesLastRunBetweenDispatches(t *testing.T) {
+	store := &countingListStore{Store: beads.NewMemStore()}
+
+	if _, err := store.Create(beads.Bead{
+		Title:  "recent run",
+		Labels: []string{"order-run:test-order"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	aa := []orders.Order{{
+		Name:     "test-order",
+		Trigger:  "cooldown",
+		Interval: "1h",
+		Formula:  "test-formula",
+	}}
+	ad := buildOrderDispatcherFromList(aa, store, nil)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	cityPath := t.TempDir()
+	now := time.Now()
+	ad.dispatch(context.Background(), cityPath, now)
+	if store.includeClosedLists == 0 {
+		t.Fatal("first dispatch did not read persisted order history")
+	}
+
+	store.reset()
+	ad.dispatch(context.Background(), cityPath, now.Add(time.Second))
+	if store.includeClosedLists != 0 {
+		t.Fatalf("second dispatch performed %d closed-history reads, want cached last-run result", store.includeClosedLists)
+	}
+
+	all, _ := store.ListOpen()
+	if len(all) != 1 {
+		t.Errorf("expected only seed bead, got %d", len(all))
 	}
 }
 
