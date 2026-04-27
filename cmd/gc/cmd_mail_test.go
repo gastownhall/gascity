@@ -2537,6 +2537,55 @@ func TestMailCheckInjectFormatsMessages(t *testing.T) {
 	}
 }
 
+func TestMailCheckInjectLimitsMessageCount(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	mp.Send("mayor", "worker", "", "first")   //nolint:errcheck
+	mp.Send("deacon", "worker", "", "second") //nolint:errcheck
+	mp.Send("dog", "worker", "", "third")     //nolint:errcheck
+	mp.Send("boot", "worker", "", "fourth")   //nolint:errcheck
+
+	var stdout bytes.Buffer
+	code := doMailCheck(mp, "worker", true, &stdout, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("doMailCheck = %d, want 0", code)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{"4 unread message(s)", "gc-1 from mayor", "gc-2 from deacon", "gc-3 from dog", "Showing the first 3 message(s)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "gc-4") || strings.Contains(out, "fourth") {
+		t.Errorf("stdout should not include the fourth message:\n%s", out)
+	}
+}
+
+func TestMailCheckInjectTruncatesLongBodies(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	longBody := "prefix " + strings.Repeat("x", mailInjectBodyPreviewSize+100)
+	mp.Send("mayor", "worker", "Long body", longBody) //nolint:errcheck
+
+	var stdout bytes.Buffer
+	code := doMailCheck(mp, "worker", true, &stdout, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("doMailCheck = %d, want 0", code)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Long body") {
+		t.Errorf("stdout missing subject:\n%s", out)
+	}
+	if !strings.Contains(out, "... [preview truncated]") {
+		t.Errorf("stdout missing truncation marker:\n%s", out)
+	}
+	if strings.Contains(out, strings.Repeat("x", mailInjectBodyPreviewSize+80)) {
+		t.Errorf("stdout includes too much of the long body:\n%s", out)
+	}
+}
+
 func TestMailCheckInjectDoesNotCloseBeads(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
