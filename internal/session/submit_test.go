@@ -219,6 +219,42 @@ func TestSubmitDefaultCodexSkipsDeferredDialogsAfterVerification(t *testing.T) {
 	}
 }
 
+func TestSubmitDefaultCodexVerificationUsesSuppressHistoryWhenCompactModeEnabled(t *testing.T) {
+	store := &captureUpdateStore{MemStore: beads.NewMemStore()}
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp).SetCompactSessionHistory(true)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "codex", t.TempDir(), "codex", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	outcome, err := mgr.Submit(context.Background(), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
+	if err != nil {
+		t.Fatalf("Submit(default): %v", err)
+	}
+	if outcome.Queued {
+		t.Fatal("Submit(default) unexpectedly queued")
+	}
+	if store.updatedID != info.ID {
+		t.Fatalf("updated ID = %q, want %q", store.updatedID, info.ID)
+	}
+	if !store.lastUpdate.SuppressHistory {
+		t.Fatal("expected SuppressHistory=true")
+	}
+	if got := store.lastUpdate.Metadata[startupDialogVerifiedKey]; got != "true" {
+		t.Fatalf("%s metadata = %q, want true", startupDialogVerifiedKey, got)
+	}
+
+	updated, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get updated bead: %v", err)
+	}
+	if got := updated.Metadata[startupDialogVerifiedKey]; got != "true" {
+		t.Fatalf("stored %s = %q, want true", startupDialogVerifiedKey, got)
+	}
+}
+
 func TestSubmitDefaultResumesSuspendedGeminiSessionAndNudgesImmediately(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

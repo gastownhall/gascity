@@ -13,7 +13,7 @@ func (s *Server) sessionManager(store beads.Store) *session.Manager {
 	if cfg == nil {
 		return session.NewManagerWithCityPath(store, s.state.SessionProvider(), s.state.CityPath())
 	}
-	return session.NewManagerWithTransportPolicyResolverAndCityPath(
+	manager := session.NewManagerWithTransportPolicyResolverAndCityPath(
 		store,
 		s.state.SessionProvider(),
 		s.state.CityPath(),
@@ -21,6 +21,8 @@ func (s *Server) sessionManager(store beads.Store) *session.Manager {
 			return configuredSessionTransportResolution(cfg, template, provider)
 		},
 	)
+	manager.SetCompactSessionHistory(cfg.Observability.SessionHistory.Compact())
+	return manager
 }
 
 func configuredSessionTransport(cfg *config.City, template, provider string) string {

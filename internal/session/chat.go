@@ -43,14 +43,12 @@ func stripResumeFlag(cmd, resumeFlag, sessionKey string) string {
 }
 
 func (m *Manager) clearStaleResumeMetadata(id string, b *beads.Bead) error {
-	if err := m.store.SetMetadata(id, "session_key", ""); err != nil {
-		return fmt.Errorf("clearing stale resume metadata session_key: %w", err)
-	}
-	if err := m.store.SetMetadata(id, "started_config_hash", ""); err != nil {
-		return fmt.Errorf("clearing stale resume metadata started_config_hash: %w", err)
-	}
-	if err := m.store.SetMetadata(id, "continuation_reset_pending", "true"); err != nil {
-		return fmt.Errorf("clearing stale resume metadata continuation_reset_pending: %w", err)
+	if err := m.updateSessionMetadata(id, map[string]string{
+		"session_key":                "",
+		"started_config_hash":        "",
+		"continuation_reset_pending": "true",
+	}); err != nil {
+		return fmt.Errorf("clearing stale resume metadata: %w", err)
 	}
 	if b.Metadata == nil {
 		b.Metadata = make(map[string]string)
@@ -225,7 +223,7 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	instanceToken := b.Metadata["instance_token"]
 	if instanceToken == "" {
 		instanceToken = NewInstanceToken()
-		if err := m.store.SetMetadata(id, "instance_token", instanceToken); err != nil {
+		if err := m.setSessionMetadata(id, "instance_token", instanceToken); err != nil {
 			return fmt.Errorf("storing instance token: %w", err)
 		}
 		if b.Metadata == nil {
@@ -333,7 +331,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 	instanceToken := b.Metadata["instance_token"]
 	if instanceToken == "" {
 		instanceToken = NewInstanceToken()
-		if err := m.store.SetMetadata(id, "instance_token", instanceToken); err != nil {
+		if err := m.setSessionMetadata(id, "instance_token", instanceToken); err != nil {
 			return fmt.Errorf("storing instance token: %w", err)
 		}
 		if b.Metadata == nil {
@@ -409,7 +407,7 @@ func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead) error {
 	if len(batch) == 0 {
 		return nil
 	}
-	if err := m.store.SetMetadataBatch(id, batch); err != nil {
+	if err := m.updateSessionMetadata(id, batch); err != nil {
 		return fmt.Errorf("%w: updating session state: %w", ErrStateSync, err)
 	}
 	if b.Metadata == nil {
@@ -558,7 +556,7 @@ func (m *Manager) dismissKnownDialogsLocked(ctx context.Context, sessName string
 }
 
 func (m *Manager) markStartupDialogsVerifiedLocked(id string, b *beads.Bead) {
-	if err := m.store.SetMetadata(id, startupDialogVerifiedKey, "true"); err != nil {
+	if err := m.setSessionMetadata(id, startupDialogVerifiedKey, "true"); err != nil {
 		return
 	}
 	if b.Metadata == nil {

@@ -657,7 +657,11 @@ func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInpu
 		return nil, huma.Error409Conflict("session " + id + " is closed")
 	}
 
-	nudgeIDs, err := session.WakeSession(store, b, time.Now().UTC())
+	compactHistory := false
+	if cfg := s.state.Config(); cfg != nil {
+		compactHistory = cfg.Observability.SessionHistory.Compact()
+	}
+	nudgeIDs, err := session.WakeSessionWithOptions(store, b, time.Now().UTC(), compactHistory)
 	if err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())
 	}

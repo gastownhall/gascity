@@ -404,6 +404,23 @@ func TestBdStoreUpdatePassesPriority(t *testing.T) {
 	}
 }
 
+func TestBdStoreUpdatePassesSuppressHistory(t *testing.T) {
+	var gotArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"id":"bd-42","title":"test","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	desc := "compact"
+	if err := s.Update("bd-42", beads.UpdateOpts{Description: &desc, SuppressHistory: true}); err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(gotArgs, " ")
+	if !strings.Contains(args, "--suppress-history") {
+		t.Fatalf("args = %q, want suppress-history flag", args)
+	}
+}
+
 func TestBdStoreCloseCLIError(t *testing.T) {
 	// CLI error should NOT be wrapped as ErrNotFound.
 	runner := func(_, _ string, _ ...string) ([]byte, error) {

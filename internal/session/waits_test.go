@@ -180,3 +180,30 @@ func TestWakeSessionRequestsStartForContinuityEligibleArchivedBead(t *testing.T)
 		t.Fatalf("wait status/state = %q/%q, want closed/canceled", updatedWait.Status, updatedWait.Metadata["state"])
 	}
 }
+
+func TestWakeSessionWithOptionsUsesSuppressHistory(t *testing.T) {
+	store := &captureUpdateStore{MemStore: beads.NewMemStore()}
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"state":        string(StateAsleep),
+			"sleep_reason": "hold",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := WakeSessionWithOptions(store, sessionBead, time.Now().UTC(), true); err != nil {
+		t.Fatalf("WakeSessionWithOptions: %v", err)
+	}
+	if store.updatedID != sessionBead.ID {
+		t.Fatalf("updatedID = %q, want %q", store.updatedID, sessionBead.ID)
+	}
+	if !store.lastUpdate.SuppressHistory {
+		t.Fatal("expected SuppressHistory=true")
+	}
+	if got := store.lastUpdate.Metadata["wake_attempts"]; got != "0" {
+		t.Fatalf("wake_attempts metadata = %q, want 0", got)
+	}
+}

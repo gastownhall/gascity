@@ -151,11 +151,30 @@ type failMetadataKeyStore struct {
 	key string
 }
 
+type captureUpdateStore struct {
+	*beads.MemStore
+	lastUpdate beads.UpdateOpts
+	updatedID  string
+}
+
+func (s *captureUpdateStore) Update(id string, opts beads.UpdateOpts) error {
+	s.updatedID = id
+	s.lastUpdate = opts
+	return s.MemStore.Update(id, opts)
+}
+
 func (s failMetadataKeyStore) SetMetadata(id, key, value string) error {
 	if key == s.key {
 		return errors.New("set metadata failed")
 	}
 	return s.MemStore.SetMetadata(id, key, value)
+}
+
+func (s failMetadataKeyStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if _, ok := kvs[s.key]; ok {
+		return errors.New("set metadata failed")
+	}
+	return s.MemStore.SetMetadataBatch(id, kvs)
 }
 
 func (s waitFailStore) List(query beads.ListQuery) ([]beads.Bead, error) {
@@ -3151,6 +3170,27 @@ func TestEnsureRunning_StartupDeathWithoutStrippableResumeClearsMetadata(t *test
 	}
 }
 
+func TestManagerUpdateSessionMetadataUsesSuppressHistoryWhenEnabled(t *testing.T) {
+	store := &captureUpdateStore{MemStore: beads.NewMemStore()}
+	mgr := NewManager(store, runtime.NewFake()).SetCompactSessionHistory(true)
+	bead, err := store.Create(beads.Bead{Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{"state": string(StateAsleep)}})
+	if err != nil {
+		t.Fatalf("Create bead: %v", err)
+	}
+	if err := mgr.updateSessionMetadata(bead.ID, map[string]string{"state": string(StateActive)}); err != nil {
+		t.Fatalf("updateSessionMetadata: %v", err)
+	}
+	if store.updatedID != bead.ID {
+		t.Fatalf("updatedID = %q, want %q", store.updatedID, bead.ID)
+	}
+	if !store.lastUpdate.SuppressHistory {
+		t.Fatal("expected SuppressHistory=true")
+	}
+	if got := store.lastUpdate.Metadata["state"]; got != string(StateActive) {
+		t.Fatalf("metadata[state] = %q, want %q", got, StateActive)
+	}
+}
+
 func TestEnsureRunning_StartupDeathClearMetadataFailurePropagates(t *testing.T) {
 	store := failMetadataKeyStore{MemStore: beads.NewMemStore(), key: "session_key"}
 	base := runtime.NewFake()
@@ -3184,7 +3224,7 @@ func TestEnsureRunning_StartupDeathClearMetadataFailurePropagates(t *testing.T) 
 	if err == nil {
 		t.Fatal("Send should fail when stale resume metadata cannot be cleared")
 	}
-	if !strings.Contains(err.Error(), "clearing stale resume metadata session_key") {
+	if !strings.Contains(err.Error(), "clearing stale resume metadata") {
 		t.Fatalf("Send error = %v, want stale metadata clear failure", err)
 	}
 

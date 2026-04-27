@@ -568,6 +568,9 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 			args = append(args, "--set-metadata", k+"="+opts.Metadata[k])
 		}
 	}
+	if opts.SuppressHistory {
+		args = append(args, "--suppress-history")
+	}
 	for _, l := range opts.Labels {
 		args = append(args, "--add-label", l)
 	}

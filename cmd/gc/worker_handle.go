@@ -71,6 +71,7 @@ func workerFactoryWithConfig(cityPath string, store beads.Store, sp runtime.Prov
 		SearchPaths:           searchPaths,
 		ResolveTransport:      resolveTransport,
 		ResolveSessionRuntime: workerSessionRuntimeResolverWithConfig(cityPath, cfg),
+		CompactSessionHistory: cfg != nil && cfg.Observability.SessionHistory.Compact(),
 	})
 }
 

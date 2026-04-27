@@ -25,6 +25,7 @@ type FactoryConfig struct {
 	Recorder              events.Recorder
 	ResolveTransport      func(template, provider string) string
 	ResolveSessionRuntime SessionRuntimeResolver
+	CompactSessionHistory bool
 }
 
 // Factory centralizes worker-boundary object construction for callers such as
@@ -55,6 +56,7 @@ func NewFactory(cfg FactoryConfig) (*Factory, error) {
 	default:
 		manager = sessionpkg.NewManager(cfg.Store, cfg.Provider)
 	}
+	manager.SetCompactSessionHistory(cfg.CompactSessionHistory)
 	return newFactory(manager, cfg.Store, cfg.Provider, cfg.SearchPaths, cfg.Recorder, cfg.ResolveSessionRuntime)
 }
 

@@ -21,6 +21,7 @@ func (s *Server) workerFactory(store beads.Store) (*worker.Factory, error) {
 		Recorder:              s.state.EventProvider(),
 		ResolveTransport:      resolveTransport,
 		ResolveSessionRuntime: s.resolveWorkerSessionRuntimeWithMetadata,
+		CompactSessionHistory: cfg != nil && cfg.Observability.SessionHistory.Compact(),
 	})
 }
 

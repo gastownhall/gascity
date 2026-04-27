@@ -32,16 +32,17 @@ type Bead struct {
 
 // UpdateOpts specifies which fields to change. Nil pointers are skipped.
 type UpdateOpts struct {
-	Title        *string // set title (nil = no change)
-	Status       *string // set status (nil = no change)
-	Type         *string // set issue type (nil = no change)
-	Priority     *int    // set priority (nil = no change)
-	Description  *string
-	ParentID     *string
-	Assignee     *string  // set assignee (nil = no change)
-	Labels       []string // append these labels (nil = no change)
-	RemoveLabels []string // remove these labels (nil = no change)
-	Metadata     map[string]string
+	Title           *string // set title (nil = no change)
+	Status          *string // set status (nil = no change)
+	Type            *string // set issue type (nil = no change)
+	Priority        *int    // set priority (nil = no change)
+	Description     *string
+	ParentID        *string
+	Assignee        *string  // set assignee (nil = no change)
+	Labels          []string // append these labels (nil = no change)
+	RemoveLabels    []string // remove these labels (nil = no change)
+	Metadata        map[string]string
+	SuppressHistory bool
 }
 
 func cloneIntPtr(v *int) *int {
