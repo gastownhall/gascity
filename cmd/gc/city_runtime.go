@@ -1058,7 +1058,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	cr.serviceStateMu.Unlock()
 
 	if cr.cs != nil {
-		cr.cs.update(nextCfg, nextSp)
+		cr.cs.updateFromRuntime(nextCfg, nextSp)
 	}
 	if cr.svc != nil {
 		if err := cr.svc.Reload(); err != nil {

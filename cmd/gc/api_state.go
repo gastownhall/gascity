@@ -51,6 +51,12 @@ type controllerState struct {
 	services      workspacesvc.Registry
 	extmsgSvc     *extmsg.Services
 	adapterReg    *extmsg.AdapterRegistry
+	updateMu      sync.Mutex // serializes rebuild+swap so stale reloads cannot overtake newer mutations
+
+	// True after an API config mutation refreshes controller state ahead of the
+	// runtime reload loop. Runtime reloads that would drop newly bound rigs are
+	// ignored until the loop observes and applies the same or a newer config.
+	configMutationPending atomic.Bool
 }
 
 type configMutationSnapshot struct {
@@ -272,6 +278,9 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 // update replaces the config, session provider, and reopens stores.
 // Stores are built outside the lock to avoid blocking readers during I/O.
 func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
+	cs.updateMu.Lock()
+	defer cs.updateMu.Unlock()
+
 	// Build new stores outside the lock (may do file I/O / subprocess spawns).
 	stores := cs.buildStores(cfg)
 	// Reopen city-level store for session beads and mail.
@@ -302,6 +311,40 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	}
 	// Keep prior non-nil store/provider if reopen fails.
 	cs.mu.Unlock()
+}
+
+func (cs *controllerState) updateFromRuntime(cfg *config.City, sp runtime.Provider) {
+	if cs.configMutationPending.Load() && cs.runtimeUpdateDropsPendingRigs(cfg) {
+		return
+	}
+	cs.update(cfg, sp)
+	cs.configMutationPending.Store(false)
+}
+
+func (cs *controllerState) runtimeUpdateDropsPendingRigs(next *config.City) bool {
+	cs.mu.RLock()
+	current := cs.cfg
+	cs.mu.RUnlock()
+	return configDropsBoundRigs(current, next)
+}
+
+func configDropsBoundRigs(current, next *config.City) bool {
+	if current == nil || next == nil {
+		return false
+	}
+	nextRigPaths := make(map[string]string, len(next.Rigs))
+	for _, rig := range next.Rigs {
+		nextRigPaths[rig.Name] = strings.TrimSpace(rig.Path)
+	}
+	for _, rig := range current.Rigs {
+		if strings.TrimSpace(rig.Path) == "" {
+			continue
+		}
+		if nextRigPaths[rig.Name] == "" {
+			return true
+		}
+	}
+	return false
 }
 
 // --- api.State implementation ---
@@ -748,6 +791,7 @@ func (cs *controllerState) mutateAndPoke(mutate func() error) error {
 		}
 		return fmt.Errorf("refreshing updated city config: %w", err)
 	}
+	cs.configMutationPending.Store(true)
 	if cs.configDirty != nil {
 		cs.configDirty.Store(true)
 	}

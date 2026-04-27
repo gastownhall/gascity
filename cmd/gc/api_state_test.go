@@ -136,6 +136,40 @@ func TestControllerStateUpdate(t *testing.T) {
 	}
 }
 
+func TestControllerStateRuntimeUpdateDoesNotDropPendingMutationRigs(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"city1\"\n\n[beads]\nprovider = \"file\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	current := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+		Rigs:      []config.Rig{{Name: "alpha", Path: t.TempDir()}},
+	}
+	stale := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+	}
+
+	cs := newControllerState(context.Background(), current, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	cs.configMutationPending.Store(true)
+
+	cs.updateFromRuntime(stale, runtime.NewFake())
+
+	if got := cs.Config(); got != current {
+		t.Fatalf("Config() = %+v, want pending mutation config with rig alpha", got)
+	}
+	if !cs.configMutationPending.Load() {
+		t.Fatal("pending mutation marker cleared by stale runtime update")
+	}
+
+	cs.updateFromRuntime(current, runtime.NewFake())
+
+	if cs.configMutationPending.Load() {
+		t.Fatal("pending mutation marker not cleared after matching runtime update")
+	}
+}
+
 func TestControllerStateCreateRigPokesReconciler(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 
