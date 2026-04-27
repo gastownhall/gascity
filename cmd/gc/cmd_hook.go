@@ -185,6 +185,11 @@ func hookQueryEnv(cityPath string, cfg *config.City, a *config.Agent) map[string
 // dir sets the command's working directory.
 type WorkQueryRunner func(command, dir string) (string, error)
 
+const (
+	hookInjectMaxItems = 3
+	hookInjectMaxBytes = 2400
+)
+
 // shellWorkQueryWithEnv runs a work query command via sh -c and returns
 // stdout. If env is non-nil it is used as the subprocess environment
 // (including any rig-scoped BEADS_DIR / GC_RIG_ROOT overrides); otherwise
@@ -265,6 +270,7 @@ func doHookWithFormat(workQuery, dir string, inject bool, hookFormat string, run
 }
 
 func formatHookInjectReminder(normalizedWork string) string {
+	preview, note := hookInjectWorkPreview(normalizedWork)
 	return fmt.Sprintf(`<system-reminder>
 You have pending work. Pick up the next item:
 
@@ -272,13 +278,58 @@ You have pending work. Pick up the next item:
 %s
 </work-items>
 
+%s
 Use the bead id from the work item:
 - If the item is not assigned to you yet, run `+"`bd update <id> --claim`"+`.
 - Do the requested work.
 - When done, run `+"`bd close <id>`"+`.
 Run `+"`gc hook`"+` to see the full queue.
 </system-reminder>
-`, normalizedWork)
+`, preview, note)
+}
+
+func hookInjectWorkPreview(normalizedWork string) (string, string) {
+	trimmed := strings.TrimSpace(normalizedWork)
+	if trimmed == "" {
+		return "", ""
+	}
+
+	var items []json.RawMessage
+	if err := json.Unmarshal([]byte(trimmed), &items); err == nil && len(items) > hookInjectMaxItems {
+		previewItems := items[:hookInjectMaxItems]
+		previewBytes, err := json.Marshal(previewItems)
+		if err == nil {
+			preview, truncated := truncateHookInjectPreview(string(previewBytes))
+			note := fmt.Sprintf("Showing %d of %d ready work items here.", len(previewItems), len(items))
+			if truncated {
+				note += " The preview was also truncated by size."
+			}
+			return preview, note
+		}
+	}
+
+	preview, truncated := truncateHookInjectPreview(trimmed)
+	if truncated {
+		return preview, fmt.Sprintf("Showing the first %d bytes of hook output here.", hookInjectMaxBytes)
+	}
+	return preview, ""
+}
+
+func truncateHookInjectPreview(s string) (string, bool) {
+	if len(s) <= hookInjectMaxBytes {
+		return s, false
+	}
+	cut := 0
+	for i := range s {
+		if i > hookInjectMaxBytes {
+			break
+		}
+		cut = i
+	}
+	if cut <= 0 {
+		cut = hookInjectMaxBytes
+	}
+	return strings.TrimSpace(s[:cut]) + "\n... [truncated]", true
 }
 
 func workQueryHasReadyWork(output string) bool {

@@ -116,6 +116,44 @@ func TestHookInjectFormatsOutput(t *testing.T) {
 	}
 }
 
+func TestHookInjectLimitsJSONWorkItems(t *testing.T) {
+	runner := func(string, string) (string, error) {
+		return `[{"id":"hw-1","title":"one"},{"id":"hw-2","title":"two"},{"id":"hw-3","title":"three"},{"id":"hw-4","title":"four"}]`, nil
+	}
+	var stdout, stderr bytes.Buffer
+	code := doHook("bd ready --json", "", true, runner, &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("doHook(inject, json work) = %d, want 0", code)
+	}
+	out := stdout.String()
+	for _, want := range []string{"hw-1", "hw-2", "hw-3", "Showing 3 of 4 ready work items"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "hw-4") {
+		t.Errorf("stdout should not include fourth work item:\n%s", out)
+	}
+}
+
+func TestHookInjectTruncatesLargePreview(t *testing.T) {
+	runner := func(string, string) (string, error) {
+		return "hw-1 open " + strings.Repeat("x", hookInjectMaxBytes+200), nil
+	}
+	var stdout, stderr bytes.Buffer
+	code := doHook("bd ready", "", true, runner, &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("doHook(inject, large work) = %d, want 0", code)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "... [truncated]") {
+		t.Errorf("stdout missing truncation marker:\n%s", out)
+	}
+	if !strings.Contains(out, "Showing the first") {
+		t.Errorf("stdout missing preview-size note:\n%s", out)
+	}
+}
+
 func TestHookInjectAlwaysExitsZero(t *testing.T) {
 	// Even on command failure, inject mode exits 0.
 	runner := func(string, string) (string, error) { return "", fmt.Errorf("command failed") }
