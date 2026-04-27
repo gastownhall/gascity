@@ -489,6 +489,62 @@ func TestPrepareWaitWakeState_SkipsMissingOpenSessionWithoutBackingGet(t *testin
 	}
 }
 
+func TestPrepareWaitWakeState_CancelsStaleEpochWaitForClosedSession(t *testing.T) {
+	base := beads.NewMemStore()
+	store := &waitGetSpyStore{Store: base}
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       "worker",
+			"agent_name":         "worker",
+			"continuation_epoch": "2",
+			"state":              string(sessionpkg.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	if err := store.Close(sessionBead.ID); err != nil {
+		t.Fatalf("close session bead: %v", err)
+	}
+	waitBead, err := store.Create(beads.Bead{
+		Type:   waitBeadType,
+		Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
+		Metadata: map[string]string{
+			"session_id":       sessionBead.ID,
+			"session_name":     "worker",
+			"kind":             "deps",
+			"state":            waitStateReady,
+			"registered_epoch": "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create wait bead: %v", err)
+	}
+
+	readyWaitSet, err := prepareWaitWakeState(store, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("prepareWaitWakeState: %v", err)
+	}
+	if len(readyWaitSet) != 0 {
+		t.Fatalf("readyWaitSet = %#v, want empty after stale wait cancellation", readyWaitSet)
+	}
+	updated, err := store.Get(waitBead.ID)
+	if err != nil {
+		t.Fatalf("store.Get(wait): %v", err)
+	}
+	if got := updated.Metadata["state"]; got != waitStateCanceled {
+		t.Fatalf("wait state = %q, want %q", got, waitStateCanceled)
+	}
+	if got := updated.Metadata["last_error"]; got != "continuation-stale" {
+		t.Fatalf("last_error = %q, want continuation-stale", got)
+	}
+	if updated.Status != "closed" {
+		t.Fatalf("wait status = %q, want closed", updated.Status)
+	}
+}
+
 func TestDepsWaitReady_IgnoresEmptyDependencyEntries(t *testing.T) {
 	store := beads.NewMemStore()
 	dep, err := store.Create(beads.Bead{Title: "dep"})

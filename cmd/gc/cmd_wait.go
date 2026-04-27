@@ -560,13 +560,20 @@ func prepareWaitWakeState(store beads.Store, now time.Time) (map[string]bool, er
 }
 
 func prepareWaitWakeStateForCity(cityPath string, store beads.Store, now time.Time) (map[string]bool, error) {
+	return prepareWaitWakeStateForCityWithSnapshot(cityPath, store, now, nil)
+}
+
+func prepareWaitWakeStateForCityWithSnapshot(cityPath string, store beads.Store, now time.Time, sessionBeads *sessionBeadSnapshot) (map[string]bool, error) {
 	waits, err := loadWaitBeads(store)
 	if err != nil {
 		return nil, err
 	}
-	sessionBeads, err := loadSessionBeadSnapshot(store)
-	if err != nil {
-		return nil, err
+	if sessionBeads == nil {
+		var err error
+		sessionBeads, err = loadSessionBeadSnapshot(store)
+		if err != nil {
+			return nil, err
+		}
 	}
 	readyWaitSet := make(map[string]bool)
 	for _, wait := range waits {
@@ -580,7 +587,11 @@ func prepareWaitWakeStateForCity(cityPath string, store beads.Store, now time.Ti
 		}
 		sessionBead, ok := sessionBeads.FindByID(sessionID)
 		if !ok {
-			continue
+			if anySessionBead, found := sessionBeads.findByIDIncludingClosed(sessionID); found {
+				sessionBead = anySessionBead
+			} else {
+				continue
+			}
 		}
 		if epoch := wait.Metadata["registered_epoch"]; epoch != "" && sessionBead.Metadata["continuation_epoch"] != "" && epoch != sessionBead.Metadata["continuation_epoch"] {
 			if err := setWaitTerminalState(store, wait.ID, map[string]string{
@@ -593,6 +604,9 @@ func prepareWaitWakeStateForCity(cityPath string, store beads.Store, now time.Ti
 			if err := clearSessionWaitHoldIfIdle(store, sessionID); err != nil {
 				return nil, err
 			}
+			continue
+		}
+		if !ok {
 			continue
 		}
 		if expiresAt := wait.Metadata["expires_at"]; expiresAt != "" {
@@ -656,14 +670,21 @@ func prepareWaitWakeStateForCity(cityPath string, store beads.Store, now time.Ti
 	return readyWaitSet, nil
 }
 
-func dispatchReadyWaitNudges(cityPath string, store beads.Store, sp runtime.Provider, now time.Time) error {
+func dispatchReadyWaitNudges(cityPath string, store beads.Store, _ runtime.Provider, now time.Time) error {
+	return dispatchReadyWaitNudgesWithSnapshot(cityPath, store, now, nil)
+}
+
+func dispatchReadyWaitNudgesWithSnapshot(cityPath string, store beads.Store, now time.Time, sessionBeads *sessionBeadSnapshot) error {
 	waits, err := loadWaitBeads(store)
 	if err != nil {
 		return err
 	}
-	sessionBeads, err := loadSessionBeadSnapshot(store)
-	if err != nil {
-		return err
+	if sessionBeads == nil {
+		var err error
+		sessionBeads, err = loadSessionBeadSnapshot(store)
+		if err != nil {
+			return err
+		}
 	}
 	for _, wait := range waits {
 		if wait.Metadata["state"] != waitStateReady {
@@ -719,9 +740,6 @@ func dispatchReadyWaitNudges(cityPath string, store beads.Store, sp runtime.Prov
 }
 
 func cachedSessionCanReceiveWaitNudge(sessionBead beads.Bead) bool {
-	if sessionBead.Status == "closed" {
-		return false
-	}
 	switch sessionpkg.State(strings.TrimSpace(sessionBead.Metadata["state"])) {
 	case "", sessionpkg.StateActive, sessionpkg.StateAwake:
 		return true
