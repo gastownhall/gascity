@@ -93,11 +93,24 @@ export default async function gascityPlugin({ directory }) {
     // Pre-compaction hook: send handoff mail and request restart to preserve
     // context across compaction. This mirrors Claude's PreCompact behavior.
     "experimental.session.compacting": async (_input, _output) => {
-      // Run gc handoff which sends mail to self and requests restart.
-      // The handoff mail preserves context that would otherwise be lost
-      // during compaction. The restart ensures the session gets fresh
-      // context with the handoff mail injected.
+      // For on-demand named sessions, gc handoff only sends mail but doesn't
+      // restart the session. We need to explicitly request a session reset
+      // to get a fresh context with the handoff mail injected.
+      //
+      // Flow:
+      // 1. gc handoff sends mail to self with context summary
+      // 2. gc session reset requests a fresh restart (preserves mail)
+      // 3. Controller stops this session and starts a new one
+      // 4. New session picks up the handoff mail in its first turn
       await run(directory, "handoff", "context cycle");
+      
+      // Request session reset to actually restart with fresh context.
+      // For on-demand named sessions, gc handoff only sends mail but doesn't
+      // restart. We explicitly reset to get a fresh context with handoff mail.
+      const alias = process.env.GC_ALIAS;
+      if (alias) {
+        await run(directory, "session", "reset", alias);
+      }
     },
   };
 }
