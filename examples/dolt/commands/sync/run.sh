@@ -123,11 +123,12 @@ if [ -d "$data_dir" ]; then
     case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|__gc_probe) continue ;; esac
     [ -n "$db_filter" ] && [ "$name" != "$db_filter" ] && continue
 
-    # Check for remote.
-    remote=""
-    if [ -f "$d/.dolt/remotes.json" ]; then
-      remote=$(grep -o '"url":"[^"]*"' "$d/.dolt/remotes.json" 2>/dev/null | head -1 | sed 's/"url":"//;s/"//' || true)
-    fi
+    # Check for remote. Ask dolt itself rather than parsing on-disk state —
+    # remote configuration lives in .dolt/repo_state.json (object key
+    # "remotes"), which also contains a "backups" object with its own "url"
+    # fields, so naive grep parsing both reads the wrong file and risks
+    # matching a backup URL.
+    remote=$(cd "$d" && dolt remote -v 2>/dev/null | awk 'NR==1 {print $2}')
 
     if [ -z "$remote" ]; then
       echo "  $name: skipped (no remote)"
