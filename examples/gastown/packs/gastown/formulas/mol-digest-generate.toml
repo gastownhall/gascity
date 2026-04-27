@@ -79,15 +79,15 @@ Gather activity data from each rig.
 
 **1. List rigs:**
 ```bash
-gc rig list
+{{binary}} rig list
 ```
 
 **2. For each rig, collect:**
 
 a) **Issues filed and closed:**
 ```bash
-gc bd list --created-after=$SINCE --json --limit=0
-gc bd list --status=closed --closed-after=$SINCE --json --limit=0
+{{binary}} bd list --created-after=$SINCE --json --limit=0
+{{binary}} bd list --status=closed --closed-after=$SINCE --json --limit=0
 ```
 
 b) **Merge activity:**
@@ -97,24 +97,24 @@ git -C <rig-path> log --merges --since=$SINCE --oneline main
 
 c) **Incidents:**
 ```bash
-gc bd list --label=incident --created-after=$SINCE --json
+{{binary}} bd list --label=incident --created-after=$SINCE --json
 ```
 
 **3. Collect town-level data:**
 
 a) **Agent events:**
 ```bash
-gc events --since=$SINCE --type=agent.started,agent.stopped,agent.crashed --json
+{{binary}} events --since=$SINCE --type=agent.started,agent.stopped,agent.crashed --json
 ```
 
 b) **Escalations:**
 ```bash
-gc bd list --label=escalation --created-after=$SINCE --json
+{{binary}} bd list --label=escalation --created-after=$SINCE --json
 ```
 
 c) **Warrants filed:**
 ```bash
-gc bd list --type=warrant --created-after=$SINCE --json
+{{binary}} bd list --type=warrant --created-after=$SINCE --json
 ```
 
 Close this step when all data is collected."""
@@ -156,20 +156,20 @@ Transform data into a formatted digest and deliver it.
 
 **2. Send to mayor:**
 ```bash
-gc mail send mayor/ -s "Gas Town Digest: $DATE" -m "$DIGEST"
+{{binary}} mail send mayor/ -s "Gas Town Digest: $DATE" -m "$DIGEST"
 ```
 
 **3. Archive as bead:**
 ```bash
-gc bd create --type=digest \
+{{binary}} bd create --type=digest \
   --title="Digest: $DATE" \
   --label=digest,{{period}}
 ```
 
 **4. Close work bead, signal reconciler, and exit:**
 ```bash
-gc bd close <work-bead> --reason "Digest generated and sent"
-gc runtime drain-ack
+{{binary}} bd close <work-bead> --reason "Digest generated and sent"
+{{binary}} runtime drain-ack
 exit
 ```
 

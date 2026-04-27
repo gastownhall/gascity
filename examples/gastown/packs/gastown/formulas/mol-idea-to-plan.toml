@@ -9,11 +9,11 @@ shortcuts today, so this formula maps the same intent onto primitives we do
 have:
 
 - repo-local artifacts (`.prd-reviews/`, `.designs/`, `.plan-reviews/`)
-- review task beads created with `gc bd create`
-- parallel dispatch via `gc sling ... --on mol-review-leg`
-- completion mail via `gc mail send`
+- review task beads created with `{{binary}} bd create`
+- parallel dispatch via `{{binary}} sling ... --on mol-review-leg`
+- completion mail via `{{binary}} mail send`
 - one human clarification gate in the live conversation
-- final bead graph creation with `gc bd create` + `gc bd dep add`
+- final bead graph creation with `{{binary}} bd create` + `{{binary}} bd dep add`
 
 Run this from a coordinator workspace that has the target repo checked out
 (typically a crew worker, or a mayor who has already `cd`'d into the rig repo).
@@ -60,15 +60,15 @@ Anchor the run in the current repository and set up durable artifact paths.
 **Do NOT use unsupported upstream shortcuts** in this port:
 - no `gt formula run`
 - no convoy formula DSL
-- no `gc sling --prompt`
+- no `{{binary}} sling --prompt`
 - no `--mail-back`
 
 Use only the primitives listed in this formula.
 
 **1. Prime and move to the repo root:**
 ```bash
-gc prime
-gc bd prime
+{{binary}} prime
+{{binary}} bd prime
 REPO_ROOT=$(git rev-parse --show-toplevel)
 cd "$REPO_ROOT"
 ```
@@ -142,7 +142,7 @@ description = """
 Fan out parallel PRD review using review task beads plus `mol-review-leg`.
 
 **Dispatch pattern for EVERY review leg in this workflow:**
-1. `gc bd create` a task bead with a detailed description
+1. `{{binary}} bd create` a task bead with a detailed description
 2. set metadata:
    - `coordinator=$COORDINATOR`
    - `review_id=$REVIEW_ID`
@@ -150,11 +150,11 @@ Fan out parallel PRD review using review task beads plus `mol-review-leg`.
    - `review_leg=<leg>`
 3. sling it to `$REVIEW_TARGET` with:
 ```bash
-gc sling "$REVIEW_TARGET" "$LEG_BEAD" --on {{review_formula}}
+{{binary}} sling "$REVIEW_TARGET" "$LEG_BEAD" --on {{review_formula}}
 ```
 4. record the bead ID in the round log
 5. wait for completion mail or poll the bead until it closes
-6. read the full report from the bead notes with `gc bd show <id>`
+6. read the full report from the bead notes with `{{binary}} bd show <id>`
 
 **Standard instructions each review bead must include:**
 - read `.prd-reviews/$REVIEW_ID/prd-draft.md`
@@ -428,10 +428,10 @@ cat ".designs/$REVIEW_ID/design-doc.md"
 ```
 
 **2. Create an owned convoy for the initiative:**
-Use `gc convoy create "<initiative-name>" --owned` to create the parent
+Use `{{binary}} convoy create "<initiative-name>" --owned` to create the parent
 container, then set its integration target with:
 ```bash
-gc convoy target <convoy-id> integration/<convoy-id>
+{{binary}} convoy target <convoy-id> integration/<convoy-id>
 ```
 If you still have older initiative epics, migrate them to convoys before
 using the convoy-only planning and refinery flow.
@@ -452,13 +452,13 @@ Prefer thin vertical slices over giant phases.
 
 After creating the task beads, add them to the convoy with:
 ```bash
-gc convoy add <convoy-id> <task-id>
+{{binary}} convoy add <convoy-id> <task-id>
 ```
 
-**4. Wire dependencies with `gc bd dep add`:**
+**4. Wire dependencies with `{{binary}} bd dep add`:**
 Model the actual "X needs Y" relationships. Verify with:
 ```bash
-gc bd blocked
+{{binary}} bd blocked
 ```
 
 **5. Record the created bead IDs in:**

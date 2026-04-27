@@ -23,7 +23,7 @@ Push conflicts are handled by fetch + rebase + retry (up to 3 times).
 | Tests fail | Fix them. Do not proceed with failures. |
 | Push conflict (3 retries exhausted) | Mail Witness, mark yourself stuck |
 | Blocked on external | Mail Witness, mark yourself stuck |
-| Context filling | `gc runtime request-restart` (blocks until controller kills you) |
+| Context filling | `{{binary}} runtime request-restart` (blocks until controller kills you) |
 | Unsure what to do | Mail Witness, don't guess |"""
 formula = "mol-polecat-commit"
 extends = ["mol-polecat-base"]
@@ -111,9 +111,9 @@ for attempt in 1 2 3; do
     fi
     if [ "$attempt" -eq 3 ]; then
         echo "Push failed after 3 attempts"
-        gc mail send <rig>/witness -s "HELP: Push conflict after 3 retries" \
+        {{binary}} mail send <rig>/witness -s "HELP: Push conflict after 3 retries" \
           -m "Issue: {{issue}}. Cannot push to {{base_branch}}."
-        gc runtime drain-ack
+        {{binary}} runtime drain-ack
         exit 1
     fi
     echo "Push failed (attempt $attempt), rebasing..."
@@ -139,11 +139,11 @@ bd close {{issue}}
 
 **5. Signal reconciler and exit.**
 ```bash
-gc runtime drain-ack
+{{binary}} runtime drain-ack
 exit
 ```
 
-`gc runtime drain-ack` tells the reconciler to kill this session. The
+`{{binary}} runtime drain-ack` tells the reconciler to kill this session. The
 reconciler only restarts you if the pool check command finds more work.
 You are GONE. Done means gone. There is no idle state.
 

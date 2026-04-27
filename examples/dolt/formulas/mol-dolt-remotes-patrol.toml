@@ -16,7 +16,7 @@ description = """
 Run the dolt sync command:
 
 ```bash
-gc dolt sync
+{{binary}} dolt sync
 ```
 
 This stages uncommitted changes, commits, and pushes each dolt database

@@ -52,11 +52,11 @@ Prime the workspace, inspect the assigned work, and understand the current bead
 metadata before doing anything destructive.
 
 ```bash
-gc prime
+{{binary}} prime
 bd prime
 bd show {{issue}}
 bd show {{issue}} --json | jq '.[0].metadata'
-gc mail inbox
+{{binary}} mail inbox
 ```
 """
 metadata = { "gc.continuation_group" = "main", "gc.session_affinity" = "require" }

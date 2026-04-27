@@ -1,8 +1,8 @@
 description = """
 Witness patrol loop. Poured as a root-only wisp on startup:
 
-  gc bd mol wisp mol-witness-patrol --root-only
-  gc bd update $WISP --assignee=$GC_AGENT
+  {{binary}} bd mol wisp mol-witness-patrol --root-only
+  {{binary}} bd update $WISP --assignee=$GC_AGENT
 
 Each wisp is ONE iteration: check for work, patrol, pour the next
 iteration. On crash, re-read the formula steps and determine where
@@ -74,7 +74,7 @@ RSS_MB=$((RSS / 1024))
 
 If RSS > 1500 MB or context feels heavy, request a restart:
 ```bash
-gc runtime request-restart
+{{binary}} runtime request-restart
 ```
 This sets `GC_RESTART_REQUESTED` metadata on the session and blocks
 forever. The controller will kill and restart the session on the next
@@ -83,7 +83,7 @@ the new session re-reads formula steps and resumes from context.
 
 **2. Check mail:**
 ```bash
-gc mail inbox
+{{binary}} mail inbox
 ```
 
 Handle each message type:
@@ -102,7 +102,7 @@ Classify by keyword, then act based on severity:
 
 For escalations:
 ```bash
-gc mail send mayor/ -s "ESCALATION: <polecat> needs help [HIGH|MED|LOW]" -m "<category>: <details>"
+{{binary}} mail send mayor/ -s "ESCALATION: <polecat> needs help [HIGH|MED|LOW]" -m "<category>: <details>"
 ```
 Do NOT escalate routine blocks or lifecycle messages — handle them yourself.
 Archive after handling.
@@ -138,16 +138,16 @@ This happens when:
 
 List beads assigned to agents in YOUR rig:
 ```bash
-gc bd list --status=in_progress --json --limit=0
-gc bd list --status=open --json --limit=0
+{{binary}} bd list --status=in_progress --json --limit=0
+{{binary}} bd list --status=open --json --limit=0
 ```
 
 Filter for beads assigned to polecat-pattern agents (e.g., `<rig>/polecats/<name>`).
 
 Cross-reference against running sessions and configured (desired) agents:
 ```bash
-gc session list --json   # running sessions
-gc config show           # configured agents (includes pool templates)
+{{binary}} session list --json   # running sessions
+{{binary}} config show           # configured agents (includes pool templates)
 ```
 
 For each bead with a polecat assignee:
@@ -169,7 +169,7 @@ Our job is to ensure work reaches the branch so it's schedulable.
 
 Read the bead metadata to find the worktree and branch:
 ```bash
-META=$(gc bd show <bead> --json | jq '.[0].metadata')
+META=$({{binary}} bd show <bead> --json | jq '.[0].metadata')
 WORKTREE=$(echo "$META" | jq -r '.worktree // empty')
 BRANCH=$(echo "$META" | jq -r '.branch // empty')
 ```
@@ -209,7 +209,7 @@ git commit -m "witness: salvage uncommitted work (<bead>)"
 Publish the work to make branch canonical:
 ```bash
 git push origin HEAD
-gc bd update <bead> --set-metadata branch=$BRANCH
+{{binary}} bd update <bead> --set-metadata branch=$BRANCH
 ```
 Skip to Step 3 (cleanup).
 
@@ -221,7 +221,7 @@ git add -A
 git commit -m "witness: salvage work from orphaned agent (<bead>)"
 BRANCH=$(git branch --show-current)
 git push origin HEAD
-gc bd update <bead> --set-metadata branch=$BRANCH
+{{binary}} bd update <bead> --set-metadata branch=$BRANCH
 ```
 Skip to Step 3 (cleanup).
 
@@ -243,8 +243,8 @@ git merge-base --is-ancestor origin/$BRANCH origin/main
 If the work is already on main:
 - **Close the bead** (work is done, don't re-dispatch):
 ```bash
-gc bd close <bead>
-gc mail send mayor/ -s "ORPHAN_CLOSED: <bead> already merged" \
+{{binary}} bd close <bead>
+{{binary}} mail send mayor/ -s "ORPHAN_CLOSED: <bead> already merged" \
   -m "Branch $BRANCH already on main. Closed instead of resetting."
 ```
 - Clean up worktree and skip to Step 4.
@@ -264,7 +264,7 @@ git worktree prune
 
 Close any orphaned workflow subtree, then return the bead to pool:
 ```bash
-gc workflow delete-source <bead> --apply && gc workflow reopen-source <bead>
+{{binary}} workflow delete-source <bead> --apply && {{binary}} workflow reopen-source <bead>
 ```
 
 **Step 4: Assess and notify.**
@@ -281,7 +281,7 @@ recovery is unexpected or concerning — use your judgment:
 
 When you do mail:
 ```bash
-gc mail send mayor/ -s "ORPHAN_RECOVERED: <bead>" \
+{{binary}} mail send mayor/ -s "ORPHAN_RECOVERED: <bead>" \
   -m "Bead <bead> was assigned to <agent> which is no longer active.
 Recovery: <what was done — branch pushed / metadata set / work salvaged / nothing to salvage>
 Branch: <branch name or 'none'>
@@ -291,7 +291,7 @@ Concern: <why this one warrants attention>"
 
 Mark recovered beads so spawn storm detection can track patterns:
 ```bash
-gc bd update <bead> --set-metadata recovered=true
+{{binary}} bd update <bead> --set-metadata recovered=true
 ```
 
 **Exit criteria:** All orphaned beads recovered, worktrees cleaned.
@@ -306,7 +306,7 @@ Ensure the refinery is processing work and the queue is healthy.
 
 **Step 1: Check work beads assigned to refinery:**
 ```bash
-gc bd list --assignee=<rig>/refinery --status=open --json
+{{binary}} bd list --assignee=<rig>/refinery --status=open --json
 ```
 
 These are work beads with `metadata.branch` and `metadata.target` that
@@ -326,12 +326,12 @@ wisp is stale, the refinery may be stuck.
 
 **Step 3: Nudge if needed:**
 ```bash
-gc nudge <rig>/refinery "Work beads waiting for merge. Please check queue."
+{{binary}} nudge <rig>/refinery "Work beads waiting for merge. Please check queue."
 ```
 
 **Step 4: Escalate if needed:**
 ```bash
-gc mail send mayor/ -s "QUEUE_HEALTH: <summary>" \
+{{binary}} mail send mayor/ -s "QUEUE_HEALTH: <summary>" \
   -m "Work bead IDs: <ids>
 Observation: <what you found>
 Recommendation: <what should happen>"
@@ -352,7 +352,7 @@ progressing. The controller can't detect this; it's a work-layer judgment.
 
 **Step 1: Find active polecat work beads:**
 ```bash
-gc bd list --status=in_progress --json --limit=0
+{{binary}} bd list --status=in_progress --json --limit=0
 ```
 Filter for beads assigned to polecat-pattern agents in YOUR rig.
 
@@ -375,7 +375,7 @@ Do NOT kill the agent directly. File a warrant bead and let the dog pool
 handle the shutdown dance (multi-stage interrogation with due process):
 
 ```bash
-gc bd create --type=warrant \
+{{binary}} bd create --type=warrant \
   --title="Stuck: <agent>" \
   --metadata '{"target":"<session-name>","reason":"No progress on <bead> for <duration>","requester":"witness"}' \
   --label=pool:dog
@@ -407,21 +407,21 @@ End of patrol cycle. Pour the next iteration, then wait or exit.
 
 If context feels heavy or RSS is high:
 ```bash
-gc runtime request-restart
+{{binary}} runtime request-restart
 ```
 This blocks forever. The controller restarts you. The next wisp
 is already assigned — the new session resumes from context.
 
 **2. Pour next iteration BEFORE burning:**
 ```bash
-NEXT=$(gc bd mol wisp mol-witness-patrol --root-only --json | jq -r '.new_epic_id')
-gc bd update "$NEXT" --assignee=$GC_AGENT
+NEXT=$({{binary}} bd mol wisp mol-witness-patrol --root-only --json | jq -r '.new_epic_id')
+{{binary}} bd update "$NEXT" --assignee=$GC_AGENT
 ```
 
 **3. Wait for activity (exponential backoff):**
 ```bash
-SEQ=$(gc events --seq)
-gc events --watch --type=bead.updated \
+SEQ=$({{binary}} events --seq)
+{{binary}} events --watch --type=bead.updated \
   --after=$SEQ --timeout {{event_timeout}}s
 ```
 
@@ -430,7 +430,7 @@ On timeout: double the timeout (cap 300s) and proceed anyway.
 
 **4. Burn this wisp:**
 ```bash
-gc bd mol burn <this-wisp-id> --force
+{{binary}} bd mol burn <this-wisp-id> --force
 ```
 
 The new wisp is ready. Re-read formula steps to start

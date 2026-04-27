@@ -29,7 +29,7 @@ This is infrastructure work. You:
 ## Safety
 
 Only removes databases matching known test/orphan patterns. Production databases
-are identified by rig registry via gc rig list --json and are never touched.
+are identified by rig registry via {{binary}} rig list --json and are never touched.
 External rigs are supported (not subject to local glob limitations).
 
 Read each step's description before acting — Config values override defaults."""
@@ -99,13 +99,13 @@ DROP DATABASE IF EXISTS `<orphan_name>`;
 ```
 
 **3. If orphan count > {{max_orphans_for_sql}}:**
-SQL cleanup would take too long. Use gc dolt cleanup instead:
+SQL cleanup would take too long. Use {{binary}} dolt cleanup instead:
 ```bash
-gc dolt cleanup --force --max <count>
+{{binary}} dolt cleanup --force --max <count>
 ```
 If even that fails, escalate:
 ```bash
-gc mail send mayor/ -s "ESCALATION: <count> orphan databases detected [HIGH]" \\
+{{binary}} mail send mayor/ -s "ESCALATION: <count> orphan databases detected [HIGH]" \\
   -m "Too many orphans for SQL cleanup. Recommend filesystem cleanup."
 ```
 
@@ -133,18 +133,18 @@ Generate summary and signal completion.
 **2. Warn if above threshold:**
 If orphan count >= {{warn_threshold}}:
 ```bash
-gc nudge deacon/ "WARN: <count> orphan databases detected"
+{{binary}} nudge deacon/ "WARN: <count> orphan databases detected"
 ```
 
 **3. Signal completion:**
 ```bash
-gc nudge deacon/ "DOG_DONE: stale-db — orphans: <count>, removed: <count>"
+{{binary}} nudge deacon/ "DOG_DONE: stale-db — orphans: <count>, removed: <count>"
 ```
 
 **4. Close work and exit:**
 ```bash
-gc bd close <work-bead> --reason "Stale DB scan complete"
-gc runtime drain-ack
+{{binary}} bd close <work-bead> --reason "Stale DB scan complete"
+{{binary}} runtime drain-ack
 exit
 ```
 

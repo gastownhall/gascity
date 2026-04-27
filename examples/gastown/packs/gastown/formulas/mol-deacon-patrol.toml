@@ -1,8 +1,8 @@
 description = """
 Deacon patrol loop. Poured as a root-only wisp on startup:
 
-  gc bd mol wisp mol-deacon-patrol --root-only
-  gc bd update $WISP --assignee=$GC_AGENT
+  {{binary}} bd mol wisp mol-deacon-patrol --root-only
+  {{binary}} bd update $WISP --assignee=$GC_AGENT
 
 Each wisp is ONE iteration: check inbox, run town-wide coordination
 tasks, pour the next iteration. On crash, re-read the formula steps
@@ -24,7 +24,7 @@ can't or shouldn't do.
    (Not "are they running" — that's the controller's job.)
 2. **Utility agent health** — detect stuck dogs, dispatch shutdown dance.
 3. **Orphan process cleanup** — kill leaked claude/node subagent processes.
-4. **System diagnostics** — run `gc doctor`, act on findings.
+4. **System diagnostics** — run `{{binary}} doctor`, act on findings.
 
 Mechanical tasks (gate evaluation, cross-rig deps, orphan bead sweeps,
 wisp compaction) are handled by exec orders in the maintenance
@@ -65,7 +65,7 @@ RSS_MB=$((RSS / 1024))
 
 If RSS > 1500 MB or context feels heavy, request a restart:
 ```bash
-gc runtime request-restart
+{{binary}} runtime request-restart
 ```
 This sets `GC_RESTART_REQUESTED` metadata on the session and blocks
 forever. The controller will kill and restart the session on the next
@@ -74,7 +74,7 @@ the new session re-reads formula steps and resumes from context.
 
 **2. Check mail:**
 ```bash
-gc mail inbox
+{{binary}} mail inbox
 ```
 
 Handle each message type:
@@ -82,7 +82,7 @@ Handle each message type:
 **HELP / Escalation:**
 Assess the request. Can you help directly? If not, escalate:
 ```bash
-gc mail send mayor/ -s "ESCALATION: <agent> needs help" -m "<details>"
+{{binary}} mail send mayor/ -s "ESCALATION: <agent> needs help" -m "<details>"
 ```
 Archive after handling.
 
@@ -159,7 +159,7 @@ something is stuck. This is exactly why an LLM does it, not Go code.
 
 **For stuck coordination agents, file a warrant:**
 ```bash
-gc bd create --type=warrant \
+{{binary}} bd create --type=warrant \
   --title="Stuck: <rig>/<role>" \
   --metadata '{"target":"<session>","reason":"<reason>","requester":"deacon"}' \
   --set-metadata gc.routed_to=dog
@@ -186,7 +186,7 @@ wisp timestamps.
 
 **Step 1: Find active utility agent work:**
 ```bash
-gc bd list --status=in_progress --metadata-field gc.routed_to=dog --json --limit=0
+{{binary}} bd list --status=in_progress --metadata-field gc.routed_to=dog --json --limit=0
 ```
 
 **Step 2: For each, assess progress:**
@@ -199,7 +199,7 @@ No hardcoded thresholds. Use judgment.
 
 **Step 3: For stuck utility agents, file a warrant:**
 ```bash
-gc bd create --type=warrant \
+{{binary}} bd create --type=warrant \
   --title="Stuck dog: <agent>" \
   --metadata '{"target":"<session>","reason":"<reason>","requester":"deacon"}' \
   --set-metadata gc.routed_to=dog
@@ -216,7 +216,7 @@ id = "dolt-health"
 title = "Run Dolt data-plane health check"
 needs = ["utility-agent-health"]
 description = """
-Run `gc dolt health --json` to inspect the Dolt data plane and flag anomalies.
+Run `{{binary}} dolt health --json` to inspect the Dolt data plane and flag anomalies.
 
 This step surfaces problems that individual patrol steps won't catch:
 commit bloat (compactor dog may have failed), stale backups (backup dog
@@ -224,7 +224,7 @@ may have failed), orphan databases, and zombie Dolt server processes.
 
 **Step 1: Run the health check**
 ```bash
-gc dolt health --json
+{{binary}} dolt health --json
 ```
 
 Parse the JSON output (HealthReport schema):
@@ -256,8 +256,8 @@ are wedged (the latter is what first prompted this check to exist).
 process is listening on the port, or a process is listening but not
 answering SQL (wedged goroutines, migration lock, saturated pool).
 ```bash
-gc mail send mayor/ -s "ESCALATION: Dolt server unreachable [CRITICAL]" \\
-  -m "gc dolt health reports server.reachable=false"
+{{binary}} mail send mayor/ -s "ESCALATION: Dolt server unreachable [CRITICAL]" \\
+  -m "{{binary}} dolt health reports server.reachable=false"
 ```
 
 **Commit bloat (commits > 50k in any DB):**
@@ -265,14 +265,14 @@ The compactor dog (`mol-dog-compactor`) may have failed. Log for awareness.
 If the compactor order is configured, it will self-dispatch. Otherwise
 nudge the dog pool:
 ```bash
-gc nudge dog/ "Compactor needed: <db_name> has <count> commits"
+{{binary}} nudge dog/ "Compactor needed: <db_name> has <count> commits"
 ```
 
 **Stale backups:**
 The backup dog (`mol-dog-backup`) may have failed. Same pattern — log and
 nudge if order hasn't self-healed:
 ```bash
-gc nudge dog/ "Backup needed: dolt backup is <age> old"
+{{binary}} nudge dog/ "Backup needed: dolt backup is <age> old"
 ```
 
 **Zombie processes:**
@@ -284,7 +284,7 @@ kill <zombie_pid>
 **Orphan DBs:**
 Run cleanup:
 ```bash
-gc dolt cleanup
+{{binary}} dolt cleanup
 ```
 If orphan count exceeds safety limit, escalate to mayor.
 
@@ -298,10 +298,10 @@ id = "system-health"
 title = "Run system diagnostics"
 needs = ["dolt-health"]
 description = """
-Run `gc doctor` for a quick workspace health check.
+Run `{{binary}} doctor` for a quick workspace health check.
 
 ```bash
-gc doctor
+{{binary}} doctor
 ```
 
 **For simple findings:** Act directly (e.g., stale lock files, temp
@@ -309,7 +309,7 @@ directory cleanup).
 
 **For complex findings:** Escalate to mayor with context:
 ```bash
-gc mail send mayor/ -s "DOCTOR: <finding>" -m "<details>"
+{{binary}} mail send mayor/ -s "DOCTOR: <finding>" -m "<details>"
 ```
 
 Close this step after check."""
@@ -327,27 +327,27 @@ End of patrol cycle. Pour the next iteration, then wait or exit.
 
 If context feels heavy or RSS is high:
 ```bash
-gc runtime request-restart
+{{binary}} runtime request-restart
 ```
 This blocks forever. The controller restarts you. The next wisp
 is already assigned — the new session resumes from context.
 
 **2. Quick inbox check (end-of-cycle hygiene):**
 ```bash
-gc mail inbox
+{{binary}} mail inbox
 ```
 Handle any urgent messages that arrived during patrol. Archive the rest.
 
 **3. Pour next iteration BEFORE burning:**
 ```bash
-NEXT=$(gc bd mol wisp mol-deacon-patrol --root-only --json | jq -r '.new_epic_id')
-gc bd update "$NEXT" --assignee=$GC_AGENT
+NEXT=$({{binary}} bd mol wisp mol-deacon-patrol --root-only --json | jq -r '.new_epic_id')
+{{binary}} bd update "$NEXT" --assignee=$GC_AGENT
 ```
 
 **4. Wait for activity (exponential backoff):**
 ```bash
-SEQ=$(gc events --seq)
-gc events --watch --type=bead.updated \
+SEQ=$({{binary}} events --seq)
+{{binary}} events --watch --type=bead.updated \
   --after=$SEQ --timeout {{event_timeout}}s
 ```
 
@@ -356,7 +356,7 @@ On timeout: double the timeout (cap 300s) and proceed anyway.
 
 **5. Burn this wisp:**
 ```bash
-gc bd mol burn <this-wisp-id> --force
+{{binary}} bd mol burn <this-wisp-id> --force
 ```
 
 The new wisp is ready. Re-read formula steps to start

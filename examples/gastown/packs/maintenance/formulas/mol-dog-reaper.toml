@@ -248,19 +248,19 @@ Generate summary and signal completion.
 
 **2. If anomalies were found, escalate:**
 ```bash
-gc mail send mayor/ -s "ESCALATION: Reaper anomalies detected [MEDIUM]" \
+{{binary}} mail send mayor/ -s "ESCALATION: Reaper anomalies detected [MEDIUM]" \
   -m "<anomaly details>"
 ```
 
 **3. Signal completion:**
 ```bash
-gc nudge deacon/ "DOG_DONE: reaper — reaped:<count>, purged:<count>, mail:<count>, closed:<count>"
+{{binary}} nudge deacon/ "DOG_DONE: reaper — reaped:<count>, purged:<count>, mail:<count>, closed:<count>"
 ```
 
 **4. Close work and exit:**
 ```bash
-gc bd close <work-bead> --reason "Reaper cycle complete"
-gc runtime drain-ack
+{{binary}} bd close <work-bead> --reason "Reaper cycle complete"
+{{binary}} runtime drain-ack
 exit
 ```
 

@@ -30,14 +30,14 @@ Prime your environment and read the assignment bead carefully.
 
 **1. Prime:**
 ```bash
-gc prime
-gc bd prime
+{{binary}} prime
+{{binary}} bd prime
 ```
 
 **2. Read the bead and metadata:**
 ```bash
-gc bd show {{issue}}
-gc bd show {{issue}} --json | jq '.[0].metadata'
+{{binary}} bd show {{issue}}
+{{binary}} bd show {{issue}} --json | jq '.[0].metadata'
 ```
 
 **Expected metadata:**
@@ -64,7 +64,7 @@ session exits.
 
 Suggested pattern:
 ```bash
-gc bd update {{issue}} --notes "$(cat <<'EOF'
+{{binary}} bd update {{issue}} --notes "$(cat <<'EOF'
 # <report title>
 
 ## Summary
@@ -93,15 +93,15 @@ After the report is stored on the bead, notify the coordinator and close out.
 
 **1. Read metadata for the mail header:**
 ```bash
-COORD=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.coordinator // empty')
-REVIEW_ID=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.review_id // empty')
-PHASE=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.review_phase // empty')
-LEG=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.review_leg // empty')
+COORD=$({{binary}} bd show {{issue}} --json | jq -r '.[0].metadata.coordinator // empty')
+REVIEW_ID=$({{binary}} bd show {{issue}} --json | jq -r '.[0].metadata.review_id // empty')
+PHASE=$({{binary}} bd show {{issue}} --json | jq -r '.[0].metadata.review_phase // empty')
+LEG=$({{binary}} bd show {{issue}} --json | jq -r '.[0].metadata.review_leg // empty')
 ```
 
 **2. If `COORD` is present, mail completion:**
 ```bash
-gc mail send "$COORD" -s "IDEA_REVIEW $REVIEW_ID $PHASE $LEG complete" -m "$(cat <<EOF
+{{binary}} mail send "$COORD" -s "IDEA_REVIEW $REVIEW_ID $PHASE $LEG complete" -m "$(cat <<EOF
 Review leg complete.
 
 Bead: {{issue}}
@@ -115,8 +115,8 @@ EOF
 
 **3. Close the bead and drain:**
 ```bash
-gc bd update {{issue}} --status=closed
-gc runtime drain-ack
+{{binary}} bd update {{issue}} --status=closed
+{{binary}} runtime drain-ack
 ```
 
 Do not overwrite the bead notes with a short "done" summary. The notes are the

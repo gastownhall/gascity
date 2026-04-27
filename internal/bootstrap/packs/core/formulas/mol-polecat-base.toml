@@ -58,7 +58,7 @@ Initialize your session and understand your assignment.
 
 **1. Prime your environment:**
 ```bash
-gc prime                    # Load role context
+{{binary}} prime                    # Load role context
 bd prime                    # Load beads context
 ```
 
@@ -85,9 +85,9 @@ You will use it in workspace-setup instead of creating a new one.
 
 **4. Check inbox for additional context:**
 ```bash
-gc mail inbox
+{{binary}} mail inbox
 # Read any HANDOFF or assignment messages, then archive after absorbing context
-# gc mail read <id> → process → gc mail archive <id>
+# {{binary}} mail read <id> → process → {{binary}} mail archive <id>
 ```
 
 **5. Understand the requirements:**
@@ -99,7 +99,7 @@ gc mail inbox
 
 If blocked or unclear, mail Witness:
 ```bash
-gc mail send <rig>/witness -s "HELP: Unclear requirements" -m "Issue: {{issue}}
+{{binary}} mail send <rig>/witness -s "HELP: Unclear requirements" -m "Issue: {{issue}}
 Question: <what you need clarified>"
 ```
 
@@ -147,7 +147,7 @@ FORBIDDEN: Pushing to {{base_branch}}. FORBIDDEN: Fixing pre-existing failures.
 
 ```bash
 bd create --title "Pre-existing failure: <description>" --type bug --priority 1
-gc mail send <rig>/witness -s "NOTICE: {{base_branch}} has failing pre-flights" \
+{{binary}} mail send <rig>/witness -s "NOTICE: {{base_branch}} has failing pre-flights" \
   -m "Filed: <bead-id>. Proceeding with {{issue}}."
 ```
 
@@ -186,14 +186,14 @@ Do NOT fix unrelated issues in this branch.
 
 **If stuck (>15 minutes):**
 ```bash
-gc mail send <rig>/witness -s "HELP: Stuck on implementation" -m "Issue: {{issue}}
+{{binary}} mail send <rig>/witness -s "HELP: Stuck on implementation" -m "Issue: {{issue}}
 Problem: <what's blocking you>
 Tried: <what you've attempted>"
 ```
 
 **If context filling up:**
 ```bash
-gc runtime request-restart
+{{binary}} runtime request-restart
 ```
 This blocks until the controller kills your session. The next session
 resumes from context (re-reads formula steps, checks git/bead state).

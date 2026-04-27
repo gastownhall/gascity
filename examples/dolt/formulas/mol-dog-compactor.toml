@@ -156,7 +156,7 @@ across all databases.
 
 If any check fails, escalate:
 ```bash
-gc mail send mayor/ -s "ESCALATION: Compaction integrity check failed [CRITICAL]" \
+{{binary}} mail send mayor/ -s "ESCALATION: Compaction integrity check failed [CRITICAL]" \
   -m "Database: <db>, table: <table>, expected: <n>, got: <m>"
 ```
 
@@ -178,13 +178,13 @@ Generate summary of compaction cycle.
 
 **2. Signal completion:**
 ```bash
-gc nudge deacon/ "DOG_DONE: compactor — compacted <count> databases, mode: {{mode}}"
+{{binary}} nudge deacon/ "DOG_DONE: compactor — compacted <count> databases, mode: {{mode}}"
 ```
 
 **3. Close work and exit:**
 ```bash
-gc bd close <work-bead> --reason "Compaction cycle complete"
-gc runtime drain-ack
+{{binary}} bd close <work-bead> --reason "Compaction cycle complete"
+{{binary}} runtime drain-ack
 exit
 ```
 

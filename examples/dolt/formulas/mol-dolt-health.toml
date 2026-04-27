@@ -16,13 +16,13 @@ description = """
 Check dolt server status and restart if it has crashed:
 
 ```bash
-gc dolt status
+{{binary}} dolt status
 ```
 
 If the server is not running:
 
 ```bash
-gc dolt start
+{{binary}} dolt start
 ```
 
 Close this step after the health check completes (even if no restart was needed)."""

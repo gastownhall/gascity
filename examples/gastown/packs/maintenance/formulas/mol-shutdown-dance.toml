@@ -4,7 +4,7 @@ Shutdown dance — due process for stuck agents.
 Dispatched by filing a warrant bead with `--label=pool:dog`:
 
 ```bash
-gc bd create --type=warrant \
+{{binary}} bd create --type=warrant \
   --title="Stuck: <agent>" \
   --metadata '{"target":"<session>","reason":"<reason>","requester":"<who>"}' \
   --label=pool:dog
@@ -73,23 +73,23 @@ Entry point. Read the warrant metadata from your wisp.
 
 **1. Read warrant details:**
 ```bash
-gc bd show <wisp-id> --json | jq '.[0].metadata'
+{{binary}} bd show <wisp-id> --json | jq '.[0].metadata'
 ```
 Extract: `target`, `reason`, `requester`, `warrant_id`.
 
 **2. Verify the warrant bead exists and is open:**
 ```bash
-gc bd show {{warrant_id}} --json | jq '.[0].status'
+{{binary}} bd show {{warrant_id}} --json | jq '.[0].status'
 ```
 If warrant is already closed (another dog handled it, or requester
 cancelled): close this step, burn the wisp, exit.
 
 **3. Check if target session is alive:**
 ```bash
-gc session peek {{target}} 1
+{{binary}} session peek {{target}} 1
 ```
 If target session doesn't exist (already dead):
-- Close warrant: `gc bd close {{warrant_id}} --reason "Target already dead"`
+- Close warrant: `{{binary}} bd close {{warrant_id}} --reason "Target already dead"`
 - Send DOG_DONE mail to requester
 - Burn this wisp, exit
 
@@ -104,7 +104,7 @@ First attempt to contact the stuck agent. Give it 60 seconds.
 
 **1. Send health check via nudge:**
 ```bash
-gc nudge {{target}} "[DOG] HEALTH CHECK: Respond ALIVE within 60s or face termination.
+{{binary}} nudge {{target}} "[DOG] HEALTH CHECK: Respond ALIVE within 60s or face termination.
 Warrant: {{warrant_id}}
 Reason: {{reason}}
 Filed by: {{requester}}
@@ -118,7 +118,7 @@ sleep 60
 
 **3. Check for response:**
 ```bash
-gc session peek {{target}} 50
+{{binary}} session peek {{target}} 50
 ```
 
 Look for the ALIVE keyword in the output after your health check message.
@@ -127,8 +127,8 @@ generated). Use judgment — explicit "ALIVE" is definitive, but active
 output also indicates the agent is functioning.
 
 **4. If ALIVE or active:**
-- Close warrant: `gc bd close {{warrant_id}} --reason "Session responded at attempt 1"`
-- Send mail: `gc mail send {{requester}}/ -s "PARDON: {{target}}" -m "Responded after attempt 1"`
+- Close warrant: `{{binary}} bd close {{warrant_id}} --reason "Session responded at attempt 1"`
+- Send mail: `{{binary}} mail send {{requester}}/ -s "PARDON: {{target}}" -m "Responded after attempt 1"`
 - Burn wisp, exit
 
 **5. If no response:** close this step, proceed to interrogation-2."""
@@ -143,7 +143,7 @@ got no response.
 
 **1. Send health check:**
 ```bash
-gc nudge {{target}} "[DOG] HEALTH CHECK: Respond ALIVE within 120s or face termination.
+{{binary}} nudge {{target}} "[DOG] HEALTH CHECK: Respond ALIVE within 120s or face termination.
 Warrant: {{warrant_id}}
 Reason: {{reason}}
 Filed by: {{requester}}
@@ -157,14 +157,14 @@ sleep 120
 
 **3. Check for response:**
 ```bash
-gc session peek {{target}} 50
+{{binary}} session peek {{target}} 50
 ```
 
 Same evaluation as attempt 1: ALIVE keyword or active output.
 
 **4. If ALIVE or active:**
-- Close warrant: `gc bd close {{warrant_id}} --reason "Session responded at attempt 2"`
-- Send mail: `gc mail send {{requester}}/ -s "PARDON: {{target}}" -m "Responded after attempt 2"`
+- Close warrant: `{{binary}} bd close {{warrant_id}} --reason "Session responded at attempt 2"`
+- Send mail: `{{binary}} mail send {{requester}}/ -s "PARDON: {{target}}" -m "Responded after attempt 2"`
 - Burn wisp, exit
 
 **5. If no response:** close this step, proceed to final interrogation."""
@@ -179,7 +179,7 @@ respond in 4 minutes after 3 attempts, it's genuinely stuck.
 
 **1. Send health check:**
 ```bash
-gc nudge {{target}} "[DOG] HEALTH CHECK: FINAL WARNING. Respond ALIVE within 240s.
+{{binary}} nudge {{target}} "[DOG] HEALTH CHECK: FINAL WARNING. Respond ALIVE within 240s.
 Warrant: {{warrant_id}}
 Reason: {{reason}}
 Filed by: {{requester}}
@@ -193,12 +193,12 @@ sleep 240
 
 **3. Check for response:**
 ```bash
-gc session peek {{target}} 50
+{{binary}} session peek {{target}} 50
 ```
 
 **4. If ALIVE or active:**
-- Close warrant: `gc bd close {{warrant_id}} --reason "Session responded at attempt 3"`
-- Send mail: `gc mail send {{requester}}/ -s "PARDON: {{target}}" -m "Responded after attempt 3 (close call)"`
+- Close warrant: `{{binary}} bd close {{warrant_id}} --reason "Session responded at attempt 3"`
+- Send mail: `{{binary}} mail send {{requester}}/ -s "PARDON: {{target}}" -m "Responded after attempt 3 (close call)"`
 - Burn wisp, exit
 
 **5. If no response:** close this step, proceed to execute."""
@@ -212,13 +212,13 @@ Three attempts, no response. Execute the warrant.
 
 **1. Capture final pane output for forensics:**
 ```bash
-gc session peek {{target}} 100
+{{binary}} session peek {{target}} 100
 ```
 Save this output — it's the last evidence of what the agent was doing.
 
 **2. Kill the session:**
 ```bash
-gc session kill {{target}}
+{{binary}} session kill {{target}}
 ```
 This kills the session directly. The reconciler will see the agent
 has no running session and restart it on the next reconcile tick.
@@ -226,13 +226,13 @@ has no running session and restart it on the next reconcile tick.
 If the kill doesn't take effect (session already dead or provider
 error), escalate:
 ```bash
-gc mail send {{requester}}/ -s "EXECUTE_FAILED: {{target}}" \
+{{binary}} mail send {{requester}}/ -s "EXECUTE_FAILED: {{target}}" \
   -m "session kill didn't take effect. Agent may need manual intervention."
 ```
 
 **3. Record execution on the warrant:**
 ```bash
-gc bd close {{warrant_id}} --reason "Executed after 3 failed attempts (420s total)"
+{{binary}} bd close {{warrant_id}} --reason "Executed after 3 failed attempts (420s total)"
 ```
 
 Close this step, proceed to epitaph."""
@@ -246,7 +246,7 @@ Final step. Create audit record and exit.
 
 **1. Send DOG_DONE notification to requester:**
 ```bash
-gc mail send {{requester}}/ -s "DOG_DONE: {{target}} warrant executed" \
+{{binary}} mail send {{requester}}/ -s "DOG_DONE: {{target}} warrant executed" \
   -m "Warrant: {{warrant_id}}
 Target: {{target}}
 Reason: {{reason}}
@@ -257,12 +257,12 @@ Action: session killed, reconciler will restart"
 **2. Close work bead (if separate from warrant):**
 If your assigned work bead is different from the warrant bead, close it:
 ```bash
-gc bd close <work-bead> --reason "Shutdown dance complete: {{target}} executed"
+{{binary}} bd close <work-bead> --reason "Shutdown dance complete: {{target}} executed"
 ```
 
 **3. Exit:**
 ```bash
-gc runtime drain-ack
+{{binary}} runtime drain-ack
 exit
 ```
 
