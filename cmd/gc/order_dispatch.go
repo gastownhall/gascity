@@ -174,10 +174,14 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		}
 		baseLastRunFn := orders.LastRunAcrossStores(storesForGate...)
 		var lastRunErr error
+		var lastRunFromCache bool
 		lastRunFn := func(orderName string) (time.Time, error) {
-			last, err := m.cachedLastRun(orderName, storeKeysForGate, baseLastRunFn)
+			last, fromCache, err := m.cachedLastRun(orderName, storeKeysForGate, baseLastRunFn)
 			if err != nil {
 				lastRunErr = err
+			}
+			if fromCache {
+				lastRunFromCache = true
 			}
 			return last, err
 		}
@@ -200,6 +204,23 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		}
 		if !result.Due {
 			continue
+		}
+		if lastRunFromCache && orderTriggerUsesLastRun(a) {
+			refreshedLastRun, err := baseLastRunFn(a.ScopedName())
+			if err != nil {
+				logDispatchError(m.stderr, "gc: order dispatch: refreshing last run for %s: %v", a.ScopedName(), err)
+				continue
+			}
+			if refreshedLastRun.After(result.LastRun) {
+				m.rememberLastRun(a.ScopedName(), storeKeysForGate, refreshedLastRun)
+				refreshedLastRunFn := func(string) (time.Time, error) {
+					return refreshedLastRun, nil
+				}
+				result = orders.CheckTriggerWithOptions(a, now, refreshedLastRunFn, m.ep, cursorFn, triggerOpts)
+				if !result.Due {
+					continue
+				}
+			}
 		}
 
 		// Skip dispatch if previous work hasn't been processed yet.
@@ -249,23 +270,23 @@ func (m *memoryOrderDispatcher) legacyCityStoreForTarget(cityPath string, target
 	return store, true
 }
 
-func (m *memoryOrderDispatcher) cachedLastRun(orderName string, storeKeys []string, read orders.LastRunFunc) (time.Time, error) {
+func (m *memoryOrderDispatcher) cachedLastRun(orderName string, storeKeys []string, read orders.LastRunFunc) (time.Time, bool, error) {
 	key := orderHistoryCacheKey(orderName, storeKeys)
 	m.cacheMu.Lock()
 	if m.lastRunCache != nil {
 		if last, ok := m.lastRunCache[key]; ok {
 			m.cacheMu.Unlock()
-			return last, nil
+			return last, true, nil
 		}
 	}
 	m.cacheMu.Unlock()
 
 	last, err := read(orderName)
 	if err != nil {
-		return time.Time{}, err
+		return time.Time{}, false, err
 	}
 	m.rememberLastRun(orderName, storeKeys, last)
-	return last, nil
+	return last, false, nil
 }
 
 func (m *memoryOrderDispatcher) rememberLastRun(orderName string, storeKeys []string, last time.Time) {
@@ -282,6 +303,10 @@ func (m *memoryOrderDispatcher) rememberLastRun(orderName string, storeKeys []st
 
 func orderHistoryCacheKey(orderName string, storeKeys []string) string {
 	return orderName + "\x00" + strings.Join(storeKeys, "\x00")
+}
+
+func orderTriggerUsesLastRun(a orders.Order) bool {
+	return a.Trigger == "cooldown" || a.Trigger == "cron"
 }
 
 // dispatchOne runs a single order dispatch in its own goroutine.

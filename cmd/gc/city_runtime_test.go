@@ -2486,6 +2486,7 @@ func TestCityRuntimeRunStopsBeforeStartedWhenCanceledDuringStartup(t *testing.T)
 	sp := runtime.NewFake()
 	var stdout bytes.Buffer
 	var started bool
+	od := &recordingOrderDispatcher{}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cr := newCityRuntime(CityRuntimeParams{
@@ -2504,6 +2505,7 @@ func TestCityRuntimeRunStopsBeforeStartedWhenCanceledDuringStartup(t *testing.T)
 		Stdout:    &stdout,
 		Stderr:    io.Discard,
 	})
+	cr.od = od
 
 	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = beads.NewMemStore()
@@ -2513,6 +2515,9 @@ func TestCityRuntimeRunStopsBeforeStartedWhenCanceledDuringStartup(t *testing.T)
 
 	if started {
 		t.Fatal("OnStarted called after cancellation")
+	}
+	if od.called.Load() {
+		t.Fatal("order dispatcher called before startup completed")
 	}
 	if strings.Contains(stdout.String(), "City started.") {
 		t.Fatalf("stdout = %q, want no started banner after cancellation", stdout.String())

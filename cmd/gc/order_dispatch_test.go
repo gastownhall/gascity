@@ -48,6 +48,12 @@ type countingListStore struct {
 	includeClosedLists int
 }
 
+type createdAtOverrideStore struct {
+	beads.Store
+
+	createdAt map[string]time.Time
+}
+
 func (s selectiveUpdateFailStore) Update(id string, opts beads.UpdateOpts) error {
 	for _, label := range opts.Labels {
 		if strings.HasPrefix(label, "order-run:") {
@@ -66,6 +72,34 @@ func (s *countingListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 
 func (s *countingListStore) reset() {
 	s.includeClosedLists = 0
+}
+
+func (s *createdAtOverrideStore) Create(b beads.Bead) (beads.Bead, error) {
+	created, err := s.Store.Create(b)
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	if !b.CreatedAt.IsZero() {
+		if s.createdAt == nil {
+			s.createdAt = make(map[string]time.Time)
+		}
+		s.createdAt[created.ID] = b.CreatedAt
+		created.CreatedAt = b.CreatedAt
+	}
+	return created, nil
+}
+
+func (s *createdAtOverrideStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	results, err := s.Store.List(query)
+	if err != nil {
+		return nil, err
+	}
+	for i := range results {
+		if created, ok := s.createdAt[results[i].ID]; ok {
+			results[i].CreatedAt = created
+		}
+	}
+	return results, nil
 }
 
 func TestOrderDispatcherNil(t *testing.T) {
@@ -255,6 +289,89 @@ func TestOrderDispatchCachesLastRunBetweenDispatches(t *testing.T) {
 	all, _ := store.ListOpen()
 	if len(all) != 1 {
 		t.Errorf("expected only seed bead, got %d", len(all))
+	}
+}
+
+func TestOrderDispatchRefreshesCachedLastRunBeforeDueDispatch(t *testing.T) {
+	baseStore := &createdAtOverrideStore{Store: beads.NewMemStore()}
+	store := &countingListStore{Store: baseStore}
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+
+	if _, err := store.Create(beads.Bead{
+		Title:     "recent run",
+		Labels:    []string{"order-run:test-order"},
+		CreatedAt: now.Add(-30 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	aa := []orders.Order{{
+		Name:     "test-order",
+		Trigger:  "cooldown",
+		Interval: "1h",
+		Exec:     "true",
+	}}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, successfulExec, nil)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	cityPath := t.TempDir()
+	ad.dispatch(context.Background(), cityPath, now)
+	if store.includeClosedLists == 0 {
+		t.Fatal("first dispatch did not read persisted order history")
+	}
+
+	store.reset()
+	if _, err := store.Create(beads.Bead{
+		Title:     "manual run",
+		Labels:    []string{"order-run:test-order"},
+		CreatedAt: now.Add(20 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ad.dispatch(context.Background(), cityPath, now.Add(31*time.Minute))
+	if store.includeClosedLists == 0 {
+		t.Fatal("due cached dispatch did not refresh persisted order history")
+	}
+
+	all := trackingBeads(t, store, "order-run:test-order")
+	if len(all) != 2 {
+		t.Fatalf("order-run beads = %d, want only seed plus manual run", len(all))
+	}
+}
+
+func TestOrderDispatchCachesAutoTrackingBeadCreatedAt(t *testing.T) {
+	store := &countingListStore{Store: beads.NewMemStore()}
+	now := time.Now()
+
+	aa := []orders.Order{{
+		Name:     "test-order",
+		Trigger:  "cooldown",
+		Interval: "1h",
+		Exec:     "true",
+	}}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, successfulExec, nil)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	cityPath := t.TempDir()
+	ad.dispatch(context.Background(), cityPath, now)
+	all := trackingBeads(t, store, "order-run:test-order")
+	if len(all) != 1 {
+		t.Fatalf("order-run beads after first dispatch = %d, want 1", len(all))
+	}
+
+	store.reset()
+	ad.dispatch(context.Background(), cityPath, now.Add(time.Second))
+	if store.includeClosedLists != 0 {
+		t.Fatalf("second dispatch performed %d closed-history reads, want cached tracking bead timestamp", store.includeClosedLists)
+	}
+	all = trackingBeads(t, store, "order-run:test-order")
+	if len(all) != 1 {
+		t.Fatalf("order-run beads after second dispatch = %d, want cached cooldown suppression", len(all))
 	}
 }
 
