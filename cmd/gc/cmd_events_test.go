@@ -355,19 +355,25 @@ func TestDoEventsFallsBackToLocalCityEventsForExplicitLocalSupervisorAPITranspor
 	}
 }
 
-func TestDoEventsReadsLocalCityEventsForUntypedCityEventType(t *testing.T) {
+func TestDoEventsReadsCustomCityEventTypesThroughAPI(t *testing.T) {
 	cityDir := t.TempDir()
-	rec := newTestProvider(t, filepath.Join(cityDir, ".gc"))
-	rec.Record(events.Event{
-		Type:    "app.custom",
+	items := []cliWireEvent{{
 		Actor:   "human",
+		Seq:     1,
 		Subject: "fixture",
+		Ts:      time.Unix(1700000000, 0).UTC(),
+		Type:    "app.custom",
 		Message: "custom event",
-	})
+		Payload: json.RawMessage(`{"source":"test"}`),
+	}}
 
 	server := newEventsTestServer(t, testEventRoutes{
-		cityEvents: func(_ http.ResponseWriter, _ *http.Request) {
-			t.Fatalf("typed API should not be queried for unregistered city event types")
+		cityEvents: func(w http.ResponseWriter, r *http.Request) {
+			if got := r.URL.Query().Get("type"); got != "app.custom" {
+				t.Fatalf("type query = %q, want app.custom", got)
+			}
+			w.Header().Set("X-GC-Index", "1")
+			writeJSONResponse(t, w, cityEventsListResponse(t, items))
 		},
 	})
 	defer server.Close()
@@ -387,7 +393,10 @@ func TestDoEventsReadsLocalCityEventsForUntypedCityEventType(t *testing.T) {
 		t.Fatalf("unmarshal stdout: %v; output=%s", err, stdout.String())
 	}
 	if got.Type != "app.custom" || got.Subject != "fixture" || got.Message != "custom event" {
-		t.Fatalf("local custom event = %+v", got)
+		t.Fatalf("custom event = %+v", got)
+	}
+	if string(got.Payload) != `{"source":"test"}` {
+		t.Fatalf("custom event payload = %s", got.Payload)
 	}
 }
 

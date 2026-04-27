@@ -59,10 +59,10 @@ func TestEventListFilterByType(t *testing.T) {
 	}
 }
 
-func TestEventListFiltersUnregisteredEventTypes(t *testing.T) {
+func TestEventListIncludesCustomEventTypes(t *testing.T) {
 	state := newFakeState(t)
 	ep := state.eventProv.(*events.Fake)
-	ep.Record(events.Event{Type: "custom.untyped", Actor: "tester"})
+	ep.Record(events.Event{Type: "custom.untyped", Actor: "tester", Payload: json.RawMessage(`{"source":"test"}`)})
 	ep.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
 	h := newTestCityHandler(t, state)
 
@@ -81,11 +81,13 @@ func TestEventListFiltersUnregisteredEventTypes(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp.Total != 1 || len(resp.Items) != 1 {
-		t.Fatalf("response = %+v, want only registered event", resp)
+	if resp.Total != 2 || len(resp.Items) != 2 {
+		t.Fatalf("response = %+v, want custom and registered events", resp)
 	}
-	if resp.Items[0]["type"] != events.SessionWoke {
-		t.Fatalf("event type = %v, want %s", resp.Items[0]["type"], events.SessionWoke)
+	custom := eventListItemByType(t, resp.Items, "custom.untyped")
+	payload := assertJSONPayloadObject(t, custom["payload"])
+	if payload["source"] != "test" {
+		t.Fatalf("custom payload = %v, want source=test", payload)
 	}
 }
 

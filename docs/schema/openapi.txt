@@ -6814,6 +6814,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeWorkerOperation"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeCustom"
           }
         ],
         "title": "Typed city event stream envelope"
@@ -7278,6 +7281,94 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope convoy.created",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeCustom": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {},
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "not": {
+              "enum": [
+                "session.woke",
+                "session.stopped",
+                "session.crashed",
+                "session.draining",
+                "session.undrained",
+                "session.quarantined",
+                "session.idle_killed",
+                "session.suspended",
+                "session.updated",
+                "bead.created",
+                "bead.closed",
+                "bead.updated",
+                "mail.sent",
+                "mail.read",
+                "mail.archived",
+                "mail.marked_read",
+                "mail.marked_unread",
+                "mail.replied",
+                "mail.deleted",
+                "convoy.created",
+                "convoy.closed",
+                "controller.started",
+                "controller.stopped",
+                "city.suspended",
+                "city.resumed",
+                "request.result.city.create",
+                "request.result.city.unregister",
+                "request.result.session.create",
+                "request.result.session.message",
+                "request.result.session.submit",
+                "request.failed",
+                "city.created",
+                "city.unregister_requested",
+                "order.fired",
+                "order.completed",
+                "order.failed",
+                "provider.swapped",
+                "worker.operation",
+                "extmsg.bound",
+                "extmsg.unbound",
+                "extmsg.group_created",
+                "extmsg.adapter_added",
+                "extmsg.adapter_removed",
+                "extmsg.inbound",
+                "extmsg.outbound"
+              ]
+            },
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope custom",
         "type": "object"
       },
       "TypedEventStreamEnvelopeExtmsgAdapterAdded": {
@@ -8895,6 +8986,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkerOperation"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeCustom"
           }
         ],
         "title": "Typed supervisor event stream envelope"
@@ -9403,6 +9497,98 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope convoy.created",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeCustom": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {},
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "not": {
+              "enum": [
+                "session.woke",
+                "session.stopped",
+                "session.crashed",
+                "session.draining",
+                "session.undrained",
+                "session.quarantined",
+                "session.idle_killed",
+                "session.suspended",
+                "session.updated",
+                "bead.created",
+                "bead.closed",
+                "bead.updated",
+                "mail.sent",
+                "mail.read",
+                "mail.archived",
+                "mail.marked_read",
+                "mail.marked_unread",
+                "mail.replied",
+                "mail.deleted",
+                "convoy.created",
+                "convoy.closed",
+                "controller.started",
+                "controller.stopped",
+                "city.suspended",
+                "city.resumed",
+                "request.result.city.create",
+                "request.result.city.unregister",
+                "request.result.session.create",
+                "request.result.session.message",
+                "request.result.session.submit",
+                "request.failed",
+                "city.created",
+                "city.unregister_requested",
+                "order.fired",
+                "order.completed",
+                "order.failed",
+                "provider.swapped",
+                "worker.operation",
+                "extmsg.bound",
+                "extmsg.unbound",
+                "extmsg.group_created",
+                "extmsg.adapter_added",
+                "extmsg.adapter_removed",
+                "extmsg.inbound",
+                "extmsg.outbound"
+              ]
+            },
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope custom",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded": {

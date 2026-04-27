@@ -218,6 +218,24 @@ export type AnnotatedProviderResponse = {
     ready_delay_ms?: number;
 };
 
+export type AsyncAcceptedBody = {
+    /**
+     * Correlation ID. Watch the city event stream for request.result.session.create, request.result.session.message, request.result.session.submit, or request.failed with this request_id.
+     */
+    request_id: string;
+    /**
+     * Async request status.
+     */
+    status: string;
+};
+
+export type AsyncAcceptedResponse = {
+    /**
+     * Correlation ID. Watch /v0/events/stream for request.result.city.create, request.result.city.unregister, or request.failed with this request_id.
+     */
+    request_id: string;
+};
+
 export type Bead = {
     assignee?: string;
     created_at: string;
@@ -366,24 +384,28 @@ export type CityCreateRequest = {
      */
     dir: string;
     /**
-     * Provider name for the city's default session template.
+     * Provider name for the city's default session template. Mutually exclusive with start_command.
      */
-    provider: string;
+    provider?: string;
+    /**
+     * Custom workspace start command for the city's default session template. Mutually exclusive with provider.
+     */
+    start_command?: string;
 };
 
-export type CityCreateResponse = {
+export type CityCreateSucceededPayload = {
     /**
-     * Resolved city name as persisted in city.toml. Use this to filter the event stream for completion.
+     * Resolved city name.
      */
     name: string;
     /**
-     * True when scaffolding + registration succeeded. Does not imply the city is ready yet; watch /v0/events/stream for city.ready.
-     */
-    ok: boolean;
-    /**
-     * Resolved absolute path of the created city directory.
+     * Resolved absolute city directory path.
      */
     path: string;
+    /**
+     * Correlation ID from the 202 response.
+     */
+    request_id: string;
 };
 
 export type CityGetResponse = {
@@ -408,10 +430,8 @@ export type CityInfo = {
 };
 
 export type CityLifecyclePayload = {
-    error?: string;
     name: string;
     path: string;
-    phases_completed?: Array<string> | null;
 };
 
 export type CityPatchInputBody = {
@@ -421,19 +441,19 @@ export type CityPatchInputBody = {
     suspended?: boolean;
 };
 
-export type CityUnregisterResponse = {
+export type CityUnregisterSucceededPayload = {
     /**
-     * Resolved registry name. Filter the event stream by this to observe completion.
+     * City name that was unregistered.
      */
     name: string;
     /**
-     * True when the registry entry was removed and the supervisor was signaled. Does not imply the city's controller has stopped yet; watch /v0/events/stream for city.unregistered.
-     */
-    ok: boolean;
-    /**
-     * Resolved absolute city directory. The directory itself is not modified; unregister only affects the supervisor's registry.
+     * Absolute city directory path.
      */
     path: string;
+    /**
+     * Correlation ID from the 202 response.
+     */
+    request_id: string;
 };
 
 export type ConfigAgentResponse = {
@@ -717,7 +737,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadEventPayload | BoundEventPayload | CityLifecyclePayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | UnboundEventPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadEventPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | RequestFailedPayload | SessionCreateSucceededPayload | SessionMessageSucceededPayload | SessionSubmitSucceededPayload | UnboundEventPayload | WorkerOperationEventPayload;
 
 export type EventStreamEnvelope = {
     actor: string;
@@ -1003,6 +1023,10 @@ export type FormulaListBody = {
      * Whether the list is partial.
      */
     partial: boolean;
+    /**
+     * Total number of formulas in the list.
+     */
+    total: number;
 };
 
 export type FormulaPreviewBody = {
@@ -1432,7 +1456,7 @@ export type ListBodyWireEvent = {
     /**
      * The list of items.
      */
-    items: Array<WireEvent> | null;
+    items: Array<TypedEventStreamEnvelope> | null;
     /**
      * Cursor for the next page of results.
      */
@@ -2070,6 +2094,25 @@ export type ReadinessResponse = {
     };
 };
 
+export type RequestFailedPayload = {
+    /**
+     * Machine-readable error code.
+     */
+    error_code: string;
+    /**
+     * Human-readable error description.
+     */
+    error_message: string;
+    /**
+     * Which operation failed.
+     */
+    operation: 'city.create' | 'city.unregister' | 'session.create' | 'session.message' | 'session.submit';
+    /**
+     * Correlation ID from the 202 response.
+     */
+    request_id: string;
+};
+
 export type RigActionBody = {
     /**
      * Action that was performed.
@@ -2261,6 +2304,17 @@ export type SessionCreateBody = {
     title?: string;
 };
 
+export type SessionCreateSucceededPayload = {
+    /**
+     * Correlation ID from the 202 response.
+     */
+    request_id: string;
+    /**
+     * Full session state as returned by GET /session/{id}.
+     */
+    session: SessionResponse;
+};
+
 export type SessionInfo = {
     attached: boolean;
     last_activity?: string;
@@ -2274,15 +2328,15 @@ export type SessionMessageInputBody = {
     message: string;
 };
 
-export type SessionMessageOutputBody = {
+export type SessionMessageSucceededPayload = {
     /**
-     * Session ID.
+     * Correlation ID from the 202 response.
      */
-    id: string;
+    request_id: string;
     /**
-     * Operation result.
+     * Session ID that received the message.
      */
-    status: string;
+    session_id: string;
 };
 
 export type SessionPatchBody = {
@@ -2425,23 +2479,23 @@ export type SessionSubmitInputBody = {
     message: string;
 };
 
-export type SessionSubmitOutputBody = {
+export type SessionSubmitSucceededPayload = {
     /**
-     * Session ID.
-     */
-    id: string;
-    /**
-     * Resolved submit intent.
+     * Resolved submit intent (default, follow_up, interrupt_now).
      */
     intent: string;
     /**
-     * Whether the message was queued.
+     * Whether the message was queued for later delivery.
      */
     queued: boolean;
     /**
-     * Operation result.
+     * Correlation ID from the 202 response.
      */
-    status: string;
+    request_id: string;
+    /**
+     * Session ID that received the submission.
+     */
+    session_id: string;
 };
 
 export type SessionTranscriptGetResponse = {
@@ -2678,7 +2732,7 @@ export type SupervisorCitiesOutputBody = {
 };
 
 export type SupervisorEventListOutputBody = {
-    items: Array<WireTaggedEvent> | null;
+    items: Array<TypedTaggedEventStreamEnvelope> | null;
     total: number;
 };
 
@@ -2760,20 +2814,12 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeBeadUpdated) | ({
     type: 'city.created';
 } & TypedEventStreamEnvelopeCityCreated) | ({
-    type: 'city.init_failed';
-} & TypedEventStreamEnvelopeCityInitFailed) | ({
-    type: 'city.ready';
-} & TypedEventStreamEnvelopeCityReady) | ({
     type: 'city.resumed';
 } & TypedEventStreamEnvelopeCityResumed) | ({
     type: 'city.suspended';
 } & TypedEventStreamEnvelopeCitySuspended) | ({
-    type: 'city.unregister_failed';
-} & TypedEventStreamEnvelopeCityUnregisterFailed) | ({
     type: 'city.unregister_requested';
 } & TypedEventStreamEnvelopeCityUnregisterRequested) | ({
-    type: 'city.unregistered';
-} & TypedEventStreamEnvelopeCityUnregistered) | ({
     type: 'controller.started';
 } & TypedEventStreamEnvelopeControllerStarted) | ({
     type: 'controller.stopped';
@@ -2818,6 +2864,18 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeOrderFired) | ({
     type: 'provider.swapped';
 } & TypedEventStreamEnvelopeProviderSwapped) | ({
+    type: 'request.failed';
+} & TypedEventStreamEnvelopeRequestFailed) | ({
+    type: 'request.result.city.create';
+} & TypedEventStreamEnvelopeRequestResultCityCreate) | ({
+    type: 'request.result.city.unregister';
+} & TypedEventStreamEnvelopeRequestResultCityUnregister) | ({
+    type: 'request.result.session.create';
+} & TypedEventStreamEnvelopeRequestResultSessionCreate) | ({
+    type: 'request.result.session.message';
+} & TypedEventStreamEnvelopeRequestResultSessionMessage) | ({
+    type: 'request.result.session.submit';
+} & TypedEventStreamEnvelopeRequestResultSessionSubmit) | ({
     type: 'session.crashed';
 } & TypedEventStreamEnvelopeSessionCrashed) | ({
     type: 'session.draining';
@@ -2837,7 +2895,9 @@ export type TypedEventStreamEnvelope = ({
     type: 'session.woke';
 } & TypedEventStreamEnvelopeSessionWoke) | ({
     type: 'worker.operation';
-} & TypedEventStreamEnvelopeWorkerOperation);
+} & TypedEventStreamEnvelopeWorkerOperation) | ({
+    type: 'TypedEventStreamEnvelopeCustom';
+} & TypedEventStreamEnvelopeCustom);
 
 /**
  * TypedEventStreamEnvelope bead.closed
@@ -2896,34 +2956,6 @@ export type TypedEventStreamEnvelopeCityCreated = {
 };
 
 /**
- * TypedEventStreamEnvelope city.init_failed
- */
-export type TypedEventStreamEnvelopeCityInitFailed = {
-    actor: string;
-    message?: string;
-    payload: CityLifecyclePayload;
-    seq: number;
-    subject?: string;
-    ts: string;
-    type: 'city.init_failed';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedEventStreamEnvelope city.ready
- */
-export type TypedEventStreamEnvelopeCityReady = {
-    actor: string;
-    message?: string;
-    payload: CityLifecyclePayload;
-    seq: number;
-    subject?: string;
-    ts: string;
-    type: 'city.ready';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
  * TypedEventStreamEnvelope city.resumed
  */
 export type TypedEventStreamEnvelopeCityResumed = {
@@ -2952,20 +2984,6 @@ export type TypedEventStreamEnvelopeCitySuspended = {
 };
 
 /**
- * TypedEventStreamEnvelope city.unregister_failed
- */
-export type TypedEventStreamEnvelopeCityUnregisterFailed = {
-    actor: string;
-    message?: string;
-    payload: CityLifecyclePayload;
-    seq: number;
-    subject?: string;
-    ts: string;
-    type: 'city.unregister_failed';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
  * TypedEventStreamEnvelope city.unregister_requested
  */
 export type TypedEventStreamEnvelopeCityUnregisterRequested = {
@@ -2976,20 +2994,6 @@ export type TypedEventStreamEnvelopeCityUnregisterRequested = {
     subject?: string;
     ts: string;
     type: 'city.unregister_requested';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedEventStreamEnvelope city.unregistered
- */
-export type TypedEventStreamEnvelopeCityUnregistered = {
-    actor: string;
-    message?: string;
-    payload: CityLifecyclePayload;
-    seq: number;
-    subject?: string;
-    ts: string;
-    type: 'city.unregistered';
     workflow?: WorkflowEventProjection;
 };
 
@@ -3046,6 +3050,20 @@ export type TypedEventStreamEnvelopeConvoyCreated = {
     subject?: string;
     ts: string;
     type: 'convoy.created';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope custom
+ */
+export type TypedEventStreamEnvelopeCustom = {
+    actor: string;
+    message?: string;
+    payload: unknown;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: string;
     workflow?: WorkflowEventProjection;
 };
 
@@ -3302,6 +3320,90 @@ export type TypedEventStreamEnvelopeProviderSwapped = {
 };
 
 /**
+ * TypedEventStreamEnvelope request.failed
+ */
+export type TypedEventStreamEnvelopeRequestFailed = {
+    actor: string;
+    message?: string;
+    payload: RequestFailedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'request.failed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope request.result.city.create
+ */
+export type TypedEventStreamEnvelopeRequestResultCityCreate = {
+    actor: string;
+    message?: string;
+    payload: CityCreateSucceededPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'request.result.city.create';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope request.result.city.unregister
+ */
+export type TypedEventStreamEnvelopeRequestResultCityUnregister = {
+    actor: string;
+    message?: string;
+    payload: CityUnregisterSucceededPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'request.result.city.unregister';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope request.result.session.create
+ */
+export type TypedEventStreamEnvelopeRequestResultSessionCreate = {
+    actor: string;
+    message?: string;
+    payload: SessionCreateSucceededPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'request.result.session.create';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope request.result.session.message
+ */
+export type TypedEventStreamEnvelopeRequestResultSessionMessage = {
+    actor: string;
+    message?: string;
+    payload: SessionMessageSucceededPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'request.result.session.message';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope request.result.session.submit
+ */
+export type TypedEventStreamEnvelopeRequestResultSessionSubmit = {
+    actor: string;
+    message?: string;
+    payload: SessionSubmitSucceededPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'request.result.session.submit';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.crashed
  */
 export type TypedEventStreamEnvelopeSessionCrashed = {
@@ -3455,20 +3557,12 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeBeadUpdated) | ({
     type: 'city.created';
 } & TypedTaggedEventStreamEnvelopeCityCreated) | ({
-    type: 'city.init_failed';
-} & TypedTaggedEventStreamEnvelopeCityInitFailed) | ({
-    type: 'city.ready';
-} & TypedTaggedEventStreamEnvelopeCityReady) | ({
     type: 'city.resumed';
 } & TypedTaggedEventStreamEnvelopeCityResumed) | ({
     type: 'city.suspended';
 } & TypedTaggedEventStreamEnvelopeCitySuspended) | ({
-    type: 'city.unregister_failed';
-} & TypedTaggedEventStreamEnvelopeCityUnregisterFailed) | ({
     type: 'city.unregister_requested';
 } & TypedTaggedEventStreamEnvelopeCityUnregisterRequested) | ({
-    type: 'city.unregistered';
-} & TypedTaggedEventStreamEnvelopeCityUnregistered) | ({
     type: 'controller.started';
 } & TypedTaggedEventStreamEnvelopeControllerStarted) | ({
     type: 'controller.stopped';
@@ -3513,6 +3607,18 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeOrderFired) | ({
     type: 'provider.swapped';
 } & TypedTaggedEventStreamEnvelopeProviderSwapped) | ({
+    type: 'request.failed';
+} & TypedTaggedEventStreamEnvelopeRequestFailed) | ({
+    type: 'request.result.city.create';
+} & TypedTaggedEventStreamEnvelopeRequestResultCityCreate) | ({
+    type: 'request.result.city.unregister';
+} & TypedTaggedEventStreamEnvelopeRequestResultCityUnregister) | ({
+    type: 'request.result.session.create';
+} & TypedTaggedEventStreamEnvelopeRequestResultSessionCreate) | ({
+    type: 'request.result.session.message';
+} & TypedTaggedEventStreamEnvelopeRequestResultSessionMessage) | ({
+    type: 'request.result.session.submit';
+} & TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit) | ({
     type: 'session.crashed';
 } & TypedTaggedEventStreamEnvelopeSessionCrashed) | ({
     type: 'session.draining';
@@ -3532,7 +3638,9 @@ export type TypedTaggedEventStreamEnvelope = ({
     type: 'session.woke';
 } & TypedTaggedEventStreamEnvelopeSessionWoke) | ({
     type: 'worker.operation';
-} & TypedTaggedEventStreamEnvelopeWorkerOperation);
+} & TypedTaggedEventStreamEnvelopeWorkerOperation) | ({
+    type: 'TypedTaggedEventStreamEnvelopeCustom';
+} & TypedTaggedEventStreamEnvelopeCustom);
 
 /**
  * TypedTaggedEventStreamEnvelope bead.closed
@@ -3595,36 +3703,6 @@ export type TypedTaggedEventStreamEnvelopeCityCreated = {
 };
 
 /**
- * TypedTaggedEventStreamEnvelope city.init_failed
- */
-export type TypedTaggedEventStreamEnvelopeCityInitFailed = {
-    actor: string;
-    city: string;
-    message?: string;
-    payload: CityLifecyclePayload;
-    seq: number;
-    subject?: string;
-    ts: string;
-    type: 'city.init_failed';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope city.ready
- */
-export type TypedTaggedEventStreamEnvelopeCityReady = {
-    actor: string;
-    city: string;
-    message?: string;
-    payload: CityLifecyclePayload;
-    seq: number;
-    subject?: string;
-    ts: string;
-    type: 'city.ready';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
  * TypedTaggedEventStreamEnvelope city.resumed
  */
 export type TypedTaggedEventStreamEnvelopeCityResumed = {
@@ -3655,21 +3733,6 @@ export type TypedTaggedEventStreamEnvelopeCitySuspended = {
 };
 
 /**
- * TypedTaggedEventStreamEnvelope city.unregister_failed
- */
-export type TypedTaggedEventStreamEnvelopeCityUnregisterFailed = {
-    actor: string;
-    city: string;
-    message?: string;
-    payload: CityLifecyclePayload;
-    seq: number;
-    subject?: string;
-    ts: string;
-    type: 'city.unregister_failed';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
  * TypedTaggedEventStreamEnvelope city.unregister_requested
  */
 export type TypedTaggedEventStreamEnvelopeCityUnregisterRequested = {
@@ -3681,21 +3744,6 @@ export type TypedTaggedEventStreamEnvelopeCityUnregisterRequested = {
     subject?: string;
     ts: string;
     type: 'city.unregister_requested';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope city.unregistered
- */
-export type TypedTaggedEventStreamEnvelopeCityUnregistered = {
-    actor: string;
-    city: string;
-    message?: string;
-    payload: CityLifecyclePayload;
-    seq: number;
-    subject?: string;
-    ts: string;
-    type: 'city.unregistered';
     workflow?: WorkflowEventProjection;
 };
 
@@ -3756,6 +3804,21 @@ export type TypedTaggedEventStreamEnvelopeConvoyCreated = {
     subject?: string;
     ts: string;
     type: 'convoy.created';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope custom
+ */
+export type TypedTaggedEventStreamEnvelopeCustom = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: unknown;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: string;
     workflow?: WorkflowEventProjection;
 };
 
@@ -4030,6 +4093,96 @@ export type TypedTaggedEventStreamEnvelopeProviderSwapped = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope request.failed
+ */
+export type TypedTaggedEventStreamEnvelopeRequestFailed = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: RequestFailedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'request.failed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope request.result.city.create
+ */
+export type TypedTaggedEventStreamEnvelopeRequestResultCityCreate = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: CityCreateSucceededPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'request.result.city.create';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope request.result.city.unregister
+ */
+export type TypedTaggedEventStreamEnvelopeRequestResultCityUnregister = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: CityUnregisterSucceededPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'request.result.city.unregister';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope request.result.session.create
+ */
+export type TypedTaggedEventStreamEnvelopeRequestResultSessionCreate = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: SessionCreateSucceededPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'request.result.session.create';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope request.result.session.message
+ */
+export type TypedTaggedEventStreamEnvelopeRequestResultSessionMessage = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: SessionMessageSucceededPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'request.result.session.message';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope request.result.session.submit
+ */
+export type TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: SessionSubmitSucceededPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'request.result.session.submit';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope session.crashed
  */
 export type TypedTaggedEventStreamEnvelopeSessionCrashed = {
@@ -4182,27 +4335,6 @@ export type TypedTaggedEventStreamEnvelopeWorkerOperation = {
 export type UnboundEventPayload = {
     count: number;
     session_id: string;
-};
-
-export type WireEvent = {
-    actor: string;
-    message?: string;
-    payload?: EventPayload;
-    seq: number;
-    subject?: string;
-    ts: string;
-    type: string;
-};
-
-export type WireTaggedEvent = {
-    actor: string;
-    city: string;
-    message?: string;
-    payload?: EventPayload;
-    seq: number;
-    subject?: string;
-    ts: string;
-    type: string;
 };
 
 export type WorkerOperationEventPayload = {
@@ -4395,7 +4527,7 @@ export type PostV0CityResponses = {
     /**
      * Accepted
      */
-    202: CityCreateResponse;
+    202: AsyncAcceptedResponse;
 };
 
 export type PostV0CityResponse = PostV0CityResponses[keyof PostV0CityResponses];
@@ -9174,7 +9306,7 @@ export type SendSessionMessageResponses = {
     /**
      * Accepted
      */
-    202: SessionMessageOutputBody;
+    202: AsyncAcceptedBody;
 };
 
 export type SendSessionMessageResponse = SendSessionMessageResponses[keyof SendSessionMessageResponses];
@@ -9479,7 +9611,7 @@ export type SubmitSessionResponses = {
     /**
      * Accepted
      */
-    202: SessionSubmitOutputBody;
+    202: AsyncAcceptedBody;
 };
 
 export type SubmitSessionResponse = SubmitSessionResponses[keyof SubmitSessionResponses];
@@ -9549,6 +9681,10 @@ export type GetV0CityByCityNameSessionByIdTranscriptData = {
          * Pagination cursor: return entries before this UUID.
          */
         before?: string;
+        /**
+         * Pagination cursor: return entries after this UUID.
+         */
+        after?: string;
     };
     url: '/v0/city/{cityName}/session/{id}/transcript';
 };
@@ -9693,7 +9829,7 @@ export type CreateSessionResponses = {
     /**
      * Accepted
      */
-    202: SessionResponse;
+    202: AsyncAcceptedBody;
 };
 
 export type CreateSessionResponse = CreateSessionResponses[keyof CreateSessionResponses];
@@ -9804,7 +9940,7 @@ export type PostV0CityByCityNameUnregisterResponses = {
     /**
      * Accepted
      */
-    202: CityUnregisterResponse;
+    202: AsyncAcceptedResponse;
 };
 
 export type PostV0CityByCityNameUnregisterResponse = PostV0CityByCityNameUnregisterResponses[keyof PostV0CityByCityNameUnregisterResponses];

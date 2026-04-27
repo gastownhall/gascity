@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -117,14 +118,36 @@ func (CityLifecyclePayload) IsEventPayload() {}
 
 // BeadEventPayload is the shape of every bead.* event payload
 // (BeadCreated, BeadUpdated, BeadClosed). The payload carries a full
-// snapshot of the bead as of the event; it is emitted by the beads
-// CachingStore's reconcile loop when external changes are detected.
+// snapshot of the bead as of the event; it is emitted by bd hooks and by
+// the beads CachingStore's reconcile loop when external changes are detected.
 type BeadEventPayload struct {
 	Bead beads.Bead `json:"bead"`
 }
 
 // IsEventPayload marks BeadEventPayload as an events.Payload variant.
 func (BeadEventPayload) IsEventPayload() {}
+
+// UnmarshalJSON accepts the current {"bead": ...} payload shape and the
+// legacy raw-bead shape emitted by older bd hook scripts.
+func (p *BeadEventPayload) UnmarshalJSON(data []byte) error {
+	var wrapped struct {
+		Bead *beads.Bead `json:"bead"`
+	}
+	if err := json.Unmarshal(data, &wrapped); err != nil {
+		return err
+	}
+	if wrapped.Bead != nil {
+		p.Bead = *wrapped.Bead
+		return nil
+	}
+
+	var bead beads.Bead
+	if err := json.Unmarshal(data, &bead); err != nil {
+		return err
+	}
+	p.Bead = bead
+	return nil
+}
 
 // WorkerOperationEventPayload is the typed payload projected for
 // worker.operation events on the supervisor event stream.
