@@ -99,12 +99,12 @@ the new convoy. Issues can also be added later with "gc convoy add".`,
 func cmdConvoyCreateWithOptions(args []string, opts convoyCreateOptions, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc convoy create: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "convoy create", err)
 		return 1
 	}
 	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
-		fmt.Fprintf(stderr, "gc convoy create: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "convoy create", err)
 		return 1
 	}
 	emitLoadCityConfigWarnings(stderr, prov)
@@ -113,7 +113,7 @@ func cmdConvoyCreateWithOptions(args []string, opts convoyCreateOptions, stdout,
 	if len(args) > 1 {
 		issueIDs = args[1:]
 		if err := validateConvoyCreateStoreScope(cfg, cityPath, issueIDs); err != nil {
-			fmt.Fprintf(stderr, "gc convoy create: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "convoy create", err)
 			return 1
 		}
 	}
@@ -127,7 +127,7 @@ func cmdConvoyCreateWithOptions(args []string, opts convoyCreateOptions, stdout,
 	}
 	store, err := openStoreAtForCity(storeDir, cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc convoy create: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "convoy create", err)
 		return 1
 	}
 
@@ -172,7 +172,7 @@ func doConvoyCreateWithOptions(store beads.Store, cfg *config.City, cityPath str
 	name := args[0]
 	issueIDs := args[1:]
 	if err := validateConvoyCreateStoreScope(cfg, cityPath, issueIDs); err != nil {
-		fmt.Fprintf(stderr, "gc convoy create: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "convoy create", err)
 		return 1
 	}
 
@@ -184,7 +184,7 @@ func doConvoyCreateWithOptions(store beads.Store, cfg *config.City, cityPath str
 
 	convoy, err := store.Create(b)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc convoy create: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "convoy create", err)
 		return 1
 	}
 
@@ -192,7 +192,7 @@ func doConvoyCreateWithOptions(store beads.Store, cfg *config.City, cityPath str
 	// through Create, but BdStore/exec.Store may not. setConvoyFields uses
 	// SetMetadata which works across all backends.
 	if err := setConvoyFields(store, convoy.ID, opts.Fields); err != nil {
-		fmt.Fprintf(stderr, "gc convoy create: warning: setting fields: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "convoy create: warning: setting fields", err)
 		// Non-fatal: convoy already created and event will be emitted.
 	}
 
@@ -456,7 +456,7 @@ func listConvoyChildren(store beads.Store, parentID string, includeClosed bool) 
 func doConvoyListAcrossStores(stores []convoyStoreView, stdout, stderr io.Writer) int {
 	convoys, err := collectOpenConvoys(stores)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc convoy list: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "convoy list", err)
 		return 1
 	}
 
@@ -529,7 +529,7 @@ func doConvoyStatus(store beads.Store, args []string, stdout, stderr io.Writer) 
 
 	convoy, err := store.Get(id)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc convoy status: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "convoy status", err)
 		return 1
 	}
 	if convoy.Type != "convoy" {
@@ -539,7 +539,7 @@ func doConvoyStatus(store beads.Store, args []string, stdout, stderr io.Writer) 
 
 	children, err := listConvoyChildren(store, id, true)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc convoy status: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "convoy status", err)
 		return 1
 	}
 
@@ -635,7 +635,7 @@ func doConvoyTarget(store beads.Store, args []string, stdout, stderr io.Writer) 
 
 	convoy, err := store.Get(id)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc convoy target: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "convoy target", err)
 		return 1
 	}
 	if convoy.Type != "convoy" {
@@ -643,7 +643,7 @@ func doConvoyTarget(store beads.Store, args []string, stdout, stderr io.Writer) 
 		return 1
 	}
 	if err := setConvoyFields(store, id, ConvoyFields{Target: target}); err != nil {
-		fmt.Fprintf(stderr, "gc convoy target: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "convoy target", err)
 		return 1
 	}
 
@@ -696,7 +696,7 @@ func doConvoyAdd(store beads.Store, args []string, stdout, stderr io.Writer) int
 
 	convoy, err := store.Get(convoyID)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc convoy add: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "convoy add", err)
 		return 1
 	}
 	if convoy.Type != "convoy" {
@@ -705,12 +705,12 @@ func doConvoyAdd(store beads.Store, args []string, stdout, stderr io.Writer) int
 	}
 
 	if _, err := store.Get(issueID); err != nil {
-		fmt.Fprintf(stderr, "gc convoy add: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "convoy add", err)
 		return 1
 	}
 
 	if err := store.Update(issueID, beads.UpdateOpts{ParentID: &convoyID}); err != nil {
-		fmt.Fprintf(stderr, "gc convoy add: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "convoy add", err)
 		return 1
 	}
 
@@ -763,7 +763,7 @@ func doConvoyClose(store beads.Store, rec events.Recorder, args []string, stdout
 
 	convoy, err := store.Get(id)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc convoy close: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "convoy close", err)
 		return 1
 	}
 	if convoy.Type != "convoy" {
@@ -772,7 +772,7 @@ func doConvoyClose(store beads.Store, rec events.Recorder, args []string, stdout
 	}
 
 	if err := store.Close(id); err != nil {
-		fmt.Fprintf(stderr, "gc convoy close: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "convoy close", err)
 		return 1
 	}
 
@@ -834,7 +834,7 @@ func doConvoyCheck(store beads.Store, rec events.Recorder, stdout, stderr io.Wri
 func doConvoyCheckAcrossStores(stores []convoyStoreView, rec events.Recorder, stdout, stderr io.Writer) int {
 	convoys, err := collectOpenConvoys(stores)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc convoy check: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "convoy check", err)
 		return 1
 	}
 
@@ -912,7 +912,7 @@ func doConvoyStranded(store beads.Store, stdout, stderr io.Writer) int {
 func doConvoyStrandedAcrossStores(stores []convoyStoreView, stdout, stderr io.Writer) int {
 	convoys, err := collectOpenConvoys(stores)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc convoy stranded: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "convoy stranded", err)
 		return 1
 	}
 
@@ -1015,7 +1015,7 @@ func doConvoyLand(store beads.Store, rec events.Recorder, args []string, opts la
 
 	convoy, err := store.Get(convoyID)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc convoy land: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "convoy land", err)
 		return 1
 	}
 	if convoy.Type != "convoy" {
@@ -1036,7 +1036,7 @@ func doConvoyLand(store beads.Store, rec events.Recorder, args []string, opts la
 	// Check children.
 	children, err := listConvoyChildren(store, convoyID, true)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc convoy land: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "convoy land", err)
 		return 1
 	}
 
@@ -1065,7 +1065,7 @@ func doConvoyLand(store beads.Store, rec events.Recorder, args []string, opts la
 
 	// Close the convoy.
 	if err := store.Close(convoyID); err != nil {
-		fmt.Fprintf(stderr, "gc convoy land: closing convoy: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "convoy land: closing convoy", err)
 		return 1
 	}
 

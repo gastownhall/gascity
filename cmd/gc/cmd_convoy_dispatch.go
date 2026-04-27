@@ -71,7 +71,7 @@ Use --follow <agent> to filter the serve loop to a specific agent template.`,
 				if errors.Is(err, dispatch.ErrControlPending) {
 					return nil
 				}
-				_, _ = fmt.Fprintf(stderr, "gc convoy control: %v\n", err)
+				cmdErr(stderr, "convoy control", err)
 				return errExit
 			}
 			return nil
@@ -91,11 +91,11 @@ func newConvoyPokeCmd(_ io.Writer, stderr io.Writer) *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			cityPath, err := resolveCity()
 			if err != nil {
-				_, _ = fmt.Fprintf(stderr, "gc convoy poke: %v\n", err)
+				cmdErr(stderr, "convoy poke", err)
 				return errExit
 			}
 			if err := pokeControlDispatch(cityPath); err != nil {
-				_, _ = fmt.Fprintf(stderr, "gc convoy poke: %v\n", err)
+				cmdErr(stderr, "convoy poke", err)
 				return errExit
 			}
 			return nil
@@ -448,7 +448,7 @@ Use --delete with --apply to also delete closed beads.`,
 			}
 			selector, err := parseSourceWorkflowStoreSelector(rigName, storeRef)
 			if err != nil {
-				_, _ = fmt.Fprintf(stderr, "gc workflow delete-source: %v\n", err)
+				cmdErr(stderr, "workflow delete-source", err)
 				return errExit
 			}
 			return exitForCode(cmdWorkflowDeleteSource(args[0], selector, apply, deleteBeads, stdout, stderr))
@@ -471,7 +471,7 @@ func newConvoyReopenSourceCmd(stdout, stderr io.Writer) *cobra.Command {
 		RunE: func(_ *cobra.Command, args []string) error {
 			selector, err := parseSourceWorkflowStoreSelector(rigName, storeRef)
 			if err != nil {
-				_, _ = fmt.Fprintf(stderr, "gc workflow reopen-source: %v\n", err)
+				cmdErr(stderr, "workflow reopen-source", err)
 				return errExit
 			}
 			return exitForCode(cmdWorkflowReopenSource(args[0], selector, stdout, stderr))
@@ -485,12 +485,12 @@ func newConvoyReopenSourceCmd(stdout, stderr io.Writer) *cobra.Command {
 func cmdWorkflowDelete(workflowID string, force, deleteBeads bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "gc workflow delete: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "workflow delete", err)
 		return 1
 	}
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc workflow delete: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "workflow delete", err)
 		return 1
 	}
 
@@ -505,7 +505,7 @@ func cmdWorkflowDelete(workflowID string, force, deleteBeads bool, stdout, stder
 		return openStoreAtForCity(dir, cityPath)
 	})
 	if err != nil {
-		fmt.Fprintf(stderr, "gc workflow delete: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "workflow delete", err)
 		return 1
 	}
 	for _, info := range stores {
@@ -720,12 +720,12 @@ func applySourceWorkflowMatchCleanup(match sourceWorkflowStoreMatch, deleteBeads
 func cmdWorkflowDeleteSource(sourceBeadID string, selector sourceWorkflowStoreSelector, apply, deleteBeads bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "gc workflow delete-source: %v\n", err)
+		cmdErr(stderr, "workflow delete-source", err)
 		return 1
 	}
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "gc workflow delete-source: %v\n", err)
+		cmdErr(stderr, "workflow delete-source", err)
 		return 1
 	}
 
@@ -735,7 +735,7 @@ func cmdWorkflowDeleteSource(sourceBeadID string, selector sourceWorkflowStoreSe
 	)
 	target, err := resolveSourceWorkflowTarget(cfg, cityPath, sourceBeadID, selector, false)
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "gc workflow delete-source: %v\n", err)
+		cmdErr(stderr, "workflow delete-source", err)
 		return 1
 	}
 	lockScope := target.storeView.path
@@ -855,7 +855,7 @@ func cmdWorkflowDeleteSource(sourceBeadID string, selector sourceWorkflowStoreSe
 		return nil
 	})
 	if runErr != nil {
-		_, _ = fmt.Fprintf(stderr, "gc workflow delete-source: %v\n", runErr)
+		cmdErr(stderr, "workflow delete-source", runErr)
 		return 1
 	}
 	return resultCode
@@ -864,19 +864,19 @@ func cmdWorkflowDeleteSource(sourceBeadID string, selector sourceWorkflowStoreSe
 func cmdWorkflowReopenSource(sourceBeadID string, selector sourceWorkflowStoreSelector, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "gc workflow reopen-source: %v\n", err)
+		cmdErr(stderr, "workflow reopen-source", err)
 		return 1
 	}
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "gc workflow reopen-source: %v\n", err)
+		cmdErr(stderr, "workflow reopen-source", err)
 		return 1
 	}
 
 	resultCode := 0
 	target, err := resolveSourceWorkflowTarget(cfg, cityPath, sourceBeadID, selector, true)
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "gc workflow reopen-source: %v\n", err)
+		cmdErr(stderr, "workflow reopen-source", err)
 		return 1
 	}
 	if target.storeView.store == nil || strings.TrimSpace(target.sourceBead.ID) == "" {
@@ -945,7 +945,7 @@ func cmdWorkflowReopenSource(sourceBeadID string, selector sourceWorkflowStoreSe
 		return nil
 	})
 	if runErr != nil {
-		_, _ = fmt.Fprintf(stderr, "gc workflow reopen-source: %v\n", runErr)
+		cmdErr(stderr, "workflow reopen-source", runErr)
 		return 1
 	}
 	return resultCode

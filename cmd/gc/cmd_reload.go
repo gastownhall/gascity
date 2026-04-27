@@ -86,7 +86,7 @@ drift rules require them.`,
 func cmdReload(args []string, async bool, timeoutValue string, timeoutChanged bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCommandCity(args)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc reload: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "reload", err)
 		return 1
 	}
 
@@ -117,7 +117,7 @@ func cmdReload(args []string, async bool, timeoutValue string, timeoutChanged bo
 				return 1
 			}
 		}
-		fmt.Fprintf(stderr, "gc reload: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "reload", err)
 		return 1
 	}
 

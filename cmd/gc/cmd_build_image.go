@@ -76,7 +76,7 @@ func doBuildImage(args []string, tag, baseImage string, rigPaths []string, push,
 		var err error
 		cityPath, err = resolveCommandCity(nil)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc build-image: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "build-image", err)
 			return 1
 		}
 	}
@@ -95,7 +95,7 @@ func doBuildImage(args []string, tag, baseImage string, rigPaths []string, push,
 	// Create temp output dir (or use a named one for context-only).
 	outputDir, err := os.MkdirTemp("", "gc-build-image-*")
 	if err != nil {
-		fmt.Fprintf(stderr, "gc build-image: creating temp dir: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "build-image: creating temp dir", err)
 		return 1
 	}
 	if !contextOnly {
@@ -111,7 +111,7 @@ func doBuildImage(args []string, tag, baseImage string, rigPaths []string, push,
 		RigPaths:  rigs,
 	}
 	if err := buildimage.AssembleContext(opts); err != nil {
-		fmt.Fprintf(stderr, "gc build-image: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "build-image", err)
 		return 1
 	}
 
@@ -124,7 +124,7 @@ func doBuildImage(args []string, tag, baseImage string, rigPaths []string, push,
 	fmt.Fprintf(stdout, "Building image %s...\n", tag) //nolint:errcheck // best-effort stdout
 	ctx := context.Background()
 	if err := buildimage.Build(ctx, outputDir, tag, stdout, stderr); err != nil {
-		fmt.Fprintf(stderr, "gc build-image: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "build-image", err)
 		return 1
 	}
 	fmt.Fprintf(stdout, "Image built: %s\n", tag) //nolint:errcheck // best-effort stdout
@@ -133,7 +133,7 @@ func doBuildImage(args []string, tag, baseImage string, rigPaths []string, push,
 	if push {
 		fmt.Fprintf(stdout, "Pushing %s...\n", tag) //nolint:errcheck // best-effort stdout
 		if err := buildimage.Push(ctx, tag, stdout, stderr); err != nil {
-			fmt.Fprintf(stderr, "gc build-image: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "build-image", err)
 			return 1
 		}
 		fmt.Fprintf(stdout, "Pushed: %s\n", tag) //nolint:errcheck // best-effort stdout

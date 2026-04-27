@@ -135,13 +135,13 @@ func cmdRigAdd(args []string, includes []string, nameOverride, prefixOverride st
 
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "rig add", err)
 		return 1
 	}
 
 	rigPath, err := resolveRigAddPath(cityPath, args[0])
 	if err != nil {
-		fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "rig add", err)
 		return 1
 	}
 	return doRigAdd(fsys.OSFS{}, cityPath, rigPath, includes, nameOverride, prefixOverride, startSuspended, adopt, stdout, stderr)
@@ -226,7 +226,7 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	cfg, err := loadCityConfigForEditFS(fs, tomlPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc rig add: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "rig add: loading config", err)
 		return 1
 	}
 	if cityUsesBdStoreContract(cityPath) && (cfg.Dolt.Host != "" || cfg.Dolt.Port != 0) {
@@ -235,7 +235,7 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 	}
 	rootDefaultRigImports, err := config.LoadRootPackDefaultRigImports(fs, cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc rig add: loading root pack defaults: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "rig add: loading root pack defaults", err)
 		return 1
 	}
 	defaultRigIncludes := append([]string{}, cfg.Workspace.DefaultRigIncludes...)
@@ -357,7 +357,7 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 
 	if adopt {
 		if err := prepareRigAdoptProviderState(cityPath, rigPath); err != nil {
-			fmt.Fprintf(stderr, "gc rig add: prepare adopted rig store: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "rig add: prepare adopted rig store", err)
 			return 1
 		}
 		w("  Adopted existing beads database")
@@ -367,7 +367,7 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 	if !adopt {
 		deferred, err = initDirIfReady(cityPath, rigPath, prefix)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "rig add", err)
 			return 1
 		}
 		if deferred {
@@ -421,7 +421,7 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		next := *cfg
 		next.Rigs = append(append([]config.Rig{}, cfg.Rigs...), rig)
 		if err := config.ValidateRigs(next.Rigs, config.EffectiveHQPrefix(&next)); err != nil {
-			fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "rig add", err)
 			return 1
 		}
 		nextCfg = &next
@@ -429,7 +429,7 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 
 	snapshots, err := snapshotRigAddTopologyFiles(fs, cityPath, nextCfg)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc rig add: snapshot canonical files: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "rig add: snapshot canonical files", err)
 		return 1
 	}
 	if !reAdd || reAddNeedsConfigWrite {
@@ -454,16 +454,16 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 
 	if adopt {
 		if err := installBeadHooks(rigPath); err != nil {
-			fmt.Fprintf(stderr, "gc rig add: installing bead hooks: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "rig add: installing bead hooks", err)
 		}
 	}
 	if err := ensureGitignoreEntries(fs, rigPath, rigGitignoreEntries); err != nil {
-		fmt.Fprintf(stderr, "gc rig add: writing .gitignore: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "rig add: writing .gitignore", err)
 	}
 	if ih := cfg.Workspace.InstallAgentHooks; len(ih) > 0 {
 		resolver := func(name string) string { return config.BuiltinFamily(name, cfg.Providers) }
 		if err := hooks.InstallWithResolver(fs, cityPath, rigPath, ih, resolver); err != nil {
-			fmt.Fprintf(stderr, "gc rig add: installing agent hooks: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "rig add: installing agent hooks", err)
 		}
 	}
 
@@ -476,13 +476,13 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		}
 		if len(layers) > 0 {
 			if rfErr := ResolveFormulas(rigPath, layers); rfErr != nil {
-				fmt.Fprintf(stderr, "gc rig add: resolving formulas: %v\n", rfErr) //nolint:errcheck // best-effort stderr
+				cmdErr(stderr, "rig add: resolving formulas", rfErr)
 			}
 		}
 	}
 
 	if err := writeBeadsEnvGTRoot(fs, rigPath, cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc rig add: warning: writing .beads/.env: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "rig add: warning: writing .beads/.env", err)
 	}
 
 	if err := rigReloadControllerConfig(cityPath); err == nil && deferred && cityUsesBdStoreContract(cityPath) {
@@ -634,7 +634,7 @@ func cmdRigList(args []string, jsonOutput bool, stdout, stderr io.Writer) int {
 	_ = args // no arguments used yet
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc rig list: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "rig list", err)
 		return 1
 	}
 	return doRigList(fsys.OSFS{}, cityPath, jsonOutput, stdout, stderr)
@@ -671,7 +671,7 @@ type RigListItem struct {
 func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.Writer) int {
 	cfg, err := loadCityConfigFS(fs, filepath.Join(cityPath, "city.toml"), stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc rig list: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "rig list", err)
 		return 1
 	}
 	resolveRigPaths(cityPath, cfg.Rigs)
@@ -703,7 +703,7 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
 		if err := enc.Encode(result); err != nil {
-			fmt.Fprintf(stderr, "gc rig list: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "rig list", err)
 			return 1
 		}
 		return 0
@@ -770,7 +770,7 @@ database remains accessible. Use "gc rig resume" to restore.`,
 func cmdRigSuspend(args []string, stdout, stderr io.Writer) int {
 	ctx, err := resolveContext()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc rig suspend: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "rig suspend", err)
 		return 1
 	}
 	rigName := ctx.RigName
@@ -789,7 +789,7 @@ func cmdRigSuspend(args []string, stdout, stderr io.Writer) int {
 			return 0
 		}
 		if !api.ShouldFallback(err) {
-			fmt.Fprintf(stderr, "gc rig suspend: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "rig suspend", err)
 			return 1
 		}
 		// Connection error — fall through to direct mutation.
@@ -803,7 +803,7 @@ func doRigSuspend(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	cfg, err := loadCityConfigForEditFS(fs, tomlPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc rig suspend: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "rig suspend", err)
 		return 1
 	}
 
@@ -821,7 +821,7 @@ func doRigSuspend(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer
 	}
 
 	if err := writeCityConfigForEditFS(fs, tomlPath, cfg); err != nil {
-		fmt.Fprintf(stderr, "gc rig suspend: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "rig suspend", err)
 		return 1
 	}
 
@@ -850,7 +850,7 @@ The reconciler will start the rig's agents on its next tick.`,
 func cmdRigResume(args []string, stdout, stderr io.Writer) int {
 	ctx, err := resolveContext()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc rig resume: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "rig resume", err)
 		return 1
 	}
 	rigName := ctx.RigName
@@ -869,7 +869,7 @@ func cmdRigResume(args []string, stdout, stderr io.Writer) int {
 			return 0
 		}
 		if !api.ShouldFallback(err) {
-			fmt.Fprintf(stderr, "gc rig resume: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "rig resume", err)
 			return 1
 		}
 		// Connection error — fall through to direct mutation.
@@ -883,7 +883,7 @@ func doRigResume(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer)
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	cfg, err := loadCityConfigForEditFS(fs, tomlPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc rig resume: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "rig resume", err)
 		return 1
 	}
 
@@ -901,7 +901,7 @@ func doRigResume(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer)
 	}
 
 	if err := writeCityConfigForEditFS(fs, tomlPath, cfg); err != nil {
-		fmt.Fprintf(stderr, "gc rig resume: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "rig resume", err)
 		return 1
 	}
 
@@ -932,14 +932,14 @@ binding from .gc/site.toml.`,
 func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc rig remove: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "rig remove", err)
 		return 1
 	}
 
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	cfg, err := loadCityConfigForEditFS(fsys.OSFS{}, tomlPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc rig remove: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "rig remove: loading config", err)
 		return 1
 	}
 
@@ -961,7 +961,7 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 
 	// Write updated config.
 	if err := writeCityConfigForEditFS(fsys.OSFS{}, tomlPath, cfg); err != nil {
-		fmt.Fprintf(stderr, "gc rig remove: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "rig remove", err)
 		return 1
 	}
 
@@ -969,7 +969,7 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 	resolveRigPaths(cityPath, cfg.Rigs)
 	allRigs := collectRigRoutes(cityPath, cfg)
 	if err := writeAllRoutes(allRigs); err != nil {
-		fmt.Fprintf(stderr, "gc rig remove: warning: writing routes: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "rig remove: warning: writing routes", err)
 	}
 
 	_ = reloadControllerConfig(cityPath)

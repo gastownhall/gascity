@@ -47,11 +47,11 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			state, err := parseDoltRuntimeStateFlags(pidText, runText, portText, dataDir, startedAt)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc dolt-state write-provider: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "dolt-state write-provider", err)
 				return errExit
 			}
 			if err := writeDoltRuntimeStateFile(stateFile, state); err != nil {
-				fmt.Fprintf(stderr, "gc dolt-state write-provider: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "dolt-state write-provider", err)
 				return errExit
 			}
 			return nil
@@ -81,16 +81,16 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 				if os.IsNotExist(err) {
 					return nil
 				}
-				fmt.Fprintf(stderr, "gc dolt-state read-provider: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "dolt-state read-provider", err)
 				return errExit
 			}
 			value, err := doltRuntimeStateField(state, field)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc dolt-state read-provider: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "dolt-state read-provider", err)
 				return errExit
 			}
 			if _, err := io.WriteString(stdout, value); err != nil {
-				fmt.Fprintf(stderr, "gc dolt-state read-provider: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "dolt-state read-provider", err)
 				return errExit
 			}
 			return nil
@@ -110,12 +110,12 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc dolt-state runtime-layout: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "dolt-state runtime-layout", err)
 				return errExit
 			}
 			for _, line := range doltRuntimeLayoutFields(layout) {
 				if _, err := fmt.Fprintln(stdout, line); err != nil {
-					fmt.Fprintf(stderr, "gc dolt-state runtime-layout: %v\n", err) //nolint:errcheck
+					cmdErr(stderr, "dolt-state runtime-layout", err)
 					return errExit
 				}
 			}
@@ -134,11 +134,11 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			port, err := chooseManagedDoltPort(cityPath, stateFile)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc dolt-state allocate-port: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "dolt-state allocate-port", err)
 				return errExit
 			}
 			if _, err := fmt.Fprintln(stdout, port); err != nil {
-				fmt.Fprintf(stderr, "gc dolt-state allocate-port: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "dolt-state allocate-port", err)
 				return errExit
 			}
 			return nil
@@ -157,12 +157,12 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			info, err := inspectManagedDoltProcess(cityPath, portText)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc dolt-state inspect-managed: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "dolt-state inspect-managed", err)
 				return errExit
 			}
 			for _, line := range doltProcessInspectionFields(info) {
 				if _, err := fmt.Fprintln(stdout, line); err != nil {
-					fmt.Fprintf(stderr, "gc dolt-state inspect-managed: %v\n", err) //nolint:errcheck
+					cmdErr(stderr, "dolt-state inspect-managed", err)
 					return errExit
 				}
 			}
@@ -182,12 +182,12 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			report, err := probeManagedDolt(cityPath, hostText, portText)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc dolt-state probe-managed: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "dolt-state probe-managed", err)
 				return errExit
 			}
 			for _, line := range managedDoltProbeFields(report) {
 				if _, err := fmt.Fprintln(stdout, line); err != nil {
-					fmt.Fprintf(stderr, "gc dolt-state probe-managed: %v\n", err) //nolint:errcheck
+					cmdErr(stderr, "dolt-state probe-managed", err)
 					return errExit
 				}
 			}
@@ -209,12 +209,12 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			report, err := assessExistingManagedDolt(cityPath, hostText, portText, userText, time.Duration(timeoutMS)*time.Millisecond)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc dolt-state existing-managed: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "dolt-state existing-managed", err)
 				return errExit
 			}
 			for _, line := range managedDoltExistingFields(report) {
 				if _, err := fmt.Fprintln(stdout, line); err != nil {
-					fmt.Fprintf(stderr, "gc dolt-state existing-managed: %v\n", err) //nolint:errcheck
+					cmdErr(stderr, "dolt-state existing-managed", err)
 					return errExit
 				}
 			}
@@ -237,7 +237,7 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if _, err := fmt.Fprintln(stdout, time.Now().UnixMilli()); err != nil {
-				fmt.Fprintf(stderr, "gc dolt-state now-ms: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "dolt-state now-ms", err)
 				return errExit
 			}
 			return nil
@@ -252,7 +252,7 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if err := managedDoltQueryProbe(hostText, portText, userText); err != nil {
-				fmt.Fprintf(stderr, "gc dolt-state query-probe: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "dolt-state query-probe", err)
 				return errExit
 			}
 			return nil
@@ -272,7 +272,7 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			state, err := managedDoltReadOnlyState(hostText, portText, userText)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc dolt-state read-only-check: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "dolt-state read-only-check", err)
 				return errExit
 			}
 			if state == "true" {
@@ -298,7 +298,7 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 				return errExit
 			}
 			if err := managedDoltResetProbe(hostText, portText, userText); err != nil {
-				fmt.Fprintf(stderr, "gc dolt-state reset-probe: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "dolt-state reset-probe", err)
 				return errExit
 			}
 			return nil
@@ -319,12 +319,12 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			report, err := managedDoltHealthCheck(hostText, portText, userText, checkReadOnly)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc dolt-state health-check: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "dolt-state health-check", err)
 				return errExit
 			}
 			for _, line := range managedDoltHealthCheckFields(report) {
 				if _, err := fmt.Fprintln(stdout, line); err != nil {
-					fmt.Fprintf(stderr, "gc dolt-state health-check: %v\n", err) //nolint:errcheck
+					cmdErr(stderr, "dolt-state health-check", err)
 					return errExit
 				}
 			}
@@ -352,12 +352,12 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 			report, err := waitForManagedDoltReady(cityPath, hostText, portText, userText, pid, time.Duration(timeoutMS)*time.Millisecond, checkDeleted)
 			for _, line := range managedDoltWaitReadyFields(report) {
 				if _, writeErr := fmt.Fprintln(stdout, line); writeErr != nil {
-					fmt.Fprintf(stderr, "gc dolt-state wait-ready: %v\n", writeErr) //nolint:errcheck
+					cmdErr(stderr, "dolt-state wait-ready", writeErr)
 					return errExit
 				}
 			}
 			if err != nil {
-				fmt.Fprintf(stderr, "gc dolt-state wait-ready: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "dolt-state wait-ready", err)
 				return errExit
 			}
 			return nil
@@ -385,12 +385,12 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 			report, err := stopManagedDoltProcess(cityPath, portText)
 			for _, line := range managedDoltStopFields(report) {
 				if _, writeErr := fmt.Fprintln(stdout, line); writeErr != nil {
-					fmt.Fprintf(stderr, "gc dolt-state stop-managed: %v\n", writeErr) //nolint:errcheck
+					cmdErr(stderr, "dolt-state stop-managed", writeErr)
 					return errExit
 				}
 			}
 			if err != nil {
-				fmt.Fprintf(stderr, "gc dolt-state stop-managed: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "dolt-state stop-managed", err)
 				return errExit
 			}
 			return nil
@@ -410,12 +410,12 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 			report, err := startManagedDoltProcess(cityPath, hostText, portText, userText, logLevel, time.Duration(timeoutMS)*time.Millisecond)
 			for _, line := range managedDoltStartFields(report) {
 				if _, writeErr := fmt.Fprintln(stdout, line); writeErr != nil {
-					fmt.Fprintf(stderr, "gc dolt-state start-managed: %v\n", writeErr) //nolint:errcheck
+					cmdErr(stderr, "dolt-state start-managed", writeErr)
 					return errExit
 				}
 			}
 			if err != nil {
-				fmt.Fprintf(stderr, "gc dolt-state start-managed: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "dolt-state start-managed", err)
 				return errExit
 			}
 			return nil
@@ -440,12 +440,12 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 			report, err := recoverManagedDoltProcess(cityPath, hostText, portText, userText, logLevel, time.Duration(timeoutMS)*time.Millisecond)
 			for _, line := range managedDoltRecoverFields(report) {
 				if _, writeErr := fmt.Fprintln(stdout, line); writeErr != nil {
-					fmt.Fprintf(stderr, "gc dolt-state recover-managed: %v\n", writeErr) //nolint:errcheck
+					cmdErr(stderr, "dolt-state recover-managed", writeErr)
 					return errExit
 				}
 			}
 			if err != nil {
-				fmt.Fprintf(stderr, "gc dolt-state recover-managed: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "dolt-state recover-managed", err)
 				return errExit
 			}
 			return nil
@@ -468,7 +468,7 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if err := preflightManagedDoltCleanup(cityPath); err != nil {
-				fmt.Fprintf(stderr, "gc dolt-state preflight-clean: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "dolt-state preflight-clean", err)
 				return errExit
 			}
 			return nil

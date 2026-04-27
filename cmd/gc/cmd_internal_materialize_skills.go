@@ -56,12 +56,12 @@ func newInternalMaterializeSkillsCmd(stdout, stderr io.Writer) *cobra.Command {
 			}
 			cityPath, err := resolveCity()
 			if err != nil {
-				fmt.Fprintf(stderr, "gc internal materialize-skills: %v\n", err) //nolint:errcheck // best-effort stderr
+				cmdErr(stderr, "internal materialize-skills", err)
 				return errExit
 			}
 			cfg, err := loadCityConfig(cityPath, stderr)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc internal materialize-skills: %v\n", err) //nolint:errcheck // best-effort stderr
+				cmdErr(stderr, "internal materialize-skills", err)
 				return errExit
 			}
 			agent, ok := resolveAgentIdentity(cfg, agentName, currentRigContext(cfg))
@@ -172,7 +172,7 @@ func materializeSkillsIntoWorkdir(cfg *config.City, agent *config.Agent, workdir
 
 	agentCat, err := materialize.LoadAgentCatalog(agent.SkillsDir)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc internal materialize-skills: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "internal materialize-skills", err)
 		return errExit
 	}
 	desired := materialize.EffectiveSet(cityCat, agentCat)
@@ -195,7 +195,7 @@ func materializeSkillsIntoWorkdir(cfg *config.City, agent *config.Agent, workdir
 		LegacyNames: materialize.LegacyStubNames(),
 	})
 	if err != nil {
-		fmt.Fprintf(stderr, "gc internal materialize-skills: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "internal materialize-skills", err)
 		return errExit
 	}
 

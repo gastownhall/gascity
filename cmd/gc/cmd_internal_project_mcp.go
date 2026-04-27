@@ -31,12 +31,12 @@ func newInternalProjectMCPCmd(stdout, stderr io.Writer) *cobra.Command {
 
 			cityPath, err := resolveCity()
 			if err != nil {
-				fmt.Fprintf(stderr, "gc internal project-mcp: %v\n", err) //nolint:errcheck // best-effort stderr
+				cmdErr(stderr, "internal project-mcp", err)
 				return errExit
 			}
 			cfg, err := loadCityConfig(cityPath, stderr)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc internal project-mcp: %v\n", err) //nolint:errcheck // best-effort stderr
+				cmdErr(stderr, "internal project-mcp", err)
 				return errExit
 			}
 
@@ -61,30 +61,30 @@ func newInternalProjectMCPCmd(stdout, stderr io.Writer) *cobra.Command {
 				// no-op so unsupported/absent providers can be ignored there.
 				catalog, lerr := loadEffectiveMCPForAgent(cityPath, cfg, &agent, identity, absWorkdir)
 				if lerr != nil {
-					fmt.Fprintf(stderr, "gc internal project-mcp: %v\n", lerr) //nolint:errcheck // best-effort stderr
+					cmdErr(stderr, "internal project-mcp", lerr)
 					return errExit
 				}
 				if len(catalog.Servers) == 0 {
 					return nil
 				}
-				fmt.Fprintf(stderr, "gc internal project-mcp: %v\n", err) //nolint:errcheck // best-effort stderr
+				cmdErr(stderr, "internal project-mcp", err)
 				return errExit
 			}
 
 			catalog, projection, err := resolveAgentMCPProjection(cityPath, cfg, &agent, identity, absWorkdir, resolvedProviderLaunchFamily(resolved))
 			if err != nil {
-				fmt.Fprintf(stderr, "gc internal project-mcp: %v\n", err) //nolint:errcheck // best-effort stderr
+				cmdErr(stderr, "internal project-mcp", err)
 				return errExit
 			}
 			if projection.Provider == "" {
 				return nil
 			}
 			if err := validateStage2TargetClaimants(cityPath, cfg, &agent, projection, exec.LookPath); err != nil {
-				fmt.Fprintf(stderr, "gc internal project-mcp: %v\n", err) //nolint:errcheck // best-effort stderr
+				cmdErr(stderr, "internal project-mcp", err)
 				return errExit
 			}
 			if err := projection.ApplyWithStderr(fsys.OSFS{}, stderr); err != nil {
-				fmt.Fprintf(stderr, "gc internal project-mcp: %v\n", err) //nolint:errcheck // best-effort stderr
+				cmdErr(stderr, "internal project-mcp", err)
 				return errExit
 			}
 			if len(catalog.Servers) > 0 {

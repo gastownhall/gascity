@@ -82,7 +82,7 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 		if inject {
 			return 0
 		}
-		fmt.Fprintf(stderr, "gc hook: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "hook", err)
 		return 1
 	}
 	cfg, err := loadCityConfig(cityPath, stderr)
@@ -90,7 +90,7 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 		if inject {
 			return 0
 		}
-		fmt.Fprintf(stderr, "gc hook: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "hook", err)
 		return 1
 	}
 	// Normalize relative rig paths to absolute so downstream rig-matching
@@ -237,7 +237,7 @@ func doHookWithFormat(workQuery, dir string, inject bool, hookFormat string, run
 		if inject {
 			return 0 // --inject always exits 0
 		}
-		fmt.Fprintf(stderr, "gc hook: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "hook", err)
 		return 1
 	}
 

@@ -59,7 +59,7 @@ individual agents, or "gc rig resume" for rigs.`,
 func cmdSuspend(args []string, stdout, stderr io.Writer) int {
 	cityPath, err := resolveSuspendDir(args)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc suspend: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "suspend", err)
 		return 1
 	}
 	if c := apiClient(cityPath); c != nil {
@@ -69,7 +69,7 @@ func cmdSuspend(args []string, stdout, stderr io.Writer) int {
 			return 0
 		}
 		if !api.ShouldFallback(err) {
-			fmt.Fprintf(stderr, "gc suspend: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "suspend", err)
 			return 1
 		}
 		// Connection error — fall through to direct mutation.
@@ -81,7 +81,7 @@ func cmdSuspend(args []string, stdout, stderr io.Writer) int {
 func cmdResume(args []string, stdout, stderr io.Writer) int {
 	cityPath, err := resolveSuspendDir(args)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc resume: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "resume", err)
 		return 1
 	}
 	if c := apiClient(cityPath); c != nil {
@@ -91,7 +91,7 @@ func cmdResume(args []string, stdout, stderr io.Writer) int {
 			return 0
 		}
 		if !api.ShouldFallback(err) {
-			fmt.Fprintf(stderr, "gc resume: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "resume", err)
 			return 1
 		}
 		// Connection error — fall through to direct mutation.

@@ -95,13 +95,13 @@ all agents with running status, rigs, and a summary count.`,
 func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCommandCity(args)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc status: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "status", err)
 		return 1
 	}
 
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc status: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "status", err)
 		return 1
 	}
 
@@ -162,7 +162,7 @@ func doCityStatus(
 	if store != nil {
 		sessions, err := collectCitySessionCounts(cityPath, store, sp, cfg)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc status: building session catalog: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "status: building session catalog", err)
 			return 1
 		}
 		if sessions.ActiveSessions > 0 || sessions.SuspendedSessions > 0 {
@@ -191,7 +191,7 @@ func doCityStatusJSON(
 	if store != nil {
 		sessions, err := collectCitySessionCounts(cityPath, store, sp, cfg)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc status: building session catalog: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "status: building session catalog", err)
 			return 1
 		}
 		snapshot.Summary.ActiveSessions = sessions.ActiveSessions
@@ -201,7 +201,7 @@ func doCityStatusJSON(
 	status := cityStatusJSONFromSnapshot(snapshot, snapshot.Summary)
 	data, err := json.MarshalIndent(status, "", "  ")
 	if err != nil {
-		fmt.Fprintf(stderr, "gc status: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "status", err)
 		return 1
 	}
 	fmt.Fprintln(stdout, string(data)) //nolint:errcheck // best-effort stdout

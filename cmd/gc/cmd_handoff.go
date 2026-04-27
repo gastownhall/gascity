@@ -64,13 +64,13 @@ func cmdHandoff(args []string, target string, stdout, stderr io.Writer) int {
 
 	current, err := currentSessionRuntimeTarget()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc handoff: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "handoff", err)
 		return 1
 	}
 
 	store, err := openCityStoreAt(current.cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc handoff: %v\n", err)                    //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "handoff", err)
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -97,7 +97,7 @@ func cmdHandoff(args []string, target string, stdout, stderr io.Writer) int {
 func cmdHandoffRemote(args []string, target string, stdout, stderr io.Writer) int {
 	targetInfo, err := resolveSessionRuntimeTarget(target, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc handoff: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "handoff", err)
 		return 1
 	}
 
@@ -107,7 +107,7 @@ func cmdHandoffRemote(args []string, target string, stdout, stderr io.Writer) in
 	}
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc handoff: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "handoff", err)
 		return 1
 	}
 	cfg, _ := loadCityConfig(cityPath, stderr)
@@ -165,7 +165,7 @@ func doHandoffWithOutcome(store beads.Store, rec events.Recorder, dops drainOps,
 		Labels:      []string{"thread:" + handoffThreadID()},
 	})
 	if err != nil {
-		fmt.Fprintf(stderr, "gc handoff: creating mail: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "handoff: creating mail", err)
 		return handoffOutcome{code: 1}
 	}
 	rec.Record(events.Event{
@@ -178,7 +178,7 @@ func doHandoffWithOutcome(store beads.Store, rec events.Recorder, dops drainOps,
 
 	restartable, err := sessionRestartableByController(store, sessionName)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc handoff: checking session type: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "handoff: checking session type", err)
 		return handoffOutcome{code: 1}
 	}
 	// On-demand named sessions are human-attended and the controller cannot
@@ -187,7 +187,7 @@ func doHandoffWithOutcome(store beads.Store, rec events.Recorder, dops drainOps,
 	// guard: gastownhall/gascity#744.
 	if !restartable {
 		if err := clearRestartRequest(store, dops, sessionName); err != nil {
-			fmt.Fprintf(stderr, "gc handoff: clearing stale restart request: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "handoff: clearing stale restart request", err)
 			return handoffOutcome{code: 1, restartRequested: false}
 		}
 		fmt.Fprintf(stdout, "Handoff: sent mail %s (named session; restart skipped).\n", b.ID) //nolint:errcheck // best-effort stdout
@@ -195,14 +195,14 @@ func doHandoffWithOutcome(store beads.Store, rec events.Recorder, dops drainOps,
 	}
 
 	if err := dops.setRestartRequested(sessionName); err != nil {
-		fmt.Fprintf(stderr, "gc handoff: setting restart flag: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "handoff: setting restart flag", err)
 		return handoffOutcome{code: 1}
 	}
 	// Also persist the request through the worker boundary so it survives
 	// tmux session death. Non-fatal: the runtime flag above is primary.
 	if persistRestart != nil {
 		if err := persistRestart(); err != nil {
-			fmt.Fprintf(stderr, "gc handoff: setting bead restart flag: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "handoff: setting bead restart flag", err)
 		}
 	}
 	rec.Record(events.Event{
@@ -288,7 +288,7 @@ func doHandoffRemote(store beads.Store, rec events.Recorder, sp runtime.Provider
 		Labels:      []string{"thread:" + handoffThreadID()},
 	})
 	if err != nil {
-		fmt.Fprintf(stderr, "gc handoff: creating mail: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "handoff: creating mail", err)
 		return 1
 	}
 	rec.Record(events.Event{
@@ -301,12 +301,12 @@ func doHandoffRemote(store beads.Store, rec events.Recorder, sp runtime.Provider
 
 	restartable, err := sessionRestartableByController(store, sessionName)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc handoff: checking session type: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "handoff: checking session type", err)
 		return 1
 	}
 	if !restartable {
 		if err := clearRestartRequest(store, newDrainOps(sp), sessionName); err != nil {
-			fmt.Fprintf(stderr, "gc handoff: clearing stale restart request: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "handoff: clearing stale restart request", err)
 			return 1
 		}
 		fmt.Fprintf(stdout, "Handoff: sent mail %s to %s (named session; kill skipped because the controller cannot restart it)\n", b.ID, targetAddress) //nolint:errcheck // best-effort stdout

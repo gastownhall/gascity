@@ -154,7 +154,7 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 		return 1
 	}
 	if err := waitLifecycleEnabled(); err != nil {
-		fmt.Fprintf(stderr, "gc session wait: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "session wait", err)
 		return 1
 	}
 	if sleep {
@@ -171,12 +171,12 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 	}
 	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, target)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session wait: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "session wait", err)
 		return 1
 	}
 	sb, err := store.Get(sessionID)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session wait: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "session wait", err)
 		return 1
 	}
 	for _, depID := range depIDs {
@@ -213,7 +213,7 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 		Metadata: meta,
 	})
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session wait: creating wait: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "session wait: creating wait", err)
 		return 1
 	}
 	ready, depErr := depsWaitReadyDetailedForCity(cityPath, store, waitBead)
@@ -223,9 +223,9 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 			"failed_at":  now.Format(time.RFC3339),
 			"last_error": depErr.Error(),
 		}); err != nil {
-			fmt.Fprintf(stderr, "gc session wait: setting failed state: %v\n", err) //nolint:errcheck
+			cmdErr(stderr, "session wait: setting failed state", err)
 		}
-		fmt.Fprintf(stderr, "gc session wait: dependency state check: %v\n", depErr) //nolint:errcheck
+		cmdErr(stderr, "session wait: dependency state check", depErr)
 		return 1
 	}
 	if ready {
@@ -233,7 +233,7 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 			"state":    waitStateReady,
 			"ready_at": now.Format(time.RFC3339),
 		}); err != nil {
-			fmt.Fprintf(stderr, "gc session wait: setting ready state: %v\n", err) //nolint:errcheck
+			cmdErr(stderr, "session wait: setting ready state", err)
 			return 1
 		}
 		fmt.Fprintf(stdout, "Registered wait %s for session %s (already ready).\n", waitBead.ID, sessionID) //nolint:errcheck
@@ -244,12 +244,12 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 			"wait_hold":    "true",
 			"sleep_intent": "wait-hold",
 		}); err != nil {
-			fmt.Fprintf(stderr, "gc session wait: setting wait hold: %v\n", err) //nolint:errcheck
+			cmdErr(stderr, "session wait: setting wait hold", err)
 			return 1
 		}
 		if cityPath, err := resolveCity(); err == nil {
 			if err := pokeController(cityPath); err != nil {
-				fmt.Fprintf(stderr, "gc session wait: poking controller: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "session wait: poking controller", err)
 				return 1
 			}
 		}
@@ -267,7 +267,7 @@ func cmdWaitList(stateFilter, sessionFilter string, stdout, stderr io.Writer) in
 	}
 	items, err := loadWaitBeads(store)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc wait list: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "wait list", err)
 		return 1
 	}
 	sort.SliceStable(items, func(i, j int) bool { return items[i].CreatedAt.Before(items[j].CreatedAt) })
@@ -297,7 +297,7 @@ func cmdWaitInspect(waitID string, stdout, stderr io.Writer) int {
 	}
 	b, err := store.Get(waitID)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc wait inspect: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "wait inspect", err)
 		return 1
 	}
 	if !sessionpkg.IsWaitBead(b) {
@@ -323,7 +323,7 @@ func cmdWaitSetState(waitID, state string, stdout, stderr io.Writer) int {
 	}
 	b, err := store.Get(waitID)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc wait: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "wait", err)
 		return 1
 	}
 	if !sessionpkg.IsWaitBead(b) {
@@ -332,7 +332,7 @@ func cmdWaitSetState(waitID, state string, stdout, stderr io.Writer) int {
 	}
 	if state == waitStateReady {
 		if err := waitLifecycleEnabled(); err != nil {
-			fmt.Fprintf(stderr, "gc wait: %v\n", err) //nolint:errcheck
+			cmdErr(stderr, "wait", err)
 			return 1
 		}
 	}
@@ -340,7 +340,7 @@ func cmdWaitSetState(waitID, state string, stdout, stderr io.Writer) int {
 	if state == waitStateReady && b.Status == "closed" {
 		retried, err := retryClosedWait(store, b, now)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc wait: %v\n", err) //nolint:errcheck
+			cmdErr(stderr, "wait", err)
 			return 1
 		}
 		fmt.Fprintf(stdout, "Retried wait %s as %s.\n", waitID, retried.ID) //nolint:errcheck
@@ -352,7 +352,7 @@ func cmdWaitSetState(waitID, state string, stdout, stderr io.Writer) int {
 		batch["ready_at"] = now
 		nextAttempt, err := nextWaitDeliveryAttempt(store, b)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc wait: %v\n", err) //nolint:errcheck
+			cmdErr(stderr, "wait", err)
 			return 1
 		}
 		if nextAttempt != "" {
@@ -375,18 +375,18 @@ func cmdWaitSetState(waitID, state string, stdout, stderr io.Writer) int {
 		}
 	}
 	if err := apply(waitID, batch); err != nil {
-		fmt.Fprintf(stderr, "gc wait: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "wait", err)
 		return 1
 	}
 	if state == waitStateCanceled {
 		if cityPath, err := resolveCity(); err == nil {
 			if err := withdrawQueuedWaitNudges(cityPath, []string{b.Metadata["nudge_id"]}); err != nil {
-				fmt.Fprintf(stderr, "gc wait: withdrawing queued nudge: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "wait: withdrawing queued nudge", err)
 				return 1
 			}
 		}
 		if err := clearSessionWaitHoldIfIdle(store, b.Metadata["session_id"]); err != nil {
-			fmt.Fprintf(stderr, "gc wait: clearing session wait hold: %v\n", err) //nolint:errcheck
+			cmdErr(stderr, "wait: clearing session wait hold", err)
 			return 1
 		}
 	}

@@ -1051,7 +1051,7 @@ func runController(
 ) int {
 	lock, err := acquireControllerLock(cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
 		return 1
 	}
 	defer lock.Close() //nolint:errcheck // best-effort cleanup
@@ -1076,7 +1076,7 @@ func runController(
 	sockPath := controllerSocketPath(cityPath)
 	lis, err := startControllerSocket(cityPath, cancel, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
 		return 1
 	}
 	defer lis.Close()         //nolint:errcheck // best-effort cleanup
@@ -1090,12 +1090,12 @@ func runController(
 	// explicitly through function parameters.
 	controllerToken, err := convergence.GenerateToken()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
 		return 1
 	}
 	_ = controllerToken // available for future waves via function parameters
 	if err := convergence.WriteToken(cityPath, controllerToken); err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
 		return 1
 	}
 	defer convergence.RemoveToken(cityPath) //nolint:errcheck // best-effort cleanup

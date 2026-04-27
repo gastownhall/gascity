@@ -91,18 +91,18 @@ config element. Use -f to layer additional config files.`,
 func doConfigShow(validate, showProvenance bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc config show: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "config show", err)
 		return 1
 	}
 
 	if err := ensureLegacyNamedPacksCached(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc config show: fetching packs: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "config show: fetching packs", err)
 		return 1
 	}
 
 	cfg, prov, err := loadConfigCommandCityConfig(cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc config show: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "config show", err)
 		return 1
 	}
 
@@ -156,7 +156,7 @@ func doConfigShow(validate, showProvenance bool, stdout, stderr io.Writer) int {
 
 	data, err := configForDisplay(cfg).Marshal()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc config show: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "config show", err)
 		return 1
 	}
 	// Emit provider inheritance chain annotations as a comment block
@@ -447,18 +447,18 @@ func collectLegacyGraphAssigneeErrors(
 func doConfigExplain(rigFilter, agentFilter string, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc config explain: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "config explain", err)
 		return 1
 	}
 
 	if err := ensureLegacyNamedPacksCached(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc config explain: fetching packs: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "config explain: fetching packs", err)
 		return 1
 	}
 
 	cfg, prov, err := loadConfigCommandCityConfig(cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc config explain: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "config explain", err)
 		return 1
 	}
 
@@ -566,20 +566,20 @@ func explainAgent(w io.Writer, a *config.Agent, prov *config.Provenance) {
 func doConfigExplainProvider(providerName string, asJSON bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc config explain: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "config explain", err)
 		return 1
 	}
 
 	if quickCfg, qErr := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); qErr == nil && len(quickCfg.Packs) > 0 {
 		if fErr := config.FetchPacks(quickCfg.Packs, cityPath); fErr != nil {
-			fmt.Fprintf(stderr, "gc config explain: fetching packs: %v\n", fErr) //nolint:errcheck
+			cmdErr(stderr, "config explain: fetching packs", fErr)
 			return 1
 		}
 	}
 
 	cfg, _, err := loadConfigCommandCityConfig(cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc config explain: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "config explain", err)
 		return 1
 	}
 
@@ -747,7 +747,7 @@ func renderProviderExplainJSON(r config.ResolvedProvider, name string, stdout, s
 	}
 	enc := jsonEncoder(stdout)
 	if err := enc.Encode(payload); err != nil {
-		fmt.Fprintf(stderr, "gc config explain: json encode: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "config explain: json encode", err)
 		return 1
 	}
 	return 0

@@ -120,7 +120,7 @@ func (c *doltTopologyCheck) Fix(_ *doctor.CheckContext) error { return nil }
 func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc doctor: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "doctor", err)
 		return 1
 	}
 

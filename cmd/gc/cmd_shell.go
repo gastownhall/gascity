@@ -217,29 +217,29 @@ func hookBlock(sh, compFile string) string {
 func cmdShellInstall(root *cobra.Command, args []string, stdout, stderr io.Writer) int {
 	sh, err := resolveShellArg(args)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc shell install: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "shell install", err)
 		return 1
 	}
 
 	// Generate completion script.
 	script, err := generateCompletion(root, sh)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc shell install: generating completion: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "shell install: generating completion", err)
 		return 1
 	}
 
 	// Write completion script to file.
 	compFile, err := completionFile(sh)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc shell install: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "shell install", err)
 		return 1
 	}
 	if err := os.MkdirAll(filepath.Dir(compFile), 0o755); err != nil {
-		fmt.Fprintf(stderr, "gc shell install: creating directory: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "shell install: creating directory", err)
 		return 1
 	}
 	if err := atomicWriteFile(compFile, script); err != nil {
-		fmt.Fprintf(stderr, "gc shell install: writing completion script: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "shell install: writing completion script", err)
 		return 1
 	}
 	fmt.Fprintf(stdout, "Wrote completion script to %s\n", compFile) //nolint:errcheck // best-effort stdout
@@ -247,14 +247,14 @@ func cmdShellInstall(root *cobra.Command, args []string, stdout, stderr io.Write
 	// Add source line to RC file.
 	rcFile, err := shellRCFile(sh)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc shell install: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "shell install", err)
 		return 1
 	}
 	if existingRC, err := installedShellRCFile(sh); err == nil {
 		rcFile = existingRC
 	}
 	if err := os.MkdirAll(filepath.Dir(rcFile), 0o755); err != nil {
-		fmt.Fprintf(stderr, "gc shell install: creating directory: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "shell install: creating directory", err)
 		return 1
 	}
 	installed, err := rcFileHasHook(rcFile)

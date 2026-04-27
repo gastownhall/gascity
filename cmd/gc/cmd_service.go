@@ -71,12 +71,12 @@ func newServiceDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
 func cmdServiceList(stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc service list: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "service list", err)
 		return 1
 	}
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc service list: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "service list", err)
 		return 1
 	}
 	return doServiceList(cfg, serviceReadClient(cityPath, cfg), stdout, stderr)
@@ -85,12 +85,12 @@ func cmdServiceList(stdout, stderr io.Writer) int {
 func cmdServiceDoctor(name string, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc service doctor: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "service doctor", err)
 		return 1
 	}
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc service doctor: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "service doctor", err)
 		return 1
 	}
 	return doServiceDoctor(cfg, serviceReadClient(cityPath, cfg), name, stdout, stderr)
@@ -117,12 +117,12 @@ Useful after updating pack scripts without a full city restart.`,
 func cmdServiceRestart(name string, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc service restart: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "service restart", err)
 		return 1
 	}
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc service restart: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "service restart", err)
 		return 1
 	}
 	client := serviceRestartClient(cityPath, cfg)
@@ -131,7 +131,7 @@ func cmdServiceRestart(name string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if err := client.RestartService(name); err != nil {
-		fmt.Fprintf(stderr, "gc service restart: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "service restart", err)
 		return 1
 	}
 	fmt.Fprintf(stdout, "Service %q restarted.\n", name) //nolint:errcheck // best-effort stdout

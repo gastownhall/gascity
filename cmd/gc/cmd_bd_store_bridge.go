@@ -66,11 +66,11 @@ func newBdStoreBridgeCmd(stdout, stderr io.Writer) *cobra.Command {
 		RunE: func(_ *cobra.Command, args []string) error {
 			op, opArgs, dir, host, port, user, err := parseBdStoreBridgeCommandArgs(args)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc bd-store-bridge: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "bd-store-bridge", err)
 				return errExit
 			}
 			if err := runBdStoreBridge(op, opArgs, dir, host, port, user, os.Stdin, stdout); err != nil {
-				fmt.Fprintf(stderr, "gc bd-store-bridge: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "bd-store-bridge", err)
 				return errExit
 			}
 			return nil

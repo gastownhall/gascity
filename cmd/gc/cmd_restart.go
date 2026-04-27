@@ -35,7 +35,7 @@ immediate reconcile.`,
 func cmdRestart(args []string, stdout, stderr io.Writer) int {
 	nameOverride, err := restartRegistrationName(args)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc restart: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "restart", err)
 		return 1
 	}
 	if code := cmdStop(args, stdout, stderr); code != 0 {
@@ -84,7 +84,7 @@ quick way to force-refresh all agents working on a particular project.`,
 func cmdRigRestart(args []string, stdout, stderr io.Writer) int {
 	ctx, err := resolveContext()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc rig restart: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "rig restart", err)
 		return 1
 	}
 	rigName := ctx.RigName
@@ -98,7 +98,7 @@ func cmdRigRestart(args []string, stdout, stderr io.Writer) int {
 	cityPath := ctx.CityPath
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc rig restart: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "rig restart", err)
 		return 1
 	}
 

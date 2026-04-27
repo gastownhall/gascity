@@ -172,7 +172,7 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 	cityPath, err := resolveCity()
 	if err != nil {
 		if strictMode {
-			fmt.Fprintf(stderr, "gc prime: no city config found: %v\n", err) //nolint:errcheck
+			cmdErr(stderr, "prime: no city config found", err)
 			return 1
 		}
 		fmt.Fprint(stdout, defaultPrimePrompt) //nolint:errcheck // best-effort stdout
@@ -181,7 +181,7 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		if strictMode {
-			fmt.Fprintf(stderr, "gc prime: loading city config: %v\n", err) //nolint:errcheck
+			cmdErr(stderr, "prime: loading city config", err)
 			return 1
 		}
 		fmt.Fprint(stdout, defaultPrimePrompt) //nolint:errcheck // best-effort stdout

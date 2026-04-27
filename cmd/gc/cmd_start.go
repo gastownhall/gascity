@@ -276,17 +276,17 @@ func doStartWithNameOverride(args []string, controllerMode bool, stdout, stderr 
 
 	dir, err := resolveStartDir(args)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
 		return 1
 	}
 
 	cityPath, err := requireBootstrappedCity(dir)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
 		return 1
 	}
 	if err := ensureCityScaffold(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc start: runtime scaffold: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start: runtime scaffold", err)
 		return 1
 	}
 	if missing := checkHardDependencies(cityPath); len(missing) > 0 {
@@ -345,19 +345,19 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	dir, err := resolveStartDir(args)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
 		return 1
 	}
 
 	cityPath, err := requireBootstrappedCity(dir)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
 		return 1
 	}
 	if controllerMode {
 		_, registered, err := registeredCityEntry(cityPath)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "start", err)
 			return 1
 		}
 		if registered {
@@ -366,16 +366,16 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		}
 	}
 	if err := ensureCityScaffold(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc start: runtime scaffold: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start: runtime scaffold", err)
 		return 1
 	}
 	if err := ensureLegacyNamedPacksCached(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc start: fetching packs: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start: fetching packs", err)
 		return 1
 	}
 	cfg, prov, err := loadStartCityConfig(cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err)                      //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -400,15 +400,15 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	// Validate rigs (prefix collisions, missing fields).
 	if err := config.ValidateRigs(cfg.Rigs, config.EffectiveHQPrefix(cfg)); err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
 		return 1
 	}
 	if err := config.ValidateServices(cfg.Services); err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
 		return 1
 	}
 	if err := workspacesvc.ValidateRuntimeSupport(cfg.Services); err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
 		return 1
 	}
 
@@ -418,7 +418,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// probe → init+hooks(city) → init+hooks(rigs) → routes.
 	resolveRigPaths(cityPath, cfg.Rigs)
 	if err := startBeadsLifecycle(cityPath, cityName, cfg, stderr); err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err)                      //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -427,7 +427,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// The gc-beads-bd script's health operation validates server liveness
 	// (TCP + query probe). Recovery is attempted on failure.
 	if err := healthBeadsProvider(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc start: beads health check: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start: beads health check", err)
 		// Non-fatal warning — server may recover by the time agents need it.
 	}
 
@@ -435,7 +435,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// System formulas/orders now arrive via the core bootstrap pack.
 	if len(cfg.FormulaLayers.City) > 0 {
 		if err := ResolveFormulas(cityPath, cfg.FormulaLayers.City); err != nil {
-			fmt.Fprintf(stderr, "gc start: city formulas: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "start: city formulas", err)
 		}
 	}
 	for _, r := range cfg.Rigs {
@@ -457,7 +457,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	// Validate agents.
 	if err := config.ValidateAgents(cfg.Agents); err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
 		return 1
 	}
 
@@ -469,7 +469,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// engdocs/proposals/skill-materialization.md § "Collision
 	// validation (startup validator)".
 	if err := checkSkillCollisions(cfg, cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
 		return 1
 	}
 
@@ -484,14 +484,14 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// write failures must block startup before sessions launch against stale or
 	// ambiguous MCP state.
 	if err := runStage1MCPProjection(cityPath, cfg, exec.LookPath, stderr); err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
 		return 1
 	}
 
 	// Validate install_agent_hooks (workspace + all agents).
 	if ih := cfg.Workspace.InstallAgentHooks; len(ih) > 0 {
 		if err := hooks.Validate(ih); err != nil {
-			fmt.Fprintf(stderr, "gc start: workspace: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "start: workspace", err)
 			return 1
 		}
 	}
@@ -531,7 +531,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	// Pre-check container images once (fail fast before N serial starts).
 	if err := checkAgentImages(sp, cfg.Agents, stderr); err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start", err)
 		return 1
 	}
 
@@ -583,7 +583,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// One-shot bead reconciliation: same code path as the daemon.
 	sessionBeads, err := loadSessionBeadSnapshot(oneShotStore)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc start: loading session beads: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "start: loading session beads", err)
 		sessionBeads = nil
 	}
 	dsResult := buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, oneShotStore, nil, sessionBeads, nil, stderr)
@@ -613,7 +613,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// Post-reconcile sync: update bead state to reflect post-start reality.
 	sessionBeads, err = loadSessionBeadSnapshot(oneShotStore)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc start: loading session beads: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "start: loading session beads", err)
 		sessionBeads = nil
 	}
 	dsResult = buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, oneShotStore, nil, sessionBeads, nil, stderr)

@@ -52,13 +52,13 @@ for reproducibility. Automatically called during "gc start".`,
 func doPackFetch(stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc pack fetch: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "pack fetch", err)
 		return 1
 	}
 
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc pack fetch: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "pack fetch", err)
 		return 1
 	}
 
@@ -69,18 +69,18 @@ func doPackFetch(stdout, stderr io.Writer) int {
 
 	fmt.Fprintf(stdout, "Fetching %d pack source(s)...\n", len(cfg.Packs)) //nolint:errcheck
 	if err := config.FetchPacks(cfg.Packs, cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc pack fetch: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "pack fetch", err)
 		return 1
 	}
 
 	// Write lockfile.
 	lock, err := config.LockFromCache(cfg.Packs, cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc pack fetch: building lock: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "pack fetch: building lock", err)
 		return 1
 	}
 	if err := config.WriteLock(cityPath, lock); err != nil {
-		fmt.Fprintf(stderr, "gc pack fetch: writing lock: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "pack fetch: writing lock", err)
 		return 1
 	}
 
@@ -118,13 +118,13 @@ and locked commit hash (if available).`,
 func doPackList(stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc pack list: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "pack list", err)
 		return 1
 	}
 
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc pack list: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "pack list", err)
 		return 1
 	}
 

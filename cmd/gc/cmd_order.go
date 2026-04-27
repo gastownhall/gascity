@@ -445,7 +445,7 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 	if a.IsExec() {
 		cfg, cfgErr := loadCityConfig(cityPath, stderr)
 		if cfgErr != nil {
-			fmt.Fprintf(stderr, "gc order run: %v\n", cfgErr) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "order run", cfgErr)
 			return 1
 		}
 		return doOrderRunExec(a, cityPath, cfg, stdout, stderr)
@@ -464,7 +464,7 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 		var err error
 		cfg, err = loadCityConfig(cityPath, stderr)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "order run", err)
 			return 1
 		}
 		cityName = config.EffectiveCityName(cfg, filepath.Base(cityPath))
@@ -478,24 +478,24 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 	}
 	recipe, err := formula.CompileWithoutRuntimeVarValidation(context.Background(), a.Formula, searchPaths, nil)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "order run", err)
 		return 1
 	}
 	if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{}); err != nil {
-		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "order run", err)
 		return 1
 	}
 
 	if a.Pool != "" && cfg != nil {
 		pool := qualifyPool(a.Pool, a.Rig)
 		if err := applyGraphRouting(recipe, nil, pool, nil, "", "", "", "", store, cityName, cityPath, cfg); err != nil {
-			fmt.Fprintf(stderr, "gc order run: routing decoration failed: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "order run: routing decoration failed", err)
 		}
 	}
 
 	cookResult, err := molecule.Instantiate(context.Background(), store, recipe, molecule.Options{})
 	if err != nil {
-		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "order run", err)
 		return 1
 	}
 	rootID := cookResult.RootID
@@ -517,7 +517,7 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 		}
 	}
 	if err := store.Update(rootID, update); err != nil {
-		fmt.Fprintf(stderr, "gc order run: labeling wisp: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "order run: labeling wisp", err)
 		return 1
 	}
 
@@ -541,14 +541,14 @@ func doOrderRunExec(a orders.Order, cityPath string, cfg *config.City, stdout, s
 
 	target, err := resolveOrderExecTarget(cityPath, cfg, a)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "order run", err)
 		return 1
 	}
 	env := orderExecEnv(cityPath, cfg, target, a)
 
 	output, err := shellExecRunner(ctx, a.Exec, target.ScopeRoot, env)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc order run: exec failed: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "order run: exec failed", err)
 		if len(output) > 0 {
 			fmt.Fprintf(stderr, "%s", output) //nolint:errcheck
 		}
@@ -653,7 +653,7 @@ func doOrderCheckWithStoresResolver(aa []orders.Order, now time.Time, ep events.
 	for _, a := range aa {
 		stores, err := resolveStores(a)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "order check", err)
 			return 1
 		}
 		baseLastRunFn := orders.LastRunAcrossStores(stores...)
@@ -760,7 +760,7 @@ func doOrderHistoryWithStoresResolver(name, rig string, aa []orders.Order, resol
 	for _, a := range targets {
 		stores, err := resolveStores(a)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc order history: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "order history", err)
 			return 1
 		}
 		label := "order-run:" + a.ScopedName()
@@ -774,7 +774,7 @@ func doOrderHistoryWithStoresResolver(name, rig string, aa []orders.Order, resol
 				Sort:          beads.SortCreatedDesc,
 			})
 			if err != nil {
-				fmt.Fprintf(stderr, "gc order history: %v\n", err) //nolint:errcheck // best-effort stderr
+				cmdErr(stderr, "order history", err)
 				if i == 0 {
 					return 1
 				}

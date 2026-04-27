@@ -109,7 +109,7 @@ func runConvoyControlServe(args []string, stdout, stderr io.Writer) error {
 		agentName = args[0]
 	}
 	if err := runWorkflowServe(agentName, true, stdout, stderr); err != nil {
-		fmt.Fprintf(stderr, "gc convoy control --serve: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "convoy control --serve", err)
 		return errExit
 	}
 	return nil

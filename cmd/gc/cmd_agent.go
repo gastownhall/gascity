@@ -437,7 +437,7 @@ func cmdAgentAdd(name, promptTemplate, dir string, suspended bool, stdout, stder
 	}
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc agent add: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "agent add", err)
 		return 1
 	}
 	return doAgentAdd(fsys.OSFS{}, cityPath, name, promptTemplate, dir, suspended, stdout, stderr)
@@ -456,7 +456,7 @@ func doAgentAdd(fs fsys.FS, cityPath, name, promptTemplate, dir string, suspende
 
 	cfg, err := loadCityConfigFS(fs, tomlPath, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc agent add: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "agent add", err)
 		return 1
 	}
 
@@ -475,7 +475,7 @@ func doAgentAdd(fs fsys.FS, cityPath, name, promptTemplate, dir string, suspende
 
 	agentDir := filepath.Join(cityPath, "agents", name)
 	if err := fs.MkdirAll(agentDir, 0o755); err != nil {
-		fmt.Fprintf(stderr, "gc agent add: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "agent add", err)
 		return 1
 	}
 
@@ -497,7 +497,7 @@ func doAgentAdd(fs fsys.FS, cityPath, name, promptTemplate, dir string, suspende
 
 	promptPath := filepath.Join(agentDir, "prompt.template.md")
 	if err := fs.WriteFile(promptPath, promptData, 0o644); err != nil {
-		fmt.Fprintf(stderr, "gc agent add: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "agent add", err)
 		return 1
 	}
 
@@ -510,7 +510,7 @@ func doAgentAdd(fs fsys.FS, cityPath, name, promptTemplate, dir string, suspende
 			b.WriteString("suspended = true\n")
 		}
 		if err := fs.WriteFile(filepath.Join(agentDir, "agent.toml"), []byte(b.String()), 0o644); err != nil {
-			fmt.Fprintf(stderr, "gc agent add: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "agent add", err)
 			return 1
 		}
 	}
@@ -546,7 +546,7 @@ func cmdAgentSuspend(args []string, stdout, stderr io.Writer) int {
 	}
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc agent suspend: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "agent suspend", err)
 		return 1
 	}
 	if c := apiClient(cityPath); c != nil {
@@ -557,7 +557,7 @@ func cmdAgentSuspend(args []string, stdout, stderr io.Writer) int {
 			return 0
 		}
 		if !api.ShouldFallback(err) {
-			fmt.Fprintf(stderr, "gc agent suspend: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "agent suspend", err)
 			return 1
 		}
 		// Connection error — fall through to direct mutation.
@@ -599,7 +599,7 @@ func cmdAgentResume(args []string, stdout, stderr io.Writer) int {
 	}
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc agent resume: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "agent resume", err)
 		return 1
 	}
 	if c := apiClient(cityPath); c != nil {
@@ -610,7 +610,7 @@ func cmdAgentResume(args []string, stdout, stderr io.Writer) int {
 			return 0
 		}
 		if !api.ShouldFallback(err) {
-			fmt.Fprintf(stderr, "gc agent resume: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "agent resume", err)
 			return 1
 		}
 		// Connection error — fall through to direct mutation.

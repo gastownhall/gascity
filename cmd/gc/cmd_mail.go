@@ -114,7 +114,7 @@ func doMailArchive(mp mail.Provider, rec events.Recorder, args []string, stdout,
 			return 0
 		}
 		telemetry.RecordMailOp(context.Background(), "archive", err)
-		fmt.Fprintf(stderr, "gc mail archive: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "mail archive", err)
 		return 1
 	}
 	telemetry.RecordMailOp(context.Background(), "archive", nil)
@@ -204,10 +204,10 @@ func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, in
 	messages, err := collectMailMessages(mp.Check, target.recipients)
 	if err != nil {
 		if inject {
-			fmt.Fprintf(stderr, "gc mail check: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "mail check", err)
 			return 0                                        // --inject always exits 0
 		}
-		fmt.Fprintf(stderr, "gc mail check: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "mail check", err)
 		return 1
 	}
 
@@ -910,13 +910,13 @@ func cmdMailSend(args []string, notify bool, all bool, from string, to string, s
 	// run without a city store, but fake/fail still require one for alias
 	// resolution in tests. Do not unify with isStorelessMailProvider.
 	if err != nil && !strings.HasPrefix(mailProviderName(), "exec:") {
-		fmt.Fprintf(stderr, "gc mail send: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "mail send", err)
 		return 1
 	}
 	if store != nil {
 		validRecipients, err = listLiveSessionMailboxes(store)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc mail send: listing live sessions: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "mail send: listing live sessions", err)
 			return 1
 		}
 	}
@@ -1011,7 +1011,7 @@ func doMailSend(mp mail.Provider, rec events.Recorder, validRecipients map[strin
 	m, err := mp.Send(sender, to, subject, body)
 	telemetry.RecordMailOp(context.Background(), "send", err)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc mail send: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "mail send", err)
 		return 1
 	}
 	rec.Record(events.Event{
@@ -1026,7 +1026,7 @@ func doMailSend(mp mail.Provider, rec events.Recorder, validRecipients map[strin
 	// Nudge recipient if requested and recipient is not human.
 	if nudgeFn != nil && to != "human" {
 		if err := nudgeFn(to); err != nil {
-			fmt.Fprintf(stderr, "gc mail send: nudge failed: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "mail send: nudge failed", err)
 		}
 	}
 	return 0
@@ -1110,7 +1110,7 @@ func doMailInbox(mp mail.Provider, recipient string, stdout, stderr io.Writer) i
 func doMailInboxTarget(mp mail.Provider, target resolvedMailTarget, stdout, stderr io.Writer) int {
 	messages, err := collectMailMessages(mp.Inbox, target.recipients)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc mail inbox: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "mail inbox", err)
 		return 1
 	}
 
@@ -1150,7 +1150,7 @@ func doMailRead(mp mail.Provider, rec events.Recorder, args []string, stdout, st
 	m, err := mp.Read(id)
 	telemetry.RecordMailOp(context.Background(), "read", err)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc mail read: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "mail read", err)
 		return 1
 	}
 
@@ -1184,7 +1184,7 @@ func doMailPeek(mp mail.Provider, args []string, stdout, stderr io.Writer) int {
 
 	m, err := mp.Get(id)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc mail peek: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "mail peek", err)
 		return 1
 	}
 
@@ -1216,7 +1216,7 @@ func cmdMailReply(args []string, subject, message string, notify bool, stdout, s
 			}
 			cityPath, err := resolveCity()
 			if err != nil {
-				fmt.Fprintf(stderr, "gc mail reply: %v\n", err) //nolint:errcheck // best-effort stderr
+				cmdErr(stderr, "mail reply", err)
 				return 1
 			}
 			cfg, _ := loadCityConfig(cityPath, stderr)
@@ -1247,7 +1247,7 @@ func doMailReply(mp mail.Provider, rec events.Recorder, id, sender, subject, bod
 	reply, err := mp.Reply(id, sender, subject, body)
 	telemetry.RecordMailOp(context.Background(), "reply", err)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc mail reply: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "mail reply", err)
 		return 1
 	}
 	rec.Record(events.Event{
@@ -1261,7 +1261,7 @@ func doMailReply(mp mail.Provider, rec events.Recorder, id, sender, subject, bod
 
 	if nudgeFn != nil && reply.To != "human" {
 		if err := nudgeFn(reply.To); err != nil {
-			fmt.Fprintf(stderr, "gc mail reply: nudge failed: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "mail reply: nudge failed", err)
 		}
 	}
 	return 0
@@ -1286,7 +1286,7 @@ func doMailMarkRead(mp mail.Provider, rec events.Recorder, args []string, stdout
 	id := args[0]
 	if err := mp.MarkRead(id); err != nil {
 		telemetry.RecordMailOp(context.Background(), "mark_read", err)
-		fmt.Fprintf(stderr, "gc mail mark-read: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "mail mark-read", err)
 		return 1
 	}
 	telemetry.RecordMailOp(context.Background(), "mark_read", nil)
@@ -1319,7 +1319,7 @@ func doMailMarkUnread(mp mail.Provider, rec events.Recorder, args []string, stdo
 	id := args[0]
 	if err := mp.MarkUnread(id); err != nil {
 		telemetry.RecordMailOp(context.Background(), "mark_unread", err)
-		fmt.Fprintf(stderr, "gc mail mark-unread: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "mail mark-unread", err)
 		return 1
 	}
 	telemetry.RecordMailOp(context.Background(), "mark_unread", nil)
@@ -1356,7 +1356,7 @@ func doMailDelete(mp mail.Provider, rec events.Recorder, args []string, stdout, 
 			return 0
 		}
 		telemetry.RecordMailOp(context.Background(), "delete", err)
-		fmt.Fprintf(stderr, "gc mail delete: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "mail delete", err)
 		return 1
 	}
 	telemetry.RecordMailOp(context.Background(), "delete", nil)
@@ -1389,7 +1389,7 @@ func doMailThread(mp mail.Provider, args []string, stdout, stderr io.Writer) int
 
 	msgs, err := mp.Thread(threadID)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc mail thread: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "mail thread", err)
 		return 1
 	}
 
@@ -1435,7 +1435,7 @@ func doMailCount(mp mail.Provider, recipient string, stdout, stderr io.Writer) i
 func doMailCountTarget(mp mail.Provider, target resolvedMailTarget, stdout, stderr io.Writer) int {
 	total, unread, err := collectMailCounts(mp.Count, target.recipients)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc mail count: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "mail count", err)
 		return 1
 	}
 	fmt.Fprintf(stdout, "%d total, %d unread for %s\n", total, unread, target.display) //nolint:errcheck // best-effort stdout

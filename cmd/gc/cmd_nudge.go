@@ -239,13 +239,13 @@ func cmdNudgeStatus(args []string, stdout, stderr io.Writer) int {
 
 	target, err := resolveNudgeTarget(targetID, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc nudge status: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "nudge status", err)
 		return 1
 	}
 
 	pending, inFlight, dead, err := listQueuedNudgesForTarget(target.cityPath, target, time.Now())
 	if err != nil {
-		fmt.Fprintf(stderr, "gc nudge status: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "nudge status", err)
 		return 1
 	}
 
@@ -300,7 +300,7 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		if inject {
 			return 0
 		}
-		fmt.Fprintf(stderr, "gc nudge drain: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "nudge drain", err)
 		return 1
 	}
 
@@ -310,7 +310,7 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		if inject {
 			return 0
 		}
-		fmt.Fprintf(stderr, "gc nudge drain: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "nudge drain", err)
 		return 1
 	}
 	if len(items) == 0 {
@@ -326,19 +326,19 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	items, blocked, err := splitQueuedNudgesForDelivery(openNudgeBeadStore(target.cityPath), items)
 	if err != nil {
 		if inject {
-			fmt.Fprintf(stderr, "gc nudge drain: validating claimed nudges: %v\n", err) //nolint:errcheck
+			cmdErr(stderr, "nudge drain: validating claimed nudges", err)
 			return 0
 		}
-		fmt.Fprintf(stderr, "gc nudge drain: validating claimed nudges: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "nudge drain: validating claimed nudges", err)
 		return 1
 	}
 	if len(blocked) > 0 {
 		if err := terminalizeBlockedQueuedNudges(target.cityPath, blocked); err != nil {
 			if inject {
-				fmt.Fprintf(stderr, "gc nudge drain: withdrawing blocked nudges: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "nudge drain: withdrawing blocked nudges", err)
 				return 0
 			}
-			fmt.Fprintf(stderr, "gc nudge drain: withdrawing blocked nudges: %v\n", err) //nolint:errcheck
+			cmdErr(stderr, "nudge drain: withdrawing blocked nudges", err)
 			return 1
 		}
 	}
@@ -366,18 +366,18 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		if inject {
 			return 0
 		}
-		fmt.Fprintf(stderr, "gc nudge drain: writing output: %v\n", writeErr) //nolint:errcheck
+		cmdErr(stderr, "nudge drain: writing output", writeErr)
 		return 1
 	}
 	if inject {
 		if err := ackQueuedNudgesWithOutcome(target.cityPath, queuedNudgeIDs(items), "accepted_for_injection", "", "hook-transport-accepted"); err != nil {
-			fmt.Fprintf(stderr, "gc nudge drain: recording injection ack: %v\n", err) //nolint:errcheck
+			cmdErr(stderr, "nudge drain: recording injection ack", err)
 			return 0
 		}
 		return 0
 	}
 	if err := ackQueuedNudges(target.cityPath, queuedNudgeIDs(items)); err != nil {
-		fmt.Fprintf(stderr, "gc nudge drain: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "nudge drain", err)
 		return 1
 	}
 	return 0
@@ -404,7 +404,7 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 	}
 	target, err := resolveNudgeTarget(targetID, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc nudge poll: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "nudge poll", err)
 		return 1
 	}
 	if sessionName != "" {
@@ -420,7 +420,7 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 		if errors.Is(err, errNudgePollerRunning) {
 			return 0
 		}
-		fmt.Fprintf(stderr, "gc nudge poll: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "nudge poll", err)
 		return 1
 	}
 	defer release()
@@ -435,7 +435,7 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 	for {
 		obs, err := workerObserveNudgeTarget(target, store, sp)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc nudge poll: %v\n", err) //nolint:errcheck
+			cmdErr(stderr, "nudge poll", err)
 			return 1
 		}
 		if !obs.Running {
@@ -452,7 +452,7 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 		missingSince = time.Time{}
 		delivered, pollErr := tryDeliverQueuedNudgesByPoller(target, store, sp, quiescence)
 		if pollErr != nil {
-			fmt.Fprintf(stderr, "gc nudge poll: %v\n", pollErr) //nolint:errcheck
+			cmdErr(stderr, "nudge poll", pollErr)
 		}
 		if delivered {
 			continue
@@ -492,7 +492,7 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 	}
 	handle, err := workerHandleForNudgeTarget(target, store, sp)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "session nudge", err)
 		return 1
 	}
 	result, err := handle.Nudge(context.Background(), worker.NudgeRequest{
@@ -501,7 +501,7 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 		Source:   "session",
 	})
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "session nudge", err)
 		return 1
 	}
 	if mode == nudgeDeliveryWaitIdle && !result.Delivered {
@@ -540,7 +540,7 @@ func deliverSessionNudgeWithProvider(target nudgeTarget, sp runtime.Provider, mo
 
 func queueSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runtime.Provider, message string, stdout, stderr io.Writer) int {
 	if err := enqueueQueuedNudge(target.cityPath, newQueuedNudgeWithOptions(target.agentKey(), message, "session", time.Now(), queuedNudgeOptionsFromTarget(target))); err != nil {
-		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "session nudge", err)
 		return 1
 	}
 	if obs, err := workerObserveNudgeTarget(target, store, sp); err == nil && obs.Running {

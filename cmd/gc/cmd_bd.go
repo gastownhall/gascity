@@ -88,7 +88,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 
 	cityPath, err := resolveBdCity(cityName)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "bd", err)
 		return 1
 	}
 
@@ -99,13 +99,13 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// in resolveBdScopeTarget / bdRigScopeTarget.
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc bd: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "bd: loading config", err)
 		return 1
 	}
 
 	target, err := resolveBdScopeTarget(cfg, cityPath, rigName, bdArgs)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "bd", err)
 		return 1
 	}
 	if !providerUsesBdStoreContract(rawBeadsProviderForScope(target.ScopeRoot, cityPath)) {
@@ -133,7 +133,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		if errors.As(err, &exitErr) {
 			return exitErr.ExitCode()
 		}
-		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "bd", err)
 		return 1
 	}
 	return 0

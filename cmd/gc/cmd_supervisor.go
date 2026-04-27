@@ -418,7 +418,7 @@ func stopSupervisorWithWait(stdout, stderr io.Writer, wait bool, waitTimeout tim
 			// Confirm the socket actually goes away, but with a small
 			// budget — the server already told us shutdown finished.
 			if err := waitForSupervisorExitUntil(sockPath, time.Now().Add(5*time.Second)); err != nil {
-				fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "supervisor stop", err)
 				return 1
 			}
 			fmt.Fprintln(stdout, "Supervisor stopped.") //nolint:errcheck
@@ -430,7 +430,7 @@ func stopSupervisorWithWait(stdout, stderr io.Writer, wait bool, waitTimeout tim
 			fmt.Fprintf(stderr, "gc supervisor stop: unexpected status %q\n", line) //nolint:errcheck
 			// Still make sure the process actually goes away.
 			if err := waitForSupervisorExitUntil(sockPath, deadline); err != nil {
-				fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "supervisor stop", err)
 				return 1
 			}
 			return 1
@@ -445,7 +445,7 @@ func stopSupervisorWithWait(stdout, stderr io.Writer, wait bool, waitTimeout tim
 	}
 
 	if err := waitForSupervisorExitUntil(sockPath, deadline); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "supervisor stop", err)
 		return 1
 	}
 	fmt.Fprintln(stdout, "Supervisor stopped.") //nolint:errcheck
@@ -640,7 +640,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 
 	lock, err := acquireSupervisorLock()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc supervisor: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "supervisor", err)
 		return 1
 	}
 	defer lock.Close() //nolint:errcheck
@@ -680,7 +680,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	// Load supervisor config.
 	supCfg, err := supervisor.LoadConfig(supervisor.ConfigPath())
 	if err != nil {
-		fmt.Fprintf(stderr, "gc supervisor: config: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "supervisor: config", err)
 		return 1
 	}
 
@@ -703,7 +703,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 
 	pprofSrv, pprofErr := api.StartPprof("")
 	if pprofErr != nil {
-		fmt.Fprintf(stderr, "gc supervisor: pprof: %v\n", pprofErr) //nolint:errcheck
+		cmdErr(stderr, "supervisor: pprof", pprofErr)
 	}
 	if pprofSrv != nil {
 		defer func() {
@@ -721,7 +721,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	}
 	go func() {
 		if err := apiMux.Serve(apiLis); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			fmt.Fprintf(stderr, "gc supervisor: api: %v\n", err) //nolint:errcheck
+			cmdErr(stderr, "supervisor: api", err)
 		}
 	}()
 	defer func() {
@@ -734,13 +734,13 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	// Control socket — uses supervisor-specific path, not the per-city controller socket.
 	sockPath := supervisorSocketPath()
 	if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor: creating socket dir: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "supervisor: creating socket dir", err)
 		return 1
 	}
 	shut := newShutdownState()
 	lis, err := startSupervisorSocket(sockPath, cancel, reconcileCh, shut)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc supervisor: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "supervisor", err)
 		return 1
 	}
 	// Socket teardown order matters. Defers run in LIFO, so listed last =
@@ -780,7 +780,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	safeReconcile := func() {
 		defer func() {
 			if r := recover(); r != nil {
-				fmt.Fprintf(stderr, "gc supervisor: reconcile panicked: %v\n", r) //nolint:errcheck
+				fmt.Fprintf(stderr, "gc supervisor: reconcile panicked: %v\n", r) //nolint:errcheck // best-effort stderr
 			}
 		}()
 		reconcileCities(reg, registry, supCfg.Publication, stdout, stderr)
@@ -836,7 +836,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 			var shutErr error
 			if len(stopFailures) > 0 {
 				shutErr = fmt.Errorf("%d cities did not shut down cleanly: %s", len(stopFailures), strings.Join(stopFailures, "; "))
-				fmt.Fprintf(stderr, "gc supervisor: %v\n", shutErr) //nolint:errcheck
+				cmdErr(stderr, "supervisor", shutErr)
 			}
 			shut.finish(shutErr)
 			fmt.Fprintln(stdout, "Supervisor stopped.") //nolint:errcheck
@@ -872,7 +872,7 @@ func reconcileCities(
 ) {
 	entries, err := reg.List()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc supervisor: registry: %v\n", err) //nolint:errcheck
+		cmdErr(stderr, "supervisor: registry", err)
 		return
 	}
 

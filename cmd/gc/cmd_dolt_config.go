@@ -40,7 +40,7 @@ func newDoltConfigCmd(_ io.Writer, stderr io.Writer) *cobra.Command {
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if err := writeManagedDoltConfigFile(configFile, host, port, dataDir, logLevel); err != nil {
-				fmt.Fprintf(stderr, "gc dolt-config write-managed: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "dolt-config write-managed", err)
 				return errExit
 			}
 			return nil
@@ -76,11 +76,11 @@ func newDoltConfigCmd(_ io.Writer, stderr io.Writer) *cobra.Command {
 				return errExit
 			}
 			if err := normalizeCanonicalBdScopeFilesForInit(cityPath, scopeDir, issuePrefix, doltDatabase); err != nil {
-				fmt.Fprintf(stderr, "gc dolt-config normalize-scope: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "dolt-config normalize-scope", err)
 				return errExit
 			}
 			if err := removeScopeLocalDoltServerArtifacts(scopeDir); err != nil {
-				fmt.Fprintf(stderr, "gc dolt-config normalize-scope: %v\n", err) //nolint:errcheck
+				cmdErr(stderr, "dolt-config normalize-scope", err)
 				return errExit
 			}
 			return nil

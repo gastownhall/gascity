@@ -168,7 +168,7 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 	if fromStdin {
 		data, err := io.ReadAll(slingStdin())
 		if err != nil {
-			fmt.Fprintf(stderr, "gc sling: reading stdin: %v\n", err) //nolint:errcheck // best-effort stderr
+			cmdErr(stderr, "sling: reading stdin", err)
 			return 1
 		}
 		content := strings.TrimRight(string(data), "\n")
@@ -185,12 +185,12 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "sling", err)
 		return 1
 	}
 	cfg, prov, err := loadSlingCityConfig(cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "sling", err)
 		return 1
 	}
 	emitLoadCityConfigWarnings(stderr, prov)
@@ -249,7 +249,7 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 
 	storeDir, store, err := openSlingStoreForSource(cfg, cityPath, beadOrFormula, a)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "sling", err)
 		return 1
 	}
 	storeRef := workflowStoreRefForDir(storeDir, cityPath, cityName, cfg)
@@ -265,7 +265,7 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 		if createInlineBead {
 			created, err := store.Create(beads.Bead{Title: beadOrFormula, Description: stdinDescription, Type: "task"})
 			if err != nil {
-				fmt.Fprintf(stderr, "gc sling: creating bead: %v\n", err) //nolint:errcheck // best-effort stderr
+				cmdErr(stderr, "sling: creating bead", err)
 				return 1
 			}
 			fmt.Fprintf(stdout, "Created %s — %q\n", created.ID, beadOrFormula) //nolint:errcheck // best-effort stdout
@@ -1418,7 +1418,7 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 
 	if err := enqueueQueuedNudgeWithStore(target.cityPath, store, newQueuedNudge(target.agent.QualifiedName(), msg, "sling", now)); err != nil {
 		telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), err)
-		fmt.Fprintf(stderr, "gc sling: nudge failed: %v\n", err) //nolint:errcheck // best-effort
+		cmdErr(stderr, "sling: nudge failed", err)
 		return
 	}
 	if running {

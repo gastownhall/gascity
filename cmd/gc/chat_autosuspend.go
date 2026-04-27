@@ -27,13 +27,13 @@ func autoSuspendChatSessions(store beads.Store, sp runtime.Provider, idleTimeout
 	}
 	catalog, err := workerSessionCatalogWithConfig(cityPath, store, sp, cfg)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc start: auto-suspend catalog: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start: auto-suspend catalog", err)
 		return
 	}
 
 	sessions, err := catalog.List("active", "")
 	if err != nil {
-		fmt.Fprintf(stderr, "gc start: auto-suspend list: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "start: auto-suspend list", err)
 		return
 	}
 

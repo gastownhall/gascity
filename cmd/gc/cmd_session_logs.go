@@ -63,12 +63,12 @@ func cmdSessionLogs(args []string, follow bool, tail int, stdout, stderr io.Writ
 
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session logs: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "session logs", err)
 		return 1
 	}
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session logs: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "session logs", err)
 		return 1
 	}
 
@@ -237,7 +237,7 @@ func doSessionLogs(path, provider string, follow bool, tail int, stdout, stderr 
 	}
 	factory, err := worker.NewFactory(worker.FactoryConfig{})
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session logs: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "session logs", err)
 		return 1
 	}
 
@@ -251,7 +251,7 @@ func runSessionLogs(factory *worker.Factory, provider, path string, follow bool,
 	// are a true "last N entries" window regardless of compaction boundaries.
 	sess, readErr := read(factory, provider, path)
 	if readErr != nil {
-		fmt.Fprintf(stderr, "gc session logs: %v\n", readErr) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "session logs", readErr)
 		return 1
 	}
 

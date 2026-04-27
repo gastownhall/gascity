@@ -49,7 +49,7 @@ func openCityStatusStore(cityPath string, stderr io.Writer) (beads.Store, int) {
 	}
 	opened, err := openCityStoreAtForStatus(cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc status: opening bead store: %v\n", err) //nolint:errcheck // best-effort stderr
+		cmdErr(stderr, "status: opening bead store", err)
 		return nil, 1
 	}
 	return opened, 0

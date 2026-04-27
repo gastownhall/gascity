@@ -62,12 +62,12 @@ func newSkillListCmd(stdout, stderr io.Writer) *cobra.Command {
 			}
 			cityPath, err := resolveCity()
 			if err != nil {
-				fmt.Fprintf(stderr, "gc skill list: %v\n", err) //nolint:errcheck // best-effort stderr
+				cmdErr(stderr, "skill list", err)
 				return errExit
 			}
 			cfg, err := loadCityConfig(cityPath, stderr)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc skill list: %v\n", err) //nolint:errcheck // best-effort stderr
+				cmdErr(stderr, "skill list", err)
 				return errExit
 			}
 
@@ -75,14 +75,14 @@ func newSkillListCmd(stdout, stderr io.Writer) *cobra.Command {
 			if strings.TrimSpace(sessionID) != "" {
 				store, err = openCityStoreAt(cityPath)
 				if err != nil {
-					fmt.Fprintf(stderr, "gc skill list: %v\n", err) //nolint:errcheck // best-effort stderr
+					cmdErr(stderr, "skill list", err)
 					return errExit
 				}
 			}
 
 			entries, err := listVisibleSkillEntries(cityPath, cfg, store, agentName, sessionID)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc skill list: %v\n", err) //nolint:errcheck // best-effort stderr
+				cmdErr(stderr, "skill list", err)
 				return errExit
 			}
 			writeVisibilityEntries(stdout, entries)
