@@ -951,6 +951,10 @@
           "$ref": "#/$defs/EventsConfig",
           "description": "Events configures the events provider backend."
         },
+        "observability": {
+          "$ref": "#/$defs/ObservabilityConfig",
+          "description": "Observability configures optional runtime observability behavior."
+        },
         "dolt": {
           "$ref": "#/$defs/DoltConfig",
           "description": "Dolt configures optional dolt server connection overrides."
@@ -1251,6 +1255,16 @@
         "template"
       ],
       "description": "NamedSession defines a canonical persistent session backed by an agent template."
+    },
+    "ObservabilityConfig": {
+      "properties": {
+        "session_history": {
+          "$ref": "#/$defs/SessionHistoryConfig"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "ObservabilityConfig holds optional observability settings."
     },
     "OptionChoice": {
       "properties": {
@@ -1985,6 +1999,17 @@
       "additionalProperties": false,
       "type": "object",
       "description": "SessionConfig holds session provider settings."
+    },
+    "SessionHistoryConfig": {
+      "properties": {
+        "mode": {
+          "type": "string",
+          "description": "Mode controls how volatile managed-session metadata updates are persisted.\nSupported values: \"\"/\"full\" (default) and \"compact\"."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "SessionHistoryConfig configures durable history behavior for managed session metadata."
     },
     "SessionSleepConfig": {
       "properties": {

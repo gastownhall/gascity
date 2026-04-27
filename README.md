@@ -45,6 +45,18 @@ The `bd` (beads) provider is the default. To use a file-based store instead
 (no dolt/bd/flock needed), set `GC_BEADS=file` or add `[beads] provider = "file"`
 to your `city.toml`.
 
+For managed session lifecycle churn, you can compact volatile session metadata
+history with:
+
+```toml
+[observability.session_history]
+mode = "compact"
+```
+
+That keeps current session state visible while suppressing durable history rows
+for selected lifecycle-only metadata updates. See the generated
+[Config Reference](docs/reference/config.md) for the full schema.
+
 Install from Homebrew:
 
 ```bash
