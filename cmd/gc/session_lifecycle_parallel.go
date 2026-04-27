@@ -1833,16 +1833,17 @@ func reachableSelectedDependencies(
 // semaphore and returns a stopResult per target. perTargetTimeout caps the
 // wall-clock each goroutine waits for run() to return; on expiry, that
 // target's outcome is "timed_out" and the inner goroutine is intentionally
-// leaked (it will return when the bounded subprocess deadline kicks in or
-// the process exits). perTargetTimeout <= 0 means no timeout (legacy
-// behavior, used only by tests that exercise unrelated paths).
+// leaked. The leak is acceptable because the only caller is the stop path,
+// which Layer 2 (tmux.tmuxSubprocessTimeout) bounds at the subprocess level
+// — leaked goroutines return when their tmux subprocess is SIGKILL'd at
+// the deadline, or when the process exits. perTargetTimeout <= 0 means no
+// timeout (legacy behavior; useful only for tests that bypass the timeout).
 func executeTargetWave(
 	targets []stopTarget,
 	maxParallel int,
 	perTargetTimeout time.Duration,
 	run func(stopTarget) error,
 ) []stopResult {
-	_ = perTargetTimeout // RED stub: parameter accepted but not yet honored.
 	if len(targets) == 0 {
 		return nil
 	}
@@ -1858,31 +1859,56 @@ func executeTargetWave(
 		go func() {
 			started := time.Now()
 			defer func() {
-				if recovered := recover(); recovered != nil {
-					stack := debug.Stack()
-					results[i] = stopResult{
-						target:   target,
-						err:      fmt.Errorf("panic during lifecycle op: %v\n%s", recovered, stack),
-						outcome:  "panic_recovered",
-						started:  started,
-						finished: time.Now(),
-					}
-				}
 				<-sem
 				done <- i
 			}()
-			err := run(target)
-			finished := time.Now()
-			outcome := "success"
-			if err != nil {
-				outcome = "provider_error"
+
+			type runResult struct {
+				err      error
+				finished time.Time
+				outcome  string
+			}
+			inner := make(chan runResult, 1)
+			go func() {
+				defer func() {
+					if recovered := recover(); recovered != nil {
+						stack := debug.Stack()
+						inner <- runResult{
+							err:      fmt.Errorf("panic during lifecycle op: %v\n%s", recovered, stack),
+							finished: time.Now(),
+							outcome:  "panic_recovered",
+						}
+					}
+				}()
+				err := run(target)
+				finished := time.Now()
+				outcome := "success"
+				if err != nil {
+					outcome = "provider_error"
+				}
+				inner <- runResult{err: err, finished: finished, outcome: outcome}
+			}()
+
+			var rr runResult
+			if perTargetTimeout > 0 {
+				select {
+				case rr = <-inner:
+				case <-time.After(perTargetTimeout):
+					rr = runResult{
+						err:      fmt.Errorf("target lifecycle op did not return within %s", perTargetTimeout),
+						finished: time.Now(),
+						outcome:  "timed_out",
+					}
+				}
+			} else {
+				rr = <-inner
 			}
 			results[i] = stopResult{
 				target:   target,
-				err:      err,
-				outcome:  outcome,
+				err:      rr.err,
+				outcome:  rr.outcome,
 				started:  started,
-				finished: finished,
+				finished: rr.finished,
 			}
 		}()
 	}

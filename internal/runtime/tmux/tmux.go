@@ -212,8 +212,13 @@ func (t *Tmux) approvalDedup() *approvalDedup {
 	return t.interactionDedup
 }
 
-// runCtx executes a tmux command with a context (for timeout/cancellation).
+// runCtx executes a tmux command with a context. The caller-supplied
+// context is composed with tmuxSubprocessTimeout so a wedged tmux server
+// or fork-blocked host cannot hang the call indefinitely. When the parent
+// already has an earlier deadline, that earlier deadline wins.
 func (t *Tmux) runCtx(ctx context.Context, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, tmuxSubprocessTimeout)
+	defer cancel()
 	allArgs := []string{"-u"}
 	if t.cfg.SocketName != "" {
 		allArgs = append(allArgs, "-L", t.cfg.SocketName)
@@ -222,18 +227,12 @@ func (t *Tmux) runCtx(ctx context.Context, args ...string) (string, error) {
 	return t.exec.executeCtx(ctx, allArgs)
 }
 
-// run executes a tmux command and returns stdout.
-// All commands include -u flag for UTF-8 support regardless of locale settings.
-// When SocketName is configured, -L <socket> is injected after -u.
-// See: https://github.com/steveyegge/gastown/issues/1219
+// run executes a tmux command and returns stdout. All commands include -u
+// for UTF-8 regardless of locale; when SocketName is set, -L <socket> is
+// injected after -u (see https://github.com/steveyegge/gastown/issues/1219).
+// Every invocation is bounded by tmuxSubprocessTimeout via runCtx.
 func (t *Tmux) run(args ...string) (string, error) {
-	allArgs := []string{"-u"}
-	if t.cfg.SocketName != "" {
-		allArgs = append(allArgs, "-L", t.cfg.SocketName)
-	}
-	allArgs = append(allArgs, args...)
-
-	return t.exec.execute(allArgs)
+	return t.runCtx(context.Background(), args...)
 }
 
 // wrapError wraps tmux errors with context.

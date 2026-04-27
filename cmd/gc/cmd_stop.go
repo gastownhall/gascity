@@ -17,6 +17,8 @@ import (
 )
 
 func newStopCmd(stdout, stderr io.Writer) *cobra.Command {
+	var wallClockTimeout time.Duration
+	var force bool
 	cmd := &cobra.Command{
 		Use:   "stop [path]",
 		Short: "Stop all agent sessions in the city",
@@ -25,15 +27,22 @@ func newStopCmd(stdout, stderr io.Writer) *cobra.Command {
 Sends interrupt signals to running agents, waits for the configured
 shutdown timeout, then force-kills any remaining sessions. Also stops
 the Dolt server and cleans up orphan sessions. If a controller is
-running, delegates shutdown to it.`,
+running, delegates shutdown to it.
+
+Use --timeout=DURATION to cap the wall-clock time gc stop will spend
+before giving up; the default derives from the configured shutdown
+grace times a fudge factor. Use --force to skip the interrupt grace
+period and go straight to kill.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdStop(args, stdout, stderr) != 0 {
+			if cmdStop(args, stdout, stderr, wallClockTimeout, force) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().DurationVar(&wallClockTimeout, "timeout", 0, "wall-clock cap for the stop sequence (0 = derive from city config)")
+	cmd.Flags().BoolVar(&force, "force", false, "skip the interrupt grace period and force-kill all sessions immediately")
 	return cmd
 }
 
@@ -43,7 +52,12 @@ const sleepReasonCityStop = "city-stop"
 
 // cmdStop stops the city by terminating all configured agent sessions.
 // If a path is given, operates there; otherwise uses cwd.
-func cmdStop(args []string, stdout, stderr io.Writer) int {
+//
+// wallClockTimeout caps how long cmdStop will wait for the shutdown
+// sequence; if 0, a default derived from cfg.Daemon.ShutdownTimeoutDuration
+// is used. force=true skips the interrupt grace period (gracefulStopAll
+// runs with timeout=0, going straight to kill).
+func cmdStop(args []string, stdout, stderr io.Writer, wallClockTimeout time.Duration, force bool) int {
 	cityPath, err := resolveCommandCity(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -54,6 +68,44 @@ func cmdStop(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+
+	wallClockCap := wallClockTimeout
+	if wallClockCap <= 0 {
+		wallClockCap = defaultStopWallClockTimeout(cfg)
+	}
+
+	type stopOutcome struct{ code int }
+	doneCh := make(chan stopOutcome, 1)
+	go func() {
+		doneCh <- stopOutcome{code: cmdStopBody(cityPath, cfg, force, stdout, stderr)}
+	}()
+
+	select {
+	case out := <-doneCh:
+		return out.code
+	case <-time.After(wallClockCap):
+		fmt.Fprintf(stderr, "gc stop: timed out after %s; some sessions may not have stopped — try gc stop --force\n", wallClockCap) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+}
+
+// defaultStopWallClockTimeout returns the wall-clock cap used by cmdStop
+// when --timeout is not set: a multiple of the configured shutdown grace,
+// padded enough to absorb the interrupt wave + per-target stop timeout
+// for every session in serial worst-case.
+func defaultStopWallClockTimeout(cfg *config.City) time.Duration {
+	base := 5 * time.Second
+	if cfg != nil {
+		if d := cfg.Daemon.ShutdownTimeoutDuration(); d > 0 {
+			base = d
+		}
+	}
+	return base*4 + stopPerTargetTimeoutDefault
+}
+
+// cmdStopBody contains the original cmdStop flow, factored out so cmdStop
+// can apply a wall-clock cap by running it in a goroutine.
+func cmdStopBody(cityPath string, cfg *config.City, force bool, stdout, stderr io.Writer) int {
 	cityName := loadedCityName(cfg, cityPath)
 
 	if handled, code := unregisterCityFromSupervisor(cityPath, stdout, stderr, "gc stop"); handled {
@@ -110,11 +162,17 @@ func cmdStop(args []string, stdout, stderr io.Writer) int {
 		recorder = fr
 	}
 
-	code := doStop(sessionNames, sp, cfg, store, cfg.Daemon.ShutdownTimeoutDuration(), recorder, stdout, stderr)
+	graceTimeout := cfg.Daemon.ShutdownTimeoutDuration()
+	if force {
+		// gracefulStopAll treats timeout=0 as "skip interrupt pass, kill immediately".
+		graceTimeout = 0
+	}
+
+	code := doStop(sessionNames, sp, cfg, store, graceTimeout, recorder, stdout, stderr)
 
 	// Clean up orphan sessions (sessions with the city prefix that are
 	// not in the current config).
-	stopOrphans(sp, desired, cfg, store, cfg.Daemon.ShutdownTimeoutDuration(), recorder, stdout, stderr)
+	stopOrphans(sp, desired, cfg, store, graceTimeout, recorder, stdout, stderr)
 
 	// Stop bead store's backing service after agents.
 	if err := shutdownBeadsProvider(cityPath); err != nil {
