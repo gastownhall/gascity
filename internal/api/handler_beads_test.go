@@ -393,7 +393,7 @@ func (s *laggyParentProjectionStore) Update(id string, opts beads.UpdateOpts) er
 	parentChanged := false
 	newParentID := ""
 	if opts.ParentID != nil {
-		current, err := s.Store.Get(id)
+		current, err := s.Get(id)
 		if err != nil {
 			return err
 		}
@@ -427,7 +427,7 @@ func (s *laggyParentProjectionStore) List(query beads.ListQuery) ([]beads.Bead, 
 	return filtered, nil
 }
 
-func (s *laggyParentProjectionStore) WaitForParentProjection(_ context.Context, id, oldParentID, newParentID string) error {
+func (s *laggyParentProjectionStore) WaitForParentProjection(_ context.Context, id string, _, _ string) error {
 	s.waitCalls++
 	delete(s.pendingChildren, id)
 	return nil
@@ -438,7 +438,7 @@ type projectionConflictStore struct {
 	waitCalls int
 }
 
-func (s *projectionConflictStore) WaitForParentProjection(_ context.Context, id, oldParentID, newParentID string) error {
+func (s *projectionConflictStore) WaitForParentProjection(_ context.Context, _, _, _ string) error {
 	s.waitCalls++
 	return beads.ErrParentProjectionSuperseded
 }

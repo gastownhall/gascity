@@ -629,7 +629,7 @@ func (s *BdStore) waitForParentProjection(ctx context.Context, id, oldParentID, 
 		select {
 		case <-ctx.Done():
 			if lastErr != nil {
-				return fmt.Errorf("updating bead %q: waiting for parent projection from %q to %q: %w (last check error: %v)", id, oldParentID, newParentID, ctx.Err(), lastErr)
+				return fmt.Errorf("updating bead %q: waiting for parent projection from %q to %q: %w (last check error: %w)", id, oldParentID, newParentID, ctx.Err(), lastErr)
 			}
 			return fmt.Errorf("updating bead %q: waiting for parent projection from %q to %q: %w", id, oldParentID, newParentID, ctx.Err())
 		case <-ticker.C:
