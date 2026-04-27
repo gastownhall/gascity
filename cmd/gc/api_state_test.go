@@ -616,7 +616,7 @@ func TestControllerStateOpenRigStoreFileOpenErrorDoesNotFallbackToBd(t *testing.
 	}
 
 	cs := &controllerState{cityPath: cityDir}
-	store := cs.openRigStore("file", "rig1", rigDir, "rg")
+	store := cs.openRigStore("file", "rig1", rigDir, "rg", nil)
 	if _, ok := store.(*beads.BdStore); ok {
 		t.Fatalf("openRigStore returned %T, want file-open failure instead of bd fallback", store)
 	}
@@ -1351,6 +1351,62 @@ func TestBuildStores_ExecProviderSetsPerRigEnv(t *testing.T) {
 		t.Errorf("regression: alpha and bravo exec stores received the same "+
 			"GC_BEADS_PREFIX=%q — store identity is not being propagated per rig",
 			alphaPrefix)
+	}
+}
+
+func TestBuildStoresBdProviderUsesPassedConfigForRigEnv(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "alpha")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	capturePath := filepath.Join(t.TempDir(), "bd.env")
+	binDir := t.TempDir()
+	fakeBD := filepath.Join(binDir, "bd")
+	script := "#!/bin/sh\n" +
+		"printf 'GC_RIG=%s\\nGC_RIG_ROOT=%s\\nBEADS_DIR=%s\\n' \"${GC_RIG:-}\" \"${GC_RIG_ROOT:-}\" \"${BEADS_DIR:-}\" > \"$BD_ENV_CAPTURE\"\n" +
+		"printf '[]\\n'\n"
+	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_ENV_CAPTURE", capturePath)
+	t.Setenv("GC_BEADS", "bd")
+
+	staleCfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	nextCfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{{
+			Name:   "alpha",
+			Path:   rigDir,
+			Prefix: "al",
+		}},
+	}
+	cs := &controllerState{
+		cfg:      staleCfg,
+		cityName: "test-city",
+		cityPath: cityDir,
+	}
+
+	stores := cs.buildStores(nextCfg)
+	if stores["alpha"] == nil {
+		t.Fatal("buildStores did not create alpha store")
+	}
+
+	data, err := os.ReadFile(capturePath)
+	if err != nil {
+		t.Fatalf("read captured bd env: %v", err)
+	}
+	env := string(data)
+	if !strings.Contains(env, "GC_RIG=alpha\n") {
+		t.Fatalf("captured env missing GC_RIG=alpha; got:\n%s", env)
+	}
+	if !strings.Contains(env, "GC_RIG_ROOT="+rigDir+"\n") {
+		t.Fatalf("captured env missing rig root %q; got:\n%s", rigDir, env)
+	}
+	if !strings.Contains(env, "BEADS_DIR="+filepath.Join(rigDir, ".beads")+"\n") {
+		t.Fatalf("captured env missing rig BEADS_DIR; got:\n%s", env)
 	}
 }
 
