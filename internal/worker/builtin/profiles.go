@@ -78,7 +78,7 @@ const (
 
 var builtinProviderOrder = []string{
 	"claude", "codex", "gemini", "cursor", "copilot",
-	"amp", "opencode", "auggie", "pi", "omp",
+	"amp", "opencode", "groq", "auggie", "pi", "omp",
 }
 
 var builtinProviderSpecs = map[string]BuiltinProviderSpec{
@@ -305,6 +305,38 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		SupportsHooks:    true,
 		InstructionsFile: "AGENTS.md",
 		ACPArgs:          []string{"acp"},
+	},
+	"groq": {
+		DisplayName: "Groq (OpenCode)",
+		Command:     "opencode",
+		OptionDefaults: map[string]string{
+			"model": "groq/openai/gpt-oss-120b",
+		},
+		PromptMode:       "none",
+		ReadyDelayMs:     8000,
+		ProcessNames:     []string{"opencode", "node", "bun"},
+		Env:              map[string]string{"OPENCODE_PERMISSION": `{"*":"allow"}`},
+		SupportsACP:      true,
+		SupportsHooks:    true,
+		InstructionsFile: "AGENTS.md",
+		ACPArgs:          []string{"acp"},
+		TitleModel:       "groq/openai/gpt-oss-20b",
+		OptionsSchema: []BuiltinProviderOption{
+			{
+				Key:   "model",
+				Label: "Model",
+				Type:  "select",
+				Choices: []BuiltinOptionChoice{
+					{Value: "", Label: "Default"},
+					{Value: "groq/openai/gpt-oss-120b", Label: "GPT-OSS 120B", FlagArgs: []string{"--model", "groq/openai/gpt-oss-120b"}},
+					{Value: "groq/openai/gpt-oss-20b", Label: "GPT-OSS 20B", FlagArgs: []string{"--model", "groq/openai/gpt-oss-20b"}},
+					{Value: "groq/llama-3.3-70b-versatile", Label: "Llama 3.3 70B Versatile", FlagArgs: []string{"--model", "groq/llama-3.3-70b-versatile"}},
+					{Value: "groq/llama-3.1-8b-instant", Label: "Llama 3.1 8B Instant", FlagArgs: []string{"--model", "groq/llama-3.1-8b-instant"}},
+					{Value: "groq/qwen/qwen3-32b", Label: "Qwen 3 32B", FlagArgs: []string{"--model", "groq/qwen/qwen3-32b"}},
+					{Value: "groq/meta-llama/llama-4-scout-17b-16e-instruct", Label: "Llama 4 Scout 17B", FlagArgs: []string{"--model", "groq/meta-llama/llama-4-scout-17b-16e-instruct"}},
+				},
+			},
+		},
 	},
 	"auggie": {
 		DisplayName:      "Auggie CLI",

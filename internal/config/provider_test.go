@@ -9,12 +9,12 @@ func TestBuiltinProviders(t *testing.T) {
 	providers := BuiltinProviders()
 	order := BuiltinProviderOrder()
 
-	// Must have exactly 10 built-in providers.
-	if len(providers) != 10 {
-		t.Fatalf("len(BuiltinProviders()) = %d, want 10", len(providers))
+	// Must have exactly 11 built-in providers.
+	if len(providers) != 11 {
+		t.Fatalf("len(BuiltinProviders()) = %d, want 11", len(providers))
 	}
-	if len(order) != 10 {
-		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 10", len(order))
+	if len(order) != 11 {
+		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 11", len(order))
 	}
 
 	// Every entry in order must exist in providers.
@@ -223,6 +223,50 @@ func TestBuiltinProvidersOpenCodePromptModeRegression(t *testing.T) {
 	}
 	if p.PromptMode == "flag" {
 		t.Fatal("PromptMode must not be \"flag\" — OpenCode treats --prompt as the first user message instead of startup persona context")
+	}
+}
+
+func TestBuiltinProvidersGroqOpenCodePreset(t *testing.T) {
+	p := BuiltinProviders()["groq"]
+	if p.Command != "opencode" {
+		t.Errorf("Command = %q, want %q", p.Command, "opencode")
+	}
+	if p.PromptMode != "none" {
+		t.Errorf("PromptMode = %q, want %q", p.PromptMode, "none")
+	}
+	if p.InstructionsFile != "AGENTS.md" {
+		t.Errorf("InstructionsFile = %q, want %q", p.InstructionsFile, "AGENTS.md")
+	}
+	if !derefBool(p.SupportsACP) {
+		t.Fatal("SupportsACP = false, want true")
+	}
+	if !derefBool(p.SupportsHooks) {
+		t.Fatal("SupportsHooks = false, want true")
+	}
+	if !reflect.DeepEqual(p.ACPArgs, []string{"acp"}) {
+		t.Fatalf("ACPArgs = %v, want [acp]", p.ACPArgs)
+	}
+	if p.OptionDefaults["model"] != "groq/openai/gpt-oss-120b" {
+		t.Fatalf("OptionDefaults[model] = %q, want groq/openai/gpt-oss-120b", p.OptionDefaults["model"])
+	}
+
+	rp := specToResolved("groq", &p)
+	if got := rp.ProviderSessionCreateTransport(); got != "acp" {
+		t.Fatalf("ProviderSessionCreateTransport() = %q, want acp", got)
+	}
+	if got, want := rp.ResolveDefaultArgs(), []string{"--model", "groq/openai/gpt-oss-120b"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ResolveDefaultArgs() = %v, want %v", got, want)
+	}
+	if got, want := rp.TitleModelFlagArgs(), []string{"--model", "groq/openai/gpt-oss-20b"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("TitleModelFlagArgs() = %v, want %v", got, want)
+	}
+
+	launch, err := BuildProviderLaunchCommand("", rp, nil, "acp")
+	if err != nil {
+		t.Fatalf("BuildProviderLaunchCommand: %v", err)
+	}
+	if want := "opencode acp --model groq/openai/gpt-oss-120b"; launch.Command != want {
+		t.Fatalf("Command = %q, want %q", launch.Command, want)
 	}
 }
 
