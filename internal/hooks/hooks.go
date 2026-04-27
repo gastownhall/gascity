@@ -29,7 +29,7 @@ var configFS embed.FS
 
 // supported lists provider names that have hook support wired into
 // Gas Town's installer.
-var supported = []string{"claude", "codex", "gemini", "kiro", "opencode", "copilot", "cursor", "pi", "omp"}
+var supported = []string{"claude", "codex", "gemini", "kiro", "opencode", "cerebras", "copilot", "cursor", "pi", "omp"}
 
 const (
 	managedPiHookVersion       = 4
@@ -156,6 +156,8 @@ func InstallWithResolver(fs fsys.FS, cityDir, workDir string, providers []string
 			err = installClaude(fs, cityDir)
 		case "codex", "gemini", "kiro", "opencode", "copilot", "cursor", "pi", "omp":
 			err = installOverlayManaged(fs, workDir, family)
+		case "cerebras":
+			err = installOverlayManaged(fs, workDir, "opencode")
 		default:
 			return fmt.Errorf("unsupported hook provider %q", p)
 		}

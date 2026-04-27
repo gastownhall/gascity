@@ -9,12 +9,12 @@ func TestBuiltinProviders(t *testing.T) {
 	providers := BuiltinProviders()
 	order := BuiltinProviderOrder()
 
-	// Must have exactly 13 built-in providers.
-	if len(providers) != 13 {
-		t.Fatalf("len(BuiltinProviders()) = %d, want 13", len(providers))
+	// Must have exactly 14 built-in providers.
+	if len(providers) != 14 {
+		t.Fatalf("len(BuiltinProviders()) = %d, want 14", len(providers))
 	}
-	if len(order) != 13 {
-		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 13", len(order))
+	if len(order) != 14 {
+		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 14", len(order))
 	}
 
 	// Every entry in order must exist in providers.
@@ -404,6 +404,50 @@ func TestBuiltinProvidersSessionIDFlag(t *testing.T) {
 		if got := providers[name].SessionIDFlag; got != "" {
 			t.Errorf("%s SessionIDFlag = %q, want empty (no documented start-with-id flag)", name, got)
 		}
+	}
+}
+
+func TestBuiltinProvidersCerebrasOpenCodePreset(t *testing.T) {
+	p := BuiltinProviders()["cerebras"]
+	if p.Command != "opencode" {
+		t.Errorf("Command = %q, want %q", p.Command, "opencode")
+	}
+	if p.PromptMode != "none" {
+		t.Errorf("PromptMode = %q, want %q", p.PromptMode, "none")
+	}
+	if p.InstructionsFile != "AGENTS.md" {
+		t.Errorf("InstructionsFile = %q, want %q", p.InstructionsFile, "AGENTS.md")
+	}
+	if !derefBool(p.SupportsACP) {
+		t.Fatal("SupportsACP = false, want true")
+	}
+	if !derefBool(p.SupportsHooks) {
+		t.Fatal("SupportsHooks = false, want true")
+	}
+	if !reflect.DeepEqual(p.ACPArgs, []string{"acp"}) {
+		t.Fatalf("ACPArgs = %v, want [acp]", p.ACPArgs)
+	}
+	if p.OptionDefaults["model"] != "cerebras/gpt-oss-120b" {
+		t.Fatalf("OptionDefaults[model] = %q, want cerebras/gpt-oss-120b", p.OptionDefaults["model"])
+	}
+
+	rp := specToResolved("cerebras", &p)
+	if got := rp.ProviderSessionCreateTransport(); got != "acp" {
+		t.Fatalf("ProviderSessionCreateTransport() = %q, want acp", got)
+	}
+	if got, want := rp.ResolveDefaultArgs(), []string{"--model", "cerebras/gpt-oss-120b"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ResolveDefaultArgs() = %v, want %v", got, want)
+	}
+	if got, want := rp.TitleModelFlagArgs(), []string{"--model", "cerebras/gpt-oss-120b"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("TitleModelFlagArgs() = %v, want %v", got, want)
+	}
+
+	launch, err := BuildProviderLaunchCommand("", rp, nil, "acp")
+	if err != nil {
+		t.Fatalf("BuildProviderLaunchCommand: %v", err)
+	}
+	if want := "opencode acp --model cerebras/gpt-oss-120b"; launch.Command != want {
+		t.Fatalf("Command = %q, want %q", launch.Command, want)
 	}
 }
 

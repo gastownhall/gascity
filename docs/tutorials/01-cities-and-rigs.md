@@ -9,9 +9,10 @@ description: Create a city, sling work to an agent, add a rig, and configure mul
 First, you'll need to install at least one CLI coding agent (which Gas City
 calls "providers") and make sure that they're on the PATH. Gas City supports
 many providers, including but not limited to Claude Code (`claude`), Codex
-(`codex`) and Gemini (`gemini`). Make sure you've configured each of your chosen
-providers (the more the merrier!) with the appropriate token and/or API key so
-that they can each run and do things for you.
+(`codex`), Gemini (`gemini`), OpenCode (`opencode`), and Cerebras
+(`cerebras`). Make sure you've configured each of your chosen providers (the
+more the merrier!) with the appropriate token and/or API key so that they can
+each run and do things for you.
 
 Next, you'll need to get the Gas City CLI installed and on your PATH:
 
@@ -70,10 +71,11 @@ Choose your coding agent:
   5. GitHub Copilot
   6. Sourcegraph AMP
   7. OpenCode
-  8. Auggie CLI
-  9. Pi Coding Agent
-  10. Oh My Pi (OMP)
-  11. Custom command
+  8. Cerebras (OpenCode)
+  9. Auggie CLI
+  10. Pi Coding Agent
+  11. Oh My Pi (OMP)
+  12. Custom command
 Agent [1]:
 [1/8] Creating runtime scaffold
 [2/8] Installing hooks (Claude Code)
