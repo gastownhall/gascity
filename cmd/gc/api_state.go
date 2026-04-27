@@ -213,7 +213,7 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 		}
 		return store
 	default: // "bd" or unrecognized
-		return bdStoreForRig(scopeRoot, cs.cityPath, cfg)
+		return bdStoreForRig(scopeRoot, cs.cityPath, cfg, prefix)
 	}
 }
 

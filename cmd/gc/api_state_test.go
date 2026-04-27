@@ -429,6 +429,57 @@ func TestControllerStateAppliesCacheReconcileBeadEventsToStores(t *testing.T) {
 	}
 }
 
+func TestControllerStateBeadEventsRespectStorePrefixes(t *testing.T) {
+	cityBacking := beads.NewMemStore()
+	rigBacking := beads.NewMemStore()
+	cityCache := beads.NewCachingStoreForTestWithPrefix(cityBacking, "mc", nil)
+	rigCache := beads.NewCachingStoreForTestWithPrefix(rigBacking, "ga", nil)
+	for name, cache := range map[string]*beads.CachingStore{
+		"city": cityCache,
+		"rig":  rigCache,
+	} {
+		if err := cache.Prime(context.Background()); err != nil {
+			t.Fatalf("Prime(%s): %v", name, err)
+		}
+	}
+
+	payload, err := json.Marshal(beads.Bead{
+		ID:     "mc-source",
+		Title:  "city source",
+		Status: "open",
+	})
+	if err != nil {
+		t.Fatalf("marshal city bead: %v", err)
+	}
+	cs := &controllerState{
+		cityBeadStore: cityCache,
+		beadStores:    map[string]beads.Store{"gascity": rigCache},
+		pokeCh:        make(chan struct{}, 1),
+	}
+
+	cs.applyBeadEventToStores(events.Event{
+		Type:    events.BeadCreated,
+		Actor:   "bd-hook",
+		Subject: "mc-source",
+		Payload: payload,
+	})
+
+	cityItems, err := cityCache.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("List city cache: %v", err)
+	}
+	if len(cityItems) != 1 || cityItems[0].ID != "mc-source" {
+		t.Fatalf("city cache items = %+v, want mc-source", cityItems)
+	}
+	rigItems, err := rigCache.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("List rig cache: %v", err)
+	}
+	if len(rigItems) != 0 {
+		t.Fatalf("rig cache items = %+v, want no city bead", rigItems)
+	}
+}
+
 func TestControllerStateBuildStoresUsesScopeLocalFileStores(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 

@@ -2,7 +2,6 @@ package beads
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -23,24 +22,18 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 		c.recordProblem(fmt.Sprintf("apply %s event", eventType), err)
 		return
 	}
+	if !c.ownsBeadID(patch.ID) {
+		return
+	}
 
 	c.mu.RLock()
 	if c.state != cacheLive {
 		c.mu.RUnlock()
 		return
 	}
-	_, cached := c.beads[patch.ID]
 	c.mu.RUnlock()
 
 	b := patch
-	if !cached {
-		if fresh, err := c.backing.Get(patch.ID); err == nil {
-			b = fresh
-		} else if !errors.Is(err, ErrNotFound) {
-			c.recordProblem(fmt.Sprintf("refresh %s event", eventType), err)
-		}
-	}
-
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.state != cacheLive {

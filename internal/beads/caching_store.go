@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,7 +23,8 @@ import (
 //
 // Only wraps BdStore because the event hook path requires dolt/bd.
 type CachingStore struct {
-	backing Store // runtime: always *BdStore; tests may use MemStore
+	backing  Store // runtime: always *BdStore; tests may use MemStore
+	idPrefix string
 
 	mu          sync.RWMutex
 	beads       map[string]Bead
@@ -84,18 +86,29 @@ const (
 // Only BdStore is supported because the event hook path (bd hooks ->
 // gc event emit -> event bus -> ApplyEvent) requires dolt infrastructure.
 func NewCachingStore(backing *BdStore, onChange func(eventType, beadID string, payload json.RawMessage)) *CachingStore {
-	return newCachingStore(backing, onChange)
+	prefix := ""
+	if backing != nil {
+		prefix = backing.IDPrefix()
+	}
+	return newCachingStore(backing, prefix, onChange)
 }
 
 // NewCachingStoreForTest wraps any Store for testing. Production code
 // must use NewCachingStore with a *BdStore.
 func NewCachingStoreForTest(backing Store, onChange func(eventType, beadID string, payload json.RawMessage)) *CachingStore {
-	return newCachingStore(backing, onChange)
+	return newCachingStore(backing, "", onChange)
 }
 
-func newCachingStore(backing Store, onChange func(eventType, beadID string, payload json.RawMessage)) *CachingStore {
+// NewCachingStoreForTestWithPrefix wraps any Store for tests that need
+// production-style bead ID ownership filtering.
+func NewCachingStoreForTestWithPrefix(backing Store, idPrefix string, onChange func(eventType, beadID string, payload json.RawMessage)) *CachingStore {
+	return newCachingStore(backing, idPrefix, onChange)
+}
+
+func newCachingStore(backing Store, idPrefix string, onChange func(eventType, beadID string, payload json.RawMessage)) *CachingStore {
 	return &CachingStore{
 		backing:    backing,
+		idPrefix:   normalizeIDPrefix(idPrefix),
 		beads:      make(map[string]Bead),
 		deps:       make(map[string][]Dep),
 		dirty:      make(map[string]struct{}),
@@ -106,6 +119,18 @@ func newCachingStore(backing Store, onChange func(eventType, beadID string, payl
 			log.Printf("beads cache: %s", msg)
 		},
 	}
+}
+
+func normalizeIDPrefix(prefix string) string {
+	return strings.Trim(strings.ToLower(strings.TrimSpace(prefix)), "-")
+}
+
+func (c *CachingStore) ownsBeadID(id string) bool {
+	if c.idPrefix == "" {
+		return true
+	}
+	id = strings.ToLower(strings.TrimSpace(id))
+	return strings.HasPrefix(id, c.idPrefix+"-")
 }
 
 func (c *CachingStore) noteMutationLocked(ids ...string) uint64 {

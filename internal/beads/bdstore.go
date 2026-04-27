@@ -102,11 +102,25 @@ type BdStore struct {
 	dir         string          // city root directory (where .beads/ lives)
 	runner      CommandRunner   // injectable for testing
 	purgeRunner PurgeRunnerFunc // injectable for testing; nil uses exec default
+	idPrefix    string          // bead ID prefix owned by this store, without trailing "-"
 }
 
 // NewBdStore creates a BdStore rooted at dir using the given runner.
 func NewBdStore(dir string, runner CommandRunner) *BdStore {
-	return &BdStore{dir: dir, runner: runner}
+	return NewBdStoreWithPrefix(dir, runner, "")
+}
+
+// NewBdStoreWithPrefix creates a BdStore with an explicit owned bead ID prefix.
+func NewBdStoreWithPrefix(dir string, runner CommandRunner, idPrefix string) *BdStore {
+	return &BdStore{dir: dir, runner: runner, idPrefix: normalizeIDPrefix(idPrefix)}
+}
+
+// IDPrefix returns the bead ID prefix owned by this store, without trailing "-".
+func (s *BdStore) IDPrefix() string {
+	if s == nil {
+		return ""
+	}
+	return s.idPrefix
 }
 
 // Init initializes a beads database via bd init --server. This is an admin
