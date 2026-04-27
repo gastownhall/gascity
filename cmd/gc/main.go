@@ -116,7 +116,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 // newRootCmd creates the root cobra command with all subcommands.
 func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 	root := &cobra.Command{
-		Use:           "gc",
+		Use:           prog(),
 		Short:         "Gas City CLI — orchestration-builder for multi-agent workflows",
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -130,7 +130,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 			if tryPackCommandFallback(args, stdout, stderr) {
 				return nil
 			}
-			fmt.Fprintf(stderr, "gc: unknown command %q\n\n", args[0]) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: unknown command %q\n\n", prog(), args[0]) //nolint:errcheck // best-effort stderr
 			printCommandUsage(stderr, cmd)
 			return errExit
 		},
@@ -224,7 +224,7 @@ func installArgUsageErrors(cmd *cobra.Command, stderr io.Writer) {
 
 func printCommandUsageError(stderr io.Writer, cmd *cobra.Command, err error) {
 	if err != nil {
-		fmt.Fprintf(stderr, "gc: %v\n\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: %v\n\n", prog(), err) //nolint:errcheck // best-effort stderr
 	}
 	printCommandUsage(stderr, cmd)
 }
