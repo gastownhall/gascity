@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/examples/gastown/packs/maintenance"
 	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 )
@@ -152,6 +153,12 @@ func materializeFS(embedded fs.FS, root, dstDir string) error {
 		data, err := fs.ReadFile(embedded, path)
 		if err != nil {
 			return fmt.Errorf("reading embedded %s: %w", path, err)
+		}
+
+		// Resolve {{binary}} and other built-in vars in SKILL.md files so
+		// materialized skills reference the actual binary name.
+		if filepath.Base(path) == "SKILL.md" {
+			data = []byte(formula.Substitute(string(data), nil))
 		}
 
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
