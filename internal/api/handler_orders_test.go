@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -405,6 +406,36 @@ func TestHandleOrderCheckTreatsWispFailedAsFailed(t *testing.T) {
 	}
 }
 
+func TestHandleOrderCheckDoesNotRunConditionByDefault(t *testing.T) {
+	fs := newFakeState(t)
+	marker := t.TempDir() + "/condition-ran"
+	fs.autos = []orders.Order{
+		{Name: "router", Formula: "review-pr", Trigger: "condition", Check: "touch " + marker},
+	}
+
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/check"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("condition marker stat err = %v, want not exist", err)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/check?fresh=true"), nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("fresh status = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("condition marker after fresh check: %v", err)
+	}
+}
+
 func TestLastRunOutcomeFromLabelsPrioritizesTerminalLabels(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -728,6 +759,73 @@ func TestHandleOrderCheckUsesRigStoreLastRunState(t *testing.T) {
 	}
 	if check.LastRunOutcome == nil || *check.LastRunOutcome != "success" {
 		t.Fatalf("last_run_outcome = %v, want success", check.LastRunOutcome)
+	}
+}
+
+type cachedOnlyOrderHistoryStore struct {
+	beads.Store
+	cached                 []beads.Bead
+	includeClosedListCalls int
+}
+
+func (s *cachedOnlyOrderHistoryStore) CachedList(query beads.ListQuery) ([]beads.Bead, bool) {
+	return beads.ApplyListQuery(s.cached, query), true
+}
+
+func (s *cachedOnlyOrderHistoryStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.IncludeClosed {
+		s.includeClosedListCalls++
+	}
+	return s.Store.List(query)
+}
+
+func TestHandleOrderCheckUsesCachedHistoryWhenAvailable(t *testing.T) {
+	fs := newFakeState(t)
+	run := beads.Bead{
+		ID:        "run-1",
+		Title:     "nightly-review wisp",
+		Status:    "closed",
+		CreatedAt: time.Now().UTC(),
+		Labels:    []string{"order-run:nightly-review", "wisp"},
+	}
+	cachedStore := &cachedOnlyOrderHistoryStore{
+		Store:  beads.NewMemStore(),
+		cached: []beads.Bead{run},
+	}
+	fs.cityBeadStore = cachedStore
+	fs.autos = []orders.Order{
+		{Name: "nightly-review", Formula: "mol-adopt-pr-v2", Trigger: "cooldown", Interval: "24h"},
+	}
+
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/check"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp struct {
+		Checks []struct {
+			Due            bool    `json:"due"`
+			LastRunOutcome *string `json:"last_run_outcome"`
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Checks) != 1 {
+		t.Fatalf("len(checks) = %d, want 1", len(resp.Checks))
+	}
+	if resp.Checks[0].Due {
+		t.Fatal("due = true, want false from cached recent run")
+	}
+	if resp.Checks[0].LastRunOutcome == nil || *resp.Checks[0].LastRunOutcome != "success" {
+		t.Fatalf("last_run_outcome = %v, want success", resp.Checks[0].LastRunOutcome)
+	}
+	if cachedStore.includeClosedListCalls != 0 {
+		t.Fatalf("IncludeClosed List calls = %d, want 0 when cached history is available", cachedStore.includeClosedListCalls)
 	}
 }
 
