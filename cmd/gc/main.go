@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/progname"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -90,6 +91,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// Publish the runtime binary name so internal/ packages can reference it
 	// in error messages and log output without importing cmd/gc.
 	progname.Set(prog())
+
+	// Register built-in formula variables so {{binary}} resolves everywhere.
+	formula.RegisterBuiltInVars(map[string]string{"binary": prog()})
 
 	// Initialize OTel telemetry (opt-in via GC_OTEL_METRICS_URL / GC_OTEL_LOGS_URL).
 	provider, err := telemetry.Init(context.Background(), "gascity", version)
