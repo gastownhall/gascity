@@ -6,6 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -88,8 +91,14 @@ func cmdHandoff(args []string, target string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	// Block forever. The controller will kill the entire process tree.
-	select {}
+	// Wait for a signal (the controller will eventually kill the entire process tree).
+	// We use a signal wait instead of an empty select{} to avoid Go's deadlock panic
+	// when no other goroutines are running.
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	<-sigChan
+
+	return 0
 }
 
 // cmdHandoffRemote sends handoff mail to a remote session and stops the target
