@@ -1236,6 +1236,16 @@ func TestCmdSlingDryRunInlineTextHasNoFalsePositivePreCheck(t *testing.T) {
 	if !strings.Contains(out, "Would create new task bead") {
 		t.Fatalf("dry-run stdout missing inline-text creation hint:\n%s", out)
 	}
+	// Cook/route preview commands must use a placeholder rather than
+	// the inline title: the live path creates a bead first and uses
+	// the new ID, so showing "write docs" as the bead-id arg would
+	// describe a command that wouldn't actually run.
+	if strings.Contains(out, "--on=write docs") || strings.Contains(out, "--on='write docs'") {
+		t.Fatalf("dry-run stdout uses inline title as bead ID in --on=...:\n%s", out)
+	}
+	if !strings.Contains(out, "<new-bead-id>") {
+		t.Fatalf("dry-run stdout missing <new-bead-id> placeholder:\n%s", out)
+	}
 	// Pre-existing footer must still be present.
 	if !strings.Contains(out, "No side effects executed (--dry-run).") {
 		t.Fatalf("dry-run stdout missing dry-run footer:\n%s", out)

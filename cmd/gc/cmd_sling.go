@@ -1507,6 +1507,14 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 		// does not exist yet, so the "no existing children" claim
 		// would be vacuously true and misleading.
 		preCheck := !opts.InlineText
+		// In inline-text mode the live path creates a fresh bead first
+		// and operates on the new ID; reuse a placeholder in preview
+		// commands so operators don't read the inline title as the bead
+		// ID a real run would attach to or route.
+		previewBeadID := opts.BeadOrFormula
+		if opts.InlineText {
+			previewBeadID = "<new-bead-id>"
+		}
 		if opts.OnFormula != "" {
 			if preCheck {
 				if rc := dryRunReportBlockingMolecule(opts, deps, querier, stderr); rc != 0 {
@@ -1519,7 +1527,7 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 			w("  bead. The agent receives the original bead with the workflow")
 			w("  attached, rather than a standalone wisp.")
 			w("")
-			cookCmd := fmt.Sprintf("bd mol cook --formula=%s --on=%s", opts.OnFormula, opts.BeadOrFormula)
+			cookCmd := fmt.Sprintf("bd mol cook --formula=%s --on=%s", opts.OnFormula, previewBeadID)
 			if opts.Title != "" {
 				cookCmd += fmt.Sprintf(" --title=%s", opts.Title)
 			}
@@ -1539,7 +1547,7 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 			w("  Target " + a.QualifiedName() + " has a default_sling_formula configured.")
 			w("  A wisp will be attached automatically (use --no-formula to suppress).")
 			w("")
-			cookCmd := fmt.Sprintf("bd mol cook --formula=%s --on=%s", a.EffectiveDefaultSlingFormula(), opts.BeadOrFormula)
+			cookCmd := fmt.Sprintf("bd mol cook --formula=%s --on=%s", a.EffectiveDefaultSlingFormula(), previewBeadID)
 			if opts.Title != "" {
 				cookCmd += fmt.Sprintf(" --title=%s", opts.Title)
 			}
@@ -1550,7 +1558,7 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 			w("")
 		}
 
-		routeCmd := sling.BuildSlingCommandForAgent("sling_query", a.EffectiveSlingQuery(), opts.BeadOrFormula, deps.CityPath, deps.CityName, a, deps.Cfg.Rigs, stderr)
+		routeCmd := sling.BuildSlingCommandForAgent("sling_query", a.EffectiveSlingQuery(), previewBeadID, deps.CityPath, deps.CityName, a, deps.Cfg.Rigs, stderr)
 		w("Route command (not executed):")
 		w("  " + routeCmd)
 		if !sling.IsCustomSlingQuery(a) {

@@ -467,8 +467,11 @@ func matchConfiguredBeadPrefix(cfg *config.City, beadID string) string {
 
 // configuredBeadPrefixes returns every prefix the city accepts for bead
 // IDs: the city's HQ prefix plus each rig's effective prefix. Empty
-// entries are skipped. Order is not significant — the caller picks the
-// longest match.
+// entries are skipped. The caller picks the longest match; order only
+// matters when equal-length matches tie, in which case the first match
+// (HQ before rigs, then cfg.Rigs declaration order) is kept. Note that
+// config validation rejects duplicate prefixes, so ties should not
+// appear in valid configs.
 func configuredBeadPrefixes(cfg *config.City) []string {
 	if cfg == nil {
 		return nil
