@@ -5,22 +5,22 @@ description: Routing work to agents with gc sling and formulas
 
 # Dispatching Work
 
-`gc sling` routes work to session configs. **Multi-session configs are valid
+`{{binary}} sling` routes work to session configs. **Multi-session configs are valid
 targets** — sling to the config and any eligible session can claim the work.
 You do NOT need to find or create an individual session first.
 
 ## Quick reference
 
 ```
-gc sling <bead-id>                     # Auto-target via rig's default_sling_target
-gc sling <session-config> <bead-id>     # Route to a specific session config
-gc sling <session-config> -f <formula>  # Instantiate formula, route wisp root
-gc sling <session-config> <bead-id> --on <formula>  # Attach wisp to existing bead
+{{binary}} sling <bead-id>                     # Auto-target via rig's default_sling_target
+{{binary}} sling <session-config> <bead-id>     # Route to a specific session config
+{{binary}} sling <session-config> -f <formula>  # Instantiate formula, route wisp root
+{{binary}} sling <session-config> <bead-id> --on <formula>  # Attach wisp to existing bead
 ```
 
 ## Targeting
 
-The `<session-config>` is a qualified config name from `gc session list`:
+The `<session-config>` is a qualified config name from `{{binary}} session list`:
 - **Single-session config:** `mayor`, `hello-world/refinery`
 - **Multi-session config:** `hello-world/polecat` — routes to the config's shared work queue
 
@@ -29,7 +29,7 @@ bead's rig prefix. The rig's `default_sling_target` in city.toml determines
 where work goes. Example: bead `hw-42` → rig `hello-world` → target
 `hello-world/polecat`.
 
-**Rig-scoped beads:** `gc sling` automatically resolves the rig directory
+**Rig-scoped beads:** `{{binary}} sling` automatically resolves the rig directory
 for rig-scoped bead IDs (e.g. `hw-abc`) and runs `bd update` from there,
 so the rig's `.beads` database is found without manual intervention.
 
@@ -40,7 +40,7 @@ the right database:
 
 ```
 bd create "fix the bug" --rig frontend   # Creates fe-xxx in frontend's db
-gc sling frontend/polecat fe-xxx         # Works — bead is in the right db
+{{binary}} sling frontend/polecat fe-xxx         # Works — bead is in the right db
 ```
 
 If the bead is in the wrong database (e.g. `gc-xxx` in HQ but targeting
@@ -49,8 +49,8 @@ a frontend agent), sling's cross-rig guard will block the route.
 ## Direct dispatch (bead to session config)
 
 ```
-gc sling <session-config> <bead-id>    # Route a bead to a session config
-gc sling <bead-id>                     # Use rig's default_sling_target
+{{binary}} sling <session-config> <bead-id>    # Route a bead to a session config
+{{binary}} sling <bead-id>                     # Use rig's default_sling_target
 ```
 
 The agent receives the bead on its hook and runs it per GUPP.
@@ -58,7 +58,7 @@ The agent receives the bead on its hook and runs it per GUPP.
 ## Formula dispatch (formula on agent)
 
 ```
-gc sling <agent> -f <formula>          # Run a formula, creating a molecule
+{{binary}} sling <agent> -f <formula>          # Run a formula, creating a molecule
 ```
 
 Creates a molecule from the formula and hooks the root bead to the agent.
@@ -66,7 +66,7 @@ Creates a molecule from the formula and hooks the root bead to the agent.
 ## Wisp dispatch (formula + existing bead)
 
 ```
-gc sling <agent> <bead-id> --on <formula>  # Attach formula wisp to bead
+{{binary}} sling <agent> <bead-id> --on <formula>  # Attach formula wisp to bead
 ```
 
 Creates a molecule wisp on the bead and routes to the agent.
@@ -74,8 +74,8 @@ Creates a molecule wisp on the bead and routes to the agent.
 ## Formulas
 
 ```
-gc formula list                        # List available formulas
-gc formula show <name>                 # Show formula definition
+{{binary}} formula list                        # List available formulas
+{{binary}} formula show <name>                 # Show formula definition
 ```
 
 ### Built-in formulas
@@ -86,7 +86,7 @@ No git branching, no worktree isolation, no refinery handoff. Good for
 demos and simple single-agent workflows.
 
 ```
-gc sling <agent> <bead-id> --on mol-do-work
+{{binary}} sling <agent> <bead-id> --on mol-do-work
 ```
 
 **mol-polecat-commit** — Direct-commit variant. Creates a worktree but
@@ -95,7 +95,7 @@ Includes preflight tests, implementation, and self-review quality gates.
 For small installations where merge review is unnecessary.
 
 ```
-gc sling <agent> <bead-id> --on mol-polecat-commit
+{{binary}} sling <agent> <bead-id> --on mol-polecat-commit
 ```
 
 **mol-polecat-base** — Shared base for polecat work formulas. Defines
@@ -116,16 +116,16 @@ otherwise from a parent convoy with `metadata.target`, otherwise from
 the rig repo's default branch.
 
 ```
-gc sling <agent> <bead-id> --on mol-polecat-work
+{{binary}} sling <agent> <bead-id> --on mol-polecat-work
 ```
 
 **mol-idea-to-plan** — Planning workflow for a coordinator session. Turns a
 rough idea into a PRD, reviewed design doc, and beads DAG using Gas City's
-existing primitives: repo-local artifact files, review task beads, `gc sling`,
+existing primitives: repo-local artifact files, review task beads, `{{binary}} sling`,
 and mail. Best run from a crew worker in the target rig.
 
 ```
-gc sling <coordinator-agent> -f mol-idea-to-plan --var problem="..." --var review_target=<rig>/polecat
+{{binary}} sling <coordinator-agent> -f mol-idea-to-plan --var problem="..." --var review_target=<rig>/polecat
 ```
 
 **mol-review-leg** — Helper formula used by `mol-idea-to-plan` review tasks.
@@ -146,27 +146,27 @@ don't sling these manually:
 ## Convoys (grouped work)
 
 ```
-gc convoy create <name> <bead-ids...>                 # Group beads into a convoy
-gc convoy create <name> --owned --target integration/<slug>  # Long-lived initiative convoy
-gc convoy target <id> <branch>                        # Set/update convoy target branch
-gc convoy list                                        # List active convoys
-gc convoy status <id>                                 # Show convoy progress + metadata
-gc convoy add <id> <bead-ids...>                      # Add beads to convoy
-gc convoy close <id>                                  # Close convoy
-gc convoy check <id>                                  # Check if all beads done
-gc convoy stranded                                    # Find convoys with no progress
-gc convoy autoclose                                   # Close convoys where all beads done
+{{binary}} convoy create <name> <bead-ids...>                 # Group beads into a convoy
+{{binary}} convoy create <name> --owned --target integration/<slug>  # Long-lived initiative convoy
+{{binary}} convoy target <id> <branch>                        # Set/update convoy target branch
+{{binary}} convoy list                                        # List active convoys
+{{binary}} convoy status <id>                                 # Show convoy progress + metadata
+{{binary}} convoy add <id> <bead-ids...>                      # Add beads to convoy
+{{binary}} convoy close <id>                                  # Close convoy
+{{binary}} convoy check <id>                                  # Check if all beads done
+{{binary}} convoy stranded                                    # Find convoys with no progress
+{{binary}} convoy autoclose                                   # Close convoys where all beads done
 ```
 
 Migration note:
-- Existing epic beads are no longer first-class containers. Migrate open epics to convoys before relying on convoy-only tooling such as `gc convoy target`, `gc sling <convoy>`, or the Gastown refinery convoy flow.
+- Existing epic beads are no longer first-class containers. Migrate open epics to convoys before relying on convoy-only tooling such as `{{binary}} convoy target`, `{{binary}} sling <convoy>`, or the Gastown refinery convoy flow.
 
 ## Orders
 
 ```
-gc order list                     # List order rules
-gc order show <name>              # Show order definition
-gc order run <name>               # Manually trigger an order
-gc order check <name>             # Check if trigger conditions are met
-gc order history <name>           # Show order run history
+{{binary}} order list                     # List order rules
+{{binary}} order show <name>              # Show order definition
+{{binary}} order run <name>               # Manually trigger an order
+{{binary}} order check <name>             # Check if trigger conditions are met
+{{binary}} order history <name>           # Show order run history
 ```

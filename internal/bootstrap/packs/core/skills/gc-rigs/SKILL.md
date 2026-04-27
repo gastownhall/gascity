@@ -20,7 +20,7 @@ bd list --dir /path/to/rig             # List rig's beads
 ```
 
 Running `bd` from the city root hits the city-level `.beads/`, not
-the rig's. Use `gc rig list` to find rig paths.
+the rig's. Use `{{binary}} rig list` to find rig paths.
 
 ## Convention
 
@@ -35,27 +35,27 @@ a custom path. Do not silently pick a location.
 ## Adding and listing
 
 ```
-gc rig add <path>                      # Register a directory as a rig
-gc rig list                            # List all registered rigs
+{{binary}} rig add <path>                      # Register a directory as a rig
+{{binary}} rig list                            # List all registered rigs
 ```
 
 ## Status and inspection
 
 ```
-gc rig status <name>                   # Show rig status, agents, health
-gc status                              # City-wide overview (includes rigs)
+{{binary}} rig status <name>                   # Show rig status, agents, health
+{{binary}} status                              # City-wide overview (includes rigs)
 ```
 
 ## Suspending and resuming
 
 ```
-gc rig suspend <name>                  # Suspend rig (all its agents stop)
-gc rig resume <name>                   # Resume a suspended rig
+{{binary}} rig suspend <name>                  # Suspend rig (all its agents stop)
+{{binary}} rig resume <name>                   # Resume a suspended rig
 ```
 
 ## Restarting
 
 ```
-gc rig restart <name>                  # Restart all agents in a rig
-gc restart                             # Restart entire city
+{{binary}} rig restart <name>                  # Restart all agents in a rig
+{{binary}} restart                             # Restart entire city
 ```

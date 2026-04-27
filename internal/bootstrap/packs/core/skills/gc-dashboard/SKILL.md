@@ -5,7 +5,7 @@ description: API server and web dashboard — config, start, monitor
 
 # Dashboard
 
-The dashboard is a web UI compiled into the `gc` binary for monitoring
+The dashboard is a web UI compiled into the `{{binary}}` binary for monitoring
 convoys, agents, mail, rigs, sessions, and events in real time.
 
 ## Prerequisites
@@ -15,7 +15,7 @@ but it no longer has to be launched from inside a city directory.
 
 ### Standalone city mode
 
-If you are using `gc start` without the machine-wide supervisor, the dashboard
+If you are using `{{binary}} start` without the machine-wide supervisor, the dashboard
 talks to that city's own API server. Ensure the city API is enabled in
 `city.toml`:
 
@@ -24,7 +24,7 @@ talks to that city's own API server. Ensure the city API is enabled in
 port = 9443
 ```
 
-Then start the city normally with `gc start`. The API server starts with the
+Then start the city normally with `{{binary}} start`. The API server starts with the
 controller on that port.
 
 ### Supervisor mode
@@ -43,14 +43,14 @@ routes requests through `/v0/city/{name}/...`.
 ## Starting the dashboard
 
 ```
-gc dashboard                               # Supervisor-only view from anywhere
-gc dashboard --port 3000                  # Same, custom dashboard port
-gc dashboard serve                        # Explicit subcommand; same discovery
-gc dashboard --city /path/to/city         # Optional city context for standalone discovery
-gc dashboard --api http://127.0.0.1:8372 # Optional override
+{{binary}} dashboard                               # Supervisor-only view from anywhere
+{{binary}} dashboard --port 3000                  # Same, custom dashboard port
+{{binary}} dashboard serve                        # Explicit subcommand; same discovery
+{{binary}} dashboard --city /path/to/city         # Optional city context for standalone discovery
+{{binary}} dashboard --api http://127.0.0.1:8372 # Optional override
 ```
 
-`gc dashboard` auto-discovers the right API server in this order:
+`{{binary}} dashboard` auto-discovers the right API server in this order:
 
 - Supervisor-managed city: uses the machine supervisor API and defaults the UI
   to the supervisor view. Pick a city in the UI.
