@@ -43,11 +43,11 @@ func TestManagedDoltReadOnlyProbeNeverTargetsLegacyDatabase(t *testing.T) {
 
 func TestManagedDoltQuoteIdentEscapesBackticks(t *testing.T) {
 	cases := map[string]string{
-		"gascity":            "`gascity`",
-		"003":                "`003`",
-		"with`backtick":      "`with``backtick`",
-		"name with spaces":   "`name with spaces`",
-		"":                   "``",
+		"gascity":          "`gascity`",
+		"003":              "`003`",
+		"with`backtick":    "`with``backtick`",
+		"name with spaces": "`name with spaces`",
+		"":                 "``",
 	}
 	for in, want := range cases {
 		if got := managedDoltQuoteIdent(in); got != want {

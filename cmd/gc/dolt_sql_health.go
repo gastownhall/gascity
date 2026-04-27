@@ -45,9 +45,9 @@ var (
 // pick as its write target. `__gc_probe` is included so existing legacy data
 // is left in place while we migrate off of it.
 var managedDoltSystemDatabases = map[string]struct{}{
-	"information_schema": {},
-	"mysql":              {},
-	"dolt_cluster":       {},
+	"information_schema":     {},
+	"mysql":                  {},
+	"dolt_cluster":           {},
 	managedDoltProbeDatabase: {},
 }
 
