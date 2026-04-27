@@ -77,7 +77,7 @@ const (
 )
 
 var builtinProviderOrder = []string{
-	"claude", "codex", "gemini", "cursor", "copilot",
+	"claude", "codex", "gemini", "kiro", "cursor", "copilot",
 	"amp", "opencode", "auggie", "pi", "omp",
 }
 
@@ -262,6 +262,17 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				},
 			},
 		},
+	},
+	"kiro": {
+		DisplayName:      "Kiro",
+		Command:          "kiro",
+		Args:             []string{"--autonomous"},
+		PromptMode:       "arg",
+		ReadyDelayMs:     5000,
+		ProcessNames:     []string{"kiro", "node"},
+		SupportsACP:      true,
+		SupportsHooks:    true,
+		InstructionsFile: "AGENTS.md",
 	},
 	"cursor": {
 		DisplayName:       "Cursor Agent",

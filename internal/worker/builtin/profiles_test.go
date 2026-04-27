@@ -8,11 +8,11 @@ func TestBuiltinProvidersAndOrder(t *testing.T) {
 	providers := BuiltinProviders()
 	order := BuiltinProviderOrder()
 
-	if len(providers) != 10 {
-		t.Fatalf("len(BuiltinProviders()) = %d, want 10", len(providers))
+	if len(providers) != 11 {
+		t.Fatalf("len(BuiltinProviders()) = %d, want 11", len(providers))
 	}
-	if len(order) != 10 {
-		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 10", len(order))
+	if len(order) != 11 {
+		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 11", len(order))
 	}
 
 	for _, name := range order {
