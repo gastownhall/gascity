@@ -2801,8 +2801,8 @@ func TestRunWizardTutorialAliasMapsToMinimal(t *testing.T) {
 }
 
 func TestRunWizardSelectCursorByNumber(t *testing.T) {
-	// Cursor is #4 in the order.
-	stdin := strings.NewReader("\n4\n")
+	// Cursor is #5 in the order.
+	stdin := strings.NewReader("\n5\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
 

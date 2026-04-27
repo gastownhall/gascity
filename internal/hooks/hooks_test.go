@@ -43,7 +43,7 @@ func claudeHookEntries(t *testing.T, data []byte, event string) []claudeHookEntr
 func TestSupportedProviders(t *testing.T) {
 	got := SupportedProviders()
 	want := map[string]bool{
-		"claude": true, "codex": true, "gemini": true, "opencode": true,
+		"claude": true, "codex": true, "gemini": true, "kiro": true, "opencode": true,
 		"copilot": true, "cursor": true, "pi": true, "omp": true,
 	}
 	if len(got) != len(want) {
