@@ -104,32 +104,33 @@ runner_workdir_for_scope() {
 # run_bd executes bd inside the beads runner pod for the projected store root.
 # When GC_BEADS_PREFIX is set, the prefix switch and bd command run in a
 # single kubectl exec to avoid interleave from concurrent invocations.
+#
+# BEADS_DIR is exported for every in-pod bd invocation so the runner always
+# targets the scope-local .beads store, including the post-init config-set
+# follow-ups in the init flow. The init branch itself must not run
+# `bd config set issue_prefix` before `bd init`, because a fresh scope has no
+# database for config writes yet.
 run_bd() {
   local scope_root workdir want
   scope_root=$(scope_root_arg_or_env "")
   workdir=$(runner_workdir_for_scope "$scope_root") || return 1
   want="${GC_BEADS_PREFIX:-}"
   if [ -n "$want" ]; then
-    "${KUBECTL[@]}" exec "$POD_NAME" -- sh -c \
-      'workdir="$1"; prefix="$2"; shift 2; mkdir -p "$workdir" && cd "$workdir" && bd config set issue_prefix "$prefix" >/dev/null 2>&1 && bd "$@"' -- "$workdir" "$want" "$@"
+    if [ "${1:-}" = "init" ]; then
+      "${KUBECTL[@]}" exec "$POD_NAME" -- sh -c \
+        'workdir="$1"; shift; mkdir -p "$workdir" && cd "$workdir" && export BEADS_DIR="$workdir/.beads" && bd "$@"' -- "$workdir" "$@"
+    else
+      "${KUBECTL[@]}" exec "$POD_NAME" -- sh -c \
+        'workdir="$1"; prefix="$2"; shift 2; mkdir -p "$workdir" && cd "$workdir" && export BEADS_DIR="$workdir/.beads" && bd config set issue_prefix "$prefix" >/dev/null 2>&1 && bd "$@"' -- "$workdir" "$want" "$@"
+    fi
   else
-    "${KUBECTL[@]}" exec "$POD_NAME" -- sh -c \
-      'workdir="$1"; shift; mkdir -p "$workdir" && cd "$workdir" && bd "$@"' -- "$workdir" "$@"
-  fi
-}
-
-# run_bd_stdin executes bd inside the beads runner pod with stdin piped through.
-run_bd_stdin() {
-  local scope_root workdir want
-  scope_root=$(scope_root_arg_or_env "")
-  workdir=$(runner_workdir_for_scope "$scope_root") || return 1
-  want="${GC_BEADS_PREFIX:-}"
-  if [ -n "$want" ]; then
-    "${KUBECTL[@]}" exec -i "$POD_NAME" -- sh -c \
-      'workdir="$1"; prefix="$2"; shift 2; mkdir -p "$workdir" && cd "$workdir" && bd config set issue_prefix "$prefix" >/dev/null 2>&1 && bd "$@"' -- "$workdir" "$want" "$@"
-  else
-    "${KUBECTL[@]}" exec -i "$POD_NAME" -- sh -c \
-      'workdir="$1"; shift; mkdir -p "$workdir" && cd "$workdir" && bd "$@"' -- "$workdir" "$@"
+    if [ "${1:-}" = "init" ]; then
+      "${KUBECTL[@]}" exec "$POD_NAME" -- sh -c \
+        'workdir="$1"; shift; mkdir -p "$workdir" && cd "$workdir" && export BEADS_DIR="$workdir/.beads" && bd "$@"' -- "$workdir" "$@"
+    else
+      "${KUBECTL[@]}" exec "$POD_NAME" -- sh -c \
+        'workdir="$1"; shift; mkdir -p "$workdir" && cd "$workdir" && export BEADS_DIR="$workdir/.beads" && bd "$@"' -- "$workdir" "$@"
+    fi
   fi
 }
 

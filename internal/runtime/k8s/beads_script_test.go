@@ -57,6 +57,56 @@ func TestBeadsScriptInitUsesScopeRootAndCanonicalDoltTarget(t *testing.T) {
 	assertCallNotContains(t, result.callLog, "3308")
 }
 
+// TestBeadsScriptInitSetsBEADSDIR verifies the contrib gc-beads-k8s script
+// exports BEADS_DIR inside the pod before running bd init. Without it, bd
+// init creates a .git/ as a side effect in the workspace. Regression for
+// #399.
+func TestBeadsScriptInitSetsBEADSDIR(t *testing.T) {
+	result := runBeadsScript(t, beadsScriptOptions{
+		Op:   "init",
+		Args: []string{"/city/frontend", "fe"},
+		Env: map[string]string{
+			"GC_CITY_PATH":    "/city",
+			"GC_STORE_ROOT":   "/city/frontend",
+			"GC_BEADS_PREFIX": "fe",
+			"GC_DOLT_HOST":    "canonical-dolt.example.com",
+			"GC_DOLT_PORT":    "4406",
+		},
+	})
+	if result.err != nil {
+		t.Fatalf("gc-beads-k8s init error = %v\noutput:\n%s", result.err, result.output)
+	}
+	assertCallContains(t, result.callLog, `export BEADS_DIR="$workdir/.beads"`)
+	assertCallContains(t, result.callLog, "init --server")
+}
+
+func TestBeadsScriptInitDoesNotPreseedIssuePrefixBeforeBdInit(t *testing.T) {
+	result := runBeadsScript(t, beadsScriptOptions{
+		Op:   "init",
+		Args: []string{"/city/frontend", "fe"},
+		Env: map[string]string{
+			"GC_CITY_PATH":    "/city",
+			"GC_STORE_ROOT":   "/city/frontend",
+			"GC_BEADS_PREFIX": "fe",
+			"GC_DOLT_HOST":    "canonical-dolt.example.com",
+			"GC_DOLT_PORT":    "4406",
+		},
+	})
+	if result.err != nil {
+		t.Fatalf("gc-beads-k8s init error = %v\noutput:\n%s", result.err, result.output)
+	}
+	lines := strings.Split(strings.TrimSpace(result.callLog), "\n")
+	if len(lines) == 0 {
+		t.Fatal("call log was empty")
+	}
+	if !strings.Contains(lines[0], "init --server") {
+		t.Fatalf("first init call = %q, want init --server", lines[0])
+	}
+	if strings.Contains(lines[0], "config set issue_prefix") {
+		t.Fatalf("first init call should not preseed issue_prefix before bd init:\n%s", lines[0])
+	}
+}
+
 func TestBeadsScriptInitRejectsPartialCanonicalDoltTarget(t *testing.T) {
 	clearDoltAndCityEnv(t)
 	result := runBeadsScript(t, beadsScriptOptions{
@@ -108,6 +158,24 @@ func TestBeadsScriptListUsesScopedWorkdir(t *testing.T) {
 	}
 	assertCallContains(t, result.callLog, "/workspace/frontend")
 	assertCallContains(t, result.callLog, "list --json --limit 0 --all")
+	assertCallContains(t, result.callLog, `export BEADS_DIR="$workdir/.beads"`)
+}
+
+func TestBeadsScriptConfigSetKeepsBEADSDIRScoped(t *testing.T) {
+	result := runBeadsScript(t, beadsScriptOptions{
+		Op:   "config-set",
+		Args: []string{"issue_prefix", "fe"},
+		Env: map[string]string{
+			"GC_CITY_PATH":  "/city",
+			"GC_STORE_ROOT": "/city/frontend",
+		},
+	})
+	if result.err != nil {
+		t.Fatalf("gc-beads-k8s config-set error = %v\noutput:\n%s", result.err, result.output)
+	}
+	assertCallContains(t, result.callLog, "/workspace/frontend")
+	assertCallContains(t, result.callLog, "config set issue_prefix fe")
+	assertCallContains(t, result.callLog, `export BEADS_DIR="$workdir/.beads"`)
 }
 
 type beadsScriptOptions struct {

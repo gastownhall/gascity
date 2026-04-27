@@ -450,6 +450,13 @@ func shutdownBeadsProvider(cityPath string) error {
 // initBeadsForDir initializes bead store infrastructure in a directory.
 // Idempotent — skips if already initialized. Callers should use
 // initAndHookDir instead to ensure hooks are installed afterward.
+//
+// Every load-bearing exec path that invokes bd init locally ensures
+// BEADS_DIR=<dir>/.beads. bd init creates a .git/ as a side effect when
+// BEADS_DIR is unset (upstream gastownhall/beads cmd/bd/init.go), so generic
+// exec providers get the scope's bead directory in the subprocess env and
+// providers that run bd init elsewhere (for example gc-beads-k8s inside the
+// pod) must set it in their own wrapper before invoking bd init.
 func initBeadsForDir(cityPath, dir, prefix, doltDatabase string) error {
 	if cityUsesBdStoreContract(cityPath) && os.Getenv("GC_DOLT") == "skip" {
 		if err := seedDeferredManagedBeadsErr(cityPath, dir, prefix, doltDatabase); err != nil {
@@ -469,7 +476,9 @@ func initBeadsForDir(cityPath, dir, prefix, doltDatabase string) error {
 		script := strings.TrimPrefix(provider, "exec:")
 		if execProviderUsesCanonicalBdScopeFiles(provider) && !execProviderNeedsScopedDoltInit(provider) {
 			baseEnv := providerLifecycleProcessEnv(cityPath, provider)
-			overrides := map[string]string{}
+			overrides := map[string]string{
+				"BEADS_DIR": filepath.Join(dir, ".beads"),
+			}
 			canonicalDoltDatabase := strings.TrimSpace(doltDatabase)
 			if canonicalDoltDatabase == "" {
 				canonicalDoltDatabase = canonicalScopeDoltDatabase(cityPath, dir, prefix)
@@ -489,7 +498,14 @@ func initBeadsForDir(cityPath, dir, prefix, doltDatabase string) error {
 			return finalizeCanonicalBdScopeInit(cityPath, dir, prefix, canonicalDoltDatabase)
 		}
 		if !execProviderNeedsScopedDoltInit(provider) {
-			return runProviderOp(script, cityPath, args...)
+			baseEnv := cityRuntimeProcessEnv(cityPath)
+			if strings.TrimSpace(cityPath) == "" {
+				baseEnv = os.Environ()
+			}
+			env := overlayEnvEntries(baseEnv, map[string]string{
+				"BEADS_DIR": filepath.Join(dir, ".beads"),
+			})
+			return runProviderOpWithEnv(script, env, args...)
 		}
 		target, err := resolveConfiguredExecStoreTarget(cityPath, dir)
 		if err != nil {
