@@ -116,6 +116,30 @@ func (s *sessionBeadSnapshot) FindSessionNameByTemplate(template string) string 
 	return s.sessionNameByTemplateHint[template]
 }
 
+func (s *sessionBeadSnapshot) FindByID(id string) (beads.Bead, bool) {
+	if s == nil || strings.TrimSpace(id) == "" {
+		return beads.Bead{}, false
+	}
+	for _, bead := range s.open {
+		if bead.ID == id {
+			return bead, true
+		}
+	}
+	return beads.Bead{}, false
+}
+
+func (s *sessionBeadSnapshot) FindBySessionName(name string) (beads.Bead, bool) {
+	if s == nil || strings.TrimSpace(name) == "" {
+		return beads.Bead{}, false
+	}
+	for _, bead := range s.open {
+		if strings.TrimSpace(bead.Metadata["session_name"]) == name {
+			return bead, true
+		}
+	}
+	return beads.Bead{}, false
+}
+
 func (s *sessionBeadSnapshot) FindSessionNameByNamedIdentity(identity string) string {
 	if s == nil || strings.TrimSpace(identity) == "" {
 		return ""

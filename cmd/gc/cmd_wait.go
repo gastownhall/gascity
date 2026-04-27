@@ -564,6 +564,10 @@ func prepareWaitWakeStateForCity(cityPath string, store beads.Store, now time.Ti
 	if err != nil {
 		return nil, err
 	}
+	sessionBeads, err := loadSessionBeadSnapshot(store)
+	if err != nil {
+		return nil, err
+	}
 	readyWaitSet := make(map[string]bool)
 	for _, wait := range waits {
 		state := wait.Metadata["state"]
@@ -574,8 +578,8 @@ func prepareWaitWakeStateForCity(cityPath string, store beads.Store, now time.Ti
 		if isWaitTerminal(state) {
 			continue
 		}
-		sessionBead, err := store.Get(sessionID)
-		if err != nil {
+		sessionBead, ok := sessionBeads.FindByID(sessionID)
+		if !ok {
 			continue
 		}
 		if epoch := wait.Metadata["registered_epoch"]; epoch != "" && sessionBead.Metadata["continuation_epoch"] != "" && epoch != sessionBead.Metadata["continuation_epoch"] {
@@ -657,6 +661,10 @@ func dispatchReadyWaitNudges(cityPath string, store beads.Store, sp runtime.Prov
 	if err != nil {
 		return err
 	}
+	sessionBeads, err := loadSessionBeadSnapshot(store)
+	if err != nil {
+		return err
+	}
 	for _, wait := range waits {
 		if wait.Metadata["state"] != waitStateReady {
 			continue
@@ -665,12 +673,11 @@ func dispatchReadyWaitNudges(cityPath string, store beads.Store, sp runtime.Prov
 		if sessionID == "" {
 			continue
 		}
-		sessionBead, err := store.Get(sessionID)
-		if err != nil {
+		sessionBead, ok := sessionBeads.FindByID(sessionID)
+		if !ok {
 			continue
 		}
-		running, err := workerSessionTargetRunningWithConfig(cityPath, store, sp, nil, sessionID)
-		if err != nil || !running {
+		if !cachedSessionCanReceiveWaitNudge(sessionBead) {
 			continue
 		}
 		nudgeID := waitNudgeID(wait)
@@ -709,6 +716,18 @@ func dispatchReadyWaitNudges(cityPath string, store beads.Store, sp runtime.Prov
 		}
 	}
 	return nil
+}
+
+func cachedSessionCanReceiveWaitNudge(sessionBead beads.Bead) bool {
+	if sessionBead.Status == "closed" {
+		return false
+	}
+	switch sessionpkg.State(strings.TrimSpace(sessionBead.Metadata["state"])) {
+	case "", sessionpkg.StateActive, sessionpkg.StateAwake:
+		return true
+	default:
+		return false
+	}
 }
 
 func finalizeReadyWaitFromNudge(store beads.Store, wait beads.Bead, now time.Time) (bool, error) {
