@@ -63,10 +63,10 @@ func newConvoyCreateCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "create <name> [issue-ids...]",
 		Short: "Create a convoy and optionally track issues",
-		Long: `Create a convoy and optionally link existing issues to it.
+		Long: fmt.Sprintf(`Create a convoy and optionally link existing issues to it.
 
 Creates a convoy bead and sets the parent of any provided issue IDs to
-the new convoy. Issues can also be added later with "gc convoy add".`,
+the new convoy. Issues can also be added later with "%s convoy add".`, prog()),
 		Example: `  gc convoy create sprint-42
   gc convoy create sprint-42 issue-1 issue-2 issue-3
   gc convoy create deploy --owner mayor --notify mayor --merge mr
@@ -722,10 +722,10 @@ func newConvoyCloseCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "close <id>",
 		Short: "Close a convoy",
-		Long: `Close a convoy bead manually.
+		Long: fmt.Sprintf(`Close a convoy bead manually.
 
 Marks the convoy as closed regardless of child issue status. Use
-"gc convoy check" to auto-close convoys where all issues are resolved.`,
+"%s convoy check" to auto-close convoys where all issues are resolved.`, prog()),
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdConvoyClose(args, stdout, stderr) != 0 {
@@ -956,11 +956,11 @@ func newConvoyLandCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "land <convoy-id>",
 		Short: "Land an owned convoy (terminate + cleanup)",
-		Long: `Land an owned convoy, verifying all children are closed.
+		Long: fmt.Sprintf(`Land an owned convoy, verifying all children are closed.
 
 Landing is the natural lifecycle termination for owned convoys created
-via "gc sling --owned". It verifies all children are closed (or uses
---force), closes the convoy bead, and records a ConvoyClosed event.`,
+via "%s sling --owned". It verifies all children are closed (or uses
+--force), closes the convoy bead, and records a ConvoyClosed event.`, prog()),
 		Example: `  gc convoy land gc-42
   gc convoy land gc-42 --force
   gc convoy land gc-42 --dry-run`,

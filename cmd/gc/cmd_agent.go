@@ -372,10 +372,10 @@ func newAgentCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "agent",
 		Short: "Manage agent configuration",
-		Long: `Manage agent configuration in city.toml.
+		Long: fmt.Sprintf(`Manage agent configuration in city.toml.
 
 Runtime operations (attach, list, peek, nudge, kill, start, stop, destroy)
-have moved to "gc session" and "gc runtime".`,
+have moved to "%s session" and "%s runtime".`, prog(), prog()),
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
@@ -523,11 +523,11 @@ func newAgentSuspendCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "suspend <name>",
 		Short: "Suspend an agent (reconciler will skip it)",
-		Long: `Suspend an agent by setting suspended=true in its durable config.
+		Long: fmt.Sprintf(`Suspend an agent by setting suspended=true in its durable config.
 
 Suspended agents are skipped by the reconciler — their sessions are not
 started or restarted. Existing sessions continue running but won't be
-replaced if they exit. Use "gc agent resume" to restore.`,
+replaced if they exit. Use "%s agent resume" to restore.`, prog()),
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdAgentSuspend(args, stdout, stderr) != 0 {

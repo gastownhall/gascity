@@ -19,11 +19,11 @@ func newMcpCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "mcp",
 		Short: "Inspect projected MCP config",
-		Long: `Inspect the projected MCP catalog for a concrete target.
+		Long: fmt.Sprintf(`Inspect the projected MCP catalog for a concrete target.
 
-Projected MCP is target-specific. Use "gc mcp list --agent <name>" when
+Projected MCP is target-specific. Use "%s mcp list --agent <name>" when
 the agent has a single deterministic projection target from config, or
-"gc mcp list --session <id>" for a live session target.`,
+"%s mcp list --session <id>" for a live session target.`, prog(), prog()),
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {

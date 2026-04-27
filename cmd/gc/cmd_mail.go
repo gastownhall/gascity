@@ -39,11 +39,11 @@ func newMailCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "mail",
 		Short: "Send and receive messages between agents and humans",
-		Long: `Send and receive messages between agents and humans.
+		Long: fmt.Sprintf(`Send and receive messages between agents and humans.
 
 Mail is implemented as beads with type="message". Messages have a
-sender, recipient, subject, and body. Use "gc mail check --inject" in agent
-hooks to deliver mail notifications into agent prompts.`,
+sender, recipient, subject, and body. Use "%s mail check --inject" in agent
+hooks to deliver mail notifications into agent prompts.`, prog()),
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
@@ -754,10 +754,10 @@ func newMailReadCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "read <id>",
 		Short: "Read a message and mark it as read",
-		Long: `Display a message and mark it as read.
+		Long: fmt.Sprintf(`Display a message and mark it as read.
 
 Shows the full message details (ID, sender, recipient, subject, date, body).
-The message stays in the store — use "gc mail archive" to permanently close it.`,
+The message stays in the store — use "%s mail archive" to permanently close it.`, prog()),
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdMailRead(args, stdout, stderr) != 0 {
@@ -772,10 +772,10 @@ func newMailPeekCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "peek <id>",
 		Short: "Show a message without marking it as read",
-		Long: `Display a message without marking it as read.
+		Long: fmt.Sprintf(`Display a message without marking it as read.
 
-Same output as "gc mail read" but does not change the message's read status.
-The message will continue to appear in inbox results.`,
+Same output as "%s mail read" but does not change the message's read status.
+The message will continue to appear in inbox results.`, prog()),
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdMailPeek(args, stdout, stderr) != 0 {

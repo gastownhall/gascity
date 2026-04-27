@@ -339,7 +339,7 @@ func writeStandaloneControllerConflict(stderr io.Writer, commandName, cityPath s
 func supervisorRetryCommand(commandName, cityPath string) string {
 	quotedPath := shellQuotePath(cityPath)
 	switch strings.TrimSpace(commandName) {
-	case "gc register":
+	case cmdName("register"):
 		return cmdName("register") + " " + quotedPath
 	default:
 		return cmdName("start") + " " + quotedPath

@@ -16,11 +16,11 @@ func newRestartCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "restart [path]",
 		Short: "Restart all agent sessions in the city",
-		Long: `Restart the city by stopping it then starting it again.
+		Long: fmt.Sprintf(`Restart the city by stopping it then starting it again.
 
-Equivalent to running "gc stop" followed by "gc start". Under supervisor
+Equivalent to running "%s stop" followed by "%s start". Under supervisor
 mode this unregisters the city, then re-registers it and triggers an
-immediate reconcile.`,
+immediate reconcile.`, prog(), prog()),
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdRestart(args, stdout, stderr) != 0 {

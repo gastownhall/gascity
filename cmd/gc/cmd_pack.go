@@ -33,11 +33,11 @@ func newPackFetchCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "fetch",
 		Short: "Clone missing and update existing remote packs",
-		Long: `Clone missing and update existing remote pack caches.
+		Long: fmt.Sprintf(`Clone missing and update existing remote pack caches.
 
 Fetches all configured pack sources from their git repositories,
 updates the local cache, and writes a lockfile with commit hashes
-for reproducibility. Automatically called during "gc start".`,
+for reproducibility. Automatically called during "%s start".`, prog()),
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if doPackFetch(stdout, stderr) != 0 {

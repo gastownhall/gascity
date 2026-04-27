@@ -17,14 +17,14 @@ func newBdCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "bd [bd-args...]",
 		Short: "Run bd in the correct rig directory",
-		Long: `Run a bd command routed to the correct rig directory.
+		Long: fmt.Sprintf(`Run a bd command routed to the correct rig directory.
 
 When beads belong to a rig (not the city root), bd must run from the
 rig directory to find the correct .beads database. This command resolves
 the rig automatically from the --rig flag or by detecting the bead prefix
 in the arguments.
 
-All arguments after "gc bd" are forwarded to bd unchanged.`,
+All arguments after "%s bd" are forwarded to bd unchanged.`, prog()),
 		Example: `  gc bd --rig my-project list
   gc bd --rig my-project create "New task"
   gc bd show my-project-abc          # auto-detects rig from bead prefix

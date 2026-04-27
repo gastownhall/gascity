@@ -439,7 +439,7 @@ func warnCheck(name, message, hint string, details []string) *doctor.CheckResult
 }
 
 func v2MigrationHint() string {
-	return `run "gc doctor --fix" to rewrite safe mechanical cases, then rerun "gc doctor"`
+	return fmt.Sprintf(`run "%s doctor --fix" to rewrite safe mechanical cases, then rerun "%s doctor"`, prog(), prog())
 }
 
 func parseCityConfig(path string) (*config.City, bool) {

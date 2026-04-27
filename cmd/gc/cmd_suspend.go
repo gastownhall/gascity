@@ -18,13 +18,13 @@ func newSuspendCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "suspend [path]",
 		Short: "Suspend the city (all agents effectively suspended)",
-		Long: `Suspends the city by setting workspace.suspended = true in city.toml.
+		Long: fmt.Sprintf(`Suspends the city by setting workspace.suspended = true in city.toml.
 
 This inherits downward — when the city is suspended, all agents are
 effectively suspended regardless of their individual suspended fields.
 The reconciler won't spawn agents, gc hook/prime return empty.
 
-Use "gc resume" to restore.`,
+Use "%s resume" to restore.`, prog()),
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdSuspend(args, stdout, stderr) != 0 {
@@ -40,11 +40,11 @@ func newResumeCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "resume [path]",
 		Short: "Resume a suspended city",
-		Long: `Resume a suspended city by clearing workspace.suspended in city.toml.
+		Long: fmt.Sprintf(`Resume a suspended city by clearing workspace.suspended in city.toml.
 
 Restores normal operation: the reconciler will spawn agents again and
-gc hook/prime will return work. Use "gc agent resume" to resume
-individual agents, or "gc rig resume" for rigs.`,
+gc hook/prime will return work. Use "%s agent resume" to resume
+individual agents, or "%s rig resume" for rigs.`, prog(), prog()),
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdResume(args, stdout, stderr) != 0 {

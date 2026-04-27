@@ -38,11 +38,11 @@ func newSupervisorCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "supervisor",
 		Short: "Manage the machine-wide supervisor",
-		Long: `Manage the machine-wide supervisor.
+		Long: fmt.Sprintf(`Manage the machine-wide supervisor.
 
 The supervisor manages all registered cities from a single process,
-hosting a unified API server. Use "gc init", "gc start", or "gc register"
-to add cities.`,
+hosting a unified API server. Use "%s init", "%s start", or "%s register"
+to add cities.`, prog(), prog(), prog()),
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()
@@ -65,9 +65,9 @@ func newSupervisorStartCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "start",
 		Short: "Start the machine-wide supervisor in the background",
-		Long: `Start the machine-wide supervisor in the background.
+		Long: fmt.Sprintf(`Start the machine-wide supervisor in the background.
 
-This forks "gc supervisor run", verifies it became ready, and returns.`,
+This forks "%s supervisor run", verifies it became ready, and returns.`, prog()),
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if doSupervisorStart(stdout, stderr) != 0 {

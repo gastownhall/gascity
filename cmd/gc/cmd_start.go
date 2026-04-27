@@ -226,12 +226,12 @@ func newStartCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "start [path]",
 		Short: "Start the city under the machine-wide supervisor",
-		Long: `Start the city under the machine-wide supervisor.
+		Long: fmt.Sprintf(`Start the city under the machine-wide supervisor.
 
-Requires an existing city bootstrapped by "gc init". Fetches remote
+Requires an existing city bootstrapped by "%s init". Fetches remote
 packs as needed, registers the city with the machine-wide supervisor,
 ensures the supervisor is running, and triggers immediate reconciliation.
-Use "gc supervisor run" for foreground operation.`,
+Use "%s supervisor run" for foreground operation.`, prog(), prog()),
 		Example: `  gc start
   gc start ~/my-city
   gc start --dry-run

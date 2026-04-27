@@ -137,12 +137,12 @@ func newRuntimeDrainCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "drain <name>",
 		Short: "Signal a session to drain (wind down gracefully)",
-		Long: `Signal a session to drain — wind down its current work gracefully.
+		Long: fmt.Sprintf(`Signal a session to drain — wind down its current work gracefully.
 
 Sets a GC_DRAIN metadata flag on the session. The agent should check
-for drain status periodically (via "gc runtime drain-check") and finish
+for drain status periodically (via "%s runtime drain-check") and finish
 its current task before exiting. Pass a session alias or ID. Use
-"gc runtime undrain" to cancel.`,
+"%s runtime undrain" to cancel.`, prog(), prog()),
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdRuntimeDrain(args, stdout, stderr) != 0 {
