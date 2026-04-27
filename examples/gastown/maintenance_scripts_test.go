@@ -604,6 +604,102 @@ func TestMaintenanceDoltScriptsRejectInvalidManagedPort(t *testing.T) {
 	}
 }
 
+func TestReaperUsesCurrentBeadsSchema(t *testing.T) {
+	path := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(reaper): %v", err)
+	}
+	script := string(data)
+
+	for _, want := range []string{
+		"\\`$DB\\`.wisp_dependencies",
+		"\\`$DB\\`.issues",
+		"issue_type = 'message'",
+		"issue_type != 'epic'",
+		"CALL DOLT_COMMIT",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("reaper script missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		"parent_id",
+		"\\`$DB\\`.mail",
+		"SELECT DOLT_COMMIT",
+	} {
+		if strings.Contains(script, forbidden) {
+			t.Fatalf("reaper script still contains stale schema reference %q", forbidden)
+		}
+	}
+}
+
+func TestReaperLogsCurrentSchemaMutations(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"SELECT COUNT"*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"SELECT id"*)
+    printf 'id\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":       doltLog,
+		"GC_CITY":             cityDir,
+		"GC_CITY_PATH":        cityDir,
+		"GC_PACK_STATE_DIR":   stateDir,
+		"GIT_CONFIG_GLOBAL":   filepath.Join(t.TempDir(), "gitconfig"),
+		"GIT_CONFIG_NOSYSTEM": "1",
+		"PATH":                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	data, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt log): %v", err)
+	}
+	log := string(data)
+	for _, want := range []string{
+		"`beads`.wisp_dependencies",
+		"`beads`.issues",
+		"issue_type = 'message'",
+		"CALL DOLT_COMMIT",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("dolt calls missing %q:\n%s", want, log)
+		}
+	}
+	for _, forbidden := range []string{
+		"parent_id",
+		"`beads`.mail",
+		"SELECT DOLT_COMMIT",
+	} {
+		if strings.Contains(log, forbidden) {
+			t.Fatalf("dolt calls still contain stale schema reference %q:\n%s", forbidden, log)
+		}
+	}
+}
+
 func listenManagedDoltPort(t *testing.T) net.Listener {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
