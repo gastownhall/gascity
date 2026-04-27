@@ -276,10 +276,18 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		InstructionsFile:  "AGENTS.md",
 	},
 	"copilot": {
-		DisplayName:       "GitHub Copilot",
-		Command:           "copilot",
-		Args:              []string{"--yolo"},
-		PromptMode:        "arg",
+		DisplayName: "GitHub Copilot",
+		Command:     "copilot",
+		Args:        []string{"--yolo"},
+		// PromptMode "none" delivers the prompt via tmux send-keys after the
+		// ready prefix is detected (Step 6 in doStartSession), instead of
+		// appending to argv. Required for copilot CLI 1.0.x which rejects
+		// positional prompt arguments ("error: too many arguments"). The old
+		// 0.0.x line accepted argv prompts; the rewrite in 1.0 made -p the
+		// only non-interactive entry, but -p exits after completion and
+		// breaks the long-running session contract gascity needs. Using
+		// "none" + send-keys preserves the interactive REPL.
+		PromptMode:        "none",
 		ReadyPromptPrefix: "\u276f ",
 		ReadyDelayMs:      5000,
 		ProcessNames:      []string{"copilot"},
