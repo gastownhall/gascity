@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -109,7 +110,11 @@ func (s *Server) findStore(rig string) beads.Store {
 // prefix/routes mapping when possible. If there is no routed match, it falls
 // back to the legacy store scan order.
 func (s *Server) beadStoresForID(id string) []beads.Store {
-	if prefix := beadPrefix(strings.TrimSpace(id)); prefix != "" {
+	id = strings.TrimSpace(id)
+	if store := s.resolveStoreByConfiguredIDPrefix(id); store != nil {
+		return []beads.Store{store}
+	}
+	if prefix := beadPrefix(id); prefix != "" {
 		if store := s.resolveStoreByPrefix(prefix); store != nil {
 			return []beads.Store{store}
 		}
@@ -125,6 +130,45 @@ func (s *Server) beadStoresForID(id string) []beads.Store {
 		candidates = append(candidates, stores[rigName])
 	}
 	return candidates
+}
+
+func (s *Server) resolveStoreByConfiguredIDPrefix(id string) beads.Store {
+	if id == "" {
+		return nil
+	}
+	cfg := s.state.Config()
+	if cfg == nil {
+		return nil
+	}
+
+	var bestStore beads.Store
+	bestLen := -1
+	if prefix := strings.TrimSpace(config.EffectiveHQPrefix(cfg)); beadIDHasConfiguredPrefix(id, prefix) {
+		if cityStore := s.state.CityBeadStore(); cityStore != nil {
+			bestStore = cityStore
+			bestLen = len(prefix)
+		}
+	}
+	for _, rig := range cfg.Rigs {
+		prefix := strings.TrimSpace(rig.EffectivePrefix())
+		if !beadIDHasConfiguredPrefix(id, prefix) || len(prefix) <= bestLen {
+			continue
+		}
+		store := s.state.BeadStore(rig.Name)
+		if store == nil {
+			continue
+		}
+		bestStore = store
+		bestLen = len(prefix)
+	}
+	return bestStore
+}
+
+func beadIDHasConfiguredPrefix(id, prefix string) bool {
+	if prefix == "" {
+		return false
+	}
+	return id == prefix || strings.HasPrefix(id, prefix+"-")
 }
 
 // resolveStoreByPrefix finds the store that owns a bead prefix by checking

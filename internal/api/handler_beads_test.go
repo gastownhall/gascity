@@ -727,6 +727,26 @@ func TestBeadUpdateUsesRoutePrefixStore(t *testing.T) {
 	}
 }
 
+func TestBeadStoresForIDUsesLongestConfiguredHyphenatedPrefix(t *testing.T) {
+	state := newFakeState(t)
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	state.cityBeadStore = cityStore
+	state.cfg.Workspace.Prefix = "mc"
+	state.cfg.Rigs = []config.Rig{{
+		Name:   "alpha",
+		Path:   "/tmp/alpha",
+		Prefix: "mc-alpha",
+	}}
+	state.stores = map[string]beads.Store{"alpha": rigStore}
+
+	server := &Server{state: state}
+	stores := server.beadStoresForID("mc-alpha-123")
+	if len(stores) != 1 || stores[0] != rigStore {
+		t.Fatalf("beadStoresForID returned %#v, want only authoritative rig store", stores)
+	}
+}
+
 func TestBeadUpdateSetsAndClearsParent(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
