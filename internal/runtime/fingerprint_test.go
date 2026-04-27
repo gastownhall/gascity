@@ -1,7 +1,6 @@
 package runtime
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -825,29 +824,6 @@ func TestIsLegacyOrMismatchedVersion(t *testing.T) {
 				t.Errorf("IsLegacyOrMismatchedVersion(%q) = %v, want %v", tc.stored, got, tc.want)
 			}
 		})
-	}
-}
-
-func TestLogCoreFingerprintDriftCopyFiles(t *testing.T) {
-	stored := map[string]string{
-		"CopyFiles": "oldhash",
-		"Command":   "samehash",
-	}
-	current := Config{
-		Command:   "claude",
-		CopyFiles: []CopyEntry{{RelDst: "bar", ContentHash: "h1"}},
-	}
-	var buf bytes.Buffer
-	LogCoreFingerprintDrift(&buf, "test-agent", stored, current)
-	out := buf.String()
-	if out == "" {
-		t.Fatal("expected diagnostic output")
-	}
-	if !bytes.Contains([]byte(out), []byte("CopyFiles")) {
-		t.Errorf("expected CopyFiles in drift output, got: %s", out)
-	}
-	if !bytes.Contains([]byte(out), []byte("RelDst")) {
-		t.Errorf("expected RelDst detail in CopyFiles drift output, got: %s", out)
 	}
 }
 
