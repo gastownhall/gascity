@@ -122,7 +122,7 @@ func newSessionReconcilerTracer(cityPath, cityName string, stderr io.Writer) *Se
 		flushDone: make(chan struct{}),
 		closeCh:   make(chan struct{}),
 	}
-	go tracer.runFlushLoop()
+	go tracer.runFlushLoop(tracer.flushCh)
 	return tracer
 }
 
@@ -162,9 +162,9 @@ func (t *SessionReconcilerTracer) Close() error {
 	return t.store.Close()
 }
 
-func (t *SessionReconcilerTracer) runFlushLoop() {
+func (t *SessionReconcilerTracer) runFlushLoop(flushCh <-chan sessionReconcilerTraceFlushRequest) {
 	defer close(t.flushDone)
-	for req := range t.flushCh {
+	for req := range flushCh {
 		err := t.store.AppendBatch(req.records, req.durability)
 		select {
 		case req.result <- err:

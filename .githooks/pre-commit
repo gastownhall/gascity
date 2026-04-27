@@ -54,6 +54,7 @@ if command -v npm >/dev/null 2>&1; then
     # Vite preview so a bundle that builds but won't serve is caught
     # before CI.
     make dashboard-check dashboard-smoke
+    git add cmd/gc/dashboard/web/src/generated
     git add cmd/gc/dashboard/web/dist
   fi
 else

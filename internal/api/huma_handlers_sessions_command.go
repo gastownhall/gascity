@@ -177,6 +177,9 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 			return
 		}
 
+		resp := sessionToResponse(info, s.state.Config())
+		resp.Kind = "agent"
+		s.emitSessionCreateSucceeded(reqID, resp)
 		s.persistSessionMeta(store, info.ID, "agent", body.ProjectID, nil)
 		s.state.Poke()
 
@@ -184,10 +187,6 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 		MaybeGenerateTitleAsync(store, info.ID, body.Title, body.Message, titleProvider, info.WorkDir, func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "session %s: "+format+"\n", append([]any{info.ID}, args...)...)
 		})
-
-		resp := sessionToResponse(info, s.state.Config())
-		resp.Kind = "agent"
-		s.emitSessionCreateSucceeded(reqID, resp)
 	}()
 
 	out := &SessionCreateOutput{Status: http.StatusAccepted}
@@ -309,11 +308,6 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Store,
 			s.emitSessionCreateFailed(reqID, "create_failed", createErr.Error())
 			return
 		}
-		s.persistSessionMeta(store, info.ID, "provider", body.ProjectID, optMeta)
-		titleProvider := s.resolveTitleProvider()
-		MaybeGenerateTitleAsync(store, info.ID, body.Title, body.Message, titleProvider, info.WorkDir, func(format string, args ...any) {
-			fmt.Fprintf(os.Stderr, "session %s: "+format+"\n", append([]any{info.ID}, args...)...)
-		})
 		if msg := strings.TrimSpace(body.Message); msg != "" {
 			if _, sendErr := s.submitMessageToSession(context.Background(), store, info.ID, msg, session.SubmitIntentDefault); sendErr != nil {
 				if rollbackErr := s.rollbackCreatedSession(store, info.ID); rollbackErr != nil {
@@ -328,6 +322,11 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Store,
 		resp := sessionToResponse(info, s.state.Config())
 		resp.Kind = "provider"
 		s.emitSessionCreateSucceeded(reqID, resp)
+		s.persistSessionMeta(store, info.ID, "provider", body.ProjectID, optMeta)
+		titleProvider := s.resolveTitleProvider()
+		MaybeGenerateTitleAsync(store, info.ID, body.Title, body.Message, titleProvider, info.WorkDir, func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, "session %s: "+format+"\n", append([]any{info.ID}, args...)...)
+		})
 	}()
 
 	out := &SessionCreateOutput{Status: http.StatusAccepted}

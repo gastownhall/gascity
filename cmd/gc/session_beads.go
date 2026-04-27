@@ -1540,8 +1540,11 @@ func reapStaleSessionBeads(
 			continue
 		}
 		// Startup grace: don't reap beads younger than the creating-state
-		// timeout. Zero CreatedAt means unknown age — skip conservatively.
-		if b.CreatedAt.IsZero() || now.Sub(b.CreatedAt) < staleCreatingStateTimeout {
+		// timeout. Use the latest known start boundary, not just CreatedAt,
+		// because a long-lived bead may have been woken moments ago.
+		// Zero CreatedAt means unknown age — skip conservatively.
+		startedAt, ok := staleReapStartBoundary(b)
+		if !ok || now.Sub(startedAt) < staleCreatingStateTimeout {
 			continue
 		}
 		if closeBead(store, b.ID, "stale-session", now.UTC(), stderr) {
@@ -1615,6 +1618,19 @@ func stopRuntimeBeforeSessionBeadMutation(
 		return false
 	}
 	return true
+}
+
+func staleReapStartBoundary(b beads.Bead) (time.Time, bool) {
+	if b.CreatedAt.IsZero() {
+		return time.Time{}, false
+	}
+	startedAt := b.CreatedAt
+	if raw := strings.TrimSpace(b.Metadata["last_woke_at"]); raw != "" {
+		if wokeAt, err := time.Parse(time.RFC3339, raw); err == nil && wokeAt.After(startedAt) {
+			startedAt = wokeAt
+		}
+	}
+	return startedAt, true
 }
 
 // closeBead sets final metadata on a session bead and closes it.

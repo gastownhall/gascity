@@ -947,15 +947,9 @@ func reconcileCities(
 			fmt.Fprintf(stderr, "gc supervisor: city '%s': no pending request_id for city.unregister completion event (path=%s)\n", cityName, path) //nolint:errcheck
 		}
 		if supRec := cr.SupervisorEventRecorder(); supRec != nil && hasReqID {
+			emitCityUnregisterTerminalEvent(supRec, reqID, cityName, path, stopErr)
 			if stopErr == nil {
 				fmt.Fprintf(stdout, "City '%s' stopped.\n", cityName) //nolint:errcheck
-				api.EmitTypedEvent(supRec, events.RequestResultCityUnregister, cityName, api.CityUnregisterSucceededPayload{
-					RequestID: reqID,
-					Name:      cityName,
-					Path:      path,
-				})
-			} else {
-				api.EmitRequestFailed(supRec, reqID, api.RequestOperationCityUnregister, "city_unregister_failed", stopErr.Error())
 			}
 		} else if stopErr == nil {
 			fmt.Fprintf(stdout, "City '%s' stopped.\n", cityName) //nolint:errcheck
@@ -1629,6 +1623,23 @@ func emitPendingCityCreateResult(cr *cityRegistry, path, cityName string, stderr
 			Path:      path,
 		})
 	}
+}
+
+func emitCityUnregisterTerminalEvent(rec events.Recorder, requestID, cityName, path string, stopErr error) {
+	if stopErr == nil {
+		api.EmitTypedEvent(rec, events.RequestResultCityUnregister, cityName, api.CityUnregisterSucceededPayload{
+			RequestID: requestID,
+			Name:      cityName,
+			Path:      path,
+		})
+		return
+	}
+	api.EmitTypedEvent(rec, events.RequestFailed, cityName, api.RequestFailedPayload{
+		RequestID:    requestID,
+		Operation:    api.RequestOperationCityUnregister,
+		ErrorCode:    "city_unregister_failed",
+		ErrorMessage: stopErr.Error(),
+	})
 }
 
 var supervisorLoadWarningSeen sync.Map

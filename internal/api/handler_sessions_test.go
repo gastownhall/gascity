@@ -1994,6 +1994,62 @@ func TestHandleSessionCreateAsync(t *testing.T) {
 	}
 }
 
+func TestHandleSessionCreateAsyncEmitsBeforeMetadataPersistenceCompletes(t *testing.T) {
+	fs := newSessionFakeState(t)
+	blocking := &blockingSetMetadataBatchStore{
+		Store:   fs.cityBeadStore,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	fs.cityBeadStore = blocking
+	defer close(blocking.release)
+
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	body := `{"kind":"agent","name":"myrig/worker","alias":"sky","async":true,"project_id":"myrig"}`
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+	accepted := decodeAsyncAccepted(t, w.Body)
+
+	select {
+	case <-blocking.entered:
+	case <-time.After(testEventTimeout):
+		t.Fatal("SetMetadataBatch was not reached")
+	}
+
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		successEvents, _ := fs.eventProv.List(events.Filter{Type: events.RequestResultSessionCreate})
+		for _, e := range successEvents {
+			var p SessionCreateSucceededPayload
+			if err := json.Unmarshal(e.Payload, &p); err == nil && requestIDMatches(p.RequestID, accepted.RequestID) {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("session create result was not emitted while metadata persistence was blocked")
+}
+
+type blockingSetMetadataBatchStore struct {
+	beads.Store
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *blockingSetMetadataBatchStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	s.once.Do(func() { close(s.entered) })
+	<-s.release
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
 func TestHandleSessionCreateAsyncAcceptsInlineMessage(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)

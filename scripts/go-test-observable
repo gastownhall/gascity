@@ -20,6 +20,31 @@ rm -f "$log"
 echo "observable go test: log=$log" >&2
 echo "observable go test: command=go test -json $*" >&2
 
+print_failure_details() {
+  if ! command -v jq >/dev/null 2>&1; then
+    return
+  fi
+  if [ ! -s "$log" ]; then
+    return
+  fi
+
+  echo "observable go test: failure details from $log" >&2
+
+  mapfile -t failed_tests < <(jq -r 'select(.Action == "fail" and .Test != null) | .Test' "$log" | sort -u)
+  if [ "${#failed_tests[@]}" -gt 0 ]; then
+    for test_name in "${failed_tests[@]}"; do
+      echo "observable go test: failed test: $test_name" >&2
+      jq -r --arg test "$test_name" 'select(.Test == $test and .Output != null) | .Output' "$log" >&2
+    done
+  else
+    echo "observable go test: no test-level failure event was emitted; showing package output tail" >&2
+  fi
+
+  failure_lines="${OBSERVABLE_FAILURE_LINES:-240}"
+  echo "observable go test: last ${failure_lines} output lines" >&2
+  jq -r 'select(.Action == "output" and .Output != null) | .Output' "$log" | tail -n "$failure_lines" >&2
+}
+
 if command -v jq >/dev/null 2>&1; then
   set +e
   go test -json "$@" \
@@ -44,6 +69,7 @@ fi
 
 if [ "$status" -ne 0 ]; then
   echo "observable go test: FAIL status=$status log=$log" >&2
+  print_failure_details
 else
   echo "observable go test: PASS log=$log" >&2
 fi

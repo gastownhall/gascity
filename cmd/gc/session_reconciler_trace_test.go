@@ -588,6 +588,30 @@ func TestTraceFlushCurrentBatchQueueFullDegrades(t *testing.T) {
 	}
 }
 
+func TestTraceCloseDoesNotDependOnMutableFlushChannelField(t *testing.T) {
+	cityDir := t.TempDir()
+	store, err := newSessionReconcilerTraceStore(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close() //nolint:errcheck
+
+	flushCh := make(chan sessionReconcilerTraceFlushRequest)
+	tracer := &SessionReconcilerTracer{
+		store:     store,
+		flushDone: make(chan struct{}),
+		flushCh:   nil,
+	}
+	go tracer.runFlushLoop(flushCh)
+	close(flushCh)
+
+	select {
+	case <-tracer.flushDone:
+	case <-time.After(time.Second):
+		t.Fatal("flush loop did not exit after the original channel closed")
+	}
+}
+
 func TestTraceFlushCurrentBatchWaitBudgetDegrades(t *testing.T) {
 	cityDir := t.TempDir()
 	store, err := newSessionReconcilerTraceStore(cityDir, io.Discard)

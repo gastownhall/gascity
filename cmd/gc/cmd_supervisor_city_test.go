@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -1186,6 +1187,39 @@ func TestReconcileCitiesUnregisterEventUsesManagedCityName(t *testing.T) {
 	}
 	if payload.RequestID != "req-test-unregister" {
 		t.Fatalf("payload.RequestID = %q, want req-test-unregister", payload.RequestID)
+	}
+}
+
+func TestEmitCityUnregisterFailureEventUsesManagedCityName(t *testing.T) {
+	supRec := events.NewFake()
+	emitCityUnregisterTerminalEvent(
+		supRec,
+		"req-test-unregister",
+		"effective-city",
+		"/tmp/effective-city",
+		errors.New("city did not exit"),
+	)
+
+	recorded := supRec.Events
+	if len(recorded) != 1 {
+		t.Fatalf("recorded %d supervisor events, want 1", len(recorded))
+	}
+	got := recorded[0]
+	if got.Type != events.RequestFailed {
+		t.Fatalf("event.Type = %q, want %q", got.Type, events.RequestFailed)
+	}
+	if got.Subject != "effective-city" {
+		t.Fatalf("event.Subject = %q, want effective-city", got.Subject)
+	}
+	var payload api.RequestFailedPayload
+	if err := json.Unmarshal(got.Payload, &payload); err != nil {
+		t.Fatalf("json.Unmarshal(payload): %v", err)
+	}
+	if payload.RequestID != "req-test-unregister" {
+		t.Fatalf("payload.RequestID = %q, want req-test-unregister", payload.RequestID)
+	}
+	if payload.Operation != api.RequestOperationCityUnregister {
+		t.Fatalf("payload.Operation = %q, want %q", payload.Operation, api.RequestOperationCityUnregister)
 	}
 }
 

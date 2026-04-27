@@ -355,6 +355,70 @@ func TestDoEventsFallsBackToLocalCityEventsForExplicitLocalSupervisorAPITranspor
 	}
 }
 
+func TestDoEventsReadsLocalCityEventsForUntypedCityEventType(t *testing.T) {
+	cityDir := t.TempDir()
+	rec := newTestProvider(t, filepath.Join(cityDir, ".gc"))
+	rec.Record(events.Event{
+		Type:    "app.custom",
+		Actor:   "human",
+		Subject: "fixture",
+		Message: "custom event",
+	})
+
+	server := newEventsTestServer(t, testEventRoutes{
+		cityEvents: func(_ http.ResponseWriter, _ *http.Request) {
+			t.Fatalf("typed API should not be queried for unregistered city event types")
+		},
+	})
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := doEvents(eventsAPIScope{
+		apiURL:   server.URL,
+		cityName: "mc-city",
+		cityPath: cityDir,
+	}, "app.custom", "", nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doEvents = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	var got cliWireEvent
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
+		t.Fatalf("unmarshal stdout: %v; output=%s", err, stdout.String())
+	}
+	if got.Type != "app.custom" || got.Subject != "fixture" || got.Message != "custom event" {
+		t.Fatalf("local custom event = %+v", got)
+	}
+}
+
+func TestDoEventsDoesNotReadLocalUntypedCityEventsForExplicitRemoteAPI(t *testing.T) {
+	cityDir := t.TempDir()
+	rec := newTestProvider(t, filepath.Join(cityDir, ".gc"))
+	rec.Record(events.Event{Type: "app.custom", Actor: "human"})
+
+	server := newEventsTestServer(t, testEventRoutes{
+		cityEvents: func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("X-GC-Index", "0")
+			writeJSONResponse(t, w, cityEventsListResponse(t, []cliWireEvent{}))
+		},
+	})
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := doEvents(eventsAPIScope{
+		apiURL:      server.URL,
+		cityName:    "mc-city",
+		cityPath:    cityDir,
+		explicitAPI: true,
+	}, "app.custom", "", nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doEvents = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != "" {
+		t.Fatalf("stdout = %q, want explicit remote API result", stdout.String())
+	}
+}
+
 func TestDoEventsSeqFallsBackToLocalCityEventHeadWhenCityStopped(t *testing.T) {
 	cityDir := t.TempDir()
 	rec := newTestProvider(t, filepath.Join(cityDir, ".gc"))

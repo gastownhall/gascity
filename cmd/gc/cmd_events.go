@@ -427,6 +427,16 @@ func validateEventsSince(sinceFlag string) error {
 }
 
 func doEvents(scope eventsAPIScope, typeFilter, sinceFlag string, payloadMatch map[string][]string, stdout, stderr io.Writer) int {
+	if shouldReadLocalUntypedCityEvents(scope, typeFilter) {
+		fallback, _, fallbackErr := readLocalCityEvents(scope, stoppedCityLocalFallbackError(scope), typeFilter, sinceFlag, stderr)
+		if fallbackErr != nil {
+			fmt.Fprintf(stderr, "gc events: %v\n", fallbackErr) //nolint:errcheck
+			return 1
+		}
+		fallback = filterCityEvents(fallback, 0, typeFilter, payloadMatch)
+		return printJSONLines(fallback, stdout, stderr)
+	}
+
 	if scope.localOnly {
 		fallback, _, fallbackErr := readLocalCityEvents(scope, stoppedCityLocalFallbackError(scope), typeFilter, sinceFlag, stderr)
 		if fallbackErr != nil {
@@ -471,6 +481,20 @@ func doEvents(scope eventsAPIScope, typeFilter, sinceFlag string, payloadMatch m
 	}
 	items = filterCityEvents(items, 0, typeFilter, payloadMatch)
 	return printJSONLines(items, stdout, stderr)
+}
+
+func shouldReadLocalUntypedCityEvents(scope eventsAPIScope, typeFilter string) bool {
+	if scope.isSupervisor() || strings.TrimSpace(scope.cityPath) == "" {
+		return false
+	}
+	eventType := strings.TrimSpace(typeFilter)
+	if eventType == "" {
+		return false
+	}
+	if _, ok := events.LookupPayload(eventType); ok {
+		return false
+	}
+	return !scope.explicitAPI || scope.localSupervisorAPI
 }
 
 func doEventsSeq(scope eventsAPIScope, stdout, stderr io.Writer) int {
