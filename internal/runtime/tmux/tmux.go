@@ -128,6 +128,12 @@ const (
 	hiddenAttachPollInterval = 50 * time.Millisecond
 )
 
+// tmuxSubprocessTimeout caps the wall-clock time any single tmux subprocess
+// invocation may run before the kernel SIGKILLs it. Bounds the shutdown path
+// against wedged tmux servers and FD/inode-exhausted hosts where fork()
+// blocks. Test-overridable; production value is 30s.
+var tmuxSubprocessTimeout = 30 * time.Second
+
 // validateSessionName checks that a session name contains only safe characters.
 // Returns ErrInvalidSessionName if the name contains dots, colons, or other
 // characters that cause tmux to silently fail or produce cryptic errors.
