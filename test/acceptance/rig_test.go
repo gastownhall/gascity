@@ -116,10 +116,15 @@ func TestRigLifecycle(t *testing.T) {
 			t.Fatalf("gc rig suspend %s: %v\n%s", rigName, err, out)
 		}
 
-		// Verify suspended state in config.
-		toml := c.ReadFile("city.toml")
-		if !strings.Contains(toml, "suspended") {
-			t.Error("city.toml should contain 'suspended' after rig suspend")
+		// Suspension is recorded in the runtime state file, not city.toml,
+		// so each clone can have its own suspended-rig profile.
+		if !c.HasFile(filepath.Join(".gc", "runtime", "rig-state.json")) {
+			t.Error(".gc/runtime/rig-state.json should exist after rig suspend")
+		} else {
+			state := c.ReadFile(filepath.Join(".gc", "runtime", "rig-state.json"))
+			if !strings.Contains(state, rigName) || !strings.Contains(state, "\"suspended\": true") {
+				t.Errorf("rig-state.json should mark %q suspended, got:\n%s", rigName, state)
+			}
 		}
 
 		// Resume.

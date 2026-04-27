@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/rigstate"
 )
 
 type registeredRigFixture struct {
@@ -207,12 +208,19 @@ func TestRigAnywhere_CmdRigSuspendFromRigDir(t *testing.T) {
 				t.Fatalf("stdout = %q, want rig suspend confirmation", stdout.String())
 			}
 
+			st, err := rigstate.Load(fsys.OSFS{}, fx.cityPath)
+			if err != nil {
+				t.Fatalf("load suspension state: %v", err)
+			}
+			if !rigstate.IsSuspended(st, fx.rigName) {
+				t.Fatalf("rig should be suspended in runtime state, got %+v", st)
+			}
 			cfg, err := config.Load(fsys.OSFS{}, filepath.Join(fx.cityPath, "city.toml"))
 			if err != nil {
 				t.Fatalf("load city config: %v", err)
 			}
-			if len(cfg.Rigs) != 1 || !cfg.Rigs[0].Suspended {
-				t.Fatalf("rig suspended = %v, want true", cfg.Rigs)
+			if len(cfg.Rigs) != 1 || cfg.Rigs[0].Suspended {
+				t.Fatalf("city.toml should NOT have suspended=true, got %v", cfg.Rigs)
 			}
 		})
 	}

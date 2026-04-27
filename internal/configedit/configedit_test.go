@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/rigstate"
 )
 
 // minimalCity returns a minimal valid city.toml with one agent.
@@ -730,9 +731,17 @@ func TestSuspendRig(t *testing.T) {
 		t.Fatalf("SuspendRig: %v", err)
 	}
 
+	// Suspension is recorded in the runtime state file, not city.toml.
+	st, err := rigstate.Load(fsys.OSFS{}, dir)
+	if err != nil {
+		t.Fatalf("Load suspension state: %v", err)
+	}
+	if !rigstate.IsSuspended(st, "my-rig") {
+		t.Error("expected my-rig to be suspended in runtime state")
+	}
 	cfg := readTOML(t, path)
-	if !cfg.Rigs[0].Suspended {
-		t.Error("expected my-rig to be suspended")
+	if cfg.Rigs[0].Suspended {
+		t.Error("expected city.toml to NOT have suspended=true")
 	}
 }
 
@@ -747,6 +756,10 @@ path = "/tmp/my-rig"
 suspended = true
 `
 	path := writeTOML(t, dir, city)
+	// Pre-populate runtime state to test both sources are cleared.
+	if err := rigstate.SetRigSuspended(fsys.OSFS{}, dir, "my-rig", true); err != nil {
+		t.Fatalf("pre-suspend: %v", err)
+	}
 	ed := configedit.NewEditor(fsys.OSFS{}, path)
 
 	if err := ed.ResumeRig("my-rig"); err != nil {
@@ -755,7 +768,14 @@ suspended = true
 
 	cfg := readTOML(t, path)
 	if cfg.Rigs[0].Suspended {
-		t.Error("expected my-rig to not be suspended")
+		t.Error("expected city.toml suspended to be cleared")
+	}
+	st, err := rigstate.Load(fsys.OSFS{}, dir)
+	if err != nil {
+		t.Fatalf("Load suspension state: %v", err)
+	}
+	if rigstate.IsSuspended(st, "my-rig") {
+		t.Error("expected my-rig to not be in runtime state")
 	}
 }
 

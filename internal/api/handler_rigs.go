@@ -8,7 +8,9 @@ import (
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	gitpkg "github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/rigstate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
@@ -78,6 +80,9 @@ func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.P
 // if all its agents are runtime-suspended via session metadata.
 func (s *Server) rigSuspended(cfg *config.City, rig config.Rig, sp runtime.Provider, cityName, cityPath string) bool {
 	if rig.Suspended {
+		return true
+	}
+	if rs, err := rigstate.Load(fsys.OSFS{}, cityPath); err == nil && rigstate.IsSuspended(rs, rig.Name) {
 		return true
 	}
 	tmpl := cfg.Workspace.SessionTemplate

@@ -15,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/rigstate"
 )
 
 type mkdirAllErrorFS struct {
@@ -1058,13 +1059,20 @@ func TestDoRigSuspend(t *testing.T) {
 		t.Errorf("output = %q, want suspend message", stdout.String())
 	}
 
-	// Verify config written with suspended=true.
+	// Verify suspension recorded in runtime state, not city.toml.
+	st, err := rigstate.Load(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rigstate.IsSuspended(st, "frontend") {
+		t.Errorf("rig should be suspended in runtime state, got %+v", st)
+	}
 	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Rigs) != 1 || !cfg.Rigs[0].Suspended {
-		t.Errorf("rig should be suspended, got %+v", cfg.Rigs)
+	if len(cfg.Rigs) != 1 || cfg.Rigs[0].Suspended {
+		t.Errorf("city.toml should NOT have suspended=true, got %+v", cfg.Rigs)
 	}
 }
 

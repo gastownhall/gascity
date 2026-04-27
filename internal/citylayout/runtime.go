@@ -102,6 +102,11 @@ func PackStateDir(cityRoot, packName string) string {
 	return filepath.Join(RuntimePacksDir(cityRoot), packName)
 }
 
+// RigStateFile returns the path to the runtime rig state file.
+func RigStateFile(cityRoot string) string {
+	return RuntimePath(cityRoot, "runtime", "rig-state.json")
+}
+
 // CityRuntimeEnv returns city runtime env vars rooted at the canonical runtime
 // directory for cityRoot.
 func CityRuntimeEnv(cityRoot string) []string {

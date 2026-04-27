@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 func newHookCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -107,7 +108,8 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 		return 1
 	}
 
-	if isAgentEffectivelySuspended(cfg, &a) {
+	suspState, _ := loadRigSuspensionState(fsys.OSFS{}, cityPath)
+	if isAgentEffectivelySuspendedWith(cfg, &a, suspState) {
 		fmt.Fprintf(stderr, "gc hook: agent %q is suspended\n", agentName) //nolint:errcheck // best-effort stderr
 		return 1
 	}

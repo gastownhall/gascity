@@ -18,6 +18,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/rigstate"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
@@ -525,17 +526,37 @@ func WriteLocalDiscoveredAgentSuspended(fs fsys.FS, cityRoot string, agent confi
 	return nil
 }
 
-// SuspendRig suspends a rig by setting suspended=true in city.toml.
+// SuspendRig suspends a rig by recording it in the runtime state file
+// (.gc/runtime/rig-state.json). The rig must exist in the config.
 func (e *Editor) SuspendRig(name string) error {
-	return e.Edit(func(cfg *config.City) error {
-		return SetRigSuspended(cfg, name, true)
-	})
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	cfg, err := e.loadForEdit()
+	if err != nil {
+		return err
+	}
+	if err := SetRigSuspended(cfg, name, true); err != nil {
+		return err
+	}
+	cityPath := filepath.Dir(e.tomlPath)
+	return rigstate.SetRigSuspended(e.fs, cityPath, name, true)
 }
 
-// ResumeRig resumes a rig by clearing suspended in city.toml.
+// ResumeRig resumes a rig by removing it from the runtime state file.
+// Also clears legacy suspended=true from city.toml if present.
 func (e *Editor) ResumeRig(name string) error {
+	cityPath := filepath.Dir(e.tomlPath)
+	if err := rigstate.SetRigSuspended(e.fs, cityPath, name, false); err != nil {
+		return err
+	}
 	return e.Edit(func(cfg *config.City) error {
-		return SetRigSuspended(cfg, name, false)
+		for i := range cfg.Rigs {
+			if cfg.Rigs[i].Name == name && cfg.Rigs[i].Suspended {
+				cfg.Rigs[i].Suspended = false
+			}
+		}
+		return nil
 	})
 }
 

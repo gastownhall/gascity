@@ -14,7 +14,9 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
+	"github.com/gastownhall/gascity/internal/rigstate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/session"
@@ -238,8 +240,8 @@ func buildDesiredStateWithSessionBeads(
 	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, beaconTime, store, stderr)
 	bp.sessionBeads = sessionBeads
 
-	// Pre-compute suspended rig paths.
-	suspendedRigPaths := buildSuspendedRigPaths(cfg)
+	// Pre-compute suspended rig paths (config + runtime state).
+	suspendedRigPaths := buildSuspendedRigPathsForCity(cfg, cityPath)
 
 	desired := make(map[string]TemplateParams)
 	var pendingPools []poolEvalWork
@@ -505,13 +507,21 @@ func buildDesiredStateWithSessionBeads(
 	}
 }
 
-func buildSuspendedRigPaths(cfg *config.City) map[string]bool {
+func buildSuspendedRigPathsForCity(cfg *config.City, cityPath string) map[string]bool {
 	if cfg == nil || len(cfg.Rigs) == 0 {
+		return nil
+	}
+	var suspState rigstate.SuspensionState
+	if cityPath != "" {
+		suspState, _ = loadRigSuspensionState(fsys.OSFS{}, cityPath)
+	}
+	suspNames := buildMergedSuspendedRigNames(cfg, suspState)
+	if len(suspNames) == 0 {
 		return nil
 	}
 	suspendedRigPaths := make(map[string]bool)
 	for _, r := range cfg.Rigs {
-		if r.Suspended {
+		if suspNames[r.Name] {
 			suspendedRigPaths[filepath.Clean(r.Path)] = true
 		}
 	}
@@ -567,7 +577,7 @@ func refreshDesiredStateWithSessionBeads(
 
 	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, result.BeaconTime, store, stderr)
 	bp.sessionBeads = sessionBeads
-	applySessionBeadDesiredOverlay(bp, cfg, refreshed.State, buildSuspendedRigPaths(cfg), result.PoolScaleCheckPartialTemplates, result.NamedScaleCheckPartialTemplates, stderr)
+	applySessionBeadDesiredOverlay(bp, cfg, refreshed.State, buildSuspendedRigPathsForCity(cfg, cityPath), result.PoolScaleCheckPartialTemplates, result.NamedScaleCheckPartialTemplates, stderr)
 	return refreshed
 }
 

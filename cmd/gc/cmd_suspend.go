@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/rigstate"
 	"github.com/spf13/cobra"
 )
 
@@ -154,8 +155,15 @@ func citySuspended(cfg *config.City) bool {
 
 // isAgentEffectivelySuspended reports whether an agent is suspended.
 // True if any of: city is suspended, agent is individually suspended,
-// or the agent's rig is suspended. Suspension inherits downward.
+// or the agent's rig is suspended (in config or runtime state).
+// Suspension inherits downward.
 func isAgentEffectivelySuspended(cfg *config.City, a *config.Agent) bool {
+	return isAgentEffectivelySuspendedWith(cfg, a, rigstate.SuspensionState{})
+}
+
+// isAgentEffectivelySuspendedWith is like isAgentEffectivelySuspended
+// but also checks the runtime suspension state.
+func isAgentEffectivelySuspendedWith(cfg *config.City, a *config.Agent, suspState rigstate.SuspensionState) bool {
 	if cfg.Workspace.Suspended {
 		return true
 	}
@@ -164,6 +172,9 @@ func isAgentEffectivelySuspended(cfg *config.City, a *config.Agent) bool {
 	}
 	if a.Dir == "" {
 		return false
+	}
+	if isRigSuspendedInState(suspState, a.Dir) {
+		return true
 	}
 	for _, r := range cfg.Rigs {
 		if r.Name == a.Dir && r.Suspended {

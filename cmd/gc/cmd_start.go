@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
+	"github.com/gastownhall/gascity/internal/rigstate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
@@ -52,11 +53,16 @@ func standaloneBuildAgentsFnWithSessionBeads(
 }
 
 // computeSuspendedNames builds a set of session names for agents marked
-// suspended in the config or belonging to suspended rigs. Also includes
-// all agents when the city itself is suspended (workspace.suspended).
-// Used by the reconciler to distinguish suspended agents from true orphans
-// during Phase 2 cleanup.
+// suspended in the config or runtime state, or belonging to suspended rigs.
+// Also includes all agents when the city itself is suspended
+// (workspace.suspended). Used by the reconciler to distinguish suspended
+// agents from true orphans during Phase 2 cleanup.
 func computeSuspendedNames(cfg *config.City, cityName, cityPath string) map[string]bool {
+	suspState, _ := loadRigSuspensionState(fsys.OSFS{}, cityPath)
+	return computeSuspendedNamesWith(cfg, cityName, cityPath, suspState)
+}
+
+func computeSuspendedNamesWith(cfg *config.City, cityName, cityPath string, suspState rigstate.SuspensionState) map[string]bool {
 	names := make(map[string]bool)
 	st := cfg.Workspace.SessionTemplate
 
@@ -75,14 +81,15 @@ func computeSuspendedNames(cfg *config.City, cityName, cityPath string) map[stri
 			names[startupSessionName(cityName, qn, st)] = true
 		}
 	}
-	// Agents in suspended rigs.
-	suspendedRigPaths := make(map[string]bool)
-	for _, r := range cfg.Rigs {
-		if r.Suspended {
-			suspendedRigPaths[filepath.Clean(r.Path)] = true
+	// Agents in suspended rigs (config + runtime state).
+	suspNames := buildMergedSuspendedRigNames(cfg, suspState)
+	if len(suspNames) > 0 {
+		suspendedRigPaths := make(map[string]bool)
+		for _, r := range cfg.Rigs {
+			if suspNames[r.Name] {
+				suspendedRigPaths[filepath.Clean(r.Path)] = true
+			}
 		}
-	}
-	if len(suspendedRigPaths) > 0 {
 		for _, a := range cfg.Agents {
 			if a.Suspended || a.Dir == "" {
 				continue // Already counted or no rig scope.
