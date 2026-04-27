@@ -88,6 +88,29 @@ brew uninstall gascity
 brew untap gastownhall/gascity             # remove the tap
 ```
 
+## Renaming the binary
+
+The binary ships as `gc` by default, but it can be called anything. Gas City
+discovers its own name from `os.Args[0]` at runtime, so renaming or
+symlinking the binary is all you need.
+
+```bash
+# Symlink to a different name
+ln -s gc myname
+
+# Or rename outright
+mv -f gc myname
+```
+
+To produce a binary with a different name from source:
+
+```bash
+make build BINARY=myname    # outputs bin/myname
+```
+
+All commands, help text, and error messages automatically reflect whatever
+name you choose.
+
 ## Direct download
 
 Release tarballs are published for every tagged version. Supported platforms:
