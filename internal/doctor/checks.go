@@ -28,6 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/doltversion"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pidutil"
+	"github.com/gastownhall/gascity/internal/progname"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
@@ -473,7 +474,7 @@ func (c *AgentSessionsCheck) Run(_ *CheckContext) *CheckResult {
 	r.Status = StatusWarning
 	r.Message = fmt.Sprintf("%d agent(s) without sessions", len(missing))
 	r.Details = missing
-	r.FixHint = "run gc start to reconcile sessions"
+	r.FixHint = "run " + progname.Get() + " start to reconcile sessions"
 	return r
 }
 
@@ -1210,7 +1211,7 @@ func resolveDoltServerFixHint(fs fsys.FS, cityPath string) string {
 func doltServerFixHint(target contract.DoltConnectionTarget) string {
 	switch target.EndpointOrigin {
 	case contract.EndpointOriginManagedCity:
-		return "run gc start to start the dolt server"
+		return "run " + progname.Get() + " start to start the dolt server"
 	case contract.EndpointOriginCityCanonical, contract.EndpointOriginExplicit, contract.EndpointOriginInheritedCity:
 		return "reconcile the canonical external Dolt endpoint"
 	default:
@@ -1532,7 +1533,7 @@ func (c *WorktreeCheck) Run(ctx *CheckContext) *CheckResult {
 	r.Status = StatusError
 	r.Message = fmt.Sprintf("%d broken worktree(s)", len(c.broken))
 	r.Details = c.broken
-	r.FixHint = "run gc doctor --fix to remove broken worktrees"
+	r.FixHint = "run " + progname.Get() + " doctor --fix to remove broken worktrees"
 	return r
 }
 
@@ -2488,17 +2489,17 @@ func (c *DoltConfigCheck) Run(_ *CheckContext) *CheckResult {
 		if os.IsNotExist(err) {
 			if !managedDoltRuntimeMaterialized(c.cityPath) {
 				r.Status = StatusOK
-				r.Message = "managed dolt-config.yaml not yet generated (run gc start to materialize)"
+				r.Message = "managed dolt-config.yaml not yet generated (run " + progname.Get() + " start to materialize)"
 				return r
 			}
 			r.Status = StatusWarning
 			r.Message = "managed dolt-config.yaml not found"
-			r.FixHint = "run gc start (or gc dolt restart) to regenerate"
+			r.FixHint = "run " + progname.Get() + " start (or " + progname.Get() + " dolt restart) to regenerate"
 			return r
 		}
 		r.Status = StatusWarning
 		r.Message = fmt.Sprintf("read dolt-config.yaml: %v", err)
-		r.FixHint = "run gc start (or gc dolt restart) to regenerate"
+		r.FixHint = "run " + progname.Get() + " start (or " + progname.Get() + " dolt restart) to regenerate"
 		return r
 	}
 
@@ -2506,7 +2507,7 @@ func (c *DoltConfigCheck) Run(_ *CheckContext) *CheckResult {
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		r.Status = StatusWarning
 		r.Message = fmt.Sprintf("parse dolt-config.yaml: %v", err)
-		r.FixHint = "stop dolt (gc dolt stop) and restart to regenerate managed config"
+		r.FixHint = "stop dolt (" + progname.Get() + " dolt stop) and restart to regenerate managed config"
 		return r
 	}
 
@@ -2545,7 +2546,7 @@ func (c *DoltConfigCheck) Run(_ *CheckContext) *CheckResult {
 	if len(drifted) > 0 {
 		r.Status = StatusWarning
 		r.Message = fmt.Sprintf("managed dolt-config.yaml drift: %s", strings.Join(drifted, ", "))
-		r.FixHint = "stop dolt (gc dolt stop) and restart to regenerate managed config"
+		r.FixHint = "stop dolt (" + progname.Get() + " dolt stop) and restart to regenerate managed config"
 		return r
 	}
 

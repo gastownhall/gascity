@@ -8,6 +8,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/progname"
 )
 
 // convoyProgress is the shared {total, closed} progress shape used by
@@ -234,7 +235,7 @@ func (s *Server) humaHandleConvoyCreate(_ context.Context, input *ConvoyCreateIn
 		if err := store.Update(itemID, beads.UpdateOpts{ParentID: &pid}); err != nil {
 			rollbackConvoyMembership(store, applied, prevParent, "convoy.create")
 			if delErr := store.Delete(convoy.ID); delErr != nil {
-				log.Printf("gc api: convoy create rollback: delete %s after link failure: %v", convoy.ID, delErr)
+				log.Printf("%s api: convoy create rollback: delete %s after link failure: %v", progname.Get(), convoy.ID, delErr)
 			}
 			return nil, huma.Error500InternalServerError("failed to link item " + itemID + ": " + err.Error())
 		}
@@ -353,7 +354,7 @@ func rollbackConvoyMembership(store beads.Store, applied []string, prevParent ma
 		itemID := applied[i]
 		prev := prevParent[itemID]
 		if err := store.Update(itemID, beads.UpdateOpts{ParentID: &prev}); err != nil {
-			log.Printf("gc api: %s rollback failed for item %s (→ %q): %v", op, itemID, prev, err)
+			log.Printf("%s api: %s rollback failed for item %s (→ %q): %v", progname.Get(), op, itemID, prev, err)
 		}
 	}
 }

@@ -14,6 +14,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/progname"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -323,13 +324,13 @@ func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := withdrawQueuedWaitNudges(store, s.state.CityPath(), nudgeIDs); err != nil {
-		log.Printf("gc api: withdrawing queued wait nudges after close %s: %v", id, err)
+		log.Printf("%s api: withdrawing queued wait nudges after close %s: %v", progname.Get(), id, err)
 	}
 
 	// Optional: permanently delete the bead after closing.
 	if r.URL.Query().Get("delete") == "true" {
 		if err := store.Delete(id); err != nil {
-			log.Printf("gc api: deleting bead after close %s: %v", id, err)
+			log.Printf("%s api: deleting bead after close %s: %v", progname.Get(), id, err)
 			writeError(w, http.StatusInternalServerError, "internal", "closed but delete failed: "+err.Error())
 			return
 		}
@@ -372,7 +373,7 @@ func (s *Server) handleSessionWake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := withdrawQueuedWaitNudges(store, s.state.CityPath(), nudgeIDs); err != nil {
-		log.Printf("gc api: withdrawing queued wait nudges after wake %s: %v", id, err)
+		log.Printf("%s api: withdrawing queued wait nudges after wake %s: %v", progname.Get(), id, err)
 	}
 	// Clear in-memory crash tracker so the reconciler doesn't immediately
 	// re-quarantine the session based on stale crash history.

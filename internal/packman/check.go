@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/progname"
 )
 
 // CheckSeverity classifies an import state validation issue.
@@ -76,7 +77,7 @@ func CheckInstalled(cityRoot string, imports map[string]config.Import) (*CheckRe
 			Code:       "missing-lockfile",
 			Path:       filepath.Join(cityRoot, LockfileName),
 			Message:    fmt.Sprintf("%s is missing for declared remote imports", LockfileName),
-			RepairHint: `run "gc import install"`,
+			RepairHint: fmt.Sprintf("run %q", progname.Get()+" import install"),
 		})
 		return report, nil
 	}
@@ -153,7 +154,7 @@ func (s *importCheckState) walkImport(name string, imp config.Import) {
 			ImportName: name,
 			Source:     imp.Source,
 			Message:    "declared remote import is not present in packs.lock",
-			RepairHint: `run "gc import install"`,
+			RepairHint: fmt.Sprintf("run %q", progname.Get()+" import install"),
 		})
 		return
 	}
@@ -164,7 +165,7 @@ func (s *importCheckState) walkImport(name string, imp config.Import) {
 			ImportName: name,
 			Source:     imp.Source,
 			Message:    "packs.lock entry is missing a commit",
-			RepairHint: `run "gc import install"`,
+			RepairHint: fmt.Sprintf("run %q", progname.Get()+" import install"),
 		})
 		return
 	}
@@ -176,7 +177,7 @@ func (s *importCheckState) walkImport(name string, imp config.Import) {
 			Source:     imp.Source,
 			Commit:     locked.Commit,
 			Message:    fmt.Sprintf("packs.lock entry version %q does not satisfy constraint %q", locked.Version, mergedConstraint),
-			RepairHint: `run "gc import install"`,
+			RepairHint: fmt.Sprintf("run %q", progname.Get()+" import install"),
 		})
 		return
 	}
@@ -195,7 +196,7 @@ func (s *importCheckState) walkImport(name string, imp config.Import) {
 			Commit:     locked.Commit,
 			Path:       filepath.Join(packDir, "pack.toml"),
 			Message:    err.Error(),
-			RepairHint: `run "gc import install"`,
+			RepairHint: fmt.Sprintf("run %q", progname.Get()+" import install"),
 		})
 		return
 	}
@@ -221,7 +222,7 @@ func (s *importCheckState) validateCachedPack(name, source, commit string) (stri
 			Source:     source,
 			Commit:     commit,
 			Message:    err.Error(),
-			RepairHint: `run "gc import install"`,
+			RepairHint: fmt.Sprintf("run %q", progname.Get()+" import install"),
 		})
 		return "", false
 	}
@@ -237,7 +238,7 @@ func (s *importCheckState) validateCachedPack(name, source, commit string) (stri
 				Commit:     commit,
 				Path:       cachePath,
 				Message:    "locked import is missing from the local repo cache",
-				RepairHint: `run "gc import install"`,
+				RepairHint: fmt.Sprintf("run %q", progname.Get()+" import install"),
 			})
 			return "", false
 		}
@@ -249,7 +250,7 @@ func (s *importCheckState) validateCachedPack(name, source, commit string) (stri
 			Commit:     commit,
 			Path:       gitPath,
 			Message:    fmt.Sprintf("cannot inspect cached repository: %v", err),
-			RepairHint: `run "gc import install"`,
+			RepairHint: fmt.Sprintf("run %q", progname.Get()+" import install"),
 		})
 		return "", false
 	} else if st.IsDir() || st.Mode().IsRegular() {
@@ -263,7 +264,7 @@ func (s *importCheckState) validateCachedPack(name, source, commit string) (stri
 				Commit:     commit,
 				Path:       cachePath,
 				Message:    fmt.Sprintf("cannot read cached repository HEAD: %v", err),
-				RepairHint: `run "gc import install"`,
+				RepairHint: fmt.Sprintf("run %q", progname.Get()+" import install"),
 			})
 			return "", false
 		}
@@ -276,7 +277,7 @@ func (s *importCheckState) validateCachedPack(name, source, commit string) (stri
 				Commit:     commit,
 				Path:       cachePath,
 				Message:    fmt.Sprintf("cached repository is checked out at %s, expected %s", strings.TrimSpace(head), commit),
-				RepairHint: `run "gc import install"`,
+				RepairHint: fmt.Sprintf("run %q", progname.Get()+" import install"),
 			})
 			return "", false
 		}
@@ -290,7 +291,7 @@ func (s *importCheckState) validateCachedPack(name, source, commit string) (stri
 				Commit:     commit,
 				Path:       cachePath,
 				Message:    fmt.Sprintf("cannot read cached repository status: %v", err),
-				RepairHint: `run "gc import install"`,
+				RepairHint: fmt.Sprintf("run %q", progname.Get()+" import install"),
 			})
 			return "", false
 		}
@@ -303,7 +304,7 @@ func (s *importCheckState) validateCachedPack(name, source, commit string) (stri
 				Commit:     commit,
 				Path:       cachePath,
 				Message:    "cached repository has local worktree changes",
-				RepairHint: `run "gc import install"`,
+				RepairHint: fmt.Sprintf("run %q", progname.Get()+" import install"),
 			})
 			return "", false
 		}
@@ -316,7 +317,7 @@ func (s *importCheckState) validateCachedPack(name, source, commit string) (stri
 			Commit:     commit,
 			Path:       gitPath,
 			Message:    "cached repository .git entry is not a file or directory",
-			RepairHint: `run "gc import install"`,
+			RepairHint: fmt.Sprintf("run %q", progname.Get()+" import install"),
 		})
 		return "", false
 	}
@@ -332,7 +333,7 @@ func (s *importCheckState) validateCachedPack(name, source, commit string) (stri
 				Commit:     commit,
 				Path:       filepath.Join(packDir, "pack.toml"),
 				Message:    "cached import is missing pack.toml",
-				RepairHint: `run "gc import install"`,
+				RepairHint: fmt.Sprintf("run %q", progname.Get()+" import install"),
 			})
 			return "", false
 		}
@@ -344,7 +345,7 @@ func (s *importCheckState) validateCachedPack(name, source, commit string) (stri
 			Commit:     commit,
 			Path:       filepath.Join(packDir, "pack.toml"),
 			Message:    fmt.Sprintf("cannot inspect cached pack.toml: %v", err),
-			RepairHint: `run "gc import install"`,
+			RepairHint: fmt.Sprintf("run %q", progname.Get()+" import install"),
 		})
 		return "", false
 	} else if st.IsDir() {
@@ -356,7 +357,7 @@ func (s *importCheckState) validateCachedPack(name, source, commit string) (stri
 			Commit:     commit,
 			Path:       filepath.Join(packDir, "pack.toml"),
 			Message:    "cached pack.toml is a directory",
-			RepairHint: `run "gc import install"`,
+			RepairHint: fmt.Sprintf("run %q", progname.Get()+" import install"),
 		})
 		return "", false
 	}
@@ -382,7 +383,7 @@ func (s *importCheckState) reportStaleLockEntries() {
 			Source:     source,
 			Commit:     pack.Commit,
 			Message:    "packs.lock contains a source that is not reachable from declared imports",
-			RepairHint: `run "gc import install"`,
+			RepairHint: fmt.Sprintf("run %q", progname.Get()+" import install"),
 		})
 	}
 }

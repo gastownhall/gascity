@@ -14,6 +14,7 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/progname"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -614,13 +615,13 @@ func (s *Server) humaHandleSessionClose(_ context.Context, input *SessionCloseIn
 		return nil, humaSessionManagerError(err)
 	}
 	if err := withdrawQueuedWaitNudges(store, s.state.CityPath(), nudgeIDs); err != nil {
-		log.Printf("gc api: withdrawing queued wait nudges after close %s: %v", id, err)
+		log.Printf("%s api: withdrawing queued wait nudges after close %s: %v", progname.Get(), id, err)
 	}
 
 	// Optional: permanently delete the bead after closing.
 	if input.Delete {
 		if err := store.Delete(id); err != nil {
-			log.Printf("gc api: deleting bead after close %s: %v", id, err)
+			log.Printf("%s api: deleting bead after close %s: %v", progname.Get(), id, err)
 			return nil, huma.Error500InternalServerError("closed but delete failed: " + err.Error())
 		}
 	}
@@ -662,7 +663,7 @@ func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInpu
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
 	if err := withdrawQueuedWaitNudges(store, s.state.CityPath(), nudgeIDs); err != nil {
-		log.Printf("gc api: withdrawing queued wait nudges after wake %s: %v", id, err)
+		log.Printf("%s api: withdrawing queued wait nudges after wake %s: %v", progname.Get(), id, err)
 	}
 	sessionName := b.Metadata["session_name"]
 	if sessionName != "" {

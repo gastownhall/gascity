@@ -8,6 +8,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/progname"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -310,7 +311,7 @@ func (s *Server) humaHandleSessionAgentList(_ context.Context, input *SessionIDI
 
 	mappings, err := sessionlog.FindAgentMappings(logPath)
 	if err != nil {
-		log.Printf("gc api: session %s agent mapping failed for %s: %v", id, logPath, err)
+		log.Printf("%s api: session %s agent mapping failed for %s: %v", progname.Get(), id, logPath, err)
 		return nil, huma.Error500InternalServerError("failed to list agents")
 	}
 	if mappings == nil {

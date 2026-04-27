@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/progname"
 )
 
 // DeprecatedAttachmentFieldsCheck scans user-editable city TOML files
@@ -73,7 +75,7 @@ func (c *DeprecatedAttachmentFieldsCheck) Run(ctx *CheckContext) *CheckResult {
 		"found deprecated attachment-list field(s) in %d file(s) (%d line range(s))",
 		len(hits), totalLines,
 	)
-	r.FixHint = `run "gc doctor --fix" to strip the deprecated fields`
+	r.FixHint = fmt.Sprintf("run %q to strip the deprecated fields", progname.Get()+" doctor --fix")
 	return r
 }
 

@@ -14,6 +14,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/progname"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
@@ -157,7 +158,7 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		}
 		var lookupErr *sling.BeadLookupError
 		if errors.As(err, &lookupErr) {
-			fmt.Fprintf(apiSlingStderr(), "gc api sling: %v\n", lookupErr) //nolint:errcheck
+			fmt.Fprintf(apiSlingStderr(), "%s api sling: %v\n", progname.Get(), lookupErr) //nolint:errcheck
 			return nil, http.StatusInternalServerError, "internal", "sling bead lookup failed", nil
 		}
 		var missingBeadErr *sling.MissingBeadError
@@ -215,7 +216,7 @@ func slingStoreBeadID(body slingBody) string {
 // source workflow. Surfaced in the conflict response body so users can fix
 // the state without grepping docs.
 func sourceWorkflowCleanupHint(sourceBeadID, storeRef string) string {
-	args := []string{"gc workflow delete-source", sourceBeadID}
+	args := []string{progname.Get() + " workflow delete-source", sourceBeadID}
 	if storeRef = strings.TrimSpace(storeRef); storeRef != "" {
 		args = append(args, "--store-ref", storeRef)
 	}

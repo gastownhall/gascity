@@ -10,6 +10,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/progname"
 )
 
 var runRepoCacheGit = defaultRunRepoCacheGit
@@ -215,7 +216,7 @@ func resolveLockedRemoteImport(source, cityRoot string) (string, bool, error) {
 	if err := WithRepoCacheReadLock(cacheRoot, func() error {
 		if _, err := os.Stat(filepath.Join(cacheDir, ".git")); err != nil {
 			if os.IsNotExist(err) {
-				return fmt.Errorf("remote import %s is locked but not cached at %s; run \"gc import install\"", source, cacheDir)
+				return fmt.Errorf("remote import %s is locked but not cached at %s; run %q", source, cacheDir, progname.Get()+" import install")
 			}
 			return fmt.Errorf("checking cached import %s: %w", source, err)
 		}
@@ -234,7 +235,7 @@ func resolveInstalledRemoteImport(source, cityRoot string) (string, error) {
 	data, err := os.ReadFile(lockPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", fmt.Errorf("remote import %s is not installed (missing packs.lock); run \"gc import install\"", source)
+			return "", fmt.Errorf("remote import %s is not installed (missing packs.lock); run %q", source, progname.Get()+" import install")
 		}
 		return "", fmt.Errorf("reading packs.lock: %w", err)
 	}
@@ -245,7 +246,7 @@ func resolveInstalledRemoteImport(source, cityRoot string) (string, error) {
 	}
 	entry, ok := lock.Packs[source]
 	if !ok || entry.Commit == "" {
-		return "", fmt.Errorf("remote import %s is not installed (missing packs.lock entry); run \"gc import install\"", source)
+		return "", fmt.Errorf("remote import %s is not installed (missing packs.lock entry); run %q", source, progname.Get()+" import install")
 	}
 
 	home, err := os.UserHomeDir()
@@ -258,7 +259,7 @@ func resolveInstalledRemoteImport(source, cityRoot string) (string, error) {
 	if err := WithRepoCacheReadLock(cacheRoot, func() error {
 		if _, err := os.Stat(filepath.Join(cacheDir, ".git")); err != nil {
 			if os.IsNotExist(err) {
-				return fmt.Errorf("remote import %s is locked but not cached at %s; run \"gc import install\"", source, cacheDir)
+				return fmt.Errorf("remote import %s is locked but not cached at %s; run %q", source, cacheDir, progname.Get()+" import install")
 			}
 			return fmt.Errorf("checking cached import %s: %w", source, err)
 		}
@@ -278,14 +279,14 @@ func validateLockedRemoteCache(source, cacheDir, commit string) error {
 		return fmt.Errorf("reading cached import %s HEAD: %w", source, err)
 	}
 	if !sameRepoCacheCommit(head, commit) {
-		return fmt.Errorf("cached import %s is checked out at %s, expected %s; run \"gc import install\"", source, strings.TrimSpace(head), commit)
+		return fmt.Errorf("cached import %s is checked out at %s, expected %s; run %q", source, strings.TrimSpace(head), commit, progname.Get()+" import install")
 	}
 	status, err := runRepoCacheGit(cacheDir, "status", "--porcelain", "--ignored")
 	if err != nil {
 		return fmt.Errorf("checking cached import %s worktree status: %w", source, err)
 	}
 	if strings.TrimSpace(status) != "" {
-		return fmt.Errorf("cached import %s has local worktree changes; run \"gc import install\"", source)
+		return fmt.Errorf("cached import %s has local worktree changes; run %q", source, progname.Get()+" import install")
 	}
 	return nil
 }
