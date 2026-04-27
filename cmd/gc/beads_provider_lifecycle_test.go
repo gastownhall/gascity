@@ -4645,6 +4645,97 @@ esac
 	}
 }
 
+// TestGcBeadsBdInitFastPathFallsThroughWhenBdConfigSetFails guards the fix for
+// the bug where seedDeferredManagedBeadsBeforeProviderReadiness writes
+// metadata.json before Dolt starts, causing op_init to take the fast path on a
+// fresh city. The fast path called `bd config set issue_prefix || true`, which
+// silently failed against the empty (schema-less) database created by
+// ensure_database_registered, leaving issue_prefix missing and making every
+// subsequent bd-create fail with "database not initialized".
+//
+// The fix: when `bd config set issue_prefix` fails, the fast path falls through
+// to the full bd-init path. This test verifies that bd init is invoked when the
+// config-set exits non-zero, reproducing the deferred-seed scenario.
+func TestGcBeadsBdInitFastPathFallsThroughWhenBdConfigSetFails(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Seed metadata.json, simulating seedDeferredManagedBeadsBeforeProviderReadiness
+	// writing it before Dolt starts (the trigger for the fast path on a fresh city).
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
+	}
+	script := gcBeadsBdScriptPath(cityPath)
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	initCalledFile := filepath.Join(t.TempDir(), "bd-init-called")
+	fakeBd := filepath.Join(binDir, "bd")
+	// bd config set exits 1 (simulating a schema-less database); bd init
+	// exits 0 and records that it ran so the test can verify the fallthrough.
+	fakeBdScript := fmt.Sprintf(`#!/bin/sh
+set -eu
+cmd="${1:-}"
+case "$cmd" in
+  config)
+    sub="${2:-}"
+    if [ "$sub" = "set" ]; then
+      # Simulate a schema-less database: config set fails because no beads tables.
+      exit 1
+    fi
+    exit 0
+    ;;
+  init)
+    # Record that bd init was called (the fallthrough worked).
+    touch %q
+    mkdir -p "$PWD/.beads"
+    exit 0
+    ;;
+  migrate|list)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, initCalledFile)
+	if err := os.WriteFile(fakeBd, []byte(fakeBdScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeDolt := filepath.Join(binDir, "dolt")
+	if err := os.WriteFile(fakeDolt, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(script, "init", cityPath, "gc", "hq")
+	cmd.Env = sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
+		"GC_CITY_PATH="+cityPath,
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
+	}
+
+	if _, err := os.Stat(initCalledFile); os.IsNotExist(err) {
+		t.Fatal("bd init was NOT called: fast path exited without falling through when bd config set failed; " +
+			"issue_prefix would be missing from the database (regression of #1295)")
+	}
+}
+
 // ── isExternalDolt tests ──────────────────────────────────────────────
 
 func TestIsExternalDoltEnvFallback(t *testing.T) {
