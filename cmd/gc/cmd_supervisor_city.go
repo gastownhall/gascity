@@ -328,7 +328,7 @@ func writeStandaloneControllerConflict(stderr io.Writer, commandName, cityPath s
 		pidSuffix = fmt.Sprintf(" (PID %d)", pid)
 		authority = fmt.Sprintf("standalone controller PID %d", pid)
 	}
-	nextCommand := "gc stop " + shellQuotePath(cityPath) + " && " + supervisorRetryCommand(commandName, cityPath)
+	nextCommand := cmdName("stop") + " " + shellQuotePath(cityPath) + " && " + supervisorRetryCommand(commandName, cityPath)
 	_, _ = fmt.Fprintf(stderr,
 		"%s: standalone controller already running for %s%s; supervisor cannot manage this city until it stops\n",
 		commandName, shellQuotePath(cityPath), pidSuffix)
@@ -340,9 +340,9 @@ func supervisorRetryCommand(commandName, cityPath string) string {
 	quotedPath := shellQuotePath(cityPath)
 	switch strings.TrimSpace(commandName) {
 	case "gc register":
-		return "gc register " + quotedPath
+		return cmdName("register") + " " + quotedPath
 	default:
-		return "gc start " + quotedPath
+		return cmdName("start") + " " + quotedPath
 	}
 }
 

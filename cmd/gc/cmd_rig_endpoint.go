@@ -382,7 +382,7 @@ func rigEndpointFollowupCommand(rig config.Rig, state contract.ConfigState) stri
 	if state.EndpointOrigin != contract.EndpointOriginExplicit || state.EndpointStatus != contract.EndpointStatusUnverified {
 		return ""
 	}
-	parts := []string{"gc rig set-endpoint", rig.Name, "--external", "--host", state.DoltHost, "--port", state.DoltPort}
+	parts := []string{cmdName("rig set-endpoint"), rig.Name, "--external", "--host", state.DoltHost, "--port", state.DoltPort}
 	if user := strings.TrimSpace(state.DoltUser); user != "" {
 		parts = append(parts, "--user", user)
 	}

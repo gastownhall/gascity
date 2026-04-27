@@ -109,9 +109,9 @@ func resolveSuspendDir(args []string) (string, error) {
 // suspended via isAgentEffectivelySuspended and computeSuspendedNames.
 func doSuspendCity(fs fsys.FS, cityPath string, suspend bool, stdout, stderr io.Writer) int {
 	tomlPath := filepath.Join(cityPath, "city.toml")
-	cmd := "gc suspend"
+	cmd := cmdName("suspend")
 	if !suspend {
-		cmd = "gc resume"
+		cmd = cmdName("resume")
 	}
 	cfg, err := loadCityConfigForEditFS(fs, tomlPath)
 	if err != nil {

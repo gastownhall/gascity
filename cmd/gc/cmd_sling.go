@@ -782,7 +782,7 @@ func missingBeadForceApplies(opts sling.SlingOpts) bool {
 }
 
 func sourceWorkflowCleanupCommand(sourceBeadID, storeRef string) string {
-	args := []string{"gc workflow delete-source", sourceBeadID}
+	args := []string{cmdName("workflow delete-source"), sourceBeadID}
 	if storeRef = strings.TrimSpace(storeRef); storeRef != "" {
 		args = append(args, "--store-ref", storeRef)
 	}
@@ -1805,6 +1805,6 @@ func checkCrossRig(beadID string, a config.Agent, cfg *config.City) string {
 	if bp == rp {
 		return ""
 	}
-	return fmt.Sprintf("gc sling: cross-rig routing blocked — bead %s (prefix %q) targets %s (rig prefix %q); use --force to override",
+	return fmt.Sprintf(cmdName("sling")+": cross-rig routing blocked — bead %s (prefix %q) targets %s (rig prefix %q); use --force to override",
 		beadID, bp, a.QualifiedName(), rp)
 }

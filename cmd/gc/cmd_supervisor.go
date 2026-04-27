@@ -1305,7 +1305,7 @@ func reconcileCities(
 						m.status = status
 					})
 				},
-				LogPrefix: "gc supervisor",
+				LogPrefix: cmdName("supervisor"),
 				Stdout:    stdout,
 				Stderr:    stderr,
 			})

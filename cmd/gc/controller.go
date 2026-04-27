@@ -991,7 +991,7 @@ func controllerLoop(
 		suspendedNames:      suspendedNames,
 		pokeCh:              make(chan struct{}, 1),
 		controlDispatcherCh: make(chan struct{}, 1),
-		logPrefix:           "gc start",
+		logPrefix:           cmdName("start"),
 		stdout:              stdout,
 		stderr:              stderr,
 	}

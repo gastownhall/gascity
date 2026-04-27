@@ -178,7 +178,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 
 	logPrefix := p.LogPrefix
 	if logPrefix == "" {
-		logPrefix = "gc start"
+		logPrefix = cmdName("start")
 	}
 
 	cr := &CityRuntime{

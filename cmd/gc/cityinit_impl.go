@@ -433,7 +433,7 @@ func (localInitializer) Init(_ context.Context, req cityinit.InitRequest) (*city
 	if code := finalizeInit(dir, io.Discard, io.Discard, initFinalizeOptions{
 		skipProviderReadiness: req.SkipProviderReadiness,
 		showProgress:          false,
-		commandName:           "gc init",
+		commandName:           cmdName("init"),
 	}); code != 0 {
 		// finalizeInit's current contract is "blocked, check
 		// stderr". Without a structured return type we can't map

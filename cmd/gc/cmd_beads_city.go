@@ -241,9 +241,9 @@ func doBeadsCityEndpoint(fs fsys.FS, cityPath string, opts cityEndpointOptions, 
 
 func cityEndpointCommandName(opts cityEndpointOptions) string {
 	if opts.External {
-		return "gc beads city use-external"
+		return cmdName("beads city use-external")
 	}
-	return "gc beads city use-managed"
+	return cmdName("beads city use-managed")
 }
 
 func validateExplicitExternalHost(host string) error {
@@ -515,7 +515,7 @@ func cityEndpointFollowupCommand(state contract.ConfigState) string {
 	if state.EndpointOrigin != contract.EndpointOriginCityCanonical || state.EndpointStatus != contract.EndpointStatusUnverified {
 		return ""
 	}
-	parts := []string{"gc beads city use-external", "--host", state.DoltHost, "--port", state.DoltPort}
+	parts := []string{cmdName("beads city use-external"), "--host", state.DoltHost, "--port", state.DoltPort}
 	if user := strings.TrimSpace(state.DoltUser); user != "" {
 		parts = append(parts, "--user", user)
 	}

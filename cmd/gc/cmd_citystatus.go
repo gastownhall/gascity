@@ -298,7 +298,7 @@ func controllerStatusLine(ctrl ControllerJSON) string {
 
 func controllerStatusGuidance(ctrl ControllerJSON, cityPath string) []string {
 	quotedPath := shellQuotePath(cityPath)
-	startCommand := "gc start " + quotedPath
+	startCommand := cmdName("start") + " " + quotedPath
 
 	switch ctrl.Mode {
 	case "standalone":
