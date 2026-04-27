@@ -547,7 +547,8 @@ type AgentOverride struct {
 	MaxActiveSessions *int `toml:"max_active_sessions,omitempty"`
 	// MinActiveSessions overrides the minimum number of sessions to keep alive.
 	MinActiveSessions *int `toml:"min_active_sessions,omitempty"`
-	// ScaleCheck overrides the shell command whose output determines desired session count.
+	// ScaleCheck overrides the shell command whose output reports new
+	// unassigned session demand for bead-backed reconciliation.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
 	// OptionDefaults adds or overrides provider option defaults for this agent.
 	// Keys are option keys, values are choice values. Merges additively
@@ -1539,12 +1540,15 @@ type Agent struct {
 	// MinActiveSessions is the minimum number of sessions to keep alive.
 	// Agent-level only. Counts against rig/workspace caps. Replaces pool.min.
 	MinActiveSessions *int `toml:"min_active_sessions,omitempty"`
-	// ScaleCheck is a shell command template whose output determines desired
-	// session count. Optional override — when set, its output is the desired
-	// count (still clamped by all cap levels). If it contains Go template
-	// placeholders, gc expands them using the same PathContext fields as
-	// work_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot,
-	// CityName) before running the command.
+	// ScaleCheck is a shell command template whose output reports new
+	// unassigned session demand. In bead-backed reconciliation this is
+	// additive: assigned work is resumed separately, and ScaleCheck reports
+	// only how many new generic sessions to start, still bounded by all cap
+	// levels. Legacy no-store evaluation continues to treat the output as
+	// the desired session count. If it contains Go template placeholders, gc
+	// expands them using the same PathContext fields as work_dir and
+	// session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName)
+	// before running the command.
 	ScaleCheck string `toml:"scale_check,omitempty"`
 	// DrainTimeout is the maximum time to wait for a session to finish its
 	// current work before force-killing it during scale-down. Duration string

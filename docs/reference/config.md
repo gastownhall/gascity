@@ -83,7 +83,7 @@ Agent defines a configured agent in the city.
 | `option_defaults` | map[string]string |  |  | OptionDefaults overrides the provider's effective schema defaults for this agent. Keys are option keys, values are choice values. Applied on top of the provider's OptionDefaults (agent keys win). Example: option_defaults = &#123; permission_mode = "plan", model = "sonnet" &#125; |
 | `max_active_sessions` | integer |  |  | MaxActiveSessions is the agent-level cap on concurrent sessions. Nil means inherit from rig, then workspace, then unlimited. Replaces pool.max. |
 | `min_active_sessions` | integer |  |  | MinActiveSessions is the minimum number of sessions to keep alive. Agent-level only. Counts against rig/workspace caps. Replaces pool.min. |
-| `scale_check` | string |  |  | ScaleCheck is a shell command template whose output determines desired session count. Optional override — when set, its output is the desired count (still clamped by all cap levels). If it contains Go template placeholders, gc expands them using the same PathContext fields as work_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName) before running the command. |
+| `scale_check` | string |  |  | ScaleCheck is a shell command template whose output reports new unassigned session demand. In bead-backed reconciliation this is additive: assigned work is resumed separately, and ScaleCheck reports only how many new generic sessions to start, still bounded by all cap levels. Legacy no-store evaluation continues to treat the output as the desired session count. If it contains Go template placeholders, gc expands them using the same PathContext fields as work_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName) before running the command. |
 | `drain_timeout` | string |  | `5m` | DrainTimeout is the maximum time to wait for a session to finish its current work before force-killing it during scale-down. Duration string (e.g., "5m", "30m", "1h"). Defaults to "5m". |
 | `on_boot` | string |  |  | OnBoot is a shell command template run once at controller startup for this agent. If it contains Go template placeholders, gc expands them using the same PathContext fields as work_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName) before running the command. |
 | `on_death` | string |  |  | OnDeath is a shell command template run when a session dies unexpectedly. If it contains Go template placeholders, gc expands them using the same PathContext fields as work_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName) before running the command. |
@@ -172,7 +172,7 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `inject_fragments_append` | []string |  |  | InjectFragmentsAppend appends to the agent's inject_fragments list. |
 | `max_active_sessions` | integer |  |  | MaxActiveSessions overrides the agent-level cap on concurrent sessions. |
 | `min_active_sessions` | integer |  |  | MinActiveSessions overrides the minimum number of sessions to keep alive. |
-| `scale_check` | string |  |  | ScaleCheck overrides the shell command whose output determines desired session count. |
+| `scale_check` | string |  |  | ScaleCheck overrides the shell command whose output reports new unassigned session demand for bead-backed reconciliation. |
 | `option_defaults` | map[string]string |  |  | OptionDefaults adds or overrides provider option defaults for this agent. Keys are option keys, values are choice values. Merges additively (override keys win over existing agent keys). Example: option_defaults = &#123; model = "sonnet" &#125; |
 
 ## AgentPatch
@@ -222,7 +222,7 @@ AgentPatch modifies an existing agent identified by (Dir, Name).
 | `inject_fragments_append` | []string |  |  | InjectFragmentsAppend appends to the agent's inject_fragments list. |
 | `max_active_sessions` | integer |  |  | MaxActiveSessions overrides the agent-level cap on concurrent sessions. |
 | `min_active_sessions` | integer |  |  | MinActiveSessions overrides the minimum number of sessions to keep alive. |
-| `scale_check` | string |  |  | ScaleCheck overrides the command template whose output determines desired session count. Supports the same Go template placeholders as Agent.scale_check. |
+| `scale_check` | string |  |  | ScaleCheck overrides the command template whose output reports new unassigned session demand for bead-backed reconciliation. Supports the same Go template placeholders as Agent.scale_check. |
 | `option_defaults` | map[string]string |  |  | OptionDefaults adds or overrides provider option defaults for this agent. Keys are option keys, values are choice values. Merges additively (patch keys win over existing agent keys). Example: option_defaults = &#123; model = "sonnet" &#125; |
 
 ## BeadsConfig

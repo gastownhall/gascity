@@ -20,7 +20,7 @@ type AwakeInput struct {
 	NamedSessions    []AwakeNamedSession
 	SessionBeads     []AwakeSessionBead
 	WorkBeads        []AwakeWorkBead
-	ScaleCheckCounts map[string]int  // agent template → desired count
+	ScaleCheckCounts map[string]int  // agent template → scale_check count
 	WorkSet          map[string]bool // agent template → work_query found pending work
 	RunningSessions  map[string]bool // session name → tmux exists
 	AttachedSessions map[string]bool // session name → user attached

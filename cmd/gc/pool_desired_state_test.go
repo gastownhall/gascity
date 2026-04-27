@@ -24,6 +24,26 @@ func sessionBead(id, status string) beads.Bead {
 	return beads.Bead{ID: id, Status: status, Type: "session"}
 }
 
+func newPoolDesiredStateTestTrace(templates ...string) *sessionReconcilerTraceCycle {
+	detail := make(map[string]TraceSource, len(templates))
+	for _, template := range templates {
+		detail[normalizedTraceTemplate(template)] = TraceSourceManual
+	}
+	return &sessionReconcilerTraceCycle{
+		tracer:            &SessionReconcilerTracer{detail: detail},
+		dropReasons:       make(map[string]int),
+		pendingDetail:     make(map[string][]SessionReconcilerTraceRecord),
+		pendingDropped:    make(map[string]int),
+		templatesTouched:  make(map[string]struct{}),
+		detailedTemplates: make(map[string]struct{}),
+		decisionCounts:    make(map[string]int),
+		operationCounts:   make(map[string]int),
+		mutationCounts:    make(map[string]int),
+		reasonCounts:      make(map[string]int),
+		outcomeCounts:     make(map[string]int),
+	}
+}
+
 func poolAgent(name, dir string, maxSess *int, minSess int) config.Agent {
 	var minPtr *int
 	if minSess > 0 {
@@ -421,6 +441,43 @@ func TestComputePoolDesiredStates_ScaleCheckRespectsCaps(t *testing.T) {
 	}
 	if len(result[0].Requests) != 3 {
 		t.Fatalf("len(requests) = %d, want 3 (capped at max)", len(result[0].Requests))
+	}
+}
+
+func TestComputePoolDesiredStates_CapsNewDemandBeforeMaterializingRequests(t *testing.T) {
+	workspaceMax := 2
+	cfg := &config.City{
+		Workspace: config.Workspace{MaxActiveSessions: &workspaceMax},
+		Agents:    []config.Agent{poolAgent("claude", "", nil, 0)},
+	}
+	work := []beads.Bead{
+		workBead("w1", "claude", "sess-1", "in_progress", 5),
+	}
+	sessions := []beads.Bead{sessionBead("sess-1", "open")}
+	trace := newPoolDesiredStateTestTrace("claude")
+
+	result := computePoolDesiredStates(cfg, work, sessions, map[string]int{"claude": 10}, trace)
+
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	if len(result[0].Requests) != 2 {
+		t.Fatalf("len(requests) = %d, want 2 (one resume plus one new demand within workspace cap)", len(result[0].Requests))
+	}
+	newCount := 0
+	for _, req := range result[0].Requests {
+		if req.Tier == "new" {
+			newCount++
+		}
+	}
+	if newCount != 1 {
+		t.Fatalf("new requests = %d, want 1", newCount)
+	}
+	capRejections := trace.decisionCounts[string(TraceSitePoolAgentCap)] +
+		trace.decisionCounts[string(TraceSitePoolRigCap)] +
+		trace.decisionCounts[string(TraceSitePoolWorkspaceCap)]
+	if capRejections != 0 {
+		t.Fatalf("cap rejections = %d, want 0; new demand should be capped before request materialization", capRejections)
 	}
 }
 

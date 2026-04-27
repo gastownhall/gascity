@@ -169,7 +169,7 @@
         },
         "scale_check": {
           "type": "string",
-          "description": "ScaleCheck is a shell command template whose output determines desired\nsession count. Optional override — when set, its output is the desired\ncount (still clamped by all cap levels). If it contains Go template\nplaceholders, gc expands them using the same PathContext fields as\nwork_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot,\nCityName) before running the command."
+          "description": "ScaleCheck is a shell command template whose output reports new\nunassigned session demand. In bead-backed reconciliation this is\nadditive: assigned work is resumed separately, and ScaleCheck reports\nonly how many new generic sessions to start, still bounded by all cap\nlevels. Legacy no-store evaluation continues to treat the output as\nthe desired session count. If it contains Go template placeholders, gc\nexpands them using the same PathContext fields as work_dir and\nsession_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName)\nbefore running the command."
         },
         "drain_timeout": {
           "type": "string",
@@ -592,7 +592,7 @@
         },
         "scale_check": {
           "type": "string",
-          "description": "ScaleCheck overrides the shell command whose output determines desired session count."
+          "description": "ScaleCheck overrides the shell command whose output reports new\nunassigned session demand for bead-backed reconciliation."
         },
         "option_defaults": {
           "additionalProperties": {
@@ -835,7 +835,7 @@
         },
         "scale_check": {
           "type": "string",
-          "description": "ScaleCheck overrides the command template whose output determines desired\nsession count. Supports the same Go template placeholders as\nAgent.scale_check."
+          "description": "ScaleCheck overrides the command template whose output reports new\nunassigned session demand for bead-backed reconciliation. Supports the\nsame Go template placeholders as Agent.scale_check."
         },
         "option_defaults": {
           "additionalProperties": {
