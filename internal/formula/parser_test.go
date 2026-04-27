@@ -2855,3 +2855,109 @@ title = "Test"
 		}
 	}
 }
+
+func TestSubstitute_BuiltInVars(t *testing.T) {
+	// Register built-in vars for this test.
+	RegisterBuiltInVars(map[string]string{"binary": "gc"})
+	t.Cleanup(func() { RegisterBuiltInVars(nil) })
+
+	tests := []struct {
+		name  string
+		input string
+		vars  map[string]string
+		want  string
+	}{
+		{
+			name:  "built-in resolves when caller map empty",
+			input: "Run {{binary}} start",
+			vars:  map[string]string{},
+			want:  "Run gc start",
+		},
+		{
+			name:  "built-in resolves when caller map nil",
+			input: "Run {{binary}} start",
+			vars:  nil,
+			want:  "Run gc start",
+		},
+		{
+			name:  "caller-supplied takes priority over built-in",
+			input: "Run {{binary}} start",
+			vars:  map[string]string{"binary": "city"},
+			want:  "Run city start",
+		},
+		{
+			name:  "built-in mixed with caller vars",
+			input: "{{binary}} cook {{recipe}}",
+			vars:  map[string]string{"recipe": "deploy"},
+			want:  "gc cook deploy",
+		},
+		{
+			name:  "unknown var still unresolved",
+			input: "{{binary}} {{unknown}}",
+			vars:  map[string]string{},
+			want:  "gc {{unknown}}",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Substitute(tt.input, tt.vars)
+			if got != tt.want {
+				t.Errorf("Substitute(%q, %v) = %q, want %q", tt.input, tt.vars, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCheckResidualVars_SkipsBuiltIns(t *testing.T) {
+	RegisterBuiltInVars(map[string]string{"binary": "gc"})
+	t.Cleanup(func() { RegisterBuiltInVars(nil) })
+
+	tests := []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{
+			name:  "only built-in placeholder",
+			input: "Run {{binary}} start",
+			want:  nil,
+		},
+		{
+			name:  "built-in plus unknown",
+			input: "{{binary}} {{feature}}",
+			want:  []string{"feature"},
+		},
+		{
+			name:  "no placeholders",
+			input: "plain text",
+			want:  nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CheckResidualVars(tt.input)
+			if len(got) != len(tt.want) {
+				t.Errorf("CheckResidualVars(%q) = %v, want %v", tt.input, got, tt.want)
+				return
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("CheckResidualVars(%q)[%d] = %q, want %q", tt.input, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestBuiltInVars_NilByDefault(t *testing.T) {
+	// Ensure no built-in vars leak between tests.
+	// With nil builtInVars, Substitute should behave as before.
+	RegisterBuiltInVars(nil)
+
+	got := Substitute("{{binary}} start", nil)
+	if got != "{{binary}} start" {
+		t.Errorf("with nil builtInVars, Substitute should leave {{binary}} unresolved, got %q", got)
+	}
+}
