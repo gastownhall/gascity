@@ -64,7 +64,7 @@ volume mounts at runtime.`,
 
 func doBuildImage(args []string, tag, baseImage string, rigPaths []string, push, contextOnly bool, stdout, stderr io.Writer) int {
 	if !contextOnly && tag == "" {
-		fmt.Fprintln(stderr, "gc build-image: --tag is required (or use --context-only)") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: --tag is required (or use --context-only)\n", cmdName("build-image")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -86,7 +86,7 @@ func doBuildImage(args []string, tag, baseImage string, rigPaths []string, push,
 	for _, rp := range rigPaths {
 		name, path, ok := strings.Cut(rp, ":")
 		if !ok || name == "" || path == "" {
-			fmt.Fprintf(stderr, "gc build-image: invalid --rig-path %q (expected name:path)\n", rp) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: invalid --rig-path %q (expected name:path)\n", cmdName("build-image"), rp) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		rigs[name] = path

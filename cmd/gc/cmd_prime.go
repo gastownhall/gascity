@@ -225,10 +225,10 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 	if strictMode {
 		switch {
 		case agentName == "":
-			fmt.Fprintf(stderr, "gc prime: --strict requires an agent name (from args, GC_ALIAS, or GC_AGENT)\n") //nolint:errcheck
+			fmt.Fprintf(stderr, "%s: --strict requires an agent name (from args, GC_ALIAS, or GC_AGENT)\n", cmdName("prime")) //nolint:errcheck
 			return 1
 		case len(resolvedAgents) == 0:
-			fmt.Fprintf(stderr, "gc prime: agent %q not found in city config\n", agentName) //nolint:errcheck
+			fmt.Fprintf(stderr, "%s: agent %q not found in city config\n", cmdName("prime"), agentName) //nolint:errcheck
 			return 1
 		}
 		// renderPrompt returns "" both when the template file cannot be read
@@ -242,7 +242,7 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 				continue
 			}
 			if _, fErr := os.ReadFile(promptTemplateSourcePath(cityPath, a.PromptTemplate)); fErr != nil {
-				fmt.Fprintf(stderr, "gc prime: prompt_template %q for agent %q: %v\n", a.PromptTemplate, agentName, fErr) //nolint:errcheck
+				fmt.Fprintf(stderr, "%s: prompt_template %q for agent %q: %v\n", cmdName("prime"), a.PromptTemplate, agentName, fErr) //nolint:errcheck
 				return 1
 			}
 		}

@@ -41,7 +41,7 @@ func cmdRigStatus(args []string, stdout, stderr io.Writer) int {
 		rigName = args[0]
 	}
 	if rigName == "" {
-		fmt.Fprintln(stderr, "gc rig status: missing rig name") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: missing rig name\n", cmdName("rig status")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	cityPath := ctx.CityPath

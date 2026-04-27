@@ -143,7 +143,7 @@ func markCityStopSessionSleepReason(store beads.Store, stderr io.Writer) {
 			continue
 		}
 		if err := store.SetMetadata(session.ID, "sleep_reason", sleepReasonCityStop); err != nil {
-			fmt.Fprintf(stderr, "gc stop: marking session %s: %v\n", session.ID, err) //nolint:errcheck // best-effort warning
+			fmt.Fprintf(stderr, "%s: marking session %s: %v\n", cmdName("stop"), session.ID, err) //nolint:errcheck // best-effort warning
 		}
 	}
 }

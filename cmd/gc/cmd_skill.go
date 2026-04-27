@@ -39,7 +39,7 @@ name collision. For the materialized set, inspect the
 			if len(args) == 0 {
 				return cmd.Help()
 			}
-			fmt.Fprintf(stderr, "gc skill: unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: unknown subcommand %q\n", cmdName("skill"), args[0]) //nolint:errcheck // best-effort stderr
 			return errExit
 		},
 	}
@@ -57,7 +57,7 @@ func newSkillListCmd(stdout, stderr io.Writer) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if strings.TrimSpace(agentName) != "" && strings.TrimSpace(sessionID) != "" {
-				fmt.Fprintln(stderr, "gc skill list: --agent and --session are mutually exclusive") //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: --agent and --session are mutually exclusive\n", cmdName("skill list")) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 			cityPath, err := resolveCity()

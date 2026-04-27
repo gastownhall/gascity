@@ -259,19 +259,19 @@ func cmdShellInstall(root *cobra.Command, args []string, stdout, stderr io.Write
 	}
 	installed, err := rcFileHasHook(rcFile)
 	if err != nil && !os.IsNotExist(err) {
-		fmt.Fprintf(stderr, "gc shell install: reading %s: %v\n", rcFile, err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: reading %s: %v\n", cmdName("shell install"), rcFile, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if installed {
 		// Update in place — the completion script is already refreshed on disk.
 		if err := rcFileReplaceHook(rcFile, hookBlock(sh, compFile)); err != nil {
-			fmt.Fprintf(stderr, "gc shell install: updating %s: %v\n", rcFile, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: updating %s: %v\n", cmdName("shell install"), rcFile, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		fmt.Fprintf(stdout, "Updated hook in %s\n", rcFile) //nolint:errcheck // best-effort stdout
 	} else {
 		if err := rcFileAppendHook(rcFile, hookBlock(sh, compFile)); err != nil {
-			fmt.Fprintf(stderr, "gc shell install: updating %s: %v\n", rcFile, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: updating %s: %v\n", cmdName("shell install"), rcFile, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		fmt.Fprintf(stdout, "Added hook to %s\n", rcFile) //nolint:errcheck // best-effort stdout
@@ -291,7 +291,7 @@ func cmdShellRemove(stdout, stderr io.Writer) int {
 		}
 		if _, err := os.Stat(compFile); err == nil {
 			if err := os.Remove(compFile); err != nil {
-				fmt.Fprintf(stderr, "gc shell remove: removing %s: %v\n", compFile, err) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: removing %s: %v\n", cmdName("shell remove"), compFile, err) //nolint:errcheck // best-effort stderr
 			} else {
 				fmt.Fprintf(stdout, "Removed %s\n", compFile) //nolint:errcheck // best-effort stdout
 				removed = true
@@ -308,7 +308,7 @@ func cmdShellRemove(stdout, stderr io.Writer) int {
 				continue
 			}
 			if err := rcFileRemoveHook(rcFile); err != nil {
-				fmt.Fprintf(stderr, "gc shell remove: updating %s: %v\n", rcFile, err) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: updating %s: %v\n", cmdName("shell remove"), rcFile, err) //nolint:errcheck // best-effort stderr
 			} else {
 				fmt.Fprintf(stdout, "Removed hook from %s\n", rcFile) //nolint:errcheck // best-effort stdout
 				removed = true

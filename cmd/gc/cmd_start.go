@@ -270,7 +270,7 @@ func doStartWithNameOverride(args []string, controllerMode bool, stdout, stderr 
 		return doStartStandalone(args, controllerMode, stdout, stderr)
 	}
 	if len(extraConfigFiles) > 0 || noStrictMode {
-		fmt.Fprintln(stderr, "gc start: --file and --no-strict only apply to the legacy standalone controller; use --foreground or remove those flags") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: --file and --no-strict only apply to the legacy standalone controller; use --foreground or remove those flags\n", cmdName("start")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -290,7 +290,7 @@ func doStartWithNameOverride(args []string, controllerMode bool, stdout, stderr 
 		return 1
 	}
 	if missing := checkHardDependencies(cityPath); len(missing) > 0 {
-		fmt.Fprintf(stderr, "gc start: missing required dependencies:\n\n") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: missing required dependencies:\n\n", cmdName("start")) //nolint:errcheck // best-effort stderr
 		for _, dep := range missing {
 			fmt.Fprintf(stderr, "  - %s", dep.name) //nolint:errcheck // best-effort stderr
 			if dep.installHint != "" {
@@ -299,7 +299,7 @@ func doStartWithNameOverride(args []string, controllerMode bool, stdout, stderr 
 			fmt.Fprintln(stderr) //nolint:errcheck // best-effort stderr
 		}
 		fmt.Fprintln(stderr)                                                               //nolint:errcheck // best-effort stderr
-		fmt.Fprintln(stderr, "gc start: install the missing dependencies, then try again") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: install the missing dependencies, then try again\n", cmdName("start")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if code := registerCityWithSupervisorNamed(cityPath, nameOverride, stdout, stderr, "gc start", true); code != 0 {
@@ -361,7 +361,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 			return 1
 		}
 		if registered {
-			fmt.Fprintf(stderr, "gc start: city is registered with the supervisor; run \"gc unregister %s\" before using --foreground\n", cityPath) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: city is registered with the supervisor; run \"gc unregister %s\" before using --foreground\n", cmdName("start"), cityPath) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	}
@@ -384,16 +384,16 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// Strict mode (default) promotes strict-eligible config warnings to errors.
 	if strictMode && len(fatalWarnings) > 0 {
 		for _, w := range fatalWarnings {
-			fmt.Fprintf(stderr, "gc start: strict: %s\n", w) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: strict: %s\n", cmdName("start"), w) //nolint:errcheck // best-effort stderr
 		}
 		for _, w := range nonFatalWarnings {
-			fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: warning: %s\n", cmdName("start"), w) //nolint:errcheck // best-effort stderr
 		}
-		fmt.Fprintln(stderr, "gc start: use --no-strict to disable strict checking") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: use --no-strict to disable strict checking\n", cmdName("start")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	for _, w := range prov.Warnings {
-		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: warning: %s\n", cmdName("start"), w) //nolint:errcheck // best-effort stderr
 	}
 
 	cityName := loadedCityName(cfg, cityPath)
@@ -445,14 +445,14 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		}
 		if len(layers) > 0 {
 			if err := ResolveFormulas(r.Path, layers); err != nil {
-				fmt.Fprintf(stderr, "gc start: rig %q formulas: %v\n", r.Name, err) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: rig %q formulas: %v\n", cmdName("start"), r.Name, err) //nolint:errcheck // best-effort stderr
 			}
 		}
 	}
 
 	// Prune legacy top-level scripts/ symlinks left by pre-PackV2 runtimes.
 	pruneLegacyConfiguredScripts(cityPath, cfg, func(scope string, err error) {
-		fmt.Fprintf(stderr, "gc start: pruning legacy %s scripts: %v\n", scope, err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: pruning legacy %s scripts: %v\n", cmdName("start"), scope, err) //nolint:errcheck // best-effort stderr
 	})
 
 	// Validate agents.
@@ -498,7 +498,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	for _, a := range cfg.Agents {
 		if len(a.InstallAgentHooks) > 0 {
 			if err := hooks.Validate(a.InstallAgentHooks); err != nil {
-				fmt.Fprintf(stderr, "gc start: agent %q: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: agent %q: %v\n", cmdName("start"), a.QualifiedName(), err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
 		}

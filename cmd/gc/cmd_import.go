@@ -477,7 +477,7 @@ func doImportAdd(fs fsys.FS, cityPath, source, nameOverride, versionFlag string,
 
 	source, gitBacked, err := normalizeImportAddSource(fs, cityPath, source)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc import add %q: %v\n", source, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s %q: %v\n", cmdName("import add"), source, err) //nolint:errcheck
 		return 1
 	}
 
@@ -486,33 +486,33 @@ func doImportAdd(fs fsys.FS, cityPath, source, nameOverride, versionFlag string,
 		name = deriveImportName(source)
 	}
 	if name == "" {
-		fmt.Fprintln(stderr, "gc import add: could not derive import name; use --name") //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: could not derive import name; use --name\n", cmdName("import add")) //nolint:errcheck
 		return 1
 	}
 	if strings.HasPrefix(name, "default-rig:") {
-		fmt.Fprintf(stderr, "gc import add: import name %q uses reserved prefix \"default-rig:\"\n", name) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: import name %q uses reserved prefix \"default-rig:\"\n", cmdName("import add"), name) //nolint:errcheck
 		return 1
 	}
 	if _, exists := scope.imports[name]; exists {
-		fmt.Fprintf(stderr, "gc import add: import %q already exists\n", name) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: import %q already exists\n", cmdName("import add"), name) //nolint:errcheck
 		return 1
 	}
 
 	version := versionFlag
 	if gitBacked {
 		if hasRepositoryRefInSource(source) {
-			fmt.Fprintf(stderr, "gc import add %q: embed refs in --version, not in the source URL\n", source) //nolint:errcheck
+			fmt.Fprintf(stderr, "%s %q: embed refs in --version, not in the source URL\n", cmdName("import add"), source) //nolint:errcheck
 			return 1
 		}
 		if version == "" {
 			version, err = defaultImportVersionForSource(source)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc import add %q: %v\n", source, err) //nolint:errcheck
+				fmt.Fprintf(stderr, "%s %q: %v\n", cmdName("import add"), source, err) //nolint:errcheck
 				return 1
 			}
 		}
 	} else if version != "" {
-		fmt.Fprintf(stderr, "gc import add %q: --version is only valid for git-backed imports\n", source) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s %q: --version is only valid for git-backed imports\n", cmdName("import add"), source) //nolint:errcheck
 		return 1
 	}
 
@@ -522,21 +522,21 @@ func doImportAdd(fs fsys.FS, cityPath, source, nameOverride, versionFlag string,
 	}
 	allImports, err := collectAllImportsFS(fs, cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc import add %q: %v\n", source, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s %q: %v\n", cmdName("import add"), source, err) //nolint:errcheck
 		return 1
 	}
 	allImports[scope.syntheticKey(name)] = scope.imports[name]
 	lock, err := syncImports(cityPath, allImports, packman.InstallResolveIfNeeded)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc import add %q: %v\n", source, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s %q: %v\n", cmdName("import add"), source, err) //nolint:errcheck
 		return 1
 	}
 	if err := scope.save(); err != nil {
-		fmt.Fprintf(stderr, "gc import add %q: %v\n", source, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s %q: %v\n", cmdName("import add"), source, err) //nolint:errcheck
 		return 1
 	}
 	if err := writeImportLockfile(fs, cityPath, lock); err != nil {
-		fmt.Fprintf(stderr, "gc import add %q: %v\n", source, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s %q: %v\n", cmdName("import add"), source, err) //nolint:errcheck
 		return 1
 	}
 	fmt.Fprintf(stdout, "Added import %q from %s\n", name, source) //nolint:errcheck
@@ -557,7 +557,7 @@ func doImportRemove(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer)
 			return 1
 		}
 		if !removed {
-			fmt.Fprintf(stderr, "gc import remove: import %q not found\n", name) //nolint:errcheck
+			fmt.Fprintf(stderr, "%s: import %q not found\n", cmdName("import remove"), name) //nolint:errcheck
 			return 1
 		}
 	} else {
@@ -566,22 +566,22 @@ func doImportRemove(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer)
 
 	allImports, err := collectAllImportsFS(fs, cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc import remove %q: %v\n", name, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s %q: %v\n", cmdName("import remove"), name, err) //nolint:errcheck
 		return 1
 	}
 	delete(allImports, scope.syntheticKey(name))
 	delete(allImports, "default-rig:"+strings.TrimPrefix(name, "default-rig:"))
 	lock, err := syncImports(cityPath, allImports, packman.InstallResolveIfNeeded)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc import remove %q: %v\n", name, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s %q: %v\n", cmdName("import remove"), name, err) //nolint:errcheck
 		return 1
 	}
 	if err := scope.save(); err != nil {
-		fmt.Fprintf(stderr, "gc import remove %q: %v\n", name, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s %q: %v\n", cmdName("import remove"), name, err) //nolint:errcheck
 		return 1
 	}
 	if err := writeImportLockfile(fs, cityPath, lock); err != nil {
-		fmt.Fprintf(stderr, "gc import remove %q: %v\n", name, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s %q: %v\n", cmdName("import remove"), name, err) //nolint:errcheck
 		return 1
 	}
 	fmt.Fprintf(stdout, "Removed import %q\n", name) //nolint:errcheck
@@ -702,18 +702,18 @@ func doImportUpgrade(cityPath, target string, stdout, stderr io.Writer) int {
 		}
 		targetImp, ok := lookupInspectableImport(target, inspectImports)
 		if !ok {
-			fmt.Fprintf(stderr, "gc import upgrade: import %q not found\n", target) //nolint:errcheck
+			fmt.Fprintf(stderr, "%s: import %q not found\n", cmdName("import upgrade"), target) //nolint:errcheck
 			return 1
 		}
 		if !isRemoteImportSource(targetImp.Source) {
-			fmt.Fprintf(stderr, "gc import upgrade: import %q is a path import and cannot be upgraded\n", target) //nolint:errcheck
+			fmt.Fprintf(stderr, "%s: import %q is a path import and cannot be upgraded\n", cmdName("import upgrade"), target) //nolint:errcheck
 			return 1
 		}
 		lock, err = syncImportsSelective(cityPath, allImports, map[string]struct{}{
 			targetImp.Source: {},
 		})
 		if err != nil {
-			fmt.Fprintf(stderr, "gc import upgrade %q: %v\n", target, err) //nolint:errcheck
+			fmt.Fprintf(stderr, "%s %q: %v\n", cmdName("import upgrade"), target, err) //nolint:errcheck
 			return 1
 		}
 	}

@@ -155,7 +155,7 @@ its current task before exiting. Pass a session alias or ID. Use
 
 func cmdRuntimeDrain(args []string, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
-		fmt.Fprintln(stderr, "gc runtime drain: missing session alias or ID") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: missing session alias or ID\n", cmdName("runtime drain")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	target, err := resolveSessionRuntimeTarget(args[0], stderr)
@@ -175,11 +175,11 @@ func doRuntimeDrain(dops drainOps, sp runtime.Provider, rec events.Recorder,
 ) int {
 	running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, sn)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc runtime drain: observing %q: %v\n", targetName, err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: observing %q: %v\n", cmdName("runtime drain"), targetName, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if !running {
-		fmt.Fprintf(stderr, "gc runtime drain: session %q is not running\n", targetName) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: session %q is not running\n", cmdName("runtime drain"), targetName) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if err := dops.setDrain(sn); err != nil {
@@ -219,7 +219,7 @@ session to continue normal operation. Pass a session alias or ID.`,
 
 func cmdRuntimeUndrain(args []string, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
-		fmt.Fprintln(stderr, "gc runtime undrain: missing session alias or ID") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: missing session alias or ID\n", cmdName("runtime undrain")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	target, err := resolveSessionRuntimeTarget(args[0], stderr)
@@ -239,11 +239,11 @@ func doRuntimeUndrain(dops drainOps, sp runtime.Provider, rec events.Recorder,
 ) int {
 	running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, sn)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc runtime undrain: observing %q: %v\n", targetName, err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: observing %q: %v\n", cmdName("runtime undrain"), targetName, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if !running {
-		fmt.Fprintf(stderr, "gc runtime undrain: session %q is not running\n", targetName) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: session %q is not running\n", cmdName("runtime undrain"), targetName) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if err := dops.clearDrain(sn); err != nil {

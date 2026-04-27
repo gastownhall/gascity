@@ -233,7 +233,7 @@ func cmdNudgeStatus(args []string, stdout, stderr io.Writer) int {
 		targetID = args[0]
 	}
 	if targetID == "" {
-		fmt.Fprintln(stderr, "gc nudge status: session not specified (set $GC_ALIAS/$GC_SESSION_ID or pass an alias/id)") //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: session not specified (set $GC_ALIAS/$GC_SESSION_ID or pass an alias/id)\n", cmdName("nudge status")) //nolint:errcheck
 		return 1
 	}
 
@@ -291,7 +291,7 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		if inject {
 			return 0
 		}
-		fmt.Fprintln(stderr, "gc nudge drain: session not specified (set $GC_ALIAS/$GC_SESSION_ID or pass an alias/id)") //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: session not specified (set $GC_ALIAS/$GC_SESSION_ID or pass an alias/id)\n", cmdName("nudge drain")) //nolint:errcheck
 		return 1
 	}
 
@@ -399,7 +399,7 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 		targetID = args[0]
 	}
 	if targetID == "" {
-		fmt.Fprintln(stderr, "gc nudge poll: session not specified (set $GC_ALIAS/$GC_SESSION_ID or pass an alias/id)") //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: session not specified (set $GC_ALIAS/$GC_SESSION_ID or pass an alias/id)\n", cmdName("nudge poll")) //nolint:errcheck
 		return 1
 	}
 	target, err := resolveNudgeTarget(targetID, stderr)
@@ -411,7 +411,7 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 		target.sessionName = sessionName
 	}
 	if target.sessionName == "" {
-		fmt.Fprintln(stderr, "gc nudge poll: session name unavailable") //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: session name unavailable\n", cmdName("nudge poll")) //nolint:errcheck
 		return 1
 	}
 
@@ -428,7 +428,7 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 	sp := newSessionProvider()
 	store := openNudgeBeadStore(target.cityPath)
 	if store == nil {
-		fmt.Fprintf(stderr, "gc nudge poll: opening city store for %q\n", target.agentKey()) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: opening city store for %q\n", cmdName("nudge poll"), target.agentKey()) //nolint:errcheck
 		return 1
 	}
 	var missingSince time.Time
@@ -475,7 +475,7 @@ func shouldKeepNudgePollerAlive(target nudgeTarget, missingSince, now time.Time)
 func deliverSessionNudge(target nudgeTarget, message string, mode nudgeDeliveryMode, stdout, stderr io.Writer) int {
 	store := openNudgeBeadStore(target.cityPath)
 	if store == nil {
-		fmt.Fprintf(stderr, "gc session nudge: opening city store for %q\n", target.agentKey()) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: opening city store for %q\n", cmdName("session nudge"), target.agentKey()) //nolint:errcheck
 		return 1
 	}
 	return deliverSessionNudgeWithWorker(target, store, newSessionProvider(), message, mode, stdout, stderr)
@@ -487,7 +487,7 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 	}
 	delivery, ok := workerNudgeDeliveryForMode(mode)
 	if !ok {
-		fmt.Fprintf(stderr, "gc session nudge: unknown delivery mode %q\n", mode) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: unknown delivery mode %q\n", cmdName("session nudge"), mode) //nolint:errcheck
 		return 1
 	}
 	handle, err := workerHandleForNudgeTarget(target, store, sp)

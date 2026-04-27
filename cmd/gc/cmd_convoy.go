@@ -29,9 +29,9 @@ use formula-compiled DAGs with control beads for orchestration.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				fmt.Fprintln(stderr, "gc convoy: missing subcommand (create, list, status, target, add, close, check, stranded, land)") //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: missing subcommand (create, list, status, target, add, close, check, stranded, land)\n", cmdName("convoy")) //nolint:errcheck // best-effort stderr
 			} else {
-				fmt.Fprintf(stderr, "gc convoy: unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: unknown subcommand %q\n", cmdName("convoy"), args[0]) //nolint:errcheck // best-effort stderr
 			}
 			return errExit
 		},
@@ -166,7 +166,7 @@ func validateConvoyCreateStoreScope(cfg *config.City, cityPath string, issueIDs 
 
 func doConvoyCreateWithOptions(store beads.Store, cfg *config.City, cityPath string, rec events.Recorder, args []string, opts convoyCreateOptions, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
-		fmt.Fprintln(stderr, "gc convoy create: missing convoy name") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: missing convoy name\n", cmdName("convoy create")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	name := args[0]
@@ -209,12 +209,12 @@ func doConvoyCreateWithOptions(store beads.Store, cfg *config.City, cityPath str
 			}
 		}
 		if _, err := childStore.Get(id); err != nil {
-			fmt.Fprintf(stderr, "gc convoy create: issue %s: %v\n", id, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: issue %s: %v\n", cmdName("convoy create"), id, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		parentID := convoy.ID
 		if err := childStore.Update(id, beads.UpdateOpts{ParentID: &parentID}); err != nil {
-			fmt.Fprintf(stderr, "gc convoy create: setting parent on %s: %v\n", id, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: setting parent on %s: %v\n", cmdName("convoy create"), id, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	}
@@ -470,7 +470,7 @@ func doConvoyListAcrossStores(stores []convoyStoreView, stdout, stderr io.Writer
 	for _, c := range convoys {
 		children, err := listConvoyChildren(c.store, c.bead.ID, true)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc convoy list: children of %s: %v\n", c.bead.ID, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: children of %s: %v\n", cmdName("convoy list"), c.bead.ID, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		closed := 0
@@ -522,7 +522,7 @@ func cmdConvoyStatus(args []string, stdout, stderr io.Writer) int {
 // doConvoyStatus shows detailed status of a convoy and its children.
 func doConvoyStatus(store beads.Store, args []string, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
-		fmt.Fprintln(stderr, "gc convoy status: missing convoy ID") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: missing convoy ID\n", cmdName("convoy status")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	id := args[0]
@@ -533,7 +533,7 @@ func doConvoyStatus(store beads.Store, args []string, stdout, stderr io.Writer) 
 		return 1
 	}
 	if convoy.Type != "convoy" {
-		fmt.Fprintf(stderr, "gc convoy status: bead %s is not a convoy\n", id) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: bead %s is not a convoy\n", cmdName("convoy status"), id) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -623,13 +623,13 @@ func cmdConvoyTarget(args []string, stdout, stderr io.Writer) int {
 
 func doConvoyTarget(store beads.Store, args []string, stdout, stderr io.Writer) int {
 	if len(args) < 2 {
-		fmt.Fprintln(stderr, "gc convoy target: missing convoy ID or branch") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: missing convoy ID or branch\n", cmdName("convoy target")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	id := args[0]
 	target := strings.TrimSpace(args[1])
 	if target == "" {
-		fmt.Fprintln(stderr, "gc convoy target: target branch cannot be empty") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: target branch cannot be empty\n", cmdName("convoy target")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -639,7 +639,7 @@ func doConvoyTarget(store beads.Store, args []string, stdout, stderr io.Writer) 
 		return 1
 	}
 	if convoy.Type != "convoy" {
-		fmt.Fprintf(stderr, "gc convoy target: bead %s is not a convoy\n", id) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: bead %s is not a convoy\n", cmdName("convoy target"), id) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if err := setConvoyFields(store, id, ConvoyFields{Target: target}); err != nil {
@@ -688,7 +688,7 @@ func cmdConvoyAdd(args []string, stdout, stderr io.Writer) int {
 // doConvoyAdd adds an issue to a convoy by setting the issue's ParentID.
 func doConvoyAdd(store beads.Store, args []string, stdout, stderr io.Writer) int {
 	if len(args) < 2 {
-		fmt.Fprintln(stderr, "gc convoy add: usage: gc convoy add <convoy-id> <issue-id>") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: usage: gc convoy add <convoy-id> <issue-id>\n", cmdName("convoy add")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	convoyID := args[0]
@@ -700,7 +700,7 @@ func doConvoyAdd(store beads.Store, args []string, stdout, stderr io.Writer) int
 		return 1
 	}
 	if convoy.Type != "convoy" {
-		fmt.Fprintf(stderr, "gc convoy add: bead %s is not a convoy\n", convoyID) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: bead %s is not a convoy\n", cmdName("convoy add"), convoyID) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -756,7 +756,7 @@ func cmdConvoyClose(args []string, stdout, stderr io.Writer) int {
 // doConvoyClose closes a convoy bead.
 func doConvoyClose(store beads.Store, rec events.Recorder, args []string, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
-		fmt.Fprintln(stderr, "gc convoy close: missing convoy ID") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: missing convoy ID\n", cmdName("convoy close")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	id := args[0]
@@ -767,7 +767,7 @@ func doConvoyClose(store beads.Store, rec events.Recorder, args []string, stdout
 		return 1
 	}
 	if convoy.Type != "convoy" {
-		fmt.Fprintf(stderr, "gc convoy close: bead %s is not a convoy\n", id) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: bead %s is not a convoy\n", cmdName("convoy close"), id) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -845,7 +845,7 @@ func doConvoyCheckAcrossStores(stores []convoyStoreView, rec events.Recorder, st
 		}
 		children, err := listConvoyChildren(item.store, item.bead.ID, true)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc convoy check: children of %s: %v\n", item.bead.ID, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: children of %s: %v\n", cmdName("convoy check"), item.bead.ID, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		if len(children) == 0 {
@@ -860,7 +860,7 @@ func doConvoyCheckAcrossStores(stores []convoyStoreView, rec events.Recorder, st
 		}
 		if allClosed {
 			if err := item.store.Close(item.bead.ID); err != nil {
-				fmt.Fprintf(stderr, "gc convoy check: closing %s: %v\n", item.bead.ID, err) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: closing %s: %v\n", cmdName("convoy check"), item.bead.ID, err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
 			rec.Record(events.Event{
@@ -925,7 +925,7 @@ func doConvoyStrandedAcrossStores(stores []convoyStoreView, stdout, stderr io.Wr
 	for _, item := range convoys {
 		children, err := listConvoyChildren(item.store, item.bead.ID, false)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc convoy stranded: children of %s: %v\n", item.bead.ID, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: children of %s: %v\n", cmdName("convoy stranded"), item.bead.ID, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		for _, ch := range children {
@@ -1008,7 +1008,7 @@ func cmdConvoyLand(args []string, opts landOpts, stdout, stderr io.Writer) int {
 // cleans up worktrees, closes the convoy bead, and records an event.
 func doConvoyLand(store beads.Store, rec events.Recorder, args []string, opts landOpts, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
-		fmt.Fprintln(stderr, "gc convoy land: missing convoy ID") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: missing convoy ID\n", cmdName("convoy land")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	convoyID := args[0]
@@ -1019,11 +1019,11 @@ func doConvoyLand(store beads.Store, rec events.Recorder, args []string, opts la
 		return 1
 	}
 	if convoy.Type != "convoy" {
-		fmt.Fprintf(stderr, "gc convoy land: bead %s is not a convoy\n", convoyID) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: bead %s is not a convoy\n", cmdName("convoy land"), convoyID) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if !hasLabel(convoy.Labels, "owned") {
-		fmt.Fprintf(stderr, "gc convoy land: convoy %s is not owned (missing 'owned' label)\n", convoyID) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: convoy %s is not owned (missing 'owned' label)\n", cmdName("convoy land"), convoyID) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -1048,7 +1048,7 @@ func doConvoyLand(store beads.Store, rec events.Recorder, args []string, opts la
 	}
 
 	if len(openChildren) > 0 && !opts.Force {
-		fmt.Fprintf(stderr, "gc convoy land: %d open child(ren):\n", len(openChildren)) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: %d open child(ren):\n", cmdName("convoy land"), len(openChildren)) //nolint:errcheck // best-effort stderr
 		for _, ch := range openChildren {
 			fmt.Fprintf(stderr, "  %s %s (%s)\n", ch.ID, ch.Title, ch.Status) //nolint:errcheck // best-effort stderr
 		}

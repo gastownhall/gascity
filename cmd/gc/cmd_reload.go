@@ -91,7 +91,7 @@ func cmdReload(args []string, async bool, timeoutValue string, timeoutChanged bo
 	}
 
 	if async && timeoutChanged {
-		fmt.Fprintln(stderr, "gc reload: --async and --timeout cannot be used together") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: --async and --timeout cannot be used together\n", cmdName("reload")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -99,11 +99,11 @@ func cmdReload(args []string, async bool, timeoutValue string, timeoutChanged bo
 	if !async {
 		timeout, err := time.ParseDuration(timeoutValue)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc reload: invalid --timeout %q: %v\n", timeoutValue, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: invalid --timeout %q: %v\n", cmdName("reload"), timeoutValue, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		if timeout <= 0 {
-			fmt.Fprintln(stderr, "gc reload: --timeout must be greater than 0") //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: --timeout must be greater than 0\n", cmdName("reload")) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		req.Timeout = timeout.String()
@@ -113,7 +113,7 @@ func cmdReload(args []string, async bool, timeoutValue string, timeoutChanged bo
 	if err != nil {
 		if isControllerUnavailableError(err) {
 			if msg := reloadUnavailableMessageHook(cityPath); msg != "" {
-				fmt.Fprintf(stderr, "gc reload: %s: %v\n", msg, err) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: %s: %v\n", cmdName("reload"), msg, err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
 		}
@@ -127,12 +127,12 @@ func cmdReload(args []string, async bool, timeoutValue string, timeoutChanged bo
 			fmt.Fprintln(stdout, strings.TrimSpace(reply.Message)) //nolint:errcheck // best-effort stdout
 		}
 		for _, warning := range reply.Warnings {
-			fmt.Fprintf(stderr, "gc reload: warning: %s\n", warning) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: warning: %s\n", cmdName("reload"), warning) //nolint:errcheck // best-effort stderr
 		}
 		return 0
 	case reloadOutcomeFailed:
 		for _, warning := range reply.Warnings {
-			fmt.Fprintf(stderr, "gc reload: warning: %s\n", warning) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: warning: %s\n", cmdName("reload"), warning) //nolint:errcheck // best-effort stderr
 		}
 		switch {
 		case strings.TrimSpace(reply.Error) != "":
@@ -140,18 +140,18 @@ func cmdReload(args []string, async bool, timeoutValue string, timeoutChanged bo
 		case strings.TrimSpace(reply.Message) != "":
 			fmt.Fprintln(stderr, strings.TrimSpace(reply.Message)) //nolint:errcheck // best-effort stderr
 		default:
-			fmt.Fprintln(stderr, "gc reload: reload failed") //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: reload failed\n", cmdName("reload")) //nolint:errcheck // best-effort stderr
 		}
 		return 1
 	case reloadOutcomeBusy, reloadOutcomeTimeout:
 		if strings.TrimSpace(reply.Message) != "" {
 			fmt.Fprintln(stderr, strings.TrimSpace(reply.Message)) //nolint:errcheck // best-effort stderr
 		} else {
-			fmt.Fprintf(stderr, "gc reload: %s\n", reply.Outcome) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: %s\n", cmdName("reload"), reply.Outcome) //nolint:errcheck // best-effort stderr
 		}
 		return 1
 	default:
-		fmt.Fprintf(stderr, "gc reload: unexpected controller outcome %q\n", reply.Outcome) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: unexpected controller outcome %q\n", cmdName("reload"), reply.Outcome) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 }

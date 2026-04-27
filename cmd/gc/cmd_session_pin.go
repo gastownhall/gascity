@@ -88,22 +88,22 @@ func cmdSessionSetPin(args []string, pinned bool, stdout, stderr io.Writer) int 
 		id, err = resolveSessionIDWithConfig(cityPath, cfg, store, args[0])
 	}
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session %s: %v\n", action, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: %v\n", cmdName("session "+action), err) //nolint:errcheck
 		return 1
 	}
 
 	b, err := store.Get(id)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session %s: %v\n", action, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: %v\n", cmdName("session "+action), err) //nolint:errcheck
 		return 1
 	}
 	if !session.IsSessionBeadOrRepairable(b) {
-		fmt.Fprintf(stderr, "gc session %s: %s is not a session\n", action, id) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: %s is not a session\n", cmdName("session "+action), id) //nolint:errcheck
 		return 1
 	}
 	session.RepairEmptyType(store, &b)
 	if b.Status == "closed" {
-		fmt.Fprintf(stderr, "gc session %s: session %s is closed\n", action, id) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: session %s is closed\n", cmdName("session "+action), id) //nolint:errcheck
 		return 1
 	}
 
@@ -113,7 +113,7 @@ func cmdSessionSetPin(args []string, pinned bool, stdout, stderr io.Writer) int 
 	}
 	if !materializedForPin {
 		if err := store.SetMetadata(id, "pin_awake", value); err != nil {
-			fmt.Fprintf(stderr, "gc session %s: updating metadata: %v\n", action, err) //nolint:errcheck
+			fmt.Fprintf(stderr, "%s: updating metadata: %v\n", cmdName("session "+action), err) //nolint:errcheck
 			return 1
 		}
 	}

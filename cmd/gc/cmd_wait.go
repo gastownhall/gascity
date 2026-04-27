@@ -132,11 +132,11 @@ func newWaitReadyCmd(stdout, stderr io.Writer) *cobra.Command {
 
 func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep bool, stdout, stderr io.Writer) int {
 	if len(depIDs) == 0 {
-		fmt.Fprintln(stderr, "gc session wait: at least one --on-beads value is required") //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: at least one --on-beads value is required\n", cmdName("session wait")) //nolint:errcheck
 		return 1
 	}
 	if strings.TrimSpace(note) == "" {
-		fmt.Fprintln(stderr, "gc session wait: --note is required") //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: --note is required\n", cmdName("session wait")) //nolint:errcheck
 		return 1
 	}
 	store, code := openCityStore(stderr, "gc session wait")
@@ -150,7 +150,7 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 		target = os.Getenv("GC_SESSION_ID")
 	}
 	if target == "" {
-		fmt.Fprintln(stderr, "gc session wait: session not specified (pass an ID/name or set $GC_SESSION_ID)") //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: session not specified (pass an ID/name or set $GC_SESSION_ID)\n", cmdName("session wait")) //nolint:errcheck
 		return 1
 	}
 	if err := waitLifecycleEnabled(); err != nil {
@@ -160,7 +160,7 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 	if sleep {
 		cityPath, err := resolveCity()
 		if err != nil || !cityUsesManagedReconciler(cityPath) {
-			fmt.Fprintln(stderr, "gc session wait: a managed controller must be running when --sleep is used") //nolint:errcheck
+			fmt.Fprintf(stderr, "%s: a managed controller must be running when --sleep is used\n", cmdName("session wait")) //nolint:errcheck
 			return 1
 		}
 	}
@@ -181,7 +181,7 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 	}
 	for _, depID := range depIDs {
 		if _, err := loadWaitDependencyBead(cityPath, store, depID); err != nil {
-			fmt.Fprintf(stderr, "gc session wait: dependency %s: %v\n", depID, err) //nolint:errcheck
+			fmt.Fprintf(stderr, "%s: dependency %s: %v\n", cmdName("session wait"), depID, err) //nolint:errcheck
 			return 1
 		}
 	}
@@ -301,7 +301,7 @@ func cmdWaitInspect(waitID string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if !sessionpkg.IsWaitBead(b) {
-		fmt.Fprintf(stderr, "gc wait inspect: %s is not a wait\n", waitID) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: %s is not a wait\n", cmdName("wait inspect"), waitID) //nolint:errcheck
 		return 1
 	}
 	fmt.Fprintf(stdout, "Wait:       %s\n", b.ID)                                               //nolint:errcheck
@@ -327,7 +327,7 @@ func cmdWaitSetState(waitID, state string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if !sessionpkg.IsWaitBead(b) {
-		fmt.Fprintf(stderr, "gc wait: %s is not a wait\n", waitID) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: %s is not a wait\n", cmdName("wait"), waitID) //nolint:errcheck
 		return 1
 	}
 	if state == waitStateReady {

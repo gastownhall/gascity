@@ -163,7 +163,7 @@ func runDiscoveredCommand(entry config.DiscoveredCommand, cityPath, cityName str
 		if errors.As(err, &exitErr) {
 			return exitErr.ExitCode()
 		}
-		fmt.Fprintf(stderr, "gc %s %s: %v\n", entry.BindingName, strings.Join(entry.Command, " "), err) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s %s: %v\n", cmdName(entry.BindingName), strings.Join(entry.Command, " "), err) //nolint:errcheck
 		return 1
 	}
 	return 0

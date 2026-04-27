@@ -108,7 +108,7 @@ func doConfigShow(validate, showProvenance bool, stdout, stderr io.Writer) int {
 
 	// Composition warnings.
 	for _, w := range prov.Warnings {
-		fmt.Fprintf(stderr, "gc config show: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: warning: %s\n", cmdName("config show"), w) //nolint:errcheck // best-effort stderr
 	}
 
 	// Run validation.
@@ -129,11 +129,11 @@ func doConfigShow(validate, showProvenance bool, stdout, stderr io.Writer) int {
 
 	if validate {
 		for _, w := range validationWarnings {
-			fmt.Fprintf(stderr, "gc config show: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: warning: %s\n", cmdName("config show"), w) //nolint:errcheck // best-effort stderr
 		}
 		if len(validationErrors) > 0 {
 			for _, e := range validationErrors {
-				fmt.Fprintf(stderr, "gc config show: %s\n", e) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: %s\n", cmdName("config show"), e) //nolint:errcheck // best-effort stderr
 			}
 			return 1
 		}
@@ -143,10 +143,10 @@ func doConfigShow(validate, showProvenance bool, stdout, stderr io.Writer) int {
 
 	// Print validation warnings even in show mode.
 	for _, w := range validationWarnings {
-		fmt.Fprintf(stderr, "gc config show: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: warning: %s\n", cmdName("config show"), w) //nolint:errcheck // best-effort stderr
 	}
 	for _, e := range validationErrors {
-		fmt.Fprintf(stderr, "gc config show: warning: %s\n", e) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: warning: %s\n", cmdName("config show"), e) //nolint:errcheck // best-effort stderr
 	}
 
 	if showProvenance {
@@ -276,7 +276,7 @@ Use --json to emit machine-readable output (providers only).`,
 				return nil
 			}
 			if asJSON {
-				fmt.Fprintln(stderr, "gc config explain: --json is only supported with --provider") //nolint:errcheck
+				fmt.Fprintf(stderr, "%s: --json is only supported with --provider\n", cmdName("config explain")) //nolint:errcheck
 				return errExit
 			}
 			if doConfigExplain(rigFilter, agentFilter, stdout, stderr) != 0 {
@@ -476,9 +476,9 @@ func doConfigExplain(rigFilter, agentFilter string, stdout, stderr io.Writer) in
 
 	if len(agents) == 0 {
 		if rigFilter != "" || agentFilter != "" {
-			fmt.Fprintf(stderr, "gc config explain: no agents match filters (rig=%q agent=%q)\n", rigFilter, agentFilter) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: no agents match filters (rig=%q agent=%q)\n", cmdName("config explain"), rigFilter, agentFilter) //nolint:errcheck // best-effort stderr
 		} else {
-			fmt.Fprintf(stderr, "gc config explain: no agents configured\n") //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: no agents configured\n", cmdName("config explain")) //nolint:errcheck // best-effort stderr
 		}
 		return 1
 	}
@@ -586,9 +586,9 @@ func doConfigExplainProvider(providerName string, asJSON bool, stdout, stderr io
 	resolved, ok := config.ResolvedProviderCached(cfg, providerName)
 	if !ok {
 		if _, isBuiltin := config.BuiltinProviders()[providerName]; isBuiltin {
-			fmt.Fprintf(stderr, "gc config explain: %q is a built-in provider; --provider only resolves custom entries\n", providerName) //nolint:errcheck
+			fmt.Fprintf(stderr, "%s: %q is a built-in provider; --provider only resolves custom entries\n", cmdName("config explain"), providerName) //nolint:errcheck
 		} else {
-			fmt.Fprintf(stderr, "gc config explain: no provider %q in resolved config\n", providerName) //nolint:errcheck
+			fmt.Fprintf(stderr, "%s: no provider %q in resolved config\n", cmdName("config explain"), providerName) //nolint:errcheck
 		}
 		return 1
 	}

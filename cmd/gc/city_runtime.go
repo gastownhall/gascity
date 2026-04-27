@@ -1764,7 +1764,7 @@ func buildStandaloneRigStores(cfg *config.City, cityPath string, stderr io.Write
 		}
 		store, err := openStoreAtForCity(rig.Path, cityPath)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc supervisor: rig bead store %q: %v\n", rig.Name, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: rig bead store %q: %v\n", cmdName("supervisor"), rig.Name, err) //nolint:errcheck // best-effort stderr
 			continue
 		}
 		stores[rig.Name] = store

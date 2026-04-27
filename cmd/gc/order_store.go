@@ -443,7 +443,7 @@ func cachedOrderHistoryStoresResolver(cityPath string, cfg *config.City, stderr 
 		if legacyOrderCityFallbackNeeded(cityPath, target) {
 			legacy, err := openCached(legacyOrderCityTarget(cityPath, cfg))
 			if err != nil {
-				fmt.Fprintf(stderr, "gc order history: legacy city fallback unavailable for %s: %v\n", a.ScopedName(), err) //nolint:errcheck
+				fmt.Fprintf(stderr, "%s: legacy city fallback unavailable for %s: %v\n", cmdName("order history"), a.ScopedName(), err) //nolint:errcheck
 				return out, nil
 			}
 			out = append(out, legacy)

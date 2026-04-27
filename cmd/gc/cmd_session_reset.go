@@ -47,7 +47,7 @@ func cmdSessionReset(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if !cityUsesManagedReconciler(cityPath) {
-		fmt.Fprintln(stderr, "gc session reset: a managed controller must be running") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: a managed controller must be running\n", cmdName("session reset")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if err := pokeController(cityPath); err != nil {

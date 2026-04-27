@@ -294,7 +294,7 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if !forceReset {
-				fmt.Fprintf(stderr, "gc dolt-state reset-probe: refusing to drop %s without --force; this database may contain a legacy bead store in old metadata\n", managedDoltProbeDatabase) //nolint:errcheck
+				fmt.Fprintf(stderr, "%s: refusing to drop %s without --force; this database may contain a legacy bead store in old metadata\n", cmdName("dolt-state reset-probe"), managedDoltProbeDatabase) //nolint:errcheck
 				return errExit
 			}
 			if err := managedDoltResetProbe(hostText, portText, userText); err != nil {
@@ -346,7 +346,7 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			pid, err := strconv.Atoi(pidText)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc dolt-state wait-ready: invalid --pid %q: %v\n", pidText, err) //nolint:errcheck
+				fmt.Fprintf(stderr, "%s: invalid --pid %q: %v\n", cmdName("dolt-state wait-ready"), pidText, err) //nolint:errcheck
 				return errExit
 			}
 			report, err := waitForManagedDoltReady(cityPath, hostText, portText, userText, pid, time.Duration(timeoutMS)*time.Millisecond, checkDeleted)

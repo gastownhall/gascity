@@ -1304,7 +1304,7 @@ func stopTargetsBounded(
 						logLifecycleOutcome(stderr, "stop", wave, result.target.name, result.target.template, result.outcome, result.started, result.finished, result.err)
 					}
 					if result.err != nil {
-						fmt.Fprintf(stderr, "gc stop: stopping %s: %s\n", result.target.name, formatLifecycleError(result.err)) //nolint:errcheck
+						fmt.Fprintf(stderr, "%s: stopping %s: %s\n", cmdName("stop"), result.target.name, formatLifecycleError(result.err)) //nolint:errcheck
 						continue
 					}
 					fmt.Fprintf(stdout, "Stopped agent '%s'\n", result.target.name) //nolint:errcheck
@@ -1346,7 +1346,7 @@ func stopTargetsBounded(
 				logLifecycleOutcome(stderr, "stop", wave, result.target.name, result.target.template, result.outcome, result.started, result.finished, result.err)
 			}
 			if result.err != nil {
-				fmt.Fprintf(stderr, "gc stop: stopping %s: %s\n", result.target.name, formatLifecycleError(result.err)) //nolint:errcheck
+				fmt.Fprintf(stderr, "%s: stopping %s: %s\n", cmdName("stop"), result.target.name, formatLifecycleError(result.err)) //nolint:errcheck
 				continue
 			}
 			fmt.Fprintf(stdout, "Stopped agent '%s'\n", result.target.name) //nolint:errcheck

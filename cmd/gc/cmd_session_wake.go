@@ -58,14 +58,14 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if !session.IsSessionBeadOrRepairable(b) {
-		fmt.Fprintf(stderr, "gc session wake: %s is not a session\n", id) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: %s is not a session\n", cmdName("session wake"), id) //nolint:errcheck
 		return 1
 	}
 	session.RepairEmptyType(store, &b)
 	nudgeIDs, err := session.WakeSession(store, b, time.Now().UTC())
 	if err != nil {
 		if state, conflict := session.WakeConflictState(err); conflict {
-			fmt.Fprintf(stderr, "gc session wake: session %s is %s\n", id, state) //nolint:errcheck
+			fmt.Fprintf(stderr, "%s: session %s is %s\n", cmdName("session wake"), id, state) //nolint:errcheck
 			return 1
 		}
 		cmdErr(stderr, "session wake: updating metadata", err)

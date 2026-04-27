@@ -47,9 +47,9 @@ hooks to deliver mail notifications into agent prompts.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				fmt.Fprintln(stderr, "gc mail: missing subcommand (archive, check, count, delete, inbox, mark-read, mark-unread, peek, read, reply, send, thread)") //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: missing subcommand (archive, check, count, delete, inbox, mark-read, mark-unread, peek, read, reply, send, thread)\n", cmdName("mail")) //nolint:errcheck // best-effort stderr
 			} else {
-				fmt.Fprintf(stderr, "gc mail: unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: unknown subcommand %q\n", cmdName("mail"), args[0]) //nolint:errcheck // best-effort stderr
 			}
 			return errExit
 		},
@@ -103,7 +103,7 @@ func cmdMailArchive(args []string, stdout, stderr io.Writer) int {
 // injected provider and recorder for testability.
 func doMailArchive(mp mail.Provider, rec events.Recorder, args []string, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
-		fmt.Fprintln(stderr, "gc mail archive: missing message ID") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: missing message ID\n", cmdName("mail archive")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	id := args[0]
@@ -164,7 +164,7 @@ func cmdMailCheckWithFormat(args []string, inject bool, hookFormat string, stdou
 				if inject {
 					return 0
 				}
-				fmt.Fprintln(stderr, "gc mail check: city is suspended") //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: city is suspended\n", cmdName("mail check")) //nolint:errcheck // best-effort stderr
 				return 1
 			}
 		}
@@ -935,7 +935,7 @@ func cmdMailSend(args []string, notify bool, all bool, from string, to string, s
 	} else if sender != "human" && store != nil {
 		sender, err = resolveMailIdentityWithConfig(cityPath, cfg, store, sender)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc mail send: invalid sender %q: %v\n", sender, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: invalid sender %q: %v\n", cmdName("mail send"), sender, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	}
@@ -956,7 +956,7 @@ func cmdMailSend(args []string, notify bool, all bool, from string, to string, s
 			args = []string{subject, message}
 		} else {
 			if len(args) < 1 {
-				fmt.Fprintln(stderr, "gc mail send: missing recipient") //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: missing recipient\n", cmdName("mail send")) //nolint:errcheck // best-effort stderr
 				return 1
 			}
 			args = []string{args[0], subject, message}
@@ -965,7 +965,7 @@ func cmdMailSend(args []string, notify bool, all bool, from string, to string, s
 	if !all && len(args) > 0 && store != nil {
 		canonicalTo, err := resolveMailRecipientIdentity(cityPath, cfg, store, args[0])
 		if err != nil {
-			fmt.Fprintf(stderr, "gc mail send: unknown recipient %q: %v\n", args[0], err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: unknown recipient %q: %v\n", cmdName("mail send"), args[0], err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		args[0] = canonicalTo
@@ -988,7 +988,7 @@ func cmdMailSend(args []string, notify bool, all bool, from string, to string, s
 // recipient is nudged after message creation (skipped for "human").
 func doMailSend(mp mail.Provider, rec events.Recorder, validRecipients map[string]bool, sender string, args []string, nudgeFn nudgeFunc, stdout, stderr io.Writer) int {
 	if len(args) < 2 {
-		fmt.Fprintln(stderr, "gc mail send: usage: gc mail send <to> <body>  OR  gc mail send <to> -s <subject> [-m <body>]") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: usage: gc mail send <to> <body>  OR  gc mail send <to> -s <subject> [-m <body>]\n", cmdName("mail send")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	to := args[0]
@@ -1004,7 +1004,7 @@ func doMailSend(mp mail.Provider, rec events.Recorder, validRecipients map[strin
 	}
 
 	if validRecipients != nil && !validRecipients[to] {
-		fmt.Fprintf(stderr, "gc mail send: unknown recipient %q\n", to) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: unknown recipient %q\n", cmdName("mail send"), to) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -1036,7 +1036,7 @@ func doMailSend(mp mail.Provider, rec events.Recorder, validRecipients map[strin
 // sender and "human"). With --all, args is [subject, body] or [body].
 func doMailSendAll(mp mail.Provider, rec events.Recorder, validRecipients map[string]bool, sender string, args []string, nudgeFn nudgeFunc, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
-		fmt.Fprintln(stderr, "gc mail send --all: usage: gc mail send --all <body>") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: usage: gc mail send --all <body>\n", cmdName("mail send --all")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -1059,14 +1059,14 @@ func doMailSendAll(mp mail.Provider, rec events.Recorder, validRecipients map[st
 	sort.Strings(recipients)
 
 	if len(recipients) == 0 {
-		fmt.Fprintln(stderr, "gc mail send --all: no recipients (all live sessions excluded)") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: no recipients (all live sessions excluded)\n", cmdName("mail send --all")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	for _, to := range recipients {
 		m, err := mp.Send(sender, to, subject, body)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc mail send --all: sending to %s: %v\n", to, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: sending to %s: %v\n", cmdName("mail send --all"), to, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		rec.Record(events.Event{
@@ -1080,7 +1080,7 @@ func doMailSendAll(mp mail.Provider, rec events.Recorder, validRecipients map[st
 
 		if nudgeFn != nil {
 			if err := nudgeFn(to); err != nil {
-				fmt.Fprintf(stderr, "gc mail send --all: nudge %s failed: %v\n", to, err) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: nudge %s failed: %v\n", cmdName("mail send --all"), to, err) //nolint:errcheck // best-effort stderr
 			}
 		}
 	}
@@ -1142,7 +1142,7 @@ func cmdMailRead(args []string, stdout, stderr io.Writer) int {
 // provider and recorder for testability.
 func doMailRead(mp mail.Provider, rec events.Recorder, args []string, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
-		fmt.Fprintln(stderr, "gc mail read: missing message ID") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: missing message ID\n", cmdName("mail read")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	id := args[0]
@@ -1177,7 +1177,7 @@ func cmdMailPeek(args []string, stdout, stderr io.Writer) int {
 // doMailPeek displays a message without marking it as read.
 func doMailPeek(mp mail.Provider, args []string, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
-		fmt.Fprintln(stderr, "gc mail peek: missing message ID") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: missing message ID\n", cmdName("mail peek")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	id := args[0]
@@ -1195,7 +1195,7 @@ func doMailPeek(mp mail.Provider, args []string, stdout, stderr io.Writer) int {
 // cmdMailReply replies to a message.
 func cmdMailReply(args []string, subject, message string, notify bool, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
-		fmt.Fprintln(stderr, "gc mail reply: missing message ID") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: missing message ID\n", cmdName("mail reply")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -1280,7 +1280,7 @@ func cmdMailMarkRead(args []string, stdout, stderr io.Writer) int {
 // doMailMarkRead marks a message as read.
 func doMailMarkRead(mp mail.Provider, rec events.Recorder, args []string, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
-		fmt.Fprintln(stderr, "gc mail mark-read: missing message ID") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: missing message ID\n", cmdName("mail mark-read")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	id := args[0]
@@ -1313,7 +1313,7 @@ func cmdMailMarkUnread(args []string, stdout, stderr io.Writer) int {
 // doMailMarkUnread marks a message as unread.
 func doMailMarkUnread(mp mail.Provider, rec events.Recorder, args []string, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
-		fmt.Fprintln(stderr, "gc mail mark-unread: missing message ID") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: missing message ID\n", cmdName("mail mark-unread")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	id := args[0]
@@ -1346,7 +1346,7 @@ func cmdMailDelete(args []string, stdout, stderr io.Writer) int {
 // doMailDelete closes a message bead (same as archive but different intent).
 func doMailDelete(mp mail.Provider, rec events.Recorder, args []string, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
-		fmt.Fprintln(stderr, "gc mail delete: missing message ID") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: missing message ID\n", cmdName("mail delete")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	id := args[0]
@@ -1382,7 +1382,7 @@ func cmdMailThread(args []string, stdout, stderr io.Writer) int {
 // doMailThread shows all messages in a thread.
 func doMailThread(mp mail.Provider, args []string, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
-		fmt.Fprintln(stderr, "gc mail thread: missing thread ID") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: missing thread ID\n", cmdName("mail thread")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	threadID := args[0]

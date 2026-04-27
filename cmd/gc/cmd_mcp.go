@@ -29,7 +29,7 @@ the agent has a single deterministic projection target from config, or
 			if len(args) == 0 {
 				return cmd.Help()
 			}
-			fmt.Fprintf(stderr, "gc mcp: unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: unknown subcommand %q\n", cmdName("mcp"), args[0]) //nolint:errcheck // best-effort stderr
 			return errExit
 		},
 	}
@@ -50,10 +50,10 @@ func newMcpListCmd(stdout, stderr io.Writer) *cobra.Command {
 			sessionID = strings.TrimSpace(sessionID)
 			switch {
 			case agentName != "" && sessionID != "":
-				fmt.Fprintln(stderr, "gc mcp list: --agent and --session are mutually exclusive") //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: --agent and --session are mutually exclusive\n", cmdName("mcp list")) //nolint:errcheck // best-effort stderr
 				return errExit
 			case agentName == "" && sessionID == "":
-				fmt.Fprintln(stderr, "gc mcp list: projected MCP is target-specific; pass --agent or --session") //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: projected MCP is target-specific; pass --agent or --session\n", cmdName("mcp list")) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 
@@ -82,13 +82,13 @@ func newMcpListCmd(stdout, stderr io.Writer) *cobra.Command {
 			} else {
 				agent, ok := resolveAgentIdentity(cfg, agentName, currentRigContext(cfg))
 				if !ok {
-					fmt.Fprintf(stderr, "gc mcp list: unknown agent %q\n", agentName) //nolint:errcheck // best-effort stderr
+					fmt.Fprintf(stderr, "%s: unknown agent %q\n", cmdName("mcp list"), agentName) //nolint:errcheck // best-effort stderr
 					return errExit
 				}
 				template := resolveAgentTemplate(agent.QualifiedName(), cfg)
 				cfgAgent := findAgentByTemplate(cfg, template)
 				if cfgAgent == nil {
-					fmt.Fprintf(stderr, "gc mcp list: unknown agent %q\n", agentName) //nolint:errcheck // best-effort stderr
+					fmt.Fprintf(stderr, "%s: unknown agent %q\n", cmdName("mcp list"), agentName) //nolint:errcheck // best-effort stderr
 					return errExit
 				}
 				view, err = resolveDeterministicAgentMCPProjection(cityPath, cfg, cfgAgent, exec.LookPath)

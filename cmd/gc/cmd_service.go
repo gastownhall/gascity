@@ -26,9 +26,9 @@ func newServiceCmd(stdout, stderr io.Writer) *cobra.Command {
 		Args:  cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				fmt.Fprintln(stderr, "gc service: missing subcommand (list, doctor, restart)") //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: missing subcommand (list, doctor, restart)\n", cmdName("service")) //nolint:errcheck // best-effort stderr
 			} else {
-				fmt.Fprintf(stderr, "gc service: unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: unknown subcommand %q\n", cmdName("service"), args[0]) //nolint:errcheck // best-effort stderr
 			}
 			return errExit
 		},
@@ -127,7 +127,7 @@ func cmdServiceRestart(name string, stdout, stderr io.Writer) int {
 	}
 	client := serviceRestartClient(cityPath, cfg)
 	if client == nil {
-		fmt.Fprintln(stderr, "gc service restart: controller is not running") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: controller is not running\n", cmdName("service restart")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if err := client.RestartService(name); err != nil {
@@ -194,7 +194,7 @@ func doServiceList(cfg *config.City, reader serviceStatusReader, stdout, stderr 
 func doServiceDoctor(cfg *config.City, reader serviceStatusReader, name string, stdout, stderr io.Writer) int {
 	svc, ok := lookupService(cfg, name)
 	if !ok {
-		fmt.Fprintf(stderr, "gc service doctor: service %q not found\n", name) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: service %q not found\n", cmdName("service doctor"), name) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -206,7 +206,7 @@ func doServiceDoctor(cfg *config.City, reader serviceStatusReader, name string, 
 			status = current
 			live = true
 		} else {
-			fmt.Fprintf(stderr, "gc service doctor: warning: %v (showing config view)\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: warning: %v (showing config view)\n", cmdName("service doctor"), err) //nolint:errcheck // best-effort stderr
 		}
 	}
 
@@ -238,7 +238,7 @@ func serviceStatuses(cfg *config.City, reader serviceStatusReader, stderr io.Wri
 		if err == nil {
 			return items, true
 		}
-		fmt.Fprintf(stderr, "gc service list: warning: %v (showing config view)\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: warning: %v (showing config view)\n", cmdName("service list"), err) //nolint:errcheck
 	}
 
 	items := make([]workspacesvc.Status, 0, len(cfg.Services))

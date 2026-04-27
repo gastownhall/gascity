@@ -116,7 +116,7 @@ DTO or SSE envelope.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if afterFlag > 0 && strings.TrimSpace(afterCursor) != "" {
-				fmt.Fprintln(stderr, "gc events: --after and --after-cursor are mutually exclusive") //nolint:errcheck
+				fmt.Fprintf(stderr, "%s: --after and --after-cursor are mutually exclusive\n", cmdName("events")) //nolint:errcheck
 				return errExit
 			}
 			if seqFlag {
@@ -203,7 +203,7 @@ func cmdEventsFollow(apiURLOverride, typeFilter string, payloadMatchArgs []strin
 func cmdEventsWatch(apiURLOverride, typeFilter string, payloadMatchArgs []string, afterSeq uint64, afterCursor, timeoutFlag string, stdout, stderr io.Writer) int {
 	timeout, err := time.ParseDuration(timeoutFlag)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc events: invalid --timeout %q: %v\n", timeoutFlag, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: invalid --timeout %q: %v\n", cmdName("events"), timeoutFlag, err) //nolint:errcheck
 		return 1
 	}
 	pm, err := parsePayloadMatch(payloadMatchArgs)
@@ -660,7 +660,7 @@ func doEventsFollow(scope eventsAPIScope, typeFilter string, payloadMatch map[st
 		}
 		resumeSeq, err = strconv.ParseUint(head, 10, 64)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc events: invalid X-GC-Index %q\n", head) //nolint:errcheck
+			fmt.Fprintf(stderr, "%s: invalid X-GC-Index %q\n", cmdName("events"), head) //nolint:errcheck
 			return 1
 		}
 	} else if !requireStreamingCityEventsReachable(ctx, client, scope, "--follow", stderr) {
@@ -728,7 +728,7 @@ func doEventsWatch(scope eventsAPIScope, typeFilter string, payloadMatch map[str
 		}
 		resumeSeq, err = strconv.ParseUint(head, 10, 64)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc events: invalid X-GC-Index %q\n", head) //nolint:errcheck
+			fmt.Fprintf(stderr, "%s: invalid X-GC-Index %q\n", cmdName("events"), head) //nolint:errcheck
 			return 1
 		}
 	}
@@ -1065,7 +1065,7 @@ func streamCityEventsOnce(ctx context.Context, client *genclient.ClientWithRespo
 			}
 			if errors.Is(err, io.EOF) {
 				if stopAfterMatch {
-					fmt.Fprintln(stderr, "gc events: stream ended before a matching event arrived") //nolint:errcheck
+					fmt.Fprintf(stderr, "%s: stream ended before a matching event arrived\n", cmdName("events")) //nolint:errcheck
 					return 1, lastSeq, false
 				}
 				// Follow mode: reconnect with lastSeq.
@@ -1164,7 +1164,7 @@ func streamSupervisorEventsOnce(ctx context.Context, client *genclient.ClientWit
 			}
 			if errors.Is(err, io.EOF) {
 				if stopAfterMatch {
-					fmt.Fprintln(stderr, "gc events: stream ended before a matching event arrived") //nolint:errcheck
+					fmt.Fprintf(stderr, "%s: stream ended before a matching event arrived\n", cmdName("events")) //nolint:errcheck
 					return 1, lastCursor, false
 				}
 				return 0, lastCursor, true
@@ -1220,14 +1220,14 @@ func printStreamError(resp *http.Response, stderr io.Writer) int {
 	defer resp.Body.Close() //nolint:errcheck
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc events: HTTP %d\n", resp.StatusCode) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: HTTP %d\n", cmdName("events"), resp.StatusCode) //nolint:errcheck
 		return 1
 	}
 	if strings.Contains(resp.Header.Get("Content-Type"), "json") {
 		var problem genclient.ErrorModel
 		if err := json.Unmarshal(body, &problem); err == nil {
 			if problem.Detail != nil && strings.TrimSpace(*problem.Detail) != "" {
-				fmt.Fprintf(stderr, "gc events: %s\n", strings.TrimSpace(*problem.Detail)) //nolint:errcheck
+				fmt.Fprintf(stderr, "%s: %s\n", cmdName("events"), strings.TrimSpace(*problem.Detail)) //nolint:errcheck
 				return 1
 			}
 		}
@@ -1236,7 +1236,7 @@ func printStreamError(resp *http.Response, stderr io.Writer) int {
 	if msg == "" {
 		msg = fmt.Sprintf("HTTP %d", resp.StatusCode)
 	}
-	fmt.Fprintf(stderr, "gc events: %s\n", msg) //nolint:errcheck
+	fmt.Fprintf(stderr, "%s: %s\n", cmdName("events"), msg) //nolint:errcheck
 	return 1
 }
 

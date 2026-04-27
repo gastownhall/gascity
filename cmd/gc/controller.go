@@ -596,7 +596,7 @@ func isConventionDiscoveryDirName(base string) bool {
 func watchConfigTargets(targets []config.WatchTarget, dirty *atomic.Bool, pokeCh chan struct{}, stderr io.Writer) func() {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc start: config watcher: %v (reload on tick only)\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: config watcher: %v (reload on tick only)\n", cmdName("start"), err) //nolint:errcheck // best-effort stderr
 		return func() {}
 	}
 	registrar := newConfigWatchRegistrar(watcher, stderr)

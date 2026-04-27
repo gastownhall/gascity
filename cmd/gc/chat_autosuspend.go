@@ -53,11 +53,11 @@ func autoSuspendChatSessions(store beads.Store, sp runtime.Provider, idleTimeout
 
 		handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, s.ID)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc start: auto-suspend session %s: %v\n", s.ID, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: auto-suspend session %s: %v\n", cmdName("start"), s.ID, err) //nolint:errcheck // best-effort stderr
 			continue
 		}
 		if err := handle.Stop(context.TODO()); err != nil {
-			fmt.Fprintf(stderr, "gc start: auto-suspend session %s: %v\n", s.ID, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: auto-suspend session %s: %v\n", cmdName("start"), s.ID, err) //nolint:errcheck // best-effort stderr
 		} else {
 			fmt.Fprintf(stdout, "Session %s auto-suspended (idle %s).\n", s.ID, formatDuration(now.Sub(s.LastActive))) //nolint:errcheck // best-effort stdout
 		}

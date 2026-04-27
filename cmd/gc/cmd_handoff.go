@@ -316,7 +316,7 @@ func doHandoffRemote(store beads.Store, rec events.Recorder, sp runtime.Provider
 	// Kill target session (reconciler restarts it).
 	running, err := workerSessionTargetRunningWithConfig("", store, sp, nil, sessionName)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc handoff: observing %s: %v\n", targetAddress, err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: observing %s: %v\n", cmdName("handoff"), targetAddress, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if !running {
@@ -324,7 +324,7 @@ func doHandoffRemote(store beads.Store, rec events.Recorder, sp runtime.Provider
 		return 0
 	}
 	if err := workerKillSessionTargetWithConfig("", store, sp, nil, sessionName); err != nil {
-		fmt.Fprintf(stderr, "gc handoff: killing %s: %v\n", targetAddress, err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: killing %s: %v\n", cmdName("handoff"), targetAddress, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	rec.Record(events.Event{

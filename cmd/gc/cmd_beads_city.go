@@ -42,9 +42,9 @@ city to an external Dolt endpoint and rewrite inherited rig mirrors.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				fmt.Fprintln(stderr, "gc beads city: missing subcommand (use-managed, use-external)") //nolint:errcheck
+				fmt.Fprintf(stderr, "%s: missing subcommand (use-managed, use-external)\n", cmdName("beads city")) //nolint:errcheck
 			} else {
-				fmt.Fprintf(stderr, "gc beads city: unknown subcommand %q\n", args[0]) //nolint:errcheck
+				fmt.Fprintf(stderr, "%s: unknown subcommand %q\n", cmdName("beads city"), args[0]) //nolint:errcheck
 			}
 			return errExit
 		},

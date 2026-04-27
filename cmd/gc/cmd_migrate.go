@@ -33,13 +33,13 @@ assets into their V2 locations.`,
 func doImportMigrate(dryRun bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc import migrate: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: %v\n", cmdName("import migrate"), err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	report, err := migrate.Apply(cityPath, migrate.Options{DryRun: dryRun})
 	if err != nil {
-		fmt.Fprintf(stderr, "gc import migrate: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: %v\n", cmdName("import migrate"), err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 

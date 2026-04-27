@@ -32,9 +32,9 @@ tick and dispatches work when a trigger opens.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				fmt.Fprintln(stderr, "gc order: missing subcommand (list, show, run, check, history)") //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: missing subcommand (list, show, run, check, history)\n", cmdName("order")) //nolint:errcheck // best-effort stderr
 			} else {
-				fmt.Fprintf(stderr, "gc order: unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: unknown subcommand %q\n", cmdName("order"), args[0]) //nolint:errcheck // best-effort stderr
 			}
 			return errExit
 		},
@@ -366,7 +366,7 @@ func cmdOrderShow(name, rig string, stdout, stderr io.Writer) int {
 func doOrderShow(aa []orders.Order, name, rig string, stdout, stderr io.Writer) int {
 	a, ok := findOrder(aa, name, rig)
 	if !ok {
-		fmt.Fprintf(stderr, "gc order show: order %q not found\n", name) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: order %q not found\n", cmdName("order show"), name) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -412,7 +412,7 @@ func cmdOrderRun(name, rig string, stdout, stderr io.Writer) int {
 	}
 	a, ok := findOrder(aa, name, rig)
 	if !ok {
-		fmt.Fprintf(stderr, "gc order run: order %q not found\n", name) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: order %q not found\n", cmdName("order run"), name) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if a.IsExec() {
@@ -437,7 +437,7 @@ func cmdOrderRun(name, rig string, stdout, stderr io.Writer) int {
 func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store, ep events.Provider, stdout, stderr io.Writer) int {
 	a, ok := findOrder(aa, name, rig)
 	if !ok {
-		fmt.Fprintf(stderr, "gc order run: order %q not found\n", name) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: order %q not found\n", cmdName("order run"), name) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -669,7 +669,7 @@ func doOrderCheckWithStoresResolver(aa []orders.Order, now time.Time, ep events.
 		if a.Trigger == "event" {
 			cursor, err := bdCursorAcrossStores(a.ScopedName(), stores...)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc order check: reading event cursor for %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: reading event cursor for %s: %v\n", cmdName("order check"), a.ScopedName(), err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
 			cursorFn = func(string) uint64 {
@@ -678,7 +678,7 @@ func doOrderCheckWithStoresResolver(aa []orders.Order, now time.Time, ep events.
 		}
 		result := orders.CheckTrigger(a, now, lastRunFn, ep, cursorFn)
 		if lastRunErr != nil {
-			fmt.Fprintf(stderr, "gc order check: reading last run for %s: %v\n", a.ScopedName(), lastRunErr) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: reading last run for %s: %v\n", cmdName("order check"), a.ScopedName(), lastRunErr) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		due := "no"

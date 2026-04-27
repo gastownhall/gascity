@@ -80,7 +80,7 @@ func warnExternalBdOverrideDrift(stderr io.Writer, cityPath string, target execS
 	if len(drift) == 0 {
 		return
 	}
-	_, _ = fmt.Fprintf(stderr, "gc bd: warning: ignoring ambient Dolt host/port override for external target: %s\n", strings.Join(drift, ", "))
+	_, _ = fmt.Fprintf(stderr, "%s: warning: ignoring ambient Dolt host/port override for external target: %s\n", cmdName("bd"), strings.Join(drift, ", "))
 }
 
 func doBd(args []string, stdout, stderr io.Writer) int {
@@ -109,7 +109,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if !providerUsesBdStoreContract(rawBeadsProviderForScope(target.ScopeRoot, cityPath)) {
-		fmt.Fprintln(stderr, "gc bd: only supported for bd-backed beads providers") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: only supported for bd-backed beads providers\n", cmdName("bd")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -117,7 +117,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 
 	bdPath, err := exec.LookPath("bd")
 	if err != nil {
-		fmt.Fprintln(stderr, "gc bd: bd not found in PATH") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: bd not found in PATH\n", cmdName("bd")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 

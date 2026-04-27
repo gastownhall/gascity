@@ -70,11 +70,11 @@ func doSupervisorRun(stdout, stderr io.Writer) int {
 
 func doSupervisorStart(stdout, stderr io.Writer) int {
 	if msg, blocked := platformSupervisorHomeOverrideError(); blocked {
-		fmt.Fprintf(stderr, "gc supervisor start: %s\n", msg) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: %s\n", cmdName("supervisor start"), msg) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if pid := supervisorAlive(); pid != 0 {
-		fmt.Fprintf(stderr, "gc supervisor start: supervisor already running (PID %d)\n", pid) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: supervisor already running (PID %d)\n", cmdName("supervisor start"), pid) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -124,13 +124,13 @@ func doSupervisorStart(stdout, stderr io.Writer) int {
 		time.Sleep(supervisorReadyPollInterval)
 	}
 
-	fmt.Fprintf(stderr, "gc supervisor start: supervisor did not become ready; see %s\n", logPath) //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, "%s: supervisor did not become ready; see %s\n", cmdName("supervisor start"), logPath) //nolint:errcheck // best-effort stderr
 	return 1
 }
 
 func ensureSupervisorRunning(stdout, stderr io.Writer) int {
 	if msg, blocked := platformSupervisorHomeOverrideError(); blocked {
-		fmt.Fprintf(stderr, "gc supervisor start: %s\n", msg) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: %s\n", cmdName("supervisor start"), msg) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	// Always regenerate the service file so upgrades pick up template
@@ -237,7 +237,7 @@ Shows recent log output from background and service-managed supervisor runs.`,
 func doSupervisorLogs(numLines int, follow bool, stdout, stderr io.Writer) int {
 	logPath := supervisorLogPath()
 	if _, err := os.Stat(logPath); os.IsNotExist(err) {
-		fmt.Fprintf(stderr, "gc supervisor logs: log file not found: %s\n", logPath) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: log file not found: %s\n", cmdName("supervisor logs"), logPath) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -275,7 +275,7 @@ starts on login.`,
 
 func doSupervisorInstall(stdout, stderr io.Writer) int {
 	if msg, blocked := platformSupervisorHomeOverrideError(); blocked {
-		fmt.Fprintf(stderr, "gc supervisor install: %s\n", msg) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: %s\n", cmdName("supervisor install"), msg) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	data, err := buildSupervisorServiceData()
@@ -290,7 +290,7 @@ func doSupervisorInstall(stdout, stderr io.Writer) int {
 	case "linux":
 		return installSupervisorSystemd(data, stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "gc supervisor install: not supported on %s\n", goruntime.GOOS) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: not supported on %s\n", cmdName("supervisor install"), goruntime.GOOS) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 }
@@ -323,7 +323,7 @@ func doSupervisorUninstall(stdout, stderr io.Writer) int {
 	case "linux":
 		return uninstallSupervisorSystemd(data, stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "gc supervisor uninstall: not supported on %s\n", goruntime.GOOS) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: not supported on %s\n", cmdName("supervisor uninstall"), goruntime.GOOS) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 }
@@ -977,9 +977,9 @@ func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Wri
 				rollbackErr = rollbackNewSupervisorSystemdInstall(path, service, false)
 			}
 			if rollbackErr != nil {
-				fmt.Fprintf(stderr, "gc supervisor install: rollback after systemctl %s failure: %v\n", strings.Join(args, " "), rollbackErr) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: rollback after systemctl %s failure: %v\n", cmdName("supervisor install"), strings.Join(args, " "), rollbackErr) //nolint:errcheck // best-effort stderr
 			}
-			fmt.Fprintf(stderr, "gc supervisor install: systemctl %s: %v\n", strings.Join(args, " "), err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: systemctl %s: %v\n", cmdName("supervisor install"), strings.Join(args, " "), err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	}
@@ -998,9 +998,9 @@ func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Wri
 				rollbackErr = rollbackNewSupervisorSystemdInstall(path, service, legacyPresent)
 			}
 			if rollbackErr != nil {
-				fmt.Fprintf(stderr, "gc supervisor install: rollback after systemctl %s failure: %v\n", strings.Join(args, " "), rollbackErr) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: rollback after systemctl %s failure: %v\n", cmdName("supervisor install"), strings.Join(args, " "), rollbackErr) //nolint:errcheck // best-effort stderr
 			}
-			fmt.Fprintf(stderr, "gc supervisor install: systemctl %s: %v\n", strings.Join(args, " "), err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: systemctl %s: %v\n", cmdName("supervisor install"), strings.Join(args, " "), err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	} else if !supervisorSystemctlActive(service) {
@@ -1013,9 +1013,9 @@ func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Wri
 				rollbackErr = rollbackNewSupervisorSystemdInstall(path, service, legacyPresent)
 			}
 			if rollbackErr != nil {
-				fmt.Fprintf(stderr, "gc supervisor install: rollback after systemctl %s failure: %v\n", strings.Join(args, " "), rollbackErr) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: rollback after systemctl %s failure: %v\n", cmdName("supervisor install"), strings.Join(args, " "), rollbackErr) //nolint:errcheck // best-effort stderr
 			}
-			fmt.Fprintf(stderr, "gc supervisor install: systemctl %s: %v\n", strings.Join(args, " "), err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: systemctl %s: %v\n", cmdName("supervisor install"), strings.Join(args, " "), err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	}

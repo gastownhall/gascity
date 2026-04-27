@@ -105,11 +105,11 @@ func doRigSetEndpoint(fs fsys.FS, cityPath, rigName string, opts rigEndpointOpti
 		// syncRigManagedPortArtifact, etc.). Empty rig.Path would produce
 		// relative `.beads/...` writes under the current working directory
 		// instead of erroring cleanly.
-		fmt.Fprintf(stderr, "gc rig set-endpoint: rig %q is declared but has no path binding — run `gc rig add <dir> --name %s` to bind it before setting its endpoint\n", rig.Name, rig.Name) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: rig %q is declared but has no path binding — run `gc rig add <dir> --name %s` to bind it before setting its endpoint\n", cmdName("rig set-endpoint"), rig.Name, rig.Name) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if !scopeUsesManagedBdStoreContract(cityPath, rig.Path) {
-		fmt.Fprintln(stderr, "gc rig set-endpoint: only supported for bd-backed beads providers") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: only supported for bd-backed beads providers\n", cmdName("rig set-endpoint")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -141,7 +141,7 @@ func doRigSetEndpoint(fs fsys.FS, cityPath, rigName string, opts rigEndpointOpti
 	if opts.External && !opts.AdoptUnverified {
 		if err := verifyRigExternalEndpoint(targetState, rig.Path, rig.Path); err != nil {
 			cmdErr(stderr, "rig set-endpoint: validate external endpoint", err)
-			fmt.Fprintf(stderr, "gc rig set-endpoint: rerun with --adopt-unverified to record this endpoint without validation\n") //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: rerun with --adopt-unverified to record this endpoint without validation\n", cmdName("rig set-endpoint")) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		targetState.EndpointStatus = contract.EndpointStatusVerified
@@ -616,10 +616,10 @@ func snapshotOptionalFile(fs fsys.FS, path string) (fileSnapshot, error) {
 
 func writeRigEndpointRollbackError(fs fsys.FS, stderr io.Writer, snapshots []fileSnapshot, action string, cause error) {
 	if restoreErr := restoreSnapshots(fs, snapshots); restoreErr != nil {
-		fmt.Fprintf(stderr, "gc rig set-endpoint: %s: %v (rollback failed: %v)\n", action, cause, restoreErr) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: %s: %v (rollback failed: %v)\n", cmdName("rig set-endpoint"), action, cause, restoreErr) //nolint:errcheck // best-effort stderr
 		return
 	}
-	fmt.Fprintf(stderr, "gc rig set-endpoint: %s: %v\n", action, cause) //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, "%s: %s: %v\n", cmdName("rig set-endpoint"), action, cause) //nolint:errcheck // best-effort stderr
 }
 
 func restoreSnapshots(fs fsys.FS, snapshots []fileSnapshot) error {

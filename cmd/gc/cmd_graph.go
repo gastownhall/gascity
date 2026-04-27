@@ -115,7 +115,7 @@ func isBlockingDep(depType string) bool {
 // doGraph resolves beads and their dependencies, then prints the graph.
 func doGraph(store beads.Store, args []string, opts graphOpts, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
-		fmt.Fprintln(stderr, "gc graph: missing bead IDs") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: missing bead IDs\n", cmdName("graph")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -141,7 +141,7 @@ func doGraph(store beads.Store, args []string, opts graphOpts, stdout, stderr io
 	for _, b := range resolved {
 		deps, err := store.DepList(b.ID, "down")
 		if err != nil {
-			fmt.Fprintf(stderr, "gc graph: listing deps for %s: %v\n", b.ID, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: listing deps for %s: %v\n", cmdName("graph"), b.ID, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		var blockedBy []string
@@ -198,7 +198,7 @@ func resolveGraphInput(store beads.Store, args []string, stderr io.Writer) ([]be
 			return nil, err
 		}
 		if b.Type == "epic" {
-			fmt.Fprintf(stderr, "gc graph: epic %s is treated as an ordinary bead; convoy expansion is first-class\n", b.ID) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: epic %s is treated as an ordinary bead; convoy expansion is first-class\n", cmdName("graph"), b.ID) //nolint:errcheck // best-effort stderr
 		}
 		if beads.IsContainerType(b.Type) {
 			children, err := store.List(beads.ListQuery{

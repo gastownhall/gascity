@@ -74,27 +74,27 @@ Examples:
 		RunE: func(_ *cobra.Command, args []string) error {
 			if fromStdin {
 				if len(args) != 1 {
-					fmt.Fprintf(stderr, "gc sling: --stdin requires exactly 1 argument (target)\n") //nolint:errcheck // best-effort stderr
+					fmt.Fprintf(stderr, "%s: --stdin requires exactly 1 argument (target)\n", cmdName("sling")) //nolint:errcheck // best-effort stderr
 					return errExit
 				}
 			} else if len(args) < 1 || len(args) > 2 {
-				fmt.Fprintf(stderr, "gc sling: requires 1 or 2 arguments: [target] <bead-or-formula>\n") //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: requires 1 or 2 arguments: [target] <bead-or-formula>\n", cmdName("sling")) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 			if owned && noConvoy {
-				fmt.Fprintf(stderr, "gc sling: --owned requires a convoy (cannot use with --no-convoy)\n") //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: --owned requires a convoy (cannot use with --no-convoy)\n", cmdName("sling")) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 			if merge != "" && merge != "direct" && merge != "mr" && merge != "local" {
-				fmt.Fprintf(stderr, "gc sling: --merge must be direct, mr, or local\n") //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: --merge must be direct, mr, or local\n", cmdName("sling")) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 			if (strings.TrimSpace(scopeKind) == "") != (strings.TrimSpace(scopeRef) == "") {
-				fmt.Fprintf(stderr, "gc sling: --scope-kind and --scope-ref must be provided together\n") //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: --scope-kind and --scope-ref must be provided together\n", cmdName("sling")) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 			if scopeKind != "" && scopeKind != "city" && scopeKind != "rig" {
-				fmt.Fprintf(stderr, "gc sling: --scope-kind must be city or rig\n") //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: --scope-kind must be city or rig\n", cmdName("sling")) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 			code := cmdSling(args, formula, nudge, force, title, vars, merge, noConvoy, owned, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, stdout, stderr)
@@ -173,7 +173,7 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 		}
 		content := strings.TrimRight(string(data), "\n")
 		if content == "" {
-			fmt.Fprintf(stderr, "gc sling: --stdin: no input received\n") //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: --stdin: no input received\n", cmdName("sling")) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		lines := strings.SplitN(content, "\n", 2)
@@ -209,25 +209,25 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 		// 1-arg: bead ID only, resolve target from rig's default_sling_target.
 		beadOrFormula = args[0]
 		if isFormula {
-			fmt.Fprintf(stderr, "gc sling: --formula requires explicit target\n") //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: --formula requires explicit target\n", cmdName("sling")) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		if !canInferSlingDefaultTargetFromBead(cfg, beadOrFormula) {
-			fmt.Fprintf(stderr, "gc sling: inline text requires explicit target\n  usage: gc sling <target> %q\n", beadOrFormula) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: inline text requires explicit target\n  usage: gc sling <target> %q\n", cmdName("sling"), beadOrFormula) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		bp := sling.BeadPrefix(beadOrFormula)
 		if bp == "" {
-			fmt.Fprintf(stderr, "gc sling: cannot derive rig from bead %q (no prefix)\n", beadOrFormula) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: cannot derive rig from bead %q (no prefix)\n", cmdName("sling"), beadOrFormula) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		rig, found := findRigByPrefix(cfg, bp)
 		if !found {
-			fmt.Fprintf(stderr, "gc sling: no rig with prefix %q for bead %s\n", bp, beadOrFormula) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: no rig with prefix %q for bead %s\n", cmdName("sling"), bp, beadOrFormula) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		if rig.DefaultSlingTarget == "" {
-			fmt.Fprintf(stderr, "gc sling: rig %q has no default_sling_target\n", rig.Name) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: rig %q has no default_sling_target\n", cmdName("sling"), rig.Name) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		target = rig.DefaultSlingTarget
@@ -518,7 +518,7 @@ func printSlingWarnings(result sling.SlingResult, stderr io.Writer) {
 		fmt.Fprintf(stderr, "Auto-burned stale molecule %s\n", id) //nolint:errcheck
 	}
 	for _, e := range result.MetadataErrors {
-		fmt.Fprintf(stderr, "gc sling: %s\n", e) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: %s\n", cmdName("sling"), e) //nolint:errcheck
 	}
 }
 
@@ -578,7 +578,7 @@ func printBatchSlingResult(result sling.SlingResult, stdout, stderr io.Writer) {
 		fmt.Fprintf(stderr, "Auto-burned stale molecule %s\n", id) //nolint:errcheck
 	}
 	for _, e := range result.MetadataErrors {
-		fmt.Fprintf(stderr, "gc sling: %s\n", e) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: %s\n", cmdName("sling"), e) //nolint:errcheck
 	}
 
 	if result.DryRun {
@@ -1314,7 +1314,7 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 			if err == nil && running {
 				member, ok := resolveAgentIdentity(cfg, qn, currentRigContext(cfg))
 				if !ok {
-					fmt.Fprintf(stderr, "gc sling: agent %q not found in config\n", qn) //nolint:errcheck // best-effort
+					fmt.Fprintf(stderr, "%s: agent %q not found in config\n", cmdName("sling"), qn) //nolint:errcheck // best-effort
 					return
 				}
 				target := buildSlingNudgeTarget(member, cityName, cityPath, cfg, store, sn)
@@ -1493,7 +1493,7 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 		if opts.OnFormula != "" {
 			// Read-only check: does the bead already have an attached molecule?
 			if label, id := sling.FindBlockingMolecule(querier, opts.BeadOrFormula, deps.Store); label != "" {
-				fmt.Fprintf(stderr, "gc sling: bead %s already has attached %s %s\n", opts.BeadOrFormula, label, id) //nolint:errcheck
+				fmt.Fprintf(stderr, "%s: bead %s already has attached %s %s\n", cmdName("sling"), opts.BeadOrFormula, label, id) //nolint:errcheck
 				return 1
 			}
 			w("Attach formula:")
@@ -1511,7 +1511,7 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 			w("")
 		} else if !opts.NoFormula && a.EffectiveDefaultSlingFormula() != "" {
 			if label, id := sling.FindBlockingMolecule(querier, opts.BeadOrFormula, deps.Store); label != "" {
-				fmt.Fprintf(stderr, "gc sling: bead %s already has attached %s %s\n", opts.BeadOrFormula, label, id) //nolint:errcheck
+				fmt.Fprintf(stderr, "%s: bead %s already has attached %s %s\n", cmdName("sling"), opts.BeadOrFormula, label, id) //nolint:errcheck
 				return 1
 			}
 			w("Default formula:")

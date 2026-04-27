@@ -92,7 +92,7 @@ func cmdRigRestart(args []string, stdout, stderr io.Writer) int {
 		rigName = args[0]
 	}
 	if rigName == "" {
-		fmt.Fprintln(stderr, "gc rig restart: missing rig name") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: missing rig name\n", cmdName("rig restart")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	cityPath := ctx.CityPath
@@ -149,7 +149,7 @@ func doRigRestart(
 			sn := lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), sessionTemplate)
 			running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, sn)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc rig restart: observing %s: %v\n", sn, err) //nolint:errcheck
+				fmt.Fprintf(stderr, "%s: observing %s: %v\n", cmdName("rig restart"), sn, err) //nolint:errcheck
 				return 1
 			}
 			if running {
@@ -166,7 +166,7 @@ func doRigRestart(
 			for _, ref := range resolvePoolSessionRefs(store, a.Name, a.Dir, sp0, &a, cityName, sessionTemplate, sp, stderr) {
 				running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, ref.sessionName)
 				if err != nil {
-					fmt.Fprintf(stderr, "gc rig restart: observing %s: %v\n", ref.sessionName, err) //nolint:errcheck
+					fmt.Fprintf(stderr, "%s: observing %s: %v\n", cmdName("rig restart"), ref.sessionName, err) //nolint:errcheck
 					return 1
 				}
 				if !running {

@@ -73,7 +73,7 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 		if inject {
 			return 0 // --inject always exits 0
 		}
-		fmt.Fprintln(stderr, "gc hook: agent not specified (set $GC_AGENT or pass as argument)") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: agent not specified (set $GC_AGENT or pass as argument)\n", cmdName("hook")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -103,7 +103,7 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 		if inject {
 			return 0
 		}
-		fmt.Fprintln(stderr, "gc hook: city is suspended") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: city is suspended\n", cmdName("hook")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -112,7 +112,7 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 		if inject {
 			return 0
 		}
-		fmt.Fprintf(stderr, "gc hook: agent %q not found in config\n", agentName) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: agent %q not found in config\n", cmdName("hook"), agentName) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -120,7 +120,7 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 		if inject {
 			return 0
 		}
-		fmt.Fprintf(stderr, "gc hook: agent %q is suspended\n", agentName) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: agent %q is suspended\n", cmdName("hook"), agentName) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 

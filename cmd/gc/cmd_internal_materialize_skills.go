@@ -47,11 +47,11 @@ func newInternalMaterializeSkillsCmd(stdout, stderr io.Writer) *cobra.Command {
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if strings.TrimSpace(agentName) == "" {
-				fmt.Fprintln(stderr, "gc internal materialize-skills: --agent is required") //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: --agent is required\n", cmdName("internal materialize-skills")) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 			if strings.TrimSpace(workdir) == "" {
-				fmt.Fprintln(stderr, "gc internal materialize-skills: --workdir is required") //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: --workdir is required\n", cmdName("internal materialize-skills")) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 			cityPath, err := resolveCity()
@@ -66,7 +66,7 @@ func newInternalMaterializeSkillsCmd(stdout, stderr io.Writer) *cobra.Command {
 			}
 			agent, ok := resolveAgentIdentity(cfg, agentName, currentRigContext(cfg))
 			if !ok {
-				fmt.Fprintf(stderr, "gc internal materialize-skills: unknown agent %q\n", agentName) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: unknown agent %q\n", cmdName("internal materialize-skills"), agentName) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 			// Resolve snapshot source: explicit --shared-catalog-snapshot-file
@@ -83,7 +83,7 @@ func newInternalMaterializeSkillsCmd(stdout, stderr io.Writer) *cobra.Command {
 			if explicitSnapshotFile != "" {
 				data, err := os.ReadFile(explicitSnapshotFile)
 				if err != nil {
-					fmt.Fprintf(stderr, "gc internal materialize-skills: reading --shared-catalog-snapshot-file %q: %v (falling back to live catalog)\n", explicitSnapshotFile, err) //nolint:errcheck // best-effort stderr
+					fmt.Fprintf(stderr, "%s: reading --shared-catalog-snapshot-file %q: %v (falling back to live catalog)\n", cmdName("internal materialize-skills"), explicitSnapshotFile, err) //nolint:errcheck // best-effort stderr
 				} else {
 					sharedCatalogSnapshot = string(data)
 				}
@@ -100,7 +100,7 @@ func newInternalMaterializeSkillsCmd(stdout, stderr io.Writer) *cobra.Command {
 			if strings.TrimSpace(sharedCatalogSnapshot) != "" {
 				cat, err := decodeSharedCatalogSnapshot(sharedCatalogSnapshot)
 				if err != nil {
-					fmt.Fprintf(stderr, "gc internal materialize-skills: decoding shared catalog snapshot: %v (falling back to live catalog)\n", err) //nolint:errcheck // best-effort stderr
+					fmt.Fprintf(stderr, "%s: decoding shared catalog snapshot: %v (falling back to live catalog)\n", cmdName("internal materialize-skills"), err) //nolint:errcheck // best-effort stderr
 				} else {
 					sharedCatalog = &cat
 				}
@@ -141,7 +141,7 @@ func decodeSharedCatalogSnapshot(encoded string) (materialize.CityCatalog, error
 
 func materializeSkillsIntoWorkdir(cfg *config.City, agent *config.Agent, workdir string, sharedCatalog *materialize.CityCatalog, stdout, stderr io.Writer) error {
 	if cfg == nil || agent == nil {
-		fmt.Fprintln(stderr, "gc internal materialize-skills: missing city config or agent") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: missing city config or agent\n", cmdName("internal materialize-skills")) //nolint:errcheck // best-effort stderr
 		return errExit
 	}
 
@@ -163,7 +163,7 @@ func materializeSkillsIntoWorkdir(cfg *config.City, agent *config.Agent, workdir
 		rigName := agentRigScopeName(agent, cfg.Rigs)
 		cat, err := loadSharedSkillCatalog(cfg, rigName)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc internal materialize-skills: shared skill catalog unavailable for %q: %v\n", agent.QualifiedName(), err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: shared skill catalog unavailable for %q: %v\n", cmdName("internal materialize-skills"), agent.QualifiedName(), err) //nolint:errcheck // best-effort stderr
 			cat.Entries = nil
 			cat.Shadowed = nil
 		}
@@ -184,7 +184,7 @@ func materializeSkillsIntoWorkdir(cfg *config.City, agent *config.Agent, workdir
 
 	absWorkdir, err := filepath.Abs(workdir)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc internal materialize-skills: resolving workdir %q: %v\n", workdir, err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: resolving workdir %q: %v\n", cmdName("internal materialize-skills"), workdir, err) //nolint:errcheck // best-effort stderr
 		return errExit
 	}
 

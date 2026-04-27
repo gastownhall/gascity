@@ -233,7 +233,7 @@ func logInitProgress(stdout io.Writer, step int, msg string) {
 }
 
 func initAlreadyInitialized(stderr io.Writer) int {
-	fmt.Fprintln(stderr, "gc init: already initialized") //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, "%s: already initialized\n", cmdName("init")) //nolint:errcheck // best-effort stderr
 	return initExitAlreadyInitialized
 }
 
@@ -679,7 +679,7 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 	// Validate the source file parses as a valid city config.
 	data, err := os.ReadFile(tomlSrc)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc init: reading %q: %v\n", tomlSrc, err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: reading %q: %v\n", cmdName("init"), tomlSrc, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	cfg, err := config.Parse(data)
@@ -966,7 +966,7 @@ func writeInitAgentPrompts(fs fsys.FS, cityPath string, cfg *config.City, stderr
 		seen[dst] = true
 		data, err := defaultPrompts.ReadFile(agent.PromptTemplate)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc init: reading embedded %s: %v\n", agent.PromptTemplate, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: reading embedded %s: %v\n", cmdName("init"), agent.PromptTemplate, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		dst = filepath.Join(cityPath, dst)
@@ -1125,7 +1125,7 @@ func doInitFromDir(srcDir, cityPath string, stdout, stderr io.Writer) int {
 func doInitFromDirWithOptionsFS(fs fsys.FS, srcDir, cityPath, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness bool) int {
 	srcToml := filepath.Join(srcDir, "city.toml")
 	if _, err := os.Stat(srcToml); err != nil {
-		fmt.Fprintf(stderr, "gc init --from: source %q has no city.toml\n", srcDir) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: source %q has no city.toml\n", cmdName("init --from"), srcDir) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if cityAlreadyInitializedFS(fs, cityPath) {
@@ -1189,7 +1189,7 @@ func doInitFromDirWithOptionsFS(fs fsys.FS, srcDir, cityPath, nameOverride strin
 	}
 	if loadErr == nil {
 		pruneLegacyConfiguredScripts(cityPath, expandedCfg, func(scope string, err error) {
-			fmt.Fprintf(stderr, "gc init: pruning legacy %s scripts: %v\n", scope, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: pruning legacy %s scripts: %v\n", cmdName("init"), scope, err) //nolint:errcheck // best-effort stderr
 		})
 	}
 

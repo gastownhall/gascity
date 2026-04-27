@@ -21,11 +21,11 @@ func newInternalProjectMCPCmd(stdout, stderr io.Writer) *cobra.Command {
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if strings.TrimSpace(agentName) == "" {
-				fmt.Fprintln(stderr, "gc internal project-mcp: --agent is required") //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: --agent is required\n", cmdName("internal project-mcp")) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 			if strings.TrimSpace(workdir) == "" {
-				fmt.Fprintln(stderr, "gc internal project-mcp: --workdir is required") //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: --workdir is required\n", cmdName("internal project-mcp")) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 
@@ -42,7 +42,7 @@ func newInternalProjectMCPCmd(stdout, stderr io.Writer) *cobra.Command {
 
 			agent, ok := resolveAgentIdentity(cfg, agentName, currentRigContext(cfg))
 			if !ok {
-				fmt.Fprintf(stderr, "gc internal project-mcp: unknown agent %q\n", agentName) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: unknown agent %q\n", cmdName("internal project-mcp"), agentName) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 			if strings.TrimSpace(identity) == "" {
@@ -50,7 +50,7 @@ func newInternalProjectMCPCmd(stdout, stderr io.Writer) *cobra.Command {
 			}
 			absWorkdir, err := filepath.Abs(workdir)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc internal project-mcp: resolving workdir %q: %v\n", workdir, err) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: resolving workdir %q: %v\n", cmdName("internal project-mcp"), workdir, err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 
