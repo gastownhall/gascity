@@ -21,7 +21,7 @@ import (
 func newInternalCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:    "internal",
-		Short:  "Internal gc subcommands (not for direct human use)",
+		Short:  fmt.Sprintf("Internal %s subcommands (not for direct human use)", prog()),
 		Hidden: true,
 	}
 	cmd.AddCommand(newInternalMaterializeSkillsCmd(stdout, stderr))

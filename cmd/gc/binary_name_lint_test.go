@@ -109,6 +109,10 @@ func containsHardcodedGC(line string) bool {
 	if strings.Contains(line, `"gc `) {
 		return true
 	}
+	// Short/Long field with "gc" as binary name mid-string
+	if (strings.Contains(line, "Short:") || strings.Contains(line, "Long:")) && strings.Contains(line, " gc ") {
+		return true
+	}
 	// Strings starting with "gc: (error prefix)
 	if strings.Contains(line, `"gc:`) {
 		return true

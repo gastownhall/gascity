@@ -38,11 +38,11 @@ func newShellInstallCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "install [bash|zsh|fish]",
 		Short: "Install or update shell integration",
-		Long: `Install or update the gc shell completion hook.
+		Long: fmt.Sprintf(`Install or update the %s shell completion hook.
 
 If no shell is specified, the shell is detected from $SHELL.
 The completion script is written to ~/.gc/completions/ and a source line
-is added to your shell RC file.`,
+is added to your shell RC file.`, prog()),
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cmdShellInstall(cmd.Root(), args, stdout, stderr) != 0 {
@@ -57,7 +57,7 @@ func newShellRemoveCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "remove",
 		Short: "Remove shell integration",
-		Long:  `Remove the gc shell completion hook from your shell RC file and delete the completion script.`,
+		Long:  fmt.Sprintf("Remove the %s shell completion hook from your shell RC file and delete the completion script.", prog()),
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if cmdShellRemove(stdout, stderr) != 0 {

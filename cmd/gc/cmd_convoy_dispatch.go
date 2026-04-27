@@ -40,7 +40,7 @@ func convoyDispatchSubcommands(stdout, stderr io.Writer) []*cobra.Command {
 func newWorkflowCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:    "workflow",
-		Short:  "Alias for gc convoy (deprecated)",
+		Short:  fmt.Sprintf("Alias for %s convoy (deprecated)", prog()),
 		Hidden: true,
 	}
 	cmd.AddCommand(convoyDispatchSubcommands(stdout, stderr)...)

@@ -88,10 +88,10 @@ func newVersionCmd(stdout io.Writer) *cobra.Command {
 	var longOutput bool
 	cmd := &cobra.Command{
 		Use:   "version",
-		Short: "Print gc version",
-		Long: `Print the gc version string.
+		Short: fmt.Sprintf("Print %s version", prog()),
+		Long: fmt.Sprintf(`Print the %s version string.
 
-Use --long to include git commit and build date metadata.`,
+Use --long to include git commit and build date metadata.`, prog()),
 		Args: cobra.NoArgs,
 		Run: func(_ *cobra.Command, _ []string) {
 			if longOutput {
