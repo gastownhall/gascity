@@ -72,7 +72,8 @@ func (s *Server) humaHandleOrderCheck(_ context.Context, input *OrderCheckInput)
 
 	index := s.latestIndex()
 	cacheKey := cacheKeyFor("orders-check", input)
-	if !input.Fresh {
+	useResponseCache := !input.Fresh && !hasConditionOrder(aa)
+	if useResponseCache {
 		if body, ok := cachedResponseAs[OrderCheckListBody](s, cacheKey, index); ok {
 			return &OrderCheckListOutput{Body: body}, nil
 		}
@@ -113,10 +114,19 @@ func (s *Server) humaHandleOrderCheck(_ context.Context, input *OrderCheckInput)
 
 	out := &OrderCheckListOutput{}
 	out.Body.Checks = checks
-	if !input.Fresh {
+	if useResponseCache {
 		s.storeResponse(cacheKey, index, out.Body)
 	}
 	return out, nil
+}
+
+func hasConditionOrder(aa []orders.Order) bool {
+	for _, a := range aa {
+		if a.Trigger == "condition" {
+			return true
+		}
+	}
+	return false
 }
 
 func checkOrderTriggerForAPI(a orders.Order, now time.Time, history []orderHistoryStoreBead, infos []workflowStoreInfo, ep events.Provider, fresh bool) orders.TriggerResult {
@@ -125,9 +135,6 @@ func checkOrderTriggerForAPI(a orders.Order, now time.Time, history []orderHisto
 			return time.Time{}, nil
 		}
 		return history[0].bead.CreatedAt, nil
-	}
-	if a.Trigger == "condition" && !fresh {
-		return orders.TriggerResult{Due: false, Reason: "condition: not evaluated in cached API check"}
 	}
 	var cursorFn orders.CursorFunc
 	if a.Trigger == "event" {
@@ -344,10 +351,6 @@ type orderHistoryStoreBead struct {
 	bead     beads.Bead
 }
 
-type cachedListStore interface {
-	CachedList(beads.ListQuery) ([]beads.Bead, bool)
-}
-
 func orderStoreInfosForState(state State, a orders.Order) ([]workflowStoreInfo, error) {
 	cityName := workflowCityScopeRef(state.CityName())
 	infos := make([]workflowStoreInfo, 0, 2)
@@ -421,17 +424,17 @@ func orderHistoryBeadsAcrossStoreInfosCachedFirst(infos []workflowStoreInfo, sco
 			var cacheOK bool
 			rows, cacheOK = cached.CachedList(query)
 			if !cacheOK {
-				continue
+				rows, err = info.store.List(query)
 			}
 		} else {
 			rows, err = info.store.List(query)
-			if err != nil {
-				if i == 0 {
-					return nil, err
-				}
-				log.Printf("api: order history list failed for %s: %v", info.ref, err)
-				continue
+		}
+		if err != nil {
+			if i == 0 {
+				return nil, err
 			}
+			log.Printf("api: order history list failed for %s: %v", info.ref, err)
+			continue
 		}
 		for _, row := range rows {
 			if !beforeTime.IsZero() && !row.CreatedAt.Before(beforeTime) {
