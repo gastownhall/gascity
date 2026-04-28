@@ -315,6 +315,37 @@ type bdIssueDep struct {
 	DependencyType string `json:"dependency_type"`
 }
 
+// PartialResultError indicates that a list-style bd command succeeded for some
+// entries but its output included entries that failed to parse. The successful
+// entries are still returned alongside this error; callers that handle dropped
+// beads defensively (e.g. the cache reconciler verifying via Get) may proceed
+// with the partial result, while callers that require a complete picture
+// should treat this as a hard failure.
+type PartialResultError struct {
+	// Op identifies the bd subcommand that produced the partial result
+	// (e.g. "bd list", "bd ready").
+	Op string
+	// Err wraps the joined per-entry parse errors from parseIssuesTolerant.
+	Err error
+}
+
+// Error reports the operation and underlying parse failures.
+func (e *PartialResultError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("%s: %v", e.Op, e.Err)
+}
+
+// Unwrap returns the joined parse error so errors.Is / errors.As traversal
+// continues into the underlying causes.
+func (e *PartialResultError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
 // parseIssuesTolerant unmarshals a JSON array of bdIssue objects, skipping
 // any entries that fail to parse (e.g. corrupt metadata with non-string values).
 // This prevents a single bad bead from breaking all list operations.
@@ -760,10 +791,12 @@ func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 	}
 	filtered := applyListQuery(result, query)
 	if parseErr != nil {
-		if len(filtered) > 0 {
-			return filtered, nil
-		}
-		return filtered, fmt.Errorf("bd list: %w", parseErr)
+		// Surface partial-parse outcomes so callers can distinguish a complete
+		// list from one that silently dropped entries. Treating a partial list
+		// as authoritative has driven a runaway cache-reconcile loop in the
+		// past (synthesizing bead.closed for beads that were merely dropped
+		// by parseIssuesTolerant).
+		return filtered, &PartialResultError{Op: "bd list", Err: parseErr}
 	}
 	return filtered, nil
 }
@@ -838,10 +871,7 @@ func (s *BdStore) Ready() ([]Bead, error) {
 		result = append(result, bead)
 	}
 	if parseErr != nil {
-		if len(result) > 0 {
-			return result, nil
-		}
-		return result, fmt.Errorf("bd ready: %w", parseErr)
+		return result, &PartialResultError{Op: "bd ready", Err: parseErr}
 	}
 	return result, nil
 }

@@ -612,8 +612,42 @@ func TestBdStoreListReturnsPartialResultsOnCorruptEntries(t *testing.T) {
 	if len(got) != 1 || got[0].ID != "bd-good" {
 		t.Fatalf("ListOpen() = %v, want only bd-good", got)
 	}
-	if err != nil {
-		t.Fatalf("ListOpen() error = %v, want nil with usable partial results", err)
+	var partial *beads.PartialResultError
+	if !errors.As(err, &partial) {
+		t.Fatalf("ListOpen() error = %v, want *beads.PartialResultError so callers can distinguish complete from partial results", err)
+	}
+	if partial.Op != "bd list" {
+		t.Errorf("PartialResultError.Op = %q, want %q", partial.Op, "bd list")
+	}
+	if partial.Err == nil {
+		t.Errorf("PartialResultError.Err is nil; want wrapped parse error")
+	}
+}
+
+func TestBdStoreReadyReturnsPartialResultErrorOnCorruptEntries(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd ready --json --limit 0`: {
+			out: []byte(`[
+				{"id":"bd-good","title":"good","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"},
+				{"id":"bd-bad","title":"bad","status":"open","issue_type":"task","created_at":"not-a-time"}
+			]`),
+		},
+	})
+
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.Ready()
+	if len(got) != 1 || got[0].ID != "bd-good" {
+		t.Fatalf("Ready() = %v, want only bd-good", got)
+	}
+	var partial *beads.PartialResultError
+	if !errors.As(err, &partial) {
+		t.Fatalf("Ready() error = %v, want *beads.PartialResultError", err)
+	}
+	if partial.Op != "bd ready" {
+		t.Errorf("PartialResultError.Op = %q, want %q", partial.Op, "bd ready")
 	}
 }
 
