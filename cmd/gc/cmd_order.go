@@ -486,8 +486,16 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 		return 1
 	}
 
+	var pool string
+	if a.Pool != "" {
+		pool, err = qualifyOrderPool(a, cfg)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
+
 	if a.Pool != "" && cfg != nil {
-		pool := qualifyPool(a.Pool, a.Rig)
 		if err := applyGraphRouting(recipe, nil, pool, nil, "", "", "", "", store, cityName, cityPath, cfg); err != nil {
 			fmt.Fprintf(stderr, "gc order run: routing decoration failed: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
@@ -512,9 +520,7 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 		)
 	}
 	if a.Pool != "" {
-		update.Metadata = map[string]string{
-			"gc.routed_to": qualifyPool(a.Pool, a.Rig),
-		}
+		update.Metadata = map[string]string{"gc.routed_to": pool}
 	}
 	if err := store.Update(rootID, update); err != nil {
 		fmt.Fprintf(stderr, "gc order run: labeling wisp: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -523,7 +529,7 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 
 	fmt.Fprintf(stdout, "Order %q executed: wisp %s", name, rootID) //nolint:errcheck
 	if a.Pool != "" {
-		fmt.Fprintf(stdout, " → gc.routed_to=%s", qualifyPool(a.Pool, a.Rig)) //nolint:errcheck
+		fmt.Fprintf(stdout, " → gc.routed_to=%s", pool) //nolint:errcheck
 	}
 	fmt.Fprintln(stdout) //nolint:errcheck
 	return 0
@@ -574,7 +580,7 @@ func cmdOrderCheck(stdout, stderr io.Writer) int {
 		return epCode
 	}
 	defer ep.Close() //nolint:errcheck // best-effort
-	return doOrderCheckWithStoresResolver(aa, time.Now(), ep, cachedOrderStoresResolver(cityPath, cfg), stdout, stderr)
+	return doOrderCheckWithStoresResolverScoped(cityPath, cfg, aa, time.Now(), ep, cachedOrderStoresResolver(cityPath, cfg), stdout, stderr)
 }
 
 // orderLastRunFn returns a LastRunFunc that queries BdStore for the most
@@ -638,6 +644,10 @@ func doOrderCheck(aa []orders.Order, now time.Time, lastRunFn orders.LastRunFunc
 }
 
 func doOrderCheckWithStoresResolver(aa []orders.Order, now time.Time, ep events.Provider, resolveStores orderStoresResolver, stdout, stderr io.Writer) int {
+	return doOrderCheckWithStoresResolverScoped("", nil, aa, now, ep, resolveStores, stdout, stderr)
+}
+
+func doOrderCheckWithStoresResolverScoped(cityPath string, cfg *config.City, aa []orders.Order, now time.Time, ep events.Provider, resolveStores orderStoresResolver, stdout, stderr io.Writer) int {
 	if len(aa) == 0 {
 		fmt.Fprintln(stdout, "No orders found.") //nolint:errcheck // best-effort stdout
 		return 1
@@ -676,7 +686,12 @@ func doOrderCheckWithStoresResolver(aa []orders.Order, now time.Time, ep events.
 				return cursor
 			}
 		}
-		result := orders.CheckTrigger(a, now, lastRunFn, ep, cursorFn)
+		triggerOpts, err := orderTriggerOptions(cityPath, cfg, a)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		result := orders.CheckTriggerWithOptions(a, now, lastRunFn, ep, cursorFn, triggerOpts)
 		if lastRunErr != nil {
 			fmt.Fprintf(stderr, "gc order check: reading last run for %s: %v\n", a.ScopedName(), lastRunErr) //nolint:errcheck // best-effort stderr
 			return 1

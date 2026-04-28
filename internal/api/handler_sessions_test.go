@@ -42,6 +42,28 @@ func createTestSession(t *testing.T, store beads.Store, sp *runtime.Fake, title 
 	return info
 }
 
+type cachedOnlyListStoreForSessionTest struct {
+	*beads.MemStore
+	blockList bool
+	listCalls int
+}
+
+func (s *cachedOnlyListStoreForSessionTest) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if s.blockList {
+		s.listCalls++
+		return nil, errors.New("backing List should not be used")
+	}
+	return s.MemStore.List(query)
+}
+
+func (s *cachedOnlyListStoreForSessionTest) CachedList(query beads.ListQuery) ([]beads.Bead, bool) {
+	rows, err := s.MemStore.List(query)
+	if err != nil {
+		return nil, false
+	}
+	return rows, true
+}
+
 func writeGeminiHistoryFixtureForAPI(t *testing.T, path, sessionID string, messages ...string) {
 	t.Helper()
 
@@ -404,13 +426,180 @@ func TestHandleSessionListActiveBeadUsesCachedLookup(t *testing.T) {
 	resp := sessionResponse{}
 	srv.enrichSessionResponse(&resp, info, fs.Config(), sessionResponseCapabilityHandle{
 		state: worker.State{Phase: worker.PhaseReady},
-	}, false, false)
+	}, false, false, false)
 
 	if !resp.Running {
 		t.Fatal("Running = false, want true")
 	}
 	if got := resp.ActiveBead; got != work.ID {
 		t.Fatalf("active_bead = %q, want cached %q", got, work.ID)
+	}
+}
+
+func TestHandleSessionListUsesCachedSessionBeadsWhenAvailable(t *testing.T) {
+	fs := newSessionFakeState(t)
+	store := &cachedOnlyListStoreForSessionTest{MemStore: beads.NewMemStore()}
+	fs.cityBeadStore = store
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "My Session")
+	store.blockList = true
+
+	req := httptest.NewRequest("GET", cityURL(fs, "/sessions"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Items []sessionResponse `json:"items"`
+		Total int               `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 1 || len(resp.Items) != 1 || resp.Items[0].ID != info.ID {
+		t.Fatalf("response = %#v, want one session %s", resp, info.ID)
+	}
+	if store.listCalls != 0 {
+		t.Fatalf("backing List calls = %d, want 0", store.listCalls)
+	}
+}
+
+func TestHandleSessionListSkipsWorkdirOnlyCodexTranscriptDiscovery(t *testing.T) {
+	fs := newSessionFakeState(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".codex", "sessions"), 0o755); err != nil {
+		t.Fatalf("MkdirAll default codex sessions: %v", err)
+	}
+	searchBase := t.TempDir()
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{searchBase}
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	workDir := t.TempDir()
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Codex Chat", "codex", workDir, "codex-max", nil, session.ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if info.SessionKey != "" {
+		t.Fatalf("SessionKey = %q, want empty for codex provider without SessionIDFlag", info.SessionKey)
+	}
+
+	codexDir := filepath.Join(searchBase, "2026", "04", "18")
+	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	codexPayload := strings.Join([]string{
+		fmt.Sprintf(`{"type":"session_meta","payload":{"cwd":%q}}`, workDir),
+		`{"type":"assistant","message":{"model":"gpt-5.5","usage":{"input_tokens":1000}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(codexDir, "session.jsonl"), []byte(codexPayload), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", cityURL(fs, "/sessions?template=myrig%2Fworker"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Items []sessionResponse `json:"items"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Items) != 1 || resp.Items[0].ID != info.ID {
+		t.Fatalf("items = %#v, want session %s", resp.Items, info.ID)
+	}
+	if resp.Items[0].Model != "" || resp.Items[0].ContextPct != nil {
+		t.Fatalf("session list used workdir-only Codex transcript discovery: model=%q context=%v", resp.Items[0].Model, resp.Items[0].ContextPct)
+	}
+}
+
+func TestHandleSessionGetAllowsWorkdirOnlyCodexTranscriptDiscovery(t *testing.T) {
+	fs := newSessionFakeState(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".codex", "sessions"), 0o755); err != nil {
+		t.Fatalf("MkdirAll default codex sessions: %v", err)
+	}
+	searchBase := t.TempDir()
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{searchBase}
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	workDir := t.TempDir()
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Codex Chat", "codex", workDir, "codex-max", nil, session.ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	codexDir := filepath.Join(searchBase, "2026", "04", "18")
+	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	codexPayload := strings.Join([]string{
+		fmt.Sprintf(`{"type":"session_meta","payload":{"cwd":%q}}`, workDir),
+		`{"type":"assistant","message":{"model":"gpt-5.5","usage":{"input_tokens":1000}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(codexDir, "session.jsonl"), []byte(codexPayload), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID, nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp sessionResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.ID != info.ID {
+		t.Fatalf("ID = %q, want %q", resp.ID, info.ID)
+	}
+	if resp.Model != "gpt-5.5" {
+		t.Fatalf("model = %q, want gpt-5.5", resp.Model)
+	}
+}
+
+func TestHandleSessionListActiveBeadUsesCachedListWhenAvailable(t *testing.T) {
+	fs := newSessionFakeState(t)
+	store := &cachedOnlyListStoreForSessionTest{MemStore: beads.NewMemStore(), blockList: true}
+	fs.stores["myrig"] = store
+	srv := New(fs)
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "My Session")
+	work, err := store.Create(beads.Bead{Title: "active work"})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+	status := "in_progress"
+	assignee := info.ID
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatalf("Update(work): %v", err)
+	}
+
+	resp := sessionResponse{}
+	srv.enrichSessionResponse(&resp, info, fs.Config(), sessionResponseCapabilityHandle{
+		state: worker.State{Phase: worker.PhaseReady},
+	}, false, false, false)
+
+	if got := resp.ActiveBead; got != work.ID {
+		t.Fatalf("active_bead = %q, want cached %q", got, work.ID)
+	}
+	if store.listCalls != 0 {
+		t.Fatalf("backing List calls = %d, want 0", store.listCalls)
 	}
 }
 
@@ -442,7 +631,7 @@ func TestHandleSessionGetActiveBeadUsesLiveLookup(t *testing.T) {
 	resp := sessionResponse{}
 	srv.enrichSessionResponse(&resp, info, fs.Config(), sessionResponseCapabilityHandle{
 		state: worker.State{Phase: worker.PhaseReady},
-	}, false, true)
+	}, false, true, true)
 
 	if !resp.Running {
 		t.Fatal("Running = false, want true")

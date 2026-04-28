@@ -29,11 +29,7 @@ With --inject: wraps output in <system-reminder> for hook injection, always exit
 		The agent is determined from $GC_AGENT or a positional argument.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			code := cmdHook(args, inject, stdout, stderr)
-			if hookFormat != "" {
-				code = cmdHookWithFormat(args, inject, hookFormat, stdout, stderr)
-			}
-			if code != 0 {
+			if cmdHookWithFormat(args, inject, hookFormat, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -47,8 +43,8 @@ With --inject: wraps output in <system-reminder> for hook injection, always exit
 // cmdHook is the CLI entry point for gc hook. Resolves the agent from
 // $GC_AGENT or a positional argument, loads the city config, and runs
 // the agent's work query.
-func cmdHook(args []string, inject bool, stdout, stderr io.Writer) int {
-	return cmdHookWithFormat(args, inject, "", stdout, stderr)
+func cmdHook(args []string, stdout, stderr io.Writer) int {
+	return cmdHookWithFormat(args, false, "", stdout, stderr)
 }
 
 func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, stderr io.Writer) int {
@@ -248,7 +244,7 @@ func doHookWithFormat(workQuery, dir string, inject bool, hookFormat string, run
 	if inject {
 		if hasWork {
 			content := formatHookInjectReminder(normalized)
-			_ = writeProviderHookContext(stdout, hookFormat, content)
+			_ = writeProviderHookContextForEvent(stdout, hookFormat, "Stop", content)
 		}
 		return 0 // --inject always exits 0
 	}

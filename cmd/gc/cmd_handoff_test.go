@@ -549,14 +549,15 @@ func TestCmdHandoffRemoteDefaultSenderFallsBackToGCAliasWhenSessionIDMissing(t *
 	if err != nil {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
-	if _, err := store.Create(beads.Bead{
+	senderBead, err := store.Create(beads.Bead{
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
 		Metadata: map[string]string{
 			"alias":        "sender",
 			"session_name": "sender-gc-42",
 		},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("Create sender: %v", err)
 	}
 	if _, err := store.Create(beads.Bead{
@@ -602,6 +603,12 @@ func TestCmdHandoffRemoteDefaultSenderFallsBackToGCAliasWhenSessionIDMissing(t *
 	}
 	if msg.From != "sender" {
 		t.Fatalf("message From = %q, want sender", msg.From)
+	}
+	if msg.Metadata["mail.from_session_id"] != senderBead.ID {
+		t.Fatalf("mail.from_session_id = %q, want %q", msg.Metadata["mail.from_session_id"], senderBead.ID)
+	}
+	if msg.Metadata["mail.from_display"] != "sender" {
+		t.Fatalf("mail.from_display = %q, want sender", msg.Metadata["mail.from_display"])
 	}
 	if msg.Assignee != "recipient" {
 		t.Fatalf("message Assignee = %q, want recipient", msg.Assignee)

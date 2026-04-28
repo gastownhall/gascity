@@ -4768,6 +4768,59 @@ max = -1
 	}
 }
 
+func TestDoPrimeFormulaV2GraphWorkerPromptClaimsRoutedWork(t *testing.T) {
+	dir := t.TempDir()
+	if err := materializeBuiltinPrompts(dir); err != nil {
+		t.Fatalf("materializeBuiltinPrompts: %v", err)
+	}
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_DIR", "")
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	tomlContent := `[workspace]
+name = "test-city"
+
+[daemon]
+formula_v2 = true
+
+[[agent]]
+name = "worker"
+dir = "myrig"
+start_command = "echo"
+
+[agent.pool]
+min = 0
+max = -1
+`
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(tomlContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doPrime([]string{"worker"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doPrime = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "gc hook") {
+		t.Fatalf("graph-worker prompt missing gc hook routed-queue lookup:\n%s", out)
+	}
+	if !strings.Contains(out, "bd update <id> --claim") {
+		t.Fatalf("graph-worker prompt missing atomic claim instruction:\n%s", out)
+	}
+	if !strings.Contains(out, "Do not start work with `bd update --status in_progress`") {
+		t.Fatalf("graph-worker prompt missing guard against unassigned in_progress work:\n%s", out)
+	}
+}
+
 func materializeBuiltinPrompts(cityPath string) error {
 	return MaterializeBuiltinPacks(cityPath)
 }

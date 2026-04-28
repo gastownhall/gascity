@@ -52,6 +52,7 @@ type ConditionEnv struct {
 	BeadID               string
 	Iteration            int
 	CityPath             string
+	StorePath            string
 	WorkDir              string
 	WispID               string
 	DocPath              string // from var.doc_path, may be empty
@@ -66,7 +67,8 @@ type ConditionEnv struct {
 
 // Environ returns the environment variable slice for exec.Cmd.
 // Only whitelisted variables: PATH (safe default), HOME, TMPDIR, convergence
-// vars, and GC_INTEGRATION_REAL_BD when present for integration-test bd shims.
+// vars, Dolt/Beads connection env, and GC_INTEGRATION_REAL_BD when present for
+// integration-test bd shims.
 func (ce ConditionEnv) Environ() []string {
 	// Use CityPath as HOME to sandbox gate scripts from the
 	// controller's home directory (which may contain .ssh, .gnupg, etc).
@@ -74,11 +76,15 @@ func (ce ConditionEnv) Environ() []string {
 	if home == "" {
 		home = os.TempDir()
 	}
+	storePath := ce.StorePath
+	if storePath == "" {
+		storePath = ce.CityPath
+	}
 	env := []string{
 		"PATH=" + conditionPATH(),
 		"HOME=" + home,
 		"TMPDIR=" + os.TempDir(),
-		"BEADS_DIR=" + filepath.Join(ce.CityPath, ".beads"),
+		"BEADS_DIR=" + filepath.Join(storePath, ".beads"),
 		"GC_BEAD_ID=" + ce.BeadID,
 		"GC_ITERATION=" + strconv.Itoa(ce.Iteration),
 		"GC_WISP_ID=" + ce.WispID,
@@ -105,8 +111,27 @@ func (ce ConditionEnv) Environ() []string {
 	if ce.WorkDir != "" {
 		env = append(env, "GC_WORK_DIR="+ce.WorkDir)
 	}
+	if ce.StorePath != "" {
+		env = append(env, "GC_STORE_PATH="+ce.StorePath)
+	}
 	if realBD := os.Getenv("GC_INTEGRATION_REAL_BD"); realBD != "" {
 		env = append(env, "GC_INTEGRATION_REAL_BD="+realBD)
+	}
+	for _, key := range []string{
+		"BEADS_DOLT_AUTO_START",
+		"BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_SERVER_USER",
+		"BEADS_DOLT_PASSWORD",
+		"GC_DOLT",
+		"GC_DOLT_HOST",
+		"GC_DOLT_PORT",
+		"GC_DOLT_USER",
+		"GC_DOLT_PASSWORD",
+	} {
+		if value := os.Getenv(key); value != "" {
+			env = append(env, key+"="+value)
+		}
 	}
 
 	return env
@@ -197,6 +222,9 @@ func runOnce(ctx context.Context, scriptPath string, env ConditionEnv, timeout t
 
 	cmd := exec.CommandContext(execCtx, scriptPath)
 	cmd.Dir = env.CityPath
+	if env.StorePath != "" {
+		cmd.Dir = env.StorePath
+	}
 	if env.WorkDir != "" {
 		cmd.Dir = env.WorkDir
 	}

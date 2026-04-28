@@ -38,29 +38,27 @@ func processRetryControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		return ControlResult{}, fmt.Errorf("%s: no attempt found", bead.ID)
 	}
 	if attempt.Status != "closed" {
-		// Invariant violation: control bead should not be ready if attempt is open.
-		return ControlResult{}, fmt.Errorf("%s: latest attempt %s is %s, not closed (invariant violation)", bead.ID, attempt.ID, attempt.Status)
+		return ControlResult{}, ErrControlPending
 	}
 
 	attemptNum, _ := strconv.Atoi(attempt.Metadata["gc.attempt"])
 	result := classifyRetryAttempt(attempt)
-
-	// Record decision in attempt log.
-	if err := appendAttemptLog(store, bead.ID, attemptNum, result.Outcome, result.Reason); err != nil {
+	attemptLog, err := appendAttemptLogValue(bead.Metadata["gc.attempt_log"], attemptNum, result.Outcome, result.Reason)
+	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: recording attempt log: %w", bead.ID, err)
 	}
 
 	switch result.Outcome {
 	case "pass":
+		closeMetadata := map[string]string{
+			"gc.attempt_log": attemptLog,
+			"gc.outcome":     "pass",
+		}
 		if outputJSON := attempt.Metadata["gc.output_json"]; outputJSON != "" {
-			if err := store.SetMetadata(bead.ID, "gc.output_json", outputJSON); err != nil {
-				return ControlResult{}, fmt.Errorf("%s: propagating output: %w", bead.ID, err)
-			}
+			closeMetadata["gc.output_json"] = outputJSON
 		}
-		if err := propagateRetrySubjectMetadata(store, bead.ID, attempt); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: propagating metadata: %w", bead.ID, err)
-		}
-		if err := setOutcomeAndClose(store, bead.ID, "pass"); err != nil {
+		copyNonGCMetadata(closeMetadata, attempt.Metadata)
+		if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing passed: %w", bead.ID, err)
 		}
 		scopeResult, err := reconcileClosedScopeMember(store, bead.ID)
@@ -70,15 +68,14 @@ func processRetryControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		return ControlResult{Processed: true, Action: "pass", Skipped: scopeResult.Skipped}, nil
 
 	case "hard":
-		if err := store.SetMetadataBatch(bead.ID, map[string]string{
+		if err := updateMetadataAndClose(store, bead.ID, map[string]string{
+			"gc.attempt_log":       attemptLog,
+			"gc.outcome":           "fail",
 			"gc.failed_attempt":    strconv.Itoa(attemptNum),
 			"gc.failure_class":     "hard",
 			"gc.failure_reason":    result.Reason,
 			"gc.final_disposition": "hard_fail",
 		}); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: marking hard fail: %w", bead.ID, err)
-		}
-		if err := setOutcomeAndClose(store, bead.ID, "fail"); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing hard-failed: %w", bead.ID, err)
 		}
 		scopeResult, err := reconcileClosedScopeMember(store, bead.ID)
@@ -89,7 +86,7 @@ func processRetryControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 
 	case "transient":
 		if attemptNum >= maxAttempts {
-			exhaustedResult, err := handleRetryExhaustion(store, bead.ID, attemptNum, result.Reason, onExhausted)
+			exhaustedResult, err := handleRetryExhaustion(store, bead.ID, attemptNum, result.Reason, onExhausted, attemptLog)
 			if err != nil {
 				return ControlResult{}, err
 			}
@@ -102,6 +99,9 @@ func processRetryControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		}
 
 		// Spawn next attempt.
+		if err := store.SetMetadata(bead.ID, "gc.attempt_log", attemptLog); err != nil {
+			return ControlResult{}, fmt.Errorf("%s: recording attempt log: %w", bead.ID, err)
+		}
 		nextAttempt := attemptNum + 1
 		if err := spawnNextAttempt(context.Background(), store, bead, nextAttempt, opts); err != nil {
 			// Controller-internal failure → close with hard error.
@@ -139,7 +139,7 @@ func processRalphControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		return ControlResult{}, fmt.Errorf("%s: no iteration found", bead.ID)
 	}
 	if iteration.Status != "closed" {
-		return ControlResult{}, fmt.Errorf("%s: latest iteration %s is %s, not closed (invariant violation)", bead.ID, iteration.ID, iteration.Status)
+		return ControlResult{}, ErrControlPending
 	}
 
 	iterationNum, _ := strconv.Atoi(iteration.Metadata["gc.attempt"])
@@ -164,17 +164,20 @@ func processRalphControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		return ControlResult{}, fmt.Errorf("%s: running check: %w", bead.ID, err)
 	}
 
-	if err := appendAttemptLog(store, bead.ID, iterationNum, checkResult.Outcome, checkResult.Stderr); err != nil {
+	attemptLog, err := appendAttemptLogValue(bead.Metadata["gc.attempt_log"], iterationNum, checkResult.Outcome, checkResult.Stderr)
+	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: recording attempt log: %w", bead.ID, err)
 	}
 
 	if checkResult.Outcome == convergence.GatePass {
-		if outputJSON := iteration.Metadata["gc.output_json"]; outputJSON != "" {
-			if err := store.SetMetadata(bead.ID, "gc.output_json", outputJSON); err != nil {
-				return ControlResult{}, fmt.Errorf("%s: propagating output: %w", bead.ID, err)
-			}
+		closeMetadata := map[string]string{
+			"gc.attempt_log": attemptLog,
+			"gc.outcome":     "pass",
 		}
-		if err := setOutcomeAndClose(store, bead.ID, "pass"); err != nil {
+		if outputJSON := iteration.Metadata["gc.output_json"]; outputJSON != "" {
+			closeMetadata["gc.output_json"] = outputJSON
+		}
+		if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing passed: %w", bead.ID, err)
 		}
 		scopeResult, err := reconcileClosedScopeMember(store, bead.ID)
@@ -185,13 +188,11 @@ func processRalphControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 	}
 
 	if iterationNum >= maxAttempts {
-		if err := store.SetMetadataBatch(bead.ID, map[string]string{
+		if err := updateMetadataAndClose(store, bead.ID, map[string]string{
+			"gc.attempt_log":    attemptLog,
 			"gc.outcome":        "fail",
 			"gc.failed_attempt": strconv.Itoa(iterationNum),
 		}); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: marking exhausted: %w", bead.ID, err)
-		}
-		if err := setOutcomeAndClose(store, bead.ID, "fail"); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing exhausted: %w", bead.ID, err)
 		}
 		scopeResult, err := reconcileClosedScopeMember(store, bead.ID)
@@ -202,6 +203,9 @@ func processRalphControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 	}
 
 	// Spawn next iteration.
+	if err := store.SetMetadata(bead.ID, "gc.attempt_log", attemptLog); err != nil {
+		return ControlResult{}, fmt.Errorf("%s: recording attempt log: %w", bead.ID, err)
+	}
 	nextIteration := iterationNum + 1
 	if err := spawnNextAttempt(context.Background(), store, bead, nextIteration, opts); err != nil {
 		_ = store.SetMetadataBatch(bead.ID, map[string]string{
@@ -218,31 +222,29 @@ func processRalphControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 	return ControlResult{Processed: true, Action: "retry", Created: 1}, nil
 }
 
-func handleRetryExhaustion(store beads.Store, beadID string, attemptNum int, reason, onExhausted string) (ControlResult, error) {
+func handleRetryExhaustion(store beads.Store, beadID string, attemptNum int, reason, onExhausted, attemptLog string) (ControlResult, error) {
 	if onExhausted == "soft_fail" {
-		if err := store.SetMetadataBatch(beadID, map[string]string{
+		if err := updateMetadataAndClose(store, beadID, map[string]string{
+			"gc.attempt_log":       attemptLog,
+			"gc.outcome":           "pass",
 			"gc.failed_attempt":    strconv.Itoa(attemptNum),
 			"gc.failure_class":     "transient",
 			"gc.failure_reason":    reason,
 			"gc.final_disposition": "soft_fail",
 		}); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: marking soft-fail: %w", beadID, err)
-		}
-		if err := setOutcomeAndClose(store, beadID, "pass"); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing soft-failed: %w", beadID, err)
 		}
 		return ControlResult{Processed: true, Action: "soft-fail"}, nil
 	}
 
-	if err := store.SetMetadataBatch(beadID, map[string]string{
+	if err := updateMetadataAndClose(store, beadID, map[string]string{
+		"gc.attempt_log":       attemptLog,
+		"gc.outcome":           "fail",
 		"gc.failed_attempt":    strconv.Itoa(attemptNum),
 		"gc.failure_class":     "transient",
 		"gc.failure_reason":    reason,
 		"gc.final_disposition": "hard_fail",
 	}); err != nil {
-		return ControlResult{}, fmt.Errorf("%s: marking exhausted: %w", beadID, err)
-	}
-	if err := setOutcomeAndClose(store, beadID, "fail"); err != nil {
 		return ControlResult{}, fmt.Errorf("%s: closing exhausted: %w", beadID, err)
 	}
 	return ControlResult{Processed: true, Action: "fail"}, nil
@@ -271,7 +273,7 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 	// Attach bypasses graph compile routing, so spawned attempts need their
 	// execution lane restored manually. Prefer each step's explicit target when
 	// available, and only inherit the parent execution lane as a fallback.
-	executionRoute := control.Metadata["gc.execution_routed_to"]
+	executionRoute := strings.TrimSpace(control.Metadata["gc.execution_routed_to"])
 	routeCfg := loadAttemptRouteConfig(opts.CityPath)
 	for i := range recipe.Steps {
 		if recipe.Steps[i].Metadata["gc.kind"] == "spec" {
@@ -286,6 +288,8 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 		}
 		if target == "" {
 			target = executionRoute
+		} else {
+			target = qualifyAttemptTargetWithSourceRoute(target, executionRoute, routeCfg)
 		}
 		if isAttemptControlKind(recipe.Steps[i].Metadata["gc.kind"]) {
 			applyAttemptControlStepRoute(&recipe.Steps[i], target, routeCfg, store)
@@ -313,6 +317,23 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 		return err
 	}
 	return nil
+}
+
+func qualifyAttemptTargetWithSourceRoute(target, sourceRoute string, cfg *config.City) string {
+	target = strings.TrimSpace(target)
+	if target == "" || strings.Contains(target, "/") || cfg == nil {
+		return target
+	}
+	sourceRoute = strings.TrimSpace(sourceRoute)
+	slash := strings.IndexByte(sourceRoute, '/')
+	if slash <= 0 {
+		return target
+	}
+	candidate := sourceRoute[:slash] + "/" + target
+	if config.FindAgent(cfg, candidate) != nil || config.FindNamedSession(cfg, candidate) != nil {
+		return candidate
+	}
+	return target
 }
 
 // buildAttemptRecipe constructs a minimal formula.Recipe for one attempt
@@ -574,8 +595,13 @@ func applyAttemptStepRoute(step *formula.RecipeStep, target string, cfg *config.
 			step.Assignee = binding.directSessionID
 			return
 		}
-		step.Metadata["gc.routed_to"] = binding.qualifiedName
-		step.Metadata["gc.execution_routed_to"] = binding.qualifiedName
+		if binding.qualifiedName != "" {
+			step.Metadata["gc.routed_to"] = binding.qualifiedName
+			step.Metadata["gc.execution_routed_to"] = binding.qualifiedName
+		} else {
+			delete(step.Metadata, "gc.routed_to")
+			delete(step.Metadata, "gc.execution_routed_to")
+		}
 		step.Labels = removeAttemptPoolLabels(step.Labels)
 		if binding.metadataOnly {
 			step.Assignee = ""
@@ -597,9 +623,11 @@ func applyAttemptControlStepRoute(step *formula.RecipeStep, executionTarget stri
 	if step.Metadata == nil {
 		step.Metadata = make(map[string]string)
 	}
+	resolvedExecutionTarget := strings.TrimSpace(executionTarget)
 	if binding, ok := resolveAttemptRouteBinding(executionTarget, cfg, store); ok {
 		switch {
 		case binding.qualifiedName != "":
+			resolvedExecutionTarget = binding.qualifiedName
 			step.Metadata["gc.execution_routed_to"] = binding.qualifiedName
 		case executionTarget != "":
 			// Direct session delivery still executes via the named/session target,
@@ -615,23 +643,51 @@ func applyAttemptControlStepRoute(step *formula.RecipeStep, executionTarget stri
 	}
 	step.Labels = removeAttemptPoolLabels(step.Labels)
 
-	controlTarget := config.ControlDispatcherAgentName
-	if binding, ok := resolveAttemptRouteBinding(controlTarget, cfg, store); ok {
-		step.Metadata["gc.routed_to"] = controlTarget
-		if binding.directSessionID != "" {
-			step.Assignee = binding.directSessionID
-			return
-		}
-		if binding.metadataOnly {
-			step.Assignee = ""
-			return
-		}
-		step.Assignee = binding.sessionName
+	controlTarget := controlDispatcherTargetForExecutionTarget(resolvedExecutionTarget)
+	if assignee, ok := resolveAttemptControlAssignee(controlTarget, cfg, store); ok {
+		delete(step.Metadata, "gc.routed_to")
+		step.Assignee = assignee
 		return
 	}
 
 	step.Metadata["gc.routed_to"] = controlTarget
 	step.Assignee = ""
+}
+
+func controlDispatcherTargetForExecutionTarget(executionTarget string) string {
+	executionTarget = strings.TrimSpace(executionTarget)
+	if slash := strings.IndexByte(executionTarget, '/'); slash > 0 {
+		return executionTarget[:slash] + "/" + config.ControlDispatcherAgentName
+	}
+	return config.ControlDispatcherAgentName
+}
+
+func resolveAttemptControlAssignee(target string, cfg *config.City, store beads.Store) (string, bool) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", false
+	}
+	if binding, ok := resolveAttemptRouteBinding(target, cfg, store); ok {
+		if binding.directSessionID != "" {
+			return binding.directSessionID, true
+		}
+		if binding.sessionName != "" {
+			return binding.sessionName, true
+		}
+	}
+	if cfg != nil {
+		if named := config.FindNamedSession(cfg, target); named != nil {
+			if spec, ok := session.FindNamedSessionSpec(cfg, cfg.EffectiveCityName(), named.QualifiedName()); ok && spec.SessionName != "" {
+				return spec.SessionName, true
+			}
+		}
+		if agentCfg := config.FindAgent(cfg, target); agentCfg != nil {
+			if sessionName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, agentCfg.QualifiedName()); sessionName != "" {
+				return sessionName, true
+			}
+		}
+	}
+	return "", false
 }
 
 func isAttemptControlKind(kind string) bool {
@@ -656,13 +712,16 @@ func resolveAttemptRouteBinding(target string, cfg *config.City, store beads.Sto
 	}
 	if cfg != nil {
 		if named := config.FindNamedSession(cfg, target); named != nil {
-			if store != nil {
-				if spec, ok := session.FindNamedSessionSpec(cfg, cfg.EffectiveCityName(), named.QualifiedName()); ok {
+			if spec, ok := session.FindNamedSessionSpec(cfg, cfg.EffectiveCityName(), named.QualifiedName()); ok {
+				if store != nil {
 					if candidates, err := store.List(beads.ListQuery{Label: session.LabelSession}); err == nil {
 						if bead, found := session.FindCanonicalNamedSessionBead(candidates, spec); found {
 							return attemptRouteBinding{directSessionID: bead.ID}, true
 						}
 					}
+				}
+				if spec.SessionName != "" {
+					return attemptRouteBinding{sessionName: spec.SessionName}, true
 				}
 			}
 			return attemptRouteBinding{
@@ -937,10 +996,17 @@ func appendAttemptLog(store beads.Store, controlID string, attempt int, outcome,
 	if err != nil {
 		return err
 	}
+	logJSON, err := appendAttemptLogValue(control.Metadata["gc.attempt_log"], attempt, outcome, reason)
+	if err != nil {
+		return err
+	}
+	return store.SetMetadata(controlID, "gc.attempt_log", logJSON)
+}
 
+func appendAttemptLogValue(existing string, attempt int, outcome, reason string) (string, error) {
 	var log []map[string]string
-	if raw := control.Metadata["gc.attempt_log"]; raw != "" {
-		_ = json.Unmarshal([]byte(raw), &log)
+	if existing != "" {
+		_ = json.Unmarshal([]byte(existing), &log)
 	}
 
 	entry := map[string]string{
@@ -967,10 +1033,27 @@ func appendAttemptLog(store beads.Store, controlID string, attempt int, outcome,
 	log = append(log, entry)
 	logJSON, err := json.Marshal(log)
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	return store.SetMetadata(controlID, "gc.attempt_log", string(logJSON))
+	return string(logJSON), nil
+}
+
+func copyNonGCMetadata(dst, src map[string]string) {
+	for key, value := range src {
+		if key == "" || strings.HasPrefix(key, "gc.") {
+			continue
+		}
+		dst[key] = value
+	}
+}
+
+func updateMetadataAndClose(store beads.Store, beadID string, metadata map[string]string) error {
+	status := "closed"
+	return store.Update(beadID, beads.UpdateOpts{
+		Status:   &status,
+		Metadata: metadata,
+	})
 }
 
 // Note: listByWorkflowRoot, setOutcomeAndClose, propagateRetrySubjectMetadata,

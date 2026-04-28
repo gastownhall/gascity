@@ -898,6 +898,9 @@ func gracefulStopAll(
 			if target, ok := targetByName[name]; ok && target.subject != "" {
 				subject = target.subject
 			}
+			if target, ok := targetByName[name]; ok && cityStopSessionMarked(store, target.sessionID) {
+				markCityStopSessionAsAsleep(store, target.sessionID, stderr)
+			}
 			rec.Record(events.Event{
 				Type: events.SessionStopped, Actor: "gc", Subject: subject,
 			})

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -116,6 +117,46 @@ func TestHookInjectFormatsOutput(t *testing.T) {
 	}
 }
 
+func TestHookCommandCodexInjectEmitsSingleStopPayload(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+work_query = "printf '[{\"id\":\"hw-1\",\"title\":\"Fix the bug\"}]'"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+
+	var stdout, stderr bytes.Buffer
+	cmd := newHookCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{"worker", "--inject", "--hook-format", "codex"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("gc hook command failed: %v; stderr=%s", err, stderr.String())
+	}
+
+	var payload struct {
+		Decision string `json:"decision"`
+		Reason   string `json:"reason"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not a single JSON payload: %v\n%s", err, stdout.String())
+	}
+	if got, want := payload.Decision, "block"; got != want {
+		t.Fatalf("decision = %q, want %q", got, want)
+	}
+	if !strings.Contains(payload.Reason, "hw-1") {
+		t.Fatalf("reason = %q, want pending work", payload.Reason)
+	}
+}
+
 func TestHookInjectAlwaysExitsZero(t *testing.T) {
 	// Even on command failure, inject mode exits 0.
 	runner := func(string, string) (string, error) { return "", fmt.Errorf("command failed") }
@@ -213,7 +254,7 @@ max = 5
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdHook(nil, false, &stdout, &stderr)
+	code := cmdHook(nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -292,7 +333,7 @@ dir = "myrig"
 	t.Setenv("BEADS_DIR", cityBeads)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdHook([]string{"worker"}, false, &stdout, &stderr)
+	code := cmdHook([]string{"worker"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -359,7 +400,7 @@ dir = "myrig"
 	t.Setenv("GC_DIR", rigAbs)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdHook([]string{"worker"}, false, &stdout, &stderr)
+	code := cmdHook([]string{"worker"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -416,7 +457,7 @@ work_query = "bd {{.CityName}} {{.Rig}} {{.AgentBase}}"
 	t.Setenv("GC_DIR", rigDir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdHook([]string{"worker"}, false, &stdout, &stderr)
+	code := cmdHook([]string{"worker"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -464,7 +505,7 @@ dir = "workdir"
 	t.Setenv("GC_CITY", cityDir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdHook([]string{"worker"}, false, &stdout, &stderr)
+	code := cmdHook([]string{"worker"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -538,7 +579,7 @@ max = 5
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdHook(nil, false, &stdout, &stderr)
+	code := cmdHook(nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -602,7 +643,7 @@ name = "worker"
 	t.Setenv("GC_CITY", cityDir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdHook([]string{"worker"}, false, &stdout, &stderr)
+	code := cmdHook([]string{"worker"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -662,7 +703,7 @@ dir = "myrig"
 	wantSession := cliSessionName(cityDir, "test-city", wantAgent, "")
 
 	var stdout, stderr bytes.Buffer
-	code := cmdHook([]string{"worker"}, false, &stdout, &stderr)
+	code := cmdHook([]string{"worker"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}

@@ -7,6 +7,7 @@ package hooks
 import (
 	"bytes"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	iofs "io/fs"
@@ -150,6 +151,9 @@ func installOverlayManaged(fs fsys.FS, workDir, provider string) error {
 			return fmt.Errorf("reading %s: %w", name, err)
 		}
 		dst := filepath.Join(workDir, filepath.FromSlash(rel))
+		if provider == "codex" && rel == path.Join(".codex", "hooks.json") {
+			return writeCodexHooksManaged(fs, dst, data)
+		}
 		return writeEmbeddedManaged(fs, dst, data, overlayManagedNeedsUpgrade(provider, rel))
 	})
 }
@@ -342,6 +346,94 @@ func readClaudeSettingsCandidate(fs fsys.FS, path string) (claudeCandidateState,
 		return candidateMissing, nil, nil
 	}
 	return candidateUnreadable, nil, err
+}
+
+func writeCodexHooksManaged(fs fsys.FS, dst string, data []byte) error {
+	if existing, err := fs.ReadFile(dst); err == nil {
+		upgraded, changed, upgradeErr := upgradeCodexHookCommands(existing)
+		if upgradeErr != nil || !changed {
+			return nil
+		}
+		return writeManagedData(fs, dst, upgraded)
+	} else if _, statErr := fs.Stat(dst); statErr == nil {
+		return nil
+	}
+	return writeManagedData(fs, dst, data)
+}
+
+func writeManagedData(fs fsys.FS, dst string, data []byte) error {
+	dir := filepath.Dir(dst)
+	if err := fs.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("creating %s: %w", dir, err)
+	}
+	if err := fs.WriteFile(dst, data, 0o644); err != nil {
+		return fmt.Errorf("writing %s: %w", dst, err)
+	}
+	return nil
+}
+
+func upgradeCodexHookCommands(existing []byte) ([]byte, bool, error) {
+	var root any
+	if err := json.Unmarshal(existing, &root); err != nil {
+		return nil, false, err
+	}
+	if !upgradeCodexHookValue(root) {
+		return nil, false, nil
+	}
+	data, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return nil, false, err
+	}
+	return append(data, '\n'), true, nil
+}
+
+func upgradeCodexHookValue(v any) bool {
+	switch node := v.(type) {
+	case map[string]any:
+		changed := false
+		for key, val := range node {
+			if key == "command" {
+				if command, ok := val.(string); ok {
+					if upgraded, didUpgrade := upgradeCodexHookCommand(command); didUpgrade {
+						node[key] = upgraded
+						changed = true
+					}
+				}
+				continue
+			}
+			if upgradeCodexHookValue(val) {
+				changed = true
+			}
+		}
+		return changed
+	case []any:
+		changed := false
+		for _, elem := range node {
+			if upgradeCodexHookValue(elem) {
+				changed = true
+			}
+		}
+		return changed
+	default:
+		return false
+	}
+}
+
+func upgradeCodexHookCommand(command string) (string, bool) {
+	if strings.Contains(command, `--hook-format codex`) {
+		return "", false
+	}
+	for _, needle := range []string{
+		`gc prime --hook`,
+		`gc nudge drain --inject`,
+		`gc mail check --inject`,
+		`gc hook --inject`,
+	} {
+		if strings.Contains(command, needle) {
+			return strings.Replace(command, needle, needle+` --hook-format codex`, 1), true
+		}
+	}
+	return "", false
 }
 
 func writeManagedFile(fs fsys.FS, dst string, data []byte, policy writeManagedFilePolicy) error {

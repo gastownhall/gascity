@@ -16,6 +16,21 @@ var ErrAlreadyArchived = errors.New("already archived")
 // ErrNotFound is returned when a message ID does not exist.
 var ErrNotFound = errors.New("message not found")
 
+const (
+	// FromSessionIDMetadataKey stores the stable session bead ID used for
+	// reply routing when a message's display sender may later be renamed.
+	FromSessionIDMetadataKey = "mail.from_session_id"
+	// FromDisplayMetadataKey stores the human-readable sender captured when
+	// the message was created.
+	FromDisplayMetadataKey = "mail.from_display"
+	// ToSessionIDMetadataKey stores the stable recipient session bead ID used
+	// for routing replies while keeping the public To field human-readable.
+	ToSessionIDMetadataKey = "mail.to_session_id"
+	// ToDisplayMetadataKey stores the human-readable recipient captured when
+	// the message was created.
+	ToDisplayMetadataKey = "mail.to_display"
+)
+
 // Message represents a mail message between agents or humans.
 type Message struct {
 	ID        string    `json:"id"`

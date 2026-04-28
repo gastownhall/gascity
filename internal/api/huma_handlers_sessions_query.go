@@ -24,19 +24,18 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	}
 	mgr := s.sessionManager(store)
 	cfg := s.state.Config()
-	sp := s.state.SessionProvider()
 
-	sessions, err := mgr.List(input.State, input.Template)
+	all, err := listSessionBeadsForReadModel(store)
 	if err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
+	listResult := mgr.ListFullFromBeads(all, input.State, input.Template)
+	sessions := listResult.Sessions
 
 	// Build bead index for reason enrichment.
 	beadIndex := make(map[string]*beads.Bead)
-	if all, listErr := store.List(beads.ListQuery{Label: session.LabelSession}); listErr == nil {
-		for i := range all {
-			beadIndex[all[i].ID] = &all[i]
-		}
+	for i := range listResult.Beads {
+		beadIndex[listResult.Beads[i].ID] = &listResult.Beads[i]
 	}
 
 	wantPeek := input.Peek
@@ -44,7 +43,7 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	items := make([]sessionResponse, len(sessions))
 	for i, sess := range sessions {
 		items[i] = sessionResponseWithReason(sess, beadIndex[sess.ID], cfg, hasDeferredQueue)
-		s.enrichSessionResponse(&items[i], sess, cfg, sp, wantPeek, false)
+		s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false)
 	}
 
 	// Pagination support.
@@ -109,7 +108,7 @@ func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput)
 	b, _ := store.Get(id)
 	wantPeek := input.Peek
 	resp := sessionResponseWithReason(info, &b, cfg, strings.TrimSpace(s.state.CityPath()) != "")
-	s.enrichSessionResponse(&resp, info, cfg, sp, wantPeek, true)
+	s.enrichSessionResponse(&resp, info, cfg, sp, wantPeek, true, true)
 	return &IndexOutput[sessionResponse]{
 		Index: s.latestIndex(),
 		Body:  resp,

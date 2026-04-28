@@ -547,7 +547,8 @@ type AgentOverride struct {
 	MaxActiveSessions *int `toml:"max_active_sessions,omitempty"`
 	// MinActiveSessions overrides the minimum number of sessions to keep alive.
 	MinActiveSessions *int `toml:"min_active_sessions,omitempty"`
-	// ScaleCheck overrides the shell command whose output determines desired session count.
+	// ScaleCheck overrides the shell command whose output reports new
+	// unassigned session demand for bead-backed reconciliation.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
 	// OptionDefaults adds or overrides provider option defaults for this agent.
 	// Keys are option keys, values are choice values. Merges additively
@@ -1539,12 +1540,15 @@ type Agent struct {
 	// MinActiveSessions is the minimum number of sessions to keep alive.
 	// Agent-level only. Counts against rig/workspace caps. Replaces pool.min.
 	MinActiveSessions *int `toml:"min_active_sessions,omitempty"`
-	// ScaleCheck is a shell command template whose output determines desired
-	// session count. Optional override — when set, its output is the desired
-	// count (still clamped by all cap levels). If it contains Go template
-	// placeholders, gc expands them using the same PathContext fields as
-	// work_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot,
-	// CityName) before running the command.
+	// ScaleCheck is a shell command template whose output reports new
+	// unassigned session demand. In bead-backed reconciliation this is
+	// additive: assigned work is resumed separately, and ScaleCheck reports
+	// only how many new generic sessions to start, still bounded by all cap
+	// levels. Legacy no-store evaluation continues to treat the output as
+	// the desired session count. If it contains Go template placeholders, gc
+	// expands them using the same PathContext fields as work_dir and
+	// session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName)
+	// before running the command.
 	ScaleCheck string `toml:"scale_check,omitempty"`
 	// DrainTimeout is the maximum time to wait for a session to finish its
 	// current work before force-killing it during scale-down. Duration string
@@ -1909,10 +1913,10 @@ func (a *Agent) DrainTimeoutDuration() time.Duration {
 
 // EffectiveScaleCheck returns the scale check command for this agent.
 // If ScaleCheck is set, returns it. Otherwise returns a default that
-// counts actionable work routed to this agent's template, including
+// counts new unassigned work routed to this agent's template, including
 // standalone formula-dispatched molecule beads (which bd ready excludes).
-// Attached formulas contribute demand through the routed source bead in the
-// ready/in_progress tiers instead of through the molecule count.
+// Assigned in-progress work is resumed from session beads, so it must not
+// create additional generic pool demand here.
 func (a *Agent) EffectiveScaleCheck() string {
 	if a.ScaleCheck != "" {
 		return a.ScaleCheck
@@ -1920,11 +1924,9 @@ func (a *Agent) EffectiveScaleCheck() string {
 	template := a.QualifiedName()
 	return `ready=$(bd ready --metadata-field gc.routed_to=` + template +
 		` --unassigned --json 2>/dev/null | jq 'length' 2>/dev/null); ` +
-		`active=$(bd list --metadata-field gc.routed_to=` + template +
-		` --status=in_progress --no-assignee --json 2>/dev/null | jq 'length' 2>/dev/null); ` +
 		`molecules=$(bd list --metadata-field gc.routed_to=` + template +
 		` --status=open --type=molecule --no-assignee --json 2>/dev/null | jq 'length' 2>/dev/null); ` +
-		`echo "$(( ${ready:-0} + ${active:-0} + ${molecules:-0} ))" || echo 0`
+		`echo "$(( ${ready:-0} + ${molecules:-0} ))" || echo 0`
 }
 
 // EffectiveMaxActiveSessions returns the agent's max active sessions.
@@ -2022,10 +2024,26 @@ func (a *Agent) EffectiveOnDeath() string {
 	if a.OnDeath != "" {
 		return a.OnDeath
 	}
+	route := a.QualifiedName()
+	if a.PoolName != "" {
+		route = a.PoolName
+	}
+	// Reset both assignee and status: clearing assignee alone leaves the bead
+	// invisible to every work_query tier (Tier 1 needs assignee match, Tiers
+	// 2/3 only match "ready" status). The next worker re-claims via Tier 3
+	// (gc.routed_to + --unassigned). If routed metadata is missing entirely,
+	// backfill the fallback route so reopened direct-assigned work does not
+	// stay invisible.
 	return `bd list --assignee=` + a.QualifiedName() +
 		` --status=in_progress --json 2>/dev/null | ` +
-		`jq -r '.[].id' 2>/dev/null | ` +
-		`xargs -rI{} bd update {} --assignee "" 2>/dev/null`
+		`jq -r '.[] | [.id, (.metadata["gc.routed_to"] // "")] | @tsv' 2>/dev/null | ` +
+		`while IFS="$(printf '\t')" read -r id current_route; do ` +
+		`[ -z "$id" ] && continue; ` +
+		`if [ -n "$current_route" ]; then ` +
+		`bd update "$id" --assignee "" --status open 2>/dev/null; ` +
+		`else bd update "$id" --assignee "" --status open --set-metadata gc.routed_to=` + route + ` 2>/dev/null; ` +
+		`fi; ` +
+		`done`
 }
 
 // EffectiveOnBoot returns the on_boot command for this agent.
@@ -2040,9 +2058,9 @@ func (a *Agent) EffectiveOnBoot() string {
 		template = a.PoolName
 	}
 	return `bd list --metadata-field gc.routed_to=` + template +
-		` --status=in_progress --json 2>/dev/null | ` +
+		` --status=in_progress --no-assignee --json 2>/dev/null | ` +
 		`jq -r '.[].id' 2>/dev/null | ` +
-		`xargs -rI{} bd update {} --assignee "" 2>/dev/null`
+		`xargs -rI{} bd update {} --status open 2>/dev/null`
 }
 
 // InjectImplicitAgents adds on-demand agents for each configured provider at

@@ -1489,11 +1489,11 @@ func TestDefaultPoolCheckUsesBdReady(t *testing.T) {
 	if !strings.Contains(check, "bd ready") {
 		t.Errorf("EffectiveScaleCheck() = %q, want bd ready for blocker-aware counting", check)
 	}
-	if !strings.Contains(check, "--status=in_progress") {
-		t.Errorf("EffectiveScaleCheck() = %q, want --status=in_progress for active work", check)
-	}
 	if !strings.Contains(check, "--type=molecule") {
 		t.Errorf("EffectiveScaleCheck() = %q, want --type=molecule for formula-dispatched work", check)
+	}
+	if strings.Contains(check, "--status=in_progress") || strings.Contains(check, "${active:-0}") {
+		t.Errorf("EffectiveScaleCheck() = %q, should not count in-progress work as new demand", check)
 	}
 }
 
@@ -1587,21 +1587,21 @@ func TestEffectiveScaleCheckDefaults(t *testing.T) {
 		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(1),
 	}
 	check := a.EffectiveScaleCheck()
-	// Default check uses bd ready (blocker-aware) + in_progress count + molecule count via gc.routed_to.
+	// Default check uses bd ready (blocker-aware) + molecule count via gc.routed_to.
 	if !strings.Contains(check, "gc.routed_to=refinery") {
 		t.Errorf("EffectiveScaleCheck = %q, want gc.routed_to=refinery", check)
 	}
-	if !strings.Contains(check, "--status=in_progress") {
-		t.Errorf("EffectiveScaleCheck = %q, want --status=in_progress for active work", check)
-	}
 	if !strings.Contains(check, "--no-assignee") {
-		t.Errorf("EffectiveScaleCheck = %q, want --no-assignee for active unassigned work", check)
+		t.Errorf("EffectiveScaleCheck = %q, want --no-assignee for new unassigned demand", check)
 	}
 	if !strings.Contains(check, "--type=molecule") {
 		t.Errorf("EffectiveScaleCheck = %q, want --type=molecule for formula-dispatched work", check)
 	}
 	if !strings.Contains(check, "${molecules:-0}") {
 		t.Errorf("EffectiveScaleCheck = %q, want ${molecules:-0} in arithmetic sum", check)
+	}
+	if strings.Contains(check, "--status=in_progress") || strings.Contains(check, "${active:-0}") {
+		t.Errorf("EffectiveScaleCheck = %q, should not count in-progress work as new demand", check)
 	}
 }
 
@@ -1616,14 +1616,14 @@ func TestEffectiveScaleCheckDefaultsQualified(t *testing.T) {
 	if !strings.Contains(check, "gc.routed_to=myproject/polecat") {
 		t.Errorf("EffectiveScaleCheck = %q, want gc.routed_to=myproject/polecat", check)
 	}
-	if !strings.Contains(check, "--status=in_progress") {
-		t.Errorf("EffectiveScaleCheck = %q, want --status=in_progress for active work", check)
-	}
 	if !strings.Contains(check, "--no-assignee") {
-		t.Errorf("EffectiveScaleCheck = %q, want --no-assignee for active unassigned work", check)
+		t.Errorf("EffectiveScaleCheck = %q, want --no-assignee for new unassigned demand", check)
 	}
 	if !strings.Contains(check, "--type=molecule") {
 		t.Errorf("EffectiveScaleCheck = %q, want --type=molecule for formula-dispatched work", check)
+	}
+	if strings.Contains(check, "--status=in_progress") || strings.Contains(check, "${active:-0}") {
+		t.Errorf("EffectiveScaleCheck = %q, should not count in-progress work as new demand", check)
 	}
 }
 
@@ -1637,23 +1637,20 @@ func TestEffectiveScaleCheckMoleculeQuery(t *testing.T) {
 	}
 	check := a.EffectiveScaleCheck()
 
-	// Must contain three separate queries summed together.
+	// Must contain blocker-aware ready demand and standalone molecule demand.
 	if !strings.Contains(check, "bd ready") {
 		t.Errorf("missing bd ready query for blocker-aware task counting")
-	}
-	if !strings.Contains(check, "--status=in_progress") {
-		t.Errorf("missing in_progress query for active work")
 	}
 	if !strings.Contains(check, "--status=open --type=molecule") {
 		t.Errorf("missing molecule query for formula-dispatched work (GH #505)")
 	}
+	if strings.Contains(check, "--status=in_progress") || strings.Contains(check, "${active:-0}") {
+		t.Errorf("EffectiveScaleCheck = %q, should not count in-progress work as new demand", check)
+	}
 
-	// All three variables must appear in the arithmetic sum.
+	// Both variables must appear in the arithmetic sum.
 	if !strings.Contains(check, "${ready:-0}") {
 		t.Errorf("missing ${ready:-0} in arithmetic sum")
-	}
-	if !strings.Contains(check, "${active:-0}") {
-		t.Errorf("missing ${active:-0} in arithmetic sum")
 	}
 	if !strings.Contains(check, "${molecules:-0}") {
 		t.Errorf("missing ${molecules:-0} in arithmetic sum")
@@ -3193,6 +3190,34 @@ func runEffectiveWorkQuery(t *testing.T, a Agent, env map[string]string, bdScrip
 	return string(out)
 }
 
+func runLifecycleHookCommand(t *testing.T, command string, env map[string]string, bdScript string) string {
+	t.Helper()
+
+	tmp := t.TempDir()
+	bdPath := filepath.Join(tmp, "bd")
+	if err := os.WriteFile(bdPath, []byte(bdScript), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	logPath := filepath.Join(tmp, "bd.log")
+
+	cmd := exec.Command("sh", "-c", command)
+	cmd.Env = []string{
+		"PATH=" + tmp + ":" + os.Getenv("PATH"),
+		"BD_LOG=" + logPath,
+	}
+	for k, v := range env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("run lifecycle hook: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read hook log: %v", err)
+	}
+	return string(data)
+}
+
 // TestEffectiveMethodsAgentRouting verifies that all agents use
 // gc.routed_to=<qualified-name> metadata routing.
 func TestEffectiveMethodsAgentRouting(t *testing.T) {
@@ -3556,7 +3581,7 @@ func TestEffectiveOnDeathDefault(t *testing.T) {
 		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
 	}
 	got := a.EffectiveOnDeath()
-	for _, want := range []string{"bd list --assignee=myrig/dog", "--status=in_progress", "--assignee \"\""} {
+	for _, want := range []string{"bd list --assignee=myrig/dog", "--status=in_progress", `--assignee "" --status open`, "--set-metadata gc.routed_to=myrig/dog"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("EffectiveOnDeath() = %q, want %q", got, want)
 		}
@@ -3577,10 +3602,70 @@ func TestEffectiveOnDeathCustom(t *testing.T) {
 func TestEffectiveOnDeathFixedAgent(t *testing.T) {
 	a := Agent{Name: "mayor"}
 	got := a.EffectiveOnDeath()
-	for _, want := range []string{"bd list --assignee=mayor", "--status=in_progress", "--assignee \"\""} {
+	for _, want := range []string{"bd list --assignee=mayor", "--status=in_progress", `--assignee "" --status open`, "--set-metadata gc.routed_to=mayor"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("EffectiveOnDeath() = %q, want %q", got, want)
 		}
+	}
+}
+
+func TestEffectiveOnDeathBackfillsMissingRouteOnReopen(t *testing.T) {
+	a := Agent{
+		Name:              "dog-1",
+		Dir:               "hello-world",
+		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
+		PoolName: "hello-world/dog",
+	}
+
+	log := runLifecycleHookCommand(t, a.EffectiveOnDeath(), nil, `#!/bin/sh
+set -eu
+case "$1" in
+  list)
+    printf '[{"id":"ga-missing","metadata":{}}]'
+    ;;
+  update)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`)
+	if !strings.Contains(log, "--status open") {
+		t.Fatalf("hook log = %q, want reopened status", log)
+	}
+	if !strings.Contains(log, "--set-metadata gc.routed_to=hello-world/dog") {
+		t.Fatalf("hook log = %q, want fallback route for ownerless reopened work", log)
+	}
+}
+
+func TestEffectiveOnDeathPreservesExistingRouteOnReopen(t *testing.T) {
+	a := Agent{
+		Name:              "dog-1",
+		Dir:               "hello-world",
+		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
+		PoolName: "hello-world/dog",
+	}
+
+	log := runLifecycleHookCommand(t, a.EffectiveOnDeath(), nil, `#!/bin/sh
+set -eu
+case "$1" in
+  list)
+    printf '[{"id":"ga-routed","metadata":{"gc.routed_to":"already/routed"}}]'
+    ;;
+  update)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`)
+	if !strings.Contains(log, "--status open") {
+		t.Fatalf("hook log = %q, want reopened status", log)
+	}
+	if strings.Contains(log, "--set-metadata") {
+		t.Fatalf("hook log = %q, want existing route preserved without overwrite", log)
 	}
 }
 
@@ -3591,10 +3676,13 @@ func TestEffectiveOnBootDefault(t *testing.T) {
 		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
 	}
 	got := a.EffectiveOnBoot()
-	for _, want := range []string{"bd list --metadata-field gc.routed_to=myrig/dog", "--status=in_progress", "--assignee \"\""} {
+	for _, want := range []string{"bd list --metadata-field gc.routed_to=myrig/dog", "--status=in_progress", "--no-assignee", "--status open"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("EffectiveOnBoot() = %q, want %q", got, want)
 		}
+	}
+	if strings.Contains(got, `--assignee ""`) {
+		t.Errorf("EffectiveOnBoot() = %q, want to target only ownerless work instead of bulk-unassigning routed work", got)
 	}
 }
 
@@ -3607,10 +3695,13 @@ func TestEffectiveOnBootDefaultPoolName(t *testing.T) {
 		PoolName: "myrig/dog",
 	}
 	got := a.EffectiveOnBoot()
-	for _, want := range []string{"bd list --metadata-field gc.routed_to=myrig/dog", "--status=in_progress", "--assignee \"\""} {
+	for _, want := range []string{"bd list --metadata-field gc.routed_to=myrig/dog", "--status=in_progress", "--no-assignee", "--status open"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("EffectiveOnBoot() = %q, want %q", got, want)
 		}
+	}
+	if strings.Contains(got, `--assignee ""`) {
+		t.Errorf("EffectiveOnBoot() = %q, want to target only ownerless work instead of bulk-unassigning routed work", got)
 	}
 }
 
@@ -3628,10 +3719,13 @@ func TestEffectiveOnBootCustom(t *testing.T) {
 func TestEffectiveOnBootNonPool(t *testing.T) {
 	a := Agent{Name: "mayor"}
 	got := a.EffectiveOnBoot()
-	for _, want := range []string{"bd list --metadata-field gc.routed_to=mayor", "--status=in_progress", "--assignee \"\""} {
+	for _, want := range []string{"bd list --metadata-field gc.routed_to=mayor", "--status=in_progress", "--no-assignee", "--status open"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("EffectiveOnBoot() = %q, want %q", got, want)
 		}
+	}
+	if strings.Contains(got, `--assignee ""`) {
+		t.Errorf("EffectiveOnBoot() = %q, want to target only ownerless work instead of bulk-unassigning routed work", got)
 	}
 }
 

@@ -6,7 +6,9 @@ import (
 	"io"
 	"log"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -74,6 +76,9 @@ type memoryOrderDispatcher struct {
 	maxTimeout time.Duration
 	cfg        *config.City
 	cityName   string
+
+	cacheMu      sync.Mutex
+	lastRunCache map[string]time.Time
 }
 
 // buildOrderDispatcher scans formula layers for orders and returns a
@@ -164,12 +169,20 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		if legacyStore != nil {
 			storesForGate = append(storesForGate, legacyStore)
 		}
+		storeKeysForGate := []string{storeKey}
+		if legacyStore != nil {
+			storeKeysForGate = append(storeKeysForGate, orderStoreTargetKey(legacyOrderCityTarget(cityPath, m.cfg)))
+		}
 		baseLastRunFn := orders.LastRunAcrossStores(storesForGate...)
 		var lastRunErr error
+		var lastRunFromCache bool
 		lastRunFn := func(orderName string) (time.Time, error) {
-			last, err := baseLastRunFn(orderName)
+			last, fromCache, err := m.cachedLastRun(orderName, storeKeysForGate, baseLastRunFn)
 			if err != nil {
 				lastRunErr = err
+			}
+			if fromCache {
+				lastRunFromCache = true
 			}
 			return last, err
 		}
@@ -184,13 +197,31 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 				return cursor
 			}
 		}
-		result := orders.CheckTrigger(a, now, lastRunFn, m.ep, cursorFn)
+		triggerOpts := orderTriggerOptionsForTarget(cityPath, m.cfg, target, a)
+		result := orders.CheckTriggerWithOptions(a, now, lastRunFn, m.ep, cursorFn, triggerOpts)
 		if lastRunErr != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: reading last run for %s: %v", a.ScopedName(), lastRunErr)
 			continue
 		}
 		if !result.Due {
 			continue
+		}
+		if lastRunFromCache && orderTriggerUsesLastRun(a) {
+			refreshedLastRun, err := baseLastRunFn(a.ScopedName())
+			if err != nil {
+				logDispatchError(m.stderr, "gc: order dispatch: refreshing last run for %s: %v", a.ScopedName(), err)
+				continue
+			}
+			if refreshedLastRun.After(result.LastRun) {
+				m.rememberLastRun(a.ScopedName(), storeKeysForGate, refreshedLastRun)
+				refreshedLastRunFn := func(string) (time.Time, error) {
+					return refreshedLastRun, nil
+				}
+				result = orders.CheckTriggerWithOptions(a, now, refreshedLastRunFn, m.ep, cursorFn, triggerOpts)
+				if !result.Due {
+					continue
+				}
+			}
 		}
 
 		// Skip dispatch if previous work hasn't been processed yet.
@@ -214,6 +245,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			logDispatchError(m.stderr, "gc: order dispatch: creating tracking bead for %s: %v", scoped, err)
 			continue
 		}
+		m.rememberLastRun(scoped, storeKeysForGate, trackingBead.CreatedAt)
 
 		// Fire and forget with timeout.
 		a := a // capture loop variable
@@ -237,6 +269,45 @@ func (m *memoryOrderDispatcher) legacyCityStoreForTarget(cityPath string, target
 	}
 	stores[key] = store
 	return store, true
+}
+
+func (m *memoryOrderDispatcher) cachedLastRun(orderName string, storeKeys []string, read orders.LastRunFunc) (time.Time, bool, error) {
+	key := orderHistoryCacheKey(orderName, storeKeys)
+	m.cacheMu.Lock()
+	if m.lastRunCache != nil {
+		if last, ok := m.lastRunCache[key]; ok {
+			m.cacheMu.Unlock()
+			return last, true, nil
+		}
+	}
+	m.cacheMu.Unlock()
+
+	last, err := read(orderName)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	m.rememberLastRun(orderName, storeKeys, last)
+	return last, false, nil
+}
+
+func (m *memoryOrderDispatcher) rememberLastRun(orderName string, storeKeys []string, last time.Time) {
+	key := orderHistoryCacheKey(orderName, storeKeys)
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	if m.lastRunCache == nil {
+		m.lastRunCache = make(map[string]time.Time)
+	}
+	if existing, ok := m.lastRunCache[key]; !ok || existing.IsZero() || last.After(existing) {
+		m.lastRunCache[key] = last
+	}
+}
+
+func orderHistoryCacheKey(orderName string, storeKeys []string) string {
+	return orderName + "\x00" + strings.Join(storeKeys, "\x00")
+}
+
+func orderTriggerUsesLastRun(a orders.Order) bool {
+	return a.Trigger == "cooldown" || a.Trigger == "cron"
 }
 
 // dispatchOne runs a single order dispatch in its own goroutine.
@@ -327,7 +398,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 			Subject: scoped,
 			Message: err.Error(),
 		})
-		store.Update(trackingID, beads.UpdateOpts{Labels: []string{"wisp", "wisp-failed"}}) //nolint:errcheck // best-effort
+		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
 		return
 	}
 	if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{}); err != nil {
@@ -337,14 +408,29 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 			Subject: scoped,
 			Message: err.Error(),
 		})
-		store.Update(trackingID, beads.UpdateOpts{Labels: []string{"wisp", "wisp-failed"}}) //nolint:errcheck // best-effort
+		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
 		return
+	}
+
+	var pool string
+	if a.Pool != "" {
+		pool, err = qualifyOrderPool(a, m.cfg)
+		if err != nil {
+			logDispatchError(m.stderr, "gc: order %s: %v", scoped, err)
+			m.rec.Record(events.Event{
+				Type:    events.OrderFailed,
+				Actor:   "controller",
+				Subject: scoped,
+				Message: err.Error(),
+			})
+			m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
+			return
+		}
 	}
 
 	// Decorate graph workflow recipes with routing metadata so child step
 	// beads get gc.routed_to set before instantiation.
 	if a.Pool != "" {
-		pool := qualifyPool(a.Pool, a.Rig)
 		if err := applyGraphRouting(recipe, nil, pool, nil, "", "", "", "", store, m.cityName, cityPath, m.cfg); err != nil {
 			logDispatchError(m.stderr, "gc: order %s: routing decoration failed: %v", scoped, err)
 			// Non-fatal — molecule still works, just without step-level routing.
@@ -359,7 +445,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 			Subject: scoped,
 			Message: err.Error(),
 		})
-		store.Update(trackingID, beads.UpdateOpts{Labels: []string{"wisp", "wisp-failed"}}) //nolint:errcheck // best-effort
+		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
 		return
 	}
 	rootID := cookResult.RootID
@@ -374,7 +460,6 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		)
 	}
 	if a.Pool != "" {
-		pool := qualifyPool(a.Pool, a.Rig)
 		update.Metadata = map[string]string{"gc.routed_to": pool}
 	}
 	if err := store.Update(rootID, update); err != nil {
@@ -387,7 +472,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 			Subject: scoped,
 			Message: fmt.Sprintf("wisp %s created but label failed: %v", rootID, err),
 		})
-		store.Update(trackingID, beads.UpdateOpts{Labels: []string{"wisp", "wisp-failed"}}) //nolint:errcheck // best-effort
+		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
 		return
 	}
 
@@ -409,11 +494,31 @@ func (m *memoryOrderDispatcher) orderRigSuspended(a orders.Order) bool {
 	if m.cfg == nil {
 		return false
 	}
-	qualified := qualifyPool(a.Pool, a.Rig)
+	qualified, err := qualifyOrderPool(a, m.cfg)
+	if err != nil {
+		return m.rigSuspendedByName(a.Rig)
+	}
 	rigName, _ := config.ParseQualifiedName(qualified)
 	if rigName == "" {
 		rigName = a.Rig
 	}
+	return m.rigSuspendedByName(rigName)
+}
+
+func (m *memoryOrderDispatcher) markTrackingFailure(store beads.Store, trackingID, scoped string, a orders.Order, headSeq uint64) {
+	labels := []string{"wisp", "wisp-failed"}
+	if a.Trigger == "event" && headSeq > 0 {
+		labels = append(labels,
+			fmt.Sprintf("order:%s", scoped),
+			fmt.Sprintf("seq:%d", headSeq),
+		)
+	}
+	if err := store.Update(trackingID, beads.UpdateOpts{Labels: labels}); err != nil {
+		logDispatchError(m.stderr, "gc: order %s: failed to mark tracking bead %s as failed: %v", scoped, trackingID, err)
+	}
+}
+
+func (m *memoryOrderDispatcher) rigSuspendedByName(rigName string) bool {
 	if rigName == "" {
 		return false
 	}
@@ -425,9 +530,9 @@ func (m *memoryOrderDispatcher) orderRigSuspended(a orders.Order) bool {
 	return false
 }
 
-// hasOpenWorkStrict reports whether any non-closed work bead exists for this
-// order. Tracking beads (title "order:<name>") are excluded, so only actual
-// work (wisps, exec results) counts.
+// hasOpenWorkStrict reports whether any non-closed work or tracking bead
+// exists for this order. Open tracking beads represent in-flight dispatch and
+// must block condition/event orders that do not consult LastRun.
 func (m *memoryOrderDispatcher) hasOpenWorkStrict(store beads.Store, scopedName string) (bool, error) {
 	results, err := store.List(beads.ListQuery{
 		Label: "order-run:" + scopedName,
@@ -436,9 +541,8 @@ func (m *memoryOrderDispatcher) hasOpenWorkStrict(store beads.Store, scopedName 
 	if err != nil {
 		return false, fmt.Errorf("listing order work beads: %w", err)
 	}
-	trackingTitle := "order:" + scopedName
 	for _, b := range results {
-		if b.Status != "closed" && b.Title != trackingTitle {
+		if b.Status != "closed" {
 			return true, nil
 		}
 	}
@@ -533,14 +637,116 @@ func rigExclusiveLayers(rigLayers, cityLayers []string) []string {
 	return rigLayers[len(cityLayers):]
 }
 
-// qualifyPool prefixes an unqualified pool name with the rig name for
-// rig-scoped orders. Already-qualified names (containing "/") are
-// returned as-is. City orders (empty rig) are unchanged.
-func qualifyPool(pool, rig string) string {
-	if rig == "" || strings.Contains(pool, "/") {
-		return pool
+// qualifyPool resolves a raw pool name from an order TOML to the qualified
+// form used by Agent.QualifiedName() — the same string the scaler queries
+// via gc.routed_to. Three layers of qualification stack:
+//
+//  1. If pool already contains "/" it is rig-qualified — pass through.
+//  2. If pool exactly matches a configured binding-qualified target
+//     ("binding.name"), preserve that target and still stack the rig prefix
+//     when present.
+//  3. If the order came from an imported pack, prefer same-source agents when
+//     resolving a bare pool name so pack-local orders stay pack-local even if
+//     other scopes also export the same bare agent name.
+//  4. Otherwise look up agents in cfg.Agents whose Dir matches rig
+//     (city orders use rig=="") and Name matches pool. If exactly one target
+//     resolves, swap pool for the binding-qualified form ("binding.name")
+//     before any rig prefixing. This handles V2 pack imports where the
+//     dispatched wisp must carry "binding.name" so the agent's default
+//     scale_check matches its own qualified name.
+//
+// Ambiguity is a hard failure: silently stamping the bare pool string would
+// recreate the exact route/scaler mismatch this helper exists to prevent.
+// nil cfg preserves the rig-only behavior so call sites without a loaded
+// city remain stable. Dotted values that do not match a configured bound
+// target are preserved for backward compatibility.
+func qualifyOrderPool(a orders.Order, cfg *config.City) (string, error) {
+	return qualifyPool(a.Pool, a.Rig, cfg, orderPoolSourceDirHint(a))
+}
+
+func orderPoolSourceDirHint(a orders.Order) string {
+	if a.FormulaLayer == "" {
+		return ""
 	}
-	return rig + "/" + pool
+	return filepath.Clean(filepath.Dir(a.FormulaLayer))
+}
+
+func qualifyPool(pool, rig string, cfg *config.City, sourceDirHint string) (string, error) {
+	if strings.Contains(pool, "/") {
+		return pool, nil
+	}
+	if cfg == nil {
+		if rig == "" {
+			return pool, nil
+		}
+		return rig + "/" + pool, nil
+	}
+
+	qualified := pool
+	scope := "city order"
+	if rig != "" {
+		scope = fmt.Sprintf("rig %q", rig)
+	}
+
+	var exactQualified []string
+	var sourceScopedMatches []string
+	var localBareMatches []string
+	var bareMatches []string
+	cleanHint := ""
+	if sourceDirHint != "" {
+		cleanHint = filepath.Clean(sourceDirHint)
+	}
+	for i := range cfg.Agents {
+		a := &cfg.Agents[i]
+		if a.Dir != rig {
+			continue
+		}
+		switch {
+		case strings.Contains(pool, ".") && a.BindingQualifiedName() == pool:
+			exactQualified = appendUniquePoolTarget(exactQualified, a.BindingQualifiedName())
+		case a.Name == pool:
+			bareMatches = appendUniquePoolTarget(bareMatches, a.BindingQualifiedName())
+			if a.BindingName == "" {
+				localBareMatches = appendUniquePoolTarget(localBareMatches, a.BindingQualifiedName())
+			}
+			if cleanHint != "" && filepath.Clean(a.SourceDir) == cleanHint {
+				sourceScopedMatches = appendUniquePoolTarget(sourceScopedMatches, a.BindingQualifiedName())
+			}
+		}
+	}
+
+	switch {
+	case len(exactQualified) == 1:
+		qualified = exactQualified[0]
+	case len(exactQualified) > 1:
+		return "", fmt.Errorf("ambiguous pool %q for %s: matches %s", pool, scope, strings.Join(exactQualified, ", "))
+	case len(sourceScopedMatches) == 1:
+		qualified = sourceScopedMatches[0]
+	case len(sourceScopedMatches) > 1:
+		return "", fmt.Errorf("ambiguous pool %q for %s: matches %s", pool, scope, strings.Join(sourceScopedMatches, ", "))
+	case len(localBareMatches) == 1:
+		qualified = localBareMatches[0]
+	case len(localBareMatches) > 1:
+		return "", fmt.Errorf("ambiguous pool %q for %s: matches %s", pool, scope, strings.Join(localBareMatches, ", "))
+	case len(bareMatches) == 1:
+		qualified = bareMatches[0]
+	case len(bareMatches) > 1:
+		return "", fmt.Errorf("ambiguous pool %q for %s: matches %s", pool, scope, strings.Join(bareMatches, ", "))
+	}
+
+	if rig == "" {
+		return qualified, nil
+	}
+	return rig + "/" + qualified, nil
+}
+
+func appendUniquePoolTarget(values []string, want string) []string {
+	for _, value := range values {
+		if value == want {
+			return values
+		}
+	}
+	return append(values, want)
 }
 
 // convertOverrides converts config.OrderOverride to orders.Override.

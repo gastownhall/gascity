@@ -506,6 +506,13 @@ func checkStability(session *beads.Bead, cfg *config.City, alive bool, dt *drain
 	if lastWoke == "" {
 		return false
 	}
+	var startupTimeout time.Duration
+	if cfg != nil {
+		startupTimeout = cfg.Session.StartupTimeoutDuration()
+	}
+	if pendingCreateStartInFlight(*session, clk, startupTimeout) {
+		return false
+	}
 	t, err := time.Parse(time.RFC3339, lastWoke)
 	if err != nil {
 		return false

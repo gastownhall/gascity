@@ -127,17 +127,10 @@ func evaluatePool(agentName string, sp scaleParams, dir string, env map[string]s
 		telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, sp.Min, err)
 		return sp.Min, fmt.Errorf("agent %q: %w", agentName, err)
 	}
-	trimmed := strings.TrimSpace(out)
-	if trimmed == "" {
-		checkErr := fmt.Errorf("agent %q: check %q produced empty output", agentName, sp.Check)
-		telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, sp.Min, checkErr)
-		return sp.Min, checkErr
-	}
-	n, err := strconv.Atoi(trimmed)
+	n, err := parseScaleCheckCount(agentName, sp.Check, out)
 	if err != nil {
-		parseErr := fmt.Errorf("agent %q: check output %q is not an integer", agentName, trimmed)
-		telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, sp.Min, parseErr)
-		return sp.Min, parseErr
+		telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, sp.Min, err)
+		return sp.Min, err
 	}
 	desired := n
 	if desired < sp.Min {
@@ -148,6 +141,38 @@ func evaluatePool(agentName string, sp scaleParams, dir string, env map[string]s
 	}
 	telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, desired, nil)
 	return desired, nil
+}
+
+func evaluatePoolNewDemand(agentName string, sp scaleParams, dir string, env map[string]string, runner ScaleCheckRunner) (int, error) {
+	start := time.Now()
+	out, err := runner(sp.Check, dir, env)
+	durationMs := float64(time.Since(start).Milliseconds())
+	if err != nil {
+		telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, 0, err)
+		return 0, fmt.Errorf("agent %q: %w", agentName, err)
+	}
+	n, err := parseScaleCheckCount(agentName, sp.Check, out)
+	if err != nil {
+		telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, 0, err)
+		return 0, err
+	}
+	telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, n, nil)
+	return n, nil
+}
+
+func parseScaleCheckCount(agentName, check, out string) (int, error) {
+	trimmed := strings.TrimSpace(out)
+	if trimmed == "" {
+		return 0, fmt.Errorf("agent %q: check %q produced empty output", agentName, check)
+	}
+	n, err := strconv.Atoi(trimmed)
+	if err != nil {
+		return 0, fmt.Errorf("agent %q: check output %q is not an integer", agentName, trimmed)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("agent %q: check output %q is negative", agentName, trimmed)
+	}
+	return n, nil
 }
 
 // SessionSetupContext holds template variables for session_setup command expansion.

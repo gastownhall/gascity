@@ -36,10 +36,13 @@ func bdStoreForCity(dir, cityPath string) *beads.BdStore {
 // when available, falling back to city-level config. Use this when the rig
 // may have its own Dolt server (e.g., shared from another city).
 func bdStoreForRig(rigDir, cityPath string, cfg *config.City) *beads.BdStore {
-	return beads.NewBdStore(rigDir, bdCommandRunnerWithManagedRetry(cityPath, func(_ string) map[string]string {
-		env := bdRuntimeEnvForRig(cityPath, cfg, rigDir)
-		return env
-	}))
+	return beads.NewBdStore(rigDir, bdCommandRunnerForRig(cityPath, cfg, rigDir))
+}
+
+func bdCommandRunnerForRig(cityPath string, cfg *config.City, rigDir string) beads.CommandRunner {
+	return bdCommandRunnerWithManagedRetry(cityPath, func(_ string) map[string]string {
+		return bdRuntimeEnvForRig(cityPath, cfg, rigDir)
+	})
 }
 
 func canonicalScopeDoltTarget(cityPath, scopeRoot string) (contract.DoltConnectionTarget, bool, error) {

@@ -263,7 +263,7 @@ func (s *Server) humaHandleMailSend(ctx context.Context, input *MailSendInput) (
 	}
 	msg.Rig = input.Body.Rig
 	s.idem.storeResponse(idemKey, bodyHash, msg)
-	s.recordMailEvent(events.MailSent, input.Body.From, msg.ID, input.Body.Rig, &msg)
+	s.recordMailEvent(events.MailSent, msg.From, msg.ID, input.Body.Rig, &msg)
 
 	return &IndexOutput[mail.Message]{
 		Index: s.latestIndex(),
@@ -449,7 +449,7 @@ func (s *Server) humaHandleMailReply(_ context.Context, input *MailReplyInput) (
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
 	msg.Rig = resolvedRig
-	s.recordMailEvent(events.MailReplied, input.Body.From, msg.ID, resolvedRig, &msg)
+	s.recordMailEvent(events.MailReplied, msg.From, msg.ID, resolvedRig, &msg)
 
 	return &IndexOutput[mail.Message]{
 		Index: s.latestIndex(),

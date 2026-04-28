@@ -175,7 +175,7 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 			fmt.Fprintf(stderr, "gc prime: no city config found: %v\n", err) //nolint:errcheck
 			return 1
 		}
-		fmt.Fprint(stdout, defaultPrimePrompt) //nolint:errcheck // best-effort stdout
+		writePrimePromptWithFormat(stdout, "", "", defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt)
 		return 0
 	}
 	cfg, err := loadCityConfig(cityPath, stderr)
@@ -184,7 +184,7 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 			fmt.Fprintf(stderr, "gc prime: loading city config: %v\n", err) //nolint:errcheck
 			return 1
 		}
-		fmt.Fprint(stdout, defaultPrimePrompt) //nolint:errcheck // best-effort stdout
+		writePrimePromptWithFormat(stdout, "", "", defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt)
 		return 0
 	}
 	resolveRigPaths(cityPath, cfg.Rigs)
@@ -317,7 +317,7 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 	// when the agent has no prompt_template and doesn't match a builtin
 	// worker prompt — a supported config shape, so the default prompt is
 	// the correct output even under --strict.
-	fmt.Fprint(stdout, defaultPrimePrompt) //nolint:errcheck // best-effort stdout
+	writePrimePromptWithFormat(stdout, "", agentName, defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt)
 	return 0
 }
 
@@ -396,7 +396,7 @@ func writePrimePromptWithFormat(stdout io.Writer, cityName, agentName, prompt st
 		prompt = prependHookBeacon(cityName, agentName, prompt)
 	}
 	if hookMode && hookFormat != "" {
-		_ = writeProviderHookContext(stdout, hookFormat, prompt)
+		_ = writeProviderHookContextForEvent(stdout, hookFormat, "SessionStart", prompt)
 		return
 	}
 	fmt.Fprint(stdout, prompt) //nolint:errcheck // best-effort stdout
