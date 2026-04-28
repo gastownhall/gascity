@@ -661,6 +661,8 @@ Canonical keys owned by GC:
 
 - `issue_prefix`
 - `dolt.auto-start`
+- `validation.on-create` — suppresses advisory noise in agent-driven workspaces where description-less creates are intentional.
+- `create.require-description` — suppresses advisory noise in agent-driven workspaces where description-less creates are intentional.
 - `gc.endpoint_origin`
 - `gc.endpoint_status`
 - external-only:
@@ -700,6 +702,8 @@ interoperability.
 issue_prefix: gc
 issue-prefix: gc
 dolt.auto-start: false
+validation.on-create: off
+create.require-description: false
 gc.endpoint_origin: managed_city
 gc.endpoint_status: verified
 ```
@@ -723,6 +727,8 @@ gc.endpoint_status: verified
 issue_prefix: gc
 issue-prefix: gc
 dolt.auto-start: false
+validation.on-create: off
+create.require-description: false
 gc.endpoint_origin: city_canonical
 gc.endpoint_status: verified
 dolt.host: db.example.com
@@ -749,6 +755,8 @@ dolt.user: root
 issue_prefix: fe
 issue-prefix: fe
 dolt.auto-start: false
+validation.on-create: off
+create.require-description: false
 gc.endpoint_origin: inherited_city
 gc.endpoint_status: verified
 ```
@@ -772,6 +780,8 @@ gc.endpoint_status: verified
 issue_prefix: fe
 issue-prefix: fe
 dolt.auto-start: false
+validation.on-create: off
+create.require-description: false
 gc.endpoint_origin: inherited_city
 gc.endpoint_status: verified
 dolt.host: db.example.com
@@ -798,6 +808,8 @@ dolt.user: root
 issue_prefix: fe
 issue-prefix: fe
 dolt.auto-start: false
+validation.on-create: off
+create.require-description: false
 gc.endpoint_origin: explicit
 gc.endpoint_status: unverified
 dolt.host: rig-db.example.com

@@ -219,6 +219,8 @@ func EnsureCanonicalConfig(fs fsys.FS, path string, state ConfigState) (bool, er
 		changed = setString(root, "issue-prefix", prefix) || changed
 	}
 	changed = setBool(root, "dolt.auto-start", false) || changed
+	changed = setString(root, "validation.on-create", "off") || changed
+	changed = setBool(root, "create.require-description", false) || changed
 	if state.EndpointOrigin != "" {
 		changed = setString(root, "gc.endpoint_origin", string(state.EndpointOrigin)) || changed
 	}
@@ -319,7 +321,9 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 	}
 
 	replacements := map[string]string{
-		"dolt.auto-start": "dolt.auto-start: false",
+		"dolt.auto-start":            "dolt.auto-start: false",
+		"validation.on-create":       "validation.on-create: off",
+		"create.require-description": "create.require-description: false",
 	}
 	if prefix != "" {
 		replacements["issue_prefix"] = "issue_prefix: " + prefix
@@ -393,6 +397,8 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 		"issue_prefix",
 		"issue-prefix",
 		"dolt.auto-start",
+		"validation.on-create",
+		"create.require-description",
 		"gc.endpoint_origin",
 		"gc.endpoint_status",
 		"dolt.host",

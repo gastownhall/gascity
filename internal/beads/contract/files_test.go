@@ -110,6 +110,8 @@ func TestEnsureCanonicalConfigCreatesManagedShape(t *testing.T) {
 		"issue_prefix: gc",
 		"issue-prefix: gc",
 		"dolt.auto-start: false",
+		"validation.on-create: off",
+		"create.require-description: false",
 		"gc.endpoint_origin: managed_city",
 		"gc.endpoint_status: verified",
 	} {
@@ -335,6 +337,8 @@ func TestEnsureCanonicalConfigFallsBackToLineRewriteOnMalformedYAML(t *testing.T
 		"issue_prefix: gc",
 		"issue-prefix: gc",
 		"dolt.auto-start: false",
+		"validation.on-create: off",
+		"create.require-description: false",
 		"gc.endpoint_origin: managed_city",
 		"gc.endpoint_status: verified",
 		": not yaml",
