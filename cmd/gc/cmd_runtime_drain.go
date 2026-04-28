@@ -369,21 +369,28 @@ func cmdRuntimeDrainAck(args []string, stdout, stderr io.Writer) int {
 func newRuntimeRequestRestartCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "request-restart",
-		Short: "Request controller restart this session (blocks until killed)",
+		Short: "Request controller restart this session (waits to be killed)",
 		Long: `Signal the controller to stop and restart this session.
 
-Sets GC_RESTART_REQUESTED metadata on the session, then blocks forever.
-The controller will stop the session on its next reconcile tick and
-restart it fresh. The blocking prevents the agent from consuming more
-context while waiting.
+Sets GC_RESTART_REQUESTED metadata on the session, then waits while the
+controller stops the session on its next reconcile tick and restarts it
+fresh. The wait keeps the agent idle so it does not consume more context
+in the interim.
 
-For on-demand configured named sessions, the controller cannot restart the
-user-attended process. In that case this command reports that restart was
-skipped and returns without blocking. No session.draining event is emitted
-when restart is skipped.
+Under normal operation the controller SIGKILLs the process tree before
+this command returns. If the controller clears the flag without killing
+(or a SIGINT/SIGTERM is received), the command exits 0 cleanly. If the
+controller has not acted within a bounded timeout (max(5*PatrolInterval,
+5min), capped at 30min) the command exits 1 with a diagnostic pointing
+at controller health.
+
+For on-demand configured named sessions, the controller cannot restart
+the user-attended process. In that case this command reports that
+restart was skipped and returns immediately. No session.draining event
+is emitted when restart is skipped.
 
 This command is designed to be called from within a session context.
-It emits a session.draining event before blocking.`,
+It emits a session.draining event before waiting.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if cmdRuntimeRequestRestart(stdout, stderr) != 0 {
