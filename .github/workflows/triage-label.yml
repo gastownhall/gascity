@@ -2,9 +2,9 @@ name: Auto-label new issues and PRs
 
 on:
   issues:
-    types: [opened]
+    types: [opened, reopened]
   pull_request_target:
-    types: [opened]
+    types: [opened, reopened, ready_for_review]
 
 jobs:
   add-triage-label:
@@ -17,7 +17,18 @@ jobs:
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           script: |
-            const number = context.issue?.number || context.payload.pull_request?.number;
+            const pullRequest = context.payload.pull_request;
+            if (pullRequest?.draft) {
+              console.log(`Skipping draft PR #${pullRequest.number}`);
+              return;
+            }
+
+            const number = context.issue?.number || pullRequest?.number;
+            if (!number) {
+              core.setFailed('Unable to determine issue or PR number');
+              return;
+            }
+
             await github.rest.issues.addLabels({
               owner: context.repo.owner,
               repo: context.repo.repo,
