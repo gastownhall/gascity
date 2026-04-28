@@ -3767,6 +3767,21 @@ func TestReconcileSessionBeads_PoolRecoveryAfterClosedBead(t *testing.T) {
 		t.Fatalf("closed bead status = %q, want closed", got.Status)
 	}
 
+	latestSnapshot, err := loadSessionBeadSnapshot(store)
+	if err != nil {
+		t.Fatalf("load latest snapshot: %v", err)
+	}
+	result := DesiredStateResult{State: ds, BaseState: ds, BeaconTime: clk.Now().UTC()}
+	refreshed := refreshDesiredStateWithSessionBeads(result, "test-city", cityPath, cfg, sp, store, latestSnapshot, &stderr)
+	ds = refreshed.State
+	newSessionName := newBead.Metadata["session_name"]
+	if newSessionName == "" {
+		t.Fatal("fresh pool bead has empty session_name")
+	}
+	if _, ok := ds[newSessionName]; !ok {
+		t.Fatalf("refreshed desired state missing fresh pool session %q; keys=%v", newSessionName, mapKeys(ds))
+	}
+
 	// Now run the reconciler with the fresh bead — it should remain open
 	// (not be closed as orphan) since the pool slot is in the desired state.
 	// The session is not running, so the reconciler should wake it.
@@ -3793,8 +3808,8 @@ func TestReconcileSessionBeads_PoolRecoveryAfterClosedBead(t *testing.T) {
 	if woken != 1 {
 		t.Fatalf("woken = %d, want 1 (recovered pool session should be started)", woken)
 	}
-	if !sp.IsRunning(sessionName) {
-		t.Fatalf("session %q not running after reconcile — pool recovery did not trigger start", sessionName)
+	if !sp.IsRunning(newSessionName) {
+		t.Fatalf("session %q not running after reconcile — pool recovery did not trigger start", newSessionName)
 	}
 }
 

@@ -2198,6 +2198,158 @@ func TestCloseBeadPreservesPendingCreateClaimWhenCloseFails(t *testing.T) {
 	}
 }
 
+func TestSyncSessionBeads_DuplicatePoolSessionNameKeepsVisibleOwner(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	template := "pack/worker"
+
+	owner, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + template},
+		Metadata: map[string]string{
+			"template":             template,
+			"agent_name":           template,
+			"state":                "creating",
+			"session_origin":       "ephemeral",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerSessionName := PoolSessionName(template, owner.ID)
+	if err := store.SetMetadata(owner.ID, "session_name", ownerSessionName); err != nil {
+		t.Fatal(err)
+	}
+
+	duplicate, err := store.Create(beads.Bead{
+		Title:  "worker-2",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + template + "-2"},
+		Metadata: map[string]string{
+			"template":             template,
+			"session_name":         ownerSessionName,
+			"agent_name":           template + "-2",
+			"pool_slot":            "2",
+			"state":                "active",
+			"session_origin":       "ephemeral",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	visible, err := loadSessionBeads(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerVisible := false
+	duplicateVisible := false
+	for _, b := range visible {
+		switch b.ID {
+		case owner.ID:
+			ownerVisible = true
+		case duplicate.ID:
+			duplicateVisible = true
+		}
+	}
+	if !ownerVisible || !duplicateVisible {
+		t.Fatalf("precondition failed: owner visible=%v duplicate visible=%v", ownerVisible, duplicateVisible)
+	}
+
+	ds := map[string]TemplateParams{
+		ownerSessionName: {
+			TemplateName: template,
+			InstanceName: template + "-2",
+			PoolSlot:     2,
+			Command:      "codex",
+		},
+	}
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+
+	ownerAfter, err := store.Get(owner.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ownerAfter.Status == "closed" {
+		t.Fatalf("owner bead %s was closed even though it owns visible session_name %q", owner.ID, ownerSessionName)
+	}
+	duplicateAfter, err := store.Get(duplicate.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if duplicateAfter.Status != "closed" {
+		t.Fatalf("duplicate bead %s status = %q, want closed", duplicate.ID, duplicateAfter.Status)
+	}
+	if got := duplicateAfter.Metadata["close_reason"]; got != "duplicate" {
+		t.Fatalf("duplicate close_reason = %q, want duplicate", got)
+	}
+}
+
+func TestSyncSessionBeads_StalePoolSnapshotReusesVisibleOwner(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	template := "pack/worker"
+
+	owner, err := createPoolSessionBead(store, template, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerSessionName := owner.Metadata["session_name"]
+	visible, err := loadSessionBeads(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerVisible := false
+	for _, b := range visible {
+		if b.ID == owner.ID {
+			ownerVisible = true
+			break
+		}
+	}
+	if !ownerVisible {
+		t.Fatalf("precondition failed: owner bead %s is not visible in the store", owner.ID)
+	}
+
+	staleSnapshot := newSessionBeadSnapshot(nil)
+	ds := map[string]TemplateParams{
+		ownerSessionName: {
+			TemplateName: template,
+			InstanceName: template + "-2",
+			PoolSlot:     2,
+			Command:      "codex",
+		},
+	}
+	var stderr bytes.Buffer
+	syncSessionBeadsWithSnapshot("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false, staleSnapshot)
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+
+	all := allSessionBeads(t, store)
+	if len(all) != 1 {
+		t.Fatalf("sync created %d session beads, want only the visible owner bead", len(all))
+	}
+	for _, b := range all {
+		if b.ID != owner.ID && b.Metadata["session_name"] == ownerSessionName {
+			t.Fatalf("new bead %s reused visible owner bead %s session_name %q", b.ID, owner.ID, ownerSessionName)
+		}
+		if b.ID != owner.ID && b.Metadata["pool_slot"] == "2" {
+			if got, want := b.Metadata["session_name"], PoolSessionName(template, b.ID); got != want {
+				t.Fatalf("new pool bead session_name = %q, want %q", got, want)
+			}
+		}
+	}
+}
+
 // TestSyncSessionBeads_RefreshesStoredCommandOnConfigChange reproduces an
 // observed bug where an agent that got an `[option_defaults] model = "opus"`
 // entry added to its config after its session bead was created never picked up
@@ -2408,8 +2560,8 @@ func TestSyncSessionBeads_StoppedAgent(t *testing.T) {
 	if len(all) != 1 {
 		t.Fatalf("expected 1 bead, got %d", len(all))
 	}
-	if all[0].Metadata["state"] != "stopped" {
-		t.Errorf("state = %q, want %q", all[0].Metadata["state"], "stopped")
+	if all[0].Metadata["state"] != "creating" {
+		t.Errorf("state = %q, want %q", all[0].Metadata["state"], "creating")
 	}
 	if all[0].Metadata["pending_create_claim"] != "true" {
 		t.Errorf("pending_create_claim = %q, want true", all[0].Metadata["pending_create_claim"])

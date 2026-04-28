@@ -77,6 +77,75 @@ func syncSessionCachedState(sessionName string, existing beads.Bead, exists bool
 	return "stopped"
 }
 
+func canonicalDuplicateSessionBead(incumbent, candidate beads.Bead) beads.Bead {
+	incumbentOwnsName := beadOwnsPoolSessionName(incumbent)
+	candidateOwnsName := beadOwnsPoolSessionName(candidate)
+	switch {
+	case candidateOwnsName && !incumbentOwnsName:
+		return candidate
+	case incumbentOwnsName && !candidateOwnsName:
+		return incumbent
+	default:
+		return candidate
+	}
+}
+
+func beadOwnsPoolSessionName(b beads.Bead) bool {
+	id := strings.TrimSpace(b.ID)
+	sn := strings.TrimSpace(b.Metadata["session_name"])
+	if id == "" || sn == "" {
+		return false
+	}
+	if template := strings.TrimSpace(b.Metadata["template"]); template != "" && sn == PoolSessionName(template, id) {
+		return true
+	}
+	return strings.HasSuffix(sn, "-"+id)
+}
+
+func findVisibleSessionBeadByName(store beads.Store, sessionName string) (beads.Bead, bool, error) {
+	sessionName = strings.TrimSpace(sessionName)
+	if store == nil || sessionName == "" {
+		return beads.Bead{}, false, nil
+	}
+	open, err := loadSessionBeads(store)
+	if err != nil {
+		return beads.Bead{}, false, err
+	}
+	var winner beads.Bead
+	found := false
+	for _, b := range open {
+		if strings.TrimSpace(b.Metadata["session_name"]) != sessionName {
+			continue
+		}
+		if !found {
+			winner = b
+			found = true
+			continue
+		}
+		winner = canonicalDuplicateSessionBead(winner, b)
+	}
+	return winner, found, nil
+}
+
+func upsertOpenSessionBead(openBeads []beads.Bead, indexBySessionName map[string]int, b beads.Bead) []beads.Bead {
+	sn := strings.TrimSpace(b.Metadata["session_name"])
+	for i := range openBeads {
+		if openBeads[i].ID != b.ID {
+			continue
+		}
+		openBeads[i] = b
+		if sn != "" {
+			indexBySessionName[sn] = i
+		}
+		return openBeads
+	}
+	openBeads = append(openBeads, b)
+	if sn != "" {
+		indexBySessionName[sn] = len(openBeads) - 1
+	}
+	return openBeads
+}
+
 func stampResolvedProviderSessionMetadata(meta map[string]string, resolved *config.ResolvedProvider) {
 	if meta == nil || resolved == nil {
 		return
@@ -646,24 +715,25 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 	indexBySessionName := make(map[string]int, len(existing))
 	openBeads := make([]beads.Bead, len(existing))
 	copy(openBeads, existing)
-	for _, b := range existing {
-		if b.Status == "closed" {
-			continue
-		}
-		if sn := b.Metadata["session_name"]; sn != "" {
-			bySessionName[sn] = b
-		}
-	}
 	for i, b := range openBeads {
 		if b.Status == "closed" {
 			continue
 		}
-		if sn := b.Metadata["session_name"]; sn != "" {
+		if sn := strings.TrimSpace(b.Metadata["session_name"]); sn != "" {
+			if incumbent, ok := bySessionName[sn]; ok {
+				winner := canonicalDuplicateSessionBead(incumbent, b)
+				bySessionName[sn] = winner
+				if winner.ID == b.ID {
+					indexBySessionName[sn] = i
+				}
+				continue
+			}
+			bySessionName[sn] = b
 			indexBySessionName[sn] = i
 		}
 	}
 
-	// Close duplicate open beads: only the last bead per session_name
+	// Close duplicate open beads: only the canonical bead per session_name
 	// (the one in bySessionName) should remain open. This prevents bead
 	// accumulation when multiple beads are created for the same session
 	// across restarts or config-drift cycles.
@@ -685,6 +755,10 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 
 	// Track open bead IDs for the returned index.
 	openIndex := make(map[string]string, len(desiredState))
+	desiredNames := make(map[string]bool, len(desiredState))
+	for sn := range desiredState {
+		desiredNames[sn] = true
+	}
 
 	now := clk.Now().UTC()
 	cityName := config.EffectiveCityName(cfg, filepath.Base(cityPath))
@@ -727,14 +801,41 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 
 		agentName := tp.TemplateName
 		// For pool instances, use the qualified instance name as the agent_name.
-		if slot := resolvePoolSlot(tp.InstanceName, tp.TemplateName); slot > 0 {
+		poolSlot := tp.PoolSlot
+		if poolSlot <= 0 {
+			poolSlot = resolvePoolSlot(tp.InstanceName, tp.TemplateName)
+		}
+		if poolSlot > 0 {
 			agentName = tp.InstanceName
 		} else if tp.InstanceName != "" && tp.InstanceName != tp.TemplateName {
 			agentName = tp.InstanceName
 		}
 		isManagedPool := origin == "ephemeral"
+		isPoolInstance := poolSlot > 0
 
 		b, exists := bySessionName[sn]
+		if !exists && isPoolInstance {
+			recovered, ok, err := findVisibleSessionBeadByName(store, sn)
+			if err != nil {
+				fmt.Fprintf(stderr, "session beads: reloading visible bead for %s: %v\n", sn, err) //nolint:errcheck
+			} else if ok {
+				b = recovered
+				exists = true
+				bySessionName[sn] = recovered
+				for i, open := range openBeads {
+					if open.Status == "closed" || open.ID == recovered.ID {
+						continue
+					}
+					if strings.TrimSpace(open.Metadata["session_name"]) != sn {
+						continue
+					}
+					if closeSessionBeadIfUnassigned(store, rigStores, open, "duplicate", now, stderr) {
+						openBeads[i].Status = "closed"
+					}
+				}
+				openBeads = upsertOpenSessionBead(openBeads, indexBySessionName, recovered)
+			}
+		}
 		state := syncSessionCachedState(sn, b, exists, sp)
 		if !exists && isConfiguredNamed {
 			if reopened, ok := reopenClosedConfiguredNamedSessionBead(cityPath, store, cfg, cityName, tp.ConfiguredNamedIdentity, sn, state, now, nil, stderr); ok {
@@ -748,18 +849,24 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		}
 		if !exists {
 			// Create a new session bead.
+			createState := state
+			if createState != "active" {
+				createState = "creating"
+			}
 			meta := map[string]string{
-				"session_name":       sn,
 				"agent_name":         agentName,
 				"live_hash":          liveHash,
 				"session_origin":     origin,
 				"generation":         strconv.Itoa(session.DefaultGeneration),
 				"continuation_epoch": strconv.Itoa(session.DefaultContinuationEpoch),
 				"instance_token":     session.NewInstanceToken(),
-				"state":              state,
+				"state":              createState,
 				"synced_at":          now.Format("2006-01-02T15:04:05Z07:00"),
 			}
-			if state != "active" {
+			if !isPoolInstance {
+				meta["session_name"] = sn
+			}
+			if createState != "active" {
 				meta["pending_create_claim"] = "true"
 			}
 			if tp.DependencyOnly {
@@ -789,15 +896,13 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			}
 			// Store the qualified template name so the API can derive the
 			// rig from it (e.g., "tower-of-hanoi/polecat" not just "polecat").
+			qualifiedTemplate := tp.TemplateName
 			if tp.RigName != "" && !strings.Contains(tp.TemplateName, "/") {
-				meta["template"] = tp.RigName + "/" + tp.TemplateName
-			} else {
-				meta["template"] = tp.TemplateName
+				qualifiedTemplate = tp.RigName + "/" + tp.TemplateName
 			}
-			if tp.PoolSlot > 0 {
-				meta["pool_slot"] = strconv.Itoa(tp.PoolSlot)
-			} else if slot := resolvePoolSlot(tp.InstanceName, tp.TemplateName); slot > 0 {
-				meta["pool_slot"] = strconv.Itoa(slot)
+			meta["template"] = qualifiedTemplate
+			if poolSlot > 0 {
+				meta["pool_slot"] = strconv.Itoa(poolSlot)
 			}
 			// Store command and resume fields so gc session attach can
 			// reconstruct the resume command from bead metadata alone.
@@ -870,11 +975,29 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			if createErr != nil {
 				fmt.Fprintf(stderr, "session beads: creating bead for %s: %v\n", agentName, createErr) //nolint:errcheck
 			} else {
-				openIndex[sn] = newBead.ID
+				createdSessionName := strings.TrimSpace(newBead.Metadata["session_name"])
+				if isPoolInstance {
+					createdSessionName = PoolSessionName(qualifiedTemplate, newBead.ID)
+					if err := store.SetMetadata(newBead.ID, "session_name", createdSessionName); err != nil {
+						_ = store.Close(newBead.ID)
+						fmt.Fprintf(stderr, "session beads: setting pool session_name for %s: %v\n", agentName, err) //nolint:errcheck
+						continue
+					}
+					if newBead.Metadata == nil {
+						newBead.Metadata = make(map[string]string, 1)
+					}
+					newBead.Metadata["session_name"] = createdSessionName
+				}
+				if createdSessionName == "" {
+					createdSessionName = sn
+				}
+				desiredNames[createdSessionName] = true
+				openIndex[createdSessionName] = newBead.ID
 				openBeads = append(openBeads, newBead)
-				indexBySessionName[sn] = len(openBeads) - 1
+				bySessionName[createdSessionName] = newBead
+				indexBySessionName[createdSessionName] = len(openBeads) - 1
 				if liveAlias := strings.TrimSpace(meta["alias"]); liveAlias != "" && state == "active" {
-					if err := session.SyncRuntimeAlias(sp, sn, liveAlias); err != nil {
+					if err := session.SyncRuntimeAlias(sp, createdSessionName, liveAlias); err != nil {
 						fmt.Fprintf(stderr, "session beads: syncing runtime alias %q for %s: %v\n", liveAlias, agentName, err) //nolint:errcheck
 					}
 				}
@@ -1097,7 +1220,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			if sn == "" {
 				continue
 			}
-			if _, hasDesired := desiredState[sn]; hasDesired {
+			if desiredNames[sn] {
 				continue
 			}
 			if b.Status == "closed" {

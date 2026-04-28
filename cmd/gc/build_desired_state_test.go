@@ -1952,7 +1952,7 @@ func TestBuildDesiredState_PendingCreatePoolSessionStaysDesiredWithoutScaleDeman
 			"pool_managed":         boolMetadata(true),
 			"pool_slot":            "1",
 			"pending_create_claim": boolMetadata(true),
-			"state":                "creating",
+			"state":                "stopped",
 		},
 	}); err != nil {
 		t.Fatalf("create session bead: %v", err)

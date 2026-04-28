@@ -784,13 +784,7 @@ func discoverSessionBeadsWithRoots(
 }
 
 func isPendingPoolCreate(b beads.Bead) bool {
-	if !isPoolManagedSessionBead(b) || strings.TrimSpace(b.Metadata["pending_create_claim"]) != boolMetadata(true) {
-		return false
-	}
-	if strings.TrimSpace(b.Metadata["state"]) != "creating" {
-		return false
-	}
-	return true
+	return isPoolManagedSessionBead(b) && strings.TrimSpace(b.Metadata["pending_create_claim"]) == boolMetadata(true)
 }
 
 func realizeDependencyFloors(
