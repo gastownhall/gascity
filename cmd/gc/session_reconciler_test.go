@@ -1546,6 +1546,160 @@ func TestReconcileSessionBeads_AsleepIdlePoolBeadFreesSlot(t *testing.T) {
 	}
 }
 
+// capturingRecorder is an in-memory events.Recorder used in tests that
+// need to assert which events were emitted.
+type capturingRecorder struct {
+	events []events.Event
+}
+
+func (c *capturingRecorder) Record(e events.Event) {
+	c.events = append(c.events, e)
+}
+
+func (c *capturingRecorder) byType(t string) []events.Event {
+	out := make([]events.Event, 0, len(c.events))
+	for _, e := range c.events {
+		if e.Type == t {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// TestReconcileSessionBeads_PoolSlotWithStrandedWorkEmitsDiagnostic
+// covers issue #1424: when a pool-managed session is observed
+// asleep + not-alive AND still has open in-progress work assigned, the
+// close gate correctly preserves the slot — but the controller used to
+// fall through silently with no event recorded. Operators had no signal
+// that the session had terminated without a clean drain. This test
+// asserts the diagnostic event fires, names the stranded work, and is
+// throttled across subsequent ticks so we don't get a storm.
+func TestReconcileSessionBeads_PoolSlotWithStrandedWorkEmitsDiagnostic(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	env.addDesired("worker", "worker", false) // NOT running — runtime is dead
+	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"state":                "asleep",
+		"sleep_reason":         "idle",
+		poolManagedMetadataKey: boolMetadata(true),
+	})
+
+	work, err := env.store.Create(beads.Bead{
+		Title:    "stranded implementation",
+		Type:     "task",
+		Status:   "open",
+		Assignee: session.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := env.store.Update(work.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("Update work bead status: %v", err)
+	}
+
+	rec := &capturingRecorder{}
+	env.rec = rec
+
+	// First tick — diagnostic must fire.
+	reconcileSessionBeadsAtPath(
+		context.Background(),
+		"",
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		newFakeDrainOps(),
+		nil,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+
+	stranded := rec.byType(events.SessionStranded)
+	if len(stranded) != 1 {
+		t.Fatalf("session.stranded events emitted = %d, want 1; got events: %+v", len(stranded), rec.events)
+	}
+	got := stranded[0]
+	if got.Subject != session.ID {
+		t.Errorf("session.stranded.subject = %q, want session bead ID %q", got.Subject, session.ID)
+	}
+	if !strings.Contains(got.Message, work.ID) {
+		t.Errorf("session.stranded.message = %q, want it to name the stranded work bead %q", got.Message, work.ID)
+	}
+	if !strings.Contains(got.Message, "worker") {
+		t.Errorf("session.stranded.message = %q, want it to name the agent template %q", got.Message, "worker")
+	}
+
+	// Verify the close gate still preserved the slot — the existing
+	// behavior is the load-bearing safety property, not what this PR
+	// changes. The diagnostic is purely an emission addition.
+	postFirst, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(session) after first tick: %v", err)
+	}
+	if postFirst.Status == "closed" {
+		t.Fatalf("session bead closed on first tick; pool-slot close gate must keep it open while in_progress work is assigned")
+	}
+
+	// Re-fetch the session bead to pick up any throttle-marker metadata
+	// the reconciler may have stamped.
+	updatedSession, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(session) before second tick: %v", err)
+	}
+
+	// Second tick — diagnostic must NOT fire again (throttled per
+	// session bead generation, mirroring the #855 drain-log throttle).
+	reconcileSessionBeadsAtPath(
+		context.Background(),
+		"",
+		[]beads.Bead{updatedSession},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		newFakeDrainOps(),
+		nil,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+
+	stranded = rec.byType(events.SessionStranded)
+	if len(stranded) != 1 {
+		t.Fatalf("session.stranded events after second tick = %d, want still 1 (throttled); events: %+v", len(stranded), rec.events)
+	}
+}
+
 // (Removed: TestReconcileSessionBeads_DrainAckPartialOwnershipSnapshotFailsClosed
 // guarded the old snapshot-backed fail-closed path — the sleep_reason
 // "ownership_snapshot_partial" branch. Drain-ack now re-queries the store
