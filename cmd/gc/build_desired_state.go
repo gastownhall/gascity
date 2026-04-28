@@ -28,7 +28,7 @@ type DesiredStateResult struct {
 	ScaleCheckCounts  map[string]int // nil when store is nil or scale_check not run
 	PoolDesiredCounts map[string]int // runtime-owned demand snapshot; reused on stable patrol ticks when still fresh
 	WorkSet           map[string]bool
-	AssignedWorkBeads []beads.Bead // actionable assigned work: in_progress or ready+assigned
+	AssignedWorkBeads []beads.Bead // actionable assigned work, plus stranded pool work that needs release
 	// AssignedWorkStores is aligned by index with AssignedWorkBeads, so later
 	// mutation paths update rig-owned work in the right store even when
 	// independent stores produce overlapping bead IDs.
@@ -501,9 +501,8 @@ func refreshDesiredStateWithSessionBeads(
 // collectAssignedWorkBeads queries each store (city + rigs) for actionable
 // assigned work. It includes in-progress assigned work plus open assigned
 // work that is actually ready. Routed-but-unassigned pool queue work is
-// intentionally excluded here; new session demand comes from scale_check
-// (and work_query as a defense-in-depth wake signal), while this helper is
-// only for preserving sessions that already own actionable work.
+// intentionally excluded here, except stranded in-progress pool work with no
+// assignee is included so reconciliation can reopen it for normal claiming.
 func collectAssignedWorkBeads(
 	cfg *config.City,
 	cityStore beads.Store,
@@ -535,9 +534,10 @@ func collectAssignedWorkBeadsWithStores(
 	var partial bool
 	for _, s := range stores {
 		seen := make(map[string]struct{})
-		// In-progress beads with an assignee (active work).
+		// In-progress beads with an assignee (active work), plus stranded
+		// unassigned pool work that needs to be reopened.
 		if inProgress, err := s.List(beads.ListQuery{Status: "in_progress", Live: true}); err == nil {
-			appendAssignedUnique(&result, &resultStores, inProgress, seen, s)
+			appendInProgressWorkUnique(cfg, &result, &resultStores, inProgress, seen, s)
 		} else {
 			log.Printf("collectAssignedWorkBeads: List(in_progress) failed: %v", err)
 			partial = true
@@ -580,27 +580,40 @@ func mergeNamedSessionDemand(poolDesired map[string]int, namedDemand map[string]
 	}
 }
 
+func appendInProgressWorkUnique(cfg *config.City, dst *[]beads.Bead, stores *[]beads.Store, beadList []beads.Bead, seen map[string]struct{}, store beads.Store) {
+	for _, b := range beadList {
+		if strings.TrimSpace(b.Assignee) == "" && !isRecoverableUnassignedInProgressPoolWork(cfg, b) {
+			continue
+		}
+		appendWorkUnique(dst, stores, b, seen, store)
+	}
+}
+
 func appendAssignedUnique(dst *[]beads.Bead, stores *[]beads.Store, beadList []beads.Bead, seen map[string]struct{}, store beads.Store) {
 	for _, b := range beadList {
 		if strings.TrimSpace(b.Assignee) == "" {
 			continue
 		}
-		// Session beads are not actionable work — filter them at the source
-		// so all consumers see only real tasks. Message beads are NOT filtered
-		// here because they represent mail that should wake/materialize sessions;
-		// idle nudge filters messages locally since mail nudging is handled
-		// separately by the mail system.
-		if b.Type == sessionBeadType {
-			continue
-		}
-		if _, ok := seen[b.ID]; ok {
-			continue
-		}
-		seen[b.ID] = struct{}{}
-		*dst = append(*dst, b)
-		if stores != nil {
-			*stores = append(*stores, store)
-		}
+		appendWorkUnique(dst, stores, b, seen, store)
+	}
+}
+
+func appendWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, b beads.Bead, seen map[string]struct{}, store beads.Store) {
+	// Session beads are not actionable work — filter them at the source
+	// so all consumers see only real tasks. Message beads are NOT filtered
+	// here because they represent mail that should wake/materialize sessions;
+	// idle nudge filters messages locally since mail nudging is handled
+	// separately by the mail system.
+	if b.Type == sessionBeadType {
+		return
+	}
+	if _, ok := seen[b.ID]; ok {
+		return
+	}
+	seen[b.ID] = struct{}{}
+	*dst = append(*dst, b)
+	if stores != nil {
+		*stores = append(*stores, store)
 	}
 }
 

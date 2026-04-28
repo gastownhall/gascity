@@ -183,6 +183,80 @@ func TestReleaseOrphanedPoolAssignments_ReopensMissingPoolAssignee(t *testing.T)
 	}
 }
 
+func TestReleaseOrphanedPoolAssignments_ReopensUnassignedInProgressPoolWork(t *testing.T) {
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title:    "stranded pool work",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set work status: %v", err)
+	}
+	work, err = store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+	if work.Assignee != "" {
+		t.Fatalf("test setup assignee = %q, want empty", work.Assignee)
+	}
+
+	released := releaseOrphanedPoolAssignments(
+		store,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		nil,
+		[]beads.Bead{work},
+		nil,
+		nil,
+	)
+	if len(released) != 1 || released[0].ID != work.ID {
+		t.Fatalf("released = %v, want [%s]", released, work.ID)
+	}
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("status = %q, want open", got.Status)
+	}
+	if got.Assignee != "" {
+		t.Fatalf("assignee = %q, want empty", got.Assignee)
+	}
+}
+
+func TestCollectAssignedWorkBeadsIncludesUnassignedInProgressPoolWorkForRecovery(t *testing.T) {
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title:    "stranded pool work",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set work status: %v", err)
+	}
+
+	found, stores, partial := collectAssignedWorkBeadsWithStores(
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		store,
+		nil,
+		nil,
+	)
+	if partial {
+		t.Fatal("collectAssignedWorkBeadsWithStores reported partial results")
+	}
+	if len(found) != 1 || found[0].ID != work.ID {
+		t.Fatalf("found = %#v, want stranded work %s", found, work.ID)
+	}
+	if len(stores) != 1 || stores[0] != store {
+		t.Fatalf("stores = %#v, want owner store", stores)
+	}
+}
+
 func TestReleaseOrphanedPoolAssignments_UpdatesRigStoreFallback(t *testing.T) {
 	cityStore := beads.NewMemStore()
 	rigStore := beads.NewMemStore()
