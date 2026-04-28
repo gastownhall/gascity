@@ -23,10 +23,10 @@ func (b *blockValidatingStore) Close(id string) error {
 	return b.Store.Close(id)
 }
 
-func (b *blockValidatingStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+func (b *blockValidatingStore) CloseAll(ids []string, _ map[string]string) (int, error) {
 	closed := 0
 	for _, id := range ids {
-		bead, err := b.Store.Get(id)
+		bead, err := b.Get(id)
 		if err != nil {
 			return closed, err
 		}
@@ -45,7 +45,7 @@ func (b *blockValidatingStore) CloseAll(ids []string, metadata map[string]string
 }
 
 func (b *blockValidatingStore) assertNoOpenBlockers(id string) error {
-	deps, err := b.Store.DepList(id, "down")
+	deps, err := b.DepList(id, "down")
 	if err != nil {
 		return err
 	}
@@ -53,7 +53,7 @@ func (b *blockValidatingStore) assertNoOpenBlockers(id string) error {
 		if d.IssueID != id || d.Type != "blocks" {
 			continue
 		}
-		blocker, err := b.Store.Get(d.DependsOnID)
+		blocker, err := b.Get(d.DependsOnID)
 		if err != nil {
 			continue
 		}
