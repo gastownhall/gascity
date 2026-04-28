@@ -283,14 +283,9 @@ func retireDuplicateConfiguredNamedSessionBeads(
 			}
 			b := openBeads[idx]
 			oldSessionName := strings.TrimSpace(b.Metadata["session_name"])
-			running := false
-			if oldSessionName != "" && oldSessionName != winnerSessionName && sp != nil {
-				running, _ = workerSessionTargetRunningWithConfig("", store, sp, cfg, oldSessionName)
-			}
-			if running {
-				if err := workerKillSessionTargetWithConfig("", store, sp, cfg, oldSessionName); err != nil {
-					fmt.Fprintf(stderr, "session beads: stopping duplicate named session %q: %v\n", oldSessionName, err) //nolint:errcheck
-				}
+			if oldSessionName != "" && oldSessionName != winnerSessionName &&
+				!stopRuntimeBeforeSessionBeadMutation(store, sp, cfg, b, "duplicate named session", stderr) {
+				continue
 			}
 			batch := session.RetireNamedSessionPatch(now, "duplicate-repair", identity)
 			if setMetaBatch(store, b.ID, batch, stderr) != nil {
@@ -359,15 +354,8 @@ func retireRemovedConfiguredNamedSessionBead(
 	if store == nil {
 		return false
 	}
-	oldSessionName := strings.TrimSpace(b.Metadata["session_name"])
-	running := false
-	if oldSessionName != "" && sp != nil {
-		running, _ = workerSessionTargetRunningWithConfig("", store, sp, nil, oldSessionName)
-	}
-	if running {
-		if err := workerKillSessionTargetWithConfig("", store, sp, nil, oldSessionName); err != nil {
-			fmt.Fprintf(stderr, "session beads: stopping removed named session %q: %v\n", oldSessionName, err) //nolint:errcheck
-		}
+	if !stopRuntimeBeforeSessionBeadMutation(store, sp, nil, b, "removed named session", stderr) {
+		return false
 	}
 	batch := session.RetireNamedSessionPatch(now, "removed-configured-named-session", namedSessionIdentity(b))
 	if setMetaBatch(store, b.ID, batch, stderr) != nil {
@@ -701,6 +689,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 	now := clk.Now().UTC()
 	cityName := config.EffectiveCityName(cfg, filepath.Base(cityPath))
 
+	blockedReconfiguredNamedIdentities := map[string]bool{}
 	if cfg != nil {
 		for i, b := range openBeads {
 			if b.Status == "closed" || !isNamedSessionBead(b) {
@@ -714,18 +703,12 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			if strings.TrimSpace(b.Metadata["session_name"]) == spec.SessionName {
 				continue
 			}
-			if closeSessionBeadIfUnassigned(store, rigStores, b, "reconfigured", now, stderr) {
-				if sn := strings.TrimSpace(b.Metadata["session_name"]); sn != "" {
-					running, _ := workerSessionTargetRunningWithConfig("", store, sp, cfg, sn)
-					if running {
-						if err := workerKillSessionTargetWithConfig("", store, sp, cfg, sn); err != nil {
-							fmt.Fprintf(stderr, "session beads: stopping drifted named session %q: %v\n", sn, err) //nolint:errcheck
-						}
-					}
-				}
-				existing[i].Status = "closed"
-				openBeads[i].Status = "closed"
+			if !closeSessionBeadIfRuntimeStoppedAndUnassigned(store, rigStores, sp, cfg, b, "reconfigured", "reconfigured named session", now, stderr) {
+				blockedReconfiguredNamedIdentities[identity] = true
+				continue
 			}
+			existing[i].Status = "closed"
+			openBeads[i].Status = "closed"
 		}
 		openBeads = retireDuplicateConfiguredNamedSessionBeads(
 			store, rigStores, sp, cfg, cityName, openBeads, bySessionName, indexBySessionName, now, stderr,
@@ -737,6 +720,9 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		liveHash := runtime.LiveFingerprint(agentCfg)
 		managedAlias := strings.TrimSpace(tp.Alias)
 		isConfiguredNamed := strings.TrimSpace(tp.ConfiguredNamedIdentity) != ""
+		if isConfiguredNamed && blockedReconfiguredNamedIdentities[strings.TrimSpace(tp.ConfiguredNamedIdentity)] {
+			continue
+		}
 		origin := templateParamsSessionOrigin(tp)
 
 		agentName := tp.TemplateName
@@ -1144,7 +1130,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				continue
 			}
 			if configuredNames[sn] {
-				if closeSessionBeadIfUnassigned(store, rigStores, b, "suspended", now, stderr) {
+				if closeSessionBeadIfRuntimeStoppedAndUnassigned(store, rigStores, sp, cfg, b, "suspended", "suspended session", now, stderr) {
 					if idx, ok := indexBySessionName[sn]; ok {
 						openBeads[idx].Status = "closed"
 					}
@@ -1158,7 +1144,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 						}
 					}
 				}
-				if closeSessionBeadIfUnassigned(store, rigStores, b, "orphaned", now, stderr) {
+				if closeSessionBeadIfRuntimeStoppedAndUnassigned(store, rigStores, sp, cfg, b, "orphaned", "orphaned session", now, stderr) {
 					if idx, ok := indexBySessionName[sn]; ok {
 						openBeads[idx].Status = "closed"
 					}
@@ -1403,6 +1389,63 @@ func reapStaleSessionBeads(
 		}
 	}
 	return reaped
+}
+
+func closeSessionBeadIfRuntimeStoppedAndUnassigned(
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	sp runtime.Provider,
+	cfg *config.City,
+	b beads.Bead,
+	closeReason string,
+	stopReason string,
+	now time.Time,
+	stderr io.Writer,
+) bool {
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	hasAssignedWork, err := sessionHasOpenAssignedWork(store, rigStores, b)
+	if err != nil {
+		fmt.Fprintf(stderr, "session work guard: checking assigned work for %s: %v\n", b.ID, err) //nolint:errcheck
+		return false
+	}
+	if hasAssignedWork {
+		return false
+	}
+	if !stopRuntimeBeforeSessionBeadMutation(store, sp, cfg, b, stopReason, stderr) {
+		return false
+	}
+	return closeBead(store, b.ID, closeReason, now, stderr)
+}
+
+func stopRuntimeBeforeSessionBeadMutation(
+	store beads.Store,
+	sp runtime.Provider,
+	cfg *config.City,
+	b beads.Bead,
+	reason string,
+	stderr io.Writer,
+) bool {
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	sessionName := strings.TrimSpace(b.Metadata["session_name"])
+	if sessionName == "" || sp == nil {
+		return true
+	}
+	if !sp.IsRunning(sessionName) {
+		return true
+	}
+	if err := workerKillSessionTargetWithConfig("", store, sp, cfg, sessionName); err != nil {
+		fmt.Fprintf(stderr, "session beads: stopping %s %q: %v\n", reason, sessionName, err) //nolint:errcheck
+		return false
+	}
+	if sp.IsRunning(sessionName) {
+		fmt.Fprintf(stderr, "session beads: stopping %s %q: still running after stop\n", reason, sessionName) //nolint:errcheck
+		return false
+	}
+	return true
 }
 
 // closeBead sets final metadata on a session bead and closes it.
