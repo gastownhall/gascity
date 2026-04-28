@@ -469,7 +469,7 @@ func controllerRestartTimeout(cfg *config.City) time.Duration {
 }
 
 // doRuntimeRequestRestart sets the restart-requested flag then polls until the
-// controller clears it (exit 0), the context is cancelled by a signal (exit 0),
+// controller clears it (exit 0), the context is canceled by a signal (exit 0),
 // or the bounded timeout expires (exit 1 with diagnostic).
 func doRuntimeRequestRestart(ctx context.Context, dops drainOps, persistRestart func() error, rec events.Recorder,
 	targetName, sn string, pollInterval, timeout time.Duration, stdout, stderr io.Writer,
