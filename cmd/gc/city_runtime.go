@@ -1184,7 +1184,11 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	}
 	rigStores := cr.rigBeadStores()
 	assignedWorkBeads := result.AssignedWorkBeads
-	if released := releaseOrphanedPoolAssignments(store, cr.cfg, sessionBeads.Open(), assignedWorkBeads, result.AssignedWorkStores, rigStores); len(released) > 0 {
+	var released []releasedPoolAssignment
+	if !result.StoreQueryPartial {
+		released = releaseOrphanedPoolAssignments(store, cr.cfg, sessionBeads.Open(), assignedWorkBeads, result.AssignedWorkStores, rigStores)
+	}
+	if len(released) > 0 {
 		for _, r := range released {
 			fmt.Fprintf(cr.stderr, "released orphaned pool work: %s\n", r.ID) //nolint:errcheck
 		}

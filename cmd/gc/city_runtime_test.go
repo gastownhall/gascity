@@ -1077,6 +1077,56 @@ func TestCityRuntimeBeadReconcileTick_TransientStoreQueryPartialKeepsRunningPool
 	}
 }
 
+func TestCityRuntimeBeadReconcileTick_StoreQueryPartialDoesNotReleaseAssignedWork(t *testing.T) {
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		ID:       "ga-live",
+		Title:    "live assigned work from partial snapshot",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: "worker-session",
+		Metadata: map[string]string{
+			"gc.routed_to": "worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("mark work in_progress: %v", err)
+	}
+	work.Status = inProgress
+
+	cr := &CityRuntime{
+		cityPath:            t.TempDir(),
+		cityName:            "maintainer-city",
+		cfg:                 &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}}},
+		sp:                  runtime.NewFake(),
+		standaloneCityStore: store,
+		sessionDrains:       newDrainTracker(),
+		rec:                 events.Discard,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+	}
+
+	cr.beadReconcileTick(context.Background(), DesiredStateResult{
+		State:              map[string]TemplateParams{},
+		ScaleCheckCounts:   map[string]int{"worker": 0},
+		AssignedWorkBeads:  []beads.Bead{work},
+		AssignedWorkStores: []beads.Store{store},
+		StoreQueryPartial:  true,
+	}, newSessionBeadSnapshot(nil), nil)
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work after partial tick: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "worker-session" {
+		t.Fatalf("partial assigned-work snapshot released work: status=%q assignee=%q", got.Status, got.Assignee)
+	}
+}
+
 func TestCityRuntimeTick_LogsWispGCPurgeCountWithNonFatalError(t *testing.T) {
 	store := beads.NewMemStore()
 	var stdout, stderr bytes.Buffer
