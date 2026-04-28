@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,6 +18,20 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
+
+// drainOpsWithCountdown wraps fakeDrainOps and returns false for isRestartRequested
+// after N calls, simulating the reconciler clearing the flag without concurrent map access.
+type drainOpsWithCountdown struct {
+	*fakeDrainOps
+	remaining atomic.Int32
+}
+
+func (c *drainOpsWithCountdown) isRestartRequested(_ string) (bool, error) {
+	if c.remaining.Add(-1) < 0 {
+		return false, nil
+	}
+	return true, nil
+}
 
 // fakeDrainOps is a test double for drainOps.
 type fakeDrainOps struct {
@@ -479,12 +494,74 @@ func TestDoRuntimeRequestRestartError(t *testing.T) {
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux borked")
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeRequestRestart(dops, nil, events.Discard, "worker", "worker", &stdout, &stderr)
+	code := doRuntimeRequestRestart(context.Background(), dops, nil, events.Discard, "worker", "worker",
+		time.Millisecond, time.Second, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
 	if got := stderr.String(); got != "gc runtime request-restart: tmux borked\n" {
 		t.Errorf("stderr = %q", got)
+	}
+}
+
+func TestDoRuntimeRequestRestartFlagCleared(t *testing.T) {
+	dops := &drainOpsWithCountdown{fakeDrainOps: newFakeDrainOps()}
+	dops.remaining.Store(2) // true for first 2 polls, then false (reconciler cleared)
+
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeRequestRestart(context.Background(), dops, nil, events.Discard, "worker", "worker",
+		10*time.Millisecond, 5*time.Second, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0 when flag cleared; stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() > 0 {
+		t.Errorf("unexpected stderr: %q", stderr.String())
+	}
+}
+
+func TestDoRuntimeRequestRestartTimeout(t *testing.T) {
+	dops := newFakeDrainOps()
+
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeRequestRestart(context.Background(), dops, nil, events.Discard, "worker", "worker",
+		10*time.Millisecond, 25*time.Millisecond, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 on timeout", code)
+	}
+	if got := stderr.String(); !strings.Contains(got, "controller did not act within") {
+		t.Errorf("stderr = %q, want timeout diagnostic", got)
+	}
+	if !strings.Contains(stderr.String(), "gc dashboard") {
+		t.Errorf("stderr = %q, want gc dashboard hint", stderr.String())
+	}
+}
+
+func TestDoRuntimeRequestRestartContextCancel(t *testing.T) {
+	dops := newFakeDrainOps()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan int, 1)
+	go func() {
+		var stdout, stderr bytes.Buffer
+		done <- doRuntimeRequestRestart(ctx, dops, nil, events.Discard, "worker", "worker",
+			10*time.Millisecond, 30*time.Second, &stdout, &stderr)
+	}()
+
+	time.Sleep(30 * time.Millisecond)
+	cancel()
+
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("code = %d, want 0 on context cancel", code)
+		}
+		// Flag must remain set so the controller can still act on its next tick.
+		if !dops.restartRequested["worker"] {
+			t.Error("restart flag should remain set after context cancel")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("doRuntimeRequestRestart did not exit on context cancel")
 	}
 }
 

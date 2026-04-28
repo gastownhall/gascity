@@ -5,9 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/spf13/cobra"
@@ -431,13 +434,38 @@ func cmdRuntimeRequestRestart(stdout, stderr io.Writer) int {
 			return handle.Reset(context.Background())
 		}
 	}
-	return doRuntimeRequestRestart(dops, persistRestart, rec, current.display, current.sessionName, stdout, stderr)
+	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return doRuntimeRequestRestart(sigCtx, dops, persistRestart, rec, current.display, current.sessionName,
+		controllerRestartPollInterval, controllerRestartTimeout(cfg), stdout, stderr)
 }
 
-// doRuntimeRequestRestart sets the restart-requested flag and blocks forever.
-// The controller will kill and restart the session on its next tick.
-func doRuntimeRequestRestart(dops drainOps, persistRestart func() error, rec events.Recorder,
-	targetName, sn string, stdout, stderr io.Writer,
+const controllerRestartPollInterval = 1 * time.Second
+
+// controllerRestartTimeout computes the bounded timeout for waiting on the
+// controller to act on a restart request: max(5*PatrolInterval, 5min), capped at 30min.
+func controllerRestartTimeout(cfg *config.City) time.Duration {
+	const floor = 5 * time.Minute
+	const ceil = 30 * time.Minute
+	patrol := 30 * time.Second
+	if cfg != nil {
+		patrol = cfg.Daemon.PatrolIntervalDuration()
+	}
+	d := 5 * patrol
+	if d < floor {
+		d = floor
+	}
+	if d > ceil {
+		d = ceil
+	}
+	return d
+}
+
+// doRuntimeRequestRestart sets the restart-requested flag then polls until the
+// controller clears it (exit 0), the context is cancelled by a signal (exit 0),
+// or the bounded timeout expires (exit 1 with diagnostic).
+func doRuntimeRequestRestart(ctx context.Context, dops drainOps, persistRestart func() error, rec events.Recorder,
+	targetName, sn string, pollInterval, timeout time.Duration, stdout, stderr io.Writer,
 ) int {
 	if err := dops.setRestartRequested(sn); err != nil {
 		fmt.Fprintf(stderr, "gc runtime request-restart: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -458,8 +486,27 @@ func doRuntimeRequestRestart(dops drainOps, persistRestart func() error, rec eve
 	})
 	fmt.Fprintln(stdout, "Restart requested. Blocking until controller kills this session...") //nolint:errcheck // best-effort stdout
 
-	// Block forever. The controller will kill the entire process tree.
-	select {}
+	deadline := time.Now().Add(timeout)
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			// Signal received; leave the flag set so the controller still acts on its next tick.
+			return 0
+		case <-ticker.C:
+			requested, err := dops.isRestartRequested(sn)
+			if err == nil && !requested {
+				// Reconciler cleared the flag; restart is in flight.
+				return 0
+			}
+			if time.Now().After(deadline) {
+				fmt.Fprintf(stderr, "gc runtime request-restart: controller did not act within %s; check `gc dashboard` or `gc trace`\n", timeout) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+		}
+	}
 }
 
 // doRuntimeDrainAck sets the drain-ack flag on the session. The controller
