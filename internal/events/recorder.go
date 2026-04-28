@@ -1,7 +1,6 @@
 package events
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -26,30 +25,17 @@ type FileRecorder struct {
 	closed bool
 }
 
-// NewFileRecorder opens (or creates) the event log at path. It scans any
-// existing file to find the maximum sequence number so new events continue
+// NewFileRecorder opens (or creates) the event log at path. It reads the tail
+// sequence from any existing append-only log so new events continue
 // monotonically. Parent directories are created as needed.
 func NewFileRecorder(path string, stderr io.Writer) (*FileRecorder, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("creating event log directory: %w", err)
 	}
 
-	// Scan existing file for max seq before opening for append.
-	var maxSeq uint64
-	if f, err := os.Open(path); err == nil {
-		scanner := bufio.NewScanner(f)
-		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // handle lines up to 1MB
-		for scanner.Scan() {
-			var e Event
-			if json.Unmarshal(scanner.Bytes(), &e) == nil && e.Seq > maxSeq {
-				maxSeq = e.Seq
-			}
-		}
-		if err := scanner.Err(); err != nil {
-			f.Close() //nolint:errcheck // closing after scan error
-			return nil, fmt.Errorf("scanning event log: %w", err)
-		}
-		f.Close() //nolint:errcheck // read-only scan
+	maxSeq, err := ReadLatestSeq(path)
+	if err != nil {
+		return nil, err
 	}
 
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
@@ -107,11 +93,20 @@ func (r *FileRecorder) LatestSeq() (uint64, error) {
 
 // Watch returns a Watcher that polls the event file for new events.
 func (r *FileRecorder) Watch(ctx context.Context, afterSeq uint64) (Watcher, error) {
+	var offset int64
+	r.mu.Lock()
+	if afterSeq >= r.seq {
+		if info, err := r.file.Stat(); err == nil {
+			offset = info.Size()
+		}
+	}
+	r.mu.Unlock()
 	return &fileWatcher{
 		path:     r.path,
 		afterSeq: afterSeq,
 		ctx:      ctx,
 		poll:     250 * time.Millisecond,
+		offset:   offset,
 		done:     make(chan struct{}),
 	}, nil
 }

@@ -599,6 +599,40 @@ func TestReadLatestSeqEmpty(t *testing.T) {
 	}
 }
 
+func TestReadLatestSeqUsesTailOfAppendOnlyLog(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	hugeMalformed := append(bytes.Repeat([]byte("x"), 2*1024*1024), '\n')
+	validTail := []byte(`{"seq":42,"type":"bead.updated","ts":"2026-01-01T00:00:00Z","actor":"test"}` + "\n")
+	if err := os.WriteFile(path, append(hugeMalformed, validTail...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	seq, err := ReadLatestSeq(path)
+	if err != nil {
+		t.Fatalf("ReadLatestSeq: %v", err)
+	}
+	if seq != 42 {
+		t.Fatalf("ReadLatestSeq = %d, want 42", seq)
+	}
+
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatalf("NewFileRecorder: %v", err)
+	}
+	rec.Record(Event{Type: BeadClosed, Actor: "test"})
+	rec.Close() //nolint:errcheck // test cleanup
+
+	seq, err = ReadLatestSeq(path)
+	if err != nil {
+		t.Fatalf("ReadLatestSeq(after record): %v", err)
+	}
+	if seq != 43 {
+		t.Fatalf("ReadLatestSeq(after record) = %d, want 43", seq)
+	}
+}
+
 func TestReadFrom(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "events.jsonl")
@@ -800,6 +834,59 @@ func TestFileRecorderWatch(t *testing.T) {
 	}
 	if e.Type != BeadClosed {
 		t.Errorf("Type = %q, want %q", e.Type, BeadClosed)
+	}
+}
+
+func TestFileRecorderWatchAfterLatestStartsAtEOF(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+
+	rec.Record(Event{Type: BeadCreated, Actor: "human", Subject: "gc-1"})
+	rec.Record(Event{Type: BeadUpdated, Actor: "human", Subject: "gc-1"})
+	seq, err := rec.LatestSeq()
+	if err != nil {
+		t.Fatalf("LatestSeq: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	w, err := rec.Watch(ctx, seq)
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+	defer w.Close() //nolint:errcheck // test cleanup
+
+	fw, ok := w.(*fileWatcher)
+	if !ok {
+		t.Fatalf("Watch returned %T, want *fileWatcher", w)
+	}
+	if fw.offset != info.Size() {
+		t.Fatalf("watch offset = %d, want EOF %d", fw.offset, info.Size())
+	}
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		rec.Record(Event{Type: BeadClosed, Actor: "human", Subject: "gc-1"})
+	}()
+	e, err := w.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if e.Seq != seq+1 {
+		t.Fatalf("Seq = %d, want %d", e.Seq, seq+1)
+	}
+	if e.Type != BeadClosed {
+		t.Fatalf("Type = %q, want %q", e.Type, BeadClosed)
 	}
 }
 

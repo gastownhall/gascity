@@ -2,6 +2,7 @@ package events
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -73,8 +74,10 @@ func ReadFiltered(path string, filter Filter) ([]Event, error) {
 	return result, nil
 }
 
-// ReadLatestSeq returns the highest Seq in the events file, or 0 if
-// the file is missing or empty.
+// ReadLatestSeq returns the latest complete event Seq in the events file, or
+// 0 if the file is missing or empty. Event logs are append-only and sequence
+// numbers are monotonic, so this reads backward from the tail instead of
+// parsing historical events on every recorder open.
 func ReadLatestSeq(path string) (uint64, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -85,19 +88,89 @@ func ReadLatestSeq(path string) (uint64, error) {
 	}
 	defer f.Close() //nolint:errcheck // read-only file
 
-	var maxSeq uint64
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // handle lines up to 1MB
-	for scanner.Scan() {
-		var e Event
-		if json.Unmarshal(scanner.Bytes(), &e) == nil && e.Seq > maxSeq {
-			maxSeq = e.Seq
+	info, err := f.Stat()
+	if err != nil {
+		return 0, fmt.Errorf("stat events: %w", err)
+	}
+	return readLatestSeqFromTail(f, info.Size())
+}
+
+func readLatestSeqFromTail(f *os.File, size int64) (uint64, error) {
+	if size <= 0 {
+		return 0, nil
+	}
+	const chunkSize int64 = 64 * 1024
+	var suffix []byte
+	end := size
+	first := true
+	for end > 0 {
+		n := chunkSize
+		if end < n {
+			n = end
+		}
+		start := end - n
+		chunk := make([]byte, n)
+		if _, err := f.ReadAt(chunk, start); err != nil && err != io.EOF {
+			return 0, fmt.Errorf("reading latest seq: %w", err)
+		}
+		data := make([]byte, 0, len(chunk)+len(suffix))
+		data = append(data, chunk...)
+		data = append(data, suffix...)
+		searchEnd := len(data)
+		if first && len(data) > 0 && data[len(data)-1] != '\n' {
+			idx := bytes.LastIndexByte(data, '\n')
+			if idx < 0 {
+				suffix = data
+				end = start
+				first = false
+				continue
+			}
+			searchEnd = idx
+		}
+		searchStart := 0
+		if start > 0 {
+			idx := bytes.IndexByte(data, '\n')
+			if idx < 0 {
+				suffix = data
+				end = start
+				first = false
+				continue
+			}
+			searchStart = idx + 1
+		}
+		if seq, ok := latestSeqInCompleteLines(data[searchStart:searchEnd]); ok {
+			return seq, nil
+		}
+		suffix = data
+		end = start
+		first = false
+	}
+	return 0, nil
+}
+
+func latestSeqInCompleteLines(data []byte) (uint64, bool) {
+	for len(data) > 0 {
+		idx := bytes.LastIndexByte(data, '\n')
+		var line []byte
+		if idx >= 0 {
+			line = data[idx+1:]
+			data = data[:idx]
+		} else {
+			line = data
+			data = nil
+		}
+		line = bytes.TrimSuffix(line, []byte{'\r'})
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var header struct {
+			Seq uint64 `json:"seq"`
+		}
+		if err := json.Unmarshal(line, &header); err == nil && header.Seq > 0 {
+			return header.Seq, true
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return maxSeq, fmt.Errorf("scanning events: %w", err)
-	}
-	return maxSeq, nil
+	return 0, false
 }
 
 // ReadFrom reads events starting at the given byte offset in the file.
