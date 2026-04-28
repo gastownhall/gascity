@@ -1759,7 +1759,12 @@ op_init() {
     # during gc init *before* Dolt starts, so on a fresh city this path is reached
     # with an empty (schema-less) database. We detect that by checking whether
     # `bd config set issue_prefix` succeeds — it fails when no beads schema exists.
-    # On failure we fall through to the full bd init path below.
+    # On failure we run `bd init` against the existing empty database to seed the
+    # schema in place. We do NOT fall through to the standard non-fast-path init
+    # below, because that path is built to create a database from scratch and bd
+    # would refuse with "Found existing Dolt database" both because metadata.json
+    # already exists locally and because ensure_database_registered just registered
+    # the database on the server.
     if [ -f "$dir/.beads/metadata.json" ]; then
         if ensure_database_registered "$dolt_database"; then
             # GC owns canonical metadata/config normalization after this backend
@@ -1773,9 +1778,45 @@ op_init() {
                 exit 0
             fi
             # bd config set failed — beads schema not yet initialized in this
-            # database (fresh empty db from ensure_database_registered). Fall
-            # through to bd init below to create the schema.
-            echo "warning: beads schema not initialized in '$dolt_database'; running bd init" >&2
+            # database. The DB and .beads/ both exist (we just registered the
+            # DB; metadata.json is already on disk), so plain `bd init` would
+            # abort with the "workspace already initialized" safety check.
+            #
+            # --database $dolt_database  : adopt the orchestrator-created DB
+            #                              (no orphan beads_<prefix> created)
+            # --reinit-local             : bypass bd's local-data safety check;
+            #                              safe here because bd config set just
+            #                              proved the schema is empty
+            echo "warning: beads schema not initialized in '$dolt_database'; running bd init to seed schema" >&2
+            local fast_path_host
+            fast_path_host=$(connect_host)
+            # Export the same Dolt connection env that run_bd_pinned uses, so
+            # bd init can authenticate against passworded servers. The fall-
+            # through scenario isn't reached often in practice (only on first
+            # init after seedDeferredManagedBeadsBeforeProviderReadiness), but
+            # if it is reached against a passworded server, bd init reads the
+            # password from BEADS_DOLT_PASSWORD.
+            (
+                cd "$dir" || exit 1
+                export BEADS_DIR="$dir/.beads"
+                export GC_DOLT_HOST="$fast_path_host"
+                export BEADS_DOLT_SERVER_HOST="$fast_path_host"
+                export GC_DOLT_PORT="$DOLT_PORT"
+                export BEADS_DOLT_SERVER_PORT="$DOLT_PORT"
+                export GC_DOLT_USER="$DOLT_USER"
+                export GC_DOLT_PASSWORD="$DOLT_PASSWORD"
+                export BEADS_DOLT_SERVER_USER="$DOLT_USER"
+                export BEADS_DOLT_PASSWORD="$DOLT_PASSWORD"
+                bd init --quiet --server --reinit-local                     --database "$dolt_database" -p "$prefix"                     --skip-hooks --skip-agents                     --server-host "$fast_path_host" --server-port "$DOLT_PORT"                     --server-user "$DOLT_USER"                     "$dir"
+            ) || die "bd init failed for $dir (fall-through after schema-less fast path)"
+            # bd init -p "$prefix" already wrote issue_prefix into the schema,
+            # and modern bd (1.x) actively rejects `bd config set issue_prefix`.
+            # types.custom can still be set via config set.
+            ensure_beads_dir_permissions "$dir"
+            run_bd_pinned "$dir" config set types.custom "$custom_types" 2>/dev/null || true
+            backfill_project_id_if_missing "$dir"
+            normalize_scope_after_init "$dir" "$prefix" "$dolt_database"
+            exit 0
         else
             # Database registration failed — fall through to full init.
             echo "warning: database '$dolt_database' not registered; re-initializing" >&2
