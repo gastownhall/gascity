@@ -34,7 +34,7 @@ mkdir -p "$(dirname "$STATE_FILE")"
 
 # Discover databases. Exclude Dolt/MySQL system schemas and Gas City's internal
 # health-probe database; the remaining databases are expected to be bead stores.
-DATABASES=$(dolt_sql -r csv -q "SHOW DATABASES" 2>/dev/null | tail -n +2 | grep -vi '^information_schema$\|^mysql$\|^dolt_cluster$\|^__gc_probe$' || true)
+DATABASES=$(dolt_sql -r csv -q "SHOW DATABASES" 2>/dev/null | tail -n +2 | grep -vi '^information_schema$\|^mysql$\|^dolt_cluster$\|^performance_schema$\|^sys$\|^__gc_probe$' || true)
 if [ -z "$DATABASES" ]; then
     exit 0
 fi

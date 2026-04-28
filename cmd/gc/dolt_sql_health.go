@@ -3,7 +3,10 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/csv"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
@@ -23,22 +26,23 @@ type managedDoltSQLHealthReport struct {
 // read-only probe no longer creates or writes to it: Dolt's autostats subsystem
 // (statspro) randomly elects one server-wide database to host the on-disk
 // stats backing store, and a tiny dedicated DB lost the lottery in production
-// — accumulating ~600k buckets / 2GB of stats noms it was never meant to
-// hold. The probe now writes into a discovered user database instead so it
-// shares a backing store with real workload traffic. This constant remains so
+// by accumulating stats noms it was never meant to hold. The probe now writes
+// into a GC-owned table inside a discovered user database instead so it shares
+// a backing store with real workload traffic. This constant remains so
 // `gc dolt-state reset-probe` can still drop the legacy DB on demand and so
 // `gc dolt-state init` can keep rejecting it as a user-supplied database name.
 const managedDoltProbeDatabase = "__gc_probe"
 
-const managedDoltProbeTable = "__probe"
+const managedDoltProbeTable = "__gc_read_only_probe"
+
+var errManagedDoltNoUserDatabase = errors.New("no user database available for managed Dolt read-only probe")
 
 var (
-	managedDoltQueryProbeDirectFn         = managedDoltQueryProbeDirect
-	managedDoltReadOnlyStateDirectFn      = managedDoltReadOnlyStateDirect
-	managedDoltConnectionCountDirectFn    = managedDoltConnectionCountDirect
-	managedDoltResetProbeDirectFn         = managedDoltResetProbeDirect
-	managedDoltSelectUserDatabaseDirectFn = managedDoltSelectUserDatabaseDirect
-	managedDoltSQLCommandTimeout          = 5 * time.Second
+	managedDoltQueryProbeDirectFn      = managedDoltQueryProbeDirect
+	managedDoltReadOnlyStateDirectFn   = managedDoltReadOnlyStateDirect
+	managedDoltConnectionCountDirectFn = managedDoltConnectionCountDirect
+	managedDoltResetProbeDirectFn      = managedDoltResetProbeDirect
+	managedDoltSQLCommandTimeout       = 5 * time.Second
 )
 
 // managedDoltSystemDatabases lists databases that the read-only probe must not
@@ -48,16 +52,18 @@ var managedDoltSystemDatabases = map[string]struct{}{
 	"information_schema":     {},
 	"mysql":                  {},
 	"dolt_cluster":           {},
+	"performance_schema":     {},
+	"sys":                    {},
 	managedDoltProbeDatabase: {},
 }
 
 // managedDoltReadOnlyProbeStatementsFor returns the read-only probe statements
-// for db. Each invocation creates the persistent `__probe` table inside db
-// (idempotent) and rewrites a single row to test writability. db must be a
-// real user database; the empty string returns nil so the caller can skip the
-// probe entirely. The database identifier is backtick-quoted because Dolt
-// derives DB names from repository directory names, which can start with a
-// digit or contain other characters that need quoting.
+// for db. Each invocation creates the persistent GC-owned probe table inside db
+// (idempotent) and rewrites a single row to test writability. db must be a real
+// user database; the empty string returns nil so the caller can skip the probe
+// entirely. The database identifier is backtick-quoted because Dolt derives DB
+// names from repository directory names, which can start with a digit or contain
+// other characters that need quoting.
 func managedDoltReadOnlyProbeStatementsFor(db string) []string {
 	db = strings.TrimSpace(db)
 	if db == "" {
@@ -110,7 +116,7 @@ func managedDoltReadOnlyState(host, port, user string) (string, error) {
 		return "unknown", err
 	}
 	if db == "" {
-		return "false", nil
+		return "unknown", errManagedDoltNoUserDatabase
 	}
 	_, err = runManagedDoltSQL(host, port, user, "-q", managedDoltReadOnlyProbeSQLFor(db))
 	if err == nil {
@@ -123,24 +129,62 @@ func managedDoltReadOnlyState(host, port, user string) (string, error) {
 	return "unknown", err
 }
 
-// managedDoltSelectUserDatabase returns the alphabetically-first database that
-// is not a system database. Returns "" when the server has no user database
-// (callers should skip the write probe in that case).
+// managedDoltSelectUserDatabase returns the first database from SHOW DATABASES
+// that is not a system database. It returns "" when the server has no user database.
 func managedDoltSelectUserDatabase(host, port, user string) (string, error) {
-	if managedDoltPassword() != "" {
-		return managedDoltSelectUserDatabaseDirectFn(host, port, user)
-	}
-	out, err := runManagedDoltSQL(host, port, user, "-r", "csv", "-q", "SHOW DATABASES")
-	if err != nil {
+	dbs, err := managedDoltSelectUserDatabases(host, port, user)
+	if err != nil || len(dbs) == 0 {
 		return "", err
 	}
-	return managedDoltFirstUserDatabase(strings.Split(out, "\n")), nil
+	return dbs[0], nil
 }
 
-// managedDoltFirstUserDatabase scans csv-format `SHOW DATABASES` output (one
-// row per line, header `Database` first) and returns the first non-system
+func managedDoltSelectUserDatabases(host, port, user string) ([]string, error) {
+	out, err := runManagedDoltSQL(host, port, user, "-r", "csv", "-q", "SHOW DATABASES")
+	if err != nil {
+		return nil, err
+	}
+	return managedDoltUserDatabasesFromCSV(out)
+}
+
+// managedDoltFirstUserDatabaseFromCSV parses csv-format `SHOW DATABASES`
+// output and returns the first non-system database, or "" when none exist.
+func managedDoltFirstUserDatabaseFromCSV(out string) (string, error) {
+	dbs, err := managedDoltUserDatabasesFromCSV(out)
+	if err != nil || len(dbs) == 0 {
+		return "", err
+	}
+	return dbs[0], nil
+}
+
+func managedDoltUserDatabasesFromCSV(out string) ([]string, error) {
+	reader := csv.NewReader(strings.NewReader(out))
+	reader.FieldsPerRecord = 1
+	dbs := []string{}
+	for {
+		record, err := reader.Read()
+		if err == io.EOF {
+			return dbs, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("parse SHOW DATABASES csv: %w", err)
+		}
+		dbs = append(dbs, managedDoltUserDatabases(record)...)
+	}
+}
+
+// managedDoltFirstUserDatabase scans database names and returns the first non-system
 // database, or "" when none exist.
 func managedDoltFirstUserDatabase(lines []string) string {
+	dbs := managedDoltUserDatabases(lines)
+	if len(dbs) == 0 {
+		return ""
+	}
+	return dbs[0]
+}
+
+func managedDoltUserDatabases(lines []string) []string {
+	dbs := []string{}
 	for _, line := range lines {
 		name := strings.TrimSpace(line)
 		if name == "" {
@@ -152,9 +196,9 @@ func managedDoltFirstUserDatabase(lines []string) string {
 		if _, system := managedDoltSystemDatabases[strings.ToLower(name)]; system {
 			continue
 		}
-		return name
+		dbs = append(dbs, name)
 	}
-	return ""
+	return dbs
 }
 
 func managedDoltConnectionCount(host, port, user string) (string, error) {
@@ -191,7 +235,9 @@ func managedDoltHealthCheck(host, port, user string, checkReadOnly bool) (manage
 	if checkReadOnly {
 		state, err := managedDoltReadOnlyState(host, port, user)
 		if err != nil {
-			return managedDoltSQLHealthReport{}, err
+			if !errors.Is(err, errManagedDoltNoUserDatabase) {
+				return managedDoltSQLHealthReport{}, err
+			}
 		}
 		report.ReadOnly = state
 	}
@@ -280,7 +326,7 @@ func managedDoltReadOnlyStateDirect(host, port, user string) (string, error) {
 		return "unknown", err
 	}
 	if userDB == "" {
-		return "false", nil
+		return "unknown", errManagedDoltNoUserDatabase
 	}
 	for _, query := range managedDoltReadOnlyProbeStatementsFor(userDB) {
 		if _, err := conn.ExecContext(ctx, query); err != nil {
@@ -294,41 +340,32 @@ func managedDoltReadOnlyStateDirect(host, port, user string) (string, error) {
 	return "false", nil
 }
 
-func managedDoltSelectUserDatabaseDirect(host, port, user string) (string, error) {
-	db, err := managedDoltOpenDB(host, port, user)
-	if err != nil {
+func managedDoltSelectUserDatabaseFromConn(ctx context.Context, conn *sql.Conn) (string, error) {
+	dbs, err := managedDoltSelectUserDatabasesFromConn(ctx, conn)
+	if err != nil || len(dbs) == 0 {
 		return "", err
 	}
-	defer db.Close() //nolint:errcheck
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return "", err
-	}
-	defer conn.Close() //nolint:errcheck
-	return managedDoltSelectUserDatabaseFromConn(ctx, conn)
+	return dbs[0], nil
 }
 
-func managedDoltSelectUserDatabaseFromConn(ctx context.Context, conn *sql.Conn) (string, error) {
+func managedDoltSelectUserDatabasesFromConn(ctx context.Context, conn *sql.Conn) ([]string, error) {
 	rows, err := conn.QueryContext(ctx, "SHOW DATABASES")
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer rows.Close() //nolint:errcheck
 	names := []string{}
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
-			return "", err
+			return nil, err
 		}
 		names = append(names, name)
 	}
 	if err := rows.Err(); err != nil {
-		return "", err
+		return nil, err
 	}
-	return managedDoltFirstUserDatabase(names), nil
+	return managedDoltUserDatabases(names), nil
 }
 
 func managedDoltConnectionCountDirect(host, port, user string) (string, error) {
@@ -354,8 +391,19 @@ func managedDoltResetProbe(host, port, user string) error {
 	if managedDoltPassword() != "" {
 		return managedDoltResetProbeDirectFn(host, port, user)
 	}
-	_, err := runManagedDoltSQL(host, port, user, "-q", "DROP DATABASE IF EXISTS "+managedDoltProbeDatabase)
-	return err
+	if _, err := runManagedDoltSQL(host, port, user, "-q", "DROP DATABASE IF EXISTS "+managedDoltProbeDatabase); err != nil {
+		return err
+	}
+	dbs, err := managedDoltSelectUserDatabases(host, port, user)
+	if err != nil {
+		return err
+	}
+	for _, db := range dbs {
+		if _, err := runManagedDoltSQL(host, port, user, "-q", managedDoltDropProbeTableSQLFor(db)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func managedDoltResetProbeDirect(host, port, user string) error {
@@ -370,8 +418,28 @@ func managedDoltResetProbeDirect(host, port, user string) error {
 	if err := db.PingContext(ctx); err != nil {
 		return err
 	}
-	_, err = db.ExecContext(ctx, "DROP DATABASE IF EXISTS "+managedDoltProbeDatabase)
-	return err
+	if _, err := db.ExecContext(ctx, "DROP DATABASE IF EXISTS "+managedDoltProbeDatabase); err != nil {
+		return err
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close() //nolint:errcheck
+	dbs, err := managedDoltSelectUserDatabasesFromConn(ctx, conn)
+	if err != nil {
+		return err
+	}
+	for _, userDB := range dbs {
+		if _, err := conn.ExecContext(ctx, managedDoltDropProbeTableSQLFor(userDB)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func managedDoltDropProbeTableSQLFor(db string) string {
+	return "DROP TABLE IF EXISTS " + managedDoltQuoteIdent(db) + "." + managedDoltQuoteIdent(managedDoltProbeTable)
 }
 
 func runManagedDoltSQL(host, port, user string, args ...string) (string, error) {

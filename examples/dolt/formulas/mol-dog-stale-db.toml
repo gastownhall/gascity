@@ -60,7 +60,7 @@ Query the Dolt server and identify orphaned databases.
 SHOW DATABASES;
 ```
 Filter out Dolt internals (information_schema, mysql, dolt_cluster,
-__gc_probe).
+performance_schema, sys, __gc_probe).
 
 **2. Classify each database:**
 

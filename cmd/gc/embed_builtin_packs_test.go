@@ -111,18 +111,20 @@ func TestBuiltinDatabaseEnumeratorsSkipManagedProbeDatabase(t *testing.T) {
 		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
 	}
 
+	doltSystemNeedle := "information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe"
+	maintenanceSystemNeedle := "^information_schema$\\|^mysql$\\|^dolt_cluster$\\|^performance_schema$\\|^sys$\\|^__gc_probe$"
 	for _, tt := range []struct {
 		pack     string
 		rel      string
 		needle   string
 		minCount int
 	}{
-		{"maintenance", filepath.Join("assets", "scripts", "jsonl-export.sh"), "^dolt_cluster$\\|^__gc_probe$", 1},
-		{"maintenance", filepath.Join("assets", "scripts", "reaper.sh"), "^dolt_cluster$\\|^__gc_probe$", 1},
-		{"dolt", filepath.Join("commands", "list", "run.sh"), "information_schema|mysql|dolt_cluster|__gc_probe", 1},
-		{"dolt", filepath.Join("commands", "cleanup", "run.sh"), "information_schema|mysql|dolt_cluster|__gc_probe", 1},
-		{"dolt", filepath.Join("commands", "health", "run.sh"), "information_schema|mysql|dolt_cluster|__gc_probe", 2},
-		{"dolt", filepath.Join("commands", "sync", "run.sh"), "information_schema|mysql|dolt_cluster|__gc_probe", 2},
+		{"maintenance", filepath.Join("assets", "scripts", "jsonl-export.sh"), maintenanceSystemNeedle, 1},
+		{"maintenance", filepath.Join("assets", "scripts", "reaper.sh"), maintenanceSystemNeedle, 1},
+		{"dolt", filepath.Join("commands", "list", "run.sh"), doltSystemNeedle, 1},
+		{"dolt", filepath.Join("commands", "cleanup", "run.sh"), doltSystemNeedle, 1},
+		{"dolt", filepath.Join("commands", "health", "run.sh"), doltSystemNeedle, 2},
+		{"dolt", filepath.Join("commands", "sync", "run.sh"), doltSystemNeedle, 2},
 		{"dolt", filepath.Join("formulas", "mol-dog-stale-db.toml"), "__gc_probe", 1},
 		{"dolt", filepath.Join("formulas", "mol-dog-doctor.toml"), "__gc_probe", 1},
 	} {
@@ -138,7 +140,16 @@ func TestBuiltinDatabaseEnumeratorsSkipManagedProbeDatabase(t *testing.T) {
 }
 
 func TestDoltSyncRejectsManagedProbeDatabaseFilter(t *testing.T) {
-	for _, dbName := range []string{managedDoltProbeDatabase, strings.ToUpper(managedDoltProbeDatabase), " " + managedDoltProbeDatabase + " "} {
+	for _, dbName := range []string{
+		managedDoltProbeDatabase,
+		strings.ToUpper(managedDoltProbeDatabase),
+		" " + managedDoltProbeDatabase + " ",
+		"information_schema",
+		"mysql",
+		"dolt_cluster",
+		"performance_schema",
+		"sys",
+	} {
 		t.Run(dbName, func(t *testing.T) {
 			dir := t.TempDir()
 			if err := MaterializeBuiltinPacks(dir); err != nil {
@@ -152,7 +163,7 @@ func TestDoltSyncRejectsManagedProbeDatabaseFilter(t *testing.T) {
 			if err == nil {
 				t.Fatalf("gc dolt sync unexpectedly accepted %s:\n%s", dbName, out)
 			}
-			if !strings.Contains(string(out), "reserved Dolt database name: "+managedDoltProbeDatabase) {
+			if !strings.Contains(string(out), "reserved Dolt database name: "+strings.TrimSpace(dbName)) {
 				t.Fatalf("gc dolt sync output = %s, want reserved database error", out)
 			}
 		})
