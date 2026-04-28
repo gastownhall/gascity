@@ -2,6 +2,8 @@ package beads
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 )
 
@@ -84,6 +86,8 @@ func (c *CachingStore) runReconciliation() {
 	for _, b := range fresh {
 		freshByID[b.ID] = cloneBead(b)
 	}
+
+	c.recoverMissingFromList(freshByID)
 
 	depMap, depsComplete, depErr := c.fetchDepsForIDs(beadIDs(freshByID))
 	if depErr != nil {
@@ -279,4 +283,49 @@ func (c *CachingStore) runReconciliation() {
 	c.updateStatsLocked()
 	c.mu.Unlock()
 	c.notifyChanges(notifications)
+}
+
+// recoverMissingFromList re-fetches any cached active bead that didn't appear
+// in freshByID and merges verified-alive ones back. This guards against
+// partial or silently-truncated List results — a List that drops an active
+// bead must not synthesize a spurious bead.closed event for it.
+//
+// On ErrNotFound the bead is left absent so the diff path can emit
+// bead.closed as before. On any other error the cached entry is merged
+// back conservatively, deferring the close to a later scan when the
+// backing store's state is unambiguous.
+func (c *CachingStore) recoverMissingFromList(freshByID map[string]Bead) {
+	c.mu.RLock()
+	candidates := make(map[string]Bead, len(c.beads))
+	for id, b := range c.beads {
+		if _, ok := freshByID[id]; ok {
+			continue
+		}
+		if b.Status == "closed" {
+			continue
+		}
+		candidates[id] = cloneBead(b)
+	}
+	c.mu.RUnlock()
+	if len(candidates) == 0 {
+		return
+	}
+	for id, cached := range candidates {
+		bead, err := c.backing.Get(id)
+		switch {
+		case err == nil:
+			if bead.Status == "closed" {
+				continue
+			}
+			freshByID[id] = cloneBead(bead)
+		case errors.Is(err, ErrNotFound):
+			// Confirmed gone; let the diff path emit bead.closed.
+		default:
+			c.recordProblem(
+				"verify missing bead before close",
+				fmt.Errorf("%s: %w", id, err),
+			)
+			freshByID[id] = cached
+		}
+	}
 }
