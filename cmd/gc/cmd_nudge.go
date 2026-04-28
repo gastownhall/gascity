@@ -804,6 +804,8 @@ func pollerSessionIdleEnough(target nudgeTarget, store beads.Store, sp runtime.P
 	if !ok {
 		return false
 	}
+	// The poller may take up to the quiescence window to exit while this
+	// runtime idle check is in progress.
 	ctx, cancel := context.WithTimeout(context.Background(), quiescence)
 	defer cancel()
 	return waiter.WaitForIdle(ctx, target.sessionName, quiescence) == nil

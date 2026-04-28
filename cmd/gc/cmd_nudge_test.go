@@ -520,6 +520,11 @@ func TestPollerSessionIdleEnoughFallsBackToIdleWaitWhenActivityUnavailable(t *te
 	if !sawWait {
 		t.Fatalf("calls = %#v, want WaitForIdle fallback", fake.Calls)
 	}
+
+	fake.WaitForIdleErrors["sess-worker"] = errors.New("timed out waiting for idle")
+	if pollerSessionIdleEnough(target, nil, fake, 3*time.Second) {
+		t.Fatal("pollerSessionIdleEnough = true, want idle wait error to suppress delivery")
+	}
 }
 
 func TestShouldKeepNudgePollerAliveDuringStartupGrace(t *testing.T) {
@@ -806,8 +811,10 @@ func TestSendMailNotifyWithWorkerStartsPollerBySessionIDForAliasedTarget(t *test
 		sessionName: info.SessionName,
 	}
 
+	called := false
 	prev := startNudgePoller
 	startNudgePoller = func(cityPath, agentName, sessionName string) error {
+		called = true
 		if cityPath != dir || agentName != info.ID || sessionName != info.SessionName {
 			t.Fatalf("unexpected poller args city=%q agent=%q session=%q", cityPath, agentName, sessionName)
 		}
@@ -817,6 +824,9 @@ func TestSendMailNotifyWithWorkerStartsPollerBySessionIDForAliasedTarget(t *test
 
 	if err := sendMailNotifyWithWorker(target, store, fake, "human"); err != nil {
 		t.Fatalf("sendMailNotifyWithWorker: %v", err)
+	}
+	if !called {
+		t.Fatal("startNudgePoller was not called")
 	}
 
 	pending, inFlight, dead, err := listQueuedNudgesForTarget(dir, target, time.Now())
