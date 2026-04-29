@@ -136,6 +136,87 @@ func TestControllerStateUpdate(t *testing.T) {
 	}
 }
 
+func TestControllerStateRuntimeUpdateDoesNotDropPendingMutationRigs(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"city1\"\n\n[beads]\nprovider = \"file\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	current := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+		Rigs:      []config.Rig{{Name: "alpha", Path: t.TempDir()}},
+	}
+	stale := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+	}
+
+	cs := newControllerState(context.Background(), current, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	cs.configMutationPending.Store(true)
+
+	cs.updateFromRuntime(stale, runtime.NewFake())
+
+	if got := cs.Config(); got != current {
+		t.Fatalf("Config() = %+v, want pending mutation config with rig alpha", got)
+	}
+	if !cs.configMutationPending.Load() {
+		t.Fatal("pending mutation marker cleared by stale runtime update")
+	}
+
+	cs.updateFromRuntime(current, runtime.NewFake())
+
+	if cs.configMutationPending.Load() {
+		t.Fatal("pending mutation marker not cleared after matching runtime update")
+	}
+}
+
+func TestControllerStateRuntimeUpdateAfterMutationPreservesCurrentStores(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "alpha")
+	current := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+		Rigs: []config.Rig{{
+			Name:   "alpha",
+			Path:   rigDir,
+			Prefix: "al",
+		}},
+	}
+	rigStore := beads.NewMemStore()
+	cityStore := beads.NewMemStore()
+	cs := &controllerState{
+		cfg:           current,
+		sp:            runtime.NewFake(),
+		beadStores:    map[string]beads.Store{"alpha": rigStore},
+		cityBeadStore: cityStore,
+		cityName:      "city1",
+		cityPath:      cityDir,
+	}
+	cs.configMutationPending.Store(true)
+
+	next := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+		Rigs: []config.Rig{{
+			Name:   "alpha",
+			Path:   rigDir,
+			Prefix: "al",
+		}},
+	}
+	cs.updateFromRuntime(next, runtime.NewFake())
+
+	if got := cs.BeadStore("alpha"); got != rigStore {
+		t.Fatalf("BeadStore(alpha) = %T %p, want original store %T %p", got, got, rigStore, rigStore)
+	}
+	if got := cs.CityBeadStore(); got != cityStore {
+		t.Fatalf("CityBeadStore() = %T %p, want original store %T %p", got, got, cityStore, cityStore)
+	}
+	if cs.Config() != next {
+		t.Fatal("Config() was not advanced to runtime snapshot")
+	}
+	if cs.configMutationPending.Load() {
+		t.Fatal("pending mutation marker not cleared after matching runtime update")
+	}
+}
+
 func TestControllerStateCreateRigPokesReconciler(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 
@@ -164,6 +245,46 @@ func TestControllerStateCreateRigPokesReconciler(t *testing.T) {
 	}
 	if got := cs.Config(); got == nil || len(got.Rigs) != 1 || got.Rigs[0].Name != "rig1" {
 		t.Fatalf("Config() rigs = %+v, want in-memory rig snapshot to include rig1", got.Rigs)
+	}
+}
+
+func TestControllerStateCreateRigInitializesStoreBeforePublishing(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatalf("enable scoped file store layout: %v", err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
+		t.Fatalf("init city store: %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+	}
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+
+	rigDir := filepath.Join(cityDir, "alpha")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("mkdir rig: %v", err)
+	}
+	if err := cs.CreateRig(config.Rig{Name: "alpha", Path: rigDir, Prefix: "al"}); err != nil {
+		t.Fatalf("CreateRig: %v", err)
+	}
+
+	store := cs.BeadStore("alpha")
+	if store == nil {
+		t.Fatal("BeadStore(alpha) = nil")
+	}
+	created, err := store.Create(beads.Bead{Title: "first rig bead", Type: "task"})
+	if err != nil {
+		t.Fatalf("newly published rig store Create: %v", err)
+	}
+	if _, err := store.Get(created.ID); err != nil {
+		t.Fatalf("newly published rig store Get(%q): %v", created.ID, err)
 	}
 }
 
@@ -582,7 +703,7 @@ func TestControllerStateOpenRigStoreFileOpenErrorDoesNotFallbackToBd(t *testing.
 	}
 
 	cs := &controllerState{cityPath: cityDir}
-	store := cs.openRigStore("file", "rig1", rigDir, "rg")
+	store := cs.openRigStore("file", "rig1", rigDir, "rg", nil)
 	if _, ok := store.(*beads.BdStore); ok {
 		t.Fatalf("openRigStore returned %T, want file-open failure instead of bd fallback", store)
 	}
@@ -1317,6 +1438,62 @@ func TestBuildStores_ExecProviderSetsPerRigEnv(t *testing.T) {
 		t.Errorf("regression: alpha and bravo exec stores received the same "+
 			"GC_BEADS_PREFIX=%q — store identity is not being propagated per rig",
 			alphaPrefix)
+	}
+}
+
+func TestBuildStoresBdProviderUsesPassedConfigForRigEnv(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "alpha")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	capturePath := filepath.Join(t.TempDir(), "bd.env")
+	binDir := t.TempDir()
+	fakeBD := filepath.Join(binDir, "bd")
+	script := "#!/bin/sh\n" +
+		"printf 'GC_RIG=%s\\nGC_RIG_ROOT=%s\\nBEADS_DIR=%s\\n' \"${GC_RIG:-}\" \"${GC_RIG_ROOT:-}\" \"${BEADS_DIR:-}\" > \"$BD_ENV_CAPTURE\"\n" +
+		"printf '[]\\n'\n"
+	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_ENV_CAPTURE", capturePath)
+	t.Setenv("GC_BEADS", "bd")
+
+	staleCfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	nextCfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{{
+			Name:   "alpha",
+			Path:   rigDir,
+			Prefix: "al",
+		}},
+	}
+	cs := &controllerState{
+		cfg:      staleCfg,
+		cityName: "test-city",
+		cityPath: cityDir,
+	}
+
+	stores := cs.buildStores(nextCfg)
+	if stores["alpha"] == nil {
+		t.Fatal("buildStores did not create alpha store")
+	}
+
+	data, err := os.ReadFile(capturePath)
+	if err != nil {
+		t.Fatalf("read captured bd env: %v", err)
+	}
+	env := string(data)
+	if !strings.Contains(env, "GC_RIG=alpha\n") {
+		t.Fatalf("captured env missing GC_RIG=alpha; got:\n%s", env)
+	}
+	if !strings.Contains(env, "GC_RIG_ROOT="+rigDir+"\n") {
+		t.Fatalf("captured env missing rig root %q; got:\n%s", rigDir, env)
+	}
+	if !strings.Contains(env, "BEADS_DIR="+filepath.Join(rigDir, ".beads")+"\n") {
+		t.Fatalf("captured env missing rig BEADS_DIR; got:\n%s", env)
 	}
 }
 

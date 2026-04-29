@@ -299,6 +299,11 @@ func mailMessagesForRecipients(fetch func(string) ([]mail.Message, error), recip
 
 func mailCountForRecipients(mp mail.Provider, recipients []string) (int, int, error) {
 	recipients = uniqueMailRecipients(recipients)
+	if counter, ok := mp.(interface {
+		CountRecipients([]string) (int, int, error)
+	}); ok {
+		return counter.CountRecipients(recipients)
+	}
 	var totalAll, unreadAll int
 	for _, recipient := range recipients {
 		total, unread, err := mp.Count(recipient)

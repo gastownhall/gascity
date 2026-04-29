@@ -350,6 +350,7 @@ OptionChoice is one allowed value for a "select" option.
 | `value` | string | **yes** |  |  |
 | `label` | string | **yes** |  |  |
 | `flag_args` | []string | **yes** |  | FlagArgs are the CLI arguments injected when this choice is selected. json:"-" is intentional: FlagArgs must never appear in the public API DTO (security boundary — prevents clients from seeing internal CLI flags). |
+| `flag_aliases` | []array |  |  | FlagAliases are equivalent CLI argument sequences stripped from legacy provider args. Like FlagArgs, they stay server-side only. |
 
 ## OrderOverride
 

@@ -51,6 +51,12 @@ type controllerState struct {
 	services      workspacesvc.Registry
 	extmsgSvc     *extmsg.Services
 	adapterReg    *extmsg.AdapterRegistry
+	updateMu      sync.Mutex // serializes rebuild+swap so stale reloads cannot overtake newer mutations
+
+	// True after an API config mutation refreshes controller state ahead of the
+	// runtime reload loop. Runtime reloads that would drop newly bound rigs are
+	// ignored until the loop observes and applies the same or a newer config.
+	configMutationPending atomic.Bool
 }
 
 type configMutationSnapshot struct {
@@ -179,7 +185,7 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 		if sharedLegacyFileStore != nil && scopeProvider == "file" && !scopeUsesFileStoreContract(scopeRoot) {
 			store = sharedLegacyFileStore
 		} else {
-			store = cs.openRigStore(scopeProvider, rig.Name, scopeRoot, rig.EffectivePrefix())
+			store = cs.openRigStore(scopeProvider, rig.Name, scopeRoot, rig.EffectivePrefix(), cfg)
 		}
 		stores[rig.Name] = wrapWithCachingStore(cs.cacheCtx, store, cs.eventProv)
 	}
@@ -187,7 +193,7 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 }
 
 // openRigStore creates a bead store for a rig path using the given provider.
-func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix string) beads.Store {
+func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix string, cfg *config.City) beads.Store {
 	scopeRoot := resolveStoreScopeRoot(cs.cityPath, rigPath)
 	if strings.HasPrefix(provider, "exec:") {
 		s := beadsexec.NewStore(strings.TrimPrefix(provider, "exec:"))
@@ -207,7 +213,7 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 		}
 		return store
 	default: // "bd" or unrecognized
-		return bdStoreForRig(scopeRoot, cs.cityPath, cs.cfg)
+		return bdStoreForRig(scopeRoot, cs.cityPath, cfg)
 	}
 }
 
@@ -272,6 +278,9 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 // update replaces the config, session provider, and reopens stores.
 // Stores are built outside the lock to avoid blocking readers during I/O.
 func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
+	cs.updateMu.Lock()
+	defer cs.updateMu.Unlock()
+
 	// Build new stores outside the lock (may do file I/O / subprocess spawns).
 	stores := cs.buildStores(cfg)
 	// Reopen city-level store for session beads and mail.
@@ -302,6 +311,119 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	}
 	// Keep prior non-nil store/provider if reopen fails.
 	cs.mu.Unlock()
+}
+
+func (cs *controllerState) updateFromRuntime(cfg *config.City, sp runtime.Provider) {
+	if cs.configMutationPending.Load() && cs.runtimeUpdateDropsPendingRigs(cfg) {
+		return
+	}
+	if cs.configMutationPending.Load() && cs.runtimeUpdateCanReuseCurrentStores(cfg) {
+		cs.updateConfigAndProviderOnly(cfg, sp)
+		cs.configMutationPending.Store(false)
+		return
+	}
+	cs.update(cfg, sp)
+	cs.configMutationPending.Store(false)
+}
+
+func (cs *controllerState) updateConfigAndProviderOnly(cfg *config.City, sp runtime.Provider) {
+	cs.updateMu.Lock()
+	defer cs.updateMu.Unlock()
+
+	cs.mu.Lock()
+	cs.cfg = cfg
+	cs.sp = sp
+	cs.mu.Unlock()
+}
+
+func (cs *controllerState) runtimeUpdateCanReuseCurrentStores(next *config.City) bool {
+	cs.mu.RLock()
+	current := cs.cfg
+	cityStore := cs.cityBeadStore
+	stores := make(map[string]beads.Store, len(cs.beadStores))
+	for name, store := range cs.beadStores {
+		stores[name] = store
+	}
+	cs.mu.RUnlock()
+
+	if cityStore == nil || !sameStoreTopology(cs.cityPath, current, next) {
+		return false
+	}
+	for _, rig := range next.Rigs {
+		if strings.TrimSpace(rig.Path) == "" {
+			continue
+		}
+		if stores[rig.Name] == nil {
+			return false
+		}
+	}
+	return true
+}
+
+func (cs *controllerState) runtimeUpdateDropsPendingRigs(next *config.City) bool {
+	cs.mu.RLock()
+	current := cs.cfg
+	cs.mu.RUnlock()
+	return configDropsBoundRigs(current, next)
+}
+
+type storeTopologyRig struct {
+	path   string
+	prefix string
+}
+
+func sameStoreTopology(cityPath string, current, next *config.City) bool {
+	if current == nil || next == nil {
+		return false
+	}
+	if config.EffectiveHQPrefix(current) != config.EffectiveHQPrefix(next) {
+		return false
+	}
+	currentRigs := storeTopologyRigs(cityPath, current.Rigs)
+	nextRigs := storeTopologyRigs(cityPath, next.Rigs)
+	if len(currentRigs) != len(nextRigs) {
+		return false
+	}
+	for name, currentRig := range currentRigs {
+		if nextRig, ok := nextRigs[name]; !ok || nextRig != currentRig {
+			return false
+		}
+	}
+	return true
+}
+
+func storeTopologyRigs(cityPath string, rigs []config.Rig) map[string]storeTopologyRig {
+	result := make(map[string]storeTopologyRig, len(rigs))
+	for _, rig := range rigs {
+		path := strings.TrimSpace(rig.Path)
+		if path != "" {
+			path = resolveStoreScopeRoot(cityPath, path)
+		}
+		result[rig.Name] = storeTopologyRig{
+			path:   path,
+			prefix: rig.EffectivePrefix(),
+		}
+	}
+	return result
+}
+
+func configDropsBoundRigs(current, next *config.City) bool {
+	if current == nil || next == nil {
+		return false
+	}
+	nextRigPaths := make(map[string]string, len(next.Rigs))
+	for _, rig := range next.Rigs {
+		nextRigPaths[rig.Name] = strings.TrimSpace(rig.Path)
+	}
+	for _, rig := range current.Rigs {
+		if strings.TrimSpace(rig.Path) == "" {
+			continue
+		}
+		if nextRigPaths[rig.Name] == "" {
+			return true
+		}
+	}
+	return false
 }
 
 // --- api.State implementation ---
@@ -550,9 +672,37 @@ func (cs *controllerState) DeleteAgent(name string) error {
 
 // CreateRig adds a new rig to city.toml.
 func (cs *controllerState) CreateRig(r config.Rig) error {
+	if err := cs.initializeRigStoreForCreate(r); err != nil {
+		return err
+	}
 	return cs.mutateAndPoke(func() error {
 		return cs.editor.CreateRig(r)
 	})
+}
+
+func (cs *controllerState) initializeRigStoreForCreate(r config.Rig) error {
+	cityPath := strings.TrimSpace(cs.cityPath)
+	rigPath := strings.TrimSpace(r.Path)
+	if cityPath == "" || rigPath == "" {
+		return nil
+	}
+
+	cs.mu.RLock()
+	cfg := cs.cfg
+	cs.mu.RUnlock()
+	if cfg != nil {
+		for _, existing := range cfg.Rigs {
+			if existing.Name == r.Name {
+				return fmt.Errorf("%w: rig %q", configedit.ErrAlreadyExists, r.Name)
+			}
+		}
+	}
+
+	scopeRoot := resolveStoreScopeRoot(cityPath, rigPath)
+	if _, err := initDirIfReady(cityPath, scopeRoot, r.EffectivePrefix()); err != nil {
+		return fmt.Errorf("initializing rig %q beads: %w", r.Name, err)
+	}
+	return nil
 }
 
 // UpdateRig partially updates a rig in city.toml.
@@ -748,6 +898,7 @@ func (cs *controllerState) mutateAndPoke(mutate func() error) error {
 		}
 		return fmt.Errorf("refreshing updated city config: %w", err)
 	}
+	cs.configMutationPending.Store(true)
 	if cs.configDirty != nil {
 		cs.configDirty.Store(true)
 	}

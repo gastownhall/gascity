@@ -1410,6 +1410,7 @@ gc mail read <id>
 Reply to a message. The reply is addressed to the original sender.
 
 Inherits the thread ID from the original message for conversation tracking.
+Use --notify to nudge the recipient after replying.
 Use -s/--subject for the reply subject and -m/--message for the reply body.
 
 ```

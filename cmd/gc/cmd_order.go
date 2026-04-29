@@ -486,8 +486,16 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 		return 1
 	}
 
+	var pool string
+	if a.Pool != "" {
+		pool, err = qualifyOrderPool(a, cfg)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
+
 	if a.Pool != "" && cfg != nil {
-		pool := qualifyPool(a.Pool, a.Rig)
 		if err := applyGraphRouting(recipe, nil, pool, nil, "", "", "", "", store, cityName, cityPath, cfg); err != nil {
 			fmt.Fprintf(stderr, "gc order run: routing decoration failed: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
@@ -512,9 +520,7 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 		)
 	}
 	if a.Pool != "" {
-		update.Metadata = map[string]string{
-			"gc.routed_to": qualifyPool(a.Pool, a.Rig),
-		}
+		update.Metadata = map[string]string{"gc.routed_to": pool}
 	}
 	if err := store.Update(rootID, update); err != nil {
 		fmt.Fprintf(stderr, "gc order run: labeling wisp: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -523,7 +529,7 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 
 	fmt.Fprintf(stdout, "Order %q executed: wisp %s", name, rootID) //nolint:errcheck
 	if a.Pool != "" {
-		fmt.Fprintf(stdout, " → gc.routed_to=%s", qualifyPool(a.Pool, a.Rig)) //nolint:errcheck
+		fmt.Fprintf(stdout, " → gc.routed_to=%s", pool) //nolint:errcheck
 	}
 	fmt.Fprintln(stdout) //nolint:errcheck
 	return 0

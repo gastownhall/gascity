@@ -1936,6 +1936,57 @@ func TestBuildDesiredState_PendingCreatePoolSessionUsesConcreteBeadIdentity(t *t
 	}
 }
 
+func TestBuildDesiredState_PendingCreatePoolSessionStaysDesiredWithoutScaleDemand(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	sessionName := "workflows__codex-max-mc-new"
+	if _, err := store.Create(beads.Bead{
+		Title:  "codex-max",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:gascity/workflows.codex-max-1"},
+		Metadata: map[string]string{
+			"template":             "gascity/workflows.codex-max",
+			"session_name":         sessionName,
+			"agent_name":           "gascity/workflows.codex-max-1",
+			"session_origin":       "ephemeral",
+			"pool_managed":         boolMetadata(true),
+			"pool_slot":            "1",
+			"pending_create_claim": boolMetadata(true),
+			"state":                "creating",
+		},
+	}); err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "gascity", Path: filepath.Join(cityPath, "repos", "gascity")}},
+		Agents: []config.Agent{{
+			Name:              "workflows.codex-max",
+			Dir:               "gascity",
+			Provider:          "test-agent",
+			StartCommand:      "true",
+			WorkDir:           ".",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(5),
+			ScaleCheck:        "printf 0",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	if got := dsResult.ScaleCheckCounts["gascity/workflows.codex-max"]; got != 0 {
+		t.Fatalf("ScaleCheckCounts[gascity/workflows.codex-max] = %d, want 0", got)
+	}
+	got, ok := dsResult.State[sessionName]
+	if !ok {
+		t.Fatalf("desired state missing pending-create pool session: keys=%v", mapKeys(dsResult.State))
+	}
+	if got.TemplateName != "gascity/workflows.codex-max" {
+		t.Fatalf("TemplateName = %q, want gascity/workflows.codex-max", got.TemplateName)
+	}
+	if got.InstanceName != sessionName {
+		t.Fatalf("InstanceName = %q, want existing session name %q", got.InstanceName, sessionName)
+	}
+}
+
 func TestBuildDesiredState_LegacyAliaslessEphemeralPoolSessionFallsBackToSessionNameIdentity(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()

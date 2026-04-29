@@ -1266,6 +1266,16 @@
           },
           "type": "array",
           "description": "FlagArgs are the CLI arguments injected when this choice is selected.\njson:\"-\" is intentional: FlagArgs must never appear in the public API DTO\n(security boundary — prevents clients from seeing internal CLI flags)."
+        },
+        "flag_aliases": {
+          "items": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "type": "array",
+          "description": "FlagAliases are equivalent CLI argument sequences stripped from legacy\nprovider args. Like FlagArgs, they stay server-side only."
         }
       },
       "additionalProperties": false,

@@ -156,14 +156,14 @@ func TestPhase0ConfigDrift_IdleNamedSessionRestartsInPlaceWithoutCapVacancy(t *t
 	if all[0].Status != "open" {
 		t.Fatalf("status = %q, want open while live restart is in progress", all[0].Status)
 	}
-	if got := all[0].Metadata["state"]; got != "creating" {
-		t.Fatalf("state = %q, want creating for idle config-drift restart without cap vacancy", got)
+	if got := all[0].Metadata["state"]; got != "active" {
+		t.Fatalf("state = %q, want active after same-tick config-drift restart", got)
 	}
-	if got := all[0].Metadata["started_config_hash"]; got != "" {
-		t.Fatalf("started_config_hash = %q, want cleared so next start uses fresh config", got)
+	if got := all[0].Metadata["started_config_hash"]; got == "" || got == runtime.CoreFingerprint(oldRuntime) {
+		t.Fatalf("started_config_hash = %q, want non-empty fresh config hash", got)
 	}
-	if got := all[0].Metadata["continuation_reset_pending"]; got != "true" {
-		t.Fatalf("continuation_reset_pending = %q, want true for unified restart path", got)
+	if got := all[0].Metadata["continuation_reset_pending"]; got != "" {
+		t.Fatalf("continuation_reset_pending = %q, want cleared after same-tick wake", got)
 	}
 }
 
@@ -235,8 +235,8 @@ func TestPhase0ConfigDrift_NamedSessionBoundsRecentActivityDeferral(t *testing.T
 	if err != nil {
 		t.Fatalf("Get(%s) after deferral limit: %v", session.ID, err)
 	}
-	if got.Metadata["state"] != "creating" {
-		t.Fatalf("state = %q, want creating after bounded recent-activity deferral", got.Metadata["state"])
+	if got.Metadata["state"] != "active" {
+		t.Fatalf("state = %q, want active after bounded recent-activity restart", got.Metadata["state"])
 	}
 	if got.Metadata[namedSessionConfigDriftDeferredAtMetadata] != "" {
 		t.Fatalf("deferred timestamp = %q, want cleared after restart", got.Metadata[namedSessionConfigDriftDeferredAtMetadata])
@@ -293,8 +293,8 @@ func TestPhase0ConfigDrift_NamedSessionDrainsWhenStaleActivity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get(%s): %v", session.ID, err)
 	}
-	if got.Metadata["state"] != "creating" {
-		t.Fatalf("state = %q, want creating for stale-activity config-drift restart", got.Metadata["state"])
+	if got.Metadata["state"] != "active" {
+		t.Fatalf("state = %q, want active after stale-activity config-drift restart", got.Metadata["state"])
 	}
 }
 

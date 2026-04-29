@@ -29,6 +29,9 @@ type OptionChoice struct {
 	// json:"-" is intentional: FlagArgs must never appear in the public API DTO
 	// (security boundary — prevents clients from seeing internal CLI flags).
 	FlagArgs []string `toml:"flag_args" json:"-"`
+	// FlagAliases are equivalent CLI argument sequences stripped from legacy
+	// provider args. Like FlagArgs, they stay server-side only.
+	FlagAliases [][]string `toml:"flag_aliases,omitempty" json:"-"`
 }
 
 // ProviderSpec defines a named provider's startup parameters.
@@ -411,9 +414,10 @@ func providerChoicesFromWorker(choices []workerbuiltin.BuiltinOptionChoice) []Op
 	out := make([]OptionChoice, len(choices))
 	for i, choice := range choices {
 		out[i] = OptionChoice{
-			Value:    choice.Value,
-			Label:    choice.Label,
-			FlagArgs: cloneStrings(choice.FlagArgs),
+			Value:       choice.Value,
+			Label:       choice.Label,
+			FlagArgs:    cloneStrings(choice.FlagArgs),
+			FlagAliases: cloneStringSlices(choice.FlagAliases),
 		}
 	}
 	return out
@@ -436,5 +440,16 @@ func cloneStrings(values []string) []string {
 	}
 	out := make([]string, len(values))
 	copy(out, values)
+	return out
+}
+
+func cloneStringSlices(values [][]string) [][]string {
+	if values == nil {
+		return nil
+	}
+	out := make([][]string, len(values))
+	for i := range values {
+		out[i] = cloneStrings(values[i])
+	}
 	return out
 }

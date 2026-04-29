@@ -73,6 +73,7 @@ type SessionReconcilerTraceCycle struct {
 	recordCount        int
 	droppedRecords     int
 	droppedBatches     int
+	ended              bool
 	dropReasons        map[string]int
 	completionStatus   TraceCompletionStatus
 	traceMode          TraceMode
@@ -271,6 +272,13 @@ func (c *SessionReconcilerTraceCycle) addRecord(rec SessionReconcilerTraceRecord
 	if len(c.records) >= sessionReconcilerTraceMaxRecordsPerCycle {
 		c.droppedRecords++
 		c.dropReasons["record_budget_exceeded"]++
+		return
+	}
+	if c.ended {
+		rec.ensureFields()
+		rec.Fields["post_cycle_result"] = true
+		rec.Fields["rollup_excluded"] = true
+		c.records = append(c.records, rec)
 		return
 	}
 	c.accumulateRecordLocked(rec)
@@ -874,6 +882,8 @@ func (c *SessionReconcilerTraceCycle) End(completion TraceCompletionStatus, fiel
 	dur := now.Sub(c.start)
 	c.mu.Lock()
 	batch := append([]SessionReconcilerTraceRecord(nil), c.records...)
+	c.records = nil
+	c.ended = true
 	droppedRecords := c.droppedRecords
 	droppedBatches := c.droppedBatches
 	dropReasons := make(map[string]int, len(c.dropReasons))

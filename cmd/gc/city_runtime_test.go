@@ -132,6 +132,45 @@ func TestCityRuntimeRequestDeferredDrainFollowUpTick_PokesOnce(t *testing.T) {
 	}
 }
 
+func TestCityRuntimeShutdownMarksCityStopSleepReason(t *testing.T) {
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "control-dispatcher",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "control-dispatcher",
+			"template":     "control-dispatcher",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	cr := &CityRuntime{
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
+		},
+		sp:                  runtime.NewFake(),
+		rec:                 events.Discard,
+		standaloneCityStore: store,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+	}
+
+	cr.shutdown()
+
+	got, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Metadata["sleep_reason"] != sleepReasonCityStop {
+		t.Fatalf("sleep_reason = %q, want %q", got.Metadata["sleep_reason"], sleepReasonCityStop)
+	}
+}
+
 func TestCityRuntimeDemandSnapshotReusesStablePatrolDemand(t *testing.T) {
 	buildCalls := 0
 	cr := &CityRuntime{
@@ -2133,6 +2172,68 @@ func TestCityRuntimeReloadSameRevisionIsNoOp(t *testing.T) {
 	}
 	if stdout.Len() != 0 {
 		t.Fatalf("stdout = %q, want empty for same-revision reload", stdout.String())
+	}
+}
+
+func TestCityRuntimeRunReloadsConfigBeforeStartupReconcile(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
+
+	if err := os.WriteFile(tomlPath, []byte(`[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[session]
+provider = "fake"
+
+[[agent]]
+name = "fresh-agent"
+`), 0o644); err != nil {
+		t.Fatalf("write updated config: %v", err)
+	}
+
+	sp := runtime.NewFake()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	var startupAgentCount atomic.Int32
+	cr := newCityRuntime(CityRuntimeParams{
+		CityPath:  cityPath,
+		CityName:  "test-city",
+		TomlPath:  tomlPath,
+		ConfigRev: configRev,
+		Cfg:       cfg,
+		SP:        sp,
+		BuildFn: func(cfg *config.City, _ runtime.Provider, _ beads.Store) DesiredStateResult {
+			startupAgentCount.Store(int32(len(cfg.Agents)))
+			cancel()
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = beads.NewMemStore()
+	cr.setControllerState(cs)
+
+	cr.run(ctx)
+
+	if got := startupAgentCount.Load(); got != 1 {
+		t.Fatalf("startup saw %d agent(s), want reloaded config with 1 agent", got)
+	}
+	if got := cr.cfg.Agents[0].Name; got != "fresh-agent" {
+		t.Fatalf("reloaded agent = %q, want fresh-agent", got)
 	}
 }
 

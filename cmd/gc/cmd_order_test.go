@@ -721,6 +721,185 @@ func TestOrderRun(t *testing.T) {
 	}
 }
 
+func TestOrderRunResolvesPackBindingForPool(t *testing.T) {
+	aa := []orders.Order{
+		{Name: "digest", Formula: "mol-digest", Trigger: "cooldown", Interval: "24h", Pool: "dog", FormulaLayer: sharedTestFormulaDir},
+	}
+	cityDir := t.TempDir()
+	writeOrderRunImportFixture(t, cityDir, "maintenance")
+	store := beads.NewMemStore()
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "digest", "", cityDir, store, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	results, err := store.ListByLabel("order-run:digest", 0)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
+	}
+	if got := results[0].Metadata["gc.routed_to"]; got != "maintenance.dog" {
+		t.Fatalf("gc.routed_to = %q, want maintenance.dog", got)
+	}
+	if !strings.Contains(stdout.String(), "gc.routed_to=maintenance.dog") {
+		t.Fatalf("stdout = %q, want binding-qualified route", stdout.String())
+	}
+}
+
+func TestOrderRunResolvesImportedPackPoolAgainstCityShadow(t *testing.T) {
+	cityDir := t.TempDir()
+	writeImportedDogOrderFixture(t, cityDir, true)
+	_, aa := loadImportedDogOrders(t, cityDir)
+	store := beads.NewMemStore()
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "digest", "", cityDir, store, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	results, err := store.ListByLabel("order-run:digest", 0)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
+	}
+	if got := results[0].Metadata["gc.routed_to"]; got != "maintenance.dog" {
+		t.Fatalf("gc.routed_to = %q, want maintenance.dog", got)
+	}
+}
+
+func TestOrderRunResolvesImportedPackPoolAgainstSiblingImportCollision(t *testing.T) {
+	cityDir := t.TempDir()
+	writeImportedDogOrderFixture(t, cityDir, false, "gastown")
+	_, aa := loadImportedDogOrders(t, cityDir)
+	store := beads.NewMemStore()
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "digest", "", cityDir, store, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	results, err := store.ListByLabel("order-run:digest", 0)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
+	}
+	if got := results[0].Metadata["gc.routed_to"]; got != "maintenance.dog" {
+		t.Fatalf("gc.routed_to = %q, want maintenance.dog", got)
+	}
+}
+
+func TestOrderRunPrefersCityShadowForPool(t *testing.T) {
+	aa := []orders.Order{
+		{Name: "digest", Formula: "mol-digest", Trigger: "cooldown", Interval: "24h", Pool: "dog", FormulaLayer: sharedTestFormulaDir},
+	}
+	cityDir := t.TempDir()
+	writeOrderRunImportFixture(t, cityDir, "maintenance")
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "shadow-city"
+prefix = "shd"
+
+[[agent]]
+name = "dog"
+`)
+	store := beads.NewMemStore()
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "digest", "", cityDir, store, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	results, err := store.ListByLabel("order-run:digest", 0)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
+	}
+	if got := results[0].Metadata["gc.routed_to"]; got != "dog" {
+		t.Fatalf("gc.routed_to = %q, want dog", got)
+	}
+	if !strings.Contains(stdout.String(), "gc.routed_to=dog") {
+		t.Fatalf("stdout = %q, want city-local route", stdout.String())
+	}
+}
+
+func TestOrderRunRejectsAmbiguousPackPool(t *testing.T) {
+	aa := []orders.Order{
+		{Name: "digest", Formula: "mol-digest", Trigger: "cooldown", Interval: "24h", Pool: "dog", FormulaLayer: sharedTestFormulaDir},
+	}
+	cityDir := t.TempDir()
+	writeOrderRunImportFixture(t, cityDir, "gastown", "maintenance")
+	store := beads.NewMemStore()
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "digest", "", cityDir, store, nil, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doOrderRun = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `ambiguous pool "dog"`) {
+		t.Fatalf("stderr = %q, want ambiguity error", stderr.String())
+	}
+	results, err := store.ListByLabel("order-run:digest", 0)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("store.ListByLabel() len = %d, want 0 (%#v)", len(results), results)
+	}
+}
+
+func writeOrderRunImportFixture(t *testing.T, cityDir string, bindings ...string) {
+	t.Helper()
+
+	packRoot := filepath.Join(cityDir, "packs")
+	if err := os.MkdirAll(packRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `
+[workspace]
+name = "test-city"
+`)
+
+	var packToml strings.Builder
+	packToml.WriteString(`
+[pack]
+name = "test-city"
+schema = 1
+`)
+	for _, binding := range bindings {
+		packDir := filepath.Join(packRoot, binding)
+		if err := os.MkdirAll(packDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(packDir, "pack.toml"), `
+[pack]
+name = "`+binding+`"
+schema = 1
+
+[[agent]]
+name = "dog"
+scope = "city"
+`)
+		packToml.WriteString(`
+[imports.` + binding + `]
+source = "./packs/` + binding + `"
+`)
+	}
+	writeFile(t, filepath.Join(cityDir, "pack.toml"), packToml.String())
+}
+
 func TestOrderRunNoPool(t *testing.T) {
 	aa := []orders.Order{
 		{Name: "cleanup", Formula: "mol-cleanup", Trigger: "cron", Schedule: "0 3 * * *", FormulaLayer: sharedTestFormulaDir},

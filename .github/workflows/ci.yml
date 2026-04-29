@@ -25,7 +25,7 @@ jobs:
       cmd_gc_process: ${{ steps.filter.outputs.cmd_gc_process }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3
+      - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3
         id: filter
         with:
           filters: |
@@ -94,34 +94,11 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
         with:
-          go-version: "1.25.8"
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "22"
-
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y tmux jq
-
-      - name: Install dolt v${{ env.DOLT_VERSION }}
-        run: |
-          curl -fsSL https://github.com/dolthub/dolt/releases/download/v${{ env.DOLT_VERSION }}/install.sh | sudo bash
-          dolt version
-
-      - name: Install released bd v${{ env.BD_VERSION }}
-        run: |
-          archive="beads_${BD_VERSION#v}_linux_amd64.tar.gz"
-          mkdir -p "$RUNNER_TEMP/beads"
-          curl -fsSL -o "$RUNNER_TEMP/$archive" \
-            "https://github.com/gastownhall/beads/releases/download/${BD_VERSION}/${archive}"
-          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/beads" bd
-          sudo install -m 0755 "$RUNNER_TEMP/beads/bd" /usr/local/bin/bd
-          bd version
-
-      - name: Install Claude CLI
-        run: npm install -g @anthropic-ai/claude-code
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "true"
 
       - name: Install tools
         run: make install-tools
@@ -151,11 +128,23 @@ jobs:
         run: make spec-ci
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de # v5
+        uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe # v5
         with:
           files: coverage.txt
           token: ${{ secrets.CODECOV_TOKEN }}
           verbose: true
+
+  release-config:
+    name: Release config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Check GoReleaser configuration
+        uses: goreleaser/goreleaser-action@1a80836c5c9d9e5755a25cb59ec6f45a3b5f41a8 # v7
+        with:
+          version: "~> v2"
+          args: check
 
   cmd-gc-process:
     name: cmd/gc process suite
@@ -225,7 +214,7 @@ jobs:
       WORKER_REPORT_DIR: /tmp/worker-core-claude-reports
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
       - name: Prepare worker report dir
@@ -257,7 +246,7 @@ jobs:
       WORKER_REPORT_DIR: /tmp/worker-core-codex-reports
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
       - name: Prepare worker report dir
@@ -289,7 +278,7 @@ jobs:
       WORKER_REPORT_DIR: /tmp/worker-core-gemini-reports
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
       - name: Prepare worker report dir
@@ -429,7 +418,7 @@ jobs:
       WORKER_REPORT_DIR: /tmp/worker-core-phase2-claude-reports
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
       - name: Install system dependencies
@@ -465,7 +454,7 @@ jobs:
       WORKER_REPORT_DIR: /tmp/worker-core-phase2-codex-reports
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
       - name: Install system dependencies
@@ -501,7 +490,7 @@ jobs:
       WORKER_REPORT_DIR: /tmp/worker-core-phase2-gemini-reports
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
       - name: Install system dependencies
@@ -829,27 +818,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
         with:
-          go-version: "1.25.8"
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "22"
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y tmux jq
-      - name: Install dolt
-        run: |
-          curl -fsSL https://github.com/dolthub/dolt/releases/download/v${{ env.DOLT_VERSION }}/install.sh | sudo bash
-      - name: Install released bd v${{ env.BD_VERSION }}
-        run: |
-          archive="beads_${BD_VERSION#v}_linux_amd64.tar.gz"
-          mkdir -p "$RUNNER_TEMP/beads"
-          curl -fsSL -o "$RUNNER_TEMP/$archive" \
-            "https://github.com/gastownhall/beads/releases/download/${BD_VERSION}/${archive}"
-          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/beads" bd
-          sudo install -m 0755 "$RUNNER_TEMP/beads/bd" /usr/local/bin/bd
-      - name: Install Claude CLI
-        run: npm install -g @anthropic-ai/claude-code
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "true"
       - name: Install tools
         run: make install-tools
       - name: Pack compatibility tests
@@ -873,7 +846,7 @@ jobs:
         with:
           node-version: "22"
       - name: Install SPA dependencies
-        run: npm install --silent
+        run: npm ci --silent
         working-directory: cmd/gc/dashboard/web
       - name: Verify generated TS schema is in sync
         run: |
@@ -903,7 +876,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
 
@@ -915,7 +888,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install mcp_agent_mail
-        run: pip install 'mcp-agent-mail==0.1.0'
+        run: python -m pip install --require-hashes -r .github/requirements/mcp-agent-mail.txt
 
       - name: MCP mail conformance test
         run: make test-mcp-mail
@@ -929,7 +902,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
 
@@ -955,7 +928,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
 

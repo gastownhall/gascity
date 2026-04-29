@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -55,7 +58,7 @@ func mergeOrderExecEnv(environ, env []string) []string {
 }
 
 func logDispatchError(stderr io.Writer, format string, args ...any) {
-	msg := fmt.Sprintf(format, args...)
+	msg := execenv.RedactText(fmt.Sprintf(format, args...), os.Environ())
 	log.Print(msg)
 	if stderr != nil {
 		fmt.Fprintln(stderr, msg) //nolint:errcheck // best-effort stderr
@@ -341,16 +344,18 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.St
 	env := orderExecEnv(cityPath, m.cfg, target, a)
 	output, err := m.execRun(ctx, a.Exec, target.ScopeRoot, env)
 	if err != nil {
+		redactionEnv := append(os.Environ(), env...)
+		errMsg := execenv.RedactText(err.Error(), redactionEnv)
 		labels = append(labels, "exec-failed")
-		logDispatchError(m.stderr, "gc: order exec %s failed: %v", scoped, err)
+		logDispatchError(m.stderr, "gc: order exec %s failed: %s", scoped, errMsg)
 		if len(output) > 0 {
-			logDispatchError(m.stderr, "gc: order exec %s output: %s", scoped, output)
+			logDispatchError(m.stderr, "gc: order exec %s output: %s", scoped, execenv.RedactText(string(output), redactionEnv))
 		}
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
 			Actor:   "controller",
 			Subject: scoped,
-			Message: err.Error(),
+			Message: errMsg,
 		})
 	} else {
 		m.rec.Record(events.Event{
@@ -397,7 +402,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 			Subject: scoped,
 			Message: err.Error(),
 		})
-		store.Update(trackingID, beads.UpdateOpts{Labels: []string{"wisp", "wisp-failed"}}) //nolint:errcheck // best-effort
+		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
 		return
 	}
 	if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{}); err != nil {
@@ -407,14 +412,29 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 			Subject: scoped,
 			Message: err.Error(),
 		})
-		store.Update(trackingID, beads.UpdateOpts{Labels: []string{"wisp", "wisp-failed"}}) //nolint:errcheck // best-effort
+		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
 		return
+	}
+
+	var pool string
+	if a.Pool != "" {
+		pool, err = qualifyOrderPool(a, m.cfg)
+		if err != nil {
+			logDispatchError(m.stderr, "gc: order %s: %v", scoped, err)
+			m.rec.Record(events.Event{
+				Type:    events.OrderFailed,
+				Actor:   "controller",
+				Subject: scoped,
+				Message: err.Error(),
+			})
+			m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
+			return
+		}
 	}
 
 	// Decorate graph workflow recipes with routing metadata so child step
 	// beads get gc.routed_to set before instantiation.
 	if a.Pool != "" {
-		pool := qualifyPool(a.Pool, a.Rig)
 		if err := applyGraphRouting(recipe, nil, pool, nil, "", "", "", "", store, m.cityName, cityPath, m.cfg); err != nil {
 			logDispatchError(m.stderr, "gc: order %s: routing decoration failed: %v", scoped, err)
 			// Non-fatal — molecule still works, just without step-level routing.
@@ -429,7 +449,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 			Subject: scoped,
 			Message: err.Error(),
 		})
-		store.Update(trackingID, beads.UpdateOpts{Labels: []string{"wisp", "wisp-failed"}}) //nolint:errcheck // best-effort
+		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
 		return
 	}
 	rootID := cookResult.RootID
@@ -444,7 +464,6 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		)
 	}
 	if a.Pool != "" {
-		pool := qualifyPool(a.Pool, a.Rig)
 		update.Metadata = map[string]string{"gc.routed_to": pool}
 	}
 	if err := store.Update(rootID, update); err != nil {
@@ -457,7 +476,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 			Subject: scoped,
 			Message: fmt.Sprintf("wisp %s created but label failed: %v", rootID, err),
 		})
-		store.Update(trackingID, beads.UpdateOpts{Labels: []string{"wisp", "wisp-failed"}}) //nolint:errcheck // best-effort
+		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
 		return
 	}
 
@@ -479,11 +498,31 @@ func (m *memoryOrderDispatcher) orderRigSuspended(a orders.Order) bool {
 	if m.cfg == nil {
 		return false
 	}
-	qualified := qualifyPool(a.Pool, a.Rig)
+	qualified, err := qualifyOrderPool(a, m.cfg)
+	if err != nil {
+		return m.rigSuspendedByName(a.Rig)
+	}
 	rigName, _ := config.ParseQualifiedName(qualified)
 	if rigName == "" {
 		rigName = a.Rig
 	}
+	return m.rigSuspendedByName(rigName)
+}
+
+func (m *memoryOrderDispatcher) markTrackingFailure(store beads.Store, trackingID, scoped string, a orders.Order, headSeq uint64) {
+	labels := []string{"wisp", "wisp-failed"}
+	if a.Trigger == "event" && headSeq > 0 {
+		labels = append(labels,
+			fmt.Sprintf("order:%s", scoped),
+			fmt.Sprintf("seq:%d", headSeq),
+		)
+	}
+	if err := store.Update(trackingID, beads.UpdateOpts{Labels: labels}); err != nil {
+		logDispatchError(m.stderr, "gc: order %s: failed to mark tracking bead %s as failed: %v", scoped, trackingID, err)
+	}
+}
+
+func (m *memoryOrderDispatcher) rigSuspendedByName(rigName string) bool {
 	if rigName == "" {
 		return false
 	}
@@ -602,14 +641,116 @@ func rigExclusiveLayers(rigLayers, cityLayers []string) []string {
 	return rigLayers[len(cityLayers):]
 }
 
-// qualifyPool prefixes an unqualified pool name with the rig name for
-// rig-scoped orders. Already-qualified names (containing "/") are
-// returned as-is. City orders (empty rig) are unchanged.
-func qualifyPool(pool, rig string) string {
-	if rig == "" || strings.Contains(pool, "/") {
-		return pool
+// qualifyPool resolves a raw pool name from an order TOML to the qualified
+// form used by Agent.QualifiedName() — the same string the scaler queries
+// via gc.routed_to. Three layers of qualification stack:
+//
+//  1. If pool already contains "/" it is rig-qualified — pass through.
+//  2. If pool exactly matches a configured binding-qualified target
+//     ("binding.name"), preserve that target and still stack the rig prefix
+//     when present.
+//  3. If the order came from an imported pack, prefer same-source agents when
+//     resolving a bare pool name so pack-local orders stay pack-local even if
+//     other scopes also export the same bare agent name.
+//  4. Otherwise look up agents in cfg.Agents whose Dir matches rig
+//     (city orders use rig=="") and Name matches pool. If exactly one target
+//     resolves, swap pool for the binding-qualified form ("binding.name")
+//     before any rig prefixing. This handles V2 pack imports where the
+//     dispatched wisp must carry "binding.name" so the agent's default
+//     scale_check matches its own qualified name.
+//
+// Ambiguity is a hard failure: silently stamping the bare pool string would
+// recreate the exact route/scaler mismatch this helper exists to prevent.
+// nil cfg preserves the rig-only behavior so call sites without a loaded
+// city remain stable. Dotted values that do not match a configured bound
+// target are preserved for backward compatibility.
+func qualifyOrderPool(a orders.Order, cfg *config.City) (string, error) {
+	return qualifyPool(a.Pool, a.Rig, cfg, orderPoolSourceDirHint(a))
+}
+
+func orderPoolSourceDirHint(a orders.Order) string {
+	if a.FormulaLayer == "" {
+		return ""
 	}
-	return rig + "/" + pool
+	return filepath.Clean(filepath.Dir(a.FormulaLayer))
+}
+
+func qualifyPool(pool, rig string, cfg *config.City, sourceDirHint string) (string, error) {
+	if strings.Contains(pool, "/") {
+		return pool, nil
+	}
+	if cfg == nil {
+		if rig == "" {
+			return pool, nil
+		}
+		return rig + "/" + pool, nil
+	}
+
+	qualified := pool
+	scope := "city order"
+	if rig != "" {
+		scope = fmt.Sprintf("rig %q", rig)
+	}
+
+	var exactQualified []string
+	var sourceScopedMatches []string
+	var localBareMatches []string
+	var bareMatches []string
+	cleanHint := ""
+	if sourceDirHint != "" {
+		cleanHint = filepath.Clean(sourceDirHint)
+	}
+	for i := range cfg.Agents {
+		a := &cfg.Agents[i]
+		if a.Dir != rig {
+			continue
+		}
+		switch {
+		case strings.Contains(pool, ".") && a.BindingQualifiedName() == pool:
+			exactQualified = appendUniquePoolTarget(exactQualified, a.BindingQualifiedName())
+		case a.Name == pool:
+			bareMatches = appendUniquePoolTarget(bareMatches, a.BindingQualifiedName())
+			if a.BindingName == "" {
+				localBareMatches = appendUniquePoolTarget(localBareMatches, a.BindingQualifiedName())
+			}
+			if cleanHint != "" && filepath.Clean(a.SourceDir) == cleanHint {
+				sourceScopedMatches = appendUniquePoolTarget(sourceScopedMatches, a.BindingQualifiedName())
+			}
+		}
+	}
+
+	switch {
+	case len(exactQualified) == 1:
+		qualified = exactQualified[0]
+	case len(exactQualified) > 1:
+		return "", fmt.Errorf("ambiguous pool %q for %s: matches %s", pool, scope, strings.Join(exactQualified, ", "))
+	case len(sourceScopedMatches) == 1:
+		qualified = sourceScopedMatches[0]
+	case len(sourceScopedMatches) > 1:
+		return "", fmt.Errorf("ambiguous pool %q for %s: matches %s", pool, scope, strings.Join(sourceScopedMatches, ", "))
+	case len(localBareMatches) == 1:
+		qualified = localBareMatches[0]
+	case len(localBareMatches) > 1:
+		return "", fmt.Errorf("ambiguous pool %q for %s: matches %s", pool, scope, strings.Join(localBareMatches, ", "))
+	case len(bareMatches) == 1:
+		qualified = bareMatches[0]
+	case len(bareMatches) > 1:
+		return "", fmt.Errorf("ambiguous pool %q for %s: matches %s", pool, scope, strings.Join(bareMatches, ", "))
+	}
+
+	if rig == "" {
+		return qualified, nil
+	}
+	return rig + "/" + qualified, nil
+}
+
+func appendUniquePoolTarget(values []string, want string) []string {
+	for _, value := range values {
+		if value == want {
+			return values
+		}
+	}
+	return append(values, want)
 }
 
 // convertOverrides converts config.OrderOverride to orders.Override.

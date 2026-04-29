@@ -1,4 +1,5 @@
 GOLANGCI_LINT_VERSION := 2.9.0
+BUILDX_VERSION := 0.21.2
 
 # Detect OS and arch for binary download.
 GOOS   := $(shell go env GOOS)
@@ -368,8 +369,7 @@ install-tools: $(GOLANGCI_LINT) install-oapi-codegen
 
 $(GOLANGCI_LINT):
 	@echo "Installing golangci-lint v$(GOLANGCI_LINT_VERSION)..."
-	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | \
-		sh -s -- -b $(BIN_DIR) v$(GOLANGCI_LINT_VERSION)
+	GOBIN=$(BIN_DIR) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v$(GOLANGCI_LINT_VERSION)
 
 ## install-oapi-codegen: install pinned oapi-codegen so the spec→client drift
 ## test (TestGeneratedClientInSync) can regenerate client_gen.go without skipping.
@@ -383,10 +383,23 @@ install-oapi-codegen:
 ## install-buildx: install docker buildx plugin
 install-buildx:
 	@mkdir -p $(HOME)/.docker/cli-plugins
-	curl -sSfL "https://github.com/docker/buildx/releases/download/v0.21.2/buildx-v0.21.2.$$(go env GOOS)-$$(go env GOARCH)" \
-		-o $(HOME)/.docker/cli-plugins/docker-buildx
-	chmod +x $(HOME)/.docker/cli-plugins/docker-buildx
-	@echo "Installed docker-buildx v0.21.2"
+	@case "$(GOOS)-$(GOARCH)" in \
+		linux-amd64|linux-arm64) ;; \
+		*) echo "Unsupported docker-buildx platform: $(GOOS)-$(GOARCH)" >&2; exit 1 ;; \
+	esac; \
+	tmp="$$(mktemp)"; \
+	checksums="$$(mktemp)"; \
+	trap 'rm -f "$$tmp" "$$checksums"' EXIT; \
+	curl -sSfL "https://github.com/docker/buildx/releases/download/v$(BUILDX_VERSION)/checksums.txt" \
+		-o "$$checksums"; \
+	asset="buildx-v$(BUILDX_VERSION).$(GOOS)-$(GOARCH)"; \
+	expected_sha="$$(awk -v asset="*$$asset" '$$2 == asset {print $$1}' "$$checksums")"; \
+	if [ -z "$$expected_sha" ]; then echo "Missing checksum for $$asset" >&2; exit 1; fi; \
+	curl -sSfL "https://github.com/docker/buildx/releases/download/v$(BUILDX_VERSION)/buildx-v$(BUILDX_VERSION).$(GOOS)-$(GOARCH)" \
+		-o "$$tmp"; \
+	echo "$$expected_sha  $$tmp" | sha256sum -c -; \
+	install -m 0755 "$$tmp" $(HOME)/.docker/cli-plugins/docker-buildx
+	@echo "Installed docker-buildx v$(BUILDX_VERSION)"
 
 ## test-mcp-mail: run mcp_agent_mail live conformance test (auto-starts server)
 test-mcp-mail:
@@ -411,7 +424,7 @@ docs-dev:
 
 ## dashboard-build: regenerate SPA types + compile the dist bundle
 dashboard-build:
-	cd cmd/gc/dashboard/web && npm install --silent && npm run gen && npm run build
+	cd cmd/gc/dashboard/web && npm ci --silent && npm run gen && npm run build
 
 ## dashboard-dev: Vite dev server (HMR) for SPA iteration
 dashboard-dev:

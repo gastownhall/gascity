@@ -84,6 +84,13 @@ func (t nudgeTarget) agentKey() string {
 	return t.sessionName
 }
 
+func (t nudgeTarget) pollerKey() string {
+	if t.sessionID != "" {
+		return t.sessionID
+	}
+	return t.agentKey()
+}
+
 func (t nudgeTarget) queueKeys() []string {
 	var keys []string
 	seen := map[string]bool{}
@@ -781,10 +788,27 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store beads.Store, sp ru
 
 func pollerSessionIdleEnough(target nudgeTarget, store beads.Store, sp runtime.Provider, quiescence time.Duration) bool {
 	obs, err := workerObserveNudgeTarget(target, store, sp)
-	if err != nil || obs.LastActivity == nil || obs.LastActivity.IsZero() {
+	if err != nil {
 		return false
 	}
-	return time.Since(*obs.LastActivity) >= quiescence
+	if quiescence <= 0 {
+		return true
+	}
+	if obs.LastActivity != nil && !obs.LastActivity.IsZero() {
+		return time.Since(*obs.LastActivity) >= quiescence
+	}
+	if target.sessionName == "" {
+		return false
+	}
+	waiter, ok := sp.(runtime.IdleWaitProvider)
+	if !ok {
+		return false
+	}
+	// The poller may take up to the quiescence window to exit while this
+	// runtime idle check is in progress.
+	ctx, cancel := context.WithTimeout(context.Background(), quiescence)
+	defer cancel()
+	return waiter.WaitForIdle(ctx, target.sessionName, quiescence) == nil
 }
 
 func maybeStartNudgePoller(target nudgeTarget) {
@@ -794,7 +818,7 @@ func maybeStartNudgePoller(target nudgeTarget) {
 	if target.sessionTransport() == "acp" {
 		return
 	}
-	if err := startNudgePoller(target.cityPath, target.agentKey(), target.sessionName); err != nil {
+	if err := startNudgePoller(target.cityPath, target.pollerKey(), target.sessionName); err != nil {
 		return
 	}
 }

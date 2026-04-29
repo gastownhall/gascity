@@ -450,11 +450,19 @@ func validateCityPath(p string) (string, error) {
 }
 
 // resolveRigToContext resolves a rig name or path to a full context by scanning
-// registered cities and their machine-local .gc/site.toml rig bindings.
+// registered cities and their machine-local .gc/site.toml rig bindings. This
+// is an explicit rig-resolution path, so stale-sibling warnings are emitted
+// to os.Stderr (deduped across the two registry scans below).
 func resolveRigToContext(nameOrPath string) (resolvedContext, error) {
-	if matches, err := registeredRigBindingsByName(nameOrPath, true); err != nil {
+	var allStale []staleRegisteredCity
+	defer func() { emitStaleRegisteredCityWarnings(os.Stderr, allStale) }()
+
+	matches, stale, err := registeredRigBindingsByName(nameOrPath, true)
+	allStale = append(allStale, stale...)
+	if err != nil {
 		return resolvedContext{}, err
-	} else if len(matches) > 0 {
+	}
+	if len(matches) > 0 {
 		return resolveRigBindingMatches(nameOrPath, matches)
 	}
 
@@ -462,17 +470,24 @@ func resolveRigToContext(nameOrPath string) (resolvedContext, error) {
 	if err != nil {
 		return resolvedContext{}, fmt.Errorf("rig %q: %w", nameOrPath, err)
 	}
-	if matches, err := registeredRigBindingsByPath(abs, true); err != nil {
+	matches, stale, err = registeredRigBindingsByPath(abs, true)
+	allStale = append(allStale, stale...)
+	if err != nil {
 		return resolvedContext{}, err
-	} else if len(matches) > 0 {
+	}
+	if len(matches) > 0 {
 		return resolveRigBindingMatches(abs, matches)
 	}
 
 	return resolvedContext{}, fmt.Errorf("rig %q is not registered in any city", nameOrPath)
 }
 
+// resolveRigPathToContext resolves an explicit path argument to a registered
+// rig context. Stale-sibling warnings are emitted to os.Stderr because the
+// caller is explicitly depending on the registry.
 func resolveRigPathToContext(dir string) (resolvedContext, bool, error) {
-	matches, err := registeredRigBindingsByPath(dir, true)
+	matches, stale, err := registeredRigBindingsByPath(dir, true)
+	emitStaleRegisteredCityWarnings(os.Stderr, stale)
 	if err != nil {
 		return resolvedContext{}, false, err
 	}
@@ -488,8 +503,10 @@ func resolveRigPathToContext(dir string) (resolvedContext, bool, error) {
 
 // lookupRigFromCwd checks registered city site bindings for a rig matching cwd.
 // Ambiguous bindings deliberately fall through to the city walk-up fallback.
+// This is an opportunistic probe (failOnLoadError=false): stale-sibling
+// warnings are intentionally dropped so unrelated commands stay quiet.
 func lookupRigFromCwd(cwd string) (resolvedContext, bool) {
-	matches, err := registeredRigBindingsByPath(cwd, false)
+	matches, _, err := registeredRigBindingsByPath(cwd, false)
 	if err != nil || len(matches) != 1 {
 		return resolvedContext{}, false
 	}
@@ -524,35 +541,70 @@ type registeredRigBinding struct {
 	Path string
 }
 
-func registeredRigBindingsByName(name string, failOnLoadError bool) ([]registeredRigBinding, error) {
+func registeredRigBindingsByName(name string, failOnLoadError bool) (matches []registeredRigBinding, stale []staleRegisteredCity, err error) {
 	return registeredRigBindings(failOnLoadError, func(binding registeredRigBinding) bool {
 		return binding.Rig.Name == name
 	})
 }
 
-func registeredRigBindingsByPath(dir string, failOnLoadError bool) ([]registeredRigBinding, error) {
+func registeredRigBindingsByPath(dir string, failOnLoadError bool) (matches []registeredRigBinding, stale []staleRegisteredCity, err error) {
 	dir = normalizePathForCompare(dir)
-	matches, err := registeredRigBindings(failOnLoadError, func(binding registeredRigBinding) bool {
+	matches, stale, err = registeredRigBindings(failOnLoadError, func(binding registeredRigBinding) bool {
 		rigPath := normalizePathForCompare(binding.Path)
 		return pathWithinScope(dir, rigPath)
 	})
 	if err != nil {
-		return nil, err
+		return nil, stale, err
 	}
-	return keepDeepestRigBindings(matches), nil
+	return keepDeepestRigBindings(matches), stale, nil
 }
 
-func registeredRigBindings(failOnLoadError bool, match func(registeredRigBinding) bool) ([]registeredRigBinding, error) {
+// staleRegisteredCity identifies a registered city whose city.toml is
+// missing on disk. registeredRigBindings returns these as structured data
+// instead of emitting to stderr so callers that are explicitly resolving a
+// registered rig can warn, while opportunistic probes stay quiet.
+type staleRegisteredCity struct {
+	Label string
+	Path  string
+}
+
+// emitStaleRegisteredCityWarnings writes one `warning: ...` line per stale
+// registry entry. Each Label is emitted at most once even if stale carries
+// duplicates (e.g. from callers that invoke registeredRigBindings twice in
+// one command).
+func emitStaleRegisteredCityWarnings(w io.Writer, stale []staleRegisteredCity) {
+	if w == nil || len(stale) == 0 {
+		return
+	}
+	seen := make(map[string]struct{}, len(stale))
+	for _, s := range stale {
+		if _, already := seen[s.Label]; already {
+			continue
+		}
+		seen[s.Label] = struct{}{}
+		fmt.Fprintf(w, "warning: skipping stale registered city %q: city.toml missing at %s\n", //nolint:errcheck // best-effort stderr
+			s.Label, s.Path)
+	}
+}
+
+func registeredRigBindings(failOnLoadError bool, match func(registeredRigBinding) bool) (_ []registeredRigBinding, stale []staleRegisteredCity, _ error) {
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
 	cities, err := reg.List()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var matched []registeredRigBinding
 	var loadErrors []string
 	for _, c := range cities {
 		cfg, err := loadCityConfigSuppressDeprecatedOrderWarnings(c.Path, io.Discard)
 		if err != nil {
+			// Tolerate stale registry entries whose city.toml has been
+			// deleted out from under the registry, but keep missing includes
+			// or other config dependencies as load errors.
+			if cityTOML, ok := missingRootCityTOML(err, c.Path); ok {
+				stale = append(stale, staleRegisteredCity{Label: registeredCityLabel(c), Path: cityTOML})
+				continue
+			}
 			loadErrors = append(loadErrors, fmt.Sprintf("%s: %v", registeredCityLabel(c), err))
 			continue
 		}
@@ -590,9 +642,21 @@ func registeredRigBindings(failOnLoadError bool, match func(registeredRigBinding
 		}
 	}
 	if len(loadErrors) > 0 && (failOnLoadError || len(matched) > 0) {
-		return nil, fmt.Errorf("loading registered city rig bindings: %s", strings.Join(loadErrors, "; "))
+		return nil, stale, fmt.Errorf("loading registered city rig bindings: %s", strings.Join(loadErrors, "; "))
 	}
-	return matched, nil
+	return matched, stale, nil
+}
+
+func missingRootCityTOML(err error, cityPath string) (string, bool) {
+	if !errors.Is(err, os.ErrNotExist) {
+		return "", false
+	}
+	var pathErr *os.PathError
+	if !errors.As(err, &pathErr) {
+		return "", false
+	}
+	cityTOML := filepath.Clean(filepath.Join(cityPath, "city.toml"))
+	return cityTOML, samePath(pathErr.Path, cityTOML)
 }
 
 func keepDeepestRigBindings(matches []registeredRigBinding) []registeredRigBinding {

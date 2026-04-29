@@ -442,6 +442,55 @@ type resolvedMailTarget struct {
 	recipients []string
 }
 
+func mailSenderRouteMetadata(store beads.Store, sender string) (map[string]string, error) {
+	sender = strings.TrimSpace(sender)
+	if store == nil || sender == "" || sender == "human" {
+		return nil, nil
+	}
+	sessionID, err := resolveSessionID(store, sender)
+	if err != nil {
+		if errors.Is(err, session.ErrSessionNotFound) || errors.Is(err, session.ErrAmbiguous) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("resolving sender route %q: %w", sender, err)
+	}
+	b, err := store.Get(sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("loading sender session %q: %w", sessionID, err)
+	}
+	display := mailSenderDisplayAddress(b, sender)
+	return map[string]string{
+		mail.FromSessionIDMetadataKey: sessionID,
+		mail.FromDisplayMetadataKey:   display,
+	}, nil
+}
+
+func mailSenderDisplayAddress(b beads.Bead, fallback string) string {
+	if alias := strings.TrimSpace(b.Metadata["alias"]); alias != "" {
+		return alias
+	}
+	fallback = strings.TrimSpace(fallback)
+	if fallback != "" && fallback != b.ID {
+		return fallback
+	}
+	if name := strings.TrimSpace(b.Metadata["session_name"]); name != "" {
+		return name
+	}
+	if b.ID != "" {
+		return b.ID
+	}
+	return fallback
+}
+
+func mailSenderDisplayFromMetadata(fallback string, metadata map[string]string) string {
+	if metadata != nil {
+		if display := strings.TrimSpace(metadata[mail.FromDisplayMetadataKey]); display != "" {
+			return display
+		}
+	}
+	return strings.TrimSpace(fallback)
+}
+
 func resolveLiveConfiguredNamedMailTarget(store beads.Store, identifier string) (resolvedMailTarget, bool, error) {
 	identifier = normalizeNamedSessionTarget(identifier)
 	if store == nil || identifier == "" || identifier == "human" || strings.Contains(identifier, "/") {
@@ -689,6 +738,10 @@ func collectMailCounts(count func(string) (int, int, error), recipients []string
 	return total, unread, nil
 }
 
+type multiRecipientMailCounter interface {
+	CountRecipients([]string) (int, int, error)
+}
+
 func newMailSendCmd(stdout, stderr io.Writer) *cobra.Command {
 	var notify bool
 	var all bool
@@ -723,6 +776,8 @@ Use --all to broadcast to all live sessions (excluding sender and "human").`,
 		},
 	}
 	cmd.Flags().BoolVar(&notify, "notify", false, "nudge the recipient after sending")
+	cmd.Flags().BoolVar(&notify, "nudge", false, "alias for --notify")
+	_ = cmd.Flags().MarkHidden("nudge")
 	cmd.Flags().BoolVar(&all, "all", false, "broadcast to all live sessions (excludes sender and human)")
 	cmd.Flags().StringVar(&from, "from", "", "sender identity (default: $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or \"human\")")
 	cmd.Flags().StringVar(&to, "to", "", "recipient address (alternative to positional argument)")
@@ -796,6 +851,7 @@ func newMailReplyCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Reply to a message. The reply is addressed to the original sender.
 
 Inherits the thread ID from the original message for conversation tracking.
+Use --notify to nudge the recipient after replying.
 Use -s/--subject for the reply subject and -m/--message for the reply body.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -808,6 +864,8 @@ Use -s/--subject for the reply subject and -m/--message for the reply body.`,
 	cmd.Flags().StringVarP(&subject, "subject", "s", "", "reply subject line")
 	cmd.Flags().StringVarP(&message, "message", "m", "", "reply body text")
 	cmd.Flags().BoolVar(&notify, "notify", false, "nudge the recipient after replying")
+	cmd.Flags().BoolVar(&notify, "nudge", false, "alias for --notify")
+	_ = cmd.Flags().MarkHidden("nudge")
 	return cmd
 }
 
@@ -1016,7 +1074,7 @@ func doMailSend(mp mail.Provider, rec events.Recorder, validRecipients map[strin
 	}
 	rec.Record(events.Event{
 		Type:    events.MailSent,
-		Actor:   sender,
+		Actor:   m.From,
 		Subject: m.ID,
 		Message: to,
 		Payload: mailEventPayload(&m),
@@ -1071,7 +1129,7 @@ func doMailSendAll(mp mail.Provider, rec events.Recorder, validRecipients map[st
 		}
 		rec.Record(events.Event{
 			Type:    events.MailSent,
-			Actor:   sender,
+			Actor:   m.From,
 			Subject: m.ID,
 			Message: to,
 			Payload: mailEventPayload(&m),
@@ -1206,25 +1264,46 @@ func cmdMailReply(args []string, subject, message string, notify bool, stdout, s
 	rec := openCityRecorder(stderr)
 
 	sender := defaultMailIdentity()
-	var hasStore bool
-	if sender != "human" {
-		if !isStorelessMailProvider() {
-			hasStore = true
-			store, storeCode := openCityStore(stderr, "gc mail reply")
+	providerName := mailProviderName()
+	var store beads.Store
+	var cityPath string
+	var cfg *config.City
+	var notifySetupErr error
+	if sender != "human" || notify {
+		switch {
+		case strings.HasPrefix(providerName, "exec:"):
+			var err error
+			cityPath, err = resolveCity()
+			if err == nil {
+				cfg, _ = loadCityConfig(cityPath, stderr)
+				store, err = openCityStoreAt(cityPath)
+			}
+			if err != nil {
+				notifySetupErr = err
+				store = nil
+			}
+		case !isStorelessMailProvider():
+			var storeCode int
+			store, storeCode = openCityStore(stderr, "gc mail reply")
 			if store == nil {
 				return storeCode
 			}
-			cityPath, err := resolveCity()
+			var err error
+			cityPath, err = resolveCity()
 			if err != nil {
 				fmt.Fprintf(stderr, "gc mail reply: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
-			cfg, _ := loadCityConfig(cityPath, stderr)
-			resolved, ok := resolveDefaultMailSenderForCommand(cityPath, cfg, store, stderr, "gc mail reply")
-			if !ok {
-				return 1
+			cfg, _ = loadCityConfig(cityPath, stderr)
+		}
+		if sender != "human" {
+			if store != nil {
+				resolved, ok := resolveDefaultMailSenderForCommand(cityPath, cfg, store, stderr, "gc mail reply")
+				if !ok {
+					return 1
+				}
+				sender = resolved
 			}
-			sender = resolved
 		}
 	}
 
@@ -1235,8 +1314,10 @@ func cmdMailReply(args []string, subject, message string, notify bool, stdout, s
 	}
 
 	var nf nudgeFunc
-	if notify && hasStore {
+	if notify && store != nil {
 		nf = newMailNudgeFunc(sender)
+	} else if notify && strings.HasPrefix(providerName, "exec:") && notifySetupErr != nil {
+		fmt.Fprintf(stderr, "gc mail reply: --notify requested but no city store available; nudge skipped: %v\n", notifySetupErr) //nolint:errcheck // best-effort stderr
 	}
 
 	return doMailReply(mp, rec, args[0], sender, subject, body, nf, stdout, stderr)
@@ -1252,7 +1333,7 @@ func doMailReply(mp mail.Provider, rec events.Recorder, id, sender, subject, bod
 	}
 	rec.Record(events.Event{
 		Type:    events.MailReplied,
-		Actor:   sender,
+		Actor:   reply.From,
 		Subject: reply.ID,
 		Message: reply.To,
 		Payload: mailEventPayload(&reply),
@@ -1433,7 +1514,13 @@ func doMailCount(mp mail.Provider, recipient string, stdout, stderr io.Writer) i
 }
 
 func doMailCountTarget(mp mail.Provider, target resolvedMailTarget, stdout, stderr io.Writer) int {
-	total, unread, err := collectMailCounts(mp.Count, target.recipients)
+	var total, unread int
+	var err error
+	if counter, ok := mp.(multiRecipientMailCounter); ok {
+		total, unread, err = counter.CountRecipients(target.recipients)
+	} else {
+		total, unread, err = collectMailCounts(mp.Count, target.recipients)
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "gc mail count: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

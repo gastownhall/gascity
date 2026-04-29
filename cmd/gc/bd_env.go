@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doltauth"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -519,7 +520,7 @@ func cityForStoreDir(dir string) string {
 }
 
 func overlayEnvEntries(environ []string, overrides map[string]string) []string {
-	out := append([]string(nil), environ...)
+	out := execenv.FilterInherited(environ)
 	if len(overrides) == 0 {
 		return out
 	}
@@ -572,7 +573,7 @@ func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 		}
 	}
 	sort.Strings(keys)
-	out := append([]string(nil), environ...)
+	out := execenv.FilterInherited(environ)
 	for _, key := range keys {
 		out = removeEnvKey(out, key)
 	}

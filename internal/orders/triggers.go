@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/execenv"
 )
 
 // TriggerResult holds the outcome of a trigger check.
@@ -157,9 +158,7 @@ func checkCondition(a Order, opts TriggerOptions) TriggerResult {
 	if opts.ConditionDir != "" {
 		cmd.Dir = opts.ConditionDir
 	}
-	if len(opts.ConditionEnv) > 0 {
-		cmd.Env = mergeConditionEnv(os.Environ(), opts.ConditionEnv)
-	}
+	cmd.Env = mergeConditionEnv(os.Environ(), opts.ConditionEnv)
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return TriggerResult{Due: false, Reason: fmt.Sprintf("check command timed out after %s", timeout)}
@@ -170,24 +169,7 @@ func checkCondition(a Order, opts TriggerOptions) TriggerResult {
 }
 
 func mergeConditionEnv(environ, extra []string) []string {
-	out := make([]string, 0, len(environ)+len(extra))
-	replaced := make(map[string]struct{}, len(extra))
-	for _, entry := range extra {
-		key, _, ok := strings.Cut(entry, "=")
-		if ok {
-			replaced[key] = struct{}{}
-		}
-	}
-	for _, entry := range environ {
-		key, _, ok := strings.Cut(entry, "=")
-		if ok {
-			if _, found := replaced[key]; found {
-				continue
-			}
-		}
-		out = append(out, entry)
-	}
-	return append(out, extra...)
+	return execenv.MergeEntries(environ, extra)
 }
 
 // checkEvent checks if matching events exist after the last cursor position.

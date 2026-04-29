@@ -7,6 +7,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // noListScanStore errors when List is called without a filter, proving that
@@ -182,6 +183,172 @@ func TestSend(t *testing.T) {
 	}
 	if hasLabel(b.Labels, "gc:message") {
 		t.Error("bead should no longer carry the legacy gc:message label")
+	}
+}
+
+func TestSendStoresStableSessionRouteWithoutChangingDisplaySender(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sender, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "gascity/workflows.codex-min-9",
+			"session_name": "workflows__codex-min-mc-sender",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+
+	msg, err := p.Send("gascity/workflows.codex-min-9", "human", "Approval", "please approve")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	if msg.From != "gascity/workflows.codex-min-9" {
+		t.Fatalf("message From = %q, want display alias", msg.From)
+	}
+	b, err := store.Get(msg.ID)
+	if err != nil {
+		t.Fatalf("Get message: %v", err)
+	}
+	if b.From != "gascity/workflows.codex-min-9" {
+		t.Fatalf("bead From = %q, want display alias", b.From)
+	}
+	if b.Metadata[fromSessionIDMetadataKey] != sender.ID {
+		t.Fatalf("%s = %q, want %q", fromSessionIDMetadataKey, b.Metadata[fromSessionIDMetadataKey], sender.ID)
+	}
+	if b.Metadata[fromDisplayMetadataKey] != "gascity/workflows.codex-min-9" {
+		t.Fatalf("%s = %q, want original display alias", fromDisplayMetadataKey, b.Metadata[fromDisplayMetadataKey])
+	}
+}
+
+func TestReplyUsesStoredSenderSessionIDAfterAliasRename(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sender, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "old-sender",
+			"session_name": "sender-gc-42",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	original, err := p.Send("old-sender", "human", "Approval", "please approve")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if err := store.SetMetadataBatch(sender.ID, session.UpdatedAliasMetadata(sender.Metadata, "new-sender")); err != nil {
+		t.Fatalf("SetMetadataBatch(alias rename): %v", err)
+	}
+
+	reply, err := p.Reply(original.ID, "human", "approved", "approved")
+	if err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	if reply.To != "old-sender" {
+		t.Fatalf("reply To = %q, want original display sender", reply.To)
+	}
+	b, err := store.Get(reply.ID)
+	if err != nil {
+		t.Fatalf("Get reply: %v", err)
+	}
+	if b.Assignee != sender.ID {
+		t.Fatalf("reply bead Assignee = %q, want stable sender session ID %q", b.Assignee, sender.ID)
+	}
+	if b.Metadata[toSessionIDMetadataKey] != sender.ID {
+		t.Fatalf("reply %s = %q, want %q", toSessionIDMetadataKey, b.Metadata[toSessionIDMetadataKey], sender.ID)
+	}
+	if b.Metadata[toDisplayMetadataKey] != "old-sender" {
+		t.Fatalf("reply %s = %q, want original display sender", toDisplayMetadataKey, b.Metadata[toDisplayMetadataKey])
+	}
+	inbox, err := p.Inbox("new-sender")
+	if err != nil {
+		t.Fatalf("Inbox(new-sender): %v", err)
+	}
+	if len(inbox) != 1 || inbox[0].ID != reply.ID {
+		t.Fatalf("Inbox(new-sender) = %#v, want reply %s", inbox, reply.ID)
+	}
+	oldInbox, err := p.Inbox("old-sender")
+	if err != nil {
+		t.Fatalf("Inbox(old-sender): %v", err)
+	}
+	if len(oldInbox) != 1 || oldInbox[0].ID != reply.ID {
+		t.Fatalf("Inbox(old-sender) = %#v, want reply %s", oldInbox, reply.ID)
+	}
+	total, unread, err := p.Count("new-sender")
+	if err != nil {
+		t.Fatalf("Count(new-sender): %v", err)
+	}
+	if total != 1 || unread != 1 {
+		t.Fatalf("Count(new-sender) = (%d, %d), want (1, 1)", total, unread)
+	}
+}
+
+func TestSendFallsBackToLiteralSenderWhenSessionIdentifierIsAmbiguous(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	for i := 0; i < 2; i++ {
+		if _, err := store.Create(beads.Bead{
+			Type:   session.BeadType,
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"alias": "duplicate",
+			},
+		}); err != nil {
+			t.Fatalf("Create session %d: %v", i, err)
+		}
+	}
+
+	msg, err := p.Send("duplicate", "human", "subject", "body")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if msg.From != "duplicate" {
+		t.Fatalf("message From = %q, want literal ambiguous sender", msg.From)
+	}
+	b, err := store.Get(msg.ID)
+	if err != nil {
+		t.Fatalf("Get message: %v", err)
+	}
+	if b.Metadata[fromSessionIDMetadataKey] != "" {
+		t.Fatalf("ambiguous sender stored %s = %q, want empty", fromSessionIDMetadataKey, b.Metadata[fromSessionIDMetadataKey])
+	}
+}
+
+func TestInboxFallsBackToLiteralRecipientWhenSessionIdentifierIsAmbiguous(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	for i := 0; i < 2; i++ {
+		if _, err := store.Create(beads.Bead{
+			Type:   session.BeadType,
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"alias": "duplicate",
+			},
+		}); err != nil {
+			t.Fatalf("Create session %d: %v", i, err)
+		}
+	}
+	msg, err := p.Send("human", "duplicate", "subject", "body")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	inbox, err := p.Inbox("duplicate")
+	if err != nil {
+		t.Fatalf("Inbox: %v", err)
+	}
+	if len(inbox) != 1 || inbox[0].ID != msg.ID {
+		t.Fatalf("Inbox = %#v, want literal recipient message %s", inbox, msg.ID)
 	}
 }
 
@@ -561,6 +728,358 @@ func TestReply(t *testing.T) {
 	}
 }
 
+// TestReplyDerivesSubjectFromOriginal ensures an empty subject is replaced
+// with "Re: <original-subject>", so underlying stores that require a
+// non-empty title (e.g. BdStore → `bd create`) don't reject the reply.
+func TestReplyDerivesSubjectFromOriginal(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("alice", "bob", "Hello", "first message")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reply, err := p.Reply(sent.ID, "bob", "", "reply body")
+	if err != nil {
+		t.Fatalf("Reply with empty subject: %v", err)
+	}
+	if reply.Subject != "Re: Hello" {
+		t.Errorf("Reply Subject = %q, want %q", reply.Subject, "Re: Hello")
+	}
+}
+
+// TestReplyPreservesExplicitSubject ensures an explicit subject is passed
+// through unchanged — no automatic "Re:" prefixing.
+func TestReplyPreservesExplicitSubject(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("alice", "bob", "Hello", "first message")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reply, err := p.Reply(sent.ID, "bob", "Custom subject", "reply body")
+	if err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	if reply.Subject != "Custom subject" {
+		t.Errorf("Reply Subject = %q, want %q", reply.Subject, "Custom subject")
+	}
+}
+
+// TestReplyAvoidsDoubleRePrefix ensures that replying to a message whose
+// subject already starts with "Re:" does not produce "Re: Re: ..." when
+// the caller omits the subject.
+func TestReplyAvoidsDoubleRePrefix(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("alice", "bob", "Re: Hello", "body")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reply, err := p.Reply(sent.ID, "bob", "", "reply body")
+	if err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	if reply.Subject != "Re: Hello" {
+		t.Errorf("Reply Subject = %q, want %q (no double prefix)", reply.Subject, "Re: Hello")
+	}
+}
+
+// TestReplyFallsBackToBodyWhenOriginalTitleEmpty covers the degenerate case
+// where an original message somehow has no title (possible in stores that
+// don't enforce title). The reply still gets a non-empty title.
+func TestReplyFallsBackToBodyWhenOriginalTitleEmpty(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	// Create a message bead directly without a title.
+	orig, err := store.Create(beads.Bead{
+		Type:     "message",
+		Assignee: "bob",
+		From:     "alice",
+		Labels:   []string{"thread:t1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reply, err := p.Reply(orig.ID, "bob", "", "a terse reply body")
+	if err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	if reply.Subject == "" {
+		t.Error("Reply Subject is empty; must be non-empty so bd create won't reject")
+	}
+	if reply.Subject != "a terse reply body" {
+		t.Errorf("Reply Subject = %q, want %q (first line of body)", reply.Subject, "a terse reply body")
+	}
+}
+
+// TestReplyAgainstBdStoreValidatesTitle is a regression test that exercises
+// the real BdStore code path: the fake runner emulates `bd create`'s
+// title-required validation. Without a derived title, Reply would fail here.
+func TestReplyAgainstBdStoreValidatesTitle(t *testing.T) {
+	// Fake runner that rejects `bd create` with empty positional title,
+	// the same way the real bd binary does.
+	runner := func(_ string, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			return nil, errors.New("unexpected command: " + name)
+		}
+		switch args[0] {
+		case "create":
+			// args: create --json <title> -t <type> [flags...]
+			if len(args) < 3 {
+				return nil, errors.New("bd create: too few args")
+			}
+			title := args[2]
+			if title == "" {
+				return nil, errors.New(`exit status 1: {"error":"validation failed for issue : title is required"}`)
+			}
+			// Return a minimal issue JSON.
+			id := "bd-" + title
+			return []byte(`{"id":"` + id + `","title":"` + title + `","status":"open","issue_type":"message","created_at":"2026-04-24T00:00:00Z"}`), nil
+		case "show":
+			// bd show --json returns a JSON array.
+			return []byte(`[{"id":"bd-Hello","title":"Hello","status":"open","issue_type":"message","assignee":"bob","from":"alice","created_at":"2026-04-24T00:00:00Z","labels":["thread:t1"]}]`), nil
+		case "update":
+			return []byte(`{}`), nil
+		case "list":
+			return []byte(`[]`), nil
+		}
+		return nil, errors.New("unexpected bd subcommand: " + args[0])
+	}
+	p := New(beads.NewBdStore(t.TempDir(), runner))
+
+	// Reply with empty subject — must succeed because the provider derives
+	// "Re: Hello" from the original message.
+	reply, err := p.Reply("bd-Hello", "bob", "", "reply body")
+	if err != nil {
+		t.Fatalf("Reply should derive a non-empty title to pass bd validation: %v", err)
+	}
+	if reply.Subject != "Re: Hello" {
+		t.Errorf("Reply Subject = %q, want %q", reply.Subject, "Re: Hello")
+	}
+}
+
+func TestReplyPrefersStoredSenderSessionID(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sender, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "gascity/workflows.codex-min-9",
+			"session_name": "workflows__codex-min-mc-sender",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	responder, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "gascity/workflows.codex-min-10",
+			"session_name": "workflows__codex-min-mc-responder",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create responder session: %v", err)
+	}
+	original, err := store.Create(beads.Bead{
+		Title:       "Approval needed",
+		Description: "please approve",
+		Type:        "message",
+		Assignee:    "human",
+		From:        "gascity/workflows.codex-min-9",
+		Labels:      []string{"thread:stable-route"},
+		Metadata: map[string]string{
+			fromSessionIDMetadataKey: sender.ID,
+			fromDisplayMetadataKey:   "gascity/workflows.codex-min-9",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create original message: %v", err)
+	}
+
+	reply, err := p.Reply(original.ID, "gascity/workflows.codex-min-10", "approved", "approved")
+	if err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+
+	if reply.To != "gascity/workflows.codex-min-9" {
+		t.Fatalf("reply To = %q, want sender display alias", reply.To)
+	}
+	if reply.From != "gascity/workflows.codex-min-10" {
+		t.Fatalf("reply From = %q, want display alias", reply.From)
+	}
+	b, err := store.Get(reply.ID)
+	if err != nil {
+		t.Fatalf("Get reply: %v", err)
+	}
+	if b.Metadata[fromSessionIDMetadataKey] != responder.ID {
+		t.Fatalf("reply %s = %q, want %q", fromSessionIDMetadataKey, b.Metadata[fromSessionIDMetadataKey], responder.ID)
+	}
+	if b.Metadata[fromDisplayMetadataKey] != "gascity/workflows.codex-min-10" {
+		t.Fatalf("reply %s = %q, want responder display alias", fromDisplayMetadataKey, b.Metadata[fromDisplayMetadataKey])
+	}
+	if b.Assignee != sender.ID {
+		t.Fatalf("reply bead Assignee = %q, want stable sender session ID %q", b.Assignee, sender.ID)
+	}
+	if b.Metadata[toSessionIDMetadataKey] != sender.ID {
+		t.Fatalf("reply %s = %q, want %q", toSessionIDMetadataKey, b.Metadata[toSessionIDMetadataKey], sender.ID)
+	}
+	if b.Metadata[toDisplayMetadataKey] != "gascity/workflows.codex-min-9" {
+		t.Fatalf("reply %s = %q, want sender display alias", toDisplayMetadataKey, b.Metadata[toDisplayMetadataKey])
+	}
+}
+
+func TestReplyToClosedSenderSessionIsDiscoverableByHistoricalAlias(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sender, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "gascity/workflows.codex-min-9",
+			"alias_history": "gascity/workflows.codex-min-8",
+			"session_name":  "workflows__codex-min-mc-sender",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create sender session: %v", err)
+	}
+	responder, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "gascity/workflows.codex-min-10",
+			"session_name": "workflows__codex-min-mc-responder",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create responder session: %v", err)
+	}
+	original, err := store.Create(beads.Bead{
+		Title:       "Approval needed",
+		Description: "please approve",
+		Type:        "message",
+		Assignee:    "human",
+		From:        "gascity/workflows.codex-min-8",
+		Labels:      []string{"thread:closed-sender-route"},
+		Metadata: map[string]string{
+			fromSessionIDMetadataKey: sender.ID,
+			fromDisplayMetadataKey:   "gascity/workflows.codex-min-8",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create original message: %v", err)
+	}
+	if err := store.Close(sender.ID); err != nil {
+		t.Fatalf("Close sender session: %v", err)
+	}
+
+	reply, err := p.Reply(original.ID, "gascity/workflows.codex-min-10", "approved", "approved")
+	if err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	if reply.To != "gascity/workflows.codex-min-8" {
+		t.Fatalf("reply To = %q, want historical sender display alias", reply.To)
+	}
+	if reply.From != "gascity/workflows.codex-min-10" {
+		t.Fatalf("reply From = %q, want responder display alias", reply.From)
+	}
+	b, err := store.Get(reply.ID)
+	if err != nil {
+		t.Fatalf("Get reply: %v", err)
+	}
+	if b.Assignee != sender.ID {
+		t.Fatalf("reply bead Assignee = %q, want closed sender session ID %q", b.Assignee, sender.ID)
+	}
+	if b.Metadata[fromSessionIDMetadataKey] != responder.ID {
+		t.Fatalf("reply %s = %q, want %q", fromSessionIDMetadataKey, b.Metadata[fromSessionIDMetadataKey], responder.ID)
+	}
+
+	msgs, err := p.Inbox("gascity/workflows.codex-min-8")
+	if err != nil {
+		t.Fatalf("Inbox by historical alias: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("Inbox by historical alias returned %d messages, want 1", len(msgs))
+	}
+	if msgs[0].ID != reply.ID {
+		t.Fatalf("Inbox by historical alias returned %s, want reply %s", msgs[0].ID, reply.ID)
+	}
+}
+
+func TestRecipientRoutesPreferLiveSessionOverClosedHistory(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	closed, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "old-worker",
+			"alias_history": "worker",
+			"session_name":  "workflows__codex-min-mc-old",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create closed session: %v", err)
+	}
+	if err := store.Close(closed.ID); err != nil {
+		t.Fatalf("Close session: %v", err)
+	}
+	live, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "worker",
+			"session_name": "workflows__codex-min-mc-live",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create live session: %v", err)
+	}
+	closedReply, err := store.Create(beads.Bead{
+		Title:    "old reply",
+		Type:     "message",
+		Assignee: closed.ID,
+		From:     "human",
+	})
+	if err != nil {
+		t.Fatalf("Create closed reply: %v", err)
+	}
+	liveMail, err := store.Create(beads.Bead{
+		Title:    "live mail",
+		Type:     "message",
+		Assignee: live.ID,
+		From:     "human",
+	})
+	if err != nil {
+		t.Fatalf("Create live mail: %v", err)
+	}
+
+	msgs, err := p.Inbox("worker")
+	if err != nil {
+		t.Fatalf("Inbox: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("Inbox returned %d messages, want 1", len(msgs))
+	}
+	if msgs[0].ID != liveMail.ID {
+		t.Fatalf("Inbox returned %s, want live message %s; closed reply was %s", msgs[0].ID, liveMail.ID, closedReply.ID)
+	}
+}
+
 // --- Thread ---
 
 func TestThread(t *testing.T) {
@@ -636,6 +1155,22 @@ func TestCount(t *testing.T) {
 	}
 	if unread != 1 {
 		t.Errorf("unread = %d, want 1", unread)
+	}
+}
+
+func TestCountRecipientsEmptyDoesNotCountAllMessages(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+	if _, err := p.Send("human", "mayor", "", "msg"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	total, unread, err := p.CountRecipients(nil)
+	if err != nil {
+		t.Fatalf("CountRecipients(nil): %v", err)
+	}
+	if total != 0 || unread != 0 {
+		t.Fatalf("CountRecipients(nil) = (%d,%d), want (0,0)", total, unread)
 	}
 }
 
