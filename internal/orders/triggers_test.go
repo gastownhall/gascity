@@ -98,7 +98,10 @@ func TestCheckTriggerCondition(t *testing.T) {
 }
 
 func TestCheckTriggerConditionUsesOptions(t *testing.T) {
-	dir := t.TempDir()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	a := Order{
 		Name:    "check",
 		Trigger: "condition",
