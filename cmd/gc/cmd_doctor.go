@@ -215,6 +215,10 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	d.Register(doctor.NewScopedDoltVersionCheckForConfig(cityPath, skipManagedDoltCheck, cfg, cfgErr))
 	d.Register(&doctor.EventsLogCheck{})
 	d.Register(doctor.NewEventLogSizeCheck())
+	if cfgErr == nil {
+		d.Register(doctor.NewWorktreeDiskSizeCheck(cfg.Doctor))
+		d.Register(doctor.NewNestedWorktreePruneCheck(cfg.Doctor))
+	}
 
 	// Custom types check — city store.
 	d.Register(doctor.NewCustomTypesCheck(cityPath, "city"))

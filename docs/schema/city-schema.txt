@@ -983,6 +983,10 @@
           "$ref": "#/$defs/ConvergenceConfig",
           "description": "Convergence configures convergence loop limits."
         },
+        "doctor": {
+          "$ref": "#/$defs/DoctorConfig",
+          "description": "Doctor configures gc doctor thresholds and policy toggles\n(worktree size warnings, nested-worktree auto-prune)."
+        },
         "service": {
           "items": {
             "$ref": "#/$defs/Service"
@@ -1084,6 +1088,28 @@
       "additionalProperties": false,
       "type": "object",
       "description": "DaemonConfig holds controller daemon settings."
+    },
+    "DoctorConfig": {
+      "properties": {
+        "worktree_rig_warn_size": {
+          "type": "string",
+          "description": "WorktreeRigWarnSize is the per-rig warning threshold for the total\ndisk footprint under .gc/worktrees/\u003crig\u003e/. Reported by the\nworktree-disk-size check. Go-style human size string (\"10GB\", \"500MB\").\nEmpty or unparseable falls back to the default (10 GB).",
+          "default": "10GB"
+        },
+        "worktree_rig_error_size": {
+          "type": "string",
+          "description": "WorktreeRigErrorSize is the per-rig error threshold. When any rig\nexceeds this, the worktree-disk-size check reports an error rather\nthan a warning. Empty or unparseable falls back to the default\n(50 GB).",
+          "default": "50GB"
+        },
+        "nested_worktree_prune": {
+          "type": "boolean",
+          "description": "NestedWorktreePrune enables the nested-worktree-prune check to\nremove safely-prunable nested worktrees on every doctor run, not\njust under --fix. Safety is enforced by mechanical checks\n(no uncommitted changes, no unpushed commits, no stashes) — never\nby role identity. Default false: doctor reports findings but only\nremoves them under --fix.",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "DoctorConfig holds settings for the gc doctor surface."
     },
     "DoltConfig": {
       "properties": {

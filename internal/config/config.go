@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -171,6 +172,9 @@ type City struct {
 	SessionSleep SessionSleepConfig `toml:"session_sleep,omitempty"`
 	// Convergence configures convergence loop limits.
 	Convergence ConvergenceConfig `toml:"convergence,omitempty"`
+	// Doctor configures gc doctor thresholds and policy toggles
+	// (worktree size warnings, nested-worktree auto-prune).
+	Doctor DoctorConfig `toml:"doctor,omitempty"`
 	// Services declares workspace-owned HTTP services mounted on the
 	// controller edge under /svc/{name}.
 	Services []Service `toml:"service,omitempty"`
@@ -1189,6 +1193,94 @@ func (c ChatSessionsConfig) IdleTimeoutDuration() time.Duration {
 		return 0
 	}
 	return d
+}
+
+// DoctorConfig holds settings for the gc doctor surface. Operator-tunable
+// thresholds and policy toggles live here; mechanical structural checks
+// (broken-worktree pointers, missing files) remain hardcoded since they
+// cannot be operator-tuned in any meaningful sense.
+type DoctorConfig struct {
+	// WorktreeRigWarnSize is the per-rig warning threshold for the total
+	// disk footprint under .gc/worktrees/<rig>/. Reported by the
+	// worktree-disk-size check. Go-style human size string ("10GB", "500MB").
+	// Empty or unparseable falls back to the default (10 GB).
+	WorktreeRigWarnSize string `toml:"worktree_rig_warn_size,omitempty" jsonschema:"default=10GB"`
+
+	// WorktreeRigErrorSize is the per-rig error threshold. When any rig
+	// exceeds this, the worktree-disk-size check reports an error rather
+	// than a warning. Empty or unparseable falls back to the default
+	// (50 GB).
+	WorktreeRigErrorSize string `toml:"worktree_rig_error_size,omitempty" jsonschema:"default=50GB"`
+
+	// NestedWorktreePrune enables the nested-worktree-prune check to
+	// remove safely-prunable nested worktrees on every doctor run, not
+	// just under --fix. Safety is enforced by mechanical checks
+	// (no uncommitted changes, no unpushed commits, no stashes) — never
+	// by role identity. Default false: doctor reports findings but only
+	// removes them under --fix.
+	NestedWorktreePrune bool `toml:"nested_worktree_prune,omitempty" jsonschema:"default=false"`
+}
+
+const (
+	defaultWorktreeRigWarnBytes  = int64(10) * 1024 * 1024 * 1024 // 10 GB
+	defaultWorktreeRigErrorBytes = int64(50) * 1024 * 1024 * 1024 // 50 GB
+)
+
+// WorktreeRigWarnBytes returns the warning threshold in bytes. Falls
+// back to defaultWorktreeRigWarnBytes when unset, unparseable, or
+// non-positive.
+func (c DoctorConfig) WorktreeRigWarnBytes() int64 {
+	if n, ok := parseHumanSize(c.WorktreeRigWarnSize); ok && n > 0 {
+		return n
+	}
+	return defaultWorktreeRigWarnBytes
+}
+
+// WorktreeRigErrorBytes returns the error threshold in bytes. Falls
+// back to defaultWorktreeRigErrorBytes when unset, unparseable, or
+// non-positive. The error threshold is clamped to at least the warn
+// threshold to keep the two-tier semantics monotonic; if the operator
+// configures error < warn, the warn value wins.
+func (c DoctorConfig) WorktreeRigErrorBytes() int64 {
+	warn := c.WorktreeRigWarnBytes()
+	n, ok := parseHumanSize(c.WorktreeRigErrorSize)
+	if !ok || n <= 0 {
+		n = defaultWorktreeRigErrorBytes
+	}
+	if n < warn {
+		return warn
+	}
+	return n
+}
+
+// parseHumanSize parses sizes like "10GB", "500 MB", "1024" (bytes
+// implied) into a byte count. Whitespace tolerant, case-insensitive.
+// Returns ok=false when the string is empty or unparseable so callers
+// can apply their own default.
+func parseHumanSize(s string) (int64, bool) {
+	s = strings.TrimSpace(strings.ToUpper(s))
+	if s == "" {
+		return 0, false
+	}
+	var unit int64 = 1
+	switch {
+	case strings.HasSuffix(s, "GB"):
+		unit = 1024 * 1024 * 1024
+		s = strings.TrimSpace(strings.TrimSuffix(s, "GB"))
+	case strings.HasSuffix(s, "MB"):
+		unit = 1024 * 1024
+		s = strings.TrimSpace(strings.TrimSuffix(s, "MB"))
+	case strings.HasSuffix(s, "KB"):
+		unit = 1024
+		s = strings.TrimSpace(strings.TrimSuffix(s, "KB"))
+	case strings.HasSuffix(s, "B"):
+		s = strings.TrimSpace(strings.TrimSuffix(s, "B"))
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return n * unit, true
 }
 
 // ConvergenceConfig holds convergence loop limits.
