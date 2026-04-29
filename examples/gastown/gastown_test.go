@@ -880,6 +880,40 @@ func TestGastownPatrolWispCommandsPropagateRoutingNamespace(t *testing.T) {
 	}
 }
 
+func TestBootPromptMatchesNamedSessionLifecycle(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "agents", "boot", "prompt.template.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading boot prompt: %v", err)
+	}
+	body := string(data)
+
+	for _, stale := range []string{
+		"{{ cmd }} agent peek",
+		"Spawn Boot (fresh session each time)",
+		"always fresh",
+		"no persistent state",
+	} {
+		if strings.Contains(body, stale) {
+			t.Fatalf("boot prompt still contains stale lifecycle or command guidance %q:\n%s", stale, body)
+		}
+	}
+
+	for _, want := range []string{
+		"{{ cmd }} session peek deacon --lines 1",
+		"{{ cmd }} session peek deacon --lines 30",
+		"configured `boot` named session",
+		"`mode = \"always\"` keeps the `boot` identity present",
+		"`wake_mode = \"fresh\"`",
+		"gives each wake a new provider context",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("boot prompt missing current lifecycle or command guidance %q:\n%s", want, body)
+		}
+	}
+}
+
 func TestIdeaToPlanFormulaUsesSupportedPrimitives(t *testing.T) {
 	dir := exampleDir()
 	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-idea-to-plan.toml")
