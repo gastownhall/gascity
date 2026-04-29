@@ -128,7 +128,10 @@ func doRigStatus(
 
 // agentStatusLine returns a human-readable status string for an agent session.
 func agentStatusLine(running bool, dops drainOps, sn string, suspended bool) string {
-	draining, _ := dops.isDraining(sn)
+	draining := false
+	if running {
+		draining, _ = dops.isDraining(sn)
+	}
 
 	switch {
 	case running && draining:

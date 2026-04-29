@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -83,15 +84,14 @@ func TestCityStatusJSONPreservesNilAgentsWhenEmpty(t *testing.T) {
 
 type failingStatusStore struct {
 	*beads.MemStore
-	failID string
-	err    error
+	err error
 }
 
-func (s *failingStatusStore) Get(id string) (beads.Bead, error) {
-	if id == s.failID {
-		return beads.Bead{}, s.err
+func (s *failingStatusStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == session.LabelSession && len(query.Metadata) > 0 {
+		return nil, s.err
 	}
-	return s.MemStore.Get(id)
+	return s.MemStore.List(query)
 }
 
 func TestCityStatusNamedSessionLookupErrorsAreSurfaced(t *testing.T) {
@@ -99,7 +99,6 @@ func TestCityStatusNamedSessionLookupErrorsAreSurfaced(t *testing.T) {
 	dops := newFakeDrainOps()
 	store := &failingStatusStore{
 		MemStore: beads.NewMemStore(),
-		failID:   "refinery",
 		err:      errors.New("store offline"),
 	}
 
@@ -111,6 +110,7 @@ func TestCityStatusNamedSessionLookupErrorsAreSurfaced(t *testing.T) {
 
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "city"},
+		Agents:    []config.Agent{{Name: "refinery"}},
 		NamedSessions: []config.NamedSession{{
 			Template: "refinery",
 		}},
@@ -132,5 +132,54 @@ func TestCityStatusNamedSessionLookupErrorsAreSurfaced(t *testing.T) {
 	out := stdout.String()
 	if !strings.Contains(out, "lookup error:") || !strings.Contains(out, "store offline") {
 		t.Fatalf("stdout = %q, want surfaced store error", out)
+	}
+}
+
+type blockingStatusListStore struct {
+	*beads.MemStore
+	block chan struct{}
+}
+
+func (s *blockingStatusListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == session.LabelSession {
+		<-s.block
+	}
+	return s.MemStore.List(query)
+}
+
+func TestCityStatusNamedSessionLookupTimeoutDegradesGracefully(t *testing.T) {
+	sp := runtime.NewFake()
+	store := &blockingStatusListStore{
+		MemStore: beads.NewMemStore(),
+		block:    make(chan struct{}),
+	}
+	oldTimeout := statusNamedSessionLookupTimeout
+	oldNameTimeout := statusSessionNameLookupTimeout
+	statusNamedSessionLookupTimeout = 10 * time.Millisecond
+	statusSessionNameLookupTimeout = 10 * time.Millisecond
+	t.Cleanup(func() {
+		statusNamedSessionLookupTimeout = oldTimeout
+		statusSessionNameLookupTimeout = oldNameTimeout
+		close(store.block)
+	})
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Agents:    []config.Agent{{Name: "refinery"}},
+		NamedSessions: []config.NamedSession{{
+			Template: "refinery",
+		}},
+	}
+
+	start := time.Now()
+	snapshot := collectCityStatusSnapshot(sp, cfg, "/home/user/city", store, io.Discard)
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Fatalf("collectCityStatusSnapshot took %s, want bounded named-session lookup", elapsed)
+	}
+	if len(snapshot.NamedSessions) != 1 {
+		t.Fatalf("named sessions = %d, want 1", len(snapshot.NamedSessions))
+	}
+	if got := snapshot.NamedSessions[0].Status; got != "lookup timeout" {
+		t.Fatalf("named session status = %q, want lookup timeout", got)
 	}
 }

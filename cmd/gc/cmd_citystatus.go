@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -65,8 +66,11 @@ type StatusSummaryJSON struct {
 }
 
 var (
-	observeSessionTargetForStatus = workerObserveSessionTargetWithConfig
-	openCityStoreAtForStatus      = openCityStoreAt
+	observeSessionTargetForStatus   = workerObserveSessionTargetWithConfig
+	openCityStoreAtForStatus        = openCityStoreAt
+	statusObservationTimeout        = 250 * time.Millisecond
+	statusNamedSessionLookupTimeout = 250 * time.Millisecond
+	statusSessionNameLookupTimeout  = 100 * time.Millisecond
 )
 
 var controllerStatusStandaloneFallbackTimeout = 250 * time.Millisecond
@@ -105,12 +109,21 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 		return 1
 	}
 
-	sp := newSessionProvider()
+	sp, err := newSessionProviderForStatus(cfg, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc status: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	dops := newDrainOps(sp)
 	if jsonOutput {
 		return doCityStatusJSON(sp, cfg, cityPath, stdout, stderr)
 	}
 	return doCityStatus(sp, dops, cfg, cityPath, stdout, stderr)
+}
+
+func newSessionProviderForStatus(cfg *config.City, cityPath string) (runtime.Provider, error) {
+	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
+	return newSessionProviderFromContextWithError(ctx, nil)
 }
 
 func observeSessionTargetWithWarning(
@@ -122,11 +135,39 @@ func observeSessionTargetWithWarning(
 	target string,
 	stderr io.Writer,
 ) worker.LiveObservation {
-	obs, err := observeSessionTargetForStatus(cityPath, store, sp, cfg, target)
-	if err != nil && stderr != nil {
-		fmt.Fprintf(stderr, "%s: observing %q: %v\n", cmdName, target, err) //nolint:errcheck // best-effort stderr
+	type observationResult struct {
+		obs worker.LiveObservation
+		err error
 	}
-	return obs
+
+	observe := observeSessionTargetForStatus
+	timeout := statusObservationTimeout
+	if timeout <= 0 {
+		obs, err := observe(cityPath, store, sp, cfg, target)
+		if err != nil && stderr != nil {
+			fmt.Fprintf(stderr, "%s: observing %q: %v\n", cmdName, target, err) //nolint:errcheck // best-effort stderr
+		}
+		return obs
+	}
+
+	resultCh := make(chan observationResult, 1)
+	go func() {
+		obs, err := observe(cityPath, store, sp, cfg, target)
+		resultCh <- observationResult{obs: obs, err: err}
+	}()
+
+	select {
+	case result := <-resultCh:
+		if result.err != nil && stderr != nil {
+			fmt.Fprintf(stderr, "%s: observing %q: %v\n", cmdName, target, result.err) //nolint:errcheck // best-effort stderr
+		}
+		return result.obs
+	case <-time.After(timeout):
+		if stderr != nil {
+			fmt.Fprintf(stderr, "%s: observing %q timed out after %s\n", cmdName, target, timeout) //nolint:errcheck // best-effort stderr
+		}
+		return worker.LiveObservation{}
+	}
 }
 
 func namedSessionBlockedBySuspension(cfg *config.City, agentCfg *config.Agent, suspendedRigs map[string]bool) bool {
@@ -159,18 +200,6 @@ func doCityStatus(
 	snapshot := collectCityStatusSnapshot(sp, cfg, cityPath, store, stderr)
 	renderCityStatusText(snapshot, dops, stdout)
 
-	if store != nil {
-		sessions, err := collectCitySessionCounts(cityPath, store, sp, cfg)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc status: building session catalog: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		if sessions.ActiveSessions > 0 || sessions.SuspendedSessions > 0 {
-			fmt.Fprintln(stdout)                                                                                            //nolint:errcheck // best-effort stdout
-			fmt.Fprintf(stdout, "Sessions: %d active, %d suspended\n", sessions.ActiveSessions, sessions.SuspendedSessions) //nolint:errcheck // best-effort stdout
-		}
-	}
-
 	return 0
 }
 
@@ -188,15 +217,6 @@ func doCityStatusJSON(
 	}
 
 	snapshot := collectCityStatusSnapshot(sp, cfg, cityPath, store, stderr)
-	if store != nil {
-		sessions, err := collectCitySessionCounts(cityPath, store, sp, cfg)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc status: building session catalog: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		snapshot.Summary.ActiveSessions = sessions.ActiveSessions
-		snapshot.Summary.SuspendedSessions = sessions.SuspendedSessions
-	}
 
 	status := cityStatusJSONFromSnapshot(snapshot, snapshot.Summary)
 	data, err := json.MarshalIndent(status, "", "  ")

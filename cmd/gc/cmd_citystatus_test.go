@@ -383,7 +383,7 @@ func TestCityStatusJSONReportsStoreOpenError(t *testing.T) {
 	}
 }
 
-func TestCityStatusJSONReportsCatalogListError(t *testing.T) {
+func TestCityStatusJSONDoesNotRequireSessionInventory(t *testing.T) {
 	sp := runtime.NewFake()
 	oldOpen := openCityStoreAtForStatus
 	openCityStoreAtForStatus = func(string) (beads.Store, error) {
@@ -396,11 +396,145 @@ func TestCityStatusJSONReportsCatalogListError(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	code := doCityStatusJSON(sp, cfg, t.TempDir(), &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("code = %d, want 1", code)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "gc status: building session catalog") || !strings.Contains(stderr.String(), "catalog unavailable") {
-		t.Fatalf("stderr = %q, want catalog list error", stderr.String())
+	if strings.Contains(stderr.String(), "building session catalog") || strings.Contains(stderr.String(), "catalog unavailable") {
+		t.Fatalf("stderr = %q, want no session catalog error", stderr.String())
+	}
+	var status StatusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &status); err != nil {
+		t.Fatalf("unmarshal: %v; output: %s", err, stdout.String())
+	}
+}
+
+func TestCityStatusDoesNotBlockOnSlowSessionInventory(t *testing.T) {
+	sp := runtime.NewFake()
+	dops := newFakeDrainOps()
+	store := &blockingStatusListStore{
+		MemStore: beads.NewMemStore(),
+		block:    make(chan struct{}),
+	}
+	oldOpen := openCityStoreAtForStatus
+	oldNameTimeout := statusSessionNameLookupTimeout
+	openCityStoreAtForStatus = func(string) (beads.Store, error) {
+		return store, nil
+	}
+	statusSessionNameLookupTimeout = 10 * time.Millisecond
+	t.Cleanup(func() {
+		openCityStoreAtForStatus = oldOpen
+		statusSessionNameLookupTimeout = oldNameTimeout
+		close(store.block)
+	})
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Agents: []config.Agent{
+			{Name: "runner", MaxActiveSessions: intPtr(1)},
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- doCityStatus(sp, dops, cfg, "/home/user/city", &stdout, &stderr)
+	}()
+
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("doCityStatus blocked on session inventory")
+	}
+	if !strings.Contains(stdout.String(), "0/1 agents running") {
+		t.Fatalf("stdout = %q, want agent summary", stdout.String())
+	}
+}
+
+func TestCmdCityStatusDoesNotLoadProviderSessionSnapshot(t *testing.T) {
+	t.Setenv("GC_SESSION", "fake")
+	cityDir := t.TempDir()
+	writePhase0InterfaceCity(t, cityDir, `[workspace]
+name = "city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "runner"
+`)
+
+	providerSnapshotBlock := make(chan struct{})
+	oldProviderStore := openSessionProviderStore
+	openSessionProviderStore = func(string) (beads.Store, error) {
+		<-providerSnapshotBlock
+		return nil, errors.New("provider snapshot should not be loaded")
+	}
+	oldStatusStore := openCityStoreAtForStatus
+	openCityStoreAtForStatus = func(string) (beads.Store, error) {
+		return beads.NewMemStore(), nil
+	}
+	t.Cleanup(func() {
+		openSessionProviderStore = oldProviderStore
+		openCityStoreAtForStatus = oldStatusStore
+		close(providerSnapshotBlock)
+	})
+
+	var stdout, stderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- cmdCityStatus([]string{cityDir}, false, &stdout, &stderr)
+	}()
+
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("cmdCityStatus blocked while loading provider session snapshot")
+	}
+	if !strings.Contains(stdout.String(), "city") {
+		t.Fatalf("stdout = %q, want city status output", stdout.String())
+	}
+}
+
+func TestCityStatusObservationTimeoutDegradesGracefully(t *testing.T) {
+	sp := runtime.NewFake()
+	dops := newFakeDrainOps()
+	oldObserve := observeSessionTargetForStatus
+	oldTimeout := statusObservationTimeout
+	observeBlock := make(chan struct{})
+	observeSessionTargetForStatus = func(string, beads.Store, runtime.Provider, *config.City, string) (worker.LiveObservation, error) {
+		<-observeBlock
+		return worker.LiveObservation{Running: true}, nil
+	}
+	statusObservationTimeout = 10 * time.Millisecond
+	t.Cleanup(func() {
+		observeSessionTargetForStatus = oldObserve
+		statusObservationTimeout = oldTimeout
+		close(observeBlock)
+	})
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Agents: []config.Agent{
+			{Name: "runner", MaxActiveSessions: intPtr(1)},
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doCityStatus(sp, dops, cfg, "/home/user/city", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "observing") || !strings.Contains(stderr.String(), "timed out") {
+		t.Fatalf("stderr = %q, want observation timeout warning", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "0/1 agents running") {
+		t.Fatalf("stdout = %q, want degraded agent summary", stdout.String())
 	}
 }
 
