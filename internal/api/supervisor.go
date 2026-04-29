@@ -75,6 +75,10 @@ type cityInitializer interface {
 	Unregister(context.Context, cityinit.UnregisterRequest) (*cityinit.UnregisterResult, error)
 }
 
+type registeredCityFinder interface {
+	FindRegisteredCity(context.Context, string) (cityinit.RegisteredCity, error)
+}
+
 // cachedCityServer pairs a State with its pre-built Server for caching.
 type cachedCityServer struct {
 	state State

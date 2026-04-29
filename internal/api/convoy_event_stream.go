@@ -115,7 +115,7 @@ func toWireTaggedEvent(te events.TaggedEvent) (WireTaggedEvent, bool) {
 	if !ok {
 		return WireTaggedEvent{}, false
 	}
-	return WireTaggedEvent{WireEvent: wire, City: te.City}, true
+	return WireTaggedEvent{WireEvent: wire, City: taggedEventWireCity(te)}, true
 }
 
 // eventStreamEnvelope is the wire shape emitted on
@@ -248,9 +248,40 @@ func wireTaggedEventFrom(te events.TaggedEvent, workflow *workflowEventProjectio
 		Subject:  te.Subject,
 		Message:  te.Message,
 		Payload:  EventPayloadUnion{Value: payload},
-		City:     te.City,
+		City:     taggedEventWireCity(te),
 		Workflow: workflow,
 	}, nil
+}
+
+func taggedEventWireCity(te events.TaggedEvent) string {
+	if te.City != "__supervisor__" {
+		return te.City
+	}
+	if te.Subject != "" && isCityRequestResultType(te.Type) {
+		return te.Subject
+	}
+	switch te.Type {
+	case events.RequestResultCityCreate:
+		var payload CityCreateSucceededPayload
+		if json.Unmarshal(te.Payload, &payload) == nil && payload.Name != "" {
+			return payload.Name
+		}
+	case events.RequestResultCityUnregister:
+		var payload CityUnregisterSucceededPayload
+		if json.Unmarshal(te.Payload, &payload) == nil && payload.Name != "" {
+			return payload.Name
+		}
+	}
+	return te.City
+}
+
+func isCityRequestResultType(eventType string) bool {
+	switch eventType {
+	case events.RequestResultCityCreate, events.RequestResultCityUnregister, events.RequestFailed:
+		return true
+	default:
+		return false
+	}
 }
 
 func customEventPayload(raw json.RawMessage) (any, error) {

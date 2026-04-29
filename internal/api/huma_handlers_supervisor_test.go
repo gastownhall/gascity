@@ -22,6 +22,10 @@ type fakeInitializer struct {
 	scaffoldResult *cityinit.InitResult
 	scaffoldErr    error
 
+	findName   string
+	findResult cityinit.RegisteredCity
+	findErr    error
+
 	unregisterReq    cityinit.UnregisterRequest
 	unregisterResult *cityinit.UnregisterResult
 	unregisterErr    error
@@ -37,6 +41,17 @@ func (f *fakeInitializer) Scaffold(_ context.Context, req cityinit.InitRequest) 
 		return nil, f.scaffoldErr
 	}
 	return f.scaffoldResult, nil
+}
+
+func (f *fakeInitializer) FindRegisteredCity(_ context.Context, name string) (cityinit.RegisteredCity, error) {
+	f.findName = name
+	if f.findErr != nil {
+		return cityinit.RegisteredCity{}, f.findErr
+	}
+	if f.findResult.Name == "" && f.findResult.Path == "" {
+		return cityinit.RegisteredCity{}, cityinit.ErrNotRegistered
+	}
+	return f.findResult, nil
 }
 
 func (f *fakeInitializer) Unregister(_ context.Context, req cityinit.UnregisterRequest) (*cityinit.UnregisterResult, error) {
@@ -216,7 +231,7 @@ func TestSupervisorCityCreateReturnsRequestID(t *testing.T) {
 	}
 }
 
-func TestSupervisorCityCreateEmitsRequestResultOnSupervisorStream(t *testing.T) {
+func TestSupervisorCityCreateStoresPendingRequestForReconciler(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	cityPath := filepath.Join(home, "mc-city")
@@ -233,6 +248,40 @@ func TestSupervisorCityCreateEmitsRequestResultOnSupervisorStream(t *testing.T) 
 	}
 	sm := NewSupervisorMux(resolver, init, false, "test", time.Now())
 
+	postReq := httptest.NewRequest(http.MethodPost, "/v0/city", strings.NewReader(`{"dir":"mc-city","provider":"claude"}`))
+	postReq.Header.Set("Content-Type", "application/json")
+	postReq.Header.Set("X-GC-Request", "test")
+	postRec := httptest.NewRecorder()
+
+	sm.ServeHTTP(postRec, postReq)
+
+	if postRec.Code != http.StatusAccepted {
+		t.Fatalf("POST /v0/city status = %d, want %d; body=%s", postRec.Code, http.StatusAccepted, postRec.Body.String())
+	}
+	var createResp struct {
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal(postRec.Body.Bytes(), &createResp); err != nil {
+		t.Fatalf("decode create response: %v; body=%s", err, postRec.Body.String())
+	}
+	if createResp.RequestID == "" {
+		t.Fatalf("empty request_id in response; body=%s", postRec.Body.String())
+	}
+	if got := resolver.pending[cityPath]; got != createResp.RequestID {
+		t.Fatalf("pending request_id = %q, want %q", got, createResp.RequestID)
+	}
+	if got := len(resolver.supervisorRecorder.(*events.Fake).Events); got != 0 {
+		t.Fatalf("supervisor events = %d, want 0 before reconciler starts city", got)
+	}
+}
+
+func TestSupervisorCityRequestResultUsesCityTagOnSupervisorStream(t *testing.T) {
+	resolver := &fakeCityResolver{
+		cities:             map[string]*fakeState{},
+		supervisorRecorder: events.NewFake(),
+	}
+	sm := NewSupervisorMux(resolver, nil, false, "test", time.Now())
+
 	streamCtx, cancelStream := context.WithCancel(context.Background())
 	defer cancelStream()
 	streamReq := httptest.NewRequest(http.MethodGet, "/v0/events/stream?after_cursor=0", nil).WithContext(streamCtx)
@@ -245,32 +294,11 @@ func TestSupervisorCityCreateEmitsRequestResultOnSupervisorStream(t *testing.T) 
 	}()
 
 	time.Sleep(50 * time.Millisecond)
-
-	postReq := httptest.NewRequest(http.MethodPost, "/v0/city", strings.NewReader(`{"dir":"mc-city","provider":"claude"}`))
-	postReq.Header.Set("Content-Type", "application/json")
-	postReq.Header.Set("X-GC-Request", "test")
-	postRec := httptest.NewRecorder()
-
-	sm.ServeHTTP(postRec, postReq)
-
-	if postRec.Code != http.StatusAccepted {
-		cancelStream()
-		<-streamDone
-		t.Fatalf("POST /v0/city status = %d, want %d; body=%s", postRec.Code, http.StatusAccepted, postRec.Body.String())
-	}
-	var createResp struct {
-		RequestID string `json:"request_id"`
-	}
-	if err := json.Unmarshal(postRec.Body.Bytes(), &createResp); err != nil {
-		cancelStream()
-		<-streamDone
-		t.Fatalf("decode create response: %v; body=%s", err, postRec.Body.String())
-	}
-	if createResp.RequestID == "" {
-		cancelStream()
-		<-streamDone
-		t.Fatalf("empty request_id in response; body=%s", postRec.Body.String())
-	}
+	EmitTypedEvent(resolver.supervisorRecorder, events.RequestResultCityCreate, "mc-city", CityCreateSucceededPayload{
+		RequestID: "req-test",
+		Name:      "mc-city",
+		Path:      "/tmp/mc-city",
+	})
 
 	time.Sleep(250 * time.Millisecond)
 	cancelStream()
@@ -288,23 +316,27 @@ func TestSupervisorCityCreateEmitsRequestResultOnSupervisorStream(t *testing.T) 
 		}
 		var env struct {
 			Type    string         `json:"type"`
+			City    string         `json:"city"`
 			Payload map[string]any `json:"payload"`
 		}
 		if err := json.Unmarshal([]byte(frame.Data), &env); err != nil {
 			t.Fatalf("decode SSE data: %v; data=%s", err, frame.Data)
 		}
 		observed = append(observed, env.Type)
-		if env.Payload["request_id"] != createResp.RequestID {
+		if env.Payload["request_id"] != "req-test" {
 			continue
 		}
 		switch env.Type {
 		case events.RequestResultCityCreate:
+			if env.City != "mc-city" {
+				t.Fatalf("city tag = %q, want mc-city; frame=%s", env.City, frame.Data)
+			}
 			return
 		case events.RequestFailed:
-			t.Fatalf("city create emitted request.failed for request_id %s: %s", createResp.RequestID, frame.Data)
+			t.Fatalf("city create emitted request.failed for request_id req-test: %s", frame.Data)
 		}
 	}
-	t.Fatalf("stream did not emit request.result.city.create for request_id %s; observed event types=%v body=%s", createResp.RequestID, observed, streamRec.Body.String())
+	t.Fatalf("stream did not emit request.result.city.create for request_id req-test; observed event types=%v body=%s", observed, streamRec.Body.String())
 }
 
 func TestSupervisorCityCreateMapsInitializerErrors(t *testing.T) {
@@ -399,6 +431,40 @@ func TestSupervisorCityUnregisterUsesInitializer(t *testing.T) {
 	}
 	if body := rec.Body.String(); !strings.Contains(body, `"request_id"`) {
 		t.Fatalf("body = %s, want request_id", body)
+	}
+}
+
+func TestSupervisorCityUnregisterStoresPendingRequestFromRegistryWhenSnapshotMissing(t *testing.T) {
+	const cityPath = "/tmp/mc-city"
+	resolver := &fakeCityResolver{
+		cities:             map[string]*fakeState{},
+		supervisorRecorder: events.NewFake(),
+	}
+	init := &fakeInitializer{
+		findResult: cityinit.RegisteredCity{
+			Name: "mc-city",
+			Path: cityPath,
+		},
+		unregisterResult: &cityinit.UnregisterResult{
+			CityName: "mc-city",
+			CityPath: cityPath,
+		},
+	}
+	sm := NewSupervisorMux(resolver, init, false, "test", time.Now())
+	req := httptest.NewRequest(http.MethodPost, "/v0/city/mc-city/unregister", nil)
+	req.Header.Set("X-GC-Request", "test")
+	rec := httptest.NewRecorder()
+
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	if init.findName != "mc-city" {
+		t.Fatalf("FindRegisteredCity name = %q, want mc-city", init.findName)
+	}
+	if got := resolver.pending[cityPath]; got == "" {
+		t.Fatalf("pending request_id for %q was not stored", cityPath)
 	}
 }
 

@@ -51,6 +51,14 @@ func NewService(deps ServiceDeps) (*Service, error) {
 	return &Service{deps: deps}, nil
 }
 
+// FindRegisteredCity returns the registry entry for name.
+func (s *Service) FindRegisteredCity(ctx context.Context, name string) (RegisteredCity, error) {
+	if s.deps.Registry == nil {
+		return RegisteredCity{}, ErrNotWired
+	}
+	return s.deps.Registry.Find(ctx, name)
+}
+
 // ValidateInitRequest validates a city init request before side effects.
 func (s *Service) ValidateInitRequest(req InitRequest) error {
 	if req.Dir == "" {

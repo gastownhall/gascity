@@ -871,6 +871,30 @@ func TestHumaBinary_SessionMessageAsync(t *testing.T) {
 	// 6. Wait for request.result.session.message on the event stream.
 	waitForRequestResultOnStream(t, eventLines, msgAccepted.RequestID, "request.result.session.message", 120*time.Second)
 	t.Logf("request.result.session.message received for %q", sessionID)
+
+	// 7. Submit a follow-up message and wait for the async result.
+	submitBody := `{"message":"follow up after async message","intent":"follow_up"}`
+	submitReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, cityBase+"/session/"+sessionID+"/submit", strings.NewReader(submitBody))
+	submitReq.Header.Set("Content-Type", "application/json")
+	submitReq.Header.Set("X-GC-Request", "true")
+	submitResp, err := http.DefaultClient.Do(submitReq)
+	if err != nil {
+		t.Fatalf("POST /submit: %v", err)
+	}
+	submitRespBody, _ := io.ReadAll(submitResp.Body)
+	_ = submitResp.Body.Close()
+	if submitResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /submit status = %d, want 202; body: %s", submitResp.StatusCode, string(submitRespBody))
+	}
+	var submitAccepted struct {
+		RequestID string `json:"request_id"`
+	}
+	json.Unmarshal(submitRespBody, &submitAccepted) //nolint:errcheck
+	if submitAccepted.RequestID == "" {
+		t.Fatalf("empty submit request_id in response; body: %s", string(submitRespBody))
+	}
+	waitForRequestResultOnStream(t, eventLines, submitAccepted.RequestID, "request.result.session.submit", 120*time.Second)
+	t.Logf("request.result.session.submit received for %q", sessionID)
 }
 
 // waitForRequestResultOnStream waits for a typed success event

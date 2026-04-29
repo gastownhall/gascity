@@ -1211,7 +1211,12 @@ func reconcileCities(
 				fmt.Fprintf(stderr, "gc supervisor: city '%s': consume pending request_id for city.create failure event failed (path=%s): %v\n", cityName, path, consumeErr) //nolint:errcheck
 			}
 			if supRec := cr.SupervisorEventRecorder(); supRec != nil && hasReqID {
-				api.EmitRequestFailed(supRec, reqID, api.RequestOperationCityCreate, "city_init_failed", err.Error())
+				api.EmitTypedEvent(supRec, events.RequestFailed, cityName, api.RequestFailedPayload{
+					RequestID:    reqID,
+					Operation:    api.RequestOperationCityCreate,
+					ErrorCode:    "city_init_failed",
+					ErrorMessage: err.Error(),
+				})
 			}
 			recordInitFailure(cityName, fmt.Sprintf("init: %v", err))
 			continue
@@ -1515,7 +1520,12 @@ func reconcileCities(
 					}
 					if hasReqID {
 						if supRec := cr.SupervisorEventRecorder(); supRec != nil {
-							api.EmitRequestFailed(supRec, reqID, api.RequestOperationCityCreate, "internal_error", fmt.Sprintf("panic: %v", r))
+							api.EmitTypedEvent(supRec, events.RequestFailed, n, api.RequestFailedPayload{
+								RequestID:    reqID,
+								Operation:    api.RequestOperationCityCreate,
+								ErrorCode:    "internal_error",
+								ErrorMessage: fmt.Sprintf("panic: %v", r),
+							})
 						}
 					}
 					// Gracefully stop agents so they aren't orphaned.

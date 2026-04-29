@@ -314,21 +314,17 @@ func (sm *SupervisorMux) humaHandleProviderReadiness(ctx context.Context, input 
 
 // humaHandleCityCreate handles POST /v0/city asynchronously. Calls
 // the city initializer in-process to write the on-disk shape and
-// register the city with the supervisor, emits request.result.city.create
-// for the returned request_id, then returns 202 Accepted. The supervisor
-// reconciler runs later startup work (prepareCityForSupervisor: pack
-// materialization, bead store startup, formula resolution, agent
-// validation) independently of the request-result contract. Clients
-// observe request completion via /v0/events/stream — no polling required.
+// register the city with the supervisor, stores request_id correlation
+// for the reconciler, then returns 202 Accepted. The supervisor
+// reconciler emits request.result.city.create after the city runtime
+// starts. Clients observe request completion via /v0/events/stream —
+// no polling required.
 //
-// Rationale: full city startup takes minutes (dolt startup,
-// provider-readiness probes, pack fetch). Blocking the city-create
-// request until startup completes exceeds reasonable client timeouts
-// (a real-world app's harness hit 120s). The create request completes
-// when scaffold+register succeeds; later startup progress is city
-// lifecycle state, not request completion. See
-// engdocs/architecture/api-control-plane.md §1–§2 on the object model
-// + typed events; §4 on the event registry.
+// Rationale: full city startup can exceed reasonable HTTP client
+// timeouts. The POST returns once scaffold+register succeeds, while
+// the terminal request-result event is held until the reconciler has
+// started the city runtime. See engdocs/architecture/api-control-plane.md
+// §1-§2 on the object model + typed events; §4 on the event registry.
 func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *SupervisorCityCreateInput) (*SupervisorCityCreateOutput, error) {
 	dir := input.Body.Dir
 	if !filepath.IsAbs(dir) {
@@ -356,6 +352,13 @@ func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *Superv
 	if err != nil {
 		return nil, huma.Error500InternalServerError(fmt.Sprintf("generating request ID: %v", err))
 	}
+	pendingStored := false
+	if store, ok := sm.resolver.(PendingRequestStore); ok {
+		if err := store.StorePendingRequestID(dir, reqID); err != nil {
+			return nil, huma.Error500InternalServerError(fmt.Sprintf("storing pending request ID: %v", err))
+		}
+		pendingStored = true
+	}
 
 	result, scaffoldErr := sm.initializer.Scaffold(ctx, cityinit.InitRequest{
 		Dir:                   dir,
@@ -366,22 +369,40 @@ func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *Superv
 	})
 	switch {
 	case errors.Is(scaffoldErr, cityinit.ErrAlreadyInitialized):
+		sm.clearPendingCityRequestID(dir, pendingStored)
 		return nil, huma.Error409Conflict("conflict: city already initialized at " + dir)
 	case errors.Is(scaffoldErr, cityinit.ErrInvalidDirectory),
 		errors.Is(scaffoldErr, cityinit.ErrInvalidProvider),
 		errors.Is(scaffoldErr, cityinit.ErrInvalidBootstrapProfile):
+		sm.clearPendingCityRequestID(dir, pendingStored)
 		return nil, huma.Error422UnprocessableEntity(scaffoldErr.Error())
 	case scaffoldErr != nil:
+		sm.clearPendingCityRequestID(dir, pendingStored)
 		return nil, huma.Error500InternalServerError(scaffoldErr.Error())
 	}
 
-	emitCityCreateSucceeded(sm.resolver, reqID, result, dir)
+	if !pendingStored {
+		emitCityCreateSucceeded(sm.resolver, reqID, result, dir)
+	}
 
 	out := &SupervisorCityCreateOutput{
 		Status: http.StatusAccepted,
 	}
 	out.Body = asyncAcceptedResponse{RequestID: reqID}
 	return out, nil
+}
+
+func (sm *SupervisorMux) clearPendingCityRequestID(cityPath string, stored bool) {
+	if !stored {
+		return
+	}
+	store, ok := sm.resolver.(PendingRequestStore)
+	if !ok {
+		return
+	}
+	if _, _, err := store.ConsumePendingRequestID(cityPath); err != nil {
+		log.Printf("api: consume pending city create request ID for %s: %v", cityPath, err)
+	}
 }
 
 func emitCityCreateSucceeded(resolver CityResolver, requestID string, result *cityinit.InitResult, fallbackPath string) {
@@ -450,11 +471,10 @@ func (sm *SupervisorMux) humaHandleCityUnregister(ctx context.Context, input *Su
 	// return ErrNotRegistered anyway.
 	var cityPath string
 	if store, ok := sm.resolver.(PendingRequestStore); ok {
-		for _, c := range sm.resolver.ListCities() {
-			if c.Name == name {
-				cityPath = c.Path
-				break
-			}
+		var pathErr error
+		cityPath, pathErr = sm.cityPathForPendingRequest(ctx, name)
+		if pathErr != nil {
+			return nil, huma.Error500InternalServerError(fmt.Sprintf("resolving city path: %v", pathErr))
 		}
 		if cityPath != "" {
 			if err := store.StorePendingRequestID(cityPath, reqID); err != nil {
@@ -484,6 +504,26 @@ func (sm *SupervisorMux) humaHandleCityUnregister(ctx context.Context, input *Su
 	out := &SupervisorCityUnregisterOutput{Status: http.StatusAccepted}
 	out.Body = cityUnregisterResponse{RequestID: reqID}
 	return out, nil
+}
+
+func (sm *SupervisorMux) cityPathForPendingRequest(ctx context.Context, name string) (string, error) {
+	for _, c := range sm.resolver.ListCities() {
+		if c.Name == name {
+			return c.Path, nil
+		}
+	}
+	finder, ok := sm.initializer.(registeredCityFinder)
+	if !ok {
+		return "", nil
+	}
+	city, err := finder.FindRegisteredCity(ctx, name)
+	if err != nil {
+		if errors.Is(err, cityinit.ErrNotRegistered) {
+			return "", nil
+		}
+		return "", err
+	}
+	return city.Path, nil
 }
 
 func cityDirAlreadyInitialized(dir string) bool {
