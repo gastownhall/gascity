@@ -496,16 +496,18 @@ func TestWorktreeDiskSizeCheck_AllMeasurementsFailedReturnsWarning(t *testing.T)
 // shared admin dir of a multi-worktree repo: list returns the same
 // entries regardless of which path is used to construct it. Per-path
 // "uncommitted/unpushed/stashed" flags drive classifyNested.
+var _ gitWorktree = (*fakeGitWorktree)(nil)
+
 type fakeGitWorktree struct {
-	listResp     []git.Worktree
-	listErr      error
-	uncommitted  map[string]bool
-	unpushed     map[string]bool
-	stashed      map[string]bool
-	removeCalls  *[]string // accumulator across handle instances
-	removeErr    map[string]error
-	currentPath  string
-	onList       func(callerPath string) // optional probe; fires per WorktreeList call
+	listResp    []git.Worktree
+	listErr     error
+	uncommitted map[string]bool
+	unpushed    map[string]bool
+	stashed     map[string]bool
+	removeCalls *[]string // accumulator across handle instances
+	removeErr   map[string]error
+	currentPath string
+	onList      func(callerPath string) // optional probe; fires per WorktreeList call
 }
 
 func (f *fakeGitWorktree) WorktreeList() ([]git.Worktree, error) {
@@ -529,16 +531,16 @@ func (f *fakeGitWorktree) WorktreeRemove(path string, _ bool) error {
 	return nil
 }
 
-// makeAgentHome creates dir/.gc/worktrees/<rig>/<agent>/ with a stub
+// makeAgentHome creates dir/.gc/worktrees/rig-a/<agent>/ with a stub
 // .git file so isGitWorktreePath returns true. Returns the agent home
 // path (canonicalized via pathutil.NormalizePathForCompare to match
 // what the check stores). The .git stub uses a shared gitdir so all
 // homes created via this helper appear to belong to the same admin
 // dir; tests that need distinct admin dirs should use
 // makeAgentHomeAdmin.
-func makeAgentHome(t *testing.T, dir, rig, agent string) string {
+func makeAgentHome(t *testing.T, dir, agent string) string {
 	t.Helper()
-	return makeAgentHomeAdmin(t, dir, rig, agent, "/tmp/none")
+	return makeAgentHomeAdmin(t, dir, "rig-a", agent, "/tmp/none")
 }
 
 // makeAgentHomeAdmin is like makeAgentHome but lets the test specify
@@ -567,7 +569,7 @@ func TestNestedWorktreePruneCheck_NoWorktreesDir(t *testing.T) {
 
 func TestNestedWorktreePruneCheck_NoNestedWorktrees(t *testing.T) {
 	dir := t.TempDir()
-	home := makeAgentHome(t, dir, "rig-a", "polecat-1")
+	home := makeAgentHome(t, dir, "polecat-1")
 	var removes []string
 	c := &NestedWorktreePruneCheck{
 		cfg: config.DoctorConfig{},
@@ -594,7 +596,7 @@ func TestNestedWorktreePruneCheck_NoNestedWorktrees(t *testing.T) {
 
 func TestNestedWorktreePruneCheck_ClassifiesSafeAndUnsafe(t *testing.T) {
 	dir := t.TempDir()
-	home := makeAgentHome(t, dir, "rig-a", "polecat-1")
+	home := makeAgentHome(t, dir, "polecat-1")
 	safe := pathutil.NormalizePathForCompare(filepath.Join(home, "worktrees", "task-clean"))
 	dirty := pathutil.NormalizePathForCompare(filepath.Join(home, "worktrees", "task-dirty"))
 	unpushed := pathutil.NormalizePathForCompare(filepath.Join(home, "worktrees", "task-unpushed"))
@@ -672,7 +674,7 @@ func TestNestedWorktreePruneCheck_ClassifiesSafeAndUnsafe(t *testing.T) {
 
 func TestNestedWorktreePruneCheck_PruneTrueEscalatesSeverity(t *testing.T) {
 	dir := t.TempDir()
-	home := makeAgentHome(t, dir, "rig-a", "polecat-1")
+	home := makeAgentHome(t, dir, "polecat-1")
 	safe := pathutil.NormalizePathForCompare(filepath.Join(home, "worktrees", "task-clean"))
 	if err := os.MkdirAll(safe, 0o755); err != nil {
 		t.Fatal(err)
@@ -700,7 +702,7 @@ func TestNestedWorktreePruneCheck_PruneTrueEscalatesSeverity(t *testing.T) {
 
 func TestNestedWorktreePruneCheck_AllUnsafeReturnsOK(t *testing.T) {
 	dir := t.TempDir()
-	home := makeAgentHome(t, dir, "rig-a", "polecat-1")
+	home := makeAgentHome(t, dir, "polecat-1")
 	dirty := pathutil.NormalizePathForCompare(filepath.Join(home, "worktrees", "task"))
 	if err := os.MkdirAll(dirty, 0o755); err != nil {
 		t.Fatal(err)
@@ -735,8 +737,8 @@ func TestNestedWorktreePruneCheck_DeduplicatesAcrossHomes(t *testing.T) {
 	// same nested worktree. The check must not classify or remove it
 	// twice.
 	dir := t.TempDir()
-	homeA := makeAgentHome(t, dir, "rig-a", "polecat-1")
-	homeB := makeAgentHome(t, dir, "rig-a", "polecat-2")
+	homeA := makeAgentHome(t, dir, "polecat-1")
+	homeB := makeAgentHome(t, dir, "polecat-2")
 
 	// Nested under homeA. homeB will also list it because they share a repo.
 	nested := pathutil.NormalizePathForCompare(filepath.Join(homeA, "worktrees", "task"))
@@ -781,7 +783,7 @@ func TestNestedWorktreePruneCheck_DeduplicatesAcrossHomes(t *testing.T) {
 // failures so the operator sees what was missed.
 func TestNestedWorktreePruneCheck_FixContinuesPastError(t *testing.T) {
 	dir := t.TempDir()
-	home := makeAgentHome(t, dir, "rig-a", "polecat-1")
+	home := makeAgentHome(t, dir, "polecat-1")
 	first := pathutil.NormalizePathForCompare(filepath.Join(home, "worktrees", "first"))
 	second := pathutil.NormalizePathForCompare(filepath.Join(home, "worktrees", "second"))
 	third := pathutil.NormalizePathForCompare(filepath.Join(home, "worktrees", "third"))
@@ -890,8 +892,8 @@ func TestPathStrictlyInside(t *testing.T) {
 		want          bool
 	}{
 		{"/a/b/c", "/a/b", true},
-		{"/a/b", "/a/b", false},               // equal — strict
-		{"/a/b", "/a/bc", false},              // prefix-but-not-subpath
+		{"/a/b", "/a/b", false},  // equal — strict
+		{"/a/b", "/a/bc", false}, // prefix-but-not-subpath
 		{"/x/y", "/a/b", false},
 		{"/a/b/c/d", "/a/b", true},
 	}

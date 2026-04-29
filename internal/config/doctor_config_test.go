@@ -138,10 +138,10 @@ func TestParseHumanSize(t *testing.T) {
 		{"", 0, false},
 		{"   ", 0, false},
 		{"junk", 0, false},
-		{"10", 10, true},        // bytes implied
-		{"1024B", 1024, true},   // explicit B suffix
+		{"10", 10, true},      // bytes implied
+		{"1024B", 1024, true}, // explicit B suffix
 		{"1KB", 1024, true},
-		{"5 mb", 5 * 1024 * 1024, true},  // case-insensitive, whitespace tolerant
+		{"5 mb", 5 * 1024 * 1024, true}, // case-insensitive, whitespace tolerant
 		{"  10gb ", 10 * 1024 * 1024 * 1024, true},
 		{"-5GB", -5 * 1024 * 1024 * 1024, true}, // accessor treats negative as unset; parser is permissive
 	}

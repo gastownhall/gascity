@@ -275,7 +275,7 @@ func (c *WorktreeDiskSizeCheck) Run(ctx *CheckContext) *CheckResult {
 	errBytes := c.cfg.WorktreeRigErrorBytes()
 
 	var details []string
-	var status CheckStatus = StatusOK
+	status := StatusOK
 	for _, s := range sizes {
 		switch {
 		case s.bytes >= errBytes:
