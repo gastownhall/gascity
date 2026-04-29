@@ -27,8 +27,25 @@ LDFLAGS := -X main.version=$(VERSION) \
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/gc
 ifeq ($(shell uname),Darwin)
-	@codesign -s - -f $(BUILD_DIR)/$(BINARY) 2>/dev/null || true
-	@echo "Signed $(BINARY) for macOS"
+	@# Prefer a stable codesigning identity over ad-hoc so TCC remembers
+	@# granted permissions across rebuilds. Ad-hoc signing produces a
+	@# fresh identity each build, which causes TCC to re-prompt forever
+	@# for App Management, Apple Events, etc. Override with
+	@# GC_SIGN_IDENTITY=<cert name>; otherwise auto-detect first valid
+	@# codesigning cert. Falls back to ad-hoc if none. The identifier is
+	@# pinned to com.gascity.gc so it stays stable across rebuilds.
+	@SIGN_ID="$${GC_SIGN_IDENTITY:-$$(security find-identity -p codesigning -v 2>/dev/null | awk -F'"' '/Apple Development:|Developer ID Application:|GasCity Dev/{print $$2; exit}')}"; \
+	if [ -n "$$SIGN_ID" ]; then \
+		codesign --sign "$$SIGN_ID" --identifier "com.gascity.gc" --options runtime --force $(BUILD_DIR)/$(BINARY) 2>/dev/null \
+			&& echo "Signed $(BINARY) with stable identity: $$SIGN_ID" \
+			|| (codesign -s - -f $(BUILD_DIR)/$(BINARY) 2>/dev/null && echo "Fell back to ad-hoc sign for $(BINARY)"); \
+	else \
+		codesign -s - -f $(BUILD_DIR)/$(BINARY) 2>/dev/null || true; \
+		echo "Ad-hoc signed $(BINARY) (set GC_SIGN_IDENTITY for stable TCC permissions)"; \
+	fi
+	@# Strip com.apple.provenance xattr; otherwise Gatekeeper kills the
+	@# binary when it's installed via `cp -f` over a running copy.
+	@xattr -d com.apple.provenance $(BUILD_DIR)/$(BINARY) 2>/dev/null || true
 endif
 
 ## install: build and install gc to GOPATH/bin (same location as go install)
