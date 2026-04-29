@@ -1212,12 +1212,13 @@ type DoctorConfig struct {
 	// (50 GB).
 	WorktreeRigErrorSize string `toml:"worktree_rig_error_size,omitempty" jsonschema:"default=50GB"`
 
-	// NestedWorktreePrune enables the nested-worktree-prune check to
-	// remove safely-prunable nested worktrees on every doctor run, not
-	// just under --fix. Safety is enforced by mechanical checks
-	// (no uncommitted changes, no unpushed commits, no stashes) — never
-	// by role identity. Default false: doctor reports findings but only
-	// removes them under --fix.
+	// NestedWorktreePrune escalates the nested-worktree-prune check
+	// from warning to error severity when safely-prunable nested
+	// worktrees are present, so CI / scripted doctor runs fail until
+	// the operator runs `gc doctor --fix`. Actual removal still
+	// requires --fix; this flag does not auto-prune. Safety is
+	// enforced by mechanical checks (no uncommitted changes, no
+	// unpushed commits, no stashes) — never by role identity.
 	NestedWorktreePrune bool `toml:"nested_worktree_prune,omitempty" jsonschema:"default=false"`
 }
 

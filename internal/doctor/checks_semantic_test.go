@@ -457,6 +457,39 @@ func TestWorktreeDiskSizeCheck_DetailsSortedDescending(t *testing.T) {
 	}
 }
 
+// TestWorktreeDiskSizeCheck_CountExcludesMeasurementErrors pins the
+// fix for a count bug: the message reports "<N> rig(s) over threshold"
+// where N must be the threshold-violation count, NOT
+// `len(details)` (which also includes measurement errors).
+func TestWorktreeDiskSizeCheck_CountExcludesMeasurementErrors(t *testing.T) {
+	dir := t.TempDir()
+	rigOver := filepath.Join(dir, ".gc", "worktrees", "over")
+	rigBroken := filepath.Join(dir, ".gc", "worktrees", "broken")
+	for _, p := range []string{rigOver, rigBroken} {
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	c := &WorktreeDiskSizeCheck{
+		cfg: config.DoctorConfig{WorktreeRigWarnSize: "5GB", WorktreeRigErrorSize: "100GB"},
+		measureDir: fakeMeasure(map[string]int64{
+			rigOver: 8 * 1024 * 1024 * 1024,
+		}, map[string]error{
+			rigBroken: errors.New("permission denied"),
+		}),
+	}
+	r := c.Run(&CheckContext{CityPath: dir})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning", r.Status)
+	}
+	// Exactly one rig is over threshold; the broken one is a
+	// measurement error, not a threshold violation.
+	if !strings.Contains(r.Message, "1 rig(s)") {
+		t.Errorf("message should report 1 rig over threshold (not 2); got %q", r.Message)
+	}
+}
+
 func TestWorktreeDiskSizeCheck_AllMeasurementsFailedReturnsWarning(t *testing.T) {
 	// "We can't tell" must not look like "we're fine". When every rig
 	// fails to measure (e.g. permission denied), the check escalates
@@ -501,15 +534,18 @@ var _ gitWorktree = (*fakeGitWorktree)(nil)
 type fakeGitWorktree struct {
 	listResp    []git.Worktree
 	listErr     error
+	notRepo     map[string]bool // paths where IsRepo returns false
 	uncommitted map[string]bool
 	unpushed    map[string]bool
 	stashed     map[string]bool
-	removeCalls *[]string // accumulator across handle instances
+	removeCalls *[]string // path argument of each WorktreeRemove call
+	removeFrom  *[]string // currentPath (cwd-equivalent) at each remove call
 	removeErr   map[string]error
 	currentPath string
 	onList      func(callerPath string) // optional probe; fires per WorktreeList call
 }
 
+func (f *fakeGitWorktree) IsRepo() bool { return !f.notRepo[f.currentPath] }
 func (f *fakeGitWorktree) WorktreeList() ([]git.Worktree, error) {
 	if f.onList != nil {
 		f.onList(f.currentPath)
@@ -522,6 +558,9 @@ func (f *fakeGitWorktree) HasStashes() bool         { return f.stashed[f.current
 func (f *fakeGitWorktree) WorktreeRemove(path string, _ bool) error {
 	if f.removeCalls != nil {
 		*f.removeCalls = append(*f.removeCalls, path)
+	}
+	if f.removeFrom != nil {
+		*f.removeFrom = append(*f.removeFrom, f.currentPath)
 	}
 	if f.removeErr != nil {
 		if e, ok := f.removeErr[path]; ok {
@@ -883,6 +922,141 @@ func TestNestedWorktreePruneCheck_DedupsWorktreeListAcrossSharedAdminDir(t *test
 	}
 	if len(listCalls) != 2 {
 		t.Errorf("WorktreeList calls = %v, want 2 (one per distinct admin dir; homeA and homeB share)", listCalls)
+	}
+}
+
+// TestNestedWorktreePruneCheck_DedupCoversNestedUnderEveryHome pins the
+// fix for a correctness bug introduced by the admin-dir dedup: when
+// homes A and B share an admin dir, only A's WorktreeList runs, but
+// nested entries living under B must still be classified. Iterating
+// the shared list against EVERY home in the admin group preserves
+// coverage; the previous implementation only checked containment
+// against the source home and silently dropped B's nested entries.
+func TestNestedWorktreePruneCheck_DedupCoversNestedUnderEveryHome(t *testing.T) {
+	dir := t.TempDir()
+	homeA := makeAgentHomeAdmin(t, dir, "rig-a", "polecat-1", "/repo/.git")
+	homeB := makeAgentHomeAdmin(t, dir, "rig-a", "polecat-2", "/repo/.git")
+	nestedUnderA := pathutil.NormalizePathForCompare(filepath.Join(homeA, "worktrees", "task-a"))
+	nestedUnderB := pathutil.NormalizePathForCompare(filepath.Join(homeB, "worktrees", "task-b"))
+	for _, p := range []string{nestedUnderA, nestedUnderB} {
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var listCalls []string
+	c := &NestedWorktreePruneCheck{
+		cfg: config.DoctorConfig{},
+		newGit: func(path string) gitWorktree {
+			return &fakeGitWorktree{
+				listResp: []git.Worktree{
+					{Path: homeA, Branch: "a"},
+					{Path: homeB, Branch: "b"},
+					{Path: nestedUnderA, Branch: "task-a"},
+					{Path: nestedUnderB, Branch: "task-b"},
+				},
+				currentPath: path,
+				onList:      func(p string) { listCalls = append(listCalls, p) },
+			}
+		},
+	}
+	r := c.Run(&CheckContext{CityPath: dir})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning", r.Status)
+	}
+	if len(listCalls) != 1 {
+		t.Errorf("WorktreeList calls = %v, want 1 (admin-dir dedup)", listCalls)
+	}
+	if len(c.findings) != 2 {
+		t.Errorf("findings = %d, want 2 (one nested under each home, even though only one WorktreeList ran)",
+			len(c.findings))
+	}
+	parents := map[string]bool{}
+	for _, f := range c.findings {
+		parents[f.parent] = true
+	}
+	if !parents[homeA] || !parents[homeB] {
+		t.Errorf("findings should attribute parents to both homes; got %v", parents)
+	}
+}
+
+// TestNestedWorktreePruneCheck_FixUsesParentForGitContext pins the fix
+// for the cwd-removal pattern: WorktreeRemove must run from the parent
+// home, not from the worktree being removed.
+func TestNestedWorktreePruneCheck_FixUsesParentForGitContext(t *testing.T) {
+	dir := t.TempDir()
+	home := makeAgentHome(t, dir, "polecat-1")
+	nested := pathutil.NormalizePathForCompare(filepath.Join(home, "worktrees", "task"))
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var removes, removeFrom []string
+	c := &NestedWorktreePruneCheck{
+		cfg: config.DoctorConfig{},
+		newGit: func(path string) gitWorktree {
+			return &fakeGitWorktree{
+				listResp: []git.Worktree{
+					{Path: home, Branch: "h"},
+					{Path: nested, Branch: "task"},
+				},
+				removeCalls: &removes,
+				removeFrom:  &removeFrom,
+				currentPath: path,
+			}
+		},
+	}
+	if r := c.Run(&CheckContext{CityPath: dir}); r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning", r.Status)
+	}
+	if err := c.Fix(&CheckContext{}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	if len(removeFrom) != 1 || removeFrom[0] != home {
+		t.Errorf("WorktreeRemove ran from %v, want exactly [%q] (parent home, not the worktree being removed)",
+			removeFrom, home)
+	}
+}
+
+// TestNestedWorktreePruneCheck_BrokenRepoGate pins the IsRepo gate that
+// defends against fail-open semantics in HasUnpushedCommits / HasStashes
+// (which return false on git error). A candidate whose admin dir is
+// corrupt must not be classified as safe to remove.
+func TestNestedWorktreePruneCheck_BrokenRepoGate(t *testing.T) {
+	dir := t.TempDir()
+	home := makeAgentHome(t, dir, "polecat-1")
+	broken := pathutil.NormalizePathForCompare(filepath.Join(home, "worktrees", "broken"))
+	if err := os.MkdirAll(broken, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var removes []string
+	c := &NestedWorktreePruneCheck{
+		cfg: config.DoctorConfig{},
+		newGit: func(path string) gitWorktree {
+			return &fakeGitWorktree{
+				listResp: []git.Worktree{
+					{Path: home, Branch: "h"},
+					{Path: broken, Branch: "broken"},
+				},
+				notRepo:     map[string]bool{broken: true},
+				removeCalls: &removes,
+				currentPath: path,
+			}
+		},
+	}
+	r := c.Run(&CheckContext{CityPath: dir})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK (broken candidate marked unsafe)", r.Status)
+	}
+	if len(c.findings) != 1 {
+		t.Fatalf("findings = %d, want 1", len(c.findings))
+	}
+	if c.findings[0].safeToRm {
+		t.Error("broken candidate should NOT be safeToRm")
+	}
+	if c.findings[0].reason != "git status unreadable" {
+		t.Errorf("reason = %q, want %q", c.findings[0].reason, "git status unreadable")
 	}
 }
 
