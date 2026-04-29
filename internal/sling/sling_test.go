@@ -499,6 +499,52 @@ func TestRigDirForBeadHonorsUnderscoredPrefix(t *testing.T) {
 	}
 }
 
+// RigDirForBead returns "" in two distinct ways: the prefix doesn't
+// parse at all (BeadPrefixForCity returns "") and the prefix parses
+// but doesn't match any configured rig (BeadPrefix falls back to
+// first-dash split for unknown prefixes). Cover both so a regression
+// that conflates the branches is caught.
+func TestRigDirForBeadEmptyPrefixAndUnknownRig(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "fe", Path: "/fe", Prefix: "fe"}},
+	}
+	// Empty input → BeadPrefixForCity returns "", short-circuits.
+	if got := RigDirForBead(cfg, ""); got != "" {
+		t.Errorf("RigDirForBead(\"\") = %q, want \"\"", got)
+	}
+	// Unknown prefix that BeadPrefix's fallback parses ("unknown")
+	// but is not a configured rig: hits the FindRigByPrefix=false
+	// branch.
+	if got := RigDirForBead(cfg, "unknown-7"); got != "" {
+		t.Errorf("RigDirForBead(unknown-7) = %q, want \"\" (no matching rig)", got)
+	}
+}
+
+// configuredBeadPrefixes skips rigs whose effective prefix is empty.
+// Reaching that branch requires both an empty Name and Prefix —
+// validated configs reject this, but the guard exists so a malformed
+// or partially-applied config can't produce an "" entry that confuses
+// equal-length tiebreaks in matchConfiguredBeadPrefix.
+func TestConfiguredBeadPrefixesSkipsEmptyRigPrefix(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test", Prefix: "HQ"},
+		Rigs: []config.Rig{
+			{Name: "fe", Path: "/fe", Prefix: "fe"},
+			{Name: "", Path: "/empty", Prefix: ""},
+		},
+	}
+	got := configuredBeadPrefixes(cfg)
+	want := []string{"HQ", "fe"}
+	if len(got) != len(want) {
+		t.Fatalf("configuredBeadPrefixes = %v, want %v (empty-prefix rig must be skipped)", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("configuredBeadPrefixes[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func TestRigDirForBeadHonorsHyphenatedPrefix(t *testing.T) {
 	cfg := &config.City{
 		Rigs: []config.Rig{
