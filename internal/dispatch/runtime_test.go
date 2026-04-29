@@ -692,10 +692,22 @@ type countingListStore struct {
 	queries   []beads.ListQuery
 }
 
+type workflowFinalizeCloseFailStore struct {
+	beads.Store
+	finalizerID string
+}
+
 func (s *countingListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	s.listCalls++
 	s.queries = append(s.queries, query)
 	return s.MemStore.List(query)
+}
+
+func (s *workflowFinalizeCloseFailStore) Update(id string, opts beads.UpdateOpts) error {
+	if id == s.finalizerID && opts.Status != nil && *opts.Status == "closed" {
+		return errors.New("finalizer close failed")
+	}
+	return s.Store.Update(id, opts)
 }
 
 type scopeSnapshotQueryGuardStore struct {
@@ -804,6 +816,74 @@ func TestProcessWorkflowFinalizeClosesWorkflow(t *testing.T) {
 	}
 	if got := rootAfter.Metadata["gc.outcome"]; got != "fail" {
 		t.Fatalf("workflow outcome = %q, want fail", got)
+	}
+}
+
+func TestProcessWorkflowFinalizeOrphanedRootClosesFinalizerWithoutError(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	finalizer := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": "missing-root-id",
+		},
+	})
+
+	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(orphan finalize): %v", err)
+	}
+	if !result.Processed {
+		t.Fatalf("result = %+v, want processed", result)
+	}
+	if result.Action != "workflow-missing_root" {
+		t.Fatalf("result.Action = %q, want workflow-missing_root", result.Action)
+	}
+
+	finalizerAfter, err := store.Get(finalizer.ID)
+	if err != nil {
+		t.Fatalf("get finalizer: %v", err)
+	}
+	if finalizerAfter.Status != "closed" {
+		t.Fatalf("finalizer status = %q, want closed", finalizerAfter.Status)
+	}
+	if got := finalizerAfter.Metadata["gc.outcome"]; got != "missing_root" {
+		t.Fatalf("finalizer outcome = %q, want missing_root", got)
+	}
+}
+
+func TestProcessWorkflowFinalizeOrphanedRootReportsFinalizerCloseFailure(t *testing.T) {
+	t.Parallel()
+
+	mem := beads.NewMemStore()
+	finalizer := mustCreateWorkflowBead(t, mem, beads.Bead{
+		Title: "Finalize workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": "missing-root-id",
+		},
+	})
+	store := &workflowFinalizeCloseFailStore{
+		Store:       mem,
+		finalizerID: finalizer.ID,
+	}
+
+	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	if err == nil {
+		t.Fatalf("ProcessControl(orphan finalize) error = nil, want finalizer close failure")
+	}
+	if result.Processed {
+		t.Fatalf("result = %+v, want not processed when finalizer close fails", result)
+	}
+	if !strings.Contains(err.Error(), "closing orphaned finalizer") {
+		t.Fatalf("error = %q, want orphaned finalizer context", err)
+	}
+	if !strings.Contains(err.Error(), "missing-root-id") {
+		t.Fatalf("error = %q, want missing root ID context", err)
 	}
 }
 

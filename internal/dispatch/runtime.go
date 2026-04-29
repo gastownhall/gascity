@@ -613,6 +613,12 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 	// so retryable scan failures keep the root live for singleton scans, but
 	// source beads are not mutated until the root is durably closed.
 	if err := setOutcomeAndClose(store, rootID, outcome); err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			if closeErr := setOutcomeAndClose(store, bead.ID, "missing_root"); closeErr != nil {
+				return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: closing orphaned finalizer (root %s missing): %w", bead.ID, rootID, closeErr))
+			}
+			return ControlResult{Processed: true, Action: "workflow-missing_root"}, nil
+		}
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: completing workflow head: %w", rootID, err))
 	}
 	if outcome == "pass" {
