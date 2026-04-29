@@ -6,6 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -110,8 +113,33 @@ func cmdHandoff(args []string, target string, auto bool, hookFormat string, stdo
 		return 0
 	}
 
-	// Block forever. The controller will kill the entire process tree.
-	select {}
+	// Wait for the controller to act on the restart request. Mirrors the
+	// poll-and-signal loop in doRuntimeRequestRestart (cmd_runtime_drain.go)
+	// so a transient API failure or dead controller doesn't trip Go's
+	// deadlock detector or hang silently. Under normal operation the
+	// controller SIGKILLs the whole process tree before this returns.
+	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	deadline := time.Now().Add(controllerRestartTimeout(cfg))
+	ticker := time.NewTicker(controllerRestartPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-sigCtx.Done():
+			// Signal received; leave the flag set so the controller still acts on its next tick.
+			return 0
+		case <-ticker.C:
+			requested, err := dops.isRestartRequested(current.sessionName)
+			if err == nil && !requested {
+				// Reconciler cleared the flag; restart is in flight.
+				return 0
+			}
+			if time.Now().After(deadline) {
+				fmt.Fprintf(stderr, "gc handoff: controller did not act within %s; check `gc dashboard` or `gc trace`\n", controllerRestartTimeout(cfg)) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+		}
+	}
 }
 
 // cmdHandoffRemote sends handoff mail to a remote session and kills its runtime.
