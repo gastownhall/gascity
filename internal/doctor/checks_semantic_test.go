@@ -457,25 +457,36 @@ func TestWorktreeDiskSizeCheck_DetailsSortedDescending(t *testing.T) {
 	}
 }
 
-func TestWorktreeDiskSizeCheck_MeasureErrorSurfaced(t *testing.T) {
+func TestWorktreeDiskSizeCheck_AllMeasurementsFailedReturnsWarning(t *testing.T) {
+	// "We can't tell" must not look like "we're fine". When every rig
+	// fails to measure (e.g. permission denied), the check escalates
+	// to Warning and surfaces the errors — matches DoltNomsSize policy.
 	dir := t.TempDir()
-	rig := filepath.Join(dir, ".gc", "worktrees", "broken")
-	if err := os.MkdirAll(rig, 0o755); err != nil {
+	rigA := filepath.Join(dir, ".gc", "worktrees", "broken-a")
+	rigB := filepath.Join(dir, ".gc", "worktrees", "broken-b")
+	if err := os.MkdirAll(rigA, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rigB, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	c := &WorktreeDiskSizeCheck{
 		cfg: config.DoctorConfig{},
 		measureDir: fakeMeasure(nil, map[string]error{
-			rig: errors.New("permission denied"),
+			rigA: errors.New("permission denied"),
+			rigB: errors.New("io error"),
 		}),
 	}
 	r := c.Run(&CheckContext{CityPath: dir})
-	if r.Status != StatusOK {
-		t.Errorf("status = %d, want OK", r.Status)
+	if r.Status != StatusWarning {
+		t.Errorf("status = %d, want Warning", r.Status)
 	}
-	if len(r.Details) == 0 || !strings.Contains(r.Details[0], "permission denied") {
-		t.Errorf("expected measure error in details; got %v", r.Details)
+	if r.FixHint == "" {
+		t.Error("expected fix hint pointing at filesystem permissions")
+	}
+	if len(r.Details) != 2 {
+		t.Errorf("len(Details) = %d, want 2 (one per failed rig)", len(r.Details))
 	}
 }
 
@@ -507,7 +518,9 @@ func (f *fakeGitWorktree) HasUncommittedWork() bool { return f.uncommitted[f.cur
 func (f *fakeGitWorktree) HasUnpushedCommits() bool { return f.unpushed[f.currentPath] }
 func (f *fakeGitWorktree) HasStashes() bool         { return f.stashed[f.currentPath] }
 func (f *fakeGitWorktree) WorktreeRemove(path string, _ bool) error {
-	*f.removeCalls = append(*f.removeCalls, path)
+	if f.removeCalls != nil {
+		*f.removeCalls = append(*f.removeCalls, path)
+	}
 	if f.removeErr != nil {
 		if e, ok := f.removeErr[path]; ok {
 			return e
@@ -762,16 +775,20 @@ func TestNestedWorktreePruneCheck_DeduplicatesAcrossHomes(t *testing.T) {
 	}
 }
 
-func TestNestedWorktreePruneCheck_FixStopsOnError(t *testing.T) {
+// TestNestedWorktreePruneCheck_FixContinuesPastError pins the
+// reclaim-as-much-as-possible semantic: a single locked worktree must
+// not strand later safe entries. The returned error joins all per-entry
+// failures so the operator sees what was missed.
+func TestNestedWorktreePruneCheck_FixContinuesPastError(t *testing.T) {
 	dir := t.TempDir()
 	home := makeAgentHome(t, dir, "rig-a", "polecat-1")
 	first := pathutil.NormalizePathForCompare(filepath.Join(home, "worktrees", "first"))
 	second := pathutil.NormalizePathForCompare(filepath.Join(home, "worktrees", "second"))
-	if err := os.MkdirAll(first, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(second, 0o755); err != nil {
-		t.Fatal(err)
+	third := pathutil.NormalizePathForCompare(filepath.Join(home, "worktrees", "third"))
+	for _, p := range []string{first, second, third} {
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	var removes []string
@@ -783,9 +800,10 @@ func TestNestedWorktreePruneCheck_FixStopsOnError(t *testing.T) {
 					{Path: home, Branch: "home"},
 					{Path: first, Branch: "first"},
 					{Path: second, Branch: "second"},
+					{Path: third, Branch: "third"},
 				},
 				removeCalls: &removes,
-				removeErr:   map[string]error{first: errors.New("git locked")},
+				removeErr:   map[string]error{second: errors.New("git locked")},
 				currentPath: path,
 			}
 		},
@@ -795,10 +813,38 @@ func TestNestedWorktreePruneCheck_FixStopsOnError(t *testing.T) {
 	}
 	err := c.Fix(&CheckContext{})
 	if err == nil {
-		t.Fatal("Fix should propagate the remove error")
+		t.Fatal("Fix should surface the remove error")
 	}
 	if !strings.Contains(err.Error(), "git locked") {
 		t.Errorf("error should wrap original; got %v", err)
+	}
+	// All three were attempted; only the failing one is missing from a
+	// successful-removal perspective — but accumulator records every
+	// call.
+	if len(removes) != 3 {
+		t.Errorf("removes = %v, want all three attempted", removes)
+	}
+}
+
+func TestReadGitAdminDir_RepoPathContainsWorktreesSegment(t *testing.T) {
+	// Regression: if the repo's own path contains "/worktrees/" as a
+	// literal segment (e.g. user keeps repos under ~/worktrees/), the
+	// admin-dir extraction must still find the LAST "/worktrees/"
+	// (the one git inserts before the per-worktree subdir), not the
+	// user's path component.
+	dir := t.TempDir()
+	tricky := filepath.Join(dir, "worktrees", "myproj")
+	if err := os.MkdirAll(tricky, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitdir := tricky + "/.git/worktrees/agentA"
+	if err := os.WriteFile(filepath.Join(tricky, ".git"), []byte("gitdir: "+gitdir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := readGitAdminDir(tricky)
+	want := pathutil.NormalizePathForCompare(tricky + "/.git")
+	if got != want {
+		t.Errorf("readGitAdminDir = %q, want %q (must use LastIndex of /worktrees/)", got, want)
 	}
 }
 

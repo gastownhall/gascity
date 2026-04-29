@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -254,11 +255,15 @@ func (c *WorktreeDiskSizeCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	if len(sizes) == 0 {
-		r.Status = StatusOK
 		if len(measureErrs) > 0 {
-			r.Message = "no rig worktree directories measurable"
+			// "We can't tell" must not look like "we're fine". Matches
+			// DoltNomsSize's policy of escalating on measurement failure.
+			r.Status = StatusWarning
+			r.Message = "could not measure any rig worktree directory"
 			r.Details = measureErrs
+			r.FixHint = "check filesystem permissions on .gc/worktrees/<rig>/"
 		} else {
+			r.Status = StatusOK
 			r.Message = "no rig worktree directories"
 		}
 		return r
@@ -492,21 +497,25 @@ func (c *NestedWorktreePruneCheck) Run(ctx *CheckContext) *CheckResult {
 // CanFix returns true — Fix removes the safely-prunable findings.
 func (c *NestedWorktreePruneCheck) CanFix() bool { return true }
 
-// Fix removes each safely-prunable nested worktree found by Run. Stops
-// on first failure so the caller sees a clear error rather than partial
-// state with a vague aggregate. Worktrees marked unsafe (uncommitted /
-// unpushed / stashed) are never touched.
+// Fix removes each safely-prunable nested worktree found by Run.
+// Continues past per-entry failures so a single locked or transiently
+// broken worktree does not strand the rest — operators run --fix to
+// reclaim disk, and partial success is more useful than zero progress.
+// Returns the joined errors of all failed removals, or nil on full
+// success. Worktrees marked unsafe (uncommitted / unpushed / stashed)
+// are never touched.
 func (c *NestedWorktreePruneCheck) Fix(_ *CheckContext) error {
+	var errs []error
 	for _, f := range c.findings {
 		if !f.safeToRm {
 			continue
 		}
 		gw := c.newGit(f.path)
 		if err := gw.WorktreeRemove(f.path, true); err != nil {
-			return fmt.Errorf("removing nested worktree %s: %w", f.path, err)
+			errs = append(errs, fmt.Errorf("removing nested worktree %s: %w", f.path, err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // classifyNested runs the safety gates on a candidate nested worktree
@@ -557,8 +566,12 @@ func readGitAdminDir(home string) string {
 		return ""
 	}
 	target := pathutil.NormalizePathForCompare(strings.TrimPrefix(line, prefix))
+	// The admin-dir's "/worktrees/" segment is always the last one in
+	// the gitdir path: <admin>/worktrees/<name>. Using LastIndex keeps
+	// the dedup correct when the repo's own path contains a literal
+	// "/worktrees/" segment (e.g. /x/worktrees/y/.git/worktrees/wt).
 	const sep = string(filepath.Separator) + "worktrees" + string(filepath.Separator)
-	if i := strings.Index(target, sep); i > 0 {
+	if i := strings.LastIndex(target, sep); i > 0 {
 		return target[:i]
 	}
 	return target
