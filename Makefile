@@ -165,9 +165,13 @@ TEST_ENV = env -i \
 ## test: run fast unit tests (skip integration-tagged and GC_FAST_UNIT-gated process tests)
 ## The skipped cmd/gc process-backed scenarios remain covered by
 ## `make test-cmd-gc-process` locally and the CI `cmd/gc process suite` job.
+## Bound package parallelism so subprocess-heavy packages do not starve each
+## other into false 5s probe/condition timeouts. Use -count=1 so pre-commit
+## reports actual test results instead of hanging after PASS while Go computes
+## cache input hashes over local working files.
 ## Wrapped in $(TEST_ENV) — see comment above for why.
 test: test-fsys-darwin-compile
-	$(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test -- ./...
+	$(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 ./...
 
 LOCAL_TEST_JOBS ?= $(shell nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 8)
 

@@ -20,7 +20,7 @@ var (
 	retiredManagedDoltDatabasePattern = regexp.MustCompile(`^.+\.replaced-[0-9]{8}T[0-9]{6}Z$`)
 )
 
-const managedDoltLsofTimeout = 500 * time.Millisecond
+const managedDoltLsofTimeout = 3 * time.Second
 
 func preflightManagedDoltCleanup(cityPath string) error {
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)

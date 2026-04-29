@@ -1032,7 +1032,6 @@ func TestDoltStateProbeManagedCmdReportsImposterHolder(t *testing.T) {
 }
 
 func TestDoltStateProbeManagedCmdReportsDeletedOwnedHolder(t *testing.T) {
-	skipSlowCmdGCTest(t, "spawns a TCP listener process and checks deleted inodes; run make test-cmd-gc-process for full coverage")
 	if _, err := exec.LookPath("lsof"); err != nil {
 		t.Skip("lsof not installed")
 	}
@@ -1274,7 +1273,6 @@ esac
 }
 
 func TestDoltStateExistingManagedCmdReportsDeletedInodes(t *testing.T) {
-	skipSlowCmdGCTest(t, "spawns an open-file TCP listener process and uses lsof; run make test-cmd-gc-process for full coverage")
 	if _, err := exec.LookPath("lsof"); err != nil {
 		t.Skip("lsof not installed")
 	}
@@ -1339,7 +1337,6 @@ esac
 }
 
 func TestDoltStatePreflightCleanCmdRemovesStaleArtifacts(t *testing.T) {
-	skipSlowCmdGCTest(t, "spawns stale socket holders and uses lsof; run make test-cmd-gc-process for full coverage")
 	if _, err := exec.LookPath("lsof"); err != nil {
 		t.Skip("lsof not installed")
 	}
@@ -1558,27 +1555,31 @@ while True:
 
 func startUnixSocketProcess(t *testing.T, socketPath string) *exec.Cmd {
 	t.Helper()
+	readyPath := filepath.Join(t.TempDir(), "ready")
 	proc := exec.Command("python3", "-c", `
 import os
 import socket
 import sys
 import time
 path = sys.argv[1]
+ready_path = sys.argv[2]
 if os.path.exists(path):
     os.remove(path)
 sock = socket.socket(socket.AF_UNIX)
 sock.bind(path)
 sock.listen(1)
+with open(ready_path, "w") as f:
+    f.write("ready\n")
 while True:
     time.sleep(1)
-`, socketPath)
+`, socketPath, readyPath)
 	if err := proc.Start(); err != nil {
 		t.Fatalf("start unix socket process: %v", err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if _, err := os.Stat(socketPath); err == nil {
-			if open, openErr := fileOpenedByAnyProcess(socketPath); openErr == nil && open {
+			if _, readyErr := os.Stat(readyPath); readyErr == nil {
 				return proc
 			}
 		}
@@ -1596,24 +1597,28 @@ func startOpenFileProcess(t *testing.T, path string) *exec.Cmd {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	readyPath := filepath.Join(t.TempDir(), "ready")
 	proc := exec.Command("python3", "-c", `
 import os
 import sys
 import time
 path = sys.argv[1]
+ready_path = sys.argv[2]
 f = open(path, "a+")
 f.write("held")
 f.flush()
+with open(ready_path, "w") as f_ready:
+    f_ready.write("ready\n")
 while True:
     time.sleep(1)
-`, path)
+`, path, readyPath)
 	if err := proc.Start(); err != nil {
 		t.Fatalf("start open-file process: %v", err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if _, err := os.Stat(path); err == nil {
-			if open, openErr := fileOpenedByAnyProcess(path); openErr == nil && open {
+			if _, readyErr := os.Stat(readyPath); readyErr == nil {
 				return proc
 			}
 		}
@@ -1631,6 +1636,7 @@ func startOpenFileAndTCPListenerProcess(t *testing.T, path string, port int, dir
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	readyPath := filepath.Join(t.TempDir(), "ready")
 	proc := exec.Command("python3", "-c", `
 import os
 import signal
@@ -1639,6 +1645,7 @@ import sys
 import time
 path = sys.argv[1]
 port = int(sys.argv[2])
+ready_path = sys.argv[3]
 f = open(path, "a+")
 f.write("held")
 f.flush()
@@ -1646,13 +1653,15 @@ sock = socket.socket()
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 sock.bind(("127.0.0.1", port))
 sock.listen(5)
+with open(ready_path, "w") as f_ready:
+    f_ready.write("ready\n")
 def _stop(*_args):
     raise SystemExit(0)
 signal.signal(signal.SIGTERM, _stop)
 signal.signal(signal.SIGINT, _stop)
 while True:
     time.sleep(1)
-`, path, strconv.Itoa(port))
+`, path, strconv.Itoa(port), readyPath)
 	if strings.TrimSpace(dir) != "" {
 		proc.Dir = dir
 	}
@@ -1662,7 +1671,7 @@ while True:
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(path); err == nil {
-			if open, openErr := fileOpenedByAnyProcess(path); openErr == nil && open {
+			if _, readyErr := os.Stat(readyPath); readyErr == nil {
 				conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 200*time.Millisecond)
 				if err == nil {
 					_ = conn.Close()
@@ -1701,7 +1710,6 @@ func processHoldsDeletedPath(pid int, targetPath string) bool {
 }
 
 func TestProcessHasDeletedDataInodesIgnoresDeletedNomsLock(t *testing.T) {
-	skipSlowCmdGCTest(t, "spawns an open-file helper and uses lsof; run make test-cmd-gc-process for full coverage")
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -2093,7 +2101,6 @@ esac
 }
 
 func TestDoltStateWaitReadyCmdDetectsDeletedInodes(t *testing.T) {
-	skipSlowCmdGCTest(t, "spawns a TCP listener process and checks deleted inodes; run make test-cmd-gc-process for full coverage")
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {

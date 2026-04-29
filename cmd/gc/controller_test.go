@@ -577,7 +577,7 @@ func TestControllerReloadsConfigImmediatelyOnWatchEvent(t *testing.T) {
 		}
 	}
 
-	deadline = time.After(1500 * time.Millisecond)
+	deadline = time.After(5 * time.Second)
 	for {
 		names, _ := lastAgentNames.Load().([]string)
 		if len(names) == 2 && names[0] == "mayor" && names[1] == "worker" {

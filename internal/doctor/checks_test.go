@@ -26,13 +26,6 @@ type partialListDoctorProvider struct {
 	listErr error
 }
 
-func skipSlowDoctorProcessTest(t *testing.T, reason string) {
-	t.Helper()
-	if strings.TrimSpace(os.Getenv("GC_FAST_UNIT")) != "0" {
-		t.Skip(reason)
-	}
-}
-
 func (p *partialListDoctorProvider) ListRunning(prefix string) ([]string, error) {
 	names, _ := p.Fake.ListRunning(prefix)
 	return names, p.listErr
@@ -2273,6 +2266,52 @@ func setupManagedDoltCity(t *testing.T) string {
 	return dir
 }
 
+func startDoctorTCPListenerProcess(t *testing.T, dataDir string) (*exec.Cmd, int) {
+	t.Helper()
+	readyPath := filepath.Join(t.TempDir(), "ready")
+	proc := exec.Command("python3", "-c", `
+import socket
+import sys
+import time
+data_dir = sys.argv[1]
+ready_path = sys.argv[2]
+sock = socket.socket()
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind(("127.0.0.1", 0))
+sock.listen(5)
+with open(ready_path, "w") as f:
+    f.write(str(sock.getsockname()[1]) + "\n")
+while True:
+    time.sleep(1)
+`, dataDir, readyPath)
+	if err := proc.Start(); err != nil {
+		t.Fatalf("start doctor TCP listener: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = proc.Process.Kill()
+		_ = proc.Wait()
+	})
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		data, err := os.ReadFile(readyPath)
+		if err == nil {
+			port, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))
+			if parseErr != nil {
+				t.Fatalf("parse listener port %q: %v", strings.TrimSpace(string(data)), parseErr)
+			}
+			conn, dialErr := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 200*time.Millisecond)
+			if dialErr == nil {
+				_ = conn.Close()
+				return proc, port
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("doctor TCP listener for %s did not become ready", dataDir)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
 func setupFreshManagedDoltCity(t *testing.T) string {
 	t.Helper()
 	t.Setenv("GC_DOLT_DATA_DIR", "")
@@ -2719,20 +2758,14 @@ func TestDoltNomsSizeCheck_IgnoresAmbientDataDirOverride(t *testing.T) {
 }
 
 func TestDoltNomsSizeCheck_UsesPublishedRuntimeDataDir(t *testing.T) {
-	skipSlowDoctorProcessTest(t, "uses live port ownership checks; run make test-cmd-gc-process for full coverage")
 	dir := setupManagedDoltCity(t)
 	dataDir := filepath.Join(t.TempDir(), "relocated-dolt-data")
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
-	t.Cleanup(func() { _ = ln.Close() })
-	port := ln.Addr().(*net.TCPAddr).Port
+	proc, port := startDoctorTCPListenerProcess(t, dataDir)
 	statePath := filepath.Join(dir, ".gc", "runtime", "packs", "dolt", "dolt-state.json")
-	state := fmt.Sprintf(`{"running":true,"pid":%d,"port":%d,"data_dir":%q}`, os.Getpid(), port, dataDir)
+	state := fmt.Sprintf(`{"running":true,"pid":%d,"port":%d,"data_dir":%q}`, proc.Process.Pid, port, dataDir)
 	if err := os.WriteFile(statePath, []byte(state), 0o644); err != nil {
 		t.Fatal(err)
 	}

@@ -64,7 +64,7 @@ func TestFileOpenedByAnyProcessBoundsLsof(t *testing.T) {
 		t.Fatal(err)
 	}
 	binDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(binDir, "lsof"), []byte("#!/bin/sh\nexec sleep 2\n"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(binDir, "lsof"), []byte("#!/bin/sh\nexec sleep 10\n"), 0o755); err != nil {
 		t.Fatalf("WriteFile(lsof): %v", err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -77,7 +77,7 @@ func TestFileOpenedByAnyProcessBoundsLsof(t *testing.T) {
 	if open {
 		t.Fatal("fileOpenedByAnyProcess() = true, want false when lsof times out")
 	}
-	if elapsed := time.Since(start); elapsed > 3*time.Second {
+	if elapsed := time.Since(start); elapsed > 4*time.Second {
 		t.Fatalf("fileOpenedByAnyProcess() took %s, want bounded timeout", elapsed)
 	}
 }
