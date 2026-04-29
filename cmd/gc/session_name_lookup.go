@@ -169,7 +169,7 @@ func findSessionNameByAgentLabel(store beads.Store, template string) string {
 }
 
 func findSessionNameByMetadata(store beads.Store, key, value string, agentNameMatch bool) string {
-	items, err := store.List(beads.ListQuery{Metadata: map[string]string{key: value}})
+	items, err := sessionpkg.ExactMetadataSessionCandidates(store, false, map[string]string{key: value})
 	if err != nil {
 		return ""
 	}

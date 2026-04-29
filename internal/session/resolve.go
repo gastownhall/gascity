@@ -58,11 +58,11 @@ func resolveSessionID(store beads.Store, identifier string, allowClosed bool) (s
 		return "", err
 	}
 
-	openSessionNameMatches, err := sessionMatchesByMetadata(store, "session_name", identifier, "")
+	openSessionNameMatches, err := ExactMetadataSessionCandidates(store, false, map[string]string{"session_name": identifier})
 	if err != nil {
 		return "", fmt.Errorf("listing sessions: %w", err)
 	}
-	openAliasMatches, err := sessionMatchesByMetadata(store, "alias", identifier, "")
+	openAliasMatches, err := ExactMetadataSessionCandidates(store, false, map[string]string{"alias": identifier})
 	if err != nil {
 		return "", fmt.Errorf("listing sessions: %w", err)
 	}
@@ -78,11 +78,11 @@ func resolveSessionID(store beads.Store, identifier string, allowClosed bool) (s
 	if !allowClosed {
 		return "", fmt.Errorf("%w: %q", ErrSessionNotFound, identifier)
 	}
-	closedSessionNameMatches, err := sessionMatchesByMetadata(store, "session_name", identifier, "closed")
+	closedSessionNameMatches, err := ExactMetadataSessionCandidatesWithStatus(store, "closed", map[string]string{"session_name": identifier})
 	if err != nil {
 		return "", fmt.Errorf("listing sessions: %w", err)
 	}
-	closedAliasMatches, err := sessionMatchesByMetadata(store, "alias", identifier, "closed")
+	closedAliasMatches, err := ExactMetadataSessionCandidatesWithStatus(store, "closed", map[string]string{"alias": identifier})
 	if err != nil {
 		return "", fmt.Errorf("listing sessions: %w", err)
 	}
@@ -95,34 +95,6 @@ func resolveSessionID(store beads.Store, identifier string, allowClosed bool) (s
 		}
 	}
 	return "", fmt.Errorf("%w: %q", ErrSessionNotFound, identifier)
-}
-
-func sessionMatchesByMetadata(store beads.Store, key, identifier, status string) ([]beads.Bead, error) {
-	query := beads.ListQuery{
-		Metadata: map[string]string{key: identifier},
-	}
-	if status != "" {
-		query.Status = status
-	}
-	items, err := store.List(query)
-	if err != nil {
-		return nil, err
-	}
-	matches := make([]beads.Bead, 0, len(items))
-	for _, b := range items {
-		if !IsSessionBeadOrRepairable(b) {
-			continue
-		}
-		RepairEmptyType(store, &b)
-		if strings.TrimSpace(b.Metadata[key]) != identifier {
-			continue
-		}
-		if status != "" && b.Status != status {
-			continue
-		}
-		matches = append(matches, b)
-	}
-	return matches, nil
 }
 
 func chooseSessionMatch(identifier string, matches []beads.Bead) (string, error) {

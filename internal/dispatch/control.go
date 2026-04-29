@@ -714,7 +714,7 @@ func resolveAttemptRouteBinding(target string, cfg *config.City, store beads.Sto
 		if named := config.FindNamedSession(cfg, target); named != nil {
 			if spec, ok := session.FindNamedSessionSpec(cfg, cfg.EffectiveCityName(), named.QualifiedName()); ok {
 				if store != nil {
-					if candidates, err := store.List(beads.ListQuery{Label: session.LabelSession}); err == nil {
+					if candidates, err := session.NamedSessionResolutionCandidates(store, spec); err == nil {
 						if bead, found := session.FindCanonicalNamedSessionBead(candidates, spec); found {
 							return attemptRouteBinding{directSessionID: bead.ID}, true
 						}

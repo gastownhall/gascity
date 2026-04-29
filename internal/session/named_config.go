@@ -223,48 +223,12 @@ func NamedSessionResolutionCandidates(store beads.Store, spec NamedSessionSpec) 
 	}
 	identity := NormalizeNamedSessionTarget(spec.Identity)
 	sessionName := strings.TrimSpace(spec.SessionName)
-	queries := []map[string]string{
-		{NamedSessionIdentityMetadata: identity},
-		{"session_name": sessionName},
-		{"session_name": identity},
-		{"alias": identity},
-	}
-
-	seenQueries := make(map[string]bool, len(queries))
-	seenBeads := make(map[string]bool)
-	candidates := make([]beads.Bead, 0, 4)
-	for _, metadata := range queries {
-		if len(metadata) != 1 {
-			continue
-		}
-		var key, value string
-		for k, v := range metadata {
-			key = k
-			value = strings.TrimSpace(v)
-		}
-		if key == "" || value == "" {
-			continue
-		}
-		queryKey := key + "\x00" + value
-		if seenQueries[queryKey] {
-			continue
-		}
-		seenQueries[queryKey] = true
-		items, err := store.List(beads.ListQuery{
-			Metadata: map[string]string{key: value},
-		})
-		if err != nil {
-			return nil, err
-		}
-		for _, b := range items {
-			if seenBeads[b.ID] || !IsSessionBeadOrRepairable(b) {
-				continue
-			}
-			seenBeads[b.ID] = true
-			candidates = append(candidates, b)
-		}
-	}
-	return candidates, nil
+	return ExactMetadataSessionCandidates(store, false,
+		map[string]string{NamedSessionIdentityMetadata: identity},
+		map[string]string{"session_name": sessionName},
+		map[string]string{"session_name": identity},
+		map[string]string{"alias": identity},
+	)
 }
 
 // FindNamedSessionConflict finds the first live session bead that blocks a configured named session.

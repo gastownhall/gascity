@@ -148,10 +148,8 @@ func (s *Server) retireContinuityIneligibleNamedSessionIdentifiers(store beads.S
 	if store == nil {
 		return nil, nil
 	}
-	all, err := store.List(beads.ListQuery{
-		Metadata: map[string]string{
-			session.NamedSessionIdentityMetadata: spec.Identity,
-		},
+	all, err := session.ExactMetadataSessionCandidates(store, false, map[string]string{
+		session.NamedSessionIdentityMetadata: spec.Identity,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("listing named session candidates: %w", err)

@@ -871,7 +871,7 @@ func TestResolveAttemptRouteBinding_ConfigTargetBeatsCollidingSessionAlias(t *te
 func TestResolveAttemptRouteBinding_NamedSessionTargetUsesCanonicalBeadID(t *testing.T) {
 	t.Parallel()
 
-	store := beads.NewMemStore()
+	store := &noBroadAttemptRouteStore{MemStore: beads.NewMemStore(), t: t}
 	named, err := store.Create(beads.Bead{
 		Title:  "worker",
 		Type:   session.BeadType,
@@ -912,6 +912,18 @@ func TestResolveAttemptRouteBinding_NamedSessionTargetUsesCanonicalBeadID(t *tes
 	if binding.qualifiedName != "" || binding.sessionName != "" {
 		t.Fatalf("binding = %+v, want direct named session only", binding)
 	}
+}
+
+type noBroadAttemptRouteStore struct {
+	*beads.MemStore
+	t *testing.T
+}
+
+func (s *noBroadAttemptRouteStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == session.LabelSession && len(query.Metadata) == 0 {
+		s.t.Fatalf("attempt route binding used broad session label scan: %+v", query)
+	}
+	return s.MemStore.List(query)
 }
 
 func TestResolveAttemptRouteBinding_NamedSessionTargetWithoutCanonicalBeadUsesSessionName(t *testing.T) {
