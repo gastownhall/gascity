@@ -129,6 +129,45 @@ Run `make help` for the full list. The most useful targets are:
 | `make dashboard-check` | Typecheck + build + test the dashboard |
 | `make cover` | Coverage run |
 
+## macOS Local Development
+
+The `build` target signs `gc` with a stable codesigning identity when one is
+available, so macOS TCC remembers permission grants (App Management, Apple
+Events, etc.) across rebuilds. Without this, ad-hoc-signed binaries get a
+fresh identity on every build and TCC re-prompts indefinitely while the
+supervisor and its child processes spawn.
+
+The build auto-detects the first valid certificate in your keychain, in
+order: `Apple Development:`, `Developer ID Application:`, then
+`GasCity Dev`. Override with `GC_SIGN_IDENTITY=<cert name>`. If no cert is
+found, the build falls back to ad-hoc signing.
+
+Getting a free certificate (no Apple Developer Program membership needed):
+
+- **Apple Development** — Xcode → Settings → Accounts → sign in with any
+  Apple ID → Manage Certificates → `+` → Apple Development. Valid one year
+  on the free tier.
+- **Self-signed** — Keychain Access → Certificate Assistant → Create a
+  Certificate. Name it whatever you like; set Identity Type to *Self
+  Signed Root* and Certificate Type to *Code Signing*. This stays valid
+  for as long as you set when creating it.
+
+A few macOS quirks worth knowing while iterating locally:
+
+- TCC keys denial records by **binary path**, not bundle identifier, for
+  CLI tools. `tccutil reset` does not accept paths or arbitrary
+  identifiers — it only resets entries keyed to a real `.app` bundle id.
+  If a stale "Don't Allow" decision is stuck, the practical escape hatch
+  is to install `gc` at a fresh path so TCC has no prior record there.
+- `cp -f` over a running binary inherits a `com.apple.provenance` xattr
+  that, combined with an unstable signature, can cause Gatekeeper to
+  kill the next invocation. Prefer the `make install` flow (which uses
+  atomic rename) or strip the xattr after copying.
+- Homebrew's `graphviz` ships a `/opt/homebrew/bin/gc` binary (a graph
+  coloring tool) that collides with our `gc`. If `which gc` resolves to
+  graphviz, install via `make install` and call `$(go env GOPATH)/bin/gc`
+  explicitly, or place your `gc` earlier in `PATH`.
+
 ## macOS Release Verification
 
 Before tagging a release, run the macOS smoke test on a Mac:
