@@ -896,6 +896,54 @@ func TestResolveSessionNameWithStore(t *testing.T) {
 	}
 }
 
+type noBroadSessionNameLookupStore struct {
+	*beads.MemStore
+	t *testing.T
+}
+
+func (s noBroadSessionNameLookupStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == sessionBeadLabel && len(query.Metadata) == 0 {
+		s.t.Fatalf("session name lookup used broad session label scan: %+v", query)
+	}
+	return s.MemStore.List(query)
+}
+
+func TestFindSessionNameByTemplateUsesTargetedLookup(t *testing.T) {
+	store := noBroadSessionNameLookupStore{MemStore: beads.NewMemStore(), t: t}
+	_, err := store.Create(beads.Bead{
+		Title:  "worker-pool",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"agent_name":           "worker",
+			"template":             "worker",
+			"session_name":         "s-pool",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"agent_name":   "worker",
+			"session_name": "s-worker",
+			"state":        "asleep",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := findSessionNameByTemplate(store, "worker")
+	if got != "s-worker" {
+		t.Fatalf("findSessionNameByTemplate(worker) = %q, want s-worker", got)
+	}
+}
+
 func TestFindSessionNameByTemplate_SkipsClosedBeads(t *testing.T) {
 	store := beads.NewMemStore()
 	b, err := store.Create(beads.Bead{

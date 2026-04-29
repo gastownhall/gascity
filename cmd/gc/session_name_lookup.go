@@ -144,11 +144,66 @@ func normalizedSessionTemplate(bead beads.Bead, cfg *config.City) string {
 // beads with an agent_name field matching the query. If no agent_name match
 // is found, falls back to template/common_name matching.
 func findSessionNameByTemplate(store beads.Store, template string) string {
-	snapshot, err := loadSessionBeadSnapshot(store)
+	template = strings.TrimSpace(template)
+	if store == nil || template == "" {
+		return ""
+	}
+	if sn := findSessionNameByMetadata(store, "agent_name", template, true); sn != "" {
+		return sn
+	}
+	if sn := findSessionNameByAgentLabel(store, template); sn != "" {
+		return sn
+	}
+	if sn := findSessionNameByMetadata(store, "template", template, false); sn != "" {
+		return sn
+	}
+	return findSessionNameByMetadata(store, "common_name", template, false)
+}
+
+func findSessionNameByAgentLabel(store beads.Store, template string) string {
+	items, err := store.List(beads.ListQuery{Label: "agent:" + template})
 	if err != nil {
 		return ""
 	}
-	return snapshot.FindSessionNameByTemplate(template)
+	return chooseSessionNameForTemplate(store, items, true, "", "")
+}
+
+func findSessionNameByMetadata(store beads.Store, key, value string, agentNameMatch bool) string {
+	items, err := store.List(beads.ListQuery{Metadata: map[string]string{key: value}})
+	if err != nil {
+		return ""
+	}
+	return chooseSessionNameForTemplate(store, items, agentNameMatch, key, value)
+}
+
+func chooseSessionNameForTemplate(store beads.Store, items []beads.Bead, agentNameMatch bool, key, value string) string {
+	var fallback string
+	for _, b := range items {
+		if !sessionpkg.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
+			continue
+		}
+		sessionpkg.RepairEmptyType(store, &b)
+		if key != "" && strings.TrimSpace(b.Metadata[key]) != value {
+			continue
+		}
+		if agentNameMatch && isPoolManagedSessionBead(b) && sessionBeadAgentName(b) == b.Metadata["template"] {
+			continue
+		}
+		if !agentNameMatch && isPoolManagedSessionBead(b) {
+			continue
+		}
+		sessionName := strings.TrimSpace(b.Metadata["session_name"])
+		if sessionName == "" {
+			continue
+		}
+		if strings.TrimSpace(b.Metadata["configured_named_identity"]) != "" {
+			return sessionName
+		}
+		if fallback == "" {
+			fallback = sessionName
+		}
+	}
+	return fallback
 }
 
 // lookupSessionName resolves a qualified agent name to its bead-derived

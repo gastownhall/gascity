@@ -325,10 +325,13 @@ func ensureSessionNameAvailableForSelfAndOwner(store beads.Store, name, selfID, 
 	if name == "" {
 		return nil
 	}
-	all, err := store.List(beads.ListQuery{
-		Label:         LabelSession,
-		IncludeClosed: true,
-	})
+	all, err := sessionIdentifierCandidates(store, true,
+		map[string]string{"session_name": name},
+		map[string]string{"alias": name},
+		map[string]string{"agent_name": name},
+		map[string]string{"template": name},
+		map[string]string{"common_name": name},
+	)
 	if err != nil {
 		return fmt.Errorf("listing sessions: %w", err)
 	}
@@ -515,10 +518,13 @@ func isConfiguredNamedSessionRuntimeName(cfg *config.City, name, owner string) b
 // ensureSessionNameAvailableForSelf so the legacy-bypass path cannot
 // suppress rejections from live alias or identifier collisions.
 func noLiveSessionNameCollisions(store beads.Store, name, selfID, selfOwner string) bool {
-	all, err := store.List(beads.ListQuery{
-		Label:         LabelSession,
-		IncludeClosed: true,
-	})
+	all, err := sessionIdentifierCandidates(store, true,
+		map[string]string{"session_name": name},
+		map[string]string{"alias": name},
+		map[string]string{"agent_name": name},
+		map[string]string{"template": name},
+		map[string]string{"common_name": name},
+	)
 	if err != nil {
 		return false
 	}
@@ -565,9 +571,11 @@ func ensureSessionAliasAvailable(store beads.Store, cfg *config.City, alias, sel
 			hasSelfBead = true
 		}
 	}
-	all, err := store.List(beads.ListQuery{
-		Label: LabelSession,
-	})
+	all, err := sessionIdentifierCandidates(store, false,
+		map[string]string{"session_name": alias},
+		map[string]string{"alias": alias},
+		map[string]string{"agent_name": alias},
+	)
 	if err != nil {
 		return fmt.Errorf("listing sessions: %w", err)
 	}
@@ -609,4 +617,46 @@ func ensureSessionAliasAvailable(store beads.Store, cfg *config.City, alias, sel
 		}
 	}
 	return nil
+}
+
+func sessionIdentifierCandidates(store beads.Store, includeClosed bool, filters ...map[string]string) ([]beads.Bead, error) {
+	if store == nil {
+		return nil, nil
+	}
+	seenQueries := make(map[string]bool, len(filters))
+	seenBeads := make(map[string]bool)
+	candidates := make([]beads.Bead, 0, len(filters))
+	for _, filter := range filters {
+		if len(filter) != 1 {
+			continue
+		}
+		var key, value string
+		for k, v := range filter {
+			key = strings.TrimSpace(k)
+			value = strings.TrimSpace(v)
+		}
+		if key == "" || value == "" {
+			continue
+		}
+		queryKey := key + "\x00" + value
+		if seenQueries[queryKey] {
+			continue
+		}
+		seenQueries[queryKey] = true
+		items, err := store.List(beads.ListQuery{
+			Metadata:      map[string]string{key: value},
+			IncludeClosed: includeClosed,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, b := range items {
+			if seenBeads[b.ID] || !IsSessionBeadOrRepairable(b) {
+				continue
+			}
+			seenBeads[b.ID] = true
+			candidates = append(candidates, b)
+		}
+	}
+	return candidates, nil
 }

@@ -13,6 +13,18 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
+type noBroadSessionIdentifierStore struct {
+	*beads.MemStore
+	t *testing.T
+}
+
+func (s *noBroadSessionIdentifierStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == LabelSession && len(query.Metadata) == 0 {
+		s.t.Fatalf("session identifier availability used broad session label scan: %+v", query)
+	}
+	return s.MemStore.List(query)
+}
+
 func TestValidateExplicitName(t *testing.T) {
 	longName := strings.Repeat("a", explicitSessionNameMaxLen+1)
 	tests := []struct {
@@ -941,6 +953,42 @@ func TestEnsureSessionNameAvailableWithConfigForOwner_AllowsPoolManagedIdentifie
 	}
 	if err := EnsureSessionNameAvailableWithConfigForOwner(store, cfg, "mayor", "", "foreman"); !errors.Is(err, ErrSessionNameExists) {
 		t.Fatalf("EnsureSessionNameAvailableWithConfigForOwner(wrong owner) = %v, want ErrSessionNameExists", err)
+	}
+}
+
+func TestEnsureSessionNameAvailableUsesTargetedIdentifierLookups(t *testing.T) {
+	store := &noBroadSessionIdentifierStore{MemStore: beads.NewMemStore(), t: t}
+	_, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"alias": "sky",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(alias holder): %v", err)
+	}
+
+	if err := EnsureSessionNameAvailableWithConfig(store, nil, "sky", ""); !errors.Is(err, ErrSessionNameExists) {
+		t.Fatalf("EnsureSessionNameAvailableWithConfig(alias collision) = %v, want ErrSessionNameExists", err)
+	}
+}
+
+func TestEnsureAliasAvailableUsesTargetedIdentifierLookups(t *testing.T) {
+	store := &noBroadSessionIdentifierStore{MemStore: beads.NewMemStore(), t: t}
+	_, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name": "sky",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(session_name holder): %v", err)
+	}
+
+	if err := EnsureAliasAvailableWithConfig(store, nil, "sky", ""); !errors.Is(err, ErrSessionAliasExists) {
+		t.Fatalf("EnsureAliasAvailableWithConfig(session_name collision) = %v, want ErrSessionAliasExists", err)
 	}
 }
 
