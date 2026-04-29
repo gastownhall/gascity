@@ -94,6 +94,7 @@
         "group": "Guides",
         "pages": [
           "guides/index",
+          "guides/migrating-from-gastown",
           "guides/migrating-to-pack-vnext",
           "guides/shareable-packs"
         ]

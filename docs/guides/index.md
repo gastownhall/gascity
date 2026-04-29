@@ -5,6 +5,7 @@ description: Practical guides for common Gas City workflows.
 
 These guides are task-oriented and current.
 
+- [Migrating from Gas Town](/guides/migrating-from-gastown)
 - [Migrating to Pack/City v.next](/guides/migrating-to-pack-vnext)
 - [Shareable Packs](/guides/shareable-packs)
 - [Using Gas City as a Multi-Agent Engineering Environment](/guides/multi-agent-engineering-environment)

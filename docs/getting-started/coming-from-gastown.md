@@ -3,6 +3,11 @@ title: Coming from Gas Town
 description: The fastest way to translate Gas Town concepts into Gas City primitives.
 ---
 
+> **Migrating a live Gas Town instance?** If you have a running Gas Town
+> with rigs and bead history you want to preserve, see the
+> [Migration Guide](/guides/migrating-from-gastown) for the hands-on
+> procedure.
+
 Gas City is the SDK extracted from Gas Town. The fastest way to get
 productive is to stop looking for a one-to-one port of Town's role tree and
 instead map Town concepts onto Gas City's primitives:
