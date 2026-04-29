@@ -249,6 +249,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	agentEnv["GC_BEADS"] = rawBeadsProviderForScope(rigRoot, p.cityPath)
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		agentEnv["GC_BIN"] = exe
+		prependGCBinDirToPATH(agentEnv, exe)
 	}
 	for key, value := range sessionDoltEnv(p.cityPath, rigRoot, p.rigs) {
 		agentEnv[key] = value
