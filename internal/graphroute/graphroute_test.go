@@ -168,14 +168,15 @@ func TestApplyGraphRouting_LegacyNilCfg(t *testing.T) {
 	}
 }
 
-func TestApplyGraphRouting_LegacyOverwritesExistingRouting(t *testing.T) {
-	// Legacy stamping mirrors graph.v2 AssignGraphStepRoute: unconditional
-	// overwrite on every non-topology step.
+func TestApplyGraphRouting_LegacyPreservesExplicitRouting(t *testing.T) {
+	// Legacy stamping supplies a fallback route, but formula-authored routes
+	// are intentional fan-out and must survive the sling target route.
 	r := &formula.Recipe{
 		Name: "mol-legacy",
 		Steps: []formula.RecipeStep{
 			{IsRoot: true, Metadata: map[string]string{}},
-			{ID: "step1", Metadata: map[string]string{"gc.routed_to": "stale-agent"}},
+			{ID: "step1", Metadata: map[string]string{"gc.routed_to": "reviewer"}},
+			{ID: "step2", Metadata: map[string]string{}},
 		},
 	}
 	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
@@ -183,8 +184,11 @@ func TestApplyGraphRouting_LegacyOverwritesExistingRouting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got := r.Steps[1].Metadata["gc.routed_to"]; got != "worker" {
-		t.Errorf("expected overwrite to worker, got %q", got)
+	if got := r.Steps[1].Metadata["gc.routed_to"]; got != "reviewer" {
+		t.Errorf("explicit route = %q, want reviewer", got)
+	}
+	if got := r.Steps[2].Metadata["gc.routed_to"]; got != "worker" {
+		t.Errorf("fallback route = %q, want worker", got)
 	}
 }
 
