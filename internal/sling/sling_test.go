@@ -429,6 +429,76 @@ func TestLooksLikeConfiguredBeadIDAcceptsHQPrefix(t *testing.T) {
 	}
 }
 
+// Underscored rig prefixes (e.g. "live_docs") are common in real cities
+// but were rejected by BeadIDParts' alpha-only prefix charset. The
+// config-aware path matches against cfg.Rigs literally, so the broken
+// charset gate is bypassed for any prefix the city has actually
+// declared. Coverage parallels the bug-report cases: live_docs,
+// migration_evals, scix_experiments, EnterpriseBench.
+func TestLooksLikeConfiguredBeadIDAcceptsUnderscoredPrefix(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "live_docs", Path: "/ld", Prefix: "live_docs"},
+			{Name: "migration_evals", Path: "/me", Prefix: "migration_evals"},
+			{Name: "scix_experiments", Path: "/sx", Prefix: "scix_experiments"},
+			{Name: "EnterpriseBench", Path: "/eb", Prefix: "EnterpriseBench"},
+		},
+	}
+	tests := []struct {
+		id   string
+		want bool
+	}{
+		{"live_docs-5du", true},
+		{"migration_evals-cns", true},
+		{"scix_experiments-wqr.9.3", true}, // hierarchical .child suffix.
+		{"EnterpriseBench-0rv.18", true},
+		{"EnterpriseBench-0rv", true},
+		{"live_docs-", false},    // empty suffix.
+		{"live_docs", false},     // no suffix dash.
+		{"unknown_rig-7", false}, // not in config.
+	}
+	for _, tt := range tests {
+		got := LooksLikeConfiguredBeadID(cfg, tt.id)
+		if got != tt.want {
+			t.Errorf("LooksLikeConfiguredBeadID(%q) = %v, want %v", tt.id, got, tt.want)
+		}
+	}
+}
+
+func TestBeadPrefixForCityHandlesUnderscoredPrefix(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "live_docs", Path: "/ld", Prefix: "live_docs"},
+			{Name: "migration_evals", Path: "/me", Prefix: "migration_evals"},
+		},
+	}
+	tests := []struct {
+		id   string
+		want string
+	}{
+		{"live_docs-5du", "live_docs"},
+		{"migration_evals-cns", "migration_evals"},
+		{"migration_evals-cns.1", "migration_evals"},
+	}
+	for _, tt := range tests {
+		got := BeadPrefixForCity(cfg, tt.id)
+		if got != tt.want {
+			t.Errorf("BeadPrefixForCity(%q) = %q, want %q", tt.id, got, tt.want)
+		}
+	}
+}
+
+func TestRigDirForBeadHonorsUnderscoredPrefix(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "live_docs", Path: "/live-docs-rig", Prefix: "live_docs"},
+		},
+	}
+	if got := RigDirForBead(cfg, "live_docs-5du"); got != "/live-docs-rig" {
+		t.Errorf("RigDirForBead(live_docs-5du) = %q, want /live-docs-rig", got)
+	}
+}
+
 func TestRigDirForBeadHonorsHyphenatedPrefix(t *testing.T) {
 	cfg := &config.City{
 		Rigs: []config.Rig{
