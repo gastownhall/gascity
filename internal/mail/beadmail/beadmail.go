@@ -388,19 +388,118 @@ func (p *Provider) recipientRoutes(recipient string) []string {
 	if recipient == "human" || p.store == nil {
 		return routes
 	}
-	sessions, err := p.store.List(beads.ListQuery{Label: session.LabelSession, IncludeClosed: true})
+
+	liveMatches, err := p.recipientSessionMatchesByCurrentAddress(recipient, false)
 	if err != nil {
 		log.Printf("beadmail: listing sessions for recipient route %q: %v", recipient, err)
+		return routes
+	}
+	if len(liveMatches) > 1 {
+		return []string{recipient}
+	}
+	if len(liveMatches) == 1 {
+		return appendSessionRecipientRoutes(routes, liveMatches[0])
+	}
+
+	closedMatches, err := p.recipientSessionMatchesByCurrentAddress(recipient, true)
+	if err != nil {
+		log.Printf("beadmail: listing closed sessions for recipient route %q: %v", recipient, err)
+		return routes
+	}
+	if len(closedMatches) > 1 {
+		return []string{recipient}
+	}
+	if len(closedMatches) == 1 {
+		return appendSessionRecipientRoutes(routes, closedMatches[0])
+	}
+	return p.recipientRoutesByHistoricalAlias(recipient, routes)
+}
+
+func (p *Provider) recipientSessionMatchesByCurrentAddress(recipient string, closed bool) ([]beads.Bead, error) {
+	var matches []beads.Bead
+	b, err := p.store.Get(recipient)
+	if err == nil && session.IsSessionBeadOrRepairable(b) && sessionRouteStatusMatches(b, closed) {
+		session.RepairEmptyType(p.store, &b)
+		matches = appendUniqueSessionRecipientMatch(matches, b)
+	} else if err != nil && !errors.Is(err, beads.ErrNotFound) {
+		return nil, fmt.Errorf("looking up session %q: %w", recipient, err)
+	}
+
+	status := ""
+	if closed {
+		status = "closed"
+	}
+	for _, key := range []string{"alias", "session_name"} {
+		keyMatches, err := p.recipientSessionMatchesByMetadata(key, recipient, status)
+		if err != nil {
+			return nil, err
+		}
+		for _, match := range keyMatches {
+			matches = appendUniqueSessionRecipientMatch(matches, match)
+		}
+	}
+	return matches, nil
+}
+
+func (p *Provider) recipientSessionMatchesByMetadata(key, recipient, status string) ([]beads.Bead, error) {
+	query := beads.ListQuery{Metadata: map[string]string{key: recipient}}
+	if status != "" {
+		query.Status = status
+	}
+	items, err := p.store.List(query)
+	if err != nil {
+		return nil, err
+	}
+	matches := make([]beads.Bead, 0, len(items))
+	for _, b := range items {
+		if !session.IsSessionBeadOrRepairable(b) {
+			continue
+		}
+		session.RepairEmptyType(p.store, &b)
+		if !sessionRouteStatusMatches(b, status == "closed") {
+			continue
+		}
+		if strings.TrimSpace(b.Metadata[key]) != recipient {
+			continue
+		}
+		matches = append(matches, b)
+	}
+	return matches, nil
+}
+
+func sessionRouteStatusMatches(b beads.Bead, closed bool) bool {
+	if closed {
+		return b.Status == "closed"
+	}
+	return b.Status != "closed"
+}
+
+func appendUniqueSessionRecipientMatch(matches []beads.Bead, b beads.Bead) []beads.Bead {
+	for _, match := range matches {
+		if match.ID == b.ID {
+			return matches
+		}
+	}
+	return append(matches, b)
+}
+
+func appendSessionRecipientRoutes(routes []string, b beads.Bead) []string {
+	for _, address := range sessionAddressesForRecipientRouting(b) {
+		routes = appendRecipientRoute(routes, address)
+	}
+	return routes
+}
+
+func (p *Provider) recipientRoutesByHistoricalAlias(recipient string, routes []string) []string {
+	sessions, err := p.store.List(beads.ListQuery{Label: session.LabelSession, IncludeClosed: true})
+	if err != nil {
+		log.Printf("beadmail: listing sessions for historical recipient route %q: %v", recipient, err)
 		return routes
 	}
 	var liveMatches []beads.Bead
 	var closedMatches []beads.Bead
 	for _, b := range sessions {
-		if !session.IsSessionBeadOrRepairable(b) {
-			continue
-		}
-		addresses := sessionAddressesForRecipientRouting(b)
-		if !containsRecipientRoute(addresses, recipient) {
+		if !session.IsSessionBeadOrRepairable(b) || !containsRecipientRoute(session.AliasHistory(b.Metadata), recipient) {
 			continue
 		}
 		if b.Status == "closed" {
@@ -416,10 +515,8 @@ func (p *Provider) recipientRoutes(recipient string) []string {
 	if len(matches) > 1 {
 		return []string{recipient}
 	}
-	for _, b := range matches {
-		for _, address := range sessionAddressesForRecipientRouting(b) {
-			routes = appendRecipientRoute(routes, address)
-		}
+	if len(matches) == 1 {
+		return appendSessionRecipientRoutes(routes, matches[0])
 	}
 	return routes
 }

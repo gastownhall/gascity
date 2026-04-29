@@ -23,6 +23,18 @@ func (s noListScanStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	return s.MemStore.List(query)
 }
 
+type noBroadSessionRouteStore struct {
+	*beads.MemStore
+	t *testing.T
+}
+
+func (s noBroadSessionRouteStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == session.LabelSession && len(query.Metadata) == 0 {
+		s.t.Fatalf("recipient routing used broad session scan: %+v", query)
+	}
+	return s.MemStore.List(query)
+}
+
 func TestInboxDoesNotCallBroadList(t *testing.T) {
 	base := beads.NewMemStore()
 	p := New(noListScanStore{MemStore: base})
@@ -1021,6 +1033,67 @@ func TestReplyToClosedSenderSessionIsDiscoverableByHistoricalAlias(t *testing.T)
 
 func TestRecipientRoutesPreferLiveSessionOverClosedHistory(t *testing.T) {
 	store := beads.NewMemStore()
+	p := New(store)
+
+	closed, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "old-worker",
+			"alias_history": "worker",
+			"session_name":  "workflows__codex-min-mc-old",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create closed session: %v", err)
+	}
+	if err := store.Close(closed.ID); err != nil {
+		t.Fatalf("Close session: %v", err)
+	}
+	live, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "worker",
+			"session_name": "workflows__codex-min-mc-live",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create live session: %v", err)
+	}
+	closedReply, err := store.Create(beads.Bead{
+		Title:    "old reply",
+		Type:     "message",
+		Assignee: closed.ID,
+		From:     "human",
+	})
+	if err != nil {
+		t.Fatalf("Create closed reply: %v", err)
+	}
+	liveMail, err := store.Create(beads.Bead{
+		Title:    "live mail",
+		Type:     "message",
+		Assignee: live.ID,
+		From:     "human",
+	})
+	if err != nil {
+		t.Fatalf("Create live mail: %v", err)
+	}
+
+	msgs, err := p.Inbox("worker")
+	if err != nil {
+		t.Fatalf("Inbox: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("Inbox returned %d messages, want 1", len(msgs))
+	}
+	if msgs[0].ID != liveMail.ID {
+		t.Fatalf("Inbox returned %s, want live message %s; closed reply was %s", msgs[0].ID, liveMail.ID, closedReply.ID)
+	}
+}
+
+func TestInboxByCurrentSessionAliasAvoidsBroadSessionScan(t *testing.T) {
+	store := noBroadSessionRouteStore{MemStore: beads.NewMemStore(), t: t}
 	p := New(store)
 
 	closed, err := store.Create(beads.Bead{
