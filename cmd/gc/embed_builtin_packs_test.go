@@ -806,3 +806,69 @@ func TestBuiltinPackIncludes_AlwaysIncludesMaintenance(t *testing.T) {
 		t.Errorf("maintenance pack not found in bd includes: %v", includes)
 	}
 }
+
+// TestConfigIncludesWithBuiltinPacks_PrependsExtrasAppendsBootstrap pins
+// the contract shared by tryReloadConfig and refreshConfigSnapshot:
+// user-supplied extraIncludes layer first, builtinPackIncludes layer on
+// top. Both supervisor reload paths route through this helper so the
+// rule is checked once here, not duplicated per call site.
+func TestConfigIncludesWithBuiltinPacks_PrependsExtrasAppendsBootstrap(t *testing.T) {
+	dir := t.TempDir()
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "")
+
+	extras := []string{"/some/user/file-a.toml", "/some/user/file-b.toml"}
+	includes := configIncludesWithBuiltinPacks(dir, extras)
+
+	bootstrap := builtinPackIncludes(dir)
+	wantLen := len(extras) + len(bootstrap)
+	if len(includes) != wantLen {
+		t.Fatalf("len(includes) = %d, want %d (extras=%v, bootstrap=%v)",
+			len(includes), wantLen, extras, bootstrap)
+	}
+
+	for i, want := range extras {
+		if includes[i] != want {
+			t.Errorf("includes[%d] = %q, want %q (extras must come first)", i, includes[i], want)
+		}
+	}
+	for i, want := range bootstrap {
+		if got := includes[len(extras)+i]; got != want {
+			t.Errorf("includes[%d] = %q, want %q (bootstrap must follow extras)",
+				len(extras)+i, got, want)
+		}
+	}
+
+	// Returned slice must be independent of the caller's extras slice
+	// (regression: a previous shape mutated the caller's slice via
+	// append-with-aliasing when extras had spare capacity).
+	extras[0] = "MUTATED"
+	if includes[0] == "MUTATED" {
+		t.Errorf("configIncludesWithBuiltinPacks aliased the caller's extras slice")
+	}
+}
+
+// TestConfigIncludesWithBuiltinPacks_NilExtras handles the common case
+// where the caller passes a nil/empty extras list (e.g. extraConfigFiles
+// is unset because no -f flag was given).
+func TestConfigIncludesWithBuiltinPacks_NilExtras(t *testing.T) {
+	dir := t.TempDir()
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "")
+
+	includes := configIncludesWithBuiltinPacks(dir, nil)
+	bootstrap := builtinPackIncludes(dir)
+
+	if len(includes) != len(bootstrap) {
+		t.Fatalf("len(includes) = %d, want %d (bootstrap only)", len(includes), len(bootstrap))
+	}
+	for i, want := range bootstrap {
+		if includes[i] != want {
+			t.Errorf("includes[%d] = %q, want %q", i, includes[i], want)
+		}
+	}
+}

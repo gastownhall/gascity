@@ -109,6 +109,23 @@ func packExists(dir string) bool {
 	return err == nil
 }
 
+// configIncludesWithBuiltinPacks returns the include list to pass to
+// config.LoadWithIncludes for the given city. The returned list is
+// `extraIncludes` followed by builtinPackIncludes(cityPath), so the
+// supervisor's reload paths and CLI commands compose the same way:
+// user-supplied includes layer first, bootstrap system packs (core,
+// maintenance, bd) layer on top so rig-scoped agents can reach
+// fragments shipped in core/template-fragments/ etc.
+//
+// Single named helper so both controller.tryReloadConfig and
+// controllerState.refreshConfigSnapshot share one shape; tests pin
+// the contract here rather than duplicating it per call site.
+func configIncludesWithBuiltinPacks(cityPath string, extraIncludes []string) []string {
+	includes := append([]string(nil), extraIncludes...)
+	includes = append(includes, builtinPackIncludes(cityPath)...)
+	return includes
+}
+
 // peekBeadsProvider reads just the beads.provider field from a city.toml
 // without doing full config parsing. Returns "" if not set or on error.
 func peekBeadsProvider(tomlPath string) string {

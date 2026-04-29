@@ -912,7 +912,8 @@ func (cs *controllerState) refreshConfigSnapshot() error {
 	}
 
 	tomlPath := filepath.Join(cs.cityPath, "city.toml")
-	nextCfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, extraConfigFiles...)
+	includes := configIncludesWithBuiltinPacks(cs.cityPath, extraConfigFiles)
+	nextCfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, includes...)
 	if err != nil {
 		return fmt.Errorf("loading updated city config: %w", err)
 	}
