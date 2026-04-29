@@ -61,14 +61,16 @@ is_known_agent() {
 }
 
 ORPHANED=0
-echo "$IN_PROGRESS" | jq -r '.[] | select(.assignee != null and .assignee != "") | "\(.id)\t\(.assignee)"' 2>/dev/null | while IFS=$'\t' read -r bead_id assignee; do
+# Process substitution (not a pipe) keeps the loop body in the parent
+# shell so $ORPHANED survives for the summary message below.
+while IFS=$'\t' read -r bead_id assignee; do
     if ! is_known_agent "$assignee"; then
         # `gc bd update` auto-resolves the bead's prefix to the right rig
         # store, so HQ and rig beads update in the correct database.
         gc bd update "$bead_id" --status=open --assignee="" 2>/dev/null || true
         ORPHANED=$((ORPHANED + 1))
     fi
-done
+done < <(echo "$IN_PROGRESS" | jq -r '.[] | select(.assignee != null and .assignee != "") | "\(.id)\t\(.assignee)"' 2>/dev/null)
 
 if [ "$ORPHANED" -gt 0 ]; then
     echo "orphan-sweep: reset $ORPHANED orphaned beads"
