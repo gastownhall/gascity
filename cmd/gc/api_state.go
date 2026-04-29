@@ -747,7 +747,7 @@ func (cs *controllerState) initializeRigStoreForCreate(r config.Rig) error {
 	}
 
 	scopeRoot := resolveStoreScopeRoot(cityPath, rigPath)
-	if _, err := initDirIfReady(cityPath, scopeRoot, r.EffectivePrefix()); err != nil {
+	if _, err := controllerStateInitRigDirIfReady(cityPath, scopeRoot, r.EffectivePrefix()); err != nil {
 		return fmt.Errorf("initializing rig %q beads: %w", r.Name, err)
 	}
 	return nil

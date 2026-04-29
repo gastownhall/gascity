@@ -79,13 +79,11 @@ type cityCreateRequest struct {
 }
 
 // cityCreateResponse is the response body for POST /v0/city. This
-// endpoint is asynchronous: a 202 response means the city was
-// scaffolded on disk and registered with the supervisor, but the
-// supervisor reconciler still has to run the slow finalize work
-// (pack materialization, bead store startup, formula resolution,
-// agent validation). Clients observe completion by subscribing to
-// /v0/events/stream and waiting for request.result.city.create or
-// request.failed with the returned request_id. Polling is unnecessary.
+// endpoint is asynchronous: a 202 response means the city was scaffolded
+// on disk and registered with the supervisor. Clients observe request
+// completion by subscribing to /v0/events/stream and waiting for
+// request.result.city.create or request.failed with the returned
+// request_id. Polling is unnecessary.
 type asyncAcceptedResponse struct {
 	RequestID string `json:"request_id" doc:"Correlation ID. Watch /v0/events/stream for request.result.city.create, request.result.city.unregister, or request.failed with this request_id."`
 }
@@ -316,21 +314,21 @@ func (sm *SupervisorMux) humaHandleProviderReadiness(ctx context.Context, input 
 
 // humaHandleCityCreate handles POST /v0/city asynchronously. Calls
 // the city initializer in-process to write the on-disk shape and
-// register the city with the supervisor, then returns 202 Accepted
-// immediately. The supervisor reconciler runs the slow finalize
-// (prepareCityForSupervisor: pack materialization, bead store
-// startup, formula resolution, agent validation) on its next tick
-// and emits request.result.city.create or request.failed on the
-// supervisor event bus when done. Clients observe completion via
-// /v0/events/stream — no polling required.
+// register the city with the supervisor, emits request.result.city.create
+// for the returned request_id, then returns 202 Accepted. The supervisor
+// reconciler runs later startup work (prepareCityForSupervisor: pack
+// materialization, bead store startup, formula resolution, agent
+// validation) independently of the request-result contract. Clients
+// observe request completion via /v0/events/stream — no polling required.
 //
-// Rationale: full city init takes minutes (dolt startup,
-// provider-readiness probes, pack fetch). Blocking the HTTP request
-// until finalize completes exceeds reasonable client timeouts
-// (a real-world app's harness hit 120s). The fast scaffold+register path takes
-// seconds; the async completion contract via SSE is the right shape
-// for a long-running operation. See engdocs/architecture/api-control-plane.md §1–§2 on
-// the object model + typed events; §4 on the event registry.
+// Rationale: full city startup takes minutes (dolt startup,
+// provider-readiness probes, pack fetch). Blocking the city-create
+// request until startup completes exceeds reasonable client timeouts
+// (a real-world app's harness hit 120s). The create request completes
+// when scaffold+register succeeds; later startup progress is city
+// lifecycle state, not request completion. See
+// engdocs/architecture/api-control-plane.md §1–§2 on the object model
+// + typed events; §4 on the event registry.
 func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *SupervisorCityCreateInput) (*SupervisorCityCreateOutput, error) {
 	dir := input.Body.Dir
 	if !filepath.IsAbs(dir) {
@@ -358,20 +356,8 @@ func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *Superv
 	if err != nil {
 		return nil, huma.Error500InternalServerError(fmt.Sprintf("generating request ID: %v", err))
 	}
-	if store, ok := sm.resolver.(PendingRequestStore); ok {
-		if err := store.StorePendingRequestID(dir, reqID); err != nil {
-			return nil, huma.Error500InternalServerError(fmt.Sprintf("storing pending request ID: %v", err))
-		}
-	}
-	cleanupPending := func() {
-		if store, ok := sm.resolver.(PendingRequestStore); ok {
-			if _, _, err := store.ConsumePendingRequestID(dir); err != nil {
-				log.Printf("api: consume pending city create request ID for %s: %v", dir, err)
-			}
-		}
-	}
 
-	_, scaffoldErr := sm.initializer.Scaffold(ctx, cityinit.InitRequest{
+	result, scaffoldErr := sm.initializer.Scaffold(ctx, cityinit.InitRequest{
 		Dir:                   dir,
 		Provider:              input.Body.Provider,
 		StartCommand:          input.Body.StartCommand,
@@ -380,23 +366,52 @@ func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *Superv
 	})
 	switch {
 	case errors.Is(scaffoldErr, cityinit.ErrAlreadyInitialized):
-		cleanupPending()
 		return nil, huma.Error409Conflict("conflict: city already initialized at " + dir)
 	case errors.Is(scaffoldErr, cityinit.ErrInvalidDirectory),
 		errors.Is(scaffoldErr, cityinit.ErrInvalidProvider),
 		errors.Is(scaffoldErr, cityinit.ErrInvalidBootstrapProfile):
-		cleanupPending()
 		return nil, huma.Error422UnprocessableEntity(scaffoldErr.Error())
 	case scaffoldErr != nil:
-		cleanupPending()
 		return nil, huma.Error500InternalServerError(scaffoldErr.Error())
 	}
+
+	emitCityCreateSucceeded(sm.resolver, reqID, result, dir)
 
 	out := &SupervisorCityCreateOutput{
 		Status: http.StatusAccepted,
 	}
 	out.Body = asyncAcceptedResponse{RequestID: reqID}
 	return out, nil
+}
+
+func emitCityCreateSucceeded(resolver CityResolver, requestID string, result *cityinit.InitResult, fallbackPath string) {
+	supSrc, ok := resolver.(SupervisorEventSource)
+	if !ok {
+		log.Printf("api: no supervisor event recorder for city.create result %s", requestID)
+		return
+	}
+	rec := supSrc.SupervisorEventRecorder()
+	if rec == nil {
+		log.Printf("api: nil supervisor event recorder for city.create result %s", requestID)
+		return
+	}
+
+	cityPath := fallbackPath
+	cityName := filepath.Base(fallbackPath)
+	if result != nil {
+		if result.CityPath != "" {
+			cityPath = result.CityPath
+		}
+		if result.CityName != "" {
+			cityName = result.CityName
+		}
+	}
+
+	EmitTypedEvent(rec, events.RequestResultCityCreate, cityName, CityCreateSucceededPayload{
+		RequestID: requestID,
+		Name:      cityName,
+		Path:      cityPath,
+	})
 }
 
 // humaHandleCityUnregister handles POST /v0/city/{cityName}/unregister

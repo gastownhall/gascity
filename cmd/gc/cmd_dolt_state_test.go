@@ -1032,6 +1032,7 @@ func TestDoltStateProbeManagedCmdReportsImposterHolder(t *testing.T) {
 }
 
 func TestDoltStateProbeManagedCmdReportsDeletedOwnedHolder(t *testing.T) {
+	skipSlowCmdGCTest(t, "spawns a TCP listener process and checks deleted inodes; run make test-cmd-gc-process for full coverage")
 	if _, err := exec.LookPath("lsof"); err != nil {
 		t.Skip("lsof not installed")
 	}
@@ -1273,6 +1274,7 @@ esac
 }
 
 func TestDoltStateExistingManagedCmdReportsDeletedInodes(t *testing.T) {
+	skipSlowCmdGCTest(t, "spawns an open-file TCP listener process and uses lsof; run make test-cmd-gc-process for full coverage")
 	if _, err := exec.LookPath("lsof"); err != nil {
 		t.Skip("lsof not installed")
 	}
@@ -1337,6 +1339,7 @@ esac
 }
 
 func TestDoltStatePreflightCleanCmdRemovesStaleArtifacts(t *testing.T) {
+	skipSlowCmdGCTest(t, "spawns stale socket holders and uses lsof; run make test-cmd-gc-process for full coverage")
 	if _, err := exec.LookPath("lsof"); err != nil {
 		t.Skip("lsof not installed")
 	}
@@ -1698,6 +1701,7 @@ func processHoldsDeletedPath(pid int, targetPath string) bool {
 }
 
 func TestProcessHasDeletedDataInodesIgnoresDeletedNomsLock(t *testing.T) {
+	skipSlowCmdGCTest(t, "spawns an open-file helper and uses lsof; run make test-cmd-gc-process for full coverage")
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -2089,6 +2093,7 @@ esac
 }
 
 func TestDoltStateWaitReadyCmdDetectsDeletedInodes(t *testing.T) {
+	skipSlowCmdGCTest(t, "spawns a TCP listener process and checks deleted inodes; run make test-cmd-gc-process for full coverage")
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {

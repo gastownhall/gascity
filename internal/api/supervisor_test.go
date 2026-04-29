@@ -19,8 +19,9 @@ import (
 
 // fakeCityResolver implements CityResolver for testing.
 type fakeCityResolver struct {
-	cities  map[string]*fakeState // keyed by city name
-	pending map[string]string
+	cities             map[string]*fakeState // keyed by city name
+	pending            map[string]string
+	supervisorRecorder events.Recorder
 }
 
 func (f *fakeCityResolver) ListCities() []CityInfo {
@@ -55,6 +56,10 @@ func (f *fakeCityResolver) ConsumePendingRequestID(cityPath string) (string, boo
 	id, ok := f.pending[cityPath]
 	delete(f.pending, cityPath)
 	return id, ok, nil
+}
+
+func (f *fakeCityResolver) SupervisorEventRecorder() events.Recorder {
+	return f.supervisorRecorder
 }
 
 func newTestSupervisorMux(t *testing.T, cities map[string]*fakeState) *SupervisorMux {

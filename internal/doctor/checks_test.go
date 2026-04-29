@@ -26,6 +26,13 @@ type partialListDoctorProvider struct {
 	listErr error
 }
 
+func skipSlowDoctorProcessTest(t *testing.T, reason string) {
+	t.Helper()
+	if strings.TrimSpace(os.Getenv("GC_FAST_UNIT")) != "0" {
+		t.Skip(reason)
+	}
+}
+
 func (p *partialListDoctorProvider) ListRunning(prefix string) ([]string, error) {
 	names, _ := p.Fake.ListRunning(prefix)
 	return names, p.listErr
@@ -2712,6 +2719,7 @@ func TestDoltNomsSizeCheck_IgnoresAmbientDataDirOverride(t *testing.T) {
 }
 
 func TestDoltNomsSizeCheck_UsesPublishedRuntimeDataDir(t *testing.T) {
+	skipSlowDoctorProcessTest(t, "uses live port ownership checks; run make test-cmd-gc-process for full coverage")
 	dir := setupManagedDoltCity(t)
 	dataDir := filepath.Join(t.TempDir(), "relocated-dolt-data")
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {

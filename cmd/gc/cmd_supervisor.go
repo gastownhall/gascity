@@ -1210,9 +1210,6 @@ func reconcileCities(
 			if consumeErr != nil {
 				fmt.Fprintf(stderr, "gc supervisor: city '%s': consume pending request_id for city.create failure event failed (path=%s): %v\n", cityName, path, consumeErr) //nolint:errcheck
 			}
-			if !hasReqID {
-				fmt.Fprintf(stderr, "gc supervisor: city '%s': no pending request_id for city.create failure event (path=%s)\n", cityName, path) //nolint:errcheck
-			}
 			if supRec := cr.SupervisorEventRecorder(); supRec != nil && hasReqID {
 				api.EmitRequestFailed(supRec, reqID, api.RequestOperationCityCreate, "city_init_failed", err.Error())
 			}
@@ -1612,9 +1609,6 @@ func emitPendingCityCreateResult(cr *cityRegistry, path, cityName string, stderr
 	reqID, hasReqID, consumeErr := cr.ConsumePendingRequestID(path)
 	if consumeErr != nil {
 		fmt.Fprintf(stderr, "gc supervisor: city '%s': consume pending request_id for city.create completion event failed (path=%s): %v\n", cityName, path, consumeErr) //nolint:errcheck
-	}
-	if !hasReqID {
-		fmt.Fprintf(stderr, "gc supervisor: city '%s': no pending request_id for city.create completion event (path=%s)\n", cityName, path) //nolint:errcheck
 	}
 	if supRec := cr.SupervisorEventRecorder(); supRec != nil && hasReqID {
 		api.EmitTypedEvent(supRec, events.RequestResultCityCreate, cityName, api.CityCreateSucceededPayload{

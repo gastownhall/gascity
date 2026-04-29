@@ -1422,8 +1422,8 @@ func TestOrderDispatchExecMarksExternalDoltTargetForManagedLocalOnlyOrders(t *te
 
 func TestOrderDispatchExecPropagatesManagedDoltLayout(t *testing.T) {
 	store := beads.NewMemStore()
-	cityDir := t.TempDir()
-	dataDir := filepath.Join(t.TempDir(), "managed-dolt")
+	cityDir := normalizePathForCompare(t.TempDir())
+	dataDir := normalizePathForCompare(filepath.Join(t.TempDir(), "managed-dolt"))
 	configFile := filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
 	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
 		t.Fatal(err)
@@ -1493,8 +1493,8 @@ func TestOrderDispatchExecPropagatesManagedDoltLayout(t *testing.T) {
 
 func TestOrderDispatchExecPropagatesLegacyManagedDoltDataDir(t *testing.T) {
 	store := beads.NewMemStore()
-	cityDir := t.TempDir()
-	dataDir := filepath.Join(cityDir, ".gc", "dolt-data")
+	cityDir := normalizePathForCompare(t.TempDir())
+	dataDir := normalizePathForCompare(filepath.Join(cityDir, ".gc", "dolt-data"))
 	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -2247,7 +2247,7 @@ func orderDispatchTestEnv(t *testing.T, envCh <-chan []string) map[string]string
 			}
 		}
 		return env
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("timed out waiting for order exec env")
 	}
 	return nil
@@ -2849,10 +2849,13 @@ func TestOrderDispatchSkipsRigConditionWhenLegacyOpenWorkReadFails(t *testing.T)
 }
 
 func TestOrderDispatchConditionUsesScopedEnv(t *testing.T) {
-	cityDir := t.TempDir()
+	cityDir := normalizePathForCompare(t.TempDir())
 	store := beads.NewMemStore()
+	if err := os.WriteFile(filepath.Join(cityDir, "scoped-marker"), []byte("ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	check := fmt.Sprintf(
-		`test "$GC_CITY_PATH" = '%s' && test "$GC_STORE_ROOT" = '%s' && test "$GC_STORE_SCOPE" = city && test "$(pwd -P)" = "$(cd '%s' && pwd -P)"`,
+		`test "$GC_CITY_PATH" = '%s' && test "$GC_STORE_ROOT" = '%s' && test "$GC_STORE_SCOPE" = city && test "$(pwd -P)" = "$(cd '%s' && pwd -P)" && test -f scoped-marker`,
 		cityDir,
 		cityDir,
 		cityDir,

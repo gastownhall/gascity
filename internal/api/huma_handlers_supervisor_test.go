@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/cityinit"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 type fakeInitializer struct {
@@ -47,7 +49,10 @@ func (f *fakeInitializer) Unregister(_ context.Context, req cityinit.UnregisterR
 
 func newTestSupervisorMuxWithInitializer(t *testing.T, init cityInitializer) *SupervisorMux {
 	t.Helper()
-	return NewSupervisorMux(&fakeCityResolver{cities: map[string]*fakeState{}}, init, false, "test", time.Now())
+	return NewSupervisorMux(&fakeCityResolver{
+		cities:             map[string]*fakeState{},
+		supervisorRecorder: events.NewFake(),
+	}, init, false, "test", time.Now())
 }
 
 func TestSupervisorCityCreateConflictsWhenTargetAlreadyInitialized(t *testing.T) {
@@ -211,6 +216,97 @@ func TestSupervisorCityCreateReturnsRequestID(t *testing.T) {
 	}
 }
 
+func TestSupervisorCityCreateEmitsRequestResultOnSupervisorStream(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cityPath := filepath.Join(home, "mc-city")
+	resolver := &fakeCityResolver{
+		cities:             map[string]*fakeState{},
+		supervisorRecorder: events.NewFake(),
+	}
+	init := &fakeInitializer{
+		scaffoldResult: &cityinit.InitResult{
+			CityName:     "mc-city",
+			CityPath:     cityPath,
+			ProviderUsed: "claude",
+		},
+	}
+	sm := NewSupervisorMux(resolver, init, false, "test", time.Now())
+
+	streamCtx, cancelStream := context.WithCancel(context.Background())
+	defer cancelStream()
+	streamReq := httptest.NewRequest(http.MethodGet, "/v0/events/stream?after_cursor=0", nil).WithContext(streamCtx)
+	streamReq.Header.Set("Accept", "text/event-stream")
+	streamRec := httptest.NewRecorder()
+	streamDone := make(chan struct{})
+	go func() {
+		defer close(streamDone)
+		sm.ServeHTTP(streamRec, streamReq)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	postReq := httptest.NewRequest(http.MethodPost, "/v0/city", strings.NewReader(`{"dir":"mc-city","provider":"claude"}`))
+	postReq.Header.Set("Content-Type", "application/json")
+	postReq.Header.Set("X-GC-Request", "test")
+	postRec := httptest.NewRecorder()
+
+	sm.ServeHTTP(postRec, postReq)
+
+	if postRec.Code != http.StatusAccepted {
+		cancelStream()
+		<-streamDone
+		t.Fatalf("POST /v0/city status = %d, want %d; body=%s", postRec.Code, http.StatusAccepted, postRec.Body.String())
+	}
+	var createResp struct {
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal(postRec.Body.Bytes(), &createResp); err != nil {
+		cancelStream()
+		<-streamDone
+		t.Fatalf("decode create response: %v; body=%s", err, postRec.Body.String())
+	}
+	if createResp.RequestID == "" {
+		cancelStream()
+		<-streamDone
+		t.Fatalf("empty request_id in response; body=%s", postRec.Body.String())
+	}
+
+	time.Sleep(250 * time.Millisecond)
+	cancelStream()
+	<-streamDone
+
+	if streamRec.Code != http.StatusOK {
+		t.Fatalf("GET /v0/events/stream status = %d, want %d; body=%s", streamRec.Code, http.StatusOK, streamRec.Body.String())
+	}
+
+	frames := parseSSETestFrames(streamRec.Body.String())
+	observed := make([]string, 0, len(frames))
+	for _, frame := range frames {
+		if frame.Data == "" {
+			continue
+		}
+		var env struct {
+			Type    string         `json:"type"`
+			Payload map[string]any `json:"payload"`
+		}
+		if err := json.Unmarshal([]byte(frame.Data), &env); err != nil {
+			t.Fatalf("decode SSE data: %v; data=%s", err, frame.Data)
+		}
+		observed = append(observed, env.Type)
+		if env.Payload["request_id"] != createResp.RequestID {
+			continue
+		}
+		switch env.Type {
+		case events.RequestResultCityCreate:
+			return
+		case events.RequestFailed:
+			t.Fatalf("city create emitted request.failed for request_id %s: %s", createResp.RequestID, frame.Data)
+		}
+	}
+	t.Fatalf("stream did not emit request.result.city.create for request_id %s; observed event types=%v body=%s", createResp.RequestID, observed, streamRec.Body.String())
+}
+
 func TestSupervisorCityCreateMapsInitializerErrors(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "mc-city")
 	tests := []struct {
@@ -245,7 +341,7 @@ func TestSupervisorCityCreateMapsInitializerErrors(t *testing.T) {
 
 func TestSupervisorCityCreateClearsPendingRequestOnScaffoldError(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "mc-city")
-	resolver := &fakeCityResolver{cities: map[string]*fakeState{}}
+	resolver := &fakeCityResolver{cities: map[string]*fakeState{}, supervisorRecorder: events.NewFake()}
 	init := &fakeInitializer{scaffoldErr: errors.New("scaffold failed")}
 	sm := NewSupervisorMux(resolver, init, false, "test", time.Now())
 	req := httptest.NewRequest(http.MethodPost, "/v0/city", strings.NewReader(`{"dir":"`+cityPath+`","provider":"codex"}`))
