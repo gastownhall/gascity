@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -3587,5 +3588,178 @@ func TestSyncSessionBeadsWithSnapshotAndRigStoresLeavesOrphanedSessionBeadOpenWh
 	}
 	if got.Status != "open" {
 		t.Fatalf("session bead status = %q, want open because rig-store work still owns it", got.Status)
+	}
+}
+
+func TestSyncSessionBeads_PreAssignsPoolWorkBeadOnNewSession(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	rigStores := map[string]beads.Store{"myrig": rigStore}
+	clk := &clock.Fake{Time: time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)}
+
+	// Work bead in rig store routed to the pool template.
+	workBead, err := rigStore.Create(beads.Bead{
+		Title:    "some work",
+		Metadata: map[string]string{"gc.routed_to": "myrig/polecat"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "polecat",
+			Dir:               "myrig",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(3),
+		}},
+	}
+
+	sn := "test-city--polecat-1"
+	desiredState := map[string]TemplateParams{
+		sn: {TemplateName: "myrig/polecat", InstanceName: sn},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeadsWithSnapshotAndRigStores(
+		t.TempDir(), cityStore, rigStores, desiredState, nil, allConfiguredDS(desiredState), cfg, clk, &stderr, false, nil,
+	)
+
+	updated, err := rigStore.Get(workBead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Assignee != sn {
+		t.Errorf("work bead assignee = %q, want %q", updated.Assignee, sn)
+	}
+}
+
+func TestSyncSessionBeads_PreAssignsUniquePoolWorkBeadsForMultipleSessions(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	rigStores := map[string]beads.Store{"myrig": rigStore}
+	clk := &clock.Fake{Time: time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)}
+
+	// Three work beads for three new pool sessions.
+	var beadIDs []string
+	for i := 0; i < 3; i++ {
+		wb, err := rigStore.Create(beads.Bead{
+			Title:    fmt.Sprintf("work-%d", i),
+			Metadata: map[string]string{"gc.routed_to": "myrig/polecat"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		beadIDs = append(beadIDs, wb.ID)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "polecat",
+			Dir:               "myrig",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(3),
+		}},
+	}
+
+	desiredState := map[string]TemplateParams{
+		"test-city--polecat-1": {TemplateName: "myrig/polecat", InstanceName: "test-city--polecat-1"},
+		"test-city--polecat-2": {TemplateName: "myrig/polecat", InstanceName: "test-city--polecat-2"},
+		"test-city--polecat-3": {TemplateName: "myrig/polecat", InstanceName: "test-city--polecat-3"},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeadsWithSnapshotAndRigStores(
+		t.TempDir(), cityStore, rigStores, desiredState, nil, allConfiguredDS(desiredState), cfg, clk, &stderr, false, nil,
+	)
+
+	// Each bead must be assigned to exactly one unique session.
+	beadAssignee := make(map[string]string) // bead ID → assignee
+	for _, id := range beadIDs {
+		wb, err := rigStore.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if wb.Assignee == "" {
+			t.Errorf("bead %s has no assignee (want a pool session name)", id)
+			continue
+		}
+		beadAssignee[id] = wb.Assignee
+	}
+	// Verify no two beads share the same assignee.
+	seen := make(map[string]string) // assignee → bead ID
+	for beadID, assignee := range beadAssignee {
+		if prev, ok := seen[assignee]; ok {
+			t.Errorf("assignee %s assigned to both %s and %s", assignee, prev, beadID)
+		}
+		seen[assignee] = beadID
+	}
+}
+
+func TestSyncSessionBeads_DoesNotPreAssignForExistingSession(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	rigStores := map[string]beads.Store{"myrig": rigStore}
+	clk := &clock.Fake{Time: time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)}
+
+	// Work bead in rig store.
+	workBead, err := rigStore.Create(beads.Bead{
+		Title:    "some work",
+		Metadata: map[string]string{"gc.routed_to": "myrig/polecat"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "polecat",
+			Dir:               "myrig",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(3),
+		}},
+	}
+
+	sn := "test-city--polecat-1"
+	desiredState := map[string]TemplateParams{
+		sn: {TemplateName: "myrig/polecat", InstanceName: sn},
+	}
+
+	// First sync: creates the session bead and pre-assigns the work bead.
+	syncSessionBeadsWithSnapshotAndRigStores(
+		t.TempDir(), cityStore, rigStores, desiredState, nil, allConfiguredDS(desiredState), cfg, clk, io.Discard, false, nil,
+	)
+
+	// Second work bead added after first sync.
+	workBead2, err := rigStore.Create(beads.Bead{
+		Title:    "more work",
+		Metadata: map[string]string{"gc.routed_to": "myrig/polecat"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Second sync: session bead exists; should not pre-assign workBead2.
+	syncSessionBeadsWithSnapshotAndRigStores(
+		t.TempDir(), cityStore, rigStores, desiredState, nil, allConfiguredDS(desiredState), cfg, clk, io.Discard, false, nil,
+	)
+
+	wb2, err := rigStore.Get(workBead2.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wb2.Assignee != "" {
+		t.Errorf("second work bead assignee = %q, want empty (session already existed)", wb2.Assignee)
+	}
+	// First bead assignment is unchanged.
+	wb1, err := rigStore.Get(workBead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wb1.Assignee != sn {
+		t.Errorf("first work bead assignee = %q, want %q", wb1.Assignee, sn)
 	}
 }

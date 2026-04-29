@@ -732,6 +732,10 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		)
 	}
 
+	// preAssignedPoolBeads tracks work beads pre-assigned to new pool sessions
+	// this pass to ensure each session gets a distinct bead.
+	preAssignedPoolBeads := make(map[string]bool)
+
 	for sn, tp := range desiredState {
 		agentCfg := templateParamsToConfig(tp)
 		liveHash := runtime.LiveFingerprint(agentCfg)
@@ -761,6 +765,13 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			}
 		}
 		if !exists {
+			// For new ephemeral pool sessions, pre-assign an available work bead
+			// to eliminate the spawn race where concurrent sessions all compete
+			// for the same Tier 3 (pool-routed unassigned) bead. The session then
+			// finds its work via Tier 2 (bd ready --assignee="$GC_SESSION_NAME").
+			if isManagedPool && !tp.DependencyOnly {
+				preAssignPoolWorkBead(store, rigStores, tp.TemplateName, sn, preAssignedPoolBeads, stderr)
+			}
 			// Create a new session bead.
 			meta := map[string]string{
 				"session_name":       sn,
@@ -1472,4 +1483,67 @@ func resolvePoolSlot(agentName, template string) int {
 		return slot
 	}
 	return 0
+}
+
+// preAssignPoolWorkBead assigns an available ready unassigned work bead
+// routed to template to sessionName. This eliminates the spawn race where
+// multiple new pool sessions concurrently compete for the same Tier 3
+// (pool-routed unassigned) bead. Once assigned, the session finds its work
+// via Tier 2 (bd ready --assignee="$GC_SESSION_NAME") instead.
+//
+// alreadyAssigned tracks beads pre-assigned earlier in the same sync pass
+// to prevent two sessions from receiving the same bead.
+// Returns the assigned bead ID, or "" if no work bead is available.
+func preAssignPoolWorkBead(
+	cityStore beads.Store,
+	rigStores map[string]beads.Store,
+	template string,
+	sessionName string,
+	alreadyAssigned map[string]bool,
+	stderr io.Writer,
+) string {
+	store := beadStoreForTemplate(cityStore, rigStores, template)
+	if store == nil {
+		return ""
+	}
+	candidates, err := beads.ReadyLive(store)
+	if err != nil {
+		if stderr != nil {
+			fmt.Fprintf(stderr, "session beads: querying pool work for %s: %v\n", sessionName, err) //nolint:errcheck
+		}
+		return ""
+	}
+	for _, wb := range candidates {
+		if strings.TrimSpace(wb.Metadata["gc.routed_to"]) != template {
+			continue
+		}
+		if strings.TrimSpace(wb.Assignee) != "" {
+			continue
+		}
+		if alreadyAssigned[wb.ID] {
+			continue
+		}
+		sn := sessionName
+		if err := store.Update(wb.ID, beads.UpdateOpts{Assignee: &sn}); err != nil {
+			if stderr != nil {
+				fmt.Fprintf(stderr, "session beads: pre-assigning %s to %s: %v\n", wb.ID, sessionName, err) //nolint:errcheck
+			}
+			continue
+		}
+		alreadyAssigned[wb.ID] = true
+		return wb.ID
+	}
+	return ""
+}
+
+// beadStoreForTemplate returns the rig store for a qualified pool agent
+// template (e.g., "myrig/polecat" → rigStores["myrig"]). Falls back to
+// cityStore when no rig prefix is found or the rig store is absent.
+func beadStoreForTemplate(cityStore beads.Store, rigStores map[string]beads.Store, template string) beads.Store {
+	if slash := strings.IndexByte(template, '/'); slash > 0 {
+		if store, ok := rigStores[template[:slash]]; ok && store != nil {
+			return store
+		}
+	}
+	return cityStore
 }
