@@ -340,6 +340,8 @@ func TestMaterializeBuiltinPacksPiHookUsesCurrentExtensionAPI(t *testing.T) {
 		`pi.on("session_compact"`,
 		`pi.on("session_shutdown"`,
 		`pi.on("before_agent_start"`,
+		`const work = run(["hook", "--inject"], ctx.cwd);`,
+		`appendSystemPrompt(event.systemPrompt, [nudges, mail, work])`,
 	} {
 		if !strings.Contains(data, want) {
 			t.Errorf("materialized Pi hook missing current extension API marker %q:\n%s", want, data)
@@ -385,6 +387,38 @@ module.exports = {
 	}
 	if !strings.Contains(data, `pi.on("session_start"`) {
 		t.Fatalf("repaired materialized Pi hook does not use current extension API:\n%s", data)
+	}
+}
+
+func TestMaterializeBuiltinPacksReplacesFactoryPiHookWithoutRoutedWorkInjection(t *testing.T) {
+	dir := t.TempDir()
+	hookPath := materializedPiHookPath(dir)
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", filepath.Dir(hookPath), err)
+	}
+	stale := []byte(`// Gas City hooks for Pi Coding Agent.
+module.exports = function gascityPiExtension(pi) {
+  pi.on("before_agent_start", (event, ctx) => {
+    const nudges = run(["nudge", "drain", "--inject"], ctx.cwd);
+    const mail = run(["mail", "check", "--inject"], ctx.cwd);
+    return { systemPrompt: [event.systemPrompt, nudges, mail].filter(Boolean).join("\n\n") };
+  });
+};
+`)
+	if err := os.WriteFile(hookPath, stale, 0o644); err != nil {
+		t.Fatalf("WriteFile(%s): %v", hookPath, err)
+	}
+
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+	}
+
+	data := readMaterializedPiHook(t, dir)
+	if data == string(stale) {
+		t.Fatal("stale factory-style materialized Pi hook was preserved; expected core pack materialization to repair it")
+	}
+	if !strings.Contains(data, `const work = run(["hook", "--inject"], ctx.cwd);`) {
+		t.Fatalf("repaired materialized Pi hook does not inject routed work in before_agent_start:\n%s", data)
 	}
 }
 

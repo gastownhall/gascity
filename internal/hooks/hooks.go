@@ -181,6 +181,15 @@ func piHookNeedsUpgrade(existing []byte) bool {
 			return true
 		}
 	}
+	for _, marker := range []string{
+		"GC_PI_HOOK_VERSION = 2",
+		`const work = run(["hook", "--inject"], ctx.cwd);`,
+		`appendSystemPrompt(event.systemPrompt, [nudges, mail, work])`,
+	} {
+		if !strings.Contains(content, marker) {
+			return true
+		}
+	}
 	return false
 }
 

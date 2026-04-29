@@ -758,6 +758,8 @@ func TestInstallPiHookUsesCurrentExtensionAPI(t *testing.T) {
 		`pi.on("session_compact"`,
 		`pi.on("session_shutdown"`,
 		`pi.on("before_agent_start"`,
+		`const work = run(["hook", "--inject"], ctx.cwd);`,
+		`appendSystemPrompt(event.systemPrompt, [nudges, mail, work])`,
 	} {
 		if !strings.Contains(data, want) {
 			t.Errorf("Pi hook missing current extension API marker %q:\n%s", want, data)
@@ -797,6 +799,32 @@ module.exports = {
 	}
 	if !strings.Contains(data, `pi.on("session_start"`) {
 		t.Fatalf("upgraded Pi hook does not use current extension API:\n%s", data)
+	}
+}
+
+func TestInstallPiHookUpgradesFactoryHookWithoutRoutedWorkInjection(t *testing.T) {
+	fs := fsys.NewFake()
+	stale := []byte(`// Gas City hooks for Pi Coding Agent.
+module.exports = function gascityPiExtension(pi) {
+  pi.on("before_agent_start", (event, ctx) => {
+    const nudges = run(["nudge", "drain", "--inject"], ctx.cwd);
+    const mail = run(["mail", "check", "--inject"], ctx.cwd);
+    return { systemPrompt: [event.systemPrompt, nudges, mail].filter(Boolean).join("\n\n") };
+  });
+};
+`)
+	fs.Files["/work/.pi/extensions/gc-hooks.js"] = stale
+
+	if err := Install(fs, "/city", "/work", []string{"pi"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	data := string(fs.Files["/work/.pi/extensions/gc-hooks.js"])
+	if data == string(stale) {
+		t.Fatal("factory-style Pi hook without routed-work injection was preserved; expected managed upgrade")
+	}
+	if !strings.Contains(data, `const work = run(["hook", "--inject"], ctx.cwd);`) {
+		t.Fatalf("upgraded Pi hook does not inject routed work in before_agent_start:\n%s", data)
 	}
 }
 
