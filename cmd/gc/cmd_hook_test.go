@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -86,38 +85,19 @@ func TestHookInjectSuppressesNoReadyMessage(t *testing.T) {
 	}
 }
 
-func TestHookInjectFormatsOutput(t *testing.T) {
+func TestHookInjectIsNonIntrusiveWithWork(t *testing.T) {
 	runner := func(string, string) (string, error) { return "hw-1  open  Fix the bug\n", nil }
 	var stdout, stderr bytes.Buffer
 	code := doHook("bd ready", "", true, runner, &stdout, &stderr)
 	if code != 0 {
 		t.Errorf("doHook(inject, work) = %d, want 0", code)
 	}
-	out := stdout.String()
-	if !strings.Contains(out, "<system-reminder>") {
-		t.Errorf("stdout missing <system-reminder>: %q", out)
-	}
-	if !strings.Contains(out, "</system-reminder>") {
-		t.Errorf("stdout missing </system-reminder>: %q", out)
-	}
-	if !strings.Contains(out, "<work-items>") {
-		t.Errorf("stdout missing <work-items>: %q", out)
-	}
-	if !strings.Contains(out, "hw-1") {
-		t.Errorf("stdout missing work item: %q", out)
-	}
-	if !strings.Contains(out, "gc hook") {
-		t.Errorf("stdout missing 'gc hook' hint: %q", out)
-	}
-	if !strings.Contains(out, "bd update <id> --claim") {
-		t.Errorf("stdout missing claim command: %q", out)
-	}
-	if !strings.Contains(out, "bd close <id>") {
-		t.Errorf("stdout missing close command: %q", out)
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty non-intrusive inject output", stdout.String())
 	}
 }
 
-func TestHookCommandCodexInjectEmitsSingleStopPayload(t *testing.T) {
+func TestHookCommandCodexInjectDoesNotBlockStop(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
@@ -141,19 +121,56 @@ work_query = "printf '[{\"id\":\"hw-1\",\"title\":\"Fix the bug\"}]'"
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("gc hook command failed: %v; stderr=%s", err, stderr.String())
 	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty non-blocking Stop hook output", stdout.String())
+	}
+}
 
-	var payload struct {
-		Decision string `json:"decision"`
-		Reason   string `json:"reason"`
+func TestCmdHookSessionTemplateContextDoesNotScanSessionsForName(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	fakeBin := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd.log")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
-		t.Fatalf("stdout is not a single JSON payload: %v\n%s", err, stdout.String())
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if got, want := payload.Decision, "block"; got != want {
-		t.Fatalf("decision = %q, want %q", got, want)
+	fakeBD := filepath.Join(fakeBin, "bd")
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %q\nprintf '[]'\n", logPath)
+	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(payload.Reason, "hw-1") {
-		t.Fatalf("reason = %q, want pending work", payload.Reason)
+
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_TEMPLATE", "worker")
+	t.Setenv("GC_ALIAS", "worker-1")
+	t.Setenv("GC_SESSION_ID", "mc-session")
+	t.Setenv("GC_SESSION_NAME", "runtime-session")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithFormat(nil, true, "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHookWithFormat() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", logPath, err)
+	}
+	logText := string(logData)
+	if strings.Contains(logText, "--label=gc:session") {
+		t.Fatalf("gc hook scanned all session beads before running work_query:\n%s", logText)
+	}
+	if !strings.Contains(logText, "--assignee=runtime-session") {
+		t.Fatalf("gc hook did not pass runtime session name into work_query; bd log:\n%s", logText)
 	}
 }
 

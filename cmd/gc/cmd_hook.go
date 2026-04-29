@@ -136,9 +136,8 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 	// names; named-session context preserves the runtime-supplied owner
 	// env while selecting the backing config through GC_TEMPLATE.
 	resolvedAgentName := a.QualifiedName()
-	resolvedSessionName := cliSessionName(cityPath, cityName, resolvedAgentName, cfg.Workspace.SessionTemplate)
 	agentForQuery := resolvedAgentName
-	sessionForQuery := resolvedSessionName
+	sessionForQuery := ""
 	if sessionTemplateContext {
 		agentForQuery = os.Getenv("GC_ALIAS")
 		if agentForQuery == "" {
@@ -148,6 +147,8 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 			agentForQuery = os.Getenv("GC_AGENT")
 		}
 		sessionForQuery = os.Getenv("GC_SESSION_NAME")
+	} else {
+		sessionForQuery = cliSessionName(cityPath, cityName, resolvedAgentName, cfg.Workspace.SessionTemplate)
 	}
 	overrides := hookQueryEnv(cityPath, cfg, &a)
 	overrides["GC_AGENT"] = agentForQuery
@@ -240,10 +241,8 @@ func doHookWithFormat(workQuery, dir string, inject bool, hookFormat string, run
 	hasWork := workQueryHasReadyWork(normalized)
 
 	if inject {
-		if hasWork {
-			content := formatHookInjectReminder(normalized)
-			_ = writeProviderHookContextForEvent(stdout, hookFormat, "Stop", content)
-		}
+		_ = hasWork
+		_ = hookFormat
 		return 0 // --inject always exits 0
 	}
 
@@ -256,23 +255,6 @@ func doHookWithFormat(workQuery, dir string, inject bool, hookFormat string, run
 	}
 	fmt.Fprint(stdout, normalized) //nolint:errcheck // best-effort stdout
 	return 0
-}
-
-func formatHookInjectReminder(normalizedWork string) string {
-	return fmt.Sprintf(`<system-reminder>
-You have pending work. Pick up the next item:
-
-<work-items>
-%s
-</work-items>
-
-Use the bead id from the work item:
-- If the item is not assigned to you yet, run `+"`bd update <id> --claim`"+`.
-- Do the requested work.
-- When done, run `+"`bd close <id>`"+`.
-Run `+"`gc hook`"+` to see the full queue.
-</system-reminder>
-`, normalizedWork)
 }
 
 func workQueryHasReadyWork(output string) bool {
