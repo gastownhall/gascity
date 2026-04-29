@@ -15,7 +15,6 @@ import (
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
-	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/sling"
 )
 
@@ -66,6 +65,8 @@ func applyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string,
 
 var (
 	workflowServeList               = nextWorkflowServeBeads
+	workflowServeListInProcess      = nextWorkflowServeBeadsInProcess
+	openControlStoreForReady        = openControlStoreAtForCity
 	controlDispatcherServe          = runControlDispatcherInStore
 	workflowServeOpenEventsProvider = func(stderr io.Writer) (events.Provider, error) {
 		ep, code := openCityEventsProvider(stderr, "gc convoy control --serve")
@@ -195,10 +196,10 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 	workQuery := expandAgentCommandTemplate(cityPath, loadedCityName(cfg, cityPath), &agentCfg, cfg.Rigs, "work_query", agentCfg.EffectiveWorkQuery(), stderr)
 	workflowTracef("serve start agent=%s city=%s dir=%s", agentCfg.QualifiedName(), cityPath, workDir)
 	if !follow {
-		_, err := drainWorkflowServeWork(agentCfg, cityPath, workDir, workQuery, workEnv, stderr)
+		_, err := drainWorkflowServeWork(agentCfg, cityPath, workDir, cfg, workQuery, workEnv, stderr)
 		return err
 	}
-	return runWorkflowServeFollow(agentCfg, cityPath, workDir, workQuery, workEnv, stderr)
+	return runWorkflowServeFollow(agentCfg, cityPath, workDir, cfg, workQuery, workEnv, stderr)
 }
 
 type workflowServeDrainResult struct {
@@ -210,11 +211,11 @@ type workflowServeDrainResult struct {
 // for a single invocation. Returns whether it advanced a control bead and
 // whether the queue still contains only pending work so the --follow caller
 // can distinguish blocked work from genuine idle.
-func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuery string, workEnv map[string]string, stderr io.Writer) (workflowServeDrainResult, error) {
+func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath string, cfg *config.City, workQuery string, workEnv map[string]string, stderr io.Writer) (workflowServeDrainResult, error) {
 	result := workflowServeDrainResult{}
 	idlePolls := 0
 	for {
-		queue, err := workflowServeList(workflowServeWorkQuery(agentCfg, workQuery), storePath, workEnv)
+		queue, err := workflowServeQueue(agentCfg, cityPath, storePath, cfg, workQuery, workEnv)
 		if err != nil {
 			workflowTracef("serve query-error agent=%s err=%v", agentCfg.QualifiedName(), err)
 			return result, fmt.Errorf("querying control work for %s: %w", agentCfg.QualifiedName(), err)
@@ -283,6 +284,23 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 	}
 }
 
+func workflowServeQueue(agentCfg config.Agent, cityPath, storePath string, cfg *config.City, workQuery string, workEnv map[string]string) ([]hookBead, error) {
+	if agentCfg.WorkQuery == "" && isWorkflowServeControlDispatcherAgent(agentCfg) {
+		target := strings.TrimSpace(agentCfg.QualifiedName())
+		if target == "" {
+			target = config.ControlDispatcherAgentName
+		}
+		sessionVals := []string{
+			os.Getenv("GC_SESSION_ID"),
+			os.Getenv("GC_SESSION_NAME"),
+			os.Getenv("GC_ALIAS"),
+			target,
+		}
+		return workflowServeListInProcess(storePath, cityPath, cfg, target, workflowServeLegacyControlRoute(target), sessionVals, workflowServeScanLimit)
+	}
+	return workflowServeList(workflowServeWorkQuery(agentCfg, workQuery), storePath, workEnv)
+}
+
 func isLegacyOversizedControlEventError(err error) bool {
 	if err == nil {
 		return false
@@ -293,7 +311,7 @@ func isLegacyOversizedControlEventError(err error) bool {
 		strings.Contains(msg, "too large")
 }
 
-func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuery string, workEnv map[string]string, stderr io.Writer) error {
+func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath string, cfg *config.City, workQuery string, workEnv map[string]string, stderr io.Writer) error {
 	ep, err := workflowServeOpenEventsProvider(stderr)
 	if err != nil {
 		return err
@@ -317,7 +335,7 @@ func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuer
 
 	idleSweeps := 0
 	for {
-		drainResult, err := drainWorkflowServeWork(agentCfg, cityPath, storePath, workQuery, workEnv, stderr)
+		drainResult, err := drainWorkflowServeWork(agentCfg, cityPath, storePath, cfg, workQuery, workEnv, stderr)
 		if err != nil {
 			return err
 		}
@@ -422,9 +440,6 @@ func workflowServeQuery(workQuery string) string {
 }
 
 func workflowServeWorkQuery(agentCfg config.Agent, expandedWorkQuery ...string) string {
-	if agentCfg.WorkQuery == "" && isWorkflowServeControlDispatcherAgent(agentCfg) {
-		return workflowServeControlReadyQuery(agentCfg)
-	}
 	workQuery := agentCfg.EffectiveWorkQuery()
 	if len(expandedWorkQuery) > 0 {
 		workQuery = expandedWorkQuery[0]
@@ -438,36 +453,6 @@ func isWorkflowServeControlDispatcherAgent(agentCfg config.Agent) bool {
 		strings.HasSuffix(qualified, "/"+config.ControlDispatcherAgentName)
 }
 
-func workflowServeControlReadyQuery(agentCfg config.Agent) string {
-	target := strings.TrimSpace(agentCfg.QualifiedName())
-	if target == "" {
-		target = config.ControlDispatcherAgentName
-	}
-	limit := fmt.Sprintf("%d", workflowServeScanLimit)
-	queryPrefix := `GC_CONTROL_TARGET=` + shellquote.Quote(target)
-	if legacy := workflowServeLegacyControlRoute(target); legacy != "" {
-		queryPrefix += ` GC_CONTROL_LEGACY_TARGET=` + shellquote.Quote(legacy)
-	}
-	query := queryPrefix + ` sh -c '` +
-		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS" "$GC_CONTROL_TARGET"; do ` +
-		`[ -z "$id" ] && continue; ` +
-		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
-		`for cand in "$id" "$legacy"; do ` +
-		`[ -z "$cand" ] && continue; ` +
-		`r=$(bd ready --assignee="$cand" --json --limit=` + limit + ` 2>/dev/null); ` +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		`done; ` +
-		`done; ` +
-		`r=$(bd ready --metadata-field "gc.routed_to=$GC_CONTROL_TARGET" --unassigned --json --limit=` + limit + ` 2>/dev/null); ` +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `
-	if legacy := workflowServeLegacyControlRoute(target); legacy != "" {
-		query += `bd ready --metadata-field "gc.routed_to=$GC_CONTROL_LEGACY_TARGET" --unassigned --json --limit=` + limit + ` 2>/dev/null'`
-	} else {
-		query += `printf "[]"` + `'`
-	}
-	return query
-}
-
 func workflowServeLegacyControlRoute(target string) string {
 	target = strings.TrimSpace(target)
 	if target == config.ControlDispatcherAgentName {
@@ -478,6 +463,81 @@ func workflowServeLegacyControlRoute(target string) string {
 		return strings.TrimSuffix(target, suffix) + "/workflow-control"
 	}
 	return ""
+}
+
+func controlReadyCandidates(sessionVals []string) []string {
+	seen := map[string]bool{}
+	var candidates []string
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			return
+		}
+		seen[value] = true
+		candidates = append(candidates, value)
+	}
+	for _, value := range sessionVals {
+		value = strings.TrimSpace(value)
+		add(value)
+		if strings.HasSuffix(value, config.ControlDispatcherAgentName) {
+			add(strings.TrimSuffix(value, config.ControlDispatcherAgentName) + "workflow-control")
+		}
+	}
+	return candidates
+}
+
+func nextWorkflowServeBeadsInProcess(storePath, cityPath string, cfg *config.City, target, legacyTarget string, sessionVals []string, limit int) ([]hookBead, error) {
+	store, err := openControlStoreForReady(storePath, cityPath, cfg)
+	if err != nil {
+		return nil, err
+	}
+	candidates := controlReadyCandidates(sessionVals)
+	for _, candidate := range candidates {
+		matches, err := store.ReadyQuery(beads.ReadyQuery{Assignee: candidate, Limit: limit})
+		if err != nil {
+			return nil, err
+		}
+		workflowTracef("serve query candidate=%s stage=assignee hits=%d", candidate, len(matches))
+		if len(matches) > 0 {
+			return hookBeadsFromBeads(matches), nil
+		}
+	}
+	matches, err := store.ReadyQuery(beads.ReadyQuery{
+		Metadata:   map[string]string{"gc.routed_to": target},
+		Unassigned: true,
+		Limit:      limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	workflowTracef("serve query candidate=%s stage=routed_to hits=%d", target, len(matches))
+	if len(matches) > 0 {
+		return hookBeadsFromBeads(matches), nil
+	}
+	if strings.TrimSpace(legacyTarget) == "" {
+		return nil, nil
+	}
+	matches, err = store.ReadyQuery(beads.ReadyQuery{
+		Metadata:   map[string]string{"gc.routed_to": legacyTarget},
+		Unassigned: true,
+		Limit:      limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	workflowTracef("serve query candidate=%s stage=legacy_routed_to hits=%d", legacyTarget, len(matches))
+	if len(matches) > 0 {
+		return hookBeadsFromBeads(matches), nil
+	}
+	return nil, nil
+}
+
+func hookBeadsFromBeads(in []beads.Bead) []hookBead {
+	out := make([]hookBead, 0, len(in))
+	for _, b := range in {
+		out = append(out, hookBead{ID: b.ID, Metadata: hookBeadMetadata(b.Metadata)})
+	}
+	return out
 }
 
 func nextWorkflowServeBeads(workQuery, dir string, env map[string]string) ([]hookBead, error) {

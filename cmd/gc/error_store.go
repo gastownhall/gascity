@@ -14,6 +14,7 @@ func (s unavailableStore) CloseAll([]string, map[string]string) (int, error) { r
 func (s unavailableStore) List(beads.ListQuery) ([]beads.Bead, error)        { return nil, s.err }
 func (s unavailableStore) ListOpen(...string) ([]beads.Bead, error)          { return nil, s.err }
 func (s unavailableStore) Ready() ([]beads.Bead, error)                      { return nil, s.err }
+func (s unavailableStore) ReadyQuery(beads.ReadyQuery) ([]beads.Bead, error) { return nil, s.err }
 func (s unavailableStore) Children(string, ...beads.QueryOpt) ([]beads.Bead, error) {
 	return nil, s.err
 }

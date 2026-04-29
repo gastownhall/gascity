@@ -341,6 +341,15 @@ func (s *Store) Ready() ([]beads.Bead, error) {
 	return result, nil
 }
 
+// ReadyQuery returns ready beads matching the query filters.
+func (s *Store) ReadyQuery(query beads.ReadyQuery) ([]beads.Bead, error) {
+	ready, err := s.Ready()
+	if err != nil {
+		return nil, err
+	}
+	return beads.ApplyReadyQuery(ready, query), nil
+}
+
 // Children returns non-closed beads whose ParentID matches by default:
 // script children <parent-id>
 func (s *Store) Children(parentID string, opts ...beads.QueryOpt) ([]beads.Bead, error) {

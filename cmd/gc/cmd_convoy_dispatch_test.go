@@ -1028,6 +1028,7 @@ func TestRunWorkflowServeProcessesReadyControlBeadsThenExits(t *testing.T) {
 
 	prevCityFlag := cityFlag
 	prevList := workflowServeList
+	prevInProcess := workflowServeListInProcess
 	prevControl := controlDispatcherServe
 	prevInterval := workflowServeIdlePollInterval
 	prevAttempts := workflowServeIdlePollAttempts
@@ -1037,26 +1038,21 @@ func TestRunWorkflowServeProcessesReadyControlBeadsThenExits(t *testing.T) {
 	t.Cleanup(func() {
 		cityFlag = prevCityFlag
 		workflowServeList = prevList
+		workflowServeListInProcess = prevInProcess
 		controlDispatcherServe = prevControl
 		workflowServeIdlePollInterval = prevInterval
 		workflowServeIdlePollAttempts = prevAttempts
 	})
 
-	cdAgent := config.Agent{Name: config.ControlDispatcherAgentName}
-	wantQuery := workflowServeWorkQuery(cdAgent)
-	var gotQueries []string
 	var gotDirs []string
-	var gotEnv []map[string]string
 	var controlled []string
 	sequence := [][]hookBead{
 		{{ID: "gc-ctrl-1", Metadata: map[string]string{"gc.kind": "scope-check"}}},
 		{{ID: "gc-ctrl-2", Metadata: map[string]string{"gc.kind": "workflow-finalize"}}},
 	}
 
-	workflowServeList = func(workQuery, dir string, env map[string]string) ([]hookBead, error) {
-		gotQueries = append(gotQueries, workQuery)
-		gotDirs = append(gotDirs, dir)
-		gotEnv = append(gotEnv, maps.Clone(env))
+	workflowServeListInProcess = func(storePath, _ string, _ *config.City, _, _ string, _ []string, _ int) ([]hookBead, error) {
+		gotDirs = append(gotDirs, storePath)
 		if len(sequence) == 0 {
 			return nil, nil
 		}
@@ -1076,137 +1072,11 @@ func TestRunWorkflowServeProcessesReadyControlBeadsThenExits(t *testing.T) {
 	if !slices.Equal(controlled, []string{"gc-ctrl-1", "gc-ctrl-2"}) {
 		t.Fatalf("controlled beads = %#v, want two ready control beads in order", controlled)
 	}
-	if len(gotQueries) != 3 {
-		t.Fatalf("workflowServeList calls = %d, want 3", len(gotQueries))
-	}
-	for i, got := range gotQueries {
-		if got != wantQuery {
-			t.Fatalf("workflowServeList query[%d] = %q, want %q", i, got, wantQuery)
-		}
-	}
 	for i, got := range gotDirs {
 		if canonicalTestPath(got) != canonicalTestPath(cityDir) {
-			t.Fatalf("workflowServeList dir[%d] = %q, want %q", i, got, cityDir)
+			t.Fatalf("workflowServeListInProcess dir[%d] = %q, want %q", i, got, cityDir)
 		}
 	}
-	for i, env := range gotEnv {
-		if env["GC_STORE_ROOT"] != cityDir {
-			t.Fatalf("workflowServeList env[%d] GC_STORE_ROOT = %q, want %q", i, env["GC_STORE_ROOT"], cityDir)
-		}
-		if env["GC_STORE_SCOPE"] != "city" {
-			t.Fatalf("workflowServeList env[%d] GC_STORE_SCOPE = %q, want city", i, env["GC_STORE_SCOPE"])
-		}
-	}
-}
-
-func TestWorkflowServeControlReadyQueryUsesControlTiers(t *testing.T) {
-	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName})
-	if strings.Contains(query, "GC_SESSION_ORIGIN") {
-		t.Fatalf("workflowServeControlReadyQuery should not gate legacy routes on session origin: %q", query)
-	}
-	if strings.Contains(query, "bd list --status in_progress") {
-		t.Fatalf("workflowServeControlReadyQuery should not return in-progress control beads: %q", query)
-	}
-	for _, want := range []string{
-		`bd ready --assignee="$cand"`,
-		`bd ready --metadata-field "gc.routed_to=$GC_CONTROL_TARGET" --unassigned`,
-		`bd ready --metadata-field "gc.routed_to=$GC_CONTROL_LEGACY_TARGET" --unassigned`,
-	} {
-		if !strings.Contains(query, want) {
-			t.Fatalf("workflowServeControlReadyQuery missing %q in %q", want, query)
-		}
-	}
-	if !strings.Contains(query, `--limit=20`) {
-		t.Fatalf("workflowServeControlReadyQuery missing scan limit: %q", query)
-	}
-}
-
-func TestWorkflowServeControlReadyQueryIgnoresInProgressAssigned(t *testing.T) {
-	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
-	out := runWorkflowServeShellQueryForTest(t, query, map[string]string{
-		"GC_SESSION_NAME":   "gascity--control-dispatcher",
-		"GC_ALIAS":          "gascity/control-dispatcher",
-		"GC_SESSION_ORIGIN": "named",
-	}, `#!/bin/sh
-set -eu
-case "$*" in
-  "list --status in_progress --assignee=gascity--control-dispatcher --json --limit=20")
-    printf '[{"id":"ga-in-progress"}]'
-    ;;
-  "ready --assignee=gascity--control-dispatcher --json --limit=20")
-    printf '[{"id":"ga-ready"}]'
-    ;;
-  "ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --json --limit=20")
-    printf '[{"id":"ga-routed"}]'
-    ;;
-  *)
-    printf '[]'
-    ;;
-esac
-`)
-	if got, want := strings.TrimSpace(out), `[{"id":"ga-ready"}]`; got != want {
-		t.Fatalf("control query output = %q, want %q", got, want)
-	}
-}
-
-func TestWorkflowServeControlReadyQueryQuotesMetadataFallbackTarget(t *testing.T) {
-	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "my rig"})
-	out := runWorkflowServeShellQueryForTest(t, query, map[string]string{}, `#!/bin/sh
-set -eu
-case "$1|$2|$3|$4|$5|$6" in
-  "ready|--metadata-field|gc.routed_to=my rig/control-dispatcher|--unassigned|--json|--limit=20")
-    printf '[{"id":"ga-routed"}]'
-    ;;
-  *)
-    printf '[]'
-    ;;
-esac
-`)
-	if got, want := strings.TrimSpace(out), `[{"id":"ga-routed"}]`; got != want {
-		t.Fatalf("control query output = %q, want %q", got, want)
-	}
-}
-
-func TestWorkflowServeControlReadyQueryUsesLegacyRouteForNamedSessions(t *testing.T) {
-	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
-	out := runWorkflowServeShellQueryForTest(t, query, map[string]string{
-		"GC_SESSION_NAME":   "gascity--control-dispatcher",
-		"GC_ALIAS":          "gascity/control-dispatcher",
-		"GC_SESSION_ORIGIN": "named",
-	}, `#!/bin/sh
-set -eu
-case "$*" in
-  "ready --metadata-field gc.routed_to=gascity/workflow-control --unassigned --json --limit=20")
-    printf '[{"id":"ga-legacy-route"}]'
-    ;;
-  *)
-    printf '[]'
-    ;;
-esac
-`)
-	if got, want := strings.TrimSpace(out), `[{"id":"ga-legacy-route"}]`; got != want {
-		t.Fatalf("control query output = %q, want %q", got, want)
-	}
-}
-
-func runWorkflowServeShellQueryForTest(t *testing.T, query string, env map[string]string, bdScript string) string {
-	t.Helper()
-
-	tmp := t.TempDir()
-	bdPath := filepath.Join(tmp, "bd")
-	if err := os.WriteFile(bdPath, []byte(bdScript), 0o755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-
-	queryEnv := []string{"PATH=" + tmp + string(os.PathListSeparator) + os.Getenv("PATH")}
-	for key, value := range env {
-		queryEnv = append(queryEnv, key+"="+value)
-	}
-	out, err := shellWorkQueryWithEnv(query, t.TempDir(), queryEnv)
-	if err != nil {
-		t.Fatalf("run workflow serve query: %v", err)
-	}
-	return out
 }
 
 // TestRunWorkflowServeOverridesInheritedCityBeadsDir is a regression test for
@@ -1237,6 +1107,7 @@ func TestRunWorkflowServeOverridesInheritedCityBeadsDir(t *testing.T) {
 
 	prevCityFlag := cityFlag
 	prevList := workflowServeList
+	prevInProcess := workflowServeListInProcess
 	prevControl := controlDispatcherServe
 	prevInterval := workflowServeIdlePollInterval
 	prevAttempts := workflowServeIdlePollAttempts
@@ -1246,6 +1117,7 @@ func TestRunWorkflowServeOverridesInheritedCityBeadsDir(t *testing.T) {
 	t.Cleanup(func() {
 		cityFlag = prevCityFlag
 		workflowServeList = prevList
+		workflowServeListInProcess = prevInProcess
 		controlDispatcherServe = prevControl
 		workflowServeIdlePollInterval = prevInterval
 		workflowServeIdlePollAttempts = prevAttempts
@@ -1309,6 +1181,7 @@ path = %q
 
 	prevCityFlag := cityFlag
 	prevList := workflowServeList
+	prevInProcess := workflowServeListInProcess
 	prevControl := controlDispatcherServe
 	prevInterval := workflowServeIdlePollInterval
 	prevAttempts := workflowServeIdlePollAttempts
@@ -1318,6 +1191,7 @@ path = %q
 	t.Cleanup(func() {
 		cityFlag = prevCityFlag
 		workflowServeList = prevList
+		workflowServeListInProcess = prevInProcess
 		controlDispatcherServe = prevControl
 		workflowServeIdlePollInterval = prevInterval
 		workflowServeIdlePollAttempts = prevAttempts
@@ -1325,9 +1199,9 @@ path = %q
 
 	calls := 0
 	var queryDir string
-	workflowServeList = func(_, dir string, _ map[string]string) ([]hookBead, error) {
+	workflowServeListInProcess = func(storePath, _ string, _ *config.City, _, _ string, _ []string, _ int) ([]hookBead, error) {
 		calls++
-		queryDir = dir
+		queryDir = storePath
 		if calls == 1 {
 			return []hookBead{{ID: "gc-rig-control", Metadata: map[string]string{"gc.kind": "scope-check"}}}, nil
 		}
@@ -1397,6 +1271,7 @@ max = 5
 
 	prevCityFlag := cityFlag
 	prevList := workflowServeList
+	prevInProcess := workflowServeListInProcess
 	prevControl := controlDispatcherServe
 	prevInterval := workflowServeIdlePollInterval
 	prevAttempts := workflowServeIdlePollAttempts
@@ -1406,6 +1281,7 @@ max = 5
 	t.Cleanup(func() {
 		cityFlag = prevCityFlag
 		workflowServeList = prevList
+		workflowServeListInProcess = prevInProcess
 		controlDispatcherServe = prevControl
 		workflowServeIdlePollInterval = prevInterval
 		workflowServeIdlePollAttempts = prevAttempts
@@ -1443,6 +1319,7 @@ func TestRunWorkflowServeRetriesBrieflyAfterProcessingBeforeIdleExit(t *testing.
 
 	prevCityFlag := cityFlag
 	prevList := workflowServeList
+	prevInProcess := workflowServeListInProcess
 	prevControl := controlDispatcherServe
 	prevInterval := workflowServeIdlePollInterval
 	prevAttempts := workflowServeIdlePollAttempts
@@ -1452,6 +1329,7 @@ func TestRunWorkflowServeRetriesBrieflyAfterProcessingBeforeIdleExit(t *testing.
 	t.Cleanup(func() {
 		cityFlag = prevCityFlag
 		workflowServeList = prevList
+		workflowServeListInProcess = prevInProcess
 		controlDispatcherServe = prevControl
 		workflowServeIdlePollInterval = prevInterval
 		workflowServeIdlePollAttempts = prevAttempts
@@ -1459,7 +1337,7 @@ func TestRunWorkflowServeRetriesBrieflyAfterProcessingBeforeIdleExit(t *testing.
 
 	var controlled []string
 	calls := 0
-	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+	workflowServeListInProcess = func(_, _ string, _ *config.City, _, _ string, _ []string, _ int) ([]hookBead, error) {
 		calls++
 		switch calls {
 		case 1:
@@ -1495,6 +1373,7 @@ func TestRunWorkflowServeSkipsPendingControlBeadAndProcessesLaterReady(t *testin
 
 	prevCityFlag := cityFlag
 	prevList := workflowServeList
+	prevInProcess := workflowServeListInProcess
 	prevControl := controlDispatcherServe
 	prevInterval := workflowServeIdlePollInterval
 	prevAttempts := workflowServeIdlePollAttempts
@@ -1504,6 +1383,7 @@ func TestRunWorkflowServeSkipsPendingControlBeadAndProcessesLaterReady(t *testin
 	t.Cleanup(func() {
 		cityFlag = prevCityFlag
 		workflowServeList = prevList
+		workflowServeListInProcess = prevInProcess
 		controlDispatcherServe = prevControl
 		workflowServeIdlePollInterval = prevInterval
 		workflowServeIdlePollAttempts = prevAttempts
@@ -1512,7 +1392,7 @@ func TestRunWorkflowServeSkipsPendingControlBeadAndProcessesLaterReady(t *testin
 	var attempted []string
 	var processed []string
 	calls := 0
-	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+	workflowServeListInProcess = func(_, _ string, _ *config.City, _, _ string, _ []string, _ int) ([]hookBead, error) {
 		calls++
 		switch calls {
 		case 1:
@@ -1554,6 +1434,7 @@ func TestRunWorkflowServeSkipsLegacyOversizedControlAndProcessesLaterReady(t *te
 
 	prevCityFlag := cityFlag
 	prevList := workflowServeList
+	prevInProcess := workflowServeListInProcess
 	prevControl := controlDispatcherServe
 	prevInterval := workflowServeIdlePollInterval
 	prevAttempts := workflowServeIdlePollAttempts
@@ -1563,6 +1444,7 @@ func TestRunWorkflowServeSkipsLegacyOversizedControlAndProcessesLaterReady(t *te
 	t.Cleanup(func() {
 		cityFlag = prevCityFlag
 		workflowServeList = prevList
+		workflowServeListInProcess = prevInProcess
 		controlDispatcherServe = prevControl
 		workflowServeIdlePollInterval = prevInterval
 		workflowServeIdlePollAttempts = prevAttempts
@@ -1571,7 +1453,7 @@ func TestRunWorkflowServeSkipsLegacyOversizedControlAndProcessesLaterReady(t *te
 	var attempted []string
 	var processed []string
 	calls := 0
-	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+	workflowServeListInProcess = func(_, _ string, _ *config.City, _, _ string, _ []string, _ int) ([]hookBead, error) {
 		calls++
 		switch calls {
 		case 1:
@@ -1613,15 +1495,17 @@ func TestRunWorkflowServeReturnsQueryError(t *testing.T) {
 
 	prevCityFlag := cityFlag
 	prevList := workflowServeList
+	prevInProcess := workflowServeListInProcess
 	prevControl := controlDispatcherServe
 	cityFlag = ""
 	t.Cleanup(func() {
 		cityFlag = prevCityFlag
 		workflowServeList = prevList
+		workflowServeListInProcess = prevInProcess
 		controlDispatcherServe = prevControl
 	})
 
-	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+	workflowServeListInProcess = func(_, _ string, _ *config.City, _, _ string, _ []string, _ int) ([]hookBead, error) {
 		return nil, os.ErrDeadlineExceeded
 	}
 	controlDispatcherServe = func(_, _, _ string, _ io.Writer, _ io.Writer) error {
@@ -1683,12 +1567,14 @@ func TestRunWorkflowServeFollowUsesSweepFallback(t *testing.T) {
 	ep := newTestProvider(t, eventsDir)
 
 	prevList := workflowServeList
+	prevInProcess := workflowServeListInProcess
 	prevControl := controlDispatcherServe
 	prevProvider := workflowServeOpenEventsProvider
 	prevSweep := workflowServeWakeSweepInterval
 	workflowServeWakeSweepInterval = time.Millisecond
 	t.Cleanup(func() {
 		workflowServeList = prevList
+		workflowServeListInProcess = prevInProcess
 		controlDispatcherServe = prevControl
 		workflowServeOpenEventsProvider = prevProvider
 		workflowServeWakeSweepInterval = prevSweep
@@ -1700,7 +1586,7 @@ func TestRunWorkflowServeFollowUsesSweepFallback(t *testing.T) {
 
 	var processed []string
 	calls := 0
-	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+	workflowServeListInProcess = func(_, _ string, _ *config.City, _, _ string, _ []string, _ int) ([]hookBead, error) {
 		calls++
 		switch calls {
 		case 1:
@@ -1721,6 +1607,7 @@ func TestRunWorkflowServeFollowUsesSweepFallback(t *testing.T) {
 		wfcAgent,
 		t.TempDir(),
 		t.TempDir(),
+		nil,
 		wfcAgent.EffectiveWorkQuery(),
 		nil,
 		io.Discard,
@@ -1738,6 +1625,7 @@ func TestRunWorkflowServeFollowResetsBackoffForProcessedEventAndPending(t *testi
 	ep := newTestProvider(t, eventsDir)
 
 	prevList := workflowServeList
+	prevInProcess := workflowServeListInProcess
 	prevControl := controlDispatcherServe
 	prevProvider := workflowServeOpenEventsProvider
 	prevWait := workflowServeWaitForWake
@@ -1745,6 +1633,7 @@ func TestRunWorkflowServeFollowResetsBackoffForProcessedEventAndPending(t *testi
 	prevAttempts := workflowServeIdlePollAttempts
 	t.Cleanup(func() {
 		workflowServeList = prevList
+		workflowServeListInProcess = prevInProcess
 		controlDispatcherServe = prevControl
 		workflowServeOpenEventsProvider = prevProvider
 		workflowServeWaitForWake = prevWait
@@ -1780,7 +1669,7 @@ func TestRunWorkflowServeFollowResetsBackoffForProcessedEventAndPending(t *testi
 	}
 
 	calls := 0
-	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+	workflowServeListInProcess = func(_, _ string, _ *config.City, _, _ string, _ []string, _ int) ([]hookBead, error) {
 		calls++
 		switch calls {
 		case 1, 2, 4, 5, 7:
@@ -1802,7 +1691,7 @@ func TestRunWorkflowServeFollowResetsBackoffForProcessedEventAndPending(t *testi
 	}
 
 	agent := config.Agent{Name: "control-dispatcher"}
-	err := runWorkflowServeFollow(agent, t.TempDir(), t.TempDir(), agent.EffectiveWorkQuery(), nil, io.Discard)
+	err := runWorkflowServeFollow(agent, t.TempDir(), t.TempDir(), nil, agent.EffectiveWorkQuery(), nil, io.Discard)
 	if !errors.Is(err, stopErr) {
 		t.Fatalf("runWorkflowServeFollow error = %v, want %v", err, stopErr)
 	}

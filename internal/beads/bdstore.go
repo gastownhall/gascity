@@ -828,6 +828,37 @@ func (s *BdStore) Ready() ([]Bead, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bd ready: %w", err)
 	}
+	return parseReadyOutput(out)
+}
+
+// ReadyQuery returns ready beads matching the query filters.
+func (s *BdStore) ReadyQuery(query ReadyQuery) ([]Bead, error) {
+	args := []string{"ready", "--json"}
+	if query.Assignee != "" {
+		args = append(args, "--assignee", query.Assignee)
+	}
+	if query.Unassigned {
+		args = append(args, "--unassigned")
+	}
+	if len(query.Metadata) > 0 {
+		keys := make([]string, 0, len(query.Metadata))
+		for k := range query.Metadata {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			args = append(args, "--metadata-field", k+"="+query.Metadata[k])
+		}
+	}
+	args = append(args, "--limit", strconv.Itoa(query.Limit))
+	out, err := s.runner(s.dir, "bd", args...)
+	if err != nil {
+		return nil, fmt.Errorf("bd ready: %w", err)
+	}
+	return parseReadyOutput(out)
+}
+
+func parseReadyOutput(out []byte) ([]Bead, error) {
 	issues, parseErr := parseIssuesTolerant(extractJSON(out))
 	result := make([]Bead, 0, len(issues))
 	for i := range issues {

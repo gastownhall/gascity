@@ -270,6 +270,15 @@ func (m *MemStore) Ready() ([]Bead, error) {
 	return result, nil
 }
 
+// ReadyQuery returns ready beads matching the query filters.
+func (m *MemStore) ReadyQuery(query ReadyQuery) ([]Bead, error) {
+	ready, err := m.Ready()
+	if err != nil {
+		return nil, err
+	}
+	return ApplyReadyQuery(ready, query), nil
+}
+
 // Get retrieves a bead by ID. Returns a wrapped ErrNotFound if the ID does
 // not exist.
 func (m *MemStore) Get(id string) (Bead, error) {

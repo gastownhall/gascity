@@ -30,6 +30,18 @@ type Bead struct {
 	Dependencies []Dep             `json:"dependencies,omitempty"`
 }
 
+// ReadyQuery describes a filtered ready-work lookup.
+//
+// Queries are conjunctive: every populated field must match. Limit controls
+// the maximum number of returned beads, with 0 meaning unlimited. Unassigned
+// requires an empty Assignee.
+type ReadyQuery struct {
+	Assignee   string
+	Metadata   map[string]string
+	Unassigned bool
+	Limit      int
+}
+
 // UpdateOpts specifies which fields to change. Nil pointers are skipped.
 type UpdateOpts struct {
 	Title        *string // set title (nil = no change)
@@ -169,6 +181,11 @@ type Store interface {
 	// to match the bd CLI's GetReadyWork semantics. Same ordering note
 	// as List.
 	Ready() ([]Bead, error)
+
+	// ReadyQuery returns ready beads matching the query filters. Stores should
+	// push filters into the backend where possible; in-memory stores may filter
+	// Ready() results directly.
+	ReadyQuery(query ReadyQuery) ([]Bead, error)
 
 	// Legacy helper; prefer List with ListQuery in new code.
 	// Children returns all beads whose ParentID matches the given ID,

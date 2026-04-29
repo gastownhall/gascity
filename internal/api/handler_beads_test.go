@@ -200,6 +200,18 @@ func (s *prefixedAliasStore) Ready() ([]beads.Bead, error) {
 	return out, nil
 }
 
+func (s *prefixedAliasStore) ReadyQuery(query beads.ReadyQuery) ([]beads.Bead, error) {
+	items, err := s.base.ReadyQuery(query)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]beads.Bead, 0, len(items))
+	for _, item := range items {
+		out = append(out, s.beadToAlias(item))
+	}
+	return out, nil
+}
+
 func (s *prefixedAliasStore) Children(parentID string, opts ...beads.QueryOpt) ([]beads.Bead, error) {
 	s.childrenCalls++
 	items, err := s.base.Children(s.aliasToBase(parentID), opts...)

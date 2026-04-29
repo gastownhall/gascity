@@ -113,6 +113,37 @@ func ApplyListQuery(items []Bead, q ListQuery) []Bead {
 	return filtered
 }
 
+// ApplyReadyQuery filters ready-work results while preserving input order.
+func ApplyReadyQuery(items []Bead, q ReadyQuery) []Bead {
+	filtered := make([]Bead, 0, len(items))
+	for _, b := range items {
+		if !readyQueryMatches(b, q) {
+			continue
+		}
+		filtered = append(filtered, b)
+		if q.Limit > 0 && len(filtered) >= q.Limit {
+			return filtered
+		}
+	}
+	return filtered
+}
+
+func readyQueryMatches(b Bead, q ReadyQuery) bool {
+	if b.Status != "open" || IsReadyExcludedType(b.Type) {
+		return false
+	}
+	if q.Assignee != "" && b.Assignee != q.Assignee {
+		return false
+	}
+	if q.Unassigned && b.Assignee != "" {
+		return false
+	}
+	if len(q.Metadata) > 0 && !matchesMetadata(b, q.Metadata) {
+		return false
+	}
+	return true
+}
+
 func applyListQuery(items []Bead, q ListQuery) []Bead {
 	return ApplyListQuery(items, q)
 }

@@ -311,6 +311,21 @@ func (c *CachingStore) Ready() ([]Bead, error) {
 	return c.backing.Ready()
 }
 
+// ReadyQuery returns ready beads matching the query filters.
+func (c *CachingStore) ReadyQuery(query ReadyQuery) ([]Bead, error) {
+	c.mu.RLock()
+	useBacking := c.state != cacheLive || len(c.dirty) > 0
+	c.mu.RUnlock()
+	if useBacking {
+		return c.backing.ReadyQuery(query)
+	}
+	ready, err := c.Ready()
+	if err != nil {
+		return nil, err
+	}
+	return ApplyReadyQuery(ready, query), nil
+}
+
 // Children returns beads with the given parent ID.
 func (c *CachingStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error) {
 	return c.List(ListQuery{

@@ -698,6 +698,48 @@ func TestBdStoreReadyEmpty(t *testing.T) {
 	}
 }
 
+func TestBdStoreReadyQueryAssigneeLimit(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd ready --json --assignee gascity/control-dispatcher --limit 20`: {
+			out: []byte(`[{"id":"bd-aaa","title":"ready one","status":"open","issue_type":"task","assignee":"gascity/control-dispatcher","created_at":"2025-01-15T10:30:00Z"}]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.ReadyQuery(beads.ReadyQuery{Assignee: "gascity/control-dispatcher", Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "bd-aaa" {
+		t.Fatalf("ReadyQuery() = %+v, want bd-aaa", got)
+	}
+}
+
+func TestBdStoreReadyQueryMetadataUnassigned(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd ready --json --unassigned --metadata-field gc.routed_to=gascity/control-dispatcher --limit 20`: {
+			out: []byte(`[{"id":"bd-routed","title":"routed","status":"open","issue_type":"task","metadata":{"gc.routed_to":"gascity/control-dispatcher"},"created_at":"2025-01-15T10:30:00Z"}]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.ReadyQuery(beads.ReadyQuery{
+		Metadata:   map[string]string{"gc.routed_to": "gascity/control-dispatcher"},
+		Unassigned: true,
+		Limit:      20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "bd-routed" {
+		t.Fatalf("ReadyQuery() = %+v, want bd-routed", got)
+	}
+}
+
 func TestBdStoreReadyError(t *testing.T) {
 	runner := func(_, _ string, _ ...string) ([]byte, error) {
 		return nil, fmt.Errorf("exit status 1")
