@@ -1006,6 +1006,49 @@ func TestDoSlingAutoNudgesRunningPoolMember(t *testing.T) {
 	}
 }
 
+// TestDoSlingNoAutoNudgeForPoolWithoutRunningMembers verifies that a
+// default sling to a pool agent with NO running instances is a silent
+// no-op — auto-nudge waking cold pools would contradict the fixed-cold
+// case which also no-ops, so --nudge stays the explicit opt-in for
+// cold wake-up. Covers the firstRunningPoolMember=false branch of
+// doSlingAutoNudge that the running-pool test does not reach.
+func TestDoSlingNoAutoNudgeForPoolWithoutRunningMembers(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	// No sp.Start — the pool has no running instances.
+	a := config.Agent{
+		Name:              "polecat",
+		Dir:               "hw",
+		MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3),
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{a},
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.CityPath = t.TempDir()
+
+	opts := testOpts(a, "BL-1")
+	code := doSling(opts, deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	for _, c := range sp.Calls {
+		if c.Method == "Nudge" || c.Method == "NudgeNow" {
+			t.Errorf("unexpected %s call on pool with no running members: %+v", c.Method, c)
+		}
+	}
+	pending, _, dead, err := listQueuedNudges(deps.CityPath, "polecat", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 0 || len(dead) != 0 {
+		t.Fatalf("pending=%d dead=%d, want 0/0 (no auto-nudge for cold pool)", len(pending), len(dead))
+	}
+}
+
 // TestDoSlingNoAutoNudgeForSuspendedAgent verifies that a default sling to a
 // suspended agent is silent — no "cannot nudge" warning and no delivery
 // attempt. The warning remains a property of the explicit --nudge path,
