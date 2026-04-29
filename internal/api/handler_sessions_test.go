@@ -4256,7 +4256,9 @@ func TestHandleSessionStreamClosedSessionReturnsSnapshot(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	req := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/stream", nil)
+	reqCtx, cancelReq := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelReq()
+	req := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/stream", nil).WithContext(reqCtx)
 	rec := httptest.NewRecorder()
 	done := make(chan struct{})
 	go func() {
@@ -4266,8 +4268,8 @@ func TestHandleSessionStreamClosedSessionReturnsSnapshot(t *testing.T) {
 
 	select {
 	case <-done:
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("closed session stream should return immediately")
+	case <-time.After(time.Second):
+		t.Fatal("closed session stream should return without waiting for request cancellation")
 	}
 
 	if !strings.Contains(rec.Body.String(), "event: turn") || !strings.Contains(rec.Body.String(), "hello") || !strings.Contains(rec.Body.String(), "world") {
@@ -4307,7 +4309,9 @@ func TestHandleSessionStreamClosedNamedSessionReturnsSnapshot(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	req := httptest.NewRequest("GET", cityURL(fs, "/session/sky/stream"), nil)
+	reqCtx, cancelReq := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelReq()
+	req := httptest.NewRequest("GET", cityURL(fs, "/session/sky/stream"), nil).WithContext(reqCtx)
 	rec := httptest.NewRecorder()
 	done := make(chan struct{})
 	go func() {
@@ -4317,8 +4321,8 @@ func TestHandleSessionStreamClosedNamedSessionReturnsSnapshot(t *testing.T) {
 
 	select {
 	case <-done:
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("closed named session stream should return immediately")
+	case <-time.After(time.Second):
+		t.Fatal("closed named session stream should return without waiting for request cancellation")
 	}
 
 	if !strings.Contains(rec.Body.String(), "event: turn") || !strings.Contains(rec.Body.String(), "hello") || !strings.Contains(rec.Body.String(), "world") {

@@ -10,8 +10,31 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
+
+func writeSSEEnvelope(t *testing.T, w http.ResponseWriter, typ string, payload any) {
+	t.Helper()
+	raw, err := json.Marshal(struct {
+		Type    string `json:"type"`
+		Payload any    `json:"payload"`
+	}{
+		Type:    typ,
+		Payload: payload,
+	})
+	if err != nil {
+		t.Fatalf("marshal SSE envelope: %v", err)
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	_, _ = w.Write([]byte("data: "))
+	_, _ = w.Write(raw)
+	_, _ = w.Write([]byte("\n\n"))
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
 
 func TestClientSuspendCity(t *testing.T) {
 	var gotMethod, gotPath string
@@ -568,6 +591,163 @@ func TestClientKillSession(t *testing.T) {
 	}
 	if gotPath != "/v0/city/alpha/session/sess-123/kill" {
 		t.Errorf("path = %q, want /v0/city/alpha/session/sess-123/kill", gotPath)
+	}
+}
+
+func TestClientSendSessionMessageWaitsForResultEvent(t *testing.T) {
+	var gotBody struct {
+		Message string `json:"message"`
+	}
+	var gotHeader string
+	var sawPost bool
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v0/city/alpha/session/sess-123/messages":
+			gotHeader = r.Header.Get("X-GC-Request")
+			sawPost = true
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatalf("decode message body: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			json.NewEncoder(w).Encode(map[string]string{"request_id": "req-msg"}) //nolint:errcheck
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/city/alpha/events/stream":
+			if !sawPost {
+				t.Fatal("event stream opened before message POST")
+			}
+			if got := r.URL.Query().Get("after_seq"); got != "0" {
+				t.Fatalf("after_seq = %q, want 0", got)
+			}
+			writeSSEEnvelope(t, w, events.RequestResultSessionMessage, SessionMessageSucceededPayload{
+				RequestID: "req-msg",
+				SessionID: "sess-123",
+			})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	if err := c.SendSessionMessage("sess-123", "wake up"); err != nil {
+		t.Fatalf("SendSessionMessage: %v", err)
+	}
+	if gotBody.Message != "wake up" {
+		t.Fatalf("message = %q, want wake up", gotBody.Message)
+	}
+	if gotHeader != "true" {
+		t.Fatalf("X-GC-Request = %q, want true", gotHeader)
+	}
+}
+
+func TestClientSendSessionMessageReportsAsyncFailure(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v0/city/alpha/session/sess-123/messages":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			json.NewEncoder(w).Encode(map[string]string{"request_id": "req-msg"}) //nolint:errcheck
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/city/alpha/events/stream":
+			writeSSEEnvelope(t, w, events.RequestFailed, RequestFailedPayload{
+				RequestID:    "req-msg",
+				Operation:    RequestOperationSessionMessage,
+				ErrorCode:    "delivery_failed",
+				ErrorMessage: "session is gone",
+			})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	err := c.SendSessionMessage("sess-123", "wake up")
+	if err == nil {
+		t.Fatal("SendSessionMessage succeeded after request.failed")
+	}
+	if !strings.Contains(err.Error(), "message failed: delivery_failed: session is gone") {
+		t.Fatalf("error = %q, want async failure detail", err.Error())
+	}
+}
+
+func TestClientSubmitSessionWaitsForResultEvent(t *testing.T) {
+	var gotBody struct {
+		Message string `json:"message"`
+		Intent  string `json:"intent"`
+	}
+	var sawPost bool
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v0/city/alpha/session/sess-123/submit":
+			sawPost = true
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatalf("decode submit body: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			json.NewEncoder(w).Encode(map[string]string{"request_id": "req-submit"}) //nolint:errcheck
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/city/alpha/events/stream":
+			if !sawPost {
+				t.Fatal("event stream opened before submit POST")
+			}
+			if got := r.URL.Query().Get("after_seq"); got != "0" {
+				t.Fatalf("after_seq = %q, want 0", got)
+			}
+			writeSSEEnvelope(t, w, events.RequestResultSessionSubmit, SessionSubmitSucceededPayload{
+				RequestID: "req-submit",
+				SessionID: "sess-123",
+				Queued:    true,
+				Intent:    string(session.SubmitIntentInterruptNow),
+			})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	resp, err := c.SubmitSession("sess-123", "take this now", session.SubmitIntentInterruptNow)
+	if err != nil {
+		t.Fatalf("SubmitSession: %v", err)
+	}
+	if gotBody.Message != "take this now" {
+		t.Fatalf("message = %q, want take this now", gotBody.Message)
+	}
+	if gotBody.Intent != string(session.SubmitIntentInterruptNow) {
+		t.Fatalf("intent = %q, want %q", gotBody.Intent, session.SubmitIntentInterruptNow)
+	}
+	if resp.Status != "accepted" || resp.ID != "sess-123" || !resp.Queued || resp.Intent != session.SubmitIntentInterruptNow {
+		t.Fatalf("response = %#v, want accepted queued interrupt_now for sess-123", resp)
+	}
+}
+
+func TestClientSubmitSessionReportsAsyncFailure(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v0/city/alpha/session/sess-123/submit":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			json.NewEncoder(w).Encode(map[string]string{"request_id": "req-submit"}) //nolint:errcheck
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/city/alpha/events/stream":
+			writeSSEEnvelope(t, w, events.RequestFailed, RequestFailedPayload{
+				RequestID:    "req-submit",
+				Operation:    RequestOperationSessionSubmit,
+				ErrorCode:    "not_ready",
+				ErrorMessage: "session is starting",
+			})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	_, err := c.SubmitSession("sess-123", "take this now", session.SubmitIntentInterruptNow)
+	if err == nil {
+		t.Fatal("SubmitSession succeeded after request.failed")
+	}
+	if !strings.Contains(err.Error(), "submit failed: not_ready: session is starting") {
+		t.Fatalf("error = %q, want async failure detail", err.Error())
 	}
 }
 
