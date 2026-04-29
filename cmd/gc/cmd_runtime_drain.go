@@ -459,7 +459,12 @@ func doRuntimeRequestRestart(dops drainOps, persistRestart func() error, rec eve
 	fmt.Fprintln(stdout, "Restart requested. Blocking until controller kills this session...") //nolint:errcheck // best-effort stdout
 
 	// Block forever. The controller will kill the entire process tree.
-	select {}
+	// time.Sleep keeps a timer goroutine alive so the Go runtime does not
+	// detect a deadlock and panic ("all goroutines are asleep") — bare
+	// `select {}` does, because no other goroutine can wake the main one.
+	for {
+		time.Sleep(time.Hour)
+	}
 }
 
 // doRuntimeDrainAck sets the drain-ack flag on the session. The controller
