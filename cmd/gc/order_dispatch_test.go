@@ -2841,7 +2841,10 @@ func TestOrderDispatchSkipsRigConditionWhenLegacyOpenWorkReadFails(t *testing.T)
 }
 
 func TestOrderDispatchConditionUsesScopedEnv(t *testing.T) {
-	cityDir := t.TempDir()
+	cityDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	store := beads.NewMemStore()
 	check := fmt.Sprintf(
 		`test "$GC_CITY_PATH" = '%s' && test "$GC_STORE_ROOT" = '%s' && test "$GC_STORE_SCOPE" = city && test "$(pwd)" = '%s'`,
