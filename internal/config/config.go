@@ -1882,8 +1882,16 @@ func (a *Agent) EffectiveSlingQuery() string {
 // DefaultSlingQuery returns the built-in metadata-routing sling query for
 // this agent. Callers outside config should prefer this helper over rebuilding
 // the command string to preserve the bd boundary invariant.
+//
+// The default sets BOTH the assignee and the gc.routed_to metadata. The
+// supervisor's pool/desired-state computation matches by assignee, so a slung
+// bead is invisible to demand without it; metadata alone causes the target
+// agent to never materialize. Setting both keeps the long-standing
+// gc.routed_to history (which other queries and the dashboard inspect) while
+// making the bead visible to the reconciler.
 func (a *Agent) DefaultSlingQuery() string {
-	return "bd update {} --set-metadata gc.routed_to=" + a.QualifiedName()
+	q := a.QualifiedName()
+	return "bd update {} --assignee " + q + " --set-metadata gc.routed_to=" + q
 }
 
 // EffectiveDefaultSlingFormula returns the default sling formula for

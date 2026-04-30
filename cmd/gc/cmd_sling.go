@@ -495,8 +495,18 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	if r.deps.Store == nil {
 		return fmt.Errorf("built-in sling routing requires a store")
 	}
-	if err := r.deps.Store.SetMetadata(req.BeadID, "gc.routed_to", req.Target); err != nil {
-		return fmt.Errorf("setting gc.routed_to on %s: %w", req.BeadID, err)
+	// Set assignee in addition to gc.routed_to. Without an assignee, the
+	// supervisor's assignedWorkBeads query (which filters by Bead.Assignee)
+	// cannot see the slung bead and the target agent never materializes —
+	// gc.routed_to alone is informational. Update writes both atomically so a
+	// concurrent reader never observes a half-routed bead. This mirrors the
+	// behavior of the textual default sling query (see Agent.DefaultSlingQuery).
+	target := req.Target
+	if err := r.deps.Store.Update(req.BeadID, beads.UpdateOpts{
+		Assignee: &target,
+		Metadata: map[string]string{"gc.routed_to": req.Target},
+	}); err != nil {
+		return fmt.Errorf("routing %s to %s: %w", req.BeadID, req.Target, err)
 	}
 	return nil
 }

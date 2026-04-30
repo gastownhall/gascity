@@ -4106,7 +4106,7 @@ func TestDryRunSingleBead(t *testing.T) {
 	if !strings.Contains(out, "Agent:       mayor (non-expanding template)") {
 		t.Errorf("stdout missing agent info: %s", out)
 	}
-	if !strings.Contains(out, "Sling query: bd update {} --set-metadata gc.routed_to=mayor") {
+	if !strings.Contains(out, "Sling query: bd update {} --assignee mayor --set-metadata gc.routed_to=mayor") {
 		t.Errorf("stdout missing sling query: %s", out)
 	}
 	// Work section.
@@ -4117,7 +4117,7 @@ func TestDryRunSingleBead(t *testing.T) {
 		t.Errorf("stdout missing bead title: %s", out)
 	}
 	// Route command.
-	if !strings.Contains(out, "bd update 'BL-42' --set-metadata gc.routed_to=mayor") {
+	if !strings.Contains(out, "bd update 'BL-42' --assignee mayor --set-metadata gc.routed_to=mayor") {
 		t.Errorf("stdout missing route command: %s", out)
 	}
 	// Footer.
@@ -4221,7 +4221,7 @@ func TestDryRunOnFormula(t *testing.T) {
 	if !strings.Contains(out, "Pre-check: BL-42 has no existing molecule/wisp children") {
 		t.Errorf("stdout missing pre-check: %s", out)
 	}
-	if !strings.Contains(out, "bd update 'BL-42' --set-metadata gc.routed_to=mayor") {
+	if !strings.Contains(out, "bd update 'BL-42' --assignee mayor --set-metadata gc.routed_to=mayor") {
 		t.Errorf("stdout missing route command: %s", out)
 	}
 	if len(runner.calls) != 0 {
@@ -4252,7 +4252,7 @@ func TestDryRunMultiSessionConfig(t *testing.T) {
 	if !strings.Contains(out, "Session config: hw/polecat (min=1 max=3)") {
 		t.Errorf("stdout missing multi-session config info: %s", out)
 	}
-	if !strings.Contains(out, "bd update {} --set-metadata gc.routed_to=hw/polecat") {
+	if !strings.Contains(out, "bd update {} --assignee hw/polecat --set-metadata gc.routed_to=hw/polecat") {
 		t.Errorf("stdout missing sling query: %s", out)
 	}
 	if !strings.Contains(out, "Multi-session configs share a routed work queue via gc.routed_to") {
@@ -4307,13 +4307,13 @@ func TestDryRunConvoy(t *testing.T) {
 		t.Errorf("stdout missing skip indicator: %s", out)
 	}
 	// Route commands.
-	if !strings.Contains(out, "bd update 'BL-1' --set-metadata gc.routed_to=mayor") {
+	if !strings.Contains(out, "bd update 'BL-1' --assignee mayor --set-metadata gc.routed_to=mayor") {
 		t.Errorf("stdout missing BL-1 route command: %s", out)
 	}
-	if !strings.Contains(out, "bd update 'BL-3' --set-metadata gc.routed_to=mayor") {
+	if !strings.Contains(out, "bd update 'BL-3' --assignee mayor --set-metadata gc.routed_to=mayor") {
 		t.Errorf("stdout missing BL-3 route command: %s", out)
 	}
-	if strings.Contains(out, "bd update 'BL-2' --set-metadata gc.routed_to=mayor") {
+	if strings.Contains(out, "bd update 'BL-2' --assignee mayor --set-metadata gc.routed_to=mayor") {
 		t.Errorf("stdout should not route closed BL-2: %s", out)
 	}
 	// Zero mutations.
@@ -4357,10 +4357,10 @@ func TestDryRunBatchOnFormula(t *testing.T) {
 		t.Errorf("stdout should not cook for closed BL-2: %s", out)
 	}
 	// Route commands.
-	if !strings.Contains(out, "bd update 'BL-1' --set-metadata gc.routed_to=mayor") {
+	if !strings.Contains(out, "bd update 'BL-1' --assignee mayor --set-metadata gc.routed_to=mayor") {
 		t.Errorf("stdout missing BL-1 route: %s", out)
 	}
-	if !strings.Contains(out, "bd update 'BL-3' --set-metadata gc.routed_to=mayor") {
+	if !strings.Contains(out, "bd update 'BL-3' --assignee mayor --set-metadata gc.routed_to=mayor") {
 		t.Errorf("stdout missing BL-3 route: %s", out)
 	}
 	if len(runner.calls) != 0 {
@@ -6054,5 +6054,49 @@ func TestSlingStdinWithExtraArg(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "--stdin requires exactly 1 argument") {
 		t.Errorf("stderr = %q, want to contain '--stdin requires exactly 1 argument'", stderr.String())
+	}
+}
+
+// TestCliBeadRouter_BuiltinPathSetsAssigneeAndMetadata pins the bug fix:
+// when a slung bead falls through the built-in fast path (no custom
+// sling_query), the bead must end up with BOTH the assignee and the
+// gc.routed_to metadata. Without the assignee, the supervisor's
+// assignedWorkBeads query (which filters by Bead.Assignee) cannot see
+// the bead, and on_demand agents like deep-investigator never materialize.
+func TestCliBeadRouter_BuiltinPathSetsAssigneeAndMetadata(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		ID:     "BL-99",
+		Title:  "investigate stale starts",
+		Type:   "task",
+		Status: "open",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			// Default sling query (no SlingQuery override) — the built-in
+			// fast path should be selected for this agent.
+			{Name: "deep-investigator"},
+		},
+	}
+	router := cliBeadRouter{deps: &slingDeps{Cfg: cfg, Store: store, Stderr: io.Discard}}
+	if err := router.Route(context.Background(), sling.RouteRequest{
+		BeadID: bead.ID,
+		Target: "deep-investigator",
+	}); err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	updated, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := updated.Assignee; got != "deep-investigator" {
+		t.Errorf("Assignee = %q, want %q (without this the supervisor cannot see the slung bead)", got, "deep-investigator")
+	}
+	if got := updated.Metadata["gc.routed_to"]; got != "deep-investigator" {
+		t.Errorf("gc.routed_to = %q, want %q", got, "deep-investigator")
 	}
 }
