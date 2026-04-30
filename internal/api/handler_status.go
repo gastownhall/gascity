@@ -3,10 +3,13 @@ package api
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/worker"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/session"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
 // statusResponse is the JSON body for GET /v0/status.
@@ -50,28 +53,34 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 func (s *Server) buildStatusBody() StatusBody {
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
-	store := s.state.CityBeadStore()
 	cityName := s.state.CityName()
 	sessTmpl := cfg.Workspace.SessionTemplate
+	sessionSnapshot := s.statusSessionSnapshot()
 
 	// Count agents by state.
 	var ac agentCounts
 	var rawRunning int
+	rigAgentCounts := make(map[string]int)
+	rigSuspendedCounts := make(map[string]int)
 	for _, a := range cfg.Agents {
-		for _, ea := range expandAgent(a, cityName, sessTmpl, sp) {
+		rigName := workdirutil.ConfiguredRigName(s.state.CityPath(), a, cfg.Rigs)
+		for _, slot := range statusAgentSlots(a, cityName, sessTmpl, sessionSnapshot) {
 			ac.Total++
-			sessName := agentSessionName(cityName, ea.qualifiedName, sessTmpl)
-			handle, _ := s.workerHandleForSessionTarget(store, sessName)
-			obs, _ := worker.ObserveHandle(context.Background(), handle)
-			running := obs.Running
+			if rigName != "" {
+				rigAgentCounts[rigName]++
+			}
+			running := statusProviderRunning(sp, slot.sessionName)
 			if running {
 				rawRunning++
 			}
-			suspended := ea.suspended || obs.Suspended
+			suspended := a.Suspended || slot.suspended
+			if suspended && rigName != "" {
+				rigSuspendedCounts[rigName]++
+			}
 			switch {
 			case suspended:
 				ac.Suspended++
-			case s.state.IsQuarantined(sessName):
+			case s.state.IsQuarantined(slot.sessionName):
 				ac.Quarantined++
 			case running:
 				ac.Running++
@@ -82,7 +91,11 @@ func (s *Server) buildStatusBody() StatusBody {
 	// Count rigs by state.
 	rc := rigCounts{Total: len(cfg.Rigs)}
 	for _, rig := range cfg.Rigs {
-		if s.rigSuspended(cfg, rig, store, sp, cityName, s.state.CityPath()) {
+		if rig.Suspended {
+			rc.Suspended++
+			continue
+		}
+		if total := rigAgentCounts[rig.Name]; total > 0 && total == rigSuspendedCounts[rig.Name] {
 			rc.Suspended++
 		}
 	}
@@ -149,6 +162,126 @@ func (s *Server) buildStatusBody() StatusBody {
 		Work:       wc,
 		Mail:       mc,
 	}
+}
+
+type statusSessionSnapshot struct {
+	bySessionName map[string]statusSessionInfo
+	byTemplate    map[string][]statusSessionInfo
+}
+
+type statusSessionInfo struct {
+	sessionName string
+	template    string
+	state       session.State
+}
+
+type statusAgentSlot struct {
+	sessionName string
+	suspended   bool
+}
+
+func (s *Server) statusSessionSnapshot() statusSessionSnapshot {
+	snapshot := statusSessionSnapshot{
+		bySessionName: make(map[string]statusSessionInfo),
+		byTemplate:    make(map[string][]statusSessionInfo),
+	}
+	store := s.state.CityBeadStore()
+	if store == nil {
+		return snapshot
+	}
+
+	rows, err := listSessionBeadsForReadModel(store)
+	if err != nil {
+		return snapshot
+	}
+
+	seenSessionName := make(map[string]bool, len(rows))
+	for _, b := range rows {
+		if b.Status == "closed" {
+			continue
+		}
+		info := statusSessionInfo{
+			sessionName: strings.TrimSpace(b.Metadata["session_name"]),
+			template:    strings.TrimSpace(b.Metadata["template"]),
+			state:       statusSessionState(b),
+		}
+		if info.sessionName == "" {
+			continue
+		}
+		if info.state == session.StateArchived {
+			continue
+		}
+		if seenSessionName[info.sessionName] {
+			continue
+		}
+		seenSessionName[info.sessionName] = true
+		snapshot.bySessionName[info.sessionName] = info
+		if info.template != "" {
+			snapshot.byTemplate[info.template] = append(snapshot.byTemplate[info.template], info)
+		}
+	}
+	return snapshot
+}
+
+func statusSessionState(b beads.Bead) session.State {
+	state := session.State(strings.TrimSpace(b.Metadata["state"]))
+	switch state {
+	case "awake":
+		return session.StateActive
+	case "drained":
+		return session.StateAsleep
+	default:
+		return state
+	}
+}
+
+func statusAgentSlots(a config.Agent, cityName, sessTmpl string, snapshot statusSessionSnapshot) []statusAgentSlot {
+	maxSess := a.EffectiveMaxActiveSessions()
+	isMultiSession := maxSess == nil || *maxSess != 1
+	if isMultiSession && (maxSess == nil || *maxSess < 0) {
+		sessions := snapshot.byTemplate[a.QualifiedName()]
+		slots := make([]statusAgentSlot, 0, len(sessions))
+		for _, info := range sessions {
+			slots = append(slots, statusAgentSlot{
+				sessionName: info.sessionName,
+				suspended:   info.state == session.StateSuspended,
+			})
+		}
+		return slots
+	}
+
+	if !isMultiSession {
+		sessionName := agentSessionName(cityName, a.QualifiedName(), sessTmpl)
+		info, ok := snapshot.bySessionName[sessionName]
+		return []statusAgentSlot{{
+			sessionName: sessionName,
+			suspended:   ok && info.state == session.StateSuspended,
+		}}
+	}
+
+	poolMax := 1
+	if maxSess != nil && *maxSess > 1 {
+		poolMax = *maxSess
+	}
+	slots := make([]statusAgentSlot, 0, poolMax)
+	for i := 1; i <= poolMax; i++ {
+		memberName := poolInstanceNameForAPI(a.Name, i, a)
+		sessionName := agentSessionName(cityName, a.QualifiedInstanceName(memberName), sessTmpl)
+		info, ok := snapshot.bySessionName[sessionName]
+		slots = append(slots, statusAgentSlot{
+			sessionName: sessionName,
+			suspended:   ok && info.state == session.StateSuspended,
+		})
+	}
+	return slots
+}
+
+func statusProviderRunning(sp interface{ IsRunning(string) bool }, sessionName string) bool {
+	sessionName = strings.TrimSpace(sessionName)
+	if sp == nil || sessionName == "" {
+		return false
+	}
+	return sp.IsRunning(sessionName)
 }
 
 // HealthInput is the Huma input for GET /v0/city/{cityName}/health.

@@ -71,6 +71,13 @@ type sessionResponseHandle interface {
 	worker.PeekHandle
 }
 
+func (s *Server) runtimeSessionResponseHandle(info session.Info) sessionResponseHandle {
+	if info.State != session.StateActive {
+		return nil
+	}
+	return newProviderSessionResponseHandle(s.state.SessionProvider(), info.SessionName, info.Provider)
+}
+
 func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 	provider, displayName := info.Provider, ""
 	if cfg != nil {
@@ -201,28 +208,25 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	templateFilter := q.Get("template")
 	wantPeek := q.Get("peek") == "true"
 
-	sessions, err := catalog.List(stateFilter, templateFilter)
+	all, err := listSessionBeadsForReadModel(store)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
+	listResult := catalog.ListFullFromBeads(all, stateFilter, templateFilter)
+	sessions := listResult.Sessions
 
 	// Build bead index for reason enrichment.
 	beadIndex := make(map[string]*beads.Bead)
-	if all, err := store.List(beads.ListQuery{Label: session.LabelSession}); err == nil {
-		for i := range all {
-			beadIndex[all[i].ID] = &all[i]
-		}
+	for i := range listResult.Beads {
+		beadIndex[listResult.Beads[i].ID] = &listResult.Beads[i]
 	}
 
 	items := make([]sessionResponse, len(sessions))
 	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
 	for i, sess := range sessions {
 		items[i] = sessionResponseWithReason(sess, beadIndex[sess.ID], cfg, hasDeferredQueue)
-		handle, err := s.workerHandleForSession(store, sess.ID)
-		if err == nil {
-			s.enrichSessionResponse(&items[i], sess, cfg, handle, wantPeek, false)
-		}
+		s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false)
 	}
 
 	pp := parsePagination(r, maxPaginationLimit)
@@ -268,7 +272,7 @@ func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 	resp := sessionResponseWithReason(info, &b, cfg, strings.TrimSpace(s.state.CityPath()) != "")
 	handle, err := s.workerHandleForSession(store, id)
 	if err == nil {
-		s.enrichSessionResponse(&resp, info, cfg, handle, wantPeek, true)
+		s.enrichSessionResponse(&resp, info, cfg, handle, wantPeek, true, true)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -449,7 +453,7 @@ func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
 
 // enrichSessionResponse populates runtime fields on a session response:
 // running state, active bead, peek output, and model/context metadata.
-func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info, _ *config.City, runtimeHandle any, wantPeek, liveActiveBead bool) {
+func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info, cfg *config.City, runtimeHandle any, wantPeek, liveActiveBead, allowWorkdirTranscriptDiscovery bool) {
 	if info.State != session.StateActive {
 		return
 	}
@@ -523,7 +527,14 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 		}
 		// Prefer session-key lookup to avoid cross-reading another session's transcript.
 		// Cache the resolved file path — session files don't move once created.
-		sessionFile := factory.DiscoverTranscript(info.Provider, workDir, info.SessionKey)
+		provider := info.Provider
+		if strings.TrimSpace(provider) == "" && cfg != nil {
+			provider, _ = resolveProviderInfo(provider, cfg)
+		}
+		if !allowWorkdirTranscriptDiscovery && !canUseCheapTranscriptLookup(provider, info.SessionKey) {
+			return
+		}
+		sessionFile := factory.DiscoverTranscript(provider, workDir, info.SessionKey)
 		if sessionFile != "" {
 			if meta, err := factory.TailMeta(sessionFile); err == nil && meta != nil {
 				resp.Model = meta.Model
@@ -535,6 +546,17 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 			}
 		}
 	}
+}
+
+func canUseCheapTranscriptLookup(provider, sessionKey string) bool {
+	if strings.TrimSpace(sessionKey) == "" {
+		return false
+	}
+	p := strings.ToLower(strings.TrimSpace(provider))
+	if strings.Contains(p, "codex") || strings.Contains(p, "gemini") {
+		return false
+	}
+	return true
 }
 
 // handleSessionPatch handles PATCH /v0/session/{id}. Title and alias are mutable.

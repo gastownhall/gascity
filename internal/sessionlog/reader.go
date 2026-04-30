@@ -427,8 +427,10 @@ func FindSessionFileForProvider(searchPaths []string, provider, workDir string) 
 		return FindCodexSessionFile(searchPaths, workDir)
 	case "gemini":
 		return FindGeminiSessionFile(searchPaths, workDir)
-	default:
+	case "", "auto":
 		return FindSessionFile(searchPaths, workDir)
+	default:
+		return findSlugSessionFile(searchPaths, workDir)
 	}
 }
 

@@ -77,6 +77,7 @@ func TestBeadsScriptInitSetsBEADSDIR(t *testing.T) {
 		t.Fatalf("gc-beads-k8s init error = %v\noutput:\n%s", result.err, result.output)
 	}
 	assertCallContains(t, result.callLog, `export BEADS_DIR="$workdir/.beads"`)
+	assertCallContains(t, result.callLog, `git config --global beads.role`)
 	assertCallContains(t, result.callLog, "init --server")
 }
 
@@ -102,8 +103,8 @@ func TestBeadsScriptInitDoesNotPreseedIssuePrefixBeforeBdInit(t *testing.T) {
 	if !strings.Contains(lines[0], "init --server") {
 		t.Fatalf("first init call = %q, want init --server", lines[0])
 	}
-	if strings.Contains(lines[0], "config set issue_prefix") {
-		t.Fatalf("first init call should not preseed issue_prefix before bd init:\n%s", lines[0])
+	if strings.Contains(result.callLog, "config set issue_prefix") {
+		t.Fatalf("init flow should not rewrite issue_prefix around bd init:\n%s", result.callLog)
 	}
 }
 
@@ -159,6 +160,23 @@ func TestBeadsScriptListUsesScopedWorkdir(t *testing.T) {
 	assertCallContains(t, result.callLog, "/workspace/frontend")
 	assertCallContains(t, result.callLog, "list --json --limit 0 --all")
 	assertCallContains(t, result.callLog, `export BEADS_DIR="$workdir/.beads"`)
+	assertCallContains(t, result.callLog, `git config --global beads.role`)
+}
+
+func TestBeadsScriptListDoesNotRewriteIssuePrefixPerCommand(t *testing.T) {
+	result := runBeadsScript(t, beadsScriptOptions{
+		Op: "list",
+		Env: map[string]string{
+			"GC_CITY_PATH":    "/city",
+			"GC_STORE_ROOT":   "/city/frontend",
+			"GC_BEADS_PREFIX": "fe",
+		},
+		ListOutput: "[]",
+	})
+	if result.err != nil {
+		t.Fatalf("gc-beads-k8s list error = %v\noutput:\n%s", result.err, result.output)
+	}
+	assertCallNotContains(t, result.callLog, "config set issue_prefix")
 }
 
 func TestBeadsScriptConfigSetKeepsBEADSDIRScoped(t *testing.T) {

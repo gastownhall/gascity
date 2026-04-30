@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -149,9 +150,7 @@ func shellSlingRunner(dir, command string, env map[string]string) (string, error
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	if len(env) > 0 {
-		cmd.Env = mergeRuntimeEnv(os.Environ(), env)
-	}
+	cmd.Env = mergeRuntimeEnv(os.Environ(), env)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return string(out), fmt.Errorf("running %q: %w", command, err)
@@ -782,12 +781,12 @@ func missingBeadForceApplies(opts sling.SlingOpts) bool {
 }
 
 func sourceWorkflowCleanupCommand(sourceBeadID, storeRef string) string {
-	args := []string{"gc workflow delete-source", sourceBeadID}
+	args := []string{"gc", "workflow", "delete-source", sourceBeadID}
 	if storeRef = strings.TrimSpace(storeRef); storeRef != "" {
 		args = append(args, "--store-ref", storeRef)
 	}
 	args = append(args, "--apply")
-	return strings.Join(args, " ")
+	return shellquote.Join(args)
 }
 
 func printSourceWorkflowConflict(stderr io.Writer, conflictErr *sourceworkflow.ConflictError, storeRef string) {

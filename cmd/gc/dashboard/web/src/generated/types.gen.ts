@@ -7616,7 +7616,12 @@ export type GetV0CityByCityNameOrdersCheckData = {
          */
         cityName: string;
     };
-    query?: never;
+    query?: {
+        /**
+         * Bypass cached order-check responses and cached order history.
+         */
+        fresh?: boolean;
+    };
     url: '/v0/city/{cityName}/orders/check';
 };
 

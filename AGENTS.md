@@ -211,13 +211,20 @@ Lesson test — it becomes LESS useful as models improve.
   definitions; the apply functions and pool deep-copy must be checked
   manually.
 
-- `TESTING.md` — testing philosophy and tier boundaries. Read before writing any test.
+- `TESTING.md` — testing philosophy, tier boundaries, and sharded local
+  runners. Read before writing any test. For broad local sweeps, prefer the
+  documented shard targets (`make test-fast-parallel`,
+  `make test-cmd-gc-process-parallel`, `make test-integration-shards-parallel`,
+  `make test-local-full-parallel`) over raw `go test`.
 
 ## Code quality gates
 
 Before considering any task complete:
 
-- `go test ./...` passes
+- Fast unit baseline passes (`make test`, or `make test-fast-parallel` on
+  machines where sharding is useful)
+- Broader process/integration coverage uses the sharded targets documented in
+  `TESTING.md` instead of one monolithic `go test ./...` sweep
 - `go vet ./...` clean
 - `.githooks/pre-commit` is active locally (`git config core.hooksPath`
   prints `.githooks`) and has run for the staged change

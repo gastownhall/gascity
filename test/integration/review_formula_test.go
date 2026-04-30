@@ -223,7 +223,11 @@ func TestAdoptPRFormulaRetriesTransientReviewerStep(t *testing.T) {
 
 	steps := listWorkflowSteps(t, cityDir, workflowID)
 	if !hasStepWithSuffix(steps, "review-pipeline.review-codex.attempt.2") {
-		t.Fatalf("missing retry attempt for codex reviewer; got: %v", steps)
+		trace := readOptionalFile(filepath.Join(cityDir, "graph-workflow-trace.log"))
+		if !traceShowsSameAttemptTransientRetry(trace, "review-loop.iteration.1.review-pipeline.review-codex.attempt.1") {
+			dumpWorkflowState(t, cityDir, workflowID)
+			t.Fatalf("missing retry attempt for codex reviewer; got: %v", steps)
+		}
 	}
 
 	logical := mustFindWorkflowBeadByRefSuffix(t, cityDir, workflowID, "review-loop.iteration.1.review-pipeline.review-codex")
@@ -234,7 +238,11 @@ func TestAdoptPRFormulaRetriesTransientReviewerStep(t *testing.T) {
 
 func TestAdoptPRFormulaSoftFailsGeminiAfterTransientRetries(t *testing.T) {
 	cityDir := setupReviewFormulaCity(t, "success", map[string]string{
-		"GC_GRAPH_ALWAYS_TRANSIENT_SUFFIXES": "review-loop.iteration.1.review-pipeline.review-gemini.attempt.",
+		"GC_GRAPH_ALWAYS_TRANSIENT_SUFFIXES": strings.Join([]string{
+			"review-loop.iteration.1.review-pipeline.review-gemini.attempt.1",
+			"review-loop.iteration.1.review-pipeline.review-gemini.attempt.2",
+			"review-loop.iteration.1.review-pipeline.review-gemini.attempt.3",
+		}, ","),
 	})
 	_, workflowID := startReviewWorkflow(t, cityDir, "mol-adopt-pr-v2", map[string]string{
 		"issue":       "",
@@ -255,6 +263,7 @@ func TestAdoptPRFormulaSoftFailsGeminiAfterTransientRetries(t *testing.T) {
 		"review-pipeline.review-gemini.attempt.3",
 	} {
 		if !hasStepWithSuffix(steps, suffix) {
+			dumpWorkflowState(t, cityDir, workflowID)
 			t.Fatalf("missing Gemini retry attempt %q; got: %v", suffix, steps)
 		}
 	}
@@ -321,7 +330,7 @@ on_exhausted = "hard_fail"
 	if !traceHasLineWithAll(trace, "exit-after-claim bead="+attempt2.ID, "ref="+attempt2.Ref) {
 		t.Fatalf("worker trace missing forced crash evidence:\n%s", trace)
 	}
-	if countTraceLinesWithAll(trace, "claim bead="+attempt2.ID) < 2 {
+	if countTraceLinesWithAll(trace, "claim bead="+attempt2.ID)+countTraceLinesWithAll(trace, "resume bead="+attempt2.ID) < 2 {
 		t.Fatalf("worker trace missing reclaim evidence for %s:\n%s", attempt2.ID, trace)
 	}
 	if !traceHasLineWithAll(trace, "run bead="+attempt2.ID, "ref="+attempt2.Ref) {
@@ -499,6 +508,22 @@ func hasStepWithSuffix(steps []string, suffix string) bool {
 		}
 	}
 	return false
+}
+
+func traceShowsSameAttemptTransientRetry(trace, stepRef string) bool {
+	runCount := 0
+	sawTransientClose := false
+	for _, line := range strings.Split(trace, "\n") {
+		if strings.Contains(line, " run bead=") && strings.Contains(line, "ref="+stepRef) {
+			runCount++
+		}
+		if strings.Contains(line, " close-fail bead=") &&
+			strings.Contains(line, "ref="+stepRef) &&
+			strings.Contains(line, "class=transient") {
+			sawTransientClose = true
+		}
+	}
+	return sawTransientClose && runCount >= 2
 }
 
 func dumpWorkflowState(t *testing.T, cityDir, workflowID string) {

@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doltauth"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -36,10 +37,13 @@ func bdStoreForCity(dir, cityPath string) *beads.BdStore {
 // when available, falling back to city-level config. Use this when the rig
 // may have its own Dolt server (e.g., shared from another city).
 func bdStoreForRig(rigDir, cityPath string, cfg *config.City) *beads.BdStore {
-	return beads.NewBdStore(rigDir, bdCommandRunnerWithManagedRetry(cityPath, func(_ string) map[string]string {
-		env := bdRuntimeEnvForRig(cityPath, cfg, rigDir)
-		return env
-	}))
+	return beads.NewBdStore(rigDir, bdCommandRunnerForRig(cityPath, cfg, rigDir))
+}
+
+func bdCommandRunnerForRig(cityPath string, cfg *config.City, rigDir string) beads.CommandRunner {
+	return bdCommandRunnerWithManagedRetry(cityPath, func(_ string) map[string]string {
+		return bdRuntimeEnvForRig(cityPath, cfg, rigDir)
+	})
 }
 
 func canonicalScopeDoltTarget(cityPath, scopeRoot string) (contract.DoltConnectionTarget, bool, error) {
@@ -516,7 +520,7 @@ func cityForStoreDir(dir string) string {
 }
 
 func overlayEnvEntries(environ []string, overrides map[string]string) []string {
-	out := append([]string(nil), environ...)
+	out := execenv.FilterInherited(environ)
 	if len(overrides) == 0 {
 		return out
 	}
@@ -569,7 +573,7 @@ func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 		}
 	}
 	sort.Strings(keys)
-	out := append([]string(nil), environ...)
+	out := execenv.FilterInherited(environ)
 	for _, key := range keys {
 		out = removeEnvKey(out, key)
 	}

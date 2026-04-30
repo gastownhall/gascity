@@ -22,23 +22,130 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  DOLT_VERSION: "1.86.1"
-  BD_VERSION: "v1.0.0"
+  DOLT_VERSION: "1.86.6"
+  BD_VERSION: "v1.0.3"
 
 jobs:
+  runner-policy:
+    name: Runner policy
+    runs-on: ubuntu-latest
+    outputs:
+      use_blacksmith: ${{ steps.policy.outputs.use_blacksmith }}
+      reason: ${{ steps.policy.outputs.reason }}
+      runner_2vcpu: ${{ steps.policy.outputs.runner_2vcpu }}
+      runner_8vcpu: ${{ steps.policy.outputs.runner_8vcpu }}
+      runner_16vcpu: ${{ steps.policy.outputs.runner_16vcpu }}
+      runner_32vcpu: ${{ steps.policy.outputs.runner_32vcpu }}
+      runner_macos: ${{ steps.policy.outputs.runner_macos }}
+    steps:
+      # Read the allowlist from the trusted base revision, not from PR code.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        if: ${{ github.event_name == 'pull_request' }}
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        if: ${{ github.event_name != 'pull_request' }}
+      - name: Select runner backend
+        id: policy
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
+          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          event_name = os.environ["EVENT_NAME"]
+          author = os.environ.get("PR_AUTHOR", "").strip()
+          association = os.environ.get("PR_ASSOCIATION", "").strip().upper()
+          try:
+              labels_payload = json.loads(os.environ.get("PR_LABELS_JSON", "[]") or "[]")
+          except json.JSONDecodeError:
+              labels_payload = []
+          if labels_payload is None:
+              labels_payload = []
+          labels = {str(label).strip() for label in labels_payload if str(label).strip()}
+
+          allowlist_path = Path(".github/blacksmith-allowlist.txt")
+          allowlist = set()
+          if allowlist_path.exists():
+              for raw_line in allowlist_path.read_text(encoding="utf-8").splitlines():
+                  line = raw_line.split("#", 1)[0].strip()
+                  if line:
+                      allowlist.add(line.lower())
+
+          use_blacksmith = False
+          reason = ""
+          if event_name != "pull_request":
+              use_blacksmith = True
+              reason = f"{event_name} event"
+          elif "ok-to-blacksmith" in labels:
+              use_blacksmith = True
+              reason = "ok-to-blacksmith label"
+          elif association in {"OWNER", "MEMBER", "COLLABORATOR"}:
+              use_blacksmith = True
+              reason = f"trusted author association: {association}"
+          elif author.lower() in allowlist:
+              use_blacksmith = True
+              reason = "author is in .github/blacksmith-allowlist.txt"
+          else:
+              reason = (
+                  f"author {author or '<unknown>'} is not on the Blacksmith allowlist; "
+                  "using GitHub-hosted runners"
+              )
+
+          if use_blacksmith:
+              runners = {
+                  "runner_2vcpu": "blacksmith-2vcpu-ubuntu-2404",
+                  "runner_8vcpu": "blacksmith-8vcpu-ubuntu-2404",
+                  "runner_16vcpu": "blacksmith-16vcpu-ubuntu-2404",
+                  "runner_32vcpu": "blacksmith-32vcpu-ubuntu-2404",
+                  "runner_macos": "blacksmith-12vcpu-macos-15",
+              }
+              backend = "Blacksmith"
+          else:
+              runners = {
+                  "runner_2vcpu": "ubuntu-latest",
+                  "runner_8vcpu": "ubuntu-latest",
+                  "runner_16vcpu": "ubuntu-latest",
+                  "runner_32vcpu": "ubuntu-latest",
+                  "runner_macos": "macos-15",
+              }
+              backend = "GitHub-hosted"
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"use_blacksmith={str(use_blacksmith).lower()}\n")
+              out.write(f"reason={reason}\n")
+              for name, runner in runners.items():
+                  out.write(f"{name}={runner}\n")
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("## Runner policy\n\n")
+              summary.write(f"- backend: `{backend}`\n")
+              summary.write(f"- use_blacksmith: `{str(use_blacksmith).lower()}`\n")
+              summary.write(f"- reason: {reason}\n")
+              if event_name == "pull_request":
+                  summary.write(f"- author: `{author}`\n")
+                  summary.write(f"- association: `{association or '<empty>'}`\n")
+          PY
+
   gate:
     name: review-formulas routing
+    needs: runner-policy
     if: >-
       github.event_name != 'pull_request' ||
       github.event.action != 'labeled' ||
-      github.event.label.name == 'needs-review-formulas'
-    runs-on: ubuntu-latest
+      (github.event.label.name == 'needs-review-formulas' || github.event.label.name == 'ok-to-blacksmith')
+    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     outputs:
       run_shard: ${{ steps.gate.outputs.run_shard }}
       reason: ${{ steps.gate.outputs.reason }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3
+      - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3
         id: filter
         with:
           filters: |
@@ -78,7 +185,7 @@ jobs:
             run_shard=true
             reason="push to main safety net"
           elif [[ "$PR_DRAFT" != "true" ]]; then
-            if [[ "$EVENT_ACTION" == "labeled" && "$LABELED_NAME" != "needs-review-formulas" ]]; then
+            if [[ "$EVENT_ACTION" == "labeled" && "$LABELED_NAME" != "needs-review-formulas" && "$LABELED_NAME" != "ok-to-blacksmith" ]]; then
               reason="ignored unrelated label event"
             elif [[ "$PATH_HIT" == "true" || "$NEEDS_LABEL" == "true" ]]; then
               run_shard=true
@@ -100,20 +207,28 @@ jobs:
 
   review-formulas-shard:
     name: Integration / review-formulas (${{ matrix.label }})
-    needs: gate
+    needs:
+      - runner-policy
+      - gate
     if: needs.gate.outputs.run_shard == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
-          - shard: review-formulas-basic
-            label: basic
-            coverprofile: coverage.integration-review-formulas-basic.txt
-          - shard: review-formulas-retries
-            label: retries
-            coverprofile: coverage.integration-review-formulas-retries.txt
+          - shard: review-formulas-basic-1-of-2
+            label: basic-1-of-2
+            coverprofile: coverage.integration-review-formulas-basic-1.txt
+          - shard: review-formulas-basic-2-of-2
+            label: basic-2-of-2
+            coverprofile: coverage.integration-review-formulas-basic-2.txt
+          - shard: review-formulas-retries-1-of-2
+            label: retries-1-of-2
+            coverprofile: coverage.integration-review-formulas-retries-1.txt
+          - shard: review-formulas-retries-2-of-2
+            label: retries-2-of-2
+            coverprofile: coverage.integration-review-formulas-retries-2.txt
           - shard: review-formulas-recovery
             label: recovery
             coverprofile: coverage.integration-review-formulas-recovery.txt
@@ -145,7 +260,7 @@ jobs:
             github.event_name != 'pull_request' ||
             github.event.pull_request.head.repo.full_name == github.repository
           )
-        uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de # v5
+        uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe # v5
         with:
           files: ${{ matrix.coverprofile }}
           flags: integration-review-formulas
@@ -159,6 +274,7 @@ jobs:
     # explicit while the shards run in parallel underneath it.
     name: Integration / review-formulas
     needs:
+      - runner-policy
       - gate
       - review-formulas-shard
     if: >-
@@ -166,9 +282,9 @@ jobs:
       (
         github.event_name != 'pull_request' ||
         github.event.action != 'labeled' ||
-        github.event.label.name == 'needs-review-formulas'
+        (github.event.label.name == 'needs-review-formulas' || github.event.label.name == 'ok-to-blacksmith')
       )
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     steps:
       - name: Finalize review-formulas result
         env:

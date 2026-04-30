@@ -83,6 +83,31 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 	return c.backing.List(query)
 }
 
+// CachedList returns query results from the in-memory cache only. The boolean
+// reports whether the cache was initialized enough to answer without touching
+// the backing store. Dirty entries are returned from the last observed
+// snapshot; callers must treat this as a read model that may lag writes or
+// reconciliation by one tick.
+func (c *CachingStore) CachedList(query ListQuery) ([]Bead, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.state != cacheLive && c.state != cachePartial {
+		return nil, false
+	}
+	cached := make([]Bead, 0, len(c.beads))
+	for _, b := range c.beads {
+		if !query.Matches(b) {
+			continue
+		}
+		cached = append(cached, cloneBead(b))
+	}
+	sortBeadsForQuery(cached, query.Sort)
+	if query.Limit > 0 && len(cached) > query.Limit {
+		cached = cached[:query.Limit]
+	}
+	return cached, true
+}
+
 func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, items []Bead) []Bead {
 	refreshedParents := make(map[string]Bead)
 	removedParents := make(map[string]struct{})
@@ -250,7 +275,6 @@ func (c *CachingStore) Ready() ([]Bead, error) {
 		statusByID := make(map[string]string, len(c.beads))
 		depsByID := make(map[string][]Dep, len(c.deps))
 		openBeads := make([]Bead, 0, len(c.beads))
-		missingDepIDs := make(map[string]struct{})
 		for _, b := range c.beads {
 			statusByID[b.ID] = b.Status
 			if b.Status == "open" && !IsReadyExcludedType(b.Type) {
@@ -260,29 +284,8 @@ func (c *CachingStore) Ready() ([]Bead, error) {
 		for _, b := range openBeads {
 			deps := cloneDeps(c.deps[b.ID])
 			depsByID[b.ID] = deps
-			for _, dep := range deps {
-				switch dep.Type {
-				case "blocks", "waits-for", "conditional-blocks":
-				default:
-					continue
-				}
-				if _, ok := statusByID[dep.DependsOnID]; !ok {
-					missingDepIDs[dep.DependsOnID] = struct{}{}
-				}
-			}
 		}
 		c.mu.RUnlock()
-
-		for depID := range missingDepIDs {
-			dep, err := c.backing.Get(depID)
-			if err != nil {
-				if errors.Is(err, ErrNotFound) {
-					continue
-				}
-				return nil, err
-			}
-			statusByID[depID] = dep.Status
-		}
 
 		var result []Bead
 		for _, b := range openBeads {
@@ -293,7 +296,7 @@ func (c *CachingStore) Ready() ([]Bead, error) {
 				default:
 					continue
 				}
-				if statusByID[dep.DependsOnID] != "closed" {
+				if status, ok := statusByID[dep.DependsOnID]; ok && status != "closed" {
 					blocked = true
 					break
 				}

@@ -155,19 +155,34 @@ func ReplaceSchemaFlags(command string, schema []ProviderOption, overrideArgs []
 	return stripped
 }
 
-// CollectAllSchemaFlags gathers all FlagArgs from all choices across all options.
-// Multi-flag FlagArgs sequences are split at "--" boundaries so that each
-// independent flag group can be matched separately during stripping.
+// CollectAllSchemaFlags gathers all FlagArgs and FlagAliases from all choices
+// across all options. Multi-flag sequences are split at "--" boundaries so that
+// each independent flag group can be matched separately during stripping.
 func CollectAllSchemaFlags(schema []ProviderOption) [][]string {
 	var flags [][]string
+	seen := make(map[string]bool)
 	for _, opt := range schema {
 		for _, choice := range opt.Choices {
-			if len(choice.FlagArgs) > 0 {
-				flags = append(flags, splitFlagArgs(choice.FlagArgs)...)
+			for _, seq := range choiceFlagSequences(choice) {
+				key := strings.Join(seq, "\x00")
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				flags = append(flags, cloneStrings(seq))
 			}
 		}
 	}
 	return flags
+}
+
+func choiceFlagSequences(choice OptionChoice) [][]string {
+	var sequences [][]string
+	sequences = append(sequences, splitFlagArgs(choice.FlagArgs)...)
+	for _, alias := range choice.FlagAliases {
+		sequences = append(sequences, splitFlagArgs(alias)...)
+	}
+	return sequences
 }
 
 // splitFlagArgs splits a FlagArgs slice into independent flag groups at
@@ -280,9 +295,9 @@ func stripArgsSlice(args []string, flags [][]string, schema []ProviderOption, in
 	return result
 }
 
-// inferChoiceFromFlags finds which schema option+choice produced the given
-// flag sequence and, if the key is not already present in defaults, sets
-// the inferred value. Only infers from exact full-FlagArgs matches to
+// inferChoiceFromFlags finds which schema option+choice produced the given flag
+// sequence and, if the key is not already present in defaults, sets the
+// inferred value. Only infers from exact full FlagArgs or FlagAliases matches to
 // avoid ambiguity with partial multi-flag matches.
 func inferChoiceFromFlags(schema []ProviderOption, flagSeq []string, defaults map[string]string) {
 	for _, opt := range schema {
@@ -290,12 +305,34 @@ func inferChoiceFromFlags(schema []ProviderOption, flagSeq []string, defaults ma
 			continue
 		}
 		for _, choice := range opt.Choices {
-			if flagsEqual(choice.FlagArgs, flagSeq) {
+			if choiceHasFlagSequence(choice, flagSeq) {
 				defaults[opt.Key] = choice.Value
 				return
 			}
 		}
 	}
+}
+
+func choiceHasFlagSequence(choice OptionChoice, flagSeq []string) bool {
+	for _, seq := range choiceFullFlagSequences(choice) {
+		if flagsEqual(seq, flagSeq) {
+			return true
+		}
+	}
+	return false
+}
+
+func choiceFullFlagSequences(choice OptionChoice) [][]string {
+	var sequences [][]string
+	if len(choice.FlagArgs) > 0 {
+		sequences = append(sequences, choice.FlagArgs)
+	}
+	for _, alias := range choice.FlagAliases {
+		if len(alias) > 0 {
+			sequences = append(sequences, alias)
+		}
+	}
+	return sequences
 }
 
 func flagsEqual(a, b []string) bool {

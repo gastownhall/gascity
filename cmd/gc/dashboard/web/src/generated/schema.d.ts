@@ -9009,7 +9009,10 @@ export interface operations {
     };
     "get-v0-city-by-city-name-orders-check": {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Bypass cached order-check responses and cached order history. */
+                fresh?: boolean;
+            };
             header?: never;
             path: {
                 /** @description City name. */

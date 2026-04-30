@@ -367,6 +367,55 @@ func TestControlDispatcherBinding_NilResolver(t *testing.T) {
 	}
 }
 
+func TestControlDispatcherBinding_ConfiguredDispatcherUsesConcreteSessionName(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{{
+		Name: "control-dispatcher",
+		Dir:  "gascity",
+	}}}
+
+	binding, err := ControlDispatcherBinding(nil, "test-city", cfg, "gascity", Deps{Resolver: testAgentResolver{}})
+	if err != nil {
+		t.Fatalf("ControlDispatcherBinding: %v", err)
+	}
+	if binding.QualifiedName != "gascity/control-dispatcher" {
+		t.Fatalf("QualifiedName = %q, want gascity/control-dispatcher", binding.QualifiedName)
+	}
+	if binding.SessionName != "gascity--control-dispatcher" {
+		t.Fatalf("SessionName = %q, want gascity--control-dispatcher", binding.SessionName)
+	}
+	if binding.MetadataOnly {
+		t.Fatalf("MetadataOnly = true, want false")
+	}
+}
+
+func TestAssignGraphStepRoute_ControlBindingUsesDirectAssigneeWithoutRoutedTo(t *testing.T) {
+	step := &formula.RecipeStep{
+		Metadata: map[string]string{
+			"gc.routed_to": "stale-control-route",
+		},
+	}
+	execution := GraphRouteBinding{
+		QualifiedName: "gascity/claude",
+		MetadataOnly:  true,
+	}
+	control := GraphRouteBinding{
+		QualifiedName: "gascity/control-dispatcher",
+		SessionName:   "gascity--control-dispatcher",
+	}
+
+	AssignGraphStepRoute(step, execution, &control)
+
+	if step.Assignee != "gascity--control-dispatcher" {
+		t.Fatalf("control assignee = %q, want gascity--control-dispatcher", step.Assignee)
+	}
+	if got := step.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("control gc.routed_to = %q, want empty direct assignee", got)
+	}
+	if got := step.Metadata[GraphExecutionRouteMetaKey]; got != "gascity/claude" {
+		t.Fatalf("control execution route = %q, want gascity/claude", got)
+	}
+}
+
 func TestWorkflowExecutionRoute(t *testing.T) {
 	b := beads.Bead{Metadata: map[string]string{"gc.routed_to": "myrig/worker"}}
 	if got := WorkflowExecutionRoute(b); got != "myrig/worker" {

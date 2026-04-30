@@ -14,6 +14,18 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
+type noBroadAPISessionRetireStore struct {
+	*beads.MemStore
+	t *testing.T
+}
+
+func (s *noBroadAPISessionRetireStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == session.LabelSession && len(query.Metadata) == 0 {
+		s.t.Fatalf("continuity retirement used broad session label scan: %+v", query)
+	}
+	return s.MemStore.List(query)
+}
+
 // Phase 0 spec coverage from engdocs/design/session-model-unification.md:
 // - Materialization contract
 // - Wake, Suspend, and Pin
@@ -275,9 +287,11 @@ func TestPhase0HandleSessionWake_NamedIdentitySkipsContinuityIneligibleHistorica
 
 func TestPhase0RetireContinuityIneligibleNamedSessionIdentifiersDoesNotRestampRetiredHistory(t *testing.T) {
 	fs := newSessionFakeState(t)
+	store := &noBroadAPISessionRetireStore{MemStore: beads.NewMemStore(), t: t}
+	fs.cityBeadStore = store
 	srv := New(fs)
 	archivedAt := "2026-03-01T12:00:00Z"
-	historical, err := fs.cityBeadStore.Create(beads.Bead{
+	historical, err := store.Create(beads.Bead{
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
 		Metadata: map[string]string{
@@ -296,7 +310,7 @@ func TestPhase0RetireContinuityIneligibleNamedSessionIdentifiersDoesNotRestampRe
 		t.Fatalf("Create(historical): %v", err)
 	}
 
-	retired, err := srv.retireContinuityIneligibleNamedSessionIdentifiers(fs.cityBeadStore, apiNamedSessionSpec{Identity: "worker"})
+	retired, err := srv.retireContinuityIneligibleNamedSessionIdentifiers(store, apiNamedSessionSpec{Identity: "worker"})
 	if err != nil {
 		t.Fatalf("retireContinuityIneligibleNamedSessionIdentifiers: %v", err)
 	}

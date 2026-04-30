@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -266,6 +267,17 @@ func TestHiddenAttachedClientCanSendText(t *testing.T) {
 	}
 	out, _ := tm.CapturePaneAll(sessionName)
 	t.Fatalf("CapturePaneAll did not contain hidden attach text:\n%s", out)
+}
+
+func TestHiddenAttachScriptArgsArePlatformSpecific(t *testing.T) {
+	tmuxArgs := []string{"-u", "-L", "socket", "attach-session", "-t", "target"}
+
+	if got, want := hiddenAttachScriptArgs("darwin", tmuxArgs), []string{"-q", "/dev/null", "tmux", "-u", "-L", "socket", "attach-session", "-t", "target"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("darwin script args = %#v, want %#v", got, want)
+	}
+	if got, want := hiddenAttachScriptArgs("linux", tmuxArgs), []string{"-qfc", "tmux -u -L socket attach-session -t target", "/dev/null"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("linux script args = %#v, want %#v", got, want)
+	}
 }
 
 func TestSendKeysAndCapture(t *testing.T) {
@@ -1266,6 +1278,11 @@ func TestCollectReparentedGroupMembers(t *testing.T) {
 		}
 		// Each reparented PID should have PPID == 1
 		ppid := getParentPID(rpid)
+		if ppid == "" && runtime.GOOS != "windows" {
+			if err := exec.Command("kill", "-0", rpid).Run(); err != nil {
+				continue
+			}
+		}
 		if ppid != "1" {
 			t.Errorf("collectReparentedGroupMembers returned PID %s with PPID %s (expected 1)", rpid, ppid)
 		}

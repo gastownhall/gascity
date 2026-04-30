@@ -428,6 +428,34 @@ prompt_template = "prompts/worker.md"
 	}
 }
 
+func TestDoPrimeWithHookFormat_FormatsDefaultFallback(t *testing.T) {
+	t.Setenv("GC_CITY", filepath.Join(t.TempDir(), "missing-city"))
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_AGENT", "")
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithHookFormat(nil, &stdout, &stderr, true, hookOutputFormatCodex, false)
+	if code != 0 {
+		t.Fatalf("doPrimeWithHookFormat() = %d, want 0; stderr=%q", code, stderr.String())
+	}
+
+	var payload struct {
+		HookSpecificOutput struct {
+			HookEventName     string `json:"hookEventName"`
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not hook JSON: %v\n%s", err, stdout.String())
+	}
+	if got, want := payload.HookSpecificOutput.HookEventName, "SessionStart"; got != want {
+		t.Fatalf("hookEventName = %q, want %q", got, want)
+	}
+	if !strings.Contains(payload.HookSpecificOutput.AdditionalContext, "# Gas City Agent") {
+		t.Fatalf("additionalContext = %q, want default prime prompt", payload.HookSpecificOutput.AdditionalContext)
+	}
+}
+
 func withPrimeHookStdin(t *testing.T, payload map[string]string) {
 	t.Helper()
 

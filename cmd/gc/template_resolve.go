@@ -24,7 +24,6 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/agent"
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
@@ -205,7 +204,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		}
 	}
 	if sessionBeadID == "" && p.beadStore != nil {
-		if all, err := p.beadStore.List(beads.ListQuery{Label: "gc:session"}); err == nil {
+		if all, err := session.ExactMetadataSessionCandidates(p.beadStore, false, map[string]string{"session_name": sessName}); err == nil {
 			for _, b := range all {
 				if !session.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
 					continue

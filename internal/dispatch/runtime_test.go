@@ -3036,6 +3036,61 @@ func TestRunRalphCheckTimeoutMetadataPrecedence(t *testing.T) {
 	}
 }
 
+func TestRunRalphCheckUsesStorePathForRelativeCheckAndSubjectEnv(t *testing.T) {
+	cityPath := t.TempDir()
+	storePath := t.TempDir()
+	workDir := filepath.Join(storePath, "frontend")
+	checkDir := filepath.Join(workDir, "checks")
+	if err := os.MkdirAll(checkDir, 0o755); err != nil {
+		t.Fatalf("mkdir check dir: %v", err)
+	}
+
+	checkPath := filepath.Join(checkDir, "env.sh")
+	script := "#!/bin/sh\n" +
+		"pwd\n" +
+		"printf 'BEAD=%s\\n' \"$GC_BEAD_ID\"\n" +
+		"printf 'CITY=%s\\n' \"$GC_CITY\"\n" +
+		"printf 'STORE=%s\\n' \"$GC_STORE_PATH\"\n" +
+		"printf 'BEADS=%s\\n' \"$BEADS_DIR\"\n"
+	if err := os.WriteFile(checkPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write check script: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	check := beads.Bead{
+		ID:   "check-1",
+		Type: "task",
+		Metadata: map[string]string{
+			"gc.check_path":    "checks/env.sh",
+			"gc.check_timeout": "30s",
+			"gc.work_dir":      "frontend",
+		},
+	}
+	subject := beads.Bead{ID: "run-1", Type: "task"}
+
+	result, err := runRalphCheck(store, check, subject, 2, ProcessOptions{
+		CityPath:  cityPath,
+		StorePath: storePath,
+	})
+	if err != nil {
+		t.Fatalf("runRalphCheck: %v", err)
+	}
+	if result.Outcome != "pass" {
+		t.Fatalf("result.Outcome = %q, want pass (stderr=%q)", result.Outcome, result.Stderr)
+	}
+	for _, want := range []string{
+		workDir,
+		"BEAD=run-1",
+		"CITY=" + cityPath,
+		"STORE=" + storePath,
+		"BEADS=" + filepath.Join(storePath, ".beads"),
+	} {
+		if !strings.Contains(result.Stdout, want) {
+			t.Fatalf("stdout = %q, want to contain %q", result.Stdout, want)
+		}
+	}
+}
+
 func writeCheckScript(t *testing.T, cityPath, name, contents string) string {
 	t.Helper()
 	scriptDir := filepath.Join(cityPath, ".gc", "scripts")

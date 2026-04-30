@@ -130,6 +130,34 @@ func TestDiscoverPathCodexIgnoresGCSessionID(t *testing.T) {
 	}
 }
 
+func TestDiscoverPathClaudeDoesNotScanCodexFallback(t *testing.T) {
+	base := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "claude-project")
+
+	payload, err := json.Marshal(map[string]any{
+		"type": "session_meta",
+		"payload": map[string]string{
+			"cwd": workDir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	codexRoot := filepath.Join(base, "sessions")
+	codexDir := filepath.Join(codexRoot, "2026", "04", "18")
+	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(codexDir, "session.jsonl"), append(payload, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := DiscoverPath([]string{codexRoot}, "claude/tmux-cli", workDir, "")
+	if got != "" {
+		t.Fatalf("DiscoverPath() = %q, want no Codex fallback for explicit Claude provider", got)
+	}
+}
+
 func TestSupportsIDLookup(t *testing.T) {
 	tests := []struct {
 		provider string

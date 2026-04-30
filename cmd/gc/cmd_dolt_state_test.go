@@ -2430,7 +2430,7 @@ esac
 	})
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"dolt-state", "recover-managed", "--city", cityPath, "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--user", "root", "--timeout-ms", "1000"}, &stdout, &stderr)
+	code := run([]string{"dolt-state", "recover-managed", "--city", cityPath, "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--user", "root", "--timeout-ms", "5000"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("run() = %d, stdout = %s stderr = %s", code, stdout.String(), stderr.String())
 	}
@@ -2731,7 +2731,7 @@ func TestDoltStateRecoverManagedCmdClearsPublishedStateWhenPreflightCleanupFails
 	defer func() { managedDoltPreflightCleanupFn = oldPreflight }()
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"dolt-state", "recover-managed", "--city", cityPath, "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--user", "root", "--timeout-ms", "1000"}, &stdout, &stderr)
+	code := run([]string{"dolt-state", "recover-managed", "--city", cityPath, "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--user", "root", "--timeout-ms", "5000"}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("run() = %d, want 1; stdout = %s stderr = %s", code, stdout.String(), stderr.String())
 	}
@@ -2864,7 +2864,7 @@ esac
 	})
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"dolt-state", "recover-managed", "--city", cityPath, "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--user", "root", "--timeout-ms", "1000"}, &stdout, &stderr)
+	code := run([]string{"dolt-state", "recover-managed", "--city", cityPath, "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--user", "root", "--timeout-ms", "5000"}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("run() = %d, want 1; stdout = %s stderr = %s", code, stdout.String(), stderr.String())
 	}

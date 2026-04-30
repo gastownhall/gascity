@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 
 import argparse
+import os
+from pathlib import Path
 import shutil
 import subprocess
 
 
-PACKAGE_BY_PROVIDER = {
-    "claude": "@anthropic-ai/claude-code",
-    "codex": "@openai/codex",
-    "gemini": "@google/gemini-cli",
+NPM_PACKAGE_BY_PROVIDER = {
+    "codex": ("@openai/codex", "CODEX_CLI_VERSION", "0.125.0"),
+    "gemini": ("@google/gemini-cli", "GEMINI_CLI_VERSION", "0.40.0"),
 }
+CLAUDE_CODE_VERSION = "2.1.123"
 
 
 def parse_args() -> argparse.Namespace:
@@ -26,15 +28,24 @@ def main() -> int:
     if args.command != "install":
         raise SystemExit(f"unsupported command: {args.command}")
     provider = args.profile.split("/", 1)[0].strip().lower()
-    package = PACKAGE_BY_PROVIDER.get(provider)
-    if not package:
+    if provider not in {"claude", *NPM_PACKAGE_BY_PROVIDER}:
         raise SystemExit(f"unsupported worker-inference profile: {args.profile!r}")
     if shutil.which(provider) and not args.force:
         print(f"{provider} already present in PATH; skipping install")
         return 0
-    subprocess.run(["npm", "install", "-g", package], check=True)
+
+    if provider == "claude":
+        version = os.environ.get("CLAUDE_CODE_VERSION", CLAUDE_CODE_VERSION)
+        repo_root = Path(__file__).resolve().parents[1]
+        installer = repo_root / ".github" / "scripts" / "install-claude-native.sh"
+        subprocess.run([str(installer), version], check=True)
+    else:
+        package, env_var, default_version = NPM_PACKAGE_BY_PROVIDER[provider]
+        version = os.environ.get(env_var, default_version)
+        subprocess.run(["npm", "install", "-g", f"{package}@{version}"], check=True)
+
     if not shutil.which(provider):
-        raise SystemExit(f"{provider} was not found in PATH after installing {package}")
+        raise SystemExit(f"{provider} was not found in PATH after installation")
     return 0
 
 

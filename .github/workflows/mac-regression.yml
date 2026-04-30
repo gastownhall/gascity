@@ -30,8 +30,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 env:
-  DOLT_VERSION: "1.86.1"
-  BD_VERSION: "v1.0.0"
+  DOLT_VERSION: "1.86.6"
+  BD_VERSION: "v1.0.3"
 
 # Trigger gate re-used by every job below via `if:`.
 # We want each job to run when EITHER:
@@ -42,10 +42,117 @@ env:
 # expression; keep them in sync.
 
 jobs:
+  runner-policy:
+    name: Runner policy
+    runs-on: ubuntu-latest
+    outputs:
+      use_blacksmith: ${{ steps.policy.outputs.use_blacksmith }}
+      reason: ${{ steps.policy.outputs.reason }}
+      runner_2vcpu: ${{ steps.policy.outputs.runner_2vcpu }}
+      runner_8vcpu: ${{ steps.policy.outputs.runner_8vcpu }}
+      runner_16vcpu: ${{ steps.policy.outputs.runner_16vcpu }}
+      runner_32vcpu: ${{ steps.policy.outputs.runner_32vcpu }}
+      runner_macos: ${{ steps.policy.outputs.runner_macos }}
+    steps:
+      # Read the allowlist from the trusted base revision, not from PR code.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        if: ${{ github.event_name == 'pull_request' }}
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        if: ${{ github.event_name != 'pull_request' }}
+      - name: Select runner backend
+        id: policy
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
+          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          event_name = os.environ["EVENT_NAME"]
+          author = os.environ.get("PR_AUTHOR", "").strip()
+          association = os.environ.get("PR_ASSOCIATION", "").strip().upper()
+          try:
+              labels_payload = json.loads(os.environ.get("PR_LABELS_JSON", "[]") or "[]")
+          except json.JSONDecodeError:
+              labels_payload = []
+          if labels_payload is None:
+              labels_payload = []
+          labels = {str(label).strip() for label in labels_payload if str(label).strip()}
+
+          allowlist_path = Path(".github/blacksmith-allowlist.txt")
+          allowlist = set()
+          if allowlist_path.exists():
+              for raw_line in allowlist_path.read_text(encoding="utf-8").splitlines():
+                  line = raw_line.split("#", 1)[0].strip()
+                  if line:
+                      allowlist.add(line.lower())
+
+          use_blacksmith = False
+          reason = ""
+          if event_name != "pull_request":
+              use_blacksmith = True
+              reason = f"{event_name} event"
+          elif "ok-to-blacksmith" in labels:
+              use_blacksmith = True
+              reason = "ok-to-blacksmith label"
+          elif association in {"OWNER", "MEMBER", "COLLABORATOR"}:
+              use_blacksmith = True
+              reason = f"trusted author association: {association}"
+          elif author.lower() in allowlist:
+              use_blacksmith = True
+              reason = "author is in .github/blacksmith-allowlist.txt"
+          else:
+              reason = (
+                  f"author {author or '<unknown>'} is not on the Blacksmith allowlist; "
+                  "using GitHub-hosted runners"
+              )
+
+          if use_blacksmith:
+              runners = {
+                  "runner_2vcpu": "blacksmith-2vcpu-ubuntu-2404",
+                  "runner_8vcpu": "blacksmith-8vcpu-ubuntu-2404",
+                  "runner_16vcpu": "blacksmith-16vcpu-ubuntu-2404",
+                  "runner_32vcpu": "blacksmith-32vcpu-ubuntu-2404",
+                  "runner_macos": "blacksmith-12vcpu-macos-15",
+              }
+              backend = "Blacksmith"
+          else:
+              runners = {
+                  "runner_2vcpu": "ubuntu-latest",
+                  "runner_8vcpu": "ubuntu-latest",
+                  "runner_16vcpu": "ubuntu-latest",
+                  "runner_32vcpu": "ubuntu-latest",
+                  "runner_macos": "macos-15",
+              }
+              backend = "GitHub-hosted"
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"use_blacksmith={str(use_blacksmith).lower()}\n")
+              out.write(f"reason={reason}\n")
+              for name, runner in runners.items():
+                  out.write(f"{name}={runner}\n")
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("## Runner policy\n\n")
+              summary.write(f"- backend: `{backend}`\n")
+              summary.write(f"- use_blacksmith: `{str(use_blacksmith).lower()}`\n")
+              summary.write(f"- reason: {reason}\n")
+              if event_name == "pull_request":
+                  summary.write(f"- author: `{author}`\n")
+                  summary.write(f"- association: `{association or '<empty>'}`\n")
+          PY
+
   # Fast quality gates that Linux runs on every PR. Keep these cheap so a
   # Mac-parity loop stays interactive.
   mac-quality:
     name: Mac / quality (lint, fmt, vet, docs)
+    needs: runner-policy
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
@@ -55,11 +162,7 @@ jobs:
         !github.event.pull_request.draft &&
         contains(github.event.pull_request.labels.*.name, 'needs-mac')
       )
-    runs-on:
-      - self-hosted
-      - macOS
-      - ARM64
-      - macstadium
+    runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -82,6 +185,7 @@ jobs:
   # Unit tests — the suite Mac already ran as "smoke".
   mac-unit:
     name: Mac / make test
+    needs: runner-policy
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
@@ -91,11 +195,7 @@ jobs:
         !github.event.pull_request.draft &&
         contains(github.event.pull_request.labels.*.name, 'needs-mac')
       )
-    runs-on:
-      - self-hosted
-      - macOS
-      - ARM64
-      - macstadium
+    runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -110,6 +210,7 @@ jobs:
   # Tier A acceptance — smoke-level gate on every PR.
   mac-acceptance:
     name: Mac / acceptance (Tier A)
+    needs: runner-policy
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
@@ -119,11 +220,7 @@ jobs:
         !github.event.pull_request.draft &&
         contains(github.event.pull_request.labels.*.name, 'needs-mac')
       )
-    runs-on:
-      - self-hosted
-      - macOS
-      - ARM64
-      - macstadium
+    runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -146,6 +243,7 @@ jobs:
   # job's result still reflects the actual outcome for the summary.
   mac-cover:
     name: Mac / test-cover
+    needs: runner-policy
     # Heavy job: schedule/full-dispatch/PR(needs-mac). Smoke dispatch skips.
     if: >-
       github.event_name == 'schedule' ||
@@ -156,11 +254,7 @@ jobs:
         !github.event.pull_request.draft &&
         contains(github.event.pull_request.labels.*.name, 'needs-mac')
       )
-    runs-on:
-      - self-hosted
-      - macOS
-      - ARM64
-      - macstadium
+    runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     timeout-minutes: 25
     outputs:
       outcome: ${{ steps.cover.outcome }}
@@ -185,18 +279,12 @@ jobs:
           path: coverage.txt
           if-no-files-found: ignore
 
-  # Integration shards. Linux runs these with continue-on-error today while
-  # stabilizing; we mirror that until Mac parity is proven. These three
-  # shards run on `needs-mac` label, nightly, or manual dispatch. The
-  # long-running review-formulas shard lives in a separate job below so
-  # it can gate on nightly / full-dispatch only.
-  # Integration shards. Linux runs these with continue-on-error today
-  # while stabilizing; we mirror that until Mac parity is proven. Split
-  # into discrete jobs (rather than a matrix) so each shard publishes
-  # its own `outputs.outcome` — matrix-job outputs are last-writer-wins
-  # and would mask a per-shard failure in the summary row.
+  # Integration shards. Packages and REST are matrix jobs whose aggregate
+  # result now gates the summary directly. The long-running review-formulas
+  # shard stays separate so it can gate on nightly / full-dispatch only.
   mac-integration-packages:
-    name: Mac / integration (packages)
+    name: Mac / integration packages / ${{ matrix.shard_name }}
+    needs: runner-policy
     if: >-
       github.event_name == 'schedule' ||
       (github.event_name == 'workflow_dispatch' && inputs.suite == 'full') ||
@@ -206,14 +294,38 @@ jobs:
         !github.event.pull_request.draft &&
         contains(github.event.pull_request.labels.*.name, 'needs-mac')
       )
-    runs-on:
-      - self-hosted
-      - macOS
-      - ARM64
-      - macstadium
-    timeout-minutes: 60
-    outputs:
-      outcome: ${{ steps.shard.outcome }}
+    runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard_name: core-1-of-4
+            shard: packages-core-1-of-4
+          - shard_name: core-2-of-4
+            shard: packages-core-2-of-4
+          - shard_name: core-3-of-4
+            shard: packages-core-3-of-4
+          - shard_name: core-4-of-4
+            shard: packages-core-4-of-4
+          - shard_name: cmd-gc-1-of-6
+            shard: packages-cmd-gc-1-of-6
+          - shard_name: cmd-gc-2-of-6
+            shard: packages-cmd-gc-2-of-6
+          - shard_name: cmd-gc-3-of-6
+            shard: packages-cmd-gc-3-of-6
+          - shard_name: cmd-gc-4-of-6
+            shard: packages-cmd-gc-4-of-6
+          - shard_name: cmd-gc-5-of-6
+            shard: packages-cmd-gc-5-of-6
+          - shard_name: cmd-gc-6-of-6
+            shard: packages-cmd-gc-6-of-6
+          - shard_name: tmux-1-of-3
+            shard: packages-runtime-tmux-1-of-3
+          - shard_name: tmux-2-of-3
+            shard: packages-runtime-tmux-2-of-3
+          - shard_name: tmux-3-of-3
+            shard: packages-runtime-tmux-3-of-3
     env:
       ANTHROPIC_BASE_URL: https://api.synthetic.new/anthropic
       ANTHROPIC_AUTH_TOKEN: ${{ secrets.SYNTHETIC_API_KEY }}
@@ -234,11 +346,11 @@ jobs:
         run: make install-tools
       - name: Run integration shard
         id: shard
-        continue-on-error: true
-        run: make test-integration-packages
+        run: ./scripts/test-integration-shard ${{ matrix.shard }}
 
   mac-integration-bdstore:
     name: Mac / integration (bdstore)
+    needs: runner-policy
     if: >-
       github.event_name == 'schedule' ||
       (github.event_name == 'workflow_dispatch' && inputs.suite == 'full') ||
@@ -248,11 +360,7 @@ jobs:
         !github.event.pull_request.draft &&
         contains(github.event.pull_request.labels.*.name, 'needs-mac')
       )
-    runs-on:
-      - self-hosted
-      - macOS
-      - ARM64
-      - macstadium
+    runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     timeout-minutes: 60
     outputs:
       outcome: ${{ steps.shard.outcome }}
@@ -280,7 +388,8 @@ jobs:
         run: make test-integration-bdstore
 
   mac-integration-rest:
-    name: Mac / integration (rest)
+    name: Mac / integration rest / ${{ matrix.shard_name }}
+    needs: runner-policy
     if: >-
       github.event_name == 'schedule' ||
       (github.event_name == 'workflow_dispatch' && inputs.suite == 'full') ||
@@ -290,14 +399,32 @@ jobs:
         !github.event.pull_request.draft &&
         contains(github.event.pull_request.labels.*.name, 'needs-mac')
       )
-    runs-on:
-      - self-hosted
-      - macOS
-      - ARM64
-      - macstadium
-    timeout-minutes: 60
-    outputs:
-      outcome: ${{ steps.shard.outcome }}
+    runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard_name: smoke-1-of-2
+            shard: rest-smoke-1-of-2
+          - shard_name: smoke-2-of-2
+            shard: rest-smoke-2-of-2
+          - shard_name: full-1-of-8
+            shard: rest-full-1-of-8
+          - shard_name: full-2-of-8
+            shard: rest-full-2-of-8
+          - shard_name: full-3-of-8
+            shard: rest-full-3-of-8
+          - shard_name: full-4-of-8
+            shard: rest-full-4-of-8
+          - shard_name: full-5-of-8
+            shard: rest-full-5-of-8
+          - shard_name: full-6-of-8
+            shard: rest-full-6-of-8
+          - shard_name: full-7-of-8
+            shard: rest-full-7-of-8
+          - shard_name: full-8-of-8
+            shard: rest-full-8-of-8
     env:
       ANTHROPIC_BASE_URL: https://api.synthetic.new/anthropic
       ANTHROPIC_AUTH_TOKEN: ${{ secrets.SYNTHETIC_API_KEY }}
@@ -318,20 +445,16 @@ jobs:
         run: make install-tools
       - name: Run integration shard
         id: shard
-        continue-on-error: true
-        run: make test-integration-rest
+        run: ./scripts/test-integration-shard ${{ matrix.shard }}
 
   # Long-running review-formulas shard — nightly / full dispatch only.
   mac-integration-review-formulas:
     name: Mac / integration (review-formulas)
+    needs: runner-policy
     if: >-
       github.event_name == 'schedule' ||
       (github.event_name == 'workflow_dispatch' && inputs.suite == 'full')
-    runs-on:
-      - self-hosted
-      - macOS
-      - ARM64
-      - macstadium
+    runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     timeout-minutes: 90
     outputs:
       outcome: ${{ steps.shard.outcome }}
@@ -361,10 +484,9 @@ jobs:
   # Aggregate summary so a single check reports Mac parity status on the
   # PR. Gated on the same trigger set as the parity jobs so it doesn't
   # post a misleading green check on PRs that never ran Mac at all. The
-  # best-effort jobs (cover, integration, review-formulas) keep their
-  # failures visible here via job outputs that capture the real
-  # step outcome — needs.<job>.result masks it as success because the
-  # failing steps are continue-on-error.
+  # best-effort jobs keep their failures visible here via job outputs that
+  # capture the real step outcome — needs.<job>.result masks it as success
+  # because the failing steps are continue-on-error.
   mac-regression-summary:
     name: Mac regression summary
     if: >-
@@ -379,6 +501,7 @@ jobs:
         )
       )
     needs:
+      - runner-policy
       - mac-quality
       - mac-unit
       - mac-acceptance
@@ -387,20 +510,18 @@ jobs:
       - mac-integration-bdstore
       - mac-integration-rest
       - mac-integration-review-formulas
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     steps:
       - name: Summarize
         env:
           QUALITY: ${{ needs.mac-quality.result }}
           UNIT: ${{ needs.mac-unit.result }}
           ACCEPTANCE: ${{ needs.mac-acceptance.result }}
-          # Best-effort jobs: use outputs.outcome (not needs.*.result)
-          # because their test step is continue-on-error, which forces
-          # needs.*.result to "success" even on failure.
+          # Best-effort jobs: use outputs.outcome (not needs.*.result).
           COVER: ${{ needs.mac-cover.outputs.outcome || needs.mac-cover.result }}
-          INT_PACKAGES: ${{ needs.mac-integration-packages.outputs.outcome || needs.mac-integration-packages.result }}
+          INT_PACKAGES: ${{ needs.mac-integration-packages.result }}
           INT_BDSTORE: ${{ needs.mac-integration-bdstore.outputs.outcome || needs.mac-integration-bdstore.result }}
-          INT_REST: ${{ needs.mac-integration-rest.outputs.outcome || needs.mac-integration-rest.result }}
+          INT_REST: ${{ needs.mac-integration-rest.result }}
           REVIEW_FORMULAS: ${{ needs.mac-integration-review-formulas.outputs.outcome || needs.mac-integration-review-formulas.result }}
         run: |
           cat >>"$GITHUB_STEP_SUMMARY" <<EOF
@@ -412,14 +533,14 @@ jobs:
           | Mac / make test | ${UNIT} |
           | Mac / acceptance (Tier A) | ${ACCEPTANCE} |
           | Mac / test-cover (best-effort) | ${COVER} |
-          | Mac / integration packages (best-effort) | ${INT_PACKAGES} |
+          | Mac / integration packages | ${INT_PACKAGES} |
           | Mac / integration bdstore (best-effort) | ${INT_BDSTORE} |
-          | Mac / integration rest (best-effort) | ${INT_REST} |
+          | Mac / integration rest | ${INT_REST} |
           | Mac / integration review-formulas (best-effort) | ${REVIEW_FORMULAS} |
           EOF
 
           fail=0
-          for result in "$QUALITY" "$UNIT" "$ACCEPTANCE"; do
+          for result in "$QUALITY" "$UNIT" "$ACCEPTANCE" "$INT_PACKAGES" "$INT_REST"; do
             # Skipped is acceptable (e.g. when run outside the needs-mac trigger set)
             case "$result" in
               success|skipped|"") ;;

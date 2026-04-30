@@ -1,0 +1,25 @@
+# GitHub logins allowed to run sponsored Blacksmith CI automatically.
+# One login per line. Blank lines and # comments are ignored.
+#
+# Seeded from the current top repository contributors; maintainers can
+# add or remove names as the sponsored fast-path policy changes.
+julianknutsen
+sjarmak
+GraemeF
+rileywhite
+csells
+thejosephstevens
+osamu2001
+tesdal
+quad341
+alexsiri7
+boylec
+donbox
+stuartparmenter
+stebbins
+Rome-1
+wynged
+EmmittJ
+quietlathe2048
+rainydan
+myster-t

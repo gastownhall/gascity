@@ -598,6 +598,37 @@ func TestCachingStoreCloseAllMarksRefreshFailuresDirty(t *testing.T) {
 	}
 }
 
+func TestCachingStoreCachedListReturnsSnapshotWithDirtyEntries(t *testing.T) {
+	t.Parallel()
+
+	backing := &refreshFailingStore{Store: NewMemStore()}
+	bead, err := backing.Create(Bead{Title: "active work"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	title := "updated while refresh fails"
+	backing.failNextGet = true
+	if err := cache.Update(bead.ID, UpdateOpts{Title: &title}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	rows, ok := cache.CachedList(ListQuery{Status: "open"})
+	if !ok {
+		t.Fatal("CachedList returned ok=false for dirty cache, want snapshot")
+	}
+	if len(rows) != 1 || rows[0].ID != bead.ID {
+		t.Fatalf("CachedList = %#v, want dirty snapshot row %s", rows, bead.ID)
+	}
+	if rows[0].Title == title {
+		t.Fatalf("CachedList returned refreshed title %q; test setup did not create a dirty stale snapshot", rows[0].Title)
+	}
+}
+
 type refreshFailingStore struct {
 	Store
 	failNextGet bool
@@ -701,4 +732,51 @@ func (s *closeAllRefreshFailingStore) CloseAll(ids []string, _ map[string]string
 func (s *closeAllRefreshFailingStore) List(query ListQuery) ([]Bead, error) {
 	s.listCalls++
 	return s.Store.List(query)
+}
+
+// Reconciliation must not re-emit bead.closed for a cache entry whose status
+// is already "closed". When ApplyEvent ingests an external bead.closed event
+// (from the bus), it stores the closed bead in c.beads. List({AllowScan:true})
+// filters out closed beads, so the next reconcile sees the entry as missing
+// from the fresh DB read and would re-emit a duplicate close notification.
+// Routed back through the event bus, that notification re-applies into every
+// caching store and reconciles into another spurious close — the storm.
+func TestCachingStoreRunReconciliationDoesNotEmitBeadClosedForAlreadyClosedCacheEntry(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	bead, err := backing.Create(Bead{Title: "task"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	var events []string
+	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, _ json.RawMessage) {
+		events = append(events, eventType+":"+beadID)
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	// External writer closes the bead in the backing store, then the close
+	// event is delivered through the bus and applied to this cache.
+	if err := backing.Close(bead.ID); err != nil {
+		t.Fatalf("backing Close: %v", err)
+	}
+	closed := bead
+	closed.Status = "closed"
+	payload, err := json.Marshal(closed)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	cache.ApplyEvent("bead.closed", payload)
+	events = nil // ignore notifications from prime/apply; only assert on reconcile output
+
+	cache.runReconciliation()
+
+	for _, e := range events {
+		if e == "bead.closed:"+bead.ID {
+			t.Fatalf("reconciler emitted duplicate bead.closed for an already-closed cache entry; events=%v", events)
+		}
+	}
 }

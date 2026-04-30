@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Existing managed cities may see a `dolt-config` doctor warning until
   `gc dolt restart` or the next managed server start regenerates
   `dolt-config.yaml`.
+- In bead-backed pool reconciliation, `scale_check` output is now documented
+  and enforced as additive new-session demand. Assigned work is resumed
+  separately; custom checks that previously returned total desired sessions
+  should return only new unassigned demand.
 
 ## [1.0.0] - 2026-04-21
 
