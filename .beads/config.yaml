@@ -54,3 +54,5 @@
 # - github.repo
 
 sync.remote: "git+https://github.com/gastownhall/gascity"
+
+export.auto: false
