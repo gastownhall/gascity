@@ -122,6 +122,13 @@ func TestQuarantinePhantomManagedDoltDatabasesQuarantinesRetiredReplacementDB(t 
 	if err := os.WriteFile(retiredManifest, []byte("retired\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	replacementLikeManifest := filepath.Join(dataDir, "ga.replaced-pending", ".dolt", "noms", "manifest")
+	if err := os.MkdirAll(filepath.Dir(replacementLikeManifest), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(replacementLikeManifest, []byte("active\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	now := time.Date(2026, 4, 29, 16, 20, 0, 0, time.UTC)
 	if err := quarantinePhantomManagedDoltDatabases(dataDir, now); err != nil {
@@ -131,12 +138,35 @@ func TestQuarantinePhantomManagedDoltDatabasesQuarantinesRetiredReplacementDB(t 
 	if _, err := os.Stat(activeManifest); err != nil {
 		t.Fatalf("active manifest stat: %v", err)
 	}
+	if _, err := os.Stat(replacementLikeManifest); err != nil {
+		t.Fatalf("replacement-like active manifest stat: %v", err)
+	}
 	if _, err := os.Stat(retiredManifest); !os.IsNotExist(err) {
 		t.Fatalf("retired manifest stat err = %v, want moved out of data dir", err)
 	}
 	quarantined := filepath.Join(dataDir, ".quarantine", "20260429T162000-ga.replaced-20260428T100722Z", ".dolt", "noms", "manifest")
 	if _, err := os.Stat(quarantined); err != nil {
 		t.Fatalf("quarantined manifest stat: %v", err)
+	}
+}
+
+func TestRetiredManagedDoltDatabaseNameRequiresTimestampSuffix(t *testing.T) {
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{name: "ga.replaced-20260428T100722Z", want: true},
+		{name: "ga.replaced-20260428T100722Z.bak", want: false},
+		{name: "ga.replaced-20260428T100722", want: false},
+		{name: "ga.replaced-pending", want: false},
+		{name: "replaced-20260428T100722Z", want: false},
+		{name: ".replaced-20260428T100722Z", want: false},
+		{name: "ga", want: false},
+	}
+	for _, tt := range tests {
+		if got := retiredManagedDoltDatabaseName(tt.name); got != tt.want {
+			t.Fatalf("retiredManagedDoltDatabaseName(%q) = %v, want %v", tt.name, got, tt.want)
+		}
 	}
 }
 

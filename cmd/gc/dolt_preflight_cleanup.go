@@ -8,13 +8,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 )
 
-var managedDoltPreflightCleanupFn = preflightManagedDoltCleanup
+var (
+	managedDoltPreflightCleanupFn     = preflightManagedDoltCleanup
+	retiredManagedDoltDatabasePattern = regexp.MustCompile(`^.+\.replaced-[0-9]{8}T[0-9]{6}Z$`)
+)
 
 const managedDoltLsofTimeout = 500 * time.Millisecond
 
@@ -112,7 +116,9 @@ func quarantinePhantomManagedDoltDatabases(dataDir string, now time.Time) error 
 		if !info.IsDir() {
 			continue
 		}
+		reason := "retired replacement"
 		if !retiredManagedDoltDatabaseName(entry.Name()) {
+			reason = "missing noms/manifest"
 			manifest := filepath.Join(doltDir, "noms", "manifest")
 			if _, err := os.Stat(manifest); err == nil {
 				continue
@@ -130,14 +136,14 @@ func quarantinePhantomManagedDoltDatabases(dataDir string, now time.Time) error 
 		if err := os.Rename(dbDir, dest); err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "gc dolt preflight: quarantined phantom database %s -> %s\n", dbDir, dest) //nolint:errcheck // best-effort warning
+		fmt.Fprintf(os.Stderr, "gc dolt preflight: quarantined unservable database (%s) %s -> %s\n", reason, dbDir, dest) //nolint:errcheck // best-effort warning
 	}
 	return nil
 }
 
 func retiredManagedDoltDatabaseName(name string) bool {
 	name = strings.TrimSpace(name)
-	return strings.Contains(name, ".replaced-")
+	return retiredManagedDoltDatabasePattern.MatchString(name)
 }
 
 func uniqueQuarantineDestination(root, stamp, name string) (string, error) {

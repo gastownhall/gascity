@@ -797,23 +797,41 @@ kill_imposter() {
     sleep 1
 }
 
-# quarantine_phantom_dbs moves dirs with .dolt/ but missing noms/manifest
-# to a quarantine directory. A phantom database crashes the entire dolt
-# server on startup, so it must be removed from DATA_DIR. The data is
-# preserved in case recovery is possible.
+retired_replacement_db_name() {
+    case "$1" in
+        ?*.replaced-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# quarantine_phantom_dbs moves unservable database dirs to quarantine.
+# This includes missing-manifest phantom dirs and Dolt-retired replacement
+# dirs that still have manifests but are no longer the active database.
 quarantine_phantom_dbs() {
     [ -d "$DATA_DIR" ] || return 0
     local dir
     for dir in "$DATA_DIR"/*/; do
         [ -d "$dir" ] || continue
-        if [ -d "$dir/.dolt" ] && [ ! -f "$dir/.dolt/noms/manifest" ]; then
-            local name
-            name=$(basename "$dir")
-            local quarantine_dir="$DATA_DIR/.quarantine/$(date +%Y%m%dT%H%M%S)-$name"
-            mkdir -p "$DATA_DIR/.quarantine"
-            echo "quarantining phantom database: $name (missing noms/manifest) → $quarantine_dir" >&2
-            mv "$dir" "$quarantine_dir"
+        [ -d "$dir/.dolt" ] || continue
+
+        local name reason
+        name=$(basename "$dir")
+        if retired_replacement_db_name "$name"; then
+            reason="retired replacement"
+        elif [ ! -f "$dir/.dolt/noms/manifest" ]; then
+            reason="missing noms/manifest"
+        else
+            continue
         fi
+
+        local quarantine_dir="$DATA_DIR/.quarantine/$(date +%Y%m%dT%H%M%S)-$name"
+        mkdir -p "$DATA_DIR/.quarantine"
+        echo "quarantining unservable database: $name ($reason) -> $quarantine_dir" >&2
+        mv -f "$dir" "$quarantine_dir"
     done
 }
 
