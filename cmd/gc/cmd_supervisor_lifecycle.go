@@ -634,6 +634,27 @@ func loadAndStartSupervisorLaunchd(path, label string) error {
 	return nil
 }
 
+func loadAndStartSupervisorLaunchdForRollback(path, label string, stderr io.Writer) error {
+	if err := supervisorLaunchctlRun("load", path); err != nil {
+		return fmt.Errorf("load %s: %w", path, err)
+	}
+	target := supervisorLaunchdServiceTarget(label)
+	if err := supervisorLaunchctlRun("enable", target); err != nil {
+		warnSupervisorLaunchdRollback(stderr, "enable %s: %v", target, err)
+	}
+	if err := supervisorLaunchctlRun("kickstart", "-p", target); err != nil {
+		warnSupervisorLaunchdRollback(stderr, "kickstart -p %s: %v", target, err)
+	}
+	return nil
+}
+
+func warnSupervisorLaunchdRollback(stderr io.Writer, format string, args ...any) {
+	if stderr == nil {
+		return
+	}
+	fmt.Fprintf(stderr, "gc supervisor install: warning: restoring launchd service: "+format+"\n", args...) //nolint:errcheck // best-effort stderr
+}
+
 func legacySupervisorLaunchdPlistPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, "Library", "LaunchAgents", defaultSupervisorLaunchdLabel+".plist")
@@ -807,6 +828,7 @@ func unloadLegacySupervisorLaunchd(remove bool) error {
 	}
 	_ = supervisorLaunchctlRun("unload", path)
 	if remove {
+		_ = supervisorLaunchctlRun("disable", supervisorLaunchdServiceTarget(defaultSupervisorLaunchdLabel))
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("removing legacy plist %s: %w", path, err)
 		}
@@ -829,26 +851,26 @@ func unloadLegacySupervisorSystemd(remove bool) error {
 	return nil
 }
 
-func rollbackNewSupervisorLaunchdInstall(path string, restoreLegacy bool) error {
+func rollbackNewSupervisorLaunchdInstall(path string, restoreLegacy bool, stderr io.Writer) error {
 	var errs []error
 	_ = supervisorLaunchctlRun("unload", path)
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		errs = append(errs, fmt.Errorf("removing failed plist %s during rollback: %w", path, err))
 	}
 	if restoreLegacy {
-		if err := loadAndStartSupervisorLaunchd(legacySupervisorLaunchdPlistPath(), defaultSupervisorLaunchdLabel); err != nil {
+		if err := loadAndStartSupervisorLaunchdForRollback(legacySupervisorLaunchdPlistPath(), defaultSupervisorLaunchdLabel, stderr); err != nil {
 			errs = append(errs, fmt.Errorf("restoring legacy plist %s: %w", legacySupervisorLaunchdPlistPath(), err))
 		}
 	}
 	return errors.Join(errs...)
 }
 
-func restorePreviousSupervisorLaunchdInstall(path string, previousContent []byte) error {
+func restorePreviousSupervisorLaunchdInstall(path string, previousContent []byte, stderr io.Writer) error {
 	var errs []error
 	_ = supervisorLaunchctlRun("unload", path)
 	if err := writeSupervisorServiceFile(path, previousContent); err != nil {
 		errs = append(errs, fmt.Errorf("restoring previous plist %s: %w", path, err))
-	} else if err := loadAndStartSupervisorLaunchd(path, supervisorLaunchdLabel()); err != nil {
+	} else if err := loadAndStartSupervisorLaunchdForRollback(path, supervisorLaunchdLabel(), stderr); err != nil {
 		errs = append(errs, fmt.Errorf("reloading previous plist %s: %w", path, err))
 	}
 	return errors.Join(errs...)
@@ -927,9 +949,9 @@ func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Wri
 	if err := loadAndStartSupervisorLaunchd(path, data.LaunchdLabel); err != nil {
 		var rollbackErr error
 		if hadCurrent {
-			rollbackErr = restorePreviousSupervisorLaunchdInstall(path, existing)
+			rollbackErr = restorePreviousSupervisorLaunchdInstall(path, existing, stderr)
 		} else {
-			rollbackErr = rollbackNewSupervisorLaunchdInstall(path, legacyPresent)
+			rollbackErr = rollbackNewSupervisorLaunchdInstall(path, legacyPresent, stderr)
 		}
 		if rollbackErr != nil {
 			fmt.Fprintf(stderr, "gc supervisor install: rollback after launchctl failure: %v\n", rollbackErr) //nolint:errcheck // best-effort stderr
@@ -948,6 +970,7 @@ func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Wri
 func uninstallSupervisorLaunchd(_ *supervisorServiceData, stdout, stderr io.Writer) int {
 	path := supervisorLaunchdPlistPath()
 	_ = supervisorLaunchctlRun("unload", path)
+	_ = supervisorLaunchctlRun("disable", supervisorLaunchdServiceTarget(supervisorLaunchdLabel()))
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		fmt.Fprintf(stderr, "gc supervisor uninstall: removing plist: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

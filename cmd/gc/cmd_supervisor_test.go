@@ -1678,6 +1678,90 @@ func TestInstallSupervisorLaunchdKeepsLegacyPlistWhenNewServiceFails(t *testing.
 		"unload " + legacyPath,
 		"load " + currentPath,
 		"load " + legacyPath,
+		"enable gui/" + strconv.Itoa(os.Getuid()) + "/" + defaultSupervisorLaunchdLabel,
+		"kickstart -p gui/" + strconv.Itoa(os.Getuid()) + "/" + defaultSupervisorLaunchdLabel,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("launchctl calls = %v, want %q", calls, want)
+		}
+	}
+}
+
+func TestInstallSupervisorLaunchdRestoresLegacyPlistWhenEnableFails(t *testing.T) {
+	homeDir := t.TempDir()
+	gcHome := filepath.Join(t.TempDir(), "isolated-home")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", gcHome)
+
+	legacyPath := legacySupervisorLaunchdPlistPath()
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacyContent, err := renderSupervisorTemplate(supervisorLaunchdTemplate, &supervisorServiceData{
+		GCPath:       "/tmp/gc-legacy",
+		LogPath:      filepath.Join(gcHome, "supervisor.log"),
+		GCHome:       gcHome,
+		LaunchdLabel: defaultSupervisorLaunchdLabel,
+		Path:         "/usr/local/bin:/usr/bin:/bin",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyPath, []byte(legacyContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	label := supervisorLaunchdLabel()
+	data := &supervisorServiceData{
+		GCPath:        "/tmp/gc-new",
+		LogPath:       filepath.Join(gcHome, "supervisor.log"),
+		GCHome:        gcHome,
+		XDGRuntimeDir: "",
+		LaunchdLabel:  label,
+		Path:          "/usr/local/bin:/usr/bin:/bin",
+	}
+
+	currentPath := filepath.Join(homeDir, "Library", "LaunchAgents", label+".plist")
+	currentTarget := "gui/" + strconv.Itoa(os.Getuid()) + "/" + label
+	legacyTarget := "gui/" + strconv.Itoa(os.Getuid()) + "/" + defaultSupervisorLaunchdLabel
+	oldRun := supervisorLaunchctlRun
+	var calls []string
+	supervisorLaunchctlRun = func(args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		if len(args) == 2 && args[0] == "enable" && args[1] == currentTarget {
+			return errors.New("new plist failed to enable")
+		}
+		if len(args) == 3 && args[0] == "kickstart" && args[2] == legacyTarget {
+			return errors.New("legacy plist failed to restart")
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		supervisorLaunchctlRun = oldRun
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := installSupervisorLaunchd(data, &stdout, &stderr); code != 1 {
+		t.Fatalf("installSupervisorLaunchd code = %d, want 1; stderr=%q", code, stderr.String())
+	}
+	if _, err := os.Stat(currentPath); !os.IsNotExist(err) {
+		t.Fatalf("new launchd plist %q should be removed during rollback; err=%v", currentPath, err)
+	}
+	if _, err := os.Stat(legacyPath); err != nil {
+		t.Fatalf("legacy launchd plist %q should remain after failed install; err=%v", legacyPath, err)
+	}
+	if strings.Contains(stderr.String(), "rollback after launchctl failure") {
+		t.Fatalf("stderr = %q, want rollback restart failure to be warning-only", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "warning: restoring launchd service: kickstart -p "+legacyTarget) {
+		t.Fatalf("stderr = %q, want warning for best-effort legacy restart", stderr.String())
+	}
+	joined := strings.Join(calls, "\n")
+	for _, want := range []string{
+		"enable " + currentTarget,
+		"load " + legacyPath,
+		"enable " + legacyTarget,
+		"kickstart -p " + legacyTarget,
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("launchctl calls = %v, want %q", calls, want)
@@ -1748,6 +1832,7 @@ func TestInstallSupervisorLaunchdRestoresLegacyPlistWhenKickstartFails(t *testin
 	for _, want := range []string{
 		"kickstart -p " + currentTarget,
 		"load " + legacyPath,
+		"enable gui/" + strconv.Itoa(os.Getuid()) + "/" + defaultSupervisorLaunchdLabel,
 		"kickstart -p gui/" + strconv.Itoa(os.Getuid()) + "/" + defaultSupervisorLaunchdLabel,
 	} {
 		if !strings.Contains(joined, want) {
@@ -1780,6 +1865,8 @@ func TestInstallSupervisorLaunchdRestoresPreviousCurrentPlistWhenUpdateFails(t *
 		Path:          "/usr/local/bin:/usr/bin:/bin",
 	}
 
+	label := supervisorLaunchdLabel()
+	target := "gui/" + strconv.Itoa(os.Getuid()) + "/" + label
 	oldRun := supervisorLaunchctlRun
 	var calls []string
 	loadCalls := 0
@@ -1817,6 +1904,17 @@ func TestInstallSupervisorLaunchdRestoresPreviousCurrentPlistWhenUpdateFails(t *
 	}
 	if loadCalls != 2 {
 		t.Fatalf("launchctl load call count = %d, want 2 (failed install + rollback restore); calls=%v", loadCalls, calls)
+	}
+	joined := strings.Join(calls, "\n")
+	for _, want := range []string{
+		"unload " + currentPath,
+		"load " + currentPath,
+		"enable " + target,
+		"kickstart -p " + target,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("launchctl calls = %v, want %q", calls, want)
+		}
 	}
 }
 
@@ -1873,7 +1971,9 @@ func TestUninstallSupervisorLaunchdRemovesMatchingLegacyDefaultPlistForIsolatedG
 	joined := strings.Join(calls, "\n")
 	for _, want := range []string{
 		"unload " + currentPath,
+		"disable gui/" + strconv.Itoa(os.Getuid()) + "/" + supervisorLaunchdLabel(),
 		"unload " + legacyPath,
+		"disable gui/" + strconv.Itoa(os.Getuid()) + "/" + defaultSupervisorLaunchdLabel,
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("launchctl calls = %v, want %q", calls, want)
