@@ -131,7 +131,7 @@ export function currentCityStatus(): CurrentCityStatus {
 export function invalidateForEventType(type: string): void {
   if (!type) return;
   if (type.startsWith("session.") || type.startsWith("agent.")) {
-    invalidate("status", "crew", "options", "topology");
+    invalidate("status", "crew", "options");
     return;
   }
   if (type.startsWith("bead.")) {

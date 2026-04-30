@@ -20,7 +20,7 @@ import {
   type DashboardResource,
 } from "./state";
 import { renderSupervisorOverview } from "./panels/supervisor";
-import { renderTopology } from "./panels/topology";
+import { invalidateTopologyCache, renderTopology } from "./panels/topology";
 import { installSharedModals } from "./modals";
 
 const CITY_SCOPED_PANEL_IDS = [
@@ -237,7 +237,10 @@ async function refreshVisibleResources(force = false): Promise<void> {
     queueRefresh(tasks, dirty, "mail", () => renderMail());
     queueRefresh(tasks, dirty, "convoys", () => renderConvoys());
     queueRefresh(tasks, dirty, "admin", () => renderAdminPanels());
-    queueRefresh(tasks, dirty, "topology", () => renderTopology());
+    queueRefresh(tasks, dirty, "topology", async () => {
+      invalidateTopologyCache();
+      await renderTopology();
+    });
   }
 
   const results = await Promise.allSettled(tasks);

@@ -4086,25 +4086,75 @@
             max-width: 100%;
         }
 
-        .topology-formula-card {
-            border: 1px solid var(--border);
-            border-radius: 4px;
-            margin-bottom: 16px;
-            overflow: hidden;
+        /* Formula browser */
+        .topology-rig-tabs {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px;
+            margin-bottom: 12px;
         }
 
-        .topology-formula-header {
+        .topology-rig-tab {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 0.8rem;
+            padding: 4px 10px;
+            transition: background 0.1s, color 0.1s;
+        }
+
+        .topology-rig-tab:hover {
+            background: var(--bg-card-hover);
+            color: var(--text-primary);
+        }
+
+        .topology-rig-tab.active {
+            background: var(--bg-card-hover);
+            border-color: var(--cyan);
+            color: var(--cyan);
+        }
+
+        .topology-formula-list {
             display: flex;
-            align-items: baseline;
-            gap: 10px;
-            padding: 8px 12px;
-            background: var(--bg-dark);
-            border-bottom: 1px solid var(--border);
+            flex-direction: column;
+            gap: 2px;
+            margin-bottom: 12px;
+            max-height: 240px;
+            overflow-y: auto;
+        }
+
+        .topology-formula-item {
+            border: 1px solid transparent;
+            border-radius: 4px;
+            cursor: pointer;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            padding: 6px 10px;
+            transition: background 0.1s;
+        }
+
+        .topology-formula-item:hover {
+            background: var(--bg-card);
+            border-color: var(--border);
+        }
+
+        .topology-formula-item.active {
+            background: var(--bg-card);
+            border-color: var(--cyan);
         }
 
         .topology-formula-name {
             color: var(--cyan);
             font-size: 0.85rem;
+        }
+
+        .topology-formula-item.active .topology-formula-name {
+            color: var(--cyan);
+            font-weight: 600;
         }
 
         .topology-formula-desc {
@@ -4116,6 +4166,25 @@
             max-width: 60ch;
         }
 
-        .topology-formula-card .topology-diagram {
-            padding: 8px 12px;
+        .topology-formula-empty {
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            font-style: italic;
+            padding: 8px 0;
+        }
+
+        .topology-formula-detail {
+            border-top: 1px solid var(--border);
+            padding-top: 12px;
+            min-height: 0;
+        }
+
+        .topology-formula-detail:empty {
+            display: none;
+        }
+
+        .topology-formula-error {
+            color: var(--red);
+            font-size: 0.85rem;
+            padding: 8px 0;
         }
