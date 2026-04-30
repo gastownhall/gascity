@@ -422,6 +422,50 @@ func TestDoSlingFormulaToAgent(t *testing.T) {
 	}
 }
 
+func TestBuildSlingFormulaVarsSeedsRoutingNamespace(t *testing.T) {
+	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), newFakeRunner().run)
+
+	vars := BuildSlingFormulaVars("mol-polecat-work", "HW-42", nil, config.Agent{
+		Name:        "polecat",
+		Dir:         "hw",
+		BindingName: "gastown",
+	}, deps)
+
+	if got := vars["rig_name"]; got != "hw" {
+		t.Fatalf("rig_name var = %q, want hw", got)
+	}
+	if got := vars["binding_name"]; got != "gastown" {
+		t.Fatalf("binding_name var = %q, want gastown", got)
+	}
+	if got := vars["binding_prefix"]; got != "gastown." {
+		t.Fatalf("binding_prefix var = %q, want gastown.", got)
+	}
+}
+
+func TestBuildSlingFormulaVarsPreservesExplicitRoutingNamespace(t *testing.T) {
+	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), newFakeRunner().run)
+
+	vars := BuildSlingFormulaVars("mol-polecat-work", "HW-42", []string{
+		"rig_name=override-rig",
+		"binding_name=override-binding",
+		"binding_prefix=override.",
+	}, config.Agent{
+		Name:        "polecat",
+		Dir:         "hw",
+		BindingName: "gastown",
+	}, deps)
+
+	if got := vars["rig_name"]; got != "override-rig" {
+		t.Fatalf("rig_name var = %q, want override-rig", got)
+	}
+	if got := vars["binding_name"]; got != "override-binding" {
+		t.Fatalf("binding_name var = %q, want override-binding", got)
+	}
+	if got := vars["binding_prefix"]; got != "override." {
+		t.Fatalf("binding_prefix var = %q, want override.", got)
+	}
+}
+
 func TestDoSlingCrossRigBlocks(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()

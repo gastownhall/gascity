@@ -302,12 +302,15 @@ Branch: {{ .Branch }}
 Run {{ cmd }} to start
 Session: {{ session "deacon" }}
 Custom: {{ .DefaultBranch }}
+Binding: {{ .BindingName }} {{ .BindingPrefix }}
 `
 	f.Files["/city/prompts/full.md.tmpl"] = []byte(tmpl)
 	ctx := PromptContext{
 		CityRoot:      "/home/user/city",
 		AgentName:     "myrig/polecat-1",
 		TemplateName:  "polecat",
+		BindingName:   "gastown",
+		BindingPrefix: "gastown.",
 		RigName:       "myrig",
 		WorkDir:       "/home/user/city/myrig/polecats/polecat-1",
 		IssuePrefix:   "mr-",
@@ -342,6 +345,9 @@ Custom: {{ .DefaultBranch }}
 	if !strings.Contains(got, "Custom: main") {
 		t.Errorf("missing env var: %q", got)
 	}
+	if !strings.Contains(got, "Binding: gastown gastown.") {
+		t.Errorf("missing binding namespace: %q", got)
+	}
 }
 
 func TestRenderPromptWorkQuery(t *testing.T) {
@@ -359,6 +365,8 @@ func TestBuildTemplateData(t *testing.T) {
 		CityRoot:      "/city",
 		AgentName:     "a/b",
 		TemplateName:  "b",
+		BindingName:   "dep",
+		BindingPrefix: "dep.",
 		RigName:       "a",
 		WorkDir:       "/city/a",
 		IssuePrefix:   "te-",
@@ -376,6 +384,12 @@ func TestBuildTemplateData(t *testing.T) {
 	}
 	if data["TemplateName"] != "b" {
 		t.Errorf("TemplateName = %q, want %q", data["TemplateName"], "b")
+	}
+	if data["BindingName"] != "dep" {
+		t.Errorf("BindingName = %q, want %q", data["BindingName"], "dep")
+	}
+	if data["BindingPrefix"] != "dep." {
+		t.Errorf("BindingPrefix = %q, want %q", data["BindingPrefix"], "dep.")
 	}
 	if data["DefaultBranch"] != "main" {
 		t.Errorf("DefaultBranch = %q, want %q", data["DefaultBranch"], "main")

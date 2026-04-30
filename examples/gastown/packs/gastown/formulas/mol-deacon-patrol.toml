@@ -162,7 +162,7 @@ something is stuck. This is exactly why an LLM does it, not Go code.
 gc bd create --type=warrant \
   --title="Stuck: <rig>/<role>" \
   --metadata '{"target":"<session>","reason":"<reason>","requester":"deacon"}' \
-  --set-metadata gc.routed_to=dog
+  --set-metadata gc.routed_to={{binding_prefix}}dog
 ```
 
 The dog pool runs `mol-shutdown-dance` for due process.
@@ -186,7 +186,7 @@ wisp timestamps.
 
 **Step 1: Find active utility agent work:**
 ```bash
-gc bd list --status=in_progress --metadata-field gc.routed_to=dog --json --limit=0
+gc bd list --status=in_progress --metadata-field gc.routed_to={{binding_prefix}}dog --json --limit=0
 ```
 
 **Step 2: For each, assess progress:**
@@ -202,7 +202,7 @@ No hardcoded thresholds. Use judgment.
 gc bd create --type=warrant \
   --title="Stuck dog: <agent>" \
   --metadata '{"target":"<session>","reason":"<reason>","requester":"deacon"}' \
-  --set-metadata gc.routed_to=dog
+  --set-metadata gc.routed_to={{binding_prefix}}dog
 ```
 
 A different dog from the pool picks up the warrant and runs the

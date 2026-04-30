@@ -626,6 +626,42 @@ func TestPromptGuidanceUsesConfiguredRigRootsAndNamespacedWorktrees(t *testing.T
 	}
 }
 
+func TestGastownRoutedToTargetsUseBindingPrefix(t *testing.T) {
+	dir := exampleDir()
+	checks := []struct {
+		rel  string
+		want string
+	}{
+		{"packs/gastown/formulas/mol-deacon-patrol.toml", "gc.routed_to={{binding_prefix}}dog"},
+		{"packs/gastown/formulas/mol-polecat-work.toml", "{{rig_name}}/{{binding_prefix}}refinery"},
+		{"packs/gastown/formulas/mol-refinery-patrol.toml", "gc.routed_to={{rig_name}}/{{binding_prefix}}polecat"},
+		{"packs/gastown/formulas/mol-idea-to-plan.toml", "$GC_RIG/{{binding_prefix}}polecat"},
+		{"packs/gastown/agents/mayor/prompt.template.md", "gc.routed_to=<rig>/{{ .BindingPrefix }}polecat"},
+		{"packs/gastown/agents/polecat/prompt.template.md", "{{ .RigName }}/{{ .BindingPrefix }}refinery"},
+		{"packs/gastown/template-fragments/approval-fallacy.template.md", "{{ .RigName }}/{{ .BindingPrefix }}refinery"},
+	}
+	for _, check := range checks {
+		data, err := os.ReadFile(filepath.Join(dir, check.rel))
+		if err != nil {
+			t.Fatalf("reading %s: %v", check.rel, err)
+		}
+		body := string(data)
+		if !strings.Contains(body, check.want) {
+			t.Errorf("%s missing %q", check.rel, check.want)
+		}
+		for _, bad := range []string{
+			"gc.routed_to=dog",
+			"gc.routed_to=<rig>/polecat",
+			"gc.routed_to=<rig>/refinery",
+			"gc.routed_to={{ .RigName }}/refinery",
+		} {
+			if strings.Contains(body, bad) {
+				t.Errorf("%s still contains short-form route %q", check.rel, bad)
+			}
+		}
+	}
+}
+
 func TestIdeaToPlanFormulaUsesSupportedPrimitives(t *testing.T) {
 	dir := exampleDir()
 	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-idea-to-plan.toml")

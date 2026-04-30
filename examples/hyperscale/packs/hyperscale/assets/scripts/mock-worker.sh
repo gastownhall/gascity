@@ -5,13 +5,15 @@
 # 100 of these run in parallel on K8s to demonstrate pool scaling.
 #
 # Required env vars (set by gc start):
-#   GC_AGENT — this agent's name (e.g., "worker-42")
-#   GC_DIR   — working directory
+#   GC_AGENT    — this agent's name (e.g., "worker-42")
+#   GC_TEMPLATE — canonical pool route target (e.g., "demo/worker")
+#   GC_DIR      — working directory
 
 set -euo pipefail
 cd "$GC_DIR"
 
 AGENT_SHORT=$(basename "$GC_AGENT")
+POOL_LABEL="${GC_TEMPLATE:-worker}"
 echo "[$AGENT_SHORT] Starting up"
 
 # Jitter to avoid 100 workers racing on the same bead.
@@ -22,7 +24,7 @@ sleep "$JITTER"
 
 BEAD_ID=""
 for attempt in $(seq 1 10); do
-    ready=$(bd ready --metadata-field gc.routed_to=worker --unassigned 2>/dev/null || true)
+    ready=$(bd ready --metadata-field "gc.routed_to=$POOL_LABEL" --unassigned 2>/dev/null || true)
     if echo "$ready" | grep -qE '[a-z]{2}-[a-z0-9]'; then
         BEAD_ID=$(echo "$ready" | head -1 | awk '{print $2}')
         if bd update "$BEAD_ID" --claim --actor="$GC_AGENT" 2>/dev/null; then

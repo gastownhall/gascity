@@ -689,7 +689,7 @@ func SlingFormulaTargetBranch(beadID string, deps SlingDeps, a config.Agent) str
 
 // BuildSlingFormulaVars builds the variable map for formula instantiation.
 func BuildSlingFormulaVars(formulaName, beadID string, userVars []string, a config.Agent, deps SlingDeps) map[string]string {
-	vars := make(map[string]string, len(userVars)+3)
+	vars := make(map[string]string, len(userVars)+6)
 	for _, v := range userVars {
 		key, value, ok := strings.Cut(v, "=")
 		if ok && key != "" {
@@ -709,6 +709,9 @@ func BuildSlingFormulaVars(formulaName, beadID string, userVars []string, a conf
 	if beadID != "" {
 		addVar("issue", beadID)
 	}
+	addVar("rig_name", a.Dir)
+	addVar("binding_name", a.BindingName)
+	addVar("binding_prefix", slingBindingPrefix(a.BindingName))
 
 	autoBranch := SlingFormulaTargetBranch(beadID, deps, a)
 	if SlingFormulaUsesBaseBranch(formulaName) {
@@ -719,6 +722,14 @@ func BuildSlingFormulaVars(formulaName, beadID string, userVars []string, a conf
 	}
 
 	return vars
+}
+
+func slingBindingPrefix(bindingName string) string {
+	bindingName = strings.TrimSpace(bindingName)
+	if bindingName == "" {
+		return ""
+	}
+	return bindingName + "."
 }
 
 // ResolveSlingEnv returns extra env vars for the sling command.

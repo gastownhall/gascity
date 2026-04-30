@@ -5688,6 +5688,52 @@ func TestBuildSlingFormulaVarsPreservesExplicitValues(t *testing.T) {
 	}
 }
 
+func TestBuildSlingFormulaVarsSeedsRoutingNamespace(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+
+	vars := buildSlingFormulaVars("mol-polecat-work", "HW-42", nil, config.Agent{
+		Name:        "polecat",
+		Dir:         "hw",
+		BindingName: "gastown",
+	}, deps)
+
+	if got, ok := findVarValue(vars, "rig_name"); !ok || got != "hw" {
+		t.Fatalf("rig_name var = %q, %v; want hw, true", got, ok)
+	}
+	if got, ok := findVarValue(vars, "binding_name"); !ok || got != "gastown" {
+		t.Fatalf("binding_name var = %q, %v; want gastown, true", got, ok)
+	}
+	if got, ok := findVarValue(vars, "binding_prefix"); !ok || got != "gastown." {
+		t.Fatalf("binding_prefix var = %q, %v; want gastown., true", got, ok)
+	}
+}
+
+func TestBuildSlingFormulaVarsPreservesExplicitRoutingNamespace(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+
+	vars := buildSlingFormulaVars("mol-polecat-work", "HW-42", []string{
+		"rig_name=override-rig",
+		"binding_name=override-binding",
+		"binding_prefix=override.",
+	}, config.Agent{
+		Name:        "polecat",
+		Dir:         "hw",
+		BindingName: "gastown",
+	}, deps)
+
+	if got, ok := findVarValue(vars, "rig_name"); !ok || got != "override-rig" {
+		t.Fatalf("rig_name var = %q, %v; want override-rig, true", got, ok)
+	}
+	if got, ok := findVarValue(vars, "binding_name"); !ok || got != "override-binding" {
+		t.Fatalf("binding_name var = %q, %v; want override-binding, true", got, ok)
+	}
+	if got, ok := findVarValue(vars, "binding_prefix"); !ok || got != "override." {
+		t.Fatalf("binding_prefix var = %q, %v; want override., true", got, ok)
+	}
+}
+
 func TestBeadMetadataTargetStopsOnParentCycle(t *testing.T) {
 	store := &recordingStore{
 		Store: beads.NewMemStore(),

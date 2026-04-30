@@ -167,7 +167,7 @@ gc workflow delete-source $WORK --apply && gc workflow reopen-source $WORK
 ```bash
 gc bd update $WORK \
   --set-metadata rejection_reason="Conflicts with $TARGET at $(git rev-parse origin/$TARGET)" \
-  --set-metadata gc.routed_to=<rig>/polecat
+  --set-metadata gc.routed_to={{rig_name}}/{{binding_prefix}}polecat
 ```
 4. Do NOT delete the branch (new polecat needs it for conflict resolution).
 5. Clean up temp branch: `git checkout {{target_branch}} && git branch -D temp`

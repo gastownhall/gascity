@@ -849,7 +849,7 @@ func collectConflictErrors(err error, visit func(*sourceworkflow.ConflictError))
 // buildSlingFormulaVars merges caller-provided vars with the runtime context
 // needed by common work formulas. Explicit --var entries always win.
 func buildSlingFormulaVars(formulaName, beadID string, userVars []string, a config.Agent, deps slingDeps) map[string]string {
-	vars := make(map[string]string, len(userVars)+3)
+	vars := make(map[string]string, len(userVars)+6)
 	for _, v := range userVars {
 		key, value, ok := strings.Cut(v, "=")
 		if ok && key != "" {
@@ -870,6 +870,9 @@ func buildSlingFormulaVars(formulaName, beadID string, userVars []string, a conf
 		// Attached work formulas conventionally expect issue=<bead-id>.
 		addVar("issue", beadID)
 	}
+	addVar("rig_name", a.Dir)
+	addVar("binding_name", a.BindingName)
+	addVar("binding_prefix", bindingPrefix(a.BindingName))
 
 	autoBranch := slingFormulaTargetBranch(beadID, deps, a)
 	if slingFormulaUsesBaseBranch(formulaName) {
