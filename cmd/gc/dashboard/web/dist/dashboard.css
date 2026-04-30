@@ -4055,3 +4055,67 @@
             border-bottom: 1px dashed var(--border);
             background: var(--bg-dark);
         }
+
+        /* Topology panel */
+        .topology-section {
+            margin-bottom: 24px;
+        }
+
+        .topology-section-title {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--text-secondary);
+            margin-bottom: 10px;
+            padding-bottom: 6px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .topology-diagram {
+            overflow-x: auto;
+            padding: 12px 0;
+            min-height: 60px;
+        }
+
+        .topology-loading {
+            color: var(--text-muted);
+            font-style: italic;
+            padding: 8px 0;
+        }
+
+        .topology-diagram svg {
+            max-width: 100%;
+        }
+
+        .topology-formula-card {
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            margin-bottom: 16px;
+            overflow: hidden;
+        }
+
+        .topology-formula-header {
+            display: flex;
+            align-items: baseline;
+            gap: 10px;
+            padding: 8px 12px;
+            background: var(--bg-dark);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .topology-formula-name {
+            color: var(--cyan);
+            font-size: 0.85rem;
+        }
+
+        .topology-formula-desc {
+            color: var(--text-secondary);
+            font-size: 0.78rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            max-width: 60ch;
+        }
+
+        .topology-formula-card .topology-diagram {
+            padding: 8px 12px;
+        }

@@ -8,7 +8,8 @@ export type DashboardResource =
   | "convoys"
   | "activity"
   | "admin"
-  | "options";
+  | "options"
+  | "topology";
 
 export interface CityInfoSummary {
   error?: string;
@@ -30,6 +31,7 @@ const ALL_RESOURCES: DashboardResource[] = [
   "activity",
   "admin",
   "options",
+  "topology",
 ];
 
 const CITY_SCOPED_RESOURCES: DashboardResource[] = [
@@ -41,6 +43,7 @@ const CITY_SCOPED_RESOURCES: DashboardResource[] = [
   "activity",
   "admin",
   "options",
+  "topology",
 ];
 
 let currentCity = readCityScope(window.location.search);
@@ -128,7 +131,7 @@ export function currentCityStatus(): CurrentCityStatus {
 export function invalidateForEventType(type: string): void {
   if (!type) return;
   if (type.startsWith("session.") || type.startsWith("agent.")) {
-    invalidate("status", "crew", "options");
+    invalidate("status", "crew", "options", "topology");
     return;
   }
   if (type.startsWith("bead.")) {
@@ -148,7 +151,7 @@ export function invalidateForEventType(type: string): void {
     return;
   }
   if (type.startsWith("service.") || type.startsWith("provider.") || type.startsWith("rig.")) {
-    invalidate("admin");
+    invalidate("admin", "topology");
     return;
   }
 }
