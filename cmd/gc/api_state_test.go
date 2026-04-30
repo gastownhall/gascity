@@ -478,6 +478,82 @@ func TestControllerStateBeadEventsRespectStorePrefixes(t *testing.T) {
 	if len(rigItems) != 0 {
 		t.Fatalf("rig cache items = %+v, want no city bead", rigItems)
 	}
+
+	payload, err = json.Marshal(beads.Bead{
+		ID:     "ga-rig",
+		Title:  "rig work",
+		Status: "open",
+	})
+	if err != nil {
+		t.Fatalf("marshal rig bead: %v", err)
+	}
+
+	cs.applyBeadEventToStores(events.Event{
+		Type:    events.BeadCreated,
+		Actor:   "bd-hook",
+		Subject: "ga-rig",
+		Payload: payload,
+	})
+
+	cityItems, err = cityCache.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("List city cache after rig event: %v", err)
+	}
+	if len(cityItems) != 1 || cityItems[0].ID != "mc-source" {
+		t.Fatalf("city cache items after rig event = %+v, want only mc-source", cityItems)
+	}
+	rigItems, err = rigCache.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("List rig cache after rig event: %v", err)
+	}
+	if len(rigItems) != 1 || rigItems[0].ID != "ga-rig" {
+		t.Fatalf("rig cache items after rig event = %+v, want ga-rig", rigItems)
+	}
+}
+
+func TestControllerStateBeadEventsUseScopePrefixWhenConfiguredPrefixDrifts(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rigs", "repo")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte("issue_prefix: repo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "repo", Path: "rigs/repo", Prefix: "ga"}}}
+	bdStore := bdStoreForRig(rigDir, cityDir, cfg, cfg.Rigs[0].EffectivePrefix())
+	rigCache := beads.NewCachingStoreForTestWithPrefix(beads.NewMemStore(), bdStore.IDPrefix(), nil)
+	if err := rigCache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime rig cache: %v", err)
+	}
+
+	payload, err := json.Marshal(beads.Bead{
+		ID:     "repo-owned",
+		Title:  "rig-owned work",
+		Status: "open",
+	})
+	if err != nil {
+		t.Fatalf("marshal rig bead: %v", err)
+	}
+	cs := &controllerState{
+		beadStores: map[string]beads.Store{"repo": rigCache},
+		pokeCh:     make(chan struct{}, 1),
+	}
+
+	cs.applyBeadEventToStores(events.Event{
+		Type:    events.BeadCreated,
+		Actor:   "bd-hook",
+		Subject: "repo-owned",
+		Payload: payload,
+	})
+
+	rigItems, err := rigCache.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("List rig cache: %v", err)
+	}
+	if len(rigItems) != 1 || rigItems[0].ID != "repo-owned" {
+		t.Fatalf("rig cache items = %+v, want repo-owned", rigItems)
+	}
 }
 
 func TestControllerStateBuildStoresUsesScopeLocalFileStores(t *testing.T) {

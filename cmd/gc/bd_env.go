@@ -42,15 +42,14 @@ func bdStoreForCity(dir, cityPath string) *beads.BdStore {
 // when available, falling back to city-level config. Use this when the rig
 // may have its own Dolt server (e.g., shared from another city).
 func bdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix ...string) *beads.BdStore {
-	prefix := ""
-	for _, candidate := range knownPrefix {
-		if strings.TrimSpace(candidate) != "" {
-			prefix = candidate
-			break
-		}
-	}
+	prefix := issuePrefixForScope(rigDir, cityPath, cfg)
 	if prefix == "" {
-		prefix = issuePrefixForScope(rigDir, cityPath, cfg)
+		for _, candidate := range knownPrefix {
+			if strings.TrimSpace(candidate) != "" {
+				prefix = candidate
+				break
+			}
+		}
 	}
 	return beads.NewBdStoreWithPrefix(rigDir, bdCommandRunnerForRig(cityPath, cfg, rigDir), prefix)
 }

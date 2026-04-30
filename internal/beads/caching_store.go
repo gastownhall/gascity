@@ -3,6 +3,7 @@ package beads
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -90,7 +91,11 @@ func NewCachingStore(backing *BdStore, onChange func(eventType, beadID string, p
 	if backing != nil {
 		prefix = backing.IDPrefix()
 	}
-	return newCachingStore(backing, prefix, onChange)
+	cs := newCachingStore(backing, prefix, onChange)
+	if cs.idPrefix == "" {
+		cs.recordProblem("bd cache ownership", errors.New("missing issue prefix; foreign bead event filtering disabled"))
+	}
+	return cs
 }
 
 // NewCachingStoreForTest wraps any Store for testing. Production code

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -995,7 +996,8 @@ func TestCachingStoreApplyEvent(t *testing.T) {
 func TestCachingStoreApplyEventIgnoresUnknownForeignBead(t *testing.T) {
 	t.Parallel()
 	mem := beads.NewMemStore()
-	cs := beads.NewCachingStoreForTestWithPrefix(mem, "gc", nil)
+	backing := &eventGetFailStore{Store: mem, failGet: true}
+	cs := beads.NewCachingStoreForTestWithPrefix(backing, "gc", nil)
 	if err := cs.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
 	}
@@ -1019,31 +1021,64 @@ func TestCachingStoreApplyEventIgnoresUnknownForeignBead(t *testing.T) {
 	if len(items) != 0 {
 		t.Fatalf("cached foreign beads = %#v, want none", items)
 	}
+	if stats := cs.Stats(); stats.ProblemCount != 0 {
+		t.Fatalf("ProblemCount = %d, want 0 (last problem: %s)", stats.ProblemCount, stats.LastProblem)
+	}
 }
 
-func TestCachingStoreApplyEventAcceptsOwnedUnknownBeadWithoutBackingGet(t *testing.T) {
+func TestCachingStoreApplyEventRefreshesOwnedUnknownBeadFromBacking(t *testing.T) {
 	t.Parallel()
 	mem := beads.NewMemStore()
-	backing := &eventGetFailStore{Store: mem, failGet: true}
+	backing := &eventGetFailStore{Store: mem}
 	cs := beads.NewCachingStoreForTestWithPrefix(backing, "gc", nil)
 	if err := cs.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
 	}
+	created, err := mem.Create(beads.Bead{
+		Title:    "owned external bead",
+		Labels:   []string{"from-backing"},
+		Metadata: map[string]string{"gc.step_ref": "mol.review"},
+	})
+	if err != nil {
+		t.Fatalf("Create backing bead: %v", err)
+	}
 
-	payload, err := json.Marshal(beads.Bead{
-		ID:     "gc-external",
-		Title:  "owned external bead",
-		Status: "open",
+	payload, err := json.Marshal(map[string]any{
+		"id":     created.ID,
+		"status": "open",
 	})
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
 
-	cs.ApplyEvent("bead.created", payload)
+	cs.ApplyEvent("bead.updated", payload)
 
-	got := requireCachedBead(t, cs, "gc-external", false)
+	got := requireCachedBead(t, cs, created.ID, false)
 	if got.Title != "owned external bead" {
 		t.Fatalf("title = %q, want owned external bead", got.Title)
+	}
+	if len(got.Labels) != 1 || got.Labels[0] != "from-backing" {
+		t.Fatalf("labels = %#v, want [from-backing]", got.Labels)
+	}
+	if got.Metadata["gc.step_ref"] != "mol.review" {
+		t.Fatalf("metadata = %#v, want gc.step_ref=mol.review", got.Metadata)
+	}
+}
+
+func TestNewCachingStoreRecordsProblemForMissingProductionPrefix(t *testing.T) {
+	t.Parallel()
+	backing := beads.NewBdStore(t.TempDir(), func(string, string, ...string) ([]byte, error) {
+		t.Fatal("runner should not be called")
+		return nil, nil
+	})
+	cs := beads.NewCachingStore(backing, nil)
+
+	stats := cs.Stats()
+	if stats.ProblemCount != 1 {
+		t.Fatalf("ProblemCount = %d, want 1", stats.ProblemCount)
+	}
+	if !strings.Contains(stats.LastProblem, "missing issue prefix") {
+		t.Fatalf("LastProblem = %q, want missing issue prefix", stats.LastProblem)
 	}
 }
 
