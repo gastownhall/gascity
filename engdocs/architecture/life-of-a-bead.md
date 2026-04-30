@@ -110,13 +110,15 @@ operation" (forward compatible).
 
 A bead exists, but no agent knows about it yet. Discovery is how agents
 find work. Gas City uses the **pull model**: agents poll for available
-work rather than being pushed assignments.
+work rather than being pushed assignments. Routed agents normally discover
+work through the claim protocol rendered into the session startup prompt:
+the protocol calls `gc hook`, claims exactly one returned bead with
+`bd update --claim`, and then the agent works that claimed bead.
 
 ### The hook mechanism (gc hook)
 
-Every agent has a `work_query` config field. When the agent's session
-provider fires a hook (e.g., Claude's Stop hook), it runs `gc hook`
-(`cmd/gc/cmd_hook.go`). The flow:
+Every agent has a `work_query` config field. `gc hook`
+(`cmd/gc/cmd_hook.go`) runs that query for plain hook discovery. The flow:
 
 1. `cmdHook()` resolves the agent from `$GC_AGENT` or a positional arg
 2. Loads city config, checks suspension status
@@ -134,9 +136,9 @@ the bd CLI filters by label server-side.
 
 ### The --inject mode
 
-With `--inject`, `gc hook` wraps output in a `<system-reminder>` XML block
-for LLM context injection. Hook-enabled agents discover work automatically
-between turns. If no work exists, `--inject` emits nothing and exits 0.
+`gc hook --inject` is legacy Stop-hook compatibility. It exits 0 without
+running the work query and emits no output. Routed discovery belongs in the
+session startup claim protocol or an explicit plain `gc hook` invocation.
 
 ### Ready() and GUPP
 

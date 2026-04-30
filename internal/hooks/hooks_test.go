@@ -127,6 +127,9 @@ func TestInstallClaude(t *testing.T) {
 	if !strings.Contains(s, "gc nudge drain --inject") {
 		t.Error("claude settings should contain gc nudge drain --inject")
 	}
+	if strings.Contains(s, "gc hook --inject") {
+		t.Error("fresh claude settings should not install no-op gc hook --inject")
+	}
 	if !strings.Contains(s, `"skipDangerousModePermissionPrompt": true`) {
 		t.Error("claude settings should contain skipDangerousModePermissionPrompt")
 	}
@@ -743,6 +746,19 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	if !strings.Contains(codexHooks, "--hook-format codex") {
 		t.Error("codex hooks should request Codex hook output format")
 	}
+	for _, rel := range []string{
+		"/work/.codex/hooks.json",
+		"/work/.gemini/settings.json",
+		"/work/.opencode/plugins/gascity.js",
+		"/work/.github/hooks/gascity.json",
+		"/work/.cursor/hooks.json",
+		"/work/.pi/extensions/gc-hooks.js",
+		"/work/.omp/hooks/gc-hook.ts",
+	} {
+		if strings.Contains(string(fs.Files[rel]), "gc hook --inject") {
+			t.Errorf("fresh overlay-managed provider file %s should not install no-op gc hook --inject", rel)
+		}
+	}
 }
 
 func TestInstallPiHookUsesCurrentExtensionAPI(t *testing.T) {
@@ -756,7 +772,6 @@ func TestInstallPiHookUsesCurrentExtensionAPI(t *testing.T) {
 		"module.exports = function gascityPiExtension(pi)",
 		`pi.on("session_start"`,
 		`pi.on("session_compact"`,
-		`pi.on("session_shutdown"`,
 		`pi.on("before_agent_start"`,
 	} {
 		if !strings.Contains(data, want) {

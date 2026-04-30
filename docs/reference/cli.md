@@ -36,7 +36,7 @@ gc [flags]
 | [gc graph](#gc-graph) | Show dependency graph for beads |
 | [gc handoff](#gc-handoff) | Send handoff mail and restart controller-managed sessions |
 | [gc help](#gc-help) | Help about any command |
-| [gc hook](#gc-hook) | Check for available work (use --inject for Stop hook output) |
+| [gc hook](#gc-hook) | Check for available work |
 | [gc import](#gc-import) | Manage pack imports |
 | [gc init](#gc-init) | Initialize a new city |
 | [gc mail](#gc-mail) | Send and receive messages between agents and humans |
@@ -1127,7 +1127,7 @@ gc help [command]
 Checks for available work using the agent's work_query config.
 
 Without --inject: prints raw output, exits 0 if work exists, 1 if empty.
-With --inject: wraps output in &lt;system-reminder&gt; for hook injection, always exits 0.
+With --inject: silent legacy Stop-hook compatibility; skips the work query and always exits 0.
 
 		The agent is determined from $GC_AGENT or a positional argument.
 
@@ -1137,8 +1137,7 @@ gc hook [agent] [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--hook-format` | string |  | format hook output for a provider |
-| `--inject` | bool |  | output &lt;system-reminder&gt; block for hook injection |
+| `--inject` | bool |  | silent legacy Stop-hook compatibility; skip work query and exit 0 |
 
 ## gc import
 

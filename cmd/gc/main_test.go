@@ -1813,7 +1813,7 @@ func TestDoInitSettingsIsValidJSON(t *testing.T) {
 	if !ok {
 		t.Fatal("settings.json 'hooks' is not an object")
 	}
-	for _, event := range []string{"SessionStart", "PreCompact", "UserPromptSubmit", "Stop"} {
+	for _, event := range []string{"SessionStart", "PreCompact", "UserPromptSubmit"} {
 		if _, ok := hookMap[event]; !ok {
 			t.Errorf("settings.json missing hook event %q", event)
 		}
