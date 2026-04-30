@@ -52,6 +52,21 @@ func (p *stopHookProvider) Stop(name string) error {
 	return p.Fake.Stop(name)
 }
 
+type failingPoolSessionNameStore struct {
+	*beads.MemStore
+}
+
+func (s *failingPoolSessionNameStore) SetMetadata(id, key, value string) error {
+	if key == "session_name" {
+		return errors.New("session_name metadata failed")
+	}
+	return s.MemStore.SetMetadata(id, key, value)
+}
+
+func (s *failingPoolSessionNameStore) Close(_ string) error {
+	return errors.New("close failed")
+}
+
 func newCountingMetadataStore() *countingMetadataStore {
 	return &countingMetadataStore{MemStore: beads.NewMemStore()}
 }
@@ -2198,6 +2213,144 @@ func TestCloseBeadPreservesPendingCreateClaimWhenCloseFails(t *testing.T) {
 	}
 }
 
+func TestBeadOwnsPoolSessionName(t *testing.T) {
+	template := "pack/worker"
+	tests := []struct {
+		name string
+		bead beads.Bead
+		want bool
+	}{
+		{
+			name: "template derived name",
+			bead: beads.Bead{
+				ID: "gc-1",
+				Metadata: map[string]string{
+					"template":     template,
+					"session_name": PoolSessionName(template, "gc-1"),
+				},
+			},
+			want: true,
+		},
+		{
+			name: "legacy suffix without template",
+			bead: beads.Bead{
+				ID: "gc-2",
+				Metadata: map[string]string{
+					"session_name": "worker-gc-2",
+				},
+			},
+			want: true,
+		},
+		{
+			name: "empty id",
+			bead: beads.Bead{
+				Metadata: map[string]string{
+					"template":     template,
+					"session_name": PoolSessionName(template, ""),
+				},
+			},
+			want: false,
+		},
+		{
+			name: "empty session name",
+			bead: beads.Bead{
+				ID: "gc-3",
+				Metadata: map[string]string{
+					"template": template,
+				},
+			},
+			want: false,
+		},
+		{
+			name: "unowned name",
+			bead: beads.Bead{
+				ID: "gc-4",
+				Metadata: map[string]string{
+					"template":     template,
+					"session_name": "worker-other",
+				},
+			},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := beadOwnsPoolSessionName(tt.bead); got != tt.want {
+				t.Fatalf("beadOwnsPoolSessionName() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCanonicalDuplicateSessionBead(t *testing.T) {
+	template := "pack/worker"
+	incumbentOwner := beads.Bead{
+		ID: "gc-1",
+		Metadata: map[string]string{
+			"template":     template,
+			"session_name": PoolSessionName(template, "gc-1"),
+		},
+	}
+	candidateOwner := beads.Bead{
+		ID: "gc-2",
+		Metadata: map[string]string{
+			"template":     template,
+			"session_name": PoolSessionName(template, "gc-2"),
+		},
+	}
+	incumbentPlain := beads.Bead{
+		ID: "gc-3",
+		Metadata: map[string]string{
+			"session_name": "worker-shared",
+		},
+	}
+	candidatePlain := beads.Bead{
+		ID: "gc-4",
+		Metadata: map[string]string{
+			"session_name": "worker-shared",
+		},
+	}
+
+	tests := []struct {
+		name      string
+		incumbent beads.Bead
+		candidate beads.Bead
+		wantID    string
+	}{
+		{
+			name:      "candidate owner beats non-owner",
+			incumbent: incumbentPlain,
+			candidate: candidateOwner,
+			wantID:    candidateOwner.ID,
+		},
+		{
+			name:      "incumbent owner beats non-owner",
+			incumbent: incumbentOwner,
+			candidate: candidatePlain,
+			wantID:    incumbentOwner.ID,
+		},
+		{
+			name:      "neither owner preserves last wins",
+			incumbent: incumbentPlain,
+			candidate: candidatePlain,
+			wantID:    candidatePlain.ID,
+		},
+		{
+			name:      "both owners preserves last wins",
+			incumbent: incumbentOwner,
+			candidate: candidateOwner,
+			wantID:    candidateOwner.ID,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := canonicalDuplicateSessionBead(tt.incumbent, tt.candidate); got.ID != tt.wantID {
+				t.Fatalf("canonicalDuplicateSessionBead() = %s, want %s", got.ID, tt.wantID)
+			}
+		})
+	}
+}
+
 func TestSyncSessionBeads_DuplicatePoolSessionNameKeepsVisibleOwner(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)}
@@ -2330,8 +2483,8 @@ func TestSyncSessionBeads_StalePoolSnapshotReusesVisibleOwner(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 	syncSessionBeadsWithSnapshot("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false, staleSnapshot)
-	if stderr.Len() > 0 {
-		t.Fatalf("unexpected stderr: %s", stderr.String())
+	if !strings.Contains(stderr.String(), "recovered visible owner") {
+		t.Fatalf("stderr %q does not mention recovered visible owner", stderr.String())
 	}
 
 	all := allSessionBeads(t, store)
@@ -2347,6 +2500,68 @@ func TestSyncSessionBeads_StalePoolSnapshotReusesVisibleOwner(t *testing.T) {
 				t.Fatalf("new pool bead session_name = %q, want %q", got, want)
 			}
 		}
+	}
+}
+
+func TestCreatePoolSessionBead_MetadataFailureLeavesReachablePlaceholder(t *testing.T) {
+	store := &failingPoolSessionNameStore{MemStore: beads.NewMemStore()}
+	template := "pack/worker"
+
+	if _, err := createPoolSessionBead(store, template, nil); err == nil {
+		t.Fatal("createPoolSessionBead returned nil error, want session_name metadata failure")
+	}
+
+	all := allSessionBeads(t, store)
+	if len(all) != 1 {
+		t.Fatalf("created %d session beads, want 1 failed-create bead", len(all))
+	}
+	if got := strings.TrimSpace(all[0].Metadata["session_name"]); got == "" {
+		t.Fatalf("failed pool bead session_name is empty: %+v", all[0])
+	}
+	if got, final := all[0].Metadata["session_name"], PoolSessionName(template, all[0].ID); got == final {
+		t.Fatalf("failed pool bead session_name = final name %q even though SetMetadata failed", got)
+	}
+}
+
+func TestSyncSessionBeads_PoolSessionNameFailureLeavesReachableFailedCreate(t *testing.T) {
+	store := &failingPoolSessionNameStore{MemStore: beads.NewMemStore()}
+	clk := &clock.Fake{Time: time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	template := "pack/worker"
+	ds := map[string]TemplateParams{
+		"legacy-worker-1": {
+			TemplateName: template,
+			InstanceName: template + "-1",
+			PoolSlot:     1,
+			Command:      "codex",
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+
+	all := allSessionBeads(t, store)
+	if len(all) != 1 {
+		t.Fatalf("created %d session beads, want 1 failed-create bead", len(all))
+	}
+	failed := all[0]
+	if failed.Status != "open" {
+		t.Fatalf("failed-create bead status = %q, want open because Close failed", failed.Status)
+	}
+	if got := strings.TrimSpace(failed.Metadata["session_name"]); got == "" {
+		t.Fatalf("failed-create bead session_name is empty: %+v", failed)
+	}
+	if got := failed.Metadata["close_reason"]; got != "failed-create" {
+		t.Fatalf("failed-create close_reason = %q, want failed-create", got)
+	}
+	if got := failed.Metadata["pending_create_claim"]; got != "" {
+		t.Fatalf("failed-create pending_create_claim = %q, want cleared", got)
+	}
+	if !strings.Contains(stderr.String(), "session_name metadata failed") {
+		t.Fatalf("stderr %q does not mention session_name metadata failure", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "close failed") {
+		t.Fatalf("stderr %q does not mention failed cleanup close", stderr.String())
 	}
 }
 
@@ -2703,8 +2918,8 @@ func TestSyncSessionBeads_ResumedAfterSuspension(t *testing.T) {
 			closedCount++
 		case "open":
 			openCount++
-			if b.Metadata["state"] != "stopped" {
-				t.Errorf("resumed bead state = %q, want %q", b.Metadata["state"], "stopped")
+			if b.Metadata["state"] != "creating" {
+				t.Errorf("resumed bead state = %q, want %q", b.Metadata["state"], "creating")
 			}
 			if b.Metadata["pending_create_claim"] != "true" {
 				t.Errorf("resumed bead pending_create_claim = %q, want true", b.Metadata["pending_create_claim"])

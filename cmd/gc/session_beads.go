@@ -102,29 +102,35 @@ func beadOwnsPoolSessionName(b beads.Bead) bool {
 	return strings.HasSuffix(sn, "-"+id)
 }
 
-func findVisibleSessionBeadByName(store beads.Store, sessionName string) (beads.Bead, bool, error) {
-	sessionName = strings.TrimSpace(sessionName)
-	if store == nil || sessionName == "" {
-		return beads.Bead{}, false, nil
+func pendingPoolSessionName(template, instanceToken string) string {
+	base := targetBasename(template)
+	if base == "" {
+		base = "pool"
 	}
-	open, err := loadSessionBeads(store)
-	if err != nil {
-		return beads.Bead{}, false, err
+	token := strings.TrimSpace(instanceToken)
+	if token == "" {
+		token = session.NewInstanceToken()
 	}
-	var winner beads.Bead
-	found := false
+	return base + "-pending-" + token
+}
+
+func indexSessionBeadsByName(open []beads.Bead) map[string]beads.Bead {
+	byName := make(map[string]beads.Bead, len(open))
 	for _, b := range open {
-		if strings.TrimSpace(b.Metadata["session_name"]) != sessionName {
+		if b.Status == "closed" {
 			continue
 		}
-		if !found {
-			winner = b
-			found = true
+		sn := strings.TrimSpace(b.Metadata["session_name"])
+		if sn == "" {
 			continue
 		}
-		winner = canonicalDuplicateSessionBead(winner, b)
+		if incumbent, ok := byName[sn]; ok {
+			byName[sn] = canonicalDuplicateSessionBead(incumbent, b)
+			continue
+		}
+		byName[sn] = b
 	}
-	return winner, found, nil
+	return byName
 }
 
 func upsertOpenSessionBead(openBeads []beads.Bead, indexBySessionName map[string]int, b beads.Bead) []beads.Bead {
@@ -762,6 +768,22 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 
 	now := clk.Now().UTC()
 	cityName := config.EffectiveCityName(cfg, filepath.Base(cityPath))
+	var (
+		visibleBySessionName map[string]beads.Bead
+		visibleLoaded        bool
+	)
+	loadVisibleBySessionName := func() (map[string]beads.Bead, error) {
+		if visibleLoaded {
+			return visibleBySessionName, nil
+		}
+		open, err := loadSessionBeads(store)
+		if err != nil {
+			return nil, err
+		}
+		visibleBySessionName = indexSessionBeadsByName(open)
+		visibleLoaded = true
+		return visibleBySessionName, nil
+	}
 
 	blockedReconfiguredNamedIdentities := map[string]bool{}
 	if cfg != nil {
@@ -815,13 +837,14 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 
 		b, exists := bySessionName[sn]
 		if !exists && isPoolInstance {
-			recovered, ok, err := findVisibleSessionBeadByName(store, sn)
+			visible, err := loadVisibleBySessionName()
 			if err != nil {
 				fmt.Fprintf(stderr, "session beads: reloading visible bead for %s: %v\n", sn, err) //nolint:errcheck
-			} else if ok {
+			} else if recovered, ok := visible[sn]; ok {
 				b = recovered
 				exists = true
 				bySessionName[sn] = recovered
+				fmt.Fprintf(stderr, "session beads: recovered visible owner %s for session_name %q from store\n", recovered.ID, sn) //nolint:errcheck
 				for i, open := range openBeads {
 					if open.Status == "closed" || open.ID == recovered.ID {
 						continue
@@ -853,13 +876,14 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			if createState != "active" {
 				createState = "creating"
 			}
+			instanceToken := session.NewInstanceToken()
 			meta := map[string]string{
 				"agent_name":         agentName,
 				"live_hash":          liveHash,
 				"session_origin":     origin,
 				"generation":         strconv.Itoa(session.DefaultGeneration),
 				"continuation_epoch": strconv.Itoa(session.DefaultContinuationEpoch),
-				"instance_token":     session.NewInstanceToken(),
+				"instance_token":     instanceToken,
 				"state":              createState,
 				"synced_at":          now.Format("2006-01-02T15:04:05Z07:00"),
 			}
@@ -903,6 +927,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			meta["template"] = qualifiedTemplate
 			if poolSlot > 0 {
 				meta["pool_slot"] = strconv.Itoa(poolSlot)
+				meta["session_name"] = pendingPoolSessionName(qualifiedTemplate, instanceToken)
 			}
 			// Store command and resume fields so gc session attach can
 			// reconstruct the resume command from bead metadata alone.
@@ -979,8 +1004,8 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				if isPoolInstance {
 					createdSessionName = PoolSessionName(qualifiedTemplate, newBead.ID)
 					if err := store.SetMetadata(newBead.ID, "session_name", createdSessionName); err != nil {
-						_ = store.Close(newBead.ID)
 						fmt.Fprintf(stderr, "session beads: setting pool session_name for %s: %v\n", agentName, err) //nolint:errcheck
+						closeFailedCreateBead(store, newBead.ID, now, stderr)
 						continue
 					}
 					if newBead.Metadata == nil {
@@ -1434,6 +1459,19 @@ func setMetaBatch(store beads.Store, id string, batch map[string]string, stderr 
 		return err
 	}
 	return nil
+}
+
+func closeFailedCreateBead(store beads.Store, id string, now time.Time, stderr io.Writer) bool {
+	patch := session.ClosePatch(now.UTC(), "failed-create")
+	patch["pending_create_claim"] = ""
+	if setMetaBatch(store, id, patch, stderr) != nil {
+		return false
+	}
+	if err := store.Close(id); err != nil {
+		fmt.Fprintf(stderr, "session beads: closing failed-create bead %s: %v\n", id, err) //nolint:errcheck
+		return false
+	}
+	return true
 }
 
 // reapStaleSessionBeads closes session beads that are stuck in the creating
