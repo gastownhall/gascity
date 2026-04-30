@@ -5734,6 +5734,22 @@ func TestBuildSlingFormulaVarsPreservesExplicitRoutingNamespace(t *testing.T) {
 	}
 }
 
+func TestBuildSlingFormulaVarsSeedsEmptyRoutingNamespaceForUnboundAgent(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+
+	vars := buildSlingFormulaVars("mol-deacon-patrol", "CITY-42", nil, config.Agent{
+		Name: "deacon",
+	}, deps)
+
+	for _, key := range []string{"rig_name", "binding_name", "binding_prefix"} {
+		got, ok := findVarValue(vars, key)
+		if !ok || got != "" {
+			t.Fatalf("%s var = %q, %v; want empty string, true", key, got, ok)
+		}
+	}
+}
+
 func TestBeadMetadataTargetStopsOnParentCycle(t *testing.T) {
 	store := &recordingStore{
 		Store: beads.NewMemStore(),

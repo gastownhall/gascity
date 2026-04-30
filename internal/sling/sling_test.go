@@ -466,6 +466,21 @@ func TestBuildSlingFormulaVarsPreservesExplicitRoutingNamespace(t *testing.T) {
 	}
 }
 
+func TestBuildSlingFormulaVarsSeedsEmptyRoutingNamespaceForUnboundAgent(t *testing.T) {
+	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), newFakeRunner().run)
+
+	vars := BuildSlingFormulaVars("mol-deacon-patrol", "CITY-42", nil, config.Agent{
+		Name: "deacon",
+	}, deps)
+
+	for _, key := range []string{"rig_name", "binding_name", "binding_prefix"} {
+		got, ok := vars[key]
+		if !ok || got != "" {
+			t.Fatalf("%s var = %q, %v; want empty string, true", key, got, ok)
+		}
+	}
+}
+
 func TestDoSlingCrossRigBlocks(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()

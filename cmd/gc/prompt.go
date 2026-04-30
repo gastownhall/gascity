@@ -234,14 +234,6 @@ func buildTemplateData(ctx PromptContext) map[string]string {
 	return m
 }
 
-func bindingPrefix(bindingName string) string {
-	bindingName = strings.TrimSpace(bindingName)
-	if bindingName == "" {
-		return ""
-	}
-	return bindingName + "."
-}
-
 // findRigPrefix returns the effective bead ID prefix for the named rig.
 // Returns empty string if rigName is empty or not found.
 func findRigPrefix(rigName string, rigs []config.Rig) string {

@@ -865,14 +865,20 @@ func buildSlingFormulaVars(formulaName, beadID string, userVars []string, a conf
 		}
 		vars[key] = value
 	}
+	addRoutingVar := func(key, value string) {
+		if _, explicit := vars[key]; explicit {
+			return
+		}
+		vars[key] = value
+	}
 
 	if beadID != "" {
 		// Attached work formulas conventionally expect issue=<bead-id>.
 		addVar("issue", beadID)
 	}
-	addVar("rig_name", a.Dir)
-	addVar("binding_name", a.BindingName)
-	addVar("binding_prefix", bindingPrefix(a.BindingName))
+	addRoutingVar("rig_name", a.Dir)
+	addRoutingVar("binding_name", a.BindingName)
+	addRoutingVar("binding_prefix", a.BindingPrefix())
 
 	autoBranch := slingFormulaTargetBranch(beadID, deps, a)
 	if slingFormulaUsesBaseBranch(formulaName) {

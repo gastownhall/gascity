@@ -561,9 +561,11 @@ func findAgentByName(cfg *config.City, name string) (config.Agent, bool) {
 // to currentRigContext when run manually.
 func buildPrimeContext(cityPath, cityName string, a *config.Agent, rigs []config.Rig, stderr io.Writer) PromptContext {
 	ctx := PromptContext{
-		CityRoot:     cityPath,
-		TemplateName: a.Name,
-		Env:          a.Env,
+		CityRoot:      cityPath,
+		TemplateName:  a.Name,
+		BindingName:   a.BindingName,
+		BindingPrefix: a.BindingPrefix(),
+		Env:           a.Env,
 	}
 
 	// Agent identity: prefer GC_ALIAS, then GC_AGENT, else config.

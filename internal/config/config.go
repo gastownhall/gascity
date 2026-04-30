@@ -52,6 +52,16 @@ func (a *Agent) BindingQualifiedName() string {
 	return a.BindingName + "." + a.Name
 }
 
+// BindingPrefix returns the import binding prefix for route/template
+// interpolation, including the trailing dot when a binding is present.
+func (a *Agent) BindingPrefix() string {
+	bindingName := strings.TrimSpace(a.BindingName)
+	if bindingName == "" {
+		return ""
+	}
+	return bindingName + "."
+}
+
 // QualifiedName returns the agent's canonical identity, including the rig
 // prefix when present. Examples: "mayor", "gastown.mayor",
 // "hello-world/polecat", and "hello-world/gastown.polecat".

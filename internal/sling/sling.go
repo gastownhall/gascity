@@ -705,13 +705,19 @@ func BuildSlingFormulaVars(formulaName, beadID string, userVars []string, a conf
 		}
 		vars[key] = value
 	}
+	addRoutingVar := func(key, value string) {
+		if _, explicit := vars[key]; explicit {
+			return
+		}
+		vars[key] = value
+	}
 
 	if beadID != "" {
 		addVar("issue", beadID)
 	}
-	addVar("rig_name", a.Dir)
-	addVar("binding_name", a.BindingName)
-	addVar("binding_prefix", slingBindingPrefix(a.BindingName))
+	addRoutingVar("rig_name", a.Dir)
+	addRoutingVar("binding_name", a.BindingName)
+	addRoutingVar("binding_prefix", a.BindingPrefix())
 
 	autoBranch := SlingFormulaTargetBranch(beadID, deps, a)
 	if SlingFormulaUsesBaseBranch(formulaName) {
@@ -722,14 +728,6 @@ func BuildSlingFormulaVars(formulaName, beadID string, userVars []string, a conf
 	}
 
 	return vars
-}
-
-func slingBindingPrefix(bindingName string) string {
-	bindingName = strings.TrimSpace(bindingName)
-	if bindingName == "" {
-		return ""
-	}
-	return bindingName + "."
 }
 
 // ResolveSlingEnv returns extra env vars for the sling command.
