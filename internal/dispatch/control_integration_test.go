@@ -871,7 +871,7 @@ func TestResolveAttemptRouteBinding_ConfigTargetBeatsCollidingSessionAlias(t *te
 func TestResolveAttemptRouteBinding_NamedSessionTargetUsesCanonicalBeadID(t *testing.T) {
 	t.Parallel()
 
-	store := &noBroadAttemptRouteStore{MemStore: beads.NewMemStore(), t: t}
+	store := &countingAttemptRouteStore{MemStore: beads.NewMemStore()}
 	named, err := store.Create(beads.Bead{
 		Title:  "worker",
 		Type:   session.BeadType,
@@ -902,6 +902,7 @@ func TestResolveAttemptRouteBinding_NamedSessionTargetUsesCanonicalBeadID(t *tes
 		}},
 	}
 
+	startCalls := store.calls
 	binding, ok := resolveAttemptRouteBinding("worker", cfg, store)
 	if !ok {
 		t.Fatal("resolveAttemptRouteBinding did not resolve named target")
@@ -912,17 +913,24 @@ func TestResolveAttemptRouteBinding_NamedSessionTargetUsesCanonicalBeadID(t *tes
 	if binding.qualifiedName != "" || binding.sessionName != "" {
 		t.Fatalf("binding = %+v, want direct named session only", binding)
 	}
-}
-
-type noBroadAttemptRouteStore struct {
-	*beads.MemStore
-	t *testing.T
-}
-
-func (s *noBroadAttemptRouteStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	if query.Label == session.LabelSession && len(query.Metadata) == 0 {
-		s.t.Fatalf("attempt route binding used broad session label scan: %+v", query)
+	// Per-resolution List calls must stay bounded so the per-attempt cost
+	// does not fan out under reconciler load. The previous implementation
+	// issued four sequential List calls per resolution; collapsing them
+	// into one label-scoped scan was the fix for ga-pa57. Allow a small
+	// margin (≤2) for unrelated lookups in the binding path while still
+	// guarding against regression to the four-call shape.
+	if delta := store.calls - startCalls; delta > 2 {
+		t.Fatalf("resolveAttemptRouteBinding issued %d List calls, want ≤2 (regression risk for ga-pa57 contention)", delta)
 	}
+}
+
+type countingAttemptRouteStore struct {
+	*beads.MemStore
+	calls int
+}
+
+func (s *countingAttemptRouteStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.calls++
 	return s.MemStore.List(query)
 }
 

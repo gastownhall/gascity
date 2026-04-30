@@ -351,3 +351,150 @@ func TestFindClosedNamedSessionBead_AcceptsLegacySessionType(t *testing.T) {
 		t.Fatalf("found bead ID = %q, want legacy %q", found.ID, legacy.ID)
 	}
 }
+
+// listCountingStore wraps a MemStore and records every List query so tests
+// can assert on call count and shape.
+type listCountingStore struct {
+	*beads.MemStore
+	queries []beads.ListQuery
+}
+
+func (s *listCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.queries = append(s.queries, query)
+	return s.MemStore.List(query)
+}
+
+func TestNamedSessionResolutionCandidates_SingleListByLabel(t *testing.T) {
+	store := &listCountingStore{MemStore: beads.NewMemStore()}
+	canonical, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			NamedSessionMetadataKey:      "true",
+			NamedSessionIdentityMetadata: "mayor",
+			"session_name":               "test-city--mayor",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(canonical): %v", err)
+	}
+	// Bead matched only by session_name == identity (legacy / fallback path).
+	bareSessionName, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name": "mayor",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(bareSessionName): %v", err)
+	}
+	// Bead matched only by alias == identity.
+	aliased, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"alias":    "mayor",
+			"template": "myrig/other",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(aliased): %v", err)
+	}
+	// Bead that should NOT be returned — different identity.
+	if _, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			NamedSessionIdentityMetadata: "polecat",
+			"session_name":               "test-city--polecat",
+		},
+	}); err != nil {
+		t.Fatalf("Create(polecat): %v", err)
+	}
+	// Non-session bead with matching alias — must be excluded.
+	if _, err := store.Create(beads.Bead{
+		Type: "task",
+		Metadata: map[string]string{
+			"alias": "mayor",
+		},
+	}); err != nil {
+		t.Fatalf("Create(non-session): %v", err)
+	}
+	// Closed session with matching identity — must be excluded (live only).
+	closed, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			NamedSessionIdentityMetadata: "mayor",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(closed): %v", err)
+	}
+	if err := store.Close(closed.ID); err != nil {
+		t.Fatalf("Close(closed): %v", err)
+	}
+
+	spec := NamedSessionSpec{
+		Identity:    "mayor",
+		SessionName: "test-city--mayor",
+	}
+	got, err := NamedSessionResolutionCandidates(store, spec)
+	if err != nil {
+		t.Fatalf("NamedSessionResolutionCandidates: %v", err)
+	}
+	gotIDs := make(map[string]bool, len(got))
+	for _, b := range got {
+		gotIDs[b.ID] = true
+	}
+	for _, want := range []string{canonical.ID, bareSessionName.ID, aliased.ID} {
+		if !gotIDs[want] {
+			t.Errorf("missing expected candidate %q in %v", want, gotIDs)
+		}
+	}
+	if gotIDs[closed.ID] {
+		t.Errorf("closed session %q must not appear in live candidates", closed.ID)
+	}
+
+	// One List call total — the contention budget that motivated this
+	// implementation. Pre-collapse, this path issued four sequential
+	// metadata-field List calls per resolution.
+	if len(store.queries) != 1 {
+		t.Fatalf("expected 1 store.List call, got %d: %+v", len(store.queries), store.queries)
+	}
+	q := store.queries[0]
+	if q.Label != LabelSession {
+		t.Errorf("query.Label = %q, want %q", q.Label, LabelSession)
+	}
+	if q.IncludeClosed {
+		t.Errorf("query.IncludeClosed = true, want false (live candidates only)")
+	}
+	if len(q.Metadata) != 0 {
+		t.Errorf("query.Metadata = %+v, want empty (label-scoped scan, in-process filter)", q.Metadata)
+	}
+}
+
+func TestNamedSessionResolutionCandidates_EmptySpecNoListCall(t *testing.T) {
+	store := &listCountingStore{MemStore: beads.NewMemStore()}
+	got, err := NamedSessionResolutionCandidates(store, NamedSessionSpec{})
+	if err != nil {
+		t.Fatalf("NamedSessionResolutionCandidates(empty): %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("got %d candidates for empty spec, want 0", len(got))
+	}
+	if len(store.queries) != 0 {
+		t.Fatalf("expected 0 store.List calls for empty spec, got %d", len(store.queries))
+	}
+}
+
+func TestNamedSessionResolutionCandidates_NilStore(t *testing.T) {
+	got, err := NamedSessionResolutionCandidates(nil, NamedSessionSpec{Identity: "mayor"})
+	if err != nil {
+		t.Fatalf("NamedSessionResolutionCandidates(nil): %v", err)
+	}
+	if got != nil {
+		t.Fatalf("got %v, want nil for nil store", got)
+	}
+}

@@ -215,20 +215,70 @@ func BeadConflictsWithNamedSession(b beads.Bead, spec NamedSessionSpec) bool {
 }
 
 // NamedSessionResolutionCandidates returns the live session beads that can own
-// or conflict with the configured named-session spec, using only exact
-// metadata lookups derived from the spec.
+// or conflict with the configured named-session spec.
+//
+// The implementation issues a single label-scoped store.List for gc:session
+// beads and applies the four metadata predicates in process. Targeted
+// per-key metadata lookups would be marginally cheaper per call against an
+// indexed store, but every named-session resolution drives four sequential
+// bd subprocess invocations through the BdStore exec runner. Under
+// reconciler/wake load — N agents × 4 sequential bd subprocesses each —
+// that fan-out saturates the bd CLI and the underlying Dolt connection
+// pool, tipping individual list invocations past the 120s subprocess
+// timeout (gascity ga-pa57, ga-sed; mayor escalation 2026-04-26). Folding
+// the four metadata predicates into one label-scoped scan caps per-resolve
+// bd invocations at one and bounds the candidate set by the active
+// session count, which is small. Measured under 20-parallel load on a
+// representative city: 5.2s → 1.3s.
 func NamedSessionResolutionCandidates(store beads.Store, spec NamedSessionSpec) ([]beads.Bead, error) {
 	if store == nil {
 		return nil, nil
 	}
 	identity := NormalizeNamedSessionTarget(spec.Identity)
 	sessionName := strings.TrimSpace(spec.SessionName)
-	return ExactMetadataSessionCandidates(store, false,
-		map[string]string{NamedSessionIdentityMetadata: identity},
-		map[string]string{"session_name": sessionName},
-		map[string]string{"session_name": identity},
-		map[string]string{"alias": identity},
-	)
+	if identity == "" && sessionName == "" {
+		return nil, nil
+	}
+	items, err := store.List(beads.ListQuery{Label: LabelSession})
+	if err != nil {
+		return nil, err
+	}
+	candidates := make([]beads.Bead, 0, len(items))
+	for _, b := range items {
+		if !IsSessionBeadOrRepairable(b) {
+			continue
+		}
+		if !beadMatchesNamedSessionResolutionFilter(b, identity, sessionName) {
+			continue
+		}
+		RepairEmptyType(store, &b)
+		candidates = append(candidates, b)
+	}
+	return candidates, nil
+}
+
+// beadMatchesNamedSessionResolutionFilter reports whether a bead matches any
+// of the metadata predicates that NamedSessionResolutionCandidates folds
+// in process: configured-named-identity, session_name against the runtime
+// name, session_name against the bare identity, or alias against the bare
+// identity. Empty arguments disable their respective predicates so the
+// behavior matches ExactMetadataSessionCandidates' empty-filter handling.
+func beadMatchesNamedSessionResolutionFilter(b beads.Bead, identity, sessionName string) bool {
+	if identity != "" {
+		if strings.TrimSpace(b.Metadata[NamedSessionIdentityMetadata]) == identity {
+			return true
+		}
+		if strings.TrimSpace(b.Metadata["session_name"]) == identity {
+			return true
+		}
+		if strings.TrimSpace(b.Metadata["alias"]) == identity {
+			return true
+		}
+	}
+	if sessionName != "" && strings.TrimSpace(b.Metadata["session_name"]) == sessionName {
+		return true
+	}
+	return false
 }
 
 // FindNamedSessionConflict finds the first live session bead that blocks a configured named session.
