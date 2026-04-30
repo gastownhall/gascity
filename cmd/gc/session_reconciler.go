@@ -146,15 +146,44 @@ func pendingCreateSessionStillLeased(session beads.Bead, cfg *config.City, clk c
 		template = session.Metadata["template"]
 	}
 	agent := findAgentByTemplate(cfg, template)
-	if agent != nil {
-		return !agent.Suspended
+	if agent == nil {
+		// Config-snapshot catch-up grace: API config mutations and session
+		// creation can arrive in adjacent reconciler ticks. Preserve a fresh
+		// pending-create bead while the runtime config snapshot catches up
+		// so it is not falsely closed as orphaned. Once the bead ages past
+		// the staleCreatingState window the grace has elapsed and the bead
+		// falls through to orphan cleanup.
+		return strings.TrimSpace(session.Metadata["pending_create_claim"]) == "true" &&
+			strings.TrimSpace(session.Metadata["state"]) == "creating" &&
+			!staleCreatingState(session, clk)
 	}
-	// API config mutations and session creation can arrive in adjacent
-	// reconciler ticks. Preserve a fresh pending-create bead while the runtime
-	// config snapshot catches up so it is not falsely closed as orphaned.
-	return strings.TrimSpace(session.Metadata["pending_create_claim"]) == "true" &&
-		strings.TrimSpace(session.Metadata["state"]) == "creating" &&
-		!staleCreatingState(session, clk)
+	if agent.Suspended {
+		return false
+	}
+	// Lease-evidence requirement: even when the agent is matched, a
+	// pending_create_claim must be backed by an active lease, or the bead
+	// would be treated as "in-flight" forever — the reconciler would skip
+	// it on every tick, the alias it holds would block new spawn attempts
+	// ("alias already belongs to gm-XXXX"), and the session would never make
+	// progress.
+	//
+	// Two evidence sources count as a held lease:
+	//   1. last_woke_at within the startup window — the wake pipeline ran.
+	//   2. CreatedAt within staleCreatingStateTimeout — the bead was just
+	//      written and the wake pipeline hasn't fired yet (manual sessions,
+	//      or supervisor restart between bead-write and wake-fire).
+	//
+	// When neither holds, the lease has expired and the bead is orphan-
+	// eligible: falling through lets the reconciler clean up, release the
+	// alias, and spawn a fresh one.
+	var startupTimeout time.Duration
+	if cfg != nil {
+		startupTimeout = cfg.Session.StartupTimeoutDuration()
+	}
+	if pendingCreateStartInFlight(session, clk, startupTimeout) {
+		return true
+	}
+	return !staleCreatingState(session, clk)
 }
 
 func pendingCreateStartInFlight(session beads.Bead, clk clock.Clock, startupTimeout time.Duration) bool {
