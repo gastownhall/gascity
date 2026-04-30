@@ -300,6 +300,7 @@ func TestLocalInitializerScaffoldPreservesExistingDirectoryWhenRegisterFails(t *
 func TestLocalInitializerInitScaffoldsAndFinalizes(t *testing.T) {
 	skipSlowCmdGCTest(t, "runs the full local init scaffold/finalize path; run make test-cmd-gc-process for full coverage")
 	configureTestDoltIdentityEnv(t)
+	configureRealBdAndDoltPath(t)
 	cityPath := filepath.Join(t.TempDir(), "init-city")
 
 	result, err := localInitializer{}.Init(context.Background(), cityinit.InitRequest{

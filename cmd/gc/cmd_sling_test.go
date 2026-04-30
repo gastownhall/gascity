@@ -503,6 +503,36 @@ func TestShellSlingRunnerOverridesInheritedBDEnv(t *testing.T) {
 	}
 }
 
+func TestShellSlingRunnerStripsInheritedSecrets(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "ghs_should_not_leak")
+	t.Setenv("OPENAI_API_KEY", "sk-should-not-leak")
+
+	out, err := shellSlingRunner("", `printf '%s|%s' "${GITHUB_TOKEN:-unset}" "${OPENAI_API_KEY:-unset}"`, nil)
+	if err != nil {
+		t.Fatalf("shellSlingRunner: %v", err)
+	}
+	if got := strings.TrimSpace(out); got != "unset|unset" {
+		t.Fatalf("shellSlingRunner inherited secrets = %q, want unset|unset", got)
+	}
+}
+
+func TestSourceWorkflowCleanupCommandQuotesUntrustedArgs(t *testing.T) {
+	got := sourceWorkflowCleanupCommand("ga-1; touch /tmp/pwn", "rig:demo; rm -rf /")
+	if got == "gc workflow delete-source ga-1; touch /tmp/pwn --store-ref rig:demo; rm -rf / --apply" {
+		t.Fatalf("cleanup command left shell metacharacters unquoted: %q", got)
+	}
+	args := shellquote.Split(got)
+	want := []string{"gc", "workflow", "delete-source", "ga-1; touch /tmp/pwn", "--store-ref", "rig:demo; rm -rf /", "--apply"}
+	if len(args) != len(want) {
+		t.Fatalf("cleanup command args = %#v, want %#v", args, want)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Fatalf("cleanup command arg[%d] = %q, want %q (command %q)", i, args[i], want[i], got)
+		}
+	}
+}
+
 func TestDoSlingBeadToPool(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -2548,8 +2578,8 @@ title = "Do work"
 			if bead.Assignee != config.ControlDispatcherAgentName {
 				t.Fatalf("workflow-finalize assignee = %q, want %q", bead.Assignee, config.ControlDispatcherAgentName)
 			}
-			if bead.Metadata["gc.routed_to"] != config.ControlDispatcherAgentName {
-				t.Fatalf("workflow-finalize gc.routed_to = %q, want %q", bead.Metadata["gc.routed_to"], config.ControlDispatcherAgentName)
+			if got := bead.Metadata["gc.routed_to"]; got != "" {
+				t.Fatalf("workflow-finalize gc.routed_to = %q, want empty direct dispatcher assignee", got)
 			}
 			if bead.Metadata[graphExecutionRouteMetaKey] != "mayor" {
 				t.Fatalf("workflow-finalize execution route = %q, want mayor", bead.Metadata[graphExecutionRouteMetaKey])

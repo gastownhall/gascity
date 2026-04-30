@@ -139,12 +139,14 @@ func (c *CachingStore) runReconciliation() {
 				continue
 			}
 			removes++
-			closed := cloneBead(old)
-			closed.Status = "closed"
-			notifications = append(notifications, cacheNotification{
-				eventType: "bead.closed",
-				bead:      closed,
-			})
+			if old.Status != "closed" {
+				closed := cloneBead(old)
+				closed.Status = "closed"
+				notifications = append(notifications, cacheNotification{
+					eventType: "bead.closed",
+					bead:      closed,
+				})
+			}
 			delete(c.beads, id)
 			delete(c.deps, id)
 			delete(c.dirty, id)
@@ -207,6 +209,9 @@ func (c *CachingStore) runReconciliation() {
 	for id, old := range c.beads {
 		if _, exists := freshByID[id]; !exists {
 			removes++
+			if old.Status == "closed" {
+				continue
+			}
 			closed := cloneBead(old)
 			closed.Status = "closed"
 			notifications = append(notifications, cacheNotification{

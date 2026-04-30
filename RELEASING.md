@@ -46,7 +46,8 @@ Version numbers live **only** in the git tag — there is no `Version` constant 
 1. **Reject `replace` directives in `go.mod`** — they break `go install ...@latest` and bottle builds in homebrew-core.
 2. **`make check-version-tag`** — asserts the tag is a clean `vMAJOR.MINOR.PATCH` with no pre-release suffix. RC/beta tags will fail the release. Pre-release tags should be cut on a dedicated branch or not trigger this workflow.
 3. **GoReleaser** — builds binaries for linux/darwin × amd64/arm64 and creates the GitHub Release with grouped changelog (`feat:` → Features, `fix:` → Bug Fixes, others → Others).
-4. **Homebrew tap update** — downloads the published checksums and writes an asset-based formula to `gastownhall/homebrew-gascity`.
+4. **Release attestations** — downloads the published checksum manifest, uploads an SPDX SBOM asset, and creates GitHub artifact attestations for the release archives.
+5. **Homebrew tap update** — downloads the published checksums and writes an asset-based formula to `gastownhall/homebrew-gascity`.
 
 Forks skip publish/announce steps automatically via the `--skip=publish --skip=announce` flag (the workflow checks `github.repository != 'gastownhall/gascity'`).
 
@@ -55,11 +56,12 @@ Forks skip publish/announce steps automatically via the `--skip=publish --skip=a
 ```bash
 make check-version-tag    # no-op unless HEAD is a release tag
 grep '^replace' go.mod    # should print nothing
+goreleaser check          # also enforced by CI
 ```
 
 ## Homebrew tap (`gastownhall/gascity`)
 
-The release workflow automatically overwrites `Formula/gascity.rb` in the `gastownhall/homebrew-gascity` repo on every tag push. It prefers the GitHub App credentials `HOMEBREW_TAP_APP_ID` and `HOMEBREW_TAP_APP_PRIVATE_KEY`, and falls back to the legacy `HOMEBREW_TAP_TOKEN` while the app rollout is in progress.
+The release workflow automatically overwrites `Formula/gascity.rb` in the `gastownhall/homebrew-gascity` repo on every tag push. Publishing is GitHub App only: `HOMEBREW_TAP_APP_ID` and `HOMEBREW_TAP_APP_PRIVATE_KEY` must be configured in repository secrets for an app installed on `gastownhall/homebrew-gascity` with contents write.
 
 The tap formula installs prebuilt release assets, so users do not need Go or a source build:
 
@@ -93,6 +95,7 @@ Manual `brew bump-formula-pr` is refused for autobump formulae. If the bot stall
 | `CHANGELOG.md` | `[Unreleased]` → `[X.Y.Z] - DATE` | `scripts/bump-version.sh` |
 | Git tag `vX.Y.Z` | Created and pushed | `scripts/bump-version.sh` |
 | GitHub Release page | Created with binaries + grouped changelog | GoReleaser in `release.yml` |
+| Release SBOM + attestations | SPDX SBOM uploaded and release archives attested | `attest-release` in `release.yml` |
 | `gastownhall/homebrew-gascity/Formula/gascity.rb` | asset URLs + `sha256` updated | `update-homebrew-formula` in `release.yml` |
 
 ## Troubleshooting
@@ -111,7 +114,7 @@ Check `.github/workflows/release.yml` still matches `tags: v*`. Verify the tag w
 
 ### Tap formula not updated
 
-Check the Homebrew tap credential in repo secrets. Preferred: `HOMEBREW_TAP_APP_ID` and `HOMEBREW_TAP_APP_PRIVATE_KEY` for a GitHub App installed on `gastownhall/homebrew-gascity` with contents write. Legacy fallback: `HOMEBREW_TAP_TOKEN` with contents write on the tap. The workflow logs will show the exact error.
+Check the Homebrew tap GitHub App credentials in repo secrets: `HOMEBREW_TAP_APP_ID` and `HOMEBREW_TAP_APP_PRIVATE_KEY`. The app must be installed on `gastownhall/homebrew-gascity` with contents write. The workflow intentionally fails instead of falling back to a long-lived token.
 
 ### Homebrew shows old version after a release
 

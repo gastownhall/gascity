@@ -97,6 +97,24 @@ func TestRenderCLIMarkdown_HiddenCommandSkipped(t *testing.T) {
 	}
 }
 
+func TestRenderCLIMarkdown_AnnotatedCommandSkipped(t *testing.T) {
+	root := &cobra.Command{Use: "app", Short: "test"}
+	root.AddCommand(&cobra.Command{
+		Use:         "pack",
+		Short:       "local pack command",
+		Annotations: map[string]string{skipCLIDocAnnotation: "true"},
+	})
+
+	var buf bytes.Buffer
+	if err := RenderCLIMarkdown(&buf, root); err != nil {
+		t.Fatalf("RenderCLIMarkdown: %v", err)
+	}
+
+	if strings.Contains(buf.String(), "pack") {
+		t.Error("annotated command 'pack' should not appear in output")
+	}
+}
+
 func TestRenderCLIMarkdown_HiddenFlagSkipped(t *testing.T) {
 	root := &cobra.Command{Use: "app", Short: "test"}
 	root.Flags().String("visible", "", "shown flag")

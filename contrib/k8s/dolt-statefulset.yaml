@@ -17,9 +17,24 @@ spec:
       labels:
         app: dolt
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       initContainers:
       - name: init-user
-        image: dolthub/dolt:1.85.0
+        image: dolthub/dolt:1.86.6
+        env:
+        - name: HOME
+          value: /tmp
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
         command:
         - sh
         - -c
@@ -37,9 +52,19 @@ spec:
         volumeMounts:
         - name: dolt-data
           mountPath: /var/lib/dolt
+        - name: tmp
+          mountPath: /tmp
       containers:
       - name: dolt
-        image: dolthub/dolt:1.85.0
+        image: dolthub/dolt:1.86.6
+        env:
+        - name: HOME
+          value: /tmp
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
         command:
         - dolt
         - sql-server
@@ -56,6 +81,8 @@ spec:
         volumeMounts:
         - name: dolt-data
           mountPath: /var/lib/dolt
+        - name: tmp
+          mountPath: /tmp
         livenessProbe:
           tcpSocket:
             port: mysql
@@ -76,6 +103,9 @@ spec:
           limits:
             cpu: "2"
             memory: 4Gi
+      volumes:
+      - name: tmp
+        emptyDir: {}
   volumeClaimTemplates:
   - metadata:
       name: dolt-data

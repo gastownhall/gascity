@@ -46,14 +46,16 @@ func GCSweepSessionBeads(store beads.Store, rigStores map[string]beads.Store, se
 }
 
 // releaseOrphanedPoolAssignments reopens active pool-routed work whose
-// assignee no longer maps to any open session bead. This recovers attempts
-// that were left in_progress after a pooled worker exited or was swept.
+// assignee no longer maps to any open session bead. This also recovers
+// pool-routed work left in_progress with no assignee, which cannot be claimed
+// again until it is moved back to open.
 func releaseOrphanedPoolAssignments(
 	store beads.Store,
 	cfg *config.City,
 	openSessionBeads []beads.Bead,
 	assignedWorkBeads []beads.Bead,
 	assignedWorkStores []beads.Store,
+	rigStores map[string]beads.Store,
 ) []releasedPoolAssignment {
 	if store == nil || cfg == nil || len(assignedWorkBeads) == 0 {
 		return nil
@@ -85,12 +87,6 @@ func releaseOrphanedPoolAssignments(
 			continue
 		}
 		assignee := strings.TrimSpace(wb.Assignee)
-		if assignee == "" {
-			continue
-		}
-		if _, ok := openIdentifiers[assignee]; ok {
-			continue
-		}
 		template := strings.TrimSpace(wb.Metadata["gc.routed_to"])
 		if template == "" {
 			continue
@@ -99,17 +95,31 @@ func releaseOrphanedPoolAssignments(
 		if agentCfg == nil || !agentCfg.SupportsGenericEphemeralSessions() {
 			continue
 		}
-		if assigneePreservesNamedSessionRoute(cfg, template, assignee) {
-			continue
+		if assignee == "" {
+			if wb.Status != "in_progress" {
+				continue
+			}
+		} else {
+			if _, ok := openIdentifiers[assignee]; ok {
+				continue
+			}
+			if assigneePreservesNamedSessionRoute(cfg, template, assignee) {
+				continue
+			}
 		}
 
-		ownerStore := store
+		var ownerStore beads.Store
 		if storeAware {
 			if i >= len(assignedWorkStores) || assignedWorkStores[i] == nil {
 				log.Printf("releaseOrphanedPoolAssignments: missing owner store for assigned work %q at index %d", wb.ID, i)
 				continue
 			}
 			ownerStore = assignedWorkStores[i]
+		} else {
+			ownerStore = storeForPoolAssignment(cfg, store, rigStores, wb)
+			if ownerStore == nil {
+				continue
+			}
 		}
 		if !releaseOrphanedPoolAssignment(ownerStore, wb.ID) {
 			continue
@@ -117,6 +127,48 @@ func releaseOrphanedPoolAssignments(
 		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
 	}
 	return released
+}
+
+func storeForPoolAssignment(cfg *config.City, cityStore beads.Store, rigStores map[string]beads.Store, wb beads.Bead) beads.Store {
+	if cfg == nil || len(rigStores) == 0 {
+		return cityStore
+	}
+	if routed := strings.TrimSpace(wb.Metadata["gc.routed_to"]); routed != "" {
+		if slash := strings.IndexByte(routed, '/'); slash > 0 {
+			if store := rigStores[routed[:slash]]; store != nil {
+				return store
+			}
+		}
+	}
+	idPrefix := beadIDPrefix(wb.ID)
+	for _, rig := range cfg.Rigs {
+		if idPrefix == rig.EffectivePrefix() {
+			if store := rigStores[rig.Name]; store != nil {
+				return store
+			}
+		}
+	}
+	return cityStore
+}
+
+func isRecoverableUnassignedInProgressPoolWork(cfg *config.City, wb beads.Bead) bool {
+	if wb.Status != "in_progress" || strings.TrimSpace(wb.Assignee) != "" {
+		return false
+	}
+	template := strings.TrimSpace(wb.Metadata["gc.routed_to"])
+	if template == "" {
+		return false
+	}
+	agentCfg := findAgentByTemplate(cfg, template)
+	return agentCfg != nil && agentCfg.SupportsGenericEphemeralSessions()
+}
+
+func beadIDPrefix(id string) string {
+	trimmed := strings.TrimSpace(id)
+	if dash := strings.IndexByte(trimmed, '-'); dash > 0 {
+		return trimmed[:dash]
+	}
+	return ""
 }
 
 func releaseOrphanedPoolAssignment(store beads.Store, id string) bool {

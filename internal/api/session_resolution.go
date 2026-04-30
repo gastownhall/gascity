@@ -136,13 +136,11 @@ func (s *Server) findCanonicalNamedSession(store beads.Store, spec apiNamedSessi
 	if store == nil {
 		return beads.Bead{}, false, nil
 	}
-	all, err := store.List(beads.ListQuery{
-		Label: session.LabelSession,
-	})
+	candidates, err := session.NamedSessionResolutionCandidates(store, spec)
 	if err != nil {
-		return beads.Bead{}, false, fmt.Errorf("listing sessions: %w", err)
+		return beads.Bead{}, false, fmt.Errorf("listing named session candidates: %w", err)
 	}
-	bead, ok := session.FindCanonicalNamedSessionBead(all, spec)
+	bead, ok := session.FindCanonicalNamedSessionBead(candidates, spec)
 	return bead, ok, nil
 }
 
@@ -150,9 +148,11 @@ func (s *Server) retireContinuityIneligibleNamedSessionIdentifiers(store beads.S
 	if store == nil {
 		return nil, nil
 	}
-	all, err := store.List(beads.ListQuery{Label: session.LabelSession})
+	all, err := session.ExactMetadataSessionCandidates(store, false, map[string]string{
+		session.NamedSessionIdentityMetadata: spec.Identity,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("listing sessions: %w", err)
+		return nil, fmt.Errorf("listing named session candidates: %w", err)
 	}
 	retired := make([]beads.Bead, 0)
 	now := time.Now().UTC()
@@ -235,11 +235,9 @@ func (s *Server) resolveConfiguredNamedSessionIDWithContext(ctx context.Context,
 		return bead.ID, true, nil
 	}
 
-	all, err := store.List(beads.ListQuery{
-		Label: session.LabelSession,
-	})
+	all, err := session.NamedSessionResolutionCandidates(store, spec)
 	if err != nil {
-		return "", true, fmt.Errorf("listing sessions: %w", err)
+		return "", true, fmt.Errorf("listing named session candidates: %w", err)
 	}
 	if bead, conflict := session.FindNamedSessionConflict(all, spec); conflict {
 		return "", true, fmt.Errorf("%w: %q conflicts with configured named session %q via live bead %s", errConfiguredNamedSessionConflict, identifier, spec.Identity, bead.ID)

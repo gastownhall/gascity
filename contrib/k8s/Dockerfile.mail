@@ -8,16 +8,29 @@
 #
 # The server exposes JSON-RPC on port 8765 and stores messages in SQLite.
 
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:46cb7cc2877e60fbd5e21a9ae6115c30ace7a077b9f8772da879e4590c18c2e3
 
-RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir "mcp_agent_mail @ git+https://github.com/Dicklesworthstone/mcp_agent_mail.git"
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    TMPDIR=/tmp
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY .github/requirements/mcp-agent-mail.txt /tmp/requirements-mcp-agent-mail.txt
+RUN python -m pip install --no-cache-dir --require-hashes \
+    -r /tmp/requirements-mcp-agent-mail.txt \
+    && rm -f /tmp/requirements-mcp-agent-mail.txt
 
 EXPOSE 8765
 
 # mcp_agent_mail uses SQLite internally — data dir for persistence.
-RUN mkdir -p /var/lib/mcp-mail
+RUN useradd -r -m -d /var/lib/mcp-mail -s /usr/sbin/nologin mcp-mail \
+    && mkdir -p /var/lib/mcp-mail \
+    && chown -R mcp-mail:mcp-mail /var/lib/mcp-mail
 WORKDIR /var/lib/mcp-mail
+USER mcp-mail
 
 # Health endpoint: GET /health/liveness
 HEALTHCHECK --interval=10s --timeout=3s --retries=3 \

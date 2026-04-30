@@ -24,6 +24,26 @@ func sessionBead(id, status string) beads.Bead {
 	return beads.Bead{ID: id, Status: status, Type: "session"}
 }
 
+func newPoolDesiredStateTestTrace(templates ...string) *sessionReconcilerTraceCycle {
+	detail := make(map[string]TraceSource, len(templates))
+	for _, template := range templates {
+		detail[normalizedTraceTemplate(template)] = TraceSourceManual
+	}
+	return &sessionReconcilerTraceCycle{
+		tracer:            &SessionReconcilerTracer{detail: detail},
+		dropReasons:       make(map[string]int),
+		pendingDetail:     make(map[string][]SessionReconcilerTraceRecord),
+		pendingDropped:    make(map[string]int),
+		templatesTouched:  make(map[string]struct{}),
+		detailedTemplates: make(map[string]struct{}),
+		decisionCounts:    make(map[string]int),
+		operationCounts:   make(map[string]int),
+		mutationCounts:    make(map[string]int),
+		reasonCounts:      make(map[string]int),
+		outcomeCounts:     make(map[string]int),
+	}
+}
+
 func poolAgent(name, dir string, maxSess *int, minSess int) config.Agent {
 	var minPtr *int
 	if minSess > 0 {
@@ -41,12 +61,13 @@ func TestComputePoolDesiredStates_ResumeBeatsNew(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(2), 0)},
 	}
-	// 1 assigned (resume) + 2 unassigned. scale_check reports 3 total demand.
+	// 1 assigned (resume) + 2 new demand. scale_check reports only the new
+	// demand, and the max cap admits one of those two new requests.
 	work := []beads.Bead{
 		workBead("w1", "rig/claude", "sess-1", "in_progress", 5),
 	}
 	sessions := []beads.Bead{sessionBead("sess-1", "open")}
-	scaleCheck := map[string]int{"rig/claude": 3}
+	scaleCheck := map[string]int{"rig/claude": 2}
 
 	result := ComputePoolDesiredStates(cfg, work, sessions, scaleCheck)
 
@@ -54,7 +75,7 @@ func TestComputePoolDesiredStates_ResumeBeatsNew(t *testing.T) {
 		t.Fatalf("len(result) = %d, want 1", len(result))
 	}
 	reqs := result[0].Requests
-	// Max=2: resume (w1) + 1 new from scale_check deficit (3-1=2, capped at max=2).
+	// Max=2: resume (w1) + 1 new from scale_check, capped at max=2.
 	if len(reqs) != 2 {
 		t.Fatalf("len(requests) = %d, want 2 (max=2)", len(reqs))
 	}
@@ -423,6 +444,43 @@ func TestComputePoolDesiredStates_ScaleCheckRespectsCaps(t *testing.T) {
 	}
 }
 
+func TestComputePoolDesiredStates_CapsNewDemandBeforeMaterializingRequests(t *testing.T) {
+	workspaceMax := 2
+	cfg := &config.City{
+		Workspace: config.Workspace{MaxActiveSessions: &workspaceMax},
+		Agents:    []config.Agent{poolAgent("claude", "", nil, 0)},
+	}
+	work := []beads.Bead{
+		workBead("w1", "claude", "sess-1", "in_progress", 5),
+	}
+	sessions := []beads.Bead{sessionBead("sess-1", "open")}
+	trace := newPoolDesiredStateTestTrace("claude")
+
+	result := computePoolDesiredStates(cfg, work, sessions, map[string]int{"claude": 10}, trace)
+
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	if len(result[0].Requests) != 2 {
+		t.Fatalf("len(requests) = %d, want 2 (one resume plus one new demand within workspace cap)", len(result[0].Requests))
+	}
+	newCount := 0
+	for _, req := range result[0].Requests {
+		if req.Tier == "new" {
+			newCount++
+		}
+	}
+	if newCount != 1 {
+		t.Fatalf("new requests = %d, want 1", newCount)
+	}
+	capRejections := trace.decisionCounts[string(TraceSitePoolAgentCap)] +
+		trace.decisionCounts[string(TraceSitePoolRigCap)] +
+		trace.decisionCounts[string(TraceSitePoolWorkspaceCap)]
+	if capRejections != 0 {
+		t.Fatalf("cap rejections = %d, want 0; new demand should be capped before request materialization", capRejections)
+	}
+}
+
 func TestComputePoolDesiredStates_OpenAssignedWorkResumes(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("claude", "", intPtr(5), 0)},
@@ -487,7 +545,7 @@ func TestComputePoolDesiredStates_NoDemandNoAssignment(t *testing.T) {
 	}
 }
 
-// Regression: scale_check=3 with 1 assigned → poolDesired=3 (1 resume + 2 new).
+// Regression: scale_check reports new demand, not total desired sessions.
 func TestComputePoolDesiredStates_ScaleCheckAndResumeAddUp(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("claude", "", intPtr(5), 0)},
@@ -496,7 +554,7 @@ func TestComputePoolDesiredStates_ScaleCheckAndResumeAddUp(t *testing.T) {
 		workBead("w1", "claude", "sess-1", "in_progress", 5),
 	}
 	sessions := []beads.Bead{sessionBead("sess-1", "open")}
-	scaleCheck := map[string]int{"claude": 3}
+	scaleCheck := map[string]int{"claude": 2}
 
 	result := ComputePoolDesiredStates(cfg, work, sessions, scaleCheck)
 
@@ -504,7 +562,7 @@ func TestComputePoolDesiredStates_ScaleCheckAndResumeAddUp(t *testing.T) {
 		t.Fatalf("len(result) = %d, want 1", len(result))
 	}
 	if len(result[0].Requests) != 3 {
-		t.Fatalf("len(requests) = %d, want 3 (1 resume + 2 new from scale_check deficit)", len(result[0].Requests))
+		t.Fatalf("len(requests) = %d, want 3 (1 resume + 2 new from scale_check)", len(result[0].Requests))
 	}
 	resumeCount := 0
 	newCount := 0

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -627,6 +628,48 @@ func TestResolveProviderBaseChainEmitsDangerousBypass(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("ResolveDefaultArgs() = %v, missing %q — session would hang on first sandboxed command", args, want)
+	}
+}
+
+func TestResolveProviderBaseChainStripsCodexAliases(t *testing.T) {
+	b := "builtin:codex"
+	city := map[string]ProviderSpec{
+		"codex-max": {
+			Base:    &b,
+			Command: "aimux",
+			Args: []string{
+				"run", "codex", "--",
+				"--dangerously-bypass-approvals-and-sandbox",
+				"-m", "gpt-5.5",
+				"-c", "model_reasoning_effort=\"xhigh\"",
+			},
+			ResumeCommand: "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.5 resume {{.SessionKey}}",
+		},
+	}
+	agent := &Agent{Name: "codex-max", Provider: "codex-max"}
+	resolved, err := ResolveProvider(agent, nil, city, lookPathAll)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	wantArgs := []string{"run", "codex", "--"}
+	if !reflect.DeepEqual(resolved.Args, wantArgs) {
+		t.Fatalf("Args = %v, want %v", resolved.Args, wantArgs)
+	}
+	if got := resolved.EffectiveDefaults["model"]; got != "gpt-5.5" {
+		t.Fatalf("EffectiveDefaults[model] = %q, want gpt-5.5", got)
+	}
+	if got := resolved.EffectiveDefaults["effort"]; got != "xhigh" {
+		t.Fatalf("EffectiveDefaults[effort] = %q, want xhigh", got)
+	}
+	command := resolved.CommandString()
+	if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
+		command = command + " " + strings.Join(defaultArgs, " ")
+	}
+	if strings.Count(command, "gpt-5.5") != 1 {
+		t.Fatalf("resolved launch command = %q, want one model flag", command)
+	}
+	if strings.Count(command, "model_reasoning_effort") != 1 {
+		t.Fatalf("resolved launch command = %q, want one effort flag", command)
 	}
 }
 

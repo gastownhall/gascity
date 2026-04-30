@@ -3,6 +3,7 @@ package beads
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -129,6 +130,123 @@ func TestCachingStoreReconciliationPreservesConcurrentEvent(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].Title != eventBead.Title {
 		t.Fatalf("ListOpen = %#v, want event title %q", items, eventBead.Title)
+	}
+}
+
+func TestCachingStoreReconciliationSkipsReemitForAlreadyClosedBead(t *testing.T) {
+	mem := NewMemStore()
+	bead, err := mem.Create(Bead{Title: "to be closed"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	var events []string
+	cs := NewCachingStoreForTest(mem, func(eventType, beadID string, _ json.RawMessage) {
+		events = append(events, eventType+":"+beadID)
+	})
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	if err := cs.Close(bead.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	wantClose := "bead.closed:" + bead.ID
+	closeSeen := false
+	for _, e := range events {
+		if e == wantClose {
+			closeSeen = true
+			break
+		}
+	}
+	if !closeSeen {
+		t.Fatalf("events after Close = %v, want to include %q", events, wantClose)
+	}
+	events = nil
+
+	cs.runReconciliation()
+
+	for _, e := range events {
+		if strings.HasPrefix(e, "bead.closed:") {
+			t.Fatalf("reconciliation re-emitted close event: %v", events)
+		}
+	}
+
+	cs.mu.RLock()
+	_, stillCached := cs.beads[bead.ID]
+	cs.mu.RUnlock()
+	if stillCached {
+		t.Fatalf("closed bead %s should be evicted from cache after reconcile", bead.ID)
+	}
+}
+
+func TestCachingStoreReconciliationSkipsReemitForAlreadyClosedBeadWithConcurrentMutation(t *testing.T) {
+	mem := NewMemStore()
+	closedBead, err := mem.Create(Bead{Title: "closed before reconcile"})
+	if err != nil {
+		t.Fatalf("Create(closed): %v", err)
+	}
+	other, err := mem.Create(Bead{Title: "concurrent target"})
+	if err != nil {
+		t.Fatalf("Create(other): %v", err)
+	}
+
+	backing := &reconcileRaceStore{
+		Store:   mem,
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		stale:   []Bead{other},
+	}
+
+	var events []string
+	var eventsMu sync.Mutex
+	cs := NewCachingStoreForTest(backing, func(eventType, beadID string, _ json.RawMessage) {
+		eventsMu.Lock()
+		defer eventsMu.Unlock()
+		events = append(events, eventType+":"+beadID)
+	})
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	if err := cs.Close(closedBead.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	eventsMu.Lock()
+	events = nil
+	eventsMu.Unlock()
+
+	backing.mu.Lock()
+	backing.block = true
+	backing.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		cs.runReconciliation()
+		close(done)
+	}()
+
+	<-backing.started
+	title := "after concurrent update"
+	if err := cs.Update(other.ID, UpdateOpts{Title: &title}); err != nil {
+		t.Fatalf("Update(other): %v", err)
+	}
+	close(backing.release)
+	<-done
+
+	eventsMu.Lock()
+	defer eventsMu.Unlock()
+	for _, e := range events {
+		if strings.HasPrefix(e, "bead.closed:") {
+			t.Fatalf("reconciliation re-emitted close event in race path: %v", events)
+		}
+	}
+
+	cs.mu.RLock()
+	_, stillCached := cs.beads[closedBead.ID]
+	cs.mu.RUnlock()
+	if stillCached {
+		t.Fatalf("closed bead %s should be evicted from cache after reconcile", closedBead.ID)
 	}
 }
 

@@ -1,7 +1,9 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "config:recommended"
+    "config:recommended",
+    "helpers:pinGitHubActionDigests",
+    "docker:pinDigests"
   ],
   "labels": ["dependencies"],
   "packageRules": [
@@ -12,6 +14,152 @@
     {
       "matchManagers": ["github-actions"],
       "groupName": "github actions"
+    },
+    {
+      "matchManagers": ["dockerfile"],
+      "groupName": "container base images"
+    },
+    {
+      "matchManagers": ["pip_requirements"],
+      "groupName": "python requirements"
+    },
+    {
+      "matchManagers": ["custom.regex"],
+      "groupName": "pinned build tools"
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "fileMatch": [
+        "/^\\.github/workflows/(ci|nightly|mac-regression|rc-gate|review-formulas)\\.yml$/",
+        "/^deps\\.env$/",
+        "/^Makefile$/",
+        "/^contrib/k8s/Dockerfile\\.base$/"
+      ],
+      "matchStrings": [
+        "DOLT_VERSION:\\s*\"(?<currentValue>\\d+\\.\\d+\\.\\d+)\"",
+        "DOLT_VERSION=(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "dolthub/dolt",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "fileMatch": [
+        "/^\\.github/workflows/(ci|nightly|mac-regression|rc-gate|review-formulas)\\.yml$/",
+        "/^deps\\.env$/"
+      ],
+      "matchStrings": [
+        "BD_VERSION:\\s*\"(?<currentValue>v?\\d+\\.\\d+\\.\\d+)\""
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "gastownhall/beads"
+    },
+    {
+      "customType": "regex",
+      "fileMatch": [
+        "/^\\.github/actions/setup-gascity-(ubuntu|macos)/action\\.yml$/",
+        "/^contrib/k8s/Dockerfile\\.base$/",
+        "/^scripts/worker_inference_setup\\.py$/"
+      ],
+      "matchStrings": [
+        "claude-version:[\\s\\S]*?default:\\s*\"(?<currentValue>\\d+\\.\\d+\\.\\d+)\"",
+        "CLAUDE_CODE_VERSION=(?<currentValue>\\d+\\.\\d+\\.\\d+)",
+        "CLAUDE_CODE_VERSION\\s*=\\s*\"(?<currentValue>\\d+\\.\\d+\\.\\d+)\""
+      ],
+      "datasourceTemplate": "npm",
+      "depNameTemplate": "@anthropic-ai/claude-code"
+    },
+    {
+      "customType": "regex",
+      "fileMatch": [
+        "/^contrib/k8s/Dockerfile\\.controller$/"
+      ],
+      "matchStrings": [
+        "KUBECTL_VERSION=(?<currentValue>v?\\d+\\.\\d+\\.\\d+)"
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "kubernetes/kubernetes"
+    },
+    {
+      "customType": "regex",
+      "fileMatch": [
+        "/^Makefile$/"
+      ],
+      "matchStrings": [
+        "GOLANGCI_LINT_VERSION\\s*:=\\s*(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "golangci/golangci-lint"
+    },
+    {
+      "customType": "regex",
+      "fileMatch": [
+        "/^Makefile$/"
+      ],
+      "matchStrings": [
+        "BUILDX_VERSION\\s*:=\\s*(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "docker/buildx"
+    },
+    {
+      "customType": "regex",
+      "fileMatch": [
+        "/^scripts/test-docker-session$/"
+      ],
+      "matchStrings": [
+        "FROM alpine:(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]+)"
+      ],
+      "datasourceTemplate": "docker",
+      "depNameTemplate": "alpine"
+    },
+    {
+      "customType": "regex",
+      "fileMatch": [
+        "/^scripts/worker_inference_setup\\.py$/"
+      ],
+      "matchStrings": [
+        "\"@openai/codex\",\\s*\"CODEX_CLI_VERSION\",\\s*\"(?<currentValue>\\d+\\.\\d+\\.\\d+)\""
+      ],
+      "datasourceTemplate": "npm",
+      "depNameTemplate": "@openai/codex"
+    },
+    {
+      "customType": "regex",
+      "fileMatch": [
+        "/^scripts/worker_inference_setup\\.py$/"
+      ],
+      "matchStrings": [
+        "\"@google/gemini-cli\",\\s*\"GEMINI_CLI_VERSION\",\\s*\"(?<currentValue>\\d+\\.\\d+\\.\\d+)\""
+      ],
+      "datasourceTemplate": "npm",
+      "depNameTemplate": "@google/gemini-cli"
+    },
+    {
+      "customType": "regex",
+      "fileMatch": [
+        "/^deps\\.env$/"
+      ],
+      "matchStrings": [
+        "BR_VERSION=(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "Dicklesworthstone/beads_rust",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "fileMatch": [
+        "/^\\.github/workflows/container-scan\\.yml$/"
+      ],
+      "matchStrings": [
+        "TRIVY_VERSION:\\s*\"(?<currentValue>v?\\d+\\.\\d+\\.\\d+)\""
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "aquasecurity/trivy"
     }
   ]
 }

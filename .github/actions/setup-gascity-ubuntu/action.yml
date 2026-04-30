@@ -5,7 +5,7 @@ inputs:
   go-version:
     description: Go version to install
     required: false
-    default: "1.25.8"
+    default: "1.25.9"
   node-version:
     description: Node.js version to install
     required: false
@@ -20,11 +20,15 @@ inputs:
     description: Whether to install the Claude CLI
     required: false
     default: "true"
+  claude-version:
+    description: Claude Code version to install with the native binary installer
+    required: false
+    default: "2.1.123"
 
 runs:
   using: composite
   steps:
-    - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+    - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
       with:
         go-version: ${{ inputs.go-version }}
 
@@ -38,31 +42,13 @@ runs:
 
     - name: Install dolt v${{ inputs.dolt-version }}
       shell: bash
-      run: |
-        curl -fsSL "https://github.com/dolthub/dolt/releases/download/v${{ inputs.dolt-version }}/install.sh" | sudo bash
-        dolt version
+      run: ${{ github.action_path }}/../../scripts/install-dolt-archive.sh "${{ inputs.dolt-version }}"
 
     - name: Install released bd v${{ inputs.bd-version }}
       shell: bash
-      run: |
-        version="${{ inputs.bd-version }}"
-        case "$(uname -m)" in
-          x86_64|amd64) bd_arch=amd64 ;;
-          aarch64|arm64) bd_arch=arm64 ;;
-          *)
-            echo "Unsupported runner architecture: $(uname -m)" >&2
-            exit 1
-            ;;
-        esac
-        archive="beads_${version#v}_linux_${bd_arch}.tar.gz"
-        mkdir -p "$RUNNER_TEMP/beads"
-        curl -fsSL -o "$RUNNER_TEMP/$archive" \
-          "https://github.com/gastownhall/beads/releases/download/${version}/${archive}"
-        tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/beads" bd
-        sudo install -m 0755 "$RUNNER_TEMP/beads/bd" /usr/local/bin/bd
-        bd version
+      run: ${{ github.action_path }}/../../scripts/install-bd-archive.sh "${{ inputs.bd-version }}"
 
     - name: Install Claude CLI
       if: ${{ inputs.install-claude-cli == 'true' }}
       shell: bash
-      run: npm install -g @anthropic-ai/claude-code
+      run: ${{ github.action_path }}/../../scripts/install-claude-native.sh "${{ inputs.claude-version }}"

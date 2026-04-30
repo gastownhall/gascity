@@ -214,6 +214,23 @@ func BeadConflictsWithNamedSession(b beads.Bead, spec NamedSessionSpec) bool {
 	return false
 }
 
+// NamedSessionResolutionCandidates returns the live session beads that can own
+// or conflict with the configured named-session spec, using only exact
+// metadata lookups derived from the spec.
+func NamedSessionResolutionCandidates(store beads.Store, spec NamedSessionSpec) ([]beads.Bead, error) {
+	if store == nil {
+		return nil, nil
+	}
+	identity := NormalizeNamedSessionTarget(spec.Identity)
+	sessionName := strings.TrimSpace(spec.SessionName)
+	return ExactMetadataSessionCandidates(store, false,
+		map[string]string{NamedSessionIdentityMetadata: identity},
+		map[string]string{"session_name": sessionName},
+		map[string]string{"session_name": identity},
+		map[string]string{"alias": identity},
+	)
+}
+
 // FindNamedSessionConflict finds the first live session bead that blocks a configured named session.
 func FindNamedSessionConflict(candidates []beads.Bead, spec NamedSessionSpec) (beads.Bead, bool) {
 	for _, b := range candidates {

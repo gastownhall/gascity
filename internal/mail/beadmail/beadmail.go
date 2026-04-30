@@ -5,13 +5,23 @@ package beadmail
 
 import (
 	"crypto/rand"
+	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/session"
+)
+
+const (
+	fromSessionIDMetadataKey = mail.FromSessionIDMetadataKey
+	fromDisplayMetadataKey   = mail.FromDisplayMetadataKey
+	toSessionIDMetadataKey   = mail.ToSessionIDMetadataKey
+	toDisplayMetadataKey     = mail.ToDisplayMetadataKey
 )
 
 // Provider implements [mail.Provider] using [beads.Store] as the backend.
@@ -31,6 +41,10 @@ func (p *Provider) Send(from, to, subject, body string) (mail.Message, error) {
 	if to == "" {
 		return mail.Message{}, fmt.Errorf("beadmail send: recipient is required")
 	}
+	from, metadata, err := p.resolveSenderRoute(from)
+	if err != nil {
+		return mail.Message{}, fmt.Errorf("beadmail send: %w", err)
+	}
 	threadID := generateThreadID()
 	labels := []string{"thread:" + threadID}
 
@@ -49,11 +63,53 @@ func (p *Provider) Send(from, to, subject, body string) (mail.Message, error) {
 		Assignee:    to,
 		From:        from,
 		Labels:      labels,
+		Metadata:    metadata,
 	})
 	if err != nil {
 		return mail.Message{}, fmt.Errorf("beadmail send: %w", err)
 	}
 	return beadToMessage(b), nil
+}
+
+func (p *Provider) resolveSenderRoute(from string) (string, map[string]string, error) {
+	from = strings.TrimSpace(from)
+	if from == "" || from == "human" || p.store == nil {
+		return from, nil, nil
+	}
+	sessionID, err := session.ResolveSessionID(p.store, from)
+	if err != nil {
+		if errors.Is(err, session.ErrSessionNotFound) || errors.Is(err, session.ErrAmbiguous) {
+			return from, nil, nil
+		}
+		return "", nil, fmt.Errorf("resolving sender %q: %w", from, err)
+	}
+	b, err := p.store.Get(sessionID)
+	if err != nil {
+		return "", nil, fmt.Errorf("loading sender session %q: %w", sessionID, err)
+	}
+	display := senderDisplayAddress(b, from)
+	metadata := map[string]string{fromSessionIDMetadataKey: sessionID}
+	if display != "" {
+		metadata[fromDisplayMetadataKey] = display
+	}
+	return display, metadata, nil
+}
+
+func senderDisplayAddress(b beads.Bead, fallback string) string {
+	if alias := strings.TrimSpace(b.Metadata["alias"]); alias != "" {
+		return alias
+	}
+	fallback = strings.TrimSpace(fallback)
+	if fallback != "" && fallback != b.ID {
+		return fallback
+	}
+	if name := strings.TrimSpace(b.Metadata["session_name"]); name != "" {
+		return name
+	}
+	if b.ID != "" {
+		return b.ID
+	}
+	return fallback
 }
 
 // Inbox returns all unread messages for the recipient.
@@ -148,8 +204,30 @@ func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
 	if err != nil {
 		return mail.Message{}, fmt.Errorf("beadmail reply: %w", err)
 	}
-	if original.From == "" {
+	toSessionID := strings.TrimSpace(original.Metadata[fromSessionIDMetadataKey])
+	to := toSessionID
+	if to == "" {
+		to = strings.TrimSpace(original.From)
+	}
+	if to == "" {
 		return mail.Message{}, fmt.Errorf("beadmail reply: original message %s has no sender to reply to", id)
+	}
+	toDisplay := strings.TrimSpace(original.Metadata[fromDisplayMetadataKey])
+	if toDisplay == "" {
+		toDisplay = strings.TrimSpace(original.From)
+	}
+	from, metadata, err := p.resolveSenderRoute(from)
+	if err != nil {
+		return mail.Message{}, fmt.Errorf("beadmail reply: %w", err)
+	}
+	if metadata == nil {
+		metadata = make(map[string]string)
+	}
+	if toSessionID != "" {
+		metadata[toSessionIDMetadataKey] = toSessionID
+	}
+	if toDisplay != "" {
+		metadata[toDisplayMetadataKey] = toDisplay
 	}
 
 	threadID := extractLabel(original.Labels, "thread:")
@@ -160,17 +238,44 @@ func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
 	labels := []string{"thread:" + threadID, "reply-to:" + id}
 
 	b, err := p.store.Create(beads.Bead{
-		Title:       subject,
+		Title:       deriveReplyTitle(subject, original.Title, body),
 		Description: body,
 		Type:        "message",
-		Assignee:    original.From, // reply goes back to sender
+		Assignee:    to, // reply goes back to sender
 		From:        from,
 		Labels:      labels,
+		Metadata:    metadata,
 	})
 	if err != nil {
 		return mail.Message{}, fmt.Errorf("beadmail reply: %w", err)
 	}
 	return beadToMessage(b), nil
+}
+
+// deriveReplyTitle returns a non-empty title for a reply message. Callers
+// that go through bd create fail validation ("title is required") if the
+// reply's title is empty, so this fallback chain always returns a usable
+// string. Precedence: explicit subject → "Re: <original>" (deduped) →
+// first line of reply body → literal "(reply)".
+func deriveReplyTitle(subject, originalTitle, body string) string {
+	if subject != "" {
+		return subject
+	}
+	if originalTitle != "" {
+		trimmed := strings.TrimLeft(originalTitle, " \t")
+		if strings.HasPrefix(strings.ToLower(trimmed), "re:") {
+			return originalTitle
+		}
+		return "Re: " + originalTitle
+	}
+	snippet := strings.SplitN(body, "\n", 2)[0]
+	if len(snippet) > 80 {
+		snippet = snippet[:77] + "..."
+	}
+	if snippet != "" {
+		return snippet
+	}
+	return "(reply)"
 }
 
 // Thread returns all messages sharing a thread ID, ordered by creation time.
@@ -196,16 +301,30 @@ func (p *Provider) Thread(threadID string) ([]mail.Message, error) {
 
 // Count returns (total, unread) message counts for a recipient.
 func (p *Provider) Count(recipient string) (int, int, error) {
-	candidates, err := p.messageCandidates(recipient)
+	total, unread, err := p.CountRecipients([]string{recipient})
 	if err != nil {
 		return 0, 0, fmt.Errorf("beadmail count: %w", err)
+	}
+	return total, unread, nil
+}
+
+// CountRecipients returns deduplicated total and unread counts for all recipient
+// routes represented by recipients.
+func (p *Provider) CountRecipients(recipients []string) (int, int, error) {
+	if len(recipients) == 0 {
+		return 0, 0, nil
+	}
+	routes := p.recipientRoutesForAll(recipients)
+	candidates, err := p.messageCandidatesForRoutes(routes)
+	if err != nil {
+		return 0, 0, fmt.Errorf("listing messages: %w", err)
 	}
 	var total, unread int
 	for _, b := range candidates {
 		if b.Status != "open" {
 			continue
 		}
-		if recipient != "" && b.Assignee != recipient {
+		if len(routes) > 0 && !matchesRecipientRoute(routes, b.Assignee) {
 			continue
 		}
 		total++
@@ -219,7 +338,8 @@ func (p *Provider) Count(recipient string) (int, int, error) {
 // filterMessages returns open message beads assigned to the recipient.
 // When includeRead is false, messages with the "read" label are excluded.
 func (p *Provider) filterMessages(recipient string, includeRead bool) ([]mail.Message, error) {
-	candidates, err := p.messageCandidates(recipient)
+	routes := p.recipientRoutes(recipient)
+	candidates, err := p.messageCandidatesForRoutes(routes)
 	if err != nil {
 		return nil, fmt.Errorf("beadmail: listing beads: %w", err)
 	}
@@ -228,7 +348,7 @@ func (p *Provider) filterMessages(recipient string, includeRead bool) ([]mail.Me
 		if b.Status != "open" {
 			continue
 		}
-		if recipient != "" && b.Assignee != recipient {
+		if len(routes) > 0 && !matchesRecipientRoute(routes, b.Assignee) {
 			continue
 		}
 		if !includeRead && hasLabel(b.Labels, "read") {
@@ -249,7 +369,102 @@ func (p *Provider) filterMessages(recipient string, includeRead bool) ([]mail.Me
 //
 // Type="message" is the authoritative discriminator; the legacy gc:message
 // label supplement was removed in #862 along with writes to that label.
-func (p *Provider) messageCandidates(recipient string) ([]beads.Bead, error) {
+func (p *Provider) recipientRoutes(recipient string) []string {
+	recipient = strings.TrimSpace(recipient)
+	if recipient == "" {
+		return nil
+	}
+	routes := make([]string, 0, 4)
+	routes = appendRecipientRoute(routes, recipient)
+	if recipient == "human" || p.store == nil {
+		return routes
+	}
+	sessions, err := p.store.List(beads.ListQuery{Label: session.LabelSession, IncludeClosed: true})
+	if err != nil {
+		log.Printf("beadmail: listing sessions for recipient route %q: %v", recipient, err)
+		return routes
+	}
+	var liveMatches []beads.Bead
+	var closedMatches []beads.Bead
+	for _, b := range sessions {
+		if !session.IsSessionBeadOrRepairable(b) {
+			continue
+		}
+		addresses := sessionAddressesForRecipientRouting(b)
+		if !containsRecipientRoute(addresses, recipient) {
+			continue
+		}
+		if b.Status == "closed" {
+			closedMatches = append(closedMatches, b)
+			continue
+		}
+		liveMatches = append(liveMatches, b)
+	}
+	matches := liveMatches
+	if len(matches) == 0 {
+		matches = closedMatches
+	}
+	if len(matches) > 1 {
+		return []string{recipient}
+	}
+	for _, b := range matches {
+		for _, address := range sessionAddressesForRecipientRouting(b) {
+			routes = appendRecipientRoute(routes, address)
+		}
+	}
+	return routes
+}
+
+func (p *Provider) recipientRoutesForAll(recipients []string) []string {
+	var routes []string
+	for _, recipient := range recipients {
+		recipientRoutes := p.recipientRoutes(recipient)
+		for _, route := range recipientRoutes {
+			routes = appendRecipientRoute(routes, route)
+		}
+	}
+	return routes
+}
+
+func sessionAddressesForRecipientRouting(b beads.Bead) []string {
+	var routes []string
+	routes = appendRecipientRoute(routes, b.ID)
+	routes = appendRecipientRoute(routes, b.Metadata["alias"])
+	routes = appendRecipientRoute(routes, b.Metadata["session_name"])
+	for _, alias := range session.AliasHistory(b.Metadata) {
+		routes = appendRecipientRoute(routes, alias)
+	}
+	return routes
+}
+
+func appendRecipientRoute(routes []string, route string) []string {
+	route = strings.TrimSpace(route)
+	if route == "" || containsRecipientRoute(routes, route) {
+		return routes
+	}
+	return append(routes, route)
+}
+
+func containsRecipientRoute(routes []string, route string) bool {
+	route = strings.TrimSpace(route)
+	for _, candidate := range routes {
+		if candidate == route {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesRecipientRoute(routes []string, assignee string) bool {
+	for _, route := range routes {
+		if assignee == route {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *Provider) messageCandidatesForRoutes(routes []string) ([]beads.Bead, error) {
 	seen := make(map[string]beads.Bead)
 	order := make([]string, 0)
 	add := func(bs []beads.Bead) {
@@ -265,16 +480,18 @@ func (p *Provider) messageCandidates(recipient string) ([]beads.Bead, error) {
 	}
 
 	// Primary: targeted query scoped to recipient.
-	if recipient != "" {
-		assigned, err := p.store.List(beads.ListQuery{
-			Assignee: recipient,
-			Type:     "message",
-			Status:   "open",
-		})
-		if err != nil {
-			return nil, fmt.Errorf("listing by assignee: %w", err)
+	if len(routes) > 0 {
+		for _, route := range routes {
+			assigned, err := p.store.List(beads.ListQuery{
+				Assignee: route,
+				Type:     "message",
+				Status:   "open",
+			})
+			if err != nil {
+				return nil, fmt.Errorf("listing by assignee %q: %w", route, err)
+			}
+			add(assigned)
 		}
-		add(assigned)
 	} else {
 		// No recipient filter — use type-based query for global discovery.
 		all, err := p.store.List(beads.ListQuery{Type: "message"})
@@ -299,10 +516,18 @@ func isMessage(b beads.Bead) bool {
 
 // beadToMessage converts a bead to a mail.Message.
 func beadToMessage(b beads.Bead) mail.Message {
+	from := b.From
+	if display := strings.TrimSpace(b.Metadata[fromDisplayMetadataKey]); display != "" {
+		from = display
+	}
+	to := b.Assignee
+	if display := strings.TrimSpace(b.Metadata[toDisplayMetadataKey]); display != "" {
+		to = display
+	}
 	return mail.Message{
 		ID:        b.ID,
-		From:      b.From,
-		To:        b.Assignee,
+		From:      from,
+		To:        to,
 		Subject:   b.Title,
 		Body:      b.Description,
 		CreatedAt: b.CreatedAt,

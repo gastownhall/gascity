@@ -681,7 +681,32 @@ func TestCachingStoreGetFallsBackForClosedBeadsAfterPrime(t *testing.T) {
 	}
 }
 
-func TestCachingStoreReadyFallsBackForClosedBlockingDepsAfterPrime(t *testing.T) {
+type countingGetStore struct {
+	beads.Store
+	mu   sync.Mutex
+	gets int
+}
+
+func (s *countingGetStore) Get(id string) (beads.Bead, error) {
+	s.mu.Lock()
+	s.gets++
+	s.mu.Unlock()
+	return s.Store.Get(id)
+}
+
+func (s *countingGetStore) resetGets() {
+	s.mu.Lock()
+	s.gets = 0
+	s.mu.Unlock()
+}
+
+func (s *countingGetStore) getCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.gets
+}
+
+func TestCachingStoreReadyTreatsMissingDepTargetAsClosedWithoutBackingGet(t *testing.T) {
 	t.Parallel()
 	mem := beads.NewMemStore()
 	blocker, err := mem.Create(beads.Bead{Title: "Closed blocker"})
@@ -699,10 +724,12 @@ func TestCachingStoreReadyFallsBackForClosedBlockingDepsAfterPrime(t *testing.T)
 		t.Fatalf("DepAdd: %v", err)
 	}
 
-	cs := beads.NewCachingStoreForTest(mem, nil)
+	backing := &countingGetStore{Store: mem}
+	cs := beads.NewCachingStoreForTest(backing, nil)
 	if err := cs.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
 	}
+	backing.resetGets()
 
 	got, err := cs.Ready()
 	if err != nil {
@@ -710,6 +737,9 @@ func TestCachingStoreReadyFallsBackForClosedBlockingDepsAfterPrime(t *testing.T)
 	}
 	if len(got) != 1 || got[0].ID != ready.ID {
 		t.Fatalf("Ready() = %v, want only %s", got, ready.ID)
+	}
+	if gets := backing.getCount(); gets != 0 {
+		t.Fatalf("Ready() performed %d backing Get calls, want 0", gets)
 	}
 }
 

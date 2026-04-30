@@ -14,6 +14,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
@@ -313,9 +314,7 @@ func (s *Server) slingRunner() sling.SlingRunner {
 		if dir != "" {
 			cmd.Dir = dir
 		}
-		if len(env) > 0 {
-			cmd.Env = mergeEnvForSling(env)
-		}
+		cmd.Env = mergeEnvForSling(env)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			return string(out), fmt.Errorf("running %q: %w", command, err)
@@ -326,13 +325,7 @@ func (s *Server) slingRunner() sling.SlingRunner {
 
 // mergeEnvForSling merges extra env vars into the current process env.
 func mergeEnvForSling(extra map[string]string) []string {
-	base := os.Environ()
-	merged := make([]string, 0, len(base)+len(extra))
-	merged = append(merged, base...)
-	for k, v := range extra {
-		merged = append(merged, k+"="+v)
-	}
-	return merged
+	return execenv.MergeMap(os.Environ(), extra)
 }
 
 // apiAgentResolver implements sling.AgentResolver for the API context.

@@ -577,9 +577,19 @@ func TestControllerReloadsConfigImmediatelyOnWatchEvent(t *testing.T) {
 		}
 	}
 
-	names, _ := lastAgentNames.Load().([]string)
-	if len(names) != 2 || names[0] != "mayor" || names[1] != "worker" {
-		t.Errorf("expected [mayor worker], got %v", names)
+	deadline = time.After(1500 * time.Millisecond)
+	for {
+		names, _ := lastAgentNames.Load().([]string)
+		if len(names) == 2 && names[0] == "mayor" && names[1] == "worker" {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Errorf("expected [mayor worker], got %v", names)
+			return
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
 }
 

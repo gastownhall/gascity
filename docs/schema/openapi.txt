@@ -17743,6 +17743,16 @@
               "pattern": "\\S",
               "type": "string"
             }
+          },
+          {
+            "description": "Bypass cached order-check responses and cached order history.",
+            "explode": false,
+            "in": "query",
+            "name": "fresh",
+            "schema": {
+              "description": "Bypass cached order-check responses and cached order history.",
+              "type": "boolean"
+            }
           }
         ],
         "responses": {

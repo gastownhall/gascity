@@ -37,12 +37,70 @@ scripts, and the large `gc-beads-bd` provider suite are routed out of the
 default path so local `make check` and CI `Check` stay focused on quick
 feedback. If you need that full `cmd/gc` scenario coverage locally, run
 `make test-cmd-gc-process`. In CI, the required non-short path is the
-`test-integration-packages` shard. If you need the heavier package
+dedicated Linux `cmd/gc process` job. The generic integration package
+shards keep `GC_FAST_UNIT=1` for `cmd/gc` unless explicitly overridden,
+so they exercise the fast package sweep without duplicating the slow
+process-backed suite. If you need the heavier package
 coverage sweep locally, use `make test-integration-packages-cover` or
 `make test-integration-shards-cover`. As a result, `coverage.txt` is the
 fast unit-only baseline; the integration contribution comes from the
 shard-specific `coverage.integration-*.txt` profiles and their matching
 Codecov flags.
+
+#### Sharded local runners
+
+For broad local runs, prefer the repo's sharded wrappers over raw `go test`
+commands. They use the same buckets as CI, run under a scrubbed environment,
+and split single-package bottlenecks such as `cmd/gc` across multiple
+processes.
+
+Use these as the default entry points:
+
+```bash
+# Fast unit baseline, with cmd/gc split into shards.
+make test-fast-parallel
+
+# Full process-backed cmd/gc suite, sharded.
+make test-cmd-gc-process-parallel
+
+# CI integration buckets, sharded.
+make test-integration-shards-parallel
+
+# Fast + process-backed cmd/gc + integration shards.
+make test-local-full-parallel
+```
+
+On large local machines, tune parallelism explicitly:
+
+```bash
+LOCAL_TEST_JOBS=48 CMD_GC_PROCESS_TOTAL=12 make test-local-full-parallel
+```
+
+For one package, shard top-level Go tests directly:
+
+```bash
+GO_TEST_COUNT=1 GO_TEST_TIMEOUT=20m ./scripts/test-go-test-shard ./cmd/gc 1 6
+GO_TEST_TAGS=acceptance_b GO_TEST_TIMEOUT=10m ./scripts/test-go-test-shard ./test/acceptance/tier_b 2 3
+```
+
+For integration buckets, use the named shard runner:
+
+```bash
+./scripts/test-integration-shard packages-cmd-gc-3-of-6
+./scripts/test-integration-shard review-formulas-retries-1-of-2
+./scripts/test-integration-shard rest-full-4-of-8
+```
+
+To force the process-backed `cmd/gc` tests through the package shard for
+diagnostics, override the default explicitly:
+
+```bash
+GC_FAST_UNIT=0 ./scripts/test-integration-shard packages-cmd-gc-3-of-6
+```
+
+Raw `go test` is still appropriate for a focused package or a single failing
+test. Do not use it as the default for full local sweeps when a sharded target
+exists.
 
 ### 2. Testscript (`.txtar` files in `cmd/gc/testdata/`)
 
@@ -109,6 +167,21 @@ subprocess. Proves the whole stack — build tags, Huma registration,
 listener bootstrap, socket paths — wires end-to-end through a real
 binary. Run with `make test-integration-huma` or
 `go test -tags integration -run TestHumaBinary ./test/integration/`.
+
+#### Live worker inference tests (`//go:build acceptance_c`)
+
+`test/acceptance/worker_inference` runs live Claude/Codex/Gemini CLI
+sessions through tmux and requires local or CI-provided provider auth. It is
+not part of PR CI. Run it deliberately when validating provider behavior:
+
+```bash
+make setup-worker-inference PROFILE=claude/tmux-cli
+make test-worker-inference PROFILE=claude/tmux-cli
+```
+
+Supported profiles are `claude/tmux-cli`, `codex/tmux-cli`, and
+`gemini/tmux-cli`. Nightly CI runs these with its configured credentials and
+uploads worker report artifacts.
 
 ### 4. Documentation sync tests (`test/docsync`)
 

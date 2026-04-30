@@ -155,14 +155,21 @@ func doHandoffWithOutcome(store beads.Store, rec events.Recorder, dops drainOps,
 	if len(args) > 1 {
 		message = args[1]
 	}
+	metadata, err := mailSenderRouteMetadata(store, sessionAddress)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc handoff: resolving sender route: %v\n", err) //nolint:errcheck // best-effort stderr
+		return handoffOutcome{code: 1}
+	}
+	senderDisplay := mailSenderDisplayFromMetadata(sessionAddress, metadata)
 
 	b, err := store.Create(beads.Bead{
 		Title:       subject,
 		Description: message,
 		Type:        "message",
 		Assignee:    sessionAddress,
-		From:        sessionAddress,
+		From:        senderDisplay,
 		Labels:      []string{"thread:" + handoffThreadID()},
+		Metadata:    metadata,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: creating mail: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -170,7 +177,7 @@ func doHandoffWithOutcome(store beads.Store, rec events.Recorder, dops drainOps,
 	}
 	rec.Record(events.Event{
 		Type:    events.MailSent,
-		Actor:   sessionAddress,
+		Actor:   senderDisplay,
 		Subject: b.ID,
 		Message: sessionAddress,
 		Payload: mailEventPayload(nil),
@@ -277,6 +284,12 @@ func doHandoffRemote(store beads.Store, rec events.Recorder, sp runtime.Provider
 	if len(args) > 1 {
 		message = args[1]
 	}
+	metadata, err := mailSenderRouteMetadata(store, sender)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc handoff: resolving sender route: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	senderDisplay := mailSenderDisplayFromMetadata(sender, metadata)
 
 	// Send mail to target.
 	b, err := store.Create(beads.Bead{
@@ -284,8 +297,9 @@ func doHandoffRemote(store beads.Store, rec events.Recorder, sp runtime.Provider
 		Description: message,
 		Type:        "message",
 		Assignee:    targetAddress,
-		From:        sender,
+		From:        senderDisplay,
 		Labels:      []string{"thread:" + handoffThreadID()},
+		Metadata:    metadata,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: creating mail: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -293,7 +307,7 @@ func doHandoffRemote(store beads.Store, rec events.Recorder, sp runtime.Provider
 	}
 	rec.Record(events.Event{
 		Type:    events.MailSent,
-		Actor:   sender,
+		Actor:   senderDisplay,
 		Subject: b.ID,
 		Message: targetAddress,
 		Payload: mailEventPayload(nil),

@@ -135,6 +135,7 @@ func TestBuildSessionResumePreservesStoredResolvedCommand(t *testing.T) {
 func TestBuildSessionResumeRebuildsBareStoredCommandForPoolClaudeAgent(t *testing.T) {
 	fs := newSessionFakeState(t)
 	claude := config.BuiltinProviders()["claude"]
+	claude.PathCheck = "true" // use /usr/bin/true so LookPath succeeds in CI
 	maxActive := 3
 	gcDir := filepath.Join(fs.cityPath, ".gc")
 	if err := os.MkdirAll(gcDir, 0o755); err != nil {

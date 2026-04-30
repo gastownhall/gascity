@@ -29,11 +29,21 @@ type waitNudgeMetadataFailStore struct {
 	*beads.MemStore
 }
 
+type waitGetSpyStore struct {
+	beads.Store
+	getIDs []string
+}
+
 func (s waitNudgeMetadataFailStore) SetMetadata(id, key, value string) error {
 	if key == "nudge_id" {
 		return errors.New("set nudge id failed")
 	}
 	return s.MemStore.SetMetadata(id, key, value)
+}
+
+func (s *waitGetSpyStore) Get(id string) (beads.Bead, error) {
+	s.getIDs = append(s.getIDs, id)
+	return s.Store.Get(id)
 }
 
 var (
@@ -74,21 +84,16 @@ func waitTestRealBDPath(t *testing.T) string {
 	t.Helper()
 	skipSlowCmdGCTest(t, "requires a managed bd lifecycle city; run make test-cmd-gc-process for full coverage")
 	waitTestRealBDPathOnce.Do(func() {
-		for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
-			if strings.TrimSpace(dir) == "" {
-				continue
-			}
-			candidate := filepath.Join(dir, "bd")
-			info, err := os.Stat(candidate)
-			if err != nil || info.IsDir() {
-				continue
-			}
-			cmd := exec.Command(candidate, "init", "--help")
-			out, err := cmd.CombinedOutput()
-			if err == nil || !strings.Contains(string(out), `unknown subcommand "init"`) {
-				waitTestRealBDCached = candidate
-				return
-			}
+		candidate, err := findPreferredBinary("bd")
+		if err != nil {
+			waitTestRealBDErr = errors.New("bd with init not installed")
+			return
+		}
+		cmd := exec.Command(candidate, "init", "--help")
+		out, err := cmd.CombinedOutput()
+		if err == nil || !strings.Contains(string(out), `unknown subcommand "init"`) {
+			waitTestRealBDCached = candidate
+			return
 		}
 		waitTestRealBDErr = errors.New("bd with init not installed")
 	})
@@ -432,6 +437,109 @@ func TestPrepareWaitWakeState_FinalizesFromNudge(t *testing.T) {
 	}
 }
 
+func TestPrepareWaitWakeState_SkipsMissingOpenSessionWithoutBackingGet(t *testing.T) {
+	base := beads.NewMemStore()
+	store := &waitGetSpyStore{Store: base}
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       "worker",
+			"agent_name":         "worker",
+			"continuation_epoch": "1",
+			"state":              string(sessionpkg.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	if err := store.Close(sessionBead.ID); err != nil {
+		t.Fatalf("close session bead: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:   waitBeadType,
+		Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
+		Metadata: map[string]string{
+			"session_id":       sessionBead.ID,
+			"session_name":     "worker",
+			"kind":             "deps",
+			"state":            waitStateReady,
+			"registered_epoch": "1",
+		},
+	}); err != nil {
+		t.Fatalf("create wait bead: %v", err)
+	}
+
+	readyWaitSet, err := prepareWaitWakeState(store, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("prepareWaitWakeState: %v", err)
+	}
+	if len(readyWaitSet) != 0 {
+		t.Fatalf("readyWaitSet = %#v, want empty for non-open session", readyWaitSet)
+	}
+	for _, id := range store.getIDs {
+		if id == sessionBead.ID {
+			t.Fatalf("prepare used Get for non-open session %s; getIDs=%v", sessionBead.ID, store.getIDs)
+		}
+	}
+}
+
+func TestPrepareWaitWakeState_CancelsStaleEpochWaitForClosedSession(t *testing.T) {
+	base := beads.NewMemStore()
+	store := &waitGetSpyStore{Store: base}
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       "worker",
+			"agent_name":         "worker",
+			"continuation_epoch": "2",
+			"state":              string(sessionpkg.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	if err := store.Close(sessionBead.ID); err != nil {
+		t.Fatalf("close session bead: %v", err)
+	}
+	waitBead, err := store.Create(beads.Bead{
+		Type:   waitBeadType,
+		Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
+		Metadata: map[string]string{
+			"session_id":       sessionBead.ID,
+			"session_name":     "worker",
+			"kind":             "deps",
+			"state":            waitStateReady,
+			"registered_epoch": "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create wait bead: %v", err)
+	}
+
+	readyWaitSet, err := prepareWaitWakeState(store, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("prepareWaitWakeState: %v", err)
+	}
+	if len(readyWaitSet) != 0 {
+		t.Fatalf("readyWaitSet = %#v, want empty after stale wait cancellation", readyWaitSet)
+	}
+	updated, err := store.Get(waitBead.ID)
+	if err != nil {
+		t.Fatalf("store.Get(wait): %v", err)
+	}
+	if got := updated.Metadata["state"]; got != waitStateCanceled {
+		t.Fatalf("wait state = %q, want %q", got, waitStateCanceled)
+	}
+	if got := updated.Metadata["last_error"]; got != "continuation-stale" {
+		t.Fatalf("last_error = %q, want continuation-stale", got)
+	}
+	if updated.Status != "closed" {
+		t.Fatalf("wait status = %q, want closed", updated.Status)
+	}
+}
+
 func TestDepsWaitReady_IgnoresEmptyDependencyEntries(t *testing.T) {
 	store := beads.NewMemStore()
 	dep, err := store.Create(beads.Bead{Title: "dep"})
@@ -735,6 +843,111 @@ func TestDispatchReadyWaitNudges_EnqueuesDeterministicNudge(t *testing.T) {
 	}
 	if _, err := refreshedStore.Get(pending[0].BeadID); err != nil {
 		t.Fatalf("refreshedStore.Get(%s): %v", pending[0].BeadID, err)
+	}
+}
+
+func TestDispatchReadyWaitNudges_UsesOpenSessionSnapshotInsteadOfWorkerRunningCheck(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	base := beads.NewMemStore()
+	store := &waitGetSpyStore{Store: base}
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       "worker",
+			"agent_name":         "worker",
+			"template":           "worker",
+			"continuation_epoch": "1",
+			"state":              string(sessionpkg.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:        waitBeadType,
+		Labels:      []string{waitBeadLabel, "session:" + sessionBead.ID},
+		Description: "Continue after review closes.",
+		Metadata: map[string]string{
+			"session_id":       sessionBead.ID,
+			"session_name":     "worker",
+			"kind":             "deps",
+			"state":            waitStateReady,
+			"dep_ids":          "gc-1",
+			"dep_mode":         "all",
+			"registered_epoch": "1",
+			"delivery_attempt": "1",
+		},
+	}); err != nil {
+		t.Fatalf("create wait bead: %v", err)
+	}
+	sp := runtime.NewFake()
+
+	if err := dispatchReadyWaitNudges(dir, store, sp, time.Now().UTC()); err != nil {
+		t.Fatalf("dispatchReadyWaitNudges: %v", err)
+	}
+	for _, id := range store.getIDs {
+		if id == sessionBead.ID {
+			t.Fatalf("dispatch used Get for session %s instead of the open-session snapshot; getIDs=%v", sessionBead.ID, store.getIDs)
+		}
+	}
+	for _, call := range sp.Calls {
+		switch call.Method {
+		case "IsRunning", "ProcessAlive", "IsAttached", "GetLastActivity", "GetMeta":
+			t.Fatalf("dispatch should trust cached session state, saw provider call %#v", call)
+		}
+	}
+}
+
+func TestDispatchReadyWaitNudges_SkipsClosedSessionWithoutBackingGet(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	base := beads.NewMemStore()
+	store := &waitGetSpyStore{Store: base}
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       "worker",
+			"agent_name":         "worker",
+			"template":           "worker",
+			"continuation_epoch": "1",
+			"state":              string(sessionpkg.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	if err := store.Close(sessionBead.ID); err != nil {
+		t.Fatalf("close session bead: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:   waitBeadType,
+		Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
+		Metadata: map[string]string{
+			"session_id":       sessionBead.ID,
+			"session_name":     "worker",
+			"kind":             "deps",
+			"state":            waitStateReady,
+			"registered_epoch": "1",
+			"delivery_attempt": "1",
+		},
+	}); err != nil {
+		t.Fatalf("create wait bead: %v", err)
+	}
+	sp := runtime.NewFake()
+
+	if err := dispatchReadyWaitNudges(dir, store, sp, time.Now().UTC()); err != nil {
+		t.Fatalf("dispatchReadyWaitNudges: %v", err)
+	}
+	for _, id := range store.getIDs {
+		if id == sessionBead.ID {
+			t.Fatalf("dispatch used Get for closed session %s; getIDs=%v", sessionBead.ID, store.getIDs)
+		}
+	}
+	if len(sp.Calls) != 0 {
+		t.Fatalf("dispatch should not query provider for a session absent from the open-session snapshot, calls=%#v", sp.Calls)
 	}
 }
 

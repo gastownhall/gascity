@@ -128,6 +128,27 @@ func orderExecEnv(cityPath string, cfg *config.City, target execStoreTarget, a o
 	return mergeRuntimeEnv(nil, env)
 }
 
+func orderTriggerOptions(cityPath string, cfg *config.City, a orders.Order) (orders.TriggerOptions, error) {
+	if a.Trigger != "condition" || strings.TrimSpace(cityPath) == "" {
+		return orders.TriggerOptions{}, nil
+	}
+	target, err := resolveOrderExecTarget(cityPath, cfg, a)
+	if err != nil {
+		return orders.TriggerOptions{}, err
+	}
+	return orderTriggerOptionsForTarget(cityPath, cfg, target, a), nil
+}
+
+func orderTriggerOptionsForTarget(cityPath string, cfg *config.City, target execStoreTarget, a orders.Order) orders.TriggerOptions {
+	if a.Trigger != "condition" || strings.TrimSpace(cityPath) == "" {
+		return orders.TriggerOptions{}
+	}
+	return orders.TriggerOptions{
+		ConditionDir: target.ScopeRoot,
+		ConditionEnv: orderExecEnv(cityPath, cfg, target, a),
+	}
+}
+
 func applyOrderExecCanonicalDoltEnv(cityPath, scopeRoot string, env map[string]string) {
 	if env == nil {
 		return

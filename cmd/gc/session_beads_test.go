@@ -27,6 +27,11 @@ type countingMetadataStore struct {
 	batchCalls  int
 }
 
+type sessionGetSpyStore struct {
+	beads.Store
+	getIDs []string
+}
+
 type failingCloseStore struct {
 	*beads.MemStore
 }
@@ -47,6 +52,11 @@ func (s *countingMetadataStore) SetMetadata(id, key, value string) error {
 func (s *countingMetadataStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	s.batchCalls++
 	return s.MemStore.SetMetadataBatch(id, kvs)
+}
+
+func (s *sessionGetSpyStore) Get(id string) (beads.Bead, error) {
+	s.getIDs = append(s.getIDs, id)
+	return s.Store.Get(id)
 }
 
 // allConfiguredDS builds configuredNames from a desiredState map.
@@ -107,6 +117,52 @@ func TestSyncSessionBeads_CreatesNewBeads(t *testing.T) {
 	}
 	if b.Metadata["instance_token"] == "" {
 		t.Error("instance_token is empty")
+	}
+}
+
+func TestSyncSessionBeads_ExistingDesiredUsesSnapshotStateWithoutWorkerLookup(t *testing.T) {
+	base := beads.NewMemStore()
+	store := &sessionGetSpyStore{Store: base}
+	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 22, 0, 0, 0, time.UTC)}
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       "control-dispatcher",
+			"agent_name":         "control-dispatcher",
+			"template":           "control-dispatcher",
+			"command":            "claude",
+			"state":              string(session.StateActive),
+			"generation":         "1",
+			"continuation_epoch": "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	ds := map[string]TemplateParams{
+		"control-dispatcher": {TemplateName: "control-dispatcher", Command: "claude"},
+	}
+	sp := runtime.NewFake()
+
+	var stderr bytes.Buffer
+	syncSessionBeadsWithSnapshot(
+		"", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false,
+		newSessionBeadSnapshot([]beads.Bead{sessionBead}),
+	)
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+	for _, id := range store.getIDs {
+		if id == "control-dispatcher" {
+			t.Fatalf("sync looked up configured session name as bead id; getIDs=%v", store.getIDs)
+		}
+	}
+	for _, call := range sp.Calls {
+		switch call.Method {
+		case "IsRunning", "ProcessAlive", "IsAttached", "GetLastActivity", "GetMeta":
+			t.Fatalf("sync should trust the session snapshot for existing desired sessions, saw provider call %#v", call)
+		}
 	}
 }
 
@@ -1170,7 +1226,7 @@ func TestRetireDuplicateConfiguredNamedSessionBeads_DoesNotStopWinnerSharingSess
 	indexBySessionName := map[string]int{sessionName: 1}
 
 	retired := retireDuplicateConfiguredNamedSessionBeads(
-		store, sp, cfg, "test-city", openBeads, bySessionName, indexBySessionName, time.Now().UTC(), io.Discard,
+		store, nil, sp, cfg, "test-city", openBeads, bySessionName, indexBySessionName, time.Now().UTC(), io.Discard,
 	)
 
 	if !sp.IsRunning(sessionName) {
@@ -2852,39 +2908,7 @@ func TestReapStaleSessionBeads(t *testing.T) {
 		wantOpen   int // expected number of open beads after reap
 	}{
 		{
-			name: "dead_session_reaped",
-			beads: []beads.Bead{{
-				Title:  "worker",
-				Type:   sessionBeadType,
-				Labels: []string{sessionBeadLabel},
-				Metadata: map[string]string{
-					"session_name": "worker-1",
-					"state":        "active",
-				},
-			}},
-			running:    nil,
-			clock:      clockPastGrace,
-			wantReaped: 1,
-			wantOpen:   0,
-		},
-		{
-			name: "live_session_kept",
-			beads: []beads.Bead{{
-				Title:  "worker",
-				Type:   sessionBeadType,
-				Labels: []string{sessionBeadLabel},
-				Metadata: map[string]string{
-					"session_name": "worker-1",
-					"state":        "active",
-				},
-			}},
-			running:    []string{"worker-1"},
-			clock:      clockPastGrace,
-			wantReaped: 0,
-			wantOpen:   1,
-		},
-		{
-			name: "creating_state_skipped",
+			name: "stuck_creating_reaped",
 			beads: []beads.Bead{{
 				Title:  "worker",
 				Type:   sessionBeadType,
@@ -2896,18 +2920,18 @@ func TestReapStaleSessionBeads(t *testing.T) {
 			}},
 			running:    nil,
 			clock:      clockPastGrace,
-			wantReaped: 0,
-			wantOpen:   1,
+			wantReaped: 1,
+			wantOpen:   0,
 		},
 		{
-			name: "pending_create_skipped",
+			name: "pending_create_creating_kept",
 			beads: []beads.Bead{{
 				Title:  "worker",
 				Type:   sessionBeadType,
 				Labels: []string{sessionBeadLabel},
 				Metadata: map[string]string{
 					"session_name":         "worker-1",
-					"state":                "stopped",
+					"state":                "creating",
 					"pending_create_claim": "true",
 				},
 			}},
@@ -2917,7 +2941,28 @@ func TestReapStaleSessionBeads(t *testing.T) {
 			wantOpen:   1,
 		},
 		{
-			name: "grace_period_honored",
+			name: "pending_create_active_kept",
+			beads: []beads.Bead{{
+				Title:  "worker",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name":         "worker-1",
+					"state":                "active",
+					"pending_create_claim": "true",
+				},
+			}},
+			running:    nil,
+			clock:      clockPastGrace,
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name: "active_session_dead_tmux_kept",
+			// Bug 1 fix: a session past creating must NEVER be reaped here,
+			// even when its tmux is dead. It may hold in_progress claims; the
+			// session lifecycle reconciler is responsible for restarting the
+			// same bead so the original assignee resumes the work.
 			beads: []beads.Bead{{
 				Title:  "worker",
 				Type:   sessionBeadType,
@@ -2925,6 +2970,54 @@ func TestReapStaleSessionBeads(t *testing.T) {
 				Metadata: map[string]string{
 					"session_name": "worker-1",
 					"state":        "active",
+				},
+			}},
+			running:    nil,
+			clock:      clockPastGrace,
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name: "awake_session_dead_tmux_kept",
+			beads: []beads.Bead{{
+				Title:  "worker",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name": "worker-1",
+					"state":        "awake",
+				},
+			}},
+			running:    nil,
+			clock:      clockPastGrace,
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name: "live_session_kept",
+			beads: []beads.Bead{{
+				Title:  "worker",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name": "worker-1",
+					"state":        "creating",
+				},
+			}},
+			running:    []string{"worker-1"},
+			clock:      clockPastGrace,
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name: "creating_within_grace_kept",
+			beads: []beads.Bead{{
+				Title:  "worker",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name": "worker-1",
+					"state":        "creating",
 				},
 			}},
 			running:    nil,
@@ -2939,7 +3032,7 @@ func TestReapStaleSessionBeads(t *testing.T) {
 				Type:   sessionBeadType,
 				Labels: []string{sessionBeadLabel},
 				Metadata: map[string]string{
-					"state": "active",
+					"state": "creating",
 				},
 			}},
 			running:    nil,
@@ -2948,14 +3041,14 @@ func TestReapStaleSessionBeads(t *testing.T) {
 			wantOpen:   1,
 		},
 		{
-			name: "draining_session_skipped",
+			name: "draining_creating_session_skipped",
 			beads: []beads.Bead{{
 				Title:  "worker",
 				Type:   sessionBeadType,
 				Labels: []string{sessionBeadLabel},
 				Metadata: map[string]string{
 					"session_name": "worker-1",
-					"state":        "active",
+					"state":        "creating",
 				},
 			}},
 			running:    nil,
@@ -2965,7 +3058,49 @@ func TestReapStaleSessionBeads(t *testing.T) {
 			wantOpen:   1,
 		},
 		{
-			name: "multiple_stale_reaped",
+			name: "configured_named_session_skipped",
+			beads: []beads.Bead{{
+				Title:  "gascity/control-dispatcher",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name":              "gascity--control-dispatcher",
+					"template":                  "gascity/control-dispatcher",
+					"state":                     "active",
+					"configured_named_session":  "true",
+					"configured_named_identity": "gascity/control-dispatcher",
+					"configured_named_mode":     "always",
+				},
+			}},
+			running:    nil,
+			clock:      clockPastGrace,
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name: "configured_named_creating_session_skipped",
+			beads: []beads.Bead{{
+				Title:  "gascity/control-dispatcher",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name":              "gascity--control-dispatcher",
+					"template":                  "gascity/control-dispatcher",
+					"state":                     "creating",
+					"configured_named_session":  "true",
+					"configured_named_identity": "gascity/control-dispatcher",
+					"configured_named_mode":     "always",
+				},
+			}},
+			running:    nil,
+			clock:      clockPastGrace,
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name: "only_creating_among_dead_reaped",
+			// Mixed pool: alpha is stuck creating, beta is past creating
+			// (active) with dead tmux, gamma is alive. Only alpha is reaped.
 			beads: []beads.Bead{
 				{
 					Title:  "session alpha",
@@ -2973,7 +3108,7 @@ func TestReapStaleSessionBeads(t *testing.T) {
 					Labels: []string{sessionBeadLabel},
 					Metadata: map[string]string{
 						"session_name": "session-alpha",
-						"state":        "active",
+						"state":        "creating",
 					},
 				},
 				{
@@ -2982,7 +3117,7 @@ func TestReapStaleSessionBeads(t *testing.T) {
 					Labels: []string{sessionBeadLabel},
 					Metadata: map[string]string{
 						"session_name": "session-beta",
-						"state":        "awake",
+						"state":        "active",
 					},
 				},
 				{
@@ -2991,14 +3126,14 @@ func TestReapStaleSessionBeads(t *testing.T) {
 					Labels: []string{sessionBeadLabel},
 					Metadata: map[string]string{
 						"session_name": "session-gamma",
-						"state":        "active",
+						"state":        "creating",
 					},
 				},
 			},
-			running:    []string{"session-gamma"}, // only gamma is alive
+			running:    []string{"session-gamma"}, // gamma's tmux is alive
 			clock:      clockPastGrace,
-			wantReaped: 2,
-			wantOpen:   1,
+			wantReaped: 1, // only alpha (creating + dead tmux) is reaped
+			wantOpen:   2, // beta (active dead tmux), gamma (creating live tmux)
 		},
 	}
 
@@ -3078,8 +3213,8 @@ func TestReapStaleSessionBeads(t *testing.T) {
 							b.ID, b.Metadata["close_reason"], "stale-session")
 					}
 				}
-				if !strings.Contains(stderr.String(), "WARN: reconciler: reaped stale session bead") {
-					t.Error("expected WARN log line for reaped bead")
+				if !strings.Contains(stderr.String(), "WARN: reconciler: reaped stuck-creating session bead") {
+					t.Errorf("expected WARN log line for reaped bead; stderr=%q", stderr.String())
 				}
 			}
 		})
@@ -3098,5 +3233,359 @@ func TestReapStaleSessionBeads_NilStoreAndProvider(t *testing.T) {
 	}
 	if got := reapStaleSessionBeads(nil, runtime.NewFake(), nil, clk, &stderr); got != 0 {
 		t.Errorf("nil store: got %d, want 0", got)
+	}
+}
+
+// TestUnclaimResetsInProgressStatus verifies the Bug 2 fix: unclaiming a
+// retired session's in_progress work must reset status to "open" so a fresh
+// worker can re-claim via the routed queue (Tier 3: gc.routed_to +
+// --unassigned). Leaving status=in_progress with no assignee makes the bead
+// invisible to every work_query tier.
+func TestUnclaimResetsInProgressStatus(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// Session bead the work was assigned to (mimics a retired worker).
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker-1",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	// In-progress work assigned to that session, with gc.routed_to set so
+	// Tier 3 of the work_query can re-route it after unclaim.
+	work, err := store.Create(beads.Bead{
+		Title:    "finalize",
+		Status:   "in_progress",
+		Assignee: sessionBead.ID,
+		Metadata: map[string]string{"gc.routed_to": "myrig/codex-max"},
+	})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("mark work in_progress: %v", err)
+	}
+
+	// Open work also assigned: should also be cleared but stays "open".
+	openWork, err := store.Create(beads.Bead{
+		Title:    "queued",
+		Status:   "open",
+		Assignee: sessionBead.ID,
+		Metadata: map[string]string{"gc.routed_to": "myrig/codex-max"},
+	})
+	if err != nil {
+		t.Fatalf("create open work: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	unclaimWorkAssignedToRetiredSessionBead(store, nil, sessionBead, "myrig/codex-max", &stderr)
+
+	gotInProgress, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("get in_progress work: %v", err)
+	}
+	if gotInProgress.Assignee != "" {
+		t.Errorf("in_progress assignee = %q, want empty", gotInProgress.Assignee)
+	}
+	if gotInProgress.Status != "open" {
+		t.Errorf("in_progress status = %q, want %q (status must reset so the bead is visible to the work_query)", gotInProgress.Status, "open")
+	}
+
+	gotOpen, err := store.Get(openWork.ID)
+	if err != nil {
+		t.Fatalf("get open work: %v", err)
+	}
+	if gotOpen.Assignee != "" {
+		t.Errorf("open assignee = %q, want empty", gotOpen.Assignee)
+	}
+	if gotOpen.Status != "open" {
+		t.Errorf("open status = %q, want %q (already open, must stay open)", gotOpen.Status, "open")
+	}
+}
+
+// closeBead is the low-level metadata+close helper. Ownership checks live in
+// closeSessionBeadIfUnassigned, which has the full multi-store, multi-identifier
+// view of assigned work. closeBead itself must stay dumb so it doesn't
+// introduce a narrower contract than the live-query helper.
+func TestCloseBeadDoesNotDuplicateOwnershipGuard(t *testing.T) {
+	store := beads.NewMemStore()
+
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker-1",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	if _, err := store.Create(beads.Bead{
+		Title:    "finalize",
+		Status:   "in_progress",
+		Assignee: sessionBead.ID,
+	}); err != nil {
+		t.Fatalf("create assigned work: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	now := time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)
+	if !closeBead(store, sessionBead.ID, "stale-session", now, &stderr) {
+		t.Fatalf("closeBead returned false; want true because ownership gating belongs to closeSessionBeadIfUnassigned: stderr=%s", stderr.String())
+	}
+	got, err := store.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("get session bead: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("session bead status = %q, want closed", got.Status)
+	}
+}
+
+func TestCloseSessionBeadIfUnassignedRefusesWhenRigStoreWorkAssignedBySessionName(t *testing.T) {
+	store := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker-1",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	if _, err := rigStore.Create(beads.Bead{
+		Title:    "rig work",
+		Status:   "open",
+		Assignee: "worker-1",
+	}); err != nil {
+		t.Fatalf("create rig work: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	now := time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)
+	if closeSessionBeadIfUnassigned(store, map[string]beads.Store{"demo": rigStore}, sessionBead, "stale-session", now, &stderr) {
+		t.Fatal("closeSessionBeadIfUnassigned returned true; want false because rig-store work is still assigned by session_name")
+	}
+	got, err := store.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("get session bead: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("session bead status = closed; want still open after helper refused close")
+	}
+}
+
+func TestUnclaimWorkAssignedToRetiredSessionBeadClearsRigStoreSessionIdentifiers(t *testing.T) {
+	store := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               "worker-1",
+			"state":                      "retired",
+			namedSessionIdentityMetadata: "frontend/worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	bySessionName, err := rigStore.Create(beads.Bead{
+		Title:    "session-name work",
+		Status:   "open",
+		Assignee: "worker-1",
+	})
+	if err != nil {
+		t.Fatalf("create session-name work: %v", err)
+	}
+
+	byIdentity, err := rigStore.Create(beads.Bead{
+		Title:    "named-identity work",
+		Status:   "open",
+		Assignee: "frontend/worker",
+	})
+	if err != nil {
+		t.Fatalf("create named-identity work: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := rigStore.Update(byIdentity.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("mark named-identity work in_progress: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	unclaimWorkAssignedToRetiredSessionBead(
+		store,
+		map[string]beads.Store{"frontend": rigStore},
+		sessionBead,
+		"frontend/codex-max",
+		&stderr,
+	)
+
+	gotBySessionName, err := rigStore.Get(bySessionName.ID)
+	if err != nil {
+		t.Fatalf("get session-name work: %v", err)
+	}
+	if gotBySessionName.Assignee != "" {
+		t.Fatalf("session-name assignee = %q, want empty", gotBySessionName.Assignee)
+	}
+	if gotBySessionName.Status != "open" {
+		t.Fatalf("session-name status = %q, want open", gotBySessionName.Status)
+	}
+
+	gotByIdentity, err := rigStore.Get(byIdentity.ID)
+	if err != nil {
+		t.Fatalf("get named-identity work: %v", err)
+	}
+	if gotByIdentity.Assignee != "" {
+		t.Fatalf("named-identity assignee = %q, want empty", gotByIdentity.Assignee)
+	}
+	if gotByIdentity.Status != "open" {
+		t.Fatalf("named-identity status = %q, want open after unclaim", gotByIdentity.Status)
+	}
+	if gotByIdentity.Metadata["gc.routed_to"] != "frontend/codex-max" {
+		t.Fatalf("named-identity gc.routed_to = %q, want frontend/codex-max", gotByIdentity.Metadata["gc.routed_to"])
+	}
+}
+
+func TestReassignWorkAssignedToRetiredSessionBeadReassignsRigStoreSessionIdentifiers(t *testing.T) {
+	store := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+
+	retired, err := store.Create(beads.Bead{
+		Title:  "old worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               "worker-1",
+			"state":                      "retired",
+			namedSessionIdentityMetadata: "frontend/worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create retired session bead: %v", err)
+	}
+	successor, err := store.Create(beads.Bead{
+		Title:  "new worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker-2",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create successor session bead: %v", err)
+	}
+
+	bySessionName, err := rigStore.Create(beads.Bead{
+		Title:    "session-name work",
+		Status:   "open",
+		Assignee: "worker-1",
+	})
+	if err != nil {
+		t.Fatalf("create session-name work: %v", err)
+	}
+	byIdentity, err := rigStore.Create(beads.Bead{
+		Title:    "named-identity work",
+		Status:   "open",
+		Assignee: "frontend/worker",
+	})
+	if err != nil {
+		t.Fatalf("create named-identity work: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	reassignWorkAssignedToRetiredSessionBead(
+		store,
+		map[string]beads.Store{"frontend": rigStore},
+		retired,
+		successor.ID,
+		&stderr,
+	)
+
+	gotBySessionName, err := rigStore.Get(bySessionName.ID)
+	if err != nil {
+		t.Fatalf("get session-name work: %v", err)
+	}
+	if gotBySessionName.Assignee != successor.ID {
+		t.Fatalf("session-name assignee = %q, want %q", gotBySessionName.Assignee, successor.ID)
+	}
+
+	gotByIdentity, err := rigStore.Get(byIdentity.ID)
+	if err != nil {
+		t.Fatalf("get named-identity work: %v", err)
+	}
+	if gotByIdentity.Assignee != successor.ID {
+		t.Fatalf("named-identity assignee = %q, want %q", gotByIdentity.Assignee, successor.ID)
+	}
+}
+
+func TestSyncSessionBeadsWithSnapshotAndRigStoresLeavesOrphanedSessionBeadOpenWhenRigStoreWorkAssigned(t *testing.T) {
+	store := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	sp := runtime.NewFake()
+	clk := &clock.Fake{}
+
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker-1",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	if _, err := rigStore.Create(beads.Bead{
+		Title:    "rig work",
+		Status:   "open",
+		Assignee: "worker-1",
+	}); err != nil {
+		t.Fatalf("create rig work: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeadsWithSnapshotAndRigStores(
+		"",
+		store,
+		map[string]beads.Store{"frontend": rigStore},
+		nil,
+		sp,
+		map[string]bool{},
+		nil,
+		clk,
+		&stderr,
+		false,
+		nil,
+	)
+
+	got, err := store.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("get session bead: %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("session bead status = %q, want open because rig-store work still owns it", got.Status)
 	}
 }
