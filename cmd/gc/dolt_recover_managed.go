@@ -92,6 +92,13 @@ func recoverManagedDoltProcess(cityPath, host, port, user, logLevel string, time
 		health, healthErr := managedDoltHealthCheck(host, port, user, true)
 		if healthErr == nil && health.ReadOnly == "true" {
 			report.DiagnosedReadOnly = true
+		} else if healthErr == nil && health.QueryReady {
+			report.Ready = true
+			report.Healthy = true
+			if err := publishManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
+				return report, fmt.Errorf("publish managed dolt runtime state: %w", err)
+			}
+			return report, nil
 		}
 	}
 
