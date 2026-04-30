@@ -25,6 +25,7 @@ type Fake struct {
 	Activity                map[string]time.Time         // session → last activity time
 	StartErrors             map[string]error             // per-session Start errors for testing
 	StopErrors              map[string]error             // per-session Stop errors for testing
+	StopLeavesRunning       map[string]bool              // per-session Stop returns nil without deleting the session
 	PendingInteractions     map[string]*PendingInteraction
 	Responses               map[string][]InteractionResponse
 	SleepCapabilityValue    SessionSleepCapability
@@ -69,6 +70,7 @@ func NewFake() *Fake {
 		Attached:                make(map[string]bool),
 		StartErrors:             make(map[string]error),
 		StopErrors:              make(map[string]error),
+		StopLeavesRunning:       make(map[string]bool),
 		PendingInteractions:     make(map[string]*PendingInteraction),
 		Responses:               make(map[string][]InteractionResponse),
 		SleepCapabilityValue:    SessionSleepCapabilityFull,
@@ -93,6 +95,7 @@ func NewFailFake() *Fake {
 		Attached:                make(map[string]bool),
 		StartErrors:             make(map[string]error),
 		StopErrors:              make(map[string]error),
+		StopLeavesRunning:       make(map[string]bool),
 		PendingInteractions:     make(map[string]*PendingInteraction),
 		Responses:               make(map[string][]InteractionResponse),
 		SleepCapabilityValue:    SessionSleepCapabilityFull,
@@ -137,6 +140,9 @@ func (f *Fake) Stop(name string) error {
 	}
 	if err, ok := f.StopErrors[name]; ok {
 		return err
+	}
+	if f.StopLeavesRunning[name] {
+		return nil
 	}
 	delete(f.sessions, name)
 	return nil

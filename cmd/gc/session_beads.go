@@ -1416,6 +1416,14 @@ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 	if !stopRuntimeBeforeSessionBeadMutation(store, sp, cfg, b, stopReason, stderr) {
 		return false
 	}
+	hasAssignedWork, err = sessionHasOpenAssignedWork(store, rigStores, b)
+	if err != nil {
+		fmt.Fprintf(stderr, "session work guard: checking assigned work for %s: %v\n", b.ID, err) //nolint:errcheck
+		return false
+	}
+	if hasAssignedWork {
+		return false
+	}
 	return closeBead(store, b.ID, closeReason, now, stderr)
 }
 
@@ -1438,11 +1446,11 @@ func stopRuntimeBeforeSessionBeadMutation(
 		return true
 	}
 	if err := workerKillSessionTargetWithConfig("", store, sp, cfg, sessionName); err != nil {
-		fmt.Fprintf(stderr, "session beads: stopping %s %q: %v\n", reason, sessionName, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "session beads: stopping %s %q (bead %s): %v\n", reason, sessionName, b.ID, err) //nolint:errcheck
 		return false
 	}
 	if sp.IsRunning(sessionName) {
-		fmt.Fprintf(stderr, "session beads: stopping %s %q: still running after stop\n", reason, sessionName) //nolint:errcheck
+		fmt.Fprintf(stderr, "session beads: stopping %s %q (bead %s): still running after stop\n", reason, sessionName, b.ID) //nolint:errcheck
 		return false
 	}
 	return true

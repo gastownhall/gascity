@@ -36,8 +36,20 @@ type failingCloseStore struct {
 	*beads.MemStore
 }
 
+type stopHookProvider struct {
+	*runtime.Fake
+	beforeStop func(string)
+}
+
 func (s *failingCloseStore) Close(_ string) error {
 	return errors.New("close failed")
+}
+
+func (p *stopHookProvider) Stop(name string) error {
+	if p.beforeStop != nil {
+		p.beforeStop(name)
+	}
+	return p.Fake.Stop(name)
 }
 
 func newCountingMetadataStore() *countingMetadataStore {
@@ -1410,10 +1422,14 @@ func TestRetireRemovedConfiguredNamedSessionBead_StopFailureKeepsRuntimeOwner(t 
 		t.Fatalf("create owned work: %v", err)
 	}
 
-	retired := retireRemovedConfiguredNamedSessionBead(store, nil, sp, b, now, io.Discard)
+	var stderr bytes.Buffer
+	retired := retireRemovedConfiguredNamedSessionBead(store, nil, sp, b, now, &stderr)
 
 	if retired {
 		t.Fatal("retireRemovedConfiguredNamedSessionBead returned true after runtime stop failed")
+	}
+	if !strings.Contains(stderr.String(), b.ID) {
+		t.Fatalf("stderr = %q, want bead ID %q", stderr.String(), b.ID)
 	}
 	got, err := store.Get(b.ID)
 	if err != nil {
@@ -1431,6 +1447,107 @@ func TestRetireRemovedConfiguredNamedSessionBead_StopFailureKeepsRuntimeOwner(t 
 	}
 	if updatedWork.Assignee != b.ID {
 		t.Fatalf("owned work assignee = %q, want unchanged %q", updatedWork.Assignee, b.ID)
+	}
+}
+
+func TestCloseSessionBeadIfRuntimeStoppedAndUnassigned_RechecksAssignedWorkAfterStop(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &stopHookProvider{Fake: runtime.NewFake()}
+	now := time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start worker: %v", err)
+	}
+	b, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker",
+			"template":     "worker",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	sp.beforeStop = func(name string) {
+		if name != "worker" {
+			t.Fatalf("Stop(%q), want worker", name)
+		}
+		if _, err := store.Create(beads.Bead{
+			Title:    "assigned during stop",
+			Type:     "task",
+			Status:   "open",
+			Assignee: b.ID,
+		}); err != nil {
+			t.Fatalf("create assigned work during stop: %v", err)
+		}
+	}
+
+	var stderr bytes.Buffer
+	closed := closeSessionBeadIfRuntimeStoppedAndUnassigned(
+		store, nil, sp, nil, b, "suspended", "suspended session", now, &stderr,
+	)
+
+	if closed {
+		t.Fatal("closeSessionBeadIfRuntimeStoppedAndUnassigned closed bead after work appeared during stop")
+	}
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", b.ID, err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("status = %q, want open", got.Status)
+	}
+	if got.Metadata["close_reason"] != "" {
+		t.Fatalf("close_reason = %q, want empty", got.Metadata["close_reason"])
+	}
+}
+
+func TestCloseSessionBeadIfRuntimeStoppedAndUnassigned_StopLeavesRunningKeepsBeadOpen(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	now := time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start worker: %v", err)
+	}
+	sp.StopLeavesRunning["worker"] = true
+	b, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker",
+			"template":     "worker",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	closed := closeSessionBeadIfRuntimeStoppedAndUnassigned(
+		store, nil, sp, nil, b, "orphaned", "orphaned session", now, &stderr,
+	)
+
+	if closed {
+		t.Fatal("closeSessionBeadIfRuntimeStoppedAndUnassigned closed bead while runtime was still running")
+	}
+	if !sp.IsRunning("worker") {
+		t.Fatal("worker runtime unexpectedly stopped")
+	}
+	if !strings.Contains(stderr.String(), b.ID) {
+		t.Fatalf("stderr = %q, want bead ID %q", stderr.String(), b.ID)
+	}
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", b.ID, err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("status = %q, want open", got.Status)
 	}
 }
 
