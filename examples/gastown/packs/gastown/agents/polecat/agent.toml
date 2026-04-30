@@ -6,3 +6,11 @@ pre_start = ["{{.ConfigDir}}/assets/scripts/worktree-setup.sh {{.RigRoot}} {{.Wo
 idle_timeout = "2h"
 min_active_sessions = 0
 max_active_sessions = 5
+default_sling_formula = "mol-polecat-work"
+# Accept either gc.routed_to=polecat metadata (canonical) or pool:polecat label (convenience).
+# Takes max within each phase (ready / in-progress) to avoid double-counting
+# beads that carry both signals. Sums the two phases — the reconciler treats
+# this number as TOTAL desired pool size, so we have to include in-progress
+# beads (each one occupies a polecat slot) or a single in-flight task starves
+# parallel claims to the rest of the queue.
+scale_check = "rm=$(bd ready --metadata-field gc.routed_to=polecat --unassigned --json 2>/dev/null | jq 'length' 2>/dev/null || echo 0); rl=$(bd ready --label pool:polecat --unassigned --json 2>/dev/null | jq 'length' 2>/dev/null || echo 0); am=$(bd list --metadata-field gc.routed_to=polecat --status=in_progress --json 2>/dev/null | jq 'length' 2>/dev/null || echo 0); al=$(bd list --label pool:polecat --status=in_progress --json 2>/dev/null | jq 'length' 2>/dev/null || echo 0); ready=$rm; [ \"${rl:-0}\" -gt \"$ready\" ] && ready=$rl; active=$am; [ \"${al:-0}\" -gt \"$active\" ] && active=$al; echo $(( ready + active ))"
