@@ -569,6 +569,7 @@ type startOps interface {
 	hasSession(name string) (bool, error)
 	sendKeys(name, text string) error
 	setRemainOnExit(name string) error
+	setAutoRespawnHook(name string) error
 	runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration) error
 }
 
@@ -618,6 +619,10 @@ func (o *tmuxStartOps) setRemainOnExit(name string) error {
 	return o.tm.SetRemainOnExit(name, true)
 }
 
+func (o *tmuxStartOps) setAutoRespawnHook(name string) error {
+	return o.tm.SetAutoRespawnHook(name)
+}
+
 func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -661,6 +666,12 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 
 	// Enable remain-on-exit for crash forensics. Best-effort.
 	_ = ops.setRemainOnExit(name)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	// Enable auto-respawn on crash. Best-effort.
+	_ = ops.setAutoRespawnHook(name)
 	if err := ctx.Err(); err != nil {
 		return err
 	}
