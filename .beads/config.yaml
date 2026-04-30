@@ -53,6 +53,6 @@
 # - github.org
 # - github.repo
 
-sync.remote: "git+https://github.com/gastownhall/gascity"
+sync.remote: "git+ssh://git@github.com/jonbaldie/gascity.git"
 
 export.auto: false
