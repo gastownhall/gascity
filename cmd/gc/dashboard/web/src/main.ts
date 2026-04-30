@@ -20,6 +20,7 @@ import {
   type DashboardResource,
 } from "./state";
 import { renderSupervisorOverview } from "./panels/supervisor";
+import { renderTopology } from "./panels/topology";
 import { installSharedModals } from "./modals";
 
 const CITY_SCOPED_PANEL_IDS = [
@@ -34,6 +35,7 @@ const CITY_SCOPED_PANEL_IDS = [
   "queues-panel",
   "beads-panel",
   "assigned-panel",
+  "topology-panel",
   "agent-log-drawer",
 ];
 
@@ -235,6 +237,7 @@ async function refreshVisibleResources(force = false): Promise<void> {
     queueRefresh(tasks, dirty, "mail", () => renderMail());
     queueRefresh(tasks, dirty, "convoys", () => renderConvoys());
     queueRefresh(tasks, dirty, "admin", () => renderAdminPanels());
+    queueRefresh(tasks, dirty, "topology", () => renderTopology());
   }
 
   const results = await Promise.allSettled(tasks);
