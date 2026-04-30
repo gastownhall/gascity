@@ -2302,6 +2302,61 @@ func TestAsyncStartSessionStillCurrent_TokenMismatchIsStale(t *testing.T) {
 	}
 }
 
+func TestAsyncStartSessionStillCurrent_PendingCreateClearedAfterAttachIsNotStale(t *testing.T) {
+	// Regression test: confirmLiveSessionState (called by ensureRunning when
+	// an attach finds the session already running) advances state to "active"
+	// and clears pending_create_claim. If that race wins against the async
+	// start result commit, the prepared bead still carries pcc="true" but
+	// current has pcc="" and state="active". The previous logic rejected the
+	// commit on the rollback drift check. The result was a stuck bead missing
+	// creation_complete_at and other start metadata, even though the spawn
+	// had succeeded.
+	//
+	// Fix: when current state has advanced to active or awake, the spawn
+	// already succeeded; commit the start result regardless of pcc drift.
+	prepared := beads.Bead{Metadata: map[string]string{
+		"instance_token":       "tok-Z",
+		"generation":           "2",
+		"state":                "creating",
+		"pending_create_claim": "true",
+	}}
+	current := beads.Bead{Metadata: map[string]string{
+		"instance_token": "tok-Z",
+		"generation":     "3",
+		"state":          "active",
+		// pending_create_claim cleared by confirmLiveSessionState
+		"pending_create_claim": "",
+	}}
+	if !asyncStartSessionStillCurrent(prepared, current) {
+		t.Fatal("session that advanced to active mid-flight must not be considered stale even when pcc was cleared")
+	}
+	if asyncStartStaleRuntimeCleanupAllowed(prepared, current) {
+		t.Fatal("session that advanced to active must not allow runtime cleanup")
+	}
+}
+
+func TestAsyncStartSessionStillCurrent_RollbackPendingCreateStillWorksWhenNotActive(t *testing.T) {
+	// Defensive: if pcc was cleared but state has NOT advanced to active/awake
+	// (still creating/asleep), the original rollback drift check still fires.
+	// This protects the prior intent: another phase decided to roll back the
+	// spawn, our result must not stomp on that decision.
+	prepared := beads.Bead{Metadata: map[string]string{
+		"instance_token":       "tok-Y",
+		"generation":           "2",
+		"state":                "creating",
+		"pending_create_claim": "true",
+	}}
+	current := beads.Bead{Metadata: map[string]string{
+		"instance_token":       "tok-Y",
+		"generation":           "3",
+		"state":                "creating",
+		"pending_create_claim": "",
+	}}
+	if asyncStartSessionStillCurrent(prepared, current) {
+		t.Fatal("pcc cleared while state still creating must be treated as rollback (stale)")
+	}
+}
+
 func TestCommitAsyncStartResult_GenerationDriftWithMatchingTokenCommits(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)}

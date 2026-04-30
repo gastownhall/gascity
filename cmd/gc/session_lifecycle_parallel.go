@@ -1056,13 +1056,24 @@ func asyncStartSessionStillCurrent(prepared, current beads.Bead) bool {
 	if !asyncStartIdentityMatches(prepared, current) {
 		return false
 	}
+	currentState := sessionpkg.State(strings.TrimSpace(current.Metadata["state"]))
+	// If the bead has progressed to a live state (active or awake), the spawn
+	// already succeeded and another phase (typically ensureRunning via attach)
+	// has cleared pending_create_claim. The async result still carries useful
+	// metadata (creation_complete_at, runtime_epoch, etc.) — commit it instead
+	// of discarding as "stale", which leaves the bead missing fields the rest
+	// of the system relies on.
+	if currentState == sessionpkg.StateAwake || currentState == sessionpkg.StateActive {
+		return true
+	}
+	// For sessions still mid-flight (creating/asleep/drained/empty), reject if
+	// pending_create_claim was cleared from under us — that means a different
+	// reconciler phase already rolled the create back, and our result would
+	// stomp on its decision.
 	if shouldRollbackPendingCreate(&prepared) && !shouldRollbackPendingCreate(&current) {
 		return false
 	}
-	currentState := strings.TrimSpace(current.Metadata["state"])
-	return confirmPendingStart(currentState) ||
-		sessionpkg.State(currentState) == sessionpkg.StateAwake ||
-		sessionpkg.State(currentState) == sessionpkg.StateActive
+	return confirmPendingStart(string(currentState))
 }
 
 func asyncStartStaleRuntimeCleanupAllowed(prepared, current beads.Bead) bool {
