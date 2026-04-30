@@ -240,7 +240,7 @@ func TestCollectAssignedWorkBeadsIncludesUnassignedInProgressPoolWorkForRecovery
 		t.Fatalf("Set work status: %v", err)
 	}
 
-	found, stores, partial := collectAssignedWorkBeadsWithStores(
+	found, stores, _, partial := collectAssignedWorkBeadsWithStores(
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		store,
 		nil,

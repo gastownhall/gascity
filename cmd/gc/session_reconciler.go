@@ -426,7 +426,7 @@ func reconcileSessionBeadsTraced(
 								Subject: template,
 								Message: "drain acknowledged by agent",
 							})
-							hasAssignedWork, assignedErr := sessionHasOpenAssignedWork(store, rigStores, *session)
+							hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, *session)
 							if assignedErr != nil {
 								fmt.Fprintf(stderr, "session reconciler: checking assigned work for drain-acked %s: %v\n", name, assignedErr) //nolint:errcheck
 								hasAssignedWork = true
@@ -628,7 +628,7 @@ func reconcileSessionBeadsTraced(
 						// the bead from the close gate and stranded new
 						// queue work on a ghost slot. Re-query the store
 						// so the decision reflects reality.
-						hasAssignedWork, assignedErr := sessionHasOpenAssignedWork(store, rigStores, *session)
+						hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, *session)
 						sleepReason := "idle"
 						if assignedErr != nil {
 							fmt.Fprintf(stderr, "session reconciler: checking assigned work for drain-acked %s: %v\n", name, assignedErr) //nolint:errcheck
@@ -1153,7 +1153,7 @@ func reconcileSessionBeadsTraced(
 		poolFreeable := !shouldWake && !target.alive && isPoolSessionSlotFreeable(*target.session) && isPoolManagedSessionBead(*target.session)
 		if poolFreeable {
 			var assignedErr error
-			hasAssignedWork, assignedErr = sessionHasOpenAssignedWork(store, rigStores, *target.session)
+			hasAssignedWork, assignedErr = sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, *target.session)
 			if assignedErr != nil {
 				fmt.Fprintf(stderr, "session reconciler: checking assigned work for drained %s: %v\n", target.session.Metadata["session_name"], assignedErr) //nolint:errcheck
 				hasAssignedWork = true
@@ -1239,17 +1239,8 @@ func resolvePreservedConfiguredNamedSessionTemplate(
 	return tp, nil
 }
 
-// sessionHasOpenAssignedWork reports whether any open or in-progress
-// work bead is assigned to the given session across the primary store
-// AND any attached rig stores. This preserves cross-store ownership
-// coverage that used to come from the retired ownership snapshot.
-//
-// A session's work bead can live in a rig store (e.g., a city-stored
-// session whose work was routed to a rig), so the close gate and
-// drain-ack must check every store the bead could live in before
-// recycling the session's slot. Live queries are used throughout:
-// any individual store failure fails the whole check closed so
-// transient errors cannot cause premature close.
+// sessionHasOpenAssignedWork reports whether any open or in-progress work bead
+// is assigned to the given session across all known stores.
 func sessionHasOpenAssignedWork(store beads.Store, rigStores map[string]beads.Store, session beads.Bead) (bool, error) {
 	if has, err := sessionHasOpenAssignedWorkInStore(store, session); err != nil || has {
 		return has, err
@@ -1260,6 +1251,51 @@ func sessionHasOpenAssignedWork(store beads.Store, rigStores map[string]beads.St
 		}
 	}
 	return false, nil
+}
+
+// sessionHasOpenAssignedWorkForReachableStore reports whether any open or
+// in-progress work bead is assigned to the given session in the store its
+// configured agent can query and claim from.
+func sessionHasOpenAssignedWorkForReachableStore(
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	session beads.Bead,
+) (bool, error) {
+	storeRef, ok := assignedWorkStoreRefForSession(cityPath, cfg, session)
+	if !ok {
+		return sessionHasOpenAssignedWork(store, rigStores, session)
+	}
+	if storeRef == "" {
+		return sessionHasOpenAssignedWorkInStore(store, session)
+	}
+	rigStore, ok := rigStores[storeRef]
+	if !ok || rigStore == nil {
+		return false, fmt.Errorf("rig store %q unavailable for session %q", storeRef, session.Metadata["session_name"])
+	}
+	return sessionHasOpenAssignedWorkInStore(rigStore, session)
+}
+
+func assignedWorkStoreRefForSession(cityPath string, cfg *config.City, session beads.Bead) (string, bool) {
+	if cfg == nil {
+		return "", false
+	}
+	template := normalizedSessionTemplate(session, cfg)
+	if template == "" {
+		template = strings.TrimSpace(session.Metadata["template"])
+	}
+	if template == "" {
+		template = strings.TrimSpace(session.Metadata["common_name"])
+	}
+	if template == "" {
+		return "", false
+	}
+	agentCfg := findAgentByTemplate(cfg, template)
+	if agentCfg == nil {
+		return "", false
+	}
+	return assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg), true
 }
 
 func sessionHasOpenAssignedWorkInStore(store beads.Store, session beads.Bead) (bool, error) {
