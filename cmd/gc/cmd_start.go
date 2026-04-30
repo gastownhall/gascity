@@ -595,7 +595,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	)
 
 	open := sessionBeads.Open()
-	if released := releaseOrphanedPoolAssignments(oneShotStore, cfg, open, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStores, rigStores); len(released) > 0 {
+	if released := releaseOrphanedPoolAssignmentsWhenSnapshotComplete(oneShotStore, cfg, open, dsResult, rigStores); len(released) > 0 {
 		for _, r := range released {
 			fmt.Fprintf(stderr, "released orphaned pool work: %s\n", r.ID) //nolint:errcheck
 		}

@@ -45,6 +45,23 @@ func GCSweepSessionBeads(store beads.Store, rigStores map[string]beads.Store, se
 	return closed
 }
 
+// releaseOrphanedPoolAssignmentsWhenSnapshotComplete skips orphan release when
+// the desired-state work snapshot is incomplete.
+func releaseOrphanedPoolAssignmentsWhenSnapshotComplete(
+	store beads.Store,
+	cfg *config.City,
+	openSessionBeads []beads.Bead,
+	result DesiredStateResult,
+	rigStores map[string]beads.Store,
+) []releasedPoolAssignment {
+	// A partial work snapshot can hide live session beads behind a transient
+	// store failure, making active work look orphaned for this tick only.
+	if result.StoreQueryPartial {
+		return nil
+	}
+	return releaseOrphanedPoolAssignments(store, cfg, openSessionBeads, result.AssignedWorkBeads, result.AssignedWorkStores, rigStores)
+}
+
 // releaseOrphanedPoolAssignments reopens active pool-routed work whose
 // assignee no longer maps to any open session bead. This also recovers
 // pool-routed work left in_progress with no assignee, which cannot be claimed
