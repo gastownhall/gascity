@@ -98,6 +98,183 @@ func TestOpenSourceWorkflowStoresFailsOnlyWhenEverythingBroken(t *testing.T) {
 	}
 }
 
+func TestWorkflowFinalizeRetriesWhenSourceWorkflowStoreScanSkipsLiveRoot(t *testing.T) {
+	cityPath := "/city"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "alpha", Path: "rigs/alpha"},
+			{Name: "broken", Path: "rigs/broken"},
+		},
+	}
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	brokenStore := beads.NewMemStore()
+
+	citySource, err := cityStore.Create(beads.Bead{Title: "Adopt PR", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create(city source): %v", err)
+	}
+	rigLaunch, err := rigStore.Create(beads.Bead{
+		Title: "Rig launch",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.source_bead_id":   citySource.ID,
+			"gc.source_store_ref": "city:test-city",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(rig launch): %v", err)
+	}
+	workflow, err := rigStore.Create(beads.Bead{
+		Title: "mol-adopt-pr-v2",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.source_bead_id":   rigLaunch.ID,
+			"gc.source_store_ref": "rig:alpha",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(workflow): %v", err)
+	}
+	cleanup, err := rigStore.Create(beads.Bead{
+		Title: "cleanup",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.outcome": "pass",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(cleanup): %v", err)
+	}
+	if err := rigStore.Close(cleanup.ID); err != nil {
+		t.Fatalf("Close(cleanup): %v", err)
+	}
+	finalizer, err := rigStore.Create(beads.Bead{
+		Title: "Finalize workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(finalizer): %v", err)
+	}
+	if err := rigStore.DepAdd(finalizer.ID, cleanup.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd(finalizer->cleanup): %v", err)
+	}
+	if err := rigStore.DepAdd(workflow.ID, finalizer.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd(workflow->finalizer): %v", err)
+	}
+	hiddenRoot, err := brokenStore.Create(beads.Bead{
+		Title: "hidden live workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":                                "workflow",
+			"gc.formula_contract":                    "graph.v2",
+			"gc.source_bead_id":                      citySource.ID,
+			sourceworkflow.SourceStoreRefMetadataKey: "city:test-city",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(hidden root): %v", err)
+	}
+
+	openStore := func(dir string) (beads.Store, error) {
+		switch filepath.Clean(dir) {
+		case filepath.Clean(cityPath):
+			return cityStore, nil
+		case filepath.Clean(filepath.Join(cityPath, "rigs/alpha")):
+			return rigStore, nil
+		case filepath.Clean(filepath.Join(cityPath, "rigs/broken")):
+			return nil, fmt.Errorf("simulated broken rig with live root %s", hiddenRoot.ID)
+		default:
+			return nil, fmt.Errorf("unexpected store path %s", dir)
+		}
+	}
+	resolver := func(ref string) (beads.Store, error) {
+		switch ref {
+		case "city:test-city":
+			return cityStore, nil
+		case "rig:alpha":
+			return rigStore, nil
+		default:
+			return nil, fmt.Errorf("unknown ref %s", ref)
+		}
+	}
+
+	_, err = dispatch.ProcessControl(rigStore, finalizer, dispatch.ProcessOptions{
+		ResolveStoreRef:      resolver,
+		SourceWorkflowStores: makeSourceWorkflowStoresListerWithOpenStore(cityPath, cfg, openStore),
+		SourceWorkflowLock:   func(_ string, _ string, fn func() error) error { return fn() },
+	})
+	if err == nil {
+		t.Fatal("ProcessControl(workflow-finalize) err = nil, want retryable skipped-store error")
+	}
+	if !strings.Contains(err.Error(), "source-workflow singleton scan skipped") {
+		t.Fatalf("ProcessControl error = %v, want skipped-store scan error", err)
+	}
+
+	workflowAfter, err := rigStore.Get(workflow.ID)
+	if err != nil {
+		t.Fatalf("Get(workflow): %v", err)
+	}
+	if workflowAfter.Status == "closed" {
+		t.Fatal("workflow status = closed; want open so singleton scans still see the retrying root")
+	}
+	finalizerAfter, err := rigStore.Get(finalizer.ID)
+	if err != nil {
+		t.Fatalf("Get(finalizer): %v", err)
+	}
+	if finalizerAfter.Status == "closed" {
+		t.Fatal("finalizer status = closed; want open so source-chain closure retries after skipped scan")
+	}
+	rigLaunchAfter, err := rigStore.Get(rigLaunch.ID)
+	if err != nil {
+		t.Fatalf("Get(rig launch): %v", err)
+	}
+	if rigLaunchAfter.Status == "closed" {
+		t.Fatal("rig launch status = closed; want open until all source-workflow stores are scanned")
+	}
+	citySourceAfter, err := cityStore.Get(citySource.ID)
+	if err != nil {
+		t.Fatalf("Get(city source): %v", err)
+	}
+	if citySourceAfter.Status == "closed" {
+		t.Fatal("city source status = closed; want open while a skipped store may contain a live root")
+	}
+	hiddenRootAfter, err := brokenStore.Get(hiddenRoot.ID)
+	if err != nil {
+		t.Fatalf("Get(hidden root): %v", err)
+	}
+	if hiddenRootAfter.Status == "closed" {
+		t.Fatal("hidden root status = closed; want unchanged")
+	}
+}
+
+func TestSourceWorkflowLockScopeForStoreRefUsesSharedHelper(t *testing.T) {
+	cityPath := "/city"
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "alpha", Path: "rigs/alpha"},
+		},
+	}
+
+	got := sourceWorkflowLockScopeForStoreRef(cityPath, cfg, "", "rig:alpha")
+	want := sourceworkflow.LockScopeForStoreRef(cityPath, "", "rig:alpha", func(rigName string) (string, bool) {
+		if rigName != "alpha" {
+			return "", false
+		}
+		return "rigs/alpha", true
+	})
+	if got != want {
+		t.Fatalf("sourceWorkflowLockScopeForStoreRef = %q, want shared helper scope %q", got, want)
+	}
+}
+
 type closeAllFailStore struct {
 	beads.Store
 	failOn map[string]struct{}
@@ -418,6 +595,7 @@ func TestCmdWorkflowDeleteSourceClosesMatchedRootsAndClearsWorkflowID(t *testing
 	}
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	prevCityFlag := cityFlag
 	cityFlag = ""
 	t.Cleanup(func() { cityFlag = prevCityFlag })
@@ -513,6 +691,7 @@ prefix = "BL"
 	}
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	prevCityFlag := cityFlag
 	cityFlag = ""
 	t.Cleanup(func() { cityFlag = prevCityFlag })
@@ -638,6 +817,7 @@ func TestCmdWorkflowDeleteSourceClosesGraphV2OnlyRoot(t *testing.T) {
 	}
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	prevCityFlag := cityFlag
 	cityFlag = ""
 	t.Cleanup(func() { cityFlag = prevCityFlag })
@@ -728,6 +908,7 @@ func TestCmdWorkflowReopenSourceClearsRoutedToForResling(t *testing.T) {
 	}
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	prevCityFlag := cityFlag
 	cityFlag = ""
 	t.Cleanup(func() { cityFlag = prevCityFlag })
@@ -786,6 +967,7 @@ func TestCmdWorkflowReopenSourceConflictsWhenLiveRootExists(t *testing.T) {
 	}
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	prevCityFlag := cityFlag
 	cityFlag = ""
 	t.Cleanup(func() { cityFlag = prevCityFlag })
@@ -827,6 +1009,7 @@ func TestCmdWorkflowDeleteSourcePreviewDoesNotClearStaleMetadata(t *testing.T) {
 	}
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	prevCityFlag := cityFlag
 	cityFlag = ""
 	t.Cleanup(func() { cityFlag = prevCityFlag })
@@ -923,6 +1106,7 @@ func TestRunWorkflowReopenSourceConflictPropagatesExitCode(t *testing.T) {
 	}
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	prevCityFlag := cityFlag
 	cityFlag = ""
 	t.Cleanup(func() { cityFlag = prevCityFlag })
@@ -2374,6 +2558,7 @@ prefix = "BL"
 	}
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	prevCityFlag := cityFlag
 	cityFlag = ""
 	t.Cleanup(func() { cityFlag = prevCityFlag })
@@ -2492,6 +2677,7 @@ prefix = "BL"
 	}
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	prevCityFlag := cityFlag
 	cityFlag = ""
 	t.Cleanup(func() { cityFlag = prevCityFlag })
@@ -2613,6 +2799,7 @@ prefix = "BL"
 	}
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	prevCityFlag := cityFlag
 	cityFlag = ""
 	t.Cleanup(func() { cityFlag = prevCityFlag })
@@ -2757,34 +2944,30 @@ func TestDeleteWorkflowBeadsRemovesDepsBeforeDelete(t *testing.T) {
 	}
 }
 
-type depListFailStore struct {
-	*beads.MemStore
-	depListCalls int
-}
-
-func (s *depListFailStore) DepList(id, direction string) ([]beads.Dep, error) {
-	s.depListCalls++
-	return nil, fmt.Errorf("unexpected dep list for %s %s", id, direction)
-}
-
-func TestApplySourceWorkflowMatchCleanupUsesCascadeRunnerForDelete(t *testing.T) {
-	base := beads.NewMemStore()
-	first, err := base.Create(beads.Bead{Title: "workflow first", Type: "task"})
+func TestApplySourceWorkflowMatchCleanupDeletesOnlyCollectedWorkflowBeads(t *testing.T) {
+	store := beads.NewMemStore()
+	first, err := store.Create(beads.Bead{Title: "workflow first", Type: "task"})
 	if err != nil {
 		t.Fatalf("Create(first): %v", err)
 	}
-	second, err := base.Create(beads.Bead{Title: "workflow second", Type: "task"})
+	second, err := store.Create(beads.Bead{Title: "workflow second", Type: "task"})
 	if err != nil {
 		t.Fatalf("Create(second): %v", err)
 	}
-	store := &depListFailStore{MemStore: base}
+	outside, err := store.Create(beads.Bead{Title: "outside follow-up", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create(outside): %v", err)
+	}
+	if err := store.DepAdd(first.ID, outside.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd(first->outside): %v", err)
+	}
+	if err := store.DepAdd(outside.ID, second.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd(outside->second): %v", err)
+	}
 
-	var gotDir, gotName string
-	var gotArgs []string
-	runner := func(dir, name string, args ...string) ([]byte, error) {
-		gotDir = dir
-		gotName = name
-		gotArgs = append([]string(nil), args...)
+	runnerCalled := false
+	runner := func(_ string, _ string, _ ...string) ([]byte, error) {
+		runnerCalled = true
 		return []byte("ok"), nil
 	}
 
@@ -2802,15 +2985,28 @@ func TestApplySourceWorkflowMatchCleanupUsesCascadeRunnerForDelete(t *testing.T)
 	if closed != 2 || deleted != 2 {
 		t.Fatalf("closed/deleted = %d/%d, want 2/2", closed, deleted)
 	}
-	if store.depListCalls != 0 {
-		t.Fatalf("dep list calls = %d, want 0", store.depListCalls)
+	if runnerCalled {
+		t.Fatal("cleanup used bd cascade runner; want explicit in-process deletion of collected IDs")
 	}
-	if gotDir != "/repo" || gotName != "bd" {
-		t.Fatalf("runner target = %q %q, want /repo bd", gotDir, gotName)
+	for _, id := range []string{first.ID, second.ID} {
+		if _, err := store.Get(id); err == nil {
+			t.Fatalf("Get(%s) succeeded after delete", id)
+		}
 	}
-	wantArgs := []string{"delete", first.ID, second.ID, "--cascade", "--force"}
-	if !slices.Equal(gotArgs, wantArgs) {
-		t.Fatalf("runner args = %#v, want %#v", gotArgs, wantArgs)
+	if got, err := store.Get(outside.ID); err != nil {
+		t.Fatalf("Get(outside): %v", err)
+	} else if got.Status != "open" {
+		t.Fatalf("outside status = %q, want open", got.Status)
+	}
+	if down, err := store.DepList(outside.ID, "down"); err != nil {
+		t.Fatalf("DepList(outside, down): %v", err)
+	} else if len(down) != 0 {
+		t.Fatalf("outside down deps = %#v, want none after collected bead deletion", down)
+	}
+	if up, err := store.DepList(outside.ID, "up"); err != nil {
+		t.Fatalf("DepList(outside, up): %v", err)
+	} else if len(up) != 0 {
+		t.Fatalf("outside up deps = %#v, want none after collected bead deletion", up)
 	}
 }
 

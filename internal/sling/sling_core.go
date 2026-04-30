@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"slices"
 	"strings"
 
@@ -802,30 +801,17 @@ func validateBatchSlingFormulaRuntimeVars(ctx context.Context, formulaName strin
 }
 
 func sourceWorkflowLockScope(deps SlingDeps) string {
-	cityPath := strings.TrimSpace(deps.CityPath)
-	if cityPath == "" {
-		return strings.TrimSpace(deps.StoreRef)
-	}
-	storeRef := strings.TrimSpace(deps.StoreRef)
-	switch {
-	case storeRef == "", strings.HasPrefix(storeRef, "city:"):
-		return filepath.Clean(cityPath)
-	case strings.HasPrefix(storeRef, "rig:"):
-		rigName := strings.TrimPrefix(storeRef, "rig:")
+	return sourceworkflow.LockScopeForStoreRef(deps.CityPath, "", deps.StoreRef, func(rigName string) (string, bool) {
 		if deps.Cfg != nil {
 			for _, rig := range deps.Cfg.Rigs {
 				if rig.Name != rigName {
 					continue
 				}
-				rigPath := rig.Path
-				if !filepath.IsAbs(rigPath) {
-					rigPath = filepath.Join(cityPath, rigPath)
-				}
-				return filepath.Clean(rigPath)
+				return rig.Path, true
 			}
 		}
-	}
-	return storeRef
+		return "", false
+	})
 }
 
 // DoSlingBatch handles convoy expansion before delegating to DoSling.
