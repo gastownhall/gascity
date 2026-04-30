@@ -26,7 +26,15 @@ type ProcessOptions struct {
 	FormulaSearchPaths []string
 	PrepareFragment    func(*formula.FragmentRecipe, beads.Bead) error
 	RecycleSession     func(beads.Bead) error
-	Tracef             func(format string, args ...any)
+	// ResolveStoreRef opens the bead store identified by a gc.source_store_ref
+	// value (e.g. "city:foo", "rig:alpha"). Used by processWorkflowFinalize to
+	// propagate successful workflow completion across store boundaries: when
+	// a graph workflow finalizes with outcome=pass, every parent source bead
+	// linked via gc.source_bead_id+gc.source_store_ref is also closed in its
+	// native store. May be nil - in which case cross-store propagation is
+	// silently skipped (single-store callers, tests without resolvers, etc.).
+	ResolveStoreRef func(ref string) (beads.Store, error)
+	Tracef          func(format string, args ...any)
 }
 
 var (
@@ -77,7 +85,7 @@ func ProcessControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (Co
 	case "scope-check":
 		return processScopeCheck(store, bead, opts)
 	case "workflow-finalize":
-		return processWorkflowFinalize(store, bead)
+		return processWorkflowFinalize(store, bead, opts)
 	default:
 		return ControlResult{}, fmt.Errorf("%s: unsupported control bead kind %q", bead.ID, bead.Metadata["gc.kind"])
 	}
@@ -467,7 +475,7 @@ func isRetryAttemptSubject(subject beads.Bead) bool {
 	return false
 }
 
-func processWorkflowFinalize(store beads.Store, bead beads.Bead) (ControlResult, error) {
+func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
 	rootID := bead.Metadata["gc.root_bead_id"]
 	if rootID == "" {
 		return ControlResult{}, fmt.Errorf("%s: missing gc.root_bead_id", bead.ID)
@@ -489,10 +497,76 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead) (ControlResult,
 	if err := setOutcomeAndClose(store, rootID, outcome); err != nil {
 		return ControlResult{}, fmt.Errorf("%s: completing workflow head: %w", rootID, err)
 	}
+	// On success, propagate the closure across the gc.source_bead_id chain so
+	// parent source beads in other stores (e.g. the city-scope "Adopt PR"
+	// request that spawned a rig-scope mol-adopt-pr-v2 workflow) don't accumulate
+	// as orphans. Failures intentionally leave parent sources open so a human
+	// can investigate via list - the bead IS the audit handle.
+	if outcome == "pass" {
+		if err := closeSourceBeadChain(store, rootID, opts); err != nil {
+			return ControlResult{}, fmt.Errorf("%s: closing source bead chain: %w", rootID, err)
+		}
+	}
 	if err := setOutcomeAndClose(store, bead.ID, "pass"); err != nil {
 		return ControlResult{}, fmt.Errorf("%s: completing workflow finalizer: %w", bead.ID, err)
 	}
 	return ControlResult{Processed: true, Action: "workflow-" + outcome}, nil
+}
+
+// closeSourceBeadChain walks gc.source_bead_id / gc.source_store_ref upward
+// from the just-finalized workflow root and closes every parent source bead
+// in its native store. The walk stops when a bead has no source pointer, when
+// a referenced store cannot be resolved, or when a bead has already been
+// closed (idempotent - a re-run of finalize after a partial crash converges
+// to the same state). This is what makes "Adopt PR" city-scope source beads
+// disappear from the human-visible queue once the rig-scope workflow merges.
+func closeSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptions) error {
+	currentStore := rootStore
+	currentID := rootID
+	visited := make(map[string]bool) // store_ref|bead_id pairs to break any unexpected cycles
+	for hop := 0; hop < 32; hop++ {
+		current, err := currentStore.Get(currentID)
+		if err != nil {
+			// Missing intermediate is not fatal - the chain just stops here.
+			return nil
+		}
+		nextID := strings.TrimSpace(current.Metadata["gc.source_bead_id"])
+		if nextID == "" {
+			return nil
+		}
+		nextRef := strings.TrimSpace(current.Metadata["gc.source_store_ref"])
+		nextStore := currentStore
+		if nextRef != "" && opts.ResolveStoreRef != nil {
+			resolved, err := opts.ResolveStoreRef(nextRef)
+			if err != nil || resolved == nil {
+				// Cannot reach the parent store from here. Skip silently -
+				// callers without a resolver are single-store contexts where
+				// cross-store propagation is not expected.
+				return nil
+			}
+			nextStore = resolved
+		} else if nextRef != "" && opts.ResolveStoreRef == nil {
+			// Cross-store reference but no resolver: nothing to do.
+			return nil
+		}
+		key := nextRef + "|" + nextID
+		if visited[key] {
+			return nil
+		}
+		visited[key] = true
+		next, err := nextStore.Get(nextID)
+		if err != nil {
+			return nil
+		}
+		if next.Status != "closed" {
+			if err := setOutcomeAndClose(nextStore, nextID, "pass"); err != nil {
+				return fmt.Errorf("closing source bead %s in %s: %w", nextID, nextRef, err)
+			}
+		}
+		currentStore = nextStore
+		currentID = nextID
+	}
+	return nil
 }
 
 func reconcileTerminalScopedMember(store beads.Store, bead beads.Bead) (ControlResult, error) {

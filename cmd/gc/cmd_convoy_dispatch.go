@@ -164,6 +164,10 @@ func runControlDispatcherWithStore(cityPath, storePath string, store beads.Store
 	switch bead.Metadata["gc.kind"] {
 	case "check", "fanout", "retry-eval", "retry", "ralph":
 		loadCfg = true
+	case "workflow-finalize":
+		// Need cfg to resolve "city:<name>" / "rig:<name>" store refs when
+		// closing parent source beads in their native stores.
+		loadCfg = true
 	}
 	if loadCfg {
 		cfg, err := loadCityConfig(cityPath, stderr)
@@ -171,6 +175,7 @@ func runControlDispatcherWithStore(cityPath, storePath string, store beads.Store
 			return err
 		}
 		resolveRigPaths(cityPath, cfg.Rigs)
+		opts.ResolveStoreRef = makeStoreRefResolver(cityPath, cfg)
 		switch bead.Metadata["gc.kind"] {
 		case "check", "fanout":
 			opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)
@@ -212,6 +217,51 @@ func runControlDispatcherWithStore(cityPath, storePath string, store beads.Store
 		fmt.Fprintln(stdout) //nolint:errcheck
 	}
 	return nil
+}
+
+// makeStoreRefResolver returns a dispatch.ProcessOptions.ResolveStoreRef
+// closure for the given city. The resolver maps "city:<name>" and
+// "rig:<name>" gc.source_store_ref values to a beads.Store rooted at the
+// matching scope. processWorkflowFinalize uses it to walk the source bead
+// chain across store boundaries so a successful rig-scope workflow closes
+// the city-scope source bead that spawned it (e.g. PR-review "Adopt PR"
+// requests).
+func makeStoreRefResolver(cityPath string, cfg *config.City) func(string) (beads.Store, error) {
+	cityName := loadedCityName(cfg, cityPath)
+	return func(ref string) (beads.Store, error) {
+		ref = strings.TrimSpace(ref)
+		if ref == "" {
+			return nil, fmt.Errorf("empty store ref")
+		}
+		switch {
+		case strings.HasPrefix(ref, "city:"):
+			name := strings.TrimSpace(strings.TrimPrefix(ref, "city:"))
+			// "city:" without a name still resolves to this city's store -
+			// older callers stamp ambiguous refs and the only reachable city
+			// from a control-dispatcher is the one it was launched in.
+			if name != "" && cityName != "" && name != cityName {
+				return nil, fmt.Errorf("city ref %q does not match this city %q", ref, cityName)
+			}
+			return openStoreAtForCity(cityPath, cityPath)
+		case strings.HasPrefix(ref, "rig:"):
+			name := strings.TrimSpace(strings.TrimPrefix(ref, "rig:"))
+			if name == "" {
+				return nil, fmt.Errorf("rig ref %q missing rig name", ref)
+			}
+			if cfg == nil {
+				return nil, fmt.Errorf("no city config available to resolve %q", ref)
+			}
+			for _, rig := range cfg.Rigs {
+				if rig.Name != name {
+					continue
+				}
+				return openControlStoreAtForCity(rig.Path, cityPath, cfg)
+			}
+			return nil, fmt.Errorf("rig %q not found in city config", name)
+		default:
+			return nil, fmt.Errorf("unsupported store ref scheme: %q", ref)
+		}
+	}
 }
 
 func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
@@ -656,10 +706,12 @@ func deleteWorkflowMatches(matches []workflowStoreMatch) (int, error) {
 }
 
 type sourceWorkflowStoreMatch struct {
-	label string
-	store beads.Store
-	roots []beads.Bead
-	beads []beads.Bead
+	label  string
+	store  beads.Store
+	roots  []beads.Bead
+	beads  []beads.Bead
+	path   string
+	runner beads.CommandRunner
 }
 
 type sourceWorkflowStoreSelector struct {
@@ -784,13 +836,28 @@ func applySourceWorkflowMatchCleanup(match sourceWorkflowStoreMatch, deleteBeads
 	if !deleteBeads {
 		return closed, deleted, incomplete
 	}
-	count, errs := deleteWorkflowBeads(match.store, ids)
+	count, errs := deleteSourceWorkflowMatchBeads(match, ids)
 	deleted += count
 	for _, deleteErr := range errs {
 		incomplete = true
 		_, _ = fmt.Fprintf(stderr, "store=%s delete_error=%v\n", match.label, deleteErr)
 	}
 	return closed, deleted, incomplete
+}
+
+func deleteSourceWorkflowMatchBeads(match sourceWorkflowStoreMatch, ids []string) (int, []error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	if match.runner != nil && strings.TrimSpace(match.path) != "" {
+		args := append([]string{"delete"}, ids...)
+		args = append(args, "--cascade", "--force")
+		if _, err := match.runner(match.path, "bd", args...); err != nil {
+			return 0, []error{err}
+		}
+		return len(ids), nil
+	}
+	return deleteWorkflowBeads(match.store, ids)
 }
 
 func cmdWorkflowDeleteSource(sourceBeadID string, selector sourceWorkflowStoreSelector, apply, deleteBeads bool, stdout, stderr io.Writer) int {
@@ -1125,28 +1192,104 @@ func collectSourceWorkflowMatches(cfg *config.City, cityPath, sourceBeadID, sour
 	if err != nil {
 		return nil, skips, err
 	}
-	matches := make([]sourceWorkflowStoreMatch, 0, len(stores))
-	for _, info := range stores {
-		rootStoreRef := workflowStoreRefForDir(info.path, cityPath, loadedCityName(cfg, cityPath), cfg)
-		roots, err := sourceworkflow.ListLiveRoots(info.store, sourceBeadID, sourceStoreRef, rootStoreRef)
-		if err != nil {
-			return nil, skips, err
+	matchesByLabel := map[string]sourceWorkflowStoreMatch{}
+	visited := map[string]struct{}{}
+	cityName := loadedCityName(cfg, cityPath)
+
+	var collect func(string, string) error
+	collect = func(currentSourceID, currentSourceStoreRef string) error {
+		currentSourceID = strings.TrimSpace(currentSourceID)
+		if currentSourceID == "" {
+			return nil
 		}
-		if len(roots) == 0 {
-			continue
+		for _, info := range stores {
+			rootStoreRef := workflowStoreRefForDir(info.path, cityPath, cityName, cfg)
+			visitKey := rootStoreRef + "\x00" + currentSourceStoreRef + "\x00" + currentSourceID
+			if _, ok := visited[visitKey]; ok {
+				continue
+			}
+			visited[visitKey] = struct{}{}
+			roots, err := sourceworkflow.ListLiveRoots(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef)
+			if err != nil {
+				return err
+			}
+			if len(roots) > 0 {
+				beadSet := make([]beads.Bead, 0, len(roots))
+				for _, root := range roots {
+					beadSet = append(beadSet, findWorkflowBeads(info.store, root.ID)...)
+				}
+				mergeSourceWorkflowMatch(matchesByLabel, sourceWorkflowStoreMatch{
+					label:  workflowDeleteStoreLabel(cfg, cityPath, info.path),
+					store:  info.store,
+					roots:  roots,
+					beads:  uniqueBeads(beadSet),
+					path:   info.path,
+					runner: workflowDeleteRunnerForPath(cfg, cityPath, info.path),
+				})
+			}
+			children, err := sourceWorkflowChildSources(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef)
+			if err != nil {
+				return err
+			}
+			for _, child := range children {
+				if err := collect(child.ID, rootStoreRef); err != nil {
+					return err
+				}
+			}
 		}
-		beadSet := make([]beads.Bead, 0, len(roots))
-		for _, root := range roots {
-			beadSet = append(beadSet, findWorkflowBeads(info.store, root.ID)...)
-		}
-		matches = append(matches, sourceWorkflowStoreMatch{
-			label: workflowDeleteStoreLabel(cfg, cityPath, info.path),
-			store: info.store,
-			roots: roots,
-			beads: uniqueBeads(beadSet),
-		})
+		return nil
+	}
+	if err := collect(sourceBeadID, sourceStoreRef); err != nil {
+		return nil, skips, err
+	}
+	matches := make([]sourceWorkflowStoreMatch, 0, len(matchesByLabel))
+	for _, match := range matchesByLabel {
+		match.roots = uniqueBeads(match.roots)
+		match.beads = uniqueBeads(match.beads)
+		matches = append(matches, match)
 	}
 	return matches, skips, nil
+}
+
+func mergeSourceWorkflowMatch(matches map[string]sourceWorkflowStoreMatch, next sourceWorkflowStoreMatch) {
+	if next.label == "" {
+		return
+	}
+	current := matches[next.label]
+	if current.label == "" {
+		matches[next.label] = next
+		return
+	}
+	current.roots = append(current.roots, next.roots...)
+	current.beads = append(current.beads, next.beads...)
+	matches[next.label] = current
+}
+
+func sourceWorkflowChildSources(store beads.Store, sourceBeadID, sourceStoreRef, rootStoreRef string) ([]beads.Bead, error) {
+	sourceBeadID = strings.TrimSpace(sourceBeadID)
+	if store == nil || sourceBeadID == "" {
+		return nil, nil
+	}
+	candidates, err := store.List(beads.ListQuery{
+		IncludeClosed: true,
+		Metadata: map[string]string{
+			"gc.source_bead_id": sourceBeadID,
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	children := make([]beads.Bead, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.ID == "" || sourceworkflow.IsWorkflowRoot(candidate) {
+			continue
+		}
+		if !sourceworkflow.WorkflowMatchesSource(candidate, sourceBeadID, sourceStoreRef, rootStoreRef) {
+			continue
+		}
+		children = append(children, candidate)
+	}
+	return children, nil
 }
 
 func sourceWorkflowMatchLabels(matches []sourceWorkflowStoreMatch) []string {

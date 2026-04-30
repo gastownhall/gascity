@@ -606,6 +606,206 @@ func TestProcessWorkflowFinalizeClosesWorkflow(t *testing.T) {
 	}
 }
 
+// TestProcessWorkflowFinalizeClosesCrossStoreSourceBead verifies that when a
+// graph workflow finalizes successfully, the engine closes any source bead
+// chain that crosses store boundaries. This is the PR-review case: the city
+// scope holds the human-visible "Adopt PR" source bead, and the rig scope
+// holds the launch bead + workflow root that the operator drives. Without
+// this propagation, the city source bead stays open forever even after the
+// PR is merged and the rig workflow is fully closed - the only way to know
+// the request finished is to read metadata, not list status.
+//
+// Wiring under test:
+//   - city store: city source bead (the original "Adopt PR" request)
+//   - rig store:  rig launch bead     gc.source_bead_id=<city-source>, gc.source_store_ref=city:test
+//     workflow root       gc.source_bead_id=<rig-launch>,  gc.source_store_ref=rig:test
+//     cleanup, finalizer
+//
+// On a successful (outcome=pass) finalize, the engine should close BOTH the
+// rig-store workflow root AND the city-store source bead.
+func TestProcessWorkflowFinalizeClosesCrossStoreSourceBead(t *testing.T) {
+	t.Parallel()
+
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+
+	citySource := mustCreateWorkflowBead(t, cityStore, beads.Bead{
+		Title: "Adopt PR: gastownhall/example#1",
+		Type:  "task",
+		Metadata: map[string]string{
+			"pr_review.pr_number": "1",
+			"pr_review.repo_slug": "gastownhall/example",
+		},
+	})
+
+	rigLaunch := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title: "Adopt PR workflow: gastownhall/example#1",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.source_bead_id":   citySource.ID,
+			"gc.source_store_ref": "city:test",
+		},
+	})
+
+	workflow := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title: "mol-adopt-pr-v2",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.source_bead_id":   rigLaunch.ID,
+			"gc.source_store_ref": "rig:test",
+		},
+	})
+
+	cleanup := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title:  "Clean up worktree",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.outcome": "pass",
+		},
+	})
+
+	finalizer := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title: "Finalize workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+
+	mustDepAdd(t, rigStore, finalizer.ID, cleanup.ID, "blocks")
+	mustDepAdd(t, rigStore, workflow.ID, finalizer.ID, "blocks")
+
+	resolver := func(ref string) (beads.Store, error) {
+		switch ref {
+		case "city:test":
+			return cityStore, nil
+		case "rig:test":
+			return rigStore, nil
+		default:
+			return nil, fmt.Errorf("unknown store ref: %s", ref)
+		}
+	}
+
+	result, err := ProcessControl(rigStore, finalizer, ProcessOptions{
+		ResolveStoreRef: resolver,
+	})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+	}
+	if !result.Processed || result.Action != "workflow-pass" {
+		t.Fatalf("workflow result = %+v, want processed workflow-pass", result)
+	}
+
+	rigRootAfter, err := rigStore.Get(workflow.ID)
+	if err != nil {
+		t.Fatalf("get workflow root: %v", err)
+	}
+	if rigRootAfter.Status != "closed" {
+		t.Fatalf("workflow root status = %q, want closed", rigRootAfter.Status)
+	}
+
+	citySourceAfter, err := cityStore.Get(citySource.ID)
+	if err != nil {
+		t.Fatalf("get city source bead: %v", err)
+	}
+	if citySourceAfter.Status != "closed" {
+		t.Fatalf("city source bead status = %q, want closed (cross-store closure on successful finalize)", citySourceAfter.Status)
+	}
+	if got := citySourceAfter.Metadata["gc.outcome"]; got != "pass" {
+		t.Errorf("city source bead gc.outcome = %q, want %q", got, "pass")
+	}
+}
+
+// TestProcessWorkflowFinalizeLeavesCrossStoreSourceBeadOpenOnFailure pins the
+// failure-side contract: a failed workflow should leave the city source bead
+// open so a human can see and act on the failure. Closure propagation only
+// happens on success.
+func TestProcessWorkflowFinalizeLeavesCrossStoreSourceBeadOpenOnFailure(t *testing.T) {
+	t.Parallel()
+
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+
+	citySource := mustCreateWorkflowBead(t, cityStore, beads.Bead{
+		Title: "Adopt PR: gastownhall/example#2",
+		Type:  "task",
+	})
+
+	rigLaunch := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title: "Adopt PR workflow: gastownhall/example#2",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.source_bead_id":   citySource.ID,
+			"gc.source_store_ref": "city:test",
+		},
+	})
+
+	workflow := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title: "mol-adopt-pr-v2",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.source_bead_id":   rigLaunch.ID,
+			"gc.source_store_ref": "rig:test",
+		},
+	})
+
+	cleanup := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title:  "Clean up worktree",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.outcome": "fail",
+		},
+	})
+
+	finalizer := mustCreateWorkflowBead(t, rigStore, beads.Bead{
+		Title: "Finalize workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+
+	mustDepAdd(t, rigStore, finalizer.ID, cleanup.ID, "blocks")
+	mustDepAdd(t, rigStore, workflow.ID, finalizer.ID, "blocks")
+
+	resolver := func(ref string) (beads.Store, error) {
+		switch ref {
+		case "city:test":
+			return cityStore, nil
+		case "rig:test":
+			return rigStore, nil
+		default:
+			return nil, fmt.Errorf("unknown store ref: %s", ref)
+		}
+	}
+
+	result, err := ProcessControl(rigStore, finalizer, ProcessOptions{
+		ResolveStoreRef: resolver,
+	})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+	}
+	if !result.Processed || result.Action != "workflow-fail" {
+		t.Fatalf("workflow result = %+v, want processed workflow-fail", result)
+	}
+
+	citySourceAfter, err := cityStore.Get(citySource.ID)
+	if err != nil {
+		t.Fatalf("get city source bead: %v", err)
+	}
+	if citySourceAfter.Status == "closed" {
+		t.Fatalf("city source bead status = closed; want still open on failed workflow so the human can act on the failure")
+	}
+}
+
 func TestProcessRalphCheckRetriesThenPasses(t *testing.T) {
 	t.Parallel()
 
