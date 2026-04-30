@@ -45,7 +45,16 @@ type DesiredStateResult struct {
 	// store failure would cause running sessions to be falsely orphaned
 	// and interrupted via Ctrl-C.
 	StoreQueryPartial bool
-	BeaconTime        time.Time
+	// SessionQueryPartial is true when session-bead snapshot loading failed.
+	// Orphan-release and drain decisions must treat this like an incomplete
+	// work snapshot because missing live session beads make assigned work look
+	// orphaned.
+	SessionQueryPartial bool
+	BeaconTime          time.Time
+}
+
+func (r DesiredStateResult) snapshotQueryPartial() bool {
+	return r.StoreQueryPartial || r.SessionQueryPartial
 }
 
 type poolEvalWork struct {
@@ -169,14 +178,18 @@ func buildDesiredState(
 	stderr io.Writer,
 ) DesiredStateResult {
 	var sessionBeads *sessionBeadSnapshot
+	var sessionQueryPartial bool
 	if store != nil {
 		var err error
 		sessionBeads, err = loadSessionBeadSnapshot(store)
 		if err != nil {
 			fmt.Fprintf(stderr, "buildDesiredState: listing session beads: %v\n", err) //nolint:errcheck
+			sessionQueryPartial = true
 		}
 	}
-	return buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, store, nil, sessionBeads, nil, stderr)
+	result := buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, store, nil, sessionBeads, nil, stderr)
+	result.SessionQueryPartial = result.SessionQueryPartial || sessionQueryPartial
+	return result
 }
 
 func buildDesiredStateWithSessionBeads(

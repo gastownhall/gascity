@@ -123,7 +123,7 @@ func TestStandaloneBuildAgentsFnWithSessionBeads_UsesRigStoresForAssignedWork(t 
 	}
 }
 
-func TestStandaloneOneShotSkipsPoolOrphanReleaseWhenStoreQueryPartial(t *testing.T) {
+func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsCompleteReleases(t *testing.T) {
 	store := beads.NewMemStore()
 	work, err := store.Create(beads.Bead{
 		ID:       "ga-live",
@@ -143,7 +143,7 @@ func TestStandaloneOneShotSkipsPoolOrphanReleaseWhenStoreQueryPartial(t *testing
 	}
 	work.Status = inProgress
 
-	released := releaseOrphanedPoolAssignmentsWhenSnapshotComplete(
+	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 		store,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}}},
 		nil,
@@ -165,7 +165,29 @@ func TestStandaloneOneShotSkipsPoolOrphanReleaseWhenStoreQueryPartial(t *testing
 		t.Fatalf("partial one-shot snapshot released work: status=%q assignee=%q", got.Status, got.Assignee)
 	}
 
-	released = releaseOrphanedPoolAssignmentsWhenSnapshotComplete(
+	released = releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
+		store,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}}},
+		nil,
+		DesiredStateResult{
+			AssignedWorkBeads:   []beads.Bead{work},
+			AssignedWorkStores:  []beads.Store{store},
+			SessionQueryPartial: true,
+		},
+		nil,
+	)
+	if len(released) != 0 {
+		t.Fatalf("released %d work bead(s) from a partial session snapshot, want none", len(released))
+	}
+	got, err = store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work after partial session snapshot release: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "worker-session" {
+		t.Fatalf("partial session snapshot released work: status=%q assignee=%q", got.Status, got.Assignee)
+	}
+
+	released = releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 		store,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}}},
 		nil,
