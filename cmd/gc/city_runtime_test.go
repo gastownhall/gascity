@@ -235,11 +235,17 @@ func TestCityRuntimeDemandSnapshotReusesStablePatrolDemand(t *testing.T) {
 }
 
 type recordingOrderDispatcher struct {
-	called atomic.Bool
+	called     atomic.Bool
+	calls      atomic.Int32
+	onDispatch func(context.Context, string, time.Time)
 }
 
-func (r *recordingOrderDispatcher) dispatch(context.Context, string, time.Time) {
+func (r *recordingOrderDispatcher) dispatch(ctx context.Context, cityRoot string, now time.Time) {
+	r.calls.Add(1)
 	r.called.Store(true)
+	if r.onDispatch != nil {
+		r.onDispatch(ctx, cityRoot, now)
+	}
 }
 
 func TestCityRuntimeTickDispatchesOrdersBeforeDemandSnapshot(t *testing.T) {
@@ -269,6 +275,120 @@ func TestCityRuntimeTickDispatchesOrdersBeforeDemandSnapshot(t *testing.T) {
 
 	if !od.called.Load() {
 		t.Fatal("order dispatcher was not called")
+	}
+}
+
+func TestCityRuntimeRunDispatchesOrdersBeforeStartupReconcile(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sp := runtime.NewFake()
+	od := &recordingOrderDispatcher{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var started atomic.Bool
+	cr := newCityRuntime(CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "test-city",
+		TomlPath: tomlPath,
+		Cfg:      cfg,
+		SP:       sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			if !od.called.Load() {
+				t.Fatal("order dispatch should happen before startup reconcile")
+			}
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops: newDrainOps(sp),
+		Rec:  events.Discard,
+		OnStarted: func() {
+			started.Store(true)
+			cancel()
+		},
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+	cr.od = od
+
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = beads.NewMemStore()
+	cr.setControllerState(cs)
+
+	cr.run(ctx)
+
+	if !started.Load() {
+		t.Fatal("OnStarted was not called")
+	}
+	if got := od.calls.Load(); got != 1 {
+		t.Fatalf("order dispatch calls = %d, want 1", got)
+	}
+}
+
+func TestCityRuntimeRunStartupOrderDispatchPanicIsRecovered(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sp := runtime.NewFake()
+	od := &recordingOrderDispatcher{
+		onDispatch: func(context.Context, string, time.Time) {
+			panic("startup order boom")
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var stderr bytes.Buffer
+	var started atomic.Bool
+	cr := newCityRuntime(CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "test-city",
+		TomlPath: tomlPath,
+		Cfg:      cfg,
+		SP:       sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops: newDrainOps(sp),
+		Rec:  events.Discard,
+		OnStarted: func() {
+			started.Store(true)
+			cancel()
+		},
+		Stdout: io.Discard,
+		Stderr: &stderr,
+	})
+	cr.od = od
+
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = beads.NewMemStore()
+	cr.setControllerState(cs)
+
+	cr.run(ctx)
+
+	if !started.Load() {
+		t.Fatal("OnStarted was not called after recovered startup order panic")
+	}
+	if got := od.calls.Load(); got != 1 {
+		t.Fatalf("order dispatch calls = %d, want 1", got)
+	}
+	if !strings.Contains(stderr.String(), "trigger=startup-orders") {
+		t.Fatalf("stderr = %q, want startup-orders panic trigger", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "startup order boom") {
+		t.Fatalf("stderr = %q, want recovered panic detail", stderr.String())
 	}
 }
 
@@ -2618,8 +2738,8 @@ func TestCityRuntimeRunStopsBeforeStartedWhenCanceledDuringStartup(t *testing.T)
 	if started {
 		t.Fatal("OnStarted called after cancellation")
 	}
-	if od.called.Load() {
-		t.Fatal("order dispatcher called before startup completed")
+	if got := od.calls.Load(); got != 1 {
+		t.Fatalf("order dispatch calls = %d, want startup dispatch before cancellation", got)
 	}
 	if strings.Contains(stdout.String(), "City started.") {
 		t.Fatalf("stdout = %q, want no started banner after cancellation", stdout.String())
