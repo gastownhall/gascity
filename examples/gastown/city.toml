@@ -36,6 +36,11 @@ shutdown_timeout = "5s"
 # molecule_id attachment semantics even when their own revision is version >= 2.
 formula_v2 = true
 
+# Optional: compact volatile managed-session lifecycle metadata history while
+# preserving current session state.
+[observability.session_history]
+mode = "compact"
+
 # Register a rig to activate per-rig agents (witness, refinery, polecat):
 # [[rigs]]
 # name = "myproject"

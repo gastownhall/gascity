@@ -145,6 +145,8 @@ type City struct {
 	Mail MailConfig `toml:"mail,omitempty"`
 	// Events configures the events provider backend.
 	Events EventsConfig `toml:"events,omitempty"`
+	// Observability configures optional runtime observability behavior.
+	Observability ObservabilityConfig `toml:"observability,omitempty"`
 	// Dolt configures optional dolt server connection overrides.
 	Dolt DoltConfig `toml:"dolt,omitempty"`
 	// Formulas configures formula directory settings.
@@ -1038,6 +1040,22 @@ type EventsConfig struct {
 	// Provider selects the events backend: "fake", "fail",
 	// "exec:<script>", or "" (default: file-backed JSONL).
 	Provider string `toml:"provider,omitempty"`
+}
+
+// ObservabilityConfig holds optional observability settings.
+type ObservabilityConfig struct {
+	SessionHistory SessionHistoryConfig `toml:"session_history,omitempty"`
+}
+
+// SessionHistoryConfig configures durable history behavior for managed session metadata.
+type SessionHistoryConfig struct {
+	// Mode controls how volatile managed-session metadata updates are persisted.
+	// Supported values: ""/"full" (default) and "compact".
+	Mode string `toml:"mode,omitempty"`
+}
+
+func (c SessionHistoryConfig) Compact() bool {
+	return strings.EqualFold(strings.TrimSpace(c.Mode), "compact")
 }
 
 // DoltConfig holds optional dolt server overrides.

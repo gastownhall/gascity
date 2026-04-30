@@ -23,6 +23,7 @@ City is the top-level configuration for a Gas City instance.
 | `session` | SessionConfig |  |  | Session configures the session provider backend. |
 | `mail` | MailConfig |  |  | Mail configures the mail provider backend. |
 | `events` | EventsConfig |  |  | Events configures the events provider backend. |
+| `observability` | ObservabilityConfig |  |  | Observability configures optional runtime observability behavior. |
 | `dolt` | DoltConfig |  |  | Dolt configures optional dolt server connection overrides. |
 | `formulas` | FormulasConfig |  |  | Formulas configures formula directory settings. |
 | `daemon` | DaemonConfig |  |  | Daemon configures controller daemon settings. |
@@ -341,6 +342,21 @@ NamedSession defines a canonical persistent session backed by an agent template.
 | `dir` | string |  |  | Dir is the identity prefix for rig-scoped named sessions after pack expansion. Empty means city-scoped. |
 | `mode` | string |  |  | Mode controls controller behavior for this named session. "on_demand" (default): reserve identity and materialize when work or an explicit reference requires it. "always": keep the canonical session controller-managed. Enum: `on_demand`, `always` |
 
+## ObservabilityConfig
+
+ObservabilityConfig holds optional observability settings.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `session_history` | SessionHistoryConfig |  |  | Controls how managed session lifecycle metadata history is persisted. |
+
+Example:
+
+```toml
+[observability.session_history]
+mode = "compact"
+```
+
 ## OptionChoice
 
 OptionChoice is one allowed value for a "select" option.
@@ -573,6 +589,14 @@ SessionConfig holds session provider settings.
 | `startup_timeout` | string |  | `60s` | StartupTimeout is how long to wait for each agent's Start() call before treating it as failed. Duration string (e.g., "60s", "2m"). Defaults to "60s". |
 | `socket` | string |  |  | Socket specifies the tmux socket name for per-city isolation. When set, all tmux commands use "tmux -L &lt;socket&gt;" to connect to a dedicated server. When empty, defaults to the city name (workspace.name) — giving every city its own tmux server automatically. Set explicitly to override. |
 | `remote_match` | string |  |  | RemoteMatch is a substring pattern for the hybrid provider to route sessions to the remote (K8s) backend. Sessions whose names contain this pattern go to K8s; all others stay local (tmux). Overridden by the GC_HYBRID_REMOTE_MATCH env var if set. |
+
+## SessionHistoryConfig
+
+SessionHistoryConfig configures durable history behavior for managed session metadata.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `mode` | string |  |  | Mode controls how volatile managed-session metadata updates are persisted. Supported values: ""/"full" (default) and "compact". |
 
 ## SessionSleepConfig
 

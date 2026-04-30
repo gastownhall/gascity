@@ -162,6 +162,10 @@ func ReassignWaits(store beads.Store, oldSessionID, newSessionID string) error {
 // WakeSession clears hold/quarantine state and cancels open waits, returning
 // any queued wait-nudge IDs that should be eagerly withdrawn.
 func WakeSession(store beads.Store, sessionBead beads.Bead, now time.Time) ([]string, error) {
+	return WakeSessionWithOptions(store, sessionBead, now, false)
+}
+
+func WakeSessionWithOptions(store beads.Store, sessionBead beads.Bead, now time.Time, suppressHistory bool) ([]string, error) {
 	if store == nil || sessionBead.ID == "" {
 		return nil, nil
 	}
@@ -187,7 +191,7 @@ func WakeSession(store beads.Store, sessionBead beads.Bead, now time.Time) ([]st
 		batch["archived_at"] = ""
 		batch["continuity_eligible"] = "true"
 	}
-	if err := store.SetMetadataBatch(sessionBead.ID, batch); err != nil {
+	if err := storeSessionMetadata(store, sessionBead.ID, batch, suppressHistory); err != nil {
 		return nil, err
 	}
 	return nudgeIDs, nil

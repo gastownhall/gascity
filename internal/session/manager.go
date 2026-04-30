@@ -118,10 +118,11 @@ type ProviderResume struct {
 // Manager orchestrates chat session lifecycle using beads for persistence
 // and runtime.Provider for runtime.
 type Manager struct {
-	store             beads.Store
-	sp                runtime.Provider
-	cityPath          string
-	transportResolver func(template, provider string) transportResolution
+	store                 beads.Store
+	sp                    runtime.Provider
+	cityPath              string
+	transportResolver     func(template, provider string) transportResolution
+	compactSessionHistory bool
 }
 
 // PruneResult reports which sessions were pruned and which queued wait nudges
@@ -214,6 +215,36 @@ func (m *Manager) routeACPIfNeeded(provider, transport, sessName string) func() 
 	}
 	router.RouteACP(sessName)
 	return func() { router.Unroute(sessName) }
+}
+
+func storeSessionMetadata(store beads.Store, id string, kvs map[string]string, suppressHistory bool) error {
+	if len(kvs) == 0 {
+		return nil
+	}
+	if suppressHistory {
+		return store.Update(id, beads.UpdateOpts{Metadata: kvs, SuppressHistory: true})
+	}
+	return store.SetMetadataBatch(id, kvs)
+}
+
+func storeSessionMetadataKey(store beads.Store, id, key, value string, suppressHistory bool) error {
+	if suppressHistory {
+		return store.Update(id, beads.UpdateOpts{Metadata: map[string]string{key: value}, SuppressHistory: true})
+	}
+	return store.SetMetadata(id, key, value)
+}
+
+func (m *Manager) updateSessionMetadata(id string, kvs map[string]string) error {
+	return storeSessionMetadata(m.store, id, kvs, m.compactSessionHistory)
+}
+
+func (m *Manager) setSessionMetadata(id, key, value string) error {
+	return storeSessionMetadataKey(m.store, id, key, value, m.compactSessionHistory)
+}
+
+func (m *Manager) SetCompactSessionHistory(enabled bool) *Manager {
+	m.compactSessionHistory = enabled
+	return m
 }
 
 // NewManager creates a Manager backed by the given bead store and session provider.
@@ -728,11 +759,11 @@ func (m *Manager) Suspend(id string) error {
 		}
 
 		// Update state and record suspension timestamp.
-		if err := m.store.SetMetadata(id, "state", string(StateSuspended)); err != nil {
+		if err := m.updateSessionMetadata(id, map[string]string{
+			"state":        string(StateSuspended),
+			"suspended_at": time.Now().UTC().Format(time.RFC3339),
+		}); err != nil {
 			return fmt.Errorf("updating session state: %w", err)
-		}
-		if err := m.store.SetMetadata(id, "suspended_at", time.Now().UTC().Format(time.RFC3339)); err != nil {
-			return fmt.Errorf("storing suspension timestamp: %w", err)
 		}
 
 		return nil
@@ -746,7 +777,7 @@ func (m *Manager) RequestFreshRestart(id string) error {
 		if _, _, err := m.sessionBead(id); err != nil {
 			return err
 		}
-		return m.store.SetMetadataBatch(id, map[string]string{
+		return m.updateSessionMetadata(id, map[string]string{
 			"restart_requested":          "true",
 			"continuation_reset_pending": "true",
 		})
@@ -805,7 +836,7 @@ func (m *Manager) clearWakeAndHoldOverrides(id string) error {
 		"held_until":   "",
 		"sleep_intent": "",
 	}
-	if err := m.store.SetMetadataBatch(id, update); err != nil {
+	if err := m.updateSessionMetadata(id, update); err != nil {
 		return fmt.Errorf("clearing wake and hold overrides: %w", err)
 	}
 	return nil
@@ -862,7 +893,7 @@ func (m *Manager) BeginDrain(id, reason string) error {
 		if !cmdLegal {
 			return nil // idempotent: already draining
 		}
-		return m.store.SetMetadataBatch(id, BeginDrainPatch(time.Now().UTC(), reason))
+		return m.updateSessionMetadata(id, BeginDrainPatch(time.Now().UTC(), reason))
 	})
 }
 
@@ -877,7 +908,7 @@ func (m *Manager) Archive(id, reason string) error {
 		if !cmdLegal {
 			return nil // idempotent: already archived
 		}
-		return m.store.SetMetadataBatch(id, ArchivePatch(time.Now().UTC(), reason, false))
+		return m.updateSessionMetadata(id, ArchivePatch(time.Now().UTC(), reason, false))
 	})
 }
 
@@ -892,7 +923,7 @@ func (m *Manager) Quarantine(id string, until time.Time, cycle int) error {
 		if !cmdLegal {
 			return nil // idempotent: already quarantined
 		}
-		return m.store.SetMetadataBatch(id, QuarantinePatch(until, cycle))
+		return m.updateSessionMetadata(id, QuarantinePatch(until, cycle))
 	})
 }
 
@@ -919,7 +950,7 @@ func (m *Manager) Reactivate(id string) error {
 		// Note: quarantine_cycle is intentionally preserved across reactivations.
 		// It tracks how many quarantine rounds the session has been through,
 		// enabling eviction after quarantine_max_attempts.
-		return m.store.SetMetadataBatch(id, ReactivatePatch(view.ContinuityEligible))
+		return m.updateSessionMetadata(id, ReactivatePatch(view.ContinuityEligible))
 	})
 }
 
@@ -935,7 +966,7 @@ func (m *Manager) ConfirmCreation(id string) error {
 		if !cmdLegal {
 			return nil // idempotent: already active
 		}
-		return m.store.SetMetadataBatch(id, ConfirmStartedPatch(time.Now()))
+		return m.updateSessionMetadata(id, ConfirmStartedPatch(time.Now()))
 	})
 }
 
@@ -1285,7 +1316,7 @@ func (m *Manager) PersistSessionKey(id, sessionKey string) error {
 		if strings.TrimSpace(b.Metadata["session_key"]) != "" {
 			return nil
 		}
-		if err := m.store.SetMetadata(id, "session_key", sessionKey); err != nil {
+		if err := m.setSessionMetadata(id, "session_key", sessionKey); err != nil {
 			return fmt.Errorf("storing session key: %w", err)
 		}
 		return nil

@@ -30,15 +30,16 @@ type createRequest struct {
 // updateRequest is the JSON wire format sent on stdin for update operations.
 // Null/missing fields are not applied. Labels appends (does not replace).
 type updateRequest struct {
-	Title        *string           `json:"title,omitempty"`
-	Status       *string           `json:"status,omitempty"`
-	Priority     *int              `json:"priority,omitempty"`
-	Description  *string           `json:"description,omitempty"`
-	ParentID     *string           `json:"parent_id,omitempty"`
-	Assignee     *string           `json:"assignee,omitempty"`
-	Labels       []string          `json:"labels,omitempty"`
-	RemoveLabels []string          `json:"remove_labels,omitempty"`
-	Metadata     map[string]string `json:"metadata,omitempty"`
+	Title           *string           `json:"title,omitempty"`
+	Status          *string           `json:"status,omitempty"`
+	Priority        *int              `json:"priority,omitempty"`
+	Description     *string           `json:"description,omitempty"`
+	ParentID        *string           `json:"parent_id,omitempty"`
+	Assignee        *string           `json:"assignee,omitempty"`
+	Labels          []string          `json:"labels,omitempty"`
+	RemoveLabels    []string          `json:"remove_labels,omitempty"`
+	Metadata        map[string]string `json:"metadata,omitempty"`
+	SuppressHistory bool              `json:"suppress_history,omitempty"`
 }
 
 // beadWire is the JSON wire format returned by the script for bead data.
@@ -85,15 +86,16 @@ func marshalCreate(b beads.Bead) ([]byte, error) {
 // marshalUpdate converts update options to JSON for the exec script.
 func marshalUpdate(opts beads.UpdateOpts) ([]byte, error) {
 	r := updateRequest{
-		Title:        opts.Title,
-		Status:       opts.Status,
-		Priority:     opts.Priority,
-		Description:  opts.Description,
-		ParentID:     opts.ParentID,
-		Assignee:     opts.Assignee,
-		Labels:       opts.Labels,
-		RemoveLabels: opts.RemoveLabels,
-		Metadata:     opts.Metadata,
+		Title:           opts.Title,
+		Status:          opts.Status,
+		Priority:        opts.Priority,
+		Description:     opts.Description,
+		ParentID:        opts.ParentID,
+		Assignee:        opts.Assignee,
+		Labels:          opts.Labels,
+		RemoveLabels:    opts.RemoveLabels,
+		Metadata:        opts.Metadata,
+		SuppressHistory: opts.SuppressHistory,
 	}
 	return json.Marshal(r)
 }

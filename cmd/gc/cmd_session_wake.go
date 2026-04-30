@@ -62,7 +62,8 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	session.RepairEmptyType(store, &b)
-	nudgeIDs, err := session.WakeSession(store, b, time.Now().UTC())
+	compactHistory := cfg != nil && cfg.Observability.SessionHistory.Compact()
+	nudgeIDs, err := session.WakeSessionWithOptions(store, b, time.Now().UTC(), compactHistory)
 	if err != nil {
 		if state, conflict := session.WakeConflictState(err); conflict {
 			fmt.Fprintf(stderr, "gc session wake: session %s is %s\n", id, state) //nolint:errcheck

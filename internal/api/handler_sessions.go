@@ -366,7 +366,11 @@ func (s *Server) handleSessionWake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session.RepairEmptyType(store, &b)
-	nudgeIDs, err := session.WakeSession(store, b, time.Now().UTC())
+	compactHistory := false
+	if cfg := s.state.Config(); cfg != nil {
+		compactHistory = cfg.Observability.SessionHistory.Compact()
+	}
+	nudgeIDs, err := session.WakeSessionWithOptions(store, b, time.Now().UTC(), compactHistory)
 	if err != nil {
 		if state, conflict := session.WakeConflictState(err); conflict {
 			writeError(w, http.StatusConflict, "conflict", "session "+id+" is "+state)
