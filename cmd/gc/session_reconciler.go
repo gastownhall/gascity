@@ -527,6 +527,27 @@ func reconcileSessionBeadsTraced(
 			rollbackPendingCreate(session, store, clk.Now().UTC(), stderr)
 			continue
 		}
+		// Desired-branch counterpart to pendingCreateSessionStillLeased: a
+		// session bead in the desired set with pending_create_claim=true but
+		// no live runtime AND no active lease is stuck. Without this rollback,
+		// the bead lives forever holding its alias, blocking new spawn
+		// attempts ("alias already belongs to gm-XXXX") for any session whose
+		// template still has demand. Rolling back closes the dead bead so the
+		// next reconciler tick can allocate a fresh slot under the same alias.
+		if !alive && shouldRollbackPendingCreate(session) {
+			var startupTimeout time.Duration
+			if cfg != nil {
+				startupTimeout = cfg.Session.StartupTimeoutDuration()
+			}
+			if !pendingCreateStartInFlight(*session, clk, startupTimeout) && staleCreatingState(*session, clk) {
+				fmt.Fprintf(stderr, "session reconciler: rolling back pending create %s: lease expired and no live runtime\n", name) //nolint:errcheck
+				if trace != nil {
+					trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, name, "pending_create_lease_expired", "rollback", nil, nil, "")
+				}
+				rollbackPendingCreate(session, store, clk.Now().UTC(), stderr)
+				continue
+			}
+		}
 
 		// Drain-ack: agent signaled it's done (gc runtime drain-ack).
 		// Honor the ack even if the agent exited before this tick; otherwise
