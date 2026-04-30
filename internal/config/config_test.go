@@ -1320,8 +1320,8 @@ func TestEffectiveWorkQueryPoolDefault(t *testing.T) {
 	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --json --limit=1") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
 	}
-	if !strings.Contains(got, "bd list --metadata-field gc.routed_to=hello-world/polecat --status=open --type=molecule --no-assignee --json --limit=1") {
-		t.Errorf("EffectiveWorkQuery() missing tier 4 molecule route: %q", got)
+	if strings.Contains(got, "--type=molecule") {
+		t.Errorf("EffectiveWorkQuery() should not route molecule containers: %q", got)
 	}
 }
 
@@ -1373,8 +1373,8 @@ func TestEffectiveWorkQueryPoolNameOverride(t *testing.T) {
 	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --json --limit=1") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to with pool name: %q", got)
 	}
-	if !strings.Contains(got, "bd list --metadata-field gc.routed_to=hello-world/dog --status=open --type=molecule --no-assignee --json --limit=1") {
-		t.Errorf("EffectiveWorkQuery() missing tier 4 molecule route with pool name: %q", got)
+	if strings.Contains(got, "--type=molecule") {
+		t.Errorf("EffectiveWorkQuery() should not route molecule containers with pool name: %q", got)
 	}
 }
 
@@ -1489,8 +1489,8 @@ func TestDefaultPoolCheckUsesBdReady(t *testing.T) {
 	if !strings.Contains(check, "bd ready") {
 		t.Errorf("EffectiveScaleCheck() = %q, want bd ready for blocker-aware counting", check)
 	}
-	if !strings.Contains(check, "--type=molecule") {
-		t.Errorf("EffectiveScaleCheck() = %q, want --type=molecule for formula-dispatched work", check)
+	if strings.Contains(check, "--type=molecule") {
+		t.Errorf("EffectiveScaleCheck() = %q, should not count molecule containers as demand", check)
 	}
 	if strings.Contains(check, "--status=in_progress") || strings.Contains(check, "${active:-0}") {
 		t.Errorf("EffectiveScaleCheck() = %q, should not count in-progress work as new demand", check)
@@ -1587,18 +1587,15 @@ func TestEffectiveScaleCheckDefaults(t *testing.T) {
 		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(1),
 	}
 	check := a.EffectiveScaleCheck()
-	// Default check uses bd ready (blocker-aware) + molecule count via gc.routed_to.
+	// Default check uses bd ready for blocker-aware routed demand.
 	if !strings.Contains(check, "gc.routed_to=refinery") {
 		t.Errorf("EffectiveScaleCheck = %q, want gc.routed_to=refinery", check)
 	}
-	if !strings.Contains(check, "--no-assignee") {
-		t.Errorf("EffectiveScaleCheck = %q, want --no-assignee for new unassigned demand", check)
+	if !strings.Contains(check, "--unassigned") {
+		t.Errorf("EffectiveScaleCheck = %q, want --unassigned for new unassigned demand", check)
 	}
-	if !strings.Contains(check, "--type=molecule") {
-		t.Errorf("EffectiveScaleCheck = %q, want --type=molecule for formula-dispatched work", check)
-	}
-	if !strings.Contains(check, "${molecules:-0}") {
-		t.Errorf("EffectiveScaleCheck = %q, want ${molecules:-0} in arithmetic sum", check)
+	if strings.Contains(check, "--type=molecule") || strings.Contains(check, "${molecules:-0}") {
+		t.Errorf("EffectiveScaleCheck = %q, should not count molecule containers as demand", check)
 	}
 	if strings.Contains(check, "--status=in_progress") || strings.Contains(check, "${active:-0}") {
 		t.Errorf("EffectiveScaleCheck = %q, should not count in-progress work as new demand", check)
@@ -1616,20 +1613,20 @@ func TestEffectiveScaleCheckDefaultsQualified(t *testing.T) {
 	if !strings.Contains(check, "gc.routed_to=myproject/polecat") {
 		t.Errorf("EffectiveScaleCheck = %q, want gc.routed_to=myproject/polecat", check)
 	}
-	if !strings.Contains(check, "--no-assignee") {
-		t.Errorf("EffectiveScaleCheck = %q, want --no-assignee for new unassigned demand", check)
+	if !strings.Contains(check, "--unassigned") {
+		t.Errorf("EffectiveScaleCheck = %q, want --unassigned for new unassigned demand", check)
 	}
-	if !strings.Contains(check, "--type=molecule") {
-		t.Errorf("EffectiveScaleCheck = %q, want --type=molecule for formula-dispatched work", check)
+	if strings.Contains(check, "--type=molecule") {
+		t.Errorf("EffectiveScaleCheck = %q, should not count molecule containers as demand", check)
 	}
 	if strings.Contains(check, "--status=in_progress") || strings.Contains(check, "${active:-0}") {
 		t.Errorf("EffectiveScaleCheck = %q, should not count in-progress work as new demand", check)
 	}
 }
 
-func TestEffectiveScaleCheckMoleculeQuery(t *testing.T) {
-	// Regression test for GH #505: default scale check must detect
-	// formula-dispatched molecule beads that bd ready excludes.
+func TestEffectiveScaleCheckUsesReadyOnly(t *testing.T) {
+	// Formula-dispatched executable roots must be visible through ready()
+	// as runnable wisps/tasks; molecule containers are not demand.
 	a := Agent{
 		Name:              "worker",
 		Dir:               "myrig",
@@ -1637,28 +1634,24 @@ func TestEffectiveScaleCheckMoleculeQuery(t *testing.T) {
 	}
 	check := a.EffectiveScaleCheck()
 
-	// Must contain blocker-aware ready demand and standalone molecule demand.
 	if !strings.Contains(check, "bd ready") {
 		t.Errorf("missing bd ready query for blocker-aware task counting")
 	}
-	if !strings.Contains(check, "--status=open --type=molecule") {
-		t.Errorf("missing molecule query for formula-dispatched work (GH #505)")
+	if strings.Contains(check, "--status=open --type=molecule") {
+		t.Errorf("unexpected molecule query in scale check: %q", check)
 	}
 	if strings.Contains(check, "--status=in_progress") || strings.Contains(check, "${active:-0}") {
 		t.Errorf("EffectiveScaleCheck = %q, should not count in-progress work as new demand", check)
 	}
 
-	// Both variables must appear in the arithmetic sum.
 	if !strings.Contains(check, "${ready:-0}") {
 		t.Errorf("missing ${ready:-0} in arithmetic sum")
 	}
-	if !strings.Contains(check, "${molecules:-0}") {
-		t.Errorf("missing ${molecules:-0} in arithmetic sum")
+	if strings.Contains(check, "${molecules:-0}") {
+		t.Errorf("unexpected ${molecules:-0} in arithmetic sum")
 	}
-
-	// Molecule query must use the qualified name for routing.
 	if !strings.Contains(check, "gc.routed_to=myrig/worker") {
-		t.Errorf("molecule query missing gc.routed_to=myrig/worker")
+		t.Errorf("ready query missing gc.routed_to=myrig/worker")
 	}
 }
 

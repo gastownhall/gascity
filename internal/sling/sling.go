@@ -814,6 +814,7 @@ func InstantiateSlingFormula(ctx context.Context, formulaName string, searchPath
 		SlingTracef("instantiate decorate-error formula=%s err=%v", formulaName, err)
 		return nil, err
 	}
+	privatizeAttachedRootOnlyWisp(recipe, sourceBeadID)
 	instantiateStart := time.Now()
 	result, err := molecule.Instantiate(ctx, deps.Store, recipe, opts)
 	if err != nil {
@@ -822,6 +823,35 @@ func InstantiateSlingFormula(ctx context.Context, formulaName string, searchPath
 	}
 	SlingTracef("instantiate done formula=%s dur=%s root=%s created=%d graph=%t", formulaName, time.Since(instantiateStart), result.RootID, result.Created, result.GraphWorkflow)
 	return result, nil
+}
+
+func privatizeAttachedRootOnlyWisp(recipe *formula.Recipe, sourceBeadID string) {
+	if recipe == nil || !recipe.RootOnly || strings.TrimSpace(sourceBeadID) == "" || len(recipe.Steps) == 0 {
+		return
+	}
+	root := &recipe.Steps[0]
+	if root.Metadata["gc.kind"] != "wisp" {
+		return
+	}
+	root.Type = "molecule"
+	root.Metadata = mapsCloneWithout(root.Metadata, "gc.kind")
+}
+
+func mapsCloneWithout(in map[string]string, drop string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for key, value := range in {
+		if key == drop {
+			continue
+		}
+		out[key] = value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // ShouldPromoteWorkflowLaunchStatus reports whether a bead's status should

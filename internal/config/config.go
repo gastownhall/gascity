@@ -1785,6 +1785,8 @@ func (a *Agent) AttachEnabled() bool {
 //
 // State priority: in_progress+assigned (crash recovery) >
 // ready+assigned (pre-assigned) > ready+unassigned+routed_to (pool).
+// Formula roots that are themselves executable must be represented as ready()
+// work (for example type=wisp); molecule containers are not routable demand.
 //
 // When the reconciler runs the query for demand detection (no session
 // context), all identity vars are empty → assignee tiers skip → only
@@ -1821,10 +1823,7 @@ func (a *Agent) EffectiveWorkQuery() string {
 			`r=$(bd ready --metadata-field gc.routed_to=` + target +
 			` --unassigned --json --limit=1 2>/dev/null); ` +
 			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-			// Tier 4: open routed molecule roots. scale_check already counts
-			// these, so startup must be able to see them too.
-			`bd list --metadata-field gc.routed_to=` + target +
-			` --status=open --type=molecule --no-assignee --json --limit=1 2>/dev/null'`
+			`printf "[]"'`
 	}
 	return `sh -c '` +
 		// Tier 1: in_progress assigned to any of my identifiers (crash recovery).
@@ -1923,8 +1922,7 @@ func (a *Agent) DrainTimeoutDuration() time.Duration {
 
 // EffectiveScaleCheck returns the scale check command for this agent.
 // If ScaleCheck is set, returns it. Otherwise returns a default that
-// counts new unassigned work routed to this agent's template, including
-// standalone formula-dispatched molecule beads (which bd ready excludes).
+// counts new unassigned work routed to this agent's template via ready().
 // Assigned in-progress work is resumed from session beads, so it must not
 // create additional generic pool demand here.
 func (a *Agent) EffectiveScaleCheck() string {
@@ -1934,9 +1932,7 @@ func (a *Agent) EffectiveScaleCheck() string {
 	template := a.QualifiedName()
 	return `ready=$(bd ready --metadata-field gc.routed_to=` + template +
 		` --unassigned --json 2>/dev/null | jq 'length' 2>/dev/null); ` +
-		`molecules=$(bd list --metadata-field gc.routed_to=` + template +
-		` --status=open --type=molecule --no-assignee --json 2>/dev/null | jq 'length' 2>/dev/null); ` +
-		`echo "$(( ${ready:-0} + ${molecules:-0} ))" || echo 0`
+		`echo "${ready:-0}" || echo 0`
 }
 
 // EffectiveMaxActiveSessions returns the agent's max active sessions.

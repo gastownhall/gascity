@@ -417,7 +417,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 		}
 		// Root bead overrides.
 		if step.IsRoot {
-			if !opts.PreserveRootType && step.Metadata["gc.kind"] != "workflow" {
+			if !opts.PreserveRootType && !preserveExecutableRootType(step) {
 				b.Type = "molecule"
 			}
 			b.Ref = recipe.Name
@@ -817,6 +817,15 @@ func stepToBead(step formula.RecipeStep, vars map[string]string, priorityOverrid
 	}
 
 	return b
+}
+
+func preserveExecutableRootType(step formula.RecipeStep) bool {
+	switch step.Metadata["gc.kind"] {
+	case "workflow", "wisp":
+		return true
+	default:
+		return false
+	}
 }
 
 func validateTimeoutMetadataVars(stepID string, metadata map[string]string) error {

@@ -2406,6 +2406,113 @@ func TestOnFormulaAttachesAndRoutes(t *testing.T) {
 	}
 }
 
+func TestOnRootOnlyFormulaKeepsAttachedWispPrivate(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "root-only.formula.toml"), []byte(`
+formula = "root-only"
+description = "Private attached root"
+version = 1
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		FormulaLayers: config.FormulaLayers{City: []string{dir}},
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+		{ID: "BL-42", Title: "Work", Type: "task", Status: "open"},
+	}, nil)
+	opts := testOpts(a, "BL-42")
+	opts.OnFormula = "root-only"
+	code := doSling(opts, deps, deps.Store, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	source, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("store.Get(BL-42): %v", err)
+	}
+	if source.Metadata["gc.routed_to"] != "mayor" {
+		t.Errorf("source gc.routed_to = %q, want mayor", source.Metadata["gc.routed_to"])
+	}
+	rootID := source.Metadata["molecule_id"]
+	if rootID == "" {
+		t.Fatal("source bead missing molecule_id")
+	}
+	root, err := deps.Store.Get(rootID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", rootID, err)
+	}
+	if root.Type != "molecule" {
+		t.Fatalf("attached root type = %q, want molecule", root.Type)
+	}
+	if root.Metadata["gc.kind"] == "wisp" {
+		t.Fatalf("attached root leaked gc.kind=wisp metadata: %+v", root.Metadata)
+	}
+	ready, err := deps.Store.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	for _, bead := range ready {
+		if bead.ID == rootID {
+			t.Fatalf("attached wisp root %s appeared in Ready(): %+v", rootID, ready)
+		}
+	}
+}
+
+func TestFormulaRootOnlyRoutesRunnableWispRoot(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "root-only.formula.toml"), []byte(`
+formula = "root-only"
+description = "Standalone root"
+version = 1
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		FormulaLayers: config.FormulaLayers{City: []string{dir}},
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	opts := testOpts(a, "root-only")
+	opts.IsFormula = true
+	code := doSling(opts, deps, deps.Store, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	root, err := deps.Store.Get("gc-1")
+	if err != nil {
+		t.Fatalf("store.Get(gc-1): %v", err)
+	}
+	if root.Type != "task" {
+		t.Fatalf("root type = %q, want task", root.Type)
+	}
+	if root.Metadata["gc.kind"] != "wisp" {
+		t.Fatalf("root gc.kind = %q, want wisp", root.Metadata["gc.kind"])
+	}
+	if root.Metadata["gc.routed_to"] != "mayor" {
+		t.Fatalf("root gc.routed_to = %q, want mayor", root.Metadata["gc.routed_to"])
+	}
+	ready, err := deps.Store.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	if len(ready) != 1 || ready[0].ID != root.ID {
+		t.Fatalf("Ready() = %+v, want only routed root %s", ready, root.ID)
+	}
+}
+
 func TestOnFormulaCopiesSourcePriorityToCreatedBeads(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
