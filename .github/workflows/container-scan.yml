@@ -6,6 +6,7 @@ on:
     paths:
       - ".dockerignore"
       - ".trivyignore.yaml"
+      - ".trivyignore-config"
       - ".github/requirements/mcp-agent-mail.in"
       - ".github/requirements/mcp-agent-mail.txt"
       - ".github/scripts/install-*.sh"
@@ -14,6 +15,7 @@ on:
       - "contrib/events-scripts/gc-events-k8s"
       - "contrib/k8s/**"
       - "contrib/mail-scripts/gc-mail-mcp-agent-mail"
+      - "contrib/session-scripts/gc-controller-k8s"
       - "deps.env"
       - "go.mod"
       - "go.sum"
@@ -22,6 +24,7 @@ on:
     paths:
       - ".dockerignore"
       - ".trivyignore.yaml"
+      - ".trivyignore-config"
       - ".github/requirements/mcp-agent-mail.in"
       - ".github/requirements/mcp-agent-mail.txt"
       - ".github/scripts/install-*.sh"
@@ -30,6 +33,7 @@ on:
       - "contrib/events-scripts/gc-events-k8s"
       - "contrib/k8s/**"
       - "contrib/mail-scripts/gc-mail-mcp-agent-mail"
+      - "contrib/session-scripts/gc-controller-k8s"
       - "deps.env"
       - "go.mod"
       - "go.sum"
@@ -70,6 +74,7 @@ jobs:
           mkdir -p trivy-results
           trivy config \
             --severity HIGH,CRITICAL \
+            --ignorefile .trivyignore-config \
             --format sarif \
             --output trivy-results/dockerfile-config.sarif \
             contrib/k8s
@@ -92,6 +97,16 @@ jobs:
         run: |
           trivy config \
             --severity HIGH,CRITICAL \
+            --ignorefile .trivyignore-config \
+            --format table \
+            contrib/k8s
+
+      - name: Enforce Dockerfile and manifest policy
+        run: |
+          trivy config \
+            --severity HIGH,CRITICAL \
+            --ignorefile .trivyignore-config \
+            --exit-code 1 \
             --format table \
             contrib/k8s
 

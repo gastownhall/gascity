@@ -53,3 +53,5 @@ RUN useradd -m -s /bin/bash gcagent \
     && echo "gcagent ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/gcagent \
     && chmod 0440 /etc/sudoers.d/gcagent
 ENV HOME=/home/gcagent
+
+USER gcagent
