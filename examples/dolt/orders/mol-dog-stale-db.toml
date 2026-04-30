@@ -1,6 +1,17 @@
+# Nightly stale-database cleanup. Fires at 03:00 daily — a low-traffic
+# window that gives any spillover a quiet morning to settle.
+#
+# Threshold rationale (revisit after first week of real cadence):
+#   max_orphans_for_sql = 20  conservative; above this the formula
+#                             escalates to mayor instead of forcing.
+#   warn_threshold      = 5   nudges deacon when orphans >= this.
 [order]
-description = "Detect and clean orphan Dolt databases"
+description = "Nightly detect-and-clean of stale Dolt databases and orphan dolt sql-server processes"
 formula = "mol-dog-stale-db"
-trigger = "cooldown"
-interval = "15m"
+trigger = "cron"
+schedule = "0 3 * * *"
 pool = "dog"
+
+[vars]
+max_orphans_for_sql = "20"
+warn_threshold = "5"
