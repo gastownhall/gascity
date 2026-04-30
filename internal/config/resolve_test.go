@@ -696,6 +696,54 @@ func TestResolveProviderChainArgsAppendAffectsResolvedArgs(t *testing.T) {
 	}
 }
 
+func TestResolveProviderChainLeafArgsOverrideInheritedCodexDefaults(t *testing.T) {
+	b := "builtin:codex"
+	city := map[string]ProviderSpec{
+		"codex-mini": {
+			Base:    &b,
+			Command: "aimux",
+			Args: []string{
+				"run", "codex", "--",
+				"--dangerously-bypass-approvals-and-sandbox",
+				"-m", "gpt-5.3-codex-spark",
+				"-c", "model_reasoning_effort=\"medium\"",
+			},
+			ResumeCommand: "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex-spark resume {{.SessionKey}}",
+		},
+	}
+	agent := &Agent{Name: "codex-min", Provider: "codex-mini"}
+	resolved, err := ResolveProvider(agent, nil, city, lookPathAll)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	wantArgs := []string{"run", "codex", "--"}
+	if !reflect.DeepEqual(resolved.Args, wantArgs) {
+		t.Fatalf("Args = %v, want %v", resolved.Args, wantArgs)
+	}
+	if got := resolved.EffectiveDefaults["model"]; got != "gpt-5.3-codex-spark" {
+		t.Fatalf("EffectiveDefaults[model] = %q, want gpt-5.3-codex-spark", got)
+	}
+	if got := resolved.EffectiveDefaults["effort"]; got != "medium" {
+		t.Fatalf("EffectiveDefaults[effort] = %q, want medium", got)
+	}
+	command := resolved.CommandString()
+	if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
+		command = command + " " + strings.Join(defaultArgs, " ")
+	}
+	if strings.Contains(command, "model_reasoning_effort=xhigh") {
+		t.Fatalf("resolved launch command = %q, inherited max effort leaked into mini provider", command)
+	}
+	if strings.Contains(command, "gpt-5.5") {
+		t.Fatalf("resolved launch command = %q, inherited max model leaked into mini provider", command)
+	}
+	if strings.Count(command, "gpt-5.3-codex-spark") != 1 {
+		t.Fatalf("resolved launch command = %q, want one spark model flag", command)
+	}
+	if strings.Count(command, "model_reasoning_effort=medium") != 1 {
+		t.Fatalf("resolved launch command = %q, want one medium effort flag", command)
+	}
+}
+
 func TestMergeProviderOverBuiltinOptionsSchemaByKeyAndOmit(t *testing.T) {
 	base := ProviderSpec{
 		OptionsSchema: []ProviderOption{

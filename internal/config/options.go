@@ -256,9 +256,9 @@ func StripFlags(command string, flags [][]string) string {
 // in declaration order.
 //
 // When a flag is stripped and it maps to a known choice value, if
-// inferDefaults is non-nil and the corresponding key is not already
-// present, the inferred value is set. This preserves user intent
-// during the Args-to-OptionDefaults migration (review major 3.1).
+// inferDefaults is non-nil the inferred value is set. Explicit provider args
+// are the leaf layer in provider inheritance, so they must override defaults
+// inherited from a base provider.
 func stripArgsSlice(args []string, flags [][]string, schema []ProviderOption, inferDefaults map[string]string) []string {
 	var result []string
 	i := 0
@@ -296,14 +296,10 @@ func stripArgsSlice(args []string, flags [][]string, schema []ProviderOption, in
 }
 
 // inferChoiceFromFlags finds which schema option+choice produced the given flag
-// sequence and, if the key is not already present in defaults, sets the
-// inferred value. Only infers from exact full FlagArgs or FlagAliases matches to
-// avoid ambiguity with partial multi-flag matches.
+// sequence and sets the inferred value. Only infers from exact full FlagArgs or
+// FlagAliases matches to avoid ambiguity with partial multi-flag matches.
 func inferChoiceFromFlags(schema []ProviderOption, flagSeq []string, defaults map[string]string) {
 	for _, opt := range schema {
-		if _, exists := defaults[opt.Key]; exists {
-			continue
-		}
 		for _, choice := range opt.Choices {
 			if choiceHasFlagSequence(choice, flagSeq) {
 				defaults[opt.Key] = choice.Value

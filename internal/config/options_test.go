@@ -330,7 +330,7 @@ func TestResolveExplicitOptions_OnlyExplicit(t *testing.T) {
 			Default: "",
 			Choices: []OptionChoice{
 				{Value: "", Label: "Default", FlagArgs: nil},
-				{Value: "opus", Label: "Opus", FlagArgs: []string{"--model", "claude-opus-4-6"}},
+				{Value: "opus", Label: "Opus", FlagArgs: []string{"--model", "claude-opus-4-7"}},
 			},
 		},
 	}
@@ -493,7 +493,7 @@ func TestResolveExplicitOptions_SubsetOfOptions(t *testing.T) {
 			Default: "",
 			Choices: []OptionChoice{
 				{Value: "", Label: "Default", FlagArgs: nil},
-				{Value: "opus", Label: "Opus", FlagArgs: []string{"--model", "claude-opus-4-6"}},
+				{Value: "opus", Label: "Opus", FlagArgs: []string{"--model", "claude-opus-4-7"}},
 			},
 		},
 	}
@@ -505,7 +505,7 @@ func TestResolveExplicitOptions_SubsetOfOptions(t *testing.T) {
 	}
 
 	// Should only return model flags, not permission_mode defaults.
-	wantArgs := []string{"--model", "claude-opus-4-6"}
+	wantArgs := []string{"--model", "claude-opus-4-7"}
 	if len(args) != len(wantArgs) {
 		t.Fatalf("got args=%v, want %v", args, wantArgs)
 	}
@@ -697,27 +697,29 @@ func TestStripArgsSlice_MultiTokenFlag(t *testing.T) {
 	}
 }
 
-func TestStripArgsSlice_ExistingDefaultNotOverridden(t *testing.T) {
+func TestStripArgsSlice_ExplicitArgsOverrideExistingDefault(t *testing.T) {
 	schema := []ProviderOption{
 		{
 			Key: "permission_mode",
 			Choices: []OptionChoice{
 				{Value: "unrestricted", FlagArgs: []string{"--dangerously-skip-permissions"}},
+				{Value: "plan", FlagArgs: []string{"--permission-mode", "plan"}},
 			},
 		},
 	}
 	flags := CollectAllSchemaFlags(schema)
 
 	args := []string{"--dangerously-skip-permissions"}
-	// Pre-populate with an existing default -- should not be overridden.
+	// Pre-populate with an inherited default. The explicit arg is the leaf
+	// provider layer and should override it.
 	inferDefaults := map[string]string{"permission_mode": "plan"}
 	result := stripArgsSlice(args, flags, schema, inferDefaults)
 
 	if len(result) != 0 {
 		t.Errorf("got %v, want []", result)
 	}
-	if inferDefaults["permission_mode"] != "plan" {
-		t.Errorf("existing default should be preserved, got %q", inferDefaults["permission_mode"])
+	if inferDefaults["permission_mode"] != "unrestricted" {
+		t.Errorf("inferred permission_mode: got %q, want unrestricted", inferDefaults["permission_mode"])
 	}
 }
 
