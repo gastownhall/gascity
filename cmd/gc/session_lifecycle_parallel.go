@@ -965,16 +965,23 @@ func stopStaleAsyncStartRuntime(result startResult, sp runtime.Provider, stderr 
 	}
 }
 
+// asyncStartSessionStillCurrent decides whether an async start result should
+// commit against the current bead. Identity is established by instance_token:
+// when the prepared and current tokens both exist and match, the bead is the
+// same session we spawned for, even if the generation has been bumped by a
+// concurrent reconciler phase (which is normal when a wave runs long enough
+// for other phases to write metadata between enqueue and result completion).
+//
+// Rejecting on generation drift alone caused stuck-creating zombies: the
+// process spawned successfully, but the result was discarded as "stale", so
+// pending_create_claim never cleared and the session never advanced past
+// state=creating. Falling back to generation only when the token is absent
+// preserves the prior behavior for callers that pre-date instance_token.
 func asyncStartSessionStillCurrent(prepared, current beads.Bead) bool {
 	if strings.TrimSpace(current.Status) == "closed" {
 		return false
 	}
-	preparedGeneration := strings.TrimSpace(prepared.Metadata["generation"])
-	if preparedGeneration != "" && strings.TrimSpace(current.Metadata["generation"]) != preparedGeneration {
-		return false
-	}
-	preparedToken := strings.TrimSpace(prepared.Metadata["instance_token"])
-	if preparedToken != "" && strings.TrimSpace(current.Metadata["instance_token"]) != preparedToken {
+	if !asyncStartIdentityMatches(prepared, current) {
 		return false
 	}
 	if shouldRollbackPendingCreate(&prepared) && !shouldRollbackPendingCreate(&current) {
@@ -990,12 +997,7 @@ func asyncStartStaleRuntimeCleanupAllowed(prepared, current beads.Bead) bool {
 	if strings.TrimSpace(current.Status) == "closed" {
 		return true
 	}
-	preparedGeneration := strings.TrimSpace(prepared.Metadata["generation"])
-	if preparedGeneration != "" && strings.TrimSpace(current.Metadata["generation"]) != preparedGeneration {
-		return true
-	}
-	preparedToken := strings.TrimSpace(prepared.Metadata["instance_token"])
-	if preparedToken != "" && strings.TrimSpace(current.Metadata["instance_token"]) != preparedToken {
+	if !asyncStartIdentityMatches(prepared, current) {
 		return true
 	}
 	currentState := sessionpkg.State(strings.TrimSpace(current.Metadata["state"]))
@@ -1005,6 +1007,24 @@ func asyncStartStaleRuntimeCleanupAllowed(prepared, current beads.Bead) bool {
 	return !confirmPendingStart(string(currentState)) &&
 		currentState != sessionpkg.StateAwake &&
 		currentState != sessionpkg.StateActive
+}
+
+// asyncStartIdentityMatches reports whether prepared and current describe the
+// same session bead. instance_token is authoritative when both sides have one;
+// only fall back to generation when the prepared bead has no token (legacy
+// pre-instance_token snapshots). Generation drift with a matching token is a
+// normal consequence of concurrent reconciler phases and must not invalidate
+// an in-flight start result.
+func asyncStartIdentityMatches(prepared, current beads.Bead) bool {
+	preparedToken := strings.TrimSpace(prepared.Metadata["instance_token"])
+	if preparedToken != "" {
+		return strings.TrimSpace(current.Metadata["instance_token"]) == preparedToken
+	}
+	preparedGeneration := strings.TrimSpace(prepared.Metadata["generation"])
+	if preparedGeneration == "" {
+		return true
+	}
+	return strings.TrimSpace(current.Metadata["generation"]) == preparedGeneration
 }
 
 func clonePreparedStartForAsync(item preparedStart) preparedStart {
