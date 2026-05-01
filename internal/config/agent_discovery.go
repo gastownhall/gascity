@@ -51,6 +51,7 @@ func DiscoverPackAgents(fs fsys.FS, packDir, _ string, skipNames map[string]bool
 			agent.Name = agentName
 		}
 		applyAgentConventionDefaults(fs, packDir, &agent)
+		agent.source = sourcePack
 
 		discovered = append(discovered, agent)
 	}

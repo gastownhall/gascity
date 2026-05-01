@@ -1978,7 +1978,36 @@ type Agent struct {
 	// Set during V2 import expansion.
 	// Runtime-only — not persisted to TOML or JSON.
 	PackName string `toml:"-" json:"-"`
+	// source records which configuration origin this agent came from
+	// (inline city.toml, an explicit pack import, or an auto-imported
+	// system pack). Stamped once at discovery; consumed by
+	// describeSource to render duplicate-name errors that never carry
+	// an empty quoted path. Unexported so the value is package-private
+	// runtime state and never appears on any wire. (See ga-tpfc.)
+	source agentSource
 }
+
+// agentSource enumerates the configuration origins recognized by
+// describeSource. Discovery sites stamp exactly one value per agent.
+type agentSource uint8
+
+const (
+	// sourceUnknown is the zero value; agents reach validation
+	// without a stamp when they came through a non-discovery code
+	// path (e.g., test fixtures that build Agents directly).
+	sourceUnknown agentSource = iota
+	// sourceInline marks agents declared as inline [[agent]] tables
+	// in the root city.toml.
+	sourceInline
+	// sourcePack marks agents that came from an explicit pack
+	// import or a workspace.includes entry.
+	sourcePack
+	// sourceAutoImport marks agents that came from a binding the
+	// city pack added via [defaults.rig.imports] (e.g., the
+	// gastown system pack). Even though the binding ends up in
+	// city.Imports after composition, the user did not write it.
+	sourceAutoImport
+)
 
 // IdleTimeoutDuration returns the idle timeout as a time.Duration.
 // Returns 0 if empty or unparseable (disabled).
@@ -2619,8 +2648,7 @@ func configuredProviderOrder(providers map[string]ProviderSpec) []string {
 // invalid pool bounds. Uniqueness is keyed on (dir, name) — the same name
 // in different dirs is allowed.
 func ValidateAgents(agents []Agent) error {
-	seen := make(map[agentKey]bool, len(agents))
-	sourceOf := make(map[agentKey]string, len(agents))
+	seen := make(map[agentKey]int, len(agents))
 	for i, a := range agents {
 		if a.Name == "" {
 			return fmt.Errorf("agent[%d]: name is required", i)
@@ -2629,17 +2657,10 @@ func ValidateAgents(agents []Agent) error {
 			return fmt.Errorf("agent %q: name must match [a-zA-Z0-9][a-zA-Z0-9_-]* (no spaces, slashes, or dots)", a.Name)
 		}
 		key := agentKey{dir: a.Dir, name: a.Name}
-		if seen[key] {
-			prev := sourceOf[key]
-			curr := a.SourceDir
-			if prev != "" || curr != "" {
-				return fmt.Errorf("agent %q: duplicate name (from %q and %q)",
-					a.QualifiedName(), prev, curr)
-			}
-			return fmt.Errorf("agent %q: duplicate name", a.QualifiedName())
+		if priorIdx, dup := seen[key]; dup {
+			return formatDuplicateAgentError(agents[priorIdx], a, "", "")
 		}
-		seen[key] = true
-		sourceOf[key] = a.SourceDir
+		seen[key] = i
 		// Scope enum.
 		switch a.Scope {
 		case "", "city", "rig":
@@ -3021,6 +3042,14 @@ func Parse(data []byte) (*City, error) {
 	// Backwards compat: promote deprecated graph_workflows → formula_v2.
 	if cfg.Daemon.GraphWorkflows && !cfg.Daemon.FormulaV2 {
 		cfg.Daemon.FormulaV2 = true
+	}
+	// Stamp source=sourceInline on agents declared via [[agent]] in
+	// the parsed TOML. These are city.toml inline agents (or test
+	// fixtures using Parse directly); pack agents go through a
+	// different parser (parsePackConfigWithMetadata) which does not
+	// stamp source.
+	for i := range cfg.Agents {
+		cfg.Agents[i].source = sourceInline
 	}
 	return &cfg, nil
 }

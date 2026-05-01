@@ -124,6 +124,12 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	cityAgentsForProvenance := root.Agents
 	root.Pricing = dedupePricingByKey(root.Pricing)
 	root.CityPricing = append([]pricing.ModelPricing(nil), root.Pricing...)
+	// defaultBindings names the [defaults.rig.imports] bindings declared
+	// by the city's pack.toml. After expansion, agents whose BindingName
+	// matches one of these names are auto-imports (the user did not
+	// write the [imports.<name>] entry; gc init auto-added it). See
+	// ga-tpfc and the source enum.
+	var defaultBindings map[string]bool
 
 	// V2: if a pack.toml exists alongside city.toml, it is the city's
 	// definition layer. Parse it and merge its content (imports, agents,
@@ -165,6 +171,10 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		var packAgents []Agent
 		for _, a := range pc.Agents {
 			if !cityAgentNames[a.Name] {
+				// Stamp source on the city pack's own [[agent]] blocks
+				// so duplicate-name errors against city.toml inline
+				// agents render a non-empty descriptor (ga-tpfc.1).
+				a.source = sourcePack
 				packAgents = append(packAgents, a)
 			}
 		}
@@ -185,6 +195,12 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		}
 		if len(defaultRigIncludes) > 0 {
 			root.Workspace.DefaultRigIncludes = append(defaultRigIncludes, root.Workspace.DefaultRigIncludes...)
+		}
+		if len(pc.Defaults.Rig.Imports) > 0 {
+			defaultBindings = make(map[string]bool, len(pc.Defaults.Rig.Imports))
+			for name := range pc.Defaults.Rig.Imports {
+				defaultBindings[name] = true
+			}
 		}
 		// Merge pack.toml providers (pack is base, city wins).
 		if len(pc.Providers) > 0 {
@@ -502,6 +518,23 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	root.PackGlobals = append(root.PackGlobals, rootPackGlobals...)
 	applyPackGlobals(root)
 
+	// Refine source provenance for default-binding imports (ga-tpfc).
+	// Discovery stamps every pack-loaded agent as sourcePack; here we
+	// promote the subset that came in via pack.toml's
+	// [defaults.rig.imports] to sourceAutoImport so describeSource can
+	// distinguish them in duplicate-name errors.
+	if len(defaultBindings) > 0 {
+		for i := range root.Agents {
+			a := &root.Agents[i]
+			if a.source != sourcePack || a.BindingName == "" {
+				continue
+			}
+			if defaultBindings[a.BindingName] {
+				a.source = sourceAutoImport
+			}
+		}
+	}
+
 	// Validate city-scoped pack requirements.
 	if err := validateCityRequirements(cityReqs, root.Agents); err != nil {
 		return nil, nil, err
@@ -593,10 +626,32 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		prov.Warnings = append(prov.Warnings, warning)
 	}
 
+	// ga-tpfc.1: promote pack-stamped agents to sourceAutoImport when
+	// their binding came in via implicit-import expansion (the gastown
+	// system pack and similar). describeSource then renders
+	// "<auto-import: …>" for these in duplicate-name errors instead of
+	// the generic "<pack: …>" or empty-string forms. Agents loaded via
+	// loadPackWithCacheOptions arrive with source=sourcePack; we override
+	// based on the post-composition ImplicitImportBindings set so the
+	// override is computed exactly once over the data the loader already
+	// stamped.
+	if len(root.ImplicitImportBindings) > 0 {
+		for i := range root.Agents {
+			a := &root.Agents[i]
+			if a.BindingName == "" {
+				continue
+			}
+			if root.ImplicitImportBindings[a.BindingName] {
+				a.source = sourceAutoImport
+			}
+		}
+	}
+
 	// Capture revision inputs after all config and pack discovery so callers
 	// can compare the loaded snapshot to future reloads without re-reading
 	// mutable files from disk.
 	prov.captureRevisionSnapshot(fs, root, cityRoot)
+
 	return root, prov, nil
 }
 
@@ -1189,6 +1244,13 @@ func parseWithMeta(data []byte, source string) (*City, toml.MetaData, []string, 
 	warnings := agentDefaultsCompatibilityWarnings(md, source)
 	normalizeLegacyOrderOverrideAliases(&cfg)
 	warnings = append(warnings, CheckUndecodedKeys(md, source)...)
+	// Stamp source=sourceInline on inline [[agent]] tables. For fragments,
+	// adjustAgentPaths later sets SourceDir, which takes precedence in
+	// describeSource (FR-1). For the root city.toml, SourceDir is empty
+	// and the inline stamp drives the fallback descriptor (FR-3).
+	for i := range cfg.Agents {
+		cfg.Agents[i].source = sourceInline
+	}
 	return &cfg, md, warnings, nil
 }
 

@@ -1345,6 +1345,10 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		}
 		// Track where this agent's config was defined.
 		agents[i].SourceDir = topoDir
+		// Stamp source provenance (ga-tpfc). expandCityPacks may
+		// later override sourcePack → sourceAutoImport for bindings
+		// that came from [defaults.rig.imports].
+		agents[i].source = sourcePack
 		// Resolve prompt_template paths relative to pack directory.
 		if agents[i].PromptTemplate != "" {
 			agents[i].PromptTemplate = adjustFragmentPath(
