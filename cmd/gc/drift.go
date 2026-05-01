@@ -19,6 +19,10 @@ type SupervisorStatus struct {
 	// predates buildID exposure.
 	BuildID string
 
+	// UptimeSec is the supervisor's reported uptime in seconds. Used to
+	// derive the `started=` token on the operator-facing identity line.
+	UptimeSec int
+
 	// PackRoots reports the supervisor's view of pack roots and when each
 	// was last parsed. The drift detector compares ParsedAt to on-disk
 	// mtime to determine whether the operator edited a pack since the

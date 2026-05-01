@@ -52,12 +52,13 @@ func (c *httpSupervisorClient) Status(ctx context.Context) (SupervisorStatus, er
 		return SupervisorStatus{}, fmt.Errorf("supervisor /health returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var body struct {
-		BuildID string `json:"build_id"`
+		BuildID   string `json:"build_id"`
+		UptimeSec int    `json:"uptime_sec"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return SupervisorStatus{}, fmt.Errorf("decoding supervisor /health: %w", err)
 	}
-	return SupervisorStatus{BuildID: body.BuildID}, nil
+	return SupervisorStatus{BuildID: body.BuildID, UptimeSec: body.UptimeSec}, nil
 }
 
 // Ping issues a GET /health and returns nil iff the response is 2xx.
