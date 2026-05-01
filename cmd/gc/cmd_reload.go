@@ -168,7 +168,13 @@ func sendReloadControlRequest(cityPath string, req reloadControlRequest) (reload
 	if err != nil {
 		return reloadControlReply{}, fmt.Errorf("marshaling request: %w", err)
 	}
-	readTimeout := 15 * time.Second
+	// The client must wait at least as long as the server's accept window
+	// (controllerReloadAcceptTimeout). Otherwise an --async request whose
+	// tick-bound controller cannot drain reloadReqCh in 15s ends up timing
+	// out client-side ("controller is running but not responding: i/o
+	// timeout") before the server has had a chance to write its busy/timeout
+	// reply, hiding the real reason from the operator.
+	readTimeout := controllerReloadAcceptTimeout + 10*time.Second
 	if req.Wait && req.Timeout != "" {
 		timeout, err := time.ParseDuration(req.Timeout)
 		if err != nil {

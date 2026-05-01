@@ -568,6 +568,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 // Trigger identifies which tick site fired so operators can correlate
 // the log with the cause.
 func (cr *CityRuntime) safeTick(fn func(), trigger string) (panicked bool) {
+	start := time.Now()
 	defer func() {
 		if r := recover(); r != nil {
 			panicked = true
@@ -578,10 +579,23 @@ func (cr *CityRuntime) safeTick(fn func(), trigger string) (panicked bool) {
 			fmt.Fprintf(cr.stderr, "%s: reconciler tick panicked (trigger=%s): %v (type=%T)\n%s\n", //nolint:errcheck // best-effort stderr
 				cr.logPrefix, trigger, r, r, debug.Stack())
 		}
+		// Slow ticks block reloadReqCh draining and produce "controller is
+		// busy" rejections. Surface them so operators can correlate slow
+		// reloads with the trigger that ate the budget.
+		if elapsed := time.Since(start); elapsed >= tickSlowThreshold {
+			fmt.Fprintf(cr.stderr, "%s: slow tick (trigger=%s) took %s (>= %s threshold)\n", //nolint:errcheck // best-effort stderr
+				cr.logPrefix, trigger, elapsed.Round(time.Millisecond), tickSlowThreshold)
+		}
 	}()
 	fn()
 	return false
 }
+
+// tickSlowThreshold is the budget above which safeTick emits a stderr
+// warning. Reload accept timeouts (controllerReloadAcceptTimeout, 60s) fire
+// when a tick holds the main goroutine longer than this; surfacing the
+// trigger lets operators identify the responsible reconciler phase.
+const tickSlowThreshold = 2 * time.Second
 
 func convergenceStartupComplete(cr *CityRuntime) bool {
 	return cr.convHandler == nil ||
