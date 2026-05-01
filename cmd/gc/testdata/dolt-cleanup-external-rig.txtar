@@ -12,9 +12,10 @@
 #   6. sync.sh external-rig route discovery (parallel registry path to cleanup.sh)
 #   7. Server-reachability gate (#1549): --force without --server-down-ok refuses when
 #      dolt is unreachable, instead of corrupting NBS state via rm -rf.
-#   8. Identifier safety (#1549): orphans whose name contains characters outside
-#      [A-Za-z0-9_] are refused before any deletion attempt, so an attacker-controlled
-#      metadata.json cannot break out of the backtick-quoted SQL identifier.
+#   8. Identifier safety (#1549): orphans whose name does not match the allowlist
+#      (first char [A-Za-z0-9_], subsequent chars [A-Za-z0-9_-]) are refused before
+#      any deletion attempt, so an attacker-controlled metadata.json cannot break
+#      out of the backtick-quoted SQL identifier.
 #
 # Each scenario uses a separate city initialized from a pre-written TOML template.
 # The pack's cleanup.sh and sync.sh are staged once under $WORK/shared/ and each
@@ -689,16 +690,28 @@ fi
 
 # Mirrors the production server-reachability check (#1549). The fixture's
 # stub runtime.sh does not export GC_DOLT_PORT or the helper functions, so
-# tcp_reachable stays false; --force without --server-down-ok refuses,
-# --force --server-down-ok takes the rm path. The fixture has no live dolt
-# server, so the SQL-DROP branch is exercised by integration tests.
+# probe_available is determined by host nc/python3, and tcp_reachable stays
+# false. With nc OR python3 present + --server-down-ok the rm path runs;
+# without either, the script refuses regardless of --server-down-ok.
 host="${GC_DOLT_HOST:-127.0.0.1}"
 : "${GC_DOLT_USER:=root}"
-sql_args="--host $host --port ${GC_DOLT_PORT:-} --user $GC_DOLT_USER --no-tls"
 export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
 
+dolt_sql_q() {
+  _dolt_sql_q_timeout="$1"; shift
+  run_bounded "$_dolt_sql_q_timeout" \
+    dolt --host "$host" --port "$GC_DOLT_PORT" --user "$GC_DOLT_USER" --no-tls \
+    sql -q "$1"
+}
+
+probe_available=false
+if command -v nc >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1; then
+  probe_available=true
+fi
+
 tcp_reachable=false
-if [ -n "$GC_DOLT_PORT" ] \
+if [ "$probe_available" = true ] \
+  && [ -n "$GC_DOLT_PORT" ] \
   && command -v managed_runtime_tcp_reachable >/dev/null 2>&1 \
   && managed_runtime_tcp_reachable "$GC_DOLT_PORT"; then
   tcp_reachable=true
@@ -708,7 +721,7 @@ sql_works=false
 if [ "$tcp_reachable" = true ] \
   && command -v dolt >/dev/null 2>&1 \
   && command -v run_bounded >/dev/null 2>&1 \
-  && run_bounded 5 dolt $sql_args sql -q "SELECT 1" >/dev/null 2>&1; then
+  && dolt_sql_q 5 "SELECT 1" >/dev/null 2>&1; then
   sql_works=true
 fi
 
@@ -718,6 +731,10 @@ if [ "$sql_works" = true ]; then
 elif [ "$tcp_reachable" = true ]; then
   echo "gc dolt cleanup: dolt is listening on port $GC_DOLT_PORT but 'SELECT 1' failed;" >&2
   echo "  refusing to rm against a potentially-live server (#1549). Fix SQL access or stop dolt and retry." >&2
+  exit 1
+elif [ "$probe_available" = false ]; then
+  echo "gc dolt cleanup: cannot probe TCP reachability (neither nc nor python3 available);" >&2
+  echo "  refusing rm fallback regardless of --server-down-ok — cannot establish 'server is stopped' (#1549)." >&2
   exit 1
 elif [ "$server_down_ok" = true ]; then
   delete_via=rm
@@ -760,11 +777,11 @@ echo "$orphans" | while IFS='|' read -r db_name size path; do
       ;;
   esac
   if [ "$delete_via" = sql ]; then
-    if run_bounded 30 dolt $sql_args sql -q "DROP DATABASE IF EXISTS \`$db_name\`" >/dev/null 2>&1; then
+    if drop_output=$(dolt_sql_q 30 "DROP DATABASE IF EXISTS \`$db_name\`" 2>&1); then
       echo "removed" >> "$removed_tmp"
       echo "  Dropped $db_name"
     else
-      echo "  Failed to drop $db_name via SQL" >&2
+      echo "  Failed to drop $db_name via SQL: ${drop_output:-(no output)}" >&2
     fi
   else
     if rm -rf "$path"; then

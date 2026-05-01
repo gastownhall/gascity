@@ -212,20 +212,41 @@ if [ "$force" != true ]; then
   exit 0
 fi
 
-# Choose deletion strategy. Three ways the probe can land:
+# Choose deletion strategy. Four states the probe can land in (the
+# "cannot probe" state was missed initially — `managed_runtime_tcp_reachable`
+# returns false for both genuinely-unreachable AND no-probe-tool-available,
+# which would otherwise let --server-down-ok rm against a live server on
+# systems missing both nc and python3):
 #   * SELECT 1 succeeds → server is up and answering; SQL DROP is safe.
 #   * Port reachable but SELECT 1 fails → server may still hold open fds;
 #     refuse regardless of --server-down-ok (the flag advertises a STOPPED
 #     server, not an unhealthy one).
+#   * Cannot probe TCP (no nc, no python3) → cannot establish "stopped";
+#     refuse regardless of --server-down-ok.
 #   * Port unreachable → server is stopped; fall back to rm only when the
 #     operator has acknowledged via --server-down-ok.
 host="${GC_DOLT_HOST:-127.0.0.1}"
 : "${GC_DOLT_USER:=root}"
-sql_args="--host $host --port ${GC_DOLT_PORT:-} --user $GC_DOLT_USER --no-tls"
 export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
 
+# dolt_sql_q TIMEOUT QUERY  — invoke dolt CLI with each arg explicitly quoted
+# so neither host nor user (env-controlled) word-splits into adjacent flags
+# even on unexpected values. Stdout/stderr are captured by callers as needed.
+dolt_sql_q() {
+  _dolt_sql_q_timeout="$1"; shift
+  run_bounded "$_dolt_sql_q_timeout" \
+    dolt --host "$host" --port "$GC_DOLT_PORT" --user "$GC_DOLT_USER" --no-tls \
+    sql -q "$1"
+}
+
+probe_available=false
+if command -v nc >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1; then
+  probe_available=true
+fi
+
 tcp_reachable=false
-if [ -n "$GC_DOLT_PORT" ] \
+if [ "$probe_available" = true ] \
+  && [ -n "$GC_DOLT_PORT" ] \
   && command -v managed_runtime_tcp_reachable >/dev/null 2>&1 \
   && managed_runtime_tcp_reachable "$GC_DOLT_PORT"; then
   tcp_reachable=true
@@ -235,7 +256,7 @@ sql_works=false
 if [ "$tcp_reachable" = true ] \
   && command -v dolt >/dev/null 2>&1 \
   && command -v run_bounded >/dev/null 2>&1 \
-  && run_bounded 5 dolt $sql_args sql -q "SELECT 1" >/dev/null 2>&1; then
+  && dolt_sql_q 5 "SELECT 1" >/dev/null 2>&1; then
   sql_works=true
 fi
 
@@ -245,6 +266,11 @@ if [ "$sql_works" = true ]; then
 elif [ "$tcp_reachable" = true ]; then
   echo "gc dolt cleanup: dolt is listening on port $GC_DOLT_PORT but 'SELECT 1' failed;" >&2
   echo "  refusing to rm against a potentially-live server (#1549). Fix SQL access or stop dolt and retry." >&2
+  exit 1
+elif [ "$probe_available" = false ]; then
+  echo "gc dolt cleanup: cannot probe TCP reachability (neither nc nor python3 available);" >&2
+  echo "  refusing rm fallback regardless of --server-down-ok — cannot establish 'server is stopped' (#1549)." >&2
+  echo "  Install nc or python3, or stop dolt and use 'dolt sql -q \"DROP DATABASE\"' against another live instance." >&2
   exit 1
 elif [ "$server_down_ok" = true ]; then
   delete_via=rm
@@ -312,11 +338,13 @@ echo "$orphans" | while IFS='|' read -r db_name size path; do
   esac
 
   if [ "$delete_via" = sql ]; then
-    if run_bounded 30 dolt $sql_args sql -q "DROP DATABASE IF EXISTS \`$db_name\`" >/dev/null 2>&1; then
+    # Capture stdout+stderr so a DROP failure (auth, TLS, unknown-db, etc.)
+    # surfaces actionable detail to the operator instead of a generic message.
+    if drop_output=$(dolt_sql_q 30 "DROP DATABASE IF EXISTS \`$db_name\`" 2>&1); then
       echo "removed" >> "$removed_tmp"
       echo "  Dropped $db_name"
     else
-      echo "  Failed to drop $db_name via SQL" >&2
+      echo "  Failed to drop $db_name via SQL: ${drop_output:-(no output)}" >&2
     fi
   else
     if rm -rf "$path"; then
