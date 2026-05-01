@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -32,16 +33,17 @@ func createPoolSessionBead(
 	}
 	instanceToken := sessionpkg.NewInstanceToken()
 	meta := map[string]string{
-		"template":             template,
-		"agent_name":           template,
-		"state":                "creating",
-		"pending_create_claim": "true",
-		"session_origin":       "ephemeral",
-		"generation":           "1",
-		"continuation_epoch":   "1",
-		"instance_token":       instanceToken,
-		"session_name":         pendingPoolSessionName(template, instanceToken),
-		poolManagedMetadataKey: boolMetadata(true),
+		"template":                  template,
+		"agent_name":                template,
+		"state":                     "creating",
+		"pending_create_claim":      "true",
+		"pending_create_started_at": pendingCreateStartedAtNow(time.Now()),
+		"session_origin":            "ephemeral",
+		"generation":                "1",
+		"continuation_epoch":        "1",
+		"instance_token":            instanceToken,
+		"session_name":              pendingPoolSessionName(template, instanceToken),
+		poolManagedMetadataKey:      boolMetadata(true),
 	}
 	bead, err := store.Create(beads.Bead{
 		Title:    targetBasename(template),

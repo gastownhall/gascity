@@ -385,6 +385,15 @@ func reconcileSessionBeadsTraced(
 	// Phase 1: Forward pass (topo order) — wake sessions, handle alive state.
 	var startCandidates []startCandidate
 	var wakeTargets []wakeTarget
+	// Rate-limit rollbacks per tick. Each rollbackPendingCreate fires three
+	// bd subprocess calls (~2s each at the bd dolt-commit cost), so an
+	// unbounded rollback storm easily blows the tick past
+	// staleCreatingStateTimeout (60s) and starves executePlannedStartsTraced
+	// — fresh pending-create beads age out before op=start fires. Capping
+	// rollbacks per tick lets the rest of the tick make forward progress;
+	// remaining stale beads roll back on subsequent ticks.
+	const maxRollbacksPerTick = 5
+	rollbacksThisTick := 0
 	for i := range ordered {
 		session := &ordered[i]
 
@@ -580,6 +589,11 @@ func reconcileSessionBeadsTraced(
 			}
 		}
 		if alive && shouldRollbackPendingCreate(session) && !runningSessionMatchesPendingCreate(session, name, sp) {
+			if rollbacksThisTick >= maxRollbacksPerTick {
+				fmt.Fprintf(stderr, "session reconciler: deferring rollback of %s (live-runtime mismatch): rollback budget exhausted this tick\n", name) //nolint:errcheck
+				continue
+			}
+			rollbacksThisTick++
 			fmt.Fprintf(stderr, "session reconciler: rolling back pending create %s: live runtime belongs to another session\n", name) //nolint:errcheck
 			if trace != nil {
 				trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, name, "pending_create_rollback", "rollback", nil, nil, "")

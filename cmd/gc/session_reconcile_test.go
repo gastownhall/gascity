@@ -245,6 +245,7 @@ func TestWakeReasons_StaleCreatingWithoutPendingClaimDoesNotWakeCreate(t *testin
 		"session_name": "worker-b1",
 		"state":        "creating",
 	})
+	// Past staleCreatingStateTimeout (60s).
 	session.CreatedAt = now.Add(-2 * time.Minute)
 
 	reasons := wakeReasons(session, &config.City{}, nil, nil, nil, nil, clk)
@@ -280,6 +281,7 @@ func TestWakeReasons_PendingCreateClaimKeepsWakeCreateAfterCreatingGoesStale(t *
 		"state":                "creating",
 		"pending_create_claim": "true",
 	})
+	// Past staleCreatingStateTimeout (60s).
 	session.CreatedAt = now.Add(-2 * time.Minute)
 
 	reasons := wakeReasons(session, &config.City{}, nil, nil, nil, nil, clk)
@@ -1408,6 +1410,7 @@ func TestHealState_StaleCreatingWithoutPendingClaimHealsToAsleep(t *testing.T) {
 	session := makeBead("b1", map[string]string{
 		"state": "creating",
 	})
+	// Past staleCreatingStateTimeout (60s).
 	session.CreatedAt = clk.Now().Add(-2 * time.Minute)
 
 	healState(&session, false, store, clk)
@@ -1481,6 +1484,7 @@ func TestHealStatePatchProjectsRuntimeLiveness(t *testing.T) {
 					"session_key":         "old-key",
 					"started_config_hash": "old-hash",
 				})
+				// Past staleCreatingStateTimeout (60s).
 				b.CreatedAt = now.Add(-2 * time.Minute)
 				return b
 			}(),
