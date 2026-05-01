@@ -2419,6 +2419,12 @@ type StatusBody struct {
 	// Name City name.
 	Name string `json:"name"`
 
+	// Partial True when one or more status backing reads returned incomplete data.
+	Partial *bool `json:"partial,omitempty"`
+
+	// PartialErrors Human-readable errors from incomplete status backing reads.
+	PartialErrors *[]string `json:"partial_errors,omitempty"`
+
 	// Path City directory path.
 	Path string `json:"path"`
 

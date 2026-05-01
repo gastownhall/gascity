@@ -329,12 +329,11 @@ type bdIssueDep struct {
 	DependencyType string `json:"dependency_type"`
 }
 
-// PartialResultError indicates that a list-style bd command succeeded for some
-// entries but its output included entries that failed to parse. The successful
-// entries are still returned alongside this error; callers that handle dropped
-// beads defensively (e.g. the cache reconciler verifying via Get) may proceed
-// with the partial result, while callers that require a complete picture
-// should treat this as a hard failure.
+// PartialResultError indicates that a list-style bd command returned at least
+// one usable entry but also included entries that failed to parse. The
+// successful entries are still returned alongside this error; callers that can
+// surface partial data may proceed with those rows, while callers that require
+// a complete picture should treat this as a hard failure.
 type PartialResultError struct {
 	// Op identifies the bd subcommand that produced the partial result
 	// (e.g. "bd list", "bd ready").
@@ -360,7 +359,8 @@ func (e *PartialResultError) Unwrap() error {
 	return e.Err
 }
 
-func isPartialResultError(err error) bool {
+// IsPartialResult reports whether err wraps a PartialResultError.
+func IsPartialResult(err error) bool {
 	var partial *PartialResultError
 	return errors.As(err, &partial)
 }
@@ -810,6 +810,9 @@ func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 	}
 	filtered := applyListQuery(result, query)
 	if parseErr != nil {
+		if len(filtered) == 0 {
+			return nil, fmt.Errorf("bd list: %w", parseErr)
+		}
 		// Surface partial-parse outcomes so callers can distinguish a complete
 		// list from one that silently dropped entries. Treating a partial list
 		// as authoritative has driven a runaway cache-reconcile loop in the
@@ -890,6 +893,9 @@ func (s *BdStore) Ready() ([]Bead, error) {
 		result = append(result, bead)
 	}
 	if parseErr != nil {
+		if len(result) == 0 {
+			return nil, fmt.Errorf("bd ready: %w", parseErr)
+		}
 		return result, &PartialResultError{Op: "bd ready", Err: parseErr}
 	}
 	return result, nil

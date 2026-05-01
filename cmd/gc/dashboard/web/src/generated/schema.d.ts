@@ -3841,6 +3841,10 @@ export interface components {
             mail: components["schemas"]["StatusMailCounts"];
             /** @description City name. */
             name: string;
+            /** @description True when one or more status backing reads returned incomplete data. */
+            partial?: boolean;
+            /** @description Human-readable errors from incomplete status backing reads. */
+            partial_errors?: string[] | null;
             /** @description City directory path. */
             path: string;
             /**

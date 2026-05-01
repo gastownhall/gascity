@@ -624,6 +624,51 @@ func TestBdStoreListReturnsPartialResultsOnCorruptEntries(t *testing.T) {
 	}
 }
 
+func TestBdStoreListReturnsHardErrorWithoutUsableSurvivors(t *testing.T) {
+	tests := []struct {
+		name string
+		out  []byte
+	}{
+		{
+			name: "malformed top-level json",
+			out:  []byte(`{not-json`),
+		},
+		{
+			name: "all entries corrupt",
+			out: []byte(`[
+				{"id":"bd-bad","title":"bad","status":"open","issue_type":"task","created_at":"not-a-time"}
+			]`),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := fakeRunner(map[string]struct {
+				out []byte
+				err error
+			}{
+				`bd list --json --include-infra --include-gates --limit 0`: {out: tc.out},
+			})
+
+			s := beads.NewBdStore("/city", runner)
+			got, err := s.ListOpen()
+			if err == nil {
+				t.Fatal("ListOpen() error = nil, want hard parse error")
+			}
+			if len(got) != 0 {
+				t.Fatalf("ListOpen() returned %v, want no usable survivors", got)
+			}
+			var partial *beads.PartialResultError
+			if errors.As(err, &partial) {
+				t.Fatalf("ListOpen() error = %v, want hard parse error not *PartialResultError", err)
+			}
+			if !strings.Contains(err.Error(), "bd list") {
+				t.Fatalf("ListOpen() error = %q, want bd list context", err)
+			}
+		})
+	}
+}
+
 func TestBdStoreReadyReturnsPartialResultErrorOnCorruptEntries(t *testing.T) {
 	runner := fakeRunner(map[string]struct {
 		out []byte
@@ -648,6 +693,35 @@ func TestBdStoreReadyReturnsPartialResultErrorOnCorruptEntries(t *testing.T) {
 	}
 	if partial.Op != "bd ready" {
 		t.Errorf("PartialResultError.Op = %q, want %q", partial.Op, "bd ready")
+	}
+}
+
+func TestBdStoreReadyReturnsHardErrorWithoutUsableSurvivors(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd ready --json --limit 0`: {
+			out: []byte(`[
+				{"id":"bd-bad","title":"bad","status":"open","issue_type":"task","created_at":"not-a-time"}
+			]`),
+		},
+	})
+
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.Ready()
+	if err == nil {
+		t.Fatal("Ready() error = nil, want hard parse error")
+	}
+	if len(got) != 0 {
+		t.Fatalf("Ready() returned %v, want no usable survivors", got)
+	}
+	var partial *beads.PartialResultError
+	if errors.As(err, &partial) {
+		t.Fatalf("Ready() error = %v, want hard parse error not *PartialResultError", err)
+	}
+	if !strings.Contains(err.Error(), "bd ready") {
+		t.Fatalf("Ready() error = %q, want bd ready context", err)
 	}
 }
 

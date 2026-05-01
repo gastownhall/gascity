@@ -71,7 +71,7 @@ func (c *CachingStore) runReconciliation() {
 	if err != nil {
 		c.mu.Lock()
 		c.syncFailures++
-		if c.syncFailures >= maxCacheSyncFailures && c.state == cacheLive {
+		if (IsPartialResult(err) || c.syncFailures >= maxCacheSyncFailures) && (c.state == cacheLive || c.state == cachePartial) {
 			c.state = cacheDegraded
 		}
 		c.recordProblemLocked("reconcile cache", err)
@@ -157,6 +157,7 @@ func (c *CachingStore) runReconciliation() {
 
 		c.syncFailures = 0
 		c.depsComplete = useFreshDeps
+		c.primePartialErr = nil
 		if c.state == cacheDegraded {
 			c.state = cacheLive
 		}
@@ -230,6 +231,7 @@ func (c *CachingStore) runReconciliation() {
 	c.beadSeq = make(map[string]uint64)
 	c.deletedSeq = make(map[string]uint64)
 	c.syncFailures = 0
+	c.primePartialErr = nil
 	if c.state == cacheDegraded {
 		c.state = cacheLive
 	}

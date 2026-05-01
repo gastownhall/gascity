@@ -564,6 +564,9 @@ func collectAssignedWorkBeadsWithStores(
 				appendInProgressWorkUnique(cfg, &result, &resultStores, inProgress, seen, s)
 			} else {
 				errs = append(errs, fmt.Errorf("List(in_progress): %w", err))
+				if beads.IsPartialResult(err) && len(inProgress) > 0 {
+					appendInProgressWorkUnique(cfg, &result, &resultStores, inProgress, seen, s)
+				}
 			}
 			// Ready beads with an assignee (queued direct handoff work that is
 			// actually runnable, not merely open). This is a lifecycle gate, so
@@ -572,6 +575,9 @@ func collectAssignedWorkBeadsWithStores(
 				appendAssignedUnique(&result, &resultStores, ready, seen, s)
 			} else {
 				errs = append(errs, fmt.Errorf("Ready(): %w", err))
+				if beads.IsPartialResult(err) && len(ready) > 0 {
+					appendAssignedUnique(&result, &resultStores, ready, seen, s)
+				}
 			}
 			results[idx] = storeAssignedWorkResult{beads: result, stores: resultStores, errs: errs}
 		}()

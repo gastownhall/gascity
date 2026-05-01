@@ -164,6 +164,26 @@ func TestBeadListReturns503OnTotalOutage(t *testing.T) {
 	}
 }
 
+func TestBeadListReturns503OnEmptyPartialTotalOutage(t *testing.T) {
+	fs := newFakeState(t)
+	fs.stores["myrig"] = &failingBeadStore{
+		Store:      fs.stores["myrig"],
+		listResult: []beads.Bead{},
+		listErr: &beads.PartialResultError{
+			Op:  "bd list",
+			Err: errors.New("skipped 1 corrupt bead"),
+		},
+	}
+
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest("GET", cityURL(fs, "/beads"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 503 {
+		t.Errorf("status = %d, want 503 when every backend has zero usable rows (body=%q)", rec.Code, rec.Body.String())
+	}
+}
+
 func TestBeadReadyPreservesPartialResultRows(t *testing.T) {
 	fs := newPartialListState(t, nil, nil)
 	bad := fs.stores["bad"]
@@ -231,6 +251,26 @@ func TestBeadReadySurfacesStoreErrorsAsPartial(t *testing.T) {
 	}
 	if len(body.PartialErrors) == 0 {
 		t.Errorf("PartialErrors empty")
+	}
+}
+
+func TestBeadReadyReturns503OnEmptyPartialTotalOutage(t *testing.T) {
+	fs := newFakeState(t)
+	fs.stores["myrig"] = &failingBeadStore{
+		Store:       fs.stores["myrig"],
+		readyResult: []beads.Bead{},
+		readyErr: &beads.PartialResultError{
+			Op:  "bd ready",
+			Err: errors.New("skipped 1 corrupt bead"),
+		},
+	}
+
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest("GET", cityURL(fs, "/beads/ready"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 503 {
+		t.Errorf("status = %d, want 503 when every backend has zero usable ready rows (body=%q)", rec.Code, rec.Body.String())
 	}
 }
 

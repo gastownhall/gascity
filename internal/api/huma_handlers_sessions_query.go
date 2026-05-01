@@ -25,7 +25,7 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	mgr := s.sessionManager(store)
 	cfg := s.state.Config()
 
-	all, err := listSessionBeadsForReadModel(store)
+	all, partialErrors, err := sessionReadModelRows(store)
 	if err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
@@ -70,7 +70,12 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 		}
 		return &ListOutput[sessionResponse]{
 			Index: s.latestIndex(),
-			Body:  ListBody[sessionResponse]{Items: items, Total: total},
+			Body: ListBody[sessionResponse]{
+				Items:         items,
+				Total:         total,
+				Partial:       len(partialErrors) > 0,
+				PartialErrors: partialErrors,
+			},
 		}, nil
 	}
 
@@ -80,7 +85,13 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	}
 	return &ListOutput[sessionResponse]{
 		Index: s.latestIndex(),
-		Body:  ListBody[sessionResponse]{Items: page, Total: total, NextCursor: nextCursor},
+		Body: ListBody[sessionResponse]{
+			Items:         page,
+			Total:         total,
+			NextCursor:    nextCursor,
+			Partial:       len(partialErrors) > 0,
+			PartialErrors: partialErrors,
+		},
 	}, nil
 }
 

@@ -2578,6 +2578,14 @@ export type StatusBody = {
      */
     name: string;
     /**
+     * True when one or more status backing reads returned incomplete data.
+     */
+    partial?: boolean;
+    /**
+     * Human-readable errors from incomplete status backing reads.
+     */
+    partial_errors?: Array<string> | null;
+    /**
      * City directory path.
      */
     path: string;

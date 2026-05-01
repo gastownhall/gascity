@@ -27,16 +27,17 @@ type CachingStore struct {
 	backing  Store // runtime: always *BdStore; tests may use MemStore
 	idPrefix string
 
-	mu           sync.RWMutex
-	beads        map[string]Bead
-	deps         map[string][]Dep
-	depsComplete bool
-	dirty        map[string]struct{}
-	beadSeq      map[string]uint64
-	deletedSeq   map[string]uint64
-	state        cacheState
-	lastFreshAt  time.Time
-	mutationSeq  uint64
+	mu              sync.RWMutex
+	beads           map[string]Bead
+	deps            map[string][]Dep
+	depsComplete    bool
+	dirty           map[string]struct{}
+	beadSeq         map[string]uint64
+	deletedSeq      map[string]uint64
+	state           cacheState
+	lastFreshAt     time.Time
+	mutationSeq     uint64
+	primePartialErr error
 
 	reconciling  atomic.Bool
 	syncFailures int
@@ -162,12 +163,14 @@ func (c *CachingStore) PrimeActive() error {
 	c.mu.RUnlock()
 
 	var all []Bead
+	var partialErr error
 	for _, status := range []string{"open", "in_progress"} {
 		beads, err := c.backing.List(ListQuery{Status: status})
 		if err != nil {
-			if !isPartialResultError(err) {
+			if !IsPartialResult(err) {
 				return fmt.Errorf("prime active (%s): %w", status, err)
 			}
+			partialErr = errors.Join(partialErr, err)
 			c.recordProblem(fmt.Sprintf("prime active (%s)", status), err)
 		}
 		all = append(all, beads...)
@@ -190,6 +193,7 @@ func (c *CachingStore) PrimeActive() error {
 	if c.state == cacheUninitialized {
 		c.state = cachePartial
 	}
+	c.primePartialErr = partialErr
 	c.markFreshLocked(time.Now())
 	c.updateStatsLocked()
 	return nil
@@ -205,13 +209,15 @@ func (c *CachingStore) Prime(_ context.Context) error {
 
 	var all []Bead
 	var err error
+	var partialErr error
 	for attempt := 1; attempt <= 3; attempt++ {
 		all, err = c.backing.List(ListQuery{AllowScan: true}) // active beads only (default)
 		if err == nil {
 			break
 		}
-		if isPartialResultError(err) {
+		if IsPartialResult(err) {
 			c.recordProblem("prime cache: partial list", err)
+			partialErr = err
 			err = nil
 			break
 		}
@@ -264,6 +270,7 @@ func (c *CachingStore) Prime(_ context.Context) error {
 	c.state = cacheLive
 	c.syncFailures = 0
 	c.stats.SyncFailures = 0
+	c.primePartialErr = partialErr
 	c.markFreshLocked(now)
 	c.updateStatsLocked()
 	return nil

@@ -427,12 +427,12 @@ func TestCachingStorePrimeActiveUsesPartialResultRows(t *testing.T) {
 		t.Fatalf("PrimeActive: %v", err)
 	}
 
-	items, ok := cache.CachedList(ListQuery{AllowScan: true})
-	if !ok {
-		t.Fatal("CachedList ok = false, want primed cache")
-	}
-	if !hasBead(items, open.ID) || !hasBead(items, inProgress.ID) {
-		t.Fatalf("CachedList = %+v, want partial open row and in-progress row", items)
+	cache.mu.RLock()
+	_, hasOpen := cache.beads[open.ID]
+	_, hasInProgress := cache.beads[inProgress.ID]
+	cache.mu.RUnlock()
+	if !hasOpen || !hasInProgress {
+		t.Fatalf("cache.beads has open=%v in_progress=%v, want both partial rows retained", hasOpen, hasInProgress)
 	}
 	stats := cache.Stats()
 	if stats.ProblemCount != 1 {
@@ -463,12 +463,11 @@ func TestCachingStorePrimeUsesPartialResultRows(t *testing.T) {
 		t.Fatalf("Prime: %v", err)
 	}
 
-	items, ok := cache.CachedList(ListQuery{AllowScan: true})
-	if !ok {
-		t.Fatal("CachedList ok = false, want primed cache")
-	}
-	if !hasBead(items, survivor.ID) {
-		t.Fatalf("CachedList = %+v, want partial survivor %s", items, survivor.ID)
+	cache.mu.RLock()
+	_, hasSurvivor := cache.beads[survivor.ID]
+	cache.mu.RUnlock()
+	if !hasSurvivor {
+		t.Fatalf("cache.beads missing partial survivor %s", survivor.ID)
 	}
 	stats := cache.Stats()
 	if stats.ProblemCount != 1 {
@@ -479,6 +478,130 @@ func TestCachingStorePrimeUsesPartialResultRows(t *testing.T) {
 	}
 	if cache.state != cacheLive {
 		t.Fatalf("state = %v, want cacheLive", cache.state)
+	}
+}
+
+func TestCachingStoreCachedListRejectsPartialPrime(t *testing.T) {
+	t.Parallel()
+
+	backing := &partialListErrorStore{
+		Store:            NewMemStore(),
+		partialAllowScan: true,
+	}
+	survivor, err := backing.Create(Bead{Title: "survives partial prime"})
+	if err != nil {
+		t.Fatalf("Create(survivor): %v", err)
+	}
+	if _, err := backing.Create(Bead{Title: "dropped by bd parse"}); err != nil {
+		t.Fatalf("Create(dropped): %v", err)
+	}
+	backing.partialRows = []Bead{survivor}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	items, ok := cache.CachedList(ListQuery{AllowScan: true})
+	if ok {
+		t.Fatalf("CachedList ok = true with items %+v, want ok=false while primePartialErr is set", items)
+	}
+}
+
+func TestCachingStorePrimePartialDoesNotServeActiveListAsComplete(t *testing.T) {
+	t.Parallel()
+
+	backing := &partialListErrorStore{
+		Store:            NewMemStore(),
+		partialAllowScan: true,
+	}
+	survivor, err := backing.Create(Bead{Title: "survives partial prime"})
+	if err != nil {
+		t.Fatalf("Create(survivor): %v", err)
+	}
+	dropped, err := backing.Create(Bead{Title: "dropped by bd parse"})
+	if err != nil {
+		t.Fatalf("Create(dropped): %v", err)
+	}
+	backing.partialRows = []Bead{survivor}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	items, err := cache.List(ListQuery{AllowScan: true})
+	var partial *PartialResultError
+	if !errors.As(err, &partial) {
+		t.Fatalf("List() error = %v, want *PartialResultError after partial prime", err)
+	}
+	if hasBead(items, dropped.ID) {
+		t.Fatalf("List() returned dropped bead %s despite backing partial rows: %+v", dropped.ID, items)
+	}
+	if !hasBead(items, survivor.ID) {
+		t.Fatalf("List() = %+v, want partial survivor %s", items, survivor.ID)
+	}
+}
+
+func TestCachingStorePrimeActivePartialFallsBackForActiveList(t *testing.T) {
+	t.Parallel()
+
+	backing := &partialListErrorStore{
+		Store:           NewMemStore(),
+		partialStatuses: map[string]bool{"open": true},
+	}
+	survivor, err := backing.Create(Bead{Title: "survives partial active prime"})
+	if err != nil {
+		t.Fatalf("Create(survivor): %v", err)
+	}
+	dropped, err := backing.Create(Bead{Title: "dropped from primed status"})
+	if err != nil {
+		t.Fatalf("Create(dropped): %v", err)
+	}
+	backing.partialRows = []Bead{survivor}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	items, err := cache.List(ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("List() error = %v, want clean backing fallback", err)
+	}
+	if !hasBead(items, survivor.ID) || !hasBead(items, dropped.ID) {
+		t.Fatalf("List() = %+v, want backing fallback to return survivor %s and dropped %s", items, survivor.ID, dropped.ID)
+	}
+}
+
+func TestCachingStoreReadyFallsBackAfterPartialPrime(t *testing.T) {
+	t.Parallel()
+
+	backing := &partialListErrorStore{
+		Store:            NewMemStore(),
+		partialAllowScan: true,
+	}
+	survivor, err := backing.Create(Bead{Title: "survives partial prime"})
+	if err != nil {
+		t.Fatalf("Create(survivor): %v", err)
+	}
+	dropped, err := backing.Create(Bead{Title: "dropped by bd parse"})
+	if err != nil {
+		t.Fatalf("Create(dropped): %v", err)
+	}
+	backing.partialRows = []Bead{survivor}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	items, err := cache.Ready()
+	if err != nil {
+		t.Fatalf("Ready() error = %v, want backing fallback success", err)
+	}
+	if !hasBead(items, survivor.ID) || !hasBead(items, dropped.ID) {
+		t.Fatalf("Ready() = %+v, want backing fallback to include survivor %s and dropped %s", items, survivor.ID, dropped.ID)
 	}
 }
 
@@ -503,8 +626,17 @@ func TestCachingStoreRunReconciliationDoesNotTreatPartialResultAsAuthoritative(t
 	}
 
 	backing.partialAllowScan = true
-	backing.partialRows = []Bead{survivor}
-	for i := 0; i < maxCacheSyncFailures; i++ {
+	claimedStatus := "in_progress"
+	if err := backing.Update(survivor.ID, UpdateOpts{Status: &claimedStatus}); err != nil {
+		t.Fatalf("Update(survivor): %v", err)
+	}
+	updatedSurvivor, err := backing.Get(survivor.ID)
+	if err != nil {
+		t.Fatalf("Get(updated survivor): %v", err)
+	}
+	backing.partialRows = []Bead{updatedSurvivor}
+	cache.runReconciliation()
+	for i := 1; i < maxCacheSyncFailures; i++ {
 		cache.runReconciliation()
 	}
 
@@ -512,14 +644,21 @@ func TestCachingStoreRunReconciliationDoesNotTreatPartialResultAsAuthoritative(t
 		if event == "bead.closed:"+dropped.ID {
 			t.Fatalf("partial reconcile emitted synthetic close for dropped row: %v", events)
 		}
+		if event == "bead.updated:"+survivor.ID {
+			t.Fatalf("partial reconcile emitted update for survivor row: %v", events)
+		}
 	}
 	cache.mu.RLock()
 	_, stillCached := cache.beads[dropped.ID]
+	cachedSurvivor := cache.beads[survivor.ID]
 	state := cache.state
 	syncFailures := cache.syncFailures
 	cache.mu.RUnlock()
 	if !stillCached {
 		t.Fatalf("dropped row %s was evicted from cache after partial reconcile", dropped.ID)
+	}
+	if cachedSurvivor.Status == claimedStatus {
+		t.Fatalf("survivor status = %q, want partial reconcile to leave cached status non-authoritative", cachedSurvivor.Status)
 	}
 	if state != cacheDegraded {
 		t.Fatalf("state = %v, want cacheDegraded after repeated partial list failures", state)
@@ -530,6 +669,85 @@ func TestCachingStoreRunReconciliationDoesNotTreatPartialResultAsAuthoritative(t
 	stats := cache.Stats()
 	if stats.ProblemCount != int64(maxCacheSyncFailures) {
 		t.Fatalf("ProblemCount = %d, want %d", stats.ProblemCount, maxCacheSyncFailures)
+	}
+}
+
+func TestCachingStoreRunReconciliationDegradesImmediatelyOnPartialResult(t *testing.T) {
+	t.Parallel()
+
+	backing := &readyCountingPartialListStore{
+		partialListErrorStore: &partialListErrorStore{
+			Store:           NewMemStore(),
+			partialStatuses: map[string]bool{"open": true},
+		},
+	}
+	survivor, err := backing.Create(Bead{Title: "survives partial list"})
+	if err != nil {
+		t.Fatalf("Create(survivor): %v", err)
+	}
+	if _, err := backing.Create(Bead{Title: "dropped by bd parse"}); err != nil {
+		t.Fatalf("Create(dropped): %v", err)
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	backing.partialAllowScan = true
+	backing.partialRows = []Bead{survivor}
+	cache.runReconciliation()
+
+	cache.mu.RLock()
+	state := cache.state
+	cache.mu.RUnlock()
+	if state != cacheDegraded {
+		t.Fatalf("state = %v, want cacheDegraded after one partial reconcile", state)
+	}
+	items, err := cache.List(ListQuery{Status: "open"})
+	if !IsPartialResult(err) {
+		t.Fatalf("List() error = %v, want PartialResultError", err)
+	}
+	if !hasBead(items, survivor.ID) {
+		t.Fatalf("List() = %+v, want survivor %s from backing fallback", items, survivor.ID)
+	}
+	if cached, ok := cache.CachedList(ListQuery{Status: "open"}); ok {
+		t.Fatalf("CachedList() = %+v, true; want unavailable after partial reconcile", cached)
+	}
+	readyCalls := backing.readyCalls
+	if _, err := cache.Ready(); err != nil {
+		t.Fatalf("Ready(): %v", err)
+	}
+	if backing.readyCalls == readyCalls {
+		t.Fatalf("Ready() did not fall back to backing store after partial reconcile")
+	}
+}
+
+func TestCachingStoreRunReconciliationDegradesPartialCache(t *testing.T) {
+	t.Parallel()
+
+	backing := &partialListErrorStore{Store: NewMemStore()}
+	if _, err := backing.Create(Bead{Title: "active bead"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	backing.partialAllowScan = true
+	for i := 0; i < maxCacheSyncFailures; i++ {
+		cache.runReconciliation()
+	}
+
+	cache.mu.RLock()
+	state := cache.state
+	syncFailures := cache.syncFailures
+	cache.mu.RUnlock()
+	if state != cacheDegraded {
+		t.Fatalf("state = %v, want cacheDegraded after repeated partial reconcile failures from cachePartial", state)
+	}
+	if syncFailures != maxCacheSyncFailures {
+		t.Fatalf("syncFailures = %d, want %d", syncFailures, maxCacheSyncFailures)
 	}
 }
 
@@ -798,7 +1016,7 @@ func (s *partialListErrorStore) List(query ListQuery) ([]Bead, error) {
 	if err != nil {
 		return nil, err
 	}
-	if s.partialStatuses[query.Status] || s.partialAllowScan && query.AllowScan {
+	if s.partialStatuses[query.Status] || (s.partialAllowScan && query.AllowScan) {
 		if s.partialRows != nil {
 			items = make([]Bead, len(s.partialRows))
 			for i := range s.partialRows {
@@ -811,6 +1029,16 @@ func (s *partialListErrorStore) List(query ListQuery) ([]Bead, error) {
 		}
 	}
 	return items, nil
+}
+
+type readyCountingPartialListStore struct {
+	*partialListErrorStore
+	readyCalls int
+}
+
+func (s *readyCountingPartialListStore) Ready() ([]Bead, error) {
+	s.readyCalls++
+	return s.partialListErrorStore.Ready()
 }
 
 func hasBead(items []Bead, id string) bool {

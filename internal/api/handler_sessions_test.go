@@ -64,6 +64,110 @@ func (s *cachedOnlyListStoreForSessionTest) CachedList(query beads.ListQuery) ([
 	return rows, true
 }
 
+type partialPrimeSessionStore struct {
+	*beads.MemStore
+	partialRows    []beads.Bead
+	labelListCalls int
+}
+
+func (s *partialPrimeSessionStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	rows, err := s.MemStore.List(query)
+	if err != nil {
+		return nil, err
+	}
+	if query.AllowScan || query.Label == session.LabelSession {
+		if query.Label == session.LabelSession {
+			s.labelListCalls++
+		}
+		if s.partialRows != nil {
+			rows = append([]beads.Bead(nil), s.partialRows...)
+		}
+		return rows, &beads.PartialResultError{
+			Op:  "bd list",
+			Err: errors.New("skipped 1 corrupt bead"),
+		}
+	}
+	return rows, nil
+}
+
+func TestListSessionBeadsForReadModelFallsBackAfterPartialCachePrime(t *testing.T) {
+	t.Parallel()
+
+	backing := &partialPrimeSessionStore{MemStore: beads.NewMemStore()}
+	survivor, err := backing.Create(beads.Bead{
+		Title:  "session survivor",
+		Labels: []string{session.LabelSession},
+	})
+	if err != nil {
+		t.Fatalf("Create(survivor): %v", err)
+	}
+	if _, err := backing.Create(beads.Bead{
+		Title:  "dropped session",
+		Labels: []string{session.LabelSession},
+	}); err != nil {
+		t.Fatalf("Create(dropped): %v", err)
+	}
+	backing.partialRows = []beads.Bead{survivor}
+
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	rows, err := listSessionBeadsForReadModel(cache)
+	var partial *beads.PartialResultError
+	if !errors.As(err, &partial) {
+		t.Fatalf("listSessionBeadsForReadModel error = %v, want *PartialResultError", err)
+	}
+	if backing.labelListCalls != 1 {
+		t.Fatalf("label List calls = %d, want 1 backing fallback after partial prime", backing.labelListCalls)
+	}
+	if len(rows) != 1 || rows[0].ID != survivor.ID {
+		t.Fatalf("rows = %+v, want partial survivor %s", rows, survivor.ID)
+	}
+}
+
+func TestHandleSessionListPreservesPartialRows(t *testing.T) {
+	fs := newSessionFakeState(t)
+	store := &partialPrimeSessionStore{MemStore: beads.NewMemStore()}
+	fs.cityBeadStore = store
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	info := createTestSession(t, store, fs.sp, "Session survivor")
+	survivor, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", info.ID, err)
+	}
+	store.partialRows = []beads.Bead{survivor}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", cityURL(fs, "/sessions"), nil)
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Items         []sessionResponse `json:"items"`
+		Total         int               `json:"total"`
+		Partial       bool              `json:"partial"`
+		PartialErrors []string          `json:"partial_errors"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !body.Partial {
+		t.Fatal("partial = false, want true")
+	}
+	if len(body.PartialErrors) == 0 {
+		t.Fatal("partial_errors empty")
+	}
+	if body.Total != 1 || len(body.Items) != 1 || body.Items[0].ID != info.ID {
+		t.Fatalf("body = %+v, want surviving session %s", body, info.ID)
+	}
+}
+
 func writeGeminiHistoryFixtureForAPI(t *testing.T, path, sessionID string, messages ...string) {
 	t.Helper()
 

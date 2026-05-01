@@ -58,7 +58,7 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 			pa.attempt()
 			list, err := store.List(query)
 			if err != nil {
-				if isBeadPartialResult(err) {
+				if beads.IsPartialResult(err) && len(list) > 0 {
 					pa.record("rig "+rigName, err)
 					pa.success()
 				} else {
@@ -136,7 +136,7 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 		pa.attempt()
 		ready, err := beads.ReadyLive(stores[rigName])
 		if err != nil {
-			if isBeadPartialResult(err) {
+			if beads.IsPartialResult(err) && len(ready) > 0 {
 				pa.record("rig "+rigName, err)
 				pa.success()
 			} else {
@@ -166,11 +166,6 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 			PartialErrors: pa.messages(),
 		},
 	}, nil
-}
-
-func isBeadPartialResult(err error) bool {
-	var partial *beads.PartialResultError
-	return errors.As(err, &partial)
 }
 
 // humaHandleBeadGraph is the Huma-typed handler for GET /v0/beads/graph/{rootID}.

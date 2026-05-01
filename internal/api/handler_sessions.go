@@ -208,7 +208,7 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	templateFilter := q.Get("template")
 	wantPeek := q.Get("peek") == "true"
 
-	all, err := listSessionBeadsForReadModel(store)
+	all, partialErrors, err := sessionReadModelRows(store)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
@@ -234,14 +234,25 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 		if pp.Limit < len(items) {
 			items = items[:pp.Limit]
 		}
-		writeJSON(w, http.StatusOK, listResponse{Items: items, Total: len(items)})
+		writeJSON(w, http.StatusOK, listResponse{
+			Items:         items,
+			Total:         len(items),
+			Partial:       len(partialErrors) > 0,
+			PartialErrors: partialErrors,
+		})
 		return
 	}
 	page, total, nextCursor := paginate(items, pp)
 	if page == nil {
 		page = []sessionResponse{}
 	}
-	writeJSON(w, http.StatusOK, listResponse{Items: page, Total: total, NextCursor: nextCursor})
+	writeJSON(w, http.StatusOK, listResponse{
+		Items:         page,
+		Total:         total,
+		NextCursor:    nextCursor,
+		Partial:       len(partialErrors) > 0,
+		PartialErrors: partialErrors,
+	})
 }
 
 func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {

@@ -6201,6 +6201,20 @@
             "description": "City name.",
             "type": "string"
           },
+          "partial": {
+            "description": "True when one or more status backing reads returned incomplete data.",
+            "type": "boolean"
+          },
+          "partial_errors": {
+            "description": "Human-readable errors from incomplete status backing reads.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "path": {
             "description": "City directory path.",
             "type": "string"
