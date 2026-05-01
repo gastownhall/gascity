@@ -198,8 +198,17 @@ func hasCacheEventField(fields map[string]json.RawMessage, name string) bool {
 }
 
 func decodeCacheEvent(payload json.RawMessage) (Bead, map[string]json.RawMessage, error) {
+	eventPayload := payload
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return Bead{}, nil, err
+	}
+	if beadPayload, ok := envelope["bead"]; ok {
+		eventPayload = beadPayload
+	}
+
 	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(payload, &fields); err != nil {
+	if err := json.Unmarshal(eventPayload, &fields); err != nil {
 		return Bead{}, nil, err
 	}
 	var wire struct {
@@ -207,7 +216,7 @@ func decodeCacheEvent(payload json.RawMessage) (Bead, map[string]json.RawMessage
 		Metadata   StringMap `json:"metadata,omitempty"`
 		TypeCompat string    `json:"type,omitempty"`
 	}
-	if err := json.Unmarshal(payload, &wire); err != nil {
+	if err := json.Unmarshal(eventPayload, &wire); err != nil {
 		return Bead{}, nil, err
 	}
 	b := wire.Bead

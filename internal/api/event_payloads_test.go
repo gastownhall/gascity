@@ -54,3 +54,28 @@ func TestDecodeBeadEventPayloadLegacyRawBead(t *testing.T) {
 		t.Fatalf("metadata state = %q, want awake", payload.Bead.Metadata["state"])
 	}
 }
+
+func TestDecodeBeadEventPayloadCoercesNonStringMetadata(t *testing.T) {
+	raw := json.RawMessage(`{"bead":{"id":"bd-123","title":"test bead","status":"open","issue_type":"session","created_at":"2026-04-26T21:37:46Z","metadata":{"generation":3,"pending_create_claim":true,"wake_attempts":0}}}`)
+
+	got, registered, err := events.DecodePayload(events.BeadUpdated, raw)
+	if err != nil {
+		t.Fatalf("DecodePayload: %v", err)
+	}
+	if !registered {
+		t.Fatal("registered = false, want true")
+	}
+	payload, ok := got.(BeadEventPayload)
+	if !ok {
+		t.Fatalf("payload = %T, want BeadEventPayload", got)
+	}
+	if payload.Bead.Metadata["generation"] != "3" {
+		t.Fatalf("generation = %q, want 3", payload.Bead.Metadata["generation"])
+	}
+	if payload.Bead.Metadata["pending_create_claim"] != "true" {
+		t.Fatalf("pending_create_claim = %q, want true", payload.Bead.Metadata["pending_create_claim"])
+	}
+	if payload.Bead.Metadata["wake_attempts"] != "0" {
+		t.Fatalf("wake_attempts = %q, want 0", payload.Bead.Metadata["wake_attempts"])
+	}
+}

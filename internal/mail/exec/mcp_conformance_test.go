@@ -323,6 +323,7 @@ export GC_MCP_MAIL_PROJECT="` + projectKey + `"
 // mcpMockCurl returns a mock curl script that simulates mcp_agent_mail v0.3.0.
 // Matches the real API: ensure_project uses human_key, register_agent accepts
 // name+program+model, send_message returns deliveries format,
+// authenticated agent operations require the returned registration token,
 // acknowledge_message requires agent_name, get_message is removed.
 func mcpMockCurl(stateDir string) string {
 	return `#!/usr/bin/env bash
@@ -339,6 +340,22 @@ next_id() {
 
 now_ts() {
   date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "2026-02-28T12:00:00Z"
+}
+
+token_for() {
+  local name="$1"
+  printf 'token-%s' "$name"
+}
+
+require_token() {
+  local action="$1" name="$2" token="$3" param="$4"
+  if [ -z "$token" ] || [ "$token" != "$(token_for "$name")" ]; then
+    jq -n --arg action "$action" --arg name "$name" --arg param "$param" '{
+      jsonrpc: "2.0", id: 1,
+      error: {code: -32000, message: ($action + " requires " + $param + " for agent " + $name)}
+    }'
+    exit 0
+  fi
 }
 
 # Parse curl args to extract URL and data.
@@ -372,10 +389,11 @@ if [[ "$url" == */mcp ]] && [ -n "$data" ]; then
       if [ -z "$name" ]; then
         name="AutoAgent$(next_id)"
       fi
+      token="$(token_for "$name")"
       echo "$name" > "$STATE_DIR/agents/$name"
-      jq -n --arg name "$name" '{
+      jq -n --arg name "$name" --arg token "$token" '{
         jsonrpc: "2.0", id: 1,
-        result: { content: [{type: "text", text: ({"id": 1, "name": $name, "program": "gc", "model": "agent"} | tojson)}] }
+        result: { content: [{type: "text", text: ({"id": 1, "name": $name, "program": "gc", "model": "agent", "registration_token": $token} | tojson)}] }
       }'
       ;;
 
@@ -390,6 +408,8 @@ if [[ "$url" == */mcp ]] && [ -n "$data" ]; then
     send_message)
       id=$(next_id)
       sender=$(echo "$args" | jq -r '.sender_name')
+      sender_token=$(echo "$args" | jq -r '.sender_token // empty')
+      require_token "send_message" "$sender" "$sender_token" "sender_token"
       to=$(echo "$args" | jq -r '.to[0]')
       subject=$(echo "$args" | jq -r '.subject')
       body_md=$(echo "$args" | jq -r '.body_md')
@@ -421,6 +441,8 @@ if [[ "$url" == */mcp ]] && [ -n "$data" ]; then
 
     fetch_inbox)
       name=$(echo "$args" | jq -r '.agent_name')
+      registration_token=$(echo "$args" | jq -r '.registration_token // empty')
+      require_token "fetch_inbox" "$name" "$registration_token" "registration_token"
       include_bodies=$(echo "$args" | jq -r '.include_bodies // false')
       # Return ALL messages for this recipient (the script does local
       # read/archived filtering). mcp_agent_mail returns all messages too.
@@ -444,6 +466,9 @@ if [[ "$url" == */mcp ]] && [ -n "$data" ]; then
       ;;
 
     acknowledge_message)
+      name=$(echo "$args" | jq -r '.agent_name')
+      registration_token=$(echo "$args" | jq -r '.registration_token // empty')
+      require_token "acknowledge_message" "$name" "$registration_token" "registration_token"
       mid=$(echo "$args" | jq -r '.message_id')
       file="$STATE_DIR/messages/$mid.json"
       if [ ! -f "$file" ]; then
@@ -464,6 +489,9 @@ if [[ "$url" == */mcp ]] && [ -n "$data" ]; then
       ;;
 
     mark_message_read)
+      name=$(echo "$args" | jq -r '.agent_name')
+      registration_token=$(echo "$args" | jq -r '.registration_token // empty')
+      require_token "mark_message_read" "$name" "$registration_token" "registration_token"
       mid=$(echo "$args" | jq -r '.message_id')
       file="$STATE_DIR/messages/$mid.json"
       if [ ! -f "$file" ]; then

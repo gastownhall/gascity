@@ -1467,6 +1467,50 @@ func TestCachingStoreApplyEventCoercesNonStringMetadata(t *testing.T) {
 	}
 }
 
+func TestCachingStoreApplyEventAcceptsWrappedHookPayload(t *testing.T) {
+	t.Parallel()
+	mem := beads.NewMemStore()
+	created, err := mem.Create(beads.Bead{Title: "message"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	cs := beads.NewCachingStoreForTest(mem, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"bead": map[string]any{
+			"id":         created.ID,
+			"title":      "message",
+			"status":     "open",
+			"issue_type": "message",
+			"metadata": map[string]any{
+				"mail.read": false,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	cs.ApplyEvent("bead.updated", payload)
+
+	stats := cs.Stats()
+	if stats.ProblemCount != 0 {
+		t.Fatalf("ProblemCount = %d, want 0 (last problem: %s)", stats.ProblemCount, stats.LastProblem)
+	}
+
+	got := requireCachedBead(t, cs, created.ID, false)
+	if got.Type != "message" {
+		t.Fatalf("Type = %q, want message", got.Type)
+	}
+	if got.Metadata["mail.read"] != "false" {
+		t.Fatalf("mail.read = %q, want false; metadata=%v", got.Metadata["mail.read"], got.Metadata)
+	}
+}
+
 func requireCachedBead(t *testing.T, cs *beads.CachingStore, id string, includeClosed bool) beads.Bead {
 	t.Helper()
 	items, err := cs.List(beads.ListQuery{AllowScan: true, IncludeClosed: includeClosed})

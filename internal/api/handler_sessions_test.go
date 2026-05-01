@@ -1934,7 +1934,7 @@ func TestHandleSessionCreateProviderReturns202WithRequestID(t *testing.T) {
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
 
-	body := `{"kind":"provider","name":"claude","project_id":"alpha","title":"contract test","alias":"contract-test"}`
+	body := `{"kind":"provider","name":"test-agent","project_id":"alpha","title":"contract test","alias":"contract-test"}`
 	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
