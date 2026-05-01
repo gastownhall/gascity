@@ -30,6 +30,7 @@ gc [flags]
 | [gc convoy](#gc-convoy) | Manage convoys — graphs of related work |
 | [gc dashboard](#gc-dashboard) | Web dashboard for monitoring the supervisor and managed cities |
 | [gc doctor](#gc-doctor) | Check workspace health |
+| [gc dolt-cleanup](#gc-dolt-cleanup) | Find and remove orphaned Dolt databases (Go-side core) |
 | [gc event](#gc-event) | Event operations |
 | [gc events](#gc-events) | Show events from the GC API |
 | [gc formula](#gc-formula) | Manage and inspect formulas |
@@ -909,6 +910,33 @@ gc doctor
 |------|------|---------|-------------|
 | `--fix` | bool |  | attempt to fix issues automatically |
 | `-v`, `--verbose` | bool |  | show extra diagnostic details |
+
+## gc dolt-cleanup
+
+gc dolt-cleanup is the Go-side implementation of the operational Dolt
+cleanup tool. It resolves the Dolt server port via the AD-04 chain
+(--port &gt; city dolt.port &gt; &lt;rigRoot&gt;/.beads/dolt-server.port &gt; 3307),
+drops stale test/agent databases, calls DOLT_PURGE_DROPPED_DATABASES
+to reclaim disk, and reaps orphaned dolt sql-server processes left
+over from leaked test harnesses.
+
+Dry-run by default. Pass --force to actually drop, purge, and kill.
+Active rig dolt servers, registered rig databases, and processes
+outside the test-config-path allowlist are always protected — see
+the PROTECTED section of the report.
+
+JSON envelope schema is stable: gc.dolt.cleanup.v1.
+
+```
+gc dolt-cleanup [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--force` | bool |  | actually drop, purge, and kill orphaned resources (default: dry-run) |
+| `--json` | bool |  | emit JSON envelope (gc.dolt.cleanup.v1) |
+| `--port` | string |  | override the resolved Dolt port |
+| `--probe` | bool |  | TCP-probe the resolved port; fail if unreachable |
 
 ## gc event
 
