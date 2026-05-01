@@ -379,6 +379,11 @@ func (cs *controllerState) updateFromRuntime(cfg *config.City, sp runtime.Provid
 			}
 		}
 	}
+	if cs.runtimeUpdateCanReuseCurrentStores(cfg) {
+		cs.updateConfigAndProviderOnly(cfg, sp)
+		cs.clearConfigMutationPending()
+		return
+	}
 	cs.update(cfg, sp)
 	cs.clearConfigMutationPending()
 }
@@ -480,6 +485,12 @@ type storeTopologyRig struct {
 
 func sameStoreTopology(cityPath string, current, next *config.City) bool {
 	if current == nil || next == nil {
+		return false
+	}
+	if strings.TrimSpace(current.Beads.Provider) != strings.TrimSpace(next.Beads.Provider) {
+		return false
+	}
+	if strings.TrimSpace(current.Mail.Provider) != strings.TrimSpace(next.Mail.Provider) {
 		return false
 	}
 	if config.EffectiveHQPrefix(current) != config.EffectiveHQPrefix(next) {

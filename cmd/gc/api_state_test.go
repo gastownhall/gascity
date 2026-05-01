@@ -262,6 +262,53 @@ func TestControllerStateRuntimeUpdateAfterMutationPreservesCurrentStores(t *test
 	}
 }
 
+func TestControllerStateRuntimeUpdatePreservesCurrentStoresWithoutPendingMutation(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "alpha")
+	current := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+		Rigs: []config.Rig{{
+			Name:   "alpha",
+			Path:   rigDir,
+			Prefix: "al",
+		}},
+	}
+	rigStore := beads.NewMemStore()
+	cityStore := beads.NewMemStore()
+	cs := &controllerState{
+		cfg:           current,
+		sp:            runtime.NewFake(),
+		beadStores:    map[string]beads.Store{"alpha": rigStore},
+		cityBeadStore: cityStore,
+		cityName:      "city1",
+		cityPath:      cityDir,
+	}
+
+	next := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+		Rigs: []config.Rig{{
+			Name:   "alpha",
+			Path:   rigDir,
+			Prefix: "al",
+		}},
+	}
+	nextProvider := runtime.NewFake()
+	cs.updateFromRuntime(next, nextProvider, "next-rev")
+
+	if got := cs.BeadStore("alpha"); got != rigStore {
+		t.Fatalf("BeadStore(alpha) = %T %p, want original store %T %p", got, got, rigStore, rigStore)
+	}
+	if got := cs.CityBeadStore(); got != cityStore {
+		t.Fatalf("CityBeadStore() = %T %p, want original store %T %p", got, got, cityStore, cityStore)
+	}
+	if cs.Config() != next {
+		t.Fatal("Config() was not advanced to runtime snapshot")
+	}
+	if cs.SessionProvider() != nextProvider {
+		t.Fatal("SessionProvider() was not advanced to runtime provider")
+	}
+}
+
 func TestControllerStateCreateRigPokesReconciler(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 
