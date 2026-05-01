@@ -151,7 +151,7 @@ func TestConfigFingerprintIgnoresGCAlias(t *testing.T) {
 	if CoreFingerprint(base) != CoreFingerprint(withAlias) {
 		t.Error("GC_ALIAS should not affect core config fingerprint")
 	}
-	if CoreFingerprintBreakdown(base)["Env"] != CoreFingerprintBreakdown(withAlias)["Env"] {
+	if CoreFingerprintBreakdown(base).Fields["Env"] != CoreFingerprintBreakdown(withAlias).Fields["Env"] {
 		t.Error("GC_ALIAS should not affect core env fingerprint breakdown")
 	}
 }
@@ -437,8 +437,8 @@ func TestCoreFingerprintBreakdownConsistency(t *testing.T) {
 			}
 			// Core hashes differ — at least one breakdown field must differ.
 			anyDiff := false
-			for field, va := range bdA {
-				if va != bdB[field] {
+			for field, va := range bdA.Fields {
+				if va != bdB.Fields[field] {
 					anyDiff = true
 					break
 				}
@@ -833,14 +833,14 @@ func TestCoreFingerprintDriftFields(t *testing.T) {
 		CopyFiles: []CopyEntry{{RelDst: "bar", Probed: true, ContentHash: "newhash"}},
 	}
 	stored := CoreFingerprintBreakdown(current)
-	stored["CopyFiles"] = "oldhash"
+	stored.Fields["CopyFiles"] = "oldhash"
 
 	got := CoreFingerprintDriftFields(stored, current)
 	if len(got) != 1 || got[0] != "CopyFiles" {
 		t.Fatalf("CoreFingerprintDriftFields = %v, want [CopyFiles]", got)
 	}
 
-	if got := CoreFingerprintDriftFields(nil, current); len(got) != 0 {
+	if got := CoreFingerprintDriftFields(BreakdownV1{}, current); len(got) != 0 {
 		t.Fatalf("CoreFingerprintDriftFields with missing breakdown = %v, want empty", got)
 	}
 }

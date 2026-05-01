@@ -56,13 +56,13 @@ func TestAcceptConfigDriftAcrossSessions_UpdatesStaleHash(t *testing.T) {
 	if updated.Metadata["started_config_hash"] != wantHash {
 		t.Errorf("started_config_hash = %q, want %q", updated.Metadata["started_config_hash"], wantHash)
 	}
-	var gotBreakdown map[string]string
+	var gotBreakdown runtime.BreakdownV1
 	if err := json.Unmarshal([]byte(updated.Metadata["core_hash_breakdown"]), &gotBreakdown); err != nil {
 		t.Fatalf("core_hash_breakdown is not valid JSON: %v", err)
 	}
 	wantBreakdown := runtime.CoreFingerprintBreakdown(runtime.Config{Command: "new-cmd"})
-	if gotBreakdown["Command"] != wantBreakdown["Command"] {
-		t.Errorf("core_hash_breakdown[Command] = %q, want %q", gotBreakdown["Command"], wantBreakdown["Command"])
+	if gotBreakdown.Fields["Command"] != wantBreakdown.Fields["Command"] {
+		t.Errorf("core_hash_breakdown[Command] = %q, want %q", gotBreakdown.Fields["Command"], wantBreakdown.Fields["Command"])
 	}
 }
 

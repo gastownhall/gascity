@@ -1220,12 +1220,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}
 						fmt.Fprintf(stderr, "config-drift %s: stored=%s current=%s cmd=%q\n", name, truncateHashForLog(storedHash), truncateHashForLog(currentHash), agentCfg.Command) //nolint:errcheck
 						// Diagnostic: log per-field breakdown to identify the drifting field.
-						var storedBreakdown map[string]string
-						if raw := session.Metadata["core_hash_breakdown"]; raw != "" {
-							_ = json.Unmarshal([]byte(raw), &storedBreakdown)
-						}
-						driftedFields := runtime.CoreFingerprintDriftFields(storedBreakdown, agentCfg)
-						runtime.LogCoreFingerprintDrift(stderr, name, storedBreakdown, agentCfg)
+						driftedFields := runtime.CoreFingerprintDriftFieldsFromJSON(session.Metadata["core_hash_breakdown"], agentCfg)
+						runtime.LogCoreFingerprintDrift(stderr, name, session.Metadata["core_hash_breakdown"], agentCfg)
 						restartedInPlace := false
 						// Attached sessions never get config-drift restarts.
 						// The human will restart when ready; drift applies
@@ -1447,11 +1443,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							}
 							continue
 						}
-						var storedBreakdown map[string]string
-						if raw := session.Metadata["core_hash_breakdown"]; raw != "" {
-							_ = json.Unmarshal([]byte(raw), &storedBreakdown)
-						}
-						driftedFields := runtime.CoreFingerprintDriftFields(storedBreakdown, agentCfg)
+						driftedFields := runtime.CoreFingerprintDriftFieldsFromJSON(session.Metadata["core_hash_breakdown"], agentCfg)
 						resetConfiguredNamedSessionForConfigDrift(session, store, sp, name, false, "asleep", clk.Now().UTC(), stderr)
 						if trace != nil {
 							trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "repair_in_place", configDriftTracePayload(storedHash, currentHash, driftedFields, nil), nil, "")
