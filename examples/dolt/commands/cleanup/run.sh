@@ -239,7 +239,7 @@ if [ "$tcp_reachable" = true ] \
   sql_works=true
 fi
 
-delete_via=""
+unset delete_via
 if [ "$sql_works" = true ]; then
   delete_via=sql
 elif [ "$tcp_reachable" = true ]; then
@@ -254,12 +254,26 @@ else
   echo "  Either start dolt and re-run, or pass --server-down-ok if the server is intentionally stopped." >&2
   exit 1
 fi
+# Belt-and-suspenders: a future edit that opens a fall-through path here would
+# silently route to the rm branch below, re-introducing the corruption #1549
+# fixes. Crash loudly instead.
+case "${delete_via:-}" in
+  sql|rm) ;;
+  *) echo "gc dolt cleanup: internal error — delete_via not set" >&2; exit 1 ;;
+esac
 
 # Remove each orphan. Track refusals and successful removals via tmpfiles so
-# the subshell's counters survive (the pipe creates a subshell).
+# the subshell's counters survive (the pipe creates a subshell). Identifier-
+# safety refusals are tracked separately because they signal "DB in an
+# impossible state" (manual fs mucking, corrupted metadata, attempted
+# injection) and must surface as a non-zero exit even when other orphans were
+# removed successfully — overlap-allowlist refusals stay on the existing
+# partial-progress semantics ("did the batch make as much progress as it
+# could").
 refused_tmp=$(mktemp)
 removed_tmp=$(mktemp)
-trap 'rm -f "$allowlist_file" "$refused_tmp" "$removed_tmp"' EXIT
+unsafe_tmp=$(mktemp)
+trap 'rm -f "$allowlist_file" "$refused_tmp" "$removed_tmp" "$unsafe_tmp"' EXIT
 echo "$orphans" | while IFS='|' read -r db_name size path; do
   [ -z "$db_name" ] && continue
 
@@ -277,11 +291,22 @@ echo "$orphans" | while IFS='|' read -r db_name size path; do
   # Identifier safety: dolt_database flows from operator-controlled metadata.json
   # straight into a backtick-quoted SQL identifier. Reject anything outside the
   # safe charset before interpolating, so an embedded backtick or semicolon
-  # cannot break out of the quoted identifier into arbitrary SQL.
+  # cannot break out of the quoted identifier into arbitrary SQL. Charset
+  # matches `valid_database_name` in commands/gc-nudge/run.sh so a name probed
+  # by `gc dolt health` or nudged by `gc dolt gc-nudge` is also reachable here.
   case "$db_name" in
-    ''|*[!A-Za-z0-9_]*)
-      echo "refusing to remove '$db_name': name contains forbidden characters (allowed: A-Z, a-z, 0-9, _)" >&2
-      echo "refused" >> "$refused_tmp"
+    [A-Za-z0-9_]*)
+      case "$db_name" in
+        *[!A-Za-z0-9_-]*)
+          echo "refusing to remove '$db_name': name contains forbidden characters (allowed: A-Z, a-z, 0-9, _, -)" >&2
+          echo "unsafe" >> "$unsafe_tmp"
+          continue
+          ;;
+      esac
+      ;;
+    *)
+      echo "refusing to remove '$db_name': name must start with [A-Za-z0-9_]" >&2
+      echo "unsafe" >> "$unsafe_tmp"
       continue
       ;;
   esac
@@ -303,15 +328,23 @@ echo "$orphans" | while IFS='|' read -r db_name size path; do
   fi
 done
 
-# Count removed and refused (the removal loop runs in a subshell, so the
-# parent shell reads back through the tmpfiles).
+# Count removed, refused (allowlist), and unsafe (identifier-safety) (the
+# removal loop runs in a subshell, so the parent shell reads back through the
+# tmpfiles).
 removed=$(wc -l < "$removed_tmp" | tr -d ' ')
 refused_count=$(wc -l < "$refused_tmp" | tr -d ' ')
+unsafe_count=$(wc -l < "$unsafe_tmp" | tr -d ' ')
 echo ""
 echo "Removed $removed of $orphan_count orphaned database(s)."
 
-# Exit non-zero if any orphan was refused or failed to remove.
-if [ "$removed" -lt "$((orphan_count - refused_count))" ] \
+# Exit non-zero when:
+#   * any unsafe identifier was found — DB in an impossible state, demands
+#     operator attention even if other orphans were removed, OR
+#   * any orphan failed to remove (count math doesn't add up — silent failure
+#     in the loop), OR
+#   * the entire batch was refused (no progress made).
+if [ "$unsafe_count" -gt 0 ] \
+  || [ "$removed" -lt "$((orphan_count - refused_count - unsafe_count))" ] \
   || { [ "$refused_count" -gt 0 ] && [ "$removed" -eq 0 ]; }; then
   exit 1
 fi

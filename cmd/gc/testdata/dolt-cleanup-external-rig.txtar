@@ -194,11 +194,20 @@ exists $WORK/city7/.beads/dolt/orphan_db
 # ==========================================================================
 # Scenario 8: Identifier safety (#1549)
 # ==========================================================================
-# city8 has two orphans:
-#   safe_orphan       — passes the [A-Za-z0-9_] charset check
-#   bad-name-orphan   — contains a hyphen, would inject if interpolated into
-#                       backtick-quoted SQL. Must be refused before any
-#                       deletion attempt and must remain on disk.
+# city8 has three orphans:
+#   safe_orphan         — pure [A-Za-z0-9_]; allowed
+#   ok-hyphen-orphan    — internal hyphen; allowed (matches health/gc-nudge)
+#   _leading_unsafe     — staged on disk under a non-conforming directory name
+#                         that fails the leading-charset check. Must be refused
+#                         before any deletion attempt and must remain on disk.
+# Because at least one orphan was refused as unsafe, the script must exit
+# non-zero even though the safe orphans were removed — identifier-safety
+# refusals signal "DB in an impossible state" (manual fs mucking, corrupted
+# metadata, attempted injection) and demand operator attention.
+#
+# The leading-unsafe orphan's directory name uses a leading hyphen, which the
+# new regex rejects via the `[A-Za-z0-9_]*` first-char gate. The directory is
+# staged inside the test environment via a separate metadata.json fragment.
 
 exec gc init --file $WORK/city8-cfg.toml $WORK/city8
 stdout 'Welcome to Gas City'
@@ -208,11 +217,18 @@ cd $WORK/city8
 cp $WORK/shared/cleanup.sh $WORK/city8/packs/dolt/commands/cleanup.sh
 chmod 755 $WORK/city8/packs/dolt/commands/cleanup.sh
 
-exec gc dolt cleanup --force --server-down-ok
+# Stage the leading-hyphen orphan dir at runtime (txtar -- markers can't carry
+# leading-hyphen path segments without ambiguity).
+mkdir $WORK/city8/.beads/dolt/-leading-unsafe
+mkdir $WORK/city8/.beads/dolt/-leading-unsafe/.dolt
+
+! exec gc dolt cleanup --force --server-down-ok
 stdout 'Removed safe_orphan'
-stderr 'name contains forbidden characters'
+stdout 'Removed ok-hyphen-orphan'
+stderr 'name must start with'
 ! exists $WORK/city8/.beads/dolt/safe_orphan
-exists $WORK/city8/.beads/dolt/bad-name-orphan
+! exists $WORK/city8/.beads/dolt/ok-hyphen-orphan
+exists $WORK/city8/.beads/dolt/-leading-unsafe
 
 # ===========================================================================
 # Shared fixture: external-rig (used by city1 and city3)
@@ -491,7 +507,7 @@ includes = ["packs/dolt"]
 
 -- city8/.beads/dolt/city8_db/.dolt/.keep --
 -- city8/.beads/dolt/safe_orphan/.dolt/.keep --
--- city8/.beads/dolt/bad-name-orphan/.dolt/.keep --
+-- city8/.beads/dolt/ok-hyphen-orphan/.dolt/.keep --
 
 -- city8/packs/dolt/pack.toml --
 [pack]
@@ -696,7 +712,7 @@ if [ "$tcp_reachable" = true ] \
   sql_works=true
 fi
 
-delete_via=""
+unset delete_via
 if [ "$sql_works" = true ]; then
   delete_via=sql
 elif [ "$tcp_reachable" = true ]; then
@@ -711,9 +727,14 @@ else
   echo "  Either start dolt and re-run, or pass --server-down-ok if the server is intentionally stopped." >&2
   exit 1
 fi
+case "${delete_via:-}" in
+  sql|rm) ;;
+  *) echo "gc dolt cleanup: internal error — delete_via not set" >&2; exit 1 ;;
+esac
 
 refused_tmp=$(mktemp)
 removed_tmp=$(mktemp)
+unsafe_tmp=$(mktemp)
 echo "$orphans" | while IFS='|' read -r db_name size path; do
   [ -z "$db_name" ] && continue
   overlap=$(overlapping_rig_path "$path")
@@ -723,9 +744,18 @@ echo "$orphans" | while IFS='|' read -r db_name size path; do
     continue
   fi
   case "$db_name" in
-    ''|*[!A-Za-z0-9_]*)
-      echo "refusing to remove '$db_name': name contains forbidden characters (allowed: A-Z, a-z, 0-9, _)" >&2
-      echo "refused" >> "$refused_tmp"
+    [A-Za-z0-9_]*)
+      case "$db_name" in
+        *[!A-Za-z0-9_-]*)
+          echo "refusing to remove '$db_name': name contains forbidden characters (allowed: A-Z, a-z, 0-9, _, -)" >&2
+          echo "unsafe" >> "$unsafe_tmp"
+          continue
+          ;;
+      esac
+      ;;
+    *)
+      echo "refusing to remove '$db_name': name must start with [A-Za-z0-9_]" >&2
+      echo "unsafe" >> "$unsafe_tmp"
       continue
       ;;
   esac
@@ -748,10 +778,12 @@ done
 
 removed=$(wc -l < "$removed_tmp" | tr -d ' ')
 refused_count=$(wc -l < "$refused_tmp" | tr -d ' ')
+unsafe_count=$(wc -l < "$unsafe_tmp" | tr -d ' ')
 echo ""
 echo "Removed $removed of $orphan_count orphaned database(s)."
 
-if [ "$removed" -lt "$((orphan_count - refused_count))" ] \
+if [ "$unsafe_count" -gt 0 ] \
+  || [ "$removed" -lt "$((orphan_count - refused_count - unsafe_count))" ] \
   || { [ "$refused_count" -gt 0 ] && [ "$removed" -eq 0 ]; }; then
   exit 1
 fi

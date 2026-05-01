@@ -105,14 +105,14 @@ the server's NBS lock):
 ```bash
 gc dolt cleanup --force --max <count>
 ```
-If `gc dolt cleanup` refuses with `dolt server unreachable`, the dolt server
-is stopped — do NOT pass `--server-down-ok` to bypass the refusal while it
-might still be running (rm -rf against a live data dir corrupts NBS state,
-#1549). Escalate instead so an operator can confirm the server is truly
-stopped before falling back:
+If `gc dolt cleanup` returns `dolt server unreachable`, STOP. Do NOT retry
+with `--server-down-ok` in this formula. Escalate immediately. Only a human
+operator may use `--server-down-ok` after independently verifying the dolt
+server process is stopped and the port is closed — running rm -rf against a
+live data dir corrupts NBS state and crash-loops the journal (#1549).
 ```bash
 gc mail send mayor/ -s "ESCALATION: <count> orphan databases detected, dolt unreachable [HIGH]" \\
-  -m "Too many orphans for inline SQL cleanup AND gc dolt cleanup refused (server unreachable). Operator must confirm dolt is stopped, then re-run with --server-down-ok."
+  -m "Too many orphans for inline SQL cleanup AND gc dolt cleanup refused (server unreachable). Operator must confirm dolt is stopped (process gone AND port closed), then re-run with --server-down-ok."
 ```
 
 **4. Record results:**
