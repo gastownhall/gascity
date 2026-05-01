@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -1593,6 +1594,49 @@ func waitForController(t *testing.T, dir string) {
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
+	}
+}
+
+// TestTryReloadConfigIncludesBuiltinPacks pins the supervisor's reload
+// path to also auto-include bootstrap packs (core, maintenance, bd),
+// matching what loadCityConfigWithBuiltinPacks does for CLI commands.
+//
+// Regression guard for: rig-scoped agent prompts referencing fragments
+// from core/template-fragments/ failed lookup at supervisor render time
+// because tryReloadConfig only forwarded extraConfigFiles to
+// config.LoadWithIncludes, omitting builtinPackIncludes(cityRoot). With
+// only the user's own pack dirs in cfg.PackDirs, prompt.go's per-pack
+// template-fragments scan never reached core, and any append_fragments
+// referencing names defined under core/template-fragments/ failed
+// "template not found".
+func TestTryReloadConfigIncludesBuiltinPacks(t *testing.T) {
+	dir := t.TempDir()
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
+	}
+	tomlPath := writeCityTOML(t, dir, "test", "mayor")
+
+	result, err := tryReloadConfig(tomlPath, "test", dir)
+	if err != nil {
+		t.Fatalf("tryReloadConfig: %v", err)
+	}
+	if result == nil || result.Cfg == nil {
+		t.Fatalf("tryReloadConfig returned nil result/cfg")
+	}
+
+	systemRoot := filepath.Join(dir, citylayout.SystemPacksRoot)
+	wantCore := filepath.Join(systemRoot, "core")
+
+	found := false
+	for _, p := range result.Cfg.PackDirs {
+		if p == wantCore {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("Cfg.PackDirs missing core pack: got %v, want path %q present",
+			result.Cfg.PackDirs, wantCore)
 	}
 }
 
