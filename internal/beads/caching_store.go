@@ -165,7 +165,10 @@ func (c *CachingStore) PrimeActive() error {
 	for _, status := range []string{"open", "in_progress"} {
 		beads, err := c.backing.List(ListQuery{Status: status})
 		if err != nil {
-			return fmt.Errorf("prime active (%s): %w", status, err)
+			if !isPartialResultError(err) {
+				return fmt.Errorf("prime active (%s): %w", status, err)
+			}
+			c.recordProblem(fmt.Sprintf("prime active (%s)", status), err)
 		}
 		all = append(all, beads...)
 	}
@@ -205,6 +208,11 @@ func (c *CachingStore) Prime(_ context.Context) error {
 	for attempt := 1; attempt <= 3; attempt++ {
 		all, err = c.backing.List(ListQuery{AllowScan: true}) // active beads only (default)
 		if err == nil {
+			break
+		}
+		if isPartialResultError(err) {
+			c.recordProblem("prime cache: partial list", err)
+			err = nil
 			break
 		}
 		c.recordProblem(fmt.Sprintf("prime cache attempt %d/3", attempt), err)

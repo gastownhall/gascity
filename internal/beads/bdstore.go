@@ -360,6 +360,11 @@ func (e *PartialResultError) Unwrap() error {
 	return e.Err
 }
 
+func isPartialResultError(err error) bool {
+	var partial *PartialResultError
+	return errors.As(err, &partial)
+}
+
 // parseIssuesTolerant unmarshals a JSON array of bdIssue objects, skipping
 // any entries that fail to parse (e.g. corrupt metadata with non-string values).
 // This prevents a single bad bead from breaking all list operations.

@@ -1402,6 +1402,35 @@ func TestCachingStoreListIncludeClosedFallsBackToCachedMatches(t *testing.T) {
 	}
 }
 
+func TestCachingStoreListIncludeClosedPreservesPartialBackingRows(t *testing.T) {
+	t.Parallel()
+	backing := &partialIncludeClosedMetadataStore{MemStore: beads.NewMemStore()}
+	open, _ := backing.Create(beads.Bead{Title: "open workflow"})
+	_ = backing.SetMetadata(open.ID, "gc.kind", "workflow")
+	closed, _ := backing.Create(beads.Bead{Title: "closed workflow"})
+	_ = backing.SetMetadata(closed.ID, "gc.kind", "workflow")
+	if err := backing.Close(closed.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	cs := beads.NewCachingStoreForTest(backing, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	results, err := cs.List(beads.ListQuery{
+		Metadata:      map[string]string{"gc.kind": "workflow"},
+		IncludeClosed: true,
+	})
+	var partial *beads.PartialResultError
+	if !errors.As(err, &partial) {
+		t.Fatalf("List(include closed) error = %v, want *PartialResultError", err)
+	}
+	if !containsBeadID(results, open.ID) || !containsBeadID(results, closed.ID) {
+		t.Fatalf("results = %+v, want cached active row and partial closed backing row", results)
+	}
+}
+
 type failingIncludeClosedMetadataStore struct {
 	*beads.MemStore
 }
@@ -1411,6 +1440,33 @@ func (s *failingIncludeClosedMetadataStore) List(query beads.ListQuery) ([]beads
 		return nil, errors.New("history unavailable")
 	}
 	return s.MemStore.List(query)
+}
+
+type partialIncludeClosedMetadataStore struct {
+	*beads.MemStore
+}
+
+func (s *partialIncludeClosedMetadataStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	items, err := s.MemStore.List(query)
+	if err != nil {
+		return nil, err
+	}
+	if query.IncludeClosed && len(query.Metadata) > 0 {
+		return items, &beads.PartialResultError{
+			Op:  "bd list",
+			Err: errors.New("skipped 1 corrupt bead"),
+		}
+	}
+	return items, nil
+}
+
+func containsBeadID(items []beads.Bead, id string) bool {
+	for _, item := range items {
+		if item.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func strPtr(s string) *string { return &s }

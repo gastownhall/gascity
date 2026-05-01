@@ -8,8 +8,9 @@ import (
 
 // List returns beads matching the query. Active-bead queries are served from
 // cache when available. IncludeClosed queries merge cached active results with
-// backing-store history when possible so callers keep the old best-effort
-// behavior from ListByLabel/ListByMetadata during transient bd failures.
+// backing-store history when possible, preserving partial backing rows when bd
+// reports corrupt entries and retaining cache-only fallback for transient
+// non-partial bd failures.
 func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
@@ -43,16 +44,16 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 		}
 		c.mu.RUnlock()
 
-		finish := func(items []Bead) ([]Bead, error) {
+		finish := func(items []Bead, err error) ([]Bead, error) {
 			sortBeadsForQuery(items, query.Sort)
 			if query.Limit > 0 && len(items) > query.Limit {
 				items = items[:query.Limit]
 			}
-			return items, nil
+			return items, err
 		}
 
 		if !query.IncludesClosed() {
-			return finish(cached)
+			return finish(cached, nil)
 		}
 
 		// The cache never has a complete closed-only or parent-history view, so
@@ -63,7 +64,9 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 
 		all, err := c.backing.List(query)
 		if err != nil {
-			return finish(cached)
+			if !isPartialResultError(err) {
+				return finish(cached, nil)
+			}
 		}
 
 		seen := make(map[string]bool, len(cached))
@@ -77,7 +80,7 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 			cached = append(cached, b)
 			seen[b.ID] = true
 		}
-		return finish(cached)
+		return finish(cached, err)
 	}
 	c.mu.RUnlock()
 	return c.backing.List(query)
