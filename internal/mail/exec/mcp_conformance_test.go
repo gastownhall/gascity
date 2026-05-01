@@ -30,7 +30,7 @@ func TestMCPMailConformance(t *testing.T) {
 
 		// State directory for the mock curl.
 		stateDir := filepath.Join(dir, "state")
-		for _, sub := range []string{"agents", "messages"} {
+		for _, sub := range []string{"agents", "messages", "contacts"} {
 			if err := os.MkdirAll(filepath.Join(stateDir, sub), 0o755); err != nil {
 				t.Fatal(err)
 			}
@@ -81,7 +81,8 @@ func TestMCPMailBridgeSourceable(t *testing.T) {
 		`declare -f gc_to_mcp_name >/dev/null && ` +
 		`declare -f mcp_to_gc_name >/dev/null && ` +
 		`declare -f ensure_agent >/dev/null && ` +
-		`declare -f build_name_map_json >/dev/null`
+		`declare -f build_name_map_json >/dev/null && ` +
+		`declare -f ensure_contact >/dev/null`
 	cmd := osexec.Command("bash", "-c", check, "bash", scriptPath)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -117,7 +118,7 @@ func TestMCPMailCrossPodNameResolution(t *testing.T) {
 
 	// Shared mock MCP state — both "pods" talk to the same mock server.
 	stateDir := filepath.Join(dir, "state")
-	for _, sub := range []string{"agents", "messages"} {
+	for _, sub := range []string{"agents", "messages", "contacts"} {
 		if err := os.MkdirAll(filepath.Join(stateDir, sub), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -210,7 +211,7 @@ func TestMCPMailProjectKeyIsolation(t *testing.T) {
 	// so both "pods" see each other's messages regardless of project value.
 	// This lets us isolate the cache-sharing behavior from mcp-side routing.
 	stateDir := filepath.Join(dir, "state")
-	for _, sub := range []string{"agents", "messages"} {
+	for _, sub := range []string{"agents", "messages", "contacts"} {
 		if err := os.MkdirAll(filepath.Join(stateDir, sub), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -358,6 +359,23 @@ require_token() {
   fi
 }
 
+contact_file() {
+  local from="$1" to="$2"
+  printf '%s/contact-%s-%s' "$STATE_DIR/contacts" "$from" "$to"
+}
+
+require_contact() {
+  local from="$1" to="$2"
+  [ "$from" = "$to" ] && return 0
+  if [ ! -f "$(contact_file "$from" "$to")" ]; then
+    jq -n --arg from "$from" --arg to "$to" '{
+      jsonrpc: "2.0", id: 1,
+      error: {code: -32000, message: ("Contact approval required for recipients: " + $to + " from " + $from)}
+    }'
+    exit 0
+  fi
+}
+
 # Parse curl args to extract URL and data.
 url="" data=""
 while [ $# -gt 0 ]; do
@@ -411,6 +429,7 @@ if [[ "$url" == */mcp ]] && [ -n "$data" ]; then
       sender_token=$(echo "$args" | jq -r '.sender_token // empty')
       require_token "send_message" "$sender" "$sender_token" "sender_token"
       to=$(echo "$args" | jq -r '.to[0]')
+      require_contact "$sender" "$to"
       subject=$(echo "$args" | jq -r '.subject')
       body_md=$(echo "$args" | jq -r '.body_md')
       ts=$(now_ts)
@@ -435,6 +454,24 @@ if [[ "$url" == */mcp ]] && [ -n "$data" ]; then
         result: { content: [{type: "text", text: ({
           deliveries: [{project: $project, payload: $msg}],
           count: 1
+        } | tojson)}] }
+      }'
+      ;;
+
+    macro_contact_handshake)
+      requester=$(echo "$args" | jq -r '.requester // .agent_name // empty')
+      target=$(echo "$args" | jq -r '.target // .to_agent // empty')
+      requester_token=$(echo "$args" | jq -r '.requester_registration_token // empty')
+      target_token=$(echo "$args" | jq -r '.target_registration_token // empty')
+      require_token "macro_contact_handshake requester approval" "$requester" "$requester_token" "requester_registration_token"
+      require_token "macro_contact_handshake target approval" "$target" "$target_token" "target_registration_token"
+      printf approved > "$(contact_file "$requester" "$target")"
+      jq -n --arg from "$requester" --arg to "$target" '{
+        jsonrpc: "2.0", id: 1,
+        result: { content: [{type: "text", text: ({
+          request: {from: $from, to: $to, status: "approved"},
+          response: {from: $from, to: $to, status: "approved"},
+          welcome_message: null
         } | tojson)}] }
       }'
       ;;

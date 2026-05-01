@@ -183,6 +183,36 @@ require_agent_token() {
   echo "$token"
 }
 
+# ensure_contact approves a sender->recipient contact link before delivery.
+# mcp_agent_mail's default contact policy can reject first-contact sends, so
+# the bridge uses both cached registration tokens to perform the same
+# explicit handshake a human-facing MCP session would perform.
+ensure_contact() {
+  local from_gc="$1" to_gc="$2"
+  [ "$from_gc" != "$to_gc" ] || return 0
+
+  local mcp_from mcp_to requester_token target_token
+  mcp_from=$(gc_to_mcp_name "$from_gc")
+  mcp_to=$(gc_to_mcp_name "$to_gc")
+  requester_token=$(require_agent_token "$from_gc")
+  target_token=$(require_agent_token "$to_gc")
+
+  mcp_call "macro_contact_handshake" "$(jq -n \
+    --arg project "$PROJECT" \
+    --arg requester "$mcp_from" \
+    --arg target "$mcp_to" \
+    --arg requester_token "$requester_token" \
+    --arg target_token "$target_token" \
+    '{
+      project_key: $project,
+      requester: $requester,
+      target: $target,
+      auto_accept: true,
+      requester_registration_token: $requester_token,
+      target_registration_token: $target_token
+    }')" > /dev/null
+}
+
 # --- Helpers ---
 
 # mcp_call invokes an MCP tool via JSON-RPC and returns the text content.
@@ -322,6 +352,7 @@ case "$op" in
     ensure_agent "$to"
     mcp_from=$(gc_to_mcp_name "$from")
     mcp_to=$(gc_to_mcp_name "$to")
+    ensure_contact "$from" "$to"
     sender_token=$(require_agent_token "$from")
 
     # Use subject for mcp subject, body for body_md.
@@ -672,6 +703,7 @@ case "$op" in
     ensure_agent "$gc_reply_to"
     mcp_from=$(gc_to_mcp_name "$from")
     mcp_to=$(gc_to_mcp_name "$gc_reply_to")
+    ensure_contact "$from" "$gc_reply_to"
     sender_token=$(require_agent_token "$from")
 
     mcp_subject="${subject:-$body}"
