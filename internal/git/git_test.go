@@ -332,6 +332,18 @@ func TestHasUnpushedCommits_NoRemote(t *testing.T) {
 	}
 }
 
+func TestHasUnpushedCommitsResult_ReturnsProbeError(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(dir))
+	g := New(dir)
+	if _, err := g.HasUnpushedCommitsResult(); err == nil {
+		t.Fatal("HasUnpushedCommitsResult() error = nil, want probe error")
+	}
+	if !g.HasUnpushedCommits() {
+		t.Error("HasUnpushedCommits() should fail closed on probe errors")
+	}
+}
+
 func TestHasStashes_NoneWhenClean(t *testing.T) {
 	repo := initTestRepo(t)
 	g := New(repo)
@@ -352,6 +364,18 @@ func TestHasStashes_DetectsStash(t *testing.T) {
 	g := New(repo)
 	if !g.HasStashes() {
 		t.Error("HasStashes() = false for repo with stash, want true")
+	}
+}
+
+func TestHasStashesResult_ReturnsProbeError(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(dir))
+	g := New(dir)
+	if _, err := g.HasStashesResult(); err == nil {
+		t.Fatal("HasStashesResult() error = nil, want probe error")
+	}
+	if !g.HasStashes() {
+		t.Error("HasStashes() should fail closed on probe errors")
 	}
 }
 

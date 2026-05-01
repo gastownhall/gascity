@@ -308,6 +308,9 @@ func (c *WorktreeDiskSizeCheck) Run(ctx *CheckContext) *CheckResult {
 	for _, e := range measureErrs {
 		details = append(details, "measure error: "+e)
 	}
+	if len(measureErrs) > 0 && status < StatusWarning {
+		status = StatusWarning
+	}
 
 	r.Status = status
 	switch status {
@@ -317,10 +320,16 @@ func (c *WorktreeDiskSizeCheck) Run(ctx *CheckContext) *CheckResult {
 		r.Details = details
 		r.FixHint = "investigate .gc/worktrees/<rig>/ for build-artifact accumulation; consider routing builds out of worktrees, periodic clean steps, or running `gc doctor --fix` to remove safely-prunable nested worktrees"
 	case StatusWarning:
-		r.Message = fmt.Sprintf("%d rig(s) approaching worktree size limit (largest: %q at %s)",
-			overThreshold, sizes[0].name, humanSize(sizes[0].bytes))
+		if overThreshold > 0 {
+			r.Message = fmt.Sprintf("%d rig(s) approaching worktree size limit (largest: %q at %s)",
+				overThreshold, sizes[0].name, humanSize(sizes[0].bytes))
+			r.FixHint = "see fix hint for nested-worktree-prune; tune [doctor].worktree_rig_warn_size if 10 GB is too tight for this install"
+		} else {
+			r.Message = fmt.Sprintf("could not measure %d rig worktree path(s) (largest measured: %q at %s)",
+				len(measureErrs), sizes[0].name, humanSize(sizes[0].bytes))
+			r.FixHint = "check filesystem permissions on .gc/worktrees/<rig>/"
+		}
 		r.Details = details
-		r.FixHint = "see fix hint for nested-worktree-prune; tune [doctor].worktree_rig_warn_size if 10 GB is too tight for this install"
 	default:
 		// All under thresholds: report the worst rig as info.
 		r.Message = fmt.Sprintf("largest rig worktree: %q at %s (under %s warn)",
@@ -346,6 +355,7 @@ type nestedWorktreeFinding struct {
 	parent   string // agent home that contains it
 	branch   string // branch name (best-effort; empty for detached)
 	reason   string // why it was rejected (empty if safe)
+	probeErr bool   // rejected because a safety probe failed
 	safeToRm bool
 }
 
@@ -356,8 +366,8 @@ type gitWorktree interface {
 	IsRepo() bool
 	WorktreeList() ([]git.Worktree, error)
 	HasUncommittedWork() bool
-	HasUnpushedCommits() bool
-	HasStashes() bool
+	HasUnpushedCommitsResult() (bool, error)
+	HasStashesResult() (bool, error)
 	WorktreeRemove(path string, force bool) error
 }
 
@@ -509,11 +519,15 @@ func (c *NestedWorktreePruneCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	var safe, unsafe []string
+	var probeErrs int
 	for _, f := range c.findings {
 		line := fmt.Sprintf("%s (branch %q)", f.path, f.branch)
 		if f.safeToRm {
 			safe = append(safe, line)
 		} else {
+			if f.probeErr {
+				probeErrs++
+			}
 			unsafe = append(unsafe, fmt.Sprintf("%s — %s", line, f.reason))
 		}
 	}
@@ -524,9 +538,15 @@ func (c *NestedWorktreePruneCheck) Run(ctx *CheckContext) *CheckResult {
 	details = append(details, listingErrs...)
 
 	if len(safe) == 0 {
-		r.Status = StatusOK
-		r.Message = fmt.Sprintf("%d nested worktree(s); none safely prunable",
-			len(c.findings))
+		if len(listingErrs) > 0 || probeErrs > 0 {
+			r.Status = StatusWarning
+			r.Message = fmt.Sprintf("%d nested worktree(s); none safely prunable; %d inspection failure(s)",
+				len(c.findings), len(listingErrs)+probeErrs)
+		} else {
+			r.Status = StatusOK
+			r.Message = fmt.Sprintf("%d nested worktree(s); none safely prunable",
+				len(c.findings))
+		}
 		details = append(details, unsafe...)
 		r.Details = details
 		return r
@@ -566,6 +586,15 @@ func (c *NestedWorktreePruneCheck) Fix(_ *CheckContext) error {
 		// being removed: git refuses to remove a worktree whose path
 		// equals cwd in some configurations, and operating from cwd of
 		// a directory we're about to delete is fragile in general.
+		current := classifyNested(c.newGit, f.path, f.parent, f.branch)
+		if !current.safeToRm {
+			reason := current.reason
+			if reason == "" {
+				reason = "safety revalidation failed"
+			}
+			errs = append(errs, fmt.Errorf("nested worktree %s no longer safe to remove: %s", f.path, reason))
+			continue
+		}
 		gw := c.newGit(f.parent)
 		if err := gw.WorktreeRemove(f.path, true); err != nil {
 			errs = append(errs, fmt.Errorf("removing nested worktree %s: %w", f.path, err))
@@ -578,10 +607,8 @@ func (c *NestedWorktreePruneCheck) Fix(_ *CheckContext) error {
 // and returns a finding describing whether it is safe to remove and,
 // if not, the first reason it was rejected. Order of checks matches
 // the user's manual recovery procedure: probe git, then status, log,
-// stash. The IsRepo probe defends against fail-open semantics in
-// HasUnpushedCommits / HasStashes (which return false on git error);
-// without it, a corrupt admin dir on the candidate would let all
-// safety gates pass.
+// stash. Any probe error rejects the candidate with a visible reason:
+// "can't tell" is not safe enough for a destructive fix.
 func classifyNested(newGit func(string) gitWorktree, path, parent, branch string) nestedWorktreeFinding {
 	f := nestedWorktreeFinding{path: path, parent: parent, branch: branch}
 	gw := newGit(path)
@@ -593,11 +620,23 @@ func classifyNested(newGit func(string) gitWorktree, path, parent, branch string
 		f.reason = "has uncommitted changes"
 		return f
 	}
-	if gw.HasUnpushedCommits() {
+	hasUnpushed, err := gw.HasUnpushedCommitsResult()
+	if err != nil {
+		f.reason = fmt.Sprintf("unpushed commit probe failed: %v", err)
+		f.probeErr = true
+		return f
+	}
+	if hasUnpushed {
 		f.reason = "has unpushed commits"
 		return f
 	}
-	if gw.HasStashes() {
+	hasStashes, err := gw.HasStashesResult()
+	if err != nil {
+		f.reason = fmt.Sprintf("stash probe failed: %v", err)
+		f.probeErr = true
+		return f
+	}
+	if hasStashes {
 		f.reason = "has stashed work"
 		return f
 	}

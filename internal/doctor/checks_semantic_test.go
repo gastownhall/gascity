@@ -369,6 +369,33 @@ func TestWorktreeDiskSizeCheck_AllUnderThreshold(t *testing.T) {
 	}
 }
 
+func TestWorktreeDiskSizeCheck_UnderThresholdWithMeasurementErrorReturnsWarning(t *testing.T) {
+	dir := t.TempDir()
+	rigOK := filepath.Join(dir, ".gc", "worktrees", "ok")
+	rigBroken := filepath.Join(dir, ".gc", "worktrees", "broken")
+	for _, p := range []string{rigOK, rigBroken} {
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	c := &WorktreeDiskSizeCheck{
+		cfg: config.DoctorConfig{WorktreeRigWarnSize: "10GB", WorktreeRigErrorSize: "50GB"},
+		measureDir: fakeMeasure(map[string]int64{
+			rigOK: 1 * 1024 * 1024 * 1024,
+		}, map[string]error{
+			rigBroken: errors.New("permission denied"),
+		}),
+	}
+	r := c.Run(&CheckContext{CityPath: dir})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg=%s details=%v", r.Status, r.Message, r.Details)
+	}
+	if !strings.Contains(strings.Join(r.Details, "\n"), "measure error: broken: permission denied") {
+		t.Errorf("details should surface measurement error; got %v", r.Details)
+	}
+}
+
 func TestWorktreeDiskSizeCheck_OverWarnThreshold(t *testing.T) {
 	dir := t.TempDir()
 	rigA := filepath.Join(dir, ".gc", "worktrees", "rig-a")
@@ -537,7 +564,9 @@ type fakeGitWorktree struct {
 	notRepo     map[string]bool // paths where IsRepo returns false
 	uncommitted map[string]bool
 	unpushed    map[string]bool
+	unpushedErr map[string]error
 	stashed     map[string]bool
+	stashedErr  map[string]error
 	removeCalls *[]string // path argument of each WorktreeRemove call
 	removeFrom  *[]string // currentPath (cwd-equivalent) at each remove call
 	removeErr   map[string]error
@@ -553,8 +582,20 @@ func (f *fakeGitWorktree) WorktreeList() ([]git.Worktree, error) {
 	return f.listResp, f.listErr
 }
 func (f *fakeGitWorktree) HasUncommittedWork() bool { return f.uncommitted[f.currentPath] }
-func (f *fakeGitWorktree) HasUnpushedCommits() bool { return f.unpushed[f.currentPath] }
-func (f *fakeGitWorktree) HasStashes() bool         { return f.stashed[f.currentPath] }
+func (f *fakeGitWorktree) HasUnpushedCommitsResult() (bool, error) {
+	if err := f.unpushedErr[f.currentPath]; err != nil {
+		return false, err
+	}
+	return f.unpushed[f.currentPath], nil
+}
+
+func (f *fakeGitWorktree) HasStashesResult() (bool, error) {
+	if err := f.stashedErr[f.currentPath]; err != nil {
+		return false, err
+	}
+	return f.stashed[f.currentPath], nil
+}
+
 func (f *fakeGitWorktree) WorktreeRemove(path string, _ bool) error {
 	if f.removeCalls != nil {
 		*f.removeCalls = append(*f.removeCalls, path)
@@ -771,6 +812,45 @@ func TestNestedWorktreePruneCheck_AllUnsafeReturnsOK(t *testing.T) {
 	}
 }
 
+func TestNestedWorktreePruneCheck_AllUnsafeWithListingErrorReturnsWarning(t *testing.T) {
+	dir := t.TempDir()
+	homeA := makeAgentHomeAdmin(t, dir, "rig-a", "agent-1", "/repo-a/.git")
+	homeB := makeAgentHomeAdmin(t, dir, "rig-b", "agent-2", "/repo-b/.git")
+	dirty := pathutil.NormalizePathForCompare(filepath.Join(homeA, "worktrees", "task"))
+	if err := os.MkdirAll(dirty, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	c := &NestedWorktreePruneCheck{
+		cfg: config.DoctorConfig{},
+		newGit: func(path string) gitWorktree {
+			switch path {
+			case homeB:
+				return &fakeGitWorktree{
+					listErr:     errors.New("cannot list worktrees"),
+					currentPath: path,
+				}
+			default:
+				return &fakeGitWorktree{
+					listResp: []git.Worktree{
+						{Path: homeA, Branch: "home-a"},
+						{Path: dirty, Branch: "task"},
+					},
+					uncommitted: map[string]bool{dirty: true},
+					currentPath: path,
+				}
+			}
+		},
+	}
+	r := c.Run(&CheckContext{CityPath: dir})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg=%s details=%v", r.Status, r.Message, r.Details)
+	}
+	if !strings.Contains(strings.Join(r.Details, "\n"), "cannot list worktrees") {
+		t.Errorf("details should include listing error; got %v", r.Details)
+	}
+}
+
 func TestNestedWorktreePruneCheck_DeduplicatesAcrossHomes(t *testing.T) {
 	// Two agent homes that share the same git repo would each list the
 	// same nested worktree. The check must not classify or remove it
@@ -864,6 +944,94 @@ func TestNestedWorktreePruneCheck_FixContinuesPastError(t *testing.T) {
 	// call.
 	if len(removes) != 3 {
 		t.Errorf("removes = %v, want all three attempted", removes)
+	}
+}
+
+func TestNestedWorktreePruneCheck_FixRevalidatesBeforeRemove(t *testing.T) {
+	dir := t.TempDir()
+	home := makeAgentHome(t, dir, "agent-1")
+	nested := pathutil.NormalizePathForCompare(filepath.Join(home, "worktrees", "task"))
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var removes []string
+	uncommitted := map[string]bool{}
+	c := &NestedWorktreePruneCheck{
+		cfg: config.DoctorConfig{},
+		newGit: func(path string) gitWorktree {
+			return &fakeGitWorktree{
+				listResp: []git.Worktree{
+					{Path: home, Branch: "h"},
+					{Path: nested, Branch: "task"},
+				},
+				uncommitted: uncommitted,
+				removeCalls: &removes,
+				currentPath: path,
+			}
+		},
+	}
+	if r := c.Run(&CheckContext{CityPath: dir}); r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning", r.Status)
+	}
+	uncommitted[nested] = true
+	err := c.Fix(&CheckContext{})
+	if err == nil {
+		t.Fatal("Fix should fail closed when revalidation finds new local work")
+	}
+	if len(removes) != 0 {
+		t.Errorf("removes = %v, want none after failed revalidation", removes)
+	}
+}
+
+func TestNestedWorktreePruneCheck_ProbeErrorsAreUnsafe(t *testing.T) {
+	dir := t.TempDir()
+	home := makeAgentHome(t, dir, "agent-1")
+	unpushedErr := pathutil.NormalizePathForCompare(filepath.Join(home, "worktrees", "unpushed-error"))
+	stashErr := pathutil.NormalizePathForCompare(filepath.Join(home, "worktrees", "stash-error"))
+	for _, p := range []string{unpushedErr, stashErr} {
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var removes []string
+	c := &NestedWorktreePruneCheck{
+		cfg: config.DoctorConfig{},
+		newGit: func(path string) gitWorktree {
+			return &fakeGitWorktree{
+				listResp: []git.Worktree{
+					{Path: home, Branch: "h"},
+					{Path: unpushedErr, Branch: "unpushed-error"},
+					{Path: stashErr, Branch: "stash-error"},
+				},
+				unpushedErr: map[string]error{unpushedErr: errors.New("log failed")},
+				stashedErr:  map[string]error{stashErr: errors.New("stash failed")},
+				removeCalls: &removes,
+				currentPath: path,
+			}
+		},
+	}
+	r := c.Run(&CheckContext{CityPath: dir})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning because probe errors are inspection failures; msg=%s details=%v", r.Status, r.Message, r.Details)
+	}
+	if len(c.findings) != 2 {
+		t.Fatalf("findings = %d, want 2", len(c.findings))
+	}
+	for _, f := range c.findings {
+		if f.safeToRm {
+			t.Fatalf("%s should not be safe after probe error", f.path)
+		}
+		if !strings.Contains(f.reason, "probe failed") {
+			t.Errorf("reason for %s = %q, want probe failure", f.path, f.reason)
+		}
+	}
+	if err := c.Fix(&CheckContext{}); err != nil {
+		t.Fatalf("Fix should skip unsafe probe-error findings without error: %v", err)
+	}
+	if len(removes) != 0 {
+		t.Errorf("removes = %v, want none", removes)
 	}
 }
 
