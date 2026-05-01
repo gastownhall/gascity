@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,24 +23,41 @@ import (
 // after N calls, simulating the reconciler clearing the flag without concurrent map access.
 type drainOpsWithCountdown struct {
 	*fakeDrainOps
-	remaining atomic.Int32
+	remaining int
+	cleared   bool
 }
 
-func (c *drainOpsWithCountdown) isRestartRequested(_ string) (bool, error) {
-	if c.remaining.Add(-1) < 0 {
+func (c *drainOpsWithCountdown) isRestartRequested(sessionName string) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.err != nil {
+		return false, c.err
+	}
+	if !c.restartRequested[sessionName] {
+		if c.cleared {
+			return false, nil
+		}
+		return false, errors.New("restart flag was not set before polling")
+	}
+	if c.remaining <= 0 {
+		delete(c.restartRequested, sessionName)
+		c.cleared = true
 		return false, nil
 	}
+	c.remaining--
 	return true, nil
 }
 
 // fakeDrainOps is a test double for drainOps.
 type fakeDrainOps struct {
+	mu               sync.Mutex
 	draining         map[string]bool
 	drainTimes       map[string]time.Time // when drain was set
 	acked            map[string]bool
 	restartRequested map[string]bool
 	driftRestart     map[string]bool
 	err              error // injected error for all ops
+	restartReadErr   error
 	setDrainCalls    []string
 	clearDrainCalls  []string
 }
@@ -56,6 +73,8 @@ func newFakeDrainOps() *fakeDrainOps {
 }
 
 func (f *fakeDrainOps) setDrain(sessionName string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.setDrainCalls = append(f.setDrainCalls, sessionName)
 	if f.err != nil {
 		return f.err
@@ -66,6 +85,8 @@ func (f *fakeDrainOps) setDrain(sessionName string) error {
 }
 
 func (f *fakeDrainOps) clearDrain(sessionName string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.clearDrainCalls = append(f.clearDrainCalls, sessionName)
 	if f.err != nil {
 		return f.err
@@ -76,6 +97,8 @@ func (f *fakeDrainOps) clearDrain(sessionName string) error {
 }
 
 func (f *fakeDrainOps) isDraining(sessionName string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.err != nil {
 		return false, f.err
 	}
@@ -83,6 +106,8 @@ func (f *fakeDrainOps) isDraining(sessionName string) (bool, error) {
 }
 
 func (f *fakeDrainOps) drainStartTime(sessionName string) (time.Time, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.err != nil {
 		return time.Time{}, f.err
 	}
@@ -94,6 +119,8 @@ func (f *fakeDrainOps) drainStartTime(sessionName string) (time.Time, error) {
 }
 
 func (f *fakeDrainOps) setDrainAck(sessionName string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.err != nil {
 		return f.err
 	}
@@ -102,6 +129,8 @@ func (f *fakeDrainOps) setDrainAck(sessionName string) error {
 }
 
 func (f *fakeDrainOps) isDrainAcked(sessionName string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.err != nil {
 		return false, f.err
 	}
@@ -109,6 +138,8 @@ func (f *fakeDrainOps) isDrainAcked(sessionName string) (bool, error) {
 }
 
 func (f *fakeDrainOps) setRestartRequested(sessionName string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.err != nil {
 		return f.err
 	}
@@ -117,13 +148,20 @@ func (f *fakeDrainOps) setRestartRequested(sessionName string) error {
 }
 
 func (f *fakeDrainOps) isRestartRequested(sessionName string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.err != nil {
 		return false, f.err
+	}
+	if f.restartReadErr != nil {
+		return false, f.restartReadErr
 	}
 	return f.restartRequested[sessionName], nil
 }
 
 func (f *fakeDrainOps) clearRestartRequested(sessionName string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.err != nil {
 		return f.err
 	}
@@ -132,6 +170,8 @@ func (f *fakeDrainOps) clearRestartRequested(sessionName string) error {
 }
 
 func (f *fakeDrainOps) setDriftRestart(sessionName string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.err != nil {
 		return f.err
 	}
@@ -140,6 +180,8 @@ func (f *fakeDrainOps) setDriftRestart(sessionName string) error {
 }
 
 func (f *fakeDrainOps) isDriftRestart(sessionName string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.err != nil {
 		return false, f.err
 	}
@@ -147,6 +189,8 @@ func (f *fakeDrainOps) isDriftRestart(sessionName string) (bool, error) {
 }
 
 func (f *fakeDrainOps) clearDriftRestart(sessionName string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.err != nil {
 		return f.err
 	}
@@ -505,8 +549,7 @@ func TestDoRuntimeRequestRestartError(t *testing.T) {
 }
 
 func TestDoRuntimeRequestRestartFlagCleared(t *testing.T) {
-	dops := &drainOpsWithCountdown{fakeDrainOps: newFakeDrainOps()}
-	dops.remaining.Store(2) // true for first 2 polls, then false (reconciler cleared)
+	dops := &drainOpsWithCountdown{fakeDrainOps: newFakeDrainOps(), remaining: 2}
 
 	var stdout, stderr bytes.Buffer
 	code := doRuntimeRequestRestart(context.Background(), dops, nil, events.Discard, "worker", "worker",
@@ -516,6 +559,12 @@ func TestDoRuntimeRequestRestartFlagCleared(t *testing.T) {
 	}
 	if stderr.Len() > 0 {
 		t.Errorf("unexpected stderr: %q", stderr.String())
+	}
+	if got := stdout.String(); !strings.Contains(got, "Waiting up to 5s") {
+		t.Errorf("stdout = %q, want bounded wait banner", got)
+	}
+	if dops.restartRequested["worker"] {
+		t.Error("restart flag should be cleared by the simulated reconciler")
 	}
 }
 
@@ -536,14 +585,29 @@ func TestDoRuntimeRequestRestartTimeout(t *testing.T) {
 	}
 }
 
+func TestDoRuntimeRequestRestartTimeoutReportsLastPollError(t *testing.T) {
+	dops := newFakeDrainOps()
+	dops.restartReadErr = errors.New("metadata read failed")
+
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeRequestRestart(context.Background(), dops, nil, events.Discard, "worker", "worker",
+		10*time.Millisecond, 25*time.Millisecond, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 on timeout", code)
+	}
+	if got := stderr.String(); !strings.Contains(got, "last poll error: metadata read failed") {
+		t.Errorf("stderr = %q, want last poll error", got)
+	}
+}
+
 func TestDoRuntimeRequestRestartContextCancel(t *testing.T) {
 	dops := newFakeDrainOps()
 
 	ctx, cancel := context.WithCancel(context.Background())
+	var stdout, stderr bytes.Buffer
 
 	done := make(chan int, 1)
 	go func() {
-		var stdout, stderr bytes.Buffer
 		done <- doRuntimeRequestRestart(ctx, dops, nil, events.Discard, "worker", "worker",
 			10*time.Millisecond, 30*time.Second, &stdout, &stderr)
 	}()
@@ -560,8 +624,57 @@ func TestDoRuntimeRequestRestartContextCancel(t *testing.T) {
 		if !dops.restartRequested["worker"] {
 			t.Error("restart flag should remain set after context cancel")
 		}
+		if got := stderr.String(); !strings.Contains(got, "restart request remains set") {
+			t.Errorf("stderr = %q, want pending restart warning", got)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("doRuntimeRequestRestart did not exit on context cancel")
+	}
+}
+
+func TestControllerRestartTimeout(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *config.City
+		want time.Duration
+	}{
+		{name: "nil config uses floor", cfg: nil, want: 5 * time.Minute},
+		{name: "empty interval uses floor", cfg: &config.City{}, want: 5 * time.Minute},
+		{name: "below floor clamps up", cfg: &config.City{Daemon: config.DaemonConfig{PatrolInterval: "15s"}}, want: 5 * time.Minute},
+		{name: "middle range uses multiplier", cfg: &config.City{Daemon: config.DaemonConfig{PatrolInterval: "2m"}}, want: 10 * time.Minute},
+		{name: "ceiling edge", cfg: &config.City{Daemon: config.DaemonConfig{PatrolInterval: "6m"}}, want: 30 * time.Minute},
+		{name: "above ceiling clamps down", cfg: &config.City{Daemon: config.DaemonConfig{PatrolInterval: "10m"}}, want: 30 * time.Minute},
+		{name: "invalid duration uses default floor", cfg: &config.City{Daemon: config.DaemonConfig{PatrolInterval: "later"}}, want: 5 * time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := controllerRestartTimeout(tt.cfg); got != tt.want {
+				t.Fatalf("controllerRestartTimeout() = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+type getMetaErrorProvider struct {
+	*runtime.Fake
+	err error
+}
+
+func (p *getMetaErrorProvider) GetMeta(_, _ string) (string, error) {
+	return "", p.err
+}
+
+func TestProviderDrainOpsIsRestartRequestedTreatsGoneSessionAsCleared(t *testing.T) {
+	dops := newDrainOps(&getMetaErrorProvider{
+		Fake: runtime.NewFake(),
+		err:  runtime.ErrSessionNotFound,
+	})
+	requested, err := dops.isRestartRequested("worker")
+	if err != nil {
+		t.Fatalf("isRestartRequested returned gone-session error: %v", err)
+	}
+	if requested {
+		t.Fatal("isRestartRequested = true, want false for gone session")
 	}
 }
 

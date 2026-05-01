@@ -1940,7 +1940,7 @@ gc runtime
 | [gc runtime drain](#gc-runtime-drain) | Signal a session to drain (wind down gracefully) |
 | [gc runtime drain-ack](#gc-runtime-drain-ack) | Acknowledge drain — signal the controller to stop this session |
 | [gc runtime drain-check](#gc-runtime-drain-check) | Check if a session is draining (exit 0 = draining) |
-| [gc runtime request-restart](#gc-runtime-request-restart) | Request controller restart this session (blocks until killed) |
+| [gc runtime request-restart](#gc-runtime-request-restart) | Request controller restart this session (waits to be killed) |
 | [gc runtime undrain](#gc-runtime-undrain) | Cancel drain on a session |
 
 ## gc runtime drain
@@ -1984,18 +1984,25 @@ gc runtime drain-check [name]
 
 Signal the controller to stop and restart this session.
 
-Sets GC_RESTART_REQUESTED metadata on the session, then blocks forever.
-The controller will stop the session on its next reconcile tick and
-restart it fresh. The blocking prevents the agent from consuming more
-context while waiting.
+Sets GC_RESTART_REQUESTED metadata on the session, then waits while the
+controller stops the session on its next reconcile tick and restarts it
+fresh. The wait keeps the agent idle so it does not consume more context
+in the interim.
 
-For on-demand configured named sessions, the controller cannot restart the
-user-attended process. In that case this command reports that restart was
-skipped and returns without blocking. No session.draining event is emitted
-when restart is skipped.
+Under normal operation the controller SIGKILLs the process tree before
+this command returns. If the controller accepts the stop handoff, the
+runtime is already gone, or a SIGINT/SIGTERM is received, the command
+exits 0 cleanly. If the controller has not acted within a bounded
+timeout (max(5*PatrolInterval, 5min), capped at 30min) the command exits
+1 with a diagnostic pointing at controller health.
+
+For on-demand configured named sessions, the controller cannot restart
+the user-attended process. In that case this command reports that
+restart was skipped and returns immediately. No session.draining event
+is emitted when restart is skipped.
 
 This command is designed to be called from within a session context.
-It emits a session.draining event before blocking.
+It emits a session.draining event before waiting.
 
 ```
 gc runtime request-restart

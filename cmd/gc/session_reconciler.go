@@ -672,8 +672,11 @@ func reconcileSessionBeadsTraced(
 			}
 			beadRequested := session.Metadata["restart_requested"] == "true"
 			if tmuxRequested || beadRequested {
-				if tmuxRequested && dops != nil {
-					_ = dops.clearRestartRequested(name)
+				if alive {
+					if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
+						fmt.Fprintf(stderr, "session reconciler: stopping restart-requested %s: %v\n", name, err) //nolint:errcheck
+						continue
+					}
 				}
 				// Providers that can inject a fresh session ID get a
 				// rotated key here so the next wake starts a brand-new
@@ -688,7 +691,10 @@ func reconcileSessionBeadsTraced(
 				if hasCapability && newSessionKey == "" {
 					batch["session_key"] = ""
 				}
-				_ = store.SetMetadataBatch(session.ID, batch)
+				if err := store.SetMetadataBatch(session.ID, batch); err != nil {
+					fmt.Fprintf(stderr, "session reconciler: recording restart handoff for %s: %v\n", name, err) //nolint:errcheck
+					continue
+				}
 				if session.Metadata == nil {
 					session.Metadata = make(map[string]string, len(batch))
 				}
@@ -696,11 +702,10 @@ func reconcileSessionBeadsTraced(
 					session.Metadata[key] = value
 				}
 				if alive {
-					if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
-						fmt.Fprintf(stderr, "session reconciler: stopping restart-requested %s: %v\n", name, err) //nolint:errcheck
-					} else {
-						fmt.Fprintf(stdout, "Stopped restart-requested session '%s'\n", name) //nolint:errcheck
+					if tmuxRequested && dops != nil {
+						_ = dops.clearRestartRequested(name)
 					}
+					fmt.Fprintf(stdout, "Stopped restart-requested session '%s'\n", name) //nolint:errcheck
 				}
 				continue
 			}
