@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
@@ -52,6 +54,31 @@ func TestCityRegistryPendingRequestIDCanonicalizesPath(t *testing.T) {
 	}
 	if got != "req-city" {
 		t.Fatalf("request ID = %q, want req-city", got)
+	}
+}
+
+func TestCityRegistryStorePendingRequestIDRejectsDuplicatePath(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	reg := newCityRegistry()
+	cityPath := filepath.Join(t.TempDir(), "city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := reg.StorePendingRequestID(cityPath, "req-first"); err != nil {
+		t.Fatal(err)
+	}
+	err := reg.StorePendingRequestID(cityPath, "req-second")
+	if !errors.Is(err, api.ErrPendingRequestExists) {
+		t.Fatalf("StorePendingRequestID duplicate error = %v, want ErrPendingRequestExists", err)
+	}
+
+	got, ok, err := reg.ConsumePendingRequestID(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || got != "req-first" {
+		t.Fatalf("consumed pending request = (%q, %t), want req-first true", got, ok)
 	}
 }
 

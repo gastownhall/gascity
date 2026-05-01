@@ -168,13 +168,13 @@ func (s *Service) Scaffold(ctx context.Context, req InitRequest) (*InitResult, e
 		}
 		return nil, fmt.Errorf("register with supervisor: %w", err)
 	}
-	if err := s.lifecycleEvents().CityCreated(req.Dir, cityName); err != nil {
-		return nil, fmt.Errorf("record city created event: %w", err)
-	}
 	result := &InitResult{
 		CityName:     cityName,
 		CityPath:     req.Dir,
 		ProviderUsed: req.Provider,
+	}
+	if err := s.lifecycleEvents().CityCreated(req.Dir, cityName); err != nil {
+		return result, NewPostRegisterFailure(fmt.Errorf("record city created event: %w", err))
 	}
 	if s.deps.Reloader != nil {
 		if err := s.deps.Reloader.Reload(); err != nil {

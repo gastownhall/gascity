@@ -5,6 +5,7 @@
 package supervisor
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -21,6 +22,10 @@ import (
 // Must start with alphanumeric and contain only alphanumerics, hyphens,
 // underscores, and dots.
 var validCityName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
+
+// ErrPendingCityRequestExists indicates a city path already has an in-flight
+// async request waiting for a terminal request-result event.
+var ErrPendingCityRequestExists = errors.New("pending city request already exists")
 
 // CityEntry is one registered city in the supervisor registry.
 type CityEntry struct {
@@ -209,11 +214,9 @@ func (r *Registry) StorePendingCityRequestID(cityPath, requestID string) error {
 	if err != nil {
 		return err
 	}
-	for i, pending := range rf.PendingCityRequests {
+	for _, pending := range rf.PendingCityRequests {
 		if sameRegistryPath(pending.Path, abs) {
-			rf.PendingCityRequests[i].Path = abs
-			rf.PendingCityRequests[i].RequestID = requestID
-			return r.saveAllLocked(rf)
+			return fmt.Errorf("%w: %s", ErrPendingCityRequestExists, abs)
 		}
 	}
 	rf.PendingCityRequests = append(rf.PendingCityRequests, PendingCityRequestEntry{

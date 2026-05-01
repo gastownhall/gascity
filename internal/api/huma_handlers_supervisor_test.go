@@ -38,7 +38,7 @@ func (f *fakeInitializer) Init(context.Context, cityinit.InitRequest) (*cityinit
 func (f *fakeInitializer) Scaffold(_ context.Context, req cityinit.InitRequest) (*cityinit.InitResult, error) {
 	f.scaffoldReq = req
 	if f.scaffoldErr != nil {
-		return nil, f.scaffoldErr
+		return f.scaffoldResult, f.scaffoldErr
 	}
 	return f.scaffoldResult, nil
 }
@@ -272,6 +272,98 @@ func TestSupervisorCityCreateStoresPendingRequestForReconciler(t *testing.T) {
 	}
 	if got := len(resolver.supervisorRecorder.(*events.Fake).Events); got != 0 {
 		t.Fatalf("supervisor events = %d, want 0 before reconciler starts city", got)
+	}
+}
+
+func TestSupervisorCityCreateRejectsDuplicatePendingRequest(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "mc-city")
+	resolver := &fakeCityResolver{
+		cities:             map[string]*fakeState{},
+		pending:            map[string]string{cityPath: "req-existing"},
+		supervisorRecorder: events.NewFake(),
+	}
+	init := &fakeInitializer{
+		scaffoldResult: &cityinit.InitResult{
+			CityName:     "mc-city",
+			CityPath:     cityPath,
+			ProviderUsed: "claude",
+		},
+	}
+	sm := NewSupervisorMux(resolver, init, false, "test", time.Now())
+
+	req := httptest.NewRequest(http.MethodPost, "/v0/city", strings.NewReader(`{"dir":"`+cityPath+`","provider":"claude"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GC-Request", "test")
+	rec := httptest.NewRecorder()
+
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	if got := resolver.pending[cityPath]; got != "req-existing" {
+		t.Fatalf("pending request_id = %q, want req-existing", got)
+	}
+	if init.scaffoldReq.Dir != "" {
+		t.Fatalf("Scaffold was called despite duplicate pending request: %+v", init.scaffoldReq)
+	}
+}
+
+func TestSupervisorCityCreateEmitsFailedEventForPostRegisterFailure(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "mc-city")
+	resolver := &fakeCityResolver{
+		cities:             map[string]*fakeState{},
+		supervisorRecorder: events.NewFake(),
+	}
+	lifecycleErr := errors.New("record city created event: disk full")
+	init := &fakeInitializer{
+		scaffoldResult: &cityinit.InitResult{
+			CityName:     "mc-city",
+			CityPath:     cityPath,
+			ProviderUsed: "claude",
+		},
+		scaffoldErr: cityinit.NewPostRegisterFailure(lifecycleErr),
+	}
+	sm := NewSupervisorMux(resolver, init, false, "test", time.Now())
+
+	req := httptest.NewRequest(http.MethodPost, "/v0/city", strings.NewReader(`{"dir":"`+cityPath+`","provider":"claude"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GC-Request", "test")
+	rec := httptest.NewRecorder()
+
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	accepted := decodeAsyncAccepted(t, rec.Body)
+	if _, ok, err := resolver.ConsumePendingRequestID(cityPath); err != nil {
+		t.Fatal(err)
+	} else if ok {
+		t.Fatal("pending request_id survived post-register failure")
+	}
+	recorded := resolver.supervisorRecorder.(*events.Fake).Events
+	if len(recorded) != 1 {
+		t.Fatalf("recorded %d events, want 1", len(recorded))
+	}
+	if recorded[0].Type != events.RequestFailed {
+		t.Fatalf("event type = %q, want %q", recorded[0].Type, events.RequestFailed)
+	}
+	var payload RequestFailedPayload
+	if err := json.Unmarshal(recorded[0].Payload, &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if payload.RequestID != accepted.RequestID {
+		t.Fatalf("request_id = %q, want %q", payload.RequestID, accepted.RequestID)
+	}
+	if payload.Operation != RequestOperationCityCreate {
+		t.Fatalf("operation = %q, want %q", payload.Operation, RequestOperationCityCreate)
+	}
+	if payload.ErrorCode != "city_init_failed" {
+		t.Fatalf("error_code = %q, want city_init_failed", payload.ErrorCode)
+	}
+	if !strings.Contains(payload.ErrorMessage, lifecycleErr.Error()) {
+		t.Fatalf("error_message = %q, want %q", payload.ErrorMessage, lifecycleErr.Error())
 	}
 }
 

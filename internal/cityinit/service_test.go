@@ -300,6 +300,46 @@ func TestServiceScaffoldRegistersAndEmitsCreated(t *testing.T) {
 	}
 }
 
+func TestServiceScaffoldReturnsPostRegisterErrorWithResultWhenCityCreatedFails(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "api-city")
+	lifecycleErr := errors.New("event log unavailable")
+	var registered bool
+	svc := mustNewService(t, ServiceDeps{
+		FS: fsys.OSScaffoldFS{},
+		Initializer: &mockInitializer{scaffoldFn: func(_ context.Context, req InitRequest) error {
+			if err := os.MkdirAll(filepath.Join(req.Dir, citylayout.RuntimeRoot), 0o755); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(req.Dir, citylayout.CityConfigFile), []byte("[workspace]\nname = \"api-city\"\n"), 0o644)
+		}},
+		Registry: &mockRegistry{registerFn: func(context.Context, string, string) error {
+			registered = true
+			return nil
+		}},
+		LifecycleEvents: &recordingLifecycleEvents{createdErr: lifecycleErr},
+	})
+
+	result, err := svc.Scaffold(context.Background(), InitRequest{
+		Dir:      cityPath,
+		Provider: "codex",
+	})
+	if !errors.Is(err, ErrPostRegisterFailure) {
+		t.Fatalf("Scaffold error = %v, want ErrPostRegisterFailure", err)
+	}
+	if !errors.Is(err, lifecycleErr) {
+		t.Fatalf("Scaffold error = %v, want wrapped lifecycle error %v", err, lifecycleErr)
+	}
+	if result == nil {
+		t.Fatal("Scaffold result = nil, want committed city result")
+	}
+	if result.CityName != "api-city" || result.CityPath != cityPath {
+		t.Fatalf("Scaffold result = %+v, want api-city/%s", result, cityPath)
+	}
+	if !registered {
+		t.Fatal("Register was not called before post-register error")
+	}
+}
+
 func TestServiceScaffoldUsesInternalScaffoldDetection(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "api-city")
 	if err := EnsureCityScaffoldFS(fsys.OSFS{}, cityPath); err != nil {

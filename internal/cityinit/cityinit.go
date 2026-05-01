@@ -13,6 +13,7 @@ package cityinit
 
 import (
 	"errors"
+	"fmt"
 )
 
 // Typed sentinel errors. Both projections map them to their own
@@ -58,6 +59,12 @@ var (
 	// Usually a bug in the scaffold step; maps to 500.
 	ErrConfigLoad = errors.New("loading city config")
 
+	// ErrPostRegisterFailure indicates the city was committed to the
+	// supervisor registry before a later scaffold-side effect failed.
+	// HTTP callers keep the 202 request_id contract and receive the
+	// failure through request.failed instead of a synchronous error.
+	ErrPostRegisterFailure = errors.New("post-register city init failure")
+
 	// ErrNotWired indicates the service was constructed without a
 	// required dependency. This is a programmer-bug tripwire for
 	// process wiring.
@@ -68,6 +75,14 @@ var (
 	// at the HTTP layer.
 	ErrNotRegistered = errors.New("city not registered with supervisor")
 )
+
+// NewPostRegisterFailure wraps err with ErrPostRegisterFailure.
+func NewPostRegisterFailure(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %w", ErrPostRegisterFailure, err)
+}
 
 // InitRequest is the typed input. Both projections populate it from
 // their own surface (CLI flags, HTTP request body) and hand it to

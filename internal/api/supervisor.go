@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net"
 	"net/http"
@@ -33,6 +34,10 @@ type CityResolver interface {
 	// CityState returns the State for a named city, or nil if not found/not running.
 	CityState(name string) State
 }
+
+// ErrPendingRequestExists indicates that a matching async request is already
+// waiting for a terminal request-result event.
+var ErrPendingRequestExists = errors.New("pending request already exists")
 
 // PendingRequestStore is an optional CityResolver extension that
 // lets async handlers store correlation request IDs for later

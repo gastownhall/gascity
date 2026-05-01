@@ -258,6 +258,13 @@ giving clients real-time visibility into operation progress.
    - `request.result.*` for success (typed per operation)
    - `request.failed` for failure (shared, `operation` enum)
 5. On success, the payload contains the full typed result.
+
+`session.message` uses the same four-minute timeout on both sides of
+the API adapter: the server emits `request.failed` with
+`error_code=timeout` at the same boundary the CLI client waits for on
+the SSE stream. If the provider path ignores cancellation and returns
+after that timeout, the API logs a late `session.message` result with
+the request ID instead of emitting a second terminal event.
 6. On failure, `error_code` + `error_message` describe the problem.
 7. Do NOT use the resource before the success event arrives.
 

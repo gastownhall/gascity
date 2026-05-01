@@ -158,6 +158,25 @@ func TestClientWaitForEventHandlesMultiLineDataFrames(t *testing.T) {
 	}
 }
 
+func TestClientWaitForEventHandlesEventFieldWithoutSpace(t *testing.T) {
+	frame := "event:tagged_event\n" +
+		`data: {"type":"request.result.session.message","payload":{"request_id":"req-1","session_id":"gc-1"}}` + "\n\n"
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(frame))
+	}))
+	defer ts.Close()
+
+	c := NewClient(ts.URL)
+	env, err := c.waitForEvent(t.Context(), "req-1", "request.result.session.message", RequestOperationSessionMessage)
+	if err != nil {
+		t.Fatalf("waitForEvent: %v", err)
+	}
+	if env.Type != "request.result.session.message" {
+		t.Fatalf("event type = %q, want request.result.session.message", env.Type)
+	}
+}
+
 func TestClientWaitForEventReportsMalformedMatchingSuccessPayload(t *testing.T) {
 	frame := `data: {"type":"request.result.session.message","payload":"not an object"}` + "\n\n"
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

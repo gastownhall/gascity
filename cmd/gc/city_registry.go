@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -95,6 +96,9 @@ func newCityRegistry() *cityRegistry {
 func (r *cityRegistry) StorePendingRequestID(cityPath, requestID string) error {
 	key := pendingRequestKey(cityPath)
 	if err := supervisor.NewRegistry(supervisor.RegistryPath()).StorePendingCityRequestID(key, requestID); err != nil {
+		if errors.Is(err, supervisor.ErrPendingCityRequestExists) {
+			return api.ErrPendingRequestExists
+		}
 		return err
 	}
 

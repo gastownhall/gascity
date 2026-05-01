@@ -1223,6 +1223,62 @@ func TestEmitCityUnregisterFailureEventUsesManagedCityName(t *testing.T) {
 	}
 }
 
+func TestReconcileCitiesEmitsCityCreateFailureForPendingConfigLoadError(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+
+	cityPath := filepath.Join(t.TempDir(), "bad-city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "bad-city"); err != nil {
+		t.Fatal(err)
+	}
+	supRec := events.NewFake()
+	registry := newCityRegistry()
+	registry.SetSupervisorRecorder(supRec)
+	if err := registry.StorePendingRequestID(cityPath, "req-test-create"); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+
+	recorded := supRec.Events
+	if len(recorded) != 1 {
+		t.Fatalf("recorded %d supervisor events, want 1; stderr=%s", len(recorded), stderr.String())
+	}
+	got := recorded[0]
+	if got.Type != events.RequestFailed {
+		t.Fatalf("event.Type = %q, want %q", got.Type, events.RequestFailed)
+	}
+	if got.Subject != "bad-city" {
+		t.Fatalf("event.Subject = %q, want bad-city", got.Subject)
+	}
+	var payload api.RequestFailedPayload
+	if err := json.Unmarshal(got.Payload, &payload); err != nil {
+		t.Fatalf("json.Unmarshal(payload): %v", err)
+	}
+	if payload.RequestID != "req-test-create" {
+		t.Fatalf("payload.RequestID = %q, want req-test-create", payload.RequestID)
+	}
+	if payload.Operation != api.RequestOperationCityCreate {
+		t.Fatalf("payload.Operation = %q, want %q", payload.Operation, api.RequestOperationCityCreate)
+	}
+	if payload.ErrorCode != "city_config_failed" {
+		t.Fatalf("payload.ErrorCode = %q, want city_config_failed", payload.ErrorCode)
+	}
+	if _, ok, err := registry.ConsumePendingRequestID(cityPath); err != nil {
+		t.Fatal(err)
+	} else if ok {
+		t.Fatal("pending request_id survived city create failure")
+	}
+}
+
 func TestReconcileCitiesUnregisterSkipsRequestResultWithoutPendingRequestID(t *testing.T) {
 	t.Setenv("GC_HOME", t.TempDir())
 

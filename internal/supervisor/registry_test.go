@@ -1,6 +1,7 @@
 package supervisor
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -153,6 +154,32 @@ func TestRegistryPendingCityRequestIDCanonicalizesPath(t *testing.T) {
 
 	if got, ok, err := reopened.ConsumePendingCityRequestID(cityPath); err != nil || ok || got != "" {
 		t.Fatalf("second consume = (%q, %t, %v), want empty false nil", got, ok, err)
+	}
+}
+
+func TestRegistryStorePendingCityRequestIDRejectsDuplicatePath(t *testing.T) {
+	dir := t.TempDir()
+	r := NewRegistry(filepath.Join(dir, "cities.toml"))
+
+	cityPath := filepath.Join(dir, "cities", "alpha")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.StorePendingCityRequestID(cityPath, "req-first"); err != nil {
+		t.Fatalf("StorePendingCityRequestID first: %v", err)
+	}
+	err := r.StorePendingCityRequestID(cityPath, "req-second")
+	if !errors.Is(err, ErrPendingCityRequestExists) {
+		t.Fatalf("StorePendingCityRequestID duplicate error = %v, want ErrPendingCityRequestExists", err)
+	}
+
+	got, ok, err := r.ConsumePendingCityRequestID(cityPath)
+	if err != nil {
+		t.Fatalf("ConsumePendingCityRequestID: %v", err)
+	}
+	if !ok || got != "req-first" {
+		t.Fatalf("consumed pending request = (%q, %t), want req-first true", got, ok)
 	}
 }
 

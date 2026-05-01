@@ -1155,6 +1155,7 @@ func reconcileCities(
 		}
 
 		if err := ensureLegacyNamedPacksCached(path); err != nil {
+			emitPendingCityCreateFailure(cr, path, name, "pack_cache_failed", err, stderr)
 			recordInitFailure(name, fmt.Sprintf("fetching packs: %v", err))
 			continue
 		}
@@ -1163,6 +1164,7 @@ func reconcileCities(
 		// System packs are appended as extra includes for normal pack expansion.
 		cfg, prov, loadErr := loadSupervisorCityConfig(path)
 		if loadErr != nil {
+			emitPendingCityCreateFailure(cr, path, name, "city_config_failed", loadErr, stderr)
 			recordInitFailure(name, loadErr.Error())
 			continue
 		}
@@ -1206,18 +1208,7 @@ func reconcileCities(
 			) {
 				delete(initStatus, path)
 			})
-			reqID, hasReqID, consumeErr := cr.ConsumePendingRequestID(path)
-			if consumeErr != nil {
-				fmt.Fprintf(stderr, "gc supervisor: city '%s': consume pending request_id for city.create failure event failed (path=%s): %v\n", cityName, path, consumeErr) //nolint:errcheck
-			}
-			if supRec := cr.SupervisorEventRecorder(); supRec != nil && hasReqID {
-				api.EmitTypedEvent(supRec, events.RequestFailed, cityName, api.RequestFailedPayload{
-					RequestID:    reqID,
-					Operation:    api.RequestOperationCityCreate,
-					ErrorCode:    "city_init_failed",
-					ErrorMessage: err.Error(),
-				})
-			}
+			emitPendingCityCreateFailure(cr, path, cityName, "city_init_failed", err, stderr)
 			recordInitFailure(cityName, fmt.Sprintf("init: %v", err))
 			continue
 		}
@@ -1266,6 +1257,7 @@ func reconcileCities(
 			) {
 				delete(initStatus, path)
 			})
+			emitPendingCityCreateFailure(cr, path, cityName, "session_provider_failed", spErr, stderr)
 			recordInitFailure(cityName, fmt.Sprintf("session provider: %v", spErr))
 			continue
 		}
@@ -1282,6 +1274,7 @@ func reconcileCities(
 			) {
 				delete(initStatus, path)
 			})
+			emitPendingCityCreateFailure(cr, path, cityName, "agent_image_check_failed", err, stderr)
 			recordInitFailure(cityName, err.Error())
 			continue
 		}
@@ -1349,6 +1342,7 @@ func reconcileCities(
 			})
 			return nil
 		}); err != nil {
+			emitPendingCityCreateFailure(cr, path, cityName, "city_runtime_failed", err, stderr)
 			recordInitFailure(cityName, fmt.Sprintf("city runtime: %v", err))
 			continue
 		}
@@ -1360,6 +1354,7 @@ func reconcileCities(
 			cs = newControllerState(cityCtx, cfg, sp, eventProv, cityName, path)
 			return nil
 		}); err != nil {
+			emitPendingCityCreateFailure(cr, path, cityName, "controller_state_failed", err, stderr)
 			recordInitFailure(cityName, fmt.Sprintf("controller state: %v", err))
 			continue
 		}
@@ -1375,6 +1370,7 @@ func reconcileCities(
 			runPoolOnBoot(cfg, path, shellRunHook, stderr)
 			return nil
 		}); err != nil {
+			emitPendingCityCreateFailure(cr, path, cityName, "pool_on_boot_failed", err, stderr)
 			recordInitFailure(cityName, fmt.Sprintf("pool on_boot: %v", err))
 			continue
 		}
@@ -1418,6 +1414,7 @@ func reconcileCities(
 			) {
 				delete(cities, path)
 			})
+			emitPendingCityCreateFailure(cr, path, cityName, "controller_lock_failed", lockErr, stderr)
 			recordInitFailure(cityName, fmt.Sprintf("controller lock: %v", lockErr))
 			continue
 		}
@@ -1442,6 +1439,7 @@ func reconcileCities(
 			) {
 				delete(cities, path)
 			})
+			emitPendingCityCreateFailure(cr, path, cityName, "controller_socket_failed", lisErr, stderr)
 			recordInitFailure(cityName, fmt.Sprintf("controller socket: %v", lisErr))
 			continue
 		}
@@ -1467,6 +1465,7 @@ func reconcileCities(
 			) {
 				delete(cities, path)
 			})
+			emitPendingCityCreateFailure(cr, path, cityName, "controller_token_failed", tokenErr, stderr)
 			recordInitFailure(cityName, fmt.Sprintf("controller token: %v", tokenErr))
 			continue
 		}
@@ -1489,6 +1488,7 @@ func reconcileCities(
 			) {
 				delete(cities, path)
 			})
+			emitPendingCityCreateFailure(cr, path, cityName, "controller_token_write_failed", err, stderr)
 			recordInitFailure(cityName, fmt.Sprintf("controller token write: %v", err))
 			continue
 		}
@@ -1625,6 +1625,24 @@ func emitPendingCityCreateResult(cr *cityRegistry, path, cityName string, stderr
 			RequestID: reqID,
 			Name:      cityName,
 			Path:      path,
+		})
+	}
+}
+
+func emitPendingCityCreateFailure(cr *cityRegistry, path, cityName, errorCode string, err error, stderr io.Writer) {
+	reqID, hasReqID, consumeErr := cr.ConsumePendingRequestID(path)
+	if consumeErr != nil {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': consume pending request_id for city.create failure event failed (path=%s): %v\n", cityName, path, consumeErr) //nolint:errcheck
+	}
+	if !hasReqID {
+		return
+	}
+	if supRec := cr.SupervisorEventRecorder(); supRec != nil {
+		api.EmitTypedEvent(supRec, events.RequestFailed, cityName, api.RequestFailedPayload{
+			RequestID:    reqID,
+			Operation:    api.RequestOperationCityCreate,
+			ErrorCode:    errorCode,
+			ErrorMessage: err.Error(),
 		})
 	}
 }

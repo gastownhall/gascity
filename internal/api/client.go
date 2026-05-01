@@ -157,8 +157,8 @@ func (c *Client) waitForEvent(ctx context.Context, requestID string, successType
 	for scanner.Scan() {
 		line := scanner.Text()
 		switch {
-		case strings.HasPrefix(line, "event: "):
-			current.Event = strings.TrimPrefix(line, "event: ")
+		case strings.HasPrefix(line, "event:"):
+			current.Event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
 		case strings.HasPrefix(line, "data:"):
 			data := strings.TrimPrefix(line, "data:")
 			data = strings.TrimPrefix(data, " ")
@@ -210,6 +210,8 @@ func (c *Client) waitForEvent(ctx context.Context, requestID string, successType
 }
 
 func payloadContainsRequestID(raw json.RawMessage, requestID string) (bool, error) {
+	// Success event types are per-operation, so the typed envelope selects the
+	// operation and the payload only needs the unique correlation ID.
 	var p struct {
 		RequestID string `json:"request_id"`
 	}

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -24,7 +25,7 @@ import (
 // respond, suspend, close, wake, rename). Split out of huma_handlers_sessions.go
 // to isolate mutation logic from reads and streaming.
 
-var sessionMessageAsyncTimeout = 90 * time.Second
+var sessionMessageAsyncTimeout = sessionMessageTimeout
 
 func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCreateInput) (*SessionCreateOutput, error) {
 	store := s.state.CityBeadStore()
@@ -487,17 +488,29 @@ func (s *Server) humaHandleSessionMessage(_ context.Context, input *SessionMessa
 		}
 
 		resultCh := make(chan messageResult, 1)
+		var terminalEmitted atomic.Bool
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
+		sendResult := func(result messageResult) {
+			if terminalEmitted.Load() {
+				if result.err != nil {
+					log.Printf("api: late session.message result after timeout request_id=%s target=%s error_code=%s err=%v", reqID, sessionTarget, result.errorCode, result.err)
+				} else {
+					log.Printf("api: late session.message result after timeout request_id=%s target=%s session_id=%s", reqID, sessionTarget, result.sessionID)
+				}
+				return
+			}
+			resultCh <- result
+		}
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					resultCh <- messageResult{errorCode: "internal_error", err: fmt.Errorf("panic: %v", r)}
+					sendResult(messageResult{errorCode: "internal_error", err: fmt.Errorf("panic: %v", r)})
 				}
 			}()
 			id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store, sessionTarget)
 			if err != nil {
-				resultCh <- messageResult{errorCode: "resolve_failed", err: err}
+				sendResult(messageResult{errorCode: "resolve_failed", err: err})
 				return
 			}
 			if err := s.sendUserMessageToSession(ctx, store, id, message); err != nil {
@@ -505,16 +518,17 @@ func (s *Server) humaHandleSessionMessage(_ context.Context, input *SessionMessa
 				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 					code = "timeout"
 				}
-				resultCh <- messageResult{sessionID: id, errorCode: code, err: err}
+				sendResult(messageResult{sessionID: id, errorCode: code, err: err})
 				return
 			}
-			resultCh <- messageResult{sessionID: id}
+			sendResult(messageResult{sessionID: id})
 		}()
 
 		timer := time.NewTimer(sessionMessageAsyncTimeout)
 		defer timer.Stop()
 		select {
 		case result := <-resultCh:
+			terminalEmitted.Store(true)
 			if result.err != nil {
 				s.emitSessionMessageFailed(reqID, result.errorCode, result.err.Error())
 				return
@@ -522,6 +536,18 @@ func (s *Server) humaHandleSessionMessage(_ context.Context, input *SessionMessa
 			s.emitSessionMessageSucceeded(reqID, result.sessionID)
 		case <-timer.C:
 			cancel()
+			select {
+			case result := <-resultCh:
+				terminalEmitted.Store(true)
+				if result.err != nil {
+					s.emitSessionMessageFailed(reqID, result.errorCode, result.err.Error())
+					return
+				}
+				s.emitSessionMessageSucceeded(reqID, result.sessionID)
+				return
+			default:
+			}
+			terminalEmitted.Store(true)
 			s.emitSessionMessageFailed(reqID, "timeout", fmt.Sprintf("session.message timed out after %s", sessionMessageAsyncTimeout))
 		}
 	}()

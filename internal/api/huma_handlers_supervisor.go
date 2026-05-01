@@ -355,6 +355,9 @@ func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *Superv
 	pendingStored := false
 	if store, ok := sm.resolver.(PendingRequestStore); ok {
 		if err := store.StorePendingRequestID(dir, reqID); err != nil {
+			if errors.Is(err, ErrPendingRequestExists) {
+				return nil, huma.Error409Conflict("conflict: city initialization already in progress at " + dir)
+			}
 			return nil, huma.Error500InternalServerError(fmt.Sprintf("storing pending request ID: %v", err))
 		}
 		pendingStored = true
@@ -367,6 +370,7 @@ func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *Superv
 		BootstrapProfile:      input.Body.BootstrapProfile,
 		SkipProviderReadiness: true,
 	})
+	postRegisterFailed := false
 	switch {
 	case errors.Is(scaffoldErr, cityinit.ErrAlreadyInitialized):
 		sm.clearPendingCityRequestID(dir, pendingStored)
@@ -376,12 +380,19 @@ func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *Superv
 		errors.Is(scaffoldErr, cityinit.ErrInvalidBootstrapProfile):
 		sm.clearPendingCityRequestID(dir, pendingStored)
 		return nil, huma.Error422UnprocessableEntity(scaffoldErr.Error())
+	case errors.Is(scaffoldErr, cityinit.ErrPostRegisterFailure):
+		failureReqID := reqID
+		if consumedReqID, ok := sm.consumePendingCityRequestID(dir, pendingStored); ok {
+			failureReqID = consumedReqID
+		}
+		emitCityCreateFailed(sm.resolver, failureReqID, result, dir, "city_init_failed", scaffoldErr)
+		postRegisterFailed = true
 	case scaffoldErr != nil:
 		sm.clearPendingCityRequestID(dir, pendingStored)
 		return nil, huma.Error500InternalServerError(scaffoldErr.Error())
 	}
 
-	if !pendingStored {
+	if !pendingStored && !postRegisterFailed {
 		emitCityCreateSucceeded(sm.resolver, reqID, result, dir)
 	}
 
@@ -393,16 +404,23 @@ func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *Superv
 }
 
 func (sm *SupervisorMux) clearPendingCityRequestID(cityPath string, stored bool) {
+	sm.consumePendingCityRequestID(cityPath, stored)
+}
+
+func (sm *SupervisorMux) consumePendingCityRequestID(cityPath string, stored bool) (string, bool) {
 	if !stored {
-		return
+		return "", false
 	}
 	store, ok := sm.resolver.(PendingRequestStore)
 	if !ok {
-		return
+		return "", false
 	}
-	if _, _, err := store.ConsumePendingRequestID(cityPath); err != nil {
+	reqID, found, err := store.ConsumePendingRequestID(cityPath)
+	if err != nil {
 		log.Printf("api: consume pending city create request ID for %s: %v", cityPath, err)
+		return "", false
 	}
+	return reqID, found
 }
 
 func emitCityCreateSucceeded(resolver CityResolver, requestID string, result *cityinit.InitResult, fallbackPath string) {
@@ -432,6 +450,32 @@ func emitCityCreateSucceeded(resolver CityResolver, requestID string, result *ci
 		RequestID: requestID,
 		Name:      cityName,
 		Path:      cityPath,
+	})
+}
+
+func emitCityCreateFailed(resolver CityResolver, requestID string, result *cityinit.InitResult, fallbackPath, errorCode string, err error) {
+	supSrc, ok := resolver.(SupervisorEventSource)
+	if !ok {
+		log.Printf("api: no supervisor event recorder for city.create failure %s", requestID)
+		return
+	}
+	rec := supSrc.SupervisorEventRecorder()
+	if rec == nil {
+		log.Printf("api: nil supervisor event recorder for city.create failure %s", requestID)
+		return
+	}
+
+	cityName := filepath.Base(fallbackPath)
+	if result != nil {
+		if result.CityName != "" {
+			cityName = result.CityName
+		}
+	}
+	EmitTypedEvent(rec, events.RequestFailed, cityName, RequestFailedPayload{
+		RequestID:    requestID,
+		Operation:    RequestOperationCityCreate,
+		ErrorCode:    errorCode,
+		ErrorMessage: err.Error(),
 	})
 }
 
@@ -478,6 +522,9 @@ func (sm *SupervisorMux) humaHandleCityUnregister(ctx context.Context, input *Su
 		}
 		if cityPath != "" {
 			if err := store.StorePendingRequestID(cityPath, reqID); err != nil {
+				if errors.Is(err, ErrPendingRequestExists) {
+					return nil, huma.Error409Conflict("conflict: city operation already in progress at " + cityPath)
+				}
 				return nil, huma.Error500InternalServerError(fmt.Sprintf("storing pending request ID: %v", err))
 			}
 		}

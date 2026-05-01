@@ -48,6 +48,9 @@ func (f *fakeCityResolver) StorePendingRequestID(cityPath, requestID string) err
 	if f.pending == nil {
 		f.pending = make(map[string]string)
 	}
+	if _, exists := f.pending[cityPath]; exists {
+		return ErrPendingRequestExists
+	}
 	f.pending[cityPath] = requestID
 	return nil
 }
