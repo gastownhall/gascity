@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"hash/fnv"
 	"net"
 	"os"
 	"os/exec"
@@ -462,7 +463,7 @@ func TestDoltGCNudgeLockIgnoresDifferentTmpDirs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LookPath(sleep): %v", err)
 	}
-	lockDir := filepath.Join("/tmp", "gc-dolt-gc", "127.0.0.1-3307.lock.d")
+	lockDir := doltGCNudgeTestLockDir(t)
 	_ = os.RemoveAll(lockDir)
 	t.Cleanup(func() { _ = os.RemoveAll(lockDir) })
 
@@ -526,7 +527,7 @@ func TestDoltGCNudgeRecoversStaleLockMarker(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cityPath := writeDoltGCNudgeCity(t)
 			captureDir := t.TempDir()
-			lockDir := filepath.Join("/tmp", "gc-dolt-gc", "127.0.0.1-3307.lock.d")
+			lockDir := doltGCNudgeTestLockDir(t)
 			_ = os.RemoveAll(lockDir)
 			t.Cleanup(func() { _ = os.RemoveAll(lockDir) })
 			if err := os.MkdirAll(lockDir, 0o700); err != nil {
@@ -1003,8 +1004,32 @@ func doltGCNudgeCommand(t *testing.T, cityPath, binDir string, extraEnv ...strin
 		baseEnv = append(baseEnv, "GC_DOLT_MANAGED_LOCAL=1")
 	}
 	cmd.Env = append([]string{}, baseEnv...)
+	extraEnv = doltGCNudgeIsolatedEnv(t, extraEnv)
 	cmd.Env = append(cmd.Env, extraEnv...)
 	return cmd
+}
+
+func doltGCNudgeIsolatedEnv(t *testing.T, env []string) []string {
+	t.Helper()
+	out := append([]string{}, env...)
+	for i, entry := range out {
+		if entry == "GC_DOLT_PORT=3307" {
+			out[i] = "GC_DOLT_PORT=" + doltGCNudgeTestPort(t)
+		}
+	}
+	return out
+}
+
+func doltGCNudgeTestLockDir(t *testing.T) string {
+	t.Helper()
+	return filepath.Join("/tmp", "gc-dolt-gc", "127.0.0.1-"+doltGCNudgeTestPort(t)+".lock.d")
+}
+
+func doltGCNudgeTestPort(t *testing.T) string {
+	t.Helper()
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(t.Name()))
+	return strconv.Itoa(20000 + int(h.Sum32()%20000))
 }
 
 func doltGCNudgeEnvHasKey(env []string, key string) bool {
