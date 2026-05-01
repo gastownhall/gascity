@@ -72,6 +72,17 @@ func TestPrependGCBinDirToPATH_PresentNotFirst_MovesToFront(t *testing.T) {
 	}
 }
 
+func TestPrependGCBinDirToPATH_PreservesLeadingEmptyEntry(t *testing.T) {
+	dir := "/Users/jbb/go/bin"
+	sep := string(os.PathListSeparator)
+	env := map[string]string{"PATH": sep + "/usr/bin"}
+	prependGCBinDirToPATH(env, filepath.Join(dir, "gc"))
+	want := dir + sep + sep + "/usr/bin"
+	if env["PATH"] != want {
+		t.Fatalf("PATH=%q, want %q", env["PATH"], want)
+	}
+}
+
 func TestPrependGCBinDirToPATH_EmptyDir_NoOp(t *testing.T) {
 	// edge: GC_BIN is just "gc" with no directory part — skip prepend.
 	env := map[string]string{"PATH": "/usr/bin"}
