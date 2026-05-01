@@ -144,3 +144,12 @@ func StatePath(cityPath string) string {
 func LockPath(cityPath string) string {
 	return citylayout.RuntimePath(cityPath, "nudges", "state.lock")
 }
+
+// WakeSocketPath returns the path to the supervisor nudge-dispatcher wake
+// socket. Producers connect to this path after enqueue to trigger immediate
+// dispatch; the supervisor listens on it when daemon.nudge_dispatcher is
+// "supervisor". Path is short to stay under the 108-byte sockaddr_un limit
+// even for nested city roots.
+func WakeSocketPath(cityPath string) string {
+	return citylayout.RuntimePath(cityPath, "nudges", "wake.sock")
+}
