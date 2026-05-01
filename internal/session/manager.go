@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -409,7 +410,20 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 
 		sessName := explicitName
 		if sessName == "" {
-			sessName = sessionNameFor(b.ID)
+			// For aliased sessions (e.g. `gc session new --alias <rig>`),
+			// prefer the canonical template-derived tmux name so the session
+			// appears in tmux as e.g. "crew-<rig>" rather than the
+			// opaque "s-<beadID>" fallback. Pool slots and unaliased
+			// ephemerals retain s-<id> because they need per-instance
+			// uniqueness.
+			if alias != "" && extraMeta["pool_slot"] == "" {
+				if canonical := agent.SessionNameFor("", template, ""); canonical != "" {
+					sessName = canonical
+				}
+			}
+			if sessName == "" {
+				sessName = sessionNameFor(b.ID)
+			}
 			if err := m.store.SetMetadata(b.ID, "session_name", sessName); err != nil {
 				_ = m.store.Close(b.ID)
 				return fmt.Errorf("storing session name: %w", err)
@@ -642,7 +656,20 @@ func (m *Manager) createAliasedBeadOnlyNamed(alias, explicitName, template, titl
 
 		sessName := explicitName
 		if sessName == "" {
-			sessName = sessionNameFor(b.ID)
+			// For aliased sessions (e.g. `gc session new --alias <rig>`),
+			// prefer the canonical template-derived tmux name so the session
+			// appears in tmux as e.g. "crew-<rig>" rather than the
+			// opaque "s-<beadID>" fallback. Pool slots and unaliased
+			// ephemerals retain s-<id> because they need per-instance
+			// uniqueness.
+			if alias != "" && extraMeta["pool_slot"] == "" {
+				if canonical := agent.SessionNameFor("", template, ""); canonical != "" {
+					sessName = canonical
+				}
+			}
+			if sessName == "" {
+				sessName = sessionNameFor(b.ID)
+			}
 			if err := m.store.SetMetadata(b.ID, "session_name", sessName); err != nil {
 				_ = m.store.Close(b.ID)
 				return fmt.Errorf("storing session name: %w", err)
