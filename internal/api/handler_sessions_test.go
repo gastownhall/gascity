@@ -1082,12 +1082,50 @@ func TestHandleSessionCloseDeleteIgnoresMissingBeadAfterClose(t *testing.T) {
 	}
 }
 
+func TestHandleSessionCloseDeleteRetriesTransientConflict(t *testing.T) {
+	fs := newSessionFakeState(t)
+	mem := beads.NewMemStore()
+	store := &transientDeleteConflictStore{Store: mem}
+	fs.cityBeadStore = store
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Transient Delete")
+
+	rec := httptest.NewRecorder()
+	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/close?delete=true", nil)
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if store.deleteCalls != 2 {
+		t.Fatalf("delete calls = %d, want 2", store.deleteCalls)
+	}
+	if _, err := mem.Get(info.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get(%s) error = %v, want ErrNotFound", info.ID, err)
+	}
+}
+
 type deleteMissingStore struct {
 	beads.Store
 }
 
 func (s deleteMissingStore) Delete(id string) error {
 	return fmt.Errorf("deleting bead %q: %w", id, beads.ErrNotFound)
+}
+
+type transientDeleteConflictStore struct {
+	beads.Store
+	deleteCalls int
+}
+
+func (s *transientDeleteConflictStore) Delete(id string) error {
+	s.deleteCalls++
+	if s.deleteCalls == 1 {
+		return fmt.Errorf("deleting bead %q: sql commit: Error 1213 (40001): serialization failure: this transaction conflicts with a committed transaction from another client, try restarting transaction", id)
+	}
+	return s.Store.Delete(id)
 }
 
 func TestHandleSessionWake_DoesNotRewriteHistoricalWaitNudge(t *testing.T) {

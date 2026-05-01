@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -293,7 +294,7 @@ func TestControllerStateRuntimeUpdatePreservesCurrentStoresWithoutPendingMutatio
 		}},
 	}
 	nextProvider := runtime.NewFake()
-	cs.updateFromRuntime(next, nextProvider, "next-rev")
+	cs.updateFromRuntime(next, nextProvider, "")
 
 	if got := cs.BeadStore("alpha"); got != rigStore {
 		t.Fatalf("BeadStore(alpha) = %T %p, want original store %T %p", got, got, rigStore, rigStore)
@@ -306,6 +307,65 @@ func TestControllerStateRuntimeUpdatePreservesCurrentStoresWithoutPendingMutatio
 	}
 	if cs.SessionProvider() != nextProvider {
 		t.Fatal("SessionProvider() was not advanced to runtime provider")
+	}
+}
+
+func TestControllerStateRuntimeUpdateIgnoresStaleRevisionWithoutPendingMutation(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "alpha")
+	cityToml := fmt.Sprintf(`[workspace]
+name = "city1"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "alpha"
+path = %q
+prefix = "al"
+
+[[agent]]
+name = "worker"
+dir = "alpha"
+provider = "bash"
+`, rigDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	current := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Rigs: []config.Rig{{
+			Name:   "alpha",
+			Path:   rigDir,
+			Prefix: "al",
+		}},
+		Agents: []config.Agent{{Name: "worker", Dir: "alpha", Provider: "bash"}},
+	}
+	stale := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Rigs: []config.Rig{{
+			Name:   "alpha",
+			Path:   rigDir,
+			Prefix: "al",
+		}},
+	}
+	originalProvider := runtime.NewFake()
+	cs := newControllerState(context.Background(), current, originalProvider, events.NewFake(), "city1", cityDir)
+
+	cs.updateFromRuntime(stale, runtime.NewFake(), "stale-rev")
+
+	if got := cs.Config(); got != current {
+		t.Fatalf("Config() = %+v, want current config with worker agent", got)
+	}
+	if cs.SessionProvider() != originalProvider {
+		t.Fatal("SessionProvider() advanced for stale runtime update")
+	}
+	if cs.configMutationPending.Load() {
+		t.Fatal("pending mutation marker set by stale runtime update")
 	}
 }
 

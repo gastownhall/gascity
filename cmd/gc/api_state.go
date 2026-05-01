@@ -378,6 +378,8 @@ func (cs *controllerState) updateFromRuntime(cfg *config.City, sp runtime.Provid
 				return
 			}
 		}
+	} else if cs.runtimeUpdateRevisionIsStale(revision) {
+		return
 	}
 	if cs.runtimeUpdateCanReuseCurrentStores(cfg) {
 		cs.updateConfigAndProviderOnly(cfg, sp)
@@ -442,6 +444,14 @@ func (cs *controllerState) runtimeUpdateStatusForPendingMutation(revision string
 		return false, true
 	}
 	return false, false
+}
+
+func (cs *controllerState) runtimeUpdateRevisionIsStale(revision string) bool {
+	if revision == "" {
+		return false
+	}
+	currentRev, err := cs.currentConfigRevision()
+	return err != nil || currentRev != revision
 }
 
 func (cs *controllerState) pendingConfigRevision() string {

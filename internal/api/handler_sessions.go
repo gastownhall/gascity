@@ -343,7 +343,7 @@ func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
 
 	// Optional: permanently delete the bead after closing.
 	if r.URL.Query().Get("delete") == "true" {
-		if err := store.Delete(id); err != nil {
+		if err := deleteSessionBeadAfterClose(store, id); err != nil {
 			log.Printf("gc api: deleting bead after close %s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "internal", "closed but delete failed: "+err.Error())
 			return
@@ -351,6 +351,32 @@ func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func deleteSessionBeadAfterClose(store beads.Store, id string) error {
+	const maxAttempts = 5
+	var err error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		err = store.Delete(id)
+		if err == nil || errors.Is(err, beads.ErrNotFound) {
+			return nil
+		}
+		if !isTransientBeadDeleteConflict(err) {
+			return err
+		}
+		time.Sleep(time.Duration(attempt+1) * 25 * time.Millisecond)
+	}
+	return err
+}
+
+func isTransientBeadDeleteConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "Error 1213") ||
+		strings.Contains(msg, "40001") ||
+		strings.Contains(msg, "serialization failure")
 }
 
 // handleSessionWake clears hold and quarantine on a session.
