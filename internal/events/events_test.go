@@ -560,6 +560,56 @@ func TestReadFiltered(t *testing.T) {
 	})
 }
 
+func TestReadFilteredMissingFile(t *testing.T) {
+	got, err := ReadFiltered(filepath.Join(t.TempDir(), "missing.jsonl"), Filter{})
+	if err != nil {
+		t.Fatalf("ReadFiltered(missing): %v", err)
+	}
+	if got != nil {
+		t.Fatalf("ReadFiltered(missing) = %v, want nil", got)
+	}
+}
+
+func TestReadFilteredSkipsMalformedLines(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	data := strings.Join([]string{
+		`not-json`,
+		`{"seq":1,"type":"bead.created","ts":"2025-06-15T10:30:00Z","actor":"actor-a","subject":"gc-1"}`,
+		``,
+	}, "\n")
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ReadFiltered(path, Filter{})
+	if err != nil {
+		t.Fatalf("ReadFiltered: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d events, want 1", len(got))
+	}
+	if got[0].Subject != "gc-1" {
+		t.Errorf("Subject = %q, want gc-1", got[0].Subject)
+	}
+}
+
+func TestReadFilteredScannerError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", 1024*1024+1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ReadFiltered(path, Filter{})
+	if err == nil {
+		t.Fatal("ReadFiltered returned nil error, want scanner error")
+	}
+	if !strings.Contains(err.Error(), "scanning events") {
+		t.Fatalf("ReadFiltered error = %q, want scanning events context", err.Error())
+	}
+}
+
 func TestReadFilteredLimitStopsScanning(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "events.jsonl")
