@@ -1,10 +1,9 @@
 name: OpenSSF Scorecard
 
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
   schedule:
-    - cron: "37 5 * * 2"
+    - cron: "37 5 * * *"
 
 permissions: read-all
 
@@ -13,6 +12,7 @@ jobs:
     name: Scorecard analysis
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 20
+    continue-on-error: true
     permissions:
       contents: read
       security-events: write
@@ -24,6 +24,7 @@ jobs:
           persist-credentials: false
 
       - name: Run OpenSSF Scorecard
+        continue-on-error: true
         uses: ossf/scorecard-action@4eaacf0543bb3f2c246792bd56e8cdeffafb205a # v2.4.3
         with:
           results_file: scorecard.sarif
@@ -31,11 +32,15 @@ jobs:
           publish_results: true
 
       - name: Upload SARIF results
+        if: ${{ hashFiles('scorecard.sarif') != '' }}
+        continue-on-error: true
         uses: github/codeql-action/upload-sarif@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4
         with:
           sarif_file: scorecard.sarif
 
       - name: Upload SARIF artifact
+        if: ${{ hashFiles('scorecard.sarif') != '' }}
+        continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: openssf-scorecard-sarif
