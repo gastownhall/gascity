@@ -3114,7 +3114,10 @@ func TestValidateAgentsDupNameMixedProvenance(t *testing.T) {
 }
 
 func TestValidateAgentsDupNameNoProvenance(t *testing.T) {
-	// Two inline agents with no SourceDir — plain error without provenance.
+	// Two zero-valued agents (no SourceDir, no source enum). Per ga-tpfc.1
+	// the rendered descriptor must always be non-empty; an unstamped agent
+	// renders as <unknown: ...>. The error must never contain an empty
+	// quoted "" path, regardless of the source category.
 	agents := []Agent{
 		{Name: "worker"},
 		{Name: "worker"},
@@ -3127,9 +3130,8 @@ func TestValidateAgentsDupNameNoProvenance(t *testing.T) {
 	if !strings.Contains(errStr, "duplicate name") {
 		t.Errorf("error should say 'duplicate name', got: %s", errStr)
 	}
-	// Should NOT contain "from" when neither has provenance.
-	if strings.Contains(errStr, "from") {
-		t.Errorf("error should not include provenance when neither has SourceDir, got: %s", errStr)
+	if strings.Contains(errStr, `""`) {
+		t.Errorf(`error contains empty quoted "" — descriptors must always be non-empty, got: %s`, errStr)
 	}
 }
 
