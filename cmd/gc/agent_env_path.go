@@ -37,8 +37,7 @@ func prependGCBinDirToPATH(env map[string]string, gcBin string) {
 	}
 
 	parts := strings.Split(base, sep)
-	entries := make([]string, 0, len(parts)+1)
-	entries = append(entries, dir)
+	entries := []string{dir}
 	for _, p := range parts {
 		if p == dir {
 			continue
