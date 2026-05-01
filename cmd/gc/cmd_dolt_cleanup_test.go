@@ -259,6 +259,47 @@ func TestRunDoltCleanup_ForceKillsOrphans(t *testing.T) {
 	}
 }
 
+func TestRunDoltCleanup_ForceCountsSuccessfulKill(t *testing.T) {
+	procs := []DoltProcInfo{
+		{PID: 4444, Argv: []string{"dolt", "sql-server", "--config", "/tmp/TestX/config.yaml"}},
+	}
+	var signals []syscall.Signal
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		FS:                fsys.NewFake(),
+		JSON:              true,
+		Force:             true,
+		HomeDir:           "/home/u",
+		DiscoverProcesses: func() ([]DoltProcInfo, error) { return procs, nil },
+		KillProcess: func(_ int, sig syscall.Signal) error {
+			signals = append(signals, sig)
+			return nil
+		},
+		ReapGracePeriod: 1,
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	}
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if r.Reaped.Count != len(procs) {
+		t.Errorf("Reaped.Count = %d, want %d", r.Reaped.Count, len(procs))
+	}
+	if r.Summary.ErrorsTotal != 0 {
+		t.Errorf("Summary.ErrorsTotal = %d, want 0", r.Summary.ErrorsTotal)
+	}
+	if len(r.Errors) != 0 || len(r.Reaped.Errors) != 0 {
+		t.Errorf("errors = %#v, reap errors = %#v; want none", r.Errors, r.Reaped.Errors)
+	}
+	if len(signals) != 2 || signals[0] != syscall.SIGTERM || signals[1] != syscall.SIGKILL {
+		t.Errorf("signals = %v, want [SIGTERM SIGKILL]", signals)
+	}
+}
+
 func TestRunDoltCleanup_ForceRecordsKillError(t *testing.T) {
 	procs := []DoltProcInfo{
 		{PID: 4444, Argv: []string{"dolt", "sql-server", "--config", "/tmp/TestX/config.yaml"}},

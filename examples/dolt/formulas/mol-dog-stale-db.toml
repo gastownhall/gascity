@@ -161,13 +161,25 @@ fi
 gc event emit mol-dog-stale-db.done \
   --message "${DONE_BYTES} bytes freed; ${DONE_ERRS} errors"
 
-if [ "$ORPHAN_TOTAL" -ge "{{warn_threshold}}" ]; then
-  gc session nudge deacon "WARN: $ORPHAN_TOTAL Dolt orphan(s) detected (warn_threshold={{warn_threshold}})"
+if [ "$APPLIED" -eq 1 ] && [ "$DONE_ERRS" -gt 0 ]; then
+  ESCALATED=1
+  gc event emit mol-dog-stale-db.escalate \
+    --message "apply reported ${DONE_ERRS} error(s); leaving work bead open"
 fi
 
-gc session nudge deacon "DOG_DONE: stale-db - orphans: ${ORPHAN_TOTAL}, applied: ${APPLIED}, escalated: ${ESCALATED}"
+if [ "$ORPHAN_TOTAL" -ge "{{warn_threshold}}" ]; then
+  gc session nudge deacon "WARN: $ORPHAN_TOTAL Dolt orphan(s) seen this scan (warn_threshold={{warn_threshold}})" || true
+fi
 
-bd close "$WORK_BEAD" --reason "Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED})"
+gc session nudge deacon "DOG_DONE: stale-db - orphans: ${ORPHAN_TOTAL}, applied: ${APPLIED}, escalated: ${ESCALATED}" || true
+
+if [ "$APPLIED" -eq 1 ] && [ "$DONE_ERRS" -gt 0 ]; then
+  echo "gc dolt-cleanup apply reported ${DONE_ERRS} error(s); leaving work bead open" >&2
+  gc runtime drain-ack
+  exit 1
+fi
+
+bd close "$WORK_BEAD" --reason "Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED}, escalated=${ESCALATED})"
 gc runtime drain-ack
 exit
 ```
