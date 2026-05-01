@@ -368,6 +368,75 @@ func TestCachingStoreApplyEventRecordsProblemOnMalformedPayload(t *testing.T) {
 	}
 }
 
+func TestCachingStoreApplyEventRechecksLocalMutationBeforeCommit(t *testing.T) {
+	backing := NewMemStore()
+	bead, err := backing.Create(Bead{
+		Title:    "mail",
+		Type:     "message",
+		Labels:   []string{"thread:abc"},
+		Metadata: map[string]string{"mail.read": "false"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	if err := cache.Update(bead.ID, UpdateOpts{
+		Labels:   []string{"read"},
+		Metadata: map[string]string{"mail.read": "true"},
+	}); err != nil {
+		t.Fatalf("Mark read update: %v", err)
+	}
+	staleRead, err := backing.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get stale read payload: %v", err)
+	}
+	payload, err := json.Marshal(staleRead)
+	if err != nil {
+		t.Fatalf("Marshal stale read payload: %v", err)
+	}
+
+	beforeCommit := make(chan struct{})
+	releaseCommit := make(chan struct{})
+	cache.applyEventBeforeCommitForTest = func() {
+		close(beforeCommit)
+		<-releaseCommit
+	}
+
+	done := make(chan struct{})
+	go func() {
+		cache.ApplyEvent("bead.updated", payload)
+		close(done)
+	}()
+
+	<-beforeCommit
+	if err := cache.Update(bead.ID, UpdateOpts{
+		RemoveLabels: []string{"read"},
+		Metadata:     map[string]string{"mail.read": "false"},
+	}); err != nil {
+		t.Fatalf("Mark unread update: %v", err)
+	}
+	close(releaseCommit)
+	<-done
+
+	got, err := cache.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get after stale event race: %v", err)
+	}
+	for _, label := range got.Labels {
+		if label == "read" {
+			t.Fatalf("labels after stale event race = %#v, want read removed", got.Labels)
+		}
+	}
+	if got.Metadata["mail.read"] != "false" {
+		t.Fatalf("mail.read after stale event race = %q, want false; metadata=%v", got.Metadata["mail.read"], got.Metadata)
+	}
+}
+
 func TestCachingStoreRunReconciliationRecordsProblemAndDegrades(t *testing.T) {
 	t.Parallel()
 

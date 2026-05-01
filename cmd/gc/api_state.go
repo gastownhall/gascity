@@ -54,9 +54,10 @@ type controllerState struct {
 	updateMu      sync.Mutex // serializes rebuild+swap so stale reloads cannot overtake newer mutations
 
 	// True after an API config mutation refreshes controller state ahead of the
-	// runtime reload loop. Runtime reloads that would drop newly bound rigs are
-	// ignored until the loop observes and applies the same or a newer config.
+	// runtime reload loop. Runtime reloads from older revisions are ignored
+	// until the loop observes and applies the same or a newer on-disk config.
 	configMutationPending atomic.Bool
+	pendingConfigRev      string
 }
 
 var controllerStateInitRigDirIfReady = initDirIfReady
@@ -361,17 +362,25 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	cs.mu.Unlock()
 }
 
-func (cs *controllerState) updateFromRuntime(cfg *config.City, sp runtime.Provider) {
-	if cs.configMutationPending.Load() && cs.runtimeUpdateDropsPendingRigs(cfg) {
-		return
-	}
-	if cs.configMutationPending.Load() && cs.runtimeUpdateCanReuseCurrentStores(cfg) {
-		cs.updateConfigAndProviderOnly(cfg, sp)
-		cs.configMutationPending.Store(false)
-		return
+func (cs *controllerState) updateFromRuntime(cfg *config.City, sp runtime.Provider, revision string) {
+	if cs.configMutationPending.Load() {
+		matchesPending, stale := cs.runtimeUpdateStatusForPendingMutation(revision)
+		if stale {
+			return
+		}
+		if matchesPending {
+			if cs.runtimeUpdateDropsPendingRigs(cfg) {
+				return
+			}
+			if cs.runtimeUpdateCanReuseCurrentStores(cfg) {
+				cs.updateConfigAndProviderOnly(cfg, sp)
+				cs.clearConfigMutationPending()
+				return
+			}
+		}
 	}
 	cs.update(cfg, sp)
-	cs.configMutationPending.Store(false)
+	cs.clearConfigMutationPending()
 }
 
 func (cs *controllerState) updateConfigAndProviderOnly(cfg *config.City, sp runtime.Provider) {
@@ -413,6 +422,55 @@ func (cs *controllerState) runtimeUpdateDropsPendingRigs(next *config.City) bool
 	current := cs.cfg
 	cs.mu.RUnlock()
 	return configDropsBoundRigs(current, next)
+}
+
+func (cs *controllerState) runtimeUpdateStatusForPendingMutation(revision string) (matchesPending, stale bool) {
+	pendingRev := cs.pendingConfigRevision()
+	if pendingRev == "" || revision == "" {
+		return true, false
+	}
+	if revision == pendingRev {
+		return true, false
+	}
+	currentRev, err := cs.currentConfigRevision()
+	if err != nil || currentRev != revision {
+		return false, true
+	}
+	return false, false
+}
+
+func (cs *controllerState) pendingConfigRevision() string {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.pendingConfigRev
+}
+
+func (cs *controllerState) currentConfigRevision() (string, error) {
+	if cs.cityPath == "" {
+		return "", nil
+	}
+	tomlPath := filepath.Join(cs.cityPath, "city.toml")
+	nextCfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, extraConfigFiles...)
+	if err != nil {
+		return "", fmt.Errorf("loading current city config: %w", err)
+	}
+	applyFeatureFlags(nextCfg)
+	applyRuntimeCityIdentity(nextCfg, cs.cityName)
+	return config.Revision(fsys.OSFS{}, prov, nextCfg, cs.cityPath), nil
+}
+
+func (cs *controllerState) markConfigMutationPending(revision string) {
+	cs.mu.Lock()
+	cs.pendingConfigRev = revision
+	cs.mu.Unlock()
+	cs.configMutationPending.Store(true)
+}
+
+func (cs *controllerState) clearConfigMutationPending() {
+	cs.mu.Lock()
+	cs.pendingConfigRev = ""
+	cs.mu.Unlock()
+	cs.configMutationPending.Store(false)
 }
 
 type storeTopologyRig struct {
@@ -937,7 +995,8 @@ func (cs *controllerState) mutateAndPoke(mutate func() error) error {
 	if err := mutate(); err != nil {
 		return err
 	}
-	if err := cs.refreshConfigSnapshot(); err != nil {
+	revision, err := cs.refreshConfigSnapshot()
+	if err != nil {
 		if snapshot != nil {
 			if restoreErr := snapshot.restore(); restoreErr != nil {
 				restoreFailure := fmt.Errorf("restoring previous city config: %w", restoreErr)
@@ -946,7 +1005,7 @@ func (cs *controllerState) mutateAndPoke(mutate func() error) error {
 		}
 		return fmt.Errorf("refreshing updated city config: %w", err)
 	}
-	cs.configMutationPending.Store(true)
+	cs.markConfigMutationPending(revision)
 	if cs.configDirty != nil {
 		cs.configDirty.Store(true)
 	}
@@ -954,24 +1013,25 @@ func (cs *controllerState) mutateAndPoke(mutate func() error) error {
 	return nil
 }
 
-func (cs *controllerState) refreshConfigSnapshot() error {
+func (cs *controllerState) refreshConfigSnapshot() (string, error) {
 	if cs.cityPath == "" || cs.cfg == nil {
-		return nil
+		return "", nil
 	}
 
 	tomlPath := filepath.Join(cs.cityPath, "city.toml")
-	nextCfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, extraConfigFiles...)
+	nextCfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, extraConfigFiles...)
 	if err != nil {
-		return fmt.Errorf("loading updated city config: %w", err)
+		return "", fmt.Errorf("loading updated city config: %w", err)
 	}
 	applyFeatureFlags(nextCfg)
 	applyRuntimeCityIdentity(nextCfg, cs.cityName)
+	revision := config.Revision(fsys.OSFS{}, prov, nextCfg, cs.cityPath)
 
 	cs.mu.RLock()
 	sp := cs.sp
 	cs.mu.RUnlock()
 	cs.update(nextCfg, sp)
-	return nil
+	return revision, nil
 }
 
 // Poke signals the controller to trigger an immediate reconciler tick.

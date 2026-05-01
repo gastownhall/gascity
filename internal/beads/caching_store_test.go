@@ -660,6 +660,153 @@ func TestCachingStoreUpdateReflectsWriteIntentWhenRefreshFails(t *testing.T) {
 	}
 }
 
+func TestCachingStoreLocalWriteIgnoresDelayedStaleEvent(t *testing.T) {
+	mem := beads.NewMemStore()
+	original, err := mem.Create(beads.Bead{
+		Title:  "mail",
+		Type:   "message",
+		Labels: []string{"thread:abc"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cs := beads.NewCachingStoreForTest(mem, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	if err := cs.Update(original.ID, beads.UpdateOpts{Labels: []string{"read"}}); err != nil {
+		t.Fatalf("Mark read update: %v", err)
+	}
+	staleReadEvent, err := mem.Get(original.ID)
+	if err != nil {
+		t.Fatalf("Get stale read event: %v", err)
+	}
+	if err := cs.Update(original.ID, beads.UpdateOpts{RemoveLabels: []string{"read"}}); err != nil {
+		t.Fatalf("Mark unread update: %v", err)
+	}
+
+	payload, err := json.Marshal(staleReadEvent)
+	if err != nil {
+		t.Fatalf("Marshal stale read event: %v", err)
+	}
+	cs.ApplyEvent("bead.updated", payload)
+
+	got, err := cs.Get(original.ID)
+	if err != nil {
+		t.Fatalf("Get after delayed stale event: %v", err)
+	}
+	if containsString(got.Labels, "read") {
+		t.Fatalf("labels after delayed stale event = %#v, want read label removed", got.Labels)
+	}
+	if !containsString(got.Labels, "thread:abc") {
+		t.Fatalf("labels after delayed stale event = %#v, want thread label preserved", got.Labels)
+	}
+}
+
+func TestCachingStoreLocalWriteIgnoresDelayedStaleEventAfterLiveRefresh(t *testing.T) {
+	mem := beads.NewMemStore()
+	original, err := mem.Create(beads.Bead{
+		Title:  "mail",
+		Type:   "message",
+		Labels: []string{"thread:abc"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cs := beads.NewCachingStoreForTest(mem, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	if err := cs.Update(original.ID, beads.UpdateOpts{
+		Labels:   []string{"read"},
+		Metadata: map[string]string{"mail.read": "true"},
+	}); err != nil {
+		t.Fatalf("Mark read update: %v", err)
+	}
+	staleReadEvent, err := mem.Get(original.ID)
+	if err != nil {
+		t.Fatalf("Get stale read event: %v", err)
+	}
+	if err := cs.Update(original.ID, beads.UpdateOpts{
+		RemoveLabels: []string{"read"},
+		Metadata:     map[string]string{"mail.read": "false"},
+	}); err != nil {
+		t.Fatalf("Mark unread update: %v", err)
+	}
+
+	if _, err := cs.List(beads.ListQuery{Live: true, Type: "message", AllowScan: true}); err != nil {
+		t.Fatalf("Live list refresh: %v", err)
+	}
+
+	payload, err := json.Marshal(staleReadEvent)
+	if err != nil {
+		t.Fatalf("Marshal stale read event: %v", err)
+	}
+	cs.ApplyEvent("bead.updated", payload)
+
+	got, err := cs.Get(original.ID)
+	if err != nil {
+		t.Fatalf("Get after delayed stale event: %v", err)
+	}
+	if containsString(got.Labels, "read") {
+		t.Fatalf("labels after delayed stale event = %#v, want read label removed", got.Labels)
+	}
+	if got.Metadata["mail.read"] != "false" {
+		t.Fatalf("mail.read after delayed stale event = %q, want false; metadata=%v", got.Metadata["mail.read"], got.Metadata)
+	}
+}
+
+func TestCachingStoreLiveListDoesNotOverwriteRecentLocalWriteWithStaleBackingRows(t *testing.T) {
+	mem := beads.NewMemStore()
+	original, err := mem.Create(beads.Bead{
+		Title:  "mail",
+		Status: "open",
+		Type:   "message",
+		Labels: []string{"thread:abc"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	store := &staleListAfterUpdateStore{
+		Store: mem,
+		stale: []beads.Bead{original},
+	}
+	cs := beads.NewCachingStoreForTest(store, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	if err := cs.Update(original.ID, beads.UpdateOpts{
+		Labels:   []string{"read"},
+		Metadata: map[string]string{"mail.read": "true"},
+	}); err != nil {
+		t.Fatalf("Mark read update: %v", err)
+	}
+	store.setStaleListCount(1)
+
+	items, err := cs.List(beads.ListQuery{Live: true, Type: "message", Status: "open", AllowScan: true})
+	if err != nil {
+		t.Fatalf("Live list refresh: %v", err)
+	}
+	got, ok := findTestBead(items, original.ID)
+	if !ok {
+		t.Fatalf("Live list did not return %s: %#v", original.ID, items)
+	}
+	if !containsString(got.Labels, "read") || got.Metadata["mail.read"] != "true" {
+		t.Fatalf("live list stale row overwrote local read state: labels=%#v metadata=%#v", got.Labels, got.Metadata)
+	}
+
+	cached, err := cs.Get(original.ID)
+	if err != nil {
+		t.Fatalf("Get after stale live list: %v", err)
+	}
+	if !containsString(cached.Labels, "read") || cached.Metadata["mail.read"] != "true" {
+		t.Fatalf("cached read state after stale live list = labels=%#v metadata=%#v, want read=true", cached.Labels, cached.Metadata)
+	}
+}
+
 func TestCachingStoreUpdateDoesNotDuplicateAuthoritativeLabels(t *testing.T) {
 	mem := beads.NewMemStore()
 	original, err := mem.Create(beads.Bead{
@@ -785,6 +932,31 @@ func (s *staleReadsAfterUpdateStore) Get(id string) (beads.Bead, error) {
 	}
 	s.mu.Unlock()
 	return s.Store.Get(id)
+}
+
+type staleListAfterUpdateStore struct {
+	beads.Store
+	mu             sync.Mutex
+	stale          []beads.Bead
+	staleListCount int
+}
+
+func (s *staleListAfterUpdateStore) setStaleListCount(count int) {
+	s.mu.Lock()
+	s.staleListCount = count
+	s.mu.Unlock()
+}
+
+func (s *staleListAfterUpdateStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.mu.Lock()
+	if s.staleListCount > 0 && query.Live {
+		s.staleListCount--
+		stale := append([]beads.Bead(nil), s.stale...)
+		s.mu.Unlock()
+		return stale, nil
+	}
+	s.mu.Unlock()
+	return s.Store.List(query)
 }
 
 type primeRaceStore struct {
@@ -1762,6 +1934,15 @@ func containsBeadID(items []beads.Bead, id string) bool {
 		}
 	}
 	return false
+}
+
+func findTestBead(items []beads.Bead, id string) (beads.Bead, bool) {
+	for _, item := range items {
+		if item.ID == id {
+			return item, true
+		}
+	}
+	return beads.Bead{}, false
 }
 
 func strPtr(s string) *string { return &s }

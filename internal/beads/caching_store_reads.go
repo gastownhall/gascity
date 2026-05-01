@@ -141,18 +141,26 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 	if c.state != cacheLive && c.state != cachePartial {
 		return items
 	}
+	now := time.Now()
 	refreshed := make([]Bead, 0, len(items))
 	for _, item := range items {
-		switch {
-		case c.deletedSeq[item.ID] > startSeq:
+		if c.deletedSeq[item.ID] > startSeq {
 			continue
-		case c.beadSeq[item.ID] > startSeq:
+		}
+		if c.beadSeq[item.ID] > startSeq {
 			current, ok := c.beads[item.ID]
 			if ok && query.Matches(current) {
 				refreshed = append(refreshed, cloneBead(current))
 			}
 			continue
-		case c.beadSeq[item.ID] == startSeq:
+		}
+		if current, keep := c.recentLocalBeadConflictLocked(item.ID, item, now); keep {
+			if query.Matches(current) {
+				refreshed = append(refreshed, current)
+			}
+			continue
+		}
+		if c.beadSeq[item.ID] == startSeq {
 			current, ok := c.beads[item.ID]
 			if ok && current.Status == "closed" && item.Status != "closed" {
 				continue
@@ -161,7 +169,10 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		c.beads[item.ID] = cloneBead(item)
 		delete(c.dirty, item.ID)
 		delete(c.deletedSeq, item.ID)
-		delete(c.beadSeq, item.ID)
+		if !recentLocalMutation(c.localBeadAt[item.ID], now) {
+			delete(c.beadSeq, item.ID)
+			delete(c.localBeadAt, item.ID)
+		}
 		if query.Matches(item) {
 			refreshed = append(refreshed, cloneBead(item))
 		}
@@ -170,13 +181,22 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
 			continue
 		}
+		if _, keep := c.recentLocalBeadConflictLocked(id, bead, now); keep {
+			continue
+		}
 		c.beads[id] = bead
 		delete(c.dirty, id)
 		delete(c.deletedSeq, id)
-		delete(c.beadSeq, id)
+		if !recentLocalMutation(c.localBeadAt[id], now) {
+			delete(c.beadSeq, id)
+			delete(c.localBeadAt, id)
+		}
 	}
 	for id := range removedParents {
 		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
+			continue
+		}
+		if current, ok := c.beads[id]; ok && current.Status != "closed" && recentLocalMutation(c.localBeadAt[id], now) {
 			continue
 		}
 		delete(c.beads, id)
@@ -184,6 +204,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		delete(c.dirty, id)
 		delete(c.deletedSeq, id)
 		delete(c.beadSeq, id)
+		delete(c.localBeadAt, id)
 	}
 	c.markFreshLocked(time.Now())
 	c.updateStatsLocked()

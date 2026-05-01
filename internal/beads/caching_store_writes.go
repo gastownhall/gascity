@@ -20,7 +20,7 @@ func (c *CachingStore) Create(b Bead) (Bead, error) {
 	}
 
 	c.mu.Lock()
-	c.noteMutationLocked(created.ID)
+	c.noteLocalMutationLocked(created.ID)
 	c.beads[created.ID] = cloneBead(created)
 	delete(c.dirty, created.ID)
 	delete(c.deletedSeq, created.ID)
@@ -50,7 +50,7 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 	fresh = applyUpdateOptsToBead(fresh, opts)
 
 	c.mu.Lock()
-	c.noteMutationLocked(id)
+	c.noteLocalMutationLocked(id)
 	c.beads[id] = cloneBead(fresh)
 	delete(c.dirty, id)
 	delete(c.deletedSeq, id)
@@ -79,7 +79,7 @@ func (c *CachingStore) Close(id string) error {
 	}
 
 	c.mu.Lock()
-	c.noteMutationLocked(id)
+	c.noteLocalMutationLocked(id)
 	if b, ok := c.beads[id]; ok {
 		b.Status = "closed"
 		c.beads[id] = b
@@ -121,7 +121,7 @@ func (c *CachingStore) Reopen(id string) error {
 	}
 
 	c.mu.Lock()
-	c.noteMutationLocked(id)
+	c.noteLocalMutationLocked(id)
 	if b, ok := c.beads[id]; ok {
 		b.Status = "open"
 		c.beads[id] = b
@@ -172,7 +172,7 @@ func (c *CachingStore) CloseAll(ids []string, metadata map[string]string) (int, 
 
 	notifications := make([]cacheNotification, 0, len(refreshed))
 	c.mu.Lock()
-	c.noteMutationLocked(ids...)
+	c.noteLocalMutationLocked(ids...)
 	if refreshErr != nil {
 		c.recordProblemLocked("close-all refresh", refreshErr)
 	}
@@ -208,7 +208,7 @@ func (c *CachingStore) SetMetadata(id, key, value string) error {
 	}
 
 	c.mu.Lock()
-	c.noteMutationLocked(id)
+	c.noteLocalMutationLocked(id)
 	if b, ok := c.beads[id]; ok {
 		if b.Metadata == nil {
 			b.Metadata = make(map[string]string)
@@ -231,7 +231,7 @@ func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error 
 	}
 
 	c.mu.Lock()
-	c.noteMutationLocked(id)
+	c.noteLocalMutationLocked(id)
 	if b, ok := c.beads[id]; ok {
 		if b.Metadata == nil {
 			b.Metadata = make(map[string]string, len(kvs))
@@ -256,7 +256,7 @@ func (c *CachingStore) DepAdd(issueID, dependsOnID, depType string) error {
 	}
 
 	c.mu.Lock()
-	c.noteMutationLocked(issueID)
+	c.noteLocalMutationLocked(issueID)
 	if !c.depsComplete {
 		delete(c.deps, issueID)
 		delete(c.dirty, issueID)
@@ -295,7 +295,7 @@ func (c *CachingStore) DepRemove(issueID, dependsOnID string) error {
 	}
 
 	c.mu.Lock()
-	c.noteMutationLocked(issueID)
+	c.noteLocalMutationLocked(issueID)
 	if !c.depsComplete {
 		delete(c.deps, issueID)
 		delete(c.dirty, issueID)
@@ -327,7 +327,7 @@ func (c *CachingStore) Delete(id string) error {
 	}
 
 	c.mu.Lock()
-	seq := c.noteMutationLocked(id)
+	seq := c.noteLocalMutationLocked(id)
 	delete(c.beads, id)
 	delete(c.deps, id)
 	delete(c.dirty, id)

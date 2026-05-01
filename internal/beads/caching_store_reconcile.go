@@ -92,12 +92,16 @@ func (c *CachingStore) runReconciliation() {
 	useFreshDeps := depsComplete && depErr == nil
 
 	c.mu.Lock()
+	now := time.Now()
 	if c.mutationSeq != startSeq {
 		var adds, removes, updates int64
 		notifications := make([]cacheNotification, 0, len(freshByID))
 
 		for id, freshBead := range freshByID {
 			if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
+				continue
+			}
+			if _, keep := c.recentLocalBeadConflictLocked(id, freshBead, now); keep {
 				continue
 			}
 
@@ -129,7 +133,10 @@ func (c *CachingStore) runReconciliation() {
 			}
 			delete(c.dirty, id)
 			delete(c.deletedSeq, id)
-			delete(c.beadSeq, id)
+			if !recentLocalMutation(c.localBeadAt[id], now) {
+				delete(c.beadSeq, id)
+				delete(c.localBeadAt, id)
+			}
 		}
 
 		for id, old := range c.beads {
@@ -137,6 +144,9 @@ func (c *CachingStore) runReconciliation() {
 				continue
 			}
 			if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
+				continue
+			}
+			if old.Status != "closed" && recentLocalMutation(c.localBeadAt[id], now) {
 				continue
 			}
 			removes++
@@ -153,6 +163,7 @@ func (c *CachingStore) runReconciliation() {
 			delete(c.dirty, id)
 			delete(c.deletedSeq, id)
 			delete(c.beadSeq, id)
+			delete(c.localBeadAt, id)
 		}
 
 		c.syncFailures = 0
@@ -161,7 +172,6 @@ func (c *CachingStore) runReconciliation() {
 		if c.state == cacheDegraded {
 			c.state = cacheLive
 		}
-		now := time.Now()
 		durMs := float64(time.Since(start).Microseconds()) / 1000.0
 		c.stats.LastReconcileAt = now
 		c.stats.LastReconcileMs = durMs
@@ -177,9 +187,23 @@ func (c *CachingStore) runReconciliation() {
 
 	var adds, removes, updates int64
 	notifications := make([]cacheNotification, 0, len(freshByID))
+	nextBeads := make(map[string]Bead, len(freshByID))
 	nextDeps := make(map[string][]Dep, len(freshByID))
+	nextDirty := make(map[string]struct{})
+	nextBeadSeq := make(map[string]uint64)
+	nextLocalBeadAt := make(map[string]time.Time)
 
 	for id, freshBead := range freshByID {
+		beadForCache := freshBead
+		preservedRecentLocal := false
+		if recentLocalMutation(c.localBeadAt[id], now) {
+			c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
+		}
+		if current, keep := c.recentLocalBeadConflictLocked(id, freshBead, now); keep {
+			beadForCache = current
+			preservedRecentLocal = true
+		}
+		nextBeads[id] = cloneBead(beadForCache)
 		if useFreshDeps {
 			nextDeps[id] = cloneDeps(depMap[id])
 		} else if deps, ok := c.deps[id]; ok {
@@ -192,9 +216,9 @@ func (c *CachingStore) runReconciliation() {
 			adds++
 			notifications = append(notifications, cacheNotification{
 				eventType: "bead.created",
-				bead:      cloneBead(freshBead),
+				bead:      cloneBead(beadForCache),
 			})
-		case beadChanged(old, freshBead):
+		case !preservedRecentLocal && beadChanged(old, freshBead):
 			updates++
 			notifications = append(notifications, cacheNotification{
 				eventType: "bead.updated",
@@ -211,6 +235,14 @@ func (c *CachingStore) runReconciliation() {
 
 	for id, old := range c.beads {
 		if _, exists := freshByID[id]; !exists {
+			if old.Status != "closed" && recentLocalMutation(c.localBeadAt[id], now) {
+				nextBeads[id] = cloneBead(old)
+				if deps, ok := c.deps[id]; ok {
+					nextDeps[id] = cloneDeps(deps)
+				}
+				c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
+				continue
+			}
 			removes++
 			if old.Status == "closed" {
 				continue
@@ -224,11 +256,12 @@ func (c *CachingStore) runReconciliation() {
 		}
 	}
 
-	c.beads = freshByID
+	c.beads = nextBeads
 	c.deps = nextDeps
 	c.depsComplete = useFreshDeps
-	c.dirty = make(map[string]struct{})
-	c.beadSeq = make(map[string]uint64)
+	c.dirty = nextDirty
+	c.beadSeq = nextBeadSeq
+	c.localBeadAt = nextLocalBeadAt
 	c.deletedSeq = make(map[string]uint64)
 	c.syncFailures = 0
 	c.primePartialErr = nil
@@ -236,7 +269,6 @@ func (c *CachingStore) runReconciliation() {
 		c.state = cacheLive
 	}
 
-	now := time.Now()
 	durMs := float64(time.Since(start).Microseconds()) / 1000.0
 	c.stats.LastReconcileAt = now
 	c.stats.LastReconcileMs = durMs

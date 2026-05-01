@@ -27,6 +27,7 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 		return
 	}
 
+	now := time.Now()
 	c.mu.RLock()
 	if c.state != cacheLive {
 		c.mu.RUnlock()
@@ -34,10 +35,21 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 	}
 	current, cached := c.beads[patch.ID]
 	_, locallyMutated := c.beadSeq[patch.ID]
+	recentlyLocal := recentLocalMutation(c.localBeadAt[patch.ID], now)
 	c.mu.RUnlock()
 
-	if eventType != "bead.closed" && cached && locallyMutated && cacheEventConflictsCurrent(current, patch, fields) {
+	conflictsCached := eventType != "bead.closed" && cached && cacheEventConflictsCurrent(current, patch, fields)
+	if conflictsCached && locallyMutated {
 		return
+	}
+	if conflictsCached && recentlyLocal {
+		matchesBacking, verifyErr := c.cacheEventMatchesBacking(patch.ID, patch, fields)
+		if verifyErr == nil && !matchesBacking {
+			return
+		}
+		if verifyErr != nil {
+			c.recordProblem(fmt.Sprintf("verify %s event", eventType), verifyErr)
+		}
 	}
 
 	b := patch
@@ -49,12 +61,21 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 		}
 	}
 
+	if c.applyEventBeforeCommitForTest != nil {
+		c.applyEventBeforeCommitForTest()
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.state != cacheLive {
 		return
 	}
 	if current, ok := c.beads[patch.ID]; ok {
+		if eventType != "bead.closed" && cacheEventConflictsCurrent(current, patch, fields) {
+			if _, locallyMutated := c.beadSeq[patch.ID]; locallyMutated || recentLocalMutation(c.localBeadAt[patch.ID], time.Now()) {
+				return
+			}
+		}
 		b = mergeCacheEventPatch(current, patch, fields)
 	}
 
@@ -189,7 +210,52 @@ func cacheEventConflictsCurrent(current, patch Bead, fields map[string]json.RawM
 	if hasCacheEventField(fields, "metadata") && !maps.Equal(current.Metadata, patch.Metadata) {
 		return true
 	}
+	if hasCacheEventField(fields, "labels") && !slices.Equal(current.Labels, patch.Labels) {
+		return true
+	}
 	return false
+}
+
+func (c *CachingStore) cacheEventMatchesBacking(id string, patch Bead, fields map[string]json.RawMessage) (bool, error) {
+	fresh, err := c.backing.Get(id)
+	if err != nil {
+		return false, err
+	}
+	return cacheEventPatchMatchesBead(fresh, patch, fields), nil
+}
+
+func cacheEventPatchMatchesBead(current, patch Bead, fields map[string]json.RawMessage) bool {
+	return !cacheEventConflictsCurrent(current, patch, fields)
+}
+
+func recentLocalMutation(mutatedAt time.Time, now time.Time) bool {
+	return !mutatedAt.IsZero() && now.Sub(mutatedAt) <= 5*time.Second
+}
+
+func (c *CachingStore) recentLocalBeadConflictLocked(id string, fresh Bead, now time.Time) (Bead, bool) {
+	current, ok := c.beads[id]
+	if !ok {
+		return Bead{}, false
+	}
+	if !recentLocalMutation(c.localBeadAt[id], now) {
+		return Bead{}, false
+	}
+	if !beadChanged(current, fresh) {
+		return Bead{}, false
+	}
+	return cloneBead(current), true
+}
+
+func (c *CachingStore) carryRecentLocalMutationLocked(id string, nextDirty map[string]struct{}, nextBeadSeq map[string]uint64, nextLocalBeadAt map[string]time.Time) {
+	if _, dirty := c.dirty[id]; dirty {
+		nextDirty[id] = struct{}{}
+	}
+	if seq, ok := c.beadSeq[id]; ok {
+		nextBeadSeq[id] = seq
+	}
+	if mutatedAt, ok := c.localBeadAt[id]; ok {
+		nextLocalBeadAt[id] = mutatedAt
+	}
 }
 
 func hasCacheEventField(fields map[string]json.RawMessage, name string) bool {

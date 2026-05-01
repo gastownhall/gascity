@@ -33,6 +33,7 @@ type CachingStore struct {
 	depsComplete    bool
 	dirty           map[string]struct{}
 	beadSeq         map[string]uint64
+	localBeadAt     map[string]time.Time
 	deletedSeq      map[string]uint64
 	state           cacheState
 	lastFreshAt     time.Time
@@ -45,6 +46,8 @@ type CachingStore struct {
 	onChange     func(eventType, beadID string, payload json.RawMessage)
 	cancelFn     context.CancelFunc
 	problemf     func(string)
+
+	applyEventBeforeCommitForTest func()
 }
 
 type cacheState int
@@ -114,14 +117,15 @@ func NewCachingStoreForTestWithPrefix(backing Store, idPrefix string, onChange f
 
 func newCachingStore(backing Store, idPrefix string, onChange func(eventType, beadID string, payload json.RawMessage)) *CachingStore {
 	return &CachingStore{
-		backing:    backing,
-		idPrefix:   normalizeIDPrefix(idPrefix),
-		beads:      make(map[string]Bead),
-		deps:       make(map[string][]Dep),
-		dirty:      make(map[string]struct{}),
-		beadSeq:    make(map[string]uint64),
-		deletedSeq: make(map[string]uint64),
-		onChange:   onChange,
+		backing:     backing,
+		idPrefix:    normalizeIDPrefix(idPrefix),
+		beads:       make(map[string]Bead),
+		deps:        make(map[string][]Dep),
+		dirty:       make(map[string]struct{}),
+		beadSeq:     make(map[string]uint64),
+		localBeadAt: make(map[string]time.Time),
+		deletedSeq:  make(map[string]uint64),
+		onChange:    onChange,
 		problemf: func(msg string) {
 			log.Printf("beads cache: %s", msg)
 		},
@@ -152,6 +156,18 @@ func (c *CachingStore) noteMutationLocked(ids ...string) uint64 {
 	return seq
 }
 
+func (c *CachingStore) noteLocalMutationLocked(ids ...string) uint64 {
+	seq := c.noteMutationLocked(ids...)
+	now := time.Now()
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		c.localBeadAt[id] = now
+	}
+	return seq
+}
+
 // PrimeActive loads all non-closed beads (open + in_progress) into the
 // cache. These are fast indexed queries that populate enough data for
 // startup paths without waiting for a full scan. The cache enters
@@ -178,6 +194,7 @@ func (c *CachingStore) PrimeActive() error {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	now := time.Now()
 	for _, b := range all {
 		if c.mutationSeq != startSeq {
 			if c.deletedSeq[b.ID] > startSeq {
@@ -187,14 +204,21 @@ func (c *CachingStore) PrimeActive() error {
 				continue
 			}
 		}
+		if _, keep := c.recentLocalBeadConflictLocked(b.ID, b, now); keep {
+			continue
+		}
 		c.beads[b.ID] = cloneBead(b)
 		delete(c.deletedSeq, b.ID)
+		if !recentLocalMutation(c.localBeadAt[b.ID], now) {
+			delete(c.beadSeq, b.ID)
+			delete(c.localBeadAt, b.ID)
+		}
 	}
 	if c.state == cacheUninitialized {
 		c.state = cachePartial
 	}
 	c.primePartialErr = partialErr
-	c.markFreshLocked(time.Now())
+	c.markFreshLocked(now)
 	c.updateStatsLocked()
 	return nil
 }
@@ -244,11 +268,38 @@ func (c *CachingStore) Prime(_ context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.mutationSeq == startSeq {
-		c.beads = beadMap
-		c.deps = depMap
+		nextBeads := beadMap
+		nextDeps := depMap
+		nextDirty := make(map[string]struct{})
+		nextBeadSeq := make(map[string]uint64)
+		nextLocalBeadAt := make(map[string]time.Time)
+		for id, current := range c.beads {
+			if fresh, exists := beadMap[id]; exists {
+				if recentLocalMutation(c.localBeadAt[id], now) {
+					c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
+				}
+				if _, keep := c.recentLocalBeadConflictLocked(id, fresh, now); keep {
+					nextBeads[id] = cloneBead(current)
+					if deps, ok := c.deps[id]; ok {
+						nextDeps[id] = cloneDeps(deps)
+					}
+				}
+				continue
+			}
+			if current.Status != "closed" && recentLocalMutation(c.localBeadAt[id], now) {
+				nextBeads[id] = cloneBead(current)
+				if deps, ok := c.deps[id]; ok {
+					nextDeps[id] = cloneDeps(deps)
+				}
+				c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
+			}
+		}
+		c.beads = nextBeads
+		c.deps = nextDeps
 		c.depsComplete = depsComplete && depErr == nil
-		c.dirty = make(map[string]struct{})
-		c.beadSeq = make(map[string]uint64)
+		c.dirty = nextDirty
+		c.beadSeq = nextBeadSeq
+		c.localBeadAt = nextLocalBeadAt
 		c.deletedSeq = make(map[string]uint64)
 	} else {
 		for id, b := range beadMap {
