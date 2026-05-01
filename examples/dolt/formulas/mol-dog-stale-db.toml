@@ -99,14 +99,20 @@ DROP DATABASE IF EXISTS `<orphan_name>`;
 ```
 
 **3. If orphan count > {{max_orphans_for_sql}}:**
-SQL cleanup would take too long. Use gc dolt cleanup instead:
+SQL cleanup would take too long via this loop. Delegate to gc dolt cleanup,
+which itself routes through the running server's `DROP DATABASE` (safe under
+the server's NBS lock):
 ```bash
 gc dolt cleanup --force --max <count>
 ```
-If even that fails, escalate:
+If `gc dolt cleanup` refuses with `dolt server unreachable`, the dolt server
+is stopped — do NOT pass `--server-down-ok` to bypass the refusal while it
+might still be running (rm -rf against a live data dir corrupts NBS state,
+#1549). Escalate instead so an operator can confirm the server is truly
+stopped before falling back:
 ```bash
-gc mail send mayor/ -s "ESCALATION: <count> orphan databases detected [HIGH]" \\
-  -m "Too many orphans for SQL cleanup. Recommend filesystem cleanup."
+gc mail send mayor/ -s "ESCALATION: <count> orphan databases detected, dolt unreachable [HIGH]" \\
+  -m "Too many orphans for inline SQL cleanup AND gc dolt cleanup refused (server unreachable). Operator must confirm dolt is stopped, then re-run with --server-down-ok."
 ```
 
 **4. Record results:**

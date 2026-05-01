@@ -6,11 +6,20 @@
 # databases (dry-run). Use --force to remove them.
 # Use --max to set a safety limit (refuses if more orphans than --max).
 #
-# Environment: GC_CITY_PATH
+# Removal strategy: when the dolt SQL server is reachable, --force issues
+# `DROP DATABASE IF EXISTS` through the running server (server-side NBS lock
+# serializes the close+remove safely). Falling back to filesystem `rm -rf`
+# while the server has the database open corrupts NBS state and crash-loops
+# the journal on next restart (#1549). The fallback is only taken when the
+# server is provably unreachable AND the operator passes --server-down-ok.
+#
+# Environment: GC_CITY_PATH (also GC_DOLT_PORT, GC_DOLT_HOST, GC_DOLT_USER,
+# GC_DOLT_PASSWORD when probing the running server)
 set -e
 
 force=false
 max_orphans=50
+server_down_ok=false
 PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)}"
 . "$PACK_DIR/assets/scripts/runtime.sh"
 data_dir="$DOLT_DATA_DIR"
@@ -19,14 +28,20 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --force) force=true; shift ;;
     --max)   max_orphans="$2"; shift 2 ;;
+    --server-down-ok) server_down_ok=true; shift ;;
     -h|--help)
-      echo "Usage: gc dolt cleanup [--force] [--max N]"
+      echo "Usage: gc dolt cleanup [--force] [--max N] [--server-down-ok]"
       echo ""
       echo "Find Dolt databases not referenced by any registered rig."
       echo ""
       echo "Flags:"
-      echo "  --force    Actually remove orphaned databases"
-      echo "  --max N    Refuse if more than N orphans (default: 50)"
+      echo "  --force            Actually remove orphaned databases"
+      echo "  --max N            Refuse if more than N orphans (default: 50)"
+      echo "  --server-down-ok   Permit filesystem rm fallback when the dolt"
+      echo "                     server is provably stopped. Without this flag"
+      echo "                     --force refuses to run when dolt is unreachable,"
+      echo "                     because rm -rf against a live server's data"
+      echo "                     directory corrupts NBS state (#1549)."
       exit 0
       ;;
     *) echo "gc dolt cleanup: unknown flag: $1" >&2; exit 1 ;;
@@ -197,6 +212,49 @@ if [ "$force" != true ]; then
   exit 0
 fi
 
+# Choose deletion strategy. Three ways the probe can land:
+#   * SELECT 1 succeeds → server is up and answering; SQL DROP is safe.
+#   * Port reachable but SELECT 1 fails → server may still hold open fds;
+#     refuse regardless of --server-down-ok (the flag advertises a STOPPED
+#     server, not an unhealthy one).
+#   * Port unreachable → server is stopped; fall back to rm only when the
+#     operator has acknowledged via --server-down-ok.
+host="${GC_DOLT_HOST:-127.0.0.1}"
+: "${GC_DOLT_USER:=root}"
+sql_args="--host $host --port ${GC_DOLT_PORT:-} --user $GC_DOLT_USER --no-tls"
+export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
+
+tcp_reachable=false
+if [ -n "$GC_DOLT_PORT" ] \
+  && command -v managed_runtime_tcp_reachable >/dev/null 2>&1 \
+  && managed_runtime_tcp_reachable "$GC_DOLT_PORT"; then
+  tcp_reachable=true
+fi
+
+sql_works=false
+if [ "$tcp_reachable" = true ] \
+  && command -v dolt >/dev/null 2>&1 \
+  && command -v run_bounded >/dev/null 2>&1 \
+  && run_bounded 5 dolt $sql_args sql -q "SELECT 1" >/dev/null 2>&1; then
+  sql_works=true
+fi
+
+delete_via=""
+if [ "$sql_works" = true ]; then
+  delete_via=sql
+elif [ "$tcp_reachable" = true ]; then
+  echo "gc dolt cleanup: dolt is listening on port $GC_DOLT_PORT but 'SELECT 1' failed;" >&2
+  echo "  refusing to rm against a potentially-live server (#1549). Fix SQL access or stop dolt and retry." >&2
+  exit 1
+elif [ "$server_down_ok" = true ]; then
+  delete_via=rm
+else
+  echo "gc dolt cleanup: dolt server unreachable on port ${GC_DOLT_PORT:-unset};" >&2
+  echo "  rm -rf against per-database dirs while the server is up corrupts NBS state (#1549)." >&2
+  echo "  Either start dolt and re-run, or pass --server-down-ok if the server is intentionally stopped." >&2
+  exit 1
+fi
+
 # Remove each orphan. Track refusals and successful removals via tmpfiles so
 # the subshell's counters survive (the pipe creates a subshell).
 refused_tmp=$(mktemp)
@@ -216,11 +274,32 @@ echo "$orphans" | while IFS='|' read -r db_name size path; do
     continue
   fi
 
-  if rm -rf "$path"; then
-    echo "removed" >> "$removed_tmp"
-    echo "  Removed $db_name"
+  # Identifier safety: dolt_database flows from operator-controlled metadata.json
+  # straight into a backtick-quoted SQL identifier. Reject anything outside the
+  # safe charset before interpolating, so an embedded backtick or semicolon
+  # cannot break out of the quoted identifier into arbitrary SQL.
+  case "$db_name" in
+    ''|*[!A-Za-z0-9_]*)
+      echo "refusing to remove '$db_name': name contains forbidden characters (allowed: A-Z, a-z, 0-9, _)" >&2
+      echo "refused" >> "$refused_tmp"
+      continue
+      ;;
+  esac
+
+  if [ "$delete_via" = sql ]; then
+    if run_bounded 30 dolt $sql_args sql -q "DROP DATABASE IF EXISTS \`$db_name\`" >/dev/null 2>&1; then
+      echo "removed" >> "$removed_tmp"
+      echo "  Dropped $db_name"
+    else
+      echo "  Failed to drop $db_name via SQL" >&2
+    fi
   else
-    echo "  Failed to remove $db_name" >&2
+    if rm -rf "$path"; then
+      echo "removed" >> "$removed_tmp"
+      echo "  Removed $db_name"
+    else
+      echo "  Failed to remove $db_name" >&2
+    fi
   fi
 done
 
