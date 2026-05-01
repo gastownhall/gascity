@@ -1577,6 +1577,64 @@ func TestCloseSessionBeadIfRuntimeStoppedAndUnassigned_StopLeavesRunningKeepsBea
 }
 
 func TestSyncSessionBeads_PreservesConfiguredNamedSessionWithoutDesiredEntry(t *testing.T) {
+	// A configured named session with state=stopped + non-empty sleep_reason
+	// (deliberate sleep marker) must remain Status=open so gc start /
+	// next-wake reuses the same bead. See ga-ue1r policy Q1.
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "refinery", StartCommand: "true", MaxActiveSessions: intPtr(2)},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "refinery", Mode: "on_demand"},
+		},
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "refinery")
+	bead, err := store.Create(beads.Bead{
+		Title:  "refinery",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               sessionName,
+			"alias":                      "refinery",
+			"template":                   "refinery",
+			"state":                      "stopped",
+			"sleep_reason":               "city-stop",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "refinery",
+			namedSessionModeMetadata:     "on_demand",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create canonical bead: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, nil, sp, map[string]bool{sessionName: true}, cfg, clk, &stderr, false)
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", bead.ID, err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("status = %q, want open", got.Status)
+	}
+	if got.Metadata["close_reason"] != "" {
+		t.Fatalf("close_reason = %q, want empty", got.Metadata["close_reason"])
+	}
+}
+
+// TestSyncSessionBeads_ReleasesStoppedNamedBeadWithoutSleepReason covers the
+// converse of the test above: a stopped bead with no sleep_reason and no
+// fresh last_woke_at is dead, not deliberately asleep. Its alias must be
+// released (close the bead) so the next spawn can claim the identity. The
+// existing close→reopen path (TestSyncSessionBeads_ReopensClosedConfiguredNamedSession)
+// preserves continuity by reusing the same bead ID on next demand. See
+// ga-ue1r policy Q2.
+func TestSyncSessionBeads_ReleasesStoppedNamedBeadWithoutSleepReason(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
 	sp := runtime.NewFake()
@@ -1615,11 +1673,8 @@ func TestSyncSessionBeads_PreservesConfiguredNamedSessionWithoutDesiredEntry(t *
 	if err != nil {
 		t.Fatalf("Get(%s): %v", bead.ID, err)
 	}
-	if got.Status != "open" {
-		t.Fatalf("status = %q, want open", got.Status)
-	}
-	if got.Metadata["close_reason"] != "" {
-		t.Fatalf("close_reason = %q, want empty", got.Metadata["close_reason"])
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed (alias released for re-claim)", got.Status)
 	}
 }
 
@@ -4492,5 +4547,77 @@ func TestSyncSessionBeadsWithSnapshotAndRigStoresLeavesOrphanedSessionBeadOpenWh
 	}
 	if got.Status != "open" {
 		t.Fatalf("session bead status = %q, want open because rig-store work still owns it", got.Status)
+	}
+}
+
+// TestPreserveConfiguredNamedSessionBead_StateGate covers ga-ue1r: a named
+// bead in a terminal-ish state (state="stopped" with no sleep_reason and no
+// fresh last_woke_at, or state="failed-create") must release its alias so the
+// next spawn can claim the identity.
+func TestPreserveConfiguredNamedSessionBead_StateGate(t *testing.T) {
+	cityName := "test-city"
+	workspace := config.Workspace{Name: cityName}
+	cfg := &config.City{
+		Workspace: workspace,
+		Agents: []config.Agent{
+			{Name: "mayor", StartCommand: "true"},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "mayor", Mode: "always"},
+		},
+	}
+	sessionName := config.NamedSessionRuntimeName(cityName, workspace, "mayor")
+	freshWoke := time.Now().UTC().Add(-30 * time.Second).Format(time.RFC3339Nano)
+	staleWoke := time.Now().UTC().Add(-2 * time.Minute).Format(time.RFC3339Nano)
+
+	cases := []struct {
+		name        string
+		state       string
+		sleepReason string
+		lastWokeAt  string
+		want        bool
+	}{
+		{name: "active live bead", state: "active", want: true},
+		{name: "asleep with idle-timeout reason", state: "asleep", sleepReason: "idle-timeout", want: true},
+		{name: "stopped with city-stop reason holds", state: "stopped", sleepReason: "city-stop", want: true},
+		{name: "stopped with idle-timeout reason holds", state: "stopped", sleepReason: "idle-timeout", lastWokeAt: freshWoke, want: true},
+		{name: "stopped fresh wake holds (race guard)", state: "stopped", lastWokeAt: freshWoke, want: true},
+		{name: "stopped stale wake releases", state: "stopped", lastWokeAt: staleWoke, want: false},
+		{name: "stopped never woke releases", state: "stopped", want: false},
+		{name: "failed-create always releases", state: "failed-create", want: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			meta := map[string]string{
+				"session_name":               sessionName,
+				"alias":                      "mayor",
+				"template":                   "mayor",
+				"agent_name":                 "mayor",
+				"state":                      tc.state,
+				namedSessionMetadataKey:      "true",
+				namedSessionIdentityMetadata: "mayor",
+				namedSessionModeMetadata:     "always",
+			}
+			if tc.sleepReason != "" {
+				meta["sleep_reason"] = tc.sleepReason
+			}
+			if tc.lastWokeAt != "" {
+				meta["last_woke_at"] = tc.lastWokeAt
+			}
+			b := beads.Bead{
+				ID:       "gm-test-" + tc.name,
+				Title:    "mayor",
+				Type:     sessionBeadType,
+				Status:   "open",
+				Labels:   []string{sessionBeadLabel, "agent:mayor"},
+				Metadata: meta,
+			}
+			got := preserveConfiguredNamedSessionBead(b, cfg, cityName)
+			if got != tc.want {
+				t.Fatalf("preserveConfiguredNamedSessionBead(state=%q sleep_reason=%q last_woke_at=%q) = %v, want %v",
+					tc.state, tc.sleepReason, tc.lastWokeAt, got, tc.want)
+			}
+		})
 	}
 }
