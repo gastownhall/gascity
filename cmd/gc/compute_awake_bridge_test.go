@@ -81,27 +81,15 @@ func TestBuildAwakeInputFromReconcilerPopulatesPendingInteractions(t *testing.T)
 	}
 }
 
-// TestBuildAwakeInputFromReconciler_NamedAlwaysPostChurnRewakes pins issue
-// #1493: a mode=always named session that hit checkChurn below the
-// quarantine threshold must be re-woken on the next reconciler tick.
-//
-// The metadata shape below is the exact post-churn snapshot reported on the
-// issue: state=asleep, sleep_reason="" (recordChurn does not set
-// sleep_reason below defaultMaxChurnCycles), state_reason="creation_complete"
-// (carried over from the prior wake, untouched by checkChurn/recordChurn),
-// last_woke_at="" (cleared by checkChurn:644 to make the trigger
-// edge-triggered), wake_attempts=0, churn_count=1.
-//
-// The test drives the full bead → AwakeInput → ComputeAwakeSet path so any
-// regression in the lifecycle projection, the bridge, or ComputeAwakeSet
-// fails it. Without the fix, the session sits asleep indefinitely despite
-// mode=always and only `gc session pin` unsticks it.
-func TestBuildAwakeInputFromReconciler_NamedAlwaysPostChurnRewakes(t *testing.T) {
+// TestBuildAwakeInputFromReconcilerNamedAlwaysPostChurnRewakes pins the
+// contract for a mode=always named session that was put to sleep after churn:
+// if named-session metadata survives, the next awake-set pass must re-wake it.
+func TestBuildAwakeInputFromReconcilerNamedAlwaysPostChurnRewakes(t *testing.T) {
 	now := time.Now().UTC()
 	cfg := &config.City{
-		Agents: []config.Agent{{Name: "refinery"}},
+		Agents: []config.Agent{{Name: "worker"}},
 		NamedSessions: []config.NamedSession{
-			{Name: "refinery", Template: "refinery", Mode: "always"},
+			{Name: "worker", Template: "worker", Mode: "always"},
 		},
 	}
 	postChurnBead := beads.Bead{
@@ -119,9 +107,9 @@ func TestBuildAwakeInputFromReconciler_NamedAlwaysPostChurnRewakes(t *testing.T)
 			"continuation_reset_pending": "",
 			"pending_create_claim":       "",
 			"pin_awake":                  "",
-			"session_name":               "refinery",
-			"template":                   "refinery",
-			"configured_named_identity":  "refinery",
+			"session_name":               "worker",
+			"template":                   "worker",
+			"configured_named_identity":  "worker",
 			"configured_named_mode":      "always",
 		},
 	}
@@ -138,17 +126,17 @@ func TestBuildAwakeInputFromReconciler_NamedAlwaysPostChurnRewakes(t *testing.T)
 		t.Fatalf("SessionBeads length = %d, want 1", len(input.SessionBeads))
 	}
 	bead := input.SessionBeads[0]
-	if bead.NamedIdentity != "refinery" {
-		t.Errorf("projected NamedIdentity = %q, want refinery (configured_named_identity should survive churn)", bead.NamedIdentity)
+	if bead.NamedIdentity != "worker" {
+		t.Errorf("projected NamedIdentity = %q, want worker (configured_named_identity should survive churn)", bead.NamedIdentity)
 	}
 	if bead.State != "asleep" {
 		t.Errorf("projected State = %q, want asleep", bead.State)
 	}
 
 	decisions := ComputeAwakeSet(input)
-	got, ok := decisions["refinery"]
+	got, ok := decisions["worker"]
 	if !ok {
-		t.Fatal("decision for 'refinery' missing from awake set")
+		t.Fatal("decision for 'worker' missing from awake set")
 	}
 	if !got.ShouldWake {
 		t.Fatalf("post-churn named-always session should wake; got decision = %+v", got)

@@ -1490,56 +1490,6 @@ func TestNamedAlways_SuspensionPropagation(t *testing.T) {
 	}
 }
 
-// TestNamedAlways_PostChurnRewakes pins the wake-after-churn invariant from
-// issue #1493. After checkChurn fires for a non-quarantining churn cycle on
-// a mode=always named session, the projected AwakeSessionBead has
-// State=asleep, SleepReason="" (recordChurn does not set sleep_reason below
-// the quarantine threshold), QuarantinedUntil=zero, and the named identity
-// metadata still present. The reconciler must re-wake it on the next tick;
-// otherwise the session sits asleep indefinitely despite mode=always.
-func TestNamedAlways_PostChurnRewakes(t *testing.T) {
-	result := ComputeAwakeSet(AwakeInput{
-		Agents:        []AwakeAgent{{QualifiedName: "refinery"}},
-		NamedSessions: []AwakeNamedSession{{Identity: "refinery", Template: "refinery", Mode: "always"}},
-		SessionBeads: []AwakeSessionBead{{
-			ID:            "mc-1",
-			SessionName:   "refinery",
-			Template:      "refinery",
-			State:         "asleep",
-			SleepReason:   "", // recordChurn leaves this empty below the quarantine threshold
-			NamedIdentity: "refinery",
-			// QuarantinedUntil zero, HeldUntil zero, WaitHold false,
-			// DependencyOnly false, Drained false, Pinned false: the exact
-			// shape produced by recordChurn when churn_count < defaultMaxChurnCycles.
-		}},
-		Now: now,
-	})
-	assertAwake(t, result, "refinery")
-	assertReason(t, result, "refinery", "named-always")
-}
-
-// TestNamedAlways_QuarantinedAfterChurnDoesNotWake pins the negative half of
-// the invariant: when churn pushes the session into quarantine
-// (QuarantinedUntil in the future), the session must stay asleep until the
-// quarantine elapses. Sibling test to TestNamedAlways_PostChurnRewakes.
-func TestNamedAlways_QuarantinedAfterChurnDoesNotWake(t *testing.T) {
-	result := ComputeAwakeSet(AwakeInput{
-		Agents:        []AwakeAgent{{QualifiedName: "refinery"}},
-		NamedSessions: []AwakeNamedSession{{Identity: "refinery", Template: "refinery", Mode: "always"}},
-		SessionBeads: []AwakeSessionBead{{
-			ID:               "mc-1",
-			SessionName:      "refinery",
-			Template:         "refinery",
-			State:            "asleep",
-			SleepReason:      "context-churn",
-			NamedIdentity:    "refinery",
-			QuarantinedUntil: now.Add(15 * time.Minute),
-		}},
-		Now: now,
-	})
-	assertAsleep(t, result, "refinery")
-}
-
 func TestScaledPool_NotAffectedByRunningOverride(t *testing.T) {
 	// Pool with scale=0 and running session. Override must NOT
 	// keep pool sessions alive — scale-down must work.
