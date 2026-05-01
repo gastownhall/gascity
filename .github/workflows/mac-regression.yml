@@ -10,7 +10,24 @@ on:
         options:
           - smoke
           - full
+          - needs-mac
         default: smoke
+      pr_number:
+        description: Pull request number for label-dispatched runs
+        required: false
+        type: string
+      head_repo:
+        description: Pull request head repository for label-dispatched runs
+        required: false
+        type: string
+      head_sha:
+        description: Pull request head SHA for label-dispatched runs
+        required: false
+        type: string
+      head_ref:
+        description: Pull request head ref for label-dispatched runs
+        required: false
+        type: string
   schedule:
     - cron: "17 3 * * *"
   pull_request:
@@ -20,13 +37,12 @@ on:
       - reopened
       - synchronize
       - ready_for_review
-      - labeled
 
 permissions:
   contents: read
 
 concurrency:
-  group: mac-regression-${{ github.event.pull_request.number || github.ref || github.run_id }}
+  group: mac-regression-${{ inputs.pr_number || github.event.pull_request.number || github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 env:
@@ -166,6 +182,10 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ inputs.head_repo || github.repository }}
+          ref: ${{ inputs.head_sha || github.sha }}
+          persist-credentials: false
       - uses: ./.github/actions/setup-gascity-macos
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
@@ -199,6 +219,10 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ inputs.head_repo || github.repository }}
+          ref: ${{ inputs.head_sha || github.sha }}
+          persist-credentials: false
       - uses: ./.github/actions/setup-gascity-macos
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
@@ -224,6 +248,10 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ inputs.head_repo || github.repository }}
+          ref: ${{ inputs.head_sha || github.sha }}
+          persist-credentials: false
       - uses: ./.github/actions/setup-gascity-macos
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
@@ -244,10 +272,13 @@ jobs:
   mac-cover:
     name: Mac / test-cover
     needs: runner-policy
-    # Heavy job: schedule/full-dispatch/PR(needs-mac). Smoke dispatch skips.
+    # Heavy job: schedule/full-dispatch/needs-mac-dispatch/PR(needs-mac). Smoke dispatch skips.
     if: >-
       github.event_name == 'schedule' ||
-      (github.event_name == 'workflow_dispatch' && inputs.suite == 'full') ||
+      (
+        github.event_name == 'workflow_dispatch' &&
+        (inputs.suite == 'full' || inputs.suite == 'needs-mac')
+      ) ||
       (
         github.event_name == 'pull_request' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
@@ -260,6 +291,10 @@ jobs:
       outcome: ${{ steps.cover.outcome }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ inputs.head_repo || github.repository }}
+          ref: ${{ inputs.head_sha || github.sha }}
+          persist-credentials: false
       - uses: ./.github/actions/setup-gascity-macos
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
@@ -287,7 +322,10 @@ jobs:
     needs: runner-policy
     if: >-
       github.event_name == 'schedule' ||
-      (github.event_name == 'workflow_dispatch' && inputs.suite == 'full') ||
+      (
+        github.event_name == 'workflow_dispatch' &&
+        (inputs.suite == 'full' || inputs.suite == 'needs-mac')
+      ) ||
       (
         github.event_name == 'pull_request' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
@@ -337,6 +375,10 @@ jobs:
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ inputs.head_repo || github.repository }}
+          ref: ${{ inputs.head_sha || github.sha }}
+          persist-credentials: false
       - uses: ./.github/actions/setup-gascity-macos
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
@@ -353,7 +395,10 @@ jobs:
     needs: runner-policy
     if: >-
       github.event_name == 'schedule' ||
-      (github.event_name == 'workflow_dispatch' && inputs.suite == 'full') ||
+      (
+        github.event_name == 'workflow_dispatch' &&
+        (inputs.suite == 'full' || inputs.suite == 'needs-mac')
+      ) ||
       (
         github.event_name == 'pull_request' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
@@ -375,6 +420,10 @@ jobs:
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ inputs.head_repo || github.repository }}
+          ref: ${{ inputs.head_sha || github.sha }}
+          persist-credentials: false
       - uses: ./.github/actions/setup-gascity-macos
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
@@ -392,7 +441,10 @@ jobs:
     needs: runner-policy
     if: >-
       github.event_name == 'schedule' ||
-      (github.event_name == 'workflow_dispatch' && inputs.suite == 'full') ||
+      (
+        github.event_name == 'workflow_dispatch' &&
+        (inputs.suite == 'full' || inputs.suite == 'needs-mac')
+      ) ||
       (
         github.event_name == 'pull_request' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
@@ -436,6 +488,10 @@ jobs:
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ inputs.head_repo || github.repository }}
+          ref: ${{ inputs.head_sha || github.sha }}
+          persist-credentials: false
       - uses: ./.github/actions/setup-gascity-macos
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
@@ -469,6 +525,10 @@ jobs:
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ inputs.head_repo || github.repository }}
+          ref: ${{ inputs.head_sha || github.sha }}
+          persist-credentials: false
       - uses: ./.github/actions/setup-gascity-macos
         with:
           dolt-version: ${{ env.DOLT_VERSION }}

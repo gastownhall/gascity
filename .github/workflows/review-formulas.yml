@@ -11,14 +11,30 @@ on:
       - reopened
       - synchronize
       - ready_for_review
-      - labeled
   workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number for label-dispatched runs
+        required: false
+        type: string
+      head_repo:
+        description: Pull request head repository for label-dispatched runs
+        required: false
+        type: string
+      head_sha:
+        description: Pull request head SHA for label-dispatched runs
+        required: false
+        type: string
+      head_ref:
+        description: Pull request head ref for label-dispatched runs
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: review-formulas-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref || github.run_id }}
+  group: review-formulas-${{ github.event_name }}-${{ inputs.pr_number || github.event.pull_request.number || github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -135,16 +151,16 @@ jobs:
   gate:
     name: review-formulas routing
     needs: runner-policy
-    if: >-
-      github.event_name != 'pull_request' ||
-      github.event.action != 'labeled' ||
-      (github.event.label.name == 'needs-review-formulas' || github.event.label.name == 'ok-to-blacksmith')
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     outputs:
       run_shard: ${{ steps.gate.outputs.run_shard }}
       reason: ${{ steps.gate.outputs.reason }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ inputs.head_repo || github.repository }}
+          ref: ${{ inputs.head_sha || github.sha }}
+          persist-credentials: false
       - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3
         id: filter
         with:
@@ -169,8 +185,6 @@ jobs:
         id: gate
         env:
           EVENT_NAME: ${{ github.event_name }}
-          EVENT_ACTION: ${{ github.event.action }}
-          LABELED_NAME: ${{ github.event.label.name }}
           PR_DRAFT: ${{ github.event.pull_request.draft }}
           PATH_HIT: ${{ steps.filter.outputs.review_formulas }}
           NEEDS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'needs-review-formulas') }}
@@ -185,9 +199,7 @@ jobs:
             run_shard=true
             reason="push to main safety net"
           elif [[ "$PR_DRAFT" != "true" ]]; then
-            if [[ "$EVENT_ACTION" == "labeled" && "$LABELED_NAME" != "needs-review-formulas" && "$LABELED_NAME" != "ok-to-blacksmith" ]]; then
-              reason="ignored unrelated label event"
-            elif [[ "$PATH_HIT" == "true" || "$NEEDS_LABEL" == "true" ]]; then
+            if [[ "$PATH_HIT" == "true" || "$NEEDS_LABEL" == "true" ]]; then
               run_shard=true
               reason="pull request path/label match"
             else
@@ -234,6 +246,10 @@ jobs:
             coverprofile: coverage.integration-review-formulas-recovery.txt
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ inputs.head_repo || github.repository }}
+          ref: ${{ inputs.head_sha || github.sha }}
+          persist-credentials: false
       - uses: ./.github/actions/setup-gascity-ubuntu
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
@@ -277,13 +293,7 @@ jobs:
       - runner-policy
       - gate
       - review-formulas-shard
-    if: >-
-      always() &&
-      (
-        github.event_name != 'pull_request' ||
-        github.event.action != 'labeled' ||
-        (github.event.label.name == 'needs-review-formulas' || github.event.label.name == 'ok-to-blacksmith')
-      )
+    if: always()
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     steps:
       - name: Finalize review-formulas result
