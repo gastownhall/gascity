@@ -61,18 +61,62 @@ func (a *Agent) describeSource(cityRoot, cityFile string) string {
 
 // formatDuplicateAgentError renders the duplicate-agent-name error for a
 // pair of conflicting agents. Co-owned with ga-9ogb (layout-version
-// migration error); that bead specializes (V1Inline, V2Convention) layout
-// pairs onto a migration-guidance variant. This bead's contract: every
-// rendered descriptor is non-empty, so the error never carries an empty
-// quoted "" path.
+// migration error); when the pair is exactly (layoutV1Inline,
+// layoutV2Convention) — in either order — the helper emits a
+// migration-guidance variant including both source descriptors and the
+// migration-guide doc path. Otherwise it falls through to the generic
+// "duplicate name (from … and …)" format.
+//
+// Every rendered descriptor is non-empty (the contract ga-tpfc.1 fixed),
+// so the error never carries an empty quoted "" path.
 //
 // cityRoot and cityFile are passed through to describeSource. Both may
 // be empty when the helper is called from validation paths that do not
 // know the city's filesystem context (e.g., test fixtures that build
 // []Agent directly).
 func formatDuplicateAgentError(a, b Agent, cityRoot, cityFile string) error {
+	if v1, v2, ok := orderV1V2(a, b); ok {
+		return formatV1V2MigrationError(v1, v2, cityRoot, cityFile)
+	}
 	return fmt.Errorf("agent %q: duplicate name (from %q and %q)",
 		a.QualifiedName(),
 		a.describeSource(cityRoot, cityFile),
 		b.describeSource(cityRoot, cityFile))
+}
+
+// orderV1V2 reports whether (a, b) is exactly the (V1Inline,
+// V2Convention) pair the migration variant cares about, and returns
+// the agents in canonical (v1, v2) order.
+func orderV1V2(a, b Agent) (v1, v2 Agent, ok bool) {
+	switch {
+	case a.layout == layoutV1Inline && b.layout == layoutV2Convention:
+		return a, b, true
+	case a.layout == layoutV2Convention && b.layout == layoutV1Inline:
+		return b, a, true
+	}
+	return Agent{}, Agent{}, false
+}
+
+// migrationGuideDocPath is the documentation slug for the v1→v2 pack
+// migration. It tracks ga-6wrr's deliverable; the path is repository-
+// relative so the operator can copy-paste it without fighting an FQDN.
+const migrationGuideDocPath = "docs/packv2/migration.mdx"
+
+// formatV1V2MigrationError renders the migration-guidance variant of
+// the duplicate-agent-name error. The headline is byte-stable; the
+// body prose may evolve.
+func formatV1V2MigrationError(v1, v2 Agent, cityRoot, cityFile string) error {
+	v1Source := v1.describeSource(cityRoot, cityFile) + "/pack.toml ([[agent]] " + v1.Name + ")"
+	v2Source := v2.describeSource(cityRoot, cityFile) + "/agents/" + v2.Name + "/agent.toml"
+	return fmt.Errorf(
+		"agent %q: pack v1/v2 layout collision\n"+
+			"  v1 source: %s\n"+
+			"  v2 source: %s\n"+
+			"A v1 [[agent]] block coexists with a v2 agents/<name>/agent.toml of the same name.\n"+
+			"To migrate, see: %s",
+		v1.QualifiedName(),
+		v1Source,
+		v2Source,
+		migrationGuideDocPath,
+	)
 }

@@ -1297,6 +1297,13 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	// Collect this pack's own requirements.
 	allRequires = append(allRequires, tc.Pack.Requires...)
 
+	// Stamp layoutV1Inline on this pack's [[agent]] blocks BEFORE v2
+	// discovery appends to tc.Agents. Discovery stamps layoutV2Convention
+	// itself; the field is preserved through the merge below. (ga-9ogb)
+	for i := range tc.Agents {
+		tc.Agents[i].layout = layoutV1Inline
+	}
+
 	// V2 convention-based agent discovery: scan agents/ directory.
 	// Convention-discovered agents are appended AFTER TOML-declared agents
 	// so [[agent]] tables take precedence when both exist.

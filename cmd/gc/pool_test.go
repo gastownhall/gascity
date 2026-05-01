@@ -717,18 +717,20 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 	// deep-copied; they are accepted by the TOML parser but not propagated
 	// through the runtime. The deep-copy contract deliberately drops them.
 	//
-	// The unexported `source` field (ga-tpfc) is also intentionally
-	// dropped: it is a config-package-internal provenance enum that
-	// describes the agent's discovery origin. Pool instances are derived
-	// objects, not discovery sites, so leaving them at sourceUnknown is
-	// semantically correct and the deep-copy in cmd/gc cannot reach across
-	// the package boundary to set an unexported field anyway.
+	// The unexported `source` (ga-tpfc) and `layout` (ga-9ogb) fields
+	// are also intentionally dropped: they are config-package-internal
+	// provenance enums that describe the agent's discovery origin. Pool
+	// instances are derived objects, not discovery sites, so leaving
+	// them at the zero value is semantically correct and the deep-copy
+	// in cmd/gc cannot reach across the package boundary to set an
+	// unexported field anyway.
 	tombstones := map[string]bool{
 		"Skills":       true,
 		"MCP":          true,
 		"SharedSkills": true,
 		"SharedMCP":    true,
 		"source":       true,
+		"layout":       true,
 	}
 
 	// Verify every non-tombstone Agent field is set (non-zero) in the test data.
