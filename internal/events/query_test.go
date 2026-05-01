@@ -8,7 +8,7 @@ import (
 // --- matchesFilter unit tests ---
 
 func TestMatchesFilter_Subject(t *testing.T) {
-	e := Event{Type: BeadCreated, Actor: "mayor", Subject: "gc-42"}
+	e := Event{Type: BeadCreated, Actor: "actor-a", Subject: "gc-42"}
 
 	if !matchesFilter(e, Filter{Subject: "gc-42"}) {
 		t.Error("expected match on Subject gc-42")
@@ -36,11 +36,11 @@ func TestMatchesFilter_Until(t *testing.T) {
 	}
 }
 
-func TestMatchesFilter_Limit_AppliedByReadFiltered(t *testing.T) {
+func TestFakeList_Limit(t *testing.T) {
 	// Create a fake with 5 events and request only 3.
 	f := NewFake()
 	for i := 0; i < 5; i++ {
-		f.Record(Event{Type: BeadCreated, Actor: "worker"})
+		f.Record(Event{Type: BeadCreated, Actor: "actor-a"})
 	}
 
 	got, err := f.List(Filter{Limit: 3})
@@ -124,16 +124,16 @@ func TestCountByActor_Empty(t *testing.T) {
 
 func TestCountByActor(t *testing.T) {
 	evts := []Event{
-		{Actor: "mayor"},
-		{Actor: "mayor"},
-		{Actor: "worker"},
+		{Actor: "actor-a"},
+		{Actor: "actor-a"},
+		{Actor: "actor-b"},
 	}
 	counts := CountByActor(evts)
-	if counts["mayor"] != 2 {
-		t.Errorf("CountByActor[mayor] = %d, want 2", counts["mayor"])
+	if counts["actor-a"] != 2 {
+		t.Errorf("CountByActor[actor-a] = %d, want 2", counts["actor-a"])
 	}
-	if counts["worker"] != 1 {
-		t.Errorf("CountByActor[worker] = %d, want 1", counts["worker"])
+	if counts["actor-b"] != 1 {
+		t.Errorf("CountByActor[actor-b] = %d, want 1", counts["actor-b"])
 	}
 }
 

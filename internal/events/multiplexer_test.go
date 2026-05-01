@@ -53,6 +53,35 @@ func TestMultiplexerListAllWithFilter(t *testing.T) {
 	}
 }
 
+func TestMultiplexerListAllAppliesGlobalLimitAfterMerge(t *testing.T) {
+	m := NewMultiplexer()
+
+	f1 := NewFake()
+	f1.Record(Event{Type: SessionWoke, Actor: "a1", Subject: "first", Ts: time.Unix(1, 0)})
+	f1.Record(Event{Type: SessionWoke, Actor: "a1", Subject: "fourth", Ts: time.Unix(4, 0)})
+
+	f2 := NewFake()
+	f2.Record(Event{Type: SessionWoke, Actor: "b1", Subject: "second", Ts: time.Unix(2, 0)})
+	f2.Record(Event{Type: SessionWoke, Actor: "b1", Subject: "third", Ts: time.Unix(3, 0)})
+
+	m.Add("city-a", f1)
+	m.Add("city-b", f2)
+
+	evts, err := m.ListAll(Filter{Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evts) != 2 {
+		t.Fatalf("got %d events, want 2", len(evts))
+	}
+	if evts[0].Subject != "first" {
+		t.Errorf("evts[0].Subject = %q, want first", evts[0].Subject)
+	}
+	if evts[1].Subject != "second" {
+		t.Errorf("evts[1].Subject = %q, want second", evts[1].Subject)
+	}
+}
+
 func TestMultiplexerListTailLimitsAcrossCities(t *testing.T) {
 	m := NewMultiplexer()
 
@@ -286,14 +315,14 @@ func TestWrapForSSE(t *testing.T) {
 	w := WrapForSSE(mw)
 	defer w.Close() //nolint:errcheck
 
-	f1.Record(Event{Type: SessionWoke, Actor: "mayor"})
+	f1.Record(Event{Type: SessionWoke, Actor: "actor-a"})
 
 	e, err := w.Next()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if e.Actor != "city-a/mayor" {
-		t.Errorf("Actor = %q, want %q", e.Actor, "city-a/mayor")
+	if e.Actor != "city-a/actor-a" {
+		t.Errorf("Actor = %q, want %q", e.Actor, "city-a/actor-a")
 	}
 }
 

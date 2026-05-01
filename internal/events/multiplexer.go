@@ -75,9 +75,11 @@ func (m *Multiplexer) snapshot() map[string]Provider {
 // timestamp. Each event is tagged with its source city.
 func (m *Multiplexer) ListAll(filter Filter) ([]TaggedEvent, error) {
 	providers := m.snapshot()
+	providerFilter := filter
+	providerFilter.Limit = 0
 	var all []TaggedEvent
 	for city, p := range providers {
-		evts, err := p.List(filter)
+		evts, err := p.List(providerFilter)
 		if err != nil {
 			continue // best-effort: skip cities with errors
 		}
@@ -88,6 +90,9 @@ func (m *Multiplexer) ListAll(filter Filter) ([]TaggedEvent, error) {
 	sort.Slice(all, func(i, j int) bool {
 		return all[i].Ts.Before(all[j].Ts)
 	})
+	if filter.Limit > 0 && len(all) > filter.Limit {
+		all = all[:filter.Limit]
+	}
 	return all, nil
 }
 

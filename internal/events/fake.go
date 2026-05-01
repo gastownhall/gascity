@@ -54,16 +54,7 @@ func (f *Fake) List(filter Filter) ([]Event, error) {
 	if f.broken {
 		return nil, fmt.Errorf("events provider unavailable")
 	}
-	var result []Event
-	for _, e := range f.Events {
-		if eventMatchesFilter(e, filter) {
-			result = append(result, e)
-			if filter.Limit > 0 && len(result) >= filter.Limit {
-				break
-			}
-		}
-	}
-	return result, nil
+	return ApplyFilter(f.Events, filter), nil
 }
 
 // ListTail returns the trailing matching events from the in-memory store.
@@ -76,7 +67,7 @@ func (f *Fake) ListTail(filter Filter, limit int) ([]Event, error) {
 	if limit <= 0 {
 		var result []Event
 		for _, e := range f.Events {
-			if eventMatchesFilter(e, filter) {
+			if matchesFilter(e, filter) {
 				result = append(result, e)
 			}
 		}
@@ -85,7 +76,7 @@ func (f *Fake) ListTail(filter Filter, limit int) ([]Event, error) {
 	reversed := make([]Event, 0, limit)
 	for i := len(f.Events) - 1; i >= 0 && len(reversed) < limit; i-- {
 		e := f.Events[i]
-		if eventMatchesFilter(e, filter) {
+		if matchesFilter(e, filter) {
 			reversed = append(reversed, e)
 		}
 	}

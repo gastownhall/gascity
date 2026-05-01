@@ -282,6 +282,77 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		}
 	})
 
+	t.Run("ListFilterBySubject", func(t *testing.T) {
+		p, cleanup := newProvider(t)
+		defer cleanup()
+
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "actor-a", Subject: "gc-1"})
+		p.Record(events.Event{Type: events.BeadClosed, Actor: "actor-a", Subject: "gc-2"})
+		p.Record(events.Event{Type: events.BeadUpdated, Actor: "actor-b", Subject: "gc-1"})
+
+		got, err := p.List(events.Filter{Subject: "gc-1"})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("List(Subject) returned %d events, want 2", len(got))
+		}
+		for _, e := range got {
+			if e.Subject != "gc-1" {
+				t.Errorf("Subject = %q, want gc-1", e.Subject)
+			}
+		}
+	})
+
+	t.Run("ListFilterByUntil", func(t *testing.T) {
+		p, cleanup := newProvider(t)
+		defer cleanup()
+
+		cutoff := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
+		before := cutoff.Add(-time.Minute)
+		after := cutoff.Add(time.Minute)
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "actor-a", Subject: "before", Ts: before})
+		p.Record(events.Event{Type: events.BeadUpdated, Actor: "actor-a", Subject: "boundary", Ts: cutoff})
+		p.Record(events.Event{Type: events.BeadClosed, Actor: "actor-a", Subject: "after", Ts: after})
+
+		got, err := p.List(events.Filter{Until: cutoff})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("List(Until) returned %d events, want 2", len(got))
+		}
+		if got[0].Subject != "before" {
+			t.Errorf("got[0].Subject = %q, want before", got[0].Subject)
+		}
+		if got[1].Subject != "boundary" {
+			t.Errorf("got[1].Subject = %q, want boundary", got[1].Subject)
+		}
+	})
+
+	t.Run("ListFilterByLimit", func(t *testing.T) {
+		p, cleanup := newProvider(t)
+		defer cleanup()
+
+		for _, subject := range []string{"gc-1", "gc-2", "gc-3", "gc-4"} {
+			p.Record(events.Event{Type: events.BeadCreated, Actor: "actor-a", Subject: subject})
+		}
+
+		got, err := p.List(events.Filter{Limit: 2})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("List(Limit) returned %d events, want 2", len(got))
+		}
+		if got[0].Subject != "gc-1" {
+			t.Errorf("got[0].Subject = %q, want gc-1", got[0].Subject)
+		}
+		if got[1].Subject != "gc-2" {
+			t.Errorf("got[1].Subject = %q, want gc-2", got[1].Subject)
+		}
+	})
+
 	t.Run("ListFilterCombined", func(t *testing.T) {
 		p, cleanup := newProvider(t)
 		defer cleanup()

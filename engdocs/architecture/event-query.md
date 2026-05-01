@@ -16,7 +16,7 @@ type Filter struct {
     Since    time.Time // match events at or after this time (inclusive)
     Until    time.Time // match events at or before this time (inclusive)
     AfterSeq uint64    // match events with Seq > AfterSeq
-    Limit    int       // cap results at this count (0 = unlimited)
+    Limit    int       // cap results at this count (0 or negative = unlimited)
 }
 ```
 
@@ -44,8 +44,9 @@ evts, err := provider.List(events.Filter{
 
 ### Limit
 
-`Limit` caps the result slice and stops scanning as soon as the cap is reached.
-Useful for dashboards that only need the first N matches:
+`Limit` caps the result slice to the first N matches in chronological scan
+order and stops scanning as soon as the cap is reached when the provider can do
+so locally. Use caller-side tail slicing when a view needs the latest N events:
 
 ```go
 recent, err := provider.List(events.Filter{
@@ -84,11 +85,15 @@ byType := events.CountByType(all)
 |---|---|
 | `internal/events/reader.go` | `Filter` extended with `Subject`, `Until`, `Limit`; `matchesFilter` helper; `ReadFiltered` updated |
 | `internal/events/fake.go` | `Fake.List` updated to use `matchesFilter` and apply `Limit` |
+| `internal/events/exec/exec.go` | Exec provider applies SDK-side filtering after script output so old scripts cannot bypass new filter fields |
+| `internal/events/multiplexer.go` | Multiplexer applies `Limit` globally after merging and sorting provider results |
 | `internal/events/query.go` | `CountByType`, `CountByActor`, `CountBySubject` |
-| `internal/events/query_test.go` | 11 tests covering all new filter predicates and count helpers |
+| `internal/events/query_test.go` | Tests covering all new filter predicates and count helpers |
 
-`matchesFilter` is an unexported helper shared by `ReadFiltered` and
-`Fake.List`, ensuring both code paths enforce the same predicate logic.
-The `exec` provider passes `Filter` to an external script as JSON — new fields
-are marshalled automatically; scripts that don't recognize them return
-unfiltered data (the in-process caller applies the filter on its side).
+`matchesFilter` is the predicate used by `ApplyFilter`, `ReadFiltered`, and the
+in-memory provider, ensuring code paths enforce the same predicate logic. The
+`exec` provider still passes `Filter` to an external script as JSON for
+provider-side narrowing, but asks scripts for an unbounded result set and then
+applies the SDK filter locally. Scripts that don't recognize new fields can
+return unfiltered data; the in-process caller enforces `Subject`, `Until`, and
+`Limit` on its side.
