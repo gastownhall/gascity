@@ -1753,6 +1753,13 @@ type Agent struct {
 	// an empty quoted path. Unexported so the value is package-private
 	// runtime state and never appears on any wire. (See ga-tpfc.)
 	source agentSource
+	// layout records which pack layout (v1 inline [[agent]] block in
+	// pack.toml vs. v2 agents/<name>/agent.toml convention) produced
+	// this agent. Stamped once at discovery; consumed by
+	// formatDuplicateAgentError to specialize the (V1Inline,
+	// V2Convention) collision into a migration-guidance variant.
+	// Unexported, runtime-only, never on any wire. (See ga-9ogb.)
+	layout agentLayout
 }
 
 // agentSource enumerates the configuration origins recognized by
@@ -1776,6 +1783,39 @@ const (
 	// city.Imports after composition, the user did not write it.
 	sourceAutoImport
 )
+
+// agentLayout enumerates the pack-layout origin of an agent: which
+// on-disk shape produced it. Exactly one value is stamped at
+// discovery time. Used by formatDuplicateAgentError to detect a v1↔v2
+// migration collision and emit a migration-guidance error. Unexported
+// so the type is package-private runtime state and never appears on
+// any wire.
+type agentLayout uint8
+
+const (
+	// layoutUnknown is the zero value. Agents reach validation
+	// without a layout stamp when they came through a non-discovery
+	// path (test fixtures, city.toml inline [[agent]] blocks — those
+	// last are a third category, not v1).
+	layoutUnknown agentLayout = iota
+	// layoutV1Inline marks agents declared as inline [[agent]] blocks
+	// in a pack's pack.toml.
+	layoutV1Inline
+	// layoutV2Convention marks agents discovered from a pack's
+	// agents/<name>/agent.toml file.
+	layoutV2Convention
+)
+
+// String renders an agentLayout for debug logs only.
+func (l agentLayout) String() string {
+	switch l {
+	case layoutV1Inline:
+		return "v1-inline"
+	case layoutV2Convention:
+		return "v2-convention"
+	}
+	return "unknown"
+}
 
 // IdleTimeoutDuration returns the idle timeout as a time.Duration.
 // Returns 0 if empty or unparseable (disabled).

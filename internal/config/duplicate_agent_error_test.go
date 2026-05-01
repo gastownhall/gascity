@@ -219,6 +219,189 @@ func TestApplyAgentOverride_PreservesSource(t *testing.T) {
 	}
 }
 
+// TestFormatDuplicateAgentError_LayoutMatrix sweeps over the 3×3
+// (a.layout, b.layout) matrix from ga-9ogb §7 and asserts the
+// migration-guidance variant fires only on the (V1Inline, V2Convention)
+// pair (in either order). The other seven cells fall through to the
+// generic format.
+func TestFormatDuplicateAgentError_LayoutMatrix(t *testing.T) {
+	const migrationHeadline = "pack v1/v2 layout collision"
+
+	layouts := []agentLayout{layoutUnknown, layoutV1Inline, layoutV2Convention}
+	for _, la := range layouts {
+		for _, lb := range layouts {
+			a := Agent{Name: "mayor", SourceDir: "packs/a", layout: la}
+			b := Agent{Name: "mayor", SourceDir: "packs/b", layout: lb}
+			err := formatDuplicateAgentError(a, b, "", "")
+			if err == nil {
+				t.Errorf("formatDuplicateAgentError returned nil for layouts (%v, %v)", la, lb)
+				continue
+			}
+			got := err.Error()
+			isV1V2 := (la == layoutV1Inline && lb == layoutV2Convention) ||
+				(la == layoutV2Convention && lb == layoutV1Inline)
+			hasMigration := strings.Contains(got, migrationHeadline)
+			if isV1V2 && !hasMigration {
+				t.Errorf("layouts (%v, %v): expected migration variant (%q), got: %s",
+					la, lb, migrationHeadline, got)
+			}
+			if !isV1V2 && hasMigration {
+				t.Errorf("layouts (%v, %v): expected generic variant, got migration: %s",
+					la, lb, got)
+			}
+			if !isV1V2 && !strings.Contains(got, "duplicate name") {
+				t.Errorf("layouts (%v, %v): expected generic 'duplicate name' wording, got: %s",
+					la, lb, got)
+			}
+			if strings.Contains(got, `""`) {
+				t.Errorf(`layouts (%v, %v): error contains empty quoted "": %s`, la, lb, got)
+			}
+		}
+	}
+}
+
+// TestFormatDuplicateAgentError_MigrationHeadlinePinned pins the exact
+// first-line headline for the migration variant. Body prose may evolve
+// without test churn, but the headline is the stable signal log
+// scrapers and operators key on.
+func TestFormatDuplicateAgentError_MigrationHeadlinePinned(t *testing.T) {
+	a := Agent{Name: "mayor", SourceDir: "packs/gastown", layout: layoutV1Inline}
+	b := Agent{Name: "mayor", BindingName: "gastown", layout: layoutV2Convention}
+	err := formatDuplicateAgentError(a, b, "", "")
+	if err == nil {
+		t.Fatal("expected migration error")
+	}
+	headline := strings.SplitN(err.Error(), "\n", 2)[0]
+	want := `agent "mayor": pack v1/v2 layout collision`
+	if headline != want {
+		t.Errorf("migration headline = %q, want %q", headline, want)
+	}
+}
+
+// TestFormatDuplicateAgentError_MigrationContainsBothSources asserts
+// the migration error names both the v1 and v2 source descriptors and
+// the migration-guide doc path. Order-independent: the helper accepts
+// (v1, v2) or (v2, v1).
+func TestFormatDuplicateAgentError_MigrationContainsBothSources(t *testing.T) {
+	v1 := Agent{Name: "mayor", SourceDir: "packs/gastown", layout: layoutV1Inline}
+	v2 := Agent{Name: "mayor", BindingName: "gastown", source: sourceAutoImport, layout: layoutV2Convention}
+
+	for _, order := range []struct {
+		a, b Agent
+	}{
+		{v1, v2},
+		{v2, v1},
+	} {
+		err := formatDuplicateAgentError(order.a, order.b, "", "")
+		if err == nil {
+			t.Fatal("expected migration error")
+		}
+		got := err.Error()
+		if !strings.Contains(got, "v1 source: ") {
+			t.Errorf(`expected "v1 source: " line, got: %s`, got)
+		}
+		if !strings.Contains(got, "v2 source: ") {
+			t.Errorf(`expected "v2 source: " line, got: %s`, got)
+		}
+		if !strings.Contains(got, "[[agent]] mayor") {
+			t.Errorf(`expected "[[agent]] mayor" reference on the v1 line, got: %s`, got)
+		}
+		if !strings.Contains(got, "agents/mayor/agent.toml") {
+			t.Errorf(`expected "agents/mayor/agent.toml" reference on the v2 line, got: %s`, got)
+		}
+		if !strings.Contains(got, "docs/packv2/migration.mdx") {
+			t.Errorf(`expected migration doc link "docs/packv2/migration.mdx", got: %s`, got)
+		}
+	}
+}
+
+// TestValidateAgents_V1V2LayoutCollisionRepro reproduces the bug ga-9ogb
+// fixes: a v1 [[agent]] block in one pack + a v2 agents/<name>/agent.toml
+// in another pack both declare "mayor". Today (pre-fix) the operator
+// gets the same generic duplicate-name error as a v2-vs-v2 conflict.
+// Post-fix, the migration headline fires.
+func TestValidateAgents_V1V2LayoutCollisionRepro(t *testing.T) {
+	agents := []Agent{
+		{Name: "mayor", SourceDir: "packs/userpack", layout: layoutV1Inline, source: sourcePack},
+		{Name: "mayor", BindingName: "gastown", source: sourceAutoImport, layout: layoutV2Convention},
+	}
+	err := ValidateAgents(agents)
+	if err == nil {
+		t.Fatal("expected duplicate-name error")
+	}
+	got := err.Error()
+	if !strings.Contains(got, "pack v1/v2 layout collision") {
+		t.Errorf("expected migration headline, got: %s", got)
+	}
+}
+
+// TestValidateAgents_FallbackSuppressesV1V2Migration asserts that when
+// one side of the v1/v2 pair carries fallback=true, the fallback agent
+// is removed by resolveFallbackAgents BEFORE ValidateAgents runs, so
+// no migration error fires. Pinned via the full LoadWithIncludes path
+// because resolveFallbackAgents is composition-layer machinery.
+func TestValidateAgents_FallbackSuppressesV1V2Migration(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	cityDir := t.TempDir()
+
+	// User pack: v1 [[agent]] mayor with fallback=true.
+	userPack := filepath.Join(cityDir, "packs", "user")
+	if err := os.MkdirAll(userPack, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userPack, "pack.toml"), []byte(`
+[pack]
+name = "user"
+schema = 1
+
+[[agent]]
+name = "mayor"
+scope = "city"
+fallback = true
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// System pack: v2 agents/mayor/agent.toml.
+	sysPack := filepath.Join(cityDir, "packs", "sys")
+	mayorDir := filepath.Join(sysPack, "agents", "mayor")
+	if err := os.MkdirAll(mayorDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sysPack, "pack.toml"), []byte(`
+[pack]
+name = "sys"
+schema = 1
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorDir, "agent.toml"), []byte(`
+scope = "city"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+[workspace]
+name = "test"
+
+[pack]
+name = "city"
+schema = 1
+includes = ["packs/user", "packs/sys"]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v — fallback should suppress the v1/v2 collision", err)
+	}
+	if err := ValidateAgents(cfg.Agents); err != nil {
+		t.Fatalf("ValidateAgents: %v — fallback should suppress the v1/v2 collision", err)
+	}
+}
+
 // TestValidateAgents_NoEmptyQuotesAcrossAllSourceCombos sweeps over all
 // source-enum × SourceDir-empty/present combinations and asserts that no
 // duplicate-agent error rendered by ValidateAgents contains an empty quoted
