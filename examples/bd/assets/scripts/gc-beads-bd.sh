@@ -1908,7 +1908,9 @@ op_init() {
                 # and bd-specific bootstrap only.
                 ensure_beads_dir_permissions "$dir"
                 normalize_scope_after_init "$dir" "$prefix" "$dolt_database"
-                run_bd_pinned "$dir" config set types.custom "$custom_types" 2>/dev/null || true
+                # bd config set is slow under bd >= 1.0.3 (~50s for types.custom
+                # auto-migrate); ensure_bd_runtime_custom_types writes the same
+                # config table directly via SQL. See ga-5mym.
                 ensure_bd_runtime_custom_types "$dolt_database" "$custom_types"
                 ensure_bd_runtime_issue_prefix "$dolt_database" "$prefix"
                 backfill_project_id_if_missing "$dir"
@@ -1961,8 +1963,10 @@ op_init() {
         die "bd schema not visible for $dolt_database after init"
     fi
 
-    # Configure custom bead types (required since beads v0.46.0).
-    run_bd_pinned "$dir" config set types.custom "$custom_types" 2>/dev/null || true
+    # Configure custom bead types (required since beads v0.46.0). Write
+    # directly to bd's config table via SQL — `bd config set` costs ~50s
+    # per call under bd >= 1.0.3 (auto-migrate) and overruns the 30s
+    # provider op timeout. See ga-5mym.
     ensure_bd_runtime_custom_types "$dolt_database" "$custom_types"
 
     # Keep bd's runtime config in sync with GC's canonical prefix. This is

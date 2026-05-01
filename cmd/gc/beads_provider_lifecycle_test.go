@@ -3875,7 +3875,10 @@ esac
 		"3307",
 		filepath.Join(rigDir, ".beads"),
 	}, "|")
-	for _, name := range []string{"config.env", "migrate.env"} {
+	// config.env is no longer asserted: bd config set was removed in ga-5mym
+	// (replaced by ensure_bd_runtime_config_value direct SQL writes). migrate
+	// is still invoked via backfill_project_id_if_missing and pins env identically.
+	for _, name := range []string{"init.env", "migrate.env"} {
 		data, err := os.ReadFile(filepath.Join(captureDir, name))
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
@@ -4385,19 +4388,21 @@ esac
 		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
 	}
 
-	for _, name := range []string{"config-db.log", "migrate-db.log"} {
-		data, err := os.ReadFile(filepath.Join(captureDir, name))
-		if err != nil {
-			t.Fatalf("ReadFile(%s): %v", name, err)
-		}
-		lines := strings.Fields(string(data))
-		if len(lines) == 0 {
-			t.Fatalf("%s empty", name)
-		}
-		for _, line := range lines {
-			if line != "gascity" {
-				t.Fatalf("%s line = %q, want gascity", name, line)
-			}
+	// Only migrate-db.log is asserted: bd config set was removed in ga-5mym
+	// (replaced by ensure_bd_runtime_config_value direct SQL writes).
+	// The migrate path still proves normalization runs before downstream
+	// bd subcommands.
+	data, err := os.ReadFile(filepath.Join(captureDir, "migrate-db.log"))
+	if err != nil {
+		t.Fatalf("ReadFile(migrate-db.log): %v", err)
+	}
+	lines := strings.Fields(string(data))
+	if len(lines) == 0 {
+		t.Fatalf("migrate-db.log empty")
+	}
+	for _, line := range lines {
+		if line != "gascity" {
+			t.Fatalf("migrate-db.log line = %q, want gascity", line)
 		}
 	}
 	metaData, err := os.ReadFile(filepath.Join(cityPath, ".beads", "metadata.json"))
@@ -4529,19 +4534,20 @@ esac
 		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
 	}
 
-	for _, name := range []string{"config-db.log", "migrate-db.log"} {
-		data, err := os.ReadFile(filepath.Join(captureDir, name))
-		if err != nil {
-			t.Fatalf("ReadFile(%s): %v", name, err)
-		}
-		lines := strings.Fields(string(data))
-		if len(lines) == 0 {
-			t.Fatalf("%s empty", name)
-		}
-		for _, line := range lines {
-			if line != strings.ToUpper(managedDoltProbeDatabase) {
-				t.Fatalf("%s line = %q, want %s", name, line, strings.ToUpper(managedDoltProbeDatabase))
-			}
+	// Only migrate-db.log is asserted: bd config set was removed in ga-5mym
+	// (replaced by ensure_bd_runtime_config_value direct SQL writes).
+	want := strings.ToUpper(managedDoltProbeDatabase)
+	data, err := os.ReadFile(filepath.Join(captureDir, "migrate-db.log"))
+	if err != nil {
+		t.Fatalf("ReadFile(migrate-db.log): %v", err)
+	}
+	lines := strings.Fields(string(data))
+	if len(lines) == 0 {
+		t.Fatalf("migrate-db.log empty")
+	}
+	for _, line := range lines {
+		if line != want {
+			t.Fatalf("migrate-db.log line = %q, want %s", line, want)
 		}
 	}
 
