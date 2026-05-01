@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"text/tabwriter"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -282,8 +283,9 @@ func formatInjectOutput(messages []mail.Message) string {
 	}
 	for _, m := range messages[:limit] {
 		subject := strings.TrimSpace(m.Subject)
-		body, truncated := mailInjectBodyPreview(m.Body)
-		if subject != "" && subject != body {
+		compactBody := compactMailInjectBody(m.Body)
+		body, truncated := mailInjectBodyPreview(compactBody)
+		if subject != "" && subject != compactBody {
 			fmt.Fprintf(&sb, "- %s from %s [%s]: %s", m.ID, m.From, subject, body)
 		} else {
 			fmt.Fprintf(&sb, "- %s from %s: %s", m.ID, m.From, body)
@@ -298,20 +300,17 @@ func formatInjectOutput(messages []mail.Message) string {
 	return sb.String()
 }
 
-func mailInjectBodyPreview(body string) (string, bool) {
-	compact := strings.Join(strings.Fields(body), " ")
+func compactMailInjectBody(body string) string {
+	return strings.Join(strings.Fields(body), " ")
+}
+
+func mailInjectBodyPreview(compact string) (string, bool) {
 	if len(compact) <= mailInjectBodyPreviewSize {
 		return compact, false
 	}
-	cut := 0
-	for i := range compact {
-		if i > mailInjectBodyPreviewSize {
-			break
-		}
-		cut = i
-	}
-	if cut <= 0 {
-		cut = mailInjectBodyPreviewSize
+	cut := mailInjectBodyPreviewSize
+	for cut > 0 && !utf8.RuneStart(compact[cut]) {
+		cut--
 	}
 	return strings.TrimSpace(compact[:cut]), true
 }
