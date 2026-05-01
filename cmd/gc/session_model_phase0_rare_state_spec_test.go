@@ -437,8 +437,8 @@ func TestShouldDeferNamedSessionConfigDriftBoundsUnknownActivity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get session bead after new drift: %v", err)
 	}
-	if err := clearNamedSessionConfigDriftDeferral(session, store); err != nil {
-		t.Fatalf("clearNamedSessionConfigDriftDeferral: %v", err)
+	if err := clearSessionConfigDriftDeferral(session, store); err != nil {
+		t.Fatalf("clearSessionConfigDriftDeferral: %v", err)
 	}
 	session, err = store.Get(session.ID)
 	if err != nil {
@@ -824,6 +824,54 @@ func TestConfigDrift_AttachedPoolSessionDefersAcrossCycles(t *testing.T) {
 		if ds != nil {
 			t.Fatalf("cycle %d: attached pool session should not be drained, got: %+v", i, ds)
 		}
+	}
+}
+
+func TestConfigDrift_AttachedPoolSessionSurvivesTransientFalseNegative(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker", StartCommand: "new-cmd"}},
+	}
+	env.addRunningWorkerDesiredWithNewConfig()
+
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	oldHash := runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"})
+	env.setSessionMetadata(&session, map[string]string{
+		"session_key":         "old-provider-conversation",
+		"started_config_hash": oldHash,
+	})
+	env.sp.SetAttached("worker", true)
+
+	env.reconcile([]beads.Bead{session})
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get after attached deferral: %v", err)
+	}
+	if got.Metadata[namedSessionAttachedConfigDriftDeferredAtMetadata] == "" {
+		t.Fatal("attached config-drift deferral timestamp was not recorded")
+	}
+
+	env.clk.Time = env.clk.Now().Add(10 * time.Second)
+	falseAttached := make([]bool, 100)
+	env.sp.SetAttachedSequence("worker", falseAttached...)
+	env.reconcile([]beads.Bead{got})
+
+	got, err = env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get after false-negative cycle: %v", err)
+	}
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("attached pool session was stopped after one false-negative attachment cycle")
+	}
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("attached pool session should not be drained after false-negative cycle, got %+v", ds)
+	}
+	if got.Metadata["started_config_hash"] != oldHash {
+		t.Fatalf("started_config_hash = %q after false-negative cycle; want %q", got.Metadata["started_config_hash"], oldHash)
+	}
+	if got.Metadata["session_key"] != "old-provider-conversation" {
+		t.Fatalf("session_key = %q after false-negative cycle; want old provider conversation preserved", got.Metadata["session_key"])
 	}
 }
 

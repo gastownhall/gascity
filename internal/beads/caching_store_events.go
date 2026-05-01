@@ -36,13 +36,28 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 	current, cached := c.beads[patch.ID]
 	_, locallyMutated := c.beadSeq[patch.ID]
 	recentlyLocal := recentLocalMutation(c.localBeadAt[patch.ID], now)
+	_, locallyDeleted := c.deletedSeq[patch.ID]
 	c.mu.RUnlock()
 
-	conflictsCached := eventType != "bead.closed" && cached && cacheEventConflictsCurrent(current, patch, fields)
-	if conflictsCached && locallyMutated {
+	conflictsCached := cached && cacheEventConflictsCurrent(current, patch, fields)
+	verifiedConflict := false
+	if conflictsCached && eventType == "bead.closed" && (locallyMutated || recentlyLocal) {
+		matchesBacking, verifyErr := c.cacheClosedEventMatchesBacking(patch.ID)
+		if verifyErr != nil {
+			c.recordProblem(fmt.Sprintf("verify %s event", eventType), verifyErr)
+			// Drop destructive close events on verification failure; reconciliation
+			// can catch up without overwriting a local reopen with a stale close.
+			return
+		}
+		if !matchesBacking {
+			return
+		}
+		verifiedConflict = true
+	}
+	if conflictsCached && eventType != "bead.closed" && locallyMutated && !verifiedConflict {
 		return
 	}
-	if conflictsCached && recentlyLocal {
+	if conflictsCached && recentlyLocal && !verifiedConflict {
 		matchesBacking, verifyErr := c.cacheEventMatchesBacking(patch.ID, patch, fields)
 		if verifyErr == nil && !matchesBacking {
 			return
@@ -56,6 +71,10 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 	if !cached {
 		if fresh, err := c.backing.Get(patch.ID); err == nil {
 			b = fresh
+		} else if errors.Is(err, ErrNotFound) {
+			if eventType != "bead.created" && locallyDeleted {
+				return
+			}
 		} else if !errors.Is(err, ErrNotFound) {
 			c.recordProblem(fmt.Sprintf("refresh %s event", eventType), err)
 		}
@@ -72,7 +91,7 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 	}
 	if current, ok := c.beads[patch.ID]; ok {
 		if eventType != "bead.closed" && cacheEventConflictsCurrent(current, patch, fields) {
-			if _, locallyMutated := c.beadSeq[patch.ID]; locallyMutated || recentLocalMutation(c.localBeadAt[patch.ID], time.Now()) {
+			if _, locallyMutated := c.beadSeq[patch.ID]; locallyMutated {
 				return
 			}
 		}
@@ -222,6 +241,14 @@ func (c *CachingStore) cacheEventMatchesBacking(id string, patch Bead, fields ma
 		return false, err
 	}
 	return cacheEventPatchMatchesBead(fresh, patch, fields), nil
+}
+
+func (c *CachingStore) cacheClosedEventMatchesBacking(id string) (bool, error) {
+	fresh, err := c.backing.Get(id)
+	if err != nil {
+		return false, err
+	}
+	return fresh.Status == "closed", nil
 }
 
 func cacheEventPatchMatchesBead(current, patch Bead, fields map[string]json.RawMessage) bool {

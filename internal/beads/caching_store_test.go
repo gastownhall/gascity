@@ -254,6 +254,57 @@ func TestCachingStoreIgnoresStaleUpdateEventAfterLocalUpdate(t *testing.T) {
 	}
 }
 
+func TestCachingStoreIgnoresStaleClosedEventAfterLocalReopen(t *testing.T) {
+	mem := beads.NewMemStore()
+	created, err := mem.Create(beads.Bead{Title: "reopen me"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mem.Close(created.ID); err != nil {
+		t.Fatalf("Close backing: %v", err)
+	}
+
+	cs := beads.NewCachingStoreForTest(mem, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if err := cs.Reopen(created.ID); err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+
+	cs.ApplyEvent("bead.closed", json.RawMessage(`{"id":"`+created.ID+`","status":"closed"}`))
+
+	got, err := cs.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("Status after stale closed event = %q, want open", got.Status)
+	}
+}
+
+func TestCachingStoreIgnoresStaleUpdateEventAfterLocalDelete(t *testing.T) {
+	mem := beads.NewMemStore()
+	created, err := mem.Create(beads.Bead{Title: "delete me"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	cs := beads.NewCachingStoreForTest(mem, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if err := cs.Delete(created.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	cs.ApplyEvent("bead.updated", json.RawMessage(`{"id":"`+created.ID+`","title":"stale","status":"open"}`))
+
+	if got, err := cs.Get(created.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get after stale update event = %+v, %v; want ErrNotFound", got, err)
+	}
+}
+
 func TestCachingStoreLiveListDoesNotOverwriteLocalCloseWithStaleActiveRow(t *testing.T) {
 	backing := &staleAfterCloseStore{MemStore: beads.NewMemStore()}
 	created, err := backing.Create(beads.Bead{Title: "close me"})

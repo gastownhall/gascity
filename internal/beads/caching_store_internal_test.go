@@ -104,6 +104,130 @@ func TestCachingStoreListLiveBypassesCache(t *testing.T) {
 	}
 }
 
+func TestCachingStoreApplyEventRecordsBackingVerificationErrorAndAppliesUpdate(t *testing.T) {
+	t.Parallel()
+
+	backing := &cacheEventVerificationFailStore{Store: NewMemStore()}
+	bead, err := backing.Create(Bead{Title: "original"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	localTitle := "local"
+	if err := cache.Update(bead.ID, UpdateOpts{Title: &localTitle}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	cache.mu.Lock()
+	delete(cache.beadSeq, bead.ID)
+	cache.mu.Unlock()
+	backing.failNextGet = true
+
+	cache.ApplyEvent("bead.updated", json.RawMessage(`{"id":"`+bead.ID+`","title":"external"}`))
+
+	got, err := cache.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Title != "external" {
+		t.Fatalf("Title after verification error = %q, want external", got.Title)
+	}
+	stats := cache.Stats()
+	if stats.ProblemCount == 0 {
+		t.Fatal("ProblemCount = 0, want verification error recorded")
+	}
+	if !strings.Contains(stats.LastProblem, "verify bead.updated event") {
+		t.Fatalf("LastProblem = %q, want verify bead.updated event", stats.LastProblem)
+	}
+}
+
+func TestCachingStoreIgnoresStaleClosedEventAfterLocalReopenBeyondRecentWindow(t *testing.T) {
+	backing := NewMemStore()
+	bead, err := backing.Create(Bead{Title: "reopen me"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := backing.Close(bead.ID); err != nil {
+		t.Fatalf("Close backing: %v", err)
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if err := cache.Reopen(bead.ID); err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+
+	cache.mu.Lock()
+	cache.localBeadAt[bead.ID] = time.Now().Add(-10 * time.Second)
+	cache.mu.Unlock()
+
+	cache.ApplyEvent("bead.closed", json.RawMessage(`{"id":"`+bead.ID+`","status":"closed"}`))
+
+	got, err := cache.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("Status after stale closed event = %q, want open", got.Status)
+	}
+}
+
+func TestCachingStoreRecordsClosedEventVerificationErrorAndPreservesLocalReopen(t *testing.T) {
+	backing := &cacheEventVerificationFailStore{Store: NewMemStore()}
+	bead, err := backing.Create(Bead{Title: "reopen me"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := backing.Close(bead.ID); err != nil {
+		t.Fatalf("Close backing: %v", err)
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if err := cache.Reopen(bead.ID); err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	backing.failNextGet = true
+
+	cache.ApplyEvent("bead.closed", json.RawMessage(`{"id":"`+bead.ID+`","status":"closed"}`))
+
+	got, err := cache.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("Status after verification error = %q, want open", got.Status)
+	}
+	stats := cache.Stats()
+	if stats.ProblemCount == 0 {
+		t.Fatal("ProblemCount = 0, want verification error recorded")
+	}
+	if !strings.Contains(stats.LastProblem, "verify bead.closed event") {
+		t.Fatalf("LastProblem = %q, want verify bead.closed event", stats.LastProblem)
+	}
+}
+
+type cacheEventVerificationFailStore struct {
+	Store
+	failNextGet bool
+}
+
+func (s *cacheEventVerificationFailStore) Get(id string) (Bead, error) {
+	if s.failNextGet {
+		s.failNextGet = false
+		return Bead{}, errors.New("backing verification failed")
+	}
+	return s.Store.Get(id)
+}
+
 func TestCachingStoreRunReconciliationDetectsPriorityChanges(t *testing.T) {
 	t.Parallel()
 

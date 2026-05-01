@@ -1107,6 +1107,50 @@ func TestHandleSessionCloseDeleteRetriesTransientConflict(t *testing.T) {
 	}
 }
 
+func TestDeleteSessionBeadAfterCloseReturnsLastTransientError(t *testing.T) {
+	store := &alwaysTransientDeleteConflictStore{Store: beads.NewMemStore()}
+
+	err := deleteSessionBeadAfterClose(store, "gc-test")
+
+	if err == nil {
+		t.Fatal("deleteSessionBeadAfterClose error = nil, want transient failure")
+	}
+	if store.deleteCalls != 5 {
+		t.Fatalf("delete calls = %d, want 5", store.deleteCalls)
+	}
+	if !strings.Contains(err.Error(), "conflict attempt 5") {
+		t.Fatalf("error = %v, want final underlying conflict", err)
+	}
+}
+
+func TestDeleteSessionBeadAfterCloseDoesNotRetryNonTransientError(t *testing.T) {
+	store := &nonTransientDeleteErrorStore{err: errors.New("permission denied")}
+
+	err := deleteSessionBeadAfterClose(store, "gc-test")
+
+	if err == nil || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("deleteSessionBeadAfterClose error = %v, want permission denied", err)
+	}
+	if store.deleteCalls != 1 {
+		t.Fatalf("delete calls = %d, want 1", store.deleteCalls)
+	}
+}
+
+func TestDeleteSessionBeadAfterCloseLogsAlreadyGone(t *testing.T) {
+	var logs bytes.Buffer
+	oldOutput := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(oldOutput)
+
+	err := deleteSessionBeadAfterClose(deleteMissingStore{Store: beads.NewMemStore()}, "gc-test")
+	if err != nil {
+		t.Fatalf("deleteSessionBeadAfterClose: %v", err)
+	}
+	if !strings.Contains(logs.String(), "already gone") {
+		t.Fatalf("logs = %q, want already gone signal", logs.String())
+	}
+}
+
 type deleteMissingStore struct {
 	beads.Store
 }
@@ -1126,6 +1170,27 @@ func (s *transientDeleteConflictStore) Delete(id string) error {
 		return fmt.Errorf("deleting bead %q: sql commit: Error 1213 (40001): serialization failure: this transaction conflicts with a committed transaction from another client, try restarting transaction", id)
 	}
 	return s.Store.Delete(id)
+}
+
+type alwaysTransientDeleteConflictStore struct {
+	beads.Store
+	deleteCalls int
+}
+
+func (s *alwaysTransientDeleteConflictStore) Delete(id string) error {
+	s.deleteCalls++
+	return fmt.Errorf("deleting bead %q: sql commit: Error 1213 (40001): serialization failure: conflict attempt %d", id, s.deleteCalls)
+}
+
+type nonTransientDeleteErrorStore struct {
+	beads.Store
+	deleteCalls int
+	err         error
+}
+
+func (s *nonTransientDeleteErrorStore) Delete(string) error {
+	s.deleteCalls++
+	return s.err
 }
 
 func TestHandleSessionWake_DoesNotRewriteHistoricalWaitNudge(t *testing.T) {

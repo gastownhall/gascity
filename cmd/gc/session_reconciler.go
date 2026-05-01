@@ -546,16 +546,15 @@ func reconcileSessionBeadsTraced(
 					}
 					ackReason, reconcilerOwnedAck := reconcilerDrainAckMatchesSession(*session, sp, name)
 					if reconcilerOwnedAck && ackReason == "config-drift" {
+						driftKey := sessionConfigDriftKey(*session, cfg, tp)
 						attached, attachErr := sessionAttachedForConfigDrift(*session, sp, cityPath, store, cfg, name)
 						if attachErr != nil {
 							fmt.Fprintf(stderr, "session reconciler: observing config-drift attachment for %s: %v\n", name, attachErr) //nolint:errcheck
 						}
 						if attached {
-							if isNamedSessionBead(*session) {
-								if driftKey := sessionConfigDriftKey(*session, cfg, tp); driftKey != "" {
-									if err := recordNamedSessionAttachedConfigDriftDeferral(*session, store, clk, driftKey); err != nil {
-										fmt.Fprintf(stderr, "session reconciler: recording attached config-drift deferral for %s: %v\n", name, err) //nolint:errcheck
-									}
+							if driftKey != "" {
+								if err := recordSessionAttachedConfigDriftDeferral(*session, store, clk, driftKey); err != nil {
+									fmt.Fprintf(stderr, "session reconciler: recording attached config-drift deferral for %s: %v\n", name, err) //nolint:errcheck
 								}
 							}
 							drainCancelled := cancelSessionConfigDriftDrain(*session, sp, dt)
@@ -564,6 +563,18 @@ func reconcileSessionBeadsTraced(
 							}
 							if trace != nil {
 								trace.recordDecision("reconciler.session.drain_ack", tp.TemplateName, name, "config_drift_attached", "cancel_reconciler_ack", traceRecordPayload{
+									"drain_canceled": drainCancelled,
+								}, nil, "")
+							}
+							continue
+						}
+						if driftKey != "" && recentlyDeferredSessionAttachedConfigDrift(*session, clk, driftKey) {
+							drainCancelled := cancelSessionConfigDriftDrain(*session, sp, dt)
+							if !drainCancelled {
+								clearReconcilerDrainAckMetadata(sp, name)
+							}
+							if trace != nil {
+								trace.recordDecision("reconciler.session.drain_ack", tp.TemplateName, name, "config_drift_recently_attached", "cancel_reconciler_ack", traceRecordPayload{
 									"drain_canceled": drainCancelled,
 								}, nil, "")
 							}
@@ -778,10 +789,8 @@ func reconcileSessionBeadsTraced(
 							fmt.Fprintf(stderr, "session reconciler: observing config-drift attachment for %s: %v\n", name, attachErr) //nolint:errcheck
 						}
 						if attached {
-							if isNamedSessionBead(*session) {
-								if err := recordNamedSessionAttachedConfigDriftDeferral(*session, store, clk, driftKey); err != nil {
-									fmt.Fprintf(stderr, "session reconciler: recording attached config-drift deferral for %s: %v\n", name, err) //nolint:errcheck
-								}
+							if err := recordSessionAttachedConfigDriftDeferral(*session, store, clk, driftKey); err != nil {
+								fmt.Fprintf(stderr, "session reconciler: recording attached config-drift deferral for %s: %v\n", name, err) //nolint:errcheck
 							}
 							drainCancelled := cancelSessionConfigDriftDrain(*session, sp, dt)
 							if trace != nil {
@@ -794,17 +803,17 @@ func reconcileSessionBeadsTraced(
 							}
 							continue
 						}
-						if isNamedSessionBead(*session) {
-							if recentlyDeferredNamedSessionAttachedConfigDrift(*session, clk, driftKey) {
-								if trace != nil {
-									trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", string(TraceOutcomeDeferredAttached), traceRecordPayload{
-										"stored_hash":   storedHash,
-										"current_hash":  currentHash,
-										"active_reason": "attached_recently",
-									}, nil, "")
-								}
-								continue
+						if recentlyDeferredSessionAttachedConfigDrift(*session, clk, driftKey) {
+							if trace != nil {
+								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", string(TraceOutcomeDeferredAttached), traceRecordPayload{
+									"stored_hash":   storedHash,
+									"current_hash":  currentHash,
+									"active_reason": "attached_recently",
+								}, nil, "")
 							}
+							continue
+						}
+						if isNamedSessionBead(*session) {
 							// Defer config-drift restart for named sessions
 							// that are actively in use (pending interaction,
 							// tmux-attached, or recent activity). This prevents
@@ -881,10 +890,8 @@ func reconcileSessionBeadsTraced(
 						}
 					}
 
-					if isNamedSessionBead(*session) {
-						if err := clearNamedSessionConfigDriftDeferral(*session, store); err != nil {
-							fmt.Fprintf(stderr, "session reconciler: clearing config-drift deferral for %s: %v\n", name, err) //nolint:errcheck
-						}
+					if err := clearSessionConfigDriftDeferral(*session, store); err != nil {
+						fmt.Fprintf(stderr, "session reconciler: clearing config-drift deferral for %s: %v\n", name, err) //nolint:errcheck
 					}
 
 					// Core config matches — check live-only drift.
@@ -1372,7 +1379,7 @@ func recordNamedSessionConfigDriftDeferredAt(session beads.Bead, store beads.Sto
 	})
 }
 
-func clearNamedSessionConfigDriftDeferral(session beads.Bead, store beads.Store) error {
+func clearSessionConfigDriftDeferral(session beads.Bead, store beads.Store) error {
 	if store == nil || session.ID == "" {
 		return nil
 	}
@@ -1390,7 +1397,7 @@ func clearNamedSessionConfigDriftDeferral(session beads.Bead, store beads.Store)
 	})
 }
 
-func recordNamedSessionAttachedConfigDriftDeferral(session beads.Bead, store beads.Store, clk clock.Clock, driftKey string) error {
+func recordSessionAttachedConfigDriftDeferral(session beads.Bead, store beads.Store, clk clock.Clock, driftKey string) error {
 	if store == nil || session.ID == "" {
 		return nil
 	}
@@ -1404,7 +1411,7 @@ func recordNamedSessionAttachedConfigDriftDeferral(session beads.Bead, store bea
 	})
 }
 
-func recentlyDeferredNamedSessionAttachedConfigDrift(session beads.Bead, clk clock.Clock, driftKey string) bool {
+func recentlyDeferredSessionAttachedConfigDrift(session beads.Bead, clk clock.Clock, driftKey string) bool {
 	if driftKey == "" || session.Metadata[namedSessionAttachedConfigDriftDeferredKeyMetadata] != driftKey {
 		return false
 	}

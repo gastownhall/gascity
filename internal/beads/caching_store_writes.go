@@ -332,6 +332,7 @@ func (c *CachingStore) Delete(id string) error {
 	delete(c.deps, id)
 	delete(c.dirty, id)
 	delete(c.beadSeq, id)
+	delete(c.localBeadAt, id)
 	c.deletedSeq[id] = seq
 	c.markFreshLocked(time.Now())
 	c.updateStatsLocked()
