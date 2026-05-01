@@ -142,7 +142,7 @@ gc mail send mayor/ -s "ESCALATION: Dolt health critical [CRITICAL]" \\
 
 **3. Signal completion:**
 ```bash
-gc nudge deacon/ "DOG_DONE: doctor — server: <status>, conns: <count>/<max>, orphans: <count>"
+gc session nudge deacon/ "DOG_DONE: doctor — server: <status>, conns: <count>/<max>, orphans: <count>"
 ```
 
 **4. Close work and exit:**

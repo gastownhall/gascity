@@ -166,7 +166,7 @@ After escalating: continue if possible, otherwise `gc bd update <bead> --status=
 ## Communication
 
 ```bash
-gc nudge {{ .RigName }}/witness "Quick question about bead status"   # Default: nudge
+gc session nudge {{ .RigName }}/witness "Quick question about bead status"   # Default: nudge
 gc mail send {{ .RigName }}/witness -s "HELP: Blocked on X" -m "..."  # Escalation: mail
 gc mail send mayor/ -s "BLOCKED: Need coordination" -m "..."          # Cross-rig: mail
 ```

@@ -181,7 +181,7 @@ re-reads formula steps and resumes from context.
 ```bash
 gc mail send mayor/ -s "Subject" -m "Message"              # Escalate to mayor
 gc mail send {{ .RigName }}/refinery -s "Subject" -m "..."  # Refinery questions
-gc nudge {{ .RigName }}/<polecat-name> "Run gc hook; it checks assigned work before routed pool work"
+gc session nudge {{ .RigName }}/<polecat-name> "Run gc hook; it checks assigned work before routed pool work"
 gc session peek {{ .RigName }}/<polecat-name> 50             # View polecat output
 ```
 

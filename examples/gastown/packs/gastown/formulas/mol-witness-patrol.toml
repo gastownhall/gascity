@@ -326,7 +326,7 @@ wisp is stale, the refinery may be stuck.
 
 **Step 3: Nudge if needed:**
 ```bash
-gc nudge <rig>/refinery "Work beads waiting for merge. Please check queue."
+gc session nudge <rig>/refinery "Work beads waiting for merge. Please check queue."
 ```
 
 **Step 4: Escalate if needed:**

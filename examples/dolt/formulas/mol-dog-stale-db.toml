@@ -143,12 +143,12 @@ Generate summary and signal completion.
 **2. Warn if above threshold:**
 If orphan count >= {{warn_threshold}}:
 ```bash
-gc nudge deacon/ "WARN: <count> orphan databases detected"
+gc session nudge deacon/ "WARN: <count> orphan databases detected"
 ```
 
 **3. Signal completion:**
 ```bash
-gc nudge deacon/ "DOG_DONE: stale-db — orphans: <count>, removed: <count>"
+gc session nudge deacon/ "DOG_DONE: stale-db — orphans: <count>, removed: <count>"
 ```
 
 **4. Close work and exit:**

@@ -116,7 +116,7 @@ for DB in $DATABASES; do
 done
 
 if [ "$HALTED" -eq 1 ]; then
-    gc nudge deacon/ "DOG_DONE: jsonl — HALTED on spike detection" 2>/dev/null || true
+    gc session nudge deacon/ "DOG_DONE: jsonl — HALTED on spike detection" 2>/dev/null || true
     exit 0
 fi
 
@@ -126,7 +126,7 @@ git add -A *.jsonl */ 2>/dev/null || true
 
 if git diff --cached --quiet 2>/dev/null; then
     # No changes.
-    gc nudge deacon/ "DOG_DONE: jsonl — no changes" 2>/dev/null || true
+    gc session nudge deacon/ "DOG_DONE: jsonl — no changes" 2>/dev/null || true
     exit 0
 fi
 
@@ -163,5 +163,5 @@ if [ -n "$FAILED_DBS" ]; then
     SUMMARY="$SUMMARY, failed: $FAILED_DBS"
 fi
 
-gc nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
+gc session nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
 echo "jsonl-export: $SUMMARY"
