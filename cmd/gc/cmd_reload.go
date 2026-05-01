@@ -31,7 +31,15 @@ const (
 )
 
 var (
-	controllerReloadAcceptTimeout = 5 * time.Second
+	// controllerReloadAcceptTimeout is how long a reload request waits for
+	// the controller's main goroutine to drain it from reloadReqCh. The
+	// main goroutine is blocked while a reconcile tick runs, and ticks can
+	// take 30s–90s+ under bead-store churn (see issue #1560). 5s was
+	// dramatically too short and produced "controller is busy" rejections
+	// for many minutes at a time. 60s gives the controller enough headroom
+	// to finish a tick before the reload is rejected, while still bounding
+	// the wait for genuinely deadlocked controllers.
+	controllerReloadAcceptTimeout = 60 * time.Second
 	sendReloadControlRequestHook  = sendReloadControlRequest
 	reloadUnavailableMessageHook  = reloadUnavailableMessage
 	supervisorAPIBaseURLHook      = supervisorAPIBaseURL
