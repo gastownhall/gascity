@@ -197,7 +197,7 @@ exists $WORK/city7/.beads/dolt/orphan_db
 # city8 has three orphans:
 #   safe_orphan         — pure [A-Za-z0-9_]; allowed
 #   ok-hyphen-orphan    — internal hyphen; allowed (matches health/gc-nudge)
-#   _leading_unsafe     — staged on disk under a non-conforming directory name
+#   -leading-unsafe     — staged on disk under a non-conforming directory name
 #                         that fails the leading-charset check. Must be refused
 #                         before any deletion attempt and must remain on disk.
 # Because at least one orphan was refused as unsafe, the script must exit
@@ -654,7 +654,7 @@ overlapping_rig_path() {
 }
 
 allowlist_file=$(mktemp)
-trap 'rm -f "$allowlist_file" "${refused_tmp:-}" "${removed_tmp:-}"' EXIT
+trap 'rm -f "$allowlist_file" "${refused_tmp:-}" "${removed_tmp:-}" "${unsafe_tmp:-}"' EXIT
 allowlist_ready=true
 if ! compute_allowlist_file "$allowlist_file"; then
   allowlist_ready=false
