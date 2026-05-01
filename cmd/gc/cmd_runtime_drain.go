@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/events"
@@ -458,8 +461,16 @@ func doRuntimeRequestRestart(dops drainOps, persistRestart func() error, rec eve
 	})
 	fmt.Fprintln(stdout, "Restart requested. Blocking until controller kills this session...") //nolint:errcheck // best-effort stdout
 
-	// Block forever. The controller will kill the entire process tree.
-	select {}
+	// Block until the controller kills the process tree. A bare select{}
+	// would trip Go's runtime deadlock detector (a single goroutine asleep
+	// with no live channel triggers "all goroutines are asleep — deadlock!").
+	// Subscribing to OS signals keeps the runtime alive: the signal-handling
+	// goroutine counts as runnable, and the kill the controller sends will
+	// arrive here as SIGTERM.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	<-sigCh
+	return 0
 }
 
 // doRuntimeDrainAck sets the drain-ack flag on the session. The controller
