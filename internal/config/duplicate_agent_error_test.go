@@ -225,7 +225,7 @@ func TestApplyAgentOverride_PreservesSource(t *testing.T) {
 // "" path. This is the fallback-suppression invariant the architecture
 // pins.
 func TestValidateAgents_NoEmptyQuotesAcrossAllSourceCombos(t *testing.T) {
-	sources := []agentSource{0, sourceInline, sourcePack, sourceAutoImport}
+	sources := []agentSource{sourceUnknown, sourceInline, sourcePack, sourceAutoImport}
 	srcDirs := []string{"", "packs/base"}
 
 	for _, sa := range sources {
