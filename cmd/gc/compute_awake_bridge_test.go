@@ -80,3 +80,80 @@ func TestBuildAwakeInputFromReconcilerPopulatesPendingInteractions(t *testing.T)
 		t.Fatalf("decision = %+v, want pending wake", got)
 	}
 }
+
+// TestBuildAwakeInputFromReconciler_NamedAlwaysPostChurnRewakes pins issue
+// #1493: a mode=always named session that hit checkChurn below the
+// quarantine threshold must be re-woken on the next reconciler tick.
+//
+// The metadata shape below is the exact post-churn snapshot reported on the
+// issue: state=asleep, sleep_reason="" (recordChurn does not set
+// sleep_reason below defaultMaxChurnCycles), state_reason="creation_complete"
+// (carried over from the prior wake, untouched by checkChurn/recordChurn),
+// last_woke_at="" (cleared by checkChurn:644 to make the trigger
+// edge-triggered), wake_attempts=0, churn_count=1.
+//
+// The test drives the full bead → AwakeInput → ComputeAwakeSet path so any
+// regression in the lifecycle projection, the bridge, or ComputeAwakeSet
+// fails it. Without the fix, the session sits asleep indefinitely despite
+// mode=always and only `gc session pin` unsticks it.
+func TestBuildAwakeInputFromReconciler_NamedAlwaysPostChurnRewakes(t *testing.T) {
+	now := time.Now().UTC()
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "refinery"}},
+		NamedSessions: []config.NamedSession{
+			{Name: "refinery", Template: "refinery", Mode: "always"},
+		},
+	}
+	postChurnBead := beads.Bead{
+		ID:     "mc-session-1",
+		Status: "open",
+		Type:   "session",
+		Metadata: map[string]string{
+			"state":                      "asleep",
+			"sleep_reason":               "",
+			"state_reason":               "creation_complete",
+			"last_woke_at":               "",
+			"wake_attempts":              "0",
+			"churn_count":                "1",
+			"session_key":                "",
+			"continuation_reset_pending": "",
+			"pending_create_claim":       "",
+			"pin_awake":                  "",
+			"session_name":               "refinery",
+			"template":                   "refinery",
+			"configured_named_identity":  "refinery",
+			"configured_named_mode":      "always",
+		},
+	}
+
+	input := buildAwakeInputFromReconciler(
+		cfg,
+		[]beads.Bead{postChurnBead},
+		nil, nil, nil, nil, nil,
+		runtime.NewFake(),
+		now,
+	)
+
+	if len(input.SessionBeads) != 1 {
+		t.Fatalf("SessionBeads length = %d, want 1", len(input.SessionBeads))
+	}
+	bead := input.SessionBeads[0]
+	if bead.NamedIdentity != "refinery" {
+		t.Errorf("projected NamedIdentity = %q, want refinery (configured_named_identity should survive churn)", bead.NamedIdentity)
+	}
+	if bead.State != "asleep" {
+		t.Errorf("projected State = %q, want asleep", bead.State)
+	}
+
+	decisions := ComputeAwakeSet(input)
+	got, ok := decisions["refinery"]
+	if !ok {
+		t.Fatal("decision for 'refinery' missing from awake set")
+	}
+	if !got.ShouldWake {
+		t.Fatalf("post-churn named-always session should wake; got decision = %+v", got)
+	}
+	if got.Reason != "named-always" {
+		t.Errorf("wake reason = %q, want named-always", got.Reason)
+	}
+}
