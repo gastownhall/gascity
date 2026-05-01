@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/gastownhall/gascity/internal/runtime"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
 // agentBuildParams holds shared, per-city parameters for building agents.
@@ -236,4 +237,22 @@ func templateNameFor(cfgAgent *config.Agent, qualifiedName string) string {
 		return t
 	}
 	return qualifiedName
+}
+
+// resolveTmuxAliasForAgent expands the agent's tmux_alias template using the
+// build params' city/rig context. Returns "" when the agent is nil, the
+// template is empty, or expansion fails — pool session creation falls back to
+// the universal PoolSessionName derivation in those cases.
+func (p *agentBuildParams) resolveTmuxAliasForAgent(agent *config.Agent) string {
+	if p == nil || agent == nil {
+		return ""
+	}
+	resolved, err := workdirutil.ResolveTmuxAlias(p.cityPath, p.cityName, *agent, p.rigs)
+	if err != nil {
+		if p.stderr != nil {
+			fmt.Fprintf(p.stderr, "tmux_alias for %q: %v (using default session name)\n", agent.QualifiedName(), err) //nolint:errcheck // best-effort stderr
+		}
+		return ""
+	}
+	return resolved
 }

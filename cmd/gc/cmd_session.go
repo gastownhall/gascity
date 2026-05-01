@@ -188,7 +188,8 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 	if alias != "" && found.SupportsMultipleSessions() {
 		alias = workdirutil.SessionQualifiedName(cityPath, found, cfg.Rigs, requestedAlias, "")
 	}
-	explicitName, err := sessionExplicitNameForNewSession(&found, alias)
+	cityName := loadedCityName(cfg, cityPath)
+	explicitName, err := sessionExplicitNameForNewSession(cityPath, cityName, cfg.Rigs, &found, alias)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -2129,8 +2130,19 @@ func resolveWorkDirForQualifiedName(cityPath string, cfg *config.City, agent *co
 	return resolveConfiguredWorkDir(cityPath, cityName, qualifiedName, agent, rigs)
 }
 
-func sessionExplicitNameForNewSession(agent *config.Agent, alias string) (string, error) {
-	if agent == nil || !agent.SupportsMultipleSessions() || strings.TrimSpace(alias) != "" {
+func sessionExplicitNameForNewSession(cityPath, cityName string, rigs []config.Rig, agent *config.Agent, alias string) (string, error) {
+	if agent == nil {
+		return "", nil
+	}
+	// tmux_alias takes precedence: when set, the resolved name becomes the
+	// explicit session_name regardless of whether --alias was supplied. This
+	// is what gives crew sessions readable tmux names like "crew--<rig>".
+	if resolved, err := workdirutil.ResolveTmuxAlias(cityPath, cityName, *agent, rigs); err != nil {
+		return "", fmt.Errorf("resolving tmux_alias: %w", err)
+	} else if resolved != "" {
+		return session.ValidateExplicitName(resolved)
+	}
+	if !agent.SupportsMultipleSessions() || strings.TrimSpace(alias) != "" {
 		return "", nil
 	}
 	return session.GenerateAdhocExplicitName(agent.Name)

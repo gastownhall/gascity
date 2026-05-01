@@ -2468,6 +2468,9 @@ func applyAgentOverride(a *Agent, ov *AgentOverride) {
 	if ov.WorkDir != nil {
 		a.WorkDir = *ov.WorkDir
 	}
+	if ov.TmuxAlias != nil {
+		a.TmuxAlias = *ov.TmuxAlias
+	}
 	if ov.Scope != nil {
 		a.Scope = *ov.Scope
 	}

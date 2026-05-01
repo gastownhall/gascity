@@ -145,6 +145,22 @@ func createPoolSessionBead(
 	now time.Time,
 	identity poolSessionCreateIdentity,
 ) (beads.Bead, error) {
+	return createPoolSessionBeadWithAlias(store, template, sessionBeads, now, identity, "")
+}
+
+// createPoolSessionBeadWithAlias creates a pool session bead and persists its
+// session_name. When resolvedTmuxAlias is non-empty, that name is used in
+// place of the universal PoolSessionName derivation. If the alias collides
+// with an existing open session bead's session_name, the bead ID is appended
+// as a "-<beadID>" suffix to keep names unique within the live snapshot.
+func createPoolSessionBeadWithAlias(
+	store beads.Store,
+	template string,
+	sessionBeads *sessionBeadSnapshot,
+	now time.Time,
+	identity poolSessionCreateIdentity,
+	resolvedTmuxAlias string,
+) (beads.Bead, error) {
 	if store == nil {
 		return beads.Bead{}, fmt.Errorf("session store unavailable for pool template %q", template)
 	}
@@ -184,7 +200,7 @@ func createPoolSessionBead(
 	if err != nil {
 		return beads.Bead{}, err
 	}
-	sessionName := PoolSessionName(template, bead.ID)
+	sessionName := derivePoolSessionName(template, bead.ID, resolvedTmuxAlias, sessionBeads)
 	if err := store.SetMetadata(bead.ID, "session_name", sessionName); err != nil {
 		_ = store.Close(bead.ID)
 		return beads.Bead{}, err
@@ -194,6 +210,38 @@ func createPoolSessionBead(
 		sessionBeads.add(bead)
 	}
 	return bead, nil
+}
+
+// derivePoolSessionName picks the session_name for a fresh pool bead. When
+// resolvedTmuxAlias is non-empty and unique within the open session snapshot,
+// it wins; otherwise the universal PoolSessionName derivation is used.
+// Collisions append the bead ID as a deterministic suffix.
+func derivePoolSessionName(template, beadID, resolvedTmuxAlias string, snapshot *sessionBeadSnapshot) string {
+	resolvedTmuxAlias = strings.TrimSpace(resolvedTmuxAlias)
+	if resolvedTmuxAlias == "" {
+		return PoolSessionName(template, beadID)
+	}
+	if openSessionNameTaken(snapshot, resolvedTmuxAlias, beadID) {
+		return resolvedTmuxAlias + "-" + beadID
+	}
+	return resolvedTmuxAlias
+}
+
+// openSessionNameTaken reports whether any open session bead in the snapshot
+// (other than selfID) already advertises name as its session_name.
+func openSessionNameTaken(snapshot *sessionBeadSnapshot, name, selfID string) bool {
+	if snapshot == nil || strings.TrimSpace(name) == "" {
+		return false
+	}
+	for _, b := range snapshot.Open() {
+		if b.ID == selfID {
+			continue
+		}
+		if strings.TrimSpace(b.Metadata["session_name"]) == name {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveSessionName returns the session name for a qualified agent name.

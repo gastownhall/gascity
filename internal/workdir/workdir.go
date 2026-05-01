@@ -9,6 +9,7 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
@@ -156,6 +157,27 @@ func ExpandTemplate(spec string, ctx PathContext) string {
 		return spec
 	}
 	return expanded
+}
+
+// ResolveTmuxAlias expands the agent's tmux_alias template and sanitizes the
+// result for use as a tmux session name. Returns "" with no error when the
+// agent has no tmux_alias configured. The returned name is suitable for use
+// as a session bead's session_name metadata.
+func ResolveTmuxAlias(cityPath, cityName string, a config.Agent, rigs []config.Rig) (string, error) {
+	spec := strings.TrimSpace(a.TmuxAlias)
+	if spec == "" {
+		return "", nil
+	}
+	ctx := PathContextForQualifiedName(cityPath, cityName, a.QualifiedName(), a, rigs)
+	expanded, err := ExpandTemplateStrict(spec, ctx)
+	if err != nil {
+		return "", fmt.Errorf("expanding tmux_alias %q: %w", spec, err)
+	}
+	resolved := strings.TrimSpace(expanded)
+	if resolved == "" {
+		return "", nil
+	}
+	return agent.SanitizeQualifiedNameForSession(resolved), nil
 }
 
 // ResolveWorkDirPathStrict returns the effective session working directory and

@@ -134,3 +134,101 @@ func TestExistingPoolSlot_CanonicalSingletonReturnsZero(t *testing.T) {
 		t.Fatalf("existingPoolSlotWithConfig(canonical singleton) = %d, want 0", got)
 	}
 }
+
+func TestCreatePoolSessionBeadWithAlias_FallsBackToPoolNameWhenAliasEmpty(t *testing.T) {
+	store := beads.NewMemStore()
+
+	bead, err := createPoolSessionBeadWithAlias(store, "claude", nil, time.Now().UTC(), poolSessionCreateIdentity{}, "")
+	if err != nil {
+		t.Fatalf("createPoolSessionBeadWithAlias: %v", err)
+	}
+	want := PoolSessionName("claude", bead.ID)
+	if got := bead.Metadata["session_name"]; got != want {
+		t.Fatalf("session_name = %q, want %q (universal fallback)", got, want)
+	}
+}
+
+func TestCreatePoolSessionBeadWithAlias_UsesResolvedAlias(t *testing.T) {
+	store := beads.NewMemStore()
+
+	bead, err := createPoolSessionBeadWithAlias(store, "crew-gastown", nil, time.Now().UTC(), poolSessionCreateIdentity{}, "crew--gastown")
+	if err != nil {
+		t.Fatalf("createPoolSessionBeadWithAlias: %v", err)
+	}
+	if got := bead.Metadata["session_name"]; got != "crew--gastown" {
+		t.Fatalf("session_name = %q, want %q (resolved alias wins)", got, "crew--gastown")
+	}
+	stored, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", bead.ID, err)
+	}
+	if got := stored.Metadata["session_name"]; got != "crew--gastown" {
+		t.Fatalf("stored session_name = %q, want %q", got, "crew--gastown")
+	}
+}
+
+func TestCreatePoolSessionBeadWithAlias_AppendsBeadIDOnCollision(t *testing.T) {
+	store := beads.NewMemStore()
+	snapshot := newSessionBeadSnapshot(nil)
+
+	first, err := createPoolSessionBeadWithAlias(store, "crew-gastown", snapshot, time.Now().UTC(), poolSessionCreateIdentity{}, "crew--gastown")
+	if err != nil {
+		t.Fatalf("first createPoolSessionBeadWithAlias: %v", err)
+	}
+	if got := first.Metadata["session_name"]; got != "crew--gastown" {
+		t.Fatalf("first session_name = %q, want %q", got, "crew--gastown")
+	}
+
+	second, err := createPoolSessionBeadWithAlias(store, "crew-gastown", snapshot, time.Now().UTC(), poolSessionCreateIdentity{}, "crew--gastown")
+	if err != nil {
+		t.Fatalf("second createPoolSessionBeadWithAlias: %v", err)
+	}
+	want := "crew--gastown-" + second.ID
+	if got := second.Metadata["session_name"]; got != want {
+		t.Fatalf("second session_name = %q, want %q (collision suffix)", got, want)
+	}
+}
+
+func TestDerivePoolSessionName(t *testing.T) {
+	tests := []struct {
+		name     string
+		template string
+		beadID   string
+		alias    string
+		snapshot *sessionBeadSnapshot
+		want     string
+	}{
+		{
+			name:     "empty alias falls back to PoolSessionName",
+			template: "claude",
+			beadID:   "gc-1",
+			alias:    "",
+			snapshot: nil,
+			want:     "claude-gc-1",
+		},
+		{
+			name:     "whitespace-only alias falls back to PoolSessionName",
+			template: "claude",
+			beadID:   "gc-1",
+			alias:    "   ",
+			snapshot: nil,
+			want:     "claude-gc-1",
+		},
+		{
+			name:     "resolved alias wins when no collision",
+			template: "crew-gastown",
+			beadID:   "gc-2",
+			alias:    "crew--gastown",
+			snapshot: nil,
+			want:     "crew--gastown",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := derivePoolSessionName(tt.template, tt.beadID, tt.alias, tt.snapshot)
+			if got != tt.want {
+				t.Fatalf("derivePoolSessionName = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
