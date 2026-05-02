@@ -310,7 +310,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Path:        cityScopePrefix + "/events/stream",
 		Summary:     "Stream city events in real time",
 		Description: "Server-Sent Events stream of city events with optional workflow projections. " +
-			"Supports reconnection via Last-Event-ID header or after_seq query param.",
+			"Supports reconnection via Last-Event-ID header or after_seq query param; omitting both starts at the current city event head.",
 	}, map[string]any{
 		"event": sseEventContract{
 			runtimeSample: eventStreamEnvelope{},

@@ -45,6 +45,36 @@ func TestStartCreatesProcess(t *testing.T) {
 	}
 }
 
+func TestStartPersistsRuntimeMetadataForGetMeta(t *testing.T) {
+	p := newTestProvider(t)
+	err := p.Start(context.Background(), "meta-start", runtime.Config{
+		Command: "sleep 3600",
+		Env: map[string]string{
+			"GC_SESSION_ID":     "bead-123",
+			"GC_INSTANCE_TOKEN": "token-456",
+			"GC_TEMPLATE":       "worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Stop("meta-start") //nolint:errcheck
+
+	for key, want := range map[string]string{
+		"GC_SESSION_ID":     "bead-123",
+		"GC_INSTANCE_TOKEN": "token-456",
+		"GC_TEMPLATE":       "worker",
+	} {
+		got, err := p.GetMeta("meta-start", key)
+		if err != nil {
+			t.Fatalf("GetMeta(%s): %v", key, err)
+		}
+		if got != want {
+			t.Fatalf("GetMeta(%s) = %q, want %q", key, got, want)
+		}
+	}
+}
+
 func TestStartLongSocketPathUsesShortSocketName(t *testing.T) {
 	// Use /tmp for a short base path — TMPDIR on macOS (/var/folders/...)
 	// is too long to find a depth where legacy > limit but short < limit.

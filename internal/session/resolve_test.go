@@ -80,6 +80,59 @@ func TestResolveSessionID_Alias(t *testing.T) {
 	}
 }
 
+type noBroadSessionListStore struct {
+	*beads.MemStore
+	t *testing.T
+}
+
+func (s *noBroadSessionListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == session.LabelSession && len(query.Metadata) == 0 {
+		s.t.Fatalf("session resolution used broad session label scan: %+v", query)
+	}
+	return s.MemStore.List(query)
+}
+
+func TestResolveSessionID_UsesTargetedAliasLookup(t *testing.T) {
+	store := &noBroadSessionListStore{MemStore: beads.NewMemStore(), t: t}
+	b, _ := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias": "overseer",
+		},
+	})
+
+	id, err := session.ResolveSessionID(store, "overseer")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != b.ID {
+		t.Fatalf("got %q, want %q", id, b.ID)
+	}
+}
+
+func TestResolveSessionIDAllowClosed_UsesTargetedSessionNameLookup(t *testing.T) {
+	store := &noBroadSessionListStore{MemStore: beads.NewMemStore(), t: t}
+	b, _ := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "sky",
+		},
+	})
+	if err := store.Close(b.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	id, err := session.ResolveSessionIDAllowClosed(store, "sky")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != b.ID {
+		t.Fatalf("got %q, want %q", id, b.ID)
+	}
+}
+
 func TestResolveSessionID_DoesNotResolveExactQualifiedTemplate(t *testing.T) {
 	store := beads.NewMemStore()
 	_, _ = store.Create(beads.Bead{

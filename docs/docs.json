@@ -112,6 +112,7 @@
           "reference/config",
           "reference/provider-overrides",
           "reference/formula",
+          "reference/trust-boundaries",
           "reference/api",
           "reference/events",
           "schema/index",

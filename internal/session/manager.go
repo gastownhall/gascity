@@ -480,6 +480,9 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 		// Start the runtime session.
 		if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 			if runtimeSessionMatchesBead(m.sp, sessName, b.ID, meta["instance_token"]) {
+				if metaErr := m.confirmStartedRuntimeMetadata(b.ID, &b); metaErr != nil {
+					return metaErr
+				}
 				info = m.infoFromBead(b)
 				return nil
 			}
@@ -494,6 +497,15 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 			}
 			return fmt.Errorf("starting session: %w", err)
 		}
+		if metaErr := m.confirmStartedRuntimeMetadata(b.ID, &b); metaErr != nil {
+			if stopErr := m.sp.Stop(sessName); stopErr != nil {
+				metaErr = errors.Join(metaErr, fmt.Errorf("stopping runtime after metadata failure: %w", stopErr))
+			}
+			if rbErr := rollbackFailedCreate(); rbErr != nil {
+				return errors.Join(metaErr, rbErr)
+			}
+			return metaErr
+		}
 
 		info = m.infoFromBead(b)
 		return nil
@@ -502,6 +514,22 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 		return Info{}, err
 	}
 	return info, nil
+}
+
+func (m *Manager) confirmStartedRuntimeMetadata(id string, b *beads.Bead) error {
+	metadata := ConfirmStartedPatch(time.Now().UTC())
+	if err := m.store.SetMetadataBatch(id, metadata); err != nil {
+		return fmt.Errorf("storing started runtime metadata: %w", err)
+	}
+	if b != nil {
+		if b.Metadata == nil {
+			b.Metadata = make(map[string]string, len(metadata))
+		}
+		for k, v := range metadata {
+			b.Metadata[k] = v
+		}
+	}
+	return nil
 }
 
 // CreateNamedWithTransport creates a new chat session bead with an optional
@@ -727,12 +755,13 @@ func (m *Manager) Suspend(id string) error {
 			}
 		}
 
-		// Update state and record suspension timestamp.
-		if err := m.store.SetMetadata(id, "state", string(StateSuspended)); err != nil {
-			return fmt.Errorf("updating session state: %w", err)
-		}
-		if err := m.store.SetMetadata(id, "suspended_at", time.Now().UTC().Format(time.RFC3339)); err != nil {
-			return fmt.Errorf("storing suspension timestamp: %w", err)
+		// Update state and suspension timestamp together so stores with a
+		// write-through cache preserve one coherent lifecycle transition.
+		if err := m.store.Update(id, beads.UpdateOpts{Metadata: map[string]string{
+			"state":        string(StateSuspended),
+			"suspended_at": time.Now().UTC().Format(time.RFC3339),
+		}}); err != nil {
+			return fmt.Errorf("updating suspension state: %w", err)
 		}
 
 		return nil

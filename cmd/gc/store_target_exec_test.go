@@ -503,7 +503,7 @@ func TestControllerStateOpenRigStoreExecProjectsRigTarget(t *testing.T) {
 	t.Setenv("GC_DOLT_HOST", "ambient-dolt")
 
 	cs := &controllerState{cityPath: cityDir}
-	store := cs.openRigStore(provider, "frontend", rigDir, "fe")
+	store := cs.openRigStore(provider, "frontend", rigDir, "fe", nil)
 	if _, err := store.Create(beads.Bead{Title: "rig"}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}

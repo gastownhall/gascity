@@ -59,6 +59,38 @@ func TestEventListFilterByType(t *testing.T) {
 	}
 }
 
+func TestEventListIncludesCustomEventTypes(t *testing.T) {
+	state := newFakeState(t)
+	ep := state.eventProv.(*events.Fake)
+	ep.Record(events.Event{Type: "custom.untyped", Actor: "tester", Payload: json.RawMessage(`{"source":"test"}`)})
+	ep.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/events"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Items []map[string]any `json:"items"`
+		Total int              `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 2 || len(resp.Items) != 2 {
+		t.Fatalf("response = %+v, want custom and registered events", resp)
+	}
+	custom := eventListItemByType(t, resp.Items, "custom.untyped")
+	payload := assertJSONPayloadObject(t, custom["payload"])
+	if payload["source"] != "test" {
+		t.Fatalf("custom payload = %v, want source=test", payload)
+	}
+}
+
 func TestEventListRejectsInvalidSince(t *testing.T) {
 	state := newFakeState(t)
 	h := newTestCityHandler(t, state)

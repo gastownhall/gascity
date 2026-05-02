@@ -27,6 +27,19 @@ trace() {
     printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$TRACE_FILE"
 }
 
+if ! command -v timeout >/dev/null 2>&1; then
+    if command -v gtimeout >/dev/null 2>&1; then
+        timeout() {
+            gtimeout "$@"
+        }
+    else
+        timeout() {
+            shift
+            "$@"
+        }
+    fi
+fi
+
 current_port_file() {
     if [ -f "$GC_CITY/.beads/dolt-server.port" ]; then
         tr -d '\n' < "$GC_CITY/.beads/dolt-server.port"
@@ -69,7 +82,7 @@ ref_matches_suffix_list() {
     for suffix in "${suffixes[@]}"; do
         suffix=$(trim_spaces "$suffix")
         [ -n "$suffix" ] || continue
-        if [[ "$ref" == *"$suffix"* ]]; then
+        if [[ "$ref" == *"$suffix" ]]; then
             return 0
         fi
     done
@@ -472,6 +485,46 @@ while true; do
     trace "run bead=$bead_id ref=$ref kind=$kind source=$source_id work_dir=$work_dir"
     trace_store
 
+    # Abort-propagation defense for TestGraphWorkflowFailureRunsCleanup.
+    # Without this, a worker that picked up .implement or .submit after
+    # preflight closed with fail, but before the controller's
+    # skipOpenScopeMembers pass ran, could race the controller:
+    #   1. Outcome race: worker closes a skipped step with pass before the
+    #      controller's skip lands. bd allows overwrites on closed beads,
+    #      so whoever writes last wins.
+    #   2. Side-effect race: .submit mutates the source issue before this
+    #      worker notices the abort.
+    #   3. Report race: worker writes the ref to REPORT_FILE between its
+    #      own outcome check and close.
+    # Defense: detect any sibling hard failure in the same workflow before
+    # step side effects and close this bead as skipped.
+    # Scoped to gc.failure_class="hard" so retry-flavor transient failures
+    # (which the controller DOESN'T use to skip siblings) don't trigger
+    # false positives. Teardown beads must still run after body failure.
+    sibling_hard_fail="false"
+    if [ "$kind" != "cleanup" ] && [ -n "$root_id" ]; then
+        if sibling_json=$(timeout 10 bd list --all --limit=0 --json 2>/dev/null); then
+            if printf '%s\n' "$sibling_json" | json_payload | jq -e \
+                --arg root "$root_id" --arg self "$bead_id" '
+                    if type == "array" then
+                        any(.[]?; (.metadata // {})["gc.root_bead_id"] == $root
+                                    and .id != $self
+                                    and .status == "closed"
+                                    and (.metadata // {})["gc.outcome"] == "fail"
+                                    and (.metadata // {})["gc.failure_class"] == "hard")
+                    else false
+                    end' >/dev/null 2>&1; then
+                sibling_hard_fail="true"
+            fi
+        fi
+    fi
+    if [ "$sibling_hard_fail" = "true" ] && [[ "$ref" != *.cleanup-worktree* ]]; then
+        trace "skip-sibling-hard-fail bead=$bead_id ref=$ref root=$root_id (sibling has outcome=fail class=hard; closing self as skipped)"
+        bd update "$bead_id" --set-metadata "gc.outcome=skipped" --status closed 2>/dev/null || \
+            trace "skip-close-failed bead=$bead_id ref=$ref"
+        continue
+    fi
+
     case "$ref" in
         *.workspace-setup*)
             if [ -z "$work_dir" ]; then
@@ -557,46 +610,6 @@ while true; do
     elif [ "$status_before" != "open" ]; then
         trace "skip-before-close bead=$bead_id ref=$ref status=$status_before outcome=$outcome_before"
         sleep 0.2
-        continue
-    fi
-
-    # Abort-propagation defense for TestGraphWorkflowFailureRunsCleanup.
-    # Without this, a worker that picked up .implement after preflight
-    # closed with fail — but before the controller's skipOpenScopeMembers
-    # pass ran — could race the controller in two ways:
-    #   1. Outcome race: worker closes .implement with pass before the
-    #      controller's skip lands. bd allows overwrites on closed beads,
-    #      so whoever writes last wins.
-    #   2. Report race: worker writes .implement to REPORT_FILE between
-    #      its own outcome check and the close.
-    # Defense: detect any sibling hard failure in the same workflow and
-    # close this bead as skipped ourselves instead of closing with pass.
-    # Scoped to gc.failure_class="hard" so retry-flavor transient
-    # failures (which the controller DOESN'T use to skip siblings) don't
-    # trigger false positives.
-    # Teardown beads must still run after body failure; only body members get
-    # the sibling-hard-fail short-circuit.
-    sibling_hard_fail="false"
-    if [ "$kind" != "cleanup" ] && [ -n "$root_id" ]; then
-        if sibling_json=$(timeout 10 bd list --all --limit=0 --json 2>/dev/null); then
-            if printf '%s\n' "$sibling_json" | json_payload | jq -e \
-                --arg root "$root_id" --arg self "$bead_id" '
-                    if type == "array" then
-                        any(.[]?; (.metadata // {})["gc.root_bead_id"] == $root
-                                    and .id != $self
-                                    and .status == "closed"
-                                    and (.metadata // {})["gc.outcome"] == "fail"
-                                    and (.metadata // {})["gc.failure_class"] == "hard")
-                    else false
-                    end' >/dev/null 2>&1; then
-                sibling_hard_fail="true"
-            fi
-        fi
-    fi
-    if [ "$sibling_hard_fail" = "true" ] && [[ "$ref" != *.cleanup-worktree* ]]; then
-        trace "skip-sibling-hard-fail bead=$bead_id ref=$ref root=$root_id (sibling has outcome=fail class=hard; closing self as skipped)"
-        bd update "$bead_id" --set-metadata "gc.outcome=skipped" --status closed 2>/dev/null || \
-            trace "skip-close-failed bead=$bead_id ref=$ref"
         continue
     fi
 

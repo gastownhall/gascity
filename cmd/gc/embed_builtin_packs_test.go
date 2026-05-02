@@ -338,12 +338,14 @@ func TestMaterializeBuiltinPacksPiHookUsesCurrentExtensionAPI(t *testing.T) {
 		"module.exports = function gascityPiExtension(pi)",
 		`pi.on("session_start"`,
 		`pi.on("session_compact"`,
-		`pi.on("session_shutdown"`,
 		`pi.on("before_agent_start"`,
 	} {
 		if !strings.Contains(data, want) {
 			t.Errorf("materialized Pi hook missing current extension API marker %q:\n%s", want, data)
 		}
+	}
+	if strings.Contains(data, "gc hook --inject") {
+		t.Errorf("materialized Pi hook should not install no-op gc hook --inject:\n%s", data)
 	}
 	for _, legacy := range []string{
 		"module.exports = {",

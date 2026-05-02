@@ -121,7 +121,7 @@ func (f *Factory) SessionByID(id string) (Handle, error) {
 	var metadata map[string]string
 	if f.store != nil {
 		if bead, beadErr := f.store.Get(id); beadErr == nil {
-			sessionKind = strings.TrimSpace(bead.Metadata["mc_session_kind"])
+			sessionKind = strings.TrimSpace(bead.Metadata["real_world_app_session_kind"])
 			if profile := strings.TrimSpace(bead.Metadata["worker_profile"]); profile != "" {
 				spec.Profile = Profile(profile)
 			}

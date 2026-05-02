@@ -102,6 +102,37 @@ func TestLockIdentityCanonicalizesScopeRefSymlinks(t *testing.T) {
 	}
 }
 
+func TestLockScopeForStoreRefResolvesCityRigAndDefaultScopes(t *testing.T) {
+	cityPath := filepath.Clean("/city")
+	rigPath := filepath.Join("rigs", "alpha")
+	resolveRig := func(name string) (string, bool) {
+		if name != "alpha" {
+			return "", false
+		}
+		return rigPath, true
+	}
+
+	tests := []struct {
+		name             string
+		defaultStorePath string
+		storeRef         string
+		want             string
+	}{
+		{name: "default store path", defaultStorePath: "/city/rigs/default", want: filepath.Clean("/city/rigs/default")},
+		{name: "city store ref", storeRef: "city:test", want: cityPath},
+		{name: "rig store ref", storeRef: "rig:alpha", want: filepath.Join(cityPath, rigPath)},
+		{name: "unknown store ref", storeRef: "external:one", want: filepath.Clean("external:one")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := LockScopeForStoreRef(cityPath, tt.defaultStorePath, tt.storeRef, resolveRig)
+			if got != tt.want {
+				t.Fatalf("LockScopeForStoreRef() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestWorkflowMatchesSourceUsesSourceStoreRefWhenPresent(t *testing.T) {
 	root := beads.Bead{
 		ID: "wf-1",

@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { renderActivity, seedActivity, type ActivityEntry } from "./activity";
+import {
+  activityStreamCursorFromRecordsForTest,
+  renderActivity,
+  seedActivity,
+  type ActivityEntry,
+} from "./activity";
 
 describe("activity feed ordering", () => {
   beforeEach(() => {
@@ -55,5 +60,25 @@ describe("activity feed ordering", () => {
     ]);
     expect(document.querySelectorAll(".tl-entry")).toHaveLength(3);
     expect(document.getElementById("activity-count")?.textContent).toBe("3");
+  });
+
+  it("computes a city stream cursor from loaded history", () => {
+    const cursor = activityStreamCursorFromRecordsForTest([
+      { seq: 12, type: "bead.created", actor: "human", ts: "2026-04-01T10:00:00Z" },
+      { seq: 19, type: "bead.updated", actor: "human", ts: "2026-04-01T10:01:00Z" },
+      { seq: 15, type: "bead.closed", actor: "human", ts: "2026-04-01T10:02:00Z" },
+    ] as any, "mc-city");
+
+    expect(cursor).toEqual({ afterSeq: "19" });
+  });
+
+  it("computes a supervisor stream cursor from loaded history", () => {
+    const cursor = activityStreamCursorFromRecordsForTest([
+      { city: "beta", seq: 3, type: "bead.created", actor: "human", ts: "2026-04-01T10:00:00Z" },
+      { city: "alpha", seq: 9, type: "bead.updated", actor: "human", ts: "2026-04-01T10:01:00Z" },
+      { city: "beta", seq: 7, type: "bead.closed", actor: "human", ts: "2026-04-01T10:02:00Z" },
+    ] as any, "");
+
+    expect(cursor).toEqual({ afterCursor: "alpha:9,beta:7" });
   });
 });

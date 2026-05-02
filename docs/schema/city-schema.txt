@@ -52,7 +52,7 @@
         },
         "description": {
           "type": "string",
-          "description": "Description is a human-readable description shown in MC's session creation UI."
+          "description": "Description is a human-readable description shown in a real-world app's session creation UI."
         },
         "dir": {
           "type": "string",
@@ -169,7 +169,7 @@
         },
         "scale_check": {
           "type": "string",
-          "description": "ScaleCheck is a shell command template whose output determines desired\nsession count. Optional override — when set, its output is the desired\ncount (still clamped by all cap levels). If it contains Go template\nplaceholders, gc expands them using the same PathContext fields as\nwork_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot,\nCityName) before running the command."
+          "description": "ScaleCheck is a shell command template whose output reports new\nunassigned session demand. In bead-backed reconciliation this is\nadditive: assigned work is resumed separately, and ScaleCheck reports\nonly how many new generic sessions to start, still bounded by all cap\nlevels. Legacy no-store evaluation continues to treat the output as\nthe desired session count. If it contains Go template placeholders, gc\nexpands them using the same PathContext fields as work_dir and\nsession_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName)\nbefore running the command."
         },
         "drain_timeout": {
           "type": "string",
@@ -592,7 +592,7 @@
         },
         "scale_check": {
           "type": "string",
-          "description": "ScaleCheck overrides the shell command whose output determines desired session count."
+          "description": "ScaleCheck overrides the shell command whose output reports new\nunassigned session demand for bead-backed reconciliation."
         },
         "option_defaults": {
           "additionalProperties": {
@@ -835,7 +835,7 @@
         },
         "scale_check": {
           "type": "string",
-          "description": "ScaleCheck overrides the command template whose output determines desired\nsession count. Supports the same Go template placeholders as\nAgent.scale_check."
+          "description": "ScaleCheck overrides the command template whose output reports new\nunassigned session demand for bead-backed reconciliation. Supports the\nsame Go template placeholders as Agent.scale_check."
         },
         "option_defaults": {
           "additionalProperties": {
@@ -983,6 +983,10 @@
           "$ref": "#/$defs/ConvergenceConfig",
           "description": "Convergence configures convergence loop limits."
         },
+        "doctor": {
+          "$ref": "#/$defs/DoctorConfig",
+          "description": "Doctor configures gc doctor thresholds and policy toggles\n(worktree size warnings, nested-worktree auto-prune)."
+        },
         "service": {
           "items": {
             "$ref": "#/$defs/Service"
@@ -1084,6 +1088,28 @@
       "additionalProperties": false,
       "type": "object",
       "description": "DaemonConfig holds controller daemon settings."
+    },
+    "DoctorConfig": {
+      "properties": {
+        "worktree_rig_warn_size": {
+          "type": "string",
+          "description": "WorktreeRigWarnSize is the per-rig warning threshold for the total\ndisk footprint under .gc/worktrees/\u003crig\u003e/. Reported by the\nworktree-disk-size check. Go-style human size string (\"10GB\", \"500MB\").\nEmpty or unparseable falls back to the default (10 GB).",
+          "default": "10GB"
+        },
+        "worktree_rig_error_size": {
+          "type": "string",
+          "description": "WorktreeRigErrorSize is the per-rig error threshold. When any rig\nexceeds this, the worktree-disk-size check reports an error rather\nthan a warning. Empty or unparseable falls back to the default\n(50 GB).",
+          "default": "50GB"
+        },
+        "nested_worktree_prune": {
+          "type": "boolean",
+          "description": "NestedWorktreePrune escalates the nested-worktree-prune check\nfrom warning to error severity when safely-prunable nested\nworktrees are present, so CI / scripted doctor runs fail until\nthe operator runs `gc doctor --fix`. Actual removal still\nrequires --fix; this flag does not auto-prune. Safety is\nenforced by mechanical checks (no uncommitted changes, no\nunpushed commits, no stashes) — never by role identity.",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "DoctorConfig holds settings for the gc doctor surface."
     },
     "DoltConfig": {
       "properties": {
@@ -1266,6 +1292,16 @@
           },
           "type": "array",
           "description": "FlagArgs are the CLI arguments injected when this choice is selected.\njson:\"-\" is intentional: FlagArgs must never appear in the public API DTO\n(security boundary — prevents clients from seeing internal CLI flags)."
+        },
+        "flag_aliases": {
+          "items": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "type": "array",
+          "description": "FlagAliases are equivalent CLI argument sequences stripped from legacy\nprovider args. Like FlagArgs, they stay server-side only."
         }
       },
       "additionalProperties": false,
@@ -1678,7 +1714,7 @@
             "type": "string"
           },
           "type": "object",
-          "description": "PermissionModes maps permission mode names to CLI flags.\nExample: {\"unrestricted\": \"--dangerously-skip-permissions\", \"plan\": \"--permission-mode plan\"}\nThis is a config-only lookup table consumed by external clients\n(e.g., Mission Control) to populate permission mode dropdowns.\nLaunch-time flag substitution is planned for a follow-up PR —\ncurrently no runtime code reads this field."
+          "description": "PermissionModes maps permission mode names to CLI flags.\nExample: {\"unrestricted\": \"--dangerously-skip-permissions\", \"plan\": \"--permission-mode plan\"}\nThis is a config-only lookup table consumed by external clients\n(e.g., real-world app) to populate permission mode dropdowns.\nLaunch-time flag substitution is planned for a follow-up PR —\ncurrently no runtime code reads this field."
         },
         "option_defaults": {
           "additionalProperties": {

@@ -498,6 +498,35 @@ func TestPollerSessionIdleEnoughUsesLastActivityWithoutCapabilityFlag(t *testing
 	}
 }
 
+func TestPollerSessionIdleEnoughFallsBackToIdleWaitWhenActivityUnavailable(t *testing.T) {
+	fake := runtime.NewFake()
+	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fake.WaitForIdleErrors["sess-worker"] = nil
+	target := nudgeTarget{sessionName: "sess-worker"}
+
+	if !pollerSessionIdleEnough(target, nil, fake, 3*time.Second) {
+		t.Fatal("pollerSessionIdleEnough = false, want idle wait fallback to allow delivery")
+	}
+
+	var sawWait bool
+	for _, call := range fake.Calls {
+		if call.Method == "WaitForIdle" && call.Name == "sess-worker" {
+			sawWait = true
+			break
+		}
+	}
+	if !sawWait {
+		t.Fatalf("calls = %#v, want WaitForIdle fallback", fake.Calls)
+	}
+
+	fake.WaitForIdleErrors["sess-worker"] = errors.New("timed out waiting for idle")
+	if pollerSessionIdleEnough(target, nil, fake, 3*time.Second) {
+		t.Fatal("pollerSessionIdleEnough = true, want idle wait error to suppress delivery")
+	}
+}
+
 func TestShouldKeepNudgePollerAliveDuringStartupGrace(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
@@ -754,6 +783,61 @@ func TestSendMailNotifyWithProviderStartsClaudePollerWhenQueueingRunningSession(
 	}
 	if !called {
 		t.Fatal("startNudgePoller was not called")
+	}
+}
+
+func TestSendMailNotifyWithWorkerStartsPollerBySessionIDForAliasedTarget(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.Create(context.Background(), "mayor", "Mayor", "codex", dir, "codex", nil, session.ProviderResume{}, runtime.Config{WorkDir: dir})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, "alias", "mayor"); err != nil {
+		t.Fatalf("SetMetadata(alias): %v", err)
+	}
+	target := nudgeTarget{
+		cityPath:    dir,
+		alias:       "mayor",
+		agent:       config.Agent{Name: "mayor", MaxActiveSessions: intPtrNudge(1)},
+		sessionID:   info.ID,
+		resolved:    &config.ResolvedProvider{Name: "codex"},
+		sessionName: info.SessionName,
+	}
+
+	called := false
+	prev := startNudgePoller
+	startNudgePoller = func(cityPath, agentName, sessionName string) error {
+		called = true
+		if cityPath != dir || agentName != info.ID || sessionName != info.SessionName {
+			t.Fatalf("unexpected poller args city=%q agent=%q session=%q", cityPath, agentName, sessionName)
+		}
+		return nil
+	}
+	t.Cleanup(func() { startNudgePoller = prev })
+
+	if err := sendMailNotifyWithWorker(target, store, fake, "human"); err != nil {
+		t.Fatalf("sendMailNotifyWithWorker: %v", err)
+	}
+	if !called {
+		t.Fatal("startNudgePoller was not called")
+	}
+
+	pending, inFlight, dead, err := listQueuedNudgesForTarget(dir, target, time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudgesForTarget: %v", err)
+	}
+	if len(pending) != 1 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("pending/inFlight/dead = %d/%d/%d, want 1/0/0", len(pending), len(inFlight), len(dead))
+	}
+	if pending[0].Agent != "mayor" || pending[0].SessionID != info.ID {
+		t.Fatalf("queued nudge agent/session = %q/%q, want mayor/%s", pending[0].Agent, pending[0].SessionID, info.ID)
 	}
 }
 

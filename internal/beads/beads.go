@@ -148,6 +148,10 @@ type Store interface {
 	// does not exist. Closing an already-closed bead is a no-op.
 	Close(id string) error
 
+	// Reopen sets a closed bead's status back to "open". Returns ErrNotFound
+	// if the ID does not exist.
+	Reopen(id string) error
+
 	// CloseAll closes multiple beads in a single batch operation and sets
 	// the given metadata on each. Already-closed beads are skipped.
 	// Returns the number of beads actually closed.

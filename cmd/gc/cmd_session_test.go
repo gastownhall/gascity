@@ -394,7 +394,7 @@ func TestCmdSessionNew_ACPTemplatePersistsStoredMCPMetadata(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
 
-	cityDir := t.TempDir()
+	cityDir := shortSocketTempDir(t, "gc-session-mcp-")
 	t.Setenv("GC_CITY", cityDir)
 	writePoolACPSessionCityTOML(t, cityDir)
 	writeCatalogFile(t, cityDir, "mcp/identity.template.toml", `

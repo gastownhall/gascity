@@ -24,7 +24,6 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/agent"
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
@@ -194,7 +193,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 
 	// Step 7: Resolve session bead ID for traceability.
 	// Look up the session bead by session_name to get the bead ID (e.g., mc-cnf).
-	// This is what MC uses to link beads → session logs.
+	// This is what real-world apps use to link beads to session logs.
 	sessionBeadID := ""
 	if p.sessionBeads != nil {
 		for _, b := range p.sessionBeads.Open() {
@@ -205,7 +204,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		}
 	}
 	if sessionBeadID == "" && p.beadStore != nil {
-		if all, err := p.beadStore.List(beads.ListQuery{Label: "gc:session"}); err == nil {
+		if all, err := session.ExactMetadataSessionCandidates(p.beadStore, false, map[string]string{"session_name": sessName}); err == nil {
 			for _, b := range all {
 				if !session.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
 					continue
@@ -277,6 +276,8 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		CityRoot:      p.cityPath,
 		AgentName:     qualifiedName,
 		TemplateName:  cfgAgent.Name,
+		BindingName:   cfgAgent.BindingName,
+		BindingPrefix: cfgAgent.BindingPrefix(),
 		RigName:       rigName,
 		RigRoot:       rigRoot,
 		WorkDir:       workDir,

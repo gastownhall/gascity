@@ -30,7 +30,7 @@ var markdownLinkRE = regexp.MustCompile(`\[[^][]+\]\(([^)]+)\)`)
 // and should be link-checked. Update this list when adding or removing doc
 // directories. TestDocDirCoverage will fail if a new directory with markdown
 // appears that is not accounted for here or in docTreeIgnored.
-var docTreeDirs = []string{"contrib", "docs", "engdocs", "specs"}
+var docTreeDirs = []string{"contrib", "docs", "engdocs"}
 
 // docTreeIgnored lists directories that contain markdown but are not
 // documentation trees (e.g., embedded prompt templates, test fixtures,

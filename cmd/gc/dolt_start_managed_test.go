@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	bdpack "github.com/gastownhall/gascity/examples/bd"
 )
 
 func TestDoltServerEnv_AppendsDefaultWhenMissing(t *testing.T) {
@@ -86,5 +88,67 @@ func TestGCBeadsBDScript_RespectsEmptyUserValue(t *testing.T) {
 	}
 	if strings.Contains(script, `${DOLT_GC_SCHEDULER:=NONE}`) {
 		t.Fatalf("gc-beads-bd.sh must not clobber an explicitly empty DOLT_GC_SCHEDULER")
+	}
+}
+
+func TestGCBeadsBDScript_UsesPortableSleepMS(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller(0) failed")
+	}
+	scriptPath := filepath.Join(filepath.Dir(thisFile), "..", "..", "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
+	data, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", scriptPath, err)
+	}
+	script := string(data)
+	embedded, err := bdpack.PackFS.ReadFile("assets/scripts/gc-beads-bd.sh")
+	if err != nil {
+		t.Fatalf("read embedded gc-beads-bd.sh: %v", err)
+	}
+	if string(embedded) != script {
+		t.Fatalf("embedded gc-beads-bd.sh differs from source script")
+	}
+
+	if !strings.Contains(script, "sleep_ms()") {
+		t.Fatalf("gc-beads-bd.sh must define portable sleep_ms helper")
+	}
+	if strings.Contains(script, `sleep "$(awk`) {
+		t.Fatalf("gc-beads-bd.sh must not use awk to calculate sleep durations")
+	}
+	if got := strings.Count(script, `sleep_ms "$backoff_ms" 2>/dev/null || sleep 1`); got < 3 {
+		t.Fatalf("gc-beads-bd.sh must use sleep_ms for retry backoff sleeps; found %d call sites", got)
+	}
+	if !strings.Contains(script, "for attempt in 1 2 3 4 5 6 7 8; do") {
+		t.Fatalf("gc-beads-bd.sh must allow slow bd runtime schema visibility after init")
+	}
+}
+
+func TestGCBeadsBDScript_QuarantinesRetiredReplacementDatabases(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller(0) failed")
+	}
+	scriptPath := filepath.Join(filepath.Dir(thisFile), "..", "..", "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
+	data, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", scriptPath, err)
+	}
+	script := string(data)
+
+	required := []string{
+		"retired_replacement_db_name()",
+		"?*.replaced-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z)",
+		`reason="retired replacement"`,
+		`quarantining unservable database`,
+		`mv -f "$dir" "$quarantine_dir"`,
+	}
+	for _, want := range required {
+		if !strings.Contains(script, want) {
+			t.Fatalf("gc-beads-bd.sh missing retired replacement fallback fragment %q", want)
+		}
+	}
+	if strings.Contains(script, "quarantining phantom database") {
+		t.Fatal("gc-beads-bd.sh still logs the broader fallback as phantom-only")
 	}
 }

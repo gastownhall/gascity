@@ -36,7 +36,7 @@ gc [flags]
 | [gc graph](#gc-graph) | Show dependency graph for beads |
 | [gc handoff](#gc-handoff) | Send handoff mail and restart controller-managed sessions |
 | [gc help](#gc-help) | Help about any command |
-| [gc hook](#gc-hook) | Check for available work (use --inject for Stop hook output) |
+| [gc hook](#gc-hook) | Check for available work |
 | [gc import](#gc-import) | Manage pack imports |
 | [gc init](#gc-init) | Initialize a new city |
 | [gc mail](#gc-mail) | Send and receive messages between agents and humans |
@@ -643,7 +643,7 @@ gc convoy
 | [gc convoy close](#gc-convoy-close) | Close a convoy |
 | [gc convoy control](#gc-convoy-control) | Execute control beads or run the control-dispatcher loop |
 | [gc convoy create](#gc-convoy-create) | Create a convoy and optionally track issues |
-| [gc convoy delete](#gc-convoy-delete) | Close and optionally delete a convoy and all its beads |
+| [gc convoy delete](#gc-convoy-delete) | Close or delete a convoy and all its beads |
 | [gc convoy delete-source](#gc-convoy-delete-source) | Close workflows sourced from a bead |
 | [gc convoy land](#gc-convoy-land) | Land an owned convoy (terminate + cleanup) |
 | [gc convoy list](#gc-convoy-list) | List open convoys with progress |
@@ -730,13 +730,13 @@ gc convoy create sprint-42
 
 ## gc convoy delete
 
-Close all open beads in a convoy, then optionally delete them.
+Close all open beads in a convoy, or delete them.
 
 Searches all stores (city + rigs) for the convoy root and all beads
 with matching gc.root_bead_id. Without --force, shows a preview.
 
 By default, beads are closed with gc.outcome=skipped. Use --delete to
-also remove them from the store after closing.
+remove them from the store via bd delete --cascade --force.
 
 ```
 gc convoy delete <convoy-id> [flags]
@@ -744,7 +744,7 @@ gc convoy delete <convoy-id> [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--delete` | bool |  | Also delete beads from the store after closing |
+| `--delete` | bool |  | Delete beads from the store instead of closing |
 | `-f`, `--force` | bool |  | Actually close/delete (without this, shows preview) |
 
 ## gc convoy delete-source
@@ -1092,6 +1092,10 @@ For controller-restartable sessions, equivalent to:
   gc mail send $GC_ALIAS &lt;subject&gt; [message]
   gc runtime request-restart
 
+Auto handoff (--auto): sends mail to self and returns without requesting a
+restart. This is for PreCompact hooks, where the provider is already managing
+the context compaction lifecycle.
+
 Remote handoff (--target): sends mail to a target session. If the target is
 controller-restartable, kills it so the reconciler restarts it with the handoff
 mail waiting. For on-demand configured named targets, sends mail and returns
@@ -1103,14 +1107,16 @@ For controller-restartable targets, equivalent to:
   gc session kill &lt;target&gt;
 
 Self-handoff requires session context (GC_ALIAS or GC_SESSION_ID, plus
-GC_SESSION_NAME and city context env). Remote handoff accepts a session alias or ID.
+GC_SESSION_NAME and city context env). Remote handoff accepts a session alias
+or ID. Subject is required unless --auto is set.
 
 ```
-gc handoff <subject> [message] [flags]
+gc handoff [subject] [message] [flags]
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--auto` | bool |  | Send handoff mail without requesting restart (for PreCompact hooks) |
 | `--target` | string |  | Remote session alias or ID to handoff (kills only controller-restartable sessions) |
 
 ## gc help
@@ -1127,7 +1133,7 @@ gc help [command]
 Checks for available work using the agent's work_query config.
 
 Without --inject: prints raw output, exits 0 if work exists, 1 if empty.
-With --inject: wraps output in &lt;system-reminder&gt; for hook injection, always exits 0.
+With --inject: silent legacy Stop-hook compatibility; skips the work query and always exits 0.
 
 		The agent is determined from $GC_AGENT or a positional argument.
 
@@ -1137,8 +1143,7 @@ gc hook [agent] [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--hook-format` | string |  | format hook output for a provider |
-| `--inject` | bool |  | output &lt;system-reminder&gt; block for hook injection |
+| `--inject` | bool |  | silent legacy Stop-hook compatibility; skip work query and exit 0 |
 
 ## gc import
 
@@ -1410,6 +1415,7 @@ gc mail read <id>
 Reply to a message. The reply is addressed to the original sender.
 
 Inherits the thread ID from the original message for conversation tracking.
+Use --notify to nudge the recipient after replying.
 Use -s/--subject for the reply subject and -m/--message for the reply body.
 
 ```
@@ -1940,7 +1946,7 @@ gc runtime
 | [gc runtime drain](#gc-runtime-drain) | Signal a session to drain (wind down gracefully) |
 | [gc runtime drain-ack](#gc-runtime-drain-ack) | Acknowledge drain — signal the controller to stop this session |
 | [gc runtime drain-check](#gc-runtime-drain-check) | Check if a session is draining (exit 0 = draining) |
-| [gc runtime request-restart](#gc-runtime-request-restart) | Request controller restart this session (blocks until killed) |
+| [gc runtime request-restart](#gc-runtime-request-restart) | Request controller restart this session (waits to be killed) |
 | [gc runtime undrain](#gc-runtime-undrain) | Cancel drain on a session |
 
 ## gc runtime drain
@@ -1984,18 +1990,25 @@ gc runtime drain-check [name]
 
 Signal the controller to stop and restart this session.
 
-Sets GC_RESTART_REQUESTED metadata on the session, then blocks forever.
-The controller will stop the session on its next reconcile tick and
-restart it fresh. The blocking prevents the agent from consuming more
-context while waiting.
+Sets GC_RESTART_REQUESTED metadata on the session, then waits while the
+controller stops the session on its next reconcile tick and restarts it
+fresh. The wait keeps the agent idle so it does not consume more context
+in the interim.
 
-For on-demand configured named sessions, the controller cannot restart the
-user-attended process. In that case this command reports that restart was
-skipped and returns without blocking. No session.draining event is emitted
-when restart is skipped.
+Under normal operation the controller SIGKILLs the process tree before
+this command returns. If the controller accepts the stop handoff, the
+runtime is already gone, or a SIGINT/SIGTERM is received, the command
+exits 0 cleanly. If the controller has not acted within a bounded
+timeout (max(5*PatrolInterval, 5min), capped at 30min) the command exits
+1 with a diagnostic pointing at controller health.
+
+For on-demand configured named sessions, the controller cannot restart
+the user-attended process. In that case this command reports that
+restart was skipped and returns immediately. No session.draining event
+is emitted when restart is skipped.
 
 This command is designed to be called from within a session context.
-It emits a session.draining event before blocking.
+It emits a session.draining event before waiting.
 
 ```
 gc runtime request-restart

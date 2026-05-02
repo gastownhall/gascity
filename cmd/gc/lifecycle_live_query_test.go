@@ -111,7 +111,13 @@ func TestUnclaimWorkAssignedToRetiredSessionBead_UsesLiveOpenOwnership(t *testin
 		t.Fatalf("Update(%s, reassigned): %v", work.ID, err)
 	}
 
-	unclaimWorkAssignedToRetiredSessionBead(cache, "retired-session", "worker", io.Discard)
+	unclaimWorkAssignedToRetiredSessionBead(
+		cache,
+		nil,
+		beads.Bead{ID: "retired-session"},
+		"worker",
+		io.Discard,
+	)
 
 	got, err := backing.Get(work.ID)
 	if err != nil {

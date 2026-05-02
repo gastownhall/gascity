@@ -8,8 +8,9 @@ import (
 
 // List returns beads matching the query. Active-bead queries are served from
 // cache when available. IncludeClosed queries merge cached active results with
-// backing-store history when possible so callers keep the old best-effort
-// behavior from ListByLabel/ListByMetadata during transient bd failures.
+// backing-store history when possible, preserving partial backing rows when bd
+// reports corrupt entries and retaining cache-only fallback for transient
+// non-partial bd failures.
 func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
@@ -28,7 +29,12 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 	c.mu.RLock()
 	state := c.state
 	if state == cacheLive || state == cachePartial {
+		primePartialErr := c.primePartialErr
 		if len(c.dirty) > 0 {
+			c.mu.RUnlock()
+			return c.backing.List(query)
+		}
+		if primePartialErr != nil {
 			c.mu.RUnlock()
 			return c.backing.List(query)
 		}
@@ -43,16 +49,16 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 		}
 		c.mu.RUnlock()
 
-		finish := func(items []Bead) ([]Bead, error) {
+		finish := func(items []Bead, err error) ([]Bead, error) {
 			sortBeadsForQuery(items, query.Sort)
 			if query.Limit > 0 && len(items) > query.Limit {
 				items = items[:query.Limit]
 			}
-			return items, nil
+			return items, err
 		}
 
 		if !query.IncludesClosed() {
-			return finish(cached)
+			return finish(cached, nil)
 		}
 
 		// The cache never has a complete closed-only or parent-history view, so
@@ -63,7 +69,9 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 
 		all, err := c.backing.List(query)
 		if err != nil {
-			return finish(cached)
+			if !IsPartialResult(err) {
+				return finish(cached, nil)
+			}
 		}
 
 		seen := make(map[string]bool, len(cached))
@@ -77,10 +85,38 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 			cached = append(cached, b)
 			seen[b.ID] = true
 		}
-		return finish(cached)
+		return finish(cached, err)
 	}
 	c.mu.RUnlock()
 	return c.backing.List(query)
+}
+
+// CachedList returns query results from the in-memory cache only. The boolean
+// reports whether the cache was initialized enough to answer without touching
+// the backing store. Dirty entries are returned from the last observed
+// snapshot; callers must treat this as a read model that may lag writes or
+// reconciliation by one tick.
+func (c *CachingStore) CachedList(query ListQuery) ([]Bead, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.state != cacheLive && c.state != cachePartial {
+		return nil, false
+	}
+	if c.primePartialErr != nil {
+		return nil, false
+	}
+	cached := make([]Bead, 0, len(c.beads))
+	for _, b := range c.beads {
+		if !query.Matches(b) {
+			continue
+		}
+		cached = append(cached, cloneBead(b))
+	}
+	sortBeadsForQuery(cached, query.Sort)
+	if query.Limit > 0 && len(cached) > query.Limit {
+		cached = cached[:query.Limit]
+	}
+	return cached, true
 }
 
 func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, items []Bead) []Bead {
@@ -105,22 +141,38 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 	if c.state != cacheLive && c.state != cachePartial {
 		return items
 	}
+	now := time.Now()
 	refreshed := make([]Bead, 0, len(items))
 	for _, item := range items {
-		switch {
-		case c.deletedSeq[item.ID] > startSeq:
+		if c.deletedSeq[item.ID] > startSeq {
 			continue
-		case c.beadSeq[item.ID] > startSeq:
+		}
+		if c.beadSeq[item.ID] > startSeq {
 			current, ok := c.beads[item.ID]
 			if ok && query.Matches(current) {
 				refreshed = append(refreshed, cloneBead(current))
 			}
 			continue
 		}
+		if current, keep := c.recentLocalBeadConflictLocked(item.ID, item, now); keep {
+			if query.Matches(current) {
+				refreshed = append(refreshed, current)
+			}
+			continue
+		}
+		if c.beadSeq[item.ID] == startSeq {
+			current, ok := c.beads[item.ID]
+			if ok && current.Status == "closed" && item.Status != "closed" {
+				continue
+			}
+		}
 		c.beads[item.ID] = cloneBead(item)
 		delete(c.dirty, item.ID)
 		delete(c.deletedSeq, item.ID)
-		delete(c.beadSeq, item.ID)
+		if !recentLocalMutation(c.localBeadAt[item.ID], now) {
+			delete(c.beadSeq, item.ID)
+			delete(c.localBeadAt, item.ID)
+		}
 		if query.Matches(item) {
 			refreshed = append(refreshed, cloneBead(item))
 		}
@@ -129,13 +181,22 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
 			continue
 		}
+		if _, keep := c.recentLocalBeadConflictLocked(id, bead, now); keep {
+			continue
+		}
 		c.beads[id] = bead
 		delete(c.dirty, id)
 		delete(c.deletedSeq, id)
-		delete(c.beadSeq, id)
+		if !recentLocalMutation(c.localBeadAt[id], now) {
+			delete(c.beadSeq, id)
+			delete(c.localBeadAt, id)
+		}
 	}
 	for id := range removedParents {
 		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
+			continue
+		}
+		if current, ok := c.beads[id]; ok && current.Status != "closed" && recentLocalMutation(c.localBeadAt[id], now) {
 			continue
 		}
 		delete(c.beads, id)
@@ -143,6 +204,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		delete(c.dirty, id)
 		delete(c.deletedSeq, id)
 		delete(c.beadSeq, id)
+		delete(c.localBeadAt, id)
 	}
 	c.markFreshLocked(time.Now())
 	c.updateStatsLocked()
@@ -190,6 +252,18 @@ func (c *CachingStore) ListOpen(status ...string) ([]Bead, error) {
 // Get returns a single bead by ID from the cache or backing store.
 func (c *CachingStore) Get(id string) (Bead, error) {
 	c.mu.RLock()
+	if _, deleted := c.deletedSeq[id]; deleted {
+		c.mu.RUnlock()
+		return Bead{}, ErrNotFound
+	}
+	if _, mutated := c.beadSeq[id]; mutated {
+		if _, dirty := c.dirty[id]; !dirty {
+			if b, ok := c.beads[id]; ok {
+				c.mu.RUnlock()
+				return cloneBead(b), nil
+			}
+		}
+	}
 	if c.state == cacheLive || c.state == cachePartial {
 		if _, ok := c.dirty[id]; ok {
 			startSeq := c.mutationSeq
@@ -242,15 +316,18 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 // Ready returns open beads whose blocking deps are all closed.
 func (c *CachingStore) Ready() ([]Bead, error) {
 	c.mu.RLock()
-	if c.state == cacheLive {
+	if c.state == cacheLive && c.depsComplete {
 		if len(c.dirty) > 0 {
+			c.mu.RUnlock()
+			return c.backing.Ready()
+		}
+		if c.primePartialErr != nil {
 			c.mu.RUnlock()
 			return c.backing.Ready()
 		}
 		statusByID := make(map[string]string, len(c.beads))
 		depsByID := make(map[string][]Dep, len(c.deps))
 		openBeads := make([]Bead, 0, len(c.beads))
-		missingDepIDs := make(map[string]struct{})
 		for _, b := range c.beads {
 			statusByID[b.ID] = b.Status
 			if b.Status == "open" && !IsReadyExcludedType(b.Type) {
@@ -260,29 +337,8 @@ func (c *CachingStore) Ready() ([]Bead, error) {
 		for _, b := range openBeads {
 			deps := cloneDeps(c.deps[b.ID])
 			depsByID[b.ID] = deps
-			for _, dep := range deps {
-				switch dep.Type {
-				case "blocks", "waits-for", "conditional-blocks":
-				default:
-					continue
-				}
-				if _, ok := statusByID[dep.DependsOnID]; !ok {
-					missingDepIDs[dep.DependsOnID] = struct{}{}
-				}
-			}
 		}
 		c.mu.RUnlock()
-
-		for depID := range missingDepIDs {
-			dep, err := c.backing.Get(depID)
-			if err != nil {
-				if errors.Is(err, ErrNotFound) {
-					continue
-				}
-				return nil, err
-			}
-			statusByID[depID] = dep.Status
-		}
 
 		var result []Bead
 		for _, b := range openBeads {
@@ -293,7 +349,7 @@ func (c *CachingStore) Ready() ([]Bead, error) {
 				default:
 					continue
 				}
-				if statusByID[dep.DependsOnID] != "closed" {
+				if status, ok := statusByID[dep.DependsOnID]; ok && status != "closed" {
 					blocked = true
 					break
 				}
@@ -365,6 +421,10 @@ func (c *CachingStore) DepList(id, direction string) ([]Dep, error) {
 	c.mu.RLock()
 	if c.state == cacheLive {
 		if direction == "down" || direction == "" {
+			if !c.depsComplete {
+				c.mu.RUnlock()
+				return c.backing.DepList(id, direction)
+			}
 			if deps, ok := c.deps[id]; ok {
 				c.mu.RUnlock()
 				return cloneDeps(deps), nil

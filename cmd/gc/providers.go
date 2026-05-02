@@ -426,6 +426,9 @@ func displayProviderName(name string) string {
 
 func configuredBeadsProviderValue(cityPath string) string {
 	if v := strings.TrimSpace(os.Getenv("GC_BEADS")); v != "" {
+		if scopedRoot := strings.TrimSpace(os.Getenv("GC_BEADS_SCOPE_ROOT")); scopedRoot != "" && cityPath != "" && !samePath(resolveStoreScopeRoot(cityPath, scopedRoot), cityPath) {
+			return strings.TrimSpace(peekBeadsProvider(filepath.Join(cityPath, "city.toml")))
+		}
 		return v
 	}
 	return strings.TrimSpace(peekBeadsProvider(filepath.Join(cityPath, "city.toml")))

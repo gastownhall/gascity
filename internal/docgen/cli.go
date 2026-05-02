@@ -11,6 +11,8 @@ import (
 	"github.com/spf13/pflag"
 )
 
+const skipCLIDocAnnotation = "gc.docgen.skip"
+
 func escapeMDXText(s string) string {
 	s = strings.ReplaceAll(s, "<", "&lt;")
 	s = strings.ReplaceAll(s, ">", "&gt;")
@@ -77,7 +79,7 @@ func walkCommands(w io.Writer, cmd *cobra.Command) error {
 		return err
 	}
 	for _, child := range cmd.Commands() {
-		if child.Hidden {
+		if skipCLIDocCommand(child) {
 			continue
 		}
 		if err := walkCommands(w, child); err != nil {
@@ -85,6 +87,13 @@ func walkCommands(w io.Writer, cmd *cobra.Command) error {
 		}
 	}
 	return nil
+}
+
+func skipCLIDocCommand(cmd *cobra.Command) bool {
+	if cmd.Hidden {
+		return true
+	}
+	return cmd.Annotations[skipCLIDocAnnotation] == "true"
 }
 
 // renderCommand renders a single command section.
@@ -234,7 +243,7 @@ func writeFlagTable(w io.Writer, flags []flagInfo) error {
 func renderSubcommandsTable(w io.Writer, cmd *cobra.Command) error {
 	var children []*cobra.Command
 	for _, c := range cmd.Commands() {
-		if !c.Hidden {
+		if !skipCLIDocCommand(c) {
 			children = append(children, c)
 		}
 	}

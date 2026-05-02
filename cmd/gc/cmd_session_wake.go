@@ -3,8 +3,10 @@ package main
 import (
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
@@ -61,6 +63,7 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc session wake: %s is not a session\n", id) //nolint:errcheck
 		return 1
 	}
+	hasRunnableTemplate := sessionWakeHasRunnableTemplate(b, cfg)
 	session.RepairEmptyType(store, &b)
 	nudgeIDs, err := session.WakeSession(store, b, time.Now().UTC())
 	if err != nil {
@@ -70,6 +73,16 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintf(stderr, "gc session wake: updating metadata: %v\n", err) //nolint:errcheck
 		return 1
+	}
+	if !hasRunnableTemplate && sessionWakeRequestedCreate(b) {
+		if err := store.SetMetadataBatch(id, map[string]string{
+			"state":                string(session.StateAsleep),
+			"state_reason":         "",
+			"pending_create_claim": "",
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc session wake: updating metadata: %v\n", err) //nolint:errcheck
+			return 1
+		}
 	}
 	if cityErr == nil {
 		if err := withdrawQueuedWaitNudges(cityPath, nudgeIDs); err != nil {
@@ -84,4 +97,20 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer) int {
 
 	fmt.Fprintf(stdout, "Session %s: wake requested.\n", id) //nolint:errcheck
 	return 0
+}
+
+func sessionWakeHasRunnableTemplate(b beads.Bead, cfg *config.City) bool {
+	if cfg == nil {
+		return true
+	}
+	template := normalizedSessionTemplate(b, cfg)
+	if template == "" {
+		template = b.Metadata["template"]
+	}
+	return findAgentByTemplate(cfg, template) != nil
+}
+
+func sessionWakeRequestedCreate(b beads.Bead) bool {
+	state := session.State(strings.TrimSpace(b.Metadata["state"]))
+	return state == session.StateSuspended || state == session.StateDrained
 }

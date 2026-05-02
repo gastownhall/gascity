@@ -122,9 +122,9 @@ type AgentPatch struct {
 	MaxActiveSessions *int `toml:"max_active_sessions,omitempty"`
 	// MinActiveSessions overrides the minimum number of sessions to keep alive.
 	MinActiveSessions *int `toml:"min_active_sessions,omitempty"`
-	// ScaleCheck overrides the command template whose output determines desired
-	// session count. Supports the same Go template placeholders as
-	// Agent.scale_check.
+	// ScaleCheck overrides the command template whose output reports new
+	// unassigned session demand for bead-backed reconciliation. Supports the
+	// same Go template placeholders as Agent.scale_check.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
 	// OptionDefaults adds or overrides provider option defaults for this agent.
 	// Keys are option keys, values are choice values. Merges additively

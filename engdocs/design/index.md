@@ -28,3 +28,4 @@ lives in the [Architecture](../architecture/index.md) section.
 | `external-messaging-fabric` | Implemented | Provider-neutral external conversation bindings, delivery context, and group sessions |
 | `external-messaging-shared-threads` | Implemented | Transcript-backed shared-thread model with membership replay and speaker-only group routing |
 | `worker-conformance` | Proposed | Canonical WorkerCore/WorkerInference contract, transcript-first conformance, and migration toward `internal/worker` |
+| `two-minute-ci-blacksmith` | Proposed | Planner-driven Blacksmith CI architecture targeting two-minute required PR feedback |

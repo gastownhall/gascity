@@ -9,8 +9,7 @@ import (
 )
 
 // SlingOutput is the Huma response for POST /v0/sling.
-// The HTTP status code varies (200 for direct sling, 201 for workflow launch),
-// so we use a custom status field.
+// The HTTP status code is supplied by the domain sling result.
 type SlingOutput struct {
 	Status int `header:"_status" doc:"HTTP status code."`
 	Body   slingResponse

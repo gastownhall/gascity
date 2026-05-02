@@ -45,9 +45,8 @@ type WorkflowAttemptSummary struct {
 // WireEvent is the list-endpoint wire shape for a single event,
 // emitted by GET /v0/city/{cityName}/events. Same envelope fields as
 // eventStreamEnvelope minus the SSE-specific Workflow projection.
-// Payload is decoded via the events registry into a typed variant so
-// the list endpoint's wire schema matches the stream endpoint's
-// instead of falling back to opaque bytes.
+// Payload is decoded via the events registry into a typed variant when
+// possible. Custom event types pass through with their raw JSON payload.
 type WireEvent struct {
 	Seq     uint64            `json:"seq"`
 	Type    string            `json:"type"`
@@ -58,6 +57,13 @@ type WireEvent struct {
 	Payload EventPayloadUnion `json:"payload,omitempty"`
 }
 
+// Schema makes list endpoints use the same envelope-discriminated schema as
+// the city event stream. Runtime JSON stays the struct shape above; the
+// OpenAPI contract tells clients to select payload type from envelope.type.
+func (WireEvent) Schema(r huma.Registry) *huma.Schema {
+	return typedEventStreamEnvelopeSchema{}.Schema(r)
+}
+
 // WireTaggedEvent is the supervisor-scope list wire shape for
 // GET /v0/events, carrying the City the event originated from.
 type WireTaggedEvent struct {
@@ -65,31 +71,29 @@ type WireTaggedEvent struct {
 	City string `json:"city"`
 }
 
-// toWireEvent decodes the bus's opaque Payload into the registered
-// typed variant and returns the list-endpoint wire shape.
-//
-// Policy:
-//   - Registered event types: emit with the typed payload variant.
-//   - Unregistered event types (e.g. ad-hoc `gc event emit custom.foo`
-//     from a user hook): emit the envelope with a null payload so the
-//     CLI user's custom events remain visible in the list. The type
-//     string, actor, subject, message, seq, and ts are preserved — only
-//     structured payload data is dropped (there is no registered schema
-//     to interpret it against). The registry-coverage test
-//     (TestEveryKnownEventTypeHasRegisteredPayload) still guarantees
-//     every KnownEventTypes constant has a registered payload; this
-//     passthrough covers only types the SDK does not know about.
-//   - Decode error on registered types: skip + log. Emitting a typed
-//     event with bus corruption would violate Principle 7.
+// Schema makes supervisor event lists use the same envelope-discriminated
+// schema as the supervisor event stream.
+func (WireTaggedEvent) Schema(r huma.Registry) *huma.Schema {
+	return typedTaggedEventStreamEnvelopeSchema{}.Schema(r)
+}
+
+// toWireEvent decodes the bus's opaque Payload into the registered typed
+// variant when one exists. Custom event types are still part of the public
+// event contract because `gc event emit` accepts them, so they pass through
+// under the schema's custom-event branch.
 func toWireEvent(e events.Event) (WireEvent, bool) {
 	decoded, registered, err := events.DecodePayload(e.Type, e.Payload)
 	if err != nil {
 		log.Printf("api: events wire: decode payload for %q seq=%d: %v", e.Type, e.Seq, err)
 		return WireEvent{}, false
 	}
-	var payload events.Payload
+	payload, err := customEventPayload(e.Payload)
+	if err != nil {
+		log.Printf("api: events wire: decode custom payload for %q seq=%d: %v", e.Type, e.Seq, err)
+		return WireEvent{}, false
+	}
 	if registered {
-		payload, _ = decoded.(events.Payload)
+		payload = decoded
 	}
 	return WireEvent{
 		Seq:     e.Seq,
@@ -104,13 +108,14 @@ func toWireEvent(e events.Event) (WireEvent, bool) {
 
 // toWireTaggedEvent is the supervisor-scope analog of toWireEvent,
 // preserving the City tag the multiplexer attached to the event.
-// Same skip-not-degrade contract: returns ok=false on decode failure.
+// Same skip-not-degrade contract for corrupt registered payloads; custom
+// event types pass through.
 func toWireTaggedEvent(te events.TaggedEvent) (WireTaggedEvent, bool) {
 	wire, ok := toWireEvent(te.Event)
 	if !ok {
 		return WireTaggedEvent{}, false
 	}
-	return WireTaggedEvent{WireEvent: wire, City: te.City}, true
+	return WireTaggedEvent{WireEvent: wire, City: taggedEventWireCity(te)}, true
 }
 
 // eventStreamEnvelope is the wire shape emitted on
@@ -145,26 +150,18 @@ type taggedEventStreamEnvelope struct {
 	Workflow *workflowEventProjection `json:"workflow,omitempty"`
 }
 
-// EventPayloadUnion wraps any registered events.Payload for wire
-// emission. Its MarshalJSON emits the concrete variant's shape
-// directly (no wrapper object); its Schema registers a named
-// EventPayload oneOf component in the OpenAPI spec so generated
-// clients receive a discriminated union over every registered payload
-// type (Principle 7). MarshalJSON is schema-intentional per Principle
-// 4's edge-case list: it enables the oneOf wire shape, not opaque
-// pass-through. No UnmarshalJSON is defined — the server is
-// marshal-only on this type, and absence of a custom unmarshaler
-// makes accidental in-process round-trips fail loudly at the
-// interface field rather than silently dropping bytes.
+// EventPayloadUnion wraps any registered events.Payload or custom raw JSON
+// payload for wire emission. Known event types keep their registered payload
+// shape; custom event types preserve what was recorded.
 type EventPayloadUnion struct {
-	Value events.Payload
+	Value any
 }
 
 // MarshalJSON emits the concrete payload's JSON directly so the wire
 // sees {"rig":...} (for mail) rather than {"Value": {...}}.
 func (p EventPayloadUnion) MarshalJSON() ([]byte, error) {
 	if p.Value == nil {
-		return []byte("null"), nil
+		return []byte("{}"), nil
 	}
 	return json.Marshal(p.Value)
 }
@@ -204,20 +201,20 @@ func (EventPayloadUnion) Schema(r huma.Registry) *huma.Schema {
 	return &huma.Schema{Ref: schemaRefPrefix + name}
 }
 
-// wireEventFrom decodes the bus's opaque Payload into the registered
-// typed variant and returns a wire envelope ready for SSE emission on
-// the per-city stream. Unregistered event types cause an error —
-// Principle 7's strict policy enforced at emission time
-// (the registry-coverage test catches this at CI).
+// wireEventFrom decodes the bus's opaque Payload into the registered typed
+// variant when one exists and otherwise emits a custom-event envelope.
 func wireEventFrom(e events.Event, workflow *workflowEventProjection) (eventStreamEnvelope, error) {
 	decoded, registered, err := events.DecodePayload(e.Type, e.Payload)
 	if err != nil {
 		return eventStreamEnvelope{}, fmt.Errorf("decode %s payload: %w", e.Type, err)
 	}
-	if !registered {
-		return eventStreamEnvelope{}, fmt.Errorf("event type %q has no registered payload (see internal/api/event_payloads.go)", e.Type)
+	payload, err := customEventPayload(e.Payload)
+	if err != nil {
+		return eventStreamEnvelope{}, fmt.Errorf("decode custom %s payload: %w", e.Type, err)
 	}
-	payload, _ := decoded.(events.Payload)
+	if registered {
+		payload = decoded
+	}
 	return eventStreamEnvelope{
 		Seq:      e.Seq,
 		Type:     e.Type,
@@ -236,10 +233,13 @@ func wireTaggedEventFrom(te events.TaggedEvent, workflow *workflowEventProjectio
 	if err != nil {
 		return taggedEventStreamEnvelope{}, fmt.Errorf("decode %s payload: %w", te.Type, err)
 	}
-	if !registered {
-		return taggedEventStreamEnvelope{}, fmt.Errorf("event type %q has no registered payload (see internal/api/event_payloads.go)", te.Type)
+	payload, err := customEventPayload(te.Payload)
+	if err != nil {
+		return taggedEventStreamEnvelope{}, fmt.Errorf("decode custom %s payload: %w", te.Type, err)
 	}
-	payload, _ := decoded.(events.Payload)
+	if registered {
+		payload = decoded
+	}
 	return taggedEventStreamEnvelope{
 		Seq:      te.Seq,
 		Type:     te.Type,
@@ -248,9 +248,50 @@ func wireTaggedEventFrom(te events.TaggedEvent, workflow *workflowEventProjectio
 		Subject:  te.Subject,
 		Message:  te.Message,
 		Payload:  EventPayloadUnion{Value: payload},
-		City:     te.City,
+		City:     taggedEventWireCity(te),
 		Workflow: workflow,
 	}, nil
+}
+
+func taggedEventWireCity(te events.TaggedEvent) string {
+	if te.City != "__supervisor__" {
+		return te.City
+	}
+	if te.Subject != "" && isCityRequestResultType(te.Type) {
+		return te.Subject
+	}
+	switch te.Type {
+	case events.RequestResultCityCreate:
+		var payload CityCreateSucceededPayload
+		if json.Unmarshal(te.Payload, &payload) == nil && payload.Name != "" {
+			return payload.Name
+		}
+	case events.RequestResultCityUnregister:
+		var payload CityUnregisterSucceededPayload
+		if json.Unmarshal(te.Payload, &payload) == nil && payload.Name != "" {
+			return payload.Name
+		}
+	}
+	return te.City
+}
+
+func isCityRequestResultType(eventType string) bool {
+	switch eventType {
+	case events.RequestResultCityCreate, events.RequestResultCityUnregister, events.RequestFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+func customEventPayload(raw json.RawMessage) (any, error) {
+	if len(raw) == 0 {
+		return map[string]any{}, nil
+	}
+	if !json.Valid(raw) {
+		return nil, fmt.Errorf("invalid JSON")
+	}
+	return raw, nil
 }
 
 func projectWorkflowEvent(state State, event events.Event) *workflowEventProjection {
