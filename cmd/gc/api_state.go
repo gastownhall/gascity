@@ -433,8 +433,11 @@ func (cs *controllerState) runtimeUpdateDropsPendingRigs(next *config.City) bool
 
 func (cs *controllerState) runtimeUpdateStatusForPendingMutation(revision string) (matchesPending, stale bool) {
 	pendingRev := cs.pendingConfigRevision()
-	if pendingRev == "" || revision == "" {
-		return true, false
+	if pendingRev == "" {
+		return false, true
+	}
+	if revision == "" {
+		return false, true
 	}
 	if revision == pendingRev {
 		return true, false
@@ -1047,6 +1050,9 @@ func (cs *controllerState) refreshConfigSnapshot() (string, error) {
 	applyFeatureFlags(nextCfg)
 	applyRuntimeCityIdentity(nextCfg, cs.cityName)
 	revision := config.Revision(fsys.OSFS{}, prov, nextCfg, cs.cityPath)
+	if revision == "" {
+		return "", errors.New("computed empty config revision")
+	}
 
 	cs.mu.RLock()
 	sp := cs.sp

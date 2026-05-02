@@ -41,7 +41,8 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 
 	conflictsCached := cached && cacheEventConflictsCurrent(current, patch, fields)
 	verifiedConflict := false
-	if conflictsCached && eventType == "bead.closed" && (locallyMutated || recentlyLocal) {
+	var verifiedClosedBase Bead
+	if conflictsCached && eventType == "bead.closed" {
 		matchesBacking, verifyErr := c.cacheClosedEventMatchesBacking(patch.ID)
 		if verifyErr != nil {
 			c.recordProblem(fmt.Sprintf("verify %s event", eventType), verifyErr)
@@ -53,6 +54,7 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 			return
 		}
 		verifiedConflict = true
+		verifiedClosedBase = cloneBead(current)
 	}
 	if conflictsCached && eventType != "bead.closed" && locallyMutated && !verifiedConflict {
 		return
@@ -90,8 +92,12 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 		return
 	}
 	if current, ok := c.beads[patch.ID]; ok {
-		if eventType != "bead.closed" && cacheEventConflictsCurrent(current, patch, fields) {
-			if _, locallyMutated := c.beadSeq[patch.ID]; locallyMutated {
+		if cacheEventConflictsCurrent(current, patch, fields) {
+			if eventType == "bead.closed" {
+				if !verifiedConflict || beadChanged(current, verifiedClosedBase) {
+					return
+				}
+			} else if _, locallyMutated := c.beadSeq[patch.ID]; locallyMutated {
 				return
 			}
 		}

@@ -3256,8 +3256,8 @@ func TestReconcileSessionBeads_ConfigDriftDrainAckUsesRecentAttachedDeferral(t *
 		t.Fatal("expected config drift key")
 	}
 	env.setSessionMetadata(&session, map[string]string{
-		namedSessionAttachedConfigDriftDeferredAtMetadata:  env.clk.Now().UTC().Format(time.RFC3339),
-		namedSessionAttachedConfigDriftDeferredKeyMetadata: driftKey,
+		sessionAttachedConfigDriftDeferredAtMetadata:  env.clk.Now().UTC().Format(time.RFC3339),
+		sessionAttachedConfigDriftDeferredKeyMetadata: driftKey,
 	})
 
 	ds := &drainState{
@@ -3340,8 +3340,8 @@ func TestReconcileSessionBeads_ConfigDriftDrainAckUsesRecentAttachedDeferralForP
 	if driftKey == "" {
 		t.Fatal("expected config drift key")
 	}
-	if got.Metadata[namedSessionAttachedConfigDriftDeferredKeyMetadata] != driftKey {
-		t.Fatalf("attached deferral key = %q, want %q", got.Metadata[namedSessionAttachedConfigDriftDeferredKeyMetadata], driftKey)
+	if got.Metadata[sessionAttachedConfigDriftDeferredKeyMetadata] != driftKey {
+		t.Fatalf("attached deferral key = %q, want %q", got.Metadata[sessionAttachedConfigDriftDeferredKeyMetadata], driftKey)
 	}
 
 	ds := &drainState{

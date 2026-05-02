@@ -691,7 +691,7 @@ func TestConfigDrift_AttachedSessionSurvivesTransientFalseNegative(t *testing.T)
 	if got.Metadata["started_config_hash"] == "" {
 		t.Fatal("started_config_hash cleared during attached deferral")
 	}
-	if got.Metadata[namedSessionAttachedConfigDriftDeferredAtMetadata] == "" {
+	if got.Metadata[sessionAttachedConfigDriftDeferredAtMetadata] == "" {
 		t.Fatal("attached config-drift deferral timestamp was not recorded")
 	}
 
@@ -771,7 +771,7 @@ func TestConfigDrift_DetachAllowsDriftToResume(t *testing.T) {
 	// Detach and ensure no recent activity.
 	env.sp.SetAttached(sessionName, false)
 	env.sp.SetActivity(sessionName, env.clk.Now().Add(-5*time.Minute))
-	env.clk.Time = env.clk.Now().Add(namedSessionAttachedConfigDriftFalseNegativeLimit + time.Second)
+	env.clk.Time = env.clk.Now().Add(sessionAttachedConfigDriftFalseNegativeLimit + time.Second)
 
 	got, err := env.store.Get(session.ID)
 	if err != nil {
@@ -848,7 +848,7 @@ func TestConfigDrift_AttachedPoolSessionSurvivesTransientFalseNegative(t *testin
 	if err != nil {
 		t.Fatalf("Get after attached deferral: %v", err)
 	}
-	if got.Metadata[namedSessionAttachedConfigDriftDeferredAtMetadata] == "" {
+	if got.Metadata[sessionAttachedConfigDriftDeferredAtMetadata] == "" {
 		t.Fatal("attached config-drift deferral timestamp was not recorded")
 	}
 

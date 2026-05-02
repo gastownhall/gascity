@@ -178,6 +178,97 @@ func TestCachingStoreIgnoresStaleClosedEventAfterLocalReopenBeyondRecentWindow(t
 	}
 }
 
+func TestCachingStoreIgnoresStaleClosedEventAfterLocalReopenAndLiveRefresh(t *testing.T) {
+	backing := NewMemStore()
+	bead, err := backing.Create(Bead{Title: "reopen me"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := backing.Close(bead.ID); err != nil {
+		t.Fatalf("Close backing: %v", err)
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if err := cache.Reopen(bead.ID); err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+
+	cache.mu.Lock()
+	cache.localBeadAt[bead.ID] = time.Now().Add(-10 * time.Second)
+	cache.mu.Unlock()
+	if got, err := cache.List(ListQuery{Status: "open", Live: true}); err != nil {
+		t.Fatalf("Live List: %v", err)
+	} else if len(got) != 1 || got[0].ID != bead.ID {
+		t.Fatalf("Live List = %+v, want reopened bead %s", got, bead.ID)
+	}
+	cache.mu.RLock()
+	_, locallyMutated := cache.beadSeq[bead.ID]
+	recentlyLocal := recentLocalMutation(cache.localBeadAt[bead.ID], time.Now())
+	cache.mu.RUnlock()
+	if locallyMutated || recentlyLocal {
+		t.Fatalf("local markers after live refresh: locallyMutated=%v recentlyLocal=%v, want both false", locallyMutated, recentlyLocal)
+	}
+
+	cache.ApplyEvent("bead.closed", json.RawMessage(`{"id":"`+bead.ID+`","status":"closed"}`))
+
+	got, err := cache.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("Status after stale closed event = %q, want open", got.Status)
+	}
+}
+
+func TestCachingStoreClosedEventRechecksLocalReopenBeforeCommit(t *testing.T) {
+	backing := NewMemStore()
+	bead, err := backing.Create(Bead{Title: "reopen me"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if err := backing.Close(bead.ID); err != nil {
+		t.Fatalf("Close backing: %v", err)
+	}
+	payload := json.RawMessage(`{"id":"` + bead.ID + `","status":"closed"}`)
+	cache.ApplyEvent("bead.closed", payload)
+
+	beforeCommit := make(chan struct{})
+	releaseCommit := make(chan struct{})
+	cache.applyEventBeforeCommitForTest = func() {
+		close(beforeCommit)
+		<-releaseCommit
+	}
+
+	done := make(chan struct{})
+	go func() {
+		cache.ApplyEvent("bead.closed", payload)
+		close(done)
+	}()
+
+	<-beforeCommit
+	if err := cache.Reopen(bead.ID); err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	close(releaseCommit)
+	<-done
+
+	got, err := cache.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("Status after stale closed event race = %q, want open", got.Status)
+	}
+}
+
 func TestCachingStoreRecordsClosedEventVerificationErrorAndPreservesLocalReopen(t *testing.T) {
 	backing := &cacheEventVerificationFailStore{Store: NewMemStore()}
 	bead, err := backing.Create(Bead{Title: "reopen me"})

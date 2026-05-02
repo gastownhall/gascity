@@ -1295,11 +1295,11 @@ func sessionHasOpenAssignedWorkInStore(store beads.Store, session beads.Bead) (b
 const (
 	namedSessionActivityThreshold                      = 2 * time.Minute
 	namedSessionRecentActivityConfigDriftDeferralLimit = 30 * time.Second
-	namedSessionAttachedConfigDriftFalseNegativeLimit  = 30 * time.Second
+	sessionAttachedConfigDriftFalseNegativeLimit       = 30 * time.Second
 	namedSessionConfigDriftDeferredAtMetadata          = "config_drift_deferred_at"
 	namedSessionConfigDriftDeferredKeyMetadata         = "config_drift_deferred_key"
-	namedSessionAttachedConfigDriftDeferredAtMetadata  = "attached_config_drift_deferred_at"
-	namedSessionAttachedConfigDriftDeferredKeyMetadata = "attached_config_drift_deferred_key"
+	sessionAttachedConfigDriftDeferredAtMetadata       = "attached_config_drift_deferred_at"
+	sessionAttachedConfigDriftDeferredKeyMetadata      = "attached_config_drift_deferred_key"
 )
 
 // namedSessionActivelyInUse returns true if a named session is currently
@@ -1385,15 +1385,15 @@ func clearSessionConfigDriftDeferral(session beads.Bead, store beads.Store) erro
 	}
 	if session.Metadata[namedSessionConfigDriftDeferredAtMetadata] == "" &&
 		session.Metadata[namedSessionConfigDriftDeferredKeyMetadata] == "" &&
-		session.Metadata[namedSessionAttachedConfigDriftDeferredAtMetadata] == "" &&
-		session.Metadata[namedSessionAttachedConfigDriftDeferredKeyMetadata] == "" {
+		session.Metadata[sessionAttachedConfigDriftDeferredAtMetadata] == "" &&
+		session.Metadata[sessionAttachedConfigDriftDeferredKeyMetadata] == "" {
 		return nil
 	}
 	return store.SetMetadataBatch(session.ID, map[string]string{
-		namedSessionConfigDriftDeferredAtMetadata:          "",
-		namedSessionConfigDriftDeferredKeyMetadata:         "",
-		namedSessionAttachedConfigDriftDeferredAtMetadata:  "",
-		namedSessionAttachedConfigDriftDeferredKeyMetadata: "",
+		namedSessionConfigDriftDeferredAtMetadata:     "",
+		namedSessionConfigDriftDeferredKeyMetadata:    "",
+		sessionAttachedConfigDriftDeferredAtMetadata:  "",
+		sessionAttachedConfigDriftDeferredKeyMetadata: "",
 	})
 }
 
@@ -1406,16 +1406,16 @@ func recordSessionAttachedConfigDriftDeferral(session beads.Bead, store beads.St
 		now = clk.Now().UTC()
 	}
 	return store.SetMetadataBatch(session.ID, map[string]string{
-		namedSessionAttachedConfigDriftDeferredAtMetadata:  now.Format(time.RFC3339),
-		namedSessionAttachedConfigDriftDeferredKeyMetadata: driftKey,
+		sessionAttachedConfigDriftDeferredAtMetadata:  now.Format(time.RFC3339),
+		sessionAttachedConfigDriftDeferredKeyMetadata: driftKey,
 	})
 }
 
 func recentlyDeferredSessionAttachedConfigDrift(session beads.Bead, clk clock.Clock, driftKey string) bool {
-	if driftKey == "" || session.Metadata[namedSessionAttachedConfigDriftDeferredKeyMetadata] != driftKey {
+	if driftKey == "" || session.Metadata[sessionAttachedConfigDriftDeferredKeyMetadata] != driftKey {
 		return false
 	}
-	raw := session.Metadata[namedSessionAttachedConfigDriftDeferredAtMetadata]
+	raw := session.Metadata[sessionAttachedConfigDriftDeferredAtMetadata]
 	if raw == "" {
 		return false
 	}
@@ -1430,7 +1430,7 @@ func recentlyDeferredSessionAttachedConfigDrift(session beads.Bead, clk clock.Cl
 	if now.Before(deferredAt) {
 		return true
 	}
-	return now.Sub(deferredAt) < namedSessionAttachedConfigDriftFalseNegativeLimit
+	return now.Sub(deferredAt) < sessionAttachedConfigDriftFalseNegativeLimit
 }
 
 // sessionAttachedForConfigDrift reports whether a session is currently
@@ -1559,8 +1559,8 @@ func resetConfiguredNamedSessionForConfigDrift(
 	batch := sessionpkg.ConfigDriftResetPatch(sessionpkg.State(nextState), newSessionKey)
 	batch[namedSessionConfigDriftDeferredAtMetadata] = ""
 	batch[namedSessionConfigDriftDeferredKeyMetadata] = ""
-	batch[namedSessionAttachedConfigDriftDeferredAtMetadata] = ""
-	batch[namedSessionAttachedConfigDriftDeferredKeyMetadata] = ""
+	batch[sessionAttachedConfigDriftDeferredAtMetadata] = ""
+	batch[sessionAttachedConfigDriftDeferredKeyMetadata] = ""
 	if err := store.SetMetadataBatch(session.ID, batch); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: recording config-drift repair for %s: %v\n", sessionName, err) //nolint:errcheck
 		return
