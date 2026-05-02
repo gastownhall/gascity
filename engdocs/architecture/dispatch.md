@@ -183,7 +183,8 @@ CLI layer (cmd/gc/cmd_sling.go)
 | `internal/beads` (Store) | `MolCook` for wisp instantiation, `Create` for auto-convoy, `Get`/`Children` for container expansion, `Update` for ParentID linking, `SetMetadata` for merge strategy |
 | `internal/config` | Agent resolution, `EffectiveSlingQuery`, pool detection via `IsPool`, `PoolConfig` for sizing, `Suspended` flag |
 | `internal/runtime` | `Provider.IsRunning` and `Provider.Nudge` for agent nudging via `doSlingNudge` |
-| `internal/agent` | `SessionNameFor` to compute session names, `agent.New` + `Nudge` to deliver nudge text |
+| `internal/agent` | `SessionNameFor` to compute session names |
+| `internal/worker` | `Handle.Nudge` at the worker boundary for direct nudge delivery |
 | `internal/telemetry` | `RecordSling` for metrics and log events on every dispatch |
 | `cmd/gc/cmd_agent.go` | `resolveAgentIdentity` for 2-step target resolution (literal then contextual) |
 

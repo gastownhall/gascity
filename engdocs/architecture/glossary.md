@@ -94,7 +94,7 @@ other source should be updated.
 - **Messaging**: Inter-agent communication composed from primitives.
   Mail = `TaskStore.Create(bead{type:"message"})`. Nudge = a
   session-layer operation implemented via `runtime.Provider.Nudge()`
-  (and exposed through `worker.SessionHandle.Nudge()` at the worker
+  (and exposed through `worker.Handle.Nudge()` at the worker
   boundary). No new primitive needed.
 
 - **Molecule**: A formula instantiated at runtime: one root bead plus
@@ -134,8 +134,8 @@ other source should be updated.
 - **Provider** (Session): Manages agent sessions. The `Provider`
   interface defines lifecycle (Start, Stop, Interrupt), querying
   (IsRunning, ProcessAlive), communication (Attach, Nudge, SendKeys),
-  and metadata (SetMeta, GetMeta). Implementations: tmux (production),
-  subprocess (remote), k8s (Kubernetes), Fake (test). See
+  and metadata (SetMeta, GetMeta). Implementations: tmux, subprocess,
+  exec, k8s, acp, auto, hybrid, and Fake (test). See
   [`internal/runtime/runtime.go`](https://github.com/gastownhall/gascity/blob/main/internal/runtime/runtime.go).
 
 - **Rig**: An external project directory registered in the city. Each

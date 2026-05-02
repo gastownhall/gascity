@@ -153,7 +153,7 @@ Optional provider extensions also live in `runtime/runtime.go`:
 | Depended on by | How |
 |---|---|
 | `cmd/gc/cmd_start.go` | Starts runtimes for configured agents |
-| `cmd/gc/reconcile.go` | Uses runtime liveness and drift signals |
+| `cmd/gc/session_reconciler.go` | Uses runtime liveness and drift signals for bead-driven session reconciliation |
 | `cmd/gc/cmd_session.go` | Attach, list, inspect, and session-level commands |
 | `cmd/gc/cmd_nudge.go` | Idle-aware and queued nudge delivery |
 | `internal/api/` | Session-aware API surfaces and status views |

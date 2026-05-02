@@ -62,7 +62,7 @@ mechanism is provably composable from the primitives.
 6. **Messaging** — Mail = `TaskStore.Create(bead{type:"message"})`.
    Nudge = a session-layer operation implemented via
    `runtime.Provider.Nudge()` (and exposed through
-   `worker.SessionHandle.Nudge()` at the worker boundary). No new
+   `worker.Handle.Nudge()` at the worker boundary). No new
    primitive needed.
 7. **Formulas & Molecules** — Formula = TOML parsed by Config. Molecule =
    root bead + child step beads in Task Store. Wisps = ephemeral molecules.
@@ -145,12 +145,17 @@ the canonical route, not the legacy route.
   `TestGCNonTestFilesStayOnWorkerBoundary` in
   `cmd/gc/worker_boundary_import_test.go`, which forbids non-test
   files from importing `session.NewManager(`, `worker.SessionHandle`,
-  `sessionlog`, and similar bypass paths. The remaining production
-  callers of `session.Manager.Create*` directly are
-  `internal/api/session_manager.go` and the package-internal helpers
-  in `internal/session/`. Tests may construct `session.Manager`
-  directly. Do not add new non-test direct `session.Manager.Create*`
-  call sites in `cmd/gc/`.
+  `sessionlog`, and similar bypass paths in `cmd/gc`. The remaining
+  manager-construction/direct-create bypasses are split by category:
+  `internal/api/session_manager.go` constructs `session.Manager` values
+  for API handlers, and `internal/api/session_resolution.go` still calls
+  `mgr.CreateAliasedNamedWithTransportAndMetadata(...)` directly. This
+  list is not a sessionlog read-site inventory; stream and transcript
+  readers in `internal/api/` and `internal/session/` still read
+  session logs directly. Package-internal helpers in `internal/session/`
+  may construct and use `session.Manager`; tests may construct it
+  directly. Do not add new non-test direct `session.Manager.Create*` call
+  sites outside the worker boundary.
 - **Session-first (completed `dd90ac0a` on Mar 8 2026).** The former
   Agent Protocol primitive was removed; responsibilities moved to
   `internal/session/` (lifecycle) and `internal/runtime/` (providers).
