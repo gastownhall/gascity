@@ -206,7 +206,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		poolSessions:            p.PoolSessions,
 		poolDeathHandlers:       p.PoolDeathHandlers,
 		suspendedNames:          suspendedNames,
-		asyncStartLimiter:       make(chan struct{}, defaultMaxParallelStartsPerWave),
+		asyncStartLimiter:       make(chan struct{}, maxParallelStartsPerTick(p.Cfg)),
 		convergenceReqCh:        p.ConvergenceReqCh,
 		reloadReqCh: func() chan reloadRequest {
 			if p.ReloadReqCh != nil {
@@ -1421,8 +1421,9 @@ func (cr *CityRuntime) requestDeferredDrainFollowUpTick() {
 }
 
 func (cr *CityRuntime) ensureAsyncStartLimiter() chan struct{} {
-	if cr.asyncStartLimiter == nil {
-		cr.asyncStartLimiter = make(chan struct{}, defaultMaxParallelStartsPerWave)
+	capacity := maxParallelStartsPerTick(cr.cfg)
+	if cr.asyncStartLimiter == nil || cap(cr.asyncStartLimiter) != capacity {
+		cr.asyncStartLimiter = make(chan struct{}, capacity)
 	}
 	return cr.asyncStartLimiter
 }

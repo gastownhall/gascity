@@ -948,15 +948,17 @@ func TestPrepareStartCandidate_NoneModeInitialMessageStaysInNudge(t *testing.T) 
 }
 
 func TestExecutePlannedStarts_RevalidatesDependenciesBetweenWaveBatches(t *testing.T) {
+	maxWakes := 3
 	sp := &dropDependencyAfterNStartsProvider{
 		Fake:      runtime.NewFake(),
-		dropAfter: defaultMaxParallelStartsPerWave,
+		dropAfter: maxWakes,
 		depName:   "db",
 	}
 	if err := sp.Start(context.Background(), "db", runtime.Config{}); err != nil {
 		t.Fatal(err)
 	}
 	cfg := &config.City{
+		Daemon: config.DaemonConfig{MaxWakesPerTick: &maxWakes},
 		Agents: []config.Agent{
 			{Name: "app-1", DependsOn: []string{"db"}},
 			{Name: "app-2", DependsOn: []string{"db"}},
@@ -997,8 +999,8 @@ func TestExecutePlannedStarts_RevalidatesDependenciesBetweenWaveBatches(t *testi
 		nil, clk, events.Discard, 5*time.Second, 0, ioDiscard{}, ioDiscard{},
 	)
 
-	if woken != defaultMaxParallelStartsPerWave {
-		t.Fatalf("woken = %d, want %d", woken, defaultMaxParallelStartsPerWave)
+	if woken != maxWakes {
+		t.Fatalf("woken = %d, want %d", woken, maxWakes)
 	}
 	for _, name := range []string{"app-1", "app-2", "app-3"} {
 		if !sp.IsRunning(name) {
@@ -1107,10 +1109,11 @@ func TestExecutePlannedStartsTraced_AsyncLimitsEnqueuedStartsPerTick(t *testing.
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 0, 0, time.UTC)}
 	sp := newGatedStartProvider()
-	cfg := &config.City{}
+	maxWakes := 4
+	cfg := &config.City{Daemon: config.DaemonConfig{MaxWakesPerTick: &maxWakes}}
 	desired := map[string]TemplateParams{}
 	var candidates []startCandidate
-	for _, name := range []string{"worker-1", "worker-2", "worker-3", "worker-4"} {
+	for _, name := range []string{"worker-1", "worker-2", "worker-3", "worker-4", "worker-5"} {
 		session, err := store.Create(beads.Bead{
 			ID:     "gc-" + name,
 			Title:  name,
@@ -1152,13 +1155,13 @@ func TestExecutePlannedStartsTraced_AsyncLimitsEnqueuedStartsPerTick(t *testing.
 		nil,
 		withAsyncStartExecution(),
 	)
-	if woken != defaultMaxParallelStartsPerWave {
-		t.Fatalf("woken = %d, want one bounded async batch of %d", woken, defaultMaxParallelStartsPerWave)
+	if woken != maxWakes {
+		t.Fatalf("woken = %d, want one bounded async batch of %d", woken, maxWakes)
 	}
-	sp.waitForStarts(t, defaultMaxParallelStartsPerWave)
+	sp.waitForStarts(t, maxWakes)
 	sp.ensureNoFurtherStart(t, 100*time.Millisecond)
-	if sp.maxInFlight > defaultMaxParallelStartsPerWave {
-		t.Fatalf("max in-flight starts = %d, want <= %d", sp.maxInFlight, defaultMaxParallelStartsPerWave)
+	if sp.maxInFlight > maxWakes {
+		t.Fatalf("max in-flight starts = %d, want <= %d", sp.maxInFlight, maxWakes)
 	}
 }
 
@@ -1379,7 +1382,7 @@ func TestCityRuntimeShutdownWaitsForTrackedAsyncStartsBeforeStopSnapshot(t *test
 		sp:                  sp,
 		rec:                 events.Discard,
 		standaloneCityStore: store,
-		asyncStartLimiter:   make(chan struct{}, defaultMaxParallelStartsPerWave),
+		asyncStartLimiter:   make(chan struct{}, maxParallelStartsPerTick(cfg)),
 		logPrefix:           "gc test",
 		stdout:              ioDiscard{},
 		stderr:              ioDiscard{},
@@ -2841,15 +2844,17 @@ func TestCommitStartResult_AtomicBatchLandsStateAndClaimClearTogether(t *testing
 }
 
 func TestExecutePlannedStarts_UsesLogicalTemplateForDependencyRechecks(t *testing.T) {
+	maxWakes := 3
 	sp := &dropDependencyAfterNStartsProvider{
 		Fake:      runtime.NewFake(),
-		dropAfter: defaultMaxParallelStartsPerWave,
+		dropAfter: maxWakes,
 		depName:   "db",
 	}
 	if err := sp.Start(context.Background(), "db", runtime.Config{}); err != nil {
 		t.Fatal(err)
 	}
 	cfg := &config.City{
+		Daemon: config.DaemonConfig{MaxWakesPerTick: &maxWakes},
 		Agents: []config.Agent{
 			{Name: "app-1", DependsOn: []string{"db"}},
 			{Name: "app-2", DependsOn: []string{"db"}},
@@ -2895,8 +2900,8 @@ func TestExecutePlannedStarts_UsesLogicalTemplateForDependencyRechecks(t *testin
 		clk, events.Discard, 5*time.Second, ioDiscard{}, ioDiscard{},
 	)
 
-	if woken != defaultMaxParallelStartsPerWave {
-		t.Fatalf("woken = %d, want %d", woken, defaultMaxParallelStartsPerWave)
+	if woken != maxWakes {
+		t.Fatalf("woken = %d, want %d", woken, maxWakes)
 	}
 	for _, name := range []string{"app-1", "app-2", "app-3"} {
 		if !sp.IsRunning(name) {

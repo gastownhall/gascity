@@ -253,6 +253,21 @@ func TestCityRuntimeDemandSnapshotReusesStablePatrolDemand(t *testing.T) {
 	}
 }
 
+func TestCityRuntimeAsyncStartLimiterUsesMaxWakesPerTick(t *testing.T) {
+	maxWakes := 7
+	cfg := &config.City{Daemon: config.DaemonConfig{MaxWakesPerTick: &maxWakes}}
+	cr := &CityRuntime{cfg: cfg}
+
+	if got := cap(cr.ensureAsyncStartLimiter()); got != maxWakes {
+		t.Fatalf("limiter cap = %d, want %d", got, maxWakes)
+	}
+
+	maxWakes = 2
+	if got := cap(cr.ensureAsyncStartLimiter()); got != maxWakes {
+		t.Fatalf("limiter cap after config change = %d, want %d", got, maxWakes)
+	}
+}
+
 type recordingOrderDispatcher struct {
 	called     atomic.Bool
 	calls      atomic.Int32

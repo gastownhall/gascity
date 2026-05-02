@@ -24,15 +24,21 @@ import (
 )
 
 const (
-	defaultMaxParallelStartsPerWave = 3
-	defaultMaxParallelStopsPerWave  = 3
-	defaultMaxParallelInterrupts    = 16
+	defaultMaxParallelStopsPerWave = 3
+	defaultMaxParallelInterrupts   = 16
 
 	// staleKeyDetectDelay is how long to wait after starting a session
 	// before checking if it died immediately (stale resume key detection).
 	// Matches the same constant in internal/session/chat.go.
 	staleKeyDetectDelay = 2 * time.Second
 )
+
+func maxParallelStartsPerTick(cfg *config.City) int {
+	if cfg == nil {
+		return config.DefaultMaxWakesPerTick
+	}
+	return cfg.Daemon.MaxWakesPerTickOrDefault()
+}
 
 type startCandidate struct {
 	session *beads.Bead
@@ -1381,10 +1387,10 @@ func executePlannedStartsTraced(
 		}
 	}
 	asyncLimiter := startOpts.asyncLimiter
+	maxWakes := maxParallelStartsPerTick(cfg)
 	if startOpts.async && asyncLimiter == nil {
-		asyncLimiter = make(chan struct{}, defaultMaxParallelStartsPerWave)
+		asyncLimiter = make(chan struct{}, maxWakes)
 	}
-	maxWakes := cfg.Daemon.MaxWakesPerTickOrDefault()
 	waveByCandidate, ok := candidateWaveOrder(candidates, cfg, desiredState, sp, cityName, store, clk)
 	if !ok {
 		fmt.Fprintln(stderr, "session reconciler: dependency graph fallback to serial start order") //nolint:errcheck
@@ -1429,7 +1435,7 @@ func executePlannedStartsTraced(
 				}
 				break
 			}
-			batchSize := min(defaultMaxParallelStartsPerWave, maxWakes-wakeCount)
+			batchSize := maxWakes - wakeCount
 			end := min(offset+batchSize, len(ready))
 			var prepared []preparedStart
 			var asyncPrepared []asyncPreparedStart
@@ -1480,7 +1486,7 @@ func executePlannedStartsTraced(
 			if startOpts.async {
 				results = enqueuePreparedStartWaveForCity(ctx, asyncPrepared, cityPath, sp, store, cfg, clk, rec, startupTimeout, wave, stdout, stderr, trace, startOpts.asyncFollowUp)
 			} else {
-				results = executePreparedStartWaveForCity(ctx, prepared, cityPath, sp, store, cfg, startupTimeout, defaultMaxParallelStartsPerWave)
+				results = executePreparedStartWaveForCity(ctx, prepared, cityPath, sp, store, cfg, startupTimeout, maxWakes)
 			}
 			for _, result := range results {
 				if trace != nil {
