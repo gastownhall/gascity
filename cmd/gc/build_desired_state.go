@@ -289,7 +289,7 @@ func buildDesiredStateWithSessionBeads(
 		} else {
 			fmt.Fprintf(stderr, "assignedWorkBeads: 0 beads (rigStores=%d)\n", len(rigStores)) //nolint:errcheck
 		}
-		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, assignedWorkBeads, assignedWorkStoreRefs)
+		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, sessionBeads.Open(), assignedWorkBeads, assignedWorkStoreRefs)
 		poolDesiredStates := ComputePoolDesiredStatesTraced(cfg, poolWorkBeads, sessionBeads.Open(), scaleCheckCounts, trace)
 		for _, poolState := range poolDesiredStates {
 			cfgAgent := findAgentByTemplate(cfg, poolState.Template)
@@ -583,7 +583,7 @@ func collectAssignedWorkBeadsWithStores(
 			} else {
 				errs = append(errs, fmt.Errorf("List(in_progress): %w", err))
 				if beads.IsPartialResult(err) && len(inProgress) > 0 {
-					appendInProgressWorkUnique(cfg, &result, &resultStores, inProgress, seen, s)
+					appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, inProgress, seen, source.store, source.ref)
 				}
 			}
 			// Ready beads with an assignee (queued direct handoff work that is
@@ -594,7 +594,7 @@ func collectAssignedWorkBeadsWithStores(
 			} else {
 				errs = append(errs, fmt.Errorf("Ready(): %w", err))
 				if beads.IsPartialResult(err) && len(ready) > 0 {
-					appendAssignedUnique(&result, &resultStores, ready, seen, s)
+					appendAssignedUnique(&result, &resultStores, &resultStoreRefs, ready, seen, source.store, source.ref)
 				}
 			}
 			results[idx] = storeAssignedWorkResult{beads: result, stores: resultStores, storeRefs: resultStoreRefs, errs: errs}
@@ -662,6 +662,8 @@ func appendAssignedUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[
 }
 
 func appendWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, b beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
+	// Invariant: dst, stores, and storeRefs are kept index-aligned by this
+	// shared growth path and the shared seen guard.
 	// Session beads are not actionable work — filter them at the source
 	// so all consumers see only real tasks. Message beads are NOT filtered
 	// here because they represent mail that should wake/materialize sessions;

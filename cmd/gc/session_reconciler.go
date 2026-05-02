@@ -452,7 +452,9 @@ func reconcileSessionBeadsTraced(
 								dt.clearIdleProbe(session.ID)
 								dt.remove(session.ID)
 							}
-							closeSessionBeadIfUnassigned(store, rigStores, *session, "drained", clk.Now().UTC(), stderr)
+							if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, *session, "drained", clk.Now().UTC(), stderr) {
+								session.Status = "closed"
+							}
 						}
 						continue
 					}
@@ -500,7 +502,9 @@ func reconcileSessionBeadsTraced(
 					if storeQueryPartial {
 						continue
 					}
-					closeSessionBeadIfUnassigned(store, rigStores, *session, reason, clk.Now().UTC(), stderr)
+					if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, *session, reason, clk.Now().UTC(), stderr) {
+						session.Status = "closed"
+					}
 				}
 				continue
 			}
@@ -1240,7 +1244,12 @@ func resolvePreservedConfiguredNamedSessionTemplate(
 }
 
 // sessionHasOpenAssignedWork reports whether any open or in-progress work bead
-// is assigned to the given session across all known stores.
+// is assigned to the given session across all known stores. Use this
+// cross-store query for cleanup-of-record paths that must not orphan work in
+// any attached store; callers preserve fail-closed behavior by refusing close
+// decisions on query errors. Reconciler close paths that should honor the
+// session's configured store reachability must use
+// sessionHasOpenAssignedWorkForReachableStore instead.
 func sessionHasOpenAssignedWork(store beads.Store, rigStores map[string]beads.Store, session beads.Bead) (bool, error) {
 	if has, err := sessionHasOpenAssignedWorkInStore(store, session); err != nil || has {
 		return has, err

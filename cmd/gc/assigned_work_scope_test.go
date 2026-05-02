@@ -51,6 +51,67 @@ func TestFilterAssignedWorkBeadsForSessionWakeKeepsOnlyReachableAssigneeSources(
 	}
 }
 
+func TestFilterAssignedWorkBeadsForPoolDemandKeepsDirectAssigneeAfterTemplateFallback(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name: "worker",
+		}},
+	}
+	sessions := []beads.Bead{{
+		ID:     "session-1",
+		Status: "open",
+		Type:   sessionBeadType,
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "worker-session",
+		},
+	}}
+	work := []beads.Bead{{
+		ID:       "direct-assigned",
+		Status:   "in_progress",
+		Assignee: "session-1",
+		Metadata: map[string]string{},
+	}}
+
+	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", sessions, work, []string{""})
+
+	if len(got) != 1 || got[0].ID != "direct-assigned" {
+		t.Fatalf("filtered work = %#v, want direct-assigned work preserved through template fallback", got)
+	}
+}
+
+func TestFilterAssignedWorkBeadsForPoolDemandDropsDirectAssigneeFromUnreachableStore(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "riga")
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "riga", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name: "worker",
+		}},
+	}
+	sessions := []beads.Bead{{
+		ID:     "session-1",
+		Status: "open",
+		Type:   sessionBeadType,
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "worker-session",
+		},
+	}}
+	work := []beads.Bead{{
+		ID:       "rig-direct-assigned",
+		Status:   "in_progress",
+		Assignee: "session-1",
+		Metadata: map[string]string{},
+	}}
+
+	got := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, sessions, work, []string{"riga"})
+
+	if len(got) != 0 {
+		t.Fatalf("filtered work = %#v, want unreachable rig-store direct assignment dropped", got)
+	}
+}
+
 func TestSessionHasOpenAssignedWorkUsesOnlyReachableStore(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "riga")

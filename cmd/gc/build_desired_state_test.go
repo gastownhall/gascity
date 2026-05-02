@@ -204,7 +204,7 @@ func TestCollectAssignedWorkBeads_PreservesPartialInProgressSurvivors(t *testing
 		t.Fatalf("reload work bead: %v", err)
 	}
 
-	got, stores, partial := collectAssignedWorkBeadsWithStores(&config.City{}, store, nil, nil)
+	got, stores, storeRefs, partial := collectAssignedWorkBeadsWithStores(&config.City{}, store, nil, nil)
 	if !partial {
 		t.Fatal("partial = false, want true")
 	}
@@ -213,6 +213,9 @@ func TestCollectAssignedWorkBeads_PreservesPartialInProgressSurvivors(t *testing
 	}
 	if len(stores) != 1 || stores[0] != store {
 		t.Fatalf("stores = %#v, want source store for partial survivor", stores)
+	}
+	if len(storeRefs) != 1 || storeRefs[0] != "" {
+		t.Fatalf("storeRefs = %#v, want city store ref for partial survivor", storeRefs)
 	}
 }
 
@@ -232,7 +235,7 @@ func TestCollectAssignedWorkBeads_PreservesPartialReadySurvivors(t *testing.T) {
 		t.Fatalf("create work bead: %v", err)
 	}
 
-	got, stores, partial := collectAssignedWorkBeadsWithStores(&config.City{}, store, nil, nil)
+	got, stores, storeRefs, partial := collectAssignedWorkBeadsWithStores(&config.City{}, store, nil, nil)
 	if !partial {
 		t.Fatal("partial = false, want true")
 	}
@@ -241,6 +244,9 @@ func TestCollectAssignedWorkBeads_PreservesPartialReadySurvivors(t *testing.T) {
 	}
 	if len(stores) != 1 || stores[0] != store {
 		t.Fatalf("stores = %#v, want source store for partial survivor", stores)
+	}
+	if len(storeRefs) != 1 || storeRefs[0] != "" {
+		t.Fatalf("storeRefs = %#v, want city store ref for partial survivor", storeRefs)
 	}
 }
 

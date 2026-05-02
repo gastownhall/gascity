@@ -27,6 +27,7 @@ func assignedWorkIndexReachableFromAgent(cityPath string, cfg *config.City, agen
 func filterAssignedWorkBeadsForPoolDemand(
 	cfg *config.City,
 	cityPath string,
+	sessionBeads []beads.Bead,
 	assignedWorkBeads []beads.Bead,
 	assignedWorkStoreRefs []string,
 ) []beads.Bead {
@@ -36,9 +37,38 @@ func filterAssignedWorkBeadsForPoolDemand(
 	if cfg == nil {
 		return assignedWorkBeads
 	}
+	assigneeToSessionBeadID := make(map[string]string)
+	sessionBeadTemplate := make(map[string]string)
+	for _, sb := range sessionBeads {
+		if sb.Status == "closed" {
+			continue
+		}
+		template := normalizedSessionTemplate(sb, cfg)
+		if template == "" {
+			template = strings.TrimSpace(sb.Metadata["template"])
+		}
+		if template != "" {
+			sessionBeadTemplate[sb.ID] = template
+		}
+		assigneeToSessionBeadID[sb.ID] = sb.ID
+		if sessionName := strings.TrimSpace(sb.Metadata["session_name"]); sessionName != "" {
+			assigneeToSessionBeadID[sessionName] = sb.ID
+		}
+		if identity := strings.TrimSpace(sb.Metadata["configured_named_identity"]); identity != "" {
+			assigneeToSessionBeadID[identity] = sb.ID
+		}
+	}
 	filtered := make([]beads.Bead, 0, len(assignedWorkBeads))
 	for i, wb := range assignedWorkBeads {
 		template := strings.TrimSpace(wb.Metadata["gc.routed_to"])
+		if template == "" {
+			if sessionBeadID := assigneeToSessionBeadID[strings.TrimSpace(wb.Assignee)]; sessionBeadID != "" {
+				template = sessionBeadTemplate[sessionBeadID]
+				if template == "" && len(cfg.Agents) == 1 {
+					template = cfg.Agents[0].QualifiedName()
+				}
+			}
+		}
 		if template == "" {
 			continue
 		}
