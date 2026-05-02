@@ -274,7 +274,7 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 	// During dry-run, mark the text as preview-only instead of creating it.
 	inlineText := false
 	if !isFormula {
-		createInlineBead, previewInlineText := resolveInlineBeadAction(cfg, beadOrFormula, dryRun)
+		createInlineBead, previewInlineText := resolveInlineBeadAction(cfg, beadOrFormula, dryRun, store)
 		inlineText = previewInlineText
 		if createInlineBead {
 			created, err := store.Create(beads.Bead{Title: beadOrFormula, Description: stdinDescription, Type: "task"})
@@ -1800,15 +1800,48 @@ func looksLikeBeadIDSuffix(baseSuffix string) bool {
 	return false
 }
 
-func shouldCreateInlineBead(cfg *config.City, beadOrFormula string) bool {
-	return looksLikeInlineText(cfg, beadOrFormula)
-}
-
-func resolveInlineBeadAction(cfg *config.City, beadOrFormula string, dryRun bool) (createInlineBead, previewInlineText bool) {
-	if dryRun && looksLikeInlineText(cfg, beadOrFormula) {
+func resolveInlineBeadAction(cfg *config.City, beadOrFormula string, dryRun bool, store beads.Store) (createInlineBead, previewInlineText bool) {
+	// Fast path: heuristics already classify this as a bead ID.
+	if !looksLikeInlineText(cfg, beadOrFormula) {
+		return false, false
+	}
+	// Store probe: covers IDs that pass the shape pre-check but fail the
+	// heuristic (e.g. descriptive multi-dash IDs like "fo-spawn-storm").
+	// A store hit means the bead exists and should be routed, not created.
+	if store != nil && isBeadIDCandidate(beadOrFormula) {
+		if _, err := store.Get(beadOrFormula); err == nil {
+			return false, false
+		}
+	}
+	if dryRun {
 		return false, true
 	}
-	return shouldCreateInlineBead(cfg, beadOrFormula), false
+	return true, false
+}
+
+// isBeadIDCandidate reports whether s has the shape of a potential bead ID:
+// no whitespace, starts with a letter, contains only letters, digits, and
+// hyphens, and has at least one hyphen. Used to gate the store probe before
+// falling back to inline-text creation.
+func isBeadIDCandidate(s string) bool {
+	if s == "" || strings.ContainsAny(s, " \t\n") {
+		return false
+	}
+	first := s[0]
+	if !('a' <= first && first <= 'z') && !('A' <= first && first <= 'Z') {
+		return false
+	}
+	hasDash := false
+	for _, c := range s {
+		switch {
+		case c == '-':
+			hasDash = true
+		case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9':
+		default:
+			return false
+		}
+	}
+	return hasDash
 }
 
 func looksLikeInlineText(cfg *config.City, beadOrFormula string) bool {

@@ -1446,7 +1446,7 @@ func TestCmdSlingDryRunInlineTextHasNoFalsePositivePreCheck(t *testing.T) {
 }
 
 func TestResolveInlineBeadActionDryRunInlineTextDoesNotProbeStore(t *testing.T) {
-	create, inlineText := resolveInlineBeadAction(&config.City{}, "write docs", true)
+	create, inlineText := resolveInlineBeadAction(&config.City{}, "write docs", true, nil)
 	if create {
 		t.Fatal("create = true, want false during dry-run")
 	}
@@ -1456,7 +1456,7 @@ func TestResolveInlineBeadActionDryRunInlineTextDoesNotProbeStore(t *testing.T) 
 }
 
 func TestResolveInlineBeadActionWhitespaceInlineTextDoesNotProbeStore(t *testing.T) {
-	create, inlineText := resolveInlineBeadAction(&config.City{}, "write docs", false)
+	create, inlineText := resolveInlineBeadAction(&config.City{}, "write docs", false, nil)
 	if !create {
 		t.Fatal("create = false, want true for whitespace inline text")
 	}
@@ -1466,7 +1466,7 @@ func TestResolveInlineBeadActionWhitespaceInlineTextDoesNotProbeStore(t *testing
 }
 
 func TestResolveInlineBeadActionSingleTokenInlineTextDoesNotProbeStore(t *testing.T) {
-	create, inlineText := resolveInlineBeadAction(&config.City{}, "docs", false)
+	create, inlineText := resolveInlineBeadAction(&config.City{}, "docs", false, nil)
 	if !create {
 		t.Fatal("create = false, want true for single-token inline text")
 	}
@@ -1476,7 +1476,7 @@ func TestResolveInlineBeadActionSingleTokenInlineTextDoesNotProbeStore(t *testin
 }
 
 func TestResolveInlineBeadActionBeadIDDoesNotProbeStore(t *testing.T) {
-	create, inlineText := resolveInlineBeadAction(&config.City{}, "FE-123", false)
+	create, inlineText := resolveInlineBeadAction(&config.City{}, "FE-123", false, nil)
 	if create {
 		t.Fatal("create = true, want false for bead ID")
 	}
@@ -1495,7 +1495,7 @@ func TestResolveInlineBeadActionHyphenatedRigPrefixIsBeadID(t *testing.T) {
 		},
 	}
 
-	create, inlineText := resolveInlineBeadAction(cfg, "agent-diagnostics-hnn", false)
+	create, inlineText := resolveInlineBeadAction(cfg, "agent-diagnostics-hnn", false, nil)
 	if create {
 		t.Fatal("create = true, want false for configured hyphenated bead ID")
 	}
@@ -1503,7 +1503,7 @@ func TestResolveInlineBeadActionHyphenatedRigPrefixIsBeadID(t *testing.T) {
 		t.Fatal("inlineText = true, want false outside dry-run")
 	}
 
-	create, inlineText = resolveInlineBeadAction(cfg, "agent-diagnostics-hnn", true)
+	create, inlineText = resolveInlineBeadAction(cfg, "agent-diagnostics-hnn", true, nil)
 	if create {
 		t.Fatal("create = true, want false during dry-run")
 	}
@@ -1513,13 +1513,13 @@ func TestResolveInlineBeadActionHyphenatedRigPrefixIsBeadID(t *testing.T) {
 }
 
 func TestResolveInlineBeadActionUnknownHyphenatedTextStillCreates(t *testing.T) {
-	// Inline text shaped like "<unknown-prefix>-<word>" must still create
-	// an inline task bead. Only inputs that match a CONFIGURED rig prefix
-	// are protected from the auto-create branch.
+	// Inline text shaped like "<unknown-prefix>-<word>" with no store must
+	// still create an inline task bead. Only inputs that match a CONFIGURED
+	// rig prefix are protected from the auto-create branch (without a store).
 	cfg := &config.City{
 		Rigs: []config.Rig{{Name: "fe", Path: "/fe", Prefix: "fe"}},
 	}
-	create, inlineText := resolveInlineBeadAction(cfg, "code-review-please", false)
+	create, inlineText := resolveInlineBeadAction(cfg, "code-review-please", false, nil)
 	if !create {
 		t.Fatal("create = false, want true for non-configured hyphenated text")
 	}
@@ -1534,7 +1534,7 @@ func TestResolveInlineBeadActionConfiguredAlphaSuffixIsBeadID(t *testing.T) {
 		Rigs:      []config.Rig{{Name: "frontend", Path: "/tmp/frontend", Prefix: "FE"}},
 	}
 
-	create, inlineText := resolveInlineBeadAction(cfg, "FE-hello", false)
+	create, inlineText := resolveInlineBeadAction(cfg, "FE-hello", false, nil)
 	if create {
 		t.Fatal("create = true, want false for configured bead ID with all-alpha suffix")
 	}
@@ -1542,12 +1542,54 @@ func TestResolveInlineBeadActionConfiguredAlphaSuffixIsBeadID(t *testing.T) {
 		t.Fatal("inlineText = true, want false outside dry-run")
 	}
 
-	create, inlineText = resolveInlineBeadAction(cfg, "FE-a1pha", false)
+	create, inlineText = resolveInlineBeadAction(cfg, "FE-a1pha", false, nil)
 	if create {
 		t.Fatal("create = true, want false for configured bead ID with digit")
 	}
 	if inlineText {
 		t.Fatal("inlineText = true, want false for configured bead ID")
+	}
+}
+
+func TestResolveInlineBeadActionMultiDashStoreHitIsBeadID(t *testing.T) {
+	// A multi-dash ID that fails the suffix heuristic but exists in the store
+	// must classify as a bead ID, not inline text.
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "fo", Path: "/tmp/fo", Prefix: "fo"}},
+	}
+	store := seededStore("fo-spawn-storm")
+
+	create, inlineText := resolveInlineBeadAction(cfg, "fo-spawn-storm", false, store)
+	if create {
+		t.Fatal("create = true, want false — bead exists in store")
+	}
+	if inlineText {
+		t.Fatal("inlineText = true, want false outside dry-run")
+	}
+
+	create, inlineText = resolveInlineBeadAction(cfg, "fo-spawn-storm", true, store)
+	if create {
+		t.Fatal("create = true, want false during dry-run")
+	}
+	if inlineText {
+		t.Fatal("inlineText = true, want false — bead exists in store")
+	}
+}
+
+func TestResolveInlineBeadActionMultiDashStoreMissStillCreates(t *testing.T) {
+	// A multi-dash ID absent from the store falls through to inline-text
+	// creation — the caller will auto-create a bead from the text.
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "fo", Path: "/tmp/fo", Prefix: "fo"}},
+	}
+	store := seededStore() // empty
+
+	create, inlineText := resolveInlineBeadAction(cfg, "fo-typo-not-real", false, store)
+	if !create {
+		t.Fatal("create = false, want true for unknown multi-dash text")
+	}
+	if inlineText {
+		t.Fatal("inlineText = true, want false outside dry-run")
 	}
 }
 
@@ -1985,6 +2027,67 @@ func TestCmdSlingAcceptsExistingBead(t *testing.T) {
 	)
 	if strings.Contains(stderr.String(), "not found in store") {
 		t.Errorf("existence check incorrectly tripped on a real bead; stderr: %s", stderr.String())
+	}
+}
+
+func TestCmdSlingMultiDashBeadIDRoutesExistingBead(t *testing.T) {
+	// gc sling target fo-spawn-storm must route the existing bead and must
+	// not create a new inline bead, when "fo-spawn-storm" exists in the store.
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "foundations")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rig): %v", err)
+	}
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatalf("ensureScopedFileStoreLayout: %v", err)
+	}
+	for _, dir := range []string{cityDir, rigDir} {
+		if err := ensurePersistedScopeLocalFileStore(dir); err != nil {
+			t.Fatalf("ensurePersistedScopeLocalFileStore(%s): %v", dir, err)
+		}
+	}
+	writeTestFileStoreBeads(t, rigDir, []beads.Bead{{
+		ID:       "fo-spawn-storm",
+		Title:    "spawn storm bead",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{},
+	}})
+	cityToml := `[workspace]
+name = "demo"
+
+[[rigs]]
+name = "foundations"
+path = "foundations"
+prefix = "fo"
+
+[[agent]]
+name = "worker"
+dir = "foundations"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Chdir(cityDir)
+
+	var stdout, stderr bytes.Buffer
+	_ = cmdSling(
+		[]string{"foundations/worker", "fo-spawn-storm"},
+		false, false, false,
+		"", nil, "",
+		true, false, "",
+		false, false, false,
+		"", "",
+		&stdout, &stderr,
+	)
+	if strings.Contains(stdout.String(), "Created ") {
+		t.Errorf("created new inline bead instead of routing existing one; stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "not found") {
+		t.Errorf("unexpected 'not found' error; stderr=%s", stderr.String())
 	}
 }
 
