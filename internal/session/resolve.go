@@ -109,6 +109,18 @@ func listSessionBeadsByMetadata(store beads.Store, key, value string, allowClose
 }
 
 func filterOutAliasMatches(in []beads.Bead, identifier string) []beads.Bead {
+	hasSessionNameOnlyMatch := false
+	for _, b := range in {
+		if strings.TrimSpace(b.Metadata["alias"]) != identifier {
+			hasSessionNameOnlyMatch = true
+			break
+		}
+	}
+	if !hasSessionNameOnlyMatch {
+		return in
+	}
+	// Demote dual alias/session_name beads only when another session_name
+	// match can own the identifier; otherwise session_name still wins.
 	out := in[:0]
 	for _, b := range in {
 		if strings.TrimSpace(b.Metadata["alias"]) == identifier {

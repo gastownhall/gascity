@@ -304,6 +304,33 @@ func TestResolveSessionID_PrefersSessionNameOverDualAliasSessionNameBead(t *test
 	}
 }
 
+func TestResolveSessionID_DualAliasSessionNameBeadWinsWhenNoOtherSessionNameMatch(t *testing.T) {
+	store := beads.NewMemStore()
+	dual, _ := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "worker",
+			"session_name": "worker",
+		},
+	})
+	_, _ = store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias": "worker",
+		},
+	})
+
+	id, err := session.ResolveSessionID(store, "worker")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != dual.ID {
+		t.Fatalf("got %q, want dual session-name match %q", id, dual.ID)
+	}
+}
+
 func TestResolveSessionID_DoesNotResolveHistoricalAlias(t *testing.T) {
 	store := beads.NewMemStore()
 	_, _ = store.Create(beads.Bead{

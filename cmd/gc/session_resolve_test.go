@@ -27,7 +27,7 @@ func (s *listQueryCaptureStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 func TestResolveConfiguredNamedSessionID_BoundedListCalls(t *testing.T) {
 	cityPath := t.TempDir()
 	cfg := &config.City{
-		Workspace: config.Workspace{Name: "test-city"},
+		Workspace: config.Workspace{Name: "test-city", SessionTemplate: "{{.City}}--{{.Agent}}"},
 		Agents: []config.Agent{{
 			Name:         "mayor",
 			StartCommand: "true",
@@ -94,7 +94,7 @@ func TestResolveConfiguredNamedSessionID_BoundedListCalls(t *testing.T) {
 func TestResolveConfiguredNamedSessionID_BoundedConflictListCalls(t *testing.T) {
 	cityPath := t.TempDir()
 	cfg := &config.City{
-		Workspace: config.Workspace{Name: "test-city"},
+		Workspace: config.Workspace{Name: "test-city", SessionTemplate: "{{.City}}--{{.Agent}}"},
 		Agents: []config.Agent{{
 			Name:         "mayor",
 			StartCommand: "true",
@@ -137,8 +137,8 @@ func TestResolveConfiguredNamedSessionID_BoundedConflictListCalls(t *testing.T) 
 	if len(store.listCalls) == 0 {
 		t.Fatalf("expected at least one List call")
 	}
-	if len(store.listCalls) > 5 {
-		t.Fatalf("List calls = %d, want bounded small constant", len(store.listCalls))
+	if len(store.listCalls) > 4 {
+		t.Fatalf("List calls = %d, want bounded small constant without duplicate session_name lookup", len(store.listCalls))
 	}
 	for i, q := range store.listCalls {
 		if len(q.Metadata) == 0 {

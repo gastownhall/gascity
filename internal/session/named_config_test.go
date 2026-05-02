@@ -393,6 +393,63 @@ func (s *listCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	return s.MemStore.List(query)
 }
 
+func TestLookupConfiguredNamedSession_BoundedConflictQueries(t *testing.T) {
+	store := &listCountingStore{MemStore: beads.NewMemStore()}
+	spec := NamedSessionSpec{
+		Identity:    "mayor",
+		SessionName: "test-city--mayor",
+	}
+	conflict, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name": spec.SessionName,
+			"template":     "other",
+			"agent_name":   "other",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(conflict): %v", err)
+	}
+
+	lookup, err := LookupConfiguredNamedSession(store, spec)
+	if err != nil {
+		t.Fatalf("LookupConfiguredNamedSession: %v", err)
+	}
+	if !lookup.HasConflict {
+		t.Fatal("HasConflict = false, want true")
+	}
+	if lookup.Conflict.ID != conflict.ID {
+		t.Fatalf("Conflict.ID = %q, want %q", lookup.Conflict.ID, conflict.ID)
+	}
+	if len(store.queries) > 4 {
+		t.Fatalf("List calls = %d, want bounded small constant without duplicate session_name lookup", len(store.queries))
+	}
+	for i, query := range store.queries {
+		if query.Label != LabelSession {
+			t.Fatalf("query #%d Label = %q, want %q", i, query.Label, LabelSession)
+		}
+		if len(query.Metadata) == 0 {
+			t.Fatalf("query #%d has no metadata filter: %+v", i, query)
+		}
+	}
+}
+
+func TestLookupConfiguredNamedSession_EmptySpecNoListCall(t *testing.T) {
+	store := &listCountingStore{MemStore: beads.NewMemStore()}
+
+	lookup, err := LookupConfiguredNamedSession(store, NamedSessionSpec{})
+	if err != nil {
+		t.Fatalf("LookupConfiguredNamedSession(empty): %v", err)
+	}
+	if lookup.HasCanonical || lookup.HasConflict {
+		t.Fatalf("lookup = %+v, want empty result", lookup)
+	}
+	if len(store.queries) != 0 {
+		t.Fatalf("List calls = %d, want 0", len(store.queries))
+	}
+}
+
 func TestNamedSessionResolutionCandidates_SingleListByLabel(t *testing.T) {
 	store := &listCountingStore{MemStore: beads.NewMemStore()}
 	canonical, err := store.Create(beads.Bead{

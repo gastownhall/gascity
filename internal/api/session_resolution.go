@@ -136,11 +136,10 @@ func (s *Server) findCanonicalNamedSession(store beads.Store, spec apiNamedSessi
 	if store == nil {
 		return beads.Bead{}, false, nil
 	}
-	candidates, err := session.NamedSessionResolutionCandidates(store, spec)
+	bead, ok, err := session.FindCanonicalConfiguredNamedSessionBead(store, spec)
 	if err != nil {
-		return beads.Bead{}, false, fmt.Errorf("listing named session candidates: %w", err)
+		return beads.Bead{}, false, fmt.Errorf("looking up canonical named session: %w", err)
 	}
-	bead, ok := session.FindCanonicalNamedSessionBead(candidates, spec)
 	return bead, ok, nil
 }
 
@@ -227,20 +226,15 @@ func (s *Server) resolveConfiguredNamedSessionIDWithContext(ctx context.Context,
 	if !ok {
 		return "", false, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
-	bead, hasCanonical, err := s.findCanonicalNamedSession(store, spec)
+	lookup, err := session.LookupConfiguredNamedSession(store, spec)
 	if err != nil {
-		return "", true, err
+		return "", true, fmt.Errorf("looking up configured named session: %w", err)
 	}
-	if hasCanonical {
-		return bead.ID, true, nil
+	if lookup.HasCanonical {
+		return lookup.Canonical.ID, true, nil
 	}
-
-	all, err := session.NamedSessionResolutionCandidates(store, spec)
-	if err != nil {
-		return "", true, fmt.Errorf("listing named session candidates: %w", err)
-	}
-	if bead, conflict := session.FindNamedSessionConflict(all, spec); conflict {
-		return "", true, fmt.Errorf("%w: %q conflicts with configured named session %q via live bead %s", errConfiguredNamedSessionConflict, identifier, spec.Identity, bead.ID)
+	if lookup.HasConflict {
+		return "", true, fmt.Errorf("%w: %q conflicts with configured named session %q via live bead %s", errConfiguredNamedSessionConflict, identifier, spec.Identity, lookup.Conflict.ID)
 	}
 
 	if !opts.materialize {
