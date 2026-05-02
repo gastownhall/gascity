@@ -119,6 +119,7 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 	if reqIDErr != nil {
 		return nil, huma.Error500InternalServerError(reqIDErr.Error())
 	}
+	eventCursor := s.currentCityEventCursor()
 
 	go func() {
 		defer s.recoverAsRequestFailed(reqID, RequestOperationSessionCreate)
@@ -170,7 +171,7 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 				return nameErr
 			}
 			var err error
-			info, err = handle.Create(context.Background(), worker.CreateModeDeferred)
+			info, err = handle.Create(context.Background(), worker.CreateModeStarted)
 			return err
 		})
 		if createErr != nil {
@@ -193,6 +194,7 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 	out := &SessionCreateOutput{Status: http.StatusAccepted}
 	out.Body.Status = "accepted"
 	out.Body.RequestID = reqID
+	out.Body.EventCursor = eventCursor
 	return out, nil
 }
 
@@ -284,6 +286,7 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Store,
 	if reqIDErr != nil {
 		return nil, huma.Error500InternalServerError(reqIDErr.Error())
 	}
+	eventCursor := s.currentCityEventCursor()
 	go func() {
 		defer s.recoverAsRequestFailed(reqID, RequestOperationSessionCreate)
 		resolvedCfg, cfgErr := resolvedSessionConfigForProvider(alias, "", template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
@@ -333,6 +336,7 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Store,
 	out := &SessionCreateOutput{Status: http.StatusAccepted}
 	out.Body.Status = "accepted"
 	out.Body.RequestID = reqID
+	out.Body.EventCursor = eventCursor
 	return out, nil
 }
 
@@ -439,6 +443,7 @@ func (s *Server) humaHandleSessionSubmit(_ context.Context, input *SessionSubmit
 	if reqIDErr != nil {
 		return nil, huma.Error500InternalServerError(reqIDErr.Error())
 	}
+	eventCursor := s.currentCityEventCursor()
 	message := input.Body.Message
 	sessionTarget := input.ID
 	go func() {
@@ -459,6 +464,7 @@ func (s *Server) humaHandleSessionSubmit(_ context.Context, input *SessionSubmit
 	out := &SessionSubmitOutput{}
 	out.Body.Status = "accepted"
 	out.Body.RequestID = reqID
+	out.Body.EventCursor = eventCursor
 	return out, nil
 }
 
@@ -476,6 +482,7 @@ func (s *Server) humaHandleSessionMessage(_ context.Context, input *SessionMessa
 	if reqIDErr != nil {
 		return nil, huma.Error500InternalServerError(reqIDErr.Error())
 	}
+	eventCursor := s.currentCityEventCursor()
 	message := input.Body.Message
 	sessionTarget := input.ID
 	go func() {
@@ -555,6 +562,7 @@ func (s *Server) humaHandleSessionMessage(_ context.Context, input *SessionMessa
 	out := &SessionMessageOutput{}
 	out.Body.Status = "accepted"
 	out.Body.RequestID = reqID
+	out.Body.EventCursor = eventCursor
 	return out, nil
 }
 

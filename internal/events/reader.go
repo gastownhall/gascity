@@ -57,21 +57,100 @@ func ReadFiltered(path string, filter Filter) ([]Event, error) {
 
 	var result []Event
 	for _, e := range all {
-		if filter.AfterSeq > 0 && e.Seq <= filter.AfterSeq {
-			continue
+		if eventMatchesFilter(e, filter) {
+			result = append(result, e)
 		}
-		if filter.Type != "" && e.Type != filter.Type {
-			continue
-		}
-		if filter.Actor != "" && e.Actor != filter.Actor {
-			continue
-		}
-		if !filter.Since.IsZero() && e.Ts.Before(filter.Since) {
-			continue
-		}
-		result = append(result, e)
 	}
 	return result, nil
+}
+
+// ReadFilteredTail reads the trailing matching events from path. A positive
+// limit returns at most that many events in chronological order; limit <= 0
+// falls back to ReadFiltered.
+func ReadFilteredTail(path string, filter Filter, limit int) ([]Event, error) {
+	if limit <= 0 {
+		return ReadFiltered(path, filter)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading events tail: %w", err)
+	}
+	defer f.Close() //nolint:errcheck // read-only file
+
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat events tail: %w", err)
+	}
+	return readFilteredTailFromFile(f, info.Size(), filter, limit)
+}
+
+func readFilteredTailFromFile(f *os.File, size int64, filter Filter, limit int) ([]Event, error) {
+	if size <= 0 {
+		return nil, nil
+	}
+	const chunkSize int64 = 64 * 1024
+	var reversed []Event
+	var pending []byte
+	end := size
+	for end > 0 && len(reversed) < limit {
+		n := chunkSize
+		if end < n {
+			n = end
+		}
+		start := end - n
+		chunk := make([]byte, n)
+		if _, err := f.ReadAt(chunk, start); err != nil && err != io.EOF {
+			return nil, fmt.Errorf("reading events tail: %w", err)
+		}
+		data := make([]byte, 0, len(chunk)+len(pending))
+		data = append(data, chunk...)
+		data = append(data, pending...)
+		parts := bytes.Split(data, []byte{'\n'})
+		firstComplete := 0
+		if start > 0 {
+			pending = append(pending[:0], parts[0]...)
+			firstComplete = 1
+		} else {
+			pending = nil
+		}
+		for i := len(parts) - 1; i >= firstComplete && len(reversed) < limit; i-- {
+			line := bytes.TrimSuffix(parts[i], []byte{'\r'})
+			if len(bytes.TrimSpace(line)) == 0 {
+				continue
+			}
+			var e Event
+			if err := json.Unmarshal(line, &e); err != nil {
+				continue
+			}
+			if eventMatchesFilter(e, filter) {
+				reversed = append(reversed, e)
+			}
+		}
+		end = start
+	}
+	for i, j := 0, len(reversed)-1; i < j; i, j = i+1, j-1 {
+		reversed[i], reversed[j] = reversed[j], reversed[i]
+	}
+	return reversed, nil
+}
+
+func eventMatchesFilter(e Event, filter Filter) bool {
+	if filter.AfterSeq > 0 && e.Seq <= filter.AfterSeq {
+		return false
+	}
+	if filter.Type != "" && e.Type != filter.Type {
+		return false
+	}
+	if filter.Actor != "" && e.Actor != filter.Actor {
+		return false
+	}
+	if !filter.Since.IsZero() && e.Ts.Before(filter.Since) {
+		return false
+	}
+	return true
 }
 
 // ReadLatestSeq returns the latest complete event Seq in the events file, or

@@ -743,6 +743,9 @@ func (m *Manager) Pending(id string) (*runtime.PendingInteraction, bool, error) 
 		if errors.Is(err, runtime.ErrInteractionUnsupported) {
 			return nil, false, nil
 		}
+		if runtime.IsSessionGone(err) {
+			return nil, true, nil
+		}
 		return nil, true, fmt.Errorf("getting pending interaction: %w", err)
 	}
 	return pending, true, nil
@@ -763,6 +766,9 @@ func (m *Manager) Respond(id string, response runtime.InteractionResponse) error
 		if err != nil {
 			if errors.Is(err, runtime.ErrInteractionUnsupported) {
 				return ErrInteractionUnsupported
+			}
+			if runtime.IsSessionGone(err) {
+				return ErrNoPendingInteraction
 			}
 			return fmt.Errorf("getting pending interaction: %w", err)
 		}

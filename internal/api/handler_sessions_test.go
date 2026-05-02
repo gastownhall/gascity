@@ -378,6 +378,14 @@ func (p *blockingNudgeProvider) Nudge(name string, content []runtime.ContentBloc
 	return p.Fake.Nudge(name, content)
 }
 
+type pendingSessionMissingProvider struct {
+	*runtime.Fake
+}
+
+func (p *pendingSessionMissingProvider) Pending(_ string) (*runtime.PendingInteraction, error) {
+	return nil, fmt.Errorf("capturing pane: %w", runtime.ErrSessionNotFound)
+}
+
 type stateWithSessionProvider struct {
 	*fakeState
 	provider runtime.Provider
@@ -2096,6 +2104,44 @@ func TestHandleSessionCreateAsync(t *testing.T) {
 	}
 	if fs.pokeCount != 1 {
 		t.Fatalf("pokeCount = %d, want 1", fs.pokeCount)
+	}
+}
+
+func TestHandleSessionCreateAsyncResultIsCommandable(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	body := `{"kind":"agent","name":"myrig/worker","alias":"commandable","async":true}`
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("create status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	accepted := decodeAsyncAccepted(t, rec.Body)
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
+	}
+	if success.Session.State == string(session.StateCreating) {
+		t.Fatalf("session create result state = %q, want commandable state", success.Session.State)
+	}
+
+	suspendReq := newPostRequest(cityURL(fs, "/session/")+success.Session.ID+"/suspend", nil)
+	suspendRec := httptest.NewRecorder()
+	h.ServeHTTP(suspendRec, suspendReq)
+
+	if suspendRec.Code != http.StatusOK {
+		t.Fatalf("suspend status = %d, want %d; body: %s", suspendRec.Code, http.StatusOK, suspendRec.Body.String())
+	}
+	bead, err := fs.cityBeadStore.Get(success.Session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", success.Session.ID, err)
+	}
+	if got := bead.Metadata["state"]; got != string(session.StateSuspended) {
+		t.Fatalf("state after suspend = %q, want %q", got, session.StateSuspended)
 	}
 }
 
@@ -4244,6 +4290,46 @@ func TestHandleSessionPendingAndRespond(t *testing.T) {
 	}
 	if got := fs.sp.Responses[info.SessionName]; len(got) != 1 || got[0].Action != "approve" {
 		t.Fatalf("responses = %#v, want single approve", got)
+	}
+}
+
+func TestHandleSessionPendingReturnsEmptyWhenRuntimeSessionMissing(t *testing.T) {
+	fs := newSessionFakeState(t)
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Interactive")
+	state := &stateWithSessionProvider{
+		fakeState: fs,
+		provider:  &pendingSessionMissingProvider{Fake: fs.sp},
+	}
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/pending", nil)
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pending status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var pendingResp sessionPendingResponse
+	if err := json.NewDecoder(rec.Body).Decode(&pendingResp); err != nil {
+		t.Fatalf("decode pending: %v", err)
+	}
+	if !pendingResp.Supported {
+		t.Fatalf("Supported = false, want true for interaction-capable provider")
+	}
+	if pendingResp.Pending != nil {
+		t.Fatalf("Pending = %#v, want nil when runtime session is gone", pendingResp.Pending)
+	}
+
+	respondReq := newPostRequest(cityURL(fs, "/session/")+info.ID+"/respond", strings.NewReader(`{"action":"approve"}`))
+	respondRec := httptest.NewRecorder()
+	h.ServeHTTP(respondRec, respondReq)
+
+	if respondRec.Code != http.StatusConflict {
+		t.Fatalf("respond status = %d, want %d; body: %s", respondRec.Code, http.StatusConflict, respondRec.Body.String())
+	}
+	if !strings.Contains(respondRec.Body.String(), "no_pending") {
+		t.Fatalf("respond body = %q, want no_pending problem", respondRec.Body.String())
 	}
 }
 

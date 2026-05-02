@@ -53,6 +53,32 @@ func TestMultiplexerListAllWithFilter(t *testing.T) {
 	}
 }
 
+func TestMultiplexerListTailLimitsAcrossCities(t *testing.T) {
+	m := NewMultiplexer()
+
+	f1 := NewFake()
+	f1.Record(Event{Type: SessionWoke, Actor: "a1", Subject: "old-a", Ts: time.Unix(1, 0)})
+	f1.Record(Event{Type: SessionWoke, Actor: "a1", Subject: "new-a", Ts: time.Unix(3, 0)})
+
+	f2 := NewFake()
+	f2.Record(Event{Type: SessionWoke, Actor: "b1", Subject: "old-b", Ts: time.Unix(2, 0)})
+	f2.Record(Event{Type: SessionWoke, Actor: "b1", Subject: "new-b", Ts: time.Unix(4, 0)})
+
+	m.Add("city-a", f1)
+	m.Add("city-b", f2)
+
+	evts, err := m.ListTail(Filter{}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evts) != 2 {
+		t.Fatalf("got %d events, want 2", len(evts))
+	}
+	if evts[0].Subject != "new-a" || evts[1].Subject != "new-b" {
+		t.Fatalf("subjects = [%s %s], want [new-a new-b]", evts[0].Subject, evts[1].Subject)
+	}
+}
+
 func TestMultiplexerWatch(t *testing.T) {
 	m := NewMultiplexer()
 

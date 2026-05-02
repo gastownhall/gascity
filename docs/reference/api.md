@@ -100,6 +100,11 @@ the per-operation `responses.200.content.text/event-stream` entry.
 Clients should follow the standard SSE reconnection protocol
 (`Last-Event-ID` header) where the server supports it; the event bus
 stream (`/v0/events/stream`) replays from the last received index.
+When no cursor is supplied, event streams start at the current event
+head and deliver future events only. Async `202 Accepted` responses
+include an `event_cursor` captured before the operation starts; pass
+that value as `after_cursor` or `after_seq` to wait for the operation's
+request-result event without replaying unrelated historical backlog.
 
 Fatal setup errors are returned as normal Problem Details responses
 *before* the stream's 200 headers commit, never as a 200 stream that
@@ -121,12 +126,13 @@ is nothing to poll.
 
 ```json
 {
-  "request_id": "req-..."
+  "request_id": "req-...",
+  "event_cursor": "__supervisor__:42,my-city:17"
 }
 ```
 
-Use the returned `request_id` to correlate the completion event on
-the supervisor event stream.
+Use `request_id` to correlate the completion event. Use `event_cursor`
+as the `after_cursor` value on the supervisor event stream.
 
 ### Completion events
 
@@ -149,10 +155,8 @@ returned `request_id`; no polling of `GET /v0/cities` or
 
 Either order works. The recommended flow is:
 
-1. `POST /v0/city` and wait for `202 {request_id}`.
-2. `GET /v0/events/stream?after_cursor=0` — request replay from
-   the start so `city.created` and the terminal request event are
-   delivered even if they fired before subscribe.
+1. `POST /v0/city` and wait for `202 {request_id, event_cursor}`.
+2. `GET /v0/events/stream?after_cursor=<event_cursor>`.
 3. Read frames until `payload.request_id == response.request_id` and
    `type ∈ {"request.result.city.create", "request.failed"}`.
 
@@ -193,9 +197,13 @@ simple `gc register`.
 
 ```json
 {
-  "request_id": "req-..."
+  "request_id": "req-...",
+  "event_cursor": "__supervisor__:43,my-city:21"
 }
 ```
+
+Pass `event_cursor` as `after_cursor` on `/v0/events/stream` and wait
+for the terminal event whose payload contains the returned `request_id`.
 
 ### Completion events
 
@@ -244,7 +252,8 @@ behavior, heartbeat suppression, and the `--seq` plain-text cursor format, see
   terminal `request.result.session.*` or `request.failed` events by
   `payload.request_id`.
 - Resume:
-  - `Last-Event-ID` or `after_seq`
+  - `Last-Event-ID` or `after_seq`; omit both to start from the
+    current city event head.
 - `gc events` in city scope outputs one `TypedEventStreamEnvelope` JSON
   object per line.
 - `gc events --watch` and `gc events --follow` in city scope output one
@@ -263,7 +272,8 @@ behavior, heartbeat suppression, and the `--seq` plain-text cursor format, see
   on this stream. Match terminal `request.result.city.*` or
   `request.failed` events by `payload.request_id`.
 - Resume:
-  - `Last-Event-ID` or `after_cursor`
+  - `Last-Event-ID` or `after_cursor`; omit both to start from the
+    current supervisor event head.
 - `gc events` in supervisor scope outputs one `TypedTaggedEventStreamEnvelope`
   JSON object per line.
 - `gc events --watch` and `gc events --follow` in supervisor scope

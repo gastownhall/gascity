@@ -138,6 +138,14 @@ func (s *Server) streamEvents(hctx huma.Context, input *EventStreamInput, send s
 	ctx := hctx.Context()
 	ep := s.state.EventProvider()
 	afterSeq := input.resolveAfterSeq()
+	if strings.TrimSpace(input.LastEventID) == "" && strings.TrimSpace(input.AfterSeq) == "" {
+		seq, err := ep.LatestSeq()
+		if err != nil {
+			log.Printf("api: events-stream: latest seq failed: %v", err)
+		} else {
+			afterSeq = seq
+		}
+	}
 	watcher, err := ep.Watch(ctx, afterSeq)
 	if err != nil {
 		log.Printf("api: events-stream: Watch failed after_seq=%d: %v", afterSeq, err)

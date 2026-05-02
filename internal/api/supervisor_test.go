@@ -491,6 +491,28 @@ func TestSupervisorPerCityEventStreamEmitsNoPayloadObject(t *testing.T) {
 	}
 }
 
+func TestSupervisorPerCityEventStreamWithoutCursorStartsAtHead(t *testing.T) {
+	s := newFakeState(t)
+	s.cityName = "gc-work"
+	ep := s.eventProv.(*events.Fake)
+	ep.Record(events.Event{Type: events.SessionWoke, Actor: "tester", Subject: "old"})
+
+	sm := newTestSupervisorMux(t, map[string]*fakeState{
+		"gc-work": s,
+	})
+
+	frame := firstSSEFrameAfterRecord(t, sm, "/v0/city/gc-work/events/stream", "event", func() {
+		ep.Record(events.Event{Type: events.SessionWoke, Actor: "tester", Subject: "new"})
+	})
+	if frame.ID != "2" {
+		t.Fatalf("SSE id = %q, want 2; body=%s", frame.ID, frame.Data)
+	}
+	data := decodeSSETestData(t, frame)
+	if data["subject"] != "new" {
+		t.Fatalf("data.subject = %v, want new; data=%v", data["subject"], data)
+	}
+}
+
 func TestSupervisorGlobalEventList(t *testing.T) {
 	s1 := newFakeState(t)
 	s1.cityName = "alpha"
@@ -664,6 +686,42 @@ func TestSupervisorGlobalEventListWithFilter(t *testing.T) {
 	}
 	if resp.Items[0].Type != events.SessionWoke {
 		t.Errorf("type = %q, want %q", resp.Items[0].Type, events.SessionWoke)
+	}
+}
+
+func TestSupervisorGlobalEventListLimitReturnsTail(t *testing.T) {
+	s1 := newFakeState(t)
+	s1.cityName = "alpha"
+	ep := s1.eventProv.(*events.Fake)
+	ep.Record(events.Event{Type: events.SessionWoke, Actor: "a1", Subject: "old"})
+	ep.Record(events.Event{Type: events.SessionStopped, Actor: "a1", Subject: "middle"})
+	ep.Record(events.Event{Type: events.SessionWoke, Actor: "a1", Subject: "new"})
+
+	sm := newTestSupervisorMux(t, map[string]*fakeState{"alpha": s1})
+
+	req := httptest.NewRequest("GET", "/v0/events?limit=1", nil)
+	rec := httptest.NewRecorder()
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Items []events.TaggedEvent `json:"items"`
+		Total int                  `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 3 {
+		t.Fatalf("total = %d, want 3", resp.Total)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("items len = %d, want 1", len(resp.Items))
+	}
+	if resp.Items[0].Subject != "new" {
+		t.Fatalf("subject = %q, want new", resp.Items[0].Subject)
 	}
 }
 
@@ -888,6 +946,28 @@ func TestSupervisorGlobalEventStreamEmitsNoPayloadObject(t *testing.T) {
 	payloadObject := assertJSONPayloadObject(t, data["payload"])
 	if len(payloadObject) != 0 {
 		t.Fatalf("data.payload = %v, want empty object for NoPayload", payloadObject)
+	}
+}
+
+func TestSupervisorGlobalEventStreamWithoutCursorStartsAtHead(t *testing.T) {
+	s := newFakeState(t)
+	s.cityName = "alpha"
+	ep := s.eventProv.(*events.Fake)
+	ep.Record(events.Event{Type: events.SessionWoke, Actor: "tester", Subject: "old"})
+
+	sm := newTestSupervisorMux(t, map[string]*fakeState{
+		"alpha": s,
+	})
+
+	frame := firstSSEFrameAfterRecord(t, sm, "/v0/events/stream", "tagged_event", func() {
+		ep.Record(events.Event{Type: events.SessionWoke, Actor: "tester", Subject: "new"})
+	})
+	if frame.ID != "alpha:2" {
+		t.Fatalf("SSE id = %q, want alpha:2; body=%s", frame.ID, frame.Data)
+	}
+	data := decodeSSETestData(t, frame)
+	if data["subject"] != "new" {
+		t.Fatalf("data.subject = %v, want new; data=%v", data["subject"], data)
 	}
 }
 

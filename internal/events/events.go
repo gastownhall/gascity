@@ -135,6 +135,12 @@ type Provider interface {
 	Close() error
 }
 
+// TailProvider is an optional extension for providers that can return the
+// trailing matching events without scanning or materializing the whole history.
+type TailProvider interface {
+	ListTail(filter Filter, limit int) ([]Event, error)
+}
+
 // Watcher yields events one at a time. Created by [Provider.Watch].
 // Callers must call Close() when done watching.
 type Watcher interface {

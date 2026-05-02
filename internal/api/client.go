@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"reflect"
 	"strings"
 	"time"
@@ -120,12 +121,19 @@ type sseEnvelope struct {
 // until it finds an event matching the given request_id (in success or
 // failure payloads), and returns the envelope. The caller decodes the
 // typed payload.
-func (c *Client) waitForEvent(ctx context.Context, requestID string, successType, failOp string) (*sseEnvelope, error) {
+func (c *Client) waitForEvent(ctx context.Context, requestID string, successType, failOp, eventCursor string) (*sseEnvelope, error) {
 	streamURL := c.baseURL + "/v0/events/stream"
+	cursor := strings.TrimSpace(eventCursor)
 	if c.cityName != "" {
-		streamURL = c.baseURL + "/v0/city/" + c.cityName + "/events/stream?after_seq=0"
+		if cursor == "" {
+			cursor = "0"
+		}
+		streamURL = c.baseURL + "/v0/city/" + c.cityName + "/events/stream?after_seq=" + url.QueryEscape(cursor)
 	} else {
-		streamURL += "?after_cursor=0"
+		if cursor == "" {
+			cursor = "0"
+		}
+		streamURL += "?after_cursor=" + url.QueryEscape(cursor)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, streamURL, nil)
 	if err != nil {
@@ -468,7 +476,7 @@ func (c *Client) SendSessionMessage(id, message string) error {
 	}
 	requestID := resp.JSON202.RequestId
 
-	env, err := c.waitForEvent(ctx, requestID, events.RequestResultSessionMessage, RequestOperationSessionMessage)
+	env, err := c.waitForEvent(ctx, requestID, events.RequestResultSessionMessage, RequestOperationSessionMessage, resp.JSON202.EventCursor)
 	if err != nil {
 		return err
 	}
@@ -511,7 +519,7 @@ func (c *Client) SubmitSession(id, message string, intent session.SubmitIntent) 
 
 	ctx, cancel := context.WithTimeout(context.Background(), sessionMessageTimeout)
 	defer cancel()
-	env, err := c.waitForEvent(ctx, requestID, events.RequestResultSessionSubmit, RequestOperationSessionSubmit)
+	env, err := c.waitForEvent(ctx, requestID, events.RequestResultSessionSubmit, RequestOperationSessionSubmit, resp.JSON202.EventCursor)
 	if err != nil {
 		return SessionSubmitResponse{}, err
 	}

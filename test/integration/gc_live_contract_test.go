@@ -81,7 +81,8 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 	cityName := "real-world-app-contract-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	cityDir := filepath.Join(root, "cities", cityName)
 	createCity := liveContractJSON[struct {
-		RequestID string `json:"request_id"`
+		RequestID   string `json:"request_id"`
+		EventCursor string `json:"event_cursor"`
 	}](t, baseURL, validator, http.MethodPost, "/v0/city", map[string]string{
 		"dir":           cityDir,
 		"start_command": "bash " + agentScript("stuck-agent.sh"),
@@ -89,13 +90,16 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 	if createCity.RequestID == "" {
 		t.Fatalf("city create response missing request_id")
 	}
+	if createCity.EventCursor == "" {
+		t.Fatalf("city create response missing event_cursor")
+	}
 
 	cityBase := "/v0/city/" + url.PathEscape(cityName)
 	waitForLiveContractRequestID[struct {
 		RequestID string `json:"request_id"`
 		Name      string `json:"name"`
 		Path      string `json:"path"`
-	}](t, baseURL, validator, "/v0/events", createCity.RequestID, "request.result.city.create", 120*time.Second)
+	}](t, baseURL, validator, "/v0/events", createCity.RequestID, "request.result.city.create", 120*time.Second, createCity.EventCursor)
 	liveContractJSON[struct {
 		Status string `json:"status"`
 	}](t, baseURL, validator, http.MethodGet, cityBase+"/health", nil, http.StatusOK)
@@ -501,11 +505,20 @@ description = "Read and complete {{issue}}."
 	}](t, baseURL, validator, http.MethodDelete, cityBase+"/rig/"+url.PathEscape(rigName), nil, http.StatusOK)
 
 	unregister := liveContractJSON[struct {
-		RequestID string `json:"request_id"`
+		RequestID   string `json:"request_id"`
+		EventCursor string `json:"event_cursor"`
 	}](t, baseURL, validator, http.MethodPost, cityBase+"/unregister", nil, http.StatusAccepted)
 	if unregister.RequestID == "" {
 		t.Fatalf("unregister response missing request_id")
 	}
+	if unregister.EventCursor == "" {
+		t.Fatalf("unregister response missing event_cursor")
+	}
+	waitForLiveContractRequestID[struct {
+		RequestID string `json:"request_id"`
+		Name      string `json:"name"`
+		Path      string `json:"path"`
+	}](t, baseURL, validator, "/v0/events", unregister.RequestID, "request.result.city.unregister", 120*time.Second, unregister.EventCursor)
 	waitForCityAbsent(t, baseURL, validator, cityName, 45*time.Second)
 }
 
@@ -616,8 +629,9 @@ type contractGraphDep struct {
 func createLiveContractAgentSession(t *testing.T, baseURL string, v openapivalidator.Validator, cityBase, targetAgent, rigName, label string) string {
 	t.Helper()
 	create := liveContractJSON[struct {
-		RequestID string `json:"request_id"`
-		Status    string `json:"status"`
+		RequestID   string `json:"request_id"`
+		EventCursor string `json:"event_cursor"`
+		Status      string `json:"status"`
 	}](t, baseURL, v, http.MethodPost, cityBase+"/sessions", map[string]any{
 		"alias":      "rw-" + label,
 		"async":      true,
@@ -629,6 +643,9 @@ func createLiveContractAgentSession(t *testing.T, baseURL string, v openapivalid
 	if create.RequestID == "" {
 		t.Fatalf("%s session create response missing request_id", label)
 	}
+	if create.EventCursor == "" {
+		t.Fatalf("%s session create response missing event_cursor", label)
+	}
 	result := waitForLiveContractRequestID[struct {
 		RequestID string `json:"request_id"`
 		Session   struct {
@@ -636,10 +653,14 @@ func createLiveContractAgentSession(t *testing.T, baseURL string, v openapivalid
 			Title string `json:"title"`
 			Alias string `json:"alias"`
 			Rig   string `json:"rig"`
+			State string `json:"state"`
 		} `json:"session"`
-	}](t, baseURL, v, "/v0/events", create.RequestID, "request.result.session.create", 120*time.Second)
+	}](t, baseURL, v, cityBase+"/events", create.RequestID, "request.result.session.create", 120*time.Second, create.EventCursor)
 	if result.Session.ID == "" {
 		t.Fatalf("%s session create result missing session.id", label)
+	}
+	if result.Session.State == "creating" {
+		t.Fatalf("%s session create result state = %q, want commandable state", label, result.Session.State)
 	}
 	if result.Session.Title != "real-world app contract "+label {
 		t.Fatalf("%s session title = %q", label, result.Session.Title)
@@ -650,6 +671,7 @@ func createLiveContractAgentSession(t *testing.T, baseURL string, v openapivalid
 	if result.Session.Alias == "" {
 		t.Fatalf("%s session missing controller-managed alias", label)
 	}
+	liveContractJSON[map[string]any](t, baseURL, v, http.MethodGet, cityBase+"/session/"+url.PathEscape(result.Session.ID)+"/pending", nil, http.StatusOK)
 	return result.Session.ID
 }
 
@@ -697,16 +719,20 @@ func exerciseLiveContractSessionLifecycle(t *testing.T, baseURL string, v openap
 	}
 
 	msg := liveContractJSON[struct {
-		RequestID string `json:"request_id"`
+		RequestID   string `json:"request_id"`
+		EventCursor string `json:"event_cursor"`
 	}](t, baseURL, v, http.MethodPost, sessionPath+"/messages", map[string]string{
 		"message": "real-world app contract message " + runID,
 	}, http.StatusAccepted)
 	if msg.RequestID == "" || msg.RequestID == id {
 		t.Fatalf("message response = %+v, want request_id distinct from session id %q", msg, id)
 	}
+	if msg.EventCursor == "" {
+		t.Fatalf("message response missing event_cursor")
+	}
 	waitForLiveContractRequestID[struct {
 		RequestID string `json:"request_id"`
-	}](t, baseURL, v, "/v0/events", msg.RequestID, "request.result.session.message", 120*time.Second)
+	}](t, baseURL, v, cityBase+"/events", msg.RequestID, "request.result.session.message", 120*time.Second, msg.EventCursor)
 
 	liveContractJSON[map[string]any](t, baseURL, v, http.MethodGet, sessionPath+"/pending", nil, http.StatusOK)
 	liveContractRequestOneOf(t, baseURL, v, http.MethodPost, sessionPath+"/respond", map[string]string{
@@ -756,6 +782,9 @@ func exerciseLiveContractSessionLifecycle(t *testing.T, baseURL string, v openap
 	if killed.ID != killID {
 		t.Fatalf("kill id = %q, want %q", killed.ID, killID)
 	}
+	liveContractJSON[struct {
+		Status string `json:"status"`
+	}](t, baseURL, v, http.MethodPost, cityBase+"/session/"+url.PathEscape(killID)+"/close?delete=true", nil, http.StatusOK)
 }
 
 func waitForLiveContractSessionState(t *testing.T, baseURL string, v openapivalidator.Validator, sessionPath, want string, timeout time.Duration) {
@@ -771,6 +800,31 @@ func waitForLiveContractSessionState(t *testing.T, baseURL string, v openapivali
 		time.Sleep(250 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s state at %s", want, sessionPath)
+}
+
+func waitForLiveContractSessionCommandable(t *testing.T, baseURL string, v openapivalidator.Validator, sessionPath string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var lastState string
+	for time.Now().Before(deadline) {
+		session := liveContractJSON[struct {
+			State string `json:"state"`
+		}](t, baseURL, v, http.MethodGet, sessionPath, nil, http.StatusOK)
+		lastState = session.State
+		switch session.State {
+		case "creating":
+			time.Sleep(250 * time.Millisecond)
+			continue
+		case "crashed", "closed":
+			t.Fatalf("session at %s reached state %q before command lifecycle checks", sessionPath, session.State)
+		default:
+			if session.State != "" {
+				return
+			}
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for session at %s to leave creating state; last state=%q", sessionPath, lastState)
 }
 
 func exerciseLiveContractFormulasAndWorkflows(t *testing.T, baseURL string, v openapivalidator.Validator, cityBase, formulaName, targetAgent, rigName, rootBeadID, runID string) {
@@ -1044,9 +1098,9 @@ func validateLiveContractResponse(t *testing.T, v openapivalidator.Validator, re
 	t.Fatalf("%s %s response does not match OpenAPI schema:\n%sbody: %s", req.Method, req.URL.Path, details.String(), string(raw))
 }
 
-func waitForLiveContractRequestID[T any](t *testing.T, baseURL string, v openapivalidator.Validator, path, requestID, successType string, timeout time.Duration) T {
+func waitForLiveContractRequestID[T any](t *testing.T, baseURL string, v openapivalidator.Validator, path, requestID, successType string, timeout time.Duration, eventCursor ...string) T {
 	t.Helper()
-	env := waitForLiveContractRequestEvent(t, baseURL, path, requestID, successType, timeout)
+	env := waitForLiveContractRequestEvent(t, baseURL, path, requestID, successType, timeout, eventCursor...)
 	var payload T
 	if err := json.Unmarshal(env.Payload, &payload); err != nil {
 		t.Fatalf("%s payload for request_id=%s did not decode: %v\npayload: %s", successType, requestID, err, string(env.Payload))
@@ -1054,19 +1108,38 @@ func waitForLiveContractRequestID[T any](t *testing.T, baseURL string, v openapi
 	return payload
 }
 
-func waitForLiveContractRequestEvent(t *testing.T, baseURL, path, requestID, successType string, timeout time.Duration) contractEvent {
+func waitForLiveContractRequestEvent(t *testing.T, baseURL, path, requestID, successType string, timeout time.Duration, eventCursor ...string) contractEvent {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
+	cursor := ""
+	if len(eventCursor) > 0 {
+		cursor = strings.TrimSpace(eventCursor[0])
+	}
 	streamPath := path
-	if strings.HasSuffix(streamPath, "/events") {
-		streamPath += "/stream?after_seq=0"
+	if strings.HasSuffix(streamPath, "/events") && streamPath != "/v0/events" {
+		streamPath += "/stream"
+		if cursor != "" {
+			streamPath += "?after_seq=" + url.QueryEscape(cursor)
+		} else {
+			streamPath += "?after_seq=0"
+		}
 	} else {
-		streamPath = strings.TrimSuffix(streamPath, "/") + "/stream?after_cursor=0"
+		streamPath = strings.TrimSuffix(streamPath, "/") + "/stream"
+		if cursor != "" {
+			streamPath += "?after_cursor=" + url.QueryEscape(cursor)
+		} else {
+			streamPath += "?after_cursor=0"
+		}
 	}
 	if path == "/v0/events" {
-		streamPath = "/v0/events/stream?after_cursor=0"
+		streamPath = "/v0/events/stream"
+		if cursor != "" {
+			streamPath += "?after_cursor=" + url.QueryEscape(cursor)
+		} else {
+			streamPath += "?after_cursor=0"
+		}
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+streamPath, nil)

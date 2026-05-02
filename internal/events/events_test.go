@@ -586,6 +586,33 @@ func TestReadFilteredAfterSeqCombined(t *testing.T) {
 	}
 }
 
+func TestReadFilteredTail(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Record(Event{Type: BeadCreated, Actor: "human"}) // seq 1
+	rec.Record(Event{Type: BeadClosed, Actor: "human"})  // seq 2
+	rec.Record(Event{Type: BeadCreated, Actor: "human"}) // seq 3
+	rec.Record(Event{Type: BeadClosed, Actor: "human"})  // seq 4
+	rec.Record(Event{Type: BeadCreated, Actor: "human"}) // seq 5
+	rec.Close()                                          //nolint:errcheck // test cleanup
+
+	got, err := ReadFilteredTail(path, Filter{Type: BeadCreated}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d events, want 2", len(got))
+	}
+	if got[0].Seq != 3 || got[1].Seq != 5 {
+		t.Fatalf("tail seqs = [%d %d], want [3 5]", got[0].Seq, got[1].Seq)
+	}
+}
+
 func TestReadLatestSeq(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "events.jsonl")

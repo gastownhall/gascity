@@ -2685,6 +2685,41 @@ func TestPendingAndRespond(t *testing.T) {
 	}
 }
 
+type pendingSessionGoneProvider struct {
+	*runtime.Fake
+}
+
+func (p *pendingSessionGoneProvider) Pending(_ string) (*runtime.PendingInteraction, error) {
+	return nil, fmt.Errorf("capturing pane: %w", runtime.ErrSessionNotFound)
+}
+
+func TestPendingAndRespondTreatMissingRuntimeSessionAsNoPending(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &pendingSessionGoneProvider{Fake: runtime.NewFake()}
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	pending, supported, err := mgr.Pending(info.ID)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if !supported {
+		t.Fatal("Pending should report supported when the provider supports interactions")
+	}
+	if pending != nil {
+		t.Fatalf("Pending = %#v, want nil for missing runtime session", pending)
+	}
+
+	err = mgr.Respond(info.ID, runtime.InteractionResponse{Action: "approve"})
+	if !errors.Is(err, ErrNoPendingInteraction) {
+		t.Fatalf("Respond error = %v, want ErrNoPendingInteraction", err)
+	}
+}
+
 func TestSendRejectsPendingInteraction(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
