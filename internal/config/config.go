@@ -1970,11 +1970,9 @@ func (a *Agent) EffectiveWorkQuery() string {
 			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 			`done; ` +
 			// Tier 3: ready unassigned routed to this config (shared routed queue).
-			// Only ephemeral sessions and controller probes consume generic config demand.
-			`case "$GC_SESSION_ORIGIN" in ` +
-			`ephemeral|"") ;; ` +
-			`*) exit 0 ;; ` +
-			`esac; ` +
+			// All session origins consume the routed queue: named sessions need
+			// the same access as ephemeral sessions when their template appears
+			// in gc.routed_to metadata.
 			`r=$(bd ready --metadata-field gc.routed_to=` + target +
 			` --unassigned --json --limit=1 2>/dev/null); ` +
 			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
@@ -2005,11 +2003,9 @@ func (a *Agent) EffectiveWorkQuery() string {
 		`done; ` +
 		// Tier 3: ready unassigned routed to this config (shared routed queue),
 		// then the legacy workflow-control route for pre-rename graphs.
-		// Only ephemeral sessions and controller probes consume generic config demand.
-		`case "$GC_SESSION_ORIGIN" in ` +
-		`ephemeral|"") ;; ` +
-		`*) exit 0 ;; ` +
-		`esac; ` +
+		// All session origins consume the routed queue: named sessions need
+		// the same access as ephemeral sessions when their template appears
+		// in gc.routed_to metadata.
 		`r=$(bd ready --metadata-field gc.routed_to=` + target +
 		` --unassigned --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +

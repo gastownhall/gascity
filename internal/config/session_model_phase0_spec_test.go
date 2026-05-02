@@ -69,16 +69,13 @@ template = "reviewer"
 	}
 }
 
-func TestPhase0ConfigDefaults_WorkQueryIsOriginAware(t *testing.T) {
+func TestPhase0ConfigDefaults_WorkQueryNoOriginGate(t *testing.T) {
 	a := Agent{Name: "worker", Dir: "myrig"}
 
 	got := a.EffectiveWorkQuery()
 
-	if !strings.Contains(got, "GC_SESSION_ORIGIN") {
-		t.Fatalf("EffectiveWorkQuery() = %q, want origin-aware GC_SESSION_ORIGIN branch", got)
-	}
-	if !strings.Contains(got, "ephemeral") {
-		t.Fatalf("EffectiveWorkQuery() = %q, want origin-specific ephemeral generic queue tier", got)
+	if strings.Contains(got, "GC_SESSION_ORIGIN") {
+		t.Fatalf("EffectiveWorkQuery() = %q, must not gate Tier 3 on GC_SESSION_ORIGIN — named sessions need the same access as ephemeral sessions", got)
 	}
 	if !strings.Contains(got, "gc.routed_to=myrig/worker") {
 		t.Fatalf("EffectiveWorkQuery() = %q, want qualified config route", got)
