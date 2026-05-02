@@ -407,6 +407,16 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string) {
 	scoped := a.ScopedName()
 	labels := []string{"exec"}
+	var headSeq uint64
+	if a.Trigger == "event" && m.ep != nil {
+		headSeq, _ = m.ep.LatestSeq()
+		if headSeq > 0 {
+			labels = append(labels,
+				fmt.Sprintf("order:%s", scoped),
+				fmt.Sprintf("seq:%d", headSeq),
+			)
+		}
+	}
 
 	env := orderExecEnv(cityPath, m.cfg, target, a)
 	output, err := m.execRun(ctx, a.Exec, target.ScopeRoot, env)

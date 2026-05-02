@@ -429,6 +429,60 @@ func TestOrderDispatchRejectsAmbiguousEventPoolOncePerEvent(t *testing.T) {
 	}
 }
 
+func TestOrderDispatchEventExecAdvancesCursor(t *testing.T) {
+	store := beads.NewMemStore()
+	eventLog := events.NewFake()
+	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+	headSeq, err := eventLog.LatestSeq()
+	if err != nil {
+		t.Fatalf("LatestSeq(): %v", err)
+	}
+
+	var calls int
+	execRun := func(context.Context, string, string, []string) ([]byte, error) {
+		calls++
+		return []byte("ok"), nil
+	}
+
+	ad := buildOrderDispatcherFromListExec([]orders.Order{{
+		Name:    "release-exec",
+		Trigger: "event",
+		On:      events.BeadClosed,
+		Exec:    "scripts/release.sh",
+	}}, store, eventLog, execRun, events.Discard)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+
+	all := trackingBeads(t, store, "order-run:release-exec")
+	if len(all) != 1 {
+		t.Fatalf("tracking beads with order-run label after first dispatch = %d, want 1", len(all))
+	}
+	if !slicesContain(all[0].Labels, "order:release-exec") {
+		t.Fatalf("tracking bead labels = %v, want order cursor label", all[0].Labels)
+	}
+	if !slicesContain(all[0].Labels, fmt.Sprintf("seq:%d", headSeq)) {
+		t.Fatalf("tracking bead labels = %v, want seq:%d", all[0].Labels, headSeq)
+	}
+	if calls != 1 {
+		t.Fatalf("exec calls after first dispatch = %d, want 1", calls)
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now().Add(10*time.Second))
+	ad.drain(context.Background())
+
+	all = trackingBeads(t, store, "order-run:release-exec")
+	if len(all) != 1 {
+		t.Fatalf("tracking beads with order-run label after second dispatch = %d, want 1", len(all))
+	}
+	if calls != 1 {
+		t.Fatalf("exec calls after second dispatch = %d, want 1", calls)
+	}
+}
+
 func TestOrderDispatchResolvesImportedPackPoolAgainstCityShadow(t *testing.T) {
 	cityDir := t.TempDir()
 	writeImportedDogOrderFixture(t, cityDir, true)
