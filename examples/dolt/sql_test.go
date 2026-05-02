@@ -7,11 +7,9 @@
 package dolt_test
 
 import (
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -82,6 +80,10 @@ func TestSQLScriptForwardsQueryArgs(t *testing.T) {
 	// the values set below. An ambient GC_DOLT_HOST in CI or a
 	// developer shell would otherwise silently flip the branch and
 	// hide whether the embedded path actually exercised "$@".
+	// Use a non-numeric GC_DOLT_PORT so managed_runtime_tcp_reachable
+	// (runtime.sh) takes its `''|*[!0-9]*` early-return path and the
+	// script falls deterministically into the embedded branch. This
+	// avoids the bind-then-close TOCTOU window of an "unused" port.
 	cmd := exec.Command("sh", script, "-q", "SELECT 1")
 	cmd.Env = append(filteredEnv("PATH",
 		"GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
@@ -92,7 +94,7 @@ func TestSQLScriptForwardsQueryArgs(t *testing.T) {
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
 		"GC_DOLT_DATA_DIR="+dataDir,
-		"GC_DOLT_PORT="+strconv.Itoa(unusedPort(t)),
+		"GC_DOLT_PORT=unreachable",
 		"GC_DOLT_USER=root",
 		"GC_DOLT_PASSWORD=",
 	)
@@ -134,21 +136,4 @@ func TestSQLScriptForwardsQueryArgs(t *testing.T) {
 	if argv[sqlIdx+1] != "-q" || argv[sqlIdx+2] != "SELECT 1" {
 		t.Fatalf("argv after `sql` = %v; want [-q, SELECT 1] (the wrapper is dropping trailing args)", argv[sqlIdx+1:])
 	}
-}
-
-// unusedPort binds a random TCP port, immediately closes it, and
-// returns the number. The TOCTOU window is benign here: port reuse
-// would only flip the script into the connected branch, which the
-// `--data-dir before sql` assertion in the test would catch.
-func unusedPort(t *testing.T) int {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	addr := ln.Addr().String()
-	_ = ln.Close()
-	_, portStr, _ := strings.Cut(addr, ":")
-	p, _ := strconv.Atoi(portStr)
-	return p
 }

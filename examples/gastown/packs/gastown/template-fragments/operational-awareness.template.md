@@ -40,8 +40,14 @@ cat /tmp/dolt-hang-$ts-procs.log
 
 # 2. Capture recent server log (timestamps, slow queries, prior crashes).
 #    `gc dolt logs` is a `tail` against an on-disk file — does not
-#    touch the live server, so no outer timeout is needed.
-gc dolt logs -n 500 2>&1 | tee /tmp/dolt-hang-$ts-logs.log
+#    touch the live server, so no outer timeout is needed. Use the
+#    redirect form for the same reason as the other steps: a missing
+#    log file should surface as a "diagnostic failed" signal, not be
+#    masked by the `tee` exit code.
+gc dolt logs -n 500 \
+    > /tmp/dolt-hang-$ts-logs.log 2>&1 \
+  || echo "(step 2 failed — see logs.log; the dolt log file may be missing)"
+cat /tmp/dolt-hang-$ts-logs.log
 
 # 3. Capture the structured health snapshot. `gc dolt health` bounds
 #    each per-database SQL probe internally with `run_bounded 5`, but

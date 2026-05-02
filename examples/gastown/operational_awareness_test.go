@@ -14,13 +14,16 @@ import (
 	"testing"
 )
 
-// killQUITRe matches `kill -QUIT` as an executable invocation across
-// the common shape variations: `kill -QUIT`, `kill  -QUIT` (multi-space),
-// `kill\t-QUIT` (tab), and `kill \\\n-QUIT` (line continuation). It
-// deliberately does NOT match prose like "use kill -QUIT" — the
-// callers strip shell comment lines before scanning, so any match
-// inside `active` is an active executable step.
-var killQUITRe = regexp.MustCompile(`(?m)(^|[^A-Za-z0-9_-])kill[ \t\\]+\n?[ \t]*-QUIT(\s|$)`)
+// killQUITRe matches `kill -QUIT` as an executable invocation:
+// anchored at start-of-line (with optional leading whitespace) and
+// followed by the QUIT signal across the common shape variations —
+// `kill -QUIT`, `kill  -QUIT` (multi-space), `kill\t-QUIT` (tab), and
+// `kill \\\n-QUIT` (line continuation). The line anchor matters: an
+// inline backticked mention like `... use \`kill -QUIT\` ...` in
+// markdown prose does NOT begin a line, so it does not match.
+// Combined with stripShellComments, this leaves only active shell
+// statements as match candidates.
+var killQUITRe = regexp.MustCompile(`(?m)^[ \t]*kill[ \t\\]+\n?[ \t]*-QUIT(\s|$)`)
 
 // operationalAwarenessFragment is the on-disk path to the template
 // fragment that ships into every gastown agent prompt via the
