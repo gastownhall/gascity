@@ -453,6 +453,41 @@ func TestHashPathContentDirectory(t *testing.T) {
 	}
 }
 
+func TestHashPathContentDirectoryIgnoresRuntimeGeneratedArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "scripts")
+	if err := os.MkdirAll(filepath.Join(sub, "__pycache__"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "check.py"), []byte("print('ok')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	h1 := HashPathContent(sub)
+	if h1 == "" {
+		t.Fatal("expected non-empty hash for directory")
+	}
+
+	if err := os.WriteFile(filepath.Join(sub, "__pycache__", "check.cpython-312.pyc"), []byte("cache-a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "scratch.tmp"), []byte("temporary"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h2 := HashPathContent(sub)
+	if h2 != h1 {
+		t.Fatalf("runtime-generated artifacts changed directory hash: %s vs %s", h1, h2)
+	}
+
+	if err := os.WriteFile(filepath.Join(sub, "check.py"), []byte("print('changed')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h3 := HashPathContent(sub)
+	if h3 == h1 {
+		t.Fatal("source file changes should change directory hash")
+	}
+}
+
 func TestHashPathContentMissingPath(t *testing.T) {
 	h := HashPathContent("/nonexistent/path/that/does/not/exist")
 	if h != "" {
@@ -505,5 +540,23 @@ func TestLogCoreFingerprintDriftCopyFiles(t *testing.T) {
 	}
 	if !bytes.Contains([]byte(out), []byte("RelDst")) {
 		t.Errorf("expected RelDst detail in CopyFiles drift output, got: %s", out)
+	}
+}
+
+func TestCoreFingerprintDriftFields(t *testing.T) {
+	current := Config{
+		Command:   "claude",
+		CopyFiles: []CopyEntry{{RelDst: "bar", Probed: true, ContentHash: "newhash"}},
+	}
+	stored := CoreFingerprintBreakdown(current)
+	stored["CopyFiles"] = "oldhash"
+
+	got := CoreFingerprintDriftFields(stored, current)
+	if len(got) != 1 || got[0] != "CopyFiles" {
+		t.Fatalf("CoreFingerprintDriftFields = %v, want [CopyFiles]", got)
+	}
+
+	if got := CoreFingerprintDriftFields(nil, current); len(got) != 0 {
+		t.Fatalf("CoreFingerprintDriftFields with missing breakdown = %v, want empty", got)
 	}
 }

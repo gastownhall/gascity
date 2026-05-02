@@ -787,6 +787,7 @@ func reconcileSessionBeadsTraced(
 						if raw := session.Metadata["core_hash_breakdown"]; raw != "" {
 							_ = json.Unmarshal([]byte(raw), &storedBreakdown)
 						}
+						driftedFields := runtime.CoreFingerprintDriftFields(storedBreakdown, agentCfg)
 						runtime.LogCoreFingerprintDrift(stderr, name, storedBreakdown, agentCfg)
 						restartedInPlace := false
 						// Attached sessions never get config-drift restarts.
@@ -806,22 +807,18 @@ func reconcileSessionBeadsTraced(
 							}
 							drainCancelled := cancelSessionConfigDriftDrain(*session, sp, dt)
 							if trace != nil {
-								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", string(TraceOutcomeDeferredAttached), traceRecordPayload{
-									"stored_hash":    storedHash,
-									"current_hash":   currentHash,
+								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", string(TraceOutcomeDeferredAttached), configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
 									"active_reason":  "attached",
 									"drain_canceled": drainCancelled,
-								}, nil, "")
+								}), nil, "")
 							}
 							continue
 						}
 						if recentlyDeferredSessionAttachedConfigDrift(*session, clk, driftKey) {
 							if trace != nil {
-								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", string(TraceOutcomeDeferredAttached), traceRecordPayload{
-									"stored_hash":   storedHash,
-									"current_hash":  currentHash,
+								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", string(TraceOutcomeDeferredAttached), configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
 									"active_reason": "attached_recently",
-								}, nil, "")
+								}), nil, "")
 							}
 							continue
 						}
@@ -837,20 +834,15 @@ func reconcileSessionBeadsTraced(
 							}
 							if active {
 								if trace != nil {
-									trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", string(TraceOutcomeDeferredActive), traceRecordPayload{
-										"stored_hash":   storedHash,
-										"current_hash":  currentHash,
+									trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", string(TraceOutcomeDeferredActive), configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
 										"active_reason": activeReason,
-									}, nil, "")
+									}), nil, "")
 								}
 								continue
 							}
 							resetConfiguredNamedSessionForConfigDrift(session, store, sp, name, alive, "creating", stderr)
 							if trace != nil {
-								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "restart_in_place", traceRecordPayload{
-									"stored_hash":  storedHash,
-									"current_hash": currentHash,
-								}, nil, "")
+								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "restart_in_place", configDriftTracePayload(storedHash, currentHash, driftedFields, nil), nil, "")
 							}
 							rec.Record(events.Event{
 								Type:    events.SessionDraining,
@@ -871,11 +863,9 @@ func reconcileSessionBeadsTraced(
 									drainCancelled = cancelSessionDrainForPending(*session, sp, dt)
 								}
 								if trace != nil {
-									trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "pending", "deferred_pending", traceRecordPayload{
-										"stored_hash":    storedHash,
-										"current_hash":   currentHash,
+									trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "pending", "deferred_pending", configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
 										"drain_canceled": drainCancelled,
-									}, nil, "")
+									}), nil, "")
 								}
 								continue
 							}
@@ -886,10 +876,7 @@ func reconcileSessionBeadsTraced(
 							if beginSessionDrain(*session, sp, dt, "config-drift", clk, ddt) {
 								fmt.Fprintf(stdout, "Draining session '%s': config-drift\n", name) //nolint:errcheck
 								if trace != nil {
-									trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "drain", traceRecordPayload{
-										"stored_hash":  storedHash,
-										"current_hash": currentHash,
-									}, nil, "")
+									trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "drain", configDriftTracePayload(storedHash, currentHash, driftedFields, nil), nil, "")
 								}
 								rec.Record(events.Event{
 									Type:    events.SessionDraining,
@@ -952,12 +939,14 @@ func reconcileSessionBeadsTraced(
 					agentCfg := templateParamsToConfig(tp)
 					currentHash := runtime.CoreFingerprint(agentCfg)
 					if storedHash != currentHash {
+						var storedBreakdown map[string]string
+						if raw := session.Metadata["core_hash_breakdown"]; raw != "" {
+							_ = json.Unmarshal([]byte(raw), &storedBreakdown)
+						}
+						driftedFields := runtime.CoreFingerprintDriftFields(storedBreakdown, agentCfg)
 						resetConfiguredNamedSessionForConfigDrift(session, store, sp, name, false, "asleep", stderr)
 						if trace != nil {
-							trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "repair_in_place", traceRecordPayload{
-								"stored_hash":  storedHash,
-								"current_hash": currentHash,
-							}, nil, "")
+							trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "repair_in_place", configDriftTracePayload(storedHash, currentHash, driftedFields, nil), nil, "")
 						}
 						continue
 					}
@@ -1525,6 +1514,22 @@ func sessionConfigDriftKey(session beads.Bead, cfg *config.City, tp TemplatePara
 		return ""
 	}
 	return storedHash + ":" + currentHash
+}
+
+func configDriftTracePayload(storedHash, currentHash string, driftedFields []string, extra traceRecordPayload) traceRecordPayload {
+	fields := append([]string(nil), driftedFields...)
+	if fields == nil {
+		fields = []string{}
+	}
+	payload := traceRecordPayload{
+		"stored_hash":    storedHash,
+		"current_hash":   currentHash,
+		"drifted_fields": fields,
+	}
+	for k, v := range extra {
+		payload[k] = v
+	}
+	return payload
 }
 
 func applyTemplateOverridesToConfig(agentCfg *runtime.Config, session beads.Bead, tp TemplateParams) {
