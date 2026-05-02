@@ -75,10 +75,10 @@ func TestE2E_Pool_WithDir(t *testing.T) {
 	wantDir := filepath.Join(cityDir, "workdir")
 
 	// Both instances share the same workdir (no template expansion).
-	if cwd := r1.get("CWD"); cwd != wantDir {
+	if cwd := r1.get("CWD"); !sameE2EPath(t, cwd, wantDir) {
 		t.Errorf("dirpool-1 CWD = %q, want %q", cwd, wantDir)
 	}
-	if cwd := r2.get("CWD"); cwd != wantDir {
+	if cwd := r2.get("CWD"); !sameE2EPath(t, cwd, wantDir) {
 		t.Errorf("dirpool-2 CWD = %q, want %q", cwd, wantDir)
 	}
 }

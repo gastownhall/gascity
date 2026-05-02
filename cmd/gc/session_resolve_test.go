@@ -87,6 +87,64 @@ func TestResolveSessionID_QualifiedAliasBasename(t *testing.T) {
 	}
 }
 
+func TestResolveSessionIDWithConfig_UsesTargetedConfiguredNamedLookup(t *testing.T) {
+	// The configured-named-session lookup must stay bounded so wake/dispatch
+	// don't fan out under reconciler load. Pre-collapse this issued four
+	// metadata-field List calls per resolution; the fix for ga-pa57 folded
+	// them into one label-scoped scan with in-process filtering. The
+	// assertion has been relaxed from "no broad scan" to "≤2 List calls"
+	// because the fan-out budget — not the query shape — is what mattered.
+	store := &countingSessionListStore{MemStore: beads.NewMemStore()}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "mayor",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "mayor",
+		}},
+	}
+	cityPath := t.TempDir()
+	sessionName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, "mayor")
+	b, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name":               sessionName,
+			"alias":                      "mayor",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "mayor",
+			namedSessionModeMetadata:     "on_demand",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(canonical): %v", err)
+	}
+
+	startCalls := store.calls
+	id, err := resolveSessionIDWithConfig(cityPath, cfg, store, "mayor")
+	if err != nil {
+		t.Fatalf("resolveSessionIDWithConfig(mayor): %v", err)
+	}
+	if id != b.ID {
+		t.Fatalf("got %q, want %q", id, b.ID)
+	}
+	if delta := store.calls - startCalls; delta > 2 {
+		t.Fatalf("resolveSessionIDWithConfig issued %d List calls, want ≤2 (regression risk for ga-pa57 contention)", delta)
+	}
+}
+
+type countingSessionListStore struct {
+	*beads.MemStore
+	calls int
+}
+
+func (s *countingSessionListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.calls++
+	return s.MemStore.List(query)
+}
+
 func TestResolveSessionID_DoesNotResolveHistoricalAlias(t *testing.T) {
 	store := beads.NewMemStore()
 	_, _ = store.Create(beads.Bead{

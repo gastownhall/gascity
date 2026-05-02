@@ -143,6 +143,40 @@ func TestGcExecLifecycleInitProcessEnvDoesNotProjectCanonicalFilesOwnedFlagForGc
 	}
 }
 
+func TestGcExecLifecycleInitProcessEnvDoesNotLeakAmbientBEADS_DIRForGcBeadsK8s(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rigs", "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExecStoreCityConfig(t, cityDir, "metro-city", "ct", []config.Rig{{
+		Name:   "frontend",
+		Path:   "rigs/frontend",
+		Prefix: "fe",
+	}})
+
+	t.Setenv("BEADS_DIR", "/tmp/ambient-beads")
+	target := execStoreTarget{
+		ScopeRoot: rigDir,
+		ScopeKind: "rig",
+		Prefix:    "fe",
+		RigName:   "frontend",
+	}
+	env, err := gcExecLifecycleInitProcessEnv(cityDir, target, "exec:/tmp/gc-beads-k8s")
+	if err != nil {
+		t.Fatalf("gcExecLifecycleInitProcessEnv(gc-beads-k8s): %v", err)
+	}
+	if got := envSliceValue(env, "BEADS_DIR"); got != "" {
+		t.Fatalf("BEADS_DIR leaked as %q", got)
+	}
+	if got := envSliceValue(env, "GC_STORE_ROOT"); got != rigDir {
+		t.Fatalf("GC_STORE_ROOT = %q, want %q", got, rigDir)
+	}
+	if got := envSliceValue(env, "GC_RIG"); got != "frontend" {
+		t.Fatalf("GC_RIG = %q, want frontend", got)
+	}
+}
+
 func TestGcExecStoreEnvProjectsGCBinForGcBeadsBd(t *testing.T) {
 	cityDir := t.TempDir()
 	oldResolve := resolveProviderLifecycleGCBinary
@@ -469,7 +503,7 @@ func TestControllerStateOpenRigStoreExecProjectsRigTarget(t *testing.T) {
 	t.Setenv("GC_DOLT_HOST", "ambient-dolt")
 
 	cs := &controllerState{cityPath: cityDir}
-	store := cs.openRigStore(provider, "frontend", rigDir, "fe")
+	store := cs.openRigStore(provider, "frontend", rigDir, "fe", nil)
 	if _, err := store.Create(beads.Bead{Title: "rig"}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}

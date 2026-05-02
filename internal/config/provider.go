@@ -29,6 +29,9 @@ type OptionChoice struct {
 	// json:"-" is intentional: FlagArgs must never appear in the public API DTO
 	// (security boundary — prevents clients from seeing internal CLI flags).
 	FlagArgs []string `toml:"flag_args" json:"-"`
+	// FlagAliases are equivalent CLI argument sequences stripped from legacy
+	// provider args. Like FlagArgs, they stay server-side only.
+	FlagAliases [][]string `toml:"flag_aliases,omitempty" json:"-"`
 }
 
 // ProviderSpec defines a named provider's startup parameters.
@@ -105,7 +108,7 @@ type ProviderSpec struct {
 	// PermissionModes maps permission mode names to CLI flags.
 	// Example: {"unrestricted": "--dangerously-skip-permissions", "plan": "--permission-mode plan"}
 	// This is a config-only lookup table consumed by external clients
-	// (e.g., Mission Control) to populate permission mode dropdowns.
+	// (e.g., real-world app) to populate permission mode dropdowns.
 	// Launch-time flag substitution is planned for a follow-up PR —
 	// currently no runtime code reads this field.
 	PermissionModes map[string]string `toml:"permission_modes,omitempty"`
@@ -200,7 +203,7 @@ type ResolvedProvider struct {
 	// EffectiveDefaults is the fully-merged option default map.
 	// Computed from: schema Default -> provider OptionDefaults -> agent OptionDefaults.
 	// Used by ResolveDefaultArgs() to produce CLI flags and by the API to
-	// tell MC what pre-selections to show.
+	// tell real-world apps what pre-selections to show.
 	EffectiveDefaults map[string]string
 }
 
@@ -411,9 +414,10 @@ func providerChoicesFromWorker(choices []workerbuiltin.BuiltinOptionChoice) []Op
 	out := make([]OptionChoice, len(choices))
 	for i, choice := range choices {
 		out[i] = OptionChoice{
-			Value:    choice.Value,
-			Label:    choice.Label,
-			FlagArgs: cloneStrings(choice.FlagArgs),
+			Value:       choice.Value,
+			Label:       choice.Label,
+			FlagArgs:    cloneStrings(choice.FlagArgs),
+			FlagAliases: cloneStringSlices(choice.FlagAliases),
 		}
 	}
 	return out
@@ -436,5 +440,16 @@ func cloneStrings(values []string) []string {
 	}
 	out := make([]string, len(values))
 	copy(out, values)
+	return out
+}
+
+func cloneStringSlices(values [][]string) [][]string {
+	if values == nil {
+		return nil
+	}
+	out := make([][]string, len(values))
+	for i := range values {
+		out[i] = cloneStrings(values[i])
+	}
 	return out
 }

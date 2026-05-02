@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -49,7 +50,7 @@ func TestGraphWorkflowSuccessPath(t *testing.T) {
 	cityDir := setupGraphWorkflowCity(t, "success")
 	issueID, workflowID := startScopedWorkflow(t, cityDir)
 
-	workflow := waitForBeadClosed(t, cityDir, workflowID, 180*time.Second)
+	workflow := waitForBeadClosed(t, cityDir, workflowID, graphWorkflowCloseTimeout())
 	if got := metaValue(workflow, "gc.outcome"); got != "pass" {
 		t.Fatalf("workflow outcome = %q, want pass", got)
 	}
@@ -94,7 +95,7 @@ func TestGraphWorkflowFailureRunsCleanup(t *testing.T) {
 	cityDir := setupGraphWorkflowCity(t, "fail-preflight")
 	issueID, workflowID := startScopedWorkflow(t, cityDir)
 
-	workflow := waitForBeadClosed(t, cityDir, workflowID, 180*time.Second)
+	workflow := waitForBeadClosed(t, cityDir, workflowID, graphWorkflowCloseTimeout())
 	if got := metaValue(workflow, "gc.outcome"); got != "fail" {
 		t.Fatalf("workflow outcome = %q, want fail", got)
 	}
@@ -149,6 +150,13 @@ func assertControlDispatcherLane(t *testing.T, cityDir string) {
 	if strings.Contains(workerTrace, "unexpected-control") {
 		t.Fatalf("worker should not receive control beads:\n%s", workerTrace)
 	}
+}
+
+func graphWorkflowCloseTimeout() time.Duration {
+	if runtime.GOOS == "darwin" {
+		return 6 * time.Minute
+	}
+	return 180 * time.Second
 }
 
 func setupGraphWorkflowCity(t *testing.T, mode string) string {

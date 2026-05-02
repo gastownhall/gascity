@@ -1,15 +1,19 @@
-import { api, cityScope } from "../api";
+import { api, cityScope, type DashboardSchema } from "../api";
+import { logWarn } from "../logger";
 import { byId, clear, el } from "../util/dom";
 import { ACTIVE_WINDOW_MS, beadPriority, formatTimestamp } from "../util/legacy";
 
-interface SessionSummary {
-  attached: boolean;
-  last_active?: string;
-  pool?: string;
-  rig?: string;
-  running: boolean;
-  template: string;
-}
+type APIResult<T> = {
+  data?: T;
+  error?: unknown;
+};
+
+type StatusBody = DashboardSchema["StatusBody"];
+type SessionList = DashboardSchema["ListBodySessionResponse"];
+type BeadList = DashboardSchema["ListBodyBead"];
+type SessionSummary = DashboardSchema["SessionResponse"];
+
+const STATUS_REQUEST_TIMEOUT_MS = 1_000;
 
 export async function renderStatus(): Promise<void> {
   const city = cityScope();
@@ -19,29 +23,47 @@ export async function renderStatus(): Promise<void> {
     await renderSupervisorStatus(banner);
     return;
   }
-  renderCityScopeBannerIdle();
 
-  const [statusR, sessionsR, beadsR, convoysR] = await Promise.all([
-    api.GET("/v0/city/{cityName}/status", { params: { path: { cityName: city } } }),
-    api.GET("/v0/city/{cityName}/sessions", {
+  const statusP = requestWithTimeout<StatusBody>(
+    "status",
+    city,
+    (signal) => api.GET("/v0/city/{cityName}/status", { params: { path: { cityName: city } }, signal }) as Promise<APIResult<StatusBody>>,
+  );
+  const sessionsP = requestWithTimeout<SessionList>(
+    "sessions",
+    city,
+    (signal) => api.GET("/v0/city/{cityName}/sessions", {
       params: { path: { cityName: city }, query: { state: "active", peek: true } },
-    }),
-    api.GET("/v0/city/{cityName}/beads", {
+      signal,
+    }) as Promise<APIResult<SessionList>>,
+  );
+  const beadsP = requestWithTimeout<BeadList>(
+    "beads",
+    city,
+    (signal) => api.GET("/v0/city/{cityName}/beads", {
       params: { path: { cityName: city }, query: { status: "open", limit: 500 } },
-    }),
-    api.GET("/v0/city/{cityName}/convoys", { params: { path: { cityName: city }, query: { limit: 200 } } }),
-  ]);
+      signal,
+    }) as Promise<APIResult<BeadList>>,
+  );
+  const convoysP = requestWithTimeout<BeadList>(
+    "convoys",
+    city,
+    (signal) => api.GET("/v0/city/{cityName}/convoys", {
+      params: { path: { cityName: city }, query: { limit: 200 } },
+      signal,
+    }) as Promise<APIResult<BeadList>>,
+  );
 
-  if (statusR.error || !statusR.data) {
-    clear(banner);
-    banner.append(el("div", { class: "banner-error" }, [`Status unavailable for ${city}`]));
-    return;
-  }
+  sessionsP.then((sessionsR) => renderCityScopeFromSessions(city, sessionsR));
+
+  const [statusR, sessionsR, beadsR, convoysR] = await Promise.all([statusP, sessionsP, beadsP, convoysP]);
+
+  if (cityScope() !== city) return;
 
   const sessions = (sessionsR.data?.items ?? []) as SessionSummary[];
   const beads = beadsR.data?.items ?? [];
   const convoys = convoysR.data?.items ?? [];
-  renderCityScopeBanner(city, sessions);
+  renderCityScopeFromSessions(city, sessionsR);
 
   // Generic "stuck" detection: any running, pooled agent whose last
   // activity is >30 min old. No role name required.
@@ -52,35 +74,85 @@ export async function renderStatus(): Promise<void> {
   const staleAssigned = beads.filter((bead) => bead.assignee && bead.status !== "closed").length;
   const highPriorityIssues = beads.filter((bead) => beadPriority(bead.priority) <= 2).length;
   const deadSessions = sessions.filter((session) => !session.running).length;
+  const statusUnavailable = Boolean(statusR.error || !statusR.data);
+  const partialUnavailable = statusUnavailable || Boolean(sessionsR.error || beadsR.error || convoysR.error);
+  const runningAgents = statusR.data?.agents.running ?? sessions.filter((session) => session.running).length;
+  const assignedWork = statusR.data?.work.in_progress ?? staleAssigned;
+  const openWork = statusR.data?.work.open ?? beads.length;
+  const unreadMail = statusR.data?.mail.unread ?? "n/a";
 
-  const stats = el("div", { class: "summary-stats" }, [
-    statChip(statusR.data.agents.running, "Agents"),
-    statChip(statusR.data.work.in_progress, "Assigned"),
-    statChip(statusR.data.work.open, "Beads"),
-    statChip(convoys.length, "Convoys"),
-    statChip(statusR.data.mail.unread, "Unread"),
-  ]);
+  const statsKey = `${city}|${runningAgents}|${assignedWork}|${openWork}|${convoys.length}|${unreadMail}|${stuckAgents}|${staleAssigned}|${highPriorityIssues}|${deadSessions}|${partialUnavailable}|${statusUnavailable}`;
+  if (statsKey !== lastStatusBannerKey) {
+    lastStatusBannerKey = statsKey;
+    const stats = el("div", { class: "summary-stats" }, [
+      statChip(runningAgents, "Agents"),
+      statChip(assignedWork, "Assigned"),
+      statChip(openWork, "Beads"),
+      statChip(convoys.length, "Convoys"),
+      statChip(unreadMail, "Unread"),
+    ]);
 
-  const alerts = el("div", { class: "summary-alerts" });
-  appendAlert(alerts, stuckAgents > 0, "alert-red", `${stuckAgents} stuck`);
-  appendAlert(alerts, staleAssigned > 0, "alert-yellow", `${staleAssigned} assigned`);
-  appendAlert(alerts, highPriorityIssues > 0, "alert-red", `${highPriorityIssues} P1/P2`);
-  appendAlert(alerts, deadSessions > 0, "alert-red", `${deadSessions} dead`);
-  if (!alerts.childNodes.length) {
-    alerts.append(el("span", { class: "alert-item alert-green" }, ["All clear"]));
+    const alerts = el("div", { class: "summary-alerts" });
+    appendAlert(alerts, statusUnavailable, "alert-yellow", "Status API slow");
+    appendAlert(alerts, partialUnavailable && !statusUnavailable, "alert-yellow", "Partial data");
+    appendAlert(alerts, stuckAgents > 0, "alert-red", `${stuckAgents} stuck`);
+    appendAlert(alerts, staleAssigned > 0, "alert-yellow", `${staleAssigned} assigned`);
+    appendAlert(alerts, highPriorityIssues > 0, "alert-red", `${highPriorityIssues} P1/P2`);
+    appendAlert(alerts, deadSessions > 0, "alert-red", `${deadSessions} dead`);
+    if (!alerts.childNodes.length) {
+      alerts.append(el("span", { class: "alert-item alert-green" }, ["All clear"]));
+    }
+
+    clear(banner);
+    banner.append(stats, alerts);
   }
+}
 
-  clear(banner);
-  banner.append(stats, alerts);
+async function requestWithTimeout<T>(
+  label: string,
+  city: string,
+  start: (signal: AbortSignal) => Promise<APIResult<T>>,
+): Promise<APIResult<T>> {
+  const controller = new AbortController();
+  let completed = false;
+  let timer: ReturnType<typeof setTimeout>;
+  return new Promise((resolve) => {
+    timer = setTimeout(() => {
+      if (completed) return;
+      completed = true;
+      const error = new Error(`${label} request timed out after ${STATUS_REQUEST_TIMEOUT_MS}ms`);
+      controller.abort();
+      logWarn("status", "City status dependency timed out", { city, label });
+      resolve({ error });
+    }, STATUS_REQUEST_TIMEOUT_MS);
+    start(controller.signal).then(
+      (value) => {
+        if (completed) return;
+        completed = true;
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        if (completed) return;
+        completed = true;
+        clearTimeout(timer);
+        logWarn("status", "City status dependency failed", { city, error, label });
+        resolve({ error });
+      },
+    );
+  });
 }
 
 async function renderSupervisorStatus(banner: HTMLElement): Promise<void> {
   renderCityScopeBannerFleet();
+  lastStatusBannerKey = "";
 
   const [healthR, citiesR] = await Promise.all([
     api.GET("/health"),
     api.GET("/v0/cities"),
   ]);
+  if (cityScope() !== "") return;
+
   const health = healthR.data;
   const cities = citiesR.data?.items ?? [];
   const total = health?.cities_total ?? cities.length;
@@ -130,19 +202,27 @@ function appendAlert(container: HTMLElement, show: boolean, klass: string, text:
   container.append(el("span", { class: `alert-item ${klass}` }, [text]));
 }
 
-// renderCityScopeBanner renders a generic "scope" banner that reports
-// whether any un-rigged, un-pooled session (the city-scope overseer, if
-// the pack defines one) is currently attached. The dashboard makes no
-// assumption about what that session is called — it just surfaces the
-// attached/detached state the API provides. Packs that don't define a
-// city-scope session show "Detached" and that's fine.
+let lastStatusBannerKey = "";
+
+function renderCityScopeFromSessions(city: string, sessionsR: APIResult<SessionList>): void {
+  if (cityScope() !== city) return;
+  if (sessionsR.error || !sessionsR.data) {
+    renderCityScopeBannerUnavailable(city, "Sessions unavailable");
+    return;
+  }
+  renderCityScopeBanner(city, (sessionsR.data.items ?? []) as SessionSummary[]);
+}
+
 function renderCityScopeBanner(city: string, sessions: SessionSummary[]): void {
   const banner = byId("scope-banner");
   const badge = byId("scope-badge");
   const status = byId("scope-status");
   if (!banner || !badge || !status) return;
 
-  const overseer = sessions.find((session) => !session.rig && !session.pool);
+  const overseer =
+    sessions.find((s) => s.configured_named_session && !s.rig) ??
+    sessions.find((s) => !s.rig && !s.pool);
+
   if (!overseer) {
     banner.classList.remove("attached");
     banner.classList.add("detached");
@@ -173,16 +253,20 @@ function renderCityScopeBanner(city: string, sessions: SessionSummary[]): void {
   );
 }
 
-function renderCityScopeBannerIdle(): void {
+function renderCityScopeBannerUnavailable(city: string, reason: string): void {
   const banner = byId("scope-banner");
   const badge = byId("scope-badge");
   const status = byId("scope-status");
   if (!banner || !badge || !status) return;
-  banner.classList.remove("attached");
+  banner.classList.remove("attached", "detached");
   banner.classList.add("detached");
   badge.className = "badge badge-muted";
-  badge.textContent = "Idle";
+  badge.textContent = "Unknown";
   clear(status);
+  status.append(
+    scopeStat("Scope", city),
+    scopeStat("Sessions", reason),
+  );
 }
 
 function renderCityScopeBannerFleet(): void {

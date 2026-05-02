@@ -196,6 +196,11 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 			return fmt.Errorf("usage: close <id>")
 		}
 		return store.Close(args[0])
+	case "reopen":
+		if len(args) < 1 {
+			return fmt.Errorf("usage: reopen <id>")
+		}
+		return store.Reopen(args[0])
 	case "list":
 		query := beads.ListQuery{AllowScan: true}
 		for _, arg := range args {

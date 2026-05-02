@@ -192,6 +192,75 @@ func TestWorktreeList(t *testing.T) {
 	}
 }
 
+// TestWorktreeList_NestedSiblings verifies the algorithmic assumption used
+// by NestedWorktreePruneCheck: when worktree B is created at a path that
+// lies inside worktree A's working tree, git treats them as siblings in
+// the same admin dir. WorktreeList() from any of A, B, or the main repo
+// returns all three entries with each entry's true on-disk path.
+//
+// This is the foundation for "find nested worktrees" — we walk per-agent
+// homes, list siblings, and filter by path containment to identify nested
+// entries.
+func TestWorktreeList_NestedSiblings(t *testing.T) {
+	repo := initTestRepo(t)
+
+	// Outer worktree (the "agent home").
+	home := filepath.Join(t.TempDir(), "home")
+	runGit(t, repo, "worktree", "add", "-b", "home-branch", home)
+
+	// Nested worktree, path lies inside `home`. Equivalent to the polecat
+	// "$(pwd)/worktrees/<issue>" pattern from mol-polecat-work.toml.
+	nested := filepath.Join(home, "worktrees", "task-x")
+	runGit(t, home, "worktree", "add", "-b", "task-x-branch", nested)
+
+	// Listing from the home worktree returns all three siblings.
+	gHome := New(home)
+	wts, err := gHome.WorktreeList()
+	if err != nil {
+		t.Fatalf("WorktreeList from home: %v", err)
+	}
+	gotPaths := make(map[string]string)
+	for _, wt := range wts {
+		gotPaths[testutil.CanonicalPath(wt.Path)] = wt.Branch
+	}
+
+	wantHome := testutil.CanonicalPath(home)
+	wantNested := testutil.CanonicalPath(nested)
+	wantRepo := testutil.CanonicalPath(repo)
+
+	if _, ok := gotPaths[wantHome]; !ok {
+		t.Errorf("home worktree %q missing from list; got %v", wantHome, gotPaths)
+	}
+	if br := gotPaths[wantNested]; br != "task-x-branch" {
+		t.Errorf("nested worktree branch = %q (path %q), want task-x-branch; full list: %v",
+			br, wantNested, gotPaths)
+	}
+	if _, ok := gotPaths[wantRepo]; !ok {
+		t.Errorf("main repo %q missing from list; got %v", wantRepo, gotPaths)
+	}
+
+	// Listing from inside the nested worktree must produce the same set.
+	gNested := New(nested)
+	wts2, err := gNested.WorktreeList()
+	if err != nil {
+		t.Fatalf("WorktreeList from nested: %v", err)
+	}
+	if len(wts2) != len(wts) {
+		t.Errorf("WorktreeList from nested returned %d entries; from home returned %d (must match)",
+			len(wts2), len(wts))
+	}
+
+	// Path containment is the discriminator the doctor check uses to
+	// classify "nested" vs "agent home" vs "main repo". Verify it works
+	// on canonical paths.
+	if !strings.HasPrefix(wantNested+string(filepath.Separator), wantHome+string(filepath.Separator)) {
+		t.Errorf("nested path %q is not a strict subpath of home %q", wantNested, wantHome)
+	}
+	if strings.HasPrefix(wantHome+string(filepath.Separator), wantNested+string(filepath.Separator)) {
+		t.Errorf("home %q must not be classified as inside nested %q", wantHome, wantNested)
+	}
+}
+
 func TestHasUncommittedWork_Clean(t *testing.T) {
 	repo := initTestRepo(t)
 	g := New(repo)
@@ -263,6 +332,18 @@ func TestHasUnpushedCommits_NoRemote(t *testing.T) {
 	}
 }
 
+func TestHasUnpushedCommitsResult_ReturnsProbeError(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(dir))
+	g := New(dir)
+	if _, err := g.HasUnpushedCommitsResult(); err == nil {
+		t.Fatal("HasUnpushedCommitsResult() error = nil, want probe error")
+	}
+	if !g.HasUnpushedCommits() {
+		t.Error("HasUnpushedCommits() should fail closed on probe errors")
+	}
+}
+
 func TestHasStashes_NoneWhenClean(t *testing.T) {
 	repo := initTestRepo(t)
 	g := New(repo)
@@ -283,6 +364,18 @@ func TestHasStashes_DetectsStash(t *testing.T) {
 	g := New(repo)
 	if !g.HasStashes() {
 		t.Error("HasStashes() = false for repo with stash, want true")
+	}
+}
+
+func TestHasStashesResult_ReturnsProbeError(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(dir))
+	g := New(dir)
+	if _, err := g.HasStashesResult(); err == nil {
+		t.Fatal("HasStashesResult() error = nil, want probe error")
+	}
+	if !g.HasStashes() {
+		t.Error("HasStashes() should fail closed on probe errors")
 	}
 }
 

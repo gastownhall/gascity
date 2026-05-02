@@ -32,7 +32,7 @@ func (s *Server) handleSessionAgentList(w http.ResponseWriter, r *http.Request) 
 	mappings, err := handle.AgentMappings(r.Context())
 	if err != nil {
 		if errors.Is(err, worker.ErrHistoryUnavailable) {
-			writeJSON(w, http.StatusOK, map[string]any{"agents": []any{}})
+			writeJSON(w, http.StatusOK, sessionAgentListResponse{})
 			return
 		}
 		writeSessionManagerError(w, err)
@@ -41,11 +41,7 @@ func (s *Server) handleSessionAgentList(w http.ResponseWriter, r *http.Request) 
 	if mappings == nil {
 		mappings = []worker.AgentMapping{}
 	}
-	if len(mappings) == 0 {
-		writeJSON(w, http.StatusOK, map[string]any{"agents": []any{}})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"agents": mappings})
+	writeJSON(w, http.StatusOK, sessionAgentListResponse{Agents: mappings})
 }
 
 // handleSessionAgentGet returns the transcript and status of a subagent.
@@ -95,9 +91,8 @@ func (s *Server) handleSessionAgentGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build raw message array for API pass-through (same as raw transcript).
-	writeJSON(w, http.StatusOK, map[string]any{
-		"messages": agentSession.RawMessages,
-		"status":   agentSession.Session.Status,
+	writeJSON(w, http.StatusOK, sessionAgentGetResponse{
+		Messages: agentSession.Session.RawPayloads(),
+		Status:   agentSession.Session.Status,
 	})
 }

@@ -3,6 +3,8 @@
 package integration
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -51,29 +53,38 @@ func TestE2E_Hook_WithWork(t *testing.T) {
 	}
 }
 
-// TestE2E_Hook_Inject verifies that gc hook --inject wraps output in
-// system-reminder tags and always exits 0.
+// TestE2E_Hook_Inject verifies that gc hook --inject is silent legacy
+// compatibility and does not run the configured work query.
 func TestE2E_Hook_Inject(t *testing.T) {
+	const markerName = "inject-work-query-ran"
 	city := e2eCity{
 		Agents: []e2eAgent{
 			{
 				Name:         "injectee",
 				StartCommand: e2eSleepScript(),
-				WorkQuery:    "echo 'inject hook work items'",
+				WorkQuery:    "touch .gc/" + markerName + " && echo 'inject hook work items'",
 			},
 		},
 	}
-	cityDir := setupE2ECity(t, nil, city)
+	cityDir := setupE2ECityNoStart(t, city)
+	markerPath := filepath.Join(cityDir, ".gc", markerName)
+	if _, err := os.Stat(markerPath); err == nil {
+		t.Fatalf("work_query marker exists before gc hook --inject: %s", markerPath)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("checking pre-hook work_query marker: %v", err)
+	}
 
-	// Hook with --inject should wrap in system-reminder.
 	out, err := gc(cityDir, "hook", "--inject", "injectee")
 	if err != nil {
 		t.Fatalf("gc hook --inject should exit 0: %v\noutput: %s", err, out)
 	}
-	if !strings.Contains(out, "<system-reminder>") {
-		t.Errorf("expected <system-reminder> in inject output:\n%s", out)
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("gc hook --inject should be silent, got:\n%s", out)
 	}
-	if !strings.Contains(out, "inject hook work items") {
-		t.Errorf("expected work items in inject output:\n%s", out)
+
+	if _, err := os.Stat(markerPath); err == nil {
+		t.Fatalf("gc hook --inject ran work_query; marker exists at %s", markerPath)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("checking work_query marker: %v", err)
 	}
 }

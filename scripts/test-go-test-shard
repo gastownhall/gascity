@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if [[ $# -ne 3 ]]; then
+  echo "usage: $0 <package> <shard-index> <shard-total>" >&2
+  exit 1
+fi
+
+test_pkg="$1"
+shard_index="$2"
+shard_total="$3"
+
+if ! [[ "$shard_index" =~ ^[0-9]+$ && "$shard_total" =~ ^[0-9]+$ ]]; then
+  echo "shard index and total must be positive integers" >&2
+  exit 1
+fi
+if (( shard_index < 1 || shard_total < 1 || shard_index > shard_total )); then
+  echo "invalid shard ${shard_index} of ${shard_total}" >&2
+  exit 1
+fi
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+timeout="${GO_TEST_TIMEOUT:-20m}"
+
+gopath_val="$(go env GOPATH)"
+gocache_val="$(go env GOCACHE)"
+gomodcache_val="$(go env GOMODCACHE)"
+gotmpdir_val="$(go env GOTMPDIR)"
+goroot_val="$(go env GOROOT)"
+
+run_go_test() {
+  env -i \
+    PATH="${PATH}" \
+    HOME="${HOME:-}" \
+    USER="${USER:-}" \
+    LOGNAME="${LOGNAME:-}" \
+    SHELL="${SHELL:-/bin/sh}" \
+    LANG="${LANG:-C.UTF-8}" \
+    TMPDIR="${TMPDIR:-/tmp}" \
+    XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
+    GOPATH="${gopath_val}" \
+    GOCACHE="${gocache_val}" \
+    GOMODCACHE="${gomodcache_val}" \
+    GOTMPDIR="${gotmpdir_val}" \
+    GOROOT="${GOROOT:-$goroot_val}" \
+    GOENV="${GOENV-}" \
+    GOFLAGS="${GOFLAGS-}" \
+    GO111MODULE="${GO111MODULE-}" \
+    GOEXPERIMENT="${GOEXPERIMENT-}" \
+    GOPROXY="${GOPROXY-}" \
+    GOPRIVATE="${GOPRIVATE-}" \
+    GONOPROXY="${GONOPROXY-}" \
+    GONOSUMDB="${GONOSUMDB-}" \
+    GOSUMDB="${GOSUMDB-}" \
+    GOINSECURE="${GOINSECURE-}" \
+    GOVCS="${GOVCS-}" \
+    GOWORK="${GOWORK-}" \
+    GC_FAST_UNIT="${GC_FAST_UNIT:-0}" \
+    go test "$@"
+}
+
+go_test_args=(-timeout "$timeout")
+if [[ -n "${GO_TEST_TAGS:-}" ]]; then
+  go_test_args=(-tags "$GO_TEST_TAGS" "${go_test_args[@]}")
+fi
+if [[ -n "${GO_TEST_COUNT:-}" ]]; then
+  go_test_args=(-count="$GO_TEST_COUNT" "${go_test_args[@]}")
+fi
+if [[ -n "${GO_TEST_COVERPROFILE:-}" ]]; then
+  go_test_args+=(-coverpkg=./... -coverprofile "$GO_TEST_COVERPROFILE")
+fi
+
+tests=()
+while IFS= read -r line; do
+  [[ "$line" == Test* ]] || continue
+  tests+=("$line")
+done < <(run_go_test "${go_test_args[@]}" "$test_pkg" -list '^Test')
+
+selected=()
+for i in "${!tests[@]}"; do
+  if (( i % shard_total == shard_index - 1 )); then
+    selected+=("${tests[$i]}")
+  fi
+done
+
+if [[ ${#selected[@]} -eq 0 ]]; then
+  echo "no tests selected for ${test_pkg} shard ${shard_index} of ${shard_total}" >&2
+  exit 1
+fi
+
+join_regex() {
+  local IFS='|'
+  printf '%s' "$*"
+}
+
+regex="^($(join_regex "${selected[@]}"))$"
+echo "Running ${test_pkg} shard ${shard_index} of ${shard_total} (${#selected[@]} tests)"
+printf '  %s\n' "${selected[@]}"
+run_go_test "${go_test_args[@]}" "$test_pkg" -run "$regex"

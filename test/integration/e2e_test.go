@@ -27,7 +27,7 @@ func TestE2E_EnvVars_CityScoped(t *testing.T) {
 	}
 
 	// GC_CITY must be the city directory.
-	if !report.has("GC_CITY", cityDir) {
+	if !report.hasPath(t, "GC_CITY", cityDir) {
 		t.Errorf("GC_CITY: got %v, want [%s]", report.getAll("GC_CITY"), cityDir)
 	}
 
@@ -79,7 +79,7 @@ func TestE2E_Dir_Default(t *testing.T) {
 	report := waitForReport(t, cityDir, "nodir", e2eDefaultTimeout())
 
 	cwd := report.get("CWD")
-	if cwd != cityDir {
+	if !sameE2EPath(t, cwd, cityDir) {
 		t.Errorf("CWD = %q, want %q (city directory)", cwd, cityDir)
 	}
 }
@@ -102,7 +102,7 @@ func TestE2E_Dir_Relative(t *testing.T) {
 
 	want := filepath.Join(cityDir, "work", "agent")
 	cwd := report.get("CWD")
-	if cwd != want {
+	if !sameE2EPath(t, cwd, want) {
 		t.Errorf("CWD = %q, want %q", cwd, want)
 	}
 }
@@ -125,11 +125,11 @@ func TestE2E_Dir_GC_DIR(t *testing.T) {
 
 	want := filepath.Join(cityDir, "subdir")
 	gcDir := report.get("GC_DIR")
-	if gcDir != want {
+	if !sameE2EPath(t, gcDir, want) {
 		t.Errorf("GC_DIR = %q, want %q", gcDir, want)
 	}
 	// GC_CITY should still be the city root.
-	if !report.has("GC_CITY", cityDir) {
+	if !report.hasPath(t, "GC_CITY", cityDir) {
 		t.Errorf("GC_CITY = %v, want [%s]", report.getAll("GC_CITY"), cityDir)
 	}
 }

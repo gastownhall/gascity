@@ -123,6 +123,92 @@ func TestStandaloneBuildAgentsFnWithSessionBeads_UsesRigStoresForAssignedWork(t 
 	}
 }
 
+func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsCompleteReleases(t *testing.T) {
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		ID:       "ga-live",
+		Title:    "live assigned work from partial snapshot",
+		Type:     "task",
+		Assignee: "worker-session",
+		Metadata: map[string]string{
+			"gc.routed_to": "worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("mark work in_progress: %v", err)
+	}
+	work.Status = inProgress
+
+	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
+		store,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}}},
+		nil,
+		DesiredStateResult{
+			AssignedWorkBeads:  []beads.Bead{work},
+			AssignedWorkStores: []beads.Store{store},
+			StoreQueryPartial:  true,
+		},
+		nil,
+	)
+	if len(released) != 0 {
+		t.Fatalf("released %d work bead(s) from a partial snapshot, want none", len(released))
+	}
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work after partial one-shot release: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "worker-session" {
+		t.Fatalf("partial one-shot snapshot released work: status=%q assignee=%q", got.Status, got.Assignee)
+	}
+
+	released = releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
+		store,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}}},
+		nil,
+		DesiredStateResult{
+			AssignedWorkBeads:   []beads.Bead{work},
+			AssignedWorkStores:  []beads.Store{store},
+			SessionQueryPartial: true,
+		},
+		nil,
+	)
+	if len(released) != 0 {
+		t.Fatalf("released %d work bead(s) from a partial session snapshot, want none", len(released))
+	}
+	got, err = store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work after partial session snapshot release: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "worker-session" {
+		t.Fatalf("partial session snapshot released work: status=%q assignee=%q", got.Status, got.Assignee)
+	}
+
+	released = releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
+		store,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}}},
+		nil,
+		DesiredStateResult{
+			AssignedWorkBeads:  []beads.Bead{work},
+			AssignedWorkStores: []beads.Store{store},
+		},
+		nil,
+	)
+	if len(released) != 1 {
+		t.Fatalf("complete one-shot snapshot released %d work bead(s), want 1", len(released))
+	}
+	got, err = store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work after complete one-shot release: %v", err)
+	}
+	if got.Status != "open" || got.Assignee != "" {
+		t.Fatalf("complete one-shot snapshot did not release orphaned work: status=%q assignee=%q", got.Status, got.Assignee)
+	}
+}
+
 func TestMergeEnvOverrideOrder(t *testing.T) {
 	a := map[string]string{"KEY": "first", "A": "a"}
 	b := map[string]string{"KEY": "second", "B": "b"}

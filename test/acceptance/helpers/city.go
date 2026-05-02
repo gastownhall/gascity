@@ -3,6 +3,7 @@ package acceptancehelpers
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -29,7 +30,7 @@ type City struct {
 // The city is NOT initialized — call Init() or InitFrom() next.
 func NewCity(t *testing.T, env *Env) *City {
 	t.Helper()
-	return newCityAt(t, env, t.TempDir())
+	return newCityAt(t, env, acceptanceTempDir(t))
 }
 
 // NewCityInRoot creates a city under the provided root directory.
@@ -218,6 +219,48 @@ func uniqueName() string {
 		return "at-fallback"
 	}
 	return "at-" + hex.EncodeToString(b)
+}
+
+func acceptanceTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "gc-acceptance-*")
+	if err != nil {
+		t.Fatalf("acceptance: creating temp dir: %v", err)
+	}
+	t.Cleanup(func() {
+		removeAllWithRetry(t, dir, 5*time.Second, 50*time.Millisecond)
+	})
+	return dir
+}
+
+func removeAllWithRetry(t *testing.T, dir string, timeout, interval time.Duration) {
+	t.Helper()
+	if err := removeAllWithRetryFunc(dir, timeout, interval, os.RemoveAll); err != nil {
+		t.Fatalf("acceptance: removing temp dir %s: %v", dir, err)
+	}
+}
+
+func removeAllWithRetryFunc(dir string, timeout, interval time.Duration, remove func(string) error) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		if err := remove(dir); err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			lastErr = err
+		} else {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(interval)
+	}
+	if lastErr == nil {
+		lastErr = errors.New("timed out")
+	}
+	return lastErr
 }
 
 // ExamplesDir returns the absolute path to the examples/ directory

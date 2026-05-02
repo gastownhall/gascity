@@ -831,7 +831,7 @@ func TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind(t *testing.T) 
 	if err != nil {
 		t.Fatalf("providerStore.Create after rebind: %v", err)
 	}
-	if got := beadPrefix(rebound.ID); got != "fe" {
+	if got := beadPrefix(nil, rebound.ID); got != "fe" {
 		t.Fatalf("provider rebind bead prefix = %q, want %q", got, "fe")
 	}
 
@@ -882,7 +882,7 @@ func TestManagedBdRigStoreConsistentAcrossRawBdGcBdAndProviderStore(t *testing.T
 	if err != nil {
 		t.Fatalf("providerStore.Create: %v", err)
 	}
-	if got := beadPrefix(providerBead.ID); got != "fe" {
+	if got := beadPrefix(nil, providerBead.ID); got != "fe" {
 		t.Fatalf("provider rig bead prefix = %q, want %q", got, "fe")
 	}
 	rawShow := runRawBDFromDir(t, bdPath, rawDir, "show", "--json", providerBead.ID)
@@ -1010,7 +1010,7 @@ func TestManagedBdCityStoreConsistentAcrossRawBdGcBdAndProviderStore(t *testing.
 	}
 
 	rawID := parseCreatedBeadID(t, runRawBDFromDir(t, bdPath, rawDir, "create", "--json", "raw city bead", "-t", "task"))
-	if got := beadPrefix(rawID); got != "gc" {
+	if got := beadPrefix(nil, rawID); got != "gc" {
 		t.Fatalf("raw city bead prefix = %q, want %q", got, "gc")
 	}
 	providerStore, err := openStoreAtForCity(cityPath, cityPath)
@@ -1036,7 +1036,7 @@ func TestManagedBdCityStoreConsistentAcrossRawBdGcBdAndProviderStore(t *testing.
 	if err != nil {
 		t.Fatalf("providerStore.Create: %v", err)
 	}
-	if got := beadPrefix(providerBead.ID); got != "gc" {
+	if got := beadPrefix(nil, providerBead.ID); got != "gc" {
 		t.Fatalf("provider city bead prefix = %q, want %q", got, "gc")
 	}
 	rawShow := runRawBDFromDir(t, bdPath, rawDir, "show", "--json", providerBead.ID)
@@ -1072,7 +1072,7 @@ func TestFreshManagedBdCityInitSeedsPinnedHQDatabaseAndKeepsGCPrefix(t *testing.
 		t.Fatalf("MkdirAll(rawDir): %v", err)
 	}
 	rawID := parseCreatedBeadID(t, runRawBDFromDir(t, bdPath, rawDir, "create", "--json", "fresh city bead", "-t", "task"))
-	if got := beadPrefix(rawID); got != "gc" {
+	if got := beadPrefix(nil, rawID); got != "gc" {
 		t.Fatalf("raw city bead prefix = %q, want %q", got, "gc")
 	}
 	providerStore, err := openStoreAtForCity(cityPath, cityPath)
@@ -1083,7 +1083,7 @@ func TestFreshManagedBdCityInitSeedsPinnedHQDatabaseAndKeepsGCPrefix(t *testing.
 	if err != nil {
 		t.Fatalf("providerStore.Create: %v", err)
 	}
-	if got := beadPrefix(providerBead.ID); got != "gc" {
+	if got := beadPrefix(nil, providerBead.ID); got != "gc" {
 		t.Fatalf("provider city bead prefix = %q, want %q", got, "gc")
 	}
 }
@@ -1490,6 +1490,8 @@ set -eu
 	origPath := os.Getenv("PATH")
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+origPath)
 	t.Setenv("CAPTURE_PATH", capture)
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	t.Setenv("GC_DOLT_PORT", "9999")
 
 	var stdout, stderr bytes.Buffer

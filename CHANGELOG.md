@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Existing managed cities may see a `dolt-config` doctor warning until
   `gc dolt restart` or the next managed server start regenerates
   `dolt-config.yaml`.
+- In bead-backed pool reconciliation, `scale_check` output is now documented
+  and enforced as additive new-session demand. Assigned work is resumed
+  separately; custom checks that previously returned total desired sessions
+  should return only new unassigned demand.
+- Session bead reconciliation now stops suspended and orphaned runtimes before
+  closing their beads; resuming one of those sessions starts a fresh lifecycle
+  instead of continuing the previous runtime process.
+- `gc hook --inject` is now silent legacy compatibility for already-installed
+  Stop/session-end hooks. Fresh managed hook configs no longer install it;
+  routed work pickup should happen through the SessionStart claim protocol or
+  an explicit non-inject `gc hook` call.
 
 ## [1.0.0] - 2026-04-21
 

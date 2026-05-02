@@ -1,16 +1,18 @@
 # Gas City agent base image — system dependencies.
 #
 # Contains everything an agent needs EXCEPT gc/bd/br binaries: OS packages,
-# Node.js, Claude Code CLI, Dolt. Rebuild only when system dependencies
-# change (~2.5 min). Agent image rebuilds on top take ~5s.
+# Claude Code CLI, Dolt. Rebuild only when system dependencies change
+# (~2.5 min). Agent image rebuilds on top take ~5s.
 #
 # Build:
 #   make docker-base
 #   # or: docker build -f contrib/k8s/Dockerfile.base -t gc-agent-base:latest .
 
-FROM ubuntu:24.04
+FROM ubuntu:24.04@sha256:c4a8d5503dfb2a3eb8ab5f807da5bc69a85730fb49b5cfca2330194ebcc41c7b
 
 ENV DEBIAN_FRONTEND=noninteractive
+ARG CLAUDE_CODE_VERSION=2.1.123
+ARG DOLT_VERSION=1.86.6
 
 # System packages.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -25,13 +27,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tmux \
     && rm -rf /var/lib/apt/lists/*
 
-# Node.js (for Claude Code CLI).
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
-    && rm -rf /var/lib/apt/lists/*
-
-# Claude Code CLI.
-RUN npm install -g @anthropic-ai/claude-code
+COPY .github/scripts/install-claude-native.sh /tmp/install-claude-native.sh
+RUN /tmp/install-claude-native.sh "${CLAUDE_CODE_VERSION}" \
+    && rm -f /tmp/install-claude-native.sh
 
 # GitHub CLI (for git credential helper in containers).
 RUN mkdir -p -m 755 /etc/apt/keyrings \
@@ -44,8 +42,9 @@ RUN mkdir -p -m 755 /etc/apt/keyrings \
     && rm -rf /var/lib/apt/lists/*
 
 # Dolt CLI — pinned version (keep in sync with deps.env).
-ARG DOLT_VERSION=1.85.0
-RUN curl -fsSL https://github.com/dolthub/dolt/releases/download/v${DOLT_VERSION}/install.sh | bash
+COPY .github/scripts/install-dolt-archive.sh /tmp/install-dolt-archive.sh
+RUN /tmp/install-dolt-archive.sh "${DOLT_VERSION}" \
+    && rm -f /tmp/install-dolt-archive.sh
 
 # Default non-root user for Claude Code (--dangerously-skip-permissions rejects root).
 # When LINUX_USERNAME is set at runtime, the pod entrypoint creates a dynamic
@@ -54,3 +53,5 @@ RUN useradd -m -s /bin/bash gcagent \
     && echo "gcagent ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/gcagent \
     && chmod 0440 /etc/sudoers.d/gcagent
 ENV HOME=/home/gcagent
+
+USER gcagent

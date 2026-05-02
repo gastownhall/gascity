@@ -5,9 +5,10 @@
 # file, commits on the branch, then hands off to the refinery for merge.
 #
 # Required env vars (set by gc start):
-#   GC_AGENT — this agent's name (e.g., "demo-repo/polecat-1")
-#   GC_CITY  — path to the city directory
-#   GC_DIR   — working directory (rig repo path)
+#   GC_AGENT    — this agent's session name
+#   GC_TEMPLATE — canonical pool route target (e.g., "demo-repo/lifecycle.polecat")
+#   GC_CITY     — path to the city directory
+#   GC_DIR      — working directory (rig repo path)
 
 set -euo pipefail
 
@@ -35,13 +36,23 @@ git config --global user.name 2>/dev/null || git config --global user.name "gc-a
 git pull --ff-only origin main 2>/dev/null || true
 
 AGENT_SHORT=$(basename "$GC_AGENT")
+POOL_LABEL="${GC_TEMPLATE:?GC_TEMPLATE must be set to canonical pool route target}"
 
-# Pool label is the agent name without the instance suffix (-1, -2, etc.).
-# For pool max=1 the name has no suffix, so we only strip if it ends in -N.
-POOL_LABEL="$GC_AGENT"
-if [[ "$POOL_LABEL" =~ -[0-9]+$ ]]; then
-    POOL_LABEL="${POOL_LABEL%-*}"
-fi
+derive_refinery_target() {
+    case "${GC_TEMPLATE:-}" in
+        *polecat)
+            printf '%s\n' "${GC_TEMPLATE%polecat}refinery"
+            ;;
+        "")
+            echo "GC_TEMPLATE must be set to canonical pool route target" >&2
+            return 1
+            ;;
+        *)
+            echo "GC_TEMPLATE=$GC_TEMPLATE does not end in 'polecat'; cannot derive refinery target" >&2
+            return 1
+            ;;
+    esac
+}
 
 echo "[$AGENT_SHORT] Starting up in rig dir: $GC_DIR"
 # Jitter startup to avoid pool members racing on the same bead.
@@ -158,7 +169,7 @@ echo "[$AGENT_SHORT] Worktree cleaned up. Branch $BRANCH persists."
 # ── Step 7: Hand off to refinery ──────────────────────────────────────────
 
 # Set branch metadata and reassign to the refinery for merge.
-REFINERY="${GC_AGENT%/*}/refinery"
+REFINERY="$(derive_refinery_target)"
 bd update "$BEAD_ID" --metadata "{\"branch\":\"$BRANCH\"}" --assignee="$REFINERY" 2>/dev/null || true
 
 gc mail send --all "READY FOR MERGE: $BRANCH ($BEAD_TITLE) → $REFINERY" 2>/dev/null || true

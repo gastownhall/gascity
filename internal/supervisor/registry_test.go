@@ -1,6 +1,7 @@
 package supervisor
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -119,6 +120,66 @@ func TestRegistryUnregister(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Errorf("expected 0 entries after unregister, got %d", len(entries))
+	}
+}
+
+func TestRegistryPendingCityRequestIDCanonicalizesPath(t *testing.T) {
+	dir := t.TempDir()
+	r := NewRegistry(filepath.Join(dir, "cities.toml"))
+
+	cityPath := filepath.Join(dir, "cities", "alpha")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(dir, "alpha-link")
+	if err := os.Symlink(cityPath, linkPath); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.StorePendingCityRequestID(linkPath, "req-alpha"); err != nil {
+		t.Fatalf("StorePendingCityRequestID: %v", err)
+	}
+
+	reopened := NewRegistry(filepath.Join(dir, "cities.toml"))
+	got, ok, err := reopened.ConsumePendingCityRequestID(cityPath)
+	if err != nil {
+		t.Fatalf("ConsumePendingCityRequestID: %v", err)
+	}
+	if !ok {
+		t.Fatal("pending request ID was not persisted")
+	}
+	if got != "req-alpha" {
+		t.Fatalf("request ID = %q, want req-alpha", got)
+	}
+
+	if got, ok, err := reopened.ConsumePendingCityRequestID(cityPath); err != nil || ok || got != "" {
+		t.Fatalf("second consume = (%q, %t, %v), want empty false nil", got, ok, err)
+	}
+}
+
+func TestRegistryStorePendingCityRequestIDRejectsDuplicatePath(t *testing.T) {
+	dir := t.TempDir()
+	r := NewRegistry(filepath.Join(dir, "cities.toml"))
+
+	cityPath := filepath.Join(dir, "cities", "alpha")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.StorePendingCityRequestID(cityPath, "req-first"); err != nil {
+		t.Fatalf("StorePendingCityRequestID first: %v", err)
+	}
+	err := r.StorePendingCityRequestID(cityPath, "req-second")
+	if !errors.Is(err, ErrPendingCityRequestExists) {
+		t.Fatalf("StorePendingCityRequestID duplicate error = %v, want ErrPendingCityRequestExists", err)
+	}
+
+	got, ok, err := r.ConsumePendingCityRequestID(cityPath)
+	if err != nil {
+		t.Fatalf("ConsumePendingCityRequestID: %v", err)
+	}
+	if !ok || got != "req-first" {
+		t.Fatalf("consumed pending request = (%q, %t), want req-first true", got, ok)
 	}
 }
 

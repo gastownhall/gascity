@@ -6,7 +6,8 @@
 # closes the bead.
 #
 # Required env vars (set by gc start):
-#   GC_AGENT — this agent's name (e.g., "demo-repo/refinery")
+#   GC_AGENT — this agent's session name
+#   GC_ALIAS — canonical agent alias (e.g., "demo-repo/lifecycle.refinery")
 #   GC_CITY  — path to the city directory
 #   GC_DIR   — working directory (rig repo path)
 
@@ -21,6 +22,7 @@ export GIT_TERMINAL_PROMPT=0
 git pull --ff-only origin main 2>/dev/null || true
 
 AGENT_SHORT=$(basename "$GC_AGENT")
+MERGE_ASSIGNEE="${GC_ALIAS:?GC_ALIAS must be set to canonical refinery route target}"
 POLL_INTERVAL="${GC_REFINERY_POLL:-3}"
 
 echo "[$AGENT_SHORT] Starting merge agent in rig dir: $GC_DIR"
@@ -35,8 +37,8 @@ while true; do
     # separate pods; local: branches exist locally, fetch is a no-op).
     git fetch origin 2>/dev/null || true
 
-    # Scan for beads assigned to us (polecats reassign after pushing their branch).
-    MERGE_BEADS=$(bd list --assignee="$GC_AGENT" --status=in_progress --json 2>/dev/null || echo "[]")
+    # Scan for beads assigned to the canonical alias polecats hand off to.
+    MERGE_BEADS=$(bd list --assignee="$MERGE_ASSIGNEE" --status=in_progress --json 2>/dev/null || echo "[]")
 
     if echo "$MERGE_BEADS" | jq -e 'length > 0' >/dev/null 2>&1; then
         # Process each bead that has branch metadata.

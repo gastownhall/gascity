@@ -126,7 +126,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	cmd.Env = bdCommandEnv(cityPath, cfg, target)
+	cmd.Env = workQueryEnvForDir(bdCommandEnv(cityPath, cfg, target), cmd.Dir)
 
 	if err := cmd.Run(); err != nil {
 		var exitErr *exec.ExitError
@@ -239,7 +239,7 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 }
 
 func bdRigForArg(cfg *config.City, arg string) (config.Rig, bool) {
-	if prefix := beadPrefix(arg); prefix != "" {
+	if prefix := beadPrefix(cfg, arg); prefix != "" {
 		return findRigByPrefix(cfg, prefix)
 	}
 	return config.Rig{}, false

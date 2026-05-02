@@ -252,9 +252,17 @@ func toRecipeWithGraph(f *Formula, graphWorkflow bool) (*Recipe, error) {
 		rootDesc = "{{desc}}"
 	}
 
+	// Vapor formulas and formulas with no materialized steps are executable
+	// wisps: the root bead itself is the work. Poured formulas keep a molecule
+	// container root because their child steps are the routable units.
+	rootOnly := (!f.Pour && f.Phase == "vapor") || len(f.Steps) == 0
+
 	// Root step
 	rootType := "molecule"
-	if graphWorkflow {
+	switch {
+	case graphWorkflow:
+		rootType = "task"
+	case rootOnly:
 		rootType = "task"
 	}
 
@@ -268,16 +276,14 @@ func toRecipeWithGraph(f *Formula, graphWorkflow bool) (*Recipe, error) {
 	if graphWorkflow {
 		rootStep.Metadata = map[string]string{"gc.kind": "workflow"}
 		rootStep.Metadata["gc.formula_contract"] = "graph.v2"
+	} else if rootOnly {
+		rootStep.Metadata = map[string]string{"gc.kind": "wisp"}
 	}
 	defPriority := 2
 	rootStep.Priority = &defPriority
 	r.Steps = append(r.Steps, rootStep)
 
-	// Determine RootOnly: vapor-phase formulas that don't explicitly
-	// request pour get root-only by default.
-	if !f.Pour && f.Phase == "vapor" {
-		r.RootOnly = true
-	}
+	r.RootOnly = rootOnly
 
 	// Flatten step tree
 	idMapping := make(map[string]string) // step.ID -> namespaced ID

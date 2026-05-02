@@ -99,14 +99,24 @@ DROP DATABASE IF EXISTS `<orphan_name>`;
 ```
 
 **3. If orphan count > {{max_orphans_for_sql}}:**
-SQL cleanup would take too long. Use gc dolt cleanup instead:
+SQL cleanup would take too long via this loop. Delegate to gc dolt cleanup,
+which itself routes through the running server's `DROP DATABASE` (safe under
+the server's NBS lock):
 ```bash
 gc dolt cleanup --force --max <count>
 ```
-If even that fails, escalate:
+If `gc dolt cleanup` returns ANY refusal (server unreachable, port reachable
+but `SELECT 1` failed, or cannot probe TCP), STOP. Do NOT retry with
+`--server-down-ok` from any agent context, including this formula. The
+flag is a TTY-only operator gesture; if you are an agent, you are not the
+operator, regardless of who scheduled you. Escalate immediately. Only a
+human operator may use `--server-down-ok`, and only after independently
+verifying the dolt server process is stopped AND the port is closed —
+running rm -rf against a live data dir corrupts NBS state and crash-loops
+the journal (#1549).
 ```bash
-gc mail send mayor/ -s "ESCALATION: <count> orphan databases detected [HIGH]" \\
-  -m "Too many orphans for SQL cleanup. Recommend filesystem cleanup."
+gc mail send mayor/ -s "ESCALATION: <count> orphan databases detected, dolt unreachable [HIGH]" \\
+  -m "Too many orphans for inline SQL cleanup AND gc dolt cleanup refused (server unreachable). Operator must confirm dolt is stopped (process gone AND port closed), then re-run with --server-down-ok."
 ```
 
 **4. Record results:**

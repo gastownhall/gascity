@@ -6,9 +6,13 @@ on:
   pull_request_target:
     types: [synchronize]
 
+permissions: {}
+
 jobs:
+  # pull_request_target is safe here because this job never checks out or runs
+  # pull request code; it only removes labels from the issue/PR metadata.
   remove-label:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     permissions:
       issues: write
       pull-requests: write

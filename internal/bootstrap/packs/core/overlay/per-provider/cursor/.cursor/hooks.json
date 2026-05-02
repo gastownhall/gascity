@@ -18,11 +18,6 @@
       {
         "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc mail check --inject"
       }
-    ],
-    "stop": [
-      {
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc hook --inject"
-      }
     ]
   }
 }
