@@ -176,7 +176,7 @@ gc mail send mayor/ -s "BLOCKED: Need coordination" -m "..."          # Cross-ri
 **Your mail budget is 0-1 messages per session.**
 
 - **Escalation**: Mail to witness as HELP — this is the ONE allowed mail use
-- **Everything else**: Use `gc nudge` — ephemeral, zero Dolt overhead
+- **Everything else**: Use `gc session nudge` — ephemeral, zero Dolt overhead
 - **Completion**: The done sequence handles notification — do NOT mail "I'm done"
 - **Status updates**: If asked for status, respond via nudge, not mail
 

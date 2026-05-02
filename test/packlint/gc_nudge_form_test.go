@@ -21,7 +21,8 @@ import (
 // nudgeScanDirs is the set of repo-root-relative directories whose embedded
 // shell text and command examples must use the canonical `gc session nudge`
 // form. Same set as `bd_show_jq_test.go` plus the user-facing docs tree,
-// which must not teach migrating users the deprecated form.
+// which must not teach migrating users the deprecated form. Design-history
+// files under engdocs are intentionally out of scope.
 var nudgeScanDirs = []string{
 	"examples",
 	"internal/bootstrap/packs",
@@ -107,13 +108,18 @@ func TestViolatesNudgeForm(t *testing.T) {
 		{name: "deprecated templated cmd", line: `{{ cmd }} nudge <target> "message"`, violation: true},
 		{name: "deprecated templated rig", line: `gc nudge {{ .RigName }}/refinery "msg"`, violation: true},
 		{name: "deprecated indented", line: `    gc nudge dog/ "Compactor needed"`, violation: true},
+		{name: "deprecated quoted positional target", line: `gc nudge "deacon/" "DOG_DONE: ok"`, violation: true},
 		{name: "canonical session form", line: `gc session nudge deacon/ "DOG_DONE: ok"`, violation: false},
 		{name: "canonical templated session form", line: `{{ cmd }} session nudge <target> "message"`, violation: false},
 		{name: "still-valid drain subcommand", line: `gc nudge drain --inject`, violation: false},
 		{name: "still-valid status subcommand", line: `gc nudge status`, violation: false},
 		{name: "still-valid poll subcommand", line: `gc nudge poll --json`, violation: false},
 		{name: "markdown link to status", line: `[gc nudge status](#gc-nudge-status) | Show queued`, violation: false},
-		{name: "backticked bare command in prose", line: "Use `gc nudge` for deferred-delivery controls", violation: false},
+		{name: "instructional backticked bare command", line: "Use `gc nudge` to alert the witness", violation: true},
+		{name: "instructional via backticked bare command", line: "Health check via `gc nudge`", violation: true},
+		{name: "instructional bare command dash", line: "Use `gc nudge` - ephemeral, zero Dolt overhead", violation: true},
+		{name: "backticked status prose", line: "Use `gc nudge status` to inspect queued nudges", violation: false},
+		{name: "backticked valid namespace prose", line: "The `gc nudge` subcommand only exposes deferred-delivery controls (`drain`, `status`, `poll`)", violation: false},
 		{name: "prose mention without invocation", line: "The gc nudge namespace is for drain/status/poll only", violation: false},
 	}
 	for _, tc := range cases {
@@ -136,6 +142,9 @@ func TestViolatesNudgeForm(t *testing.T) {
 // after a shell prompt. Mid-line occurrences are treated as prose
 // references (e.g., `Use the gc nudge namespace ...`).
 func violatesNudgeForm(line string) string {
+	if v := violatesBacktickedBareNudge(line); v != "" {
+		return v
+	}
 	for _, prefix := range nudgeCommandPrefixes(line) {
 		before := strings.TrimSpace(line[:prefix.start])
 		switch before {
@@ -147,10 +156,6 @@ func violatesNudgeForm(line string) string {
 		if rest == "" {
 			continue
 		}
-		switch rest[0] {
-		case '`', '"', '\'':
-			continue
-		}
 		if isWordChar(rest[0]) {
 			if validNudgeSubcommands[firstToken(rest)] {
 				continue
@@ -159,6 +164,22 @@ func violatesNudgeForm(line string) string {
 		return strings.TrimSpace(line[prefix.start:])
 	}
 	return ""
+}
+
+// violatesBacktickedBareNudge catches instructional prose that names the
+// retired send interface without an explicit target, such as "Use `gc nudge`".
+func violatesBacktickedBareNudge(line string) string {
+	const bare = "`gc nudge`"
+	if !strings.Contains(line, bare) {
+		return ""
+	}
+	lower := strings.ToLower(line)
+	if strings.Contains(lower, "drain") &&
+		strings.Contains(lower, "status") &&
+		strings.Contains(lower, "poll") {
+		return ""
+	}
+	return bare
 }
 
 type nudgePrefix struct {

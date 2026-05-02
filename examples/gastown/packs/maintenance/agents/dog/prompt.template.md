@@ -42,7 +42,7 @@ before killing the session.
 
 | Attempt | Timeout | Message |
 |---------|---------|---------|
-| 1 | 60s | Health check via `gc nudge` |
+| 1 | 60s | Health check via `gc session nudge` |
 | 2 | 120s | Second health check |
 | 3 | 240s | Final warning |
 
