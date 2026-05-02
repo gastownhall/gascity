@@ -93,9 +93,10 @@ type CityRuntime struct {
 	onStarted           func()
 	onStatus            func(string)
 
-	shutdownOnce   sync.Once
-	logPrefix      string // "gc start" or "gc supervisor"
-	stdout, stderr io.Writer
+	shutdownOnce             sync.Once
+	preserveSessionsShutdown atomic.Bool
+	logPrefix                string // "gc start" or "gc supervisor"
+	stdout, stderr           io.Writer
 }
 
 const runtimeDemandSnapshotMaxAge = 30 * time.Second
@@ -1951,19 +1952,48 @@ func orderShutdownDrainTimeout(total time.Duration) time.Duration {
 	return reloadOrderDrainTimeout
 }
 
+func (cr *CityRuntime) recordPreservedShutdownTrace() {
+	trace := cr.beginTraceCycle("shutdown", "preserve_sessions", nil)
+	if trace == nil {
+		return
+	}
+	trace.recordOperation("lifecycle.shutdown.preserve_sessions", "", "", "", "retained", string(TraceOutcomeApplied), traceRecordPayload{
+		"city_path": cr.cityPath,
+		"city_name": cr.cityName,
+		"reason":    "supervisor_shutdown_preserve_mode",
+	}, "")
+	trace.end(TraceCompletionCompleted, traceRecordPayload{
+		"phase":     "shutdown",
+		"mode":      "preserve_sessions",
+		"city_name": cr.cityName,
+		"reason":    "supervisor_shutdown_preserve_mode",
+	})
+}
+
 // shutdown performs graceful two-pass agent shutdown for this city.
 // Safe to call multiple times (e.g., from both panic recovery and
 // normal shutdown) — only the first call takes effect.
 func (cr *CityRuntime) shutdown() {
 	cr.shutdownOnce.Do(func() {
 		cr.waitForAsyncStarts()
+		preserveSessions := cr.preserveSessionsShutdown.Load()
+		if preserveSessions {
+			cr.recordPreservedShutdownTrace()
+		}
 		if cr.trace != nil {
 			_ = cr.trace.Close()
 		}
 		if cr.svc != nil {
+			// Workspace-service proxies are process-group-bound, not preserved
+			// agent sessions. Close them so the next supervisor can reacquire
+			// their sockets and ports during re-adoption.
 			if err := cr.svc.Close(); err != nil {
 				fmt.Fprintf(cr.stderr, "%s: service shutdown: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 			}
+		}
+		if preserveSessions {
+			fmt.Fprintf(cr.stdout, "Preserving agent sessions for supervisor re-adoption.\n") //nolint:errcheck // best-effort stdout
+			return
 		}
 		// Drain order dispatchers with a small cap before stopping sessions.
 		// Use a fresh context because the tick ctx is already canceled at this
@@ -1991,4 +2021,8 @@ func (cr *CityRuntime) shutdown() {
 		markCityStopSessionSleepReason(store, cr.stderr)
 		gracefulStopAll(running, cr.sp, gracefulTimeout, cr.rec, cr.cfg, store, cr.stdout, cr.stderr)
 	})
+}
+
+func (cr *CityRuntime) preserveSessionsOnShutdown() {
+	cr.preserveSessionsShutdown.Store(true)
 }
