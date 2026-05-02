@@ -1283,6 +1283,74 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		}
 	})
 
+	// Regression for ga-gu3p / ga-9fb5: a city declared locally on disk
+	// (city.toml + .gc/site.toml) but not yet registered with the
+	// supervisor (cities.toml empty) must still resolve --rig from cwd.
+	// `gc rig list` already works in this state because it reads city.toml
+	// directly; resolveRigToContext used to only consult the supervisor
+	// registry, so `gc mcp list --rig X` reported the rig as unregistered
+	// even though it was perfectly visible to the user.
+	t.Run("local_unregistered_city_with_site_binding_resolves", func(t *testing.T) {
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+
+		cityPath := setupCity(t, "local-city")
+		rigDir := filepath.Join(t.TempDir(), "local-rig")
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// writeRigAnywhereCityToml writes both city.toml AND .gc/site.toml
+		// (via PersistRigSiteBindings) — exactly the on-disk state that
+		// the user hits before `gc start` registers the city. Deliberately
+		// skip registerCityForRigResolution so cities.toml stays empty.
+		toml := fmt.Sprintf("[workspace]\nname = \"local-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"local-rig\"\npath = %q\n", rigDir)
+		writeRigAnywhereCityToml(t, cityPath, toml)
+		setCwd(t, cityPath)
+
+		ctx, err := resolveRigToContext("local-rig")
+		if err != nil {
+			t.Fatalf("resolveRigToContext: %v", err)
+		}
+		if ctx.CityPath != cityPath {
+			t.Errorf("CityPath = %q, want %q", ctx.CityPath, cityPath)
+		}
+		if ctx.RigName != "local-rig" {
+			t.Errorf("RigName = %q, want %q", ctx.RigName, "local-rig")
+		}
+	})
+
+	// Companion to the previous test: the local-city fallback only fires
+	// when a real .gc/site.toml binding exists. A legacy city.toml with
+	// an inline `path = ...` (no site binding) must still be rejected so
+	// the legacy_city_toml_path_is_not_registered_binding invariant
+	// continues to apply at the cwd-walk level too.
+	t.Run("local_unregistered_city_legacy_path_still_rejected", func(t *testing.T) {
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+
+		cityPath := setupCity(t, "local-legacy")
+		rigDir := filepath.Join(t.TempDir(), "local-legacy-rig")
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		legacy := fmt.Sprintf("[workspace]\nname = \"local-legacy\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"local-legacy-rig\"\npath = %q\n", rigDir)
+		if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(legacy), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(config.SiteBindingPath(cityPath)); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		setCwd(t, cityPath)
+
+		_, err := resolveRigToContext("local-legacy-rig")
+		if err == nil {
+			t.Fatal("resolveRigToContext should reject a legacy city.toml even via the local-city fallback")
+		}
+		if !strings.Contains(err.Error(), "not registered") {
+			t.Fatalf("error = %q, want not registered", err)
+		}
+	})
+
 	t.Run("path_argument_fails_closed_on_binding_load_error", func(t *testing.T) {
 		gcHome := t.TempDir()
 		t.Setenv("GC_HOME", gcHome)
