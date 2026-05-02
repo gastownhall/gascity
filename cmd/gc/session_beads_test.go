@@ -2135,18 +2135,20 @@ func TestSyncSessionBeads_BatchesExistingMetadataBackfill(t *testing.T) {
 	}
 }
 
-// eofOnBeadStore wraps a MemStore and returns an unexpected-EOF error from
-// SetMetadataBatch for one specific bead ID, simulating a transient Dolt
-// packet failure on a single write. All other writes pass through to the
-// underlying MemStore.
+// eofOnBeadStore wraps a MemStore and returns one unexpected-EOF error from
+// SetMetadataBatch, simulating a transient Dolt packet failure on a single
+// write. All other writes pass through to the underlying MemStore.
 type eofOnBeadStore struct {
 	*beads.MemStore
-	failID    string
+	failNext  bool
+	failedID  string
 	failCalls int
 }
 
 func (s *eofOnBeadStore) SetMetadataBatch(id string, kvs map[string]string) error {
-	if id == s.failID {
+	if s.failNext {
+		s.failNext = false
+		s.failedID = id
 		s.failCalls++
 		return fmt.Errorf(
 			"setting metadata on %q: exit status 1: [mysql] 2026/04/12 22:39:29 packets.go:58 unexpected EOF",
@@ -2190,68 +2192,80 @@ func TestSyncSessionBeads_IsolatesSetMetadataBatchEOFToSingleBead(t *testing.T) 
 		}
 		return b
 	}
-	beadA := seed("mayor")
-	beadB := seed("witness")
-	beadC := seed("dog")
-
-	// Wrap the store so bead B's SetMetadataBatch returns an EOF-shaped
-	// error every time. The underlying MemStore never sees writes for B.
-	store := &eofOnBeadStore{MemStore: inner, failID: beadB.ID}
+	beadA := seed("configured-alpha")
+	beadB := seed("configured-beta")
+	beadC := seed("configured-gamma")
 
 	ds := map[string]TemplateParams{
-		"mayor":   {TemplateName: "mayor", Command: "true"},
-		"witness": {TemplateName: "witness", Command: "true"},
-		"dog":     {TemplateName: "dog", Command: "true"},
+		"configured-alpha": {TemplateName: "configured-alpha", Command: "true"},
+		"configured-beta":  {TemplateName: "configured-beta", Command: "true"},
+		"configured-gamma": {TemplateName: "configured-gamma", Command: "true"},
 	}
+	expectedTemplates := map[string]string{
+		beadA.ID: "configured-alpha",
+		beadB.ID: "configured-beta",
+		beadC.ID: "configured-gamma",
+	}
+
+	// Wrap the store so the first SetMetadataBatch returns an EOF-shaped
+	// error. Because syncSessionBeads ranges over a map, failing the first
+	// metadata write makes the continuation assertion order-independent.
+	store := &eofOnBeadStore{MemStore: inner, failNext: true}
 
 	var stderr bytes.Buffer
 	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
 
-	// The EOF must have been observed at least once on bead B.
-	if store.failCalls == 0 {
-		t.Fatalf("SetMetadataBatch(%s) was never called; test did not exercise failure path", beadB.ID)
+	// The EOF must have been observed on exactly one seeded bead.
+	if store.failCalls != 1 {
+		t.Fatalf("SetMetadataBatch failure calls = %d, want 1", store.failCalls)
+	}
+	failedID := store.failedID
+	failedTemplate, ok := expectedTemplates[failedID]
+	if failedID == "" || !ok {
+		t.Fatalf("failed metadata write ID = %q, want one of %v", failedID, expectedTemplates)
 	}
 
 	// stderr must identify the failed bead and the transient EOF marker
 	// so operators can correlate the log with the underlying transport
 	// failure.
 	msg := stderr.String()
-	if !strings.Contains(msg, beadB.ID) {
-		t.Errorf("stderr missing failed bead ID %q:\n%s", beadB.ID, msg)
+	if !strings.Contains(msg, failedID) {
+		t.Errorf("stderr missing failed bead ID %q:\n%s", failedID, msg)
 	}
 	if !strings.Contains(strings.ToLower(msg), "unexpected eof") {
 		t.Errorf("stderr missing 'unexpected EOF' marker:\n%s", msg)
 	}
 
-	// The unrelated beads MUST have their template backfilled. A broken
-	// isolation contract would skip the whole loop or propagate the EOF
-	// and leave A and C unwritten.
-	gotA, err := inner.Get(beadA.ID)
-	if err != nil {
-		t.Fatalf("Get(%s): %v", beadA.ID, err)
-	}
-	if gotA.Metadata["template"] != "mayor" {
-		t.Errorf("bead A template = %q, want %q (isolation broken)",
-			gotA.Metadata["template"], "mayor")
-	}
-	gotC, err := inner.Get(beadC.ID)
-	if err != nil {
-		t.Fatalf("Get(%s): %v", beadC.ID, err)
-	}
-	if gotC.Metadata["template"] != "dog" {
-		t.Errorf("bead C template = %q, want %q (isolation broken)",
-			gotC.Metadata["template"], "dog")
+	// Every non-failed bead MUST have its template backfilled in the same
+	// tick. The failed bead MUST remain unwritten so the next tick retries
+	// the full backfill from a clean state.
+	for id, want := range expectedTemplates {
+		got, err := inner.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if id == failedID {
+			if got.Metadata["template"] != "" {
+				t.Errorf("failed bead template = %q, want empty (EOF should block write)",
+					got.Metadata["template"])
+			}
+			continue
+		}
+		if got.Metadata["template"] != want {
+			t.Errorf("non-failed bead %s template = %q, want %q (isolation broken)",
+				id, got.Metadata["template"], want)
+		}
 	}
 
-	// The failed bead's metadata MUST remain unwritten so the next tick
-	// retries the full backfill from a clean state (idempotence).
-	gotB, err := inner.Get(beadB.ID)
+	var retryStderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &retryStderr, false)
+
+	retried, err := inner.Get(failedID)
 	if err != nil {
-		t.Fatalf("Get(%s): %v", beadB.ID, err)
+		t.Fatalf("Get(%s) after retry: %v", failedID, err)
 	}
-	if gotB.Metadata["template"] != "" {
-		t.Errorf("bead B template = %q, want empty (EOF should block write)",
-			gotB.Metadata["template"])
+	if retried.Metadata["template"] != failedTemplate {
+		t.Errorf("retried bead template = %q, want %q", retried.Metadata["template"], failedTemplate)
 	}
 }
 
