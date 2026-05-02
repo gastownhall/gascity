@@ -322,6 +322,9 @@ func FindClosedNamedSessionBeadForSessionName(store beads.Store, identity, sessi
 		if b.Status != "closed" {
 			continue
 		}
+		if !closedNamedSessionReopenEligible(b) {
+			continue
+		}
 		if sessionName != "" {
 			if strings.TrimSpace(b.Metadata["session_name"]) == sessionName {
 				return b, true, nil
@@ -340,6 +343,21 @@ func FindClosedNamedSessionBeadForSessionName(store beads.Store, identity, sessi
 		return fallback, true, nil
 	}
 	return beads.Bead{}, false, nil
+}
+
+func closedNamedSessionReopenEligible(b beads.Bead) bool {
+	if strings.TrimSpace(b.Metadata["continuity_eligible"]) == "false" {
+		return false
+	}
+	switch strings.TrimSpace(b.Metadata["close_reason"]) {
+	case "duplicate", "duplicate-repair", "gc_swept", "orphaned", "reconfigured", "stale-session":
+		return false
+	}
+	switch strings.TrimSpace(b.Metadata["state"]) {
+	case "duplicate", "duplicate-repair", "gc_swept", "orphaned", "reconfigured", "stale-session":
+		return false
+	}
+	return true
 }
 
 // FindCanonicalNamedSessionBead finds the active bead that owns a configured named session.

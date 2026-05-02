@@ -165,6 +165,35 @@ func TestFindClosedNamedSessionBeadForSessionName_PrefersMatchingCanonicalCandid
 	}
 }
 
+func TestFindClosedNamedSessionBeadForSessionName_SkipsTerminalRetiredCandidate(t *testing.T) {
+	store := beads.NewMemStore()
+	orphaned, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name":               "test-city--mayor",
+			"close_reason":               "orphaned",
+			"state":                      "orphaned",
+			NamedSessionMetadataKey:      "true",
+			NamedSessionIdentityMetadata: "mayor",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(orphaned): %v", err)
+	}
+	if err := store.Close(orphaned.ID); err != nil {
+		t.Fatalf("Close(orphaned): %v", err)
+	}
+
+	found, ok, err := FindClosedNamedSessionBeadForSessionName(store, "mayor", "test-city--mayor")
+	if err != nil {
+		t.Fatalf("FindClosedNamedSessionBeadForSessionName: %v", err)
+	}
+	if ok {
+		t.Fatalf("FindClosedNamedSessionBeadForSessionName returned %q, want no reusable bead", found.ID)
+	}
+}
+
 func TestFindClosedNamedSessionBead_PrefersNewestClosedCanonical(t *testing.T) {
 	store := beads.NewMemStore()
 	older, err := store.Create(beads.Bead{
