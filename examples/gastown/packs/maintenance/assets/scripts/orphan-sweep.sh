@@ -35,8 +35,13 @@ if [ "$IN_PROGRESS" = "[]" ]; then
     exit 0
 fi
 
-# Step 2: Get all known agent names (from config, scoped to [[agent]] blocks).
-AGENTS=$(gc config show 2>/dev/null | awk '/^\[\[agent\]\]/{a=1} a && /^\s*name\s*=/{print; a=0}' | sed 's/.*=\s*"\(.*\)"/\1/') || exit 0
+# Step 2: Get all known agent identities from resolved config.
+# `gc config explain` prints Agent.QualifiedName(), including import binding
+# and rig scope. Fall back to the older config-show parser for older binaries.
+AGENTS=$(gc config explain 2>/dev/null | awk '/^Agent: /{print $2}') || AGENTS=""
+if [ -z "$AGENTS" ]; then
+    AGENTS=$(gc config show 2>/dev/null | awk '/^\[\[agent\]\]/{a=1} a && /^\s*name\s*=/{print; a=0}' | sed 's/.*=\s*"\(.*\)"/\1/') || exit 0
+fi
 if [ -z "$AGENTS" ]; then
     exit 0
 fi
