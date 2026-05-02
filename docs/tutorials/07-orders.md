@@ -327,8 +327,10 @@ schedule = "0 6 * * *"
 ```
 
 Overrides can change `enabled`, `trigger`, `interval`, `schedule`, `check`, `on`,
-`pool`, and `timeout`. The override matches by order name — if no order with
-that name exists, it's an error (fail-fast, not silent).
+`pool`, and `timeout`. The override matches by order name. An override that
+targets a nonexistent order produces an error rather than silently no-opping
+— `gc order` CLI commands fail; `gc start` logs the error and continues
+running with the unmatched override skipped.
 
 ### Rig scoping
 

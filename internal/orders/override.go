@@ -85,8 +85,8 @@ func notFoundError(idx int, ov Override, aa []Order) error {
 			return fmt.Errorf(
 				"orders.overrides[%d]: order %q not found at city scope (%s rig-scoped); "+
 					"set %s to target a per-rig instance, "+
-					`or use rig = "*" to target all instances`,
-				idx, ov.Name, pluralizeRigCount(len(rigs)), formatRigSuggestions(rigs),
+					"or use rig = %q to target all instances",
+				idx, ov.Name, pluralizeRigCount(len(rigs)), formatRigSuggestions(rigs), RigWildcard,
 			)
 		}
 		return fmt.Errorf("orders.overrides[%d]: order %q not found", idx, ov.Name)
