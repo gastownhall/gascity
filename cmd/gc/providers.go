@@ -189,7 +189,7 @@ func newSessionProviderFromContext(ctx sessionProviderContext, sessionBeads *ses
 }
 
 func newSessionProviderFromContextWithError(ctx sessionProviderContext, sessionBeads *sessionBeadSnapshot) (runtime.Provider, error) {
-	sp, err := newSessionProviderByName(ctx.providerName, ctx.sc, ctx.cityName, ctx.cityPath)
+	sp, err := buildSessionProviderByName(ctx.providerName, ctx.sc, ctx.cityName, ctx.cityPath)
 	if err != nil {
 		return nil, err
 	}

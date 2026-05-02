@@ -87,7 +87,7 @@ Use --rig to disambiguate same-name orders in different rigs.`,
 		ValidArgsFunction: completeOrderNames,
 	}
 	cmd.Flags().StringVar(&rig, "rig", "", "rig name to disambiguate same-name orders")
-	_ = cmd.RegisterFlagCompletionFunc("rig", completeRigNames)
+	_ = cmd.RegisterFlagCompletionFunc("rig", completeRigFlagNames)
 	return cmd
 }
 
@@ -112,7 +112,7 @@ Use --rig to disambiguate same-name orders in different rigs.`,
 		ValidArgsFunction: completeOrderNames,
 	}
 	cmd.Flags().StringVar(&rig, "rig", "", "rig name to disambiguate same-name orders")
-	_ = cmd.RegisterFlagCompletionFunc("rig", completeRigNames)
+	_ = cmd.RegisterFlagCompletionFunc("rig", completeRigFlagNames)
 	return cmd
 }
 
@@ -157,7 +157,7 @@ name. Use --rig to filter by rig.`,
 		ValidArgsFunction: completeOrderNames,
 	}
 	cmd.Flags().StringVar(&rig, "rig", "", "rig name to filter order history")
-	_ = cmd.RegisterFlagCompletionFunc("rig", completeRigNames)
+	_ = cmd.RegisterFlagCompletionFunc("rig", completeRigFlagNames)
 	return cmd
 }
 
