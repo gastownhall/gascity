@@ -83,9 +83,6 @@ func (f *Fake) WriteFile(name string, data []byte, perm os.FileMode) error {
 	if err, ok := f.Errors[name]; ok {
 		return err
 	}
-	if f.Files == nil {
-		f.Files = make(map[string][]byte)
-	}
 	modTime := f.nextModTime()
 	cp := make([]byte, len(data))
 	copy(cp, data)

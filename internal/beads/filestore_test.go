@@ -532,6 +532,54 @@ func TestFileStoreRefreshesSameSizeExternalRewrite(t *testing.T) {
 	}
 }
 
+func TestFileStoreMutatorReloadsSameSizeExternalRewriteWithUnchangedFreshness(t *testing.T) {
+	f := fsys.NewFake()
+	path := "/city/.gc/beads.json"
+
+	stale, err := beads.OpenFileStore(f, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer, err := beads.OpenFileStore(f, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	created, err := stale.Create(beads.Bead{Title: "alpha"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalModTime := f.ModTimes[path]
+	originalLen := len(f.Files[path])
+
+	if err := writer.Update(created.ID, beads.UpdateOpts{Title: ptr("bravo")}); err != nil {
+		t.Fatalf("Update(%q) from second handle: %v", created.ID, err)
+	}
+	if gotLen := len(f.Files[path]); gotLen != originalLen {
+		t.Fatalf("expected same-size external rewrite, got %d -> %d bytes", originalLen, gotLen)
+	}
+	f.ModTimes[path] = originalModTime
+
+	if err := stale.SetMetadata(created.ID, "owner", "controller"); err != nil {
+		t.Fatalf("SetMetadata(%q) from stale handle: %v", created.ID, err)
+	}
+
+	fresh, err := beads.OpenFileStore(f, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := fresh.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get(%q) after stale-handle mutator: %v", created.ID, err)
+	}
+	if got.Title != "bravo" {
+		t.Fatalf("Title after stale-handle mutator = %q, want bravo", got.Title)
+	}
+	if got.Metadata["owner"] != "controller" {
+		t.Fatalf("metadata[owner] after stale-handle mutator = %q, want controller", got.Metadata["owner"])
+	}
+}
+
 func TestFileStoreRefreshFallbackReloadsWhenStatFails(t *testing.T) {
 	base := fsys.NewFake()
 	path := "/city/.gc/beads.json"

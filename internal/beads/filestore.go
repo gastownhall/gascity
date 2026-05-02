@@ -151,6 +151,8 @@ func (fs *FileStore) refreshFreshnessCache() {
 // readers, but uses an mtime+size fast path to avoid full JSON reloads on
 // every read. The remaining per-read Stat cost is acceptable for now; if
 // polling latency becomes measurable, we can replace it with a lighter seq hint.
+// Read wrappers intentionally skip the cross-process locker because writers
+// publish complete JSON files with temp-file-plus-rename atomic replacement.
 func (fs *FileStore) refreshReadStateLocked() error {
 	current, err := fs.currentFreshness()
 	if err != nil {
@@ -185,7 +187,7 @@ func (fs *FileStore) Create(b Bead) (Bead, error) {
 		return Bead{}, err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
-	if err := fs.refreshReadStateLocked(); err != nil {
+	if err := fs.reloadFromDisk(); err != nil {
 		return Bead{}, err
 	}
 	snap := fs.snapshotLocked()
@@ -209,7 +211,7 @@ func (fs *FileStore) Update(id string, opts UpdateOpts) error {
 		return err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
-	if err := fs.refreshReadStateLocked(); err != nil {
+	if err := fs.reloadFromDisk(); err != nil {
 		return err
 	}
 	snap := fs.snapshotLocked()
@@ -232,7 +234,7 @@ func (fs *FileStore) Close(id string) error {
 		return err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
-	if err := fs.refreshReadStateLocked(); err != nil {
+	if err := fs.reloadFromDisk(); err != nil {
 		return err
 	}
 	snap := fs.snapshotLocked()
@@ -255,7 +257,7 @@ func (fs *FileStore) Reopen(id string) error {
 		return err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
-	if err := fs.refreshReadStateLocked(); err != nil {
+	if err := fs.reloadFromDisk(); err != nil {
 		return err
 	}
 	snap := fs.snapshotLocked()
@@ -278,7 +280,7 @@ func (fs *FileStore) Delete(id string) error {
 		return err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
-	if err := fs.refreshReadStateLocked(); err != nil {
+	if err := fs.reloadFromDisk(); err != nil {
 		return err
 	}
 	snap := fs.snapshotLocked()
@@ -300,7 +302,7 @@ func (fs *FileStore) CloseAll(ids []string, metadata map[string]string) (int, er
 		return 0, err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
-	if err := fs.refreshReadStateLocked(); err != nil {
+	if err := fs.reloadFromDisk(); err != nil {
 		return 0, err
 	}
 	snap := fs.snapshotLocked()
@@ -326,7 +328,7 @@ func (fs *FileStore) SetMetadata(id, key, value string) error {
 		return err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
-	if err := fs.refreshReadStateLocked(); err != nil {
+	if err := fs.reloadFromDisk(); err != nil {
 		return err
 	}
 	snap := fs.snapshotLocked()
@@ -349,7 +351,7 @@ func (fs *FileStore) SetMetadataBatch(id string, kvs map[string]string) error {
 		return err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
-	if err := fs.refreshReadStateLocked(); err != nil {
+	if err := fs.reloadFromDisk(); err != nil {
 		return err
 	}
 	snap := fs.snapshotLocked()
@@ -463,7 +465,7 @@ func (fs *FileStore) DepAdd(issueID, dependsOnID, depType string) error {
 		return err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
-	if err := fs.refreshReadStateLocked(); err != nil {
+	if err := fs.reloadFromDisk(); err != nil {
 		return err
 	}
 	snap := fs.snapshotLocked()
@@ -486,7 +488,7 @@ func (fs *FileStore) DepRemove(issueID, dependsOnID string) error {
 		return err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
-	if err := fs.refreshReadStateLocked(); err != nil {
+	if err := fs.reloadFromDisk(); err != nil {
 		return err
 	}
 	snap := fs.snapshotLocked()
