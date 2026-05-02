@@ -178,9 +178,8 @@ func TestBuiltinProvidersReturnsNewMap(t *testing.T) {
 }
 
 // TestBuiltinProvidersOpenCode verifies the opencode provider keeps startup
-// instructions out of argv. OpenCode treats argv prompt payloads as a normal
-// user message, so hook-enabled sessions must receive startup context through
-// gc prime --hook instead of argv.
+// instructions out of bare argv. OpenCode treats positional prompt payloads as
+// project paths in TUI mode, so tmux startup delivery must use --prompt.
 func TestBuiltinProvidersOpenCode(t *testing.T) {
 	p := BuiltinProviders()["opencode"]
 	if p.Command != "opencode" {
@@ -192,11 +191,11 @@ func TestBuiltinProvidersOpenCode(t *testing.T) {
 	if !reflect.DeepEqual(p.ACPArgs, []string{"acp"}) {
 		t.Errorf("ACPArgs = %v, want [acp]", p.ACPArgs)
 	}
-	if p.PromptMode != "none" {
-		t.Errorf("PromptMode = %q, want %q", p.PromptMode, "none")
+	if p.PromptMode != "flag" {
+		t.Errorf("PromptMode = %q, want %q", p.PromptMode, "flag")
 	}
-	if p.PromptFlag != "" {
-		t.Errorf("PromptFlag = %q, want empty", p.PromptFlag)
+	if p.PromptFlag != "--prompt" {
+		t.Errorf("PromptFlag = %q, want --prompt", p.PromptFlag)
 	}
 	if !derefBool(p.SupportsHooks) {
 		t.Error("SupportsHooks = false, want true")
@@ -207,6 +206,12 @@ func TestBuiltinProvidersOpenCode(t *testing.T) {
 	if p.InstructionsFile != "AGENTS.md" {
 		t.Errorf("InstructionsFile = %q, want %q", p.InstructionsFile, "AGENTS.md")
 	}
+	if p.ResumeFlag != "--session" {
+		t.Errorf("ResumeFlag = %q, want --session", p.ResumeFlag)
+	}
+	if p.ResumeStyle != "flag" {
+		t.Errorf("ResumeStyle = %q, want flag", p.ResumeStyle)
+	}
 	if p.ReadyDelayMs != 8000 {
 		t.Errorf("ReadyDelayMs = %d, want 8000", p.ReadyDelayMs)
 	}
@@ -214,15 +219,15 @@ func TestBuiltinProvidersOpenCode(t *testing.T) {
 
 // TestBuiltinProvidersOpenCodePromptModeRegression guards against switching
 // OpenCode back to argv-based prompt delivery. Gas City renders the startup
-// prompt as persona instructions, not as the first user task, so OpenCode must
-// not receive it through argv at startup.
+// prompt as startup material, so OpenCode must not receive it as a bare
+// positional argument at startup.
 func TestBuiltinProvidersOpenCodePromptModeRegression(t *testing.T) {
 	p := BuiltinProviders()["opencode"]
 	if p.PromptMode == "arg" {
 		t.Fatal("PromptMode must not be \"arg\" — OpenCode interprets positional prompt argv as a project path")
 	}
-	if p.PromptMode == "flag" {
-		t.Fatal("PromptMode must not be \"flag\" — OpenCode treats --prompt as the first user message instead of startup persona context")
+	if p.PromptMode != "flag" || p.PromptFlag != "--prompt" {
+		t.Fatalf("OpenCode prompt delivery = %q %q, want flag --prompt", p.PromptMode, p.PromptFlag)
 	}
 }
 

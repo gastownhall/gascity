@@ -15,6 +15,8 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/runtime"
 	runtimetmux "github.com/gastownhall/gascity/internal/runtime/tmux"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -82,6 +84,9 @@ func newLiveWorkerHandleHarness(t *testing.T) (*liveWorkerHandleHarness, error) 
 	if err := writeWorkerHandleInstructions(root, resolved.InstructionsFile); err != nil {
 		return nil, err
 	}
+	if err := installLiveHandleProviderHooks(root, liveSetup.Profile); err != nil {
+		return nil, err
+	}
 
 	socketName := filepath.Base(root)
 	tmuxCfg := runtimetmux.DefaultConfig()
@@ -137,6 +142,15 @@ func newLiveWorkerHandleHarness(t *testing.T) (*liveWorkerHandleHarness, error) 
 	return harness, nil
 }
 
+func installLiveHandleProviderHooks(workDir string, profile workerpkg.Profile) error {
+	switch profile {
+	case workerpkg.ProfileOpenCodeTmuxCLI:
+		return hooks.Install(fsys.OSFS{}, workDir, workDir, []string{"opencode"})
+	default:
+		return nil
+	}
+}
+
 func liveWorkerDebugf(format string, args ...any) {
 	if strings.TrimSpace(os.Getenv("GC_WORKER_HANDLE_DEBUG")) != "1" {
 		return
@@ -165,7 +179,8 @@ func resolveLiveHandleProvider() (*config.ResolvedProvider, error) {
 	}
 	return config.ResolveProvider(agent, workspace, map[string]config.ProviderSpec{
 		liveSetup.Provider: {
-			Command: liveSetup.BinaryPath,
+			Command:    liveSetup.BinaryPath,
+			ArgsAppend: liveProviderArgsAppend(),
 		},
 	}, exec.LookPath)
 }
@@ -273,20 +288,21 @@ func (h *liveWorkerHandleHarness) stop() (workerpkg.State, map[string]string, er
 func (h *liveWorkerHandleHarness) submitAndWaitForFile(prompt, outputRel string, delivery workerpkg.DeliveryIntent) (workerpkg.State, string, map[string]string, error) {
 	ctx := context.Background()
 	evidence := h.baseEvidence()
-	evidence["prompt"] = prompt
 	evidence["submit_delivery"] = string(delivery)
 	outputPath := filepath.Join(h.workDir, outputRel)
 	evidence["output_path"] = outputPath
+	actualPrompt := prompt + "\n\nWrite the requested output file at this exact path: " + outputPath
+	evidence["prompt"] = actualPrompt
 
 	result, err := h.handle.Message(ctx, workerpkg.MessageRequest{
-		Text:     prompt,
+		Text:     actualPrompt,
 		Delivery: delivery,
 	})
 	evidence["submit_queued"] = strconv.FormatBool(result.Queued)
 
 	state, stateErr := h.handle.State(ctx)
 	evidence = h.withStateEvidence(evidence, state, stateErr)
-	liveWorkerDebugf("submit-and-wait work_dir=%s delivery=%s phase=%s session_id=%s session_name=%s queued=%v err=%v state_err=%v prompt=%q", h.workDir, delivery, state.Phase, state.SessionID, state.SessionName, result.Queued, err, stateErr, prompt)
+	liveWorkerDebugf("submit-and-wait work_dir=%s delivery=%s phase=%s session_id=%s session_name=%s queued=%v err=%v state_err=%v prompt=%q", h.workDir, delivery, state.Phase, state.SessionID, state.SessionName, result.Queued, err, stateErr, actualPrompt)
 	if err != nil {
 		return state, "", h.withBlockedEvidence(evidence, state.SessionName), err
 	}

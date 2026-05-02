@@ -11,9 +11,10 @@ type Profile string
 // revive:disable:exported
 const ( //nolint:revive // exported enum values are documented by the enclosing type.
 	// Profile* identify the supported canonical worker profiles.
-	ProfileClaudeTmuxCLI Profile = "claude/tmux-cli"
-	ProfileCodexTmuxCLI  Profile = "codex/tmux-cli"
-	ProfileGeminiTmuxCLI Profile = "gemini/tmux-cli"
+	ProfileClaudeTmuxCLI   Profile = "claude/tmux-cli"
+	ProfileCodexTmuxCLI    Profile = "codex/tmux-cli"
+	ProfileGeminiTmuxCLI   Profile = "gemini/tmux-cli"
+	ProfileOpenCodeTmuxCLI Profile = "opencode/tmux-cli"
 )
 
 // CapabilityStatus expresses whether a Phase 1 capability is available.

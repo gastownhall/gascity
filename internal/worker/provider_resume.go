@@ -12,7 +12,11 @@ func derivedResumeSessionKey(provider, providerSessionID string) string {
 	if providerSessionID == "" {
 		return ""
 	}
-	if !strings.Contains(strings.ToLower(strings.TrimSpace(provider)), "codex") {
+	providerFamily := strings.ToLower(strings.TrimSpace(provider))
+	if strings.Contains(providerFamily, "opencode") {
+		return providerSessionID
+	}
+	if !strings.Contains(providerFamily, "codex") {
 		return ""
 	}
 	matches := codexThreadIDPattern.FindAllString(providerSessionID, -1)

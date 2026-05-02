@@ -10,6 +10,7 @@ import subprocess
 NPM_PACKAGE_BY_PROVIDER = {
     "codex": ("@openai/codex", "CODEX_CLI_VERSION", "0.125.0"),
     "gemini": ("@google/gemini-cli", "GEMINI_CLI_VERSION", "0.40.0"),
+    "opencode": ("opencode-ai", "OPENCODE_CLI_VERSION", "1.14.33"),
 }
 CLAUDE_CODE_VERSION = "2.1.123"
 
