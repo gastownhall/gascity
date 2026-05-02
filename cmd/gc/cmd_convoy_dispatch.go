@@ -350,7 +350,9 @@ func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (be
 			}
 		}
 	}
-	return openStoreAtForCity(storePath, cityPath)
+	// A bd-backed scope can outlive its rig entry in city.toml. Control paths
+	// still need write-capable bd commands with auto-export suppressed.
+	return controlBdStoreForRig(scopeRoot, cityPath, cfg), nil
 }
 
 // findBeadAcrossStores tries the city store first, then all rig stores,

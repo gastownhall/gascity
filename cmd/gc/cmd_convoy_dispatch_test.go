@@ -1917,6 +1917,7 @@ func TestOpenControlStoreAtForCityPreservesFileAndExecProviderStores(t *testing.
 
 	t.Run("file", func(t *testing.T) {
 		t.Setenv("GC_BEADS", "file")
+		t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 		store, err := openControlStoreAtForCity(rigDir, cityDir, cfg)
 		if err != nil {
 			t.Fatalf("openControlStoreAtForCity(file): %v", err)
@@ -1931,6 +1932,7 @@ func TestOpenControlStoreAtForCityPreservesFileAndExecProviderStores(t *testing.
 		script := writeExecCaptureScript(t, captureDir)
 		provider := "exec:" + script
 		t.Setenv("GC_BEADS", provider)
+		t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 
 		store, err := openControlStoreAtForCity(rigDir, cityDir, cfg)
 		if err != nil {
@@ -1947,6 +1949,69 @@ func TestOpenControlStoreAtForCityPreservesFileAndExecProviderStores(t *testing.
 			t.Fatalf("exec GC_STORE_SCOPE = %q, want rig", got)
 		}
 	})
+}
+
+func TestOpenControlStoreAtForCityUsesControlRunnerForStaleBdScope(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	staleRigDir := filepath.Join(cityDir, "rigs", "removed")
+	if err := os.MkdirAll(filepath.Join(staleRigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staleRigDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"removed"}`), 0o644); err != nil {
+		t.Fatalf("write stale rig metadata: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "active", Path: "rigs/active"}},
+	}
+	t.Setenv("GC_BEADS", "bd")
+
+	var calls [][]string
+	var envs []map[string]string
+	prevRunner := beadsExecCommandRunnerWithEnv
+	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
+		envs = append(envs, maps.Clone(env))
+		return func(_ string, name string, args ...string) ([]byte, error) {
+			if name != "bd" {
+				return nil, fmt.Errorf("unexpected command %q", name)
+			}
+			calls = append(calls, append([]string(nil), args...))
+			return []byte(`[]`), nil
+		}
+	}
+	t.Cleanup(func() { beadsExecCommandRunnerWithEnv = prevRunner })
+
+	status := "closed"
+	store, err := openControlStoreAtForCity(staleRigDir, cityDir, cfg)
+	if err != nil {
+		t.Fatalf("openControlStoreAtForCity(stale rig): %v", err)
+	}
+	if err := store.Update("ga-stale-control", beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("stale rig control update: %v", err)
+	}
+
+	if len(calls) != 1 {
+		t.Fatalf("bd calls = %#v, want one update call", calls)
+	}
+	if len(envs) != 1 {
+		t.Fatalf("bd envs = %#v, want one command environment", envs)
+	}
+	if call := calls[0]; len(call) < 1 || call[0] != "update" {
+		t.Fatalf("bd call = %#v, want update ...", calls[0])
+	}
+	if slices.Contains(calls[0], "--sandbox") {
+		t.Fatalf("bd call = %#v, write-capable control stores must not use --sandbox", calls[0])
+	}
+	if got := envs[0]["BD_EXPORT_AUTO"]; got != "false" {
+		t.Fatalf("BD_EXPORT_AUTO = %q, want false", got)
+	}
+	if got := envs[0]["BEADS_DIR"]; got != filepath.Join(staleRigDir, ".beads") {
+		t.Fatalf("BEADS_DIR = %q, want stale rig store", got)
+	}
+	if got := envs[0]["GC_RIG_ROOT"]; got != staleRigDir {
+		t.Fatalf("GC_RIG_ROOT = %q, want stale rig root", got)
+	}
 }
 
 func TestRunWorkflowServeUsesGCTemplateForSessionContext(t *testing.T) {
