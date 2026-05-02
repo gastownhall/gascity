@@ -2587,6 +2587,33 @@ func TestMailCheckInjectTruncatesLongBodies(t *testing.T) {
 	}
 }
 
+func TestMailCheckInjectCompactsAndBoundsLongSubjects(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	longSubject := "subject\n\tline " + strings.Repeat("x", mailInjectBodyPreviewSize+100) + " tail"
+	mp.Send("sender-a", "recipient", longSubject, "short body") //nolint:errcheck
+
+	var stdout bytes.Buffer
+	code := doMailCheck(mp, "recipient", true, &stdout, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("doMailCheck = %d, want 0", code)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "[subject line ") {
+		t.Fatalf("stdout missing compacted subject prefix:\n%s", out)
+	}
+	if strings.Contains(out, "subject\n\tline") {
+		t.Fatalf("stdout contains raw multiline subject:\n%s", out)
+	}
+	if strings.Contains(out, strings.Repeat("x", mailInjectBodyPreviewSize+80)) {
+		t.Fatalf("stdout includes too much of the long subject:\n%s", out)
+	}
+	if !strings.Contains(out, "... [subject truncated]") {
+		t.Fatalf("stdout missing subject truncation marker:\n%s", out)
+	}
+}
+
 func TestMailCheckInjectOmitsSubjectWhenFullBodyMatches(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
@@ -2611,18 +2638,24 @@ func TestMailCheckInjectOmitsSubjectWhenFullBodyMatches(t *testing.T) {
 	}
 }
 
-func TestMailInjectBodyPreviewCompactsWhitespace(t *testing.T) {
-	compact := compactMailInjectBody(" first\n\tsecond   third ")
-	if compact != "first second third" {
-		t.Fatalf("compactMailInjectBody = %q, want %q", compact, "first second third")
+func TestMailInjectBodyPreviewUsesBoundedScan(t *testing.T) {
+	body := strings.Repeat(" ", mailInjectPreviewScanSize+1) + "tail"
+	preview, truncated := mailInjectBodyPreview(body)
+	if !truncated {
+		t.Fatalf("mailInjectBodyPreview did not truncate after scan budget")
 	}
+	if preview != "" {
+		t.Fatalf("mailInjectBodyPreview = %q, want empty preview after leading-space budget", preview)
+	}
+}
 
-	preview, truncated := mailInjectBodyPreview(compact)
+func TestMailInjectBodyPreviewCompactsWhitespace(t *testing.T) {
+	preview, truncated := mailInjectBodyPreview(" first\n\tsecond   third ")
 	if truncated {
 		t.Fatalf("mailInjectBodyPreview truncated short body")
 	}
-	if preview != compact {
-		t.Fatalf("mailInjectBodyPreview = %q, want %q", preview, compact)
+	if preview != "first second third" {
+		t.Fatalf("mailInjectBodyPreview = %q, want %q", preview, "first second third")
 	}
 }
 

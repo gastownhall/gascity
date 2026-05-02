@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"text/tabwriter"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -29,6 +30,7 @@ type nudgeFunc func(recipient string) error
 const (
 	mailInjectMaxMessages     = 3
 	mailInjectBodyPreviewSize = 240
+	mailInjectPreviewScanSize = 4096
 )
 
 func newMailNudgeFunc(sender string) nudgeFunc {
@@ -282,15 +284,18 @@ func formatInjectOutput(messages []mail.Message) string {
 		fmt.Fprintf(&sb, "Showing the first %d message(s) here; run 'gc mail inbox' for the full list.\n\n", limit)
 	}
 	for _, m := range messages[:limit] {
-		subject := strings.TrimSpace(m.Subject)
-		compactBody := compactMailInjectBody(m.Body)
-		body, truncated := mailInjectBodyPreview(compactBody)
-		if subject != "" && subject != compactBody {
-			fmt.Fprintf(&sb, "- %s from %s [%s]: %s", m.ID, m.From, subject, body)
+		subject, subjectTruncated := mailInjectSubjectPreview(m.Subject)
+		body, bodyTruncated := mailInjectBodyPreview(m.Body)
+		if subject != "" && subject != body {
+			fmt.Fprintf(&sb, "- %s from %s [%s", m.ID, m.From, subject)
+			if subjectTruncated {
+				sb.WriteString(" ... [subject truncated]")
+			}
+			fmt.Fprintf(&sb, "]: %s", body)
 		} else {
 			fmt.Fprintf(&sb, "- %s from %s: %s", m.ID, m.From, body)
 		}
-		if truncated {
+		if bodyTruncated {
 			sb.WriteString(" ... [preview truncated]")
 		}
 		sb.WriteByte('\n')
@@ -300,19 +305,59 @@ func formatInjectOutput(messages []mail.Message) string {
 	return sb.String()
 }
 
-func compactMailInjectBody(body string) string {
-	return strings.Join(strings.Fields(body), " ")
+func mailInjectSubjectPreview(subject string) (string, bool) {
+	return mailInjectTextPreview(subject, mailInjectBodyPreviewSize)
 }
 
-func mailInjectBodyPreview(compact string) (string, bool) {
-	if len(compact) <= mailInjectBodyPreviewSize {
-		return compact, false
+func mailInjectBodyPreview(body string) (string, bool) {
+	return mailInjectTextPreview(body, mailInjectBodyPreviewSize)
+}
+
+func mailInjectTextPreview(text string, limit int) (string, bool) {
+	if limit <= 0 {
+		return "", strings.TrimSpace(text) != ""
 	}
-	cut := mailInjectBodyPreviewSize
-	for cut > 0 && !utf8.RuneStart(compact[cut]) {
-		cut--
+
+	var sb strings.Builder
+	scanned := 0
+	pendingSpace := false
+	for len(text) > 0 {
+		if scanned >= mailInjectPreviewScanSize {
+			return sb.String(), true
+		}
+
+		r, size := utf8.DecodeRuneInString(text)
+		if scanned+size > mailInjectPreviewScanSize {
+			return sb.String(), true
+		}
+		text = text[size:]
+		scanned += size
+
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			if sb.Len() > 0 {
+				pendingSpace = true
+			}
+			continue
+		}
+
+		encodedLen := utf8.RuneLen(r)
+		if encodedLen < 0 {
+			encodedLen = len(string(r))
+		}
+		needed := encodedLen
+		if pendingSpace && sb.Len() > 0 {
+			needed++
+		}
+		if sb.Len()+needed > limit {
+			return sb.String(), true
+		}
+		if pendingSpace && sb.Len() > 0 {
+			sb.WriteByte(' ')
+			pendingSpace = false
+		}
+		sb.WriteRune(r)
 	}
-	return strings.TrimSpace(compact[:cut]), true
+	return sb.String(), false
 }
 
 func defaultMailIdentity() string {
