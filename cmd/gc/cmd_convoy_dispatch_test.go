@@ -1359,7 +1359,7 @@ func TestRunWorkflowServeProcessesReadyControlBeadsThenExits(t *testing.T) {
 	})
 
 	cdAgent := config.Agent{Name: config.ControlDispatcherAgentName}
-	wantQuery := workflowServeWorkQuery(cdAgent)
+	wantQuery := workflowServeControlReadyQuery(cdAgent, "control-dispatcher")
 	var gotQueries []string
 	var gotDirs []string
 	var gotEnv []map[string]string
@@ -1415,6 +1415,60 @@ func TestRunWorkflowServeProcessesReadyControlBeadsThenExits(t *testing.T) {
 	}
 }
 
+func TestRunWorkflowServeDrainsReadyBatchBeforeRequery(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+
+	prevCityFlag := cityFlag
+	prevList := workflowServeList
+	prevControl := controlDispatcherServe
+	prevInterval := workflowServeIdlePollInterval
+	prevAttempts := workflowServeIdlePollAttempts
+	cityFlag = ""
+	workflowServeIdlePollInterval = 0
+	workflowServeIdlePollAttempts = 0
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+		workflowServeList = prevList
+		controlDispatcherServe = prevControl
+		workflowServeIdlePollInterval = prevInterval
+		workflowServeIdlePollAttempts = prevAttempts
+	})
+
+	var controlled []string
+	calls := 0
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		calls++
+		switch calls {
+		case 1:
+			return []hookBead{
+				{ID: "gc-ctrl-1", Metadata: map[string]string{"gc.kind": "scope-check"}},
+				{ID: "gc-ctrl-2", Metadata: map[string]string{"gc.kind": "workflow-finalize"}},
+			}, nil
+		default:
+			return nil, nil
+		}
+	}
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+		controlled = append(controlled, beadID)
+		return nil
+	}
+
+	if err := runWorkflowServe("", false, io.Discard, io.Discard); err != nil {
+		t.Fatalf("runWorkflowServe: %v", err)
+	}
+
+	if !slices.Equal(controlled, []string{"gc-ctrl-1", "gc-ctrl-2"}) {
+		t.Fatalf("controlled beads = %#v, want ready batch drained in order", controlled)
+	}
+	if calls != 2 {
+		t.Fatalf("workflowServeList calls = %d, want first ready batch plus idle check", calls)
+	}
+}
+
 func TestWorkflowServeControlReadyQueryUsesControlTiers(t *testing.T) {
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName})
 	if strings.Contains(query, "GC_SESSION_ORIGIN") {
@@ -1462,6 +1516,79 @@ esac
 `)
 	if got, want := strings.TrimSpace(out), `[{"id":"ga-ready"}]`; got != want {
 		t.Fatalf("control query output = %q, want %q", got, want)
+	}
+}
+
+func TestWorkflowServeControlReadyQueryUsesConfiguredRuntimeNameWhenEnvIsManualSession(t *testing.T) {
+	query := workflowServeControlReadyQuery(
+		config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"},
+		"gascity--control-dispatcher",
+	)
+	out := runWorkflowServeShellQueryForTest(t, query, map[string]string{
+		"GC_SESSION_ID":     "mc-manual",
+		"GC_SESSION_NAME":   "s-mc-manual",
+		"GC_AGENT":          "s-mc-manual",
+		"GC_SESSION_ORIGIN": "manual",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  "ready --assignee=gascity--control-dispatcher --json --limit=20")
+    printf '[{"id":"ga-control-ready"}]'
+    ;;
+  *)
+    echo "unexpected first control query: $*" >&2
+    exit 42
+    ;;
+esac
+`)
+	if got, want := strings.TrimSpace(out), `[{"id":"ga-control-ready"}]`; got != want {
+		t.Fatalf("control query output = %q, want %q", got, want)
+	}
+}
+
+func TestWorkflowServeControlReadyQueryPrioritizesConfiguredRuntimeName(t *testing.T) {
+	query := workflowServeControlReadyQuery(
+		config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"},
+		"gascity--control-dispatcher",
+	)
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "bd.log")
+	bdPath := filepath.Join(tmp, "bd")
+	if err := os.WriteFile(bdPath, []byte(`#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$BD_LOG"
+case "$*" in
+  "ready --assignee=gascity--control-dispatcher --json --limit=20")
+    printf '[{"id":"ga-control-ready"}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	out, err := shellWorkQueryWithEnv(query, t.TempDir(), []string{
+		"PATH=" + tmp + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"BD_LOG=" + logPath,
+		"GC_SESSION_ID=mc-manual",
+		"GC_SESSION_NAME=s-mc-manual",
+		"GC_AGENT=s-mc-manual",
+		"GC_SESSION_ORIGIN=manual",
+	})
+	if err != nil {
+		t.Fatalf("run workflow serve query: %v", err)
+	}
+	if got, want := strings.TrimSpace(out), `[{"id":"ga-control-ready"}]`; got != want {
+		t.Fatalf("control query output = %q, want %q", got, want)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read bd log: %v", err)
+	}
+	firstCall, _, _ := strings.Cut(strings.TrimSpace(string(logData)), "\n")
+	if want := "ready --assignee=gascity--control-dispatcher --json --limit=20"; firstCall != want {
+		t.Fatalf("first bd call = %q, want %q; all calls:\n%s", firstCall, want, string(logData))
 	}
 }
 

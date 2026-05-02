@@ -116,6 +116,151 @@ func TestProcessScopeCheckClosesScopeOnSuccess(t *testing.T) {
 	}
 }
 
+func TestProcessScopeCheckSuccessUsesScopedSnapshotQueries(t *testing.T) {
+	t.Parallel()
+
+	base := beads.NewMemStore()
+	store := &scopeSnapshotQueryGuardStore{Store: base}
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	body := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "body",
+		},
+	})
+	step := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "implement",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+			"gc.outcome":      "pass",
+		},
+	})
+	control := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize scope for implement",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope-check",
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "control",
+		},
+	})
+	control = mustGetBead(t, store, control.ID)
+
+	mustDepAdd(t, store, control.ID, step.ID, "blocks")
+	mustDepAdd(t, store, body.ID, control.ID, "blocks")
+
+	result, err := ProcessControl(store, control, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(scope-check): %v", err)
+	}
+	if !result.Processed || result.Action != "scope-pass" {
+		t.Fatalf("scope result = %+v, want processed scope-pass", result)
+	}
+	if store.broadRootQueries != 0 {
+		t.Fatalf("broad workflow-root queries = %d, want 0", store.broadRootQueries)
+	}
+	if store.scopedMemberQueries == 0 {
+		t.Fatal("expected scoped member query")
+	}
+	if store.scopeBodyQueries == 0 {
+		t.Fatal("expected scope body query")
+	}
+}
+
+func TestProcessScopeCheckPassWithRemainingOpenAvoidsClosedSnapshot(t *testing.T) {
+	t.Parallel()
+
+	base := beads.NewMemStore()
+	store := &scopeSnapshotQueryGuardStore{Store: base}
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "body",
+		},
+	})
+	done := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "done",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+			"gc.outcome":      "pass",
+		},
+	})
+	stillOpen := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "still open",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+		},
+	})
+	control := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize scope for done",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope-check",
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "control",
+		},
+	})
+
+	mustDepAdd(t, store, control.ID, done.ID, "blocks")
+
+	result, err := ProcessControl(store, control, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(scope-check): %v", err)
+	}
+	if !result.Processed || result.Action != "continue" {
+		t.Fatalf("scope result = %+v, want processed continue", result)
+	}
+	if store.closedScopedQueries != 0 {
+		t.Fatalf("closed scoped snapshot queries = %d, want 0", store.closedScopedQueries)
+	}
+	if store.activeScopedQueries == 0 {
+		t.Fatal("expected active scoped completion query")
+	}
+	remaining, err := store.Get(stillOpen.ID)
+	if err != nil {
+		t.Fatalf("Get remaining member: %v", err)
+	}
+	if remaining.Status != "open" {
+		t.Fatalf("remaining member status = %q, want open", remaining.Status)
+	}
+}
+
 func TestProcessScopeCheckAbortsScopeOnFailure(t *testing.T) {
 	t.Parallel()
 
@@ -491,14 +636,37 @@ func TestProcessScopeCheckUsesSingleWorkflowSnapshotAndEmitsTrace(t *testing.T) 
 	if result.Action != "scope-pass" {
 		t.Fatalf("action = %q, want scope-pass", result.Action)
 	}
-	if store.listCalls != 1 {
-		t.Fatalf("List calls = %d, want 1 workflow snapshot", store.listCalls)
+	if store.listCalls != 3 {
+		t.Fatalf("List calls = %d, want 3 scoped completion/snapshot queries", store.listCalls)
 	}
-	if len(store.queries) != 1 {
-		t.Fatalf("queries = %d, want 1", len(store.queries))
+	if len(store.queries) != 3 {
+		t.Fatalf("queries = %d, want 3", len(store.queries))
 	}
-	if got := store.queries[0].Metadata["gc.root_bead_id"]; got != workflow.ID {
-		t.Fatalf("root metadata query = %q, want %q", got, workflow.ID)
+	for i, query := range store.queries {
+		if got := query.Metadata["gc.root_bead_id"]; got != workflow.ID {
+			t.Fatalf("query[%d] root metadata = %q, want %q", i, got, workflow.ID)
+		}
+	}
+	if got := store.queries[0].Metadata["gc.kind"]; got != "scope" {
+		t.Fatalf("query[0] gc.kind = %q, want scope", got)
+	}
+	if got := store.queries[0].Metadata["gc.scope_role"]; got != "body" {
+		t.Fatalf("query[0] gc.scope_role = %q, want body", got)
+	}
+	if store.queries[0].IncludeClosed {
+		t.Fatal("query[0] should be active-only body lookup")
+	}
+	if got := store.queries[1].Metadata["gc.scope_ref"]; got != "body" {
+		t.Fatalf("query[1] gc.scope_ref = %q, want body", got)
+	}
+	if store.queries[1].IncludeClosed {
+		t.Fatal("query[1] should be active-only completion check")
+	}
+	if got := store.queries[2].Metadata["gc.scope_ref"]; got != "body" {
+		t.Fatalf("query[2] gc.scope_ref = %q, want body", got)
+	}
+	if !store.queries[2].IncludeClosed {
+		t.Fatal("query[2] should load closed scope members for final snapshot")
 	}
 	traceText := trace.String()
 	for _, want := range []string{
@@ -528,6 +696,35 @@ func (s *countingListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	s.listCalls++
 	s.queries = append(s.queries, query)
 	return s.MemStore.List(query)
+}
+
+type scopeSnapshotQueryGuardStore struct {
+	beads.Store
+	broadRootQueries    int
+	scopedMemberQueries int
+	scopeBodyQueries    int
+	activeScopedQueries int
+	closedScopedQueries int
+}
+
+func (s *scopeSnapshotQueryGuardStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if root := strings.TrimSpace(query.Metadata["gc.root_bead_id"]); root != "" {
+		switch {
+		case len(query.Metadata) == 1:
+			s.broadRootQueries++
+			return nil, fmt.Errorf("unexpected broad workflow-root query for %s", root)
+		case query.Metadata["gc.scope_ref"] != "":
+			s.scopedMemberQueries++
+			if query.IncludeClosed {
+				s.closedScopedQueries++
+			} else {
+				s.activeScopedQueries++
+			}
+		case query.Metadata["gc.kind"] == "scope":
+			s.scopeBodyQueries++
+		}
+	}
+	return s.Store.List(query)
 }
 
 func newStrictCloseStore() *strictCloseStore {
