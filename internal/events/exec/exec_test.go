@@ -195,14 +195,46 @@ esac
 	if err := json.Unmarshal(data, &f); err != nil {
 		t.Fatalf("unmarshal filter: %v", err)
 	}
-	if f.Subject != "gc-1" {
-		t.Errorf("script filter Subject = %q, want gc-1", f.Subject)
+	if f.Subject != "" {
+		t.Errorf("script filter Subject = %q, want empty legacy value", f.Subject)
 	}
-	if !f.Until.Equal(until) {
-		t.Errorf("script filter Until = %v, want %v", f.Until, until)
+	if !f.Until.IsZero() {
+		t.Errorf("script filter Until = %v, want zero legacy value", f.Until)
 	}
 	if f.Limit != 0 {
 		t.Errorf("script filter Limit = %d, want 0", f.Limit)
+	}
+}
+
+func TestListUsesLegacyScriptFilterShape(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+case "$1" in
+  ensure-running) exit 2 ;;
+  list)
+    input="$(cat)"
+    case "$input" in
+      *'"Subject"'*|*'"Until"'*|*'"Limit"'*)
+        echo "unknown filter key in $input" >&2
+        exit 1
+        ;;
+    esac
+    echo '[{"seq":1,"type":"bead.created","ts":"2025-06-15T10:30:00Z","actor":"actor-a","subject":"gc-1"},{"seq":2,"type":"bead.created","ts":"2025-06-15T10:31:00Z","actor":"actor-a","subject":"gc-2"}]'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script, os.Stderr)
+
+	evts, err := p.List(events.Filter{Subject: "gc-1", Limit: 1})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(evts) != 1 {
+		t.Fatalf("List returned %d events, want 1", len(evts))
+	}
+	if evts[0].Subject != "gc-1" {
+		t.Fatalf("List returned subject %q, want gc-1", evts[0].Subject)
 	}
 }
 

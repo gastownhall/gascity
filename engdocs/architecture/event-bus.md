@@ -393,19 +393,22 @@ suite against a stateful jq-based mock script.
   compaction. For long-running cities, manual truncation or external
   log rotation is needed.
 
-- **ReadFiltered scans the entire file.** Every `List` call reads all
-  events from disk and filters in memory. There are no indexes. This
-  is acceptable at current scale but will degrade with very large event
-  logs. `ReadFrom` with byte offsets provides incremental reading for
-  the Watch path.
+- **ReadFiltered streams without indexes.** `ReadFiltered` scans the
+  JSONL file once, applies `Filter` as it reads, and stops early when a
+  positive direct-provider `Limit` is reached. There are still no
+  indexes, so broad time/type/actor/subject queries remain linear in the
+  event log until their limit is satisfied. `ReadFrom` with byte offsets
+  provides incremental reading for the Watch path.
 
 - **No event schema validation.** Event types are string constants with
   no runtime validation. Recording an event with a misspelled type
   succeeds silently.
 
-- **Filter does not support Subject.** The Filter struct supports Type,
-  Actor, Since, and AfterSeq but not Subject. Filtering by subject
-  requires post-filtering in the caller.
+- **Multiplexer limits are global post-merge caps.** The multiplexer
+  clears per-provider `Filter.Limit`, merges and sorts provider results,
+  then applies the global limit so cross-city ordering stays correct.
+  This means a multiplexer `Limit` does not cap work inside each
+  provider.
 
 - **Exec provider Watch is subprocess-lifetime-bound.** The exec
   watcher reads from a long-running subprocess's stdout. If the
@@ -416,6 +419,9 @@ suite against a stateful jq-based mock script.
 
 - [Architecture glossary](glossary.md) -- authoritative definitions of
   event bus, order, trigger, and other terms used in this document
+- [Event query primitives](event-query.md) -- `Filter` fields,
+  streaming read semantics, multiplexer limit behavior, and aggregation
+  helpers
 - [Health Patrol architecture](health-patrol.md) -- how the controller
   reconciliation loop records agent lifecycle events on every tick
 - [Bead Store architecture](beads.md) -- the other Layer 0-1 primitive;

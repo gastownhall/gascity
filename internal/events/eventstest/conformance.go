@@ -357,9 +357,16 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		p, cleanup := newProvider(t)
 		defer cleanup()
 
-		p.Record(events.Event{Type: events.BeadCreated, Actor: "human"}) // seq 1
-		p.Record(events.Event{Type: events.BeadClosed, Actor: "human"})  // seq 2
-		p.Record(events.Event{Type: events.BeadCreated, Actor: "human"}) // seq 3
+		base := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
+		p.Record(events.Event{Type: events.MailSent, Actor: "seed", Subject: "seed", Ts: base})                           // seq 1
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Subject: "gc-1", Ts: base.Add(2 * time.Hour)})    // after Until
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Subject: "gc-1", Ts: base.Add(-2 * time.Hour)})   // before Since
+		p.Record(events.Event{Type: events.BeadClosed, Actor: "human", Subject: "gc-1", Ts: base.Add(10 * time.Minute)})  // wrong Type
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "agent", Subject: "gc-1", Ts: base.Add(20 * time.Minute)}) // wrong Actor
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Subject: "gc-2", Ts: base.Add(30 * time.Minute)}) // wrong Subject
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Subject: "gc-1", Ts: base.Add(40 * time.Minute)}) // match 1
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Subject: "gc-1", Ts: base.Add(50 * time.Minute)}) // match 2
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Subject: "gc-1", Ts: base.Add(55 * time.Minute)}) // limited out
 
 		// Get all to find seq of first event.
 		all, err := p.List(events.Filter{})
@@ -370,16 +377,28 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 			t.Fatal("need at least 1 event")
 		}
 
-		// Type + AfterSeq combined: bead.created with seq > first event.
-		got, err := p.List(events.Filter{Type: events.BeadCreated, AfterSeq: all[0].Seq})
+		got, err := p.List(events.Filter{
+			Type:     events.BeadCreated,
+			Actor:    "human",
+			Subject:  "gc-1",
+			Since:    base.Add(-time.Hour),
+			Until:    base.Add(time.Hour),
+			AfterSeq: all[0].Seq,
+			Limit:    2,
+		})
 		if err != nil {
 			t.Fatalf("List(combined): %v", err)
 		}
-		if len(got) != 1 {
-			t.Fatalf("List(Type+AfterSeq) returned %d events, want 1", len(got))
+		if len(got) != 2 {
+			t.Fatalf("List(all predicates) returned %d events, want 2", len(got))
 		}
-		if got[0].Type != events.BeadCreated {
-			t.Errorf("Type = %q, want %q", got[0].Type, events.BeadCreated)
+		for _, e := range got {
+			if e.Type != events.BeadCreated || e.Actor != "human" || e.Subject != "gc-1" {
+				t.Fatalf("event = %+v, want bead.created by human for gc-1", e)
+			}
+			if e.Ts.Before(base.Add(-time.Hour)) || e.Ts.After(base.Add(time.Hour)) {
+				t.Fatalf("event Ts = %s, want within combined window", e.Ts)
+			}
 		}
 	})
 

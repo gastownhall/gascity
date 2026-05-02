@@ -597,16 +597,24 @@ func TestReadFilteredSkipsMalformedLines(t *testing.T) {
 func TestReadFilteredScannerError(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "events.jsonl")
-	if err := os.WriteFile(path, []byte(strings.Repeat("x", 1024*1024+1)), 0o644); err != nil {
+	first := `{"seq":1,"type":"bead.created","ts":"2025-06-15T10:30:00Z","actor":"actor-a","subject":"gc-1"}` + "\n"
+	oversizedLine := strings.Repeat("x", 1024*1024+1)
+	if err := os.WriteFile(path, []byte(first+oversizedLine), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err := ReadFiltered(path, Filter{})
+	got, err := ReadFiltered(path, Filter{})
 	if err == nil {
 		t.Fatal("ReadFiltered returned nil error, want scanner error")
 	}
 	if !strings.Contains(err.Error(), "scanning events") {
 		t.Fatalf("ReadFiltered error = %q, want scanning events context", err.Error())
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d partial events, want 1", len(got))
+	}
+	if got[0].Subject != "gc-1" {
+		t.Errorf("partial Subject = %q, want gc-1", got[0].Subject)
 	}
 }
 

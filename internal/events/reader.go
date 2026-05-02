@@ -95,7 +95,8 @@ func ReadAll(path string) ([]Event, error) {
 
 // ReadFiltered reads events from path and returns only those matching
 // all non-zero fields in filter. Returns (nil, nil) if the file is
-// missing or empty.
+// missing or empty. Scanner errors return the events parsed before the
+// error alongside the error.
 func ReadFiltered(path string, filter Filter) ([]Event, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -199,10 +200,6 @@ func readFilteredTailFromFile(f *os.File, size int64, filter Filter, limit int) 
 		reversed[i], reversed[j] = reversed[j], reversed[i]
 	}
 	return reversed, nil
-}
-
-func eventMatchesFilter(e Event, filter Filter) bool {
-	return matchesFilter(e, filter)
 }
 
 // ReadLatestSeq returns the latest complete event Seq in the events file, or

@@ -6,7 +6,7 @@ easy to compose and test.
 
 ## Extended Filter
 
-`Filter` now supports five predicates instead of four:
+`Filter` now supports six predicates plus a result cap:
 
 ```go
 type Filter struct {
@@ -46,14 +46,20 @@ evts, err := provider.List(events.Filter{
 
 `Limit` caps the result slice to the first N matches in chronological scan
 order and stops scanning as soon as the cap is reached when the provider can do
-so locally. Use caller-side tail slicing when a view needs the latest N events:
+so locally. This is the earliest matching window, not the latest N events; use
+`ListTail` or caller-side tail slicing when a view needs the trailing window:
 
 ```go
-recent, err := provider.List(events.Filter{
+firstCreated, err := provider.List(events.Filter{
     Type:  events.BeadCreated,
     Limit: 10,
 })
 ```
+
+For `Multiplexer` calls, `Limit` is applied after provider results are merged
+and sorted by timestamp, city, then sequence. That preserves one deterministic
+global earliest-window ordering across cities, but it also means the cap does
+not bound each provider's local scan work.
 
 ## Aggregation Helpers
 
@@ -85,15 +91,15 @@ byType := events.CountByType(all)
 |---|---|
 | `internal/events/reader.go` | `Filter` extended with `Subject`, `Until`, `Limit`; `matchesFilter` helper; `ReadFiltered` updated |
 | `internal/events/fake.go` | `Fake.List` updated to use `matchesFilter` and apply `Limit` |
-| `internal/events/exec/exec.go` | Exec provider applies SDK-side filtering after script output so old scripts cannot bypass new filter fields |
-| `internal/events/multiplexer.go` | Multiplexer applies `Limit` globally after merging and sorting provider results |
+| `internal/events/exec/exec.go` | Exec provider keeps the legacy script filter JSON shape and applies SDK-side filtering after script output so old scripts cannot bypass new filter fields |
+| `internal/events/multiplexer.go` | Multiplexer applies `Limit` globally after deterministically merging and sorting provider results |
 | `internal/events/query.go` | `CountByType`, `CountByActor`, `CountBySubject` |
 | `internal/events/query_test.go` | Tests covering all new filter predicates and count helpers |
 
 `matchesFilter` is the predicate used by `ApplyFilter`, `ReadFiltered`, and the
 in-memory provider, ensuring code paths enforce the same predicate logic. The
-`exec` provider still passes `Filter` to an external script as JSON for
-provider-side narrowing, but asks scripts for an unbounded result set and then
-applies the SDK filter locally. Scripts that don't recognize new fields can
-return unfiltered data; the in-process caller enforces `Subject`, `Until`, and
-`Limit` on its side.
+`exec` provider still passes the legacy `Type`/`Actor`/`Since`/`AfterSeq`
+filter shape to an external script as JSON for provider-side narrowing, but
+asks scripts for an unbounded result set and then applies the SDK filter
+locally. Scripts that don't recognize new fields can return unfiltered data;
+the in-process caller enforces `Subject`, `Until`, and `Limit` on its side.
