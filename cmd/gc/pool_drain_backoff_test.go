@@ -64,11 +64,11 @@ func TestPoolDrainBackoff_ExponentialSchedule(t *testing.T) {
 	template := "foundations/worker"
 
 	want := []time.Duration{
-		drainBackoffBase,                   // streak 1: 30s
-		drainBackoffBase * 2,               // streak 2: 60s
-		drainBackoffBase * 4,               // streak 3: 120s
-		drainBackoffBase * 8,               // streak 4: 240s
-		drainBackoffCap,                    // streak >=5: capped at 5min
+		drainBackoffBase,     // streak 1: 30s
+		drainBackoffBase * 2, // streak 2: 60s
+		drainBackoffBase * 4, // streak 3: 120s
+		drainBackoffBase * 8, // streak 4: 240s
+		drainBackoffCap,      // streak >=5: capped at 5min
 	}
 
 	for i, expectedBackoff := range want {
