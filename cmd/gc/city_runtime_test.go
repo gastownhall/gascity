@@ -326,9 +326,65 @@ func (r *recordingOrderDispatcher) dispatch(ctx context.Context, cityRoot string
 	}
 }
 
-func (r *recordingOrderDispatcher) drain(ctx context.Context) {
+func (r *recordingOrderDispatcher) drain(ctx context.Context) bool {
 	r.drainCalls++
 	r.drainCtxErr = ctx.Err()
+	return true
+}
+
+type blockingOrderDispatcher struct {
+	mu         sync.Mutex
+	drainCalls int
+	ctxErrs    []error
+	release    chan struct{}
+	drained    chan struct{}
+}
+
+func newBlockingOrderDispatcher() *blockingOrderDispatcher {
+	return &blockingOrderDispatcher{
+		release: make(chan struct{}),
+		drained: make(chan struct{}, 16),
+	}
+}
+
+func (b *blockingOrderDispatcher) dispatch(context.Context, string, time.Time) {}
+
+func (b *blockingOrderDispatcher) drain(ctx context.Context) bool {
+	b.mu.Lock()
+	b.drainCalls++
+	b.ctxErrs = append(b.ctxErrs, ctx.Err())
+	b.mu.Unlock()
+	b.drained <- struct{}{}
+	select {
+	case <-b.release:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (b *blockingOrderDispatcher) waitForDrainCalls(t *testing.T, want int) {
+	t.Helper()
+	deadline := time.After(500 * time.Millisecond)
+	for {
+		b.mu.Lock()
+		got := b.drainCalls
+		b.mu.Unlock()
+		if got >= want {
+			return
+		}
+		select {
+		case <-b.drained:
+		case <-deadline:
+			t.Fatalf("drainCalls = %d, want at least %d", got, want)
+		}
+	}
+}
+
+func (b *blockingOrderDispatcher) drainContextErrors() []error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]error(nil), b.ctxErrs...)
 }
 
 func TestCityRuntimeTickDispatchesOrdersBeforeDemandSnapshot(t *testing.T) {
@@ -2478,6 +2534,139 @@ func TestCityRuntimeReloadSameRevisionIsNoOp(t *testing.T) {
 	}
 }
 
+func TestCityRuntimeReloadRetainsTimedOutDispatcherForShutdownDrain(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
+
+	od := newBlockingOrderDispatcher()
+	var stdout bytes.Buffer
+	cr := &CityRuntime{
+		cityPath:   cityPath,
+		cityName:   "test-city",
+		tomlPath:   tomlPath,
+		configRev:  configRev,
+		cfg:        cfg,
+		sp:         runtime.NewFake(),
+		dops:       newDrainOps(runtime.NewFake()),
+		od:         od,
+		rec:        events.Discard,
+		logPrefix:  "gc start",
+		stdout:     &stdout,
+		stderr:     io.Discard,
+		configName: "test-city",
+	}
+
+	writeCityRuntimeConfigWithShutdownTimeout(t, tomlPath, "fake", "1s")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	lastProviderName := "fake"
+	cr.reloadConfig(ctx, &lastProviderName, cityPath)
+	od.waitForDrainCalls(t, 1)
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		cr.shutdown()
+		close(shutdownDone)
+	}()
+	od.waitForDrainCalls(t, 2)
+	close(od.release)
+	select {
+	case <-shutdownDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdown did not return after retained dispatcher was released")
+	}
+}
+
+func TestCityRuntimeReloadDrainShortCircuitsOnTickContextCancel(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
+
+	od := newBlockingOrderDispatcher()
+	cr := &CityRuntime{
+		cityPath:   cityPath,
+		cityName:   "test-city",
+		tomlPath:   tomlPath,
+		configRev:  configRev,
+		cfg:        cfg,
+		sp:         runtime.NewFake(),
+		dops:       newDrainOps(runtime.NewFake()),
+		od:         od,
+		rec:        events.Discard,
+		logPrefix:  "gc start",
+		stdout:     io.Discard,
+		stderr:     io.Discard,
+		configName: "test-city",
+	}
+
+	writeCityRuntimeConfigWithShutdownTimeout(t, tomlPath, "fake", "1s")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	lastProviderName := "fake"
+	start := time.Now()
+	cr.reloadConfig(ctx, &lastProviderName, cityPath)
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Fatalf("reload drain took %s after tick context cancellation, want <200ms", elapsed)
+	}
+	errs := od.drainContextErrors()
+	if len(errs) == 0 || !errors.Is(errs[0], context.Canceled) {
+		t.Fatalf("drain ctx error = %v, want context.Canceled", errs)
+	}
+	close(od.release)
+}
+
+func TestCityRuntimeReloadDrainBoundedByTimeout(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
+
+	od := newBlockingOrderDispatcher()
+	cr := &CityRuntime{
+		cityPath:   cityPath,
+		cityName:   "test-city",
+		tomlPath:   tomlPath,
+		configRev:  configRev,
+		cfg:        cfg,
+		sp:         runtime.NewFake(),
+		dops:       newDrainOps(runtime.NewFake()),
+		od:         od,
+		rec:        events.Discard,
+		logPrefix:  "gc start",
+		stdout:     io.Discard,
+		stderr:     io.Discard,
+		configName: "test-city",
+	}
+
+	writeCityRuntimeConfigWithShutdownTimeout(t, tomlPath, "fake", "1s")
+	lastProviderName := "fake"
+	start := time.Now()
+	cr.reloadConfig(context.Background(), &lastProviderName, cityPath)
+	elapsed := time.Since(start)
+	if elapsed < reloadOrderDrainTimeout || elapsed > reloadOrderDrainTimeout+500*time.Millisecond {
+		t.Fatalf("reload elapsed = %s, want bounded near %s", elapsed, reloadOrderDrainTimeout)
+	}
+	close(od.release)
+}
+
 func TestCityRuntimeRunReloadsConfigBeforeStartupReconcile(t *testing.T) {
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
@@ -3371,6 +3560,17 @@ func (p *orderingFakeProvider) events() []string {
 	return append([]string(nil), p.seq...)
 }
 
+type interruptStopsProvider struct {
+	*runtime.Fake
+}
+
+func (p *interruptStopsProvider) Interrupt(name string) error {
+	if err := p.Fake.Interrupt(name); err != nil {
+		return err
+	}
+	return p.Stop(name)
+}
+
 // TestCityRuntimeShutdownDrainsOrderDispatch verifies shutdown invokes
 // orderDispatcher.drain with a fresh (non-canceled) context before
 // stopping sessions — regression for #991.
@@ -3399,6 +3599,34 @@ func TestCityRuntimeShutdownDrainsOrderDispatch(t *testing.T) {
 	}
 	if od.drainCtxErr != nil {
 		t.Fatalf("drain received a canceled ctx (%v); shutdown must pass a fresh context", od.drainCtxErr)
+	}
+}
+
+func TestCityRuntimeShutdownPreservesFullGracefulBudgetWithOrders(t *testing.T) {
+	cfg := &config.City{}
+	cfg.Daemon.ShutdownTimeout = "1s"
+
+	sp := &interruptStopsProvider{Fake: runtime.NewFake()}
+	if err := sp.Start(context.Background(), "probe", runtime.Config{}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	od := &recordingOrderDispatcher{}
+
+	var stdout, stderr bytes.Buffer
+	cr := &CityRuntime{
+		cfg:       cfg,
+		sp:        sp,
+		od:        od,
+		rec:       events.Discard,
+		logPrefix: "gc start",
+		stdout:    &stdout,
+		stderr:    &stderr,
+	}
+
+	cr.shutdown()
+
+	if !strings.Contains(stdout.String(), "waiting 1s") {
+		t.Fatalf("stdout = %q, want full 1s graceful session budget", stdout.String())
 	}
 }
 
@@ -3439,7 +3667,7 @@ func TestCityRuntimeShutdownBlockedDispatchPersistsOutcomeBeforeGracefulStop(t *
 	}
 
 	cfg := &config.City{}
-	cfg.Daemon.ShutdownTimeout = "5s"
+	cfg.Daemon.ShutdownTimeout = "200ms"
 
 	var stdout, stderr bytes.Buffer
 	cr := &CityRuntime{
@@ -3503,16 +3731,18 @@ func TestCityRuntimeShutdownBlockedDispatchPersistsOutcomeBeforeGracefulStop(t *
 	}
 }
 
-// TestCityRuntimeShutdownNilODIsSafe verifies shutdown does not panic when
-// cr.od is nil — preserves behavior of runtimes built without orders.
-func TestCityRuntimeShutdownNilODIsSafe(_ *testing.T) {
+func TestCityRuntimeShutdownPreservesFullGracefulBudgetWhenNoOrders(t *testing.T) {
 	cfg := &config.City{}
-	cfg.Daemon.ShutdownTimeout = "0s"
+	cfg.Daemon.ShutdownTimeout = "1s"
 
+	sp := &interruptStopsProvider{Fake: runtime.NewFake()}
+	if err := sp.Start(context.Background(), "probe", runtime.Config{}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
 	var stdout, stderr bytes.Buffer
 	cr := &CityRuntime{
 		cfg:       cfg,
-		sp:        runtime.NewFake(),
+		sp:        sp,
 		rec:       events.Discard,
 		logPrefix: "gc start",
 		stdout:    &stdout,
@@ -3520,6 +3750,40 @@ func TestCityRuntimeShutdownNilODIsSafe(_ *testing.T) {
 	}
 
 	cr.shutdown()
+
+	if !strings.Contains(stdout.String(), "waiting 1s") {
+		t.Fatalf("stdout = %q, want full 1s graceful session budget", stdout.String())
+	}
+}
+
+func TestCityRuntimeShutdownZeroTimeoutDoesNotWaitForOrderDrain(t *testing.T) {
+	cfg := &config.City{}
+	cfg.Daemon.ShutdownTimeout = "0s"
+
+	od := newBlockingOrderDispatcher()
+	var stdout, stderr bytes.Buffer
+	cr := &CityRuntime{
+		cfg:       cfg,
+		sp:        runtime.NewFake(),
+		od:        od,
+		rec:       events.Discard,
+		logPrefix: "gc start",
+		stdout:    &stdout,
+		stderr:    &stderr,
+	}
+
+	done := make(chan struct{})
+	go func() {
+		cr.shutdown()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("shutdown waited on order drain despite shutdown_timeout=0s")
+	}
+	close(od.release)
 }
 
 func TestCityRuntimeShutdownWarnsWhenSessionListingIsPartial(t *testing.T) {
@@ -3570,6 +3834,14 @@ func writeCityRuntimeConfig(t *testing.T, tomlPath, provider string) {
 func writeCityRuntimeConfigNamed(t *testing.T, tomlPath, name, provider string) {
 	t.Helper()
 	data := []byte("[workspace]\nname = \"" + name + "\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"" + provider + "\"\n")
+	if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+}
+
+func writeCityRuntimeConfigWithShutdownTimeout(t *testing.T, tomlPath, provider, timeout string) {
+	t.Helper()
+	data := []byte("[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"" + provider + "\"\n\n[daemon]\nshutdown_timeout = \"" + timeout + "\"\n")
 	if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}

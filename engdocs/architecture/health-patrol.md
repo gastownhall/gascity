@@ -357,14 +357,16 @@ stubbed `ExecRunner`) with no external infrastructure dependencies. See
 
 - **Order dispatch goroutines are drained on controller exit**:
   Each due order launches a goroutine whose completion is tracked
-  by a `sync.WaitGroup`. Controller shutdown and config reload call
-  `orderDispatcher.drain(ctx)` with a bounded timeout so tracking
-  bead outcomes and event records are persisted before the old
-  dispatcher is discarded. If the drain timeout expires, the
-  compensating startup sweep (`sweepOrphanedOrderTrackingRetry`)
-  closes any orphaned tracking beads on the next boot. Failed
-  orders emit events but do not retry; the tracking bead prevents
-  re-fire within the same cooldown window.
+  by an in-flight counter and channel signal. Controller shutdown
+  and config reload call `orderDispatcher.drain(ctx)` with a bounded
+  timeout so tracking bead outcomes and event records are persisted
+  before the old dispatcher is discarded. If reload drain times out,
+  the runtime retains the old dispatcher and drains it again during
+  shutdown. If shutdown drain also times out, the compensating
+  startup sweep (`sweepOrphanedOrderTrackingRetry`) closes any
+  orphaned tracking beads on the next boot. Failed orders emit
+  events but do not retry; the tracking bead prevents re-fire within
+  the same cooldown window.
 
 - **No hot-reload for structural changes**: Changing `workspace.name`
   requires a full controller restart. `tryReloadConfig()` rejects name

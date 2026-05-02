@@ -30,8 +30,10 @@ import (
 // reloadOrderDrainTimeout bounds how long config reload will wait for
 // the outgoing order dispatcher's in-flight goroutines before replacing
 // it. Reload runs on the tick loop, so a larger budget would stall all
-// other subsystems; orphan tracking beads are compensated by the next
-// startup sweep.
+// other subsystems. Dispatchers that do not drain within this budget are
+// retained and drained again during controller shutdown; orphan tracking
+// beads are still compensated by the next startup sweep if shutdown also
+// cannot wait long enough.
 const reloadOrderDrainTimeout = 1 * time.Second
 
 // CityRuntime holds all running state for a single city's reconciliation
@@ -56,12 +58,13 @@ type CityRuntime struct {
 	buildFn                 func(*config.City, runtime.Provider, beads.Store) DesiredStateResult
 	buildFnWithSessionBeads func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult
 
-	dops  drainOps
-	ct    crashTracker
-	it    idleTracker
-	wg    wispGC
-	od    orderDispatcher
-	trace *sessionReconcilerTraceManager
+	dops                    drainOps
+	ct                      crashTracker
+	it                      idleTracker
+	wg                      wispGC
+	od                      orderDispatcher
+	retiredOrderDispatchers []orderDispatcher
+	trace                   *sessionReconcilerTraceManager
 
 	rec events.Recorder
 	cs  *controllerState // nil when controller-managed bead stores are unavailable
@@ -1080,15 +1083,16 @@ func (cr *CityRuntime) reloadConfigTraced(
 	// Drain the outgoing dispatcher before replacing it so in-flight
 	// dispatchOne goroutines persist their tracking-bead outcomes against
 	// the store they were scheduled against. Reload runs on the same
-	// goroutine as tick, so no concurrent dispatch can race Add against
-	// Wait here. The reload budget is capped at reloadOrderDrainTimeout
-	// so a wedged exec order cannot stall the tick loop — orphaned
-	// tracking beads are cleaned up by the next-boot startup sweep.
+	// goroutine as tick, so no concurrent dispatch can create a new
+	// in-flight signal on this dispatcher while drain observes it. The
+	// reload budget is capped at reloadOrderDrainTimeout so a wedged exec
+	// order cannot stall the tick loop; timed-out dispatchers are retained
+	// and drained again during shutdown.
 	// Deriving from ctx (the tick ctx) lets a shutdown racing with reload
 	// short-circuit the drain instead of waiting the full 1s.
 	if cr.od != nil {
 		drainCtx, drainCancel := context.WithTimeout(ctx, reloadOrderDrainTimeout)
-		cr.od.drain(drainCtx)
+		cr.drainOutgoingOrderDispatcher(drainCtx, cr.od)
 		drainCancel()
 	}
 	cr.od = buildOrderDispatcher(cityRoot, nextCfg, cr.rec, cr.stderr)
@@ -1911,6 +1915,42 @@ func (cr *CityRuntime) beginTraceCycle(trigger, detail string, sessionBeads *ses
 	return cr.trace.beginCycle(info, cr.cfg, sessionBeads)
 }
 
+func (cr *CityRuntime) drainOutgoingOrderDispatcher(ctx context.Context, od orderDispatcher) {
+	if od == nil {
+		return
+	}
+	if od.drain(ctx) {
+		return
+	}
+	cr.retiredOrderDispatchers = append(cr.retiredOrderDispatchers, od)
+}
+
+func (cr *CityRuntime) drainOrderDispatchers(ctx context.Context) {
+	var retained []orderDispatcher
+	if cr.od != nil && !cr.od.drain(ctx) {
+		retained = append(retained, cr.od)
+	}
+	for _, od := range cr.retiredOrderDispatchers {
+		if od == nil {
+			continue
+		}
+		if !od.drain(ctx) {
+			retained = append(retained, od)
+		}
+	}
+	cr.retiredOrderDispatchers = retained
+}
+
+func orderShutdownDrainTimeout(total time.Duration) time.Duration {
+	if total <= 0 {
+		return 0
+	}
+	if total < reloadOrderDrainTimeout {
+		return total
+	}
+	return reloadOrderDrainTimeout
+}
+
 // shutdown performs graceful two-pass agent shutdown for this city.
 // Safe to call multiple times (e.g., from both panic recovery and
 // normal shutdown) — only the first call takes effect.
@@ -1925,20 +1965,18 @@ func (cr *CityRuntime) shutdown() {
 				fmt.Fprintf(cr.stderr, "%s: service shutdown: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 			}
 		}
-		// When an order dispatcher is active, slice the shutdown budget
-		// 50/50 so drain and graceful session-stop each get part of it.
-		// Drain uses a fresh context because the tick ctx is already
-		// canceled at this point, which would make drain a no-op.
+		// Drain order dispatchers with a small cap before stopping sessions.
+		// Use a fresh context because the tick ctx is already canceled at this
+		// point, which would make drain a no-op. shutdown_timeout remains the
+		// graceful session-stop budget; order drain does not silently halve it.
 		// Orphaned tracking beads (if drain times out) are closed by
-		// sweepOrphanedOrderTrackingRetry on next start. Runtimes with
-		// no orders keep the full budget for gracefulStopAll.
+		// sweepOrphanedOrderTrackingRetry on next start.
 		total := cr.cfg.Daemon.ShutdownTimeoutDuration()
 		gracefulTimeout := total
-		if cr.od != nil {
-			drainTimeout := total / 2
-			gracefulTimeout = total - drainTimeout
+		if cr.od != nil || len(cr.retiredOrderDispatchers) > 0 {
+			drainTimeout := orderShutdownDrainTimeout(total)
 			drainCtx, drainCancel := context.WithTimeout(context.Background(), drainTimeout)
-			cr.od.drain(drainCtx)
+			cr.drainOrderDispatchers(drainCtx)
 			drainCancel()
 		}
 		running, listErr := cr.sp.ListRunning("")

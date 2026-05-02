@@ -251,14 +251,15 @@ Violations indicate bugs.
   reprocessing already-handled events.
 
 - **Dispatch goroutines are drained on controller exit**: Each due
-  order launches a goroutine whose completion is tracked by a
-  `sync.WaitGroup` on the dispatcher. Controller shutdown and
-  config reload call `orderDispatcher.drain(ctx)` with a bounded
-  timeout so tracking bead outcomes and `order.failed` /
+  order launches a goroutine whose completion is tracked by an
+  in-flight counter and channel signal on the dispatcher. Controller
+  shutdown and config reload call `orderDispatcher.drain(ctx)` with
+  a bounded timeout so tracking bead outcomes and `order.failed` /
   `order.completed` events are persisted before the dispatcher is
-  discarded. Failed orders emit `order.failed` events but do not
-  retry; the tracking bead prevents re-fire within the same
-  cooldown window.
+  discarded. Reload retains any dispatcher that does not drain before
+  its timeout and drains it again during controller shutdown. Failed
+  orders emit `order.failed` events but do not retry; the tracking
+  bead prevents re-fire within the same cooldown window.
 
 - **No role names in Go code**: The order subsystem operates on
   config-driven pool names and formula references. No line of Go
