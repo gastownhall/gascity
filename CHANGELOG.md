@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `proxy_process` services now receive a `GC_SERVICE_URL_PREFIX` that the
+  supervisor's public listener actually routes. Previously the prefix was
+  the per-city-relative `/svc/<name>`, so any service that composed
+  `CallbackURL = $GC_API_BASE_URL + $GC_SERVICE_URL_PREFIX` (the documented
+  shape for adapter self-registration) would 404 on inbound calls. The
+  prefix is now the full `/v0/city/<cityName>/svc/<svcName>` path. The
+  per-city router contract (`config.Service.MountPathOrDefault`) is
+  unchanged.
+
 ### Changed
 
 - Managed Dolt config now emits listener backlog and connection-timeout keys.
