@@ -239,9 +239,29 @@ func waitForStandaloneControllerStop(cityPath string, timeout time.Duration) err
 func doStop(sessionNames []string, sp runtime.Provider, cfg *config.City, store beads.Store, timeout time.Duration,
 	rec events.Recorder, stdout, stderr io.Writer,
 ) int {
+	visible := map[string]bool{}
+	if sp != nil {
+		names, err := sp.ListRunning("")
+		if err != nil {
+			names = nil
+		}
+		for _, name := range names {
+			if name = strings.TrimSpace(name); name != "" {
+				visible[name] = true
+			}
+		}
+	}
 	var running []string
 	for _, sn := range sessionNames {
+		sn = strings.TrimSpace(sn)
+		if sn == "" {
+			continue
+		}
 		if alive, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, sn); err == nil && alive {
+			running = append(running, sn)
+			continue
+		}
+		if visible[sn] {
 			running = append(running, sn)
 		}
 	}

@@ -51,6 +51,42 @@ type stopHookProvider struct {
 	beforeStop func(string)
 }
 
+type deadRuntimeArtifactProvider struct {
+	*runtime.Fake
+	visible map[string]bool
+	live    map[string]bool
+	stopped []string
+}
+
+func newDeadRuntimeArtifactProvider() *deadRuntimeArtifactProvider {
+	return &deadRuntimeArtifactProvider{
+		Fake:    runtime.NewFake(),
+		visible: make(map[string]bool),
+		live:    make(map[string]bool),
+	}
+}
+
+func (p *deadRuntimeArtifactProvider) ListRunning(prefix string) ([]string, error) {
+	var names []string
+	for name := range p.visible {
+		if strings.HasPrefix(name, prefix) {
+			names = append(names, name)
+		}
+	}
+	return names, nil
+}
+
+func (p *deadRuntimeArtifactProvider) IsRunning(name string) bool {
+	return p.live[name]
+}
+
+func (p *deadRuntimeArtifactProvider) Stop(name string) error {
+	p.stopped = append(p.stopped, name)
+	delete(p.visible, name)
+	delete(p.live, name)
+	return nil
+}
+
 func (s *failingCloseStore) Close(_ string) error {
 	return errors.New("close failed")
 }
@@ -4138,6 +4174,53 @@ func TestReapStaleSessionBeads_NilStoreAndProvider(t *testing.T) {
 	}
 	if got := reapStaleSessionBeads(nil, runtime.NewFake(), nil, clk, &stderr); got != 0 {
 		t.Errorf("nil store: got %d, want 0", got)
+	}
+}
+
+func TestCleanupDeadRuntimeSessionCorpsesStopsVisibleDeadSessions(t *testing.T) {
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible["dead-worker"] = true
+	sp.visible["live-worker"] = true
+	sp.visible["untracked-worker"] = true
+	sp.live["live-worker"] = true
+
+	snapshot := newSessionBeadSnapshot([]beads.Bead{
+		{
+			ID:     "s1",
+			Status: "open",
+			Metadata: map[string]string{
+				"session_name": "dead-worker",
+				"template":     "worker",
+			},
+		},
+		{
+			ID:     "s2",
+			Status: "open",
+			Metadata: map[string]string{
+				"session_name": "live-worker",
+				"template":     "worker",
+			},
+		},
+		{
+			ID:     "s3",
+			Status: "open",
+			Metadata: map[string]string{
+				"session_name": "absent-worker",
+				"template":     "worker",
+			},
+		},
+	})
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(snapshot, sp, &stderr)
+	if got != 1 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
+	}
+	if len(sp.stopped) != 1 || sp.stopped[0] != "dead-worker" {
+		t.Fatalf("stopped = %v, want [dead-worker]", sp.stopped)
+	}
+	if !sp.visible["live-worker"] || !sp.visible["untracked-worker"] {
+		t.Fatalf("cleanup stopped live or untracked session: visible=%v", sp.visible)
 	}
 }
 

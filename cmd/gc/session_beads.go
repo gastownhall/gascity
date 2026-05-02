@@ -1555,6 +1555,53 @@ func reapStaleSessionBeads(
 	return reaped
 }
 
+func cleanupDeadRuntimeSessionCorpses(
+	sessionBeads *sessionBeadSnapshot,
+	sp runtime.Provider,
+	stderr io.Writer,
+) int {
+	if sessionBeads == nil || sp == nil {
+		return 0
+	}
+	visible, err := sp.ListRunning("")
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: listing runtime sessions for dead cleanup: %v\n", err) //nolint:errcheck
+		return 0
+	}
+	if len(visible) == 0 {
+		return 0
+	}
+	visibleSet := make(map[string]bool, len(visible))
+	for _, name := range visible {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			visibleSet[name] = true
+		}
+	}
+	if len(visibleSet) == 0 {
+		return 0
+	}
+
+	cleaned := 0
+	seen := make(map[string]bool)
+	for _, b := range sessionBeads.Open() {
+		name := strings.TrimSpace(b.Metadata["session_name"])
+		if name == "" || seen[name] || !visibleSet[name] {
+			continue
+		}
+		seen[name] = true
+		if sp.IsRunning(name) {
+			continue
+		}
+		if err := sp.Stop(name); err != nil {
+			fmt.Fprintf(stderr, "session reconciler: cleaning dead runtime session %s: %v\n", name, err) //nolint:errcheck
+			continue
+		}
+		cleaned++
+	}
+	return cleaned
+}
+
 func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 	store beads.Store,
 	rigStores map[string]beads.Store,
