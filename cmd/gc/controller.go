@@ -295,9 +295,19 @@ func handleReloadSocketCmd(conn net.Conn, payload string, ch chan reloadRequest)
 	}
 	timer := time.NewTimer(acceptTimeout)
 	defer timer.Stop()
+	queueStart := time.Now()
 	select {
 	case ch <- req:
+		// Surface unusually long queue waits so operators can correlate them
+		// with the slow tick that held the main goroutine. Reloads should
+		// normally accept in a handful of milliseconds.
+		if waited := time.Since(queueStart); waited >= reloadQueueWaitThreshold {
+			fmt.Fprintf(os.Stderr, "gc reload: waited %s in reload accept queue (controller main goroutine was busy; check `slow tick` warnings for the responsible trigger)\n", //nolint:errcheck // best-effort stderr
+				waited.Round(time.Millisecond))
+		}
 	case <-timer.C:
+		fmt.Fprintf(os.Stderr, "gc reload: accept queue timed out after %s (controller never freed the main goroutine; check `slow tick` warnings)\n", //nolint:errcheck // best-effort stderr
+			acceptTimeout.Round(time.Millisecond))
 		writeJSONLine(conn, reloadControlReply{
 			Outcome: reloadOutcomeBusy,
 			Message: "Reload request could not be accepted because the controller is busy.",
@@ -769,14 +779,29 @@ func reloadWarningsFromError(err error) []string {
 // canonical/compat default tables stay strict-fatal unless --no-strict
 // disables the gate.
 func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadResult, error) {
+	// Per-phase timing so a slow reload can be diagnosed from logs alone:
+	// healthy reloads should complete in well under a second; if a phase
+	// exceeds reloadPhaseSlowThreshold we surface it on stderr immediately.
+	phaseStart := time.Now()
+	logSlow := func(phase string) {
+		elapsed := time.Since(phaseStart)
+		if elapsed >= reloadPhaseSlowThreshold {
+			fmt.Fprintf(os.Stderr, "gc reload: phase %q took %s (>= %s threshold)\n", //nolint:errcheck // best-effort stderr
+				phase, elapsed.Round(time.Millisecond), reloadPhaseSlowThreshold)
+		}
+		phaseStart = time.Now()
+	}
+
 	if err := ensureLegacyNamedPacksCached(cityRoot); err != nil {
 		return nil, fmt.Errorf("fetching packs: %w", err)
 	}
+	logSlow("fetch-packs")
 
 	newCfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, extraConfigFiles...)
 	if err != nil {
 		return nil, fmt.Errorf("parsing city.toml: %w", err)
 	}
+	logSlow("parse-config")
 	applyFeatureFlags(newCfg)
 	reloadWarnings := append([]string(nil), prov.Warnings...)
 	resultWithWarnings := func(warnings []string) *reloadResult {
@@ -813,13 +838,27 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 	if err := workspacesvc.ValidateRuntimeSupport(newCfg.Services); err != nil {
 		return failWithWarnings(fmt.Errorf("validating services: %w", err))
 	}
+	logSlow("validate")
 	newName := loadedCityName(newCfg, filepath.Dir(tomlPath))
 	if newName != lockedWorkspaceName {
 		return failWithWarnings(fmt.Errorf("workspace.name changed from %q to %q (restart controller to apply)", lockedWorkspaceName, newName))
 	}
 	rev := config.Revision(fsys.OSFS{}, prov, newCfg, cityRoot)
+	logSlow("compute-revision")
 	return &reloadResult{Cfg: newCfg, Prov: prov, Revision: rev, Warnings: reloadWarnings}, nil
 }
+
+// reloadPhaseSlowThreshold is the per-phase budget above which tryReloadConfig
+// emits a stderr warning. Healthy reloads should finish each phase in well
+// under this; a phase exceeding it points at the bottleneck (e.g. dolt
+// metadata enumeration during compute-revision, or a slow remote pack fetch).
+const reloadPhaseSlowThreshold = 500 * time.Millisecond
+
+// reloadQueueWaitThreshold is the budget above which the reload accept handler
+// emits a stderr warning about how long the request waited in
+// reloadReqCh. Reloads should normally be drained within a few milliseconds;
+// long waits indicate a slow tick on the main goroutine.
+const reloadQueueWaitThreshold = 1 * time.Second
 
 // gracefulStopAll performs two-pass graceful shutdown:
 //  1. Send Interrupt (Ctrl-C) to all sessions
