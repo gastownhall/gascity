@@ -242,8 +242,13 @@ func doStop(sessionNames []string, sp runtime.Provider, cfg *config.City, store 
 	visible := map[string]bool{}
 	if sp != nil {
 		names, err := sp.ListRunning("")
-		if err != nil {
+		partialList := runtime.IsPartialListError(err)
+		if err != nil && !partialList {
+			fmt.Fprintf(stderr, "gc stop: listing sessions: %v\n", err) //nolint:errcheck // best-effort stderr
 			names = nil
+		}
+		if partialList {
+			fmt.Fprintf(stderr, "gc stop: listing sessions partially failed: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
 		for _, name := range names {
 			if name = strings.TrimSpace(name); name != "" {

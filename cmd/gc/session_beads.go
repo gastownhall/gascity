@@ -1474,10 +1474,14 @@ func closeFailedCreateBead(store beads.Store, id string, now time.Time, stderr i
 	return true
 }
 
-// reapStaleSessionBeads closes session beads that are stuck in the creating
-// state past the startup grace period — sessions whose tmux process never
-// completed startup, so they are guaranteed not to hold work claims (claim
-// is the first thing a worker does after startup).
+// reapStaleSessionBeads closes beads whose runtime is gone while startup is
+// still incomplete. cleanupDeadRuntimeSessionCorpses handles the inverse
+// mismatch: open beads whose runtime artifact is visible but confirmed dead.
+//
+// This function only targets session beads stuck in the creating state past the
+// startup grace period — sessions whose tmux process never completed startup,
+// so they are guaranteed not to hold work claims (claim is the first thing a
+// worker does after startup).
 //
 // Sessions that completed startup (state=active, awake, etc.) are NEVER reaped
 // here even if their tmux session has died: they may hold in_progress claims,
@@ -1557,16 +1561,25 @@ func reapStaleSessionBeads(
 
 func cleanupDeadRuntimeSessionCorpses(
 	sessionBeads *sessionBeadSnapshot,
+	dt *drainTracker,
 	sp runtime.Provider,
 	stderr io.Writer,
 ) int {
 	if sessionBeads == nil || sp == nil {
 		return 0
 	}
+	deadChecker, ok := sp.(runtime.DeadRuntimeSessionChecker)
+	if !ok {
+		return 0
+	}
 	visible, err := sp.ListRunning("")
-	if err != nil {
+	partialList := runtime.IsPartialListError(err)
+	if err != nil && !partialList {
 		fmt.Fprintf(stderr, "session reconciler: listing runtime sessions for dead cleanup: %v\n", err) //nolint:errcheck
 		return 0
+	}
+	if partialList {
+		fmt.Fprintf(stderr, "session reconciler: listing runtime sessions partially failed for dead cleanup; checking %d visible session(s): %v\n", len(visible), err) //nolint:errcheck
 	}
 	if len(visible) == 0 {
 		return 0
@@ -1585,18 +1598,31 @@ func cleanupDeadRuntimeSessionCorpses(
 	cleaned := 0
 	seen := make(map[string]bool)
 	for _, b := range sessionBeads.Open() {
+		pendingCreate := strings.TrimSpace(b.Metadata["pending_create_claim"]) == "true"
+		if pendingCreate || (dt != nil && dt.get(b.ID) != nil) || isNamedSessionBead(b) {
+			continue
+		}
 		name := strings.TrimSpace(b.Metadata["session_name"])
 		if name == "" || seen[name] || !visibleSet[name] {
 			continue
 		}
 		seen[name] = true
-		if sp.IsRunning(name) {
+		dead, err := deadChecker.IsDeadRuntimeSession(name)
+		if err != nil {
+			fmt.Fprintf(stderr, "session reconciler: confirming dead runtime session %s: %v\n", name, err) //nolint:errcheck
+			continue
+		}
+		if !dead {
 			continue
 		}
 		if err := sp.Stop(name); err != nil {
+			if runtime.IsSessionGone(err) {
+				continue
+			}
 			fmt.Fprintf(stderr, "session reconciler: cleaning dead runtime session %s: %v\n", name, err) //nolint:errcheck
 			continue
 		}
+		fmt.Fprintf(stderr, "session reconciler: cleaned dead runtime session %s\n", name) //nolint:errcheck
 		cleaned++
 	}
 	return cleaned

@@ -53,16 +53,25 @@ type stopHookProvider struct {
 
 type deadRuntimeArtifactProvider struct {
 	*runtime.Fake
-	visible map[string]bool
-	live    map[string]bool
-	stopped []string
+	visible   map[string]bool
+	live      map[string]bool
+	dead      map[string]bool
+	deadErrs  map[string]error
+	stopErrs  map[string]error
+	listErr   error
+	stopped   []string
+	stopCalls map[string]int
 }
 
 func newDeadRuntimeArtifactProvider() *deadRuntimeArtifactProvider {
 	return &deadRuntimeArtifactProvider{
-		Fake:    runtime.NewFake(),
-		visible: make(map[string]bool),
-		live:    make(map[string]bool),
+		Fake:      runtime.NewFake(),
+		visible:   make(map[string]bool),
+		live:      make(map[string]bool),
+		dead:      make(map[string]bool),
+		deadErrs:  make(map[string]error),
+		stopErrs:  make(map[string]error),
+		stopCalls: make(map[string]int),
 	}
 }
 
@@ -73,17 +82,29 @@ func (p *deadRuntimeArtifactProvider) ListRunning(prefix string) ([]string, erro
 			names = append(names, name)
 		}
 	}
-	return names, nil
+	return names, p.listErr
 }
 
 func (p *deadRuntimeArtifactProvider) IsRunning(name string) bool {
 	return p.live[name]
 }
 
+func (p *deadRuntimeArtifactProvider) IsDeadRuntimeSession(name string) (bool, error) {
+	if err := p.deadErrs[name]; err != nil {
+		return false, err
+	}
+	return p.dead[name], nil
+}
+
 func (p *deadRuntimeArtifactProvider) Stop(name string) error {
+	p.stopCalls[name]++
+	if err := p.stopErrs[name]; err != nil {
+		return err
+	}
 	p.stopped = append(p.stopped, name)
 	delete(p.visible, name)
 	delete(p.live, name)
+	delete(p.dead, name)
 	return nil
 }
 
@@ -4183,6 +4204,7 @@ func TestCleanupDeadRuntimeSessionCorpsesStopsVisibleDeadSessions(t *testing.T) 
 	sp.visible["live-worker"] = true
 	sp.visible["untracked-worker"] = true
 	sp.live["live-worker"] = true
+	sp.dead["dead-worker"] = true
 
 	snapshot := newSessionBeadSnapshot([]beads.Bead{
 		{
@@ -4212,7 +4234,7 @@ func TestCleanupDeadRuntimeSessionCorpsesStopsVisibleDeadSessions(t *testing.T) 
 	})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(snapshot, sp, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(snapshot, nil, sp, &stderr)
 	if got != 1 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -4221,6 +4243,188 @@ func TestCleanupDeadRuntimeSessionCorpsesStopsVisibleDeadSessions(t *testing.T) 
 	}
 	if !sp.visible["live-worker"] || !sp.visible["untracked-worker"] {
 		t.Fatalf("cleanup stopped live or untracked session: visible=%v", sp.visible)
+	}
+}
+
+func TestCleanupDeadRuntimeSessionCorpsesSkipsLivenessUncertainty(t *testing.T) {
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible["worker"] = true
+	sp.deadErrs["worker"] = errors.New("pane state unavailable")
+
+	snapshot := newSessionBeadSnapshot([]beads.Bead{{
+		ID:     "s1",
+		Status: "open",
+		Metadata: map[string]string{
+			"session_name": "worker",
+		},
+	}})
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(snapshot, nil, sp, &stderr)
+	if got != 0 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 0", got)
+	}
+	if sp.stopCalls["worker"] != 0 {
+		t.Fatalf("Stop called for liveness-uncertain session: calls=%d stderr=%q", sp.stopCalls["worker"], stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "confirming dead runtime session worker") {
+		t.Fatalf("stderr = %q, want dead-confirmation warning", stderr.String())
+	}
+}
+
+func TestCleanupDeadRuntimeSessionCorpsesSkipsVisibleSessionWhenCheckerReportsLive(t *testing.T) {
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible["mixed-pane-worker"] = true
+
+	snapshot := newSessionBeadSnapshot([]beads.Bead{{
+		ID:     "s1",
+		Status: "open",
+		Metadata: map[string]string{
+			"session_name": "mixed-pane-worker",
+		},
+	}})
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(snapshot, nil, sp, &stderr)
+	if got != 0 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 0", got)
+	}
+	if sp.stopCalls["mixed-pane-worker"] != 0 {
+		t.Fatalf("Stop calls = %d, want 0 for checker-live session", sp.stopCalls["mixed-pane-worker"])
+	}
+}
+
+func TestCleanupDeadRuntimeSessionCorpsesUsesPartialListResults(t *testing.T) {
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible["worker"] = true
+	sp.dead["worker"] = true
+	sp.listErr = &runtime.PartialListError{Err: errors.New("remote backend down")}
+
+	snapshot := newSessionBeadSnapshot([]beads.Bead{{
+		ID:     "s1",
+		Status: "open",
+		Metadata: map[string]string{
+			"session_name": "worker",
+		},
+	}})
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(snapshot, nil, sp, &stderr)
+	if got != 1 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
+	}
+	if sp.stopCalls["worker"] != 1 {
+		t.Fatalf("Stop calls = %d, want 1", sp.stopCalls["worker"])
+	}
+	if !strings.Contains(stderr.String(), "listing runtime sessions partially failed") {
+		t.Fatalf("stderr = %q, want partial-list warning", stderr.String())
+	}
+}
+
+func TestCleanupDeadRuntimeSessionCorpsesSkipsLifecycleOwnedBeads(t *testing.T) {
+	sp := newDeadRuntimeArtifactProvider()
+	for _, name := range []string{"pending-worker", "draining-worker", "named-worker", "ordinary-worker"} {
+		sp.visible[name] = true
+		sp.dead[name] = true
+	}
+
+	dt := newDrainTracker()
+	dt.set("draining", &drainState{reason: "user"})
+	snapshot := newSessionBeadSnapshot([]beads.Bead{
+		{
+			ID:     "pending",
+			Status: "open",
+			Metadata: map[string]string{
+				"session_name":         "pending-worker",
+				"pending_create_claim": "true",
+			},
+		},
+		{
+			ID:     "draining",
+			Status: "open",
+			Metadata: map[string]string{
+				"session_name": "draining-worker",
+			},
+		},
+		{
+			ID:     "named",
+			Status: "open",
+			Metadata: map[string]string{
+				"session_name":                       "named-worker",
+				session.NamedSessionMetadataKey:      "true",
+				session.NamedSessionIdentityMetadata: "rig/worker",
+				session.NamedSessionModeMetadata:     "always",
+			},
+		},
+		{
+			ID:     "ordinary",
+			Status: "open",
+			Metadata: map[string]string{
+				"session_name": "ordinary-worker",
+			},
+		},
+	})
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(snapshot, dt, sp, &stderr)
+	if got != 1 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
+	}
+	if sp.stopCalls["ordinary-worker"] != 1 {
+		t.Fatalf("ordinary Stop calls = %d, want 1", sp.stopCalls["ordinary-worker"])
+	}
+	for _, name := range []string{"pending-worker", "draining-worker", "named-worker"} {
+		if sp.stopCalls[name] != 0 {
+			t.Fatalf("Stop(%s) calls = %d, want 0", name, sp.stopCalls[name])
+		}
+	}
+}
+
+func TestCleanupDeadRuntimeSessionCorpsesSkipsBlankAndDeduplicatesNames(t *testing.T) {
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible["worker"] = true
+	sp.dead["worker"] = true
+
+	snapshot := newSessionBeadSnapshot([]beads.Bead{
+		{ID: "blank", Status: "open", Metadata: map[string]string{"session_name": "  "}},
+		{ID: "first", Status: "open", Metadata: map[string]string{"session_name": "worker"}},
+		{ID: "second", Status: "open", Metadata: map[string]string{"session_name": " worker "}},
+	})
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(snapshot, nil, sp, &stderr)
+	if got != 1 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
+	}
+	if sp.stopCalls["worker"] != 1 {
+		t.Fatalf("Stop calls = %d, want 1", sp.stopCalls["worker"])
+	}
+}
+
+func TestCleanupDeadRuntimeSessionCorpsesReportsStopErrors(t *testing.T) {
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible["worker"] = true
+	sp.dead["worker"] = true
+	sp.stopErrs["worker"] = errors.New("stop failed")
+
+	snapshot := newSessionBeadSnapshot([]beads.Bead{{
+		ID:     "s1",
+		Status: "open",
+		Metadata: map[string]string{
+			"session_name": "worker",
+		},
+	}})
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(snapshot, nil, sp, &stderr)
+	if got != 0 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 0", got)
+	}
+	if sp.stopCalls["worker"] != 1 {
+		t.Fatalf("Stop calls = %d, want 1", sp.stopCalls["worker"])
+	}
+	if !strings.Contains(stderr.String(), "cleaning dead runtime session worker: stop failed") {
+		t.Fatalf("stderr = %q, want Stop error", stderr.String())
 	}
 }
 
