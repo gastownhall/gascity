@@ -26,11 +26,13 @@ export function installDashboardLogging(): void {
   if (installed || typeof window === "undefined") return;
   installed = true;
 
-  mirrorConsole("debug", "debug");
-  mirrorConsole("info", "info");
+  if (verboseLoggingEnabled()) {
+    mirrorConsole("debug", "debug");
+    mirrorConsole("info", "info");
+    mirrorConsole("log", "info");
+  }
   mirrorConsole("warn", "warn");
   mirrorConsole("error", "error");
-  mirrorConsole("log", "info");
 
   window.addEventListener("error", (event) => {
     logError("window", "Unhandled error", {
@@ -48,10 +50,12 @@ export function installDashboardLogging(): void {
 }
 
 export function logDebug(scope: string, message: string, details?: unknown): void {
+  if (!verboseLoggingEnabled()) return;
   emit("debug", scope, message, details);
 }
 
 export function logInfo(scope: string, message: string, details?: unknown): void {
+  if (!verboseLoggingEnabled()) return;
   emit("info", scope, message, details);
 }
 
@@ -64,9 +68,22 @@ export function logError(scope: string, message: string, details?: unknown): voi
 }
 
 function emit(level: DashboardLogLevel, scope: string, message: string, details?: unknown): void {
+  if ((level === "debug" || level === "info") && !verboseLoggingEnabled()) return;
   const entry = makeEntry(level, scope, message, details);
   originalConsole[level](`[dashboard][${scope}] ${message}`, safeSerialize(details));
   sendToServer(entry);
+}
+
+function verboseLoggingEnabled(): boolean {
+  if (typeof window === "undefined") return false;
+  const params = new URLSearchParams(window.location.search);
+  const query = (params.get("debug") ?? "").toLowerCase();
+  if (query === "1" || query === "true") return true;
+  try {
+    return window.localStorage.getItem("gc.dashboard.debug") === "true";
+  } catch {
+    return false;
+  }
 }
 
 function mirrorConsole(method: keyof typeof originalConsole, level: DashboardLogLevel): void {

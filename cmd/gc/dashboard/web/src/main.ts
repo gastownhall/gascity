@@ -1,12 +1,12 @@
 import { cityScope } from "./api";
 import { renderCityTabs } from "./panels/cities";
 import { renderStatus } from "./panels/status";
-import { renderCrew, installCrewInteractions, closeLogDrawerExternal } from "./panels/crew";
-import { renderIssues, installIssueInteractions } from "./panels/issues";
-import { renderMail, installMailInteractions } from "./panels/mail";
-import { renderConvoys, installConvoyInteractions } from "./panels/convoys";
-import { eventTypeFromMessage, loadActivityHistory, startActivityStream, stopActivityStream, installActivityInteractions } from "./panels/activity";
-import { renderAdminPanels, installAdminInteractions } from "./panels/admin";
+import { renderCrew, installCrewInteractions, closeLogDrawerExternal, resetCrewNoCity } from "./panels/crew";
+import { renderIssues, installIssueInteractions, resetIssuesNoCity } from "./panels/issues";
+import { renderMail, installMailInteractions, resetMailNoCity } from "./panels/mail";
+import { renderConvoys, installConvoyInteractions, resetConvoysNoCity } from "./panels/convoys";
+import { eventTypeFromMessage, loadActivityHistory, resetActivity, startActivityStream, stopActivityStream, installActivityInteractions } from "./panels/activity";
+import { renderAdminPanels, installAdminInteractions, renderAdminEmptyStates } from "./panels/admin";
 import { invalidateOptions } from "./panels/options";
 import { installPanelAffordances, popPause, refreshPaused, reportUIError, setPopPauseListener } from "./ui";
 import { installCommandPalette } from "./palette";
@@ -132,13 +132,12 @@ function byId(id: string): HTMLElement | null {
 
 void boot().catch((error) => reportUIError("Dashboard boot failed", error));
 
-function syncCityScopedControls(): void {
-  const hasCity = cityScope() !== "";
-  syncCityScopedPanels(hasCity);
-  setControlState("new-convoy-btn", hasCity, "Select a city to create a convoy");
-  setControlState("new-issue-btn", hasCity, "Select a city to create a bead");
-  setControlState("compose-mail-btn", hasCity, "Select a city to compose mail");
-  setControlState("open-assign-btn", hasCity, "Select a city to assign work");
+function syncCityScopedControls(enabled: boolean): void {
+  syncCityScopedPanels(enabled);
+  setControlState("new-convoy-btn", enabled, "Select a running city to create a convoy");
+  setControlState("new-issue-btn", enabled, "Select a running city to create a bead");
+  setControlState("compose-mail-btn", enabled, "Select a running city to compose mail");
+  setControlState("open-assign-btn", enabled, "Select a running city to assign work");
 }
 
 function setControlState(id: string, enabled: boolean, disabledTitle: string): void {
@@ -208,10 +207,12 @@ function syncCityScopedPanels(hasCity: boolean): void {
 }
 
 const REFRESH_DEBOUNCE_MS = 1_000;
+const REFRESH_MIN_INTERVAL_MS = 10_000;
 
 const refreshScheduler = createRefreshScheduler({
   delayMs: REFRESH_DEBOUNCE_MS,
   isPaused: refreshPaused,
+  minIntervalMs: REFRESH_MIN_INTERVAL_MS,
   onError: (error) => reportUIError("Refresh failed", error),
   run: () => refreshVisibleResources(),
 });
@@ -222,7 +223,6 @@ function scheduleRefresh(): void {
 
 async function refreshVisibleResources(force = false): Promise<void> {
   syncCityScopeFromLocation();
-  syncCityScopedControls();
 
   const dirty = consumeInvalidated(force);
   if (dirty.size === 0) return;
@@ -237,9 +237,17 @@ async function refreshVisibleResources(force = false): Promise<void> {
   const tasks: Array<Promise<void>> = [];
   const status = currentCityStatus();
   const hasRunningCity = status.kind === "running";
+  syncCityScopedControls(hasRunningCity);
+  if (status.kind === "not-running" || status.kind === "unknown") {
+    resetCityScopedResourceViews();
+  }
 
   queueRefresh(tasks, dirty, "status", () => renderStatus());
-  queueRefresh(tasks, dirty, "activity", () => loadActivityHistory());
+  if (status.kind === "supervisor" || hasRunningCity) {
+    queueRefresh(tasks, dirty, "activity", () => loadActivityHistory());
+  } else {
+    resetActivity();
+  }
   // Only fan out per-city fetches when the selected city is actually
   // running. Stopped/unknown cities return 404 for every endpoint,
   // which cascades into a console full of errors for the user. Let
@@ -261,6 +269,14 @@ async function refreshVisibleResources(force = false): Promise<void> {
   if (dirty.has("supervisor") || dirty.has("cities")) {
     renderSupervisorOverview();
   }
+}
+
+function resetCityScopedResourceViews(): void {
+  resetConvoysNoCity();
+  resetCrewNoCity();
+  resetIssuesNoCity();
+  resetMailNoCity();
+  renderAdminEmptyStates();
 }
 
 function queueRefresh(

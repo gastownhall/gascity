@@ -60,6 +60,12 @@ export async function loadActivityHistory(): Promise<void> {
   await seedActivity(normalized);
 }
 
+export function resetActivity(): void {
+  entries.splice(0, entries.length);
+  streamCursor = {};
+  renderActivity();
+}
+
 export function startActivityStream(
   onEvent?: (msg: DashboardEventMessage, eventType: string) => void,
   onStatus?: (status: import("../sse").SSEStatus) => void,
@@ -295,19 +301,7 @@ function cursorFromRecords(records: DashboardEventRecord[], city: string): { aft
     return maxSeq > 0 ? { afterSeq: String(maxSeq) } : {};
   }
 
-  const seqsByCity = new Map<string, number>();
-  records.forEach((record) => {
-    const recordScope = recordCity(record);
-    if (!recordScope || !record.seq) return;
-    seqsByCity.set(recordScope, Math.max(seqsByCity.get(recordScope) ?? 0, record.seq));
-  });
-  if (seqsByCity.size === 0) return {};
-  return {
-    afterCursor: [...seqsByCity.entries()]
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([scope, seq]) => `${scope}:${seq}`)
-      .join(","),
-  };
+  return {};
 }
 
 function stableEventID(record: DashboardEventRecord, eventID?: string): string {
