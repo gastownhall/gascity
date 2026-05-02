@@ -258,14 +258,54 @@ func TestCityRuntimeAsyncStartLimiterUsesMaxWakesPerTick(t *testing.T) {
 	cfg := &config.City{Daemon: config.DaemonConfig{MaxWakesPerTick: &maxWakes}}
 	cr := &CityRuntime{cfg: cfg}
 
-	if got := cap(cr.ensureAsyncStartLimiter()); got != maxWakes {
+	if got := cr.ensureAsyncStartLimiter().capacity(); got != maxWakes {
 		t.Fatalf("limiter cap = %d, want %d", got, maxWakes)
 	}
 
 	maxWakes = 2
-	if got := cap(cr.ensureAsyncStartLimiter()); got != maxWakes {
+	if got := cr.ensureAsyncStartLimiter().capacity(); got != maxWakes {
 		t.Fatalf("limiter cap after config change = %d, want %d", got, maxWakes)
 	}
+}
+
+func TestCityRuntimeAsyncStartLimiterResizePreservesInFlightBudget(t *testing.T) {
+	maxWakes := 3
+	cfg := &config.City{Daemon: config.DaemonConfig{MaxWakesPerTick: &maxWakes}}
+	cr := &CityRuntime{cfg: cfg}
+	limiter := cr.ensureAsyncStartLimiter()
+
+	var releases []func()
+	for i := 0; i < maxWakes; i++ {
+		release, reserved, outcome := reserveAsyncStartSlot(context.Background(), limiter)
+		if !reserved {
+			t.Fatalf("reserve initial slot = %s, want success", outcome)
+		}
+		releases = append(releases, release)
+	}
+
+	maxWakes = 2
+	resized := cr.ensureAsyncStartLimiter()
+	if resized != limiter {
+		t.Fatal("resized limiter should preserve the same in-flight reservation counter")
+	}
+	if got := resized.capacity(); got != maxWakes {
+		t.Fatalf("resized cap = %d, want %d", got, maxWakes)
+	}
+	if _, reserved, outcome := reserveAsyncStartSlot(context.Background(), resized); reserved || outcome != "deferred_by_async_start_limit" {
+		t.Fatalf("reserve while old slots exceed resized cap = reserved %v outcome %q, want deferred", reserved, outcome)
+	}
+
+	releases[0]()
+	if _, reserved, outcome := reserveAsyncStartSlot(context.Background(), resized); reserved || outcome != "deferred_by_async_start_limit" {
+		t.Fatalf("reserve at resized cap = reserved %v outcome %q, want deferred", reserved, outcome)
+	}
+	releases[1]()
+	release, reserved, outcome := reserveAsyncStartSlot(context.Background(), resized)
+	if !reserved {
+		t.Fatalf("reserve below resized cap = %s, want success", outcome)
+	}
+	release()
+	releases[2]()
 }
 
 type recordingOrderDispatcher struct {

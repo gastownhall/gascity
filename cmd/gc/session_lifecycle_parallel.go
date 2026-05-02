@@ -24,6 +24,12 @@ import (
 )
 
 const (
+	// Starts spend the configurable MaxWakesPerTick budget across ticks, but
+	// preparation stays chunked so flapping dependencies are observed between batches.
+	defaultStartDependencyRecheckBatchSize = 3
+
+	// Stops and interrupts are teardown paths, so their parallelism is not
+	// derived from the wake budget used for starts.
 	defaultMaxParallelStopsPerWave = 3
 	defaultMaxParallelInterrupts   = 16
 
@@ -33,11 +39,86 @@ const (
 	staleKeyDetectDelay = 2 * time.Second
 )
 
+type asyncStartLimiter struct {
+	mu       sync.Mutex
+	limit    int
+	inFlight int
+}
+
+func newAsyncStartLimiter(capacity int) *asyncStartLimiter {
+	if capacity <= 0 {
+		capacity = 1
+	}
+	return &asyncStartLimiter{limit: capacity}
+}
+
+func (l *asyncStartLimiter) resize(capacity int) {
+	if l == nil {
+		return
+	}
+	if capacity <= 0 {
+		capacity = 1
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.limit = capacity
+}
+
+func (l *asyncStartLimiter) capacity() int {
+	if l == nil {
+		return 0
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.limit
+}
+
+func (l *asyncStartLimiter) reserve(ctx context.Context) (func(), bool, string) {
+	if l == nil {
+		return func() {}, true, ""
+	}
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return nil, false, "context_canceled"
+		default:
+		}
+	}
+	l.mu.Lock()
+	if l.inFlight >= l.limit {
+		l.mu.Unlock()
+		return nil, false, "deferred_by_async_start_limit"
+	}
+	l.inFlight++
+	l.mu.Unlock()
+	return func() {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		if l.inFlight > 0 {
+			l.inFlight--
+		}
+	}, true, ""
+}
+
 func maxParallelStartsPerTick(cfg *config.City) int {
 	if cfg == nil {
 		return config.DefaultMaxWakesPerTick
 	}
 	return cfg.Daemon.MaxWakesPerTickOrDefault()
+}
+
+func startCandidateHasTemplateDependencies(candidate startCandidate, cfg *config.City) bool {
+	cfgAgent := findAgentByTemplate(cfg, candidate.logicalTemplate(cfg))
+	return cfgAgent != nil && len(cfgAgent.DependsOn) > 0
+}
+
+func asyncStartBatchNeedsFollowUp(candidates []startCandidate, cfg *config.City) bool {
+	for _, candidate := range candidates {
+		if startCandidateHasTemplateDependencies(candidate, cfg) {
+			return true
+		}
+	}
+	return false
 }
 
 type startCandidate struct {
@@ -77,7 +158,7 @@ type startResult struct {
 type startExecutionOptions struct {
 	async         bool
 	asyncFollowUp func()
-	asyncLimiter  chan struct{}
+	asyncLimiter  *asyncStartLimiter
 	asyncTracker  *asyncStartTracker
 }
 
@@ -95,7 +176,7 @@ func withAsyncStartFollowUp(fn func()) startExecutionOption {
 	}
 }
 
-func withAsyncStartLimiter(limiter chan struct{}) startExecutionOption {
+func withAsyncStartLimiter(limiter *asyncStartLimiter) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.asyncLimiter = limiter
 	}
@@ -836,23 +917,8 @@ func enqueuePreparedStartWaveForCity(
 	return results
 }
 
-func reserveAsyncStartSlot(ctx context.Context, limiter chan struct{}) (func(), bool, string) {
-	if limiter == nil {
-		return func() {}, true, ""
-	}
-	if ctx != nil {
-		select {
-		case <-ctx.Done():
-			return nil, false, "context_canceled"
-		default:
-		}
-	}
-	select {
-	case limiter <- struct{}{}:
-		return func() { <-limiter }, true, ""
-	default:
-		return nil, false, "deferred_by_async_start_limit"
-	}
+func reserveAsyncStartSlot(ctx context.Context, limiter *asyncStartLimiter) (func(), bool, string) {
+	return limiter.reserve(ctx)
 }
 
 func commitAsyncStartResultWithContext(
@@ -1389,7 +1455,7 @@ func executePlannedStartsTraced(
 	asyncLimiter := startOpts.asyncLimiter
 	maxWakes := maxParallelStartsPerTick(cfg)
 	if startOpts.async && asyncLimiter == nil {
-		asyncLimiter = make(chan struct{}, maxWakes)
+		asyncLimiter = newAsyncStartLimiter(maxWakes)
 	}
 	waveByCandidate, ok := candidateWaveOrder(candidates, cfg, desiredState, sp, cityName, store, clk)
 	if !ok {
@@ -1404,7 +1470,7 @@ func executePlannedStartsTraced(
 	wakeCount := 0
 	for wave := 0; wave <= maxWave; wave++ {
 		waveStarted := time.Now()
-		asyncBatchEnqueued := false
+		asyncFollowUpRequired := false
 		var waveCandidates []startCandidate
 		for idx, candidate := range candidates {
 			if waveByCandidate[idx] == wave {
@@ -1435,11 +1501,12 @@ func executePlannedStartsTraced(
 				}
 				break
 			}
-			batchSize := maxWakes - wakeCount
+			batchSize := min(defaultStartDependencyRecheckBatchSize, maxWakes-wakeCount)
 			end := min(offset+batchSize, len(ready))
+			batchCandidates := ready[offset:end]
 			var prepared []preparedStart
 			var asyncPrepared []asyncPreparedStart
-			for _, candidate := range ready[offset:end] {
+			for _, candidate := range batchCandidates {
 				if !allDependenciesAliveForTemplateWithClock(candidate.logicalTemplate(cfg), cfg, desiredState, sp, cityName, store, clk) {
 					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "blocked_on_dependencies", time.Time{}, time.Time{}, nil)
 					continue
@@ -1485,8 +1552,11 @@ func executePlannedStartsTraced(
 			var results []startResult
 			if startOpts.async {
 				results = enqueuePreparedStartWaveForCity(ctx, asyncPrepared, cityPath, sp, store, cfg, clk, rec, startupTimeout, wave, stdout, stderr, trace, startOpts.asyncFollowUp)
+				if len(results) > 0 && asyncStartBatchNeedsFollowUp(batchCandidates, cfg) {
+					asyncFollowUpRequired = true
+				}
 			} else {
-				results = executePreparedStartWaveForCity(ctx, prepared, cityPath, sp, store, cfg, startupTimeout, maxWakes)
+				results = executePreparedStartWaveForCity(ctx, prepared, cityPath, sp, store, cfg, startupTimeout, batchSize)
 			}
 			for _, result := range results {
 				if trace != nil {
@@ -1498,7 +1568,6 @@ func executePlannedStartsTraced(
 				if result.outcome == "start_enqueued" {
 					logLifecycleOutcome(stderr, "start", wave, result.prepared.candidate.name(), result.prepared.candidate.logicalTemplate(cfg), result.outcome, result.started, result.finished, nil)
 					wakeCount++
-					asyncBatchEnqueued = true
 					continue
 				}
 				if result.err == nil && result.outcome != "session_initializing" {
@@ -1508,15 +1577,14 @@ func executePlannedStartsTraced(
 					wakeCount++
 				}
 			}
-			if startOpts.async && asyncBatchEnqueued {
+			if startOpts.async && asyncFollowUpRequired {
 				break
 			}
 		}
 		logLifecycleWave(stderr, "start", wave, waveStarted, len(waveCandidates))
-		if startOpts.async && asyncBatchEnqueued {
-			// Async starts intentionally enqueue one bounded batch per tick.
-			// Completion pokes the controller so the next batch observes
-			// committed dependency and pending-create state first.
+		if startOpts.async && asyncFollowUpRequired {
+			// Dependency-sensitive async batches yield after enqueueing so the
+			// next batch observes committed dependency and pending-create state.
 			return wakeCount
 		}
 	}

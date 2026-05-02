@@ -417,6 +417,24 @@ func (p *dropDependencyAfterNStartsProvider) Start(ctx context.Context, name str
 	return nil
 }
 
+func (p *dropDependencyAfterNStartsProvider) waitForStarts(t *testing.T, want int) {
+	t.Helper()
+	deadline := time.After(3 * time.Second)
+	for {
+		p.mu.Lock()
+		got := p.starts
+		p.mu.Unlock()
+		if got >= want {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for %d starts, got %d", want, got)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
 type panicStartProvider struct {
 	*runtime.Fake
 }
@@ -948,10 +966,11 @@ func TestPrepareStartCandidate_NoneModeInitialMessageStaysInNudge(t *testing.T) 
 }
 
 func TestExecutePlannedStarts_RevalidatesDependenciesBetweenWaveBatches(t *testing.T) {
-	maxWakes := 3
+	maxWakes := 8
+	dropAfter := 3
 	sp := &dropDependencyAfterNStartsProvider{
 		Fake:      runtime.NewFake(),
-		dropAfter: maxWakes,
+		dropAfter: dropAfter,
 		depName:   "db",
 	}
 	if err := sp.Start(context.Background(), "db", runtime.Config{}); err != nil {
@@ -993,14 +1012,15 @@ func TestExecutePlannedStarts_RevalidatesDependenciesBetweenWaveBatches(t *testi
 	}
 
 	poolDesired := map[string]int{"app-1": 1, "app-2": 1, "app-3": 1, "app-4": 1}
+	var stderr bytes.Buffer
 	woken := reconcileSessionBeads(
 		context.Background(), sessions, desired, configuredSessionNames(cfg, "", store),
 		cfg, sp, store, nil, nil, nil, newDrainTracker(), poolDesired, false, nil, "",
-		nil, clk, events.Discard, 5*time.Second, 0, ioDiscard{}, ioDiscard{},
+		nil, clk, events.Discard, 5*time.Second, 0, ioDiscard{}, &stderr,
 	)
 
-	if woken != maxWakes {
-		t.Fatalf("woken = %d, want %d", woken, maxWakes)
+	if woken != dropAfter {
+		t.Fatalf("woken = %d, want %d", woken, dropAfter)
 	}
 	for _, name := range []string{"app-1", "app-2", "app-3"} {
 		if !sp.IsRunning(name) {
@@ -1009,6 +1029,125 @@ func TestExecutePlannedStarts_RevalidatesDependenciesBetweenWaveBatches(t *testi
 	}
 	if sp.IsRunning("app-4") {
 		t.Fatal("app-4 should be blocked after db dies between wave batches")
+	}
+	gotLog := stderr.String()
+	if !strings.Contains(gotLog, "session=app-4") || !strings.Contains(gotLog, "outcome=blocked_on_dependencies") {
+		t.Fatalf("app-4 log = %q, want blocked_on_dependencies", gotLog)
+	}
+	if strings.Contains(gotLog, "session=app-4 template=app-4 outcome=deferred_by_wake_budget") {
+		t.Fatalf("app-4 was deferred by wake budget instead of dependency recheck: %q", gotLog)
+	}
+}
+
+func TestExecutePlannedStartsTraced_AsyncRevalidatesDependenciesBetweenBatches(t *testing.T) {
+	maxWakes := 8
+	dropAfter := 3
+	sp := &dropDependencyAfterNStartsProvider{
+		Fake:      runtime.NewFake(),
+		dropAfter: dropAfter,
+		depName:   "db",
+	}
+	if err := sp.Start(context.Background(), "db", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Daemon: config.DaemonConfig{MaxWakesPerTick: &maxWakes},
+		Agents: []config.Agent{
+			{Name: "app-1", DependsOn: []string{"db"}},
+			{Name: "app-2", DependsOn: []string{"db"}},
+			{Name: "app-3", DependsOn: []string{"db"}},
+			{Name: "app-4", DependsOn: []string{"db"}},
+			{Name: "db", MaxActiveSessions: intPtr(1)},
+		},
+	}
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC)}
+	desired := map[string]TemplateParams{}
+	candidates := make([]startCandidate, 0, 4)
+	for _, name := range []string{"app-1", "app-2", "app-3", "app-4"} {
+		tp := TemplateParams{Command: name, SessionName: name, TemplateName: name}
+		desired[name] = tp
+		created, err := store.Create(beads.Bead{
+			ID:     name + "-id",
+			Title:  name,
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: creatingMeta(map[string]string{
+				"session_name":         name,
+				"template":             name,
+				"generation":           "1",
+				"continuation_epoch":   "1",
+				"instance_token":       "tok-" + name,
+				"pending_create_claim": "true",
+			}),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		candidate := created
+		candidates = append(candidates, startCandidate{session: &candidate, tp: tp})
+	}
+
+	woken := executePlannedStartsTraced(
+		context.Background(),
+		candidates,
+		cfg,
+		desired,
+		sp,
+		store,
+		"test-city",
+		"",
+		clk,
+		events.Discard,
+		5*time.Second,
+		ioDiscard{},
+		ioDiscard{},
+		nil,
+		withAsyncStartExecution(),
+	)
+	if woken != defaultStartDependencyRecheckBatchSize {
+		t.Fatalf("first async woken = %d, want dependency-recheck batch size %d", woken, defaultStartDependencyRecheckBatchSize)
+	}
+	sp.waitForStarts(t, 1+defaultStartDependencyRecheckBatchSize)
+	for _, name := range []string{"app-1", "app-2", "app-3"} {
+		if !sp.IsRunning(name) {
+			t.Fatalf("%s should have started before dependency loss was observed", name)
+		}
+	}
+	if sp.IsRunning("db") {
+		t.Fatal("db should have stopped after the dependency provider drop point")
+	}
+	if sp.IsRunning("app-4") {
+		t.Fatal("app-4 should not be enqueued in the async batch after db dies")
+	}
+
+	var secondStderr bytes.Buffer
+	woken = executePlannedStartsTraced(
+		context.Background(),
+		[]startCandidate{candidates[3]},
+		cfg,
+		desired,
+		sp,
+		store,
+		"test-city",
+		"",
+		clk,
+		events.Discard,
+		5*time.Second,
+		ioDiscard{},
+		&secondStderr,
+		nil,
+		withAsyncStartExecution(),
+	)
+	if woken != 0 {
+		t.Fatalf("second async woken = %d, want 0 after dependency loss", woken)
+	}
+	if sp.IsRunning("app-4") {
+		t.Fatal("app-4 should remain blocked after dependency loss")
+	}
+	gotLog := secondStderr.String()
+	if !strings.Contains(gotLog, "session=app-4") || !strings.Contains(gotLog, "outcome=blocked_on_dependencies") {
+		t.Fatalf("app-4 log = %q, want blocked_on_dependencies", gotLog)
 	}
 }
 
@@ -1155,13 +1294,14 @@ func TestExecutePlannedStartsTraced_AsyncLimitsEnqueuedStartsPerTick(t *testing.
 		nil,
 		withAsyncStartExecution(),
 	)
-	if woken != maxWakes {
-		t.Fatalf("woken = %d, want one bounded async batch of %d", woken, maxWakes)
+	wantWoken := maxWakes
+	if woken != wantWoken {
+		t.Fatalf("woken = %d, want configured wake budget %d", woken, wantWoken)
 	}
-	sp.waitForStarts(t, maxWakes)
+	sp.waitForStarts(t, wantWoken)
 	sp.ensureNoFurtherStart(t, 100*time.Millisecond)
-	if sp.maxInFlight > maxWakes {
-		t.Fatalf("max in-flight starts = %d, want <= %d", sp.maxInFlight, maxWakes)
+	if sp.maxInFlight > wantWoken {
+		t.Fatalf("max in-flight starts = %d, want <= %d", sp.maxInFlight, wantWoken)
 	}
 }
 
@@ -1196,7 +1336,7 @@ func TestExecutePlannedStartsTraced_AsyncLimiterSharedAcrossTicks(t *testing.T) 
 		desired[name] = tp
 		return startCandidate{session: &session, tp: tp}
 	}
-	limiter := make(chan struct{}, 1)
+	limiter := newAsyncStartLimiter(1)
 	first := makeCandidate("worker-1")
 	second := makeCandidate("worker-2")
 
@@ -1315,8 +1455,11 @@ func TestExecutePlannedStartsTraced_AsyncLimiterDeferredStartDoesNotRunAfterCanc
 	t.Cleanup(func() { sp.release("worker") })
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	tp := TemplateParams{Command: "worker", SessionName: "worker", TemplateName: "worker"}
-	limiter := make(chan struct{}, 1)
-	limiter <- struct{}{}
+	limiter := newAsyncStartLimiter(1)
+	releaseLimiter, reserved, outcome := reserveAsyncStartSlot(context.Background(), limiter)
+	if !reserved {
+		t.Fatalf("reserve limiter = %s, want success", outcome)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 
 	if got := executePlannedStartsTraced(
@@ -1340,7 +1483,7 @@ func TestExecutePlannedStartsTraced_AsyncLimiterDeferredStartDoesNotRunAfterCanc
 		t.Fatalf("woken = %d, want 0 while async limiter is full", got)
 	}
 	cancel()
-	<-limiter
+	releaseLimiter()
 	sp.ensureNoFurtherStart(t, 100*time.Millisecond)
 	updated, err := store.Get(session.ID)
 	if err != nil {
@@ -1349,6 +1492,19 @@ func TestExecutePlannedStartsTraced_AsyncLimiterDeferredStartDoesNotRunAfterCanc
 	if got := updated.Metadata["last_woke_at"]; got != "" {
 		t.Fatalf("last_woke_at = %q, want empty because no async start was queued", got)
 	}
+}
+
+func TestAsyncStartLimiterNilReceiverMethodsAreNoops(t *testing.T) {
+	var limiter *asyncStartLimiter
+	limiter.resize(5)
+	if got := limiter.capacity(); got != 0 {
+		t.Fatalf("nil limiter capacity = %d, want 0", got)
+	}
+	release, reserved, outcome := reserveAsyncStartSlot(context.Background(), limiter)
+	if !reserved || outcome != "" {
+		t.Fatalf("nil limiter reserve = reserved %v outcome %q, want success", reserved, outcome)
+	}
+	release()
 }
 
 func TestCityRuntimeShutdownWaitsForTrackedAsyncStartsBeforeStopSnapshot(t *testing.T) {
@@ -1382,7 +1538,7 @@ func TestCityRuntimeShutdownWaitsForTrackedAsyncStartsBeforeStopSnapshot(t *test
 		sp:                  sp,
 		rec:                 events.Discard,
 		standaloneCityStore: store,
-		asyncStartLimiter:   make(chan struct{}, maxParallelStartsPerTick(cfg)),
+		asyncStartLimiter:   newAsyncStartLimiter(maxParallelStartsPerTick(cfg)),
 		logPrefix:           "gc test",
 		stdout:              ioDiscard{},
 		stderr:              ioDiscard{},
@@ -2844,10 +3000,11 @@ func TestCommitStartResult_AtomicBatchLandsStateAndClaimClearTogether(t *testing
 }
 
 func TestExecutePlannedStarts_UsesLogicalTemplateForDependencyRechecks(t *testing.T) {
-	maxWakes := 3
+	maxWakes := 8
+	dropAfter := 3
 	sp := &dropDependencyAfterNStartsProvider{
 		Fake:      runtime.NewFake(),
-		dropAfter: maxWakes,
+		dropAfter: dropAfter,
 		depName:   "db",
 	}
 	if err := sp.Start(context.Background(), "db", runtime.Config{}); err != nil {
@@ -2895,13 +3052,14 @@ func TestExecutePlannedStarts_UsesLogicalTemplateForDependencyRechecks(t *testin
 		})
 	}
 
+	var stderr bytes.Buffer
 	woken := executePlannedStarts(
 		context.Background(), candidates, cfg, desired, sp, store, "",
-		clk, events.Discard, 5*time.Second, ioDiscard{}, ioDiscard{},
+		clk, events.Discard, 5*time.Second, ioDiscard{}, &stderr,
 	)
 
-	if woken != maxWakes {
-		t.Fatalf("woken = %d, want %d", woken, maxWakes)
+	if woken != dropAfter {
+		t.Fatalf("woken = %d, want %d", woken, dropAfter)
 	}
 	for _, name := range []string{"app-1", "app-2", "app-3"} {
 		if !sp.IsRunning(name) {
@@ -2910,6 +3068,13 @@ func TestExecutePlannedStarts_UsesLogicalTemplateForDependencyRechecks(t *testin
 	}
 	if sp.IsRunning("app-4") {
 		t.Fatal("app-4 should be blocked after db dies between batches even when bead template is stale")
+	}
+	gotLog := stderr.String()
+	if !strings.Contains(gotLog, "session=app-4") || !strings.Contains(gotLog, "template=app-4") || !strings.Contains(gotLog, "outcome=blocked_on_dependencies") {
+		t.Fatalf("app-4 log = %q, want logical template dependency block", gotLog)
+	}
+	if strings.Contains(gotLog, "session=app-4 template=app-4 outcome=deferred_by_wake_budget") {
+		t.Fatalf("app-4 was deferred by wake budget instead of dependency recheck: %q", gotLog)
 	}
 }
 
