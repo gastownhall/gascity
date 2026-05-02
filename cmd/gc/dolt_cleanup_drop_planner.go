@@ -2,10 +2,10 @@ package main
 
 import "strings"
 
-// defaultStaleDatabasePrefixes mirrors
-// /home/jaword/projects/beads/cmd/bd/dolt.go:staleDatabasePrefixes — the
-// list of name prefixes that identify test/agent databases left behind by
-// interrupted runs. The lists must converge (be-hjj-3 syncs the beads side).
+// defaultStaleDatabasePrefixes mirrors beads/cmd/bd/dolt.go
+// staleDatabasePrefixes: the list of name prefixes that identify test/agent
+// databases left behind by interrupted runs. The lists must converge
+// (be-hjj-3 syncs the beads side).
 //
 // Convention:
 //   - testdb_*: BEADS_TEST_MODE=1 FNV hash of temp paths
@@ -27,6 +27,7 @@ var systemDatabaseNames = map[string]bool{
 	"performance_schema": true,
 	"sys":                true,
 	"dolt_cluster":       true,
+	"__gc_probe":         true,
 }
 
 // DoltDropPlan classifies a SHOW DATABASES result into to-drop, protected,
@@ -42,20 +43,24 @@ type DoltDropPlan struct {
 	// PROTECTED section per designer Wireframe 1.
 	Protected []string
 	// Skipped records each stale-prefix-matched name that the planner
-	// declined to drop, with the reason. The only reason populated today is
-	// rig-protection.
+	// declined to drop, with the reason.
 	Skipped []DoltDropSkip
 }
 
 // DoltDropSkip is a single stale-but-spared database with the reason.
 type DoltDropSkip struct {
-	Name   string
-	Reason string
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
 }
 
 // DropSkipReasonRigProtected marks a stale-matched DB held back because its
 // name appears in the rig-protection list (architect 4.2 safety contract).
 const DropSkipReasonRigProtected = "rig-protected"
+
+// DropSkipReasonInvalidIdentifier marks a stale-matched DB held back because
+// its name does not fit the conservative identifier shape allowed for
+// destructive DROP DATABASE targets.
+const DropSkipReasonInvalidIdentifier = "invalid-identifier"
 
 // planDoltDrops classifies the names returned by SHOW DATABASES against the
 // stale-prefix list and the rig-protection list. The protection check wins
@@ -86,6 +91,10 @@ func planDoltDrops(allDBs, stalePrefixes, protectedNames []string) DoltDropPlan 
 			plan.Skipped = append(plan.Skipped, DoltDropSkip{Name: name, Reason: DropSkipReasonRigProtected})
 			continue
 		}
+		if !validDoltDatabaseIdentifier(name) {
+			plan.Skipped = append(plan.Skipped, DoltDropSkip{Name: name, Reason: DropSkipReasonInvalidIdentifier})
+			continue
+		}
 		plan.ToDrop = append(plan.ToDrop, name)
 	}
 	return plan
@@ -93,9 +102,48 @@ func planDoltDrops(allDBs, stalePrefixes, protectedNames []string) DoltDropPlan 
 
 func hasAnyPrefix(name string, prefixes []string) bool {
 	for _, p := range prefixes {
+		if p == "beads_t" {
+			if hasBeadsTHexSuffix(name) {
+				return true
+			}
+			continue
+		}
 		if strings.HasPrefix(name, p) {
 			return true
 		}
 	}
 	return false
+}
+
+func hasBeadsTHexSuffix(name string) bool {
+	const prefix = "beads_t"
+	if !strings.HasPrefix(name, prefix) {
+		return false
+	}
+	suffix := strings.TrimPrefix(name, prefix)
+	if len(suffix) < 8 {
+		return false
+	}
+	for _, r := range suffix {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validDoltDatabaseIdentifier(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+			continue
+		}
+		if i > 0 && r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }

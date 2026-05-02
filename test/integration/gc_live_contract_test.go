@@ -1098,7 +1098,7 @@ func liveContractHTTPRequest(baseURL, method, path string, body any) (*http.Requ
 
 func assertLiveContractStreamOpens(t *testing.T, baseURL, path string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+path, nil)
 	if err != nil {

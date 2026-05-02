@@ -42,14 +42,20 @@ func TestExtractConfigPath_FlagAtEnd(t *testing.T) {
 }
 
 func TestIsTestConfigPath_TmpTestPrefix(t *testing.T) {
-	if !isTestConfigPath("/tmp/TestOrchestrator123/config.yaml", "/home/u") {
+	if !isTestConfigPath("/tmp/TestOrchestrator123/config.yaml", "/home/u", "") {
 		t.Error("expected /tmp/Test* to be a test path")
 	}
 }
 
 func TestIsTestConfigPath_HomeGotmpTestPrefix(t *testing.T) {
-	if !isTestConfigPath("/home/u/.gotmp/TestFuzz/config.yaml", "/home/u") {
+	if !isTestConfigPath("/home/u/.gotmp/TestFuzz/config.yaml", "/home/u", "") {
 		t.Error("expected $HOME/.gotmp/Test* to be a test path")
+	}
+}
+
+func TestIsTestConfigPath_ProcessTempDirTestPrefix(t *testing.T) {
+	if !isTestConfigPath("/var/tmp/go-test/TestRepro/config.yaml", "/home/u", "/var/tmp/go-test") {
+		t.Error("expected os.TempDir()/Test* to be a test path")
 	}
 }
 
@@ -59,10 +65,11 @@ func TestIsTestConfigPath_NotTest(t *testing.T) {
 		"/var/lib/dolt/config.yaml",          // production-ish
 		"/tmp/random/config.yaml",            // tmp but not Test prefix
 		"/home/u/.gotmp/other/config.yaml",   // gotmp but not Test prefix
+		"/var/tmp/go-test/Other/config.yaml", // temp root but not Test prefix
 		"",                                   // missing
 	}
 	for _, p := range cases {
-		if isTestConfigPath(p, "/home/u") {
+		if isTestConfigPath(p, "/home/u", "/var/tmp/go-test") {
 			t.Errorf("isTestConfigPath(%q) = true, want false", p)
 		}
 	}
@@ -74,7 +81,7 @@ func TestClassifyDoltProcess_ProtectedByRigPort(t *testing.T) {
 		Argv:  []string{"dolt", "sql-server", "--config", "/tmp/TestFoo/config.yaml"},
 		Ports: []int{28231},
 	}
-	got := classifyDoltProcess(p, map[int]string{28231: "beads"}, "/home/u")
+	got := classifyDoltProcess(p, map[int]string{28231: "beads"}, "/home/u", "")
 
 	if got.Action != "protect" {
 		t.Errorf("Action = %q, want protect", got.Action)
@@ -90,7 +97,7 @@ func TestClassifyDoltProcess_OrphanByTestPath(t *testing.T) {
 		Argv:  []string{"dolt", "sql-server", "--config", "/tmp/TestMailRouter9182/config.yaml"},
 		Ports: []int{},
 	}
-	got := classifyDoltProcess(p, nil, "/home/u")
+	got := classifyDoltProcess(p, nil, "/home/u", "")
 
 	if got.Action != "reap" {
 		t.Errorf("Action = %q, want reap", got.Action)
@@ -107,7 +114,7 @@ func TestClassifyDoltProcess_ProtectedByPathNotOnAllowlist(t *testing.T) {
 		Argv:  []string{"dolt", "sql-server", "--config", "/tmp/be-s9d-bench-dolt/config.yaml"},
 		Ports: []int{33400},
 	}
-	got := classifyDoltProcess(p, nil, "/home/u")
+	got := classifyDoltProcess(p, nil, "/home/u", "")
 
 	if got.Action != "protect" {
 		t.Errorf("Action = %q, want protect", got.Action)
@@ -127,7 +134,7 @@ func TestClassifyDoltProcess_ProtectedWhenConfigMissing(t *testing.T) {
 		Argv:  []string{"dolt", "sql-server"},
 		Ports: []int{},
 	}
-	got := classifyDoltProcess(p, nil, "/home/u")
+	got := classifyDoltProcess(p, nil, "/home/u", "")
 
 	if got.Action != "protect" {
 		t.Errorf("Action = %q, want protect", got.Action)
@@ -144,7 +151,7 @@ func TestClassifyDoltProcess_RigPortBeatsConfigPath(t *testing.T) {
 		Argv:  []string{"dolt", "sql-server", "--config", "/tmp/TestSomething/config.yaml"},
 		Ports: []int{28231},
 	}
-	got := classifyDoltProcess(p, map[int]string{28231: "beads"}, "/home/u")
+	got := classifyDoltProcess(p, map[int]string{28231: "beads"}, "/home/u", "")
 
 	if got.Action != "protect" {
 		t.Errorf("Action = %q, want protect (rig port wins)", got.Action)
@@ -160,7 +167,7 @@ func TestPlanReap_BuildsOrphanAndProtectedLists(t *testing.T) {
 	}
 	rigPorts := map[int]string{28231: "beads"}
 
-	plan := planOrphanReap(procs, rigPorts, "/home/u")
+	plan := planOrphanReap(procs, rigPorts, "/home/u", "")
 
 	wantReap := []int{1281044, 1281099}
 	gotReap := make([]int, 0, len(plan.Reap))

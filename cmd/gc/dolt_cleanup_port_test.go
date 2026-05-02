@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -161,29 +163,64 @@ func TestResolveDoltPort_TriedRecordsAllSources(t *testing.T) {
 	}
 }
 
-func TestResolveDoltPort_EmptyPortFileFallsThrough(t *testing.T) {
-	fs := fsys.NewFake()
-	fs.Files["/city/.beads/dolt-server.port"] = []byte("\n")
-	in := PortResolverInput{
-		Rigs: []resolverRig{{Name: "hq", Path: "/city", HQ: true}},
-		FS:   fs,
-	}
-
-	got := ResolveDoltPort(in)
-
-	if got.Port != 3307 || !got.Fallback {
-		t.Errorf("expected legacy fallback for empty port file, got %+v", got)
-	}
-	// The rig-port-file attempt should record an error/empty status.
-	for _, attempt := range got.Tried {
-		if attempt.Source == "/city/.beads/dolt-server.port" {
-			if attempt.Status != "error" {
-				t.Errorf("rig-port-file attempt status = %q, want error", attempt.Status)
+func TestResolveDoltPort_BadRigPortFileStopsBeforeLegacyFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		setup      func(*fsys.Fake)
+		wantDetail string
+	}{
+		{
+			name:       "empty",
+			setup:      func(fs *fsys.Fake) { fs.Files["/city/.beads/dolt-server.port"] = []byte("\n") },
+			wantDetail: "empty",
+		},
+		{
+			name:       "malformed",
+			setup:      func(fs *fsys.Fake) { fs.Files["/city/.beads/dolt-server.port"] = []byte("not-a-port\n") },
+			wantDetail: "invalid port",
+		},
+		{
+			name:       "unreadable",
+			setup:      func(fs *fsys.Fake) { fs.Errors["/city/.beads/dolt-server.port"] = os.ErrPermission },
+			wantDetail: "permission",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := fsys.NewFake()
+			tc.setup(fs)
+			in := PortResolverInput{
+				Rigs: []resolverRig{{Name: "hq", Path: "/city", HQ: true}},
+				FS:   fs,
 			}
-			return
-		}
+
+			got := ResolveDoltPort(in)
+
+			if got.Port != 0 {
+				t.Errorf("Port = %d, want unresolved zero port", got.Port)
+			}
+			if got.Fallback {
+				t.Errorf("Fallback = true, want false for bad rig port file")
+			}
+			if got.Source != "/city/.beads/dolt-server.port" {
+				t.Errorf("Source = %q, want bad rig-port-file path", got.Source)
+			}
+			for _, attempt := range got.Tried {
+				if attempt.Source == "legacy default" {
+					t.Fatalf("legacy default was tried after bad rig port file: %+v", got.Tried)
+				}
+				if attempt.Source == "/city/.beads/dolt-server.port" {
+					if attempt.Status != "error" {
+						t.Errorf("rig-port-file attempt status = %q, want error", attempt.Status)
+					}
+					if !strings.Contains(attempt.Detail, tc.wantDetail) {
+						t.Errorf("rig-port-file detail = %q, want substring %q", attempt.Detail, tc.wantDetail)
+					}
+					return
+				}
+			}
+			t.Errorf("did not find /city/.beads/dolt-server.port in Tried entries: %+v", got.Tried)
+		})
 	}
-	t.Errorf("did not find /city/.beads/dolt-server.port in Tried entries: %+v", got.Tried)
 }
 
 func TestResolveDoltPort_NoRigsFalse_FallsThroughDirectly(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -139,6 +140,42 @@ func TestRunDoltCleanup_HumanOutputShowsErrorsSection(t *testing.T) {
 	}
 	if !strings.Contains(out, "drop-boom") {
 		t.Errorf("ERRORS section missing the actual error message:\n%s", out)
+	}
+}
+
+func TestRunDoltCleanup_HumanOutputCountsPostSIGTERMGoneAsReaped(t *testing.T) {
+	discoverCalls := 0
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		FS:      fsys.NewFake(),
+		JSON:    false,
+		Force:   true,
+		HomeDir: "/home/u",
+		DiscoverProcesses: func() ([]DoltProcInfo, error) {
+			discoverCalls++
+			switch discoverCalls {
+			case 1, 2:
+				return []DoltProcInfo{{
+					PID:            4444,
+					Argv:           []string{"dolt", "sql-server", "--config", "/tmp/TestX/config.yaml"},
+					RSSBytes:       4096,
+					StartTimeTicks: 10,
+				}}, nil
+			default:
+				return nil, nil
+			}
+		},
+		KillProcess:     func(_ int, _ syscall.Signal) error { return nil },
+		ReapGracePeriod: 1,
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Reaped:        1") {
+		t.Errorf("human output did not count post-SIGTERM disappearance as reaped:\n%s", out)
 	}
 }
 

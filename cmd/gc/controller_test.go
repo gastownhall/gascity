@@ -1465,7 +1465,8 @@ func TestControllerReloadCommandReloadsConfigImmediately(t *testing.T) {
 		}
 	}
 
-	writeCityTOML(t, dir, "test", "mayor", "worker")
+	expectedAgentNames := []string{"mayor", "worker"}
+	writeCityTOML(t, dir, "test", expectedAgentNames...)
 
 	before := reconcileCount.Load()
 	resp, err := sendControllerCommand(dir, "reload")
@@ -1476,19 +1477,37 @@ func TestControllerReloadCommandReloadsConfigImmediately(t *testing.T) {
 		t.Fatalf("reload response = %q, want %q", string(resp), "ok")
 	}
 
+	agentNamesMatch := func(names []string) bool {
+		if len(names) != len(expectedAgentNames) {
+			return false
+		}
+		for i := range expectedAgentNames {
+			if names[i] != expectedAgentNames[i] {
+				return false
+			}
+		}
+		return true
+	}
+
+	var names []string
 	deadline = time.After(1500 * time.Millisecond)
-	for reconcileCount.Load() <= before || !strings.Contains(stdout.String(), "Config reloaded") {
+	for {
+		names, _ = lastAgentNames.Load().([]string)
+		if reconcileCount.Load() > before &&
+			strings.Contains(stdout.String(), "Config reloaded") &&
+			agentNamesMatch(names) {
+			break
+		}
 		select {
 		case <-deadline:
-			t.Fatalf("timed out waiting for reload command to apply config; reconciles=%d stdout=%q stderr=%q", reconcileCount.Load(), stdout.String(), stderr.String())
+			t.Fatalf("timed out waiting for reload command to apply config; reconciles=%d agents=%v stdout=%q stderr=%q", reconcileCount.Load(), names, stdout.String(), stderr.String())
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
 
-	names, _ := lastAgentNames.Load().([]string)
-	if len(names) != 2 || names[0] != "mayor" || names[1] != "worker" {
-		t.Fatalf("expected [mayor worker], got %v", names)
+	if !agentNamesMatch(names) {
+		t.Fatalf("expected %v, got %v", expectedAgentNames, names)
 	}
 }
 

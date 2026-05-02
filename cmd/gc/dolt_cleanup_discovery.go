@@ -75,12 +75,55 @@ func discoverDoltProcesses() ([]DoltProcInfo, error) {
 			continue
 		}
 		out = append(out, DoltProcInfo{
-			PID:   pid,
-			Argv:  argv,
-			Ports: pidPorts[pid],
+			PID:            pid,
+			Argv:           argv,
+			Ports:          pidPorts[pid],
+			RSSBytes:       readProcRSSBytes(pid),
+			StartTimeTicks: readProcStartTimeTicks(pid),
 		})
 	}
 	return out, nil
+}
+
+func readProcStartTimeTicks(pid int) uint64 {
+	data, err := readWithTimeout(filepath.Join("/proc", strconv.Itoa(pid), "stat"), procEnumerationTimeout)
+	if err != nil {
+		return 0
+	}
+	return parseProcStartTimeTicks(data)
+}
+
+func parseProcStartTimeTicks(data []byte) uint64 {
+	text := string(data)
+	closeParen := strings.LastIndex(text, ")")
+	if closeParen < 0 {
+		return 0
+	}
+	fields := strings.Fields(text[closeParen+1:])
+	if len(fields) <= 19 {
+		return 0
+	}
+	startTime, err := strconv.ParseUint(fields[19], 10, 64)
+	if err != nil {
+		return 0
+	}
+	return startTime
+}
+
+func readProcRSSBytes(pid int) int64 {
+	data, err := readWithTimeout(filepath.Join("/proc", strconv.Itoa(pid), "statm"), procEnumerationTimeout)
+	if err != nil {
+		return 0
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) < 2 {
+		return 0
+	}
+	pages, err := strconv.ParseInt(fields[1], 10, 64)
+	if err != nil || pages <= 0 {
+		return 0
+	}
+	return pages * int64(os.Getpagesize())
 }
 
 // readDoltSQLServerArgv reads /proc/<pid>/cmdline and returns the NUL-split

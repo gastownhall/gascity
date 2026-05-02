@@ -56,7 +56,7 @@ func TestPlanDoltDrops_IgnoresSystemDatabases(t *testing.T) {
 	// performance_schema, sys, dolt_cluster — none of these are stale DBs
 	// and the planner must never attempt to drop them.
 	all := []string{
-		"information_schema", "mysql", "performance_schema", "sys", "dolt_cluster",
+		"information_schema", "mysql", "performance_schema", "sys", "dolt_cluster", "__gc_probe",
 		"testdb_real",
 	}
 	stale := []string{"testdb_"}
@@ -67,6 +67,82 @@ func TestPlanDoltDrops_IgnoresSystemDatabases(t *testing.T) {
 	wantDrop := []string{"testdb_real"}
 	if !equalStringSlice(plan.ToDrop, wantDrop) {
 		t.Errorf("ToDrop = %v, want %v", plan.ToDrop, wantDrop)
+	}
+}
+
+func TestPlanDoltDrops_BeadsTRequiresHexSuffix(t *testing.T) {
+	all := []string{
+		"beads_t1234abcd",
+		"beads_team",
+		"beads_tenant",
+		"beads_tmp_prod",
+		"beads_t123",
+		"beads_t1234abcg",
+	}
+
+	plan := planDoltDrops(all, defaultStaleDatabasePrefixes, nil)
+
+	wantDrop := []string{"beads_t1234abcd"}
+	if !equalStringSlice(plan.ToDrop, wantDrop) {
+		t.Errorf("ToDrop = %v, want %v", plan.ToDrop, wantDrop)
+	}
+	if len(plan.Skipped) != 0 {
+		t.Errorf("Skipped = %v, want empty because non-hex beads_t names are not stale matches", plan.Skipped)
+	}
+}
+
+func TestPlanDoltDrops_SkipsInvalidDropIdentifiers(t *testing.T) {
+	all := []string{
+		"testdb_valid_1",
+		"testdb_bad;drop",
+		"doctest_bad`tick",
+	}
+
+	plan := planDoltDrops(all, defaultStaleDatabasePrefixes, nil)
+
+	wantDrop := []string{"testdb_valid_1"}
+	if !equalStringSlice(plan.ToDrop, wantDrop) {
+		t.Errorf("ToDrop = %v, want %v", plan.ToDrop, wantDrop)
+	}
+	wantSkipped := map[string]bool{
+		"testdb_bad;drop":  false,
+		"doctest_bad`tick": false,
+	}
+	for _, skipped := range plan.Skipped {
+		if _, ok := wantSkipped[skipped.Name]; ok && skipped.Reason == DropSkipReasonInvalidIdentifier {
+			wantSkipped[skipped.Name] = true
+		}
+	}
+	for name, found := range wantSkipped {
+		if !found {
+			t.Errorf("missing invalid-identifier skip for %q in %+v", name, plan.Skipped)
+		}
+	}
+}
+
+func TestValidDoltDatabaseIdentifierBoundaries(t *testing.T) {
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{name: "", want: false},
+		{name: "a", want: true},
+		{name: "-foo", want: false},
+		{name: "_foo", want: true},
+		{name: "foo-bar", want: true},
+		{name: "foo--bar", want: true},
+		{name: "123", want: true},
+		{name: "foo.bar", want: false},
+		{name: "foo bar", want: false},
+		{name: "foo`bar", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := validDoltDatabaseIdentifier(tt.name); got != tt.want {
+				t.Fatalf("validDoltDatabaseIdentifier(%q) = %v, want %v", tt.name, got, tt.want)
+			}
+		})
 	}
 }
 

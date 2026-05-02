@@ -918,12 +918,19 @@ cleanup tool. It resolves the Dolt server port via the AD-04 chain
 (--port &gt; city dolt.port &gt; &lt;rigRoot&gt;/.beads/dolt-server.port &gt; 3307),
 drops stale test/agent databases, calls DOLT_PURGE_DROPPED_DATABASES
 to reclaim disk, and reaps orphaned dolt sql-server processes left
-over from leaked test harnesses.
+over from leaked test harnesses. Invalid explicit ports and unreadable
+or invalid rig port files fail closed before cleanup stages run; only
+absent rig port files can reach the legacy default.
 
 Dry-run by default. Pass --force to actually drop, purge, and kill.
 Active rig dolt servers, registered rig databases, and processes
-outside the test-config-path allowlist are always protected — see
-the PROTECTED section of the report.
+outside the test-config-path allowlist (/tmp/Test*, os.TempDir()/Test*,
+~/.gotmp/Test*) are always protected — see the PROTECTED section of the
+report. Destructive drops are limited to known stale test database name
+shapes and conservative SQL identifier characters; skipped stale matches
+are reported in dropped.skipped. Rig dolt_database names used for purge
+must use the same identifier shape: ASCII letters, digits, underscores,
+and non-leading hyphens.
 
 JSON envelope schema is stable: gc.dolt.cleanup.v1.
 

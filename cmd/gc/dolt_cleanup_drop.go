@@ -39,6 +39,12 @@ const cleanupListTimeout = 30 * time.Second
 // report but never abort the run.
 func runDropStage(report *CleanupReport, opts cleanupOptions) {
 	if opts.DoltClient == nil {
+		if opts.DoltClientOpenErr != nil {
+			recordCleanupError(report, "drop", "", opts.DoltClientOpenErr)
+		}
+		return
+	}
+	if opts.Force && hasRigProtectionError(report) {
 		return
 	}
 
@@ -64,11 +70,18 @@ func runDropStage(report *CleanupReport, opts cleanupOptions) {
 	plan := planDoltDrops(all, stalePrefixes, protected)
 	report.Dropped.Count = len(plan.ToDrop)
 	report.Dropped.Names = append([]string{}, plan.ToDrop...)
+	report.Dropped.Skipped = append([]DoltDropSkip{}, plan.Skipped...)
+	for _, skipped := range plan.Skipped {
+		if skipped.Reason == DropSkipReasonInvalidIdentifier {
+			recordCleanupError(report, "drop", skipped.Name, fmt.Errorf("invalid database identifier %q", skipped.Name))
+		}
+	}
 
 	if !opts.Force {
 		return
 	}
 
+	droppedNames := make([]string, 0, len(plan.ToDrop))
 	for _, name := range plan.ToDrop {
 		dropCtx, dropCancel := context.WithTimeout(context.Background(), cleanupDropTimeout)
 		err := opts.DoltClient.DropDatabase(dropCtx, name)
@@ -84,11 +97,14 @@ func runDropStage(report *CleanupReport, opts cleanupOptions) {
 				Error: err.Error(),
 			})
 			report.Summary.ErrorsTotal++
+			continue
 		}
+		droppedNames = append(droppedNames, name)
 	}
 	// Update the count to the actually-dropped tally so the summary
 	// matches the live world rather than the planned set.
-	report.Dropped.Count = len(plan.ToDrop) - len(report.Dropped.Failed)
+	report.Dropped.Names = droppedNames
+	report.Dropped.Count = len(droppedNames)
 }
 
 // sqlCleanupDoltClient wraps a *sql.DB to satisfy CleanupDoltClient.
@@ -127,6 +143,9 @@ func (c *sqlCleanupDoltClient) ListDatabases(ctx context.Context) ([]string, err
 }
 
 func (c *sqlCleanupDoltClient) DropDatabase(ctx context.Context, name string) error {
+	if !validDoltDatabaseIdentifier(name) {
+		return fmt.Errorf("invalid database identifier %q", name)
+	}
 	// Escape backticks in identifiers to prevent injection (` → ``).
 	safe := strings.ReplaceAll(name, "`", "``")
 	_, err := c.db.ExecContext(ctx, fmt.Sprintf("DROP DATABASE `%s`", safe)) //nolint:gosec // G201: identifier-escaped
@@ -134,11 +153,20 @@ func (c *sqlCleanupDoltClient) DropDatabase(ctx context.Context, name string) er
 }
 
 func (c *sqlCleanupDoltClient) PurgeDroppedDatabases(ctx context.Context, rigDB string) error {
+	if !validDoltDatabaseIdentifier(rigDB) {
+		return fmt.Errorf("invalid database identifier %q", rigDB)
+	}
+	conn, err := c.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close() //nolint:errcheck
+
 	safe := strings.ReplaceAll(rigDB, "`", "``")
-	if _, err := c.db.ExecContext(ctx, fmt.Sprintf("USE `%s`", safe)); err != nil { //nolint:gosec // G201: identifier-escaped
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf("USE `%s`", safe)); err != nil { //nolint:gosec // G201: identifier-escaped
 		return fmt.Errorf("USE %q: %w", rigDB, err)
 	}
-	if _, err := c.db.ExecContext(ctx, "CALL DOLT_PURGE_DROPPED_DATABASES()"); err != nil {
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_PURGE_DROPPED_DATABASES()"); err != nil {
 		return err
 	}
 	return nil

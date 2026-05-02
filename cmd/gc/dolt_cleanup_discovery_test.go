@@ -2,6 +2,7 @@ package main
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -93,6 +94,18 @@ func TestSplitCmdline_Empty(t *testing.T) {
 	}
 	if got := splitCmdline([]byte{}); len(got) != 0 {
 		t.Errorf("splitCmdline([]) = %v, want empty", got)
+	}
+}
+
+func TestParseProcStartTimeTicks(t *testing.T) {
+	fieldsAfterComm := []string{
+		"S", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+		"10", "11", "12", "13", "14", "15", "16", "17", "18", "98765",
+	}
+	line := "123 (dolt sql server) " + strings.Join(fieldsAfterComm, " ")
+
+	if got := parseProcStartTimeTicks([]byte(line)); got != 98765 {
+		t.Fatalf("parseProcStartTimeTicks = %d, want 98765", got)
 	}
 }
 

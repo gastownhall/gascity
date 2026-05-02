@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	iofs "io/fs"
 	"path/filepath"
 	"time"
 
@@ -30,26 +33,62 @@ func runPurgeStage(report *CleanupReport, opts cleanupOptions) {
 	if opts.FS == nil {
 		return
 	}
+	if opts.Force && hasRigProtectionError(report) {
+		return
+	}
 
 	var totalBytes int64
+	bytesByRigDB := map[string]int64{}
 	for _, rig := range opts.Rigs {
 		root := filepath.Join(rig.Path, droppedDatabasesDir)
 		bytes, err := sumBytesUnder(opts.FS, root)
 		if err != nil {
-			// Missing directory is normal (no drops to reclaim) — only
-			// surface unexpected errors.
+			recordCleanupError(report, "purge", root, err)
 			continue
 		}
 		totalBytes += bytes
+		bytesByRigDB[rigDoltDatabaseName(rig, opts.FS)] += bytes
 	}
-	report.Purge.BytesReclaimed = totalBytes
 
-	if !opts.Force || opts.DoltClient == nil {
+	if !opts.Force {
+		report.Purge.BytesReclaimed = totalBytes
+		return
+	}
+	if opts.DoltClient == nil {
+		if opts.DoltClientOpenErr != nil {
+			recordCleanupError(report, "purge", "", opts.DoltClientOpenErr)
+		}
 		return
 	}
 
+	listCtx, listCancel := context.WithTimeout(context.Background(), cleanupListTimeout)
+	liveDBs, err := opts.DoltClient.ListDatabases(listCtx)
+	listCancel()
+	if err != nil {
+		report.Errors = append(report.Errors, CleanupError{Stage: "purge", Error: err.Error()})
+		report.Summary.ErrorsTotal++
+		return
+	}
+	live := make(map[string]bool, len(liveDBs))
+	for _, name := range liveDBs {
+		live[name] = true
+	}
+
 	allOK := true
+	var reclaimedBytes int64
 	for _, rp := range report.RigsProtected {
+		if !live[rp.DB] {
+			if bytesByRigDB[rp.DB] > 0 {
+				allOK = false
+				recordCleanupError(
+					report,
+					"purge",
+					rp.DB,
+					fmt.Errorf("database not live with %d reclaimable dropped-database bytes", bytesByRigDB[rp.DB]),
+				)
+			}
+			continue
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), cleanupPurgeTimeout)
 		err := opts.DoltClient.PurgeDroppedDatabases(ctx, rp.DB)
 		cancel()
@@ -61,8 +100,11 @@ func runPurgeStage(report *CleanupReport, opts cleanupOptions) {
 				Error: err.Error(),
 			})
 			report.Summary.ErrorsTotal++
+			continue
 		}
+		reclaimedBytes += bytesByRigDB[rp.DB]
 	}
+	report.Purge.BytesReclaimed = reclaimedBytes
 	report.Purge.OK = allOK
 }
 
@@ -72,23 +114,31 @@ func runPurgeStage(report *CleanupReport, opts cleanupOptions) {
 // are followed via Stat (the dolt dropped-databases directory does not
 // contain symlinks in normal operation).
 func sumBytesUnder(fs fsys.FS, root string) (int64, error) {
+	return sumBytesUnderPath(fs, root, true)
+}
+
+func sumBytesUnderPath(fs fsys.FS, root string, allowMissingRoot bool) (int64, error) {
 	entries, err := fs.ReadDir(root)
 	if err != nil {
-		return 0, err
+		if allowMissingRoot && errors.Is(err, iofs.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("read %s: %w", root, err)
 	}
 	var total int64
 	for _, e := range entries {
 		full := filepath.Join(root, e.Name())
 		if e.IsDir() {
-			sub, err := sumBytesUnder(fs, full)
-			if err == nil {
-				total += sub
+			sub, err := sumBytesUnderPath(fs, full, false)
+			if err != nil {
+				return 0, err
 			}
+			total += sub
 			continue
 		}
 		info, err := fs.Stat(full)
 		if err != nil {
-			continue
+			return 0, fmt.Errorf("stat %s: %w", full, err)
 		}
 		total += info.Size()
 	}

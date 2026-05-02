@@ -61,8 +61,9 @@ type CleanupDroppedReport struct {
 	// Names lists the databases the drop step targeted: the candidates in
 	// dry-run, the actually-dropped names in --force. Order follows the
 	// SHOW DATABASES result.
-	Names  []string             `json:"names"`
-	Failed []CleanupDropFailure `json:"failed"`
+	Names   []string             `json:"names"`
+	Failed  []CleanupDropFailure `json:"failed"`
+	Skipped []DoltDropSkip       `json:"skipped"`
 }
 
 // CleanupDropFailure records a single drop step that did not complete.
@@ -73,7 +74,9 @@ type CleanupDropFailure struct {
 
 // CleanupPurgeReport summarizes the purge step.
 type CleanupPurgeReport struct {
-	OK             bool  `json:"ok"`
+	OK bool `json:"ok"`
+	// BytesReclaimed is an estimate in dry-run mode and confirmed reclaimed
+	// bytes in --force mode. Failed forced purge calls do not contribute.
 	BytesReclaimed int64 `json:"bytes_reclaimed"`
 }
 
@@ -81,6 +84,10 @@ type CleanupPurgeReport struct {
 type CleanupReapedReport struct {
 	Count         int   `json:"count"`
 	ProtectedPIDs []int `json:"protected_pids"`
+	// VanishedPIDs records reap targets missing before any signal was sent.
+	// Post-SIGTERM disappearance is counted as a successful reap because this
+	// process sent the termination signal and the process exited before SIGKILL.
+	VanishedPIDs []int `json:"vanished_pids"`
 	// Targets records the PIDs the reaper identified as test orphans (the
 	// reap candidates). Populated in both dry-run and --force; --force
 	// additionally drives Count to reflect actually-killed processes.
@@ -120,8 +127,14 @@ func (r CleanupReport) MarshalJSON() ([]byte, error) {
 	if r.Dropped.Failed == nil {
 		r.Dropped.Failed = []CleanupDropFailure{}
 	}
+	if r.Dropped.Skipped == nil {
+		r.Dropped.Skipped = []DoltDropSkip{}
+	}
 	if r.Reaped.ProtectedPIDs == nil {
 		r.Reaped.ProtectedPIDs = []int{}
+	}
+	if r.Reaped.VanishedPIDs == nil {
+		r.Reaped.VanishedPIDs = []int{}
 	}
 	if r.Reaped.Targets == nil {
 		r.Reaped.Targets = []CleanupReapTarget{}
@@ -145,17 +158,21 @@ func (r CleanupReport) MarshalJSON() ([]byte, error) {
 // DiscoverProcesses and KillProcess are injection points for tests; in
 // production they default to the /proc walker and syscall.Kill respectively.
 // HomeDir defaults to the live $HOME and seeds the test-config-path allowlist
-// (~/.gotmp/Test* recognition).
+// (~/.gotmp/Test* recognition). TempDir defaults to the live os.TempDir() and
+// lets the reaper recognize Go test temp roots on hosts where TMPDIR is not
+// /tmp.
 type cleanupOptions struct {
-	Flag     string
-	CityPort int
-	Rigs     []resolverRig
-	FS       fsys.FS
-	JSON     bool
-	Probe    bool
-	Force    bool
-	Host     string
-	HomeDir  string
+	Flag           string
+	CityPort       int
+	PortResolution PortResolution
+	Rigs           []resolverRig
+	FS             fsys.FS
+	JSON           bool
+	Probe          bool
+	Force          bool
+	Host           string
+	HomeDir        string
+	TempDir        string
 
 	// StalePrefixes overrides defaultStaleDatabasePrefixes when non-empty.
 	// Set by tests; production passes nil and falls back to the built-in.
@@ -166,6 +183,9 @@ type cleanupOptions struct {
 	// operations) — useful for tests that exercise the port resolver and
 	// reaper in isolation.
 	DoltClient CleanupDoltClient
+	// DoltClientOpenErr records a failed attempt to open the production SQL
+	// client. Tests that intentionally omit DoltClient leave this nil.
+	DoltClientOpenErr error
 
 	DiscoverProcesses func() ([]DoltProcInfo, error)
 	KillProcess       func(pid int, sig syscall.Signal) error
@@ -182,13 +202,9 @@ type cleanupOptions struct {
 // otherwise the report still renders with errors describing the unreachable
 // data plane.
 func runDoltCleanup(opts cleanupOptions, stdout, stderr io.Writer) int {
-	in := PortResolverInput{
-		Flag:     opts.Flag,
-		CityPort: opts.CityPort,
-		Rigs:     opts.Rigs,
-		FS:       opts.FS,
-	}
-	resolution := ResolveDoltPort(in)
+	resolution := cleanupPortResolution(opts)
+	opts.PortResolution = resolution
+	protections, protectionErrors := rigProtections(opts.Rigs, opts.FS)
 
 	report := CleanupReport{
 		Schema: CleanupSchemaVersion,
@@ -197,7 +213,26 @@ func runDoltCleanup(opts cleanupOptions, stdout, stderr io.Writer) int {
 			Source:   resolution.Source,
 			Fallback: resolution.Fallback,
 		},
-		RigsProtected: rigProtections(opts.Rigs, opts.FS),
+		RigsProtected: protections,
+	}
+	for _, e := range protectionErrors {
+		recordCleanupError(&report, "rig", e.rig, e.err)
+	}
+	recordUnsafeRigDatabaseNames(&report)
+
+	if fatalAttempt, err := fatalPortResolutionAttempt(resolution); err != nil {
+		fatalResolution := resolution
+		fatalResolution.Port = 0
+		fatalResolution.Source = fatalAttempt.Source
+		fatalResolution.Fallback = false
+		report.Port = CleanupPortReport{
+			Resolved: 0,
+			Source:   fatalAttempt.Source,
+			Fallback: false,
+		}
+		recordCleanupError(&report, "port", fatalAttempt.Source, err)
+		emitReport(report, fatalResolution, opts, stdout, stderr)
+		return 1
 	}
 
 	if opts.Probe {
@@ -222,7 +257,31 @@ func runDoltCleanup(opts cleanupOptions, stdout, stderr io.Writer) int {
 	report.Summary.BytesFreedDisk = report.Purge.BytesReclaimed
 
 	emitReport(report, resolution, opts, stdout, stderr)
+	if opts.DoltClientOpenErr != nil {
+		return 1
+	}
 	return 0
+}
+
+func cleanupPortResolution(opts cleanupOptions) PortResolution {
+	if opts.PortResolution.Port != 0 || opts.PortResolution.Source != "" || len(opts.PortResolution.Tried) != 0 {
+		return opts.PortResolution
+	}
+	return ResolveDoltPort(PortResolverInput{
+		Flag:     opts.Flag,
+		CityPort: opts.CityPort,
+		Rigs:     opts.Rigs,
+		FS:       opts.FS,
+	})
+}
+
+func recordCleanupError(report *CleanupReport, stage, name string, err error) {
+	entry := CleanupError{Stage: stage, Error: err.Error()}
+	if name != "" {
+		entry.Name = name
+	}
+	report.Errors = append(report.Errors, entry)
+	report.Summary.ErrorsTotal++
 }
 
 // runReapStage discovers live `dolt sql-server` processes, classifies them
@@ -243,8 +302,12 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 		return
 	}
 
-	rigPorts := loadRigDoltPorts(opts.Rigs, opts.FS)
-	plan := planOrphanReap(procs, rigPorts, opts.HomeDir)
+	rigPorts := protectedDoltPortsForReap(opts)
+	tempDir := opts.TempDir
+	if tempDir == "" {
+		tempDir = os.TempDir()
+	}
+	plan := planOrphanReap(procs, rigPorts, opts.HomeDir, tempDir)
 
 	report.Reaped.ProtectedPIDs = nil
 	for _, p := range plan.Protected {
@@ -252,11 +315,12 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 	}
 	report.Reaped.Targets = nil
 	for _, t := range plan.Reap {
-		report.Reaped.Targets = append(report.Reaped.Targets, CleanupReapTarget(t))
+		report.Reaped.Targets = append(report.Reaped.Targets, CleanupReapTarget{PID: t.PID, ConfigPath: t.ConfigPath})
 	}
 
 	if !opts.Force {
 		report.Reaped.Count = len(plan.Reap)
+		report.Summary.BytesFreedRSS = sumReapTargetRSS(plan.Reap, nil)
 		return
 	}
 
@@ -271,20 +335,40 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 
 	reaped := 0
 	gone := make(map[int]bool, len(plan.Reap))
+	sigtermSent := make(map[int]bool, len(plan.Reap))
 	for _, target := range plan.Reap {
+		switch revalidateReapTarget(report, discover, target, rigPorts, opts.HomeDir, tempDir, "SIGTERM") {
+		case reapRevalidationEligible:
+		case reapRevalidationVanished:
+			appendVanishedPID(report, target.PID)
+			continue
+		default:
+			continue
+		}
 		if err := killFn(target.PID, syscall.SIGTERM); err != nil {
 			if errors.Is(err, syscall.ESRCH) {
 				gone[target.PID] = true
 			} else {
 				recordReapSignalError(report, target.PID, syscall.SIGTERM, err)
 			}
+			continue
 		}
+		sigtermSent[target.PID] = true
 	}
 	if grace > 0 {
 		time.Sleep(grace)
 	}
+
 	for _, target := range plan.Reap {
-		if gone[target.PID] {
+		if gone[target.PID] || !sigtermSent[target.PID] {
+			continue
+		}
+		switch revalidateReapTarget(report, discover, target, rigPorts, opts.HomeDir, tempDir, "SIGKILL") {
+		case reapRevalidationEligible:
+		case reapRevalidationVanished:
+			gone[target.PID] = true
+			continue
+		default:
 			continue
 		}
 		if err := killFn(target.PID, syscall.SIGKILL); err != nil {
@@ -303,6 +387,121 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 		}
 	}
 	report.Reaped.Count = reaped
+	report.Summary.BytesFreedRSS = sumReapTargetRSS(plan.Reap, gone)
+}
+
+func protectedDoltPortsForReap(opts cleanupOptions) map[int]string {
+	ports := loadRigDoltPorts(opts.Rigs, opts.FS)
+	if opts.PortResolution.Port <= 0 {
+		return ports
+	}
+	source := opts.PortResolution.Source
+	if source == "" {
+		source = "selected"
+	}
+	if _, ok := ports[opts.PortResolution.Port]; !ok {
+		ports[opts.PortResolution.Port] = source
+	}
+	return ports
+}
+
+type reapRevalidationStatus int
+
+const (
+	reapRevalidationEligible reapRevalidationStatus = iota
+	reapRevalidationProtected
+	reapRevalidationVanished
+	reapRevalidationError
+)
+
+func revalidateReapTarget(report *CleanupReport, discover func() ([]DoltProcInfo, error), target ReapTarget, rigPorts map[int]string, homeDir, tempDir, signalName string) reapRevalidationStatus {
+	refreshed, err := discover()
+	if err != nil {
+		recordReapRevalidationError(report, signalName, err)
+		return reapRevalidationError
+	}
+	for _, proc := range refreshed {
+		if proc.PID != target.PID {
+			continue
+		}
+		recheck := classifyDoltProcess(proc, rigPorts, homeDir, tempDir)
+		if recheck.Action != "reap" || recheck.ConfigPath != target.ConfigPath || !sameReapProcessIdentity(target, proc) {
+			appendProtectedPID(report, target.PID)
+			return reapRevalidationProtected
+		}
+		return reapRevalidationEligible
+	}
+	return reapRevalidationVanished
+}
+
+func sameReapProcessIdentity(target ReapTarget, proc DoltProcInfo) bool {
+	return target.StartTimeTicks != 0 && proc.StartTimeTicks == target.StartTimeTicks
+}
+
+func recordReapRevalidationError(report *CleanupReport, signalName string, err error) {
+	msg := fmt.Sprintf("revalidate before %s: %v", signalName, err)
+	report.Reaped.Errors = append(report.Reaped.Errors, msg)
+	report.Errors = append(report.Errors, CleanupError{
+		Stage: "reap",
+		Error: msg,
+	})
+	report.Summary.ErrorsTotal++
+}
+
+func sumReapTargetRSS(targets []ReapTarget, include map[int]bool) int64 {
+	var total int64
+	for _, target := range targets {
+		if include != nil && !include[target.PID] {
+			continue
+		}
+		if target.RSSBytes > 0 {
+			total += target.RSSBytes
+		}
+	}
+	return total
+}
+
+func fatalPortResolutionError(resolution PortResolution) error {
+	_, err := fatalPortResolutionAttempt(resolution)
+	return err
+}
+
+func fatalPortResolutionAttempt(resolution PortResolution) (PortResolutionAttempt, error) {
+	for _, attempt := range resolution.Tried {
+		if attempt.Status != "error" {
+			continue
+		}
+		if attempt.Source != "--port flag" && !isRigPortFileSource(attempt.Source) {
+			continue
+		}
+		if attempt.Detail != "" {
+			return attempt, errors.New(attempt.Detail)
+		}
+		return attempt, fmt.Errorf("%s resolution failed", attempt.Source)
+	}
+	return PortResolutionAttempt{}, nil
+}
+
+func isRigPortFileSource(source string) bool {
+	return filepath.Base(source) == "dolt-server.port" && filepath.Base(filepath.Dir(source)) == ".beads"
+}
+
+func appendProtectedPID(report *CleanupReport, pid int) {
+	for _, existing := range report.Reaped.ProtectedPIDs {
+		if existing == pid {
+			return
+		}
+	}
+	report.Reaped.ProtectedPIDs = append(report.Reaped.ProtectedPIDs, pid)
+}
+
+func appendVanishedPID(report *CleanupReport, pid int) {
+	for _, existing := range report.Reaped.VanishedPIDs {
+		if existing == pid {
+			return
+		}
+	}
+	report.Reaped.VanishedPIDs = append(report.Reaped.VanishedPIDs, pid)
 }
 
 func recordReapSignalError(report *CleanupReport, pid int, sig syscall.Signal, err error) {
@@ -349,13 +548,20 @@ func emitHumanReport(report CleanupReport, resolution PortResolution, opts clean
 	if host == "" {
 		host = "127.0.0.1"
 	}
-	if resolution.Fallback {
+	switch {
+	case resolution.Port <= 0:
+		fmt.Fprintln(stdout, "✖ Dolt server port: unresolved") //nolint:errcheck
+		fmt.Fprintln(stdout, "  Tried sources, in order:")     //nolint:errcheck
+		for _, attempt := range resolution.Tried {
+			fmt.Fprintf(stdout, "    %-46s  %s\n", attempt.Source, attemptStatusLabel(attempt)) //nolint:errcheck
+		}
+	case resolution.Fallback:
 		fmt.Fprintf(stdout, "⚠ Dolt server port: %d (legacy default — fallback)\n", resolution.Port) //nolint:errcheck
 		fmt.Fprintln(stdout, "  Tried sources, in order:")                                           //nolint:errcheck
 		for _, attempt := range resolution.Tried {
 			fmt.Fprintf(stdout, "    %-46s  %s\n", attempt.Source, attemptStatusLabel(attempt)) //nolint:errcheck
 		}
-	} else {
+	default:
 		fmt.Fprintf(stdout, "Dolt server: %s:%d (resolved from %s)\n", host, resolution.Port, resolution.Source) //nolint:errcheck
 	}
 
@@ -381,6 +587,9 @@ func emitDroppedSection(report CleanupReport, stdout io.Writer) {
 	}
 	for _, f := range report.Dropped.Failed {
 		fmt.Fprintf(stdout, "  ✖ %s — %s\n", f.Name, f.Error) //nolint:errcheck
+	}
+	for _, s := range report.Dropped.Skipped {
+		fmt.Fprintf(stdout, "  skipped %s — %s\n", s.Name, s.Reason) //nolint:errcheck
 	}
 }
 
@@ -521,12 +730,19 @@ cleanup tool. It resolves the Dolt server port via the AD-04 chain
 (--port > city dolt.port > <rigRoot>/.beads/dolt-server.port > 3307),
 drops stale test/agent databases, calls DOLT_PURGE_DROPPED_DATABASES
 to reclaim disk, and reaps orphaned dolt sql-server processes left
-over from leaked test harnesses.
+over from leaked test harnesses. Invalid explicit ports and unreadable
+or invalid rig port files fail closed before cleanup stages run; only
+absent rig port files can reach the legacy default.
 
 Dry-run by default. Pass --force to actually drop, purge, and kill.
 Active rig dolt servers, registered rig databases, and processes
-outside the test-config-path allowlist are always protected — see
-the PROTECTED section of the report.
+outside the test-config-path allowlist (/tmp/Test*, os.TempDir()/Test*,
+~/.gotmp/Test*) are always protected — see the PROTECTED section of the
+report. Destructive drops are limited to known stale test database name
+shapes and conservative SQL identifier characters; skipped stale matches
+are reported in dropped.skipped. Rig dolt_database names used for purge
+must use the same identifier shape: ASCII letters, digits, underscores,
+and non-leading hyphens.
 
 JSON envelope schema is stable: gc.dolt.cleanup.v1.`,
 		Args: cobra.NoArgs,
@@ -553,25 +769,28 @@ JSON envelope schema is stable: gc.dolt.cleanup.v1.`,
 				Force:    force,
 				Host:     cfg.Dolt.Host,
 				HomeDir:  homeDir,
+				TempDir:  os.TempDir(),
 			}
 
 			// Resolve the port first so we can open a Dolt connection at the
-			// right address. Failing to open the connection isn't fatal —
-			// the report still renders, just with empty drop/purge sections
-			// and an entry in errors.
+			// right address. Failed opens are reported by runDoltCleanup inside
+			// the typed cleanup envelope.
 			resolution := ResolveDoltPort(PortResolverInput{
 				Flag: opts.Flag, CityPort: opts.CityPort, Rigs: opts.Rigs, FS: opts.FS,
 			})
+			opts.PortResolution = resolution
 			host := opts.Host
 			if host == "" {
 				host = "127.0.0.1"
 			}
-			client, openErr := newSQLCleanupDoltClient(host, strconv.Itoa(resolution.Port))
-			if openErr != nil {
-				fmt.Fprintf(stderr, "gc dolt-cleanup: warn: %v\n", openErr) //nolint:errcheck
-			} else {
-				opts.DoltClient = client
-				defer client.Close() //nolint:errcheck
+			if fatalPortResolutionError(resolution) == nil {
+				client, openErr := newSQLCleanupDoltClient(host, strconv.Itoa(resolution.Port))
+				if openErr != nil {
+					opts.DoltClientOpenErr = openErr
+				} else {
+					opts.DoltClient = client
+					defer client.Close() //nolint:errcheck
+				}
 			}
 
 			if code := runDoltCleanup(opts, stdout, stderr); code != 0 {
@@ -590,42 +809,87 @@ JSON envelope schema is stable: gc.dolt.cleanup.v1.`,
 // rigProtections projects the resolver's rig list into the JSON-envelope
 // rigs_protected entries. The DB name is read from each rig's
 // <rigPath>/.beads/metadata.json `dolt_database` field; rig.Name is used as
-// a fallback when metadata is missing or doesn't specify dolt_database.
-// Reading the actual DB name is required for the drop step's safety
-// guarantee (refuse to drop any DB whose name matches a registered rig DB)
-// to hold when an operator chose a dolt_database name that differs from
-// the registered rig name. Order is HQ-first to match the port-resolution
+// an authoritative default only when metadata is absent or silent on
+// dolt_database. Unreadable or corrupt metadata is returned as an error so
+// forced destructive work can fail closed instead of pretending the fallback is
+// the live DB identity. Order is HQ-first to match the port-resolution
 // preference.
-func rigProtections(rigs []resolverRig, fs fsys.FS) []CleanupRigProtection {
+func rigProtections(rigs []resolverRig, fs fsys.FS) ([]CleanupRigProtection, []rigProtectionError) {
 	out := make([]CleanupRigProtection, 0, len(rigs))
+	var errs []rigProtectionError
 	for _, r := range orderRigsHQFirst(rigs) {
-		out = append(out, CleanupRigProtection{Rig: r.Name, DB: rigDoltDatabaseName(r, fs)})
+		resolution := resolveRigDoltDatabase(r, fs)
+		out = append(out, CleanupRigProtection{Rig: r.Name, DB: resolution.name})
+		if resolution.err != nil {
+			errs = append(errs, rigProtectionError{rig: r.Name, err: resolution.err})
+		}
 	}
-	return out
+	return out, errs
 }
 
-// rigDoltDatabaseName returns the rig's dolt database name as recorded in
-// its metadata.json, falling back to rig.Name when metadata is missing or
-// silent on dolt_database.
-func rigDoltDatabaseName(r resolverRig, fs fsys.FS) string {
-	if fs == nil {
-		return r.Name
+type rigProtectionError struct {
+	rig string
+	err error
+}
+
+func recordUnsafeRigDatabaseNames(report *CleanupReport) {
+	for _, rp := range report.RigsProtected {
+		if validDoltDatabaseIdentifier(rp.DB) {
+			continue
+		}
+		recordCleanupError(report, "rig", rp.Rig, fmt.Errorf("rig %q dolt_database %q is not cleanup-safe", rp.Rig, rp.DB))
 	}
-	data, err := fs.ReadFile(filepath.Join(r.Path, ".beads", "metadata.json"))
+}
+
+func hasRigProtectionError(report *CleanupReport) bool {
+	for _, e := range report.Errors {
+		if e.Stage == "rig" {
+			return true
+		}
+	}
+	return false
+}
+
+// rigDoltDatabaseName returns the rig's dolt database name as recorded in its
+// metadata.json, falling back to rig.Name only for authoritative defaults.
+func rigDoltDatabaseName(r resolverRig, fs fsys.FS) string {
+	return resolveRigDoltDatabase(r, fs).name
+}
+
+type rigDoltDatabaseResolution struct {
+	name string
+	err  error
+}
+
+func resolveRigDoltDatabase(r resolverRig, fs fsys.FS) rigDoltDatabaseResolution {
+	if fs == nil {
+		return rigDoltDatabaseResolution{name: r.Name}
+	}
+	metadataPath := filepath.Join(r.Path, ".beads", "metadata.json")
+	data, err := fs.ReadFile(metadataPath)
 	if err != nil {
-		return r.Name
+		if errors.Is(err, os.ErrNotExist) {
+			return rigDoltDatabaseResolution{name: r.Name}
+		}
+		return rigDoltDatabaseResolution{
+			name: r.Name,
+			err:  fmt.Errorf("read rig metadata %s: %w", metadataPath, err),
+		}
 	}
 	var meta map[string]any
-	if json.Unmarshal(data, &meta) != nil {
-		return r.Name
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return rigDoltDatabaseResolution{
+			name: r.Name,
+			err:  fmt.Errorf("parse rig metadata %s: %w", metadataPath, err),
+		}
 	}
 	if db, ok := meta["dolt_database"]; ok {
 		s := strings.TrimSpace(fmt.Sprint(db))
 		if s != "" && s != "<nil>" {
-			return s
+			return rigDoltDatabaseResolution{name: s}
 		}
 	}
-	return r.Name
+	return rigDoltDatabaseResolution{name: r.Name}
 }
 
 // loadResolverRigs builds the resolver's rig list from a city config. The HQ

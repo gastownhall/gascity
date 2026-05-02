@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -93,6 +95,10 @@ func ResolveDoltPort(in PortResolverInput) PortResolution {
 			res.Source = attempt.Source
 			return res
 		}
+		if attempt.Status == "error" {
+			res.Source = attempt.Source
+			return res
+		}
 	}
 
 	// Legacy default — record an attempt for the trail.
@@ -142,6 +148,13 @@ func tryCityConfigPort(port int) (PortResolutionAttempt, int, bool) {
 func tryRigPortFile(fs fsys.FS, path string) (PortResolutionAttempt, int, bool) {
 	data, err := fs.ReadFile(path)
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return PortResolutionAttempt{
+				Source: path,
+				Status: "error",
+				Detail: fmt.Sprintf("read port file: %v", err),
+			}, 0, false
+		}
 		return PortResolutionAttempt{Source: path, Status: "not-found"}, 0, false
 	}
 	text := strings.TrimSpace(string(data))
