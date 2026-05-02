@@ -105,6 +105,8 @@ type BdStore struct {
 	idPrefix    string          // bead ID prefix owned by this store, without trailing "-"
 }
 
+const bdTransientWriteAttempts = 3
+
 // NewBdStore creates a BdStore rooted at dir using the given runner.
 func NewBdStore(dir string, runner CommandRunner) *BdStore {
 	return NewBdStoreWithPrefix(dir, runner, "")
@@ -640,7 +642,7 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 
 // SetMetadata sets a key-value metadata pair on a bead via bd update.
 func (s *BdStore) SetMetadata(id, key, value string) error {
-	_, err := s.runner(s.dir, "bd", "update", "--json", id,
+	err := s.runBDTransientWrite("update", "--json", id,
 		"--set-metadata", key+"="+value)
 	if err != nil {
 		if isBdNotFound(err) {
@@ -667,7 +669,7 @@ func (s *BdStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	for _, k := range keys {
 		args = append(args, "--set-metadata", k+"="+kvs[k])
 	}
-	_, err := s.runner(s.dir, "bd", args...)
+	err := s.runBDTransientWrite(args...)
 	if err != nil {
 		if isBdNotFound(err) {
 			return fmt.Errorf("setting metadata on %q: %w", id, ErrNotFound)
@@ -675,6 +677,27 @@ func (s *BdStore) SetMetadataBatch(id string, kvs map[string]string) error {
 		return fmt.Errorf("setting metadata on %q: %w", id, err)
 	}
 	return nil
+}
+
+func (s *BdStore) runBDTransientWrite(args ...string) error {
+	var err error
+	for attempt := 1; attempt <= bdTransientWriteAttempts; attempt++ {
+		_, err = s.runner(s.dir, "bd", args...)
+		if err == nil || !isBdTransientWriteConflict(err) || attempt == bdTransientWriteAttempts {
+			return err
+		}
+		time.Sleep(time.Duration(attempt) * 25 * time.Millisecond)
+	}
+	return err
+}
+
+func isBdTransientWriteConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "Error 1213 (40001): serialization failure") ||
+		strings.Contains(msg, "this transaction conflicts with a committed transaction")
 }
 
 // Ping verifies the bd binary is accessible by running a no-op command.
