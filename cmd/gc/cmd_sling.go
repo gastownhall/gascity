@@ -1828,7 +1828,7 @@ func isBeadIDCandidate(s string) bool {
 		return false
 	}
 	first := s[0]
-	if !('a' <= first && first <= 'z') && !('A' <= first && first <= 'Z') {
+	if (first < 'a' || first > 'z') && (first < 'A' || first > 'Z') {
 		return false
 	}
 	hasDash := false
