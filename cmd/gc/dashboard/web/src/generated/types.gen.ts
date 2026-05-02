@@ -220,7 +220,7 @@ export type AnnotatedProviderResponse = {
 
 export type AsyncAcceptedBody = {
     /**
-     * City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog.
+     * City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or the event log is empty.
      */
     event_cursor: string;
     /**
@@ -235,7 +235,7 @@ export type AsyncAcceptedBody = {
 
 export type AsyncAcceptedResponse = {
     /**
-     * Supervisor event-stream cursor captured before the async request was accepted. Pass this value as after_cursor to /v0/events/stream to receive the request result without replaying unrelated historical backlog.
+     * Supervisor event-stream cursor captured before the async request was accepted. Pass this value as after_cursor to /v0/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or every event log is empty.
      */
     event_cursor: string;
     /**

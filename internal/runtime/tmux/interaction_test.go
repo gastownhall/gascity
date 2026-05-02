@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -189,6 +190,35 @@ func TestPhase2ProviderPendingInteractionSeam(t *testing.T) {
 
 	pending, err := provider.Pending(session)
 	reporter.Require(t, pendingInteractionSeamResult(session, pending, err, fe.calls))
+}
+
+func TestProviderPendingMapsTmuxSessionNotFoundToRuntimeSentinel(t *testing.T) {
+	provider := &Provider{
+		tm: &Tmux{
+			exec: &fakeExecutor{err: ErrSessionNotFound},
+		},
+	}
+
+	pending, err := provider.Pending("missing")
+	if pending != nil {
+		t.Fatalf("Pending = %#v, want nil", pending)
+	}
+	if !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("Pending error = %v, want runtime.ErrSessionNotFound", err)
+	}
+}
+
+func TestProviderRespondMapsTmuxSessionNotFoundToRuntimeSentinel(t *testing.T) {
+	provider := &Provider{
+		tm: &Tmux{
+			exec: &fakeExecutor{err: ErrSessionNotFound},
+		},
+	}
+
+	err := provider.Respond("missing", runtime.InteractionResponse{Action: "approve"})
+	if !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("Respond error = %v, want runtime.ErrSessionNotFound", err)
+	}
 }
 
 func TestPhase2ProviderRespondRejectsMismatchedRequest(t *testing.T) {

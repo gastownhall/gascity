@@ -2145,10 +2145,14 @@ func TestHandleSessionCreateAsyncResultIsCommandable(t *testing.T) {
 	}
 }
 
-func TestHandleSessionCreateAsyncEmitsBeforeMetadataPersistenceCompletes(t *testing.T) {
+func TestHandleSessionCreateAsyncEmitsBeforeOptionalMetadataPersistenceCompletes(t *testing.T) {
 	fs := newSessionFakeState(t)
 	blocking := &blockingSetMetadataBatchStore{
-		Store:   fs.cityBeadStore,
+		Store: fs.cityBeadStore,
+		shouldBlock: func(kvs map[string]string) bool {
+			return kvs["real_world_app_session_kind"] == "agent" &&
+				kvs["real_world_app_project_id"] == "myrig"
+		},
 		entered: make(chan struct{}),
 		release: make(chan struct{}),
 	}
@@ -2190,14 +2194,17 @@ func TestHandleSessionCreateAsyncEmitsBeforeMetadataPersistenceCompletes(t *test
 
 type blockingSetMetadataBatchStore struct {
 	beads.Store
-	entered chan struct{}
-	release chan struct{}
-	once    sync.Once
+	shouldBlock func(map[string]string) bool
+	entered     chan struct{}
+	release     chan struct{}
+	once        sync.Once
 }
 
 func (s *blockingSetMetadataBatchStore) SetMetadataBatch(id string, kvs map[string]string) error {
-	s.once.Do(func() { close(s.entered) })
-	<-s.release
+	if s.shouldBlock != nil && s.shouldBlock(kvs) {
+		s.once.Do(func() { close(s.entered) })
+		<-s.release
+	}
 	return s.Store.SetMetadataBatch(id, kvs)
 }
 

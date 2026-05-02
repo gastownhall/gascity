@@ -19,17 +19,16 @@ func newRequestID() (string, error) {
 	return "req-" + hex.EncodeToString(b), nil
 }
 
-func (s *Server) currentCityEventCursor() string {
+func (s *Server) currentCityEventCursor() (string, error) {
 	ep := s.state.EventProvider()
 	if ep == nil {
-		return "0"
+		return "0", nil
 	}
 	seq, err := ep.LatestSeq()
 	if err != nil {
-		log.Printf("api: city events cursor: %v", err)
-		return "0"
+		return "", fmt.Errorf("capturing city event cursor: %w", err)
 	}
-	return strconv.FormatUint(seq, 10)
+	return strconv.FormatUint(seq, 10), nil
 }
 
 // EmitTypedEvent records a typed async result event to the given recorder.

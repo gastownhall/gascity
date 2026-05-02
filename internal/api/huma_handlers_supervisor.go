@@ -86,7 +86,7 @@ type cityCreateRequest struct {
 // request_id. Polling is unnecessary.
 type asyncAcceptedResponse struct {
 	RequestID   string `json:"request_id" doc:"Correlation ID. Watch /v0/events/stream for request.result.city.create, request.result.city.unregister, or request.failed with this request_id."`
-	EventCursor string `json:"event_cursor" doc:"Supervisor event-stream cursor captured before the async request was accepted. Pass this value as after_cursor to /v0/events/stream to receive the request result without replaying unrelated historical backlog."`
+	EventCursor string `json:"event_cursor" doc:"Supervisor event-stream cursor captured before the async request was accepted. Pass this value as after_cursor to /v0/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or every event log is empty."`
 }
 
 // SupervisorCityCreateInput is the input for POST /v0/city.
@@ -354,7 +354,10 @@ func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *Superv
 	if err != nil {
 		return nil, huma.Error500InternalServerError(fmt.Sprintf("generating request ID: %v", err))
 	}
-	eventCursor := sm.currentSupervisorEventCursor()
+	eventCursor, cursorErr := sm.currentSupervisorEventCursor()
+	if cursorErr != nil {
+		return nil, huma.Error500InternalServerError(cursorErr.Error())
+	}
 	pendingStored := false
 	if store, ok := sm.resolver.(PendingRequestStore); ok {
 		if err := store.StorePendingRequestID(dir, reqID); err != nil {
@@ -510,7 +513,10 @@ func (sm *SupervisorMux) humaHandleCityUnregister(ctx context.Context, input *Su
 	if err != nil {
 		return nil, huma.Error500InternalServerError(fmt.Sprintf("generating request ID: %v", err))
 	}
-	eventCursor := sm.currentSupervisorEventCursor()
+	eventCursor, cursorErr := sm.currentSupervisorEventCursor()
+	if cursorErr != nil {
+		return nil, huma.Error500InternalServerError(cursorErr.Error())
+	}
 
 	// Store the pending request_id BEFORE Unregister triggers a
 	// reconciler reload, so the reconciler can correlate the
@@ -648,6 +654,10 @@ func (sm *SupervisorMux) currentSupervisorEventTotal() int {
 	if err != nil {
 		log.Printf("api: supervisor events total: %v", err)
 	}
+	// This optimized unfiltered total treats LatestSeq as an event count because
+	// event logs are append-only, gap-free, and unpruned today. Any future
+	// retention/pruning/compaction must replace this path with an explicit count
+	// API.
 	const maxInt = int(^uint(0) >> 1)
 	total := 0
 	for _, seq := range cursors {
@@ -659,16 +669,20 @@ func (sm *SupervisorMux) currentSupervisorEventTotal() int {
 	return total
 }
 
-func (sm *SupervisorMux) currentSupervisorEventCursor() string {
+func (sm *SupervisorMux) currentSupervisorEventCursor() (string, error) {
 	mux := sm.buildMultiplexer()
 	cursors, err := mux.LatestCursor()
 	if err != nil {
-		log.Printf("api: supervisor events cursor: %v", err)
+		// Async supervisor writes need a complete pre-acceptance cursor for all
+		// cities. List and stream paths may degrade with partial cursors, but
+		// this path fails before accepting the request so clients never wait from
+		// an ambiguous cursor.
+		return "", fmt.Errorf("capturing supervisor event cursor: %w", err)
 	}
 	if cursor := events.FormatCursor(cursors); cursor != "" {
-		return cursor
+		return cursor, nil
 	}
-	return "0"
+	return "0", nil
 }
 
 // --- Supervisor global events stream (Fix 3g final wiring) ---

@@ -146,7 +146,15 @@ func pendingCreateSessionStillLeased(session beads.Bead, cfg *config.City, clk c
 		template = session.Metadata["template"]
 	}
 	agent := findAgentByTemplate(cfg, template)
-	return agent != nil && !agent.Suspended
+	if agent != nil {
+		return !agent.Suspended
+	}
+	// API config mutations and session creation can arrive in adjacent
+	// reconciler ticks. Preserve a fresh pending-create bead while the runtime
+	// config snapshot catches up so it is not falsely closed as orphaned.
+	return strings.TrimSpace(session.Metadata["pending_create_claim"]) == "true" &&
+		strings.TrimSpace(session.Metadata["state"]) == "creating" &&
+		!staleCreatingState(session, clk)
 }
 
 func pendingCreateStartInFlight(session beads.Bead, clk clock.Clock, startupTimeout time.Duration) bool {

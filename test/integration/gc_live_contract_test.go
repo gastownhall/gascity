@@ -470,6 +470,9 @@ description = "Read and complete {{issue}}."
 	liveContractJSON[struct {
 		Status string `json:"status"`
 	}](t, baseURL, validator, http.MethodDelete, mailPath+mailRigQuery, nil, http.StatusOK)
+	liveContractJSON[struct {
+		Status string `json:"status"`
+	}](t, baseURL, validator, http.MethodPost, cityBase+"/session/"+url.PathEscape(sessionID)+"/close?delete=true", nil, http.StatusOK)
 
 	exerciseLiveContractSessionLifecycle(t, baseURL, validator, cityBase, targetAgent, rigName, runID)
 
@@ -497,6 +500,7 @@ description = "Read and complete {{issue}}."
 	liveContractJSON[struct {
 		Status string `json:"status"`
 	}](t, baseURL, validator, http.MethodPatch, cityBase, map[string]bool{"suspended": true}, http.StatusOK)
+	closeLiveContractRigSessions(t, baseURL, validator, cityBase, rigName)
 	liveContractJSON[struct {
 		Status string `json:"status"`
 	}](t, baseURL, validator, http.MethodPatch, cityBase, map[string]bool{"suspended": false}, http.StatusOK)
@@ -673,6 +677,42 @@ func createLiveContractAgentSession(t *testing.T, baseURL string, v openapivalid
 	}
 	liveContractJSON[map[string]any](t, baseURL, v, http.MethodGet, cityBase+"/session/"+url.PathEscape(result.Session.ID)+"/pending", nil, http.StatusOK)
 	return result.Session.ID
+}
+
+func closeLiveContractRigSessions(t *testing.T, baseURL string, v openapivalidator.Validator, cityBase, rigName string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		sessions := liveContractJSON[struct {
+			Items []struct {
+				ID       string `json:"id"`
+				Rig      string `json:"rig"`
+				Template string `json:"template"`
+				State    string `json:"state"`
+			} `json:"items"`
+		}](t, baseURL, v, http.MethodGet, cityBase+"/sessions?limit=100", nil, http.StatusOK)
+
+		remaining := 0
+		for _, sess := range sessions.Items {
+			if sess.ID == "" || sess.State == "closed" {
+				continue
+			}
+			if sess.Rig != rigName && !strings.HasPrefix(sess.Template, rigName+"/") {
+				continue
+			}
+			remaining++
+			liveContractJSON[struct {
+				Status string `json:"status"`
+			}](t, baseURL, v, http.MethodPost, cityBase+"/session/"+url.PathEscape(sess.ID)+"/close?delete=true", nil, http.StatusOK)
+		}
+		if remaining == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out closing %d live contract rig session(s)", remaining)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 func exerciseLiveContractSessionLifecycle(t *testing.T, baseURL string, v openapivalidator.Validator, cityBase, targetAgent, rigName, runID string) {
@@ -1098,9 +1138,9 @@ func validateLiveContractResponse(t *testing.T, v openapivalidator.Validator, re
 	t.Fatalf("%s %s response does not match OpenAPI schema:\n%sbody: %s", req.Method, req.URL.Path, details.String(), string(raw))
 }
 
-func waitForLiveContractRequestID[T any](t *testing.T, baseURL string, v openapivalidator.Validator, path, requestID, successType string, timeout time.Duration, eventCursor ...string) T {
+func waitForLiveContractRequestID[T any](t *testing.T, baseURL string, v openapivalidator.Validator, path, requestID, successType string, timeout time.Duration, eventCursor string) T {
 	t.Helper()
-	env := waitForLiveContractRequestEvent(t, baseURL, path, requestID, successType, timeout, eventCursor...)
+	env := waitForLiveContractRequestEvent(t, baseURL, path, requestID, successType, timeout, eventCursor)
 	var payload T
 	if err := json.Unmarshal(env.Payload, &payload); err != nil {
 		t.Fatalf("%s payload for request_id=%s did not decode: %v\npayload: %s", successType, requestID, err, string(env.Payload))
@@ -1108,15 +1148,12 @@ func waitForLiveContractRequestID[T any](t *testing.T, baseURL string, v openapi
 	return payload
 }
 
-func waitForLiveContractRequestEvent(t *testing.T, baseURL, path, requestID, successType string, timeout time.Duration, eventCursor ...string) contractEvent {
+func waitForLiveContractRequestEvent(t *testing.T, baseURL, path, requestID, successType string, timeout time.Duration, eventCursor string) contractEvent {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cursor := ""
-	if len(eventCursor) > 0 {
-		cursor = strings.TrimSpace(eventCursor[0])
-	}
+	cursor := strings.TrimSpace(eventCursor)
 	streamPath := path
 	if strings.HasSuffix(streamPath, "/events") && streamPath != "/v0/events" {
 		streamPath += "/stream"

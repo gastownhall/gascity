@@ -145,8 +145,8 @@ func TestMultiplexerLatestCursorSkipsBrokenProviders(t *testing.T) {
 	m.Add("broken", NewFailFake())
 
 	cursors, err := m.LatestCursor()
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("LatestCursor() error = nil, want broken provider error")
 	}
 	if len(cursors) != 2 {
 		t.Fatalf("cursor count = %d, want 2: %v", len(cursors), cursors)

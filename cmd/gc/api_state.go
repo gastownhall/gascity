@@ -25,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
@@ -1070,6 +1071,45 @@ func (cs *controllerState) Poke() {
 	select {
 	case cs.pokeCh <- struct{}{}:
 	default: // poke already pending
+	}
+}
+
+// WaitForSessionCommandable waits until the controller has reconciled an async
+// session create into a lifecycle state that can accept normal commands.
+func (cs *controllerState) WaitForSessionCommandable(ctx context.Context, sessionID string) (session.Info, error) {
+	store := cs.CityBeadStore()
+	if store == nil {
+		return session.Info{}, errors.New("city bead store is unavailable")
+	}
+	catalog, err := workerSessionCatalogWithConfig(cs.CityPath(), store, cs.SessionProvider(), cs.Config())
+	if err != nil {
+		return session.Info{}, err
+	}
+
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		info, err := catalog.Get(sessionID)
+		if err != nil {
+			return session.Info{}, err
+		}
+		if info.Closed {
+			return session.Info{}, fmt.Errorf("session is closed: %s", sessionID)
+		}
+		switch info.State {
+		case session.StateActive, session.StateAwake, session.StateAsleep, session.StateSuspended, session.StateQuarantined:
+			return info, nil
+		case session.StateCreating, "":
+		default:
+			return session.Info{}, fmt.Errorf("session %s reached non-commandable state %q", sessionID, info.State)
+		}
+
+		select {
+		case <-ctx.Done():
+			return session.Info{}, fmt.Errorf("session %s did not become commandable: %w", sessionID, ctx.Err())
+		case <-ticker.C:
+		}
 	}
 }
 

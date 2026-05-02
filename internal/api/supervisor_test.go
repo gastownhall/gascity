@@ -1072,6 +1072,49 @@ func TestSupervisorGlobalEventStreamAfterCursorReplaysFromCursor(t *testing.T) {
 	}
 }
 
+func TestCurrentSupervisorEventCursorReturnsProviderErrors(t *testing.T) {
+	s := newFakeState(t)
+	s.cityName = "alpha"
+	s.eventProv = events.NewFailFake()
+
+	sm := newTestSupervisorMux(t, map[string]*fakeState{
+		"alpha": s,
+	})
+
+	if got, err := sm.currentSupervisorEventCursor(); err == nil {
+		t.Fatalf("currentSupervisorEventCursor() = %q, nil error; want provider error", got)
+	}
+}
+
+func TestCurrentSupervisorEventCursorIsStrictOnPartialProviderFailure(t *testing.T) {
+	healthy := newFakeState(t)
+	healthy.cityName = "alpha"
+	healthy.eventProv.(*events.Fake).Record(events.Event{
+		Type:    events.SessionWoke,
+		Actor:   "tester",
+		Subject: "healthy",
+	})
+	broken := newFakeState(t)
+	broken.cityName = "bravo"
+	broken.eventProv = events.NewFailFake()
+
+	sm := newTestSupervisorMux(t, map[string]*fakeState{
+		"alpha": healthy,
+		"bravo": broken,
+	})
+
+	got, err := sm.currentSupervisorEventCursor()
+	if err == nil {
+		t.Fatalf("currentSupervisorEventCursor() = %q, nil error; want strict partial-provider failure", got)
+	}
+	if got != "" {
+		t.Fatalf("currentSupervisorEventCursor() returned partial cursor %q with error; want empty cursor", got)
+	}
+	if !strings.Contains(err.Error(), "bravo") {
+		t.Fatalf("currentSupervisorEventCursor() error = %v, want broken city name", err)
+	}
+}
+
 func TestSupervisorGlobalEventStreamProjectsWorkflowMetadata(t *testing.T) {
 	s1 := newFakeState(t)
 	s1.cityName = "alpha"

@@ -176,6 +176,8 @@ func TestAsyncAcceptedRequestIDDescriptionsNameTypedResultEvents(t *testing.T) {
 	}
 	assertCursorDescription("AsyncAcceptedBody", "after_seq")
 	assertCursorDescription("AsyncAcceptedResponse", "after_cursor")
+	assertCursorDescription("AsyncAcceptedBody", "no event provider")
+	assertCursorDescription("AsyncAcceptedResponse", "no event provider")
 
 	got := openAPI.Components.Schemas["SessionCreateSucceededPayload"].Properties["session"].Description
 	if !bytes.Contains([]byte(got), []byte("lifecycle commands")) {

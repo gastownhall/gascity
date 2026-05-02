@@ -2087,7 +2087,7 @@ export interface components {
             ready_delay_ms?: number;
         };
         AsyncAcceptedBody: {
-            /** @description City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog. */
+            /** @description City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or the event log is empty. */
             event_cursor: string;
             /** @description Correlation ID. Watch the city event stream for request.result.session.create, request.result.session.message, request.result.session.submit, or request.failed with this request_id. */
             request_id: string;
@@ -2098,7 +2098,7 @@ export interface components {
             status: string;
         };
         AsyncAcceptedResponse: {
-            /** @description Supervisor event-stream cursor captured before the async request was accepted. Pass this value as after_cursor to /v0/events/stream to receive the request result without replaying unrelated historical backlog. */
+            /** @description Supervisor event-stream cursor captured before the async request was accepted. Pass this value as after_cursor to /v0/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or every event log is empty. */
             event_cursor: string;
             /** @description Correlation ID. Watch /v0/events/stream for request.result.city.create, request.result.city.unregister, or request.failed with this request_id. */
             request_id: string;

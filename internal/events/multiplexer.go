@@ -112,6 +112,7 @@ func (m *Multiplexer) ListTail(filter Filter, limit int) ([]TaggedEvent, error) 
 			}
 		}
 		if err != nil {
+			log.Printf("events: list tail failed for city %q: %v", city, err)
 			continue // best-effort: skip cities with errors
 		}
 		for _, e := range evts {
@@ -132,15 +133,17 @@ func (m *Multiplexer) ListTail(filter Filter, limit int) ([]TaggedEvent, error) 
 func (m *Multiplexer) LatestCursor() (map[string]uint64, error) {
 	providers := m.snapshot()
 	cursors := make(map[string]uint64, len(providers))
+	var errs []error
 	for city, p := range providers {
 		seq, err := p.LatestSeq()
 		if err != nil {
 			log.Printf("events: latest cursor failed for city %q: %v", city, err)
+			errs = append(errs, fmt.Errorf("%s: %w", city, err))
 			continue
 		}
 		cursors[city] = seq
 	}
-	return cursors, nil
+	return cursors, errors.Join(errs...)
 }
 
 // Watch returns a Watcher that merges events from all currently registered

@@ -373,5 +373,3 @@ These apply to all code in this project — frontend and server:
   static checking (linting, compilers, etc) is that they surface issues at
   build-time so that they can be fixed now instead of lead to errors at runtime.
   Take advantage of that feedback to fix those errors!
-- **Use Centralized Semantic Constant Values** using enums and constants instead
-  of spreading magic numbers through-out the code.

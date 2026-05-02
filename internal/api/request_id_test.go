@@ -79,7 +79,11 @@ func TestCurrentCityEventCursor(t *testing.T) {
 		fs := newFakeState(t)
 		fs.eventProv = nil
 		srv := &Server{state: fs}
-		if got := srv.currentCityEventCursor(); got != "0" {
+		got, err := srv.currentCityEventCursor()
+		if err != nil {
+			t.Fatalf("currentCityEventCursor() error = %v", err)
+		}
+		if got != "0" {
 			t.Fatalf("currentCityEventCursor() = %q, want 0", got)
 		}
 	})
@@ -90,7 +94,11 @@ func TestCurrentCityEventCursor(t *testing.T) {
 		ep.Record(events.Event{Type: events.SessionWoke, Actor: "test"})
 		ep.Record(events.Event{Type: events.SessionStopped, Actor: "test"})
 		srv := &Server{state: fs}
-		if got := srv.currentCityEventCursor(); got != "2" {
+		got, err := srv.currentCityEventCursor()
+		if err != nil {
+			t.Fatalf("currentCityEventCursor() error = %v", err)
+		}
+		if got != "2" {
 			t.Fatalf("currentCityEventCursor() = %q, want 2", got)
 		}
 	})
@@ -99,8 +107,8 @@ func TestCurrentCityEventCursor(t *testing.T) {
 		fs := newFakeState(t)
 		fs.eventProv = events.NewFailFake()
 		srv := &Server{state: fs}
-		if got := srv.currentCityEventCursor(); got != "0" {
-			t.Fatalf("currentCityEventCursor() = %q, want 0", got)
+		if got, err := srv.currentCityEventCursor(); err == nil {
+			t.Fatalf("currentCityEventCursor() = %q, nil error; want provider error", got)
 		}
 	})
 }
