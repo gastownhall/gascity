@@ -629,7 +629,7 @@ func resolveRigToContext(nameOrPath string) (resolvedContext, error) {
 
 	// Fallback: a city declared locally but not yet handed to the
 	// supervisor (cities.toml does not list it) is invisible to the
-	// registry walks above. Honour --rig/$GC_RIG by checking the
+	// registry walks above. Honor --rig/$GC_RIG by checking the
 	// cwd-walked city for a site-bound rig of this name. Site binding
 	// is required: legacy city.toml-only paths remain rejected so the
 	// existing legacy_city_toml_path_is_not_registered_binding test
