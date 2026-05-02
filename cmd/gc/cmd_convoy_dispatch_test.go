@@ -1477,10 +1477,13 @@ func TestWorkflowServeControlReadyQueryUsesControlTiers(t *testing.T) {
 	if strings.Contains(query, "bd list --status in_progress") {
 		t.Fatalf("workflowServeControlReadyQuery should not return in-progress control beads: %q", query)
 	}
+	if !strings.Contains(query, "BD_EXPORT_AUTO=false") {
+		t.Fatalf("workflowServeControlReadyQuery should disable bd auto-export: %q", query)
+	}
 	for _, want := range []string{
-		`bd --readonly ready --assignee="$cand"`,
-		`bd --readonly ready --metadata-field "gc.routed_to=$GC_CONTROL_TARGET" --unassigned`,
-		`bd --readonly ready --metadata-field "gc.routed_to=$GC_CONTROL_LEGACY_TARGET" --unassigned`,
+		`bd --readonly --sandbox ready --assignee="$cand"`,
+		`bd --readonly --sandbox ready --metadata-field "gc.routed_to=$GC_CONTROL_TARGET" --unassigned`,
+		`bd --readonly --sandbox ready --metadata-field "gc.routed_to=$GC_CONTROL_LEGACY_TARGET" --unassigned`,
 	} {
 		if !strings.Contains(query, want) {
 			t.Fatalf("workflowServeControlReadyQuery missing %q in %q", want, query)
@@ -1503,10 +1506,10 @@ case "$*" in
   "list --status in_progress --assignee=gascity--control-dispatcher --json --limit=20")
     printf '[{"id":"ga-in-progress"}]'
     ;;
-  "--readonly ready --assignee=gascity--control-dispatcher --json --limit=20")
+  "--readonly --sandbox ready --assignee=gascity--control-dispatcher --json --limit=20")
     printf '[{"id":"ga-ready"}]'
     ;;
-  "--readonly ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --json --limit=20")
+  "--readonly --sandbox ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --json --limit=20")
     printf '[{"id":"ga-routed"}]'
     ;;
   *)
@@ -1532,7 +1535,7 @@ func TestWorkflowServeControlReadyQueryUsesConfiguredRuntimeNameWhenEnvIsManualS
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "ready --assignee=gascity--control-dispatcher --json --limit=20")
+  "--readonly --sandbox ready --assignee=gascity--control-dispatcher --json --limit=20")
     printf '[{"id":"ga-control-ready"}]'
     ;;
   *)
@@ -1556,9 +1559,13 @@ func TestWorkflowServeControlReadyQueryPrioritizesConfiguredRuntimeName(t *testi
 	bdPath := filepath.Join(tmp, "bd")
 	if err := os.WriteFile(bdPath, []byte(`#!/bin/sh
 set -eu
+[ "${BD_EXPORT_AUTO:-}" = "false" ] || {
+  echo "BD_EXPORT_AUTO=${BD_EXPORT_AUTO:-}" >&2
+  exit 43
+}
 printf '%s\n' "$*" >> "$BD_LOG"
 case "$*" in
-  "ready --assignee=gascity--control-dispatcher --json --limit=20")
+  "--readonly --sandbox ready --assignee=gascity--control-dispatcher --json --limit=20")
     printf '[{"id":"ga-control-ready"}]'
     ;;
   *)
@@ -1587,7 +1594,7 @@ esac
 		t.Fatalf("read bd log: %v", err)
 	}
 	firstCall, _, _ := strings.Cut(strings.TrimSpace(string(logData)), "\n")
-	if want := "ready --assignee=gascity--control-dispatcher --json --limit=20"; firstCall != want {
+	if want := "--readonly --sandbox ready --assignee=gascity--control-dispatcher --json --limit=20"; firstCall != want {
 		t.Fatalf("first bd call = %q, want %q; all calls:\n%s", firstCall, want, string(logData))
 	}
 }
@@ -1596,8 +1603,8 @@ func TestWorkflowServeControlReadyQueryQuotesMetadataFallbackTarget(t *testing.T
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "my rig"})
 	out := runWorkflowServeShellQueryForTest(t, query, map[string]string{}, `#!/bin/sh
 set -eu
-case "$1|$2|$3|$4|$5|$6|$7" in
-  "--readonly|ready|--metadata-field|gc.routed_to=my rig/control-dispatcher|--unassigned|--json|--limit=20")
+case "$1|$2|$3|$4|$5|$6|$7|$8|${9-}" in
+  "--readonly|--sandbox|ready|--metadata-field|gc.routed_to=my rig/control-dispatcher|--unassigned|--json|--limit=20|")
     printf '[{"id":"ga-routed"}]'
     ;;
   *)
@@ -1619,7 +1626,7 @@ func TestWorkflowServeControlReadyQueryUsesLegacyRouteForNamedSessions(t *testin
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "--readonly ready --metadata-field gc.routed_to=gascity/workflow-control --unassigned --json --limit=20")
+  "--readonly --sandbox ready --metadata-field gc.routed_to=gascity/workflow-control --unassigned --json --limit=20")
     printf '[{"id":"ga-legacy-route"}]'
     ;;
   *)
@@ -1799,6 +1806,69 @@ path = %q
 	}
 	if gotBeadID != "gc-rig-control" {
 		t.Fatalf("control beadID = %q, want gc-rig-control", gotBeadID)
+	}
+}
+
+func TestOpenControlStoreUsesSandboxedBdRunner(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "myrig-repo")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "myrig", Path: rigDir}},
+	}
+	t.Setenv("GC_BEADS", "bd")
+
+	var calls [][]string
+	var envs []map[string]string
+	prevRunner := beadsExecCommandRunnerWithEnv
+	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
+		envs = append(envs, maps.Clone(env))
+		return func(_ string, name string, args ...string) ([]byte, error) {
+			if name != "bd" {
+				return nil, fmt.Errorf("unexpected command %q", name)
+			}
+			calls = append(calls, append([]string(nil), args...))
+			return []byte(`[]`), nil
+		}
+	}
+	t.Cleanup(func() { beadsExecCommandRunnerWithEnv = prevRunner })
+
+	status := "closed"
+	cityStore, err := openControlStoreAtForCity(cityDir, cityDir, cfg)
+	if err != nil {
+		t.Fatalf("openControlStoreAtForCity(city): %v", err)
+	}
+	if err := cityStore.Update("ga-city-control", beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("city control update: %v", err)
+	}
+	rigStore, err := openControlStoreAtForCity(rigDir, cityDir, cfg)
+	if err != nil {
+		t.Fatalf("openControlStoreAtForCity(rig): %v", err)
+	}
+	if err := rigStore.Update("ga-rig-control", beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("rig control update: %v", err)
+	}
+
+	if len(calls) != 2 {
+		t.Fatalf("bd calls = %#v, want two update calls", calls)
+	}
+	if len(envs) != 2 {
+		t.Fatalf("bd envs = %#v, want two command environments", envs)
+	}
+	for i, call := range calls {
+		if len(call) < 2 || call[0] != "--sandbox" || call[1] != "update" {
+			t.Fatalf("bd call = %#v, want --sandbox update ...", call)
+		}
+		if got := envs[i]["BD_EXPORT_AUTO"]; got != "false" {
+			t.Fatalf("bd env %d BD_EXPORT_AUTO = %q, want false", i, got)
+		}
 	}
 }
 

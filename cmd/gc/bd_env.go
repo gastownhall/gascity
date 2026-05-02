@@ -54,6 +54,53 @@ func bdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix ...str
 	return beads.NewBdStoreWithPrefix(rigDir, bdCommandRunnerForRig(cityPath, cfg, rigDir), prefix)
 }
 
+func controlBdStoreForCity(dir, cityPath string, cfg *config.City) *beads.BdStore {
+	return beads.NewBdStoreWithPrefix(dir, controlBdCommandRunnerForCity(cityPath), issuePrefixForScope(dir, cityPath, cfg))
+}
+
+func controlBdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix ...string) *beads.BdStore {
+	prefix := issuePrefixForScope(rigDir, cityPath, cfg)
+	if prefix == "" {
+		for _, candidate := range knownPrefix {
+			if strings.TrimSpace(candidate) != "" {
+				prefix = candidate
+				break
+			}
+		}
+	}
+	return beads.NewBdStoreWithPrefix(rigDir, controlBdCommandRunnerForRig(cityPath, cfg, rigDir), prefix)
+}
+
+func controlBdCommandRunnerForCity(cityPath string) beads.CommandRunner {
+	return sandboxBDCommandRunner(bdCommandRunnerWithManagedRetry(cityPath, func(dir string) map[string]string {
+		env := bdRuntimeEnv(cityPath)
+		env["BEADS_DIR"] = filepath.Join(dir, ".beads")
+		applyControlBdEnv(env)
+		return env
+	}))
+}
+
+func controlBdCommandRunnerForRig(cityPath string, cfg *config.City, rigDir string) beads.CommandRunner {
+	return sandboxBDCommandRunner(bdCommandRunnerWithManagedRetry(cityPath, func(_ string) map[string]string {
+		env := bdRuntimeEnvForRig(cityPath, cfg, rigDir)
+		applyControlBdEnv(env)
+		return env
+	}))
+}
+
+func applyControlBdEnv(env map[string]string) {
+	env["BD_EXPORT_AUTO"] = "false"
+}
+
+func sandboxBDCommandRunner(base beads.CommandRunner) beads.CommandRunner {
+	return func(dir, name string, args ...string) ([]byte, error) {
+		if name == "bd" {
+			args = append([]string{"--sandbox"}, args...)
+		}
+		return base(dir, name, args...)
+	}
+}
+
 func issuePrefixForScope(scopeRoot, cityPath string, cfg *config.City) string {
 	if prefix := readScopeIssuePrefix(scopeRoot); prefix != "" {
 		return prefix

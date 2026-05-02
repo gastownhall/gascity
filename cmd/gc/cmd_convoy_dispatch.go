@@ -331,17 +331,25 @@ func sourceWorkflowLockScopeForStoreRef(cityPath string, cfg *config.City, defau
 }
 
 func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
+	scopeRoot := resolveStoreScopeRoot(cityPath, storePath)
+	provider := rawBeadsProviderForScope(scopeRoot, cityPath)
+	if provider == "file" || strings.HasPrefix(provider, "exec:") {
+		return openStoreAtForCity(storePath, cityPath)
+	}
+	if samePath(scopeRoot, cityPath) {
+		return controlBdStoreForCity(scopeRoot, cityPath, cfg), nil
+	}
 	if cfg != nil {
 		for _, rig := range cfg.Rigs {
 			rigPath := rig.Path
 			if !filepath.IsAbs(rigPath) {
 				rigPath = filepath.Join(cityPath, rigPath)
 			}
-			if samePath(rigPath, storePath) {
-				if !scopeUsesManagedBdStoreContract(cityPath, storePath) {
+			if samePath(rigPath, scopeRoot) {
+				if !scopeUsesManagedBdStoreContract(cityPath, scopeRoot) {
 					return openStoreAtForCity(storePath, cityPath)
 				}
-				return bdStoreForRig(storePath, cityPath, cfg), nil
+				return controlBdStoreForRig(scopeRoot, cityPath, cfg), nil
 			}
 		}
 	}
