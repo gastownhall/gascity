@@ -1703,7 +1703,7 @@
         },
         "resume_command": {
           "type": "string",
-          "description": "ResumeCommand is the full shell command to run when resuming a session.\nSupports {{.SessionKey}} template variable. When set, takes precedence\nover ResumeFlag/ResumeStyle. Example:\n  \"claude --resume {{.SessionKey}} --dangerously-skip-permissions\""
+          "description": "ResumeCommand is the full shell command to run when resuming a session.\nSupports only the {{.SessionKey}} template variable. When set, takes precedence\nover ResumeFlag/ResumeStyle. When schema-managed defaults are inserted, the\nresolver tokenizes and re-emits the command; for subcommand-style resume it\ninserts after the ResumeFlag token that precedes {{.SessionKey}}. Example:\n  \"claude --resume {{.SessionKey}} --dangerously-skip-permissions\"\nSchema-managed defaults missing from a subcommand-style resume command\nare inserted before {{.SessionKey}} during provider resolution."
         },
         "session_id_flag": {
           "type": "string",

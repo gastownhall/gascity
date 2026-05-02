@@ -4486,6 +4486,23 @@ func TestResolvePoolSlot_NamepoolThemedName(t *testing.T) {
 }
 
 func TestResolveResumeCommand(t *testing.T) {
+	codexBase := "builtin:codex"
+	codexMini, err := config.ResolveProvider(&config.Agent{Name: "codex-mini", Provider: "codex-mini"}, nil, map[string]config.ProviderSpec{
+		"codex-mini": {
+			Base:    &codexBase,
+			Command: "aimux",
+			Args: []string{
+				"run", "codex", "--",
+				"--dangerously-bypass-approvals-and-sandbox",
+				"-m", "gpt-5.3-codex-spark",
+				"-c", "model_reasoning_effort=\"medium\"",
+			},
+			ResumeCommand: "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex-spark resume {{.SessionKey}}",
+		},
+	}, func(name string) (string, error) { return "/usr/bin/" + name, nil })
+	if err != nil {
+		t.Fatalf("ResolveProvider(codex-mini): %v", err)
+	}
 	tests := []struct {
 		name       string
 		command    string
@@ -4539,6 +4556,13 @@ func TestResolveResumeCommand(t *testing.T) {
 				ResumeCommand: "my-agent --continue",
 			},
 			want: "my-agent --continue",
+		},
+		{
+			name:       "explicit wrapped codex resume command includes inferred defaults",
+			command:    "aimux run codex -- --dangerously-bypass-approvals-and-sandbox --model gpt-5.3-codex-spark -c model_reasoning_effort=medium",
+			sessionKey: "def-456",
+			provider:   codexMini,
+			want:       "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex-spark resume -c model_reasoning_effort=medium def-456",
 		},
 	}
 	for _, tt := range tests {

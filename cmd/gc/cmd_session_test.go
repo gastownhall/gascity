@@ -841,6 +841,77 @@ func TestBuildResumeCommandUsesBuiltinAncestorForClaudeSettings(t *testing.T) {
 	}
 }
 
+func TestBuildResumeCommandIncludesWrappedCodexResumeDefaults(t *testing.T) {
+	cityDir := t.TempDir()
+	base := "builtin:codex"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "worker", Provider: "codex-mini"},
+		},
+		Providers: map[string]config.ProviderSpec{
+			"codex-mini": {
+				Base:    &base,
+				Command: "aimux",
+				Args: []string{
+					"run", "codex", "--",
+					"--dangerously-bypass-approvals-and-sandbox",
+					"-m", "gpt-5.3-codex-spark",
+					"-c", "model_reasoning_effort=\"medium\"",
+				},
+				PathCheck:     "true",
+				ResumeCommand: "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex-spark resume {{.SessionKey}}",
+			},
+		},
+	}
+	info := session.Info{
+		Template:   "worker",
+		Command:    "codex",
+		Provider:   "codex-mini",
+		WorkDir:    "/tmp/workdir",
+		SessionKey: "abc-123",
+	}
+
+	cmd, _ := buildResumeCommand(cityDir, cfg, info, "", io.Discard)
+	want := "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex-spark resume -c model_reasoning_effort=medium abc-123"
+	if cmd != want {
+		t.Fatalf("resume command = %q, want %q", cmd, want)
+	}
+}
+
+func TestBuildResumeCommandProviderKindSkipsTemplateCollision(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "runner", Provider: "agent-provider"},
+		},
+		Providers: map[string]config.ProviderSpec{
+			"runner": {
+				Command:    "true",
+				Args:       []string{"provider"},
+				ResumeFlag: "--resume",
+			},
+			"agent-provider": {
+				Command:    "true",
+				Args:       []string{"agent"},
+				ResumeFlag: "--resume",
+			},
+		},
+	}
+	info := session.Info{
+		Template:   "runner",
+		Command:    "stale",
+		WorkDir:    "/tmp/workdir",
+		SessionKey: "abc-123",
+	}
+
+	cmd, _ := buildResumeCommand(t.TempDir(), cfg, info, "provider", io.Discard)
+	want := "true provider --resume abc-123"
+	if cmd != want {
+		t.Fatalf("resume command = %q, want %q", cmd, want)
+	}
+}
+
 func TestSessionReason_FallsThroughToProviderForSleepingAttachment(t *testing.T) {
 	provider := runtime.NewFake()
 	if err := provider.Start(context.Background(), "sleeping-worker", runtime.Config{Command: "echo"}); err != nil {

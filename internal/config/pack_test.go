@@ -650,6 +650,11 @@ func TestPackContentHashRecursiveIgnoresRuntimeDirs(t *testing.T) {
 	writeFile(t, dir, "state/triage/runs/audit.json", `{"status":"running"}`)
 	writeFile(t, dir, "tmp/scratch.txt", "scratch")
 	writeFile(t, dir, "__pycache__/helper.pyc", "compiled")
+	writeFile(t, dir, ".gc/runtime.json", `{"pid":123}`)
+	writeFile(t, dir, ".beads/db", "runtime state")
+	writeFile(t, dir, ".cache/tool/result.json", `{"cached":true}`)
+	writeFile(t, dir, ".git/HEAD", "ref: refs/heads/main")
+	writeFile(t, dir, "nested/__pycache__/helper.pyc", "compiled")
 	h2 := PackContentHashRecursive(fsys.OSFS{}, dir)
 	if h2 != h1 {
 		t.Fatalf("hash changed after runtime output writes: %q vs %q", h1, h2)

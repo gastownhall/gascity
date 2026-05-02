@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Stop/session-end hooks. Fresh managed hook configs no longer install it;
   routed work pickup should happen through the SessionStart claim protocol or
   an explicit non-inject `gc hook` call.
+- The built-in Claude provider's `model = "opus"` option now emits
+  `claude-opus-4-7`. Cities that rely on the `opus` alias should expect the
+  new model target after upgrading.
 
 ## [1.0.0] - 2026-04-21
 
