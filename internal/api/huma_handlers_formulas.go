@@ -13,6 +13,7 @@ import (
 // FormulaListBody is the response body for GET /v0/formulas.
 type FormulaListBody struct {
 	Items   []formulaSummaryResponse `json:"items" doc:"Formula summaries."`
+	Total   int                      `json:"total" doc:"Total number of formulas in the list."`
 	Partial bool                     `json:"partial" doc:"Whether the list is partial."`
 }
 
@@ -46,6 +47,7 @@ func (s *Server) humaHandleFormulaList(_ context.Context, input *FormulaListInpu
 
 	out := &FormulaListOutput{}
 	out.Body.Items = items
+	out.Body.Total = len(items)
 	out.Body.Partial = false
 	return out, nil
 }

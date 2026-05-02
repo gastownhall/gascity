@@ -2,6 +2,7 @@ package events
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -56,25 +57,106 @@ func ReadFiltered(path string, filter Filter) ([]Event, error) {
 
 	var result []Event
 	for _, e := range all {
-		if filter.AfterSeq > 0 && e.Seq <= filter.AfterSeq {
-			continue
+		if eventMatchesFilter(e, filter) {
+			result = append(result, e)
 		}
-		if filter.Type != "" && e.Type != filter.Type {
-			continue
-		}
-		if filter.Actor != "" && e.Actor != filter.Actor {
-			continue
-		}
-		if !filter.Since.IsZero() && e.Ts.Before(filter.Since) {
-			continue
-		}
-		result = append(result, e)
 	}
 	return result, nil
 }
 
-// ReadLatestSeq returns the highest Seq in the events file, or 0 if
-// the file is missing or empty.
+// ReadFilteredTail reads the trailing matching events from path. A positive
+// limit returns at most that many events in chronological order; limit <= 0
+// falls back to ReadFiltered.
+func ReadFilteredTail(path string, filter Filter, limit int) ([]Event, error) {
+	if limit <= 0 {
+		return ReadFiltered(path, filter)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading events tail: %w", err)
+	}
+	defer f.Close() //nolint:errcheck // read-only file
+
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat events tail: %w", err)
+	}
+	return readFilteredTailFromFile(f, info.Size(), filter, limit)
+}
+
+func readFilteredTailFromFile(f *os.File, size int64, filter Filter, limit int) ([]Event, error) {
+	if size <= 0 {
+		return nil, nil
+	}
+	const chunkSize int64 = 64 * 1024
+	var reversed []Event
+	var pending []byte
+	end := size
+	for end > 0 && len(reversed) < limit {
+		n := chunkSize
+		if end < n {
+			n = end
+		}
+		start := end - n
+		chunk := make([]byte, n)
+		if _, err := f.ReadAt(chunk, start); err != nil && err != io.EOF {
+			return nil, fmt.Errorf("reading events tail: %w", err)
+		}
+		data := make([]byte, 0, len(chunk)+len(pending))
+		data = append(data, chunk...)
+		data = append(data, pending...)
+		parts := bytes.Split(data, []byte{'\n'})
+		firstComplete := 0
+		if start > 0 {
+			pending = append(pending[:0], parts[0]...)
+			firstComplete = 1
+		} else {
+			pending = nil
+		}
+		for i := len(parts) - 1; i >= firstComplete && len(reversed) < limit; i-- {
+			line := bytes.TrimSuffix(parts[i], []byte{'\r'})
+			if len(bytes.TrimSpace(line)) == 0 {
+				continue
+			}
+			var e Event
+			if err := json.Unmarshal(line, &e); err != nil {
+				continue
+			}
+			if eventMatchesFilter(e, filter) {
+				reversed = append(reversed, e)
+			}
+		}
+		end = start
+	}
+	for i, j := 0, len(reversed)-1; i < j; i, j = i+1, j-1 {
+		reversed[i], reversed[j] = reversed[j], reversed[i]
+	}
+	return reversed, nil
+}
+
+func eventMatchesFilter(e Event, filter Filter) bool {
+	if filter.AfterSeq > 0 && e.Seq <= filter.AfterSeq {
+		return false
+	}
+	if filter.Type != "" && e.Type != filter.Type {
+		return false
+	}
+	if filter.Actor != "" && e.Actor != filter.Actor {
+		return false
+	}
+	if !filter.Since.IsZero() && e.Ts.Before(filter.Since) {
+		return false
+	}
+	return true
+}
+
+// ReadLatestSeq returns the latest complete event Seq in the events file, or
+// 0 if the file is missing or empty. Event logs are append-only and sequence
+// numbers are monotonic, so this reads backward from the tail instead of
+// parsing historical events on every recorder open.
 func ReadLatestSeq(path string) (uint64, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -85,19 +167,89 @@ func ReadLatestSeq(path string) (uint64, error) {
 	}
 	defer f.Close() //nolint:errcheck // read-only file
 
-	var maxSeq uint64
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // handle lines up to 1MB
-	for scanner.Scan() {
-		var e Event
-		if json.Unmarshal(scanner.Bytes(), &e) == nil && e.Seq > maxSeq {
-			maxSeq = e.Seq
+	info, err := f.Stat()
+	if err != nil {
+		return 0, fmt.Errorf("stat events: %w", err)
+	}
+	return readLatestSeqFromTail(f, info.Size())
+}
+
+func readLatestSeqFromTail(f *os.File, size int64) (uint64, error) {
+	if size <= 0 {
+		return 0, nil
+	}
+	const chunkSize int64 = 64 * 1024
+	var suffix []byte
+	end := size
+	first := true
+	for end > 0 {
+		n := chunkSize
+		if end < n {
+			n = end
+		}
+		start := end - n
+		chunk := make([]byte, n)
+		if _, err := f.ReadAt(chunk, start); err != nil && err != io.EOF {
+			return 0, fmt.Errorf("reading latest seq: %w", err)
+		}
+		data := make([]byte, 0, len(chunk)+len(suffix))
+		data = append(data, chunk...)
+		data = append(data, suffix...)
+		searchEnd := len(data)
+		if first && len(data) > 0 && data[len(data)-1] != '\n' {
+			idx := bytes.LastIndexByte(data, '\n')
+			if idx < 0 {
+				suffix = data
+				end = start
+				first = false
+				continue
+			}
+			searchEnd = idx
+		}
+		searchStart := 0
+		if start > 0 {
+			idx := bytes.IndexByte(data, '\n')
+			if idx < 0 {
+				suffix = data
+				end = start
+				first = false
+				continue
+			}
+			searchStart = idx + 1
+		}
+		if seq, ok := latestSeqInCompleteLines(data[searchStart:searchEnd]); ok {
+			return seq, nil
+		}
+		suffix = data
+		end = start
+		first = false
+	}
+	return 0, nil
+}
+
+func latestSeqInCompleteLines(data []byte) (uint64, bool) {
+	for len(data) > 0 {
+		idx := bytes.LastIndexByte(data, '\n')
+		var line []byte
+		if idx >= 0 {
+			line = data[idx+1:]
+			data = data[:idx]
+		} else {
+			line = data
+			data = nil
+		}
+		line = bytes.TrimSuffix(line, []byte{'\r'})
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var header struct {
+			Seq uint64 `json:"seq"`
+		}
+		if err := json.Unmarshal(line, &header); err == nil && header.Seq > 0 {
+			return header.Seq, true
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return maxSeq, fmt.Errorf("scanning events: %w", err)
-	}
-	return maxSeq, nil
+	return 0, false
 }
 
 // ReadFrom reads events starting at the given byte offset in the file.

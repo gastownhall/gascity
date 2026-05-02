@@ -146,6 +146,10 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 	if cityPath == "" {
 		return convergence.GateResult{}, fmt.Errorf("%s: missing city path for exec check", bead.ID)
 	}
+	storePath := opts.StorePath
+	if storePath == "" {
+		storePath = cityPath
+	}
 
 	workDir := resolveInheritedMetadata(store, bead, "work_dir", "gc.work_dir")
 	resolvedWorkDir := ""
@@ -153,10 +157,10 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 		if filepath.IsAbs(workDir) {
 			resolvedWorkDir = workDir
 		} else {
-			resolvedWorkDir = filepath.Join(cityPath, workDir)
+			resolvedWorkDir = filepath.Join(storePath, workDir)
 		}
 	}
-	scriptBase := cityPath
+	scriptBase := storePath
 	if resolvedWorkDir != "" {
 		scriptBase = resolvedWorkDir
 	}
@@ -184,10 +188,15 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 		timeout = parsed
 	}
 
+	conditionBeadID := subject.ID
+	if conditionBeadID == "" {
+		conditionBeadID = bead.ID
+	}
 	result := convergence.RunCondition(context.Background(), scriptPath, convergence.ConditionEnv{
-		BeadID:    bead.ID,
+		BeadID:    conditionBeadID,
 		Iteration: attempt,
 		CityPath:  cityPath,
+		StorePath: storePath,
 		WorkDir:   resolvedWorkDir,
 	}, timeout, 0)
 	return result, nil

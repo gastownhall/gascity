@@ -1386,6 +1386,37 @@ func TestStartWarnsWhenInitBeadsInPodFails(t *testing.T) {
 	}
 }
 
+// TestInitBeadsInPodBdInitSetsBEADSDIR verifies that the pod bootstrap bd init
+// sets BEADS_DIR so bd does not create a .git/ as a side effect in the pod
+// workspace. Regression for #399.
+func TestInitBeadsInPodBdInitSetsBEADSDIR(t *testing.T) {
+	fake := newFakeK8sOps()
+	cfg := runtime.Config{
+		Env: map[string]string{
+			"GC_DOLT_HOST":    podManagedDoltHost,
+			"GC_DOLT_PORT":    podManagedDoltPort,
+			"GC_BEADS_PREFIX": "demo",
+		},
+	}
+	if err := initBeadsInPod(context.Background(), fake, "gc-test-pod", cfg, "/workspace/demo-repo", podManagedDoltHost, podManagedDoltPort); err != nil {
+		t.Fatalf("initBeadsInPod: %v", err)
+	}
+	var script string
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && len(c.cmd) >= 3 && c.cmd[0] == "sh" && c.cmd[1] == "-c" {
+			script = c.cmd[2]
+			break
+		}
+	}
+	if script == "" {
+		t.Fatal("no sh -c exec call found")
+	}
+	want := `BEADS_DIR="$WD/.beads" bd init --server`
+	if !strings.Contains(script, want) {
+		t.Errorf("bd init invocation missing BEADS_DIR env prefix: %q not found in script:\n%s", want, script)
+	}
+}
+
 // TestInitBeadsInPodStripsProjectIDFromMetadata verifies that the metadata
 // patch removes the controller's project_id so the agent pod's bd does not
 // fail with PROJECT IDENTITY MISMATCH against the in-cluster Dolt server.

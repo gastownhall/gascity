@@ -100,7 +100,7 @@ gc mail inbox
 When nudged after dispatch, run `gc hook` or `{{ .WorkQuery }}`. That lookup
 checks assigned work first (session bead ID, runtime session name, then
 alias) and only falls through to unassigned pool work routed to
-`{{ .RigName }}/polecat`.
+`{{ .RigName }}/{{ .BindingPrefix }}polecat`.
 
 **Hook/work query -> Read formula steps -> Follow in order -> done sequence.**
 
@@ -199,7 +199,7 @@ gc bd update <work-bead> \
   --set-metadata branch=$(git branch --show-current) \
   --set-metadata target={{ .DefaultBranch }} \
   --notes "Implemented: <brief summary>"
-gc bd update <work-bead> --status=open --assignee={{ .RigName }}/refinery --set-metadata gc.routed_to={{ .RigName }}/refinery
+gc bd update <work-bead> --status=open --assignee={{ .RigName }}/{{ .BindingPrefix }}refinery --set-metadata gc.routed_to={{ .RigName }}/{{ .BindingPrefix }}refinery
 gc runtime drain-ack
 exit
 ```

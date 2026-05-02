@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/cityinit"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -58,16 +59,7 @@ type initPackConfig struct {
 	Global         config.PackGlobal              `toml:"global,omitempty"`
 }
 
-var initConventionDirs = []string{
-	"agents",
-	"commands",
-	"doctor",
-	citylayout.FormulasRoot,
-	citylayout.OrdersRoot,
-	"template-fragments",
-	"overlays",
-	"assets",
-}
+var initConventionDirs = cityinit.InitConventionDirs()
 
 // wizardConfig carries the results of the interactive init wizard (or defaults
 // for non-interactive paths). doInit uses it to decide which config to write.
@@ -90,8 +82,8 @@ func canBootstrapExistingCity(wiz wizardConfig) bool {
 }
 
 const (
-	bootstrapProfileK8sCell          = "k8s-cell"
-	bootstrapProfileSingleHostCompat = "single-host-compat"
+	bootstrapProfileK8sCell          = cityinit.BootstrapProfileK8sCell
+	bootstrapProfileSingleHostCompat = cityinit.BootstrapProfileSingleHostCompat
 )
 
 // isTerminal reports whether f is connected to a terminal (not a pipe or file).
@@ -381,16 +373,7 @@ func normalizeInitProvider(provider string) (string, error) {
 }
 
 func normalizeBootstrapProfile(profile string) (string, error) {
-	switch strings.TrimSpace(profile) {
-	case "":
-		return "", nil
-	case bootstrapProfileK8sCell, "kubernetes", "kubernetes-cell":
-		return bootstrapProfileK8sCell, nil
-	case bootstrapProfileSingleHostCompat:
-		return bootstrapProfileSingleHostCompat, nil
-	default:
-		return "", fmt.Errorf("unknown bootstrap profile %q", profile)
-	}
+	return cityinit.NormalizeBootstrapProfile(profile)
 }
 
 func initPromptTemplatePath(templatePath string) (string, bool) {
@@ -1079,13 +1062,7 @@ func overrideCityName(f fsys.FS, tomlPath, name string, stderr io.Writer) int {
 // Priority: explicit --name flag > name set on the source/template config >
 // target directory basename.
 func resolveCityName(nameOverride, sourceName, cityPath string) string {
-	if n := strings.TrimSpace(nameOverride); n != "" {
-		return n
-	}
-	if n := strings.TrimSpace(sourceName); n != "" {
-		return n
-	}
-	return strings.TrimSpace(filepath.Base(cityPath))
+	return cityinit.ResolveCityName(nameOverride, sourceName, cityPath)
 }
 
 func cmdInitFromDirWithOptions(fromDir string, args []string, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness bool) int {

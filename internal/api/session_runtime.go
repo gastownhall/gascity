@@ -542,7 +542,7 @@ func (s *Server) resolveSessionRuntimeWithMetadata(info session.Info, metadata m
 	return resolved, workDir, transport, transport == "" && legacyACPTransportAmbiguous(resolved, configuredTransport, info.Command, metadata)
 }
 
-// sessionKind reads the persisted mc_session_kind from bead metadata.
+// sessionKind reads the persisted real_world_app_session_kind from bead metadata.
 func (s *Server) sessionKind(sessionID string) string {
 	store := s.state.CityBeadStore()
 	if store == nil {
@@ -552,7 +552,7 @@ func (s *Server) sessionKind(sessionID string) string {
 	if err != nil {
 		return ""
 	}
-	return b.Metadata["mc_session_kind"]
+	return b.Metadata["real_world_app_session_kind"]
 }
 
 // resolveBareProvider resolves a provider by name without an agent template.

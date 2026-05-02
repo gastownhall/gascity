@@ -53,7 +53,7 @@ Your formula: `mol-refinery-patrol`
 gc bd list --assignee="$GC_ALIAS" --status=in_progress
 
 # If none found, pour one (root-only — no child step beads) and assign it
-WISP=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --json | jq -r '.new_epic_id')
+WISP=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id')
 gc bd update "$WISP" --assignee="$GC_ALIAS"
 ```
 
@@ -172,7 +172,7 @@ alert the witness, not `gc mail send`.
 
 | Want to... | Correct command |
 |------------|----------------|
-| Pour next wisp | `gc bd mol wisp mol-refinery-patrol --root-only` |
+| Pour next wisp | `gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }}` |
 | Burn current wisp | `gc bd mol burn <wisp-id> --force` |
 | Find assigned work | `gc bd list --assignee="$GC_ALIAS" --status=open` |
 | Snapshot event position | `gc events --seq` |

@@ -115,7 +115,8 @@ gc nudge {{"{{requester}}"}}/ "DOG_DONE: <target> — <outcome>"
 | Close completed work | `gc bd close <id> --reason "..."` |
 | Request target restart | `gc session kill <target>` |
 | List orphan databases | `gc dolt cleanup` |
-| Remove orphan databases | `gc dolt cleanup --force` |
+| Remove orphan databases | `gc dolt cleanup --force` (safe via SQL DROP when dolt is up) |
+| Remove orphan databases (dolt stopped) | `gc dolt cleanup --force --server-down-ok` (**operator/TTY-only**; do **not** use from autonomous/agent contexts — the rm fallback corrupts NBS state if dolt is actually running, #1549) |
 | Exit (return to pool) | `gc runtime drain-ack && exit` |
 
 Working directory: {{ .WorkDir }}

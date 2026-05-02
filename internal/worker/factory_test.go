@@ -136,8 +136,8 @@ func TestFactorySessionByIDResolvesSessionRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBeadOnly: %v", err)
 	}
-	if err := store.SetMetadata(info.ID, "mc_session_kind", "provider"); err != nil {
-		t.Fatalf("SetMetadata(mc_session_kind): %v", err)
+	if err := store.SetMetadata(info.ID, "real_world_app_session_kind", "provider"); err != nil {
+		t.Fatalf("SetMetadata(real_world_app_session_kind): %v", err)
 	}
 	if err := store.SetMetadata(info.ID, "worker_profile", string(ProfileClaudeTmuxCLI)); err != nil {
 		t.Fatalf("SetMetadata(worker_profile): %v", err)

@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	goruntime "runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -1137,7 +1138,7 @@ func (t *Tmux) ensureHiddenAttachedClient(target string) error {
 		cmdArgs = append(cmdArgs, "-L", t.cfg.SocketName)
 	}
 	cmdArgs = append(cmdArgs, "attach-session", "-t", target)
-	cmd := exec.CommandContext(ctx, "script", "-qfc", "tmux "+shellquote.Join(cmdArgs), "/dev/null")
+	cmd := exec.CommandContext(ctx, "script", hiddenAttachScriptArgs(goruntime.GOOS, cmdArgs)...)
 	cmd.Env = append(cmd.Environ(), "TERM=xterm-256color")
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
@@ -1178,6 +1179,14 @@ func (t *Tmux) ensureHiddenAttachedClient(target string) error {
 		return err
 	}
 	return nil
+}
+
+func hiddenAttachScriptArgs(goos string, tmuxArgs []string) []string {
+	if goos == "darwin" {
+		args := []string{"-q", "/dev/null", "tmux"}
+		return append(args, tmuxArgs...)
+	}
+	return []string{"-qfc", "tmux " + shellquote.Join(tmuxArgs), "/dev/null"}
 }
 
 func (t *Tmux) hiddenAttachClient(target string) *hiddenAttachClient {

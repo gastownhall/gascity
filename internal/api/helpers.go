@@ -5,9 +5,11 @@ package api
 // fixtures) and by the agents-cache envelope. Huma handlers use
 // ListOutput[T] / ListBody[T] instead.
 type listResponse struct {
-	Items      any    `json:"items"`
-	Total      int    `json:"total"`
-	NextCursor string `json:"next_cursor,omitempty"`
+	Items         any      `json:"items"`
+	Total         int      `json:"total"`
+	NextCursor    string   `json:"next_cursor,omitempty"`
+	Partial       bool     `json:"partial,omitempty"`
+	PartialErrors []string `json:"partial_errors,omitempty"`
 }
 
 // latestIndex returns the latest event sequence, or 0 if unavailable.

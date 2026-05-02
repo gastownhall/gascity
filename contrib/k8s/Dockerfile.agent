@@ -14,8 +14,13 @@
 # The gc binary should be built first and placed in the build context root:
 #   go build -o gc ./cmd/gc
 
+# Local build-layer image produced by Dockerfile.base, not a registry pull.
 ARG BASE_IMAGE=gc-agent-base:latest
 FROM ${BASE_IMAGE}
+
+# Build-time copies and ownership fixes require root; the final image drops
+# back to gcagent below.
+USER root
 
 # bd (beads) CLI — copied from build context.
 # Build with: cp $(which bd) . && docker build ...

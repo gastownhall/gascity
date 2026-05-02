@@ -21,6 +21,7 @@ import {
 } from "./state";
 import { renderSupervisorOverview } from "./panels/supervisor";
 import { installSharedModals } from "./modals";
+import { createRefreshScheduler } from "./refresh_scheduler";
 
 const CITY_SCOPED_PANEL_IDS = [
   "convoy-panel",
@@ -76,9 +77,10 @@ function wireSSE(): void {
       // Always mark the dirty set — the pause guard only defers the
       // render. Without this, events that arrive while a modal is open
       // get dropped and panels stay stale after the modal closes.
-      invalidateForEventType(eventType);
+      const needsRefresh = invalidateForEventType(eventType);
+      if (!needsRefresh) return;
       if (refreshPaused()) return;
-      void refreshVisibleResources().catch((error) => reportUIError("Refresh failed", error));
+      scheduleRefresh();
     },
     setConnectionBadge,
   );
@@ -203,6 +205,19 @@ function syncCityScopedPanels(hasCity: boolean): void {
       popPause();
     }
   });
+}
+
+const REFRESH_DEBOUNCE_MS = 1_000;
+
+const refreshScheduler = createRefreshScheduler({
+  delayMs: REFRESH_DEBOUNCE_MS,
+  isPaused: refreshPaused,
+  onError: (error) => reportUIError("Refresh failed", error),
+  run: () => refreshVisibleResources(),
+});
+
+function scheduleRefresh(): void {
+  refreshScheduler.schedule();
 }
 
 async function refreshVisibleResources(force = false): Promise<void> {

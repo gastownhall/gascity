@@ -1,7 +1,7 @@
 description = """
 Deacon patrol loop. Poured as a root-only wisp on startup:
 
-  gc bd mol wisp mol-deacon-patrol --root-only
+  gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix={{binding_prefix}}
   gc bd update $WISP --assignee=$GC_AGENT
 
 Each wisp is ONE iteration: check inbox, run town-wide coordination
@@ -162,7 +162,7 @@ something is stuck. This is exactly why an LLM does it, not Go code.
 gc bd create --type=warrant \
   --title="Stuck: <rig>/<role>" \
   --metadata '{"target":"<session>","reason":"<reason>","requester":"deacon"}' \
-  --set-metadata gc.routed_to=dog
+  --set-metadata gc.routed_to={{binding_prefix}}dog
 ```
 
 The dog pool runs `mol-shutdown-dance` for due process.
@@ -186,7 +186,7 @@ wisp timestamps.
 
 **Step 1: Find active utility agent work:**
 ```bash
-gc bd list --status=in_progress --metadata-field gc.routed_to=dog --json --limit=0
+gc bd list --status=in_progress --metadata-field gc.routed_to={{binding_prefix}}dog --json --limit=0
 ```
 
 **Step 2: For each, assess progress:**
@@ -202,7 +202,7 @@ No hardcoded thresholds. Use judgment.
 gc bd create --type=warrant \
   --title="Stuck dog: <agent>" \
   --metadata '{"target":"<session>","reason":"<reason>","requester":"deacon"}' \
-  --set-metadata gc.routed_to=dog
+  --set-metadata gc.routed_to={{binding_prefix}}dog
 ```
 
 A different dog from the pool picks up the warrant and runs the
@@ -340,7 +340,7 @@ Handle any urgent messages that arrived during patrol. Archive the rest.
 
 **3. Pour next iteration BEFORE burning:**
 ```bash
-NEXT=$(gc bd mol wisp mol-deacon-patrol --root-only --json | jq -r '.new_epic_id')
+NEXT=$(gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id')
 gc bd update "$NEXT" --assignee=$GC_AGENT
 ```
 

@@ -22,6 +22,9 @@ bd ready --assignee="$GC_SESSION_NAME" --json --limit=1
 
 # Step 3: If still nothing, check the routed queue (multi-session configs only)
 gc hook
+
+# Step 4: If gc hook returned an unassigned routed bead, claim it atomically
+bd update <id> --claim
 ```
 
 If you have no work after all three checks, run:
@@ -33,14 +36,17 @@ gc runtime drain-ack
 ## How To Work
 
 1. Find your assigned bead (see Startup above).
-2. Read it with `bd show <id>`.
-3. **Claim continuation group** (see below).
-4. Execute exactly that bead's description.
-5. On success, close it:
+2. If the bead came from `gc hook`, claim it with `bd update <id> --claim`
+   before doing any work. Do not start work with `bd update --status in_progress`;
+   only `--claim` sets both assignee and in-progress state atomically.
+3. Read it with `bd show <id>`.
+4. **Claim continuation group** (see below).
+5. Execute exactly that bead's description.
+6. On success, close it:
    ```bash
    bd update <id> --set-metadata gc.outcome=pass --status closed
    ```
-6. On transient failure, mark it transient and close it:
+7. On transient failure, mark it transient and close it:
    ```bash
    bd update <id> \
      --set-metadata gc.outcome=fail \
@@ -48,7 +54,7 @@ gc runtime drain-ack
      --set-metadata gc.failure_reason=<short_reason> \
      --status closed
    ```
-7. On unrecoverable failure, mark it hard-failed and close it:
+8. On unrecoverable failure, mark it hard-failed and close it:
    ```bash
    bd update <id> \
      --set-metadata gc.outcome=fail \
@@ -56,11 +62,11 @@ gc runtime drain-ack
      --set-metadata gc.failure_reason=<short_reason> \
      --status closed
    ```
-8. After closing, check for more assigned work:
+9. After closing, check for more assigned work:
    ```bash
    bd ready --assignee="$GC_SESSION_NAME" --json --limit=1
    ```
-9. If more work exists, go to step 2. If not, poll briefly (see below).
+10. If more work exists, go to step 2. If not, poll briefly (see below).
 
 ## Continuation Group — Session Affinity
 

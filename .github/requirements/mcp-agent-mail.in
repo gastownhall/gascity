@@ -1,0 +1,3 @@
+# PyPI is still at 0.1.0; pin the v0.3.2 release commit until upstream
+# publishes current wheel/sdist assets.
+mcp-agent-mail @ https://github.com/Dicklesworthstone/mcp_agent_mail/archive/32783f6848bd63c425c4b5004cee3350016635fb.tar.gz

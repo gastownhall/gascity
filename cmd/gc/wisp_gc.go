@@ -51,9 +51,9 @@ func (m *memoryWispGC) runGC(store beads.Store, now time.Time) (int, error) {
 		return 0, fmt.Errorf("listing closed molecules: bead store unavailable")
 	}
 
-	entries, err := store.List(beads.ListQuery{Status: "closed", Type: "molecule"})
+	entries, err := closedWispGCEntries(store)
 	if err != nil {
-		return 0, fmt.Errorf("listing closed molecules: %w", err)
+		return 0, err
 	}
 
 	cutoff := now.Add(-m.ttl)
@@ -69,6 +69,34 @@ func (m *memoryWispGC) runGC(store beads.Store, now time.Time) (int, error) {
 	}
 
 	return purged, deleteErr
+}
+
+func closedWispGCEntries(store beads.Store) ([]beads.Bead, error) {
+	entries := make([]beads.Bead, 0)
+	seen := make(map[string]struct{})
+	appendUnique := func(items []beads.Bead) {
+		for _, item := range items {
+			if item.ID == "" {
+				continue
+			}
+			if _, ok := seen[item.ID]; ok {
+				continue
+			}
+			seen[item.ID] = struct{}{}
+			entries = append(entries, item)
+		}
+	}
+	molecules, err := store.List(beads.ListQuery{Status: "closed", Type: "molecule"})
+	if err != nil {
+		return nil, fmt.Errorf("listing closed molecule roots: %w", err)
+	}
+	appendUnique(molecules)
+	wisps, err := store.List(beads.ListQuery{Status: "closed", Metadata: map[string]string{"gc.kind": "wisp"}})
+	if err != nil {
+		return nil, fmt.Errorf("listing closed wisp roots: %w", err)
+	}
+	appendUnique(wisps)
+	return entries, nil
 }
 
 func purgeExpiredBeadClosures(store beads.Store, entries []beads.Bead, cutoff time.Time) (int, error) {

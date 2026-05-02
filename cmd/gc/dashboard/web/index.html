@@ -29,7 +29,7 @@
       <div class="scope-banner detached" id="scope-banner">
         <div class="scope-info">
           <span class="scope-title">City Scope</span>
-          <span class="badge badge-muted" id="scope-badge">Idle</span>
+          <span class="badge badge-muted" id="scope-badge">Loading</span>
         </div>
         <div class="scope-status" id="scope-status"></div>
       </div>
@@ -74,6 +74,7 @@
                     <button class="convoy-add-issue-btn" id="convoy-add-issue-btn">+ Add Issue</button>
                   </div>
                   <div id="convoy-add-issue-form" class="convoy-add-issue-form" style="display: none;">
+                    <label for="convoy-add-issue-input" class="sr-only">Issue ID</label>
                     <input type="text" id="convoy-add-issue-input" class="convoy-add-issue-input" placeholder="Enter issue ID..." />
                     <button class="btn-primary convoy-add-issue-submit" id="convoy-add-issue-submit">Add</button>
                     <button class="btn-secondary convoy-add-issue-cancel" id="convoy-add-issue-cancel">Cancel</button>
@@ -368,6 +369,7 @@
 
     <div id="command-palette-overlay" class="command-palette-overlay">
       <div class="command-palette">
+        <label for="command-palette-input" class="sr-only">Search commands</label>
         <input type="text" id="command-palette-input" class="command-palette-input" placeholder="Type to search commands..." autocomplete="off" />
         <div id="command-palette-results" class="command-palette-results"></div>
         <div class="command-palette-footer">

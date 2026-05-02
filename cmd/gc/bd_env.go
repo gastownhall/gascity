@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doltauth"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -29,17 +31,61 @@ func bdCommandRunnerForCity(cityPath string) beads.CommandRunner {
 }
 
 func bdStoreForCity(dir, cityPath string) *beads.BdStore {
-	return beads.NewBdStore(dir, bdCommandRunnerForCity(cityPath))
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil {
+		cfg = nil
+	}
+	return beads.NewBdStoreWithPrefix(dir, bdCommandRunnerForCity(cityPath), issuePrefixForScope(dir, cityPath, cfg))
 }
 
 // bdStoreForRig opens a bead store at rigDir using rig-level Dolt config
 // when available, falling back to city-level config. Use this when the rig
 // may have its own Dolt server (e.g., shared from another city).
-func bdStoreForRig(rigDir, cityPath string, cfg *config.City) *beads.BdStore {
-	return beads.NewBdStore(rigDir, bdCommandRunnerWithManagedRetry(cityPath, func(_ string) map[string]string {
-		env := bdRuntimeEnvForRig(cityPath, cfg, rigDir)
-		return env
-	}))
+func bdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix ...string) *beads.BdStore {
+	prefix := issuePrefixForScope(rigDir, cityPath, cfg)
+	if prefix == "" {
+		for _, candidate := range knownPrefix {
+			if strings.TrimSpace(candidate) != "" {
+				prefix = candidate
+				break
+			}
+		}
+	}
+	return beads.NewBdStoreWithPrefix(rigDir, bdCommandRunnerForRig(cityPath, cfg, rigDir), prefix)
+}
+
+func issuePrefixForScope(scopeRoot, cityPath string, cfg *config.City) string {
+	if prefix := readScopeIssuePrefix(scopeRoot); prefix != "" {
+		return prefix
+	}
+	if cfg == nil {
+		return ""
+	}
+	scopeRoot = filepath.Clean(scopeRoot)
+	if filepath.Clean(cityPath) == scopeRoot {
+		return config.EffectiveHQPrefix(cfg)
+	}
+	for i := range cfg.Rigs {
+		rigPath := resolveStoreScopeRoot(cityPath, cfg.Rigs[i].Path)
+		if filepath.Clean(rigPath) == scopeRoot {
+			return cfg.Rigs[i].EffectivePrefix()
+		}
+	}
+	return ""
+}
+
+func readScopeIssuePrefix(scopeRoot string) string {
+	prefix, ok, err := contract.ReadIssuePrefix(fsys.OSFS{}, filepath.Join(scopeRoot, ".beads", "config.yaml"))
+	if err != nil || !ok {
+		return ""
+	}
+	return prefix
+}
+
+func bdCommandRunnerForRig(cityPath string, cfg *config.City, rigDir string) beads.CommandRunner {
+	return bdCommandRunnerWithManagedRetry(cityPath, func(_ string) map[string]string {
+		return bdRuntimeEnvForRig(cityPath, cfg, rigDir)
+	})
 }
 
 func canonicalScopeDoltTarget(cityPath, scopeRoot string) (contract.DoltConnectionTarget, bool, error) {
@@ -516,7 +562,7 @@ func cityForStoreDir(dir string) string {
 }
 
 func overlayEnvEntries(environ []string, overrides map[string]string) []string {
-	out := append([]string(nil), environ...)
+	out := execenv.FilterInherited(environ)
 	if len(overrides) == 0 {
 		return out
 	}
@@ -569,7 +615,7 @@ func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 		}
 	}
 	sort.Strings(keys)
-	out := append([]string(nil), environ...)
+	out := execenv.FilterInherited(environ)
 	for _, key := range keys {
 		out = removeEnvKey(out, key)
 	}

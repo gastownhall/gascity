@@ -26,6 +26,8 @@ type PromptContext struct {
 	CityRoot      string
 	AgentName     string // qualified: "rig/polecat-1" or "mayor"
 	TemplateName  string // config name: "polecat" (template) or "mayor" (named backing template)
+	BindingName   string
+	BindingPrefix string
 	RigName       string
 	RigRoot       string
 	WorkDir       string
@@ -211,7 +213,7 @@ func effectivePromptFragments(global, inject, appendFragments, inherited, defaul
 // buildTemplateData merges Env (lower priority) with SDK fields (higher
 // priority) into a single map for template execution.
 func buildTemplateData(ctx PromptContext) map[string]string {
-	m := make(map[string]string, len(ctx.Env)+8)
+	m := make(map[string]string, len(ctx.Env)+10)
 	for k, v := range ctx.Env {
 		m[k] = v
 	}
@@ -219,6 +221,8 @@ func buildTemplateData(ctx PromptContext) map[string]string {
 	m["CityRoot"] = ctx.CityRoot
 	m["AgentName"] = ctx.AgentName
 	m["TemplateName"] = ctx.TemplateName
+	m["BindingName"] = ctx.BindingName
+	m["BindingPrefix"] = ctx.BindingPrefix
 	m["RigName"] = ctx.RigName
 	m["RigRoot"] = ctx.RigRoot
 	m["WorkDir"] = ctx.WorkDir

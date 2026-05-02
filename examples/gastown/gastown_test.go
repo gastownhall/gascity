@@ -218,7 +218,7 @@ func TestRefineryFormulaRespectsExistingPRMetadata(t *testing.T) {
 		`--set-metadata gc.routed_to=human`,
 		`--set-metadata blocked_reason="$reason"`,
 		`gc mail send mayor/ -s "ESCALATION: invalid existing_pr for $WORK"`,
-		`NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --json | jq -r '.new_epic_id')`,
+		`NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id')`,
 		`gc bd update "$NEXT" --assignee=$GC_AGENT`,
 		`CURRENT_WISP=${GC_BEAD_ID:-}`,
 		`gc bd mol burn "$CURRENT_WISP" --force`,
@@ -623,6 +623,109 @@ func TestPromptGuidanceUsesConfiguredRigRootsAndNamespacedWorktrees(t *testing.T
 	}
 	if strings.Contains(string(polecatPrompt), "that's not a git working tree") {
 		t.Fatalf("polecat prompt still claims rig root is not a git working tree:\n%s", polecatPrompt)
+	}
+}
+
+func TestGastownRoutedToTargetsUseBindingPrefix(t *testing.T) {
+	dir := exampleDir()
+	checks := []struct {
+		rel  string
+		want string
+	}{
+		{"packs/gastown/formulas/mol-deacon-patrol.toml", "gc.routed_to={{binding_prefix}}dog"},
+		{"packs/gastown/formulas/mol-polecat-work.toml", "{{rig_name}}/{{binding_prefix}}refinery"},
+		{"packs/gastown/formulas/mol-refinery-patrol.toml", "gc.routed_to={{rig_name}}/{{binding_prefix}}polecat"},
+		{"packs/gastown/formulas/mol-idea-to-plan.toml", "$GC_RIG/{{binding_prefix}}polecat"},
+		{"packs/gastown/agents/mayor/prompt.template.md", "gc.routed_to=<rig>/{{ .BindingPrefix }}polecat"},
+		{"packs/gastown/agents/polecat/prompt.template.md", "{{ .RigName }}/{{ .BindingPrefix }}refinery"},
+		{"packs/gastown/template-fragments/approval-fallacy.template.md", "{{ .RigName }}/{{ .BindingPrefix }}refinery"},
+	}
+	for _, check := range checks {
+		data, err := os.ReadFile(filepath.Join(dir, check.rel))
+		if err != nil {
+			t.Fatalf("reading %s: %v", check.rel, err)
+		}
+		body := string(data)
+		if !strings.Contains(body, check.want) {
+			t.Errorf("%s missing %q", check.rel, check.want)
+		}
+		for _, bad := range []string{
+			"gc.routed_to=dog",
+			"gc.routed_to=<rig>/polecat",
+			"gc.routed_to=<rig>/refinery",
+			"gc.routed_to={{ .RigName }}/refinery",
+		} {
+			if strings.Contains(body, bad) {
+				t.Errorf("%s still contains short-form route %q", check.rel, bad)
+			}
+		}
+	}
+}
+
+func TestGastownPatrolWispCommandsPropagateRoutingNamespace(t *testing.T) {
+	dir := exampleDir()
+	checks := []struct {
+		rel     string
+		formula string
+		vars    []string
+	}{
+		{
+			rel:     "packs/gastown/agents/deacon/prompt.template.md",
+			formula: "mol-deacon-patrol",
+			vars:    []string{"--var binding_prefix="},
+		},
+		{
+			rel:     "packs/gastown/formulas/mol-deacon-patrol.toml",
+			formula: "mol-deacon-patrol",
+			vars:    []string{"--var binding_prefix="},
+		},
+		{
+			rel:     "packs/gastown/agents/refinery/prompt.template.md",
+			formula: "mol-refinery-patrol",
+			vars:    []string{"--var target_branch=", "--var rig_name=", "--var binding_prefix="},
+		},
+		{
+			rel:     "packs/gastown/formulas/mol-refinery-patrol.toml",
+			formula: "mol-refinery-patrol",
+			vars:    []string{"--var target_branch=", "--var rig_name=", "--var binding_prefix="},
+		},
+	}
+	for _, check := range checks {
+		data, err := os.ReadFile(filepath.Join(dir, check.rel))
+		if err != nil {
+			t.Fatalf("reading %s: %v", check.rel, err)
+		}
+		for lineNo, line := range strings.Split(string(data), "\n") {
+			if !strings.Contains(line, "gc bd mol wisp "+check.formula+" --root-only") {
+				continue
+			}
+			for _, want := range check.vars {
+				if !strings.Contains(line, want) {
+					t.Errorf("%s:%d wisp command missing %q:\n%s", check.rel, lineNo+1, want, line)
+				}
+			}
+		}
+	}
+
+	renderVars := map[string]string{
+		"binding_prefix": "gastown.",
+		"rig_name":       "gascity",
+		"target_branch":  "main",
+	}
+	for _, rel := range []string{
+		"packs/gastown/formulas/mol-deacon-patrol.toml",
+		"packs/gastown/formulas/mol-refinery-patrol.toml",
+	} {
+		data, err := os.ReadFile(filepath.Join(dir, rel))
+		if err != nil {
+			t.Fatalf("reading %s: %v", rel, err)
+		}
+		rendered := formula.Substitute(string(data), renderVars)
+		for _, bad := range []string{"{{binding_prefix}}", "{{rig_name}}"} {
+			if strings.Contains(rendered, bad) {
+				t.Errorf("%s rendered patrol formula still contains %q", rel, bad)
+			}
+		}
 	}
 }
 

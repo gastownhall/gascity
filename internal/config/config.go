@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -50,6 +51,16 @@ func (a *Agent) BindingQualifiedName() string {
 		return a.Name
 	}
 	return a.BindingName + "." + a.Name
+}
+
+// BindingPrefix returns the import binding prefix for route/template
+// interpolation, including the trailing dot when a binding is present.
+func (a *Agent) BindingPrefix() string {
+	bindingName := strings.TrimSpace(a.BindingName)
+	if bindingName == "" {
+		return ""
+	}
+	return bindingName + "."
 }
 
 // QualifiedName returns the agent's canonical identity, including the rig
@@ -161,6 +172,9 @@ type City struct {
 	SessionSleep SessionSleepConfig `toml:"session_sleep,omitempty"`
 	// Convergence configures convergence loop limits.
 	Convergence ConvergenceConfig `toml:"convergence,omitempty"`
+	// Doctor configures gc doctor thresholds and policy toggles
+	// (worktree size warnings, nested-worktree auto-prune).
+	Doctor DoctorConfig `toml:"doctor,omitempty"`
 	// Services declares workspace-owned HTTP services mounted on the
 	// controller edge under /svc/{name}.
 	Services []Service `toml:"service,omitempty"`
@@ -547,7 +561,8 @@ type AgentOverride struct {
 	MaxActiveSessions *int `toml:"max_active_sessions,omitempty"`
 	// MinActiveSessions overrides the minimum number of sessions to keep alive.
 	MinActiveSessions *int `toml:"min_active_sessions,omitempty"`
-	// ScaleCheck overrides the shell command whose output determines desired session count.
+	// ScaleCheck overrides the shell command whose output reports new
+	// unassigned session demand for bead-backed reconciliation.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
 	// OptionDefaults adds or overrides provider option defaults for this agent.
 	// Keys are option keys, values are choice values. Merges additively
@@ -1180,6 +1195,95 @@ func (c ChatSessionsConfig) IdleTimeoutDuration() time.Duration {
 	return d
 }
 
+// DoctorConfig holds settings for the gc doctor surface. Operator-tunable
+// thresholds and policy toggles live here; mechanical structural checks
+// (broken-worktree pointers, missing files) remain hardcoded since they
+// cannot be operator-tuned in any meaningful sense.
+type DoctorConfig struct {
+	// WorktreeRigWarnSize is the per-rig warning threshold for the total
+	// disk footprint under .gc/worktrees/<rig>/. Reported by the
+	// worktree-disk-size check. Go-style human size string ("10GB", "500MB").
+	// Empty or unparseable falls back to the default (10 GB).
+	WorktreeRigWarnSize string `toml:"worktree_rig_warn_size,omitempty" jsonschema:"default=10GB"`
+
+	// WorktreeRigErrorSize is the per-rig error threshold. When any rig
+	// exceeds this, the worktree-disk-size check reports an error rather
+	// than a warning. Empty or unparseable falls back to the default
+	// (50 GB).
+	WorktreeRigErrorSize string `toml:"worktree_rig_error_size,omitempty" jsonschema:"default=50GB"`
+
+	// NestedWorktreePrune escalates the nested-worktree-prune check
+	// from warning to error severity when safely-prunable nested
+	// worktrees are present, so CI / scripted doctor runs fail until
+	// the operator runs `gc doctor --fix`. Actual removal still
+	// requires --fix; this flag does not auto-prune. Safety is
+	// enforced by mechanical checks (no uncommitted changes, no
+	// unpushed commits, no stashes) — never by role identity.
+	NestedWorktreePrune bool `toml:"nested_worktree_prune,omitempty" jsonschema:"default=false"`
+}
+
+const (
+	defaultWorktreeRigWarnBytes  = int64(10) * 1024 * 1024 * 1024 // 10 GB
+	defaultWorktreeRigErrorBytes = int64(50) * 1024 * 1024 * 1024 // 50 GB
+)
+
+// WorktreeRigWarnBytes returns the warning threshold in bytes. Falls
+// back to defaultWorktreeRigWarnBytes when unset, unparseable, or
+// non-positive.
+func (c DoctorConfig) WorktreeRigWarnBytes() int64 {
+	if n, ok := parseHumanSize(c.WorktreeRigWarnSize); ok && n > 0 {
+		return n
+	}
+	return defaultWorktreeRigWarnBytes
+}
+
+// WorktreeRigErrorBytes returns the error threshold in bytes. Falls
+// back to defaultWorktreeRigErrorBytes when unset, unparseable, or
+// non-positive. The error threshold is clamped to at least the warn
+// threshold to keep the two-tier semantics monotonic; if the operator
+// configures error < warn, the warn value wins.
+func (c DoctorConfig) WorktreeRigErrorBytes() int64 {
+	warn := c.WorktreeRigWarnBytes()
+	n, ok := parseHumanSize(c.WorktreeRigErrorSize)
+	if !ok || n <= 0 {
+		n = defaultWorktreeRigErrorBytes
+	}
+	if n < warn {
+		return warn
+	}
+	return n
+}
+
+// parseHumanSize parses sizes like "10GB", "500 MB", "1024" (bytes
+// implied) into a byte count. Whitespace tolerant, case-insensitive.
+// Returns ok=false when the string is empty or unparseable so callers
+// can apply their own default.
+func parseHumanSize(s string) (int64, bool) {
+	s = strings.TrimSpace(strings.ToUpper(s))
+	if s == "" {
+		return 0, false
+	}
+	var unit int64 = 1
+	switch {
+	case strings.HasSuffix(s, "GB"):
+		unit = 1024 * 1024 * 1024
+		s = strings.TrimSpace(strings.TrimSuffix(s, "GB"))
+	case strings.HasSuffix(s, "MB"):
+		unit = 1024 * 1024
+		s = strings.TrimSpace(strings.TrimSuffix(s, "MB"))
+	case strings.HasSuffix(s, "KB"):
+		unit = 1024
+		s = strings.TrimSpace(strings.TrimSuffix(s, "KB"))
+	case strings.HasSuffix(s, "B"):
+		s = strings.TrimSpace(strings.TrimSuffix(s, "B"))
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return n * unit, true
+}
+
 // ConvergenceConfig holds convergence loop limits.
 type ConvergenceConfig struct {
 	// MaxPerAgent is the maximum number of active convergence loops per agent.
@@ -1477,7 +1581,7 @@ func normalizeAgentDefaultsAlias(cfg *City, meta toml.MetaData) {
 type Agent struct {
 	// Name is the unique identifier for this agent.
 	Name string `toml:"name" jsonschema:"required"`
-	// Description is a human-readable description shown in MC's session creation UI.
+	// Description is a human-readable description shown in a real-world app's session creation UI.
 	Description string `toml:"description,omitempty"`
 	// Dir is the identity prefix for rig-scoped agents and the default
 	// working directory when WorkDir is not set.
@@ -1539,12 +1643,15 @@ type Agent struct {
 	// MinActiveSessions is the minimum number of sessions to keep alive.
 	// Agent-level only. Counts against rig/workspace caps. Replaces pool.min.
 	MinActiveSessions *int `toml:"min_active_sessions,omitempty"`
-	// ScaleCheck is a shell command template whose output determines desired
-	// session count. Optional override — when set, its output is the desired
-	// count (still clamped by all cap levels). If it contains Go template
-	// placeholders, gc expands them using the same PathContext fields as
-	// work_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot,
-	// CityName) before running the command.
+	// ScaleCheck is a shell command template whose output reports new
+	// unassigned session demand. In bead-backed reconciliation this is
+	// additive: assigned work is resumed separately, and ScaleCheck reports
+	// only how many new generic sessions to start, still bounded by all cap
+	// levels. Legacy no-store evaluation continues to treat the output as
+	// the desired session count. If it contains Go template placeholders, gc
+	// expands them using the same PathContext fields as work_dir and
+	// session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName)
+	// before running the command.
 	ScaleCheck string `toml:"scale_check,omitempty"`
 	// DrainTimeout is the maximum time to wait for a session to finish its
 	// current work before force-killing it during scale-down. Duration string
@@ -1771,6 +1878,8 @@ func (a *Agent) AttachEnabled() bool {
 //
 // State priority: in_progress+assigned (crash recovery) >
 // ready+assigned (pre-assigned) > ready+unassigned+routed_to (pool).
+// Formula roots that are themselves executable must be represented as ready()
+// work (for example type=wisp); molecule containers are not routable demand.
 //
 // When the reconciler runs the query for demand detection (no session
 // context), all identity vars are empty → assignee tiers skip → only
@@ -1807,10 +1916,7 @@ func (a *Agent) EffectiveWorkQuery() string {
 			`r=$(bd ready --metadata-field gc.routed_to=` + target +
 			` --unassigned --json --limit=1 2>/dev/null); ` +
 			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-			// Tier 4: open routed molecule roots. scale_check already counts
-			// these, so startup must be able to see them too.
-			`bd list --metadata-field gc.routed_to=` + target +
-			` --status=open --type=molecule --no-assignee --json --limit=1 2>/dev/null'`
+			`printf "[]"'`
 	}
 	return `sh -c '` +
 		// Tier 1: in_progress assigned to any of my identifiers (crash recovery).
@@ -1909,10 +2015,9 @@ func (a *Agent) DrainTimeoutDuration() time.Duration {
 
 // EffectiveScaleCheck returns the scale check command for this agent.
 // If ScaleCheck is set, returns it. Otherwise returns a default that
-// counts actionable work routed to this agent's template, including
-// standalone formula-dispatched molecule beads (which bd ready excludes).
-// Attached formulas contribute demand through the routed source bead in the
-// ready/in_progress tiers instead of through the molecule count.
+// counts new unassigned work routed to this agent's template via ready().
+// Assigned in-progress work is resumed from session beads, so it must not
+// create additional generic pool demand here.
 func (a *Agent) EffectiveScaleCheck() string {
 	if a.ScaleCheck != "" {
 		return a.ScaleCheck
@@ -1920,11 +2025,7 @@ func (a *Agent) EffectiveScaleCheck() string {
 	template := a.QualifiedName()
 	return `ready=$(bd ready --metadata-field gc.routed_to=` + template +
 		` --unassigned --json 2>/dev/null | jq 'length' 2>/dev/null); ` +
-		`active=$(bd list --metadata-field gc.routed_to=` + template +
-		` --status=in_progress --no-assignee --json 2>/dev/null | jq 'length' 2>/dev/null); ` +
-		`molecules=$(bd list --metadata-field gc.routed_to=` + template +
-		` --status=open --type=molecule --no-assignee --json 2>/dev/null | jq 'length' 2>/dev/null); ` +
-		`echo "$(( ${ready:-0} + ${active:-0} + ${molecules:-0} ))" || echo 0`
+		`echo "${ready:-0}" || echo 0`
 }
 
 // EffectiveMaxActiveSessions returns the agent's max active sessions.
@@ -2022,10 +2123,26 @@ func (a *Agent) EffectiveOnDeath() string {
 	if a.OnDeath != "" {
 		return a.OnDeath
 	}
+	route := a.QualifiedName()
+	if a.PoolName != "" {
+		route = a.PoolName
+	}
+	// Reset both assignee and status: clearing assignee alone leaves the bead
+	// invisible to every work_query tier (Tier 1 needs assignee match, Tiers
+	// 2/3 only match "ready" status). The next worker re-claims via Tier 3
+	// (gc.routed_to + --unassigned). If routed metadata is missing entirely,
+	// backfill the fallback route so reopened direct-assigned work does not
+	// stay invisible.
 	return `bd list --assignee=` + a.QualifiedName() +
 		` --status=in_progress --json 2>/dev/null | ` +
-		`jq -r '.[].id' 2>/dev/null | ` +
-		`xargs -rI{} bd update {} --assignee "" 2>/dev/null`
+		`jq -r '.[] | [.id, (.metadata["gc.routed_to"] // "")] | @tsv' 2>/dev/null | ` +
+		`while IFS="$(printf '\t')" read -r id current_route; do ` +
+		`[ -z "$id" ] && continue; ` +
+		`if [ -n "$current_route" ]; then ` +
+		`bd update "$id" --assignee "" --status open 2>/dev/null; ` +
+		`else bd update "$id" --assignee "" --status open --set-metadata gc.routed_to=` + route + ` 2>/dev/null; ` +
+		`fi; ` +
+		`done`
 }
 
 // EffectiveOnBoot returns the on_boot command for this agent.
@@ -2040,9 +2157,9 @@ func (a *Agent) EffectiveOnBoot() string {
 		template = a.PoolName
 	}
 	return `bd list --metadata-field gc.routed_to=` + template +
-		` --status=in_progress --json 2>/dev/null | ` +
+		` --status=in_progress --no-assignee --json 2>/dev/null | ` +
 		`jq -r '.[].id' 2>/dev/null | ` +
-		`xargs -rI{} bd update {} --assignee "" 2>/dev/null`
+		`xargs -rI{} bd update {} --status open 2>/dev/null`
 }
 
 // InjectImplicitAgents adds on-demand agents for each configured provider at

@@ -60,6 +60,7 @@ export function eventCategory(eventType: string): string {
     return "work";
   }
   if (eventType.startsWith("mail.")) return "comms";
+  if (eventType.startsWith("request.result.") || eventType === "request.failed") return "system";
   return "system";
 }
 
@@ -82,7 +83,9 @@ export function eventIcon(eventType: string): string {
     "convoy.closed": "✅",
     "mail.delivered": "📬",
     "mail.read": "📨",
+    "request.failed": "❌",
   };
+  if (eventType.startsWith("request.result.")) return "🔔";
   return icons[eventType] ?? "📋";
 }
 
@@ -118,7 +121,11 @@ export function eventSummary(
       return `${shortActor} created convoy ${subject ?? ""}`.trim();
     case "convoy.closed":
       return `${shortActor} closed convoy ${subject ?? ""}`.trim();
+    case "request.failed":
+      return message ?? `${subject ?? "request"} failed`;
     default:
+      if (eventType.startsWith("request.result."))
+        return message ?? `${subject ?? "request"} succeeded`;
       return message ?? subject ?? eventType;
   }
 }

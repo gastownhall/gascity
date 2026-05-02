@@ -1,0 +1,4 @@
+# Gas City controller implements the Kubernetes session protocol by execing
+# into namespace-local agent pods. Keep this exception narrow: do not add
+# wildcard pod verbs or cluster-wide roles.
+KSV-0053

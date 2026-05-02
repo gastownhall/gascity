@@ -47,6 +47,14 @@ func writeNamedTestSession(t *testing.T, searchBase, workDir, fileName string, l
 	return path
 }
 
+type noLabelScanSessionLogStore struct {
+	*beads.MemStore
+}
+
+func (s *noLabelScanSessionLogStore) ListByLabel(label string, _ int, _ ...beads.QueryOpt) ([]beads.Bead, error) {
+	return nil, fmt.Errorf("unexpected label scan for %q", label)
+}
+
 func TestDoSessionLogsBasic(t *testing.T) {
 	searchBase := t.TempDir()
 	workDir := t.TempDir()
@@ -123,7 +131,7 @@ func TestDoSessionLogsTailReturnsLastNEntries(t *testing.T) {
 		t.Errorf("tail=2 should include the last entry 'reply-3', got: %s", out)
 	}
 	// Everything before the last 2 must be absent. In particular, the FIRST
-	// entry must not leak through — that was the bug the user reported.
+	// entry must not leak through; that was the bug the user reported.
 	forbidden := []string{"first", "reply-1", "second", "reply-2"}
 	for _, s := range forbidden {
 		if strings.Contains(out, s) {
@@ -380,6 +388,67 @@ func TestResolveStoredSessionLogSource_DoesNotCrossAmbiguousWorkDir(t *testing.T
 	}
 	if got != "" {
 		t.Fatalf("resolveStoredSessionLogSource() path = %q, want empty for ambiguous same-workdir transcript", got)
+	}
+}
+
+func TestCanFallbackStoredSessionLogByWorkDirUsesTargetedLookup(t *testing.T) {
+	store := &noLabelScanSessionLogStore{MemStore: beads.NewMemStore()}
+	workDir := t.TempDir()
+	b, _ := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "worker",
+			"provider":     "codex",
+			"session_name": "worker",
+			"state":        "awake",
+			"work_dir":     workDir,
+		},
+	})
+
+	ok := canFallbackStoredSessionLogByWorkDir(store, sessionLogContext{
+		sessionID: b.ID,
+		workDir:   workDir,
+		provider:  "codex",
+	})
+	if !ok {
+		t.Fatal("canFallbackStoredSessionLogByWorkDir() = false, want true")
+	}
+}
+
+func TestCanFallbackStoredSessionLogByWorkDirIgnoresAsleepPeersForLiveTarget(t *testing.T) {
+	store := beads.NewMemStore()
+	workDir := t.TempDir()
+	target, _ := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "worker",
+			"provider":     "codex",
+			"session_name": "worker",
+			"state":        "awake",
+			"work_dir":     workDir,
+		},
+	})
+	_, _ = store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "old-worker",
+			"provider":     "codex",
+			"session_name": "old-worker",
+			"state":        "asleep",
+			"work_dir":     workDir,
+		},
+	})
+
+	ok := canFallbackStoredSessionLogByWorkDir(store, sessionLogContext{
+		sessionID: target.ID,
+		workDir:   workDir,
+		provider:  "codex",
+	})
+	if !ok {
+		t.Fatal("canFallbackStoredSessionLogByWorkDir() = false, want true")
 	}
 }
 

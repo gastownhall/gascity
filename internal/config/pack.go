@@ -1584,6 +1584,7 @@ func deepCopyOptionChoices(in []OptionChoice) []OptionChoice {
 	for i := range in {
 		out[i] = in[i]
 		out[i].FlagArgs = append([]string(nil), in[i].FlagArgs...)
+		out[i].FlagAliases = cloneStringSlices(in[i].FlagAliases)
 	}
 	return out
 }

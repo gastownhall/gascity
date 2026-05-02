@@ -520,6 +520,54 @@ func TestSubmitFollowUpOnAsleepSessionFallsBackToImmediateSend(t *testing.T) {
 	}
 }
 
+func TestSubmitDefaultQueuesWhenWakeAlreadyRequested(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	cityPath := t.TempDir()
+	mgr := NewManagerWithCityPath(store, sp, cityPath)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", t.TempDir(), "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := sp.Stop(info.SessionName); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := store.SetMetadataBatch(info.ID, map[string]string{
+		"state":                string(StateCreating),
+		"pending_create_claim": "true",
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch: %v", err)
+	}
+	callsBefore := len(sp.Calls)
+
+	outcome, err := mgr.Submit(context.Background(), info.ID, "deliver after wake", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
+	if err != nil {
+		t.Fatalf("Submit(default): %v", err)
+	}
+	if !outcome.Queued {
+		t.Fatal("Submit(default) should queue while wake is already requested")
+	}
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(state.Pending) != 1 {
+		t.Fatalf("pending queued submits = %d, want 1", len(state.Pending))
+	}
+	if state.Pending[0].SessionID != info.ID {
+		t.Fatalf("SessionID = %q, want %q", state.Pending[0].SessionID, info.ID)
+	}
+	if state.Pending[0].Message != "deliver after wake" {
+		t.Fatalf("Message = %q, want deliver after wake", state.Pending[0].Message)
+	}
+	for _, call := range sp.Calls[callsBefore:] {
+		if call.Method == "Start" || call.Method == "Nudge" || call.Method == "NudgeNow" {
+			t.Fatalf("unexpected runtime call while queueing against requested wake: %#v", call)
+		}
+	}
+}
+
 func TestSubmissionCapabilitiesFollowUpUnsupportedForACP(t *testing.T) {
 	caps := SubmissionCapabilitiesForMetadata(
 		map[string]string{

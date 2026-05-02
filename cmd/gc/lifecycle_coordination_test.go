@@ -374,6 +374,47 @@ func TestLifecycleCoordination_InitDirIfReady_RetriesTransientManagedDoltFailure
 	}
 }
 
+func TestLifecycleCoordination_InitDirIfReady_RetriesManagedDoltSchemaNotReady(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	MaterializeBuiltinPacks(dir) //nolint:errcheck
+	t.Setenv("GC_BEADS", "bd")
+
+	originalEnsure := initDirIfReadyEnsureBeadsProvider
+	originalInitAndHook := initDirIfReadyInitAndHookDir
+	originalDelay := initDirIfReadyRetryDelay
+	t.Cleanup(func() {
+		initDirIfReadyEnsureBeadsProvider = originalEnsure
+		initDirIfReadyInitAndHookDir = originalInitAndHook
+		initDirIfReadyRetryDelay = originalDelay
+	})
+
+	initDirIfReadyRetryDelay = 0
+	initDirIfReadyEnsureBeadsProvider = func(_ string) error { return nil }
+
+	var initCalls int
+	initDirIfReadyInitAndHookDir = func(_, _, _ string) error {
+		initCalls++
+		if initCalls == 1 {
+			return fmt.Errorf("bd list: exit status 1: table not found: issues")
+		}
+		return nil
+	}
+
+	deferred, err := initDirIfReady(dir, dir, "gc")
+	if err != nil {
+		t.Fatalf("initDirIfReady() error = %v, want nil after retry", err)
+	}
+	if deferred {
+		t.Fatal("initDirIfReady() deferred = true, want false")
+	}
+	if initCalls != 2 {
+		t.Fatalf("initAndHookDir calls = %d, want 2", initCalls)
+	}
+}
+
 func TestLifecycleCoordination_InitDirIfReady_DoesNotRetryNonManagedProviderFailure(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {

@@ -159,6 +159,15 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 		clearWorkDir()
 		return fmt.Errorf("creating control socket for %q: %w", name, err)
 	}
+	if err := p.persistStartMetadata(name, cfg.Env); err != nil {
+		lis.Close() //nolint:errcheck
+		_ = os.Remove(p.sockPath(name))
+		_ = os.Remove(p.sockNamePath(name))
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		clearWorkDir()
+		return fmt.Errorf("storing metadata for %q: %w", name, err)
+	}
 
 	go func() {
 		_ = cmd.Wait()
@@ -167,6 +176,7 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 		lis.Close()                 //nolint:errcheck
 		os.Remove(p.sockPath(name)) //nolint:errcheck
 		_ = os.Remove(p.sockNamePath(name))
+		p.clearSessionMeta(name)
 		close(done)
 	}()
 
@@ -300,6 +310,17 @@ func (p *Provider) RemoveMeta(name, key string) error {
 	return err
 }
 
+func (p *Provider) persistStartMetadata(name string, env map[string]string) error {
+	p.clearSessionMeta(name)
+	for key, value := range env {
+		if err := p.SetMeta(name, key, value); err != nil {
+			p.clearSessionMeta(name)
+			return err
+		}
+	}
+	return nil
+}
+
 // GetLastActivity returns zero time — subprocess provider does not
 // support activity tracking.
 func (p *Provider) GetLastActivity(_ string) (time.Time, error) {
@@ -367,6 +388,16 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 
 func (p *Provider) metaPath(name, key string) string {
 	return filepath.Join(p.dir, metaFilePrefix(name)+".meta."+metaFileKey(key))
+}
+
+func (p *Provider) clearSessionMeta(name string) {
+	matches, err := filepath.Glob(filepath.Join(p.dir, metaFilePrefix(name)+".meta.*"))
+	if err != nil {
+		return
+	}
+	for _, path := range matches {
+		_ = os.Remove(path)
+	}
 }
 
 func metaFilePrefix(name string) string {

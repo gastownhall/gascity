@@ -204,7 +204,7 @@ the PR is open and matches the branch, base, and origin repository.
 
 **5. Reassign to refinery:**
 ```bash
-gc bd update {{issue}} --status=open --assignee=<rig>/refinery --set-metadata gc.routed_to=<rig>/refinery
+gc bd update {{issue}} --status=open --assignee={{rig_name}}/{{binding_prefix}}refinery --set-metadata gc.routed_to={{rig_name}}/{{binding_prefix}}refinery
 ```
 
 Update both `assignee` AND `gc.routed_to` so the reconciler stops

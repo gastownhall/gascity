@@ -8,7 +8,6 @@
 // Gas City uses:
 //   - session.created / session.compacted → gc prime --hook (side effects such
 //     as session-id persistence and poller bootstrap)
-//   - session.deleted → gc hook --inject (pick up newly queued work on exit)
 //   - experimental.chat.system.transform → inject gc prime --hook, queued
 //     nudges, and unread mail into the system prompt for each turn
 
@@ -60,9 +59,6 @@ export default async function gascityPlugin({ directory }) {
         case "session.created":
         case "session.compacted":
           await readPrime(true);
-          return;
-        case "session.deleted":
-          await run(directory, "hook", "--inject");
           return;
         default:
           return;

@@ -58,44 +58,13 @@ func resolveSessionID(store beads.Store, identifier string, allowClosed bool) (s
 		return "", err
 	}
 
-	// Fall back to live alias/session_name resolution among session beads.
-	all, err := store.List(beads.ListQuery{
-		Label:         LabelSession,
-		IncludeClosed: allowClosed,
-	})
+	openSessionNameMatches, err := ExactMetadataSessionCandidates(store, false, map[string]string{"session_name": identifier})
 	if err != nil {
 		return "", fmt.Errorf("listing sessions: %w", err)
 	}
-
-	var openSessionNameMatches []beads.Bead
-	var openAliasMatches []beads.Bead
-	var closedSessionNameMatches []beads.Bead
-	var closedAliasMatches []beads.Bead
-	for _, b := range all {
-		if !IsSessionBeadOrRepairable(b) {
-			continue
-		}
-		RepairEmptyType(store, &b)
-		alias := strings.TrimSpace(b.Metadata["alias"])
-		sessionName := strings.TrimSpace(b.Metadata["session_name"])
-		if b.Status != "closed" {
-			switch {
-			case alias == identifier:
-				openAliasMatches = append(openAliasMatches, b)
-			case sessionName == identifier:
-				openSessionNameMatches = append(openSessionNameMatches, b)
-			}
-			continue
-		}
-		if !allowClosed {
-			continue
-		}
-		switch {
-		case alias == identifier:
-			closedAliasMatches = append(closedAliasMatches, b)
-		case sessionName == identifier:
-			closedSessionNameMatches = append(closedSessionNameMatches, b)
-		}
+	openAliasMatches, err := ExactMetadataSessionCandidates(store, false, map[string]string{"alias": identifier})
+	if err != nil {
+		return "", fmt.Errorf("listing sessions: %w", err)
 	}
 
 	for _, matches := range [][]beads.Bead{
@@ -108,6 +77,14 @@ func resolveSessionID(store beads.Store, identifier string, allowClosed bool) (s
 	}
 	if !allowClosed {
 		return "", fmt.Errorf("%w: %q", ErrSessionNotFound, identifier)
+	}
+	closedSessionNameMatches, err := ExactMetadataSessionCandidatesWithStatus(store, "closed", map[string]string{"session_name": identifier})
+	if err != nil {
+		return "", fmt.Errorf("listing sessions: %w", err)
+	}
+	closedAliasMatches, err := ExactMetadataSessionCandidatesWithStatus(store, "closed", map[string]string{"alias": identifier})
+	if err != nil {
+		return "", fmt.Errorf("listing sessions: %w", err)
 	}
 	for _, matches := range [][]beads.Bead{
 		closedSessionNameMatches,

@@ -2,13 +2,13 @@
 title: "Named Configured Sessions"
 ---
 
-| Field | Value |
-|---|---|
-| Status | Accepted |
-| Date | 2026-03-23 |
-| Author(s) | Codex |
-| Issue | N/A |
-| Supersedes | N/A |
+| Field         | Value                                 |
+| ------------- | ------------------------------------- |
+| Status        | Accepted                              |
+| Date          | 2026-03-23                            |
+| Author(s)     | Codex                                 |
+| Issue         | N/A                                   |
+| Supersedes    | N/A                                   |
 | Superseded by | session-model-unification (partially) |
 
 > Note
@@ -71,7 +71,7 @@ canonical sessions where they make sense.
   runtime singleton.
 - Add an explicit config object for canonical persistent sessions.
 - Give named sessions a stable alias so `gc sling`, `gc mail`, `gc
-  nudge`, attach, and workflow routing can target the same identity.
+nudge`, attach, and workflow routing can target the same identity.
 - Support both:
   - `always`: controller-kept sessions like `deacon`
   - `on_demand`: lazy sessions like `mayor` or `refinery`
@@ -596,7 +596,7 @@ CLI and API session targeting intentionally differ on ambient context:
 - API resolution has no ambient rig shortcut. Bare names only resolve
   when city-unique; otherwise callers must send the fully qualified
   identity or use `template:<qualified-name>`.
-- Mission Control and other API clients should normalize user-selected
+- real-world app and other API clients should normalize user-selected
   targets to fully qualified identities before calling GC so rig-scoped
   templates and aliases are always representable.
 

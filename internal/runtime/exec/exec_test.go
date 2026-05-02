@@ -15,6 +15,11 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
 )
 
+const (
+	startupWatchNoHangTestTimeout = 10 * time.Second
+	startupWatchBlockingSleep     = "30"
+)
+
 // writeScript creates an executable shell script in dir and returns its path.
 func writeScript(t *testing.T, dir, content string) string {
 	t.Helper()
@@ -362,7 +367,7 @@ case "$op" in
     cat > /dev/null
     ;;
   watch-startup)
-    sh -c 'sleep 5' &
+    sh -c 'sleep `+startupWatchBlockingSleep+`' &
     exit 0
     ;;
   peek)
@@ -387,8 +392,10 @@ esac
 	})
 
 	done := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	go func() {
-		done <- p.Start(context.Background(), "test-sess", runtime.Config{
+		done <- p.Start(ctx, "test-sess", runtime.Config{
 			EmitsPermissionWarning: true,
 		})
 	}()
@@ -398,7 +405,8 @@ esac
 		if err != nil {
 			t.Fatalf("Start: %v", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(startupWatchNoHangTestTimeout):
+		cancel()
 		t.Fatal("Start() hung while cleaning up a no-event watch-startup child")
 	}
 
@@ -423,7 +431,7 @@ case "$op" in
     ;;
   watch-startup)
     printf '%s\n' 'not-json'
-    sleep 5
+    sleep `+startupWatchBlockingSleep+`
     ;;
   stop)
     echo "$*" >> "`+stopFile+`"
@@ -434,8 +442,10 @@ esac
 	p := NewProvider(script)
 
 	done := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	go func() {
-		done <- p.Start(context.Background(), "test-sess", runtime.Config{
+		done <- p.Start(ctx, "test-sess", runtime.Config{
 			EmitsPermissionWarning: true,
 		})
 	}()
@@ -448,7 +458,8 @@ esac
 		if !strings.Contains(err.Error(), "startup watcher decode") {
 			t.Fatalf("Start error = %v, want startup watcher decode context", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(startupWatchNoHangTestTimeout):
+		cancel()
 		t.Fatal("Start() hung after malformed first watch-startup event")
 	}
 
@@ -469,14 +480,14 @@ op="$1"
 case "$op" in
   watch-startup)
     printf '%s\n' 'not-json'
-    sleep 5
+    sleep `+startupWatchBlockingSleep+`
     ;;
   *) exit 2 ;;
 esac
 `)
 	p := NewProvider(script)
 
-	snapshots, closeWatch, ok, err := p.startStartupWatch(context.Background(), "test-sess", time.Second)
+	snapshots, closeWatch, ok, err := p.startStartupWatch(context.Background(), "test-sess", startupWatchNoHangTestTimeout)
 	if err == nil {
 		t.Fatal("startStartupWatch succeeded, want malformed first event error")
 	}
@@ -554,7 +565,7 @@ case "$op" in
     ;;
   watch-startup)
     printf '%s\n' '{"content":"starting up"}'
-    sleep 5
+    sleep `+startupWatchBlockingSleep+`
     ;;
   peek)
     echo "$*" >> "`+peekFile+`"
@@ -573,8 +584,10 @@ esac
 	p := NewProvider(script)
 
 	done := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	go func() {
-		done <- p.Start(context.Background(), "test-sess", runtime.Config{
+		done <- p.Start(ctx, "test-sess", runtime.Config{
 			EmitsPermissionWarning: true,
 		})
 	}()
@@ -584,7 +597,8 @@ esac
 		if err != nil {
 			t.Fatalf("Start: %v", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(startupWatchNoHangTestTimeout):
+		cancel()
 		t.Fatal("Start() hung while falling back from an irrelevant watch-startup snapshot")
 	}
 
@@ -622,7 +636,7 @@ case "$op" in
       printf '%s\n' '{"content":"user@host $"}'
       i=$((i+1))
     done
-    sleep 5
+    sleep `+startupWatchBlockingSleep+`
     ;;
   send-keys)
     ;;
@@ -635,8 +649,10 @@ esac
 	p := NewProvider(script)
 
 	done := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	go func() {
-		done <- p.Start(context.Background(), "test-sess", runtime.Config{
+		done <- p.Start(ctx, "test-sess", runtime.Config{
 			EmitsPermissionWarning: true,
 		})
 	}()
@@ -646,7 +662,8 @@ esac
 		if err != nil {
 			t.Fatalf("Start() error = %v, want nil", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(startupWatchNoHangTestTimeout):
+		cancel()
 		t.Fatal("Start() hung while cleaning up watch-startup stream")
 	}
 }

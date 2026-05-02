@@ -24,21 +24,24 @@
 # main(); wrappers may call it explicitly if they need cache paths before
 # invoking main().
 
-# Cache directories for name mappings and message state.
+# Cache directories for name mappings, agent tokens, and message state.
 #
 # Layout:
 #   name-map/     gc-name → mcp-name (Adjective+Noun) mapping
+#   agent-token/  gc-name → mcp registration token
 #   msg-agent/    msg-id → recipient gc-name (repopulated on inbox/check)
 #   msg-read/     msg-id → local "read" / "archived" filter state
 #   msg-thread/   msg-id → locally-generated thread id
 #   msg-reply-to/ msg-id → parent msg-id (set on reply)
 #
-# Only name-map is shared across K8s pods. When GC_CITY is set (the
-# controller passes it via the city volume mount), name-map lives under
-# the city directory so every pod sharing that volume sees the same
-# gc → mcp mapping. This is what enables cross-pod name resolution:
+# name-map and agent-token are shared across K8s pods. When GC_CITY is
+# set (the controller passes it via the city volume mount), they live
+# under the city directory so every pod sharing that volume sees the
+# same gc → mcp mapping and the matching registration token. This is
+# what enables cross-pod name resolution and authenticated reads/sends:
 # a receiving pod can reverse-map an mcp sender name back to its gc
-# name without calling mcp_agent_mail's whois API.
+# name without calling mcp_agent_mail's whois API, and can authenticate
+# as its deterministic mcp identity.
 #
 # Message state (msg-agent, msg-read, msg-thread, msg-reply-to) stays
 # pod-local in /tmp even when GC_CITY is set. Each pod repopulates these
@@ -63,10 +66,12 @@ _init_config() {
   CACHE_DIR="/tmp/gc-mcp-mail-cache/${PROJECT_HASH}"
   if [ -n "${GC_CITY:-}" ]; then
     NAME_MAP_DIR="${GC_CITY}/.gc/mail-cache/${PROJECT_HASH}/name-map"
+    AGENT_TOKEN_DIR="${GC_CITY}/.gc/mail-cache/${PROJECT_HASH}/agent-token"
   else
     NAME_MAP_DIR="${CACHE_DIR}/name-map"
+    AGENT_TOKEN_DIR="${CACHE_DIR}/agent-token"
   fi
-  mkdir -p "$NAME_MAP_DIR" "$CACHE_DIR/msg-agent" "$CACHE_DIR/msg-read" "$CACHE_DIR/msg-thread"
+  mkdir -p "$NAME_MAP_DIR" "$AGENT_TOKEN_DIR" "$CACHE_DIR/msg-agent" "$CACHE_DIR/msg-read" "$CACHE_DIR/msg-thread"
 }
 
 # --- Name mapping ---
@@ -150,6 +155,64 @@ build_name_map_json() {
   echo "$map"
 }
 
+# cache_agent_token stores the mcp_agent_mail registration token for a
+# gc identity. Agent names may contain slashes, so the token path mirrors
+# the name-map path structure.
+cache_agent_token() {
+  local gc_name="$1" token="$2"
+  [ -n "$token" ] || return 0
+  mkdir -p "$(dirname "$AGENT_TOKEN_DIR/$gc_name")"
+  ( umask 077; printf '%s' "$token" > "$AGENT_TOKEN_DIR/$gc_name" )
+}
+
+# get_agent_token retrieves the cached registration token for a gc identity.
+get_agent_token() {
+  local gc_name="$1"
+  cat "$AGENT_TOKEN_DIR/$gc_name" 2>/dev/null || true
+}
+
+# require_agent_token prints the cached token or fails with a clear error.
+require_agent_token() {
+  local gc_name="$1"
+  local token
+  token=$(get_agent_token "$gc_name")
+  if [ -z "$token" ]; then
+    echo "missing mcp_agent_mail registration token for $gc_name" >&2
+    return 1
+  fi
+  echo "$token"
+}
+
+# ensure_contact approves a sender->recipient contact link before delivery.
+# mcp_agent_mail's default contact policy can reject first-contact sends, so
+# the bridge uses both cached registration tokens to perform the same
+# explicit handshake a human-facing MCP session would perform.
+ensure_contact() {
+  local from_gc="$1" to_gc="$2"
+  [ "$from_gc" != "$to_gc" ] || return 0
+
+  local mcp_from mcp_to requester_token target_token
+  mcp_from=$(gc_to_mcp_name "$from_gc")
+  mcp_to=$(gc_to_mcp_name "$to_gc")
+  requester_token=$(require_agent_token "$from_gc")
+  target_token=$(require_agent_token "$to_gc")
+
+  mcp_call "macro_contact_handshake" "$(jq -n \
+    --arg project "$PROJECT" \
+    --arg requester "$mcp_from" \
+    --arg target "$mcp_to" \
+    --arg requester_token "$requester_token" \
+    --arg target_token "$target_token" \
+    '{
+      project_key: $project,
+      requester: $requester,
+      target: $target,
+      auto_accept: true,
+      requester_registration_token: $requester_token,
+      target_registration_token: $target_token
+    }')" > /dev/null
+}
+
 # --- Helpers ---
 
 # mcp_call invokes an MCP tool via JSON-RPC and returns the text content.
@@ -196,10 +259,21 @@ ensure_agent() {
   local gc_name="$1"
   local mcp_name
   mcp_name=$(gc_to_mcp_name "$gc_name")
-  mcp_call "register_agent" "$(jq -n \
+  local token args result new_token
+  token=$(get_agent_token "$gc_name")
+  args=$(jq -n \
     --arg project "$PROJECT" \
     --arg name "$mcp_name" \
-    '{project_key: $project, name: $name, program: "gc", model: "agent"}')" > /dev/null 2>&1 || true
+    --arg token "$token" \
+    '{
+      project_key: $project,
+      name: $name,
+      program: "gc",
+      model: "agent"
+    } + (if $token != "" then {registration_token: $token} else {} end)')
+  result=$(mcp_call "register_agent" "$args")
+  new_token=$(echo "$result" | jq -r '.registration_token // empty' 2>/dev/null || true)
+  cache_agent_token "$gc_name" "$new_token"
 }
 
 # cache_recipient stores a message→recipient mapping for later read/archive.
@@ -278,6 +352,8 @@ case "$op" in
     ensure_agent "$to"
     mcp_from=$(gc_to_mcp_name "$from")
     mcp_to=$(gc_to_mcp_name "$to")
+    ensure_contact "$from" "$to"
+    sender_token=$(require_agent_token "$from")
 
     # Use subject for mcp subject, body for body_md.
     # If no subject, use body as subject (mcp_agent_mail requires subject).
@@ -289,12 +365,14 @@ case "$op" in
       --arg to "$mcp_to" \
       --arg subject "$mcp_subject" \
       --arg body_md "$body" \
+      --arg sender_token "$sender_token" \
       '{
         project_key: $project,
         sender_name: $from,
         to: [$to],
         subject: $subject,
-        body_md: $body_md
+        body_md: $body_md,
+        sender_token: $sender_token
       }')")
 
     # Extract message from deliveries response.
@@ -322,11 +400,13 @@ case "$op" in
     recipient="${1:?usage: gc-mail-mcp-agent-mail inbox <recipient>}"
     ensure_agent "$recipient"
     mcp_recipient=$(gc_to_mcp_name "$recipient")
+    registration_token=$(require_agent_token "$recipient")
 
     result=$(mcp_call "fetch_inbox" "$(jq -n \
       --arg project "$PROJECT" \
       --arg name "$mcp_recipient" \
-      '{project_key: $project, agent_name: $name, include_bodies: true}')")
+      --arg registration_token "$registration_token" \
+      '{project_key: $project, agent_name: $name, include_bodies: true, registration_token: $registration_token}')")
 
     if [ -z "$result" ] || [ "$result" = "null" ] || [ "$result" = "[]" ]; then
       echo ""
@@ -382,11 +462,13 @@ case "$op" in
     recipient="${1:?usage: gc-mail-mcp-agent-mail check <recipient>}"
     ensure_agent "$recipient"
     mcp_recipient=$(gc_to_mcp_name "$recipient")
+    registration_token=$(require_agent_token "$recipient")
 
     result=$(mcp_call "fetch_inbox" "$(jq -n \
       --arg project "$PROJECT" \
       --arg name "$mcp_recipient" \
-      '{project_key: $project, agent_name: $name, include_bodies: true}')")
+      --arg registration_token "$registration_token" \
+      '{project_key: $project, agent_name: $name, include_bodies: true, registration_token: $registration_token}')")
 
     if [ -z "$result" ] || [ "$result" = "null" ] || [ "$result" = "[]" ]; then
       echo ""
@@ -449,13 +531,16 @@ case "$op" in
       echo "no cached recipient for message $id" >&2
       exit 1
     fi
+    ensure_agent "$recipient"
     mcp_recipient=$(gc_to_mcp_name "$recipient")
+    registration_token=$(require_agent_token "$recipient")
 
     # Fetch message content before acknowledging (may leave inbox after).
     result=$(mcp_call "fetch_inbox" "$(jq -n \
       --arg project "$PROJECT" \
       --arg name "$mcp_recipient" \
-      '{project_key: $project, agent_name: $name, include_bodies: true}')")
+      --arg registration_token "$registration_token" \
+      '{project_key: $project, agent_name: $name, include_bodies: true, registration_token: $registration_token}')")
 
     # Find the specific message by ID.
     msg=""
@@ -475,8 +560,9 @@ case "$op" in
     mcp_call "acknowledge_message" "$(jq -n \
       --arg project "$PROJECT" \
       --arg agent "$mcp_recipient" \
+      --arg registration_token "$registration_token" \
       --argjson id "$id" \
-      '{project_key: $project, agent_name: $agent, message_id: $id}')" > /dev/null 2>&1 || true
+      '{project_key: $project, agent_name: $agent, message_id: $id, registration_token: $registration_token}')" > /dev/null 2>&1 || true
 
     # Convert to gc Message format.
     # Map mcp sender name back to gc name.
@@ -510,12 +596,15 @@ case "$op" in
       echo "no cached recipient for message $id" >&2
       exit 1
     fi
+    ensure_agent "$recipient"
     mcp_recipient=$(gc_to_mcp_name "$recipient")
+    registration_token=$(require_agent_token "$recipient")
 
     result=$(mcp_call "fetch_inbox" "$(jq -n \
       --arg project "$PROJECT" \
       --arg name "$mcp_recipient" \
-      '{project_key: $project, agent_name: $name, include_bodies: true}')")
+      --arg registration_token "$registration_token" \
+      '{project_key: $project, agent_name: $name, include_bodies: true, registration_token: $registration_token}')")
 
     msg=""
     if [ -n "$result" ] && [ "$result" != "null" ] && [ "$result" != "[]" ]; then
@@ -555,12 +644,15 @@ case "$op" in
     # Also acknowledge server-side.
     recipient=$(get_cached_recipient "$id")
     if [ -n "$recipient" ]; then
+      ensure_agent "$recipient"
       mcp_recipient=$(gc_to_mcp_name "$recipient")
+      registration_token=$(require_agent_token "$recipient")
       mcp_call "acknowledge_message" "$(jq -n \
         --arg project "$PROJECT" \
         --arg agent "$mcp_recipient" \
+        --arg registration_token "$registration_token" \
         --argjson id "$id" \
-        '{project_key: $project, agent_name: $agent, message_id: $id}')" > /dev/null 2>&1 || true
+        '{project_key: $project, agent_name: $agent, message_id: $id, registration_token: $registration_token}')" > /dev/null 2>&1 || true
     fi
     ;;
 
@@ -589,11 +681,14 @@ case "$op" in
     fi
 
     # Fetch original to determine who sent it (that's our reply target).
+    ensure_agent "$recipient"
     mcp_recipient=$(gc_to_mcp_name "$recipient")
+    registration_token=$(require_agent_token "$recipient")
     result=$(mcp_call "fetch_inbox" "$(jq -n \
       --arg project "$PROJECT" \
       --arg name "$mcp_recipient" \
-      '{project_key: $project, agent_name: $name, include_bodies: true}')")
+      --arg registration_token "$registration_token" \
+      '{project_key: $project, agent_name: $name, include_bodies: true, registration_token: $registration_token}')")
 
     reply_to=""
     if [ -n "$result" ] && [ "$result" != "null" ] && [ "$result" != "[]" ]; then
@@ -608,6 +703,8 @@ case "$op" in
     ensure_agent "$gc_reply_to"
     mcp_from=$(gc_to_mcp_name "$from")
     mcp_to=$(gc_to_mcp_name "$gc_reply_to")
+    ensure_contact "$from" "$gc_reply_to"
+    sender_token=$(require_agent_token "$from")
 
     mcp_subject="${subject:-$body}"
     reply_result=$(mcp_call "send_message" "$(jq -n \
@@ -616,12 +713,14 @@ case "$op" in
       --arg to "$mcp_to" \
       --arg subject "$mcp_subject" \
       --arg body_md "$body" \
+      --arg sender_token "$sender_token" \
       '{
         project_key: $project,
         sender_name: $from,
         to: [$to],
         subject: $subject,
-        body_md: $body_md
+        body_md: $body_md,
+        sender_token: $sender_token
       }')")
 
     msg_id=$(echo "$reply_result" | jq -r '.deliveries[0].payload.id')
@@ -662,12 +761,15 @@ case "$op" in
       # Look up recipient to fetch message details.
       recipient=$(get_cached_recipient "$mid")
       [ -n "$recipient" ] || continue
+      ensure_agent "$recipient"
       mcp_recipient=$(gc_to_mcp_name "$recipient")
+      registration_token=$(require_agent_token "$recipient")
       # Fetch inbox to find the message.
       inbox_result=$(mcp_call "fetch_inbox" "$(jq -n \
         --arg project "$PROJECT" \
         --arg name "$mcp_recipient" \
-        '{project_key: $project, agent_name: $name, include_bodies: true}')")
+        --arg registration_token "$registration_token" \
+        '{project_key: $project, agent_name: $name, include_bodies: true, registration_token: $registration_token}')")
       msg=""
       if [ -n "$inbox_result" ] && [ "$inbox_result" != "null" ] && [ "$inbox_result" != "[]" ]; then
         # Message IDs may be numeric or string; try both.
@@ -701,11 +803,13 @@ case "$op" in
     recipient="${1:?usage: gc-mail-mcp-agent-mail count <recipient>}"
     ensure_agent "$recipient"
     mcp_recipient=$(gc_to_mcp_name "$recipient")
+    registration_token=$(require_agent_token "$recipient")
 
     result=$(mcp_call "fetch_inbox" "$(jq -n \
       --arg project "$PROJECT" \
       --arg name "$mcp_recipient" \
-      '{project_key: $project, agent_name: $name, include_bodies: true}')")
+      --arg registration_token "$registration_token" \
+      '{project_key: $project, agent_name: $name, include_bodies: true, registration_token: $registration_token}')")
 
     total=0
     unread=0
@@ -738,7 +842,9 @@ case "$op" in
       echo "no cached recipient for message $id" >&2
       exit 1
     fi
+    ensure_agent "$recipient"
     mcp_recipient=$(gc_to_mcp_name "$recipient")
+    registration_token=$(require_agent_token "$recipient")
 
     local_st=$(msg_status "$id")
     if [ "$local_st" = "archived" ]; then
@@ -751,8 +857,9 @@ case "$op" in
     mcp_call "acknowledge_message" "$(jq -n \
       --arg project "$PROJECT" \
       --arg agent "$mcp_recipient" \
+      --arg registration_token "$registration_token" \
       --argjson id "$id" \
-      '{project_key: $project, agent_name: $agent, message_id: $id}')" > /dev/null
+      '{project_key: $project, agent_name: $agent, message_id: $id, registration_token: $registration_token}')" > /dev/null
     ;;
 
   archive)
@@ -768,7 +875,9 @@ case "$op" in
       echo "no cached recipient for message $id" >&2
       exit 1
     fi
+    ensure_agent "$recipient"
     mcp_recipient=$(gc_to_mcp_name "$recipient")
+    registration_token=$(require_agent_token "$recipient")
 
     # Check local status for double-archive detection.
     # mcp_agent_mail's acknowledge is idempotent (no error on re-ack),
@@ -784,8 +893,9 @@ case "$op" in
     mcp_call "acknowledge_message" "$(jq -n \
       --arg project "$PROJECT" \
       --arg agent "$mcp_recipient" \
+      --arg registration_token "$registration_token" \
       --argjson id "$id" \
-      '{project_key: $project, agent_name: $agent, message_id: $id}')" > /dev/null
+      '{project_key: $project, agent_name: $agent, message_id: $id, registration_token: $registration_token}')" > /dev/null
     ;;
 
   *)

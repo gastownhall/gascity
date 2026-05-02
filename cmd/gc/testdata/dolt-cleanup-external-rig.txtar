@@ -1,12 +1,21 @@
-# dolt cleanup + sync: external-rig discovery and allowlist guard (#706, #711)
+# dolt cleanup + sync: external-rig discovery and allowlist guard (#706, #711, #1549)
 #
-# Covers six scenarios:
+# Covers eight scenarios:
 #   1. External rig database is NOT listed as orphan (registry via gc rig list --json)
-#   2. --force removes genuine orphan at default data-dir (HQ-rooted; guard must not fire)
+#   2. --force removes genuine orphan at default data-dir (HQ-rooted; guard must not fire).
+#      Fixtures run without a live dolt server, so --server-down-ok is required to permit
+#      the filesystem rm fallback (#1549).
 #   3. Local rig database discovered via gc rig list --json (complements scenario 1)
-#   4. Allowlist refusal: orphan whose path overlaps a registered rig path is refused
+#   4. Allowlist refusal: orphan whose path overlaps a registered rig path is refused.
+#      Uses --server-down-ok so the server probe doesn't refuse first.
 #   5. Path-prefix boundary: rig at /a/b does NOT protect a database at /a/bc
 #   6. sync.sh external-rig route discovery (parallel registry path to cleanup.sh)
+#   7. Server-reachability gate (#1549): --force without --server-down-ok refuses when
+#      dolt is unreachable, instead of corrupting NBS state via rm -rf.
+#   8. Identifier safety (#1549): orphans whose name does not match the allowlist
+#      (first char [A-Za-z0-9_], subsequent chars [A-Za-z0-9_-]) are refused before
+#      any deletion attempt, so an attacker-controlled metadata.json cannot break
+#      out of the backtick-quoted SQL identifier.
 #
 # Each scenario uses a separate city initialized from a pre-written TOML template.
 # The pack's cleanup.sh and sync.sh are staged once under $WORK/shared/ and each
@@ -49,7 +58,9 @@ stdout 'orphan_db'
 # Tests that --force removes genuine orphan at default data-dir (HQ-rooted).
 # The allowlist guard must not fire for HQ-managed storage: select(.hq != true)
 # excludes HQ from the rig-path overlap check, so orphan_db is correctly removed.
-exec gc dolt cleanup --force
+# --server-down-ok acknowledges that the test environment has no live dolt server
+# and permits the filesystem rm fallback (#1549).
+exec gc dolt cleanup --force --server-down-ok
 stdout 'Removed orphan_db'
 ! exists $WORK/city1/.beads/dolt/orphan_db
 exists $WORK/city1/.beads/dolt/ext_db
@@ -100,7 +111,9 @@ env CITY3_RIG_PATH=$WORK/city3-rig
 
 cp $WORK/shared/cleanup.sh $WORK/city3/packs/dolt/commands/cleanup.sh
 chmod 755 $WORK/city3/packs/dolt/commands/cleanup.sh
-! exec gc dolt cleanup --force
+# --server-down-ok lets the script proceed past the server-reachability gate
+# so the allowlist-overlap refusal (the actual subject of this scenario) fires.
+! exec gc dolt cleanup --force --server-down-ok
 stderr 'refusing to remove'
 
 # ==========================================================================
@@ -157,6 +170,66 @@ exec gc dolt sync --gc --dry-run
 stdout 'city5/\.beads/routes\.jsonl'
 stdout 'external-rig-5/\.beads/routes\.jsonl'
 stdout 'city5_db: skipped'
+
+# ==========================================================================
+# Scenario 7: Server-reachability gate (#1549)
+# ==========================================================================
+# city7 has one orphan_db. With no live dolt server and no --server-down-ok,
+# `gc dolt cleanup --force` MUST refuse rather than rm -rf — running rm
+# against per-database directories that the dolt server has open corrupts
+# NBS state and crash-loops the journal. The orphan must remain on disk.
+
+exec gc init --file $WORK/city7-cfg.toml $WORK/city7
+stdout 'Welcome to Gas City'
+
+cd $WORK/city7
+
+cp $WORK/shared/cleanup.sh $WORK/city7/packs/dolt/commands/cleanup.sh
+chmod 755 $WORK/city7/packs/dolt/commands/cleanup.sh
+
+! exec gc dolt cleanup --force
+stderr 'dolt server unreachable'
+stderr '--server-down-ok'
+exists $WORK/city7/.beads/dolt/orphan_db
+
+# ==========================================================================
+# Scenario 8: Identifier safety (#1549)
+# ==========================================================================
+# city8 has three orphans:
+#   safe_orphan         — pure [A-Za-z0-9_]; allowed
+#   ok-hyphen-orphan    — internal hyphen; allowed (matches health/gc-nudge)
+#   -leading-unsafe     — staged on disk under a non-conforming directory name
+#                         that fails the leading-charset check. Must be refused
+#                         before any deletion attempt and must remain on disk.
+# Because at least one orphan was refused as unsafe, the script must exit
+# non-zero even though the safe orphans were removed — identifier-safety
+# refusals signal "DB in an impossible state" (manual fs mucking, corrupted
+# metadata, attempted injection) and demand operator attention.
+#
+# The leading-unsafe orphan's directory name uses a leading hyphen, which the
+# new regex rejects via the `[A-Za-z0-9_]*` first-char gate. The directory is
+# staged inside the test environment via a separate metadata.json fragment.
+
+exec gc init --file $WORK/city8-cfg.toml $WORK/city8
+stdout 'Welcome to Gas City'
+
+cd $WORK/city8
+
+cp $WORK/shared/cleanup.sh $WORK/city8/packs/dolt/commands/cleanup.sh
+chmod 755 $WORK/city8/packs/dolt/commands/cleanup.sh
+
+# Stage the leading-hyphen orphan dir at runtime (txtar -- markers can't carry
+# leading-hyphen path segments without ambiguity).
+mkdir $WORK/city8/.beads/dolt/-leading-unsafe
+mkdir $WORK/city8/.beads/dolt/-leading-unsafe/.dolt
+
+! exec gc dolt cleanup --force --server-down-ok
+stdout 'Removed safe_orphan'
+stdout 'Removed ok-hyphen-orphan'
+stderr 'name must start with'
+! exists $WORK/city8/.beads/dolt/safe_orphan
+! exists $WORK/city8/.beads/dolt/ok-hyphen-orphan
+exists $WORK/city8/.beads/dolt/-leading-unsafe
 
 # ===========================================================================
 # Shared fixture: external-rig (used by city1 and city3)
@@ -383,6 +456,85 @@ GC_BEADS_BD_SCRIPT="${GC_BEADS_BD_SCRIPT:-/bin/true}"
 -- city5/packs/dolt/commands/.keep --
 
 # ===========================================================================
+# city7 fixtures (Scenario 7: server-reachability gate, #1549)
+# ===========================================================================
+
+-- city7-cfg.toml --
+[workspace]
+name = "city7"
+includes = ["packs/dolt"]
+
+-- city7/.beads/metadata.json --
+{"dolt_database": "city7_db", "issue_prefix": "c7"}
+
+-- city7/.beads/dolt/city7_db/.dolt/.keep --
+-- city7/.beads/dolt/orphan_db/.dolt/.keep --
+
+-- city7/packs/dolt/pack.toml --
+[pack]
+name = "dolt"
+schema = 1
+
+[[commands]]
+name = "cleanup"
+description = "Find and remove orphaned Dolt databases"
+script = "commands/cleanup.sh"
+
+-- city7/packs/dolt/scripts/runtime.sh --
+#!/bin/sh
+: "${GC_CITY_PATH:?GC_CITY_PATH must be set}"
+CITY_RUNTIME_DIR="${GC_CITY_RUNTIME_DIR:-$GC_CITY_PATH/.gc/runtime}"
+PACK_STATE_DIR="${GC_PACK_STATE_DIR:-$CITY_RUNTIME_DIR/packs/dolt}"
+DOLT_BEADS_DATA_DIR="$GC_CITY_PATH/.beads/dolt"
+if [ -d "$DOLT_BEADS_DATA_DIR" ]; then
+  DOLT_DATA_DIR="$DOLT_BEADS_DATA_DIR"
+else
+  DOLT_DATA_DIR="$PACK_STATE_DIR/dolt-data"
+fi
+
+-- city7/packs/dolt/commands/.keep --
+
+# ===========================================================================
+# city8 fixtures (Scenario 8: identifier safety, #1549)
+# ===========================================================================
+
+-- city8-cfg.toml --
+[workspace]
+name = "city8"
+includes = ["packs/dolt"]
+
+-- city8/.beads/metadata.json --
+{"dolt_database": "city8_db", "issue_prefix": "c8"}
+
+-- city8/.beads/dolt/city8_db/.dolt/.keep --
+-- city8/.beads/dolt/safe_orphan/.dolt/.keep --
+-- city8/.beads/dolt/ok-hyphen-orphan/.dolt/.keep --
+
+-- city8/packs/dolt/pack.toml --
+[pack]
+name = "dolt"
+schema = 1
+
+[[commands]]
+name = "cleanup"
+description = "Find and remove orphaned Dolt databases"
+script = "commands/cleanup.sh"
+
+-- city8/packs/dolt/scripts/runtime.sh --
+#!/bin/sh
+: "${GC_CITY_PATH:?GC_CITY_PATH must be set}"
+CITY_RUNTIME_DIR="${GC_CITY_RUNTIME_DIR:-$GC_CITY_PATH/.gc/runtime}"
+PACK_STATE_DIR="${GC_PACK_STATE_DIR:-$CITY_RUNTIME_DIR/packs/dolt}"
+DOLT_BEADS_DATA_DIR="$GC_CITY_PATH/.beads/dolt"
+if [ -d "$DOLT_BEADS_DATA_DIR" ]; then
+  DOLT_DATA_DIR="$DOLT_BEADS_DATA_DIR"
+else
+  DOLT_DATA_DIR="$PACK_STATE_DIR/dolt-data"
+fi
+
+-- city8/packs/dolt/commands/.keep --
+
+# ===========================================================================
 # Shared cleanup.sh fixture — staged into each city's packs/dolt/commands/
 # by the exec cp calls above. Mirrors the logic of
 # examples/dolt/commands/cleanup/run.sh; the only adaptation is sourcing
@@ -391,11 +543,13 @@ GC_BEADS_BD_SCRIPT="${GC_BEADS_BD_SCRIPT:-/bin/true}"
 
 -- shared/cleanup.sh --
 #!/bin/sh
-# gc dolt cleanup — test fixture mirroring examples/dolt/commands/cleanup/run.sh (#706, #711).
+# gc dolt cleanup — test fixture mirroring examples/dolt/commands/cleanup/run.sh
+# (#706, #711, #1549).
 set -e
 
 force=false
 max_orphans=50
+server_down_ok=false
 PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)}"
 . "$PACK_DIR/scripts/runtime.sh"
 data_dir="$DOLT_DATA_DIR"
@@ -404,7 +558,8 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --force) force=true; shift ;;
     --max)   max_orphans="$2"; shift 2 ;;
-    -h|--help) echo "Usage: gc dolt cleanup [--force] [--max N]"; exit 0 ;;
+    --server-down-ok) server_down_ok=true; shift ;;
+    -h|--help) echo "Usage: gc dolt cleanup [--force] [--max N] [--server-down-ok]"; exit 0 ;;
     *) echo "gc dolt cleanup: unknown flag: $1" >&2; exit 1 ;;
   esac
 done
@@ -500,7 +655,7 @@ overlapping_rig_path() {
 }
 
 allowlist_file=$(mktemp)
-trap 'rm -f "$allowlist_file" "${refused_tmp:-}" "${removed_tmp:-}"' EXIT
+trap 'rm -f "$allowlist_file" "${refused_tmp:-}" "${removed_tmp:-}" "${unsafe_tmp:-}"' EXIT
 allowlist_ready=true
 if ! compute_allowlist_file "$allowlist_file"; then
   allowlist_ready=false
@@ -533,8 +688,70 @@ if [ "$force" != true ]; then
   exit 0
 fi
 
+# Mirrors the production server-reachability check (#1549). The fixture's
+# stub runtime.sh does not export GC_DOLT_PORT or the helper functions, so
+# probe_available is determined by host nc/python3, and tcp_reachable stays
+# false. With nc OR python3 present + --server-down-ok the rm path runs;
+# without either, the script refuses regardless of --server-down-ok.
+host="${GC_DOLT_HOST:-127.0.0.1}"
+: "${GC_DOLT_USER:=root}"
+export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
+
+dolt_sql_q() {
+  _dolt_sql_q_timeout="$1"; shift
+  run_bounded "$_dolt_sql_q_timeout" \
+    dolt --host "$host" --port "$GC_DOLT_PORT" --user "$GC_DOLT_USER" --no-tls \
+    sql -q "$1"
+}
+
+probe_available=false
+if command -v nc >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1; then
+  probe_available=true
+fi
+
+tcp_reachable=false
+if [ "$probe_available" = true ] \
+  && [ -n "$GC_DOLT_PORT" ] \
+  && command -v managed_runtime_tcp_reachable >/dev/null 2>&1 \
+  && managed_runtime_tcp_reachable "$GC_DOLT_PORT"; then
+  tcp_reachable=true
+fi
+
+sql_works=false
+if [ "$tcp_reachable" = true ] \
+  && command -v dolt >/dev/null 2>&1 \
+  && command -v run_bounded >/dev/null 2>&1 \
+  && dolt_sql_q 5 "SELECT 1" >/dev/null 2>&1; then
+  sql_works=true
+fi
+
+unset delete_via
+if [ "$sql_works" = true ]; then
+  delete_via=sql
+elif [ "$tcp_reachable" = true ]; then
+  echo "gc dolt cleanup: dolt is listening on port $GC_DOLT_PORT but 'SELECT 1' failed;" >&2
+  echo "  refusing to rm against a potentially-live server (#1549). Fix SQL access or stop dolt and retry." >&2
+  exit 1
+elif [ "$probe_available" = false ]; then
+  echo "gc dolt cleanup: cannot probe TCP reachability (neither nc nor python3 available);" >&2
+  echo "  refusing rm fallback regardless of --server-down-ok — cannot establish 'server is stopped' (#1549)." >&2
+  exit 1
+elif [ "$server_down_ok" = true ]; then
+  delete_via=rm
+else
+  echo "gc dolt cleanup: dolt server unreachable on port ${GC_DOLT_PORT:-unset};" >&2
+  echo "  rm -rf against per-database dirs while the server is up corrupts NBS state (#1549)." >&2
+  echo "  Either start dolt and re-run, or pass --server-down-ok if the server is intentionally stopped." >&2
+  exit 1
+fi
+case "${delete_via:-}" in
+  sql|rm) ;;
+  *) echo "gc dolt cleanup: internal error — delete_via not set" >&2; exit 1 ;;
+esac
+
 refused_tmp=$(mktemp)
 removed_tmp=$(mktemp)
+unsafe_tmp=$(mktemp)
 echo "$orphans" | while IFS='|' read -r db_name size path; do
   [ -z "$db_name" ] && continue
   overlap=$(overlapping_rig_path "$path")
@@ -543,20 +760,47 @@ echo "$orphans" | while IFS='|' read -r db_name size path; do
     echo "refused" >> "$refused_tmp"
     continue
   fi
-  if rm -rf "$path"; then
-    echo "removed" >> "$removed_tmp"
-    echo "  Removed $db_name"
+  case "$db_name" in
+    [A-Za-z0-9_]*)
+      case "$db_name" in
+        *[!A-Za-z0-9_-]*)
+          echo "refusing to remove '$db_name': name contains forbidden characters (allowed: A-Z, a-z, 0-9, _, -)" >&2
+          echo "unsafe" >> "$unsafe_tmp"
+          continue
+          ;;
+      esac
+      ;;
+    *)
+      echo "refusing to remove '$db_name': name must start with [A-Za-z0-9_]" >&2
+      echo "unsafe" >> "$unsafe_tmp"
+      continue
+      ;;
+  esac
+  if [ "$delete_via" = sql ]; then
+    if drop_output=$(dolt_sql_q 30 "DROP DATABASE IF EXISTS \`$db_name\`" 2>&1); then
+      echo "removed" >> "$removed_tmp"
+      echo "  Dropped $db_name"
+    else
+      echo "  Failed to drop $db_name via SQL: ${drop_output:-(no output)}" >&2
+    fi
   else
-    echo "  Failed to remove $db_name" >&2
+    if rm -rf "$path"; then
+      echo "removed" >> "$removed_tmp"
+      echo "  Removed $db_name"
+    else
+      echo "  Failed to remove $db_name" >&2
+    fi
   fi
 done
 
 removed=$(wc -l < "$removed_tmp" | tr -d ' ')
 refused_count=$(wc -l < "$refused_tmp" | tr -d ' ')
+unsafe_count=$(wc -l < "$unsafe_tmp" | tr -d ' ')
 echo ""
 echo "Removed $removed of $orphan_count orphaned database(s)."
 
-if [ "$removed" -lt "$((orphan_count - refused_count))" ] \
+if [ "$unsafe_count" -gt 0 ] \
+  || [ "$removed" -lt "$((orphan_count - refused_count - unsafe_count))" ] \
   || { [ "$refused_count" -gt 0 ] && [ "$removed" -eq 0 ]; }; then
   exit 1
 fi

@@ -249,6 +249,51 @@ func TestCreate(t *testing.T) {
 	}
 }
 
+func TestCreateConfirmsStartedStateWithoutControllerDriftHash(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(
+		context.Background(),
+		"helper",
+		"my chat",
+		"claude",
+		"/tmp",
+		"claude",
+		map[string]string{"BEADS_DIR": "/tmp/beads"},
+		ProviderResume{},
+		runtime.Config{
+			Env:              map[string]string{"GC_CITY": "test-city"},
+			FingerprintExtra: map[string]string{"depends_on": "db"},
+			SessionLive:      []string{"echo live"},
+		},
+	)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := b.Metadata["started_config_hash"]; got != "" {
+		t.Fatalf("started_config_hash = %q, want empty so controller owns drift hashes", got)
+	}
+	if got := b.Metadata["started_live_hash"]; got != "" {
+		t.Fatalf("started_live_hash = %q, want empty so controller owns drift hashes", got)
+	}
+	if got := b.Metadata["live_hash"]; got != "" {
+		t.Fatalf("live_hash = %q, want empty so controller owns drift hashes", got)
+	}
+	if got := b.Metadata["state_reason"]; got != "creation_complete" {
+		t.Fatalf("state_reason = %q, want creation_complete", got)
+	}
+	if got := b.Metadata["creation_complete_at"]; got == "" {
+		t.Fatal("creation_complete_at is empty")
+	}
+}
+
 func TestCreateDefaultsTitleToTemplate(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -2682,6 +2727,121 @@ func TestPendingAndRespond(t *testing.T) {
 		t.Fatalf("Pending after Respond: %v", err)
 	} else if got != nil {
 		t.Fatalf("pending should be cleared after Respond, got %#v", got)
+	}
+}
+
+type pendingSessionGoneProvider struct {
+	*runtime.Fake
+}
+
+func (p *pendingSessionGoneProvider) Pending(_ string) (*runtime.PendingInteraction, error) {
+	return nil, fmt.Errorf("capturing pane: %w", runtime.ErrSessionNotFound)
+}
+
+type pendingSessionErrorProvider struct {
+	*runtime.Fake
+	err error
+}
+
+func (p *pendingSessionErrorProvider) Pending(_ string) (*runtime.PendingInteraction, error) {
+	return nil, p.err
+}
+
+type respondSessionGoneProvider struct {
+	*runtime.Fake
+}
+
+func (p *respondSessionGoneProvider) Pending(_ string) (*runtime.PendingInteraction, error) {
+	return &runtime.PendingInteraction{
+		RequestID: "req-1",
+		Kind:      "approval",
+		Prompt:    "approve?",
+	}, nil
+}
+
+func (p *respondSessionGoneProvider) Respond(_ string, _ runtime.InteractionResponse) error {
+	return fmt.Errorf("send-keys failed: %w", runtime.ErrSessionNotFound)
+}
+
+func TestPendingAndRespondTreatMissingRuntimeSessionAsNoPending(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &pendingSessionGoneProvider{Fake: runtime.NewFake()}
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	pending, supported, err := mgr.Pending(info.ID)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if !supported {
+		t.Fatal("Pending should report supported when the provider supports interactions")
+	}
+	if pending != nil {
+		t.Fatalf("Pending = %#v, want nil for missing runtime session", pending)
+	}
+
+	err = mgr.Respond(info.ID, runtime.InteractionResponse{Action: "approve"})
+	if !errors.Is(err, ErrNoPendingInteraction) {
+		t.Fatalf("Respond error = %v, want ErrNoPendingInteraction", err)
+	}
+}
+
+func TestRespondTreatsRuntimeSessionGoneDuringResponseAsNoPending(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &respondSessionGoneProvider{Fake: runtime.NewFake()}
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	err = mgr.Respond(info.ID, runtime.InteractionResponse{Action: "approve"})
+	if !errors.Is(err, ErrNoPendingInteraction) {
+		t.Fatalf("Respond error = %v, want ErrNoPendingInteraction", err)
+	}
+}
+
+func TestPendingAndRespondDoNotSwallowUnrelatedNotFoundErrors(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &pendingSessionErrorProvider{
+		Fake: runtime.NewFake(),
+		err:  fmt.Errorf("loading config file: not found"),
+	}
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	pending, supported, err := mgr.Pending(info.ID)
+	if err == nil {
+		t.Fatalf("Pending err = nil, want unrelated provider error")
+	}
+	if !supported {
+		t.Fatal("Pending should report supported when provider returned a non-session-gone error")
+	}
+	if pending != nil {
+		t.Fatalf("Pending = %#v, want nil on provider error", pending)
+	}
+	if !strings.Contains(err.Error(), "loading config file: not found") {
+		t.Fatalf("Pending err = %v, want original provider error", err)
+	}
+
+	err = mgr.Respond(info.ID, runtime.InteractionResponse{Action: "approve"})
+	if err == nil {
+		t.Fatalf("Respond err = nil, want unrelated provider error")
+	}
+	if errors.Is(err, ErrNoPendingInteraction) {
+		t.Fatalf("Respond err = %v, must not downgrade unrelated provider errors to ErrNoPendingInteraction", err)
+	}
+	if !strings.Contains(err.Error(), "loading config file: not found") {
+		t.Fatalf("Respond err = %v, want original provider error", err)
 	}
 }
 
