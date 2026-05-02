@@ -47,9 +47,9 @@ type Message struct {
 	Rig       string    `json:"rig,omitempty"`
 }
 
-// ArchiveResult is one message's outcome in a batch [Provider.ArchiveMany]
-// call. Err is nil for a newly-archived message, [ErrAlreadyArchived] for
-// idempotent re-archive, or a provider error.
+// ArchiveResult is one message's outcome in a batch [Provider.ArchiveMany] or
+// [Provider.DeleteMany] call. Err is nil for a newly-closed message,
+// [ErrAlreadyArchived] for an idempotent re-close, or a provider error.
 type ArchiveResult struct {
 	ID  string
 	Err error
@@ -89,6 +89,12 @@ type Provider interface {
 
 	// Delete is an alias for Archive (closes the bead).
 	Delete(id string) error
+
+	// DeleteMany deletes a batch of messages in one round-trip where the
+	// backend supports it, returning per-id results in input order.
+	// Implementations MUST preserve delete semantics and per-id error
+	// reporting.
+	DeleteMany(ids []string) ([]ArchiveResult, error)
 
 	// Check returns unread messages without marking them read.
 	Check(recipient string) ([]Message, error)

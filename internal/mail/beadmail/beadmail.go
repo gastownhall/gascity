@@ -240,6 +240,13 @@ func (p *Provider) ArchiveMany(ids []string) ([]mail.ArchiveResult, error) {
 	return results, nil
 }
 
+// DeleteMany deletes a batch of messages by closing message beads. Beadmail
+// delete and archive have the same storage semantics, so this preserves the
+// batched [beads.Store.CloseAll] path from [Provider.ArchiveMany].
+func (p *Provider) DeleteMany(ids []string) ([]mail.ArchiveResult, error) {
+	return p.ArchiveMany(ids)
+}
+
 // All returns all open messages (read and unread) for the recipient.
 func (p *Provider) All(recipient string) ([]mail.Message, error) {
 	return p.filterMessages(recipient, true)

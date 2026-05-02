@@ -1466,7 +1466,8 @@ func cmdMailDelete(args []string, stdout, stderr io.Writer) int {
 
 // doMailDelete closes one or more message beads (same as archive but
 // different intent). Single-id behavior matches the pre-batch CLI
-// byte-for-byte; multi-id uses mp.ArchiveMany for a single-round-trip close.
+// byte-for-byte; multi-id uses mp.DeleteMany to preserve provider delete
+// semantics.
 func doMailDelete(mp mail.Provider, rec events.Recorder, args []string, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "gc mail delete: missing message ID") //nolint:errcheck // best-effort stderr
@@ -1500,7 +1501,7 @@ func doMailDeleteSingle(mp mail.Provider, rec events.Recorder, id string, stdout
 }
 
 func doMailDeleteMany(mp mail.Provider, rec events.Recorder, ids []string, stdout, stderr io.Writer) int {
-	results, err := mp.ArchiveMany(ids)
+	results, err := mp.DeleteMany(ids)
 	if err != nil {
 		telemetry.RecordMailOp(context.Background(), "delete", err)
 		fmt.Fprintf(stderr, "gc mail delete: %v\n", err) //nolint:errcheck // best-effort stderr

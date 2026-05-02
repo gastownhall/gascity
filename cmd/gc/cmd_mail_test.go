@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	mailexec "github.com/gastownhall/gascity/internal/mail/exec"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -40,6 +41,9 @@ func (countOnlyMailProvider) ArchiveMany([]string) ([]mail.ArchiveResult, error)
 	panic("unexpected ArchiveMany")
 }
 func (countOnlyMailProvider) Delete(string) error { panic("unexpected Delete") }
+func (countOnlyMailProvider) DeleteMany([]string) ([]mail.ArchiveResult, error) {
+	panic("unexpected DeleteMany")
+}
 func (countOnlyMailProvider) Check(string) ([]mail.Message, error) { panic("unexpected Check") }
 func (countOnlyMailProvider) Reply(string, string, string, string) (mail.Message, error) {
 	panic("unexpected Reply")
@@ -1842,6 +1846,45 @@ func TestMailDeleteMultiPartialFailure(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "gc mail delete ghost") {
 		t.Errorf("stderr missing per-id error for ghost:\n%s", stderr.String())
+	}
+}
+
+func TestMailDeleteMultiExecProviderUsesDeleteCommand(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "ops.log")
+	scriptPath := filepath.Join(dir, "mail-provider")
+	script := fmt.Sprintf(`#!/bin/sh
+set -eu
+op="$1"
+case "$op" in
+  ensure-running)
+    ;;
+  archive|delete)
+    printf '%%s %%s\n' "$op" "$2" >> %q
+    ;;
+  *)
+    echo "unexpected op $op" >&2
+    exit 2
+    ;;
+esac
+`, logPath)
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(script): %v", err)
+	}
+
+	mp := mailexec.NewProvider(scriptPath)
+	var stdout, stderr bytes.Buffer
+	code := doMailDelete(mp, events.Discard, []string{"msg-1", "msg-2"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailDelete = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	gotBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(log): %v", err)
+	}
+	want := "delete msg-1\ndelete msg-2\n"
+	if got := string(gotBytes); got != want {
+		t.Fatalf("exec operations = %q, want %q", got, want)
 	}
 }
 
