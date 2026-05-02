@@ -102,7 +102,7 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 // --json, while stderr is often empty. Returns "" when the output does
 // not look like a bd error envelope so callers can fall through.
 func bdStdoutErrorDetail(out []byte) string {
-	trimmed := bytes.TrimSpace(out)
+	trimmed := bytes.TrimSpace(extractJSON(out))
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return ""
 	}

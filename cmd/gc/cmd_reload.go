@@ -176,13 +176,9 @@ func sendReloadControlRequest(cityPath string, req reloadControlRequest) (reload
 	if err != nil {
 		return reloadControlReply{}, fmt.Errorf("marshaling request: %w", err)
 	}
-	readTimeout := 15 * time.Second
-	if req.Wait && req.Timeout != "" {
-		timeout, err := time.ParseDuration(req.Timeout)
-		if err != nil {
-			return reloadControlReply{}, fmt.Errorf("parsing request timeout: %w", err)
-		}
-		readTimeout = controllerReloadAcceptTimeout + timeout + 10*time.Second
+	readTimeout, err := reloadControlReadTimeout(req)
+	if err != nil {
+		return reloadControlReply{}, err
 	}
 	resp, err := sendControllerCommandWithReadTimeout(cityPath, "reload:"+string(data), readTimeout)
 	if err != nil {
@@ -193,6 +189,18 @@ func sendReloadControlRequest(cityPath string, req reloadControlRequest) (reload
 		return reloadControlReply{}, fmt.Errorf("parsing response: %w", err)
 	}
 	return reply, nil
+}
+
+func reloadControlReadTimeout(req reloadControlRequest) (time.Duration, error) {
+	readTimeout := 2*controllerReloadAcceptTimeout + 10*time.Second
+	if req.Wait && req.Timeout != "" {
+		timeout, err := time.ParseDuration(req.Timeout)
+		if err != nil {
+			return 0, fmt.Errorf("parsing request timeout: %w", err)
+		}
+		readTimeout += timeout
+	}
+	return readTimeout, nil
 }
 
 func reloadUnavailableMessage(cityPath string) string {
