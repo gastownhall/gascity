@@ -32,10 +32,11 @@ type Config struct {
 
 // Section holds the [supervisor] table fields.
 type Section struct {
-	Port           int    `toml:"port,omitempty"`
-	Bind           string `toml:"bind,omitempty"`
-	PatrolInterval string `toml:"patrol_interval,omitempty"`
-	AllowMutations bool   `toml:"allow_mutations,omitempty"`
+	Port           int      `toml:"port,omitempty"`
+	Bind           string   `toml:"bind,omitempty"`
+	PatrolInterval string   `toml:"patrol_interval,omitempty"`
+	AllowMutations bool     `toml:"allow_mutations,omitempty"`
+	AllowedOrigins []string `toml:"allowed_origins,omitempty"`
 }
 
 // PublicationConfig holds machine-wide publication policy for workspace
