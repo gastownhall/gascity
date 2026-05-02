@@ -1,10 +1,13 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -30,6 +33,66 @@ func TestHandleAgentCreate(t *testing.T) {
 	}
 	if !found {
 		t.Error("agent 'coder' not found in config after create")
+	}
+}
+
+// agentVisibilityFakeState wraps fakeMutatorState with an
+// AgentVisibilityWaiter implementation so the handler-side wiring can be
+// exercised without spinning up the real controller.
+type agentVisibilityFakeState struct {
+	*fakeMutatorState
+	waitCalled atomic.Bool
+	waitName   atomic.Value // string
+	waitErr    error
+}
+
+func (s *agentVisibilityFakeState) WaitForAgentVisibility(_ context.Context, qualifiedName string) error {
+	s.waitCalled.Store(true)
+	s.waitName.Store(qualifiedName)
+	return s.waitErr
+}
+
+// TestHandleAgentCreate_InvokesVisibilityWaiter verifies that POST /agents
+// calls WaitForAgentVisibility with the qualified name on success. This is
+// the read-after-write guarantee that prevents a follow-up POST /sling from
+// 404ing on the freshly created target.
+func TestHandleAgentCreate_InvokesVisibilityWaiter(t *testing.T) {
+	fs := &agentVisibilityFakeState{fakeMutatorState: newFakeMutatorState(t)}
+	h := newTestCityHandler(t, fs)
+
+	body := `{"name":"coder","dir":"myrig","provider":"claude"}`
+	req := newPostRequest(cityURL(fs, "/agents"), strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusCreated, w.Body.String())
+	}
+	if !fs.waitCalled.Load() {
+		t.Fatal("WaitForAgentVisibility was not called")
+	}
+	if got, _ := fs.waitName.Load().(string); got != "myrig/coder" {
+		t.Errorf("WaitForAgentVisibility called with %q, want %q", got, "myrig/coder")
+	}
+}
+
+// TestHandleAgentCreate_VisibilityWaiterErrorSurfacesAs500 ensures that a
+// wait failure (e.g., context deadline) does not silently 201 — the caller
+// must know the agent isn't yet reachable through findAgent.
+func TestHandleAgentCreate_VisibilityWaiterErrorSurfacesAs500(t *testing.T) {
+	fs := &agentVisibilityFakeState{
+		fakeMutatorState: newFakeMutatorState(t),
+		waitErr:          errors.New("simulated visibility wait failure"),
+	}
+	h := newTestCityHandler(t, fs)
+
+	body := `{"name":"coder","dir":"myrig","provider":"claude"}`
+	req := newPostRequest(cityURL(fs, "/agents"), strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusInternalServerError, w.Body.String())
 	}
 }
 

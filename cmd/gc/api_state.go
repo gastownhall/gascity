@@ -783,6 +783,17 @@ func (cs *controllerState) CreateAgent(a config.Agent) error {
 	})
 }
 
+// WaitForAgentVisibility blocks until findAgent in the controller's hot-reloaded
+// config snapshot resolves the given qualified agent name. After CreateAgent,
+// mutateAndPoke has already refreshed cs.cfg from disk, so the first check
+// virtually always succeeds; the wait exists as a safety net for the runtime
+// race where a stale config-reload tick clobbers cs.cfg between our refresh
+// and a subsequent reader. The next runtime tick reads the latest disk content
+// and restores the agent.
+func (cs *controllerState) WaitForAgentVisibility(ctx context.Context, qualifiedName string) error {
+	return api.WaitForAgentVisibilityIn(ctx, cs.Config, qualifiedName)
+}
+
 // UpdateAgent partially updates an existing agent definition in city.toml.
 func (cs *controllerState) UpdateAgent(name string, patch api.AgentUpdate) error {
 	return cs.mutateAndPoke(func() error {

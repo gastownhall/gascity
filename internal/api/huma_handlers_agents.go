@@ -236,7 +236,7 @@ func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
 // humaHandleAgentCreate is the Huma-typed handler for POST /v0/agents.
 // Body validation (Name and Provider required with minLength:"1") is
 // enforced by the framework from AgentCreateInput's struct tags.
-func (s *Server) humaHandleAgentCreate(_ context.Context, input *AgentCreateInput) (*AgentCreatedOutput, error) {
+func (s *Server) humaHandleAgentCreate(ctx context.Context, input *AgentCreateInput) (*AgentCreatedOutput, error) {
 	sm, ok := s.state.(StateMutator)
 	if !ok {
 		return nil, errMutationsNotSupported
@@ -252,9 +252,20 @@ func (s *Server) humaHandleAgentCreate(_ context.Context, input *AgentCreateInpu
 	if err := sm.CreateAgent(a); err != nil {
 		return nil, mutationError(err)
 	}
+	// Block until the new agent is reachable through findAgent, so the
+	// 201 response is a strict read-after-write signal: a follow-up
+	// POST /sling against the same target will not race a stale runtime
+	// config snapshot. See beads.ParentProjectionWaiter for the matching
+	// pattern in POST /bead/{id}/update.
+	qualifiedName := a.QualifiedName()
+	if waiter, ok := s.state.(AgentVisibilityWaiter); ok {
+		if err := waiter.WaitForAgentVisibility(ctx, qualifiedName); err != nil {
+			return nil, huma.Error500InternalServerError(err.Error())
+		}
+	}
 	resp := &AgentCreatedOutput{}
 	resp.Body.Status = "created"
-	resp.Body.Agent = a.QualifiedName()
+	resp.Body.Agent = qualifiedName
 	return resp, nil
 }
 
