@@ -105,7 +105,7 @@ func startNudgeWakeListener(ctx context.Context, cityPath string, wakeCh chan<- 
 //
 // This is a no-op when the dispatcher is configured for "legacy" mode —
 // the per-session `gc nudge poll` processes own delivery in that case.
-func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, quiescence time.Duration) (int, error) {
+func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot) (int, error) {
 	if cfg == nil || sessionBeads == nil || cityPath == "" {
 		return 0, nil
 	}
@@ -168,7 +168,7 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store beads.Stor
 		if !matched {
 			continue
 		}
-		ok, err := tryDeliverQueuedNudgesByPoller(target, store, sp, quiescence)
+		ok, err := tryDeliverQueuedNudgesByPoller(target, store, sp, defaultNudgePollQuiescence)
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}
