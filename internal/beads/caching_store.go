@@ -61,19 +61,21 @@ const (
 
 // CacheStats exposes cache freshness, reconciliation, and problem state.
 type CacheStats struct {
-	TotalBeads      int
-	TotalDeps       int
-	LastFreshAt     time.Time
-	LastReconcileAt time.Time
-	LastReconcileMs float64
-	Adds            int64
-	Removes         int64
-	Updates         int64
-	SyncFailures    int
-	ProblemCount    int64
-	LastProblemAt   time.Time
-	LastProblem     string
-	State           string
+	TotalBeads              int
+	TotalDeps               int
+	LastFreshAt             time.Time
+	LastReconcileAt         time.Time
+	LastReconcileMs         float64
+	Adds                    int64
+	Removes                 int64
+	Updates                 int64
+	ReconcileRecoveries     int64
+	ReconcileCloseDeferrals int64
+	SyncFailures            int
+	ProblemCount            int64
+	LastProblemAt           time.Time
+	LastProblem             string
+	State                   string
 }
 
 const (

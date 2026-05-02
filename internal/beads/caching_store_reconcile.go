@@ -287,16 +287,17 @@ func (c *CachingStore) runReconciliation() {
 
 // recoverMissingFromList re-fetches any cached active bead that didn't appear
 // in freshByID and merges verified-alive ones back. This guards against
-// partial or silently-truncated List results — a List that drops an active
-// bead must not synthesize a spurious bead.closed event for it.
+// cleanly incomplete List results: a List that drops an active bead must not
+// synthesize a spurious bead.closed event for it.
 //
 // On ErrNotFound the bead is left absent so the diff path can emit
 // bead.closed as before. On any other error the cached entry is merged
 // back conservatively, deferring the close to a later scan when the
-// backing store's state is unambiguous.
+// backing store's state is unambiguous. Callers must own freshByID and not
+// access it concurrently while recovery is running.
 func (c *CachingStore) recoverMissingFromList(freshByID map[string]Bead) {
 	c.mu.RLock()
-	candidates := make(map[string]Bead, len(c.beads))
+	candidates := make(map[string]Bead)
 	for id, b := range c.beads {
 		if _, ok := freshByID[id]; ok {
 			continue
@@ -310,14 +311,26 @@ func (c *CachingStore) recoverMissingFromList(freshByID map[string]Bead) {
 	if len(candidates) == 0 {
 		return
 	}
+	var recoveredAlive int64
+	var deferredClose int64
 	for id, cached := range candidates {
 		bead, err := c.backing.Get(id)
 		switch {
 		case err == nil:
+			if bead.ID != id {
+				c.recordProblem(
+					"verify missing bead before close",
+					fmt.Errorf("%s: backing returned bead %q", id, bead.ID),
+				)
+				freshByID[id] = cached
+				deferredClose++
+				continue
+			}
 			if bead.Status == "closed" {
 				continue
 			}
 			freshByID[id] = cloneBead(bead)
+			recoveredAlive++
 		case errors.Is(err, ErrNotFound):
 			// Confirmed gone; let the diff path emit bead.closed.
 		default:
@@ -326,6 +339,13 @@ func (c *CachingStore) recoverMissingFromList(freshByID map[string]Bead) {
 				fmt.Errorf("%s: %w", id, err),
 			)
 			freshByID[id] = cached
+			deferredClose++
 		}
+	}
+	if recoveredAlive != 0 || deferredClose != 0 {
+		c.mu.Lock()
+		c.stats.ReconcileRecoveries += recoveredAlive
+		c.stats.ReconcileCloseDeferrals += deferredClose
+		c.mu.Unlock()
 	}
 }

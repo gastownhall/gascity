@@ -9,11 +9,12 @@ import (
 )
 
 // droppingListStore wraps a Store and silently omits selected bead IDs from
-// List results — simulating a tolerant parser that drops malformed entries
-// or a partial List under backend stress.
+// List results, simulating a cleanly parsed but incomplete List under backend
+// stress.
 type droppingListStore struct {
 	Store
 	dropFromList map[string]struct{}
+	getOverride  map[string]Bead
 	getErr       map[string]error
 }
 
@@ -36,13 +37,26 @@ func (s *droppingListStore) Get(id string) (Bead, error) {
 	if err, ok := s.getErr[id]; ok {
 		return Bead{}, err
 	}
+	if b, ok := s.getOverride[id]; ok {
+		return cloneBead(b), nil
+	}
 	return s.Store.Get(id)
 }
 
+func assertNotCached(t *testing.T, cache *CachingStore, id string) {
+	t.Helper()
+	cache.mu.RLock()
+	_, ok := cache.beads[id]
+	cache.mu.RUnlock()
+	if ok {
+		t.Fatalf("cache still has bead %q after confirmed close", id)
+	}
+}
+
 // TestReconcileSkipsCloseWhenListDropsAliveBead reproduces the cache-thrash
-// scenario where bd's tolerant JSON parser silently drops an alive bead from
-// a List result. Before the fix, the reconciler would synthesize bead.closed
-// every cycle and re-introduction via other paths would re-trigger it.
+// scenario where a cleanly incomplete List omits an alive bead. Before the
+// fix, the reconciler would synthesize bead.closed every cycle and
+// re-introduction via other paths would re-trigger it.
 func TestReconcileSkipsCloseWhenListDropsAliveBead(t *testing.T) {
 	t.Parallel()
 
@@ -86,6 +100,13 @@ func TestReconcileSkipsCloseWhenListDropsAliveBead(t *testing.T) {
 	if _, err := cache.Get(survivor.ID); err != nil {
 		t.Fatalf("Get(survivor) after reconcile: %v", err)
 	}
+	stats := cache.Stats()
+	if stats.ReconcileRecoveries != 1 {
+		t.Fatalf("ReconcileRecoveries = %d, want 1", stats.ReconcileRecoveries)
+	}
+	if stats.ReconcileCloseDeferrals != 0 {
+		t.Fatalf("ReconcileCloseDeferrals = %d, want 0", stats.ReconcileCloseDeferrals)
+	}
 }
 
 // TestReconcileEmitsCloseWhenBackingConfirmsNotFound verifies that a genuine
@@ -118,12 +139,61 @@ func TestReconcileEmitsCloseWhenBackingConfirmsNotFound(t *testing.T) {
 	cache.runReconciliation()
 
 	want := "bead.closed:" + gone.ID
+	found := false
 	for _, e := range events {
 		if e == want {
-			return
+			found = true
+			break
 		}
 	}
-	t.Fatalf("events = %v, want %s when backing confirmed not-found", events, want)
+	if !found {
+		t.Fatalf("events = %v, want %s when backing confirmed not-found", events, want)
+	}
+	if _, err := cache.Get(gone.ID); err == nil {
+		t.Fatalf("Get(gone) succeeded after confirmed close; cache should evict it")
+	}
+	assertNotCached(t, cache, gone.ID)
+}
+
+// TestReconcileEmitsCloseWhenGetReturnsClosed verifies that a real open-to-
+// closed transition still emits bead.closed when the closed bead is absent
+// from normal List results.
+func TestReconcileEmitsCloseWhenGetReturnsClosed(t *testing.T) {
+	t.Parallel()
+
+	mem := NewMemStore()
+	closing, err := mem.Create(Bead{Title: "Closing"})
+	if err != nil {
+		t.Fatalf("Create closing: %v", err)
+	}
+
+	backing := &droppingListStore{Store: mem}
+	var events []string
+	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, _ json.RawMessage) {
+		events = append(events, eventType+":"+beadID)
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if err := mem.Close(closing.ID); err != nil {
+		t.Fatalf("Close backing bead: %v", err)
+	}
+	events = events[:0]
+
+	cache.runReconciliation()
+
+	want := "bead.closed:" + closing.ID
+	found := false
+	for _, e := range events {
+		if e == want {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("events = %v, want %s when backing returned closed bead", events, want)
+	}
+	assertNotCached(t, cache, closing.ID)
 }
 
 // TestReconcileDefersCloseOnBackingError verifies that a transient backing
@@ -160,5 +230,61 @@ func TestReconcileDefersCloseOnBackingError(t *testing.T) {
 	}
 	if _, err := cache.Get(uncertain.ID); err != nil {
 		t.Fatalf("Get(uncertain) after reconcile: %v", err)
+	}
+	stats := cache.Stats()
+	if stats.ReconcileRecoveries != 0 {
+		t.Fatalf("ReconcileRecoveries = %d, want 0", stats.ReconcileRecoveries)
+	}
+	if stats.ReconcileCloseDeferrals != 1 {
+		t.Fatalf("ReconcileCloseDeferrals = %d, want 1", stats.ReconcileCloseDeferrals)
+	}
+}
+
+// TestReconcileDefersCloseWhenGetReturnsWrongID verifies recovery does not
+// merge a successful but invalid Get result under the requested ID.
+func TestReconcileDefersCloseWhenGetReturnsWrongID(t *testing.T) {
+	t.Parallel()
+
+	mem := NewMemStore()
+	uncertain, err := mem.Create(Bead{Title: "Uncertain"})
+	if err != nil {
+		t.Fatalf("Create uncertain: %v", err)
+	}
+
+	backing := &droppingListStore{Store: mem}
+	var events []string
+	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, _ json.RawMessage) {
+		events = append(events, eventType+":"+beadID)
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	backing.dropFromList = map[string]struct{}{uncertain.ID: {}}
+	backing.getOverride = map[string]Bead{
+		uncertain.ID: {ID: "wrong-id", Title: "Wrong bead", Status: "open"},
+	}
+	events = events[:0]
+
+	cache.runReconciliation()
+
+	for _, e := range events {
+		if e == "bead.closed:"+uncertain.ID {
+			t.Fatalf("emitted bead.closed despite wrong backing.Get ID; events = %v", events)
+		}
+	}
+	got, err := cache.Get(uncertain.ID)
+	if err != nil {
+		t.Fatalf("Get(uncertain) after reconcile: %v", err)
+	}
+	if got.ID != uncertain.ID || got.Title != uncertain.Title {
+		t.Fatalf("Get(uncertain) = %#v, want cached bead %#v", got, uncertain)
+	}
+	stats := cache.Stats()
+	if stats.ReconcileRecoveries != 0 {
+		t.Fatalf("ReconcileRecoveries = %d, want 0", stats.ReconcileRecoveries)
+	}
+	if stats.ReconcileCloseDeferrals != 1 {
+		t.Fatalf("ReconcileCloseDeferrals = %d, want 1", stats.ReconcileCloseDeferrals)
 	}
 }
