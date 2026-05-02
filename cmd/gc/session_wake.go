@@ -454,6 +454,7 @@ func advanceSessionDrainsWithSessionsTraced(
 		if !running {
 			// Process exited — drain complete.
 			completeDrain(session, store, ds, clk)
+			notifyDrainObservers(dt, *session)
 			dt.clearIdleProbe(id)
 			dt.remove(id)
 			telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "complete")
@@ -568,6 +569,7 @@ func advanceSessionDrainsWithSessionsTraced(
 			}
 			if !running {
 				completeDrain(session, store, ds, clk)
+				notifyDrainObservers(dt, *session)
 				dt.clearIdleProbe(id)
 				dt.remove(id)
 				telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "timeout")
@@ -579,6 +581,22 @@ func advanceSessionDrainsWithSessionsTraced(
 		}
 		// Else: still draining, check again next tick.
 	}
+}
+
+// notifyDrainObservers fires the drainTracker's onComplete callback for a
+// session whose drain just terminated. Callback is best-effort: a nil
+// receiver, missing callback, or zero-value session is a silent no-op.
+func notifyDrainObservers(dt *drainTracker, session beads.Bead) {
+	if dt == nil {
+		return
+	}
+	dt.mu.Lock()
+	cb := dt.onComplete
+	dt.mu.Unlock()
+	if cb == nil {
+		return
+	}
+	cb(session)
 }
 
 // completeDrain writes drain-complete metadata to the bead.

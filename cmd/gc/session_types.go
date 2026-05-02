@@ -4,6 +4,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -75,6 +76,12 @@ type drainTracker struct {
 	drains          map[string]*drainState     // session bead ID -> drain state
 	idleProbes      map[string]*idleProbeState // session bead ID -> async idle probe
 	idleProbeCursor int
+	// onComplete, when set, is invoked once per session whose drain
+	// reaches the terminal completeDrain path. The reconciler uses this
+	// to feed the drain-without-work circuit-breaker without widening
+	// the advanceSessionDrains signature. Pure observation hook —
+	// must not block or mutate drain state.
+	onComplete func(session beads.Bead)
 }
 
 func newDrainTracker() *drainTracker {

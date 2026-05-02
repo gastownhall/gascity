@@ -80,7 +80,8 @@ type CityRuntime struct {
 	standaloneRigStores map[string]beads.Store
 
 	// Bead-driven reconciler state (Phase 2f).
-	sessionDrains     *drainTracker // in-memory drain tracker; nil when bead reconciler disabled
+	sessionDrains     *drainTracker     // in-memory drain tracker; nil when bead reconciler disabled
+	poolDrainBackoff  *poolDrainBackoff // drain-without-work spawn-storm circuit-breaker
 	asyncStartLimiter *asyncStartLimiter
 	asyncStarts       asyncStartTracker
 	demandSnapshot    *runtimeDemandSnapshot
@@ -312,6 +313,8 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// Initialize bead-driven drain tracker when bead store is available.
 	if cr.cityBeadStore() != nil && cr.tomlPath != "" {
 		cr.sessionDrains = newDrainTracker()
+		cr.poolDrainBackoff = newPoolDrainBackoff(clock.Real{})
+		cr.installPoolDrainObserver()
 	}
 	if ctx.Err() != nil {
 		return
@@ -1155,6 +1158,10 @@ func (cr *CityRuntime) reloadConfigTraced(
 	if cr.cityBeadStore() != nil && cr.tomlPath != "" && cr.sessionDrains == nil {
 		cr.sessionDrains = newDrainTracker()
 	}
+	if cr.cityBeadStore() != nil && cr.tomlPath != "" && cr.poolDrainBackoff == nil {
+		cr.poolDrainBackoff = newPoolDrainBackoff(clock.Real{})
+		cr.installPoolDrainObserver()
+	}
 	cr.configRev = result.Revision
 	cr.watchTargets = config.WatchTargets(result.Prov, nextCfg, cityRoot)
 	cr.restartConfigWatcher()
@@ -1848,6 +1855,12 @@ func (cr *CityRuntime) loadDemandSnapshot(
 		if sessionBeads != nil {
 			openSessionBeads = sessionBeads.Open()
 		}
+		// Drain-without-work circuit-breaker: zero out scale_check demand for
+		// pools that have hit the spawn-storm pathology threshold and have
+		// no successful claims to suppress the trigger. Operates on the
+		// scale_check map only — assigned-work resume requests still flow
+		// through, so a backoff cannot starve in-flight claimed work.
+		applyPoolDrainBackoff(cr.poolDrainBackoff, cr.cityBeadStore(), result.ScaleCheckCounts)
 		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cr.cfg, cr.cityPath, openSessionBeads, result.AssignedWorkBeads, result.AssignedWorkStoreRefs)
 		result.PoolDesiredCounts = retainScaleCheckPartialPoolDesired(
 			PoolDesiredCounts(ComputePoolDesiredStatesTraced(
@@ -2046,6 +2059,22 @@ func (cr *CityRuntime) recordPreservedShutdownTrace() {
 		"city_name": cr.cityName,
 		"reason":    "supervisor_shutdown_preserve_mode",
 	})
+}
+
+// installPoolDrainObserver wires the drain-without-work detector to the
+// drainTracker's onComplete hook so each terminated drain feeds the
+// circuit-breaker. Reads cr.cfg and the city store at observation time —
+// safe across config reloads because the closure resolves fields lazily.
+func (cr *CityRuntime) installPoolDrainObserver() {
+	if cr == nil || cr.sessionDrains == nil || cr.poolDrainBackoff == nil {
+		return
+	}
+	detector := cr.poolDrainBackoff
+	cr.sessionDrains.mu.Lock()
+	cr.sessionDrains.onComplete = func(session beads.Bead) {
+		recordPoolDrainAck(detector, cr.cityBeadStore(), cr.cfg, session)
+	}
+	cr.sessionDrains.mu.Unlock()
 }
 
 // shutdown performs graceful two-pass agent shutdown for this city.

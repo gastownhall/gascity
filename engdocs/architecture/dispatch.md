@@ -247,6 +247,44 @@ System formulas are embedded in the `gc` binary and materialized to
 layer (Layer 0) in the formula resolution stack. Pack and city-level
 formulas override system formulas by name.
 
+## Spawn-Storm Defenses
+
+Pool agents have a feedback loop between `scale_check` (the demand
+oracle) and `work_query` (what a worker finds at the hook): when the two
+disagree about whether actionable work exists, the controller can
+spawn worker after worker that immediately drain-acks because no work
+is claimable. This is a "spawn storm" — visible as a sustained run of
+ephemeral pool sessions starting and exiting with `claim_count == 0`.
+
+Two complementary detectors guard against this:
+
+- **Per-bead positive-signal detector** (`spawn_storm.go`, sibling
+  defense layer): watches that pool work which scale_check says is
+  there actually does get claimed by spawned workers. When a specific
+  bead is repeatedly slung but never claimed, this detector trips and
+  applies exponential backoff before spawning more workers for it.
+
+- **Drain-without-work circuit breaker** (`pool_drain_backoff.go`):
+  observes the pathology directly — counts drain-acked sessions whose
+  lifetime claim count was zero, per pool, per rolling 5-minute window.
+  When that count crosses a threshold AND no in-progress claim exists
+  pool-wide (the rate-condition that suppresses race-loser noise),
+  scale_check demand for that pool is forced to 0 and held there with
+  exponential backoff (30s → 60s → 120s → 240s → 5min capped).
+
+Both detectors share cooldown surface — a successful claim observed
+pool-wide resets the drain-detector's streak immediately, the same
+healthy-progress signal the per-bead detector also responds to. The
+drain detector is robust across worker-pool model changes because it
+keys off worker outcomes (terminated without claiming) rather than
+supervisor model preconditions, so future changes to `work_query`
+semantics cannot silently disable it.
+
+State for the drain detector lives in memory on `CityRuntime` alongside
+`drainTracker`; it is intentionally lost on controller restart so a
+freshly restarted controller starts in the unsuppressed state and
+re-derives any active backoff from observed behavior.
+
 ## Testing
 
 Dispatch testing follows the philosophy in
