@@ -250,6 +250,73 @@ func TestResolveSessionID_SessionNameExactMatch(t *testing.T) {
 	}
 }
 
+func TestResolveSessionID_SessionNameExactMatchAcceptsTypeOnlySessionBead(t *testing.T) {
+	store := beads.NewMemStore()
+	b, _ := store.Create(beads.Bead{
+		Type: session.BeadType,
+		Metadata: map[string]string{
+			"session_name": "s-gc-legacy",
+		},
+	})
+
+	id, err := session.ResolveSessionID(store, "s-gc-legacy")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != b.ID {
+		t.Fatalf("got %q, want %q", id, b.ID)
+	}
+}
+
+func TestResolveSessionID_AliasExactMatchAcceptsTypeOnlySessionBead(t *testing.T) {
+	store := beads.NewMemStore()
+	b, _ := store.Create(beads.Bead{
+		Type: session.BeadType,
+		Metadata: map[string]string{
+			"alias": "legacy",
+		},
+	})
+
+	id, err := session.ResolveSessionID(store, "legacy")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != b.ID {
+		t.Fatalf("got %q, want %q", id, b.ID)
+	}
+}
+
+func TestResolveSessionID_TrimsMetadataIdentifier(t *testing.T) {
+	store := beads.NewMemStore()
+	b, _ := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "worker",
+		},
+	})
+
+	id, err := session.ResolveSessionID(store, " worker ")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != b.ID {
+		t.Fatalf("got %q, want %q", id, b.ID)
+	}
+}
+
+func TestResolveSessionID_WhitespaceOnlyIdentifierDoesNotList(t *testing.T) {
+	store := &listCountingStore{Store: beads.NewMemStore()}
+
+	_, err := session.ResolveSessionID(store, "   ")
+	if !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("ResolveSessionID(whitespace) = %v, want ErrSessionNotFound", err)
+	}
+	if len(store.listCalls) != 0 {
+		t.Fatalf("List calls = %d, want 0 for empty trimmed metadata identifier", len(store.listCalls))
+	}
+}
+
 func TestResolveSessionID_PrefersSessionNameOverAlias(t *testing.T) {
 	store := beads.NewMemStore()
 	_, _ = store.Create(beads.Bead{
@@ -414,6 +481,33 @@ func TestResolveSessionIDAllowClosed_ResolvesClosedSessionName(t *testing.T) {
 	}
 	if id != b.ID {
 		t.Fatalf("got %q, want %q", id, b.ID)
+	}
+}
+
+func TestResolveSessionIDAllowClosed_OpenHitStaysCacheServed(t *testing.T) {
+	backing := &listCountingStore{Store: beads.NewMemStore()}
+	b, _ := backing.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "sky",
+		},
+	})
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+	backing.listCalls = nil
+
+	id, err := session.ResolveSessionIDAllowClosed(cache, "sky")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != b.ID {
+		t.Fatalf("got %q, want %q", id, b.ID)
+	}
+	if len(backing.listCalls) != 0 {
+		t.Fatalf("backing List calls = %d, want 0 for cached open match: %+v", len(backing.listCalls), backing.listCalls)
 	}
 }
 

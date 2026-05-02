@@ -3970,11 +3970,8 @@ func assertSessionResolverMetadataFilteredListCalls(t *testing.T, calls []beads.
 		t.Fatal("expected at least one List call")
 	}
 	for i, query := range calls {
-		if query.Label != session.LabelSession {
-			t.Fatalf("List call #%d Label = %q, want %q", i, query.Label, session.LabelSession)
-		}
 		if len(query.Metadata) == 0 {
-			t.Fatalf("List call #%d has no metadata filter (would scan all session beads): %+v", i, query)
+			t.Fatalf("List call #%d has no metadata filter (would scan broad bead sets): %+v", i, query)
 		}
 	}
 }

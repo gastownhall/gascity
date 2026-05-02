@@ -426,12 +426,82 @@ func TestLookupConfiguredNamedSession_BoundedConflictQueries(t *testing.T) {
 		t.Fatalf("List calls = %d, want bounded small constant without duplicate session_name lookup", len(store.queries))
 	}
 	for i, query := range store.queries {
-		if query.Label != LabelSession {
-			t.Fatalf("query #%d Label = %q, want %q", i, query.Label, LabelSession)
-		}
 		if len(query.Metadata) == 0 {
 			t.Fatalf("query #%d has no metadata filter: %+v", i, query)
 		}
+	}
+}
+
+func TestLookupConfiguredNamedSession_AcceptsTypeOnlyCanonicalBead(t *testing.T) {
+	store := beads.NewMemStore()
+	spec := NamedSessionSpec{
+		Identity:    "mayor",
+		SessionName: "test-city--mayor",
+	}
+	canonical, err := store.Create(beads.Bead{
+		Type: BeadType,
+		Metadata: map[string]string{
+			NamedSessionMetadataKey:      "true",
+			NamedSessionIdentityMetadata: spec.Identity,
+			"session_name":               spec.SessionName,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(canonical): %v", err)
+	}
+
+	lookup, err := LookupConfiguredNamedSession(store, spec)
+	if err != nil {
+		t.Fatalf("LookupConfiguredNamedSession: %v", err)
+	}
+	if !lookup.HasCanonical {
+		t.Fatal("HasCanonical = false, want true")
+	}
+	if lookup.Canonical.ID != canonical.ID {
+		t.Fatalf("Canonical.ID = %q, want %q", lookup.Canonical.ID, canonical.ID)
+	}
+}
+
+func TestLookupConfiguredNamedSession_ReportsSessionNameConflictBeforeAliasConflict(t *testing.T) {
+	store := beads.NewMemStore()
+	spec := NamedSessionSpec{
+		Identity:    "mayor",
+		SessionName: "test-city--mayor",
+	}
+	aliasConflict, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"alias":      spec.Identity,
+			"template":   "other",
+			"agent_name": "other",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(alias conflict): %v", err)
+	}
+	sessionNameConflict, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name": spec.SessionName,
+			"template":     "other",
+			"agent_name":   "other",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(session_name conflict): %v", err)
+	}
+
+	lookup, err := LookupConfiguredNamedSession(store, spec)
+	if err != nil {
+		t.Fatalf("LookupConfiguredNamedSession: %v", err)
+	}
+	if !lookup.HasConflict {
+		t.Fatal("HasConflict = false, want true")
+	}
+	if lookup.Conflict.ID != sessionNameConflict.ID {
+		t.Fatalf("Conflict.ID = %q, want session_name conflict %q before alias conflict %q", lookup.Conflict.ID, sessionNameConflict.ID, aliasConflict.ID)
 	}
 }
 

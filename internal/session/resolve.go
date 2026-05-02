@@ -20,6 +20,9 @@ var (
 // live identifiers: open exact session_name matches first, then open exact
 // current alias matches. Normal session targeting does not fall through to
 // template, agent_name, or historical alias compatibility identifiers.
+// When a bead has both alias and session_name equal to the identifier, a
+// separate session_name-only bead owns the identifier; the dual bead remains
+// the session_name match only when no other session_name match exists.
 //
 // Returns ErrSessionNotFound if no live match is found, or ErrAmbiguous
 // (wrapped with details) if multiple sessions match the identifier.
@@ -58,29 +61,51 @@ func resolveSessionID(store beads.Store, identifier string, allowClosed bool) (s
 		return "", err
 	}
 
-	bySessionName, err := listSessionBeadsByMetadata(store, "session_name", identifier, allowClosed)
+	lookupIdentifier := strings.TrimSpace(identifier)
+	if lookupIdentifier == "" {
+		return "", fmt.Errorf("%w: %q", ErrSessionNotFound, identifier)
+	}
+
+	bySessionName, err := listSessionBeadsByMetadata(store, "session_name", lookupIdentifier, false)
 	if err != nil {
 		return "", fmt.Errorf("listing sessions by session_name: %w", err)
 	}
-	byAlias, err := listSessionBeadsByMetadata(store, "alias", identifier, allowClosed)
+	bySessionName = filterOutAliasMatches(bySessionName, lookupIdentifier)
+	if len(bySessionName) > 0 {
+		return chooseSessionMatch(identifier, bySessionName)
+	}
+
+	byAlias, err := listSessionBeadsByMetadata(store, "alias", lookupIdentifier, false)
 	if err != nil {
 		return "", fmt.Errorf("listing sessions by alias: %w", err)
 	}
-	bySessionName = filterOutAliasMatches(bySessionName, identifier)
-
-	openSessionName, closedSessionName := splitOpen(bySessionName)
-	if len(openSessionName) > 0 {
-		return chooseSessionMatch(identifier, openSessionName)
-	}
-	openAlias, closedAlias := splitOpen(byAlias)
-	if len(openAlias) > 0 {
-		return chooseSessionMatch(identifier, openAlias)
+	if len(byAlias) > 0 {
+		return chooseSessionMatch(identifier, byAlias)
 	}
 	if !allowClosed {
 		return "", fmt.Errorf("%w: %q", ErrSessionNotFound, identifier)
 	}
+
+	bySessionName, err = listSessionBeadsByMetadata(store, "session_name", lookupIdentifier, true)
+	if err != nil {
+		return "", fmt.Errorf("listing closed sessions by session_name: %w", err)
+	}
+	bySessionName = filterOutAliasMatches(bySessionName, lookupIdentifier)
+	openSessionName, closedSessionName := splitOpen(bySessionName)
+	if len(openSessionName) > 0 {
+		return chooseSessionMatch(identifier, openSessionName)
+	}
 	if len(closedSessionName) > 0 {
 		return chooseSessionMatch(identifier, closedSessionName)
+	}
+
+	byAlias, err = listSessionBeadsByMetadata(store, "alias", lookupIdentifier, true)
+	if err != nil {
+		return "", fmt.Errorf("listing closed sessions by alias: %w", err)
+	}
+	openAlias, closedAlias := splitOpen(byAlias)
+	if len(openAlias) > 0 {
+		return chooseSessionMatch(identifier, openAlias)
 	}
 	if len(closedAlias) > 0 {
 		return chooseSessionMatch(identifier, closedAlias)
@@ -89,15 +114,19 @@ func resolveSessionID(store beads.Store, identifier string, allowClosed bool) (s
 }
 
 func listSessionBeadsByMetadata(store beads.Store, key, value string, allowClosed bool) ([]beads.Bead, error) {
+	key = strings.TrimSpace(key)
+	value = strings.TrimSpace(value)
+	if key == "" || value == "" {
+		return nil, nil
+	}
 	raw, err := store.List(beads.ListQuery{
-		Label:         LabelSession,
 		Metadata:      map[string]string{key: value},
 		IncludeClosed: allowClosed,
 	})
 	if err != nil {
 		return nil, err
 	}
-	out := raw[:0]
+	out := make([]beads.Bead, 0, len(raw))
 	for _, b := range raw {
 		if !IsSessionBeadOrRepairable(b) {
 			continue

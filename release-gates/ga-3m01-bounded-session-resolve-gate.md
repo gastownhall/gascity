@@ -1,55 +1,67 @@
-# Release gate — bound session resolve list calls (ga-3m01)
+# Release gate - bound session resolve list calls (ga-3m01)
 
-**Verdict:** PASS
+**Verdict:** LOCAL FIXES READY FOR RE-REVIEW
 
-Branch: `release/ga-3m01-bounded-session-resolve` (cut fresh off `origin/main` @ `07005b57`)
-Commit (cherry-picked): `2977299d` — perf(session): bound alias resolve list calls via metadata filters (ga-3m01)
+Branch: `release/ga-3m01-bounded-session-resolve`
+Base: `origin/main` at adopted PR creation
+PR: `gastownhall/gascity#1241`
 
-Source SHA on builder branch (fork/gc-builder-1-01561d4fb9ea): `515f2f92`. Cherry-picked clean (zero conflicts).
+Final adopted branch scope:
 
-Diff vs `origin/main`: 4 files changed, +184/-51 lines:
-- `cmd/gc/session_resolve.go` (+22/-4)
-- `cmd/gc/session_resolve_test.go` (+75/-0)
-- `internal/session/resolve.go` (+45/-47)
-- `internal/session/resolve_test.go` (+42/-0)
+- `e5718407c` - perf(session): bound alias resolve list calls via metadata filters
+- `18eb8268a` - fix(session): preserve bounded resolver semantics
+- `5d5db8a09` - fix(session): share bounded named-session lookup
+- Maintainer review fixup - restore trimmed metadata lookup semantics, preserve type-only session bead recovery, keep allow-closed open hits cache-served, document the resolver precedence rules, and refresh this gate evidence.
 
-## Review
+Current diff vs `refs/adopt-pr/ga-houfq0/upstream-base` spans these files:
 
-| Review bead | Reviews   | Verdict | Reviewer             |
-|-------------|-----------|---------|----------------------|
-| ga-lixd     | ga-3m01   | PASS    | gascity/reviewer-1   |
+- `cmd/gc/session_resolve.go`
+- `cmd/gc/session_resolve_test.go`
+- `internal/api/handler_sessions_test.go`
+- `internal/api/session_resolution.go`
+- `internal/session/named_config.go`
+- `internal/session/named_config_test.go`
+- `internal/session/resolve.go`
+- `internal/session/resolve_test.go`
+- `release-gates/ga-3m01-bounded-session-resolve-gate.md`
 
-Reviewer message (`gm-wisp-buz`): *"ga-lixd PASS. The fix bounds resolveSessionID and resolveConfiguredNamedSessionID via metadata-keyed store.List queries; resolveOpenQualifiedAliasBasename intentionally unchanged per spec exception. All resolver tests pass; preexisting cmd/gc failures (mail / city-flag / nudge-materialize) reproduce on baseline HEAD without this commit and are not regressions."*
+## Review State
 
-Gemini second-pass: disabled per current rig configuration.
+The original reviewer pass applied only to the first cherry-picked perf commit. Adopt-PR review attempt 2 later requested changes for whitespace normalization, the allow-closed cache path, resolver contract documentation, deterministic conflict coverage, and this stale gate evidence. Review attempt 3 then caught that exact metadata lookups had become label-prefiltered and no longer reached legacy type-only session beads.
+
+This local fixup addresses those findings. A fresh synthesis and quality scorecard still need to approve the local HEAD before the workflow can move to human approval or merge.
 
 ## Criteria
 
-| # | Criterion                             | Verdict | Evidence |
-|---|---------------------------------------|---------|----------|
-| 1 | Review PASS present                   | PASS    | reviewer-1 PASS on ga-lixd via mail `gm-wisp-buz`. |
-| 2 | Acceptance criteria met               | PASS    | Done-when items from ga-3m01 all green: `TestResolveSessionID_BoundedListCalls` and `TestResolveConfiguredNamedSessionID_BoundedListCalls` pass; existing tests in `internal/session/resolve_test.go` and `cmd/gc/session_resolve_test.go` unchanged and passing; `go vet ./...` clean; `resolveOpenQualifiedAliasBasename` left intact per spec exception. |
-| 3 | Tests pass                            | PASS    | Targeted: `go test ./internal/session/ -count=1` → ok 4.4s; `go test -run 'TestResolveSessionID\|TestResolveConfiguredNamedSessionID' ./cmd/gc/ -count=1` → ok 0.075s. Full `./...` has the same package-level failures in `cmd/gc`, `internal/doctor`, `internal/runtime/k8s` as `origin/main` baseline — preexisting, no regressions (see below). |
-| 4 | No high-severity review findings open | PASS    | Reviewer reported no findings. resolveOpenQualifiedAliasBasename exception is acknowledged in the bead spec. |
-| 5 | Final branch is clean                 | PASS    | `git status` clean (only this gate file untracked at write time). |
-| 6 | Branch diverges cleanly from main     | PASS    | `git cherry-pick 515f2f92` onto fresh branch off `origin/main` applied with zero conflicts. |
+| # | Criterion | Verdict | Evidence |
+|---|-----------|---------|----------|
+| 1 | Resolver lookups remain bounded | PASS | `TestResolveSessionID_BoundedListCalls`, `TestResolveConfiguredNamedSessionID_BoundedListCalls`, API configured-session tests, and named-session lookup tests assert metadata-filtered queries instead of broad session scans. |
+| 2 | Existing identifier semantics preserved | PASS | `TestResolveSessionID_TrimsMetadataIdentifier` covers the old trim-before-metadata-lookup behavior; `TestResolveSessionID_WhitespaceOnlyIdentifierDoesNotList` covers empty trimmed inputs. |
+| 3 | Type-only session beads remain recoverable | PASS | `TestResolveSessionID_SessionNameExactMatchAcceptsTypeOnlySessionBead`, `TestResolveSessionID_AliasExactMatchAcceptsTypeOnlySessionBead`, and `TestLookupConfiguredNamedSession_AcceptsTypeOnlyCanonicalBead` cover metadata matches on `Type == "session"` beads without the `gc:session` label. |
+| 4 | Allow-closed open hits stay cache-served | PASS | `TestResolveSessionIDAllowClosed_OpenHitStaysCacheServed` primes a `CachingStore` and asserts an open allow-closed hit does not issue backing `List` calls. |
+| 5 | Dual alias/session-name precedence is documented | PASS | `ResolveSessionID` godoc now states that a session-name-only bead owns the identifier over a dual alias/session-name bead, while a single dual bead still resolves. |
+| 6 | Configured named-session conflicts are deterministic | PASS | `TestLookupConfiguredNamedSession_ReportsSessionNameConflictBeforeAliasConflict` pins session-name conflicts before alias conflicts. |
+| 7 | Release evidence covers final branch | PASS | This gate lists the post-review branch files and validation commands instead of the original four-file cherry-pick only. |
+| 8 | Fresh review approval | PENDING | Required by the adopt-PR workflow after this local fixup. |
 
-## Build / vet
+## Validation
 
-- `go vet ./...` → clean
-- Cherry-pick clean (no conflicts)
+Commands run on the adopted worktree:
 
-## Pre-existing failures (not introduced)
+- `go test ./internal/session -run 'TestResolveSessionID_TrimsMetadataIdentifier|TestResolveSessionID_WhitespaceOnlyIdentifierDoesNotList|TestResolveSessionIDAllowClosed_OpenHitStaysCacheServed|TestLookupConfiguredNamedSession_ReportsSessionNameConflictBeforeAliasConflict' -count=1` -> pass
+- `go test ./internal/session -run 'TestResolveSessionID_SessionNameExactMatchAcceptsTypeOnlySessionBead|TestResolveSessionID_AliasExactMatchAcceptsTypeOnlySessionBead|TestLookupConfiguredNamedSession_AcceptsTypeOnlyCanonicalBead' -count=1` -> pass
+- `go test ./internal/session -count=1` -> pass
+- `git diff --check` -> pass
+- `go test ./internal/api -run 'TestResolveConfiguredNamedSessionIDWithContext|TestHandleSessionSubmitMaterializesNamedSession|TestFindNamedSessionSpecForTarget' -count=1` -> pass
+- `go test ./cmd/gc -run 'TestResolveSessionID|TestResolveConfiguredNamedSessionID' -count=1` -> pass
+- `make test` -> pass
 
-Full-suite test on the branch shows 109 individual `--- FAIL` lines across 3 packages (`cmd/gc`, `internal/doctor`, `internal/runtime/k8s`); baseline `origin/main` shows 106. The three differential tests are:
+## Performance Evidence
 
-- `TestControllerReloadCommandReloadsConfigImmediately`
-- `TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout`
-- `TestEnsureManagedDoltProjectIDGeneratesLocalIdentityWhenMetadataAndDatabaseMissing`
+This gate no longer claims the older `5.2s -> 1.3s` wall-clock measurement for the new `LookupConfiguredNamedSession` path. The current evidence is structural: resolver tests assert bounded metadata-filtered query shapes and prevent broad session scans. A separate benchmark or production trace is required before publishing a wall-clock improvement number for this specific path.
 
-All three reproduce identically on `origin/main` when run targeted (no full-suite timeout). Failure mode in all three: `Error 1146 (HY000): table not found: metadata` from `gc dolt-state ensure-project-id` — unrelated to session-resolve, root cause is the same dolt-schema issue on both branches. The 109/106 differential is full-suite cmd/gc 600s timeout cutoff noise (which tests run before the timeout differs run-to-run), not a regression.
+The dispatcher attempt-route binding path intentionally remains on `NamedSessionResolutionCandidates`, whose one label-scoped scan is documented separately for high-concurrency dispatcher load. Migrating or remeasuring that path is outside this PR and should be handled as follow-up work if needed.
 
-## Push target
+## Push Target
 
-`fork` (quad341/gascity) — `origin` (gastownhall/gascity) is read-only from this rig (`git push --dry-run origin HEAD` → 403).
-PR cross-repo: `--head quad341:release/ga-3m01-bounded-session-resolve --base main`.
+Do not push from review-fix iterations. The finalize step owns any push, follow-up PR creation, or merge after fresh review and human approval.

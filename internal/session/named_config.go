@@ -234,6 +234,9 @@ func FindCanonicalConfiguredNamedSessionBead(store beads.Store, spec NamedSessio
 
 // LookupConfiguredNamedSession finds the canonical bead or first live conflict
 // for a configured named session using exact metadata-filtered store queries.
+// The result is stitched from several sequential store reads; downstream
+// uniqueness and claim serialization remain the authority under concurrent
+// bead mutation.
 func LookupConfiguredNamedSession(store beads.Store, spec NamedSessionSpec) (ConfiguredNamedSessionLookup, error) {
 	return lookupConfiguredNamedSession(store, spec, true)
 }
@@ -305,18 +308,18 @@ func lookupConfiguredNamedSession(store beads.Store, spec NamedSessionSpec, incl
 }
 
 func listConfiguredNamedSessionBeadsByMetadata(store beads.Store, key, value string) ([]beads.Bead, error) {
+	key = strings.TrimSpace(key)
 	value = strings.TrimSpace(value)
-	if value == "" {
+	if key == "" || value == "" {
 		return nil, nil
 	}
 	items, err := store.List(beads.ListQuery{
-		Label:    LabelSession,
 		Metadata: map[string]string{key: value},
 	})
 	if err != nil {
 		return nil, err
 	}
-	out := items[:0]
+	out := make([]beads.Bead, 0, len(items))
 	for _, b := range items {
 		if !IsSessionBeadOrRepairable(b) {
 			continue
