@@ -68,7 +68,19 @@ func (e controllerCommandError) Is(target error) bool {
 		(target == errControllerUnresponsive && e.unresponsive)
 }
 
-const controllerSocketPathLimit = 100
+const (
+	controllerSocketPathLimit        = 100
+	sessionCircuitResetCommandPrefix = "session-circuit-reset:"
+)
+
+type sessionCircuitResetRequest struct {
+	Identity string `json:"identity"`
+}
+
+type sessionCircuitResetReply struct {
+	Outcome string `json:"outcome"`
+	Error   string `json:"error,omitempty"`
+}
 
 // controllerSocketPath returns the Unix socket path for controller commands.
 // It preserves the legacy .gc/controller.sock location for short city paths,
@@ -187,6 +199,8 @@ func handleControllerConn(
 			default:
 			}
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
+		case strings.HasPrefix(line, sessionCircuitResetCommandPrefix):
+			handleSessionCircuitResetSocketCmd(conn, line[len(sessionCircuitResetCommandPrefix):])
 		case strings.HasPrefix(line, "converge:"):
 			handleConvergeSocketCmd(conn, line[len("converge:"):], convergenceReqCh)
 		case strings.HasPrefix(line, "trace-arm:"):
@@ -207,6 +221,53 @@ func handleControllerConn(
 			handleTraceStatusSocketCmd(conn, cityPath)
 		}
 	}
+}
+
+func handleSessionCircuitResetSocketCmd(conn net.Conn, payload string) {
+	var req sessionCircuitResetRequest
+	if err := json.Unmarshal([]byte(payload), &req); err != nil {
+		writeJSONLine(conn, sessionCircuitResetReply{
+			Outcome: "failed",
+			Error:   fmt.Sprintf("invalid session circuit reset request: %v", err),
+		})
+		return
+	}
+	identity := strings.TrimSpace(req.Identity)
+	if identity == "" {
+		writeJSONLine(conn, sessionCircuitResetReply{
+			Outcome: "failed",
+			Error:   "identity is required",
+		})
+		return
+	}
+	defaultSessionCircuitBreaker().Reset(identity)
+	writeJSONLine(conn, sessionCircuitResetReply{Outcome: "ok"})
+}
+
+func resetSessionCircuitBreakerOnController(cityPath, identity string) error {
+	identity = strings.TrimSpace(identity)
+	if identity == "" {
+		return nil
+	}
+	payload, err := json.Marshal(sessionCircuitResetRequest{Identity: identity})
+	if err != nil {
+		return fmt.Errorf("encoding session circuit reset request: %w", err)
+	}
+	resp, err := sendControllerCommand(cityPath, sessionCircuitResetCommandPrefix+string(payload))
+	if err != nil {
+		return err
+	}
+	var reply sessionCircuitResetReply
+	if err := json.Unmarshal(resp, &reply); err != nil {
+		return fmt.Errorf("decoding session circuit reset reply: %w", err)
+	}
+	if reply.Outcome != "ok" {
+		if reply.Error != "" {
+			return fmt.Errorf("%s", reply.Error)
+		}
+		return fmt.Errorf("session circuit reset failed")
+	}
+	return nil
 }
 
 func handleReloadSocketCmd(conn net.Conn, payload string, ch chan reloadRequest) {

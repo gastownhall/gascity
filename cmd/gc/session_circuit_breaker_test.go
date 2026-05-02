@@ -155,6 +155,32 @@ func TestSessionCircuitBreaker_AutoResetAfterSilence(t *testing.T) {
 	}
 }
 
+func TestSessionCircuitBreaker_AutoResetClearsProgressSignature(t *testing.T) {
+	t0 := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	cb := breakerAt(30*time.Minute, 5)
+	const id = "gastown/mayor"
+
+	cb.ObserveProgressSignature(id, "assigned-work-before-open", t0)
+	for i := 0; i < 6; i++ {
+		cb.RecordRestart(id, t0.Add(time.Duration(i)*time.Minute))
+	}
+	if !cb.IsOpen(id, t0.Add(6*time.Minute)) {
+		t.Fatalf("precondition: breaker should be open after 6 restarts")
+	}
+
+	resetAt := t0.Add(65 * time.Minute)
+	if cb.IsOpen(id, resetAt) {
+		t.Fatalf("breaker should auto-reset to CLOSED after silence")
+	}
+	cb.ObserveProgressSignature(id, "assigned-work-after-reset", resetAt.Add(time.Minute))
+	for i := 0; i < 6; i++ {
+		state := cb.RecordRestart(id, resetAt.Add(time.Duration(i+2)*time.Minute))
+		if i == 5 && state != circuitOpen {
+			t.Fatalf("expected breaker to re-open after reset with no post-reset progress, got %v", state)
+		}
+	}
+}
+
 func TestSessionCircuitBreaker_ManualReset(t *testing.T) {
 	t0 := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
 	cb := breakerAt(30*time.Minute, 5)
@@ -217,6 +243,24 @@ func TestSessionCircuitBreaker_Snapshot(t *testing.T) {
 	}
 }
 
+func TestSessionCircuitBreaker_SnapshotTrimsExpiredRestartWindow(t *testing.T) {
+	t0 := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	cb := breakerAt(30*time.Minute, 5)
+	cb.RecordRestart("gastown/mayor", t0)
+	cb.RecordRestart("gastown/mayor", t0.Add(time.Minute))
+
+	snap := cb.Snapshot(t0.Add(32 * time.Minute))
+	if len(snap) != 1 {
+		t.Fatalf("snapshot len = %d, want 1", len(snap))
+	}
+	if snap[0].RestartCount != 0 {
+		t.Fatalf("restart count = %d, want expired entries trimmed", snap[0].RestartCount)
+	}
+	if !snap[0].WindowStart.IsZero() {
+		t.Fatalf("window start = %v, want zero after all entries expire", snap[0].WindowStart)
+	}
+}
+
 func TestSessionCircuitBreaker_ObserveProgressSignature(t *testing.T) {
 	t0 := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
 	cb := breakerAt(30*time.Minute, 5)
@@ -275,13 +319,23 @@ func TestComputeNamedSessionProgressSignatures(t *testing.T) {
 	}
 }
 
+func configureAlwaysNamedMayor(env *reconcilerTestEnv) {
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "mayor"}},
+		NamedSessions: []config.NamedSession{{
+			Name:     "mayor",
+			Template: "mayor",
+			Dir:      "gastown",
+			Mode:     "always",
+		}},
+	}
+}
+
 // TestReconciler_CircuitOpenBlocksSpawn verifies that a named session with
 // an OPEN breaker is NOT added to startCandidates and is NOT spawned.
 func TestReconciler_CircuitOpenBlocksSpawn(t *testing.T) {
 	env := newReconcilerTestEnv()
-	env.cfg = &config.City{
-		Agents: []config.Agent{{Name: "mayor"}},
-	}
+	configureAlwaysNamedMayor(env)
 
 	// Inject a breaker with aggressive thresholds and pre-trip it for the mayor.
 	cb := breakerAt(30*time.Minute, 5)
@@ -337,9 +391,7 @@ func TestReconciler_CircuitOpenBlocksSpawn(t *testing.T) {
 // named session normally.
 func TestReconciler_CircuitClosedAllowsSpawn(t *testing.T) {
 	env := newReconcilerTestEnv()
-	env.cfg = &config.City{
-		Agents: []config.Agent{{Name: "mayor"}},
-	}
+	configureAlwaysNamedMayor(env)
 
 	cb := breakerAt(30*time.Minute, 5)
 	restore := setSessionCircuitBreakerForTest(cb)
@@ -383,5 +435,70 @@ func TestReconciler_CircuitClosedAllowsSpawn(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected mayor in snapshot, got %+v", snap)
+	}
+}
+
+func TestReconciler_CircuitTripsThroughRepeatedWakeAttempts(t *testing.T) {
+	env := newReconcilerTestEnv()
+	configureAlwaysNamedMayor(env)
+	env.addDesired("mayor", "mayor", false)
+
+	cb := breakerAt(30*time.Minute, 5)
+	restore := setSessionCircuitBreakerForTest(cb)
+	defer restore()
+
+	const identity = "gastown/mayor"
+	b, err := env.store.Create(beads.Bead{
+		Title:  "mayor",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               "mayor",
+			"agent_name":                 "mayor",
+			"template":                   "mayor",
+			"state":                      "asleep",
+			"live_hash":                  runtime.LiveFingerprint(runtime.Config{Command: "test-cmd"}),
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: identity,
+			namedSessionModeMetadata:     "always",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create bead: %v", err)
+	}
+
+	for i := 0; i < 5; i++ {
+		current, err := env.store.Get(b.ID)
+		if err != nil {
+			t.Fatalf("get bead attempt %d: %v", i+1, err)
+		}
+		if woken := env.reconcile([]beads.Bead{current}); woken != 1 {
+			t.Fatalf("attempt %d: woken = %d, want 1; stderr=%s", i+1, woken, env.stderr.String())
+		}
+		if !env.sp.IsRunning("mayor") {
+			t.Fatalf("attempt %d: mayor should be running after CLOSED breaker wake", i+1)
+		}
+		if err := env.sp.Stop("mayor"); err != nil {
+			t.Fatalf("attempt %d: stop mayor: %v", i+1, err)
+		}
+		env.clk.Advance(6 * time.Minute)
+	}
+
+	current, err := env.store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("get bead before trip: %v", err)
+	}
+	if woken := env.reconcile([]beads.Bead{current}); woken != 0 {
+		t.Fatalf("trip attempt: woken = %d, want 0", woken)
+	}
+	if env.sp.IsRunning("mayor") {
+		t.Fatal("mayor should not be running after circuit trips")
+	}
+	if !strings.Contains(env.stderr.String(), "CIRCUIT_OPEN") {
+		t.Fatalf("expected CIRCUIT_OPEN log in stderr, got: %q", env.stderr.String())
+	}
+	snap := cb.Snapshot(env.clk.Now().UTC())
+	if len(snap) != 1 || snap[0].Identity != identity || snap[0].State != "CIRCUIT_OPEN" || snap[0].RestartCount != 6 {
+		t.Fatalf("snapshot after trip = %+v, want one OPEN entry with 6 restarts", snap)
 	}
 }

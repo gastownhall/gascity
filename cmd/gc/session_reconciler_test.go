@@ -115,6 +115,9 @@ type reconcilerTestEnv struct {
 }
 
 func newReconcilerTestEnv() *reconcilerTestEnv {
+	sessionCircuitBreakerMu.Lock()
+	sessionCircuitBreakerSingleton = newSessionCircuitBreaker(sessionCircuitBreakerConfig{})
+	sessionCircuitBreakerMu.Unlock()
 	return &reconcilerTestEnv{
 		store:        beads.NewMemStore(),
 		sp:           runtime.NewFake(),

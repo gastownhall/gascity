@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,31 +50,6 @@ func TestCmdSessionReset_ClearsCircuitBreaker(t *testing.T) {
 		t.Fatalf("store.Create(session bead): %v", err)
 	}
 
-	// Stand up a fake controller socket so cmdSessionReset's pokeController
-	// + cityUsesManagedReconciler check both succeed.
-	sockPath := filepath.Join(cityDir, ".gc", "controller.sock")
-	lis, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatalf("Listen(%q): %v", sockPath, err)
-	}
-	defer lis.Close() //nolint:errcheck
-	go func() {
-		for {
-			conn, err := lis.Accept()
-			if err != nil {
-				return
-			}
-			buf := make([]byte, 64)
-			n, _ := conn.Read(buf)
-			reply := "ok\n"
-			if string(buf[:n]) == "ping\n" {
-				reply = "123\n"
-			}
-			conn.Write([]byte(reply)) //nolint:errcheck
-			conn.Close()              //nolint:errcheck
-		}
-	}()
-
 	// Trip the breaker for "mayor" by recording enough restarts inside
 	// the rolling window with no progress events.
 	cb := newSessionCircuitBreaker(sessionCircuitBreakerConfig{
@@ -89,6 +65,21 @@ func TestCmdSessionReset_ClearsCircuitBreaker(t *testing.T) {
 	if !cb.IsOpen(identity, now.Add(time.Minute)) {
 		t.Fatalf("precondition: expected breaker OPEN for %q after 4 restarts", identity)
 	}
+
+	lis, err := startControllerSocket(
+		cityDir,
+		func() {},
+		nil,
+		make(chan reloadRequest),
+		make(chan convergenceRequest, 1),
+		make(chan struct{}, 1),
+		make(chan struct{}, 1),
+	)
+	if err != nil {
+		t.Fatalf("startControllerSocket: %v", err)
+	}
+	defer lis.Close()                              //nolint:errcheck
+	defer os.Remove(controllerSocketPath(cityDir)) //nolint:errcheck
 
 	var stdout, stderr bytes.Buffer
 	if code := cmdSessionReset([]string{identity}, &stdout, &stderr); code != 0 {
@@ -140,11 +131,11 @@ func TestCmdSessionReset_RequestsFreshRestartWithController(t *testing.T) {
 	}
 	defer lis.Close() //nolint:errcheck
 
-	commands := make(chan string, 3)
+	commands := make(chan string, 4)
 	errCh := make(chan error, 1)
 	go func() {
 		defer close(commands)
-		for i := 0; i < 3; i++ {
+		for i := 0; i < 4; i++ {
 			conn, err := lis.Accept()
 			if err != nil {
 				errCh <- err
@@ -162,6 +153,8 @@ func TestCmdSessionReset_RequestsFreshRestartWithController(t *testing.T) {
 			reply := "ok\n"
 			if cmd == "ping\n" {
 				reply = "123\n"
+			} else if strings.HasPrefix(cmd, "session-circuit-reset:") {
+				reply = `{"outcome":"ok"}` + "\n"
 			}
 			if _, err := conn.Write([]byte(reply)); err != nil {
 				conn.Close() //nolint:errcheck
@@ -177,9 +170,9 @@ func TestCmdSessionReset_RequestsFreshRestartWithController(t *testing.T) {
 		t.Fatalf("cmdSessionReset(controller) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
-	gotCommands := make([]string, 0, 3)
+	gotCommands := make([]string, 0, 4)
 	deadline := time.After(2 * time.Second)
-	for len(gotCommands) < 3 {
+	for len(gotCommands) < 4 {
 		select {
 		case err := <-errCh:
 			if err != nil {
@@ -187,8 +180,8 @@ func TestCmdSessionReset_RequestsFreshRestartWithController(t *testing.T) {
 			}
 		case cmd, ok := <-commands:
 			if !ok {
-				if len(gotCommands) != 3 {
-					t.Fatalf("controller commands = %v, want ping plus 2 pokes", gotCommands)
+				if len(gotCommands) != 4 {
+					t.Fatalf("controller commands = %v, want ping, poke, reset, poke", gotCommands)
 				}
 				break
 			}
@@ -197,11 +190,20 @@ func TestCmdSessionReset_RequestsFreshRestartWithController(t *testing.T) {
 			t.Fatalf("timed out waiting for controller pokes, got %v", gotCommands)
 		}
 	}
-	wantCommands := []string{"ping\n", "poke\n", "poke\n"}
-	for i, want := range wantCommands {
+	wantExact := []string{"ping\n", "poke\n"}
+	for i, want := range wantExact {
 		if gotCommands[i] != want {
 			t.Fatalf("controller command %d = %q, want %q", i, gotCommands[i], want)
 		}
+	}
+	if !strings.HasPrefix(gotCommands[2], "session-circuit-reset:") {
+		t.Fatalf("controller command 2 = %q, want session-circuit-reset", gotCommands[2])
+	}
+	if !strings.Contains(gotCommands[2], `"identity":"sky"`) {
+		t.Fatalf("controller command 2 = %q, want identity sky", gotCommands[2])
+	}
+	if gotCommands[3] != "poke\n" {
+		t.Fatalf("controller command 3 = %q, want poke", gotCommands[3])
 	}
 
 	reloaded, err := openCityStoreAt(cityDir)

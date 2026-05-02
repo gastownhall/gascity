@@ -157,6 +157,7 @@ func (b *sessionCircuitBreaker) maybeAutoResetLocked(e *circuitBreakerEntry, now
 		e.openedAt = time.Time{}
 		e.openRestartCnt = 0
 		e.loggedOpenOnce = false
+		e.progressSig = ""
 	}
 }
 
@@ -303,6 +304,7 @@ func (b *sessionCircuitBreaker) Snapshot(now time.Time) []CircuitBreakerSnapshot
 	out := make([]CircuitBreakerSnapshot, 0, len(b.entries))
 	for id, e := range b.entries {
 		b.maybeAutoResetLocked(e, now)
+		b.trimLocked(e, now)
 		snap := CircuitBreakerSnapshot{
 			Identity:     id,
 			State:        e.state.String(),

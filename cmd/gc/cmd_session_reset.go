@@ -74,22 +74,21 @@ func cmdSessionReset(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// Clear any tripped circuit breaker for this session's named identity.
-	// The breaker is keyed by named-session identity (see
-	// session_circuit_breaker.go), which the reconciler obtains from the
-	// session bead via namedSessionIdentity. Operators are told to run
-	// `gc session reset <identity>` from the breaker's ERROR log, so this
-	// must actually clear the breaker — otherwise the supervisor would
-	// continue to refuse respawns until the auto-reset window elapsed.
-	cb := defaultSessionCircuitBreaker()
-	// Reset by the user's input first: in the common case the operator
-	// pasted the identity from the ERROR message verbatim ("mayor"), and
-	// the resolver below may not be able to map that back to a session
-	// bead if the breaker is tripped because no session ever materialized.
-	cb.Reset(args[0])
+	identities := []string{args[0]}
 	if bead, err := store.Get(sessionID); err == nil {
 		if identity := namedSessionIdentity(bead); identity != "" {
-			cb.Reset(identity)
+			identities = append(identities, identity)
+		}
+	}
+	seen := make(map[string]bool, len(identities))
+	for _, identity := range identities {
+		if identity == "" || seen[identity] {
+			continue
+		}
+		seen[identity] = true
+		if err := resetSessionCircuitBreakerOnController(cityPath, identity); err != nil {
+			fmt.Fprintf(stderr, "gc session reset: clearing session circuit breaker for %q: %v\n", identity, err) //nolint:errcheck // best-effort stderr
+			return 1
 		}
 	}
 
