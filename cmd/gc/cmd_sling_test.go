@@ -1625,6 +1625,81 @@ func TestCmdSlingRefusesMissingConfiguredPrefixAllAlphaBeadID(t *testing.T) {
 	}
 }
 
+// TestCmdSlingMultiDashBeadIDRoutesExistingBead verifies that a bead ID
+// containing multiple dashes (e.g. "fo-spawn-storm") is treated as an existing
+// bead when its prefix matches a configured rig — not as inline text that would
+// silently create a new bead.
+func TestCmdSlingMultiDashBeadIDRoutesExistingBead(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "foundations")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rig): %v", err)
+	}
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatalf("ensureScopedFileStoreLayout: %v", err)
+	}
+	for _, dir := range []string{cityDir, rigDir} {
+		if err := ensurePersistedScopeLocalFileStore(dir); err != nil {
+			t.Fatalf("ensurePersistedScopeLocalFileStore(%s): %v", dir, err)
+		}
+	}
+	writeTestFileStoreBeads(t, rigDir, []beads.Bead{{
+		ID:       "fo-spawn-storm",
+		Title:    "spawn storm investigation",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{},
+	}})
+	cityToml := `[workspace]
+name = "demo"
+
+[[rigs]]
+name = "foundations"
+path = "foundations"
+prefix = "fo"
+
+[[agent]]
+name = "worker"
+dir = "foundations"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Chdir(cityDir)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSling(
+		[]string{"foundations/worker", "fo-spawn-storm"},
+		false, false, false,
+		"", nil, "",
+		true, false, "",
+		false, false, false,
+		"", "",
+		&stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("cmdSling returned %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Created ") {
+		t.Fatalf("stdout = %q, want existing bead route without inline creation", stdout.String())
+	}
+
+	rigStore, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig): %v", err)
+	}
+	routed, err := rigStore.Get("fo-spawn-storm")
+	if err != nil {
+		t.Fatalf("rigStore.Get(fo-spawn-storm): %v", err)
+	}
+	if routed.Metadata["gc.routed_to"] != "foundations/worker" {
+		t.Fatalf("bead gc.routed_to = %q, want foundations/worker", routed.Metadata["gc.routed_to"])
+	}
+}
+
 func TestSlingStoreEnvUsesRigBdRuntimeForMixedProviderRig(t *testing.T) {
 	cityDir := t.TempDir()
 	wantPort := strconv.Itoa(writeReachableManagedDoltState(t, cityDir))
@@ -5850,6 +5925,37 @@ func TestLooksLikeBeadID(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("looksLikeBeadID(%q) = %v, want %v", tt.input, got, tt.want)
 		}
+	}
+}
+
+func TestLooksLikeConfiguredBeadID(t *testing.T) {
+	cfg := &config.City{Rigs: []config.Rig{{Name: "foundations", Prefix: "fo"}}}
+
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		// Multi-dash IDs with a known rig prefix are accepted.
+		{"fo-spawn-storm", true},
+		{"fo-rebase-pr-1105", true},
+		{"fo-sling-target-race-line-216", true},
+		// Single-dash ID with known prefix still works.
+		{"fo-abc123", true},
+		// Spaces are not bead IDs.
+		{"hello world", false},
+		// Unknown prefix is not accepted.
+		{"some-other-prefix-thing", false},
+	}
+	for _, tt := range tests {
+		got := looksLikeConfiguredBeadID(cfg, tt.input)
+		if got != tt.want {
+			t.Errorf("looksLikeConfiguredBeadID(%q) = %v, want %v", tt.input, got, tt.want)
+		}
+	}
+
+	// No config → always false.
+	if looksLikeConfiguredBeadID(nil, "fo-spawn-storm") {
+		t.Error("looksLikeConfiguredBeadID(nil, ...) = true, want false")
 	}
 }
 

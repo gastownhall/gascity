@@ -263,6 +263,14 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 		createInlineBead, previewInlineText := resolveInlineBeadAction(cfg, beadOrFormula, dryRun)
 		inlineText = previewInlineText
 		if createInlineBead {
+			// Defense in depth: looksLikeConfiguredBeadID should have already
+			// caught any rig-prefixed string. If one slips through, error out
+			// rather than silently creating a new bead when the caller likely
+			// meant to route an existing one.
+			if hasKnownRigPrefix(cfg, beadOrFormula) {
+				fmt.Fprintf(stderr, "gc sling: %q looks like a bead ID with a known rig prefix — did you mean to route an existing bead? Try: bd show %s\n", beadOrFormula, beadOrFormula) //nolint:errcheck
+				return 1
+			}
 			created, err := store.Create(beads.Bead{Title: beadOrFormula, Description: stdinDescription, Type: "task"})
 			if err != nil {
 				fmt.Fprintf(stderr, "gc sling: creating bead: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1473,6 +1481,12 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 		w("  The wisp root bead (not the formula name) is routed to the agent.")
 		w("")
 	} else {
+		// Warn when this preview is for inline text: the live path would create
+		// a new bead rather than route the one shown below.
+		if opts.InlineText {
+			fmt.Fprintf(stderr, "gc sling: warning: %q is treated as inline text — live path would create a new bead titled %q, not route this bead\n", opts.BeadOrFormula, opts.BeadOrFormula) //nolint:errcheck
+		}
+
 		// Work section (bead info).
 		printBeadInfo(w, querier, opts.BeadOrFormula)
 
@@ -1757,18 +1771,66 @@ func looksLikeInlineText(cfg *config.City, beadOrFormula string) bool {
 }
 
 func looksLikeConfiguredBeadID(cfg *config.City, s string) bool {
-	prefix, baseSuffix, ok := sling.BeadIDParts(s)
-	if !ok || len(baseSuffix) > 8 {
-		return false
-	}
 	if cfg == nil {
 		return false
+	}
+	s = strings.TrimSpace(s)
+	if s == "" || strings.ContainsAny(s, " \t\n/\\") {
+		return false
+	}
+	i := strings.Index(s, "-")
+	if i <= 0 || i == len(s)-1 {
+		return false
+	}
+	prefix := s[:i]
+	// Validate prefix: must start with a letter, remaining chars alphanumeric.
+	for idx, c := range prefix {
+		if idx == 0 {
+			if ('A' > c || c > 'Z') && ('a' > c || c > 'z') {
+				return false
+			}
+			continue
+		}
+		if ('0' > c || c > '9') && ('a' > c || c > 'z') && ('A' > c || c > 'Z') {
+			return false
+		}
+	}
+	// Validate everything after the prefix dash: alphanumeric or dash only.
+	// This accepts multi-dash IDs like "fo-spawn-storm" when "fo" is a known rig.
+	for _, c := range s[i+1:] {
+		if ('0' > c || c > '9') && ('a' > c || c > 'z') && ('A' > c || c > 'Z') && c != '-' {
+			return false
+		}
 	}
 	if strings.EqualFold(prefix, config.EffectiveHQPrefix(cfg)) {
 		return true
 	}
-	for i := range cfg.Rigs {
-		if strings.EqualFold(prefix, cfg.Rigs[i].EffectivePrefix()) {
+	for j := range cfg.Rigs {
+		if strings.EqualFold(prefix, cfg.Rigs[j].EffectivePrefix()) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasKnownRigPrefix reports whether s begins with a known rig or HQ prefix
+// followed by a dash. Used as a defense-in-depth guard before creating an
+// inline bead — if the prefix matches a known rig, the caller likely meant to
+// route an existing bead.
+func hasKnownRigPrefix(cfg *config.City, s string) bool {
+	if cfg == nil {
+		return false
+	}
+	i := strings.Index(s, "-")
+	if i <= 0 {
+		return false
+	}
+	prefix := s[:i]
+	if strings.EqualFold(prefix, config.EffectiveHQPrefix(cfg)) {
+		return true
+	}
+	for j := range cfg.Rigs {
+		if strings.EqualFold(prefix, cfg.Rigs[j].EffectivePrefix()) {
 			return true
 		}
 	}
