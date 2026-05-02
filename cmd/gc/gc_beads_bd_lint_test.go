@@ -26,7 +26,7 @@ func TestGcBeadsBdNoBdConfigSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open script: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() //nolint:errcheck // test cleanup
 
 	// Match `bd <args> config set` and `run_bd_<wrapper> <args> config set`.
 	// The script invokes bd both directly and through helpers like
