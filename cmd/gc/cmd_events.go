@@ -1422,7 +1422,7 @@ func matchPayload(payload any, payloadMatch map[string][]string) bool {
 
 func matchPayloadObject(obj map[string]any, payloadMatch map[string][]string) bool {
 	for key, wants := range payloadMatch {
-		value, ok := obj[key]
+		value, ok := lookupPayloadKey(obj, key)
 		if !ok {
 			return false
 		}
@@ -1439,6 +1439,36 @@ func matchPayloadObject(obj map[string]any, payloadMatch map[string][]string) bo
 		}
 	}
 	return true
+}
+
+// lookupPayloadKey resolves a key against a payload object, supporting
+// dotted paths into nested map[string]any values. A flat key like "type"
+// looks up at the top level; "bead.issue_type" walks obj["bead"]["issue_type"].
+//
+// This allows --payload-match to filter nested event payloads such as
+// bead.closed (where the actually-filterable fields live under
+// payload.bead.*) while remaining backward-compatible with existing
+// flat-key callers.
+//
+// Returns (value, true) if the path resolves; (nil, false) if any segment
+// is missing or an intermediate value is not an object.
+func lookupPayloadKey(obj map[string]any, key string) (any, bool) {
+	if !strings.Contains(key, ".") {
+		v, ok := obj[key]
+		return v, ok
+	}
+	var current any = obj
+	for _, part := range strings.Split(key, ".") {
+		m, ok := current.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		current, ok = m[part]
+		if !ok {
+			return nil, false
+		}
+	}
+	return current, true
 }
 
 func payloadValueString(value any) string {
