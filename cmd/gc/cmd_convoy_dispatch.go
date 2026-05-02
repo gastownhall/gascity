@@ -346,9 +346,6 @@ func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (be
 				rigPath = filepath.Join(cityPath, rigPath)
 			}
 			if samePath(rigPath, scopeRoot) {
-				if !scopeUsesManagedBdStoreContract(cityPath, scopeRoot) {
-					return openStoreAtForCity(storePath, cityPath)
-				}
 				return controlBdStoreForRig(scopeRoot, cityPath, cfg), nil
 			}
 		}

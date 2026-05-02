@@ -1601,19 +1601,38 @@ esac
 
 func TestWorkflowServeControlReadyQueryQuotesMetadataFallbackTarget(t *testing.T) {
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "my rig"})
-	out := runWorkflowServeShellQueryForTest(t, query, map[string]string{}, `#!/bin/sh
+	tmp := t.TempDir()
+	argsPath := filepath.Join(tmp, "matched.args")
+	out := runWorkflowServeShellQueryForTest(t, query, map[string]string{
+		"BD_MATCHED_ARGS": argsPath,
+	}, `#!/bin/sh
 set -eu
-case "$1|$2|$3|$4|$5|$6|$7|$8|${9-}" in
-  "--readonly|--sandbox|ready|--metadata-field|gc.routed_to=my rig/control-dispatcher|--unassigned|--json|--limit=20|")
-    printf '[{"id":"ga-routed"}]'
-    ;;
-  *)
-    printf '[]'
-    ;;
-esac
+if [ "$#" -eq 8 ] &&
+   [ "$1" = "--readonly" ] &&
+   [ "$2" = "--sandbox" ] &&
+   [ "$3" = "ready" ] &&
+   [ "$4" = "--metadata-field" ] &&
+   [ "$5" = "gc.routed_to=my rig/control-dispatcher" ] &&
+   [ "$6" = "--unassigned" ] &&
+   [ "$7" = "--json" ] &&
+   [ "$8" = "--limit=20" ]; then
+  printf '%s\n' "$@" > "$BD_MATCHED_ARGS"
+  printf '[{"id":"ga-routed"}]'
+  exit 0
+fi
+printf '[]'
 `)
 	if got, want := strings.TrimSpace(out), `[{"id":"ga-routed"}]`; got != want {
 		t.Fatalf("control query output = %q, want %q", got, want)
+	}
+	argsData, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read matched args: %v", err)
+	}
+	gotArgs := strings.Split(strings.TrimSpace(string(argsData)), "\n")
+	wantArgs := []string{"--readonly", "--sandbox", "ready", "--metadata-field", "gc.routed_to=my rig/control-dispatcher", "--unassigned", "--json", "--limit=20"}
+	if !slices.Equal(gotArgs, wantArgs) {
+		t.Fatalf("matched bd args = %#v, want %#v", gotArgs, wantArgs)
 	}
 }
 
@@ -1809,7 +1828,7 @@ path = %q
 	}
 }
 
-func TestOpenControlStoreUsesSandboxedBdRunner(t *testing.T) {
+func TestOpenControlStoreDisablesAutoExportWithoutSandboxingWrites(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "myrig-repo")
@@ -1863,13 +1882,71 @@ func TestOpenControlStoreUsesSandboxedBdRunner(t *testing.T) {
 		t.Fatalf("bd envs = %#v, want two command environments", envs)
 	}
 	for i, call := range calls {
-		if len(call) < 2 || call[0] != "--sandbox" || call[1] != "update" {
-			t.Fatalf("bd call = %#v, want --sandbox update ...", call)
+		if len(call) < 1 || call[0] != "update" {
+			t.Fatalf("bd call = %#v, want update ...", call)
+		}
+		if slices.Contains(call, "--sandbox") {
+			t.Fatalf("bd call = %#v, write-capable control stores must not use --sandbox", call)
 		}
 		if got := envs[i]["BD_EXPORT_AUTO"]; got != "false" {
 			t.Fatalf("bd env %d BD_EXPORT_AUTO = %q, want false", i, got)
 		}
 	}
+}
+
+func TestOpenControlStoreAtForCityPreservesFileAndExecProviderStores(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rigs", "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExecStoreCityConfig(t, cityDir, "metro-city", "ct", []config.Rig{{
+		Name:   "frontend",
+		Path:   "rigs/frontend",
+		Prefix: "fe",
+	}})
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "metro-city", Prefix: "ct"},
+		Rigs: []config.Rig{{
+			Name:   "frontend",
+			Path:   "rigs/frontend",
+			Prefix: "fe",
+		}},
+	}
+
+	t.Run("file", func(t *testing.T) {
+		t.Setenv("GC_BEADS", "file")
+		store, err := openControlStoreAtForCity(rigDir, cityDir, cfg)
+		if err != nil {
+			t.Fatalf("openControlStoreAtForCity(file): %v", err)
+		}
+		if _, ok := store.(*beads.FileStore); !ok {
+			t.Fatalf("control store = %T, want *beads.FileStore for file provider", store)
+		}
+	})
+
+	t.Run("exec", func(t *testing.T) {
+		captureDir := t.TempDir()
+		script := writeExecCaptureScript(t, captureDir)
+		provider := "exec:" + script
+		t.Setenv("GC_BEADS", provider)
+
+		store, err := openControlStoreAtForCity(rigDir, cityDir, cfg)
+		if err != nil {
+			t.Fatalf("openControlStoreAtForCity(exec): %v", err)
+		}
+		if _, err := store.Create(beads.Bead{Title: "rig"}); err != nil {
+			t.Fatalf("exec control Create: %v", err)
+		}
+		env := readExecCaptureEnv(t, filepath.Join(captureDir, "frontend.env"))
+		if got := env["GC_PROVIDER"]; got != provider {
+			t.Fatalf("exec GC_PROVIDER = %q, want %q", got, provider)
+		}
+		if got := env["GC_STORE_SCOPE"]; got != "rig" {
+			t.Fatalf("exec GC_STORE_SCOPE = %q, want rig", got)
+		}
+	})
 }
 
 func TestRunWorkflowServeUsesGCTemplateForSessionContext(t *testing.T) {

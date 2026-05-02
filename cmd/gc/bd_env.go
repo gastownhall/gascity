@@ -72,33 +72,24 @@ func controlBdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix
 }
 
 func controlBdCommandRunnerForCity(cityPath string) beads.CommandRunner {
-	return sandboxBDCommandRunner(bdCommandRunnerWithManagedRetry(cityPath, func(dir string) map[string]string {
+	return bdCommandRunnerWithManagedRetry(cityPath, func(dir string) map[string]string {
 		env := bdRuntimeEnv(cityPath)
 		env["BEADS_DIR"] = filepath.Join(dir, ".beads")
 		applyControlBdEnv(env)
 		return env
-	}))
+	})
 }
 
 func controlBdCommandRunnerForRig(cityPath string, cfg *config.City, rigDir string) beads.CommandRunner {
-	return sandboxBDCommandRunner(bdCommandRunnerWithManagedRetry(cityPath, func(_ string) map[string]string {
+	return bdCommandRunnerWithManagedRetry(cityPath, func(_ string) map[string]string {
 		env := bdRuntimeEnvForRig(cityPath, cfg, rigDir)
 		applyControlBdEnv(env)
 		return env
-	}))
+	})
 }
 
 func applyControlBdEnv(env map[string]string) {
 	env["BD_EXPORT_AUTO"] = "false"
-}
-
-func sandboxBDCommandRunner(base beads.CommandRunner) beads.CommandRunner {
-	return func(dir, name string, args ...string) ([]byte, error) {
-		if name == "bd" {
-			args = append([]string{"--sandbox"}, args...)
-		}
-		return base(dir, name, args...)
-	}
 }
 
 func issuePrefixForScope(scopeRoot, cityPath string, cfg *config.City) string {
