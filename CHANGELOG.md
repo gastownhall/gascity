@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `[[orders.overrides]]` rig matching is stricter and clearer. A rigless
+  override (`rig` unset) still matches **only** city-level orders; if the
+  named order exists only as per-rig instances, the error now names every
+  matching rig so it's obvious what to type. `rig = "*"` is a new wildcard
+  that targets every instance of the named order (city-level + per-rig).
+  The literal `"*"` is reserved and rejected as a real rig name by config
+  validation.
 - Managed Dolt config now emits listener backlog and connection-timeout keys.
   Existing managed cities may see a `dolt-config` doctor warning until
   `gc dolt restart` or the next managed server start regenerates

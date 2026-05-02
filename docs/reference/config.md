@@ -370,7 +370,7 @@ OrderOverride modifies a scanned order's scheduling fields.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `name` | string | **yes** |  | Name is the order name to target (required). |
-| `rig` | string |  |  | Rig scopes the override to a specific rig's order. Empty matches city-level orders. |
+| `rig` | string |  |  | Rig scopes the override to a specific rig's order. Empty matches ONLY city-level orders (those with no rig); it does NOT match per-rig instances of the same name — those expand at scan time and require an explicit rig. Use rig = "*" as a wildcard to match every instance of the named order (city-level + every rig-scoped copy). The literal "*" is reserved and rejected as a real rig name by config validation. |
 | `enabled` | boolean |  |  | Enabled overrides whether the order is active. |
 | `trigger` | string |  |  | Trigger overrides the trigger type. |
 | `gate` | string |  |  | Gate is a deprecated alias for Trigger accepted during the gate-&gt;trigger migration. Parsed inputs are normalized to Trigger. |

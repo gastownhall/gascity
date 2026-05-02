@@ -2549,6 +2549,17 @@ func TestValidateRigs_MissingPath(t *testing.T) {
 	}
 }
 
+func TestValidateRigs_WildcardNameRejected(t *testing.T) {
+	rigs := []Rig{{Name: "*", Path: "/a"}}
+	err := ValidateRigs(rigs, "ci")
+	if err == nil {
+		t.Fatal(`expected error for rig name "*"`)
+	}
+	if !strings.Contains(err.Error(), "wildcard") {
+		t.Errorf("error = %q, want 'wildcard'", err)
+	}
+}
+
 func TestValidateRigs_DuplicateName(t *testing.T) {
 	rigs := []Rig{
 		{Name: "frontend", Path: "/a"},

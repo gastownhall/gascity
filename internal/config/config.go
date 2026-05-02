@@ -15,6 +15,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/orders"
 )
 
 // validAgentName matches names safe for use in session identifiers.
@@ -1088,8 +1089,13 @@ type OrdersConfig struct {
 type OrderOverride struct {
 	// Name is the order name to target (required).
 	Name string `toml:"name" jsonschema:"required"`
-	// Rig scopes the override to a specific rig's order.
-	// Empty matches city-level orders.
+	// Rig scopes the override to a specific rig's order. Empty matches
+	// ONLY city-level orders (those with no rig); it does NOT match
+	// per-rig instances of the same name — those expand at scan time
+	// and require an explicit rig. Use rig = "*" as a wildcard to match
+	// every instance of the named order (city-level + every rig-scoped
+	// copy). The literal "*" is reserved and rejected as a real rig
+	// name by config validation.
 	Rig string `toml:"rig,omitempty"`
 	// Enabled overrides whether the order is active.
 	Enabled *bool `toml:"enabled,omitempty"`
@@ -2716,6 +2722,11 @@ func ValidateRigs(rigs []Rig, hqPrefix string) error {
 	for i, r := range rigs {
 		if r.Name == "" {
 			return fmt.Errorf("rig[%d]: name is required", i)
+		}
+		// orders.RigWildcard is reserved as the [[orders.overrides]]
+		// token; a real rig with that name would be silently shadowed.
+		if r.Name == orders.RigWildcard {
+			return fmt.Errorf("rig[%d]: name %q is reserved as the [[orders.overrides]] wildcard", i, r.Name)
 		}
 		if r.Path == "" {
 			return fmt.Errorf("rig %q: path is required", r.Name)
