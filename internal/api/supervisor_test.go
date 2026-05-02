@@ -725,6 +725,87 @@ func TestSupervisorGlobalEventListLimitReturnsTail(t *testing.T) {
 	}
 }
 
+func TestSupervisorGlobalEventListLimitReturnsTailAcrossCitiesWithHeadTotal(t *testing.T) {
+	s1 := newFakeState(t)
+	s1.cityName = "alpha"
+	alpha := s1.eventProv.(*events.Fake)
+	alpha.Record(events.Event{Type: events.SessionWoke, Actor: "a1", Subject: "alpha-old", Ts: time.Unix(1, 0)})
+	alpha.Record(events.Event{Type: events.SessionWoke, Actor: "a1", Subject: "alpha-new", Ts: time.Unix(4, 0)})
+
+	s2 := newFakeState(t)
+	s2.cityName = "beta"
+	beta := s2.eventProv.(*events.Fake)
+	beta.Record(events.Event{Type: events.SessionWoke, Actor: "b1", Subject: "beta-old", Ts: time.Unix(2, 0)})
+	beta.Record(events.Event{Type: events.SessionStopped, Actor: "b1", Subject: "beta-middle", Ts: time.Unix(3, 0)})
+	beta.Record(events.Event{Type: events.SessionWoke, Actor: "b1", Subject: "beta-new", Ts: time.Unix(5, 0)})
+
+	sm := newTestSupervisorMux(t, map[string]*fakeState{
+		"alpha": s1,
+		"beta":  s2,
+	})
+
+	req := httptest.NewRequest("GET", "/v0/events?limit=2", nil)
+	rec := httptest.NewRecorder()
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Items []events.TaggedEvent `json:"items"`
+		Total int                  `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 5 {
+		t.Fatalf("total = %d, want 5", resp.Total)
+	}
+	if len(resp.Items) != 2 {
+		t.Fatalf("items len = %d, want 2", len(resp.Items))
+	}
+	if resp.Items[0].Subject != "alpha-new" || resp.Items[1].Subject != "beta-new" {
+		t.Fatalf("subjects = [%s %s], want [alpha-new beta-new]", resp.Items[0].Subject, resp.Items[1].Subject)
+	}
+}
+
+func TestSupervisorGlobalEventListLimitWithFilterReportsFilteredTotal(t *testing.T) {
+	s1 := newFakeState(t)
+	s1.cityName = "alpha"
+	ep := s1.eventProv.(*events.Fake)
+	ep.Record(events.Event{Type: events.SessionWoke, Actor: "a1", Subject: "old", Ts: time.Unix(1, 0)})
+	ep.Record(events.Event{Type: events.SessionStopped, Actor: "a1", Subject: "ignored", Ts: time.Unix(2, 0)})
+	ep.Record(events.Event{Type: events.SessionWoke, Actor: "a1", Subject: "new", Ts: time.Unix(3, 0)})
+
+	sm := newTestSupervisorMux(t, map[string]*fakeState{"alpha": s1})
+
+	req := httptest.NewRequest("GET", "/v0/events?type=session.woke&limit=1", nil)
+	rec := httptest.NewRecorder()
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Items []events.TaggedEvent `json:"items"`
+		Total int                  `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 2 {
+		t.Fatalf("total = %d, want 2 filtered matches", resp.Total)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("items len = %d, want 1", len(resp.Items))
+	}
+	if resp.Items[0].Subject != "new" {
+		t.Fatalf("subject = %q, want new", resp.Items[0].Subject)
+	}
+}
+
 func TestSupervisorGlobalEventListRejectsInvalidSince(t *testing.T) {
 	sm := newTestSupervisorMux(t, map[string]*fakeState{})
 
@@ -968,6 +1049,26 @@ func TestSupervisorGlobalEventStreamWithoutCursorStartsAtHead(t *testing.T) {
 	data := decodeSSETestData(t, frame)
 	if data["subject"] != "new" {
 		t.Fatalf("data.subject = %v, want new; data=%v", data["subject"], data)
+	}
+}
+
+func TestSupervisorGlobalEventStreamAfterCursorReplaysFromCursor(t *testing.T) {
+	s := newFakeState(t)
+	s.cityName = "alpha"
+	ep := s.eventProv.(*events.Fake)
+	ep.Record(events.Event{Type: events.SessionWoke, Actor: "tester", Subject: "old"})
+
+	sm := newTestSupervisorMux(t, map[string]*fakeState{
+		"alpha": s,
+	})
+
+	frame := firstSSEFrameAfterRecord(t, sm, "/v0/events/stream?after_cursor=alpha:0", "tagged_event", func() {})
+	if frame.ID != "alpha:1" {
+		t.Fatalf("SSE id = %q, want alpha:1; body=%s", frame.ID, frame.Data)
+	}
+	data := decodeSSETestData(t, frame)
+	if data["subject"] != "old" {
+		t.Fatalf("data.subject = %v, want old; data=%v", data["subject"], data)
 	}
 }
 
