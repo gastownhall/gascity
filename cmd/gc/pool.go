@@ -102,10 +102,16 @@ type scaleParams struct {
 }
 
 // scaleParamsFor extracts scaling parameters from an Agent's fields.
+//
+// Check is the count-form pool-demand query (EffectivePoolDemandQuery).
+// It shares the bd ready predicate with EffectiveWorkQuery's Tier 3 via
+// bdReadyPoolDemandShell, keeping reconciler spawn decisions and worker
+// claim decisions structurally symmetric. See engdocs/architecture/dispatch.md
+// "scale_check ↔ work_query correspondence".
 func scaleParamsFor(a *config.Agent) scaleParams {
 	sp := scaleParams{
 		Min:   a.EffectiveMinActiveSessions(),
-		Check: a.EffectiveScaleCheck(),
+		Check: a.EffectivePoolDemandQuery(),
 	}
 	if m := a.EffectiveMaxActiveSessions(); m != nil {
 		sp.Max = *m

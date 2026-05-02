@@ -2493,6 +2493,22 @@ func (a *Agent) AttachEnabled() bool {
 	return a.Attach == nil || *a.Attach
 }
 
+// bdReadyPoolDemandShell returns the bd ready predicate for unassigned,
+// non-epic pool demand routed to target. This is the one-source-of-truth for the
+// "is there work this template can claim?" question that both the worker
+// (via EffectiveWorkQuery Tier 3) and the reconciler (via
+// EffectivePoolDemandQuery, count-form) ask. Diverging the two
+// re-introduces the protocol-mismatch class — see the
+// "scale_check ↔ work_query correspondence" note in
+// engdocs/architecture/dispatch.md and the spawn-storm regression
+// addressed by PR #1516.
+//
+// Callers append their own bd flags (--limit=1 for first-row work_query;
+// piped to jq 'length' for the count-form) and shell handling.
+func bdReadyPoolDemandShell(target string) string {
+	return `bd ready --metadata-field gc.routed_to=` + target + ` --unassigned --exclude-type=epic --json`
+}
+
 // EffectiveWorkQuery returns the work query command for this agent.
 // If WorkQuery is set, returns it as-is. Otherwise returns the default
 // three-tier query with multi-identifier assignee resolution.
@@ -2517,6 +2533,10 @@ func (a *Agent) AttachEnabled() bool {
 // When the reconciler runs the query for demand detection (no session
 // context), all identity vars are empty → assignee tiers skip → only
 // the routed_to tier fires to detect new demand.
+//
+// Tier 3's predicate is shared with EffectivePoolDemandQuery via
+// bdReadyPoolDemandShell so reconciler spawn decisions and worker claim
+// decisions stay symmetric.
 func (a *Agent) EffectiveWorkQuery() string {
 	if a.WorkQuery != "" {
 		return a.WorkQuery
@@ -2546,8 +2566,7 @@ func (a *Agent) EffectiveWorkQuery() string {
 			`ephemeral|"") ;; ` +
 			`*) exit 0 ;; ` +
 			`esac; ` +
-			`r=$(bd ready --metadata-field gc.routed_to=` + target +
-			` --unassigned --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+			`r=$(` + bdReadyPoolDemandShell(target) + ` --limit=1 2>/dev/null); ` +
 			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 			`printf "[]"'`
 	}
@@ -2581,11 +2600,9 @@ func (a *Agent) EffectiveWorkQuery() string {
 		`ephemeral|"") ;; ` +
 		`*) exit 0 ;; ` +
 		`esac; ` +
-		`r=$(bd ready --metadata-field gc.routed_to=` + target +
-		` --unassigned --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`r=$(` + bdReadyPoolDemandShell(target) + ` --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		`bd ready --metadata-field gc.routed_to=` + legacyTarget +
-		` --unassigned --exclude-type=epic --json --limit=1 2>/dev/null'`
+		bdReadyPoolDemandShell(legacyTarget) + ` --limit=1 2>/dev/null'`
 }
 
 func legacyWorkflowControlQualifiedName(target string) string {
@@ -2646,18 +2663,38 @@ func (a *Agent) DrainTimeoutDuration() time.Duration {
 	return dur
 }
 
-// EffectiveScaleCheck returns the scale check command for this agent.
-// If ScaleCheck is set, returns it. Otherwise returns a default that
-// counts new unassigned work routed to this agent's template via ready().
-// Assigned in-progress work is resumed from session beads, so it must not
-// create additional generic pool demand here.
-func (a *Agent) EffectiveScaleCheck() string {
+// EffectivePoolDemandQuery returns the count-form pool-demand query the
+// reconciler runs to detect new unassigned routed work. It is the
+// reconciler-side counterpart to EffectiveWorkQuery's Tier 3 (the worker
+// claim path): both derive their predicate from bdReadyPoolDemandShell so
+// any future change to the pool-demand shape flows to both paths
+// simultaneously.
+//
+// If ScaleCheck is set (user override), it takes precedence and is
+// returned as-is. Otherwise the default count-form is returned.
+//
+// Assigned in-progress work is resumed from session beads, so it must
+// not create additional generic pool demand here.
+//
+// See engdocs/architecture/dispatch.md "scale_check ↔ work_query
+// correspondence" and the protocol-mismatch class regression addressed
+// by PR #1516.
+func (a *Agent) EffectivePoolDemandQuery() string {
 	if a.ScaleCheck != "" {
 		return a.ScaleCheck
 	}
 	template := a.QualifiedName()
-	return `ready_json=$(bd ready --metadata-field gc.routed_to=` + template +
-		` --unassigned --limit 0 --json) && printf '%s\n' "$ready_json" | jq 'length'`
+	return `ready_json=$(` + bdReadyPoolDemandShell(template) +
+		` --limit 0) && printf '%s\n' "$ready_json" | jq 'length'`
+}
+
+// EffectiveScaleCheck returns the scale check command for this agent.
+// Pass-through to EffectivePoolDemandQuery for back-compat with code and
+// configs that name the predicate "scale_check"; new call sites should
+// prefer EffectivePoolDemandQuery to make the dependency on the
+// work_query predicate explicit.
+func (a *Agent) EffectiveScaleCheck() string {
+	return a.EffectivePoolDemandQuery()
 }
 
 // EffectiveMaxActiveSessions returns the agent's max active sessions.

@@ -2,7 +2,7 @@
 title: "Dispatch (Sling)"
 ---
 
-> Last verified against code: 2026-04-25
+> Last verified against code: 2026-05-06
 
 ## Summary
 
@@ -140,6 +140,44 @@ CLI layer (cmd/gc/cmd_sling.go)
   `SlingQuery` field and `EffectiveSlingQuery()` method that determines
   how beads are routed to this agent.
 
+## scale_check ↔ work_query correspondence
+
+Dispatch has two read sides that must stay symmetric:
+
+- **Reconciler (spawn side)**: when deciding whether a pool template
+  needs another session, the controller invokes
+  `Agent.EffectivePoolDemandQuery` (a thin pass-through that
+  `EffectiveScaleCheck` also returns) and parses the count.
+- **Worker (claim side)**: when an ephemeral session boots, `gc hook`
+  invokes `Agent.EffectiveWorkQuery`, whose Tier 3 fires for unassigned
+  routed work after the assignee tiers fall through.
+
+Both forms answer the same question — "is there ready, unassigned,
+non-epic work routed to this template?" — and must therefore observe
+the bead store through the same filter. They share the predicate via
+the package-level helper `bdReadyPoolDemandShell(target) → "bd ready
+--metadata-field gc.routed_to=<target> --unassigned --exclude-type=epic
+--json"`. The count form pipes through `jq 'length'`; the work-query
+form appends `--limit=1` and prints the first match. Targets resolve to
+`Agent.PoolName` when set and `Agent.QualifiedName()` otherwise, so
+pool instances and pool templates land on the same routed queue.
+
+Diverging the two — for example, by adding a state filter to the
+work-query without updating the count form — re-introduces the
+protocol-mismatch class. Pre-PR #1516 symptom: the reconciler counted
+molecule-typed beads as demand while the worker's `bd ready` skipped
+them, so spawned sessions exited immediately and the reconciler
+re-spawned, producing spawn storms.
+
+PR #1516 retired the divergent molecule tier from both paths
+simultaneously, leaving "ready unassigned non-epic routed_to" as the
+single predicate shape. This refactor made that equivalence
+**structural** by routing both paths through `bdReadyPoolDemandShell`.
+Adding new tiers or filters in the future is a single-helper change; tests
+`TestPoolDemandPredicateSharedWithWorkQuery` (structural) and
+`TestPoolDemandAndWorkQueryAgreeOnRoutedSemantics` (behavioral)
+guard against regressions.
+
 ## Invariants
 
 1. **Sling query placeholder is always `{}`.** The `buildSlingCommand`
@@ -183,6 +221,25 @@ CLI layer (cmd/gc/cmd_sling.go)
     `bd update {} --label=pool:<name>`. Custom `sling_query` overrides
     the default entirely.
 
+11. **scale_check ↔ work_query correspondence.** The reconciler's
+    pool-demand-detection path (`Agent.EffectivePoolDemandQuery`, count
+    form) and the worker's claim path (`Agent.EffectiveWorkQuery`, Tier
+    3 first-row form) MUST derive their `bd ready --metadata-field
+    gc.routed_to=<target> --unassigned --exclude-type=epic --json`
+    predicate from the same `bdReadyPoolDemandShell` helper in
+    `internal/config/config.go`. Any tier-shape change to one (added
+    filter, modified target resolution, new state) MUST be reflected in
+    the other. Diverging the two
+    re-introduces the protocol-mismatch class — the reconciler spawning
+    sessions for work the worker can't claim, or the worker idle while
+    new demand sits unspawned. Enforced by
+    `TestPoolDemandPredicateSharedWithWorkQuery` and
+    `TestPoolDemandAndWorkQueryAgreeOnRoutedSemantics` in
+    `internal/config/config_test.go`. Historical context: PR #1516
+    symmetrically simplified both predicates to just "ready unassigned
+    non-epic routed_to" (removing molecule-tier counting from each); this
+    refactor made that equivalence structural rather than coincidental.
+
 ## Interactions
 
 | Depends on | How |
@@ -212,7 +269,7 @@ CLI layer (cmd/gc/cmd_sling.go)
 | `cmd/gc/system_formulas.go` | `MaterializeSystemFormulas`, `ListEmbeddedSystemFormulas`, stale file cleanup |
 | `cmd/gc/system_formulas_test.go` | Tests for materialization: empty FS, write, overwrite, stale cleanup, idempotency, orders |
 | `cmd/gc/pool.go` | `evaluatePool` (scale check), `poolAgents` (instance expansion), `expandSessionSetup` (template context) |
-| `internal/config/config.go` | `Agent.SlingQuery`, `Agent.EffectiveSlingQuery()`, `Agent.EffectiveWorkQuery()`, `Agent.IsPool()` |
+| `internal/config/config.go` | `Agent.SlingQuery`, `Agent.EffectiveSlingQuery()`, `Agent.EffectiveWorkQuery()`, `Agent.EffectivePoolDemandQuery()`, `Agent.EffectiveScaleCheck()`, `bdReadyPoolDemandShell()`, `Agent.IsPool()` |
 | `internal/beads/beads.go` | `IsContainerType`, `Store.MolCook`, `Store.Children`, `Store.SetMetadata` |
 | `internal/beads/bdstore.go` | `BdStore.MolCook` and `BdStore.MolCookOn` -- formula-backed wisp instantiation via `bd mol wisp` / `bd mol bond` |
 | `internal/telemetry/recorder.go` | `RecordSling` -- metrics counter + structured log event for each dispatch |
