@@ -2,7 +2,11 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -393,6 +397,31 @@ func TestSubmitFollowUpQueuesDeferredMessageAndStartsCodexPoller(t *testing.T) {
 	}
 	if pollerCalls != 1 {
 		t.Fatalf("pollerCalls = %d, want 1", pollerCalls)
+	}
+}
+
+func TestEnsureSessionSubmitPollerRejectsGoTestExecutable(t *testing.T) {
+	cityPath := t.TempDir()
+	exe := filepath.Join(t.TempDir(), "session.test")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(test executable): %v", err)
+	}
+
+	origExecutable := sessionSubmitPollerExecutable
+	sessionSubmitPollerExecutable = func() (string, error) {
+		return exe, nil
+	}
+	defer func() { sessionSubmitPollerExecutable = origExecutable }()
+
+	err := ensureSessionSubmitPoller(cityPath, "agent", "s-test")
+	if err == nil || !strings.Contains(err.Error(), "Go test binary") {
+		t.Fatalf("ensureSessionSubmitPoller error = %v, want Go test binary refusal", err)
+	}
+	if _, statErr := os.Stat(sessionSubmitPollerPIDPath(cityPath, "s-test")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("poller pid file stat error = %v, want not exist", statErr)
+	}
+	if _, statErr := os.Stat(sessionSubmitPollerLogPath(cityPath, "s-test")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("poller log file stat error = %v, want not exist", statErr)
 	}
 }
 
