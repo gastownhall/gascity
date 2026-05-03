@@ -14,8 +14,12 @@ type acpRoutingProvider interface {
 
 func validateSessionTransport(resolved *config.ResolvedProvider, transport string, sp runtime.Provider) (string, error) {
 	transport = strings.TrimSpace(transport)
-	if transport != "acp" {
+	switch transport {
+	case "", config.SessionTransportTmux:
 		return transport, nil
+	case config.SessionTransportACP:
+	default:
+		return "", fmt.Errorf("unknown session transport %q", transport)
 	}
 	providerName := ""
 	if resolved != nil {

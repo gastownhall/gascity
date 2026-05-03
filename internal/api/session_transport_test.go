@@ -43,6 +43,27 @@ func TestProviderSessionTransportSupportsACPAloneStaysDefault(t *testing.T) {
 	}
 }
 
+func TestValidateSessionTransportAcceptsTmuxTransport(t *testing.T) {
+	transport, err := validateSessionTransport(&config.ResolvedProvider{
+		Name: "custom",
+	}, "tmux", runtime.NewFake())
+	if err != nil {
+		t.Fatalf("validateSessionTransport: %v", err)
+	}
+	if transport != "tmux" {
+		t.Fatalf("validateSessionTransport() = %q, want %q", transport, "tmux")
+	}
+}
+
+func TestValidateSessionTransportRejectsUnknownTransport(t *testing.T) {
+	_, err := validateSessionTransport(&config.ResolvedProvider{
+		Name: "custom",
+	}, "stdio", runtime.NewFake())
+	if err == nil {
+		t.Fatal("validateSessionTransport() error = nil, want unknown transport error")
+	}
+}
+
 func TestResolveSessionTemplateForCreateUsesProviderACPDefault(t *testing.T) {
 	fs := newSessionFakeState(t)
 	supportsACP := true

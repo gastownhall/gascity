@@ -25,10 +25,13 @@ type ProviderLaunchCommand struct {
 //
 // When transport is "acp", the ACP-specific command (ACPCommand/ACPArgs) is
 // used as the base instead of the default Command/Args. Pass "" for the
-// default (tmux) transport.
+// provider default or "tmux" for the tmux-backed CLI transport.
 func BuildProviderLaunchCommand(cityPath string, resolved *ResolvedProvider, optionOverrides map[string]string, transport string) (ProviderLaunchCommand, error) {
 	if resolved == nil {
 		return ProviderLaunchCommand{}, fmt.Errorf("resolved provider is nil")
+	}
+	if !IsValidSessionTransport(transport) {
+		return ProviderLaunchCommand{}, fmt.Errorf("unknown session transport %q", strings.TrimSpace(transport))
 	}
 
 	command := providerLaunchBaseCommand(resolved, transport)
@@ -67,15 +70,21 @@ func BuildProviderLaunchCommandWithoutOptions(cityPath string, resolved *Resolve
 	if resolved == nil {
 		return ProviderLaunchCommand{}, fmt.Errorf("resolved provider is nil")
 	}
+	if !IsValidSessionTransport(transport) {
+		return ProviderLaunchCommand{}, fmt.Errorf("unknown session transport %q", strings.TrimSpace(transport))
+	}
 	return appendProviderSettings(cityPath, resolved.Name, providerLaunchBaseCommand(resolved, transport)), nil
 }
 
 func providerLaunchBaseCommand(resolved *ResolvedProvider, transport string) string {
-	command := resolved.CommandString()
-	if transport == "acp" {
-		command = resolved.ACPCommandString()
+	switch strings.TrimSpace(transport) {
+	case SessionTransportACP:
+		return resolved.ACPCommandString()
+	case "", SessionTransportTmux:
+		return resolved.CommandString()
+	default:
+		return resolved.CommandString()
 	}
-	return command
 }
 
 func appendProviderSettings(cityPath, providerName, command string) ProviderLaunchCommand {

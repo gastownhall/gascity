@@ -1697,6 +1697,23 @@ func TestValidateResolvedSessionTransportAcceptsRoutedACPProvider(t *testing.T) 
 	}
 }
 
+func TestValidateResolvedSessionTransportAcceptsTmuxTransport(t *testing.T) {
+	if err := validateResolvedSessionTransport(&config.ResolvedProvider{
+		Name: "opencode",
+	}, "tmux", runtime.NewFake()); err != nil {
+		t.Fatalf("validateResolvedSessionTransport() = %v, want nil", err)
+	}
+}
+
+func TestValidateResolvedSessionTransportRejectsUnknownTransport(t *testing.T) {
+	err := validateResolvedSessionTransport(&config.ResolvedProvider{
+		Name: "opencode",
+	}, "stdio", runtime.NewFake())
+	if err == nil || !strings.Contains(err.Error(), "unknown session transport") {
+		t.Fatalf("validateResolvedSessionTransport() error = %v, want unknown transport error", err)
+	}
+}
+
 func TestValidateResolvedSessionTransportRejectsRoutedProviderWhenTransportCapabilityDisablesACP(t *testing.T) {
 	err := validateResolvedSessionTransport(&config.ResolvedProvider{
 		Name:        "opencode",

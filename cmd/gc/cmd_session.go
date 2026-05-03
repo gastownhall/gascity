@@ -470,8 +470,12 @@ type acpRouteRegistrar interface {
 
 func validateResolvedSessionTransport(resolved *config.ResolvedProvider, transport string, sp runtime.Provider) error {
 	transport = strings.TrimSpace(transport)
-	if transport != "acp" {
+	switch transport {
+	case "", config.SessionTransportTmux:
 		return nil
+	case config.SessionTransportACP:
+	default:
+		return fmt.Errorf("unknown session transport %q", transport)
 	}
 	providerName := ""
 	if resolved != nil {
