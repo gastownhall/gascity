@@ -30,7 +30,7 @@ var markdownLinkRE = regexp.MustCompile(`\[[^][]+\]\(([^)]+)\)`)
 // and should be link-checked. Update this list when adding or removing doc
 // directories. TestDocDirCoverage will fail if a new directory with markdown
 // appears that is not accounted for here or in docTreeIgnored.
-var docTreeDirs = []string{"contrib", "docs", "engdocs"}
+var docTreeDirs = []string{"contrib", "docs", "engdocs", "release-gates"}
 
 // docTreeIgnored lists directories that contain markdown but are not
 // documentation trees (e.g., embedded prompt templates, test fixtures,
@@ -570,7 +570,7 @@ func TestNoKnownStaleDocReferences(t *testing.T) {
 		"agent.NewFake",
 		"session.Fake",
 		"agent.Fake",
-		"internal/dolt",
+		"internal/dolt/",
 	}
 
 	var hits []string

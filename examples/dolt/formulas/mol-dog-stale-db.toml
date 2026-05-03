@@ -1,161 +1,262 @@
 description = """
-Detect stale and test databases accumulating in the Dolt server.
+Detect and clean stale Dolt databases and orphan Dolt processes.
 
-Stale databases are orphaned test databases (testdb_*, beads_t*, beads_pt*,
-doctest_*, doctortest_*, beads_vr*) that accumulate on the production Dolt
-server when tests leak or cleanup fails. These consume disk space, degrade
-server performance, and inflate SHOW DATABASES output.
-
-This formula adds continuous monitoring: detect orphan accumulation before
-it reaches crisis levels.
+This formula shells out to `gc dolt-cleanup --json`, parses the
+`gc.dolt.cleanup.v1` envelope, and emits one summary line per stage
+to `gc events` so operators skimming a long scrollback can spot
+trends. The full JSON report is appended to the work bead so a
+follow-up reader can `bd show <id>` to see details.
 
 ## Dog Contract
 
 This is infrastructure work. You:
-1. Query SHOW DATABASES and identify stale/test databases
-2. Count and classify orphans
-3. Clean up if count is manageable, escalate if excessive
-4. Report findings and exit
-5. Return to kennel
+1. Run a dry-run `gc dolt-cleanup --json --probe` scan.
+2. Decide: no work -> report, at/below stale-DB threshold -> apply, above threshold -> escalate.
+3. Apply with `gc dolt-cleanup --json --probe --force` only when safe.
+4. Report findings, nudge deacon if past warn threshold, exit.
+5. Return to kennel.
 
 ## Variables
 
 | Variable | Source | Description |
 |----------|--------|-------------|
-| port | config | Dolt server port (default 3307) |
-| max_orphans_for_sql | config | Max orphans for SQL-based cleanup (default 50) |
-| warn_threshold | config | Orphan count to trigger warning (default 5) |
+| max_orphans_for_sql | formula default | Max stale dropped databases before escalating instead of forcing (default 20) |
+| warn_threshold | formula default | Orphan count that triggers a warning to deacon (default 5) |
 
 ## Safety
 
-Only removes databases matching known test/orphan patterns. Production databases
-are identified by rig registry via gc rig list --json and are never touched.
-External rigs are supported (not subject to local glob limitations).
+`gc dolt-cleanup` resolves the Dolt port via the AD-04 chain
+(--port flag > city dolt.port > <rigRoot>/.beads/dolt-server.port >
+legacy 3307). Invalid explicit ports and unreadable or invalid rig
+port files fail closed; only absent rig port files can reach the
+legacy default. It cross-references registered rigs (HQ-first) and
+will not drop any database whose name matches a registered rig DB,
+nor any Dolt internals (`information_schema`, `mysql`,
+`dolt_cluster`, `__gc_probe`). Orphan-process kills are restricted
+to processes whose `--config` path lives under the test-config
+allowlist (`/tmp/Test*`, `os.TempDir()/Test*`, `~/.gotmp/Test*`).
+Database identifiers used for destructive DROP and purge calls must
+contain only ASCII letters, digits, underscores, and non-leading
+hyphens; rigs with other `dolt_database` names should be renamed or
+handled manually so the cleanup can stay SQL-injection safe.
 
-Read each step's description before acting — Config values override defaults."""
+The apply branch treats a non-zero `gc dolt-cleanup --probe --force`
+exit as an operator escalation. Do not retry from this formula with
+the separate `gc dolt cleanup --server-down-ok` fallback; that is a
+TTY-only human action after independently verifying the dolt server
+process is stopped and the port is closed.
+
+The runtime work is intentionally one formula step. Formula steps are
+separate agent interactions, so scan, decision, apply, and report state
+must stay inside one shell execution instead of relying on variables to
+cross step boundaries."""
 formula = "mol-dog-stale-db"
 version = 1
 
 [vars]
-[vars.port]
-description = "Dolt server port"
-default = "3307"
-
 [vars.max_orphans_for_sql]
-description = "Maximum orphan count for SQL-based cleanup (above this, escalate instead)"
-default = "50"
+description = "Maximum stale dropped database count the formula auto-applies; above this, it escalates instead"
+default = "20"
 
 [vars.warn_threshold]
-description = "Orphan count that triggers a warning"
+description = "Orphan count that triggers a warning nudge to deacon"
 default = "5"
 
 [[steps]]
-id = "scan"
-title = "Scan for stale and test databases"
-description = """
-Query the Dolt server and identify orphaned databases.
-
-**1. Query SHOW DATABASES:**
-```sql
-SHOW DATABASES;
-```
-Filter out Dolt internals (information_schema, mysql, dolt_cluster,
-performance_schema, sys, __gc_probe).
-
-**2. Classify each database:**
-
-Known test/orphan patterns:
-- `testdb_*` — test harness databases
-- `beads_t*` — beads test databases
-- `beads_pt*` — beads patrol test databases
-- `beads_vr*` — beads version test databases
-- `doctest_*` — documentation test databases
-- `doctortest_*` — doctor test databases
-
-Production databases are those referenced by any rig's metadata.
-
-**3. Record findings:**
-- Total database count
-- Production database count and names
-- Orphan database count and names
-- Orphan total size (check filesystem)
-
-**Exit criteria:** All databases classified."""
-
-[[steps]]
 id = "cleanup"
-title = "Clean up orphan databases"
-needs = ["scan"]
+title = "Scan, decide, apply, and report stale Dolt cleanup"
 description = """
-Remove orphan databases if count is manageable.
+Run this as one shell script so every derived value remains in the same process:
 
-**1. If no orphans found:**
-Skip — nothing to clean.
-
-**2. If orphan count <= {{max_orphans_for_sql}}:**
-Clean up via SQL:
-```sql
-DROP DATABASE IF EXISTS `<orphan_name>`;
-```
-
-**3. If orphan count > {{max_orphans_for_sql}}:**
-SQL cleanup would take too long via this loop. Delegate to gc dolt cleanup,
-which itself routes through the running server's `DROP DATABASE` (safe under
-the server's NBS lock):
 ```bash
-gc dolt cleanup --force --max <count>
-```
-If `gc dolt cleanup` returns ANY refusal (server unreachable, port reachable
-but `SELECT 1` failed, or cannot probe TCP), STOP. Do NOT retry with
-`--server-down-ok` from any agent context, including this formula. The
-flag is a TTY-only operator gesture; if you are an agent, you are not the
-operator, regardless of who scheduled you. Escalate immediately. Only a
-human operator may use `--server-down-ok`, and only after independently
-verifying the dolt server process is stopped AND the port is closed —
-running rm -rf against a live data dir corrupts NBS state and crash-loops
-the journal (#1549).
-```bash
-gc mail send mayor/ -s "ESCALATION: <count> orphan databases detected, dolt unreachable [HIGH]" \\
-  -m "Too many orphans for inline SQL cleanup AND gc dolt cleanup refused (server unreachable). Operator must confirm dolt is stopped (process gone AND port closed), then re-run with --server-down-ok."
-```
+set -euo pipefail
 
-**4. Record results:**
-- Orphans removed (count)
-- Orphans remaining (count)
-- Any errors during cleanup
+WORK_BEAD="${GC_BEAD_ID:?GC_BEAD_ID required (set by gc hook); aborting}"
+TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/dolt-cleanup.XXXXXX")
+DRAIN_ACKED=0
 
-**Exit criteria:** Orphans cleaned (or escalated if too many)."""
+cleanup() {
+  rm -rf "$TMP_DIR"
+  if [ "$DRAIN_ACKED" -ne 1 ]; then
+    gc runtime drain-ack || true
+  fi
+}
+trap cleanup EXIT
 
-[[steps]]
-id = "report"
-title = "Report findings and return to kennel"
-needs = ["cleanup"]
-description = """
-Generate summary and signal completion.
+SCAN_FILE="$TMP_DIR/scan.json"
+APPLY_FILE="$TMP_DIR/apply.json"
 
-**1. Generate report summary:**
-- Total databases
-- Production databases
-- Orphan databases found
-- Orphans removed
-- Orphans remaining
+append_report_note() {
+  local title="$1"
+  local file="$2"
+  if [ -s "$file" ]; then
+    if ! bd update "$WORK_BEAD" --append-notes "$(printf '## %s %s\n\n```json\n%s\n```' "$title" "$(date -Is)" "$(cat "$file")")"; then
+      echo "failed to append ${title} report; continuing to drain-ack" >&2
+    fi
+  fi
+}
 
-**2. Warn if above threshold:**
-If orphan count >= {{warn_threshold}}:
-```bash
-gc session nudge deacon/ "WARN: <count> orphan databases detected"
-```
+run_or_warn() {
+  local label="$1"
+  shift
+  if ! "$@"; then
+    echo "${label} failed; continuing to drain-ack" >&2
+  fi
+}
 
-**3. Signal completion:**
-```bash
-gc session nudge deacon/ "DOG_DONE: stale-db — orphans: <count>, removed: <count>"
-```
+drain_ack_once() {
+  if [ "$DRAIN_ACKED" -ne 1 ]; then
+    gc runtime drain-ack
+    DRAIN_ACKED=1
+  fi
+}
 
-**4. Close work and exit:**
-```bash
-gc bd close <work-bead> --reason "Stale DB scan complete"
-gc runtime drain-ack
+fail_open_after_drain() {
+  local message="$1"
+  echo "$message" >&2
+  drain_ack_once # drain-ack before failing open
+  exit 1
+}
+
+if ! gc dolt-cleanup --json --probe > "$SCAN_FILE"; then
+  append_report_note "scan (dry-run failed)" "$SCAN_FILE"
+  run_or_warn "emit dry-run failure escalation" gc event emit mol-dog-stale-db.escalate \
+    --message "dry-run failed before a valid cleanup decision; leaving work bead open"
+  fail_open_after_drain "gc dolt-cleanup dry-run failed; leaving work bead open"
+fi
+if ! jq -e '.schema == "gc.dolt.cleanup.v1"' "$SCAN_FILE" >/dev/null; then
+  append_report_note "scan (invalid JSON)" "$SCAN_FILE"
+  run_or_warn "emit invalid dry-run JSON escalation" gc event emit mol-dog-stale-db.escalate \
+    --message "dry-run returned invalid JSON; leaving work bead open"
+  fail_open_after_drain "gc dolt-cleanup dry-run returned invalid JSON; leaving work bead open"
+fi
+
+ORPHAN_DBS=$(jq -r '.dropped.count // 0' "$SCAN_FILE")
+ORPHAN_PROCS=$(jq -r '.reaped.targets | length' "$SCAN_FILE")
+ORPHAN_TOTAL=$((ORPHAN_DBS + ORPHAN_PROCS))
+DISK_BYTES=$(jq -r '.summary.bytes_freed_disk // .purge.bytes_reclaimed // 0' "$SCAN_FILE")
+RSS_BYTES=$(jq -r '.summary.bytes_freed_rss // 0' "$SCAN_FILE")
+SCAN_ERRS=$(jq -r '.summary.errors_total // 0' "$SCAN_FILE")
+INVALID_DROP_SKIPS=$(jq -r '[.dropped.skipped[]? | select(.reason == "invalid-identifier")] | length' "$SCAN_FILE")
+
+run_or_warn "emit scan event" gc event emit mol-dog-stale-db.scan \
+  --message "$ORPHAN_DBS orphans (${DISK_BYTES} bytes), $ORPHAN_PROCS procs (${RSS_BYTES} bytes)" \
+  --payload "$(jq -c '{dropped: .dropped.count, purge_bytes: .purge.bytes_reclaimed, procs: (.reaped.targets | length), rss_bytes: .summary.bytes_freed_rss, errors: .summary.errors_total, invalid_identifier_skips: ([.dropped.skipped[]? | select(.reason == "invalid-identifier")] | length)}' "$SCAN_FILE")"
+
+append_report_note "scan (dry-run)" "$SCAN_FILE"
+
+APPLIED=0
+ESCALATED=0
+DONE_BYTES=0
+DONE_ERRS="$SCAN_ERRS"
+DROP_OK=0
+DROP_FAIL=0
+PURGE_BYTES=0
+MISSED_PURGE_BYTES=0
+REAP_KILLED=0
+REAP_TOTAL="$ORPHAN_PROCS"
+
+if [ "$SCAN_ERRS" -gt 0 ] || [ "$INVALID_DROP_SKIPS" -gt 0 ]; then
+  ESCALATED=1
+  run_or_warn "send dry-run error escalation mail" gc mail send mayor \
+    "ESCALATION: Dolt cleanup dry-run reported ${SCAN_ERRS} error(s), ${INVALID_DROP_SKIPS} invalid stale database identifier(s)" \
+    "Dry-run report attached to work bead. Operator review required before forcing cleanup."
+  run_or_warn "emit dry-run error escalation" gc event emit mol-dog-stale-db.escalate \
+    --message "dry-run reported ${SCAN_ERRS} error(s), ${INVALID_DROP_SKIPS} invalid stale database identifier(s); leaving work bead open"
+  fail_open_after_drain "gc dolt-cleanup dry-run reported ${SCAN_ERRS} error(s), ${INVALID_DROP_SKIPS} invalid stale database identifier(s); leaving work bead open"
+elif [ "$ORPHAN_TOTAL" -eq 0 ] && [ "$DISK_BYTES" -le 0 ]; then
+  :
+elif [ "$ORPHAN_DBS" -gt "{{max_orphans_for_sql}}" ]; then
+  ESCALATED=1
+  DONE_BYTES=$((DISK_BYTES + RSS_BYTES))
+  run_or_warn "send max-orphan escalation mail" gc mail send mayor \
+    "ESCALATION: $ORPHAN_DBS stale Dolt databases exceed max_orphans_for_sql={{max_orphans_for_sql}}" \
+    "Dry-run report attached to work bead. Operator review required before forcing cleanup."
+  run_or_warn "emit max-orphan escalation" gc event emit mol-dog-stale-db.escalate \
+    --message "$ORPHAN_DBS stale databases > max_orphans_for_sql={{max_orphans_for_sql}} -> mail sent to mayor"
+else
+  if ! gc dolt-cleanup --json --probe --force > "$APPLY_FILE"; then
+    ESCALATED=1
+    append_report_note "apply (--force, failed)" "$APPLY_FILE"
+    run_or_warn "send apply refusal escalation mail" gc mail send mayor \
+      "ESCALATION: gc dolt-cleanup apply refused [HIGH]" \
+      "gc dolt-cleanup --probe --force refused. Do not retry from an agent. Operator must confirm dolt is stopped (process gone AND port closed), then use the separate gc dolt cleanup --server-down-ok fallback if appropriate."
+    run_or_warn "emit apply refusal escalation" gc event emit mol-dog-stale-db.escalate \
+      --message "apply refused; operator must verify dolt stopped before using gc dolt cleanup --server-down-ok"
+    fail_open_after_drain "gc dolt-cleanup apply failed; leaving work bead open"
+  fi
+  if ! jq -e '.schema == "gc.dolt.cleanup.v1"' "$APPLY_FILE" >/dev/null; then
+    append_report_note "apply (--force, invalid JSON)" "$APPLY_FILE"
+    run_or_warn "emit invalid apply JSON escalation" gc event emit mol-dog-stale-db.escalate \
+      --message "apply returned invalid JSON; leaving work bead open"
+    fail_open_after_drain "gc dolt-cleanup apply returned invalid JSON; leaving work bead open"
+  fi
+
+  DROP_OK=$(jq -r '.dropped.count // 0' "$APPLY_FILE")
+  DROP_FAIL=$(jq -r '.dropped.failed | length' "$APPLY_FILE")
+  PURGE_BYTES=$(jq -r '.purge.bytes_reclaimed // 0' "$APPLY_FILE")
+  REAP_KILLED=$(jq -r '.reaped.count // 0' "$APPLY_FILE")
+  REAP_TOTAL=$(jq -r '.reaped.targets | length' "$APPLY_FILE")
+  DONE_ERRS=$(jq -r '.summary.errors_total // 0' "$APPLY_FILE")
+  DONE_BYTES=$(jq -r '(.summary.bytes_freed_disk // 0) + (.summary.bytes_freed_rss // 0)' "$APPLY_FILE")
+  if [ "$PURGE_BYTES" -lt "$DISK_BYTES" ]; then
+    MISSED_PURGE_BYTES=$((DISK_BYTES - PURGE_BYTES))
+    DONE_ERRS=$((DONE_ERRS + 1))
+  fi
+  APPLIED=1
+
+  run_or_warn "emit drop event" gc event emit mol-dog-stale-db.drop \
+    --message "${DROP_OK}/${ORPHAN_DBS} ok, ${DROP_FAIL} failed"
+
+  PURGE_MESSAGE="${PURGE_BYTES} bytes reclaimed"
+  if [ "$MISSED_PURGE_BYTES" -gt 0 ]; then
+    PURGE_MESSAGE="${PURGE_MESSAGE} (${MISSED_PURGE_BYTES} bytes missed)"
+  fi
+  run_or_warn "emit purge event" gc event emit mol-dog-stale-db.purge \
+    --message "$PURGE_MESSAGE"
+
+  run_or_warn "emit reap event" gc event emit mol-dog-stale-db.reap \
+    --message "${REAP_KILLED}/${REAP_TOTAL} procs killed"
+
+  append_report_note "apply (--force)" "$APPLY_FILE"
+fi
+
+if [ "$APPLIED" -eq 1 ]; then
+  DONE_MESSAGE="${DONE_BYTES} bytes freed; ${DONE_ERRS} errors"
+else
+  DONE_MESSAGE="${DONE_BYTES} bytes reclaimable; ${DONE_ERRS} errors"
+fi
+
+run_or_warn "emit done event" gc event emit mol-dog-stale-db.done \
+  --message "$DONE_MESSAGE"
+
+if [ "$APPLIED" -eq 1 ] && [ "$DONE_ERRS" -gt 0 ]; then
+  ESCALATED=1
+  run_or_warn "emit apply error escalation" gc event emit mol-dog-stale-db.escalate \
+    --message "apply reported ${DONE_ERRS} error(s); leaving work bead open"
+fi
+
+if [ "$APPLIED" -eq 1 ] && [ "$MISSED_PURGE_BYTES" -gt 0 ]; then
+  ESCALATED=1
+  run_or_warn "emit missed purge escalation" gc event emit mol-dog-stale-db.escalate \
+    --message "apply missed ${MISSED_PURGE_BYTES} reclaimable bytes; leaving work bead open"
+fi
+
+if [ "$ORPHAN_TOTAL" -ge "{{warn_threshold}}" ]; then
+  gc session nudge deacon "WARN: $ORPHAN_TOTAL Dolt orphan(s) seen this scan (warn_threshold={{warn_threshold}})" || true
+fi
+
+gc session nudge deacon "DOG_DONE: stale-db - orphans: ${ORPHAN_TOTAL}, applied: ${APPLIED}, escalated: ${ESCALATED}" || true
+
+if [ "$APPLIED" -eq 1 ] && [ "$DONE_ERRS" -gt 0 ]; then
+  fail_open_after_drain "gc dolt-cleanup apply reported ${DONE_ERRS} error(s); leaving work bead open"
+fi
+
+bd close "$WORK_BEAD" --reason "Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED}, escalated=${ESCALATED})"
+drain_ack_once # drain-ack before normal exit
 exit
 ```
 
-**Exit criteria:** Report sent, dog returned to kennel."""
+**Exit criteria:** JSON schema validated, scan JSON attached, apply JSON
+attached when forced, stage events emitted, deacon nudged through
+`gc session nudge`, work bead closed, dog returned to kennel."""

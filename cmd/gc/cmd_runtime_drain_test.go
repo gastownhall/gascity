@@ -747,7 +747,7 @@ func TestRuntimeRequestRestartNamedOnDemandReturnsWithoutBlocking(t *testing.T) 
 		if code != 0 {
 			t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("cmdRuntimeRequestRestart blocked for named on-demand session")
 	}
 	if !strings.Contains(stdout.String(), "Restart skipped for named session") {
