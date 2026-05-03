@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
 )
@@ -188,30 +189,51 @@ func routeFanoutFragmentSteps(fragment *formula.FragmentRecipe, control beads.Be
 	}
 	routeCfg := loadAttemptRouteConfig(opts.CityPath)
 	for i := range fragment.Steps {
-		if fragment.Steps[i].Metadata["gc.kind"] == "spec" {
+		step := &fragment.Steps[i]
+		if step.Metadata["gc.kind"] == "spec" {
 			continue
 		}
-		target := strings.TrimSpace(fragment.Steps[i].Metadata["gc.run_target"])
-		if target == "" {
-			target = strings.TrimSpace(fragment.Steps[i].Metadata["gc.routed_to"])
-		}
-		if target == "" {
-			target = strings.TrimSpace(fragment.Steps[i].Assignee)
-		}
-		if target == "" {
-			target = executionRoute
-		} else {
-			target = qualifyAttemptTargetWithSourceRoute(target, executionRoute, routeCfg)
-		}
-		if isAttemptControlKind(fragment.Steps[i].Metadata["gc.kind"]) {
-			applyAttemptControlStepRoute(&fragment.Steps[i], target, routeCfg, store)
+		if isAttemptControlKind(step.Metadata["gc.kind"]) {
+			target := strings.TrimSpace(step.Metadata["gc.execution_routed_to"])
+			if target == "" {
+				target = fanoutFragmentStepTarget(*step, executionRoute, routeCfg)
+			}
+			applyAttemptControlStepRoute(step, target, routeCfg, store)
 			continue
 		}
+		if fanoutFragmentStepHasRoute(*step) {
+			continue
+		}
+		target := fanoutFragmentStepTarget(*step, executionRoute, routeCfg)
 		if target == "" {
 			continue
 		}
-		applyAttemptStepRoute(&fragment.Steps[i], target, routeCfg, store)
+		applyAttemptStepRoute(step, target, routeCfg, store)
 	}
+}
+
+func fanoutFragmentStepTarget(step formula.RecipeStep, executionRoute string, routeCfg *config.City) string {
+	target := strings.TrimSpace(step.Metadata["gc.run_target"])
+	if target == "" {
+		target = strings.TrimSpace(step.Metadata["gc.routed_to"])
+	}
+	if target == "" {
+		target = strings.TrimSpace(step.Assignee)
+	}
+	if target == "" {
+		return executionRoute
+	}
+	return qualifyAttemptTargetWithSourceRoute(target, executionRoute, routeCfg)
+}
+
+func fanoutFragmentStepHasRoute(step formula.RecipeStep) bool {
+	if strings.TrimSpace(step.Metadata["gc.execution_routed_to"]) != "" {
+		return true
+	}
+	if strings.TrimSpace(step.Metadata["gc.routed_to"]) != "" {
+		return true
+	}
+	return strings.TrimSpace(step.Assignee) != ""
 }
 
 func resolveExistingFragmentInstanceFromBeads(store beads.Store, all []beads.Bead, _ string, fragment *formula.FragmentRecipe, externalDeps []molecule.ExternalDep) (map[string]string, error) {
