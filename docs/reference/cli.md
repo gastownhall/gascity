@@ -30,6 +30,7 @@ gc [flags]
 | [gc convoy](#gc-convoy) | Manage convoys — graphs of related work |
 | [gc dashboard](#gc-dashboard) | Web dashboard for monitoring the supervisor and managed cities |
 | [gc doctor](#gc-doctor) | Check workspace health |
+| [gc dolt-cleanup](#gc-dolt-cleanup) | Find and remove orphaned Dolt databases (Go-side core) |
 | [gc event](#gc-event) | Event operations |
 | [gc events](#gc-events) | Show events from the GC API |
 | [gc formula](#gc-formula) | Manage and inspect formulas |
@@ -910,6 +911,40 @@ gc doctor
 | `--fix` | bool |  | attempt to fix issues automatically |
 | `-v`, `--verbose` | bool |  | show extra diagnostic details |
 
+## gc dolt-cleanup
+
+gc dolt-cleanup is the Go-side implementation of the operational Dolt
+cleanup tool. It resolves the Dolt server port via the AD-04 chain
+(--port &gt; city dolt.port &gt; &lt;rigRoot&gt;/.beads/dolt-server.port &gt; 3307),
+drops stale test/agent databases, calls DOLT_PURGE_DROPPED_DATABASES
+to reclaim disk, and reaps orphaned dolt sql-server processes left
+over from leaked test harnesses. Invalid explicit ports and unreadable
+or invalid rig port files fail closed before cleanup stages run; only
+absent rig port files can reach the legacy default.
+
+Dry-run by default. Pass --force to actually drop, purge, and kill.
+Active rig dolt servers, registered rig databases, and processes
+outside the test-config-path allowlist (/tmp/Test*, os.TempDir()/Test*,
+~/.gotmp/Test*) are always protected — see the PROTECTED section of the
+report. Destructive drops are limited to known stale test database name
+shapes and conservative SQL identifier characters; skipped stale matches
+are reported in dropped.skipped. Rig dolt_database names used for purge
+must use the same identifier shape: ASCII letters, digits, underscores,
+and non-leading hyphens.
+
+JSON envelope schema is stable: gc.dolt.cleanup.v1.
+
+```
+gc dolt-cleanup [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--force` | bool |  | actually drop, purge, and kill orphaned resources (default: dry-run) |
+| `--json` | bool |  | emit JSON envelope (gc.dolt.cleanup.v1) |
+| `--port` | string |  | override the resolved Dolt port |
+| `--probe` | bool |  | TCP-probe the resolved port; fail if unreachable |
+
 ## gc event
 
 Event operations
@@ -1549,6 +1584,7 @@ gc order
 | [gc order list](#gc-order-list) | List available orders |
 | [gc order run](#gc-order-run) | Execute an order manually |
 | [gc order show](#gc-order-show) | Show details of an order |
+| [gc order sweep-tracking](#gc-order-sweep-tracking) | Close stale order-tracking beads |
 
 ## gc order check
 
@@ -1619,6 +1655,22 @@ gc order show <name> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--rig` | string |  | rig name to disambiguate same-name orders |
+
+## gc order sweep-tracking
+
+Close stale open order-tracking beads.
+
+This is intended for maintenance exec orders. It only closes tracking beads
+older than --stale-after so a fresh in-flight order is not interrupted.
+
+```
+gc order sweep-tracking [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--quiet` | bool |  | suppress success output |
+| `--stale-after` | duration | `10m0s` | minimum age for an open tracking bead to be closed |
 
 ## gc pack
 

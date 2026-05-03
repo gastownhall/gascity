@@ -66,6 +66,8 @@ type CityRuntime struct {
 	retiredOrderDispatchers []orderDispatcher
 	trace                   *sessionReconcilerTraceManager
 
+	orderSweepWatchdogLast time.Time
+
 	rec events.Recorder
 	cs  *controllerState // nil when controller-managed bead stores are unavailable
 	svc *workspacesvc.Manager
@@ -791,8 +793,35 @@ func (cr *CityRuntime) dispatchOrders(ctx context.Context, cityRoot string) {
 	if ctx.Err() != nil {
 		return
 	}
+	now := time.Now()
+	cr.runOrderTrackingSweepWatchdog(now)
 	if cr.od != nil {
-		cr.od.dispatch(ctx, cityRoot, time.Now())
+		cr.od.dispatch(ctx, cityRoot, now)
+	}
+}
+
+func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
+	if !cr.orderSweepWatchdogLast.IsZero() && now.Sub(cr.orderSweepWatchdogLast) < orderTrackingSweepWatchdogInterval {
+		return
+	}
+	cr.orderSweepWatchdogLast = now
+
+	store := cr.cityBeadStore()
+	if store == nil {
+		return
+	}
+	onlyOrders := map[string]struct{}{
+		orderTrackingSweepOrder: {},
+	}
+	n, err := sweepStaleOrderTracking(store, now, orderTrackingSweepWatchdogStaleAfter, onlyOrders, orderTrackingWatchdogMetadataInitiator)
+	if err != nil {
+		if cr.stderr != nil {
+			fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		}
+		return
+	}
+	if n > 0 && cr.stderr != nil {
+		fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog closed %d stale tracking bead(s)\n", cr.logPrefix, n) //nolint:errcheck // best-effort stderr
 	}
 }
 
