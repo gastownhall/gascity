@@ -213,7 +213,7 @@ single handler error cases belong in unit tests next to the implementation.
 
 #### Live worker inference tests (`//go:build acceptance_c`)
 
-`test/acceptance/worker_inference` runs live Claude/Codex/Gemini CLI
+`test/acceptance/worker_inference` runs live Claude/Codex/Gemini/OpenCode CLI
 sessions through tmux and requires local or CI-provided provider auth. It is
 not part of PR CI. Run it deliberately when validating provider behavior:
 
@@ -222,9 +222,13 @@ make setup-worker-inference PROFILE=claude/tmux-cli
 make test-worker-inference PROFILE=claude/tmux-cli
 ```
 
-Supported profiles are `claude/tmux-cli`, `codex/tmux-cli`, and
-`gemini/tmux-cli`. Nightly CI runs these with its configured credentials and
-uploads worker report artifacts.
+Supported profiles are `claude/tmux-cli`, `codex/tmux-cli`,
+`gemini/tmux-cli`, and `opencode/tmux-cli`. OpenCode live tests use Gemini via
+`--model google/gemini-2.5-flash` by default; set
+`GC_WORKER_INFERENCE_OPENCODE_MODEL` to override it and provide
+`GOOGLE_GENERATIVE_AI_API_KEY`, `GEMINI_API_KEY`, or `GOOGLE_API_KEY` for auth.
+Nightly CI runs the configured profile matrix with its credentials and uploads
+worker report artifacts.
 
 ### 4. Documentation sync tests (`test/docsync`)
 

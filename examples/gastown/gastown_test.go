@@ -74,14 +74,38 @@ func TestCityTomlParses(t *testing.T) {
 		t.Errorf("Workspace.Name = %q, want %q", cfg.Workspace.Name, "gastown")
 	}
 	if len(cfg.Workspace.Includes) != 0 {
-		t.Errorf("Workspace.Includes = %v, want empty (migrated to [imports.gastown])", cfg.Workspace.Includes)
+		t.Errorf("Workspace.Includes = %v, want empty (migrated to pack.toml)", cfg.Workspace.Includes)
 	}
-	gastownImp, ok := cfg.Imports["gastown"]
+	// Imports live in pack.toml (portable definition), not city.toml (deployment).
+	if len(cfg.Imports) != 0 {
+		t.Errorf("cfg.Imports = %v, want empty (imports migrated to pack.toml)", cfg.Imports)
+	}
+}
+
+func TestCityPackTomlParses(t *testing.T) {
+	dir := exampleDir()
+	data, err := os.ReadFile(filepath.Join(dir, "pack.toml"))
+	if err != nil {
+		t.Fatalf("reading pack.toml: %v", err)
+	}
+
+	var tc packFileConfig
+	if _, err := toml.Decode(string(data), &tc); err != nil {
+		t.Fatalf("parsing pack.toml: %v", err)
+	}
+
+	if tc.Pack.Name != "gastown" {
+		t.Errorf("[pack] name = %q, want %q", tc.Pack.Name, "gastown")
+	}
+	if tc.Pack.Schema != 2 {
+		t.Errorf("[pack] schema = %d, want 2", tc.Pack.Schema)
+	}
+	gastownImp, ok := tc.Imports["gastown"]
 	if !ok {
-		t.Fatalf("cfg.Imports = %v, want entry for \"gastown\"", cfg.Imports)
+		t.Fatalf("pack.toml imports = %v, want entry for \"gastown\"", tc.Imports)
 	}
 	if gastownImp.Source != "packs/gastown" {
-		t.Errorf("cfg.Imports[\"gastown\"].Source = %q, want %q", gastownImp.Source, "packs/gastown")
+		t.Errorf("pack.toml imports[\"gastown\"].Source = %q, want %q", gastownImp.Source, "packs/gastown")
 	}
 }
 

@@ -1081,6 +1081,18 @@ func (s *dirtyGetRaceStore) Get(id string) (beads.Bead, error) {
 	}
 }
 
+type updateRefreshStore struct {
+	beads.Store
+	fresh map[string]beads.Bead
+}
+
+func (s *updateRefreshStore) Get(id string) (beads.Bead, error) {
+	if b, ok := s.fresh[id]; ok {
+		return b, nil
+	}
+	return s.Store.Get(id)
+}
+
 func TestCachingStoreGetFallsBackForClosedBeadsAfterPrime(t *testing.T) {
 	t.Parallel()
 	mem := beads.NewMemStore()
@@ -1170,6 +1182,309 @@ func TestCachingStoreReadyTreatsMissingDepTargetAsClosedWithoutBackingGet(t *tes
 	}
 	if gets := backing.getCount(); gets != 0 {
 		t.Fatalf("Ready() performed %d backing Get calls, want 0", gets)
+	}
+}
+
+func TestCachingStoreCachedReadyUsesPrimedDependencies(t *testing.T) {
+	t.Parallel()
+	mem := beads.NewMemStore()
+	blocker, err := mem.Create(beads.Bead{Title: "Blocker"})
+	if err != nil {
+		t.Fatalf("Create(blocker): %v", err)
+	}
+	blocked, err := mem.Create(beads.Bead{Title: "Blocked"})
+	if err != nil {
+		t.Fatalf("Create(blocked): %v", err)
+	}
+	ready, err := mem.Create(beads.Bead{Title: "Ready"})
+	if err != nil {
+		t.Fatalf("Create(ready): %v", err)
+	}
+	if err := mem.DepAdd(blocked.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+
+	cache := beads.NewCachingStoreForTest(mem, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+	got, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable")
+	}
+	ids := map[string]bool{}
+	for _, b := range got {
+		ids[b.ID] = true
+	}
+	if !ids[blocker.ID] || !ids[ready.ID] || ids[blocked.ID] {
+		t.Fatalf("CachedReady ids = %v, want blocker and ready only", ids)
+	}
+}
+
+func TestCachingStoreCachedReadyUsesWriteThroughDependencies(t *testing.T) {
+	t.Parallel()
+	mem := beads.NewMemStore()
+	blocker, err := mem.Create(beads.Bead{Title: "Blocker"})
+	if err != nil {
+		t.Fatalf("Create(blocker): %v", err)
+	}
+	blocked, err := mem.Create(beads.Bead{Title: "Blocked"})
+	if err != nil {
+		t.Fatalf("Create(blocked): %v", err)
+	}
+
+	cache := beads.NewCachingStoreForTest(mem, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+	if err := cache.DepAdd(blocked.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+
+	got, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable")
+	}
+	ids := map[string]bool{}
+	for _, b := range got {
+		ids[b.ID] = true
+	}
+	if !ids[blocker.ID] || ids[blocked.ID] {
+		t.Fatalf("CachedReady ids = %v, want blocker only", ids)
+	}
+}
+
+func TestCachingStoreCachedReadyIgnoresStaleDependencyEventsAfterLocalMutation(t *testing.T) {
+	t.Parallel()
+
+	t.Run("dep add", func(t *testing.T) {
+		mem := beads.NewMemStore()
+		blocker, err := mem.Create(beads.Bead{Title: "Blocker"})
+		if err != nil {
+			t.Fatalf("Create(blocker): %v", err)
+		}
+		target, err := mem.Create(beads.Bead{Title: "Target"})
+		if err != nil {
+			t.Fatalf("Create(target): %v", err)
+		}
+		cache := beads.NewCachingStoreForTest(mem, nil)
+		if err := cache.PrimeActive(); err != nil {
+			t.Fatalf("PrimeActive: %v", err)
+		}
+		if err := cache.DepAdd(target.ID, blocker.ID, "blocks"); err != nil {
+			t.Fatalf("DepAdd: %v", err)
+		}
+
+		cache.ApplyEvent("bead.updated", []byte(`{"id":"`+target.ID+`","title":"Target","status":"open","issue_type":"task","dependencies":[]}`))
+
+		ready, ok := cache.CachedReady()
+		if !ok {
+			t.Fatal("CachedReady reported cache unavailable")
+		}
+		ids := map[string]bool{}
+		for _, b := range ready {
+			ids[b.ID] = true
+		}
+		if ids[target.ID] {
+			t.Fatalf("CachedReady ids = %v, want stale event to leave target blocked", ids)
+		}
+	})
+
+	t.Run("dep remove", func(t *testing.T) {
+		mem := beads.NewMemStore()
+		blocker, err := mem.Create(beads.Bead{Title: "Blocker"})
+		if err != nil {
+			t.Fatalf("Create(blocker): %v", err)
+		}
+		target, err := mem.Create(beads.Bead{Title: "Target", Needs: []string{blocker.ID}})
+		if err != nil {
+			t.Fatalf("Create(target): %v", err)
+		}
+		cache := beads.NewCachingStoreForTest(mem, nil)
+		if err := cache.PrimeActive(); err != nil {
+			t.Fatalf("PrimeActive: %v", err)
+		}
+		if err := cache.DepRemove(target.ID, blocker.ID); err != nil {
+			t.Fatalf("DepRemove: %v", err)
+		}
+
+		cache.ApplyEvent("bead.updated", []byte(`{"id":"`+target.ID+`","title":"Target","status":"open","issue_type":"task","needs":["`+blocker.ID+`"]}`))
+
+		ready, ok := cache.CachedReady()
+		if !ok {
+			t.Fatal("CachedReady reported cache unavailable")
+		}
+		ids := map[string]bool{}
+		for _, b := range ready {
+			ids[b.ID] = true
+		}
+		if !ids[target.ID] {
+			t.Fatalf("CachedReady ids = %v, want stale event to leave target ready", ids)
+		}
+	})
+}
+
+func TestCachingStoreCachedReadyIgnoresStaleDependencyEventsAfterEventMutation(t *testing.T) {
+	t.Parallel()
+
+	mem := beads.NewMemStore()
+	closedBlocker, err := mem.Create(beads.Bead{Title: "Closed blocker"})
+	if err != nil {
+		t.Fatalf("Create(closed blocker): %v", err)
+	}
+	closed := "closed"
+	if err := mem.Update(closedBlocker.ID, beads.UpdateOpts{Status: &closed}); err != nil {
+		t.Fatalf("Update(closed blocker): %v", err)
+	}
+	openBlocker, err := mem.Create(beads.Bead{Title: "Open blocker"})
+	if err != nil {
+		t.Fatalf("Create(open blocker): %v", err)
+	}
+	target, err := mem.Create(beads.Bead{Title: "Target"})
+	if err != nil {
+		t.Fatalf("Create(target): %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(mem, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	cache.ApplyEvent("bead.updated", []byte(`{"id":"`+target.ID+`","title":"Target","status":"open","issue_type":"task","dependencies":[{"issue_id":"`+target.ID+`","depends_on_id":"`+closedBlocker.ID+`","type":"blocks"},{"issue_id":"`+target.ID+`","depends_on_id":"`+openBlocker.ID+`","type":"blocks"}]}`))
+	cache.ApplyEvent("bead.updated", []byte(`{"id":"`+target.ID+`","title":"Target","status":"open","issue_type":"task","dependencies":[{"issue_id":"`+target.ID+`","depends_on_id":"`+closedBlocker.ID+`","type":"blocks"}]}`))
+
+	ready, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable")
+	}
+	ids := map[string]bool{}
+	for _, b := range ready {
+		ids[b.ID] = true
+	}
+	if ids[target.ID] {
+		t.Fatalf("CachedReady ids = %v, want stale dependency event to leave target blocked by %s", ids, openBlocker.ID)
+	}
+}
+
+func TestCachingStoreCachedReadyUsesCompleteCreatedEventDependencies(t *testing.T) {
+	t.Parallel()
+	cache := beads.NewCachingStoreForTest(beads.NewMemStore(), nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	cache.ApplyEvent("bead.created", []byte(`{"id":"gc-1","title":"Event task","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z"}`))
+
+	ready, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable")
+	}
+	if len(ready) != 1 || ready[0].ID != "gc-1" {
+		t.Fatalf("CachedReady = %#v, want event-created bead", ready)
+	}
+}
+
+func TestCachingStoreCachedReadyUnavailableForPartialEventDependencies(t *testing.T) {
+	t.Parallel()
+	cache := beads.NewCachingStoreForTest(beads.NewMemStore(), nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	cache.ApplyEvent("bead.created", []byte(`{"id":"gc-1","status":"open"}`))
+
+	if ready, ok := cache.CachedReady(); ok {
+		t.Fatalf("CachedReady ok with unknown event dependency coverage, ready=%v", ready)
+	}
+}
+
+func TestCachingStoreCachedReadyRefreshesEventNeedsDependencies(t *testing.T) {
+	t.Parallel()
+	mem := beads.NewMemStore()
+	blocker, err := mem.Create(beads.Bead{Title: "Blocker"})
+	if err != nil {
+		t.Fatalf("Create(blocker): %v", err)
+	}
+	target, err := mem.Create(beads.Bead{Title: "Event target"})
+	if err != nil {
+		t.Fatalf("Create(target): %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(mem, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	cache.ApplyEvent("bead.updated", []byte(`{"id":"`+target.ID+`","title":"Event target","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z","needs":["`+blocker.ID+`"]}`))
+	ready, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable after needs add")
+	}
+	ids := map[string]bool{}
+	for _, b := range ready {
+		ids[b.ID] = true
+	}
+	if ids[target.ID] {
+		t.Fatalf("CachedReady ids = %v, want target blocked by event needs", ids)
+	}
+
+	cache.ApplyEvent("bead.updated", []byte(`{"id":"`+target.ID+`","title":"Event target","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z"}`))
+	if ready, ok = cache.CachedReady(); ok {
+		t.Fatalf("CachedReady available after dependency-omitting update, ready=%v", ready)
+	}
+
+	cache.ApplyEvent("bead.updated", []byte(`{"id":"`+target.ID+`","title":"Event target","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z","needs":[]}`))
+	ready, ok = cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable after explicit needs clear")
+	}
+	ids = map[string]bool{}
+	for _, b := range ready {
+		ids[b.ID] = true
+	}
+	if !ids[target.ID] {
+		t.Fatalf("CachedReady ids = %v, want target ready after explicit needs clear", ids)
+	}
+}
+
+func TestCachingStoreUpdateClearsCachedDependenciesFromFreshBead(t *testing.T) {
+	t.Parallel()
+	mem := beads.NewMemStore()
+	blocker, err := mem.Create(beads.Bead{Title: "Blocker"})
+	if err != nil {
+		t.Fatalf("Create(blocker): %v", err)
+	}
+	blocked, err := mem.Create(beads.Bead{Title: "Blocked", Needs: []string{blocker.ID}})
+	if err != nil {
+		t.Fatalf("Create(blocked): %v", err)
+	}
+	backing := &updateRefreshStore{
+		Store: beads.NewMemStoreFrom(2, []beads.Bead{blocker, blocked}, nil),
+		fresh: make(map[string]beads.Bead),
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	fresh := blocked
+	fresh.Title = "Cleared"
+	fresh.Needs = nil
+	fresh.Dependencies = nil
+	backing.fresh[blocked.ID] = fresh
+	title := "Cleared"
+	if err := cache.Update(blocked.ID, beads.UpdateOpts{Title: &title}); err != nil {
+		t.Fatalf("Update(blocked): %v", err)
+	}
+
+	ready, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable")
+	}
+	ids := map[string]bool{}
+	for _, b := range ready {
+		ids[b.ID] = true
+	}
+	if !ids[blocked.ID] {
+		t.Fatalf("CachedReady ids = %v, want update refresh to clear stale deps", ids)
 	}
 }
 

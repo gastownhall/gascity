@@ -108,6 +108,10 @@ func (c *CachingStore) runReconciliation() {
 			if _, keep := c.recentLocalBeadConflictLocked(id, freshBead, now); keep {
 				continue
 			}
+			freshDeps := depsFromBeadFields(freshBead)
+			if useFreshDeps {
+				freshDeps = depMap[id]
+			}
 
 			old, exists := c.beads[id]
 			switch {
@@ -123,7 +127,7 @@ func (c *CachingStore) runReconciliation() {
 					eventType: "bead.updated",
 					bead:      cloneBead(freshBead),
 				})
-			case useFreshDeps && depsChanged(c.deps[id], depMap[id]):
+			case depsChanged(c.deps[id], freshDeps):
 				updates++
 				notifications = append(notifications, cacheNotification{
 					eventType: "bead.updated",
@@ -132,9 +136,7 @@ func (c *CachingStore) runReconciliation() {
 			}
 
 			c.beads[id] = cloneBead(freshBead)
-			if useFreshDeps {
-				c.deps[id] = cloneDeps(depMap[id])
-			}
+			c.deps[id] = cloneDeps(freshDeps)
 			delete(c.dirty, id)
 			delete(c.deletedSeq, id)
 			if !recentLocalMutation(c.localBeadAt[id], now) {
@@ -207,12 +209,12 @@ func (c *CachingStore) runReconciliation() {
 			beadForCache = current
 			preservedRecentLocal = true
 		}
-		nextBeads[id] = cloneBead(beadForCache)
+		freshDeps := depsFromBeadFields(freshBead)
 		if useFreshDeps {
-			nextDeps[id] = cloneDeps(depMap[id])
-		} else if deps, ok := c.deps[id]; ok {
-			nextDeps[id] = cloneDeps(deps)
+			freshDeps = depMap[id]
 		}
+		nextBeads[id] = cloneBead(beadForCache)
+		nextDeps[id] = cloneDeps(freshDeps)
 
 		old, exists := c.beads[id]
 		switch {
@@ -228,7 +230,7 @@ func (c *CachingStore) runReconciliation() {
 				eventType: "bead.updated",
 				bead:      cloneBead(freshBead),
 			})
-		case useFreshDeps && depsChanged(c.deps[id], depMap[id]):
+		case !preservedRecentLocal && depsChanged(c.deps[id], freshDeps):
 			updates++
 			notifications = append(notifications, cacheNotification{
 				eventType: "bead.updated",

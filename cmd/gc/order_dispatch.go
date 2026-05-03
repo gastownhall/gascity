@@ -21,7 +21,17 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
-const labelOrderTracking = "order-tracking"
+const (
+	labelOrderTracking = "order-tracking"
+
+	orderTrackingSweepOrder                = "order-tracking-sweep"
+	defaultOrderTrackingSweepStaleAfter    = 10 * time.Minute
+	orderTrackingSweepWatchdogInterval     = 30 * time.Second
+	orderTrackingSweepWatchdogStaleAfter   = 2 * time.Minute
+	orderTrackingSweepMetadataReason       = "stale-order-tracking"
+	orderTrackingSweepMetadataInitiator    = "order-tracking-sweep"
+	orderTrackingWatchdogMetadataInitiator = "controller-watchdog"
+)
 
 // orderDispatcher evaluates order trigger conditions and dispatches due
 // orders as wisps or exec scripts. Follows the nil-guard tracker pattern:
@@ -733,6 +743,63 @@ func sweepOrphanedOrderTracking(store beads.Store) (int, error) {
 		return n, fmt.Errorf("closing orphaned order-tracking beads: %w", err)
 	}
 	return n, nil
+}
+
+// sweepStaleOrderTracking closes open order-tracking beads whose creation
+// timestamp is older than staleAfter. When onlyOrders is non-empty, it only
+// closes tracking beads for those scoped order names.
+func sweepStaleOrderTracking(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string) (int, error) {
+	if staleAfter <= 0 {
+		return 0, fmt.Errorf("stale-after must be positive")
+	}
+	all, err := store.ListByLabel(labelOrderTracking, 0)
+	if err != nil {
+		return 0, fmt.Errorf("listing order-tracking beads: %w", err)
+	}
+
+	cutoff := now.Add(-staleAfter)
+	var ids []string
+	for _, b := range all {
+		if len(onlyOrders) > 0 {
+			name, ok := orderNameFromTrackingBead(b)
+			if !ok {
+				continue
+			}
+			if _, ok := onlyOrders[name]; !ok {
+				continue
+			}
+		}
+		if b.CreatedAt.IsZero() || b.CreatedAt.After(cutoff) {
+			continue
+		}
+		ids = append(ids, b.ID)
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	metadata := map[string]string{
+		"order_tracking_sweep": orderTrackingSweepMetadataReason,
+	}
+	if initiator != "" {
+		metadata["order_tracking_sweep_by"] = initiator
+	}
+	n, err := store.CloseAll(ids, metadata)
+	if err != nil {
+		return n, fmt.Errorf("closing stale order-tracking beads: %w", err)
+	}
+	return n, nil
+}
+
+func orderNameFromTrackingBead(b beads.Bead) (string, bool) {
+	for _, label := range b.Labels {
+		if name, ok := strings.CutPrefix(label, "order-run:"); ok && name != "" {
+			return name, true
+		}
+	}
+	if name, ok := strings.CutPrefix(b.Title, "order:"); ok && name != "" {
+		return name, true
+	}
+	return "", false
 }
 
 // sweepOrphanedOrderTrackingRetry calls sweepOrphanedOrderTracking with

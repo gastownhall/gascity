@@ -403,6 +403,7 @@ func writeControllerNamedSessionCityTOML(t *testing.T, dir, cityName, mode, idle
 	var buf bytes.Buffer
 	buf.WriteString("[workspace]\nname = " + `"` + cityName + `"` + "\n\n")
 	buf.WriteString("[beads]\nprovider = \"file\"\n\n")
+	buf.WriteString("[daemon]\nshutdown_timeout = \"20ms\"\n\n")
 	buf.WriteString("[[agent]]\nname = \"mayor\"\nstart_command = \"echo hello\"\n")
 	if idleTimeout != "" {
 		buf.WriteString("idle_timeout = " + `"` + idleTimeout + `"` + "\n")
@@ -1942,7 +1943,8 @@ func TestControllerReloadCommandReloadsConfigImmediately(t *testing.T) {
 		}
 	}
 
-	writeCityTOML(t, dir, "test", "mayor", "worker")
+	expectedAgentNames := []string{"mayor", "worker"}
+	writeCityTOML(t, dir, "test", expectedAgentNames...)
 
 	before := reconcileCount.Load()
 	resp, err := sendControllerCommand(dir, "reload")
@@ -1953,19 +1955,29 @@ func TestControllerReloadCommandReloadsConfigImmediately(t *testing.T) {
 		t.Fatalf("reload response = %q, want %q", string(resp), "ok")
 	}
 
+	agentNamesMatch := func(names []string) bool {
+		return containsAgentNames(names, expectedAgentNames...)
+	}
+
+	var names []string
 	deadline = time.After(1500 * time.Millisecond)
-	for reconcileCount.Load() <= before || !strings.Contains(stdout.String(), "Config reloaded") {
+	for {
+		names, _ = lastAgentNames.Load().([]string)
+		if reconcileCount.Load() > before &&
+			strings.Contains(stdout.String(), "Config reloaded") &&
+			agentNamesMatch(names) {
+			break
+		}
 		select {
 		case <-deadline:
-			t.Fatalf("timed out waiting for reload command to apply config; reconciles=%d stdout=%q stderr=%q", reconcileCount.Load(), stdout.String(), stderr.String())
+			t.Fatalf("timed out waiting for reload command to apply config; reconciles=%d agents=%v stdout=%q stderr=%q", reconcileCount.Load(), names, stdout.String(), stderr.String())
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
 
-	names, _ := lastAgentNames.Load().([]string)
-	if !containsAgentNames(names, "mayor", "worker") {
-		t.Fatalf("expected mayor and worker, got %v", names)
+	if !agentNamesMatch(names) {
+		t.Fatalf("expected %v, got %v", expectedAgentNames, names)
 	}
 }
 

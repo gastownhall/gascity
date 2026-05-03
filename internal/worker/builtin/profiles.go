@@ -307,13 +307,16 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		DisplayName:      "OpenCode",
 		Command:          "opencode",
 		Args:             []string{},
-		PromptMode:       "none",
+		PromptMode:       "flag",
+		PromptFlag:       "--prompt",
 		ReadyDelayMs:     8000,
 		ProcessNames:     []string{"opencode", "node", "bun"},
 		Env:              map[string]string{"OPENCODE_PERMISSION": `{"*":"allow"}`},
 		SupportsACP:      true,
 		SupportsHooks:    true,
 		InstructionsFile: "AGENTS.md",
+		ResumeFlag:       "--session",
+		ResumeStyle:      "flag",
 		ACPArgs:          []string{"acp"},
 	},
 	"auggie": {
@@ -370,23 +373,25 @@ func BuiltinProviders() map[string]BuiltinProviderSpec {
 func CanonicalProfileIdentity(profile string) (ProfileIdentity, bool) {
 	switch profile {
 	case "claude/tmux-cli":
-		return newProfileIdentity(profile, "claude", "tmux-cli"), true
+		return newProfileIdentity(profile, "claude"), true
 	case "codex/tmux-cli":
-		return newProfileIdentity(profile, "codex", "tmux-cli"), true
+		return newProfileIdentity(profile, "codex"), true
 	case "gemini/tmux-cli":
-		return newProfileIdentity(profile, "gemini", "tmux-cli"), true
+		return newProfileIdentity(profile, "gemini"), true
+	case "opencode/tmux-cli":
+		return newProfileIdentity(profile, "opencode"), true
 	default:
 		return ProfileIdentity{}, false
 	}
 }
 
-func newProfileIdentity(profile, family, transport string) ProfileIdentity {
+func newProfileIdentity(profile, family string) ProfileIdentity {
 	compatibility := fmt.Sprintf("%s|behavior=%s|transcript=%s", profile, canonicalBehaviorClaimsVersion, canonicalTranscriptAdapterVersion)
 	sum := sha256.Sum256([]byte(compatibility))
 	return ProfileIdentity{
 		Profile:                  profile,
 		ProviderFamily:           family,
-		TransportClass:           transport,
+		TransportClass:           "tmux-cli",
 		BehaviorClaimsVersion:    canonicalBehaviorClaimsVersion,
 		TranscriptAdapterVersion: canonicalTranscriptAdapterVersion,
 		CompatibilityVersion:     compatibility,

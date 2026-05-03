@@ -155,6 +155,8 @@ func ReadProviderFile(provider, path string, tailCompactions int) (*Session, err
 		return ReadCodexFile(path, tailCompactions)
 	case "gemini":
 		return ReadGeminiFile(path, tailCompactions)
+	case "opencode":
+		return ReadOpenCodeFile(path, tailCompactions)
 	default:
 		return ReadFile(path, tailCompactions)
 	}
@@ -202,6 +204,8 @@ func ReadProviderFileRaw(provider, path string, tailCompactions int) (*Session, 
 		return ReadCodexFile(path, tailCompactions)
 	case "gemini":
 		return ReadGeminiFile(path, tailCompactions)
+	case "opencode":
+		return ReadOpenCodeFile(path, tailCompactions)
 	default:
 		return ReadFileRaw(path, tailCompactions)
 	}
@@ -273,6 +277,8 @@ func ReadProviderFileOlder(provider, path string, tailCompactions int, beforeMes
 		return ReadCodexFile(path, tailCompactions)
 	case "gemini":
 		return ReadGeminiFile(path, tailCompactions)
+	case "opencode":
+		return ReadOpenCodeFile(path, tailCompactions)
 	default:
 		return ReadFileOlder(path, tailCompactions, beforeMessageID)
 	}
@@ -287,6 +293,8 @@ func ReadProviderFileRawOlder(provider, path string, tailCompactions int, before
 		return ReadCodexFile(path, tailCompactions)
 	case "gemini":
 		return ReadGeminiFile(path, tailCompactions)
+	case "opencode":
+		return ReadOpenCodeFile(path, tailCompactions)
 	default:
 		return ReadFileRawOlder(path, tailCompactions, beforeMessageID)
 	}
@@ -357,6 +365,8 @@ func ReadProviderFileNewer(provider, path string, tailCompactions int, afterMess
 		return ReadCodexFile(path, tailCompactions)
 	case "gemini":
 		return ReadGeminiFile(path, tailCompactions)
+	case "opencode":
+		return ReadOpenCodeFile(path, tailCompactions)
 	default:
 		return ReadFileNewer(path, tailCompactions, afterMessageID)
 	}
@@ -371,6 +381,8 @@ func ReadProviderFileRawNewer(provider, path string, tailCompactions int, afterM
 		return ReadCodexFile(path, tailCompactions)
 	case "gemini":
 		return ReadGeminiFile(path, tailCompactions)
+	case "opencode":
+		return ReadOpenCodeFile(path, tailCompactions)
 	default:
 		return ReadFileRawNewer(path, tailCompactions, afterMessageID)
 	}
@@ -521,6 +533,8 @@ func FindSessionFileForProvider(searchPaths []string, provider, workDir string) 
 		return FindCodexSessionFile(searchPaths, workDir)
 	case "gemini":
 		return FindGeminiSessionFile(searchPaths, workDir)
+	case "opencode":
+		return FindOpenCodeSessionFile(searchPaths, workDir)
 	case "", "auto":
 		return FindSessionFile(searchPaths, workDir)
 	default:
@@ -538,6 +552,8 @@ func FindProviderFallbackSessionFile(searchPaths []string, provider, workDir str
 		return FindCodexSessionFile(searchPaths, workDir)
 	case "gemini":
 		return FindGeminiSessionFile(searchPaths, workDir)
+	case "opencode":
+		return FindOpenCodeSessionFile(searchPaths, workDir)
 	default:
 		return findClaudeLatestSessionFile(searchPaths, workDir)
 	}
@@ -911,6 +927,8 @@ func providerFamily(provider string) string {
 		return "codex"
 	case strings.Contains(p, "gemini"):
 		return "gemini"
+	case strings.Contains(p, "opencode"):
+		return "opencode"
 	default:
 		return p
 	}

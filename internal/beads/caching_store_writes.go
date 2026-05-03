@@ -22,6 +22,7 @@ func (c *CachingStore) Create(b Bead) (Bead, error) {
 	c.mu.Lock()
 	c.noteLocalMutationLocked(created.ID)
 	c.beads[created.ID] = cloneBead(created)
+	c.deps[created.ID] = depsFromBeadFields(created)
 	delete(c.dirty, created.ID)
 	delete(c.deletedSeq, created.ID)
 	c.markFreshLocked(time.Now())
@@ -52,6 +53,7 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 	c.mu.Lock()
 	c.noteLocalMutationLocked(id)
 	c.beads[id] = cloneBead(fresh)
+	c.deps[id] = depsFromBeadFields(fresh)
 	delete(c.dirty, id)
 	delete(c.deletedSeq, id)
 	c.markFreshLocked(time.Now())
@@ -258,13 +260,14 @@ func (c *CachingStore) DepAdd(issueID, dependsOnID, depType string) error {
 	c.mu.Lock()
 	c.noteLocalMutationLocked(issueID)
 	if !c.depsComplete {
-		delete(c.deps, issueID)
-		delete(c.dirty, issueID)
-		delete(c.deletedSeq, issueID)
-		c.markFreshLocked(time.Now())
-		c.updateStatsLocked()
-		c.mu.Unlock()
-		return nil
+		if _, known := c.deps[issueID]; !known {
+			delete(c.dirty, issueID)
+			delete(c.deletedSeq, issueID)
+			c.markFreshLocked(time.Now())
+			c.updateStatsLocked()
+			c.mu.Unlock()
+			return nil
+		}
 	}
 	deps := c.deps[issueID]
 	for i, d := range deps {
@@ -297,13 +300,14 @@ func (c *CachingStore) DepRemove(issueID, dependsOnID string) error {
 	c.mu.Lock()
 	c.noteLocalMutationLocked(issueID)
 	if !c.depsComplete {
-		delete(c.deps, issueID)
-		delete(c.dirty, issueID)
-		delete(c.deletedSeq, issueID)
-		c.markFreshLocked(time.Now())
-		c.updateStatsLocked()
-		c.mu.Unlock()
-		return nil
+		if _, known := c.deps[issueID]; !known {
+			delete(c.dirty, issueID)
+			delete(c.deletedSeq, issueID)
+			c.markFreshLocked(time.Now())
+			c.updateStatsLocked()
+			c.mu.Unlock()
+			return nil
+		}
 	}
 	deps := c.deps[issueID]
 	for i, d := range deps {

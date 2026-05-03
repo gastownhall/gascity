@@ -28,6 +28,7 @@ var phase2CatalogProfiles = []ProfileID{
 	ProfileClaudeTmuxCLI,
 	ProfileCodexTmuxCLI,
 	ProfileGeminiTmuxCLI,
+	ProfileOpenCodeTmuxCLI,
 }
 
 var phase2CatalogOnce struct {

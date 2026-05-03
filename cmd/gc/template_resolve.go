@@ -574,14 +574,14 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		// SessionStart hooks can enrich context, but the startup prompt still
 		// needs a first-turn delivery mechanism. Without argv/flag/nudge
 		// delivery, freshly spawned workers sit idle at the provider prompt.
-		if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none" {
-			if nudge != "" {
-				nudge = tp.Prompt + "\n\n---\n\n" + nudge
-			} else {
-				nudge = tp.Prompt
-			}
+		switch {
+		case tp.IsACP:
+			nudge = prependStartupPromptToNudge(tp.Prompt, nudge)
 			startupPromptDelivered = true
-		} else {
+		case tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none":
+			nudge = prependStartupPromptToNudge(tp.Prompt, nudge)
+			startupPromptDelivered = true
+		default:
 			promptSuffix = shellquote.Quote(tp.Prompt)
 			startupPromptDelivered = promptSuffix != ""
 			if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "flag" {
@@ -627,4 +627,11 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		CopyFiles:              tp.Hints.CopyFiles,
 		FingerprintExtra:       tp.FPExtra,
 	}
+}
+
+func prependStartupPromptToNudge(prompt, nudge string) string {
+	if nudge != "" {
+		return prompt + "\n\n---\n\n" + nudge
+	}
+	return prompt
 }

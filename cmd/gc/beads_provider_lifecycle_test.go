@@ -3251,7 +3251,10 @@ count=0
 if [ -f "$attempts_file" ]; then
   count=$(cat "$attempts_file")
 fi
-[ "$count" -ge 2 ]
+if [ "$count" -ge 2 ]; then
+  exit 0
+fi
+exit 1
 `, attemptsFile)
 	if err := os.WriteFile(fakeNC, []byte(fakeNCScript), 0o755); err != nil {
 		t.Fatal(err)
