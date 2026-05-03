@@ -72,6 +72,25 @@ func TestConfigDriftTracePayloadIncludesDriftedFields(t *testing.T) {
 	}
 }
 
+func TestConfigDriftTracePayloadReservedFieldsOverrideExtras(t *testing.T) {
+	payload := configDriftTracePayload("stored", "current", []string{"CopyFiles"}, traceRecordPayload{
+		"stored_hash":    "extra-stored",
+		"current_hash":   "extra-current",
+		"drifted_fields": []string{"Command"},
+	})
+
+	fields, ok := payload["drifted_fields"].([]string)
+	if !ok {
+		t.Fatalf("drifted_fields type = %T, want []string", payload["drifted_fields"])
+	}
+	if len(fields) != 1 || fields[0] != "CopyFiles" {
+		t.Fatalf("drifted_fields = %v, want [CopyFiles]", fields)
+	}
+	if payload["stored_hash"] != "stored" || payload["current_hash"] != "current" {
+		t.Fatalf("reserved hash fields should win over extras: %#v", payload)
+	}
+}
+
 func TestTraceArmStorePersistence(t *testing.T) {
 	cityDir := t.TempDir()
 	store := newSessionReconcilerTraceArmStore(cityDir)

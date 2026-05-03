@@ -1521,14 +1521,13 @@ func configDriftTracePayload(storedHash, currentHash string, driftedFields []str
 	if fields == nil {
 		fields = []string{}
 	}
-	payload := traceRecordPayload{
-		"stored_hash":    storedHash,
-		"current_hash":   currentHash,
-		"drifted_fields": fields,
-	}
+	payload := traceRecordPayload{}
 	for k, v := range extra {
 		payload[k] = v
 	}
+	payload["stored_hash"] = storedHash
+	payload["current_hash"] = currentHash
+	payload["drifted_fields"] = fields
 	return payload
 }
 
