@@ -2276,6 +2276,80 @@ name = "mayor"
 	}
 }
 
+// --- MaxConcurrentWisps / wisp backpressure tests ---
+
+func TestWispBackpressureDisabledByDefault(t *testing.T) {
+	d := DaemonConfig{}
+	if d.WispBackpressureEnabled() {
+		t.Error("WispBackpressureEnabled() should be false when MaxConcurrentWisps is nil")
+	}
+	if d.ShouldThrottleWisps(1000) {
+		t.Error("ShouldThrottleWisps() should be false when backpressure is disabled")
+	}
+}
+
+func TestWispBackpressureDisabledWhenZero(t *testing.T) {
+	v := 0
+	d := DaemonConfig{MaxConcurrentWisps: &v}
+	if d.WispBackpressureEnabled() {
+		t.Error("WispBackpressureEnabled() should be false when MaxConcurrentWisps is 0")
+	}
+}
+
+func TestWispBackpressureEnabled(t *testing.T) {
+	v := 5
+	d := DaemonConfig{MaxConcurrentWisps: &v}
+	if !d.WispBackpressureEnabled() {
+		t.Error("WispBackpressureEnabled() should be true when MaxConcurrentWisps > 0")
+	}
+}
+
+func TestShouldThrottleWisps(t *testing.T) {
+	v := 3
+	d := DaemonConfig{MaxConcurrentWisps: &v}
+	tests := []struct {
+		active int
+		want   bool
+	}{
+		{0, false},
+		{2, false},
+		{3, true}, // at cap
+		{4, true}, // over cap
+	}
+	for _, tt := range tests {
+		got := d.ShouldThrottleWisps(tt.active)
+		if got != tt.want {
+			t.Errorf("ShouldThrottleWisps(%d) = %v, want %v", tt.active, got, tt.want)
+		}
+	}
+}
+
+func TestParseMaxConcurrentWisps(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test"
+
+[daemon]
+max_concurrent_wisps = 8
+
+[[agent]]
+name = "worker"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Daemon.MaxConcurrentWisps == nil {
+		t.Fatal("Daemon.MaxConcurrentWisps is nil, want 8")
+	}
+	if *cfg.Daemon.MaxConcurrentWisps != 8 {
+		t.Errorf("Daemon.MaxConcurrentWisps = %d, want 8", *cfg.Daemon.MaxConcurrentWisps)
+	}
+	if !cfg.Daemon.WispBackpressureEnabled() {
+		t.Error("WispBackpressureEnabled() should be true after parsing max_concurrent_wisps = 8")
+	}
+}
+
 // --- DrainTimeout tests ---
 
 func TestDrainTimeoutDefault(t *testing.T) {
