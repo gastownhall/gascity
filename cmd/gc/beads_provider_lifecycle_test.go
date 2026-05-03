@@ -3203,7 +3203,11 @@ case "$cmd" in
     exit 0
     ;;
   --host)
-    exit 0
+    count=0
+    if [ -f "$attempts_file" ]; then
+      count=$(cat "$attempts_file")
+    fi
+    [ "$count" -ge 2 ]
     ;;
   sql-server)
     config_file=""

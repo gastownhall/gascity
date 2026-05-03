@@ -364,6 +364,29 @@ func (p *transportCapableProvider) SupportsTransport(transport string) bool {
 	return transport == "acp"
 }
 
+type blockingStartProvider struct {
+	*runtime.Fake
+	started chan struct{}
+	unblock chan struct{}
+	once    sync.Once
+}
+
+func (p *blockingStartProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if p.started != nil {
+		p.once.Do(func() {
+			close(p.started)
+		})
+	}
+	if p.unblock != nil {
+		select {
+		case <-p.unblock:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return p.Fake.Start(ctx, name, cfg)
+}
+
 type blockingNudgeProvider struct {
 	*runtime.Fake
 	started chan struct{}
@@ -3377,8 +3400,6 @@ func TestHandleSessionMessageMaterializedNamedSessionUsesLaunchCommandDefaults(t
 
 func TestHandleSessionMessageQueuesSuspendedSessionMessage(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
-	h := newTestCityHandlerWith(t, fs, srv)
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Resume Me")
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -3386,23 +3407,52 @@ func TestHandleSessionMessageQueuesSuspendedSessionMessage(t *testing.T) {
 		t.Fatalf("Suspend: %v", err)
 	}
 
-	callsBefore := len(fs.sp.Calls)
+	blocker := &blockingStartProvider{
+		Fake:    fs.sp,
+		started: make(chan struct{}),
+		unblock: make(chan struct{}),
+	}
+	var unblockOnce sync.Once
+	unblock := func() {
+		unblockOnce.Do(func() {
+			close(blocker.unblock)
+		})
+	}
+	t.Cleanup(unblock)
+
+	srv := New(&stateWithSessionProvider{fakeState: fs, provider: blocker})
+	h := newTestCityHandlerWith(t, fs, srv)
 
 	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/messages", strings.NewReader(`{"message":"hello"}`))
 	req.Header.Set("Idempotency-Key", "sess-msg-1")
 	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(w, req)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler blocked on suspended-session start instead of returning accepted")
+	}
 
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
 	}
-	for _, call := range fs.sp.Calls[callsBefore:] {
-		if call.Method == "Start" {
-			t.Fatalf("sp.Start should not be called synchronously — message should be queued for async delivery")
-		}
-		if call.Method == "Nudge" {
-			t.Fatalf("sp.Nudge should not be called synchronously — message should be queued for async delivery")
-		}
+	accepted := decodeAsyncAccepted(t, w.Body)
+
+	select {
+	case <-blocker.started:
+	case <-time.After(testEventTimeout):
+		t.Fatal("provider start was not reached")
+	}
+	unblock()
+
+	success, failure := waitForSessionMessageResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session message failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
 	}
 }
 
