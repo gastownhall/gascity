@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// RigWildcard, when used as Override.Rig, matches every order with the
+// RigWildcard is the Override.Rig value that matches every order with the
 // override's name regardless of rig scope (city-level + every rig-scoped
 // instance). It is reserved as a config-time literal: real rig names
 // equal to "*" are rejected by config validation.
@@ -78,8 +78,8 @@ func rigMatches(ovRig, orderRig string) bool {
 // name, the error names every such rig so the user knows exactly what to
 // type — this is the gotcha that the previous error message hid.
 func notFoundError(idx int, ov Override, aa []Order) error {
-	switch {
-	case ov.Rig == "":
+	switch ov.Rig {
+	case "":
 		rigs := rigsForName(aa, ov.Name)
 		if len(rigs) > 0 {
 			return fmt.Errorf(
@@ -90,7 +90,7 @@ func notFoundError(idx int, ov Override, aa []Order) error {
 			)
 		}
 		return fmt.Errorf("orders.overrides[%d]: order %q not found", idx, ov.Name)
-	case ov.Rig == RigWildcard:
+	case RigWildcard:
 		return fmt.Errorf("orders.overrides[%d]: order %q not found (rig %q matches no instances)", idx, ov.Name, RigWildcard)
 	default:
 		return fmt.Errorf("orders.overrides[%d]: order %q (rig %q) not found", idx, ov.Name, ov.Rig)
