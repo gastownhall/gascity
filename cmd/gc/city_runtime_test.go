@@ -2492,11 +2492,7 @@ func TestCityRuntimeReloadSameRevisionIsNoOp(t *testing.T) {
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	writeCityRuntimeConfig(t, tomlPath, "fake")
 
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
-	configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
 
 	sp := runtime.NewFake()
 	var stdout bytes.Buffer
@@ -2539,11 +2535,7 @@ func TestCityRuntimeReloadRetainsTimedOutDispatcherForShutdownDrain(t *testing.T
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	writeCityRuntimeConfig(t, tomlPath, "fake")
 
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
-	configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
 
 	od := newBlockingOrderDispatcher()
 	var stdout bytes.Buffer
@@ -2697,7 +2689,7 @@ name = "fresh-agent"
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	var startupAgentCount atomic.Int32
+	var sawFreshAgent atomic.Bool
 	cr := newCityRuntime(CityRuntimeParams{
 		CityPath:  cityPath,
 		CityName:  "test-city",
@@ -2706,7 +2698,11 @@ name = "fresh-agent"
 		Cfg:       cfg,
 		SP:        sp,
 		BuildFn: func(cfg *config.City, _ runtime.Provider, _ beads.Store) DesiredStateResult {
-			startupAgentCount.Store(int32(len(cfg.Agents)))
+			for _, agent := range cfg.Agents {
+				if agent.Name == "fresh-agent" {
+					sawFreshAgent.Store(true)
+				}
+			}
 			cancel()
 			return DesiredStateResult{State: map[string]TemplateParams{}}
 		},
@@ -2721,11 +2717,8 @@ name = "fresh-agent"
 
 	cr.run(ctx)
 
-	if got := startupAgentCount.Load(); got != 1 {
-		t.Fatalf("startup saw %d agent(s), want reloaded config with 1 agent", got)
-	}
-	if got := cr.cfg.Agents[0].Name; got != "fresh-agent" {
-		t.Fatalf("reloaded agent = %q, want fresh-agent", got)
+	if !sawFreshAgent.Load() {
+		t.Fatalf("startup did not see reloaded fresh-agent; agents = %#v", cr.cfg.Agents)
 	}
 }
 
@@ -2771,11 +2764,7 @@ func TestCityRuntimeReloadKeepsRegisteredAliasForEffectiveIdentity(t *testing.T)
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	writeCityRuntimeConfigNamed(t, tomlPath, "declared-city", "fake")
 
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
-	configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
 
 	sp := runtime.NewFake()
 	cr := newTestCityRuntime(t, CityRuntimeParams{
@@ -2824,11 +2813,7 @@ func TestCityRuntimeManualReloadReplyWaitsForTickCompletion(t *testing.T) {
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	writeCityRuntimeConfig(t, tomlPath, "fake")
 
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
-	configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
 
 	doneCh := make(chan reloadControlReply, 1)
 	dirty := &atomic.Bool{}
@@ -2971,11 +2956,7 @@ func TestCityRuntimeManualReloadPanicAfterReloadKeepsReloadReplyAndClears(t *tes
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	writeCityRuntimeConfig(t, tomlPath, "fake")
 
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
-	configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
 
 	doneCh := make(chan reloadControlReply, 1)
 	dirty := &atomic.Bool{}
@@ -3830,6 +3811,16 @@ func writeCityRuntimeConfig(t *testing.T, tomlPath, provider string) {
 	t.Helper()
 	clearInheritedBeadsEnv(t)
 	writeCityRuntimeConfigNamed(t, tomlPath, "test-city", provider)
+}
+
+func loadCityRuntimeControllerConfig(t *testing.T, cityPath string) (*config.City, string) {
+	t.Helper()
+	cfg, prov, err := loadCityConfigWithBuiltinPacks(cityPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	applyFeatureFlags(cfg)
+	return cfg, config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
 }
 
 func writeCityRuntimeConfigNamed(t *testing.T, tomlPath, name, provider string) {

@@ -75,7 +75,7 @@ type TemplateParams struct {
 	RigRoot string
 	// WakeMode controls whether the next wake resumes or starts fresh conversation state.
 	WakeMode string
-	// IsACP is true if session = "acp".
+	// IsACP is true when the resolved session transport is SessionTransportACP.
 	IsACP bool
 	// HookEnabled reports whether provider hooks are installed for this agent.
 	// Hooks complement startup delivery but do not replace the initial
@@ -131,8 +131,14 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 	sessionTransport := config.ResolveSessionCreateTransport(cfgAgent.Session, resolved)
 	// Step 2: Validate session vs provider compatibility.
-	if sessionTransport == "acp" && !resolved.SupportsACP {
-		return TemplateParams{}, fmt.Errorf("agent %q: session = \"acp\" but provider %q does not support ACP (set supports_acp = true on the provider)", qualifiedName, resolved.Name)
+	switch sessionTransport {
+	case config.SessionTransportACP:
+		if !resolved.SupportsACP {
+			return TemplateParams{}, fmt.Errorf("agent %q: session = \"acp\" but provider %q does not support ACP (set supports_acp = true on the provider)", qualifiedName, resolved.Name)
+		}
+	case "", config.SessionTransportTmux:
+	default:
+		return TemplateParams{}, fmt.Errorf("agent %q: unknown session transport %q", qualifiedName, sessionTransport)
 	}
 
 	// Step 3: Expand dir template.
@@ -151,10 +157,13 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// Step 5: Build copy_files and command with settings args + schema defaults.
 	var copyFiles []runtime.CopyEntry
 	var command string
-	if sessionTransport == "acp" {
+	switch sessionTransport {
+	case config.SessionTransportACP:
 		command = resolved.ACPCommandString()
-	} else {
+	case "", config.SessionTransportTmux:
 		command = resolved.CommandString()
+	default:
+		return TemplateParams{}, fmt.Errorf("agent %q: unknown session transport %q", qualifiedName, sessionTransport)
 	}
 	// Append schema-derived default args (e.g., --dangerously-skip-permissions
 	// from EffectiveDefaults["permission_mode"] = "unrestricted").
@@ -481,7 +490,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		}
 	}
 	var mcpServers []runtime.MCPServerConfig
-	if sessionTransport == "acp" {
+	if sessionTransport == config.SessionTransportACP {
 		mcpServers = materialize.RuntimeMCPServers(mcpCatalog.Servers)
 	}
 
@@ -518,7 +527,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		RigName:          rigName,
 		RigRoot:          rigRoot,
 		WakeMode:         cfgAgent.WakeMode,
-		IsACP:            sessionTransport == "acp",
+		IsACP:            sessionTransport == config.SessionTransportACP,
 		HookEnabled:      hasHooks,
 		MCPServers:       mcpServers,
 	}, nil

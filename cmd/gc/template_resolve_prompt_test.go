@@ -348,6 +348,84 @@ func TestResolveTemplateNoneModeRetainsPromptForDeferredDelivery(t *testing.T) {
 	}
 }
 
+func TestResolveTemplateExplicitTmuxUsesProviderCommandForOpenCode(t *testing.T) {
+	cityPath := t.TempDir()
+	fs := fsys.NewFake()
+	fs.Files[cityPath+"/prompts/pool-worker.md"] = []byte("pool prompt body")
+
+	params := &agentBuildParams{
+		fs:        fs,
+		cityName:  "bright-lights",
+		cityPath:  cityPath,
+		workspace: &config.Workspace{Name: "bright-lights", Provider: "gemini"},
+		providers: map[string]config.ProviderSpec{
+			"gemini": {
+				Base:        stringPtr("builtin:opencode"),
+				Command:     "opencode",
+				PathCheck:   "opencode",
+				Args:        []string{"--model", "google/gemini-3.1-pro-preview"},
+				PromptMode:  "flag",
+				PromptFlag:  "--prompt",
+				SupportsACP: boolPtr(true),
+				ACPArgs:     []string{"acp"},
+			},
+		},
+		lookPath:        func(string) (string, error) { return "/usr/bin/opencode", nil },
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:           "gemini",
+		PromptTemplate: "prompts/pool-worker.md",
+		Provider:       "gemini",
+		Session:        "tmux",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if tp.IsACP {
+		t.Fatal("IsACP = true, want false for explicit tmux transport")
+	}
+	want := "opencode --model google/gemini-3.1-pro-preview"
+	if tp.Command != want {
+		t.Fatalf("Command = %q, want %q", tp.Command, want)
+	}
+}
+
+func TestResolveTemplateRejectsUnknownSessionTransport(t *testing.T) {
+	cityPath := t.TempDir()
+	fs := fsys.NewFake()
+	fs.Files[cityPath+"/prompts/pool-worker.md"] = []byte("pool prompt body")
+
+	params := &agentBuildParams{
+		fs:              fs,
+		cityName:        "bright-lights",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Name: "bright-lights", Provider: "opencode"},
+		providers:       config.BuiltinProviders(),
+		lookPath:        func(string) (string, error) { return "/usr/bin/opencode", nil },
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:           "opencode",
+		PromptTemplate: "prompts/pool-worker.md",
+		Provider:       "opencode",
+		Session:        "stdio",
+	}
+
+	_, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err == nil || !strings.Contains(err.Error(), "unknown session transport") {
+		t.Fatalf("resolveTemplate() error = %v, want unknown session transport", err)
+	}
+}
+
 func TestResolveTemplateHookEnabledOpencodeOmitsPrimeInstruction(t *testing.T) {
 	cityPath := t.TempDir()
 	fs := fsys.NewFake()

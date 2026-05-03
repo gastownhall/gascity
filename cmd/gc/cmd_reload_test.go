@@ -430,10 +430,11 @@ func TestSendReloadControlRequestNoChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	tomlPath := writeCityTOML(t, dir, "test", "mayor")
-	cfg, prov, err := config.LoadWithIncludes(osFS{}, tomlPath)
+	cfg, prov, err := loadCityConfigWithBuiltinPacks(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	applyFeatureFlags(cfg)
 	configRev := config.Revision(osFS{}, prov, cfg, dir)
 
 	var stdout, stderr bytes.Buffer
@@ -497,13 +498,21 @@ func TestSendReloadControlRequestInvalidConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	tomlPath := writeCityTOML(t, dir, "test", "mayor")
-	cfg, prov, err := config.LoadWithIncludes(osFS{}, tomlPath)
+	cfg, prov, err := loadCityConfigWithBuiltinPacks(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	applyFeatureFlags(cfg)
+	var stdout, stderr bytes.Buffer
+	allOrders, err := scanAllOrders(dir, cfg, &stderr, "gc reload test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, order := range allOrders {
+		cfg.Orders.Skip = append(cfg.Orders.Skip, order.Name)
+	}
 	configRev := config.Revision(osFS{}, prov, cfg, dir)
 
-	var stdout, stderr bytes.Buffer
 	done := make(chan struct{})
 	go func() {
 		runController(dir, tomlPath, cfg, configRev, buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
@@ -528,21 +537,48 @@ func TestSendReloadControlRequestInvalidConfig(t *testing.T) {
 		}
 	}
 
+	oldDebounce := debounceDelay
+	debounceDelay = 30 * time.Second
+	t.Cleanup(func() {
+		debounceDelay = oldDebounce
+	})
 	if err := os.WriteFile(tomlPath, []byte("[[[ bad toml"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	reply, err := sendReloadControlRequest(dir, reloadControlRequest{Wait: true, Timeout: "1s"})
-	if err != nil {
-		t.Fatalf("sendReloadControlRequest: %v", err)
+	stdoutBeforeInvalid := stdout.String()
+	var reply reloadControlReply
+	deadline = time.After(45 * time.Second)
+	for {
+		reply, err = sendReloadControlRequest(dir, reloadControlRequest{Wait: true, Timeout: "30s"})
+		if err != nil {
+			t.Fatalf("sendReloadControlRequest: %v", err)
+		}
+		if reply.Outcome != reloadOutcomeBusy {
+			break
+		}
+		if strings.Contains(stderr.String(), "config reload") {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("reload stayed busy; last reply = %+v", reply)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
-	if reply.Outcome != reloadOutcomeFailed {
-		t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeFailed)
-	}
-	if !strings.Contains(reply.Error, "parsing city.toml") {
+	switch {
+	case reply.Outcome == reloadOutcomeBusy:
+		if !strings.Contains(stderr.String(), "config reload") {
+			t.Fatalf("busy reload did not produce invalid config error; stderr=%q", stderr.String())
+		}
+	case reply.Outcome != reloadOutcomeFailed:
+		t.Fatalf("reply.Outcome = %q, want %q; stdout=%q stderr=%q",
+			reply.Outcome, reloadOutcomeFailed, stdout.String(), stderr.String())
+	case !strings.Contains(reply.Error, "parsing city.toml"):
 		t.Fatalf("reply.Error = %q", reply.Error)
 	}
-	if strings.Contains(stdout.String(), "Config reloaded:") {
+	if strings.Contains(strings.TrimPrefix(stdout.String(), stdoutBeforeInvalid), "Config reloaded:") {
 		t.Fatalf("stdout unexpectedly contains reload success: %q", stdout.String())
 	}
 }

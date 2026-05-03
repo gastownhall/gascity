@@ -484,7 +484,7 @@ type AgentOverride struct {
 	// PromptTemplate overrides the prompt template path.
 	// Relative paths resolve against the city directory.
 	PromptTemplate *string `toml:"prompt_template,omitempty"`
-	// Session overrides the session transport ("acp").
+	// Session overrides the session transport ("acp" or "tmux").
 	Session *string `toml:"session,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
@@ -1663,10 +1663,11 @@ type Agent struct {
 	// Used for CLI agents that don't accept command-line prompts.
 	Nudge string `toml:"nudge,omitempty"`
 	// Session overrides the session transport for this agent.
-	// "" (default) uses the city-level session provider (typically tmux).
-	// "acp" uses the Agent Client Protocol (JSON-RPC over stdio).
-	// The agent's resolved provider must have supports_acp = true.
-	Session string `toml:"session,omitempty" jsonschema:"enum=acp"`
+	// "" (default) uses the provider default.
+	// "tmux" uses the tmux-backed CLI path even when the provider supports ACP.
+	// "acp" uses the Agent Client Protocol (JSON-RPC over stdio); the agent's
+	// resolved provider must have supports_acp = true.
+	Session string `toml:"session,omitempty" jsonschema:"enum=acp,enum=tmux"`
 	// Provider names the provider preset to use for this agent.
 	Provider string `toml:"provider,omitempty"`
 	// StartCommand overrides the provider's command for this agent.
