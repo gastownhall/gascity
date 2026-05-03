@@ -591,6 +591,12 @@ func reconcileSessionBeadsTraced(
 		if alive && shouldRollbackPendingCreate(session) && !runningSessionMatchesPendingCreate(session, name, sp) {
 			if rollbacksThisTick >= maxRollbacksPerTick {
 				fmt.Fprintf(stderr, "session reconciler: deferring rollback of %s (live-runtime mismatch): rollback budget exhausted this tick\n", name) //nolint:errcheck
+				if trace != nil {
+					trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, name, "pending_create_rollback", "rollback_deferred", traceRecordPayload{
+						"rollbacks_this_tick":    rollbacksThisTick,
+						"max_rollbacks_per_tick": maxRollbacksPerTick,
+					}, nil, "")
+				}
 				continue
 			}
 			rollbacksThisTick++
@@ -923,7 +929,7 @@ func reconcileSessionBeadsTraced(
 								}
 								continue
 							}
-							resetConfiguredNamedSessionForConfigDrift(session, store, sp, name, alive, "creating", stderr)
+							resetConfiguredNamedSessionForConfigDrift(session, store, sp, name, alive, "creating", clk.Now().UTC(), stderr)
 							if trace != nil {
 								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "restart_in_place", configDriftTracePayload(storedHash, currentHash, driftedFields, nil), nil, "")
 							}
@@ -1027,7 +1033,7 @@ func reconcileSessionBeadsTraced(
 							_ = json.Unmarshal([]byte(raw), &storedBreakdown)
 						}
 						driftedFields := runtime.CoreFingerprintDriftFields(storedBreakdown, agentCfg)
-						resetConfiguredNamedSessionForConfigDrift(session, store, sp, name, false, "asleep", stderr)
+						resetConfiguredNamedSessionForConfigDrift(session, store, sp, name, false, "asleep", clk.Now().UTC(), stderr)
 						if trace != nil {
 							trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "repair_in_place", configDriftTracePayload(storedHash, currentHash, driftedFields, nil), nil, "")
 						}
@@ -1700,6 +1706,7 @@ func resetConfiguredNamedSessionForConfigDrift(
 	sessionName string,
 	alive bool,
 	nextState string,
+	now time.Time,
 	stderr io.Writer,
 ) {
 	if session == nil || store == nil {
@@ -1717,7 +1724,7 @@ func resetConfiguredNamedSessionForConfigDrift(
 	if newKey, err := sessionpkg.GenerateSessionKey(); err == nil {
 		newSessionKey = newKey
 	}
-	batch := sessionpkg.ConfigDriftResetPatch(sessionpkg.State(nextState), newSessionKey)
+	batch := sessionpkg.ConfigDriftResetPatch(sessionpkg.State(nextState), newSessionKey, now)
 	batch[namedSessionConfigDriftDeferredAtMetadata] = ""
 	batch[namedSessionConfigDriftDeferredKeyMetadata] = ""
 	batch[sessionAttachedConfigDriftDeferredAtMetadata] = ""

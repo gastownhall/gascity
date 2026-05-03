@@ -503,14 +503,22 @@ func creatingStateIsStale(input LifecycleInput) bool {
 	if input.StaleCreatingAfter <= 0 {
 		return false
 	}
-	if input.CreatedAt.IsZero() {
-		return true
-	}
 	now := input.Now
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	return !now.Before(input.CreatedAt.Add(input.StaleCreatingAfter))
+	startedAt := input.CreatedAt
+	if input.Metadata != nil {
+		if v := strings.TrimSpace(input.Metadata["pending_create_started_at"]); v != "" {
+			if t, err := time.Parse(time.RFC3339, v); err == nil && !t.IsZero() {
+				startedAt = t
+			}
+		}
+	}
+	if startedAt.IsZero() {
+		return true
+	}
+	return !now.Before(startedAt.Add(input.StaleCreatingAfter))
 }
 
 func shouldResetContinuation(base BaseState, meta map[string]string, sleepReason string) bool {

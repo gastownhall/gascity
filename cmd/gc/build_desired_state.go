@@ -1416,7 +1416,7 @@ func selectOrCreatePoolSessionBead(
 			return bead, nil
 		}
 	}
-	return createPoolSessionBead(bp.beadStore, template, bp.sessionBeads)
+	return createPoolSessionBead(bp.beadStore, template, bp.sessionBeads, poolSessionCreateStartedAt(bp))
 }
 
 func selectOrCreateDependencyPoolSessionBead(
@@ -1444,7 +1444,11 @@ func selectOrCreateDependencyPoolSessionBead(
 			return bead, nil
 		}
 	}
-	return createPoolSessionBead(bp.beadStore, template, bp.sessionBeads)
+	return createPoolSessionBead(bp.beadStore, template, bp.sessionBeads, poolSessionCreateStartedAt(bp))
+}
+
+func poolSessionCreateStartedAt(_ *agentBuildParams) time.Time {
+	return time.Now().UTC()
 }
 
 func agentInSuspendedRig(

@@ -178,10 +178,7 @@ func sessionStartRequested(session beads.Bead, clk clock.Clock) bool {
 // transition (see staleCreatingState below), not from the bead row's
 // CreatedAt — so configured-named-session reopens get a fresh window
 // each time the bead is reopened.
-//
-// Declared as var (not const) so tests can override it without forcing
-// every test fixture to use 60s+ timestamps.
-var staleCreatingStateTimeout = time.Minute
+const staleCreatingStateTimeout = time.Minute
 
 func sessionMetadataState(session beads.Bead) string {
 	switch state := strings.TrimSpace(session.Metadata["state"]); state {

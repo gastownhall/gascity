@@ -1505,6 +1505,7 @@ func setMetaBatch(store beads.Store, id string, batch map[string]string, stderr 
 func closeFailedCreateBead(store beads.Store, id string, now time.Time, stderr io.Writer) bool {
 	patch := session.ClosePatch(now.UTC(), "failed-create")
 	patch["pending_create_claim"] = ""
+	patch["pending_create_started_at"] = ""
 	if setMetaBatch(store, id, patch, stderr) != nil {
 		return false
 	}

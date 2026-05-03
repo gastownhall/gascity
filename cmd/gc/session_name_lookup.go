@@ -27,6 +27,7 @@ func createPoolSessionBead(
 	store beads.Store,
 	template string,
 	sessionBeads *sessionBeadSnapshot,
+	now time.Time,
 ) (beads.Bead, error) {
 	if store == nil {
 		return beads.Bead{}, fmt.Errorf("session store unavailable for pool template %q", template)
@@ -37,7 +38,7 @@ func createPoolSessionBead(
 		"agent_name":                template,
 		"state":                     "creating",
 		"pending_create_claim":      "true",
-		"pending_create_started_at": pendingCreateStartedAtNow(time.Now()),
+		"pending_create_started_at": pendingCreateStartedAtNow(now),
 		"session_origin":            "ephemeral",
 		"generation":                "1",
 		"continuation_epoch":        "1",
