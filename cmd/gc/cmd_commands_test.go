@@ -532,6 +532,76 @@ func TestTryDiscoveredCommandFallback_NamespaceHelpListsChildren(t *testing.T) {
 	}
 }
 
+func TestPrintDiscoveredCommandHelpFallbacks(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		entry config.DiscoveredCommand
+		want  string
+	}{
+		{
+			name:  "description",
+			entry: config.DiscoveredCommand{Command: []string{"status"}, Description: "Show status"},
+			want:  "Show status\n",
+		},
+		{
+			name:  "generic",
+			entry: config.DiscoveredCommand{Command: []string{"repo", "sync"}},
+			want:  "Pack command: repo sync\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			printDiscoveredCommandHelp(&stdout, tc.entry)
+			if got := stdout.String(); got != tc.want {
+				t.Fatalf("stdout = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPrintDiscoveredCommandListFiltersPrefixAndSkipsExactNamespace(t *testing.T) {
+	entries := []config.DiscoveredCommand{
+		{Command: []string{"repo"}, Description: "Repo namespace"},
+		{Command: []string{"repo", "sync"}, Description: "Sync repo"},
+		{Command: []string{"repo", "clean"}, Description: "Clean repo"},
+		{Command: []string{"status"}, Description: "Show status"},
+	}
+
+	var stdout bytes.Buffer
+	printDiscoveredCommandList(&stdout, "gs", []string{"repo"}, entries)
+
+	out := stdout.String()
+	for _, want := range []string{
+		"Available commands for gs repo:",
+		"sync",
+		"Sync repo",
+		"clean",
+		"Clean repo",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q, got:\n%s", want, out)
+		}
+	}
+	for _, notWant := range []string{"Repo namespace", "status", "Show status"} {
+		if strings.Contains(out, notWant) {
+			t.Fatalf("stdout unexpectedly contained %q, got:\n%s", notWant, out)
+		}
+	}
+}
+
+func TestDiscoveredCommandPrefixHelpers(t *testing.T) {
+	entries := []config.DiscoveredCommand{{Command: []string{"repo", "sync"}}}
+	if !discoveredCommandPrefixExists(entries, []string{"repo"}) {
+		t.Fatal("expected repo prefix to exist")
+	}
+	if discoveredCommandPrefixExists(entries, []string{"missing"}) {
+		t.Fatal("missing prefix unexpectedly exists")
+	}
+	if commandHasPrefix([]string{"repo"}, []string{"repo", "sync"}) {
+		t.Fatal("short command unexpectedly matched longer prefix")
+	}
+}
+
 func TestAddDiscoveredCommandsToRoot_DedupsDuplicateLeaf(t *testing.T) {
 	root := &cobra.Command{Use: "gc"}
 	entries := []config.DiscoveredCommand{
