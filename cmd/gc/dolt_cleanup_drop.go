@@ -68,8 +68,6 @@ func runDropStage(report *CleanupReport, opts cleanupOptions) {
 	}
 
 	plan := planDoltDrops(all, stalePrefixes, protected)
-	report.Dropped.Count = len(plan.ToDrop)
-	report.Dropped.Names = append([]string{}, plan.ToDrop...)
 	report.Dropped.Skipped = append([]DoltDropSkip{}, plan.Skipped...)
 	for _, skipped := range plan.Skipped {
 		if skipped.Reason == DropSkipReasonInvalidIdentifier {
@@ -78,6 +76,17 @@ func runDropStage(report *CleanupReport, opts cleanupOptions) {
 	}
 
 	if !opts.Force {
+		report.Dropped.Count = len(plan.ToDrop)
+		report.Dropped.Names = append([]string{}, plan.ToDrop...)
+		return
+	}
+	if opts.MaxOrphanDBs > 0 && len(plan.ToDrop) > opts.MaxOrphanDBs {
+		recordCleanupError(
+			report,
+			"drop",
+			"",
+			fmt.Errorf("apply-time stale database count %d exceeds max_orphans_for_sql=%d; refusing forced drops", len(plan.ToDrop), opts.MaxOrphanDBs),
+		)
 		return
 	}
 

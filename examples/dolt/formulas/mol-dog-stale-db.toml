@@ -175,7 +175,7 @@ elif [ "$ORPHAN_DBS" -gt "{{max_orphans_for_sql}}" ]; then
   run_or_warn "emit max-orphan escalation" gc event emit mol-dog-stale-db.escalate \
     --message "$ORPHAN_DBS stale databases > max_orphans_for_sql={{max_orphans_for_sql}} -> mail sent to mayor"
 else
-  if ! gc dolt-cleanup --json --probe --force > "$APPLY_FILE"; then
+  if ! gc dolt-cleanup --json --probe --force --max-orphan-dbs "{{max_orphans_for_sql}}" > "$APPLY_FILE"; then
     ESCALATED=1
     append_report_note "apply (--force, failed)" "$APPLY_FILE"
     run_or_warn "send apply refusal escalation mail" gc mail send mayor \

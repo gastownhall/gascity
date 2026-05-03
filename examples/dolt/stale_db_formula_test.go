@@ -33,7 +33,7 @@ func TestStaleDBFormulaRuntimeContract(t *testing.T) {
 		`trap cleanup EXIT`,
 		`drain_ack_once()`,
 		`gc dolt-cleanup --json --probe > "$SCAN_FILE"`,
-		`gc dolt-cleanup --json --probe --force > "$APPLY_FILE"`,
+		`gc dolt-cleanup --json --probe --force --max-orphan-dbs "{{max_orphans_for_sql}}" > "$APPLY_FILE"`,
 		`jq -r '.dropped.count // 0'`,
 		`jq -r '[.dropped.skipped[]? | select(.reason == "invalid-identifier")] | length'`,
 		`jq -r '.reaped.targets | length'`,
@@ -397,7 +397,7 @@ esac
 		t.Fatalf("rendered script failed: %v\nlog:\n%s\noutput:\n%s", err, log, out)
 	}
 	for _, want := range []string{
-		"gc dolt-cleanup --json --probe --force",
+		"gc dolt-cleanup --json --probe --force --max-orphan-dbs 20",
 		"gc event emit mol-dog-stale-db.done --message 1200 bytes freed; 0 errors",
 		"bd close bead-1",
 	} {
@@ -482,7 +482,7 @@ esac
 		t.Fatalf("rendered script failed: %v\nlog:\n%s\noutput:\n%s", err, log, out)
 	}
 	for _, want := range []string{
-		"gc dolt-cleanup --json --probe --force",
+		"gc dolt-cleanup --json --probe --force --max-orphan-dbs 20",
 		"gc event emit mol-dog-stale-db.done --message 4096 bytes freed; 0 errors",
 		"bd close bead-1",
 	} {
@@ -570,7 +570,7 @@ esac
 		t.Fatalf("rendered script exited successfully; want SQL-backed apply failure to keep work open\nlog:\n%s\noutput:\n%s", log, out)
 	}
 	for _, want := range []string{
-		"gc dolt-cleanup --json --probe --force",
+		"gc dolt-cleanup --json --probe --force --max-orphan-dbs 20",
 		"bd update bead-1 --append-notes",
 		"## apply (--force, failed)",
 		`"stage":"purge"`,

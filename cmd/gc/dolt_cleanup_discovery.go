@@ -33,7 +33,7 @@ func loadRigDoltPorts(rigs []resolverRig, fs fsys.FS) map[int]string {
 			continue
 		}
 		port, err := strconv.Atoi(text)
-		if err != nil || port <= 0 {
+		if err != nil || !validDoltPort(port) {
 			continue
 		}
 		out[port] = rig.Name

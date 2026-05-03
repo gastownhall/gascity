@@ -173,6 +173,7 @@ type cleanupOptions struct {
 	Host           string
 	HomeDir        string
 	TempDir        string
+	MaxOrphanDBs   int
 
 	// StalePrefixes overrides defaultStaleDatabasePrefixes when non-empty.
 	// Set by tests; production passes nil and falls back to the built-in.
@@ -400,6 +401,9 @@ func protectedDoltPortsForReap(opts cleanupOptions) map[int]string {
 	if opts.PortResolution.Port <= 0 {
 		return ports
 	}
+	if opts.PortResolution.Fallback || opts.PortResolution.Source == "legacy default" {
+		return ports
+	}
 	source := opts.PortResolution.Source
 	if source == "" {
 		source = "selected"
@@ -476,7 +480,7 @@ func fatalPortResolutionAttempt(resolution PortResolution) (PortResolutionAttemp
 		if attempt.Status != "error" {
 			continue
 		}
-		if attempt.Source != "--port flag" && !isRigPortFileSource(attempt.Source) {
+		if attempt.Source != "--port flag" && attempt.Source != "city config dolt.port" && !isRigPortFileSource(attempt.Source) {
 			continue
 		}
 		if attempt.Detail != "" {
@@ -721,10 +725,11 @@ func probeDoltPort(host string, port int) error {
 // delegate to this Go-side command once feature parity lands.
 func newDoltCleanupCmd(stdout, stderr io.Writer) *cobra.Command {
 	var (
-		portFlag string
-		jsonOut  bool
-		probe    bool
-		force    bool
+		portFlag     string
+		jsonOut      bool
+		probe        bool
+		force        bool
+		maxOrphanDBs int
 	)
 
 	cmd := &cobra.Command{
@@ -736,10 +741,14 @@ cleanup tool. It resolves the Dolt server port via the AD-04 chain
 drops stale test/agent databases, calls DOLT_PURGE_DROPPED_DATABASES
 to reclaim disk, and reaps orphaned dolt sql-server processes left
 over from leaked test harnesses. Invalid explicit ports and unreadable
-or invalid rig port files fail closed before cleanup stages run; only
-absent rig port files can reach the legacy default.
+or invalid city/rig port settings fail closed before cleanup stages run;
+only absent rig port files can reach the legacy default. The legacy
+default is a connection fallback only; it does not protect port 3307
+from orphan-process reaping.
 
 Dry-run by default. Pass --force to actually drop, purge, and kill.
+Pass --max-orphan-dbs with --force to refuse destructive drops if the
+live apply-time stale database count exceeds the scan-time threshold.
 Active rig dolt servers, registered rig databases, active test temp roots,
 and processes outside the test-config-path allowlist (/tmp/Test*,
 os.TempDir()/Test*, known Gas City test prefixes, ~/.gotmp/Test*) are always
@@ -748,9 +757,13 @@ report. Destructive drops are limited to known stale test database name
 shapes and conservative SQL identifier characters; skipped stale matches
 are reported in dropped.skipped. Rig dolt_database names used for purge
 must use the same identifier shape: ASCII letters, digits, underscores,
-and non-leading hyphens.
+and non-leading hyphens. Missing or silent rig metadata disables forced
+drop/purge because the live database name cannot be proven safe.
 
-JSON envelope schema is stable: gc.dolt.cleanup.v1.`,
+JSON envelope schema is stable: gc.dolt.cleanup.v1. Automation that
+uses --json must inspect summary.errors_total and errors; cleanup stage
+errors are reported in the envelope even when the command can still
+return successfully after emitting the report.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			cityPath, err := resolveCity()
@@ -766,16 +779,17 @@ JSON envelope schema is stable: gc.dolt.cleanup.v1.`,
 			rigs := loadResolverRigs(cityPath, cfg)
 			homeDir, _ := os.UserHomeDir()
 			opts := cleanupOptions{
-				Flag:     portFlag,
-				CityPort: cfg.Dolt.Port,
-				Rigs:     rigs,
-				FS:       fsys.OSFS{},
-				JSON:     jsonOut,
-				Probe:    probe,
-				Force:    force,
-				Host:     cfg.Dolt.Host,
-				HomeDir:  homeDir,
-				TempDir:  os.TempDir(),
+				Flag:         portFlag,
+				CityPort:     cfg.Dolt.Port,
+				Rigs:         rigs,
+				FS:           fsys.OSFS{},
+				JSON:         jsonOut,
+				Probe:        probe,
+				Force:        force,
+				Host:         cfg.Dolt.Host,
+				HomeDir:      homeDir,
+				TempDir:      os.TempDir(),
+				MaxOrphanDBs: maxOrphanDBs,
 			}
 
 			// Resolve the port first so we can open a Dolt connection at the
@@ -809,17 +823,16 @@ JSON envelope schema is stable: gc.dolt.cleanup.v1.`,
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON envelope (gc.dolt.cleanup.v1)")
 	cmd.Flags().BoolVar(&probe, "probe", false, "TCP-probe the resolved port; fail if unreachable")
 	cmd.Flags().BoolVar(&force, "force", false, "actually drop, purge, and kill orphaned resources (default: dry-run)")
+	cmd.Flags().IntVar(&maxOrphanDBs, "max-orphan-dbs", 0, "with --force, refuse drops when live stale database count exceeds this limit")
 	return cmd
 }
 
 // rigProtections projects the resolver's rig list into the JSON-envelope
 // rigs_protected entries. The DB name is read from each rig's
-// <rigPath>/.beads/metadata.json `dolt_database` field; rig.Name is used as
-// an authoritative default only when metadata is absent or silent on
-// dolt_database. Unreadable or corrupt metadata is returned as an error so
-// forced destructive work can fail closed instead of pretending the fallback is
-// the live DB identity. Order is HQ-first to match the port-resolution
-// preference.
+// <rigPath>/.beads/metadata.json `dolt_database` field. Missing, silent,
+// unreadable, or corrupt metadata is returned as an error so forced destructive
+// work can fail closed instead of pretending the fallback is the live DB
+// identity. Order is HQ-first to match the port-resolution preference.
 func rigProtections(rigs []resolverRig, fs fsys.FS) ([]CleanupRigProtection, []rigProtectionError) {
 	out := make([]CleanupRigProtection, 0, len(rigs))
 	var errs []rigProtectionError
@@ -857,7 +870,8 @@ func hasRigProtectionError(report *CleanupReport) bool {
 }
 
 // rigDoltDatabaseName returns the rig's dolt database name as recorded in its
-// metadata.json, falling back to rig.Name only for authoritative defaults.
+// metadata.json, falling back to rig.Name only as a report label when metadata
+// is missing or silent.
 func rigDoltDatabaseName(r resolverRig, fs fsys.FS) string {
 	return resolveRigDoltDatabase(r, fs).name
 }
@@ -869,13 +883,19 @@ type rigDoltDatabaseResolution struct {
 
 func resolveRigDoltDatabase(r resolverRig, fs fsys.FS) rigDoltDatabaseResolution {
 	if fs == nil {
-		return rigDoltDatabaseResolution{name: r.Name}
+		return rigDoltDatabaseResolution{
+			name: r.Name,
+			err:  fmt.Errorf("missing filesystem for rig metadata; cannot verify live dolt database name"),
+		}
 	}
 	metadataPath := filepath.Join(r.Path, ".beads", "metadata.json")
 	data, err := fs.ReadFile(metadataPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return rigDoltDatabaseResolution{name: r.Name}
+			return rigDoltDatabaseResolution{
+				name: r.Name,
+				err:  fmt.Errorf("missing rig metadata %s; cannot verify live dolt database name", metadataPath),
+			}
 		}
 		return rigDoltDatabaseResolution{
 			name: r.Name,
@@ -895,7 +915,10 @@ func resolveRigDoltDatabase(r resolverRig, fs fsys.FS) rigDoltDatabaseResolution
 			return rigDoltDatabaseResolution{name: s}
 		}
 	}
-	return rigDoltDatabaseResolution{name: r.Name}
+	return rigDoltDatabaseResolution{
+		name: r.Name,
+		err:  fmt.Errorf("rig metadata %s lacks dolt_database; cannot verify live dolt database name", metadataPath),
+	}
 }
 
 // loadResolverRigs builds the resolver's rig list from a city config. The HQ

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	iofs "io/fs"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -40,6 +42,9 @@ func runPurgeStage(report *CleanupReport, opts cleanupOptions) {
 	var totalBytes int64
 	bytesByRigDB := map[string]int64{}
 	for _, rig := range opts.Rigs {
+		if opts.Force && !rigSharesResolvedDoltServer(rig, opts) {
+			continue
+		}
 		root := filepath.Join(rig.Path, droppedDatabasesDir)
 		bytes, err := sumBytesUnder(opts.FS, root)
 		if err != nil {
@@ -106,6 +111,33 @@ func runPurgeStage(report *CleanupReport, opts cleanupOptions) {
 	}
 	report.Purge.BytesReclaimed = reclaimedBytes
 	report.Purge.OK = allOK
+}
+
+func rigSharesResolvedDoltServer(rig resolverRig, opts cleanupOptions) bool {
+	if opts.PortResolution.Port <= 0 || opts.FS == nil {
+		return true
+	}
+	port, ok := rigPortFileValue(rig, opts.FS)
+	if !ok {
+		return true
+	}
+	return port == opts.PortResolution.Port
+}
+
+func rigPortFileValue(rig resolverRig, fs fsys.FS) (int, bool) {
+	data, err := fs.ReadFile(filepath.Join(rig.Path, ".beads", "dolt-server.port"))
+	if err != nil {
+		return 0, false
+	}
+	text := strings.TrimSpace(string(data))
+	if text == "" {
+		return 0, false
+	}
+	port, err := strconv.Atoi(text)
+	if err != nil || !validDoltPort(port) {
+		return 0, false
+	}
+	return port, true
 }
 
 // sumBytesUnder walks the given root recursively and returns the total

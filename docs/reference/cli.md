@@ -919,10 +919,14 @@ cleanup tool. It resolves the Dolt server port via the AD-04 chain
 drops stale test/agent databases, calls DOLT_PURGE_DROPPED_DATABASES
 to reclaim disk, and reaps orphaned dolt sql-server processes left
 over from leaked test harnesses. Invalid explicit ports and unreadable
-or invalid rig port files fail closed before cleanup stages run; only
-absent rig port files can reach the legacy default.
+or invalid city/rig port settings fail closed before cleanup stages run;
+only absent rig port files can reach the legacy default. The legacy
+default is a connection fallback only; it does not protect port 3307
+from orphan-process reaping.
 
 Dry-run by default. Pass --force to actually drop, purge, and kill.
+Pass --max-orphan-dbs with --force to refuse destructive drops if the
+live apply-time stale database count exceeds the scan-time threshold.
 Active rig dolt servers, registered rig databases, active test temp roots,
 and processes outside the test-config-path allowlist (/tmp/Test*,
 os.TempDir()/Test*, known Gas City test prefixes, ~/.gotmp/Test*) are always
@@ -931,9 +935,13 @@ report. Destructive drops are limited to known stale test database name
 shapes and conservative SQL identifier characters; skipped stale matches
 are reported in dropped.skipped. Rig dolt_database names used for purge
 must use the same identifier shape: ASCII letters, digits, underscores,
-and non-leading hyphens.
+and non-leading hyphens. Missing or silent rig metadata disables forced
+drop/purge because the live database name cannot be proven safe.
 
-JSON envelope schema is stable: gc.dolt.cleanup.v1.
+JSON envelope schema is stable: gc.dolt.cleanup.v1. Automation that
+uses --json must inspect summary.errors_total and errors; cleanup stage
+errors are reported in the envelope even when the command can still
+return successfully after emitting the report.
 
 ```
 gc dolt-cleanup [flags]
@@ -943,6 +951,7 @@ gc dolt-cleanup [flags]
 |------|------|---------|-------------|
 | `--force` | bool |  | actually drop, purge, and kill orphaned resources (default: dry-run) |
 | `--json` | bool |  | emit JSON envelope (gc.dolt.cleanup.v1) |
+| `--max-orphan-dbs` | int |  | with --force, refuse drops when live stale database count exceeds this limit |
 | `--port` | string |  | override the resolved Dolt port |
 | `--probe` | bool |  | TCP-probe the resolved port; fail if unreachable |
 
