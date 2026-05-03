@@ -152,6 +152,7 @@ func (s *Server) streamEvents(hctx huma.Context, input *EventStreamInput, send s
 		return
 	}
 	defer watcher.Close() //nolint:errcheck
+	flushSSEHeaders(hctx)
 
 	keepalive := time.NewTicker(sseKeepalive)
 	defer keepalive.Stop()

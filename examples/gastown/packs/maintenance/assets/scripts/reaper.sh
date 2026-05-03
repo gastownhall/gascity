@@ -32,9 +32,12 @@ PURGE_AGE_H=$(duration_to_hours "$PURGE_AGE")
 STALE_AGE_H=$(duration_to_hours "$STALE_ISSUE_AGE")
 MAIL_AGE_H=$(duration_to_hours "$MAIL_DELETE_AGE")
 
-# Discover databases from Dolt server. Exclude Dolt/MySQL system schemas and
-# Gas City's internal health-probe database; remaining DBs are bead stores.
-DATABASES=$(dolt_sql -r csv -q "SHOW DATABASES" 2>/dev/null | tail -n +2 | grep -vi '^information_schema$\|^mysql$\|^dolt_cluster$\|^performance_schema$\|^sys$\|^__gc_probe$' || true)
+# Discover databases from Dolt server. Exclude Dolt/MySQL system schemas,
+# Gas City's internal health-probe database, and test-fixture scratch
+# databases (benchdb, testdb_*, beads_t*, beads_pt*, beads_vr*, doctest_*,
+# doctortest_* — patterns from mol-dog-stale-db); the remainder are bead
+# stores.
+DATABASES=$(dolt_sql -r csv -q "SHOW DATABASES" 2>/dev/null | tail -n +2 | grep -vi '^information_schema$\|^mysql$\|^dolt_cluster$\|^performance_schema$\|^sys$\|^__gc_probe$\|^benchdb$\|^testdb_\|^beads_t\|^beads_pt\|^beads_vr\|^doctest_\|^doctortest_' || true)
 if [ -z "$DATABASES" ]; then
     # No databases accessible — nothing to do.
     exit 0

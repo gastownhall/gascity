@@ -403,7 +403,7 @@ func writeControllerNamedSessionCityTOML(t *testing.T, dir, cityName, mode, idle
 	var buf bytes.Buffer
 	buf.WriteString("[workspace]\nname = " + `"` + cityName + `"` + "\n\n")
 	buf.WriteString("[beads]\nprovider = \"file\"\n\n")
-	buf.WriteString("[daemon]\nshutdown_timeout = \"20ms\"\n\n")
+	buf.WriteString("[daemon]\nshutdown_timeout = \"0s\"\n\n")
 	buf.WriteString("[[agent]]\nname = \"mayor\"\nstart_command = \"echo hello\"\n")
 	if idleTimeout != "" {
 		buf.WriteString("idle_timeout = " + `"` + idleTimeout + `"` + "\n")
