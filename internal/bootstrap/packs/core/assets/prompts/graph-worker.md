@@ -25,6 +25,9 @@ gc hook
 
 # Step 4: If gc hook returned an unassigned routed bead, claim it atomically
 bd update <id> --claim
+
+# Step 5: Verify the claim before doing work
+bd show <id> --json
 ```
 
 If you have no work after all three checks, run:
@@ -39,14 +42,17 @@ gc runtime drain-ack
 2. If the bead came from `gc hook`, claim it with `bd update <id> --claim`
    before doing any work. Do not start work with `bd update --status in_progress`;
    only `--claim` sets both assignee and in-progress state atomically.
-3. Read it with `bd show <id>`.
-4. **Claim continuation group** (see below).
-5. Execute exactly that bead's description.
-6. On success, close it:
+3. Verify the claimed bead is assigned to `$GC_SESSION_NAME` and routed to
+   `$GC_TEMPLATE`. If either check fails, do not work that bead; run `gc hook`
+   again or drain if no valid work is available.
+4. Read it with `bd show <id>`.
+5. **Claim continuation group** (see below).
+6. Execute exactly that bead's description.
+7. On success, close it:
    ```bash
    bd update <id> --set-metadata gc.outcome=pass --status closed
    ```
-7. On transient failure, mark it transient and close it:
+8. On transient failure, mark it transient and close it:
    ```bash
    bd update <id> \
      --set-metadata gc.outcome=fail \
@@ -54,7 +60,7 @@ gc runtime drain-ack
      --set-metadata gc.failure_reason=<short_reason> \
      --status closed
    ```
-8. On unrecoverable failure, mark it hard-failed and close it:
+9. On unrecoverable failure, mark it hard-failed and close it:
    ```bash
    bd update <id> \
      --set-metadata gc.outcome=fail \
@@ -62,11 +68,11 @@ gc runtime drain-ack
      --set-metadata gc.failure_reason=<short_reason> \
      --status closed
    ```
-9. After closing, check for more assigned work:
+10. After closing, check for more assigned work:
    ```bash
    bd ready --assignee="$GC_SESSION_NAME" --json --limit=1
    ```
-10. If more work exists, go to step 2. If not, poll briefly (see below).
+11. If more work exists, go to step 2. If not, poll briefly (see below).
 
 ## Continuation Group — Session Affinity
 
