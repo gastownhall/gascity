@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/extmsg"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -332,7 +333,6 @@ func TestPhase0RetireContinuityIneligibleNamedSessionIdentifiersDoesNotRestampRe
 func TestPhase0HandleSessionWake_ContinuityEligibleArchivedBeadRequestsStart(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
-	h := newTestCityHandlerWith(t, fs, srv)
 	id := phase0MaterializeCityScopedNamedWorker(t, srv, fs)
 	if err := fs.cityBeadStore.SetMetadataBatch(id, map[string]string{
 		"state":               "archived",
@@ -342,6 +342,13 @@ func TestPhase0HandleSessionWake_ContinuityEligibleArchivedBeadRequestsStart(t *
 		t.Fatalf("SetMetadataBatch(archived): %v", err)
 	}
 
+	unblockStart := make(chan struct{})
+	provider := &blockingStartProvider{Fake: runtime.NewFake(), unblock: unblockStart}
+	wrappedState := &stateWithSessionProvider{fakeState: fs, provider: provider}
+	t.Cleanup(func() { close(unblockStart) })
+
+	srv = New(wrappedState)
+	h := newTestCityHandlerWith(t, wrappedState, srv)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, newPostRequest(cityURL(fs, "/session/"+id+"/wake"), nil))
 	if rec.Code != http.StatusOK {
