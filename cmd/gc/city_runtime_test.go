@@ -531,6 +531,49 @@ func TestCityRuntimeRunStartupOrderDispatchPanicIsRecovered(t *testing.T) {
 	}
 }
 
+func TestOrderTrackingSweepWatchdogOnlyClosesSweepOrderTracking(t *testing.T) {
+	store := beads.NewMemStore()
+	sweepTracking, err := store.Create(beads.Bead{
+		Title:  "order:" + orderTrackingSweepOrder,
+		Labels: []string{"order-run:" + orderTrackingSweepOrder, labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create(sweep): %v", err)
+	}
+	mergeTracking, err := store.Create(beads.Bead{
+		Title:  "order:pr-merge-queue",
+		Labels: []string{"order-run:pr-merge-queue", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create(merge): %v", err)
+	}
+
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		standaloneCityStore: store,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+		logPrefix:           "gc test",
+	}
+	cr.runOrderTrackingSweepWatchdog(time.Now().Add(orderTrackingSweepWatchdogStaleAfter + time.Second))
+
+	gotSweep, err := store.Get(sweepTracking.ID)
+	if err != nil {
+		t.Fatalf("Get(sweep): %v", err)
+	}
+	if gotSweep.Status != "closed" {
+		t.Fatalf("sweep tracking status = %s, want closed", gotSweep.Status)
+	}
+	gotMerge, err := store.Get(mergeTracking.ID)
+	if err != nil {
+		t.Fatalf("Get(merge): %v", err)
+	}
+	if gotMerge.Status != "open" {
+		t.Fatalf("merge tracking status = %s, want open", gotMerge.Status)
+	}
+}
+
 func TestCityRuntimeDemandSnapshotRefreshesWhenDemandCommandsAreCustom(t *testing.T) {
 	cases := []struct {
 		name  string

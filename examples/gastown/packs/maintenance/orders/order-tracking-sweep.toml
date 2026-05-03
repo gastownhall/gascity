@@ -1,0 +1,8 @@
+# Closes stale order tracking beads left behind by crashed or resource-starved
+# exec dispatches. Fresh tracking beads are left alone so in-flight orders keep
+# their normal single-flight protection.
+[order]
+description = "Close stale order-tracking beads so blocked orders can retry"
+trigger = "cooldown"
+interval = "1m"
+exec = "gc order sweep-tracking --stale-after 10m --quiet"

@@ -2380,6 +2380,65 @@ func TestSweepOrphanedOrderTracking_OnlyClosedBeads(t *testing.T) {
 	}
 }
 
+func TestSweepStaleOrderTracking_ClosesOnlyOldOpenTrackingBeads(t *testing.T) {
+	store := beads.NewMemStore()
+
+	old, err := store.Create(beads.Bead{
+		Title:  "order:old-sweep",
+		Labels: []string{"order-run:old-sweep", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create(old): %v", err)
+	}
+	oldWork, err := store.Create(beads.Bead{
+		Title:  "real work",
+		Labels: []string{"order-run:old-sweep"},
+	})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+
+	time.Sleep(150 * time.Millisecond)
+
+	fresh, err := store.Create(beads.Bead{
+		Title:  "order:fresh-sweep",
+		Labels: []string{"order-run:fresh-sweep", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create(fresh): %v", err)
+	}
+
+	closed, err := sweepStaleOrderTracking(store, time.Now(), 100*time.Millisecond, nil, orderTrackingSweepMetadataInitiator)
+	if err != nil {
+		t.Fatalf("sweepStaleOrderTracking: %v", err)
+	}
+	if closed != 1 {
+		t.Fatalf("closed = %d, want 1", closed)
+	}
+
+	gotOld, err := store.Get(old.ID)
+	if err != nil {
+		t.Fatalf("Get(old): %v", err)
+	}
+	if gotOld.Status != "closed" {
+		t.Fatalf("old tracking status = %s, want closed", gotOld.Status)
+	}
+	gotFresh, err := store.Get(fresh.ID)
+	if err != nil {
+		t.Fatalf("Get(fresh): %v", err)
+	}
+	if gotFresh.Status != "open" {
+		t.Fatalf("fresh tracking status = %s, want open", gotFresh.Status)
+	}
+	gotWork, err := store.Get(oldWork.ID)
+	if err != nil {
+		t.Fatalf("Get(work): %v", err)
+	}
+	if gotWork.Status != "open" {
+		t.Fatalf("non-tracking work status = %s, want open", gotWork.Status)
+	}
+}
+
 func TestStartupSweepThenBuildDispatcher(t *testing.T) {
 	store := beads.NewMemStore()
 

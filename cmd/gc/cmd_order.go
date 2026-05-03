@@ -32,7 +32,7 @@ tick and dispatches work when a trigger opens.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				fmt.Fprintln(stderr, "gc order: missing subcommand (list, show, run, check, history)") //nolint:errcheck // best-effort stderr
+				fmt.Fprintln(stderr, "gc order: missing subcommand (list, show, run, check, history, sweep-tracking)") //nolint:errcheck // best-effort stderr
 			} else {
 				fmt.Fprintf(stderr, "gc order: unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
 			}
@@ -45,6 +45,7 @@ tick and dispatches work when a trigger opens.`,
 		newOrderRunCmd(stdout, stderr),
 		newOrderCheckCmd(stdout, stderr),
 		newOrderHistoryCmd(stdout, stderr),
+		newOrderSweepTrackingCmd(stdout, stderr),
 	)
 	return cmd
 }
@@ -158,6 +159,29 @@ name. Use --rig to filter by rig.`,
 	}
 	cmd.Flags().StringVar(&rig, "rig", "", "rig name to filter order history")
 	_ = cmd.RegisterFlagCompletionFunc("rig", completeRigFlagNames)
+	return cmd
+}
+
+func newOrderSweepTrackingCmd(stdout, stderr io.Writer) *cobra.Command {
+	staleAfter := defaultOrderTrackingSweepStaleAfter
+	quiet := false
+	cmd := &cobra.Command{
+		Use:   "sweep-tracking",
+		Short: "Close stale order-tracking beads",
+		Long: `Close stale open order-tracking beads.
+
+This is intended for maintenance exec orders. It only closes tracking beads
+older than --stale-after so a fresh in-flight order is not interrupted.`,
+		Args: cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if cmdOrderSweepTracking(staleAfter, quiet, stdout, stderr) != 0 {
+				return errExit
+			}
+			return nil
+		},
+	}
+	cmd.Flags().DurationVar(&staleAfter, "stale-after", defaultOrderTrackingSweepStaleAfter, "minimum age for an open tracking bead to be closed")
+	cmd.Flags().BoolVar(&quiet, "quiet", false, "suppress success output")
 	return cmd
 }
 
@@ -910,6 +934,34 @@ func doOrderHistoryWithStoresResolver(name, rig string, aa []orders.Order, resol
 		for _, e := range entries {
 			fmt.Fprintf(stdout, "%-20s %-15s %s\n", e.order, e.id, e.createdAt.Format(time.RFC3339)) //nolint:errcheck
 		}
+	}
+	return 0
+}
+
+// --- gc order sweep-tracking ---
+
+func cmdOrderSweepTracking(staleAfter time.Duration, quiet bool, stdout, stderr io.Writer) int {
+	if staleAfter <= 0 {
+		fmt.Fprintln(stderr, "gc order sweep-tracking: --stale-after must be positive") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	store, err := openStoreAtForCity(cityPath, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	closed, err := sweepStaleOrderTracking(store, time.Now(), staleAfter, nil, orderTrackingSweepMetadataInitiator)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if !quiet {
+		fmt.Fprintf(stdout, "closed %d stale order-tracking bead(s)\n", closed) //nolint:errcheck // best-effort stdout
 	}
 	return 0
 }
