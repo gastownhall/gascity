@@ -1477,10 +1477,13 @@ func TestWorkflowServeControlReadyQueryUsesControlTiers(t *testing.T) {
 	if strings.Contains(query, "bd list --status in_progress") {
 		t.Fatalf("workflowServeControlReadyQuery should not return in-progress control beads: %q", query)
 	}
+	if !strings.Contains(query, "BD_EXPORT_AUTO=false") {
+		t.Fatalf("workflowServeControlReadyQuery should disable bd auto-export: %q", query)
+	}
 	for _, want := range []string{
-		`bd ready --assignee="$cand"`,
-		`bd ready --metadata-field "gc.routed_to=$GC_CONTROL_TARGET" --unassigned`,
-		`bd ready --metadata-field "gc.routed_to=$GC_CONTROL_LEGACY_TARGET" --unassigned`,
+		`bd --readonly --sandbox ready --assignee="$cand"`,
+		`bd --readonly --sandbox ready --metadata-field "gc.routed_to=$GC_CONTROL_TARGET" --unassigned`,
+		`bd --readonly --sandbox ready --metadata-field "gc.routed_to=$GC_CONTROL_LEGACY_TARGET" --unassigned`,
 	} {
 		if !strings.Contains(query, want) {
 			t.Fatalf("workflowServeControlReadyQuery missing %q in %q", want, query)
@@ -1503,10 +1506,10 @@ case "$*" in
   "list --status in_progress --assignee=gascity--control-dispatcher --json --limit=20")
     printf '[{"id":"ga-in-progress"}]'
     ;;
-  "ready --assignee=gascity--control-dispatcher --json --limit=20")
+  "--readonly --sandbox ready --assignee=gascity--control-dispatcher --json --limit=20")
     printf '[{"id":"ga-ready"}]'
     ;;
-  "ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --json --limit=20")
+  "--readonly --sandbox ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --json --limit=20")
     printf '[{"id":"ga-routed"}]'
     ;;
   *)
@@ -1532,7 +1535,7 @@ func TestWorkflowServeControlReadyQueryUsesConfiguredRuntimeNameWhenEnvIsManualS
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "ready --assignee=gascity--control-dispatcher --json --limit=20")
+  "--readonly --sandbox ready --assignee=gascity--control-dispatcher --json --limit=20")
     printf '[{"id":"ga-control-ready"}]'
     ;;
   *)
@@ -1556,9 +1559,13 @@ func TestWorkflowServeControlReadyQueryPrioritizesConfiguredRuntimeName(t *testi
 	bdPath := filepath.Join(tmp, "bd")
 	if err := os.WriteFile(bdPath, []byte(`#!/bin/sh
 set -eu
+[ "${BD_EXPORT_AUTO:-}" = "false" ] || {
+  echo "BD_EXPORT_AUTO=${BD_EXPORT_AUTO:-}" >&2
+  exit 43
+}
 printf '%s\n' "$*" >> "$BD_LOG"
 case "$*" in
-  "ready --assignee=gascity--control-dispatcher --json --limit=20")
+  "--readonly --sandbox ready --assignee=gascity--control-dispatcher --json --limit=20")
     printf '[{"id":"ga-control-ready"}]'
     ;;
   *)
@@ -1587,26 +1594,45 @@ esac
 		t.Fatalf("read bd log: %v", err)
 	}
 	firstCall, _, _ := strings.Cut(strings.TrimSpace(string(logData)), "\n")
-	if want := "ready --assignee=gascity--control-dispatcher --json --limit=20"; firstCall != want {
+	if want := "--readonly --sandbox ready --assignee=gascity--control-dispatcher --json --limit=20"; firstCall != want {
 		t.Fatalf("first bd call = %q, want %q; all calls:\n%s", firstCall, want, string(logData))
 	}
 }
 
 func TestWorkflowServeControlReadyQueryQuotesMetadataFallbackTarget(t *testing.T) {
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "my rig"})
-	out := runWorkflowServeShellQueryForTest(t, query, map[string]string{}, `#!/bin/sh
+	tmp := t.TempDir()
+	argsPath := filepath.Join(tmp, "matched.args")
+	out := runWorkflowServeShellQueryForTest(t, query, map[string]string{
+		"BD_MATCHED_ARGS": argsPath,
+	}, `#!/bin/sh
 set -eu
-case "$1|$2|$3|$4|$5|$6" in
-  "ready|--metadata-field|gc.routed_to=my rig/control-dispatcher|--unassigned|--json|--limit=20")
-    printf '[{"id":"ga-routed"}]'
-    ;;
-  *)
-    printf '[]'
-    ;;
-esac
+if [ "$#" -eq 8 ] &&
+   [ "$1" = "--readonly" ] &&
+   [ "$2" = "--sandbox" ] &&
+   [ "$3" = "ready" ] &&
+   [ "$4" = "--metadata-field" ] &&
+   [ "$5" = "gc.routed_to=my rig/control-dispatcher" ] &&
+   [ "$6" = "--unassigned" ] &&
+   [ "$7" = "--json" ] &&
+   [ "$8" = "--limit=20" ]; then
+  printf '%s\n' "$@" > "$BD_MATCHED_ARGS"
+  printf '[{"id":"ga-routed"}]'
+  exit 0
+fi
+printf '[]'
 `)
 	if got, want := strings.TrimSpace(out), `[{"id":"ga-routed"}]`; got != want {
 		t.Fatalf("control query output = %q, want %q", got, want)
+	}
+	argsData, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read matched args: %v", err)
+	}
+	gotArgs := strings.Split(strings.TrimSpace(string(argsData)), "\n")
+	wantArgs := []string{"--readonly", "--sandbox", "ready", "--metadata-field", "gc.routed_to=my rig/control-dispatcher", "--unassigned", "--json", "--limit=20"}
+	if !slices.Equal(gotArgs, wantArgs) {
+		t.Fatalf("matched bd args = %#v, want %#v", gotArgs, wantArgs)
 	}
 }
 
@@ -1619,7 +1645,7 @@ func TestWorkflowServeControlReadyQueryUsesLegacyRouteForNamedSessions(t *testin
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "ready --metadata-field gc.routed_to=gascity/workflow-control --unassigned --json --limit=20")
+  "--readonly --sandbox ready --metadata-field gc.routed_to=gascity/workflow-control --unassigned --json --limit=20")
     printf '[{"id":"ga-legacy-route"}]'
     ;;
   *)
@@ -1799,6 +1825,192 @@ path = %q
 	}
 	if gotBeadID != "gc-rig-control" {
 		t.Fatalf("control beadID = %q, want gc-rig-control", gotBeadID)
+	}
+}
+
+func TestOpenControlStoreDisablesAutoExportWithoutSandboxingWrites(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "myrig-repo")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "myrig", Path: rigDir}},
+	}
+	t.Setenv("GC_BEADS", "bd")
+
+	var calls [][]string
+	var envs []map[string]string
+	prevRunner := beadsExecCommandRunnerWithEnv
+	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
+		envs = append(envs, maps.Clone(env))
+		return func(_ string, name string, args ...string) ([]byte, error) {
+			if name != "bd" {
+				return nil, fmt.Errorf("unexpected command %q", name)
+			}
+			calls = append(calls, append([]string(nil), args...))
+			return []byte(`[]`), nil
+		}
+	}
+	t.Cleanup(func() { beadsExecCommandRunnerWithEnv = prevRunner })
+
+	status := "closed"
+	cityStore, err := openControlStoreAtForCity(cityDir, cityDir, cfg)
+	if err != nil {
+		t.Fatalf("openControlStoreAtForCity(city): %v", err)
+	}
+	if err := cityStore.Update("ga-city-control", beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("city control update: %v", err)
+	}
+	rigStore, err := openControlStoreAtForCity(rigDir, cityDir, cfg)
+	if err != nil {
+		t.Fatalf("openControlStoreAtForCity(rig): %v", err)
+	}
+	if err := rigStore.Update("ga-rig-control", beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("rig control update: %v", err)
+	}
+
+	if len(calls) != 2 {
+		t.Fatalf("bd calls = %#v, want two update calls", calls)
+	}
+	if len(envs) != 2 {
+		t.Fatalf("bd envs = %#v, want two command environments", envs)
+	}
+	for i, call := range calls {
+		if len(call) < 1 || call[0] != "update" {
+			t.Fatalf("bd call = %#v, want update ...", call)
+		}
+		if slices.Contains(call, "--sandbox") {
+			t.Fatalf("bd call = %#v, write-capable control stores must not use --sandbox", call)
+		}
+		if got := envs[i]["BD_EXPORT_AUTO"]; got != "false" {
+			t.Fatalf("bd env %d BD_EXPORT_AUTO = %q, want false", i, got)
+		}
+	}
+}
+
+func TestOpenControlStoreAtForCityPreservesFileAndExecProviderStores(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rigs", "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExecStoreCityConfig(t, cityDir, "metro-city", "ct", []config.Rig{{
+		Name:   "frontend",
+		Path:   "rigs/frontend",
+		Prefix: "fe",
+	}})
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "metro-city", Prefix: "ct"},
+		Rigs: []config.Rig{{
+			Name:   "frontend",
+			Path:   "rigs/frontend",
+			Prefix: "fe",
+		}},
+	}
+
+	t.Run("file", func(t *testing.T) {
+		t.Setenv("GC_BEADS", "file")
+		t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+		store, err := openControlStoreAtForCity(rigDir, cityDir, cfg)
+		if err != nil {
+			t.Fatalf("openControlStoreAtForCity(file): %v", err)
+		}
+		if _, ok := store.(*beads.FileStore); !ok {
+			t.Fatalf("control store = %T, want *beads.FileStore for file provider", store)
+		}
+	})
+
+	t.Run("exec", func(t *testing.T) {
+		captureDir := t.TempDir()
+		script := writeExecCaptureScript(t, captureDir)
+		provider := "exec:" + script
+		t.Setenv("GC_BEADS", provider)
+		t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+		store, err := openControlStoreAtForCity(rigDir, cityDir, cfg)
+		if err != nil {
+			t.Fatalf("openControlStoreAtForCity(exec): %v", err)
+		}
+		if _, err := store.Create(beads.Bead{Title: "rig"}); err != nil {
+			t.Fatalf("exec control Create: %v", err)
+		}
+		env := readExecCaptureEnv(t, filepath.Join(captureDir, "frontend.env"))
+		if got := env["GC_PROVIDER"]; got != provider {
+			t.Fatalf("exec GC_PROVIDER = %q, want %q", got, provider)
+		}
+		if got := env["GC_STORE_SCOPE"]; got != "rig" {
+			t.Fatalf("exec GC_STORE_SCOPE = %q, want rig", got)
+		}
+	})
+}
+
+func TestOpenControlStoreAtForCityUsesControlRunnerForStaleBdScope(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	staleRigDir := filepath.Join(cityDir, "rigs", "removed")
+	if err := os.MkdirAll(filepath.Join(staleRigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staleRigDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"removed"}`), 0o644); err != nil {
+		t.Fatalf("write stale rig metadata: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "active", Path: "rigs/active"}},
+	}
+	t.Setenv("GC_BEADS", "bd")
+
+	var calls [][]string
+	var envs []map[string]string
+	prevRunner := beadsExecCommandRunnerWithEnv
+	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
+		envs = append(envs, maps.Clone(env))
+		return func(_ string, name string, args ...string) ([]byte, error) {
+			if name != "bd" {
+				return nil, fmt.Errorf("unexpected command %q", name)
+			}
+			calls = append(calls, append([]string(nil), args...))
+			return []byte(`[]`), nil
+		}
+	}
+	t.Cleanup(func() { beadsExecCommandRunnerWithEnv = prevRunner })
+
+	status := "closed"
+	store, err := openControlStoreAtForCity(staleRigDir, cityDir, cfg)
+	if err != nil {
+		t.Fatalf("openControlStoreAtForCity(stale rig): %v", err)
+	}
+	if err := store.Update("ga-stale-control", beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("stale rig control update: %v", err)
+	}
+
+	if len(calls) != 1 {
+		t.Fatalf("bd calls = %#v, want one update call", calls)
+	}
+	if len(envs) != 1 {
+		t.Fatalf("bd envs = %#v, want one command environment", envs)
+	}
+	if call := calls[0]; len(call) < 1 || call[0] != "update" {
+		t.Fatalf("bd call = %#v, want update ...", calls[0])
+	}
+	if slices.Contains(calls[0], "--sandbox") {
+		t.Fatalf("bd call = %#v, write-capable control stores must not use --sandbox", calls[0])
+	}
+	if got := envs[0]["BD_EXPORT_AUTO"]; got != "false" {
+		t.Fatalf("BD_EXPORT_AUTO = %q, want false", got)
+	}
+	if got := envs[0]["BEADS_DIR"]; got != filepath.Join(staleRigDir, ".beads") {
+		t.Fatalf("BEADS_DIR = %q, want stale rig store", got)
+	}
+	if got := envs[0]["GC_RIG_ROOT"]; got != staleRigDir {
+		t.Fatalf("GC_RIG_ROOT = %q, want stale rig root", got)
 	}
 }
 

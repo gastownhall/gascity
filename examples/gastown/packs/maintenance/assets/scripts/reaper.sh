@@ -37,7 +37,7 @@ MAIL_AGE_H=$(duration_to_hours "$MAIL_DELETE_AGE")
 # databases (benchdb, testdb_*, beads_t*, beads_pt*, beads_vr*, doctest_*,
 # doctortest_* — patterns from mol-dog-stale-db); the remainder are bead
 # stores.
-DATABASES=$(dolt_sql -r csv -q "SHOW DATABASES" 2>/dev/null | tail -n +2 | grep -vi '^information_schema$\|^mysql$\|^dolt_cluster$\|^__gc_probe$\|^benchdb$\|^testdb_\|^beads_t\|^beads_pt\|^beads_vr\|^doctest_\|^doctortest_' || true)
+DATABASES=$(dolt_sql -r csv -q "SHOW DATABASES" 2>/dev/null | tail -n +2 | grep -vi '^information_schema$\|^mysql$\|^dolt_cluster$\|^performance_schema$\|^sys$\|^__gc_probe$\|^benchdb$\|^testdb_\|^beads_t\|^beads_pt\|^beads_vr\|^doctest_\|^doctortest_' || true)
 if [ -z "$DATABASES" ]; then
     # No databases accessible — nothing to do.
     exit 0
@@ -160,5 +160,5 @@ if [ -n "$DRY_RUN" ]; then
     SUMMARY="$SUMMARY (dry run)"
 fi
 
-gc nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
+gc session nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
 echo "reaper: $SUMMARY"

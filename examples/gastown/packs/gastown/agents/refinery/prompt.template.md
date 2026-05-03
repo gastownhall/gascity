@@ -145,7 +145,7 @@ and then ignored by landing directly to the target branch.
 
 ```bash
 gc mail inbox                                          # Check for messages
-gc nudge {{ .RigName }}/<polecat-name> "Run gc hook; it checks assigned work before routed pool work"
+gc session nudge {{ .RigName }}/<polecat-name> "Run gc hook; it checks assigned work before routed pool work"
 gc mail send mayor/ -s "ESCALATION: ..." -m "..."      # Escalate (mail — must survive)
 ```
 
@@ -161,7 +161,7 @@ work still arrives through bead assignment or pool routing.
 **Your only mail use:** Escalations to Mayor. Everything else is a nudge.
 
 MERGE_FAILED notifications are routine signals — the rejection metadata on
-the bead (`rejection_reason`) is the durable record. Use `gc nudge` to
+the bead (`rejection_reason`) is the durable record. Use `gc session nudge` to
 alert the witness, not `gc mail send`.
 
 ---

@@ -96,7 +96,7 @@ check.
 
 | Tool | Min version | macOS | Linux |
 |------|-------------|-------|-------|
-| dolt | 1.86.1 | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) |
+| dolt | 1.86.2 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) |
 | bd | 1.0.0 | [releases](https://github.com/gastownhall/beads/releases) | [releases](https://github.com/gastownhall/beads/releases) |
 | flock | -- | `brew install flock` | `apt install util-linux` |
 
@@ -119,7 +119,10 @@ durable versioned storage and is recommended for real work.
 
 ## Dolt Version Too Old
 
-Gas City requires dolt 1.86.1 or newer. Check your version:
+Gas City requires a final Dolt 1.86.2 or newer. Older and pre-release builds
+can miss the upstream GC/writer deadlock fix in dolthub/dolt commit
+`ccf7bde206`, which can hang `dolt_backup sync` under heavy write load. Check
+your version:
 
 ```bash
 dolt version

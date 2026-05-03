@@ -696,6 +696,309 @@ func TestResolveProviderChainArgsAppendAffectsResolvedArgs(t *testing.T) {
 	}
 }
 
+func TestResolveProviderChainLeafArgsOverrideInheritedCodexDefaults(t *testing.T) {
+	b := "builtin:codex"
+	city := map[string]ProviderSpec{
+		"codex-mini": {
+			Base:    &b,
+			Command: "aimux",
+			Args: []string{
+				"run", "codex", "--",
+				"--dangerously-bypass-approvals-and-sandbox",
+				"-m", "gpt-5.3-codex-spark",
+				"-c", "model_reasoning_effort=\"medium\"",
+			},
+			ResumeCommand: "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex-spark resume {{.SessionKey}}",
+		},
+	}
+	agent := &Agent{Name: "codex-min", Provider: "codex-mini"}
+	resolved, err := ResolveProvider(agent, nil, city, lookPathAll)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	wantArgs := []string{"run", "codex", "--"}
+	if !reflect.DeepEqual(resolved.Args, wantArgs) {
+		t.Fatalf("Args = %v, want %v", resolved.Args, wantArgs)
+	}
+	if got := resolved.EffectiveDefaults["model"]; got != "gpt-5.3-codex-spark" {
+		t.Fatalf("EffectiveDefaults[model] = %q, want gpt-5.3-codex-spark", got)
+	}
+	if got := resolved.EffectiveDefaults["effort"]; got != "medium" {
+		t.Fatalf("EffectiveDefaults[effort] = %q, want medium", got)
+	}
+	command := resolved.CommandString()
+	if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
+		command = command + " " + strings.Join(defaultArgs, " ")
+	}
+	if strings.Contains(command, "model_reasoning_effort=xhigh") {
+		t.Fatalf("resolved launch command = %q, inherited max effort leaked into mini provider", command)
+	}
+	if strings.Contains(command, "gpt-5.5") {
+		t.Fatalf("resolved launch command = %q, inherited max model leaked into mini provider", command)
+	}
+	if strings.Count(command, "gpt-5.3-codex-spark") != 1 {
+		t.Fatalf("resolved launch command = %q, want one spark model flag", command)
+	}
+	if strings.Count(command, "model_reasoning_effort=medium") != 1 {
+		t.Fatalf("resolved launch command = %q, want one medium effort flag", command)
+	}
+	resumeCommand := strings.ReplaceAll(resolved.ResumeCommand, "{{.SessionKey}}", "session-123")
+	if !strings.Contains(resumeCommand, "resume -c model_reasoning_effort=medium session-123") {
+		t.Fatalf("resolved resume command = %q, missing medium effort default before session key", resumeCommand)
+	}
+}
+
+func TestResolveProviderExplicitBaseArgsOverrideSameLayerOptionDefaults(t *testing.T) {
+	builtinCodex := "builtin:codex"
+	providers := map[string]ProviderSpec{
+		"codex-mini": {
+			Base: &builtinCodex,
+			Args: []string{
+				"-m",
+				"gpt-5.3-codex-spark",
+			},
+			OptionDefaults: map[string]string{
+				"model": "gpt-5.5",
+			},
+		},
+	}
+	agent := &Agent{Name: "codex-min", Provider: "codex-mini"}
+
+	resolved, err := ResolveProvider(agent, nil, providers, lookPathOnly("codex"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if got := resolved.EffectiveDefaults["model"]; got != "gpt-5.3-codex-spark" {
+		t.Fatalf("EffectiveDefaults[model] = %q, want args-inferred gpt-5.3-codex-spark", got)
+	}
+	defaultLine := strings.Join(resolved.ResolveDefaultArgs(), " ")
+	if strings.Contains(defaultLine, "gpt-5.5") {
+		t.Fatalf("ResolveDefaultArgs() = %v, preserved stale same-layer option_defaults", resolved.ResolveDefaultArgs())
+	}
+	if !strings.Contains(defaultLine, "gpt-5.3-codex-spark") {
+		t.Fatalf("ResolveDefaultArgs() = %v, missing args-inferred model", resolved.ResolveDefaultArgs())
+	}
+}
+
+func TestResolveProviderChainChildOptionDefaultsBeatInheritedArgs(t *testing.T) {
+	builtinCodex := "builtin:codex"
+	city := map[string]ProviderSpec{
+		"codex-base": {
+			Base:    &builtinCodex,
+			Command: "aimux",
+			Args: []string{
+				"run", "codex", "--",
+				"-m", "gpt-5.5",
+			},
+			ResumeCommand: "aimux run codex -- resume {{.SessionKey}}",
+		},
+		"codex-mini": {
+			Base: basePtr("codex-base"),
+			OptionDefaults: map[string]string{
+				"model": "gpt-5.3-codex-spark",
+			},
+		},
+	}
+	resolved, err := ResolveProviderChain("codex-mini", city["codex-mini"], city)
+	if err != nil {
+		t.Fatalf("ResolveProviderChain: %v", err)
+	}
+	if got := resolved.EffectiveDefaults["model"]; got != "gpt-5.3-codex-spark" {
+		t.Fatalf("EffectiveDefaults[model] = %q, want child option default gpt-5.3-codex-spark", got)
+	}
+	if strings.Contains(strings.Join(resolved.ResolveDefaultArgs(), " "), "gpt-5.5") {
+		t.Fatalf("ResolveDefaultArgs() = %v, inherited parent arg overrode child option_defaults", resolved.ResolveDefaultArgs())
+	}
+}
+
+func TestResolveProviderChainArgsAppendInfersSchemaDefaults(t *testing.T) {
+	builtinCodex := "builtin:codex"
+	providers := map[string]ProviderSpec{
+		"codex-wrapper": {
+			Base:          &builtinCodex,
+			Command:       "aimux",
+			Args:          []string{"run", "codex", "--"},
+			ResumeCommand: "aimux run codex -- resume {{.SessionKey}}",
+		},
+		"codex-mini": {
+			Base: basePtr("codex-wrapper"),
+			ArgsAppend: []string{
+				"-m",
+				"gpt-5.3-codex-spark",
+			},
+		},
+	}
+
+	resolved, err := ResolveProviderChain("codex-mini", providers["codex-mini"], providers)
+	if err != nil {
+		t.Fatalf("ResolveProviderChain: %v", err)
+	}
+	wantArgs := []string{"run", "codex", "--"}
+	if !reflect.DeepEqual(resolved.Args, wantArgs) {
+		t.Fatalf("Args = %v, want schema-managed args_append stripped to %v", resolved.Args, wantArgs)
+	}
+	if got := resolved.EffectiveDefaults["model"]; got != "gpt-5.3-codex-spark" {
+		t.Fatalf("EffectiveDefaults[model] = %q, want gpt-5.3-codex-spark", got)
+	}
+	defaultLine := strings.Join(resolved.ResolveDefaultArgs(), " ")
+	if !strings.Contains(defaultLine, "--model gpt-5.3-codex-spark") {
+		t.Fatalf("ResolveDefaultArgs() = %v, missing args_append-inferred model", resolved.ResolveDefaultArgs())
+	}
+	optKeys := resolved.Provenance.MapKeyLayer["option_defaults"]
+	if optKeys == nil {
+		t.Fatal("option_defaults provenance missing")
+	}
+	if got := optKeys["model"]; got != "providers.codex-mini" {
+		t.Fatalf("option_defaults[model] layer = %q, want providers.codex-mini", got)
+	}
+}
+
+func TestResolveProviderChainSchemaOnlyChildArgsReplaceInheritedArgs(t *testing.T) {
+	builtinCodex := "builtin:codex"
+	providers := map[string]ProviderSpec{
+		"codex-wrapper": {
+			Base:    &builtinCodex,
+			Command: "aimux",
+			Args: []string{
+				"run",
+				"codex",
+				"--",
+				"--parent-non-schema",
+			},
+			ResumeCommand: "aimux run codex -- resume {{.SessionKey}}",
+		},
+		"codex-mini": {
+			Base: basePtr("codex-wrapper"),
+			Args: []string{
+				"-m",
+				"gpt-5.3-codex-spark",
+			},
+		},
+	}
+
+	resolved, err := ResolveProviderChain("codex-mini", providers["codex-mini"], providers)
+	if err != nil {
+		t.Fatalf("ResolveProviderChain: %v", err)
+	}
+	if resolved.Args == nil {
+		t.Fatalf("Args = nil, want non-nil empty slice to preserve child replacement")
+	}
+	if len(resolved.Args) != 0 {
+		t.Fatalf("Args = %v, want empty slice with no inherited parent args", resolved.Args)
+	}
+	if got := resolved.EffectiveDefaults["model"]; got != "gpt-5.3-codex-spark" {
+		t.Fatalf("EffectiveDefaults[model] = %q, want gpt-5.3-codex-spark", got)
+	}
+}
+
+func TestResolveProviderChainCodexSuggestArgsReplaceInheritedUnrestricted(t *testing.T) {
+	builtinCodex := "builtin:codex"
+	providers := map[string]ProviderSpec{
+		"codex-suggest": {
+			Base: &builtinCodex,
+			Args: []string{
+				"--ask-for-approval",
+				"untrusted",
+				"--sandbox",
+				"read-only",
+			},
+		},
+	}
+
+	resolved, err := ResolveProviderChain("codex-suggest", providers["codex-suggest"], providers)
+	if err != nil {
+		t.Fatalf("ResolveProviderChain: %v", err)
+	}
+	if len(resolved.Args) != 0 {
+		t.Fatalf("Args = %v, want schema-managed args stripped", resolved.Args)
+	}
+	if got := resolved.EffectiveDefaults["permission_mode"]; got != "suggest" {
+		t.Fatalf("EffectiveDefaults[permission_mode] = %q, want suggest", got)
+	}
+	defaultArgs := resolved.ResolveDefaultArgs()
+	defaultLine := strings.Join(defaultArgs, " ")
+	if strings.Contains(defaultLine, "--dangerously-bypass-approvals-and-sandbox") {
+		t.Fatalf("ResolveDefaultArgs() = %v, preserved inherited unrestricted flag", defaultArgs)
+	}
+	if !strings.Contains(defaultLine, "--ask-for-approval untrusted --sandbox read-only") {
+		t.Fatalf("ResolveDefaultArgs() = %v, missing suggest permission flags", defaultArgs)
+	}
+	if strings.Count(defaultLine, "--sandbox read-only") != 1 {
+		t.Fatalf("ResolveDefaultArgs() = %v, want one read-only sandbox flag sequence", defaultArgs)
+	}
+}
+
+func TestResolveProviderAgentOptionDefaultsUpdateWrappedResumeDefaults(t *testing.T) {
+	builtinCodex := "builtin:codex"
+	providers := map[string]ProviderSpec{
+		"codex-mini": {
+			Base:    &builtinCodex,
+			Command: "aimux",
+			Args: []string{
+				"run", "codex", "--",
+				"--dangerously-bypass-approvals-and-sandbox",
+				"-m", "gpt-5.3-codex-spark",
+				"-c", "model_reasoning_effort=\"medium\"",
+			},
+			ResumeCommand: "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex-spark resume {{.SessionKey}}",
+		},
+	}
+	agent := &Agent{
+		Name:     "worker",
+		Provider: "codex-mini",
+		OptionDefaults: map[string]string{
+			"effort": "high",
+		},
+	}
+	resolved, err := ResolveProvider(agent, nil, providers, lookPathOnly("aimux"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	resumeCommand := strings.ReplaceAll(resolved.ResumeCommand, "{{.SessionKey}}", "session-123")
+	if !strings.Contains(resumeCommand, "resume -c model_reasoning_effort=high session-123") {
+		t.Fatalf("resolved resume command = %q, missing agent effort default before session key", resumeCommand)
+	}
+	if strings.Contains(resumeCommand, "model_reasoning_effort=medium") {
+		t.Fatalf("resolved resume command = %q, retained provider effort default after agent override", resumeCommand)
+	}
+	defaultArgs := strings.Join(resolved.ResolveDefaultArgs(), " ")
+	if !strings.Contains(defaultArgs, "model_reasoning_effort=high") {
+		t.Fatalf("ResolveDefaultArgs() = %v, missing agent effort default", resolved.ResolveDefaultArgs())
+	}
+}
+
+func TestResolveProviderFlagStyleResumeCommandAppendsDefaults(t *testing.T) {
+	agent := &Agent{Name: "worker", Provider: "custom"}
+	providers := map[string]ProviderSpec{
+		"custom": {
+			Command:       "custom-agent",
+			ResumeFlag:    "--resume",
+			ResumeStyle:   "flag",
+			ResumeCommand: "custom-agent --resume {{.SessionKey}} --safe",
+			OptionDefaults: map[string]string{
+				"model": "opus",
+			},
+			OptionsSchema: []ProviderOption{
+				{
+					Key: "model",
+					Choices: []OptionChoice{
+						{Value: "opus", FlagArgs: []string{"--model", "claude-opus-4-7"}},
+					},
+				},
+			},
+		},
+	}
+
+	resolved, err := ResolveProvider(agent, nil, providers, lookPathOnly("custom-agent"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	want := "custom-agent --resume {{.SessionKey}} --safe --model claude-opus-4-7"
+	if resolved.ResumeCommand != want {
+		t.Fatalf("ResumeCommand = %q, want %q", resolved.ResumeCommand, want)
+	}
+}
+
 func TestMergeProviderOverBuiltinOptionsSchemaByKeyAndOmit(t *testing.T) {
 	base := ProviderSpec{
 		OptionsSchema: []ProviderOption{

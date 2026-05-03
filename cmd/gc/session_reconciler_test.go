@@ -115,6 +115,9 @@ type reconcilerTestEnv struct {
 }
 
 func newReconcilerTestEnv() *reconcilerTestEnv {
+	sessionCircuitBreakerMu.Lock()
+	sessionCircuitBreakerSingleton = newSessionCircuitBreaker(sessionCircuitBreakerConfig{})
+	sessionCircuitBreakerMu.Unlock()
 	return &reconcilerTestEnv{
 		store:        beads.NewMemStore(),
 		sp:           runtime.NewFake(),
@@ -755,12 +758,12 @@ func TestReconcileSessionBeads_CloseGateLiveStoreErrorKeepsSlot(t *testing.T) {
 	}
 }
 
-// TestReconcileSessionBeads_CloseGateRespectsCrossStoreAssignedWork
-// verifies that the close gate's live ownership check looks across the
-// primary store AND any attached rig stores. A city-stored asleep+idle
-// pool session with work assigned to it in a rig store must NOT get
-// its slot freed — the rig-stored work would be orphaned.
-func TestReconcileSessionBeads_CloseGateRespectsCrossStoreAssignedWork(t *testing.T) {
+// TestReconcileSessionBeads_CloseGateIgnoresUnreachableRigAssignedWork
+// verifies that the close gate's live ownership check only considers the
+// store scope the session's configured agent can query and claim from. A
+// city-scoped pool session must not be retained by unrelated rig-store work
+// that happens to share one of its assignment identifiers.
+func TestReconcileSessionBeads_CloseGateIgnoresUnreachableRigAssignedWork(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
 		Agents: []config.Agent{{Name: "worker"}},
@@ -773,11 +776,11 @@ func TestReconcileSessionBeads_CloseGateRespectsCrossStoreAssignedWork(t *testin
 		poolManagedMetadataKey: boolMetadata(true),
 	})
 
-	// Work assigned to the session lives in a rig store, not the city
-	// store. The live cross-store query must find it and veto the close.
+	// Work assigned to the session lives in a rig store, not the city store.
+	// This city-scoped session cannot claim it, so it must not veto close.
 	rigStore := beads.NewMemStore()
 	if _, err := rigStore.Create(beads.Bead{
-		Title:    "cross-store work",
+		Title:    "unreachable rig work",
 		Type:     "task",
 		Status:   "open",
 		Assignee: session.ID,
@@ -817,8 +820,120 @@ func TestReconcileSessionBeads_CloseGateRespectsCrossStoreAssignedWork(t *testin
 	if err != nil {
 		t.Fatalf("Get(%s): %v", session.ID, err)
 	}
-	if got.Status == "closed" {
-		t.Fatalf("status = %q, want open — close gate must honor cross-store assigned work and leave the pool slot for the rig-stored work to drain", got.Status)
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed — unreachable rig-store assigned work must not retain a city-scoped pool slot", got.Status)
+	}
+}
+
+func TestReconcileSessionBeads_DrainAckedOrphanCloseIgnoresUnreachableRigAssignedWork(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+
+	rigStore := beads.NewMemStore()
+	if _, err := rigStore.Create(beads.Bead{
+		Title:    "unreachable rig work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: session.ID,
+	}); err != nil {
+		t.Fatalf("Create rig work bead: %v", err)
+	}
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+
+	reconcileSessionBeadsAtPath(
+		context.Background(),
+		"",
+		[]beads.Bead{session},
+		env.desiredState,
+		nil,
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		nil,
+		map[string]beads.Store{"some-rig": rigStore},
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed — drain-acked close must ignore work in stores the session cannot reach", got.Status)
+	}
+}
+
+func TestReconcileSessionBeads_SuspendedCloseIgnoresUnreachableRigAssignedWork(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+
+	rigStore := beads.NewMemStore()
+	if _, err := rigStore.Create(beads.Bead{
+		Title:    "unreachable rig work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: session.ID,
+	}); err != nil {
+		t.Fatalf("Create rig work bead: %v", err)
+	}
+
+	reconcileSessionBeadsAtPath(
+		context.Background(),
+		"",
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		newFakeDrainOps(),
+		nil,
+		map[string]beads.Store{"some-rig": rigStore},
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed — suspended close must ignore work in stores the session cannot reach", got.Status)
 	}
 }
 
@@ -1506,6 +1621,118 @@ func TestReconcileSessionBeads_AlwaysNamedSessionWakesFromDrainedCompatibilitySt
 	}
 	if !env.sp.IsRunning(sessionName) {
 		t.Fatalf("always named session %q should have been restarted", sessionName)
+	}
+}
+
+// TestReconcileSessionBeads_AlwaysNamedSessionWakesAfterLiveChurnSequence
+// pins the expected post-churn contract by driving the full crash-then-recover
+// sequence instead of pre-staging post-churn metadata. This covers the contract
+// needed for issue #1493, but it is not proof that the reported production
+// trigger was reproduced or fixed; keep #1493 open until reporter confirmation
+// or a production-shaped integration shard reproduces the original symptom.
+func TestReconcileSessionBeads_AlwaysNamedSessionWakesAfterLiveChurnSequence(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true"}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:                 "true",
+		SessionName:             sessionName,
+		TemplateName:            "worker",
+		ConfiguredNamedIdentity: "worker",
+		ConfiguredNamedMode:     "always",
+	}
+	session := env.createSessionBead(sessionName, "worker")
+	// Mark the bead as having woken 90 seconds ago: past stabilityThreshold
+	// (30s) and before churnProductivityThreshold (5min). This is the churn
+	// band that recordChurn fires for. The session is NOT running in the
+	// fake provider, so the reconciler will see alive=false.
+	wokeAt := env.clk.Now().Add(-90 * time.Second).UTC().Format(time.RFC3339)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "always",
+		"state":                      "active",
+		"last_woke_at":               wokeAt,
+		"session_key":                "old-key",
+	})
+
+	// First tick: detect non-productive death, recordChurn fires, session
+	// transitions through to asleep state.
+	env.reconcile([]beads.Bead{session})
+
+	// Reload the bead from the store to capture every metadata change made
+	// by the reconciler tick (healState, checkChurn, recordChurn).
+	reloaded, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if reloaded.Metadata["churn_count"] != "1" {
+		t.Fatalf("after tick 1 churn_count = %q, want 1 (recordChurn must fire)", reloaded.Metadata["churn_count"])
+	}
+	if reloaded.Metadata["last_woke_at"] != "" {
+		t.Fatalf("after tick 1 last_woke_at = %q, want empty (checkChurn clears it)", reloaded.Metadata["last_woke_at"])
+	}
+
+	// Second tick: the post-churn shape is now in the store. The
+	// named-always session must be re-woken on this tick.
+	env.clk.Time = env.clk.Time.Add(30 * time.Second)
+	env.reconcile([]beads.Bead{reloaded})
+
+	if !env.sp.IsRunning(sessionName) {
+		final, _ := env.store.Get(session.ID)
+		t.Fatalf(
+			"always named session %q must restart on the tick after churn (#1493); state=%q sleep_reason=%q churn_count=%q wake_attempts=%q quarantined_until=%q",
+			sessionName,
+			final.Metadata["state"],
+			final.Metadata["sleep_reason"],
+			final.Metadata["churn_count"],
+			final.Metadata["wake_attempts"],
+			final.Metadata["quarantined_until"],
+		)
+	}
+}
+
+// TestReconcileSessionBeads_QuarantinedNamedSessionStaysAsleepAfterChurn pins
+// the negative half of the post-churn invariant: when churn pushes the
+// session into quarantine, the session must stay asleep until the
+// quarantine elapses, even for mode=always.
+func TestReconcileSessionBeads_QuarantinedNamedSessionStaysAsleepAfterChurn(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true"}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:                 "true",
+		SessionName:             sessionName,
+		TemplateName:            "worker",
+		ConfiguredNamedIdentity: "worker",
+		ConfiguredNamedMode:     "always",
+	}
+	session := env.createSessionBead(sessionName, "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "always",
+		"state":                      "asleep",
+		"sleep_reason":               "context-churn",
+		"churn_count":                "3",
+		"quarantined_until":          env.clk.Now().Add(15 * time.Minute).UTC().Format(time.RFC3339),
+	})
+
+	woken := env.reconcile([]beads.Bead{session})
+
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0 (quarantined session must not wake during the quarantine window)", woken)
+	}
+	if env.sp.IsRunning(sessionName) {
+		t.Fatalf("quarantined named session %q must stay asleep until the quarantine elapses", sessionName)
 	}
 }
 
@@ -2647,6 +2874,126 @@ func TestReconcileSessionBeads_ConvergesPendingCreateWhenRuntimeMatchesBead(t *t
 	}
 	if got.Metadata["wake_attempts"] != "" {
 		t.Fatalf("wake_attempts = %q, want empty", got.Metadata["wake_attempts"])
+	}
+}
+
+func TestReconcileSessionBeads_RollsBackPendingCreateWhenLeaseExpiredAndNoRuntime(t *testing.T) {
+	// Regression test: a session bead in the desired set with
+	// pending_create_claim=true but no live runtime AND no active lease
+	// (last_woke_at empty AND CreatedAt past staleCreatingState window) is
+	// stuck. Without this rollback, the bead lives forever holding its alias,
+	// blocking new spawn attempts ("alias already belongs to gm-XXXX") for
+	// any session whose template still has demand.
+	store := beads.NewMemStore()
+	sp := runtime.NewFake() // no runtime started
+	clk := &clock.Fake{Time: time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)}
+	cfg := &config.City{Agents: []config.Agent{{Name: "helper"}}}
+	desired := map[string]TemplateParams{
+		"helper": {
+			Command:      "test-cmd",
+			SessionName:  "helper",
+			TemplateName: "helper",
+		},
+	}
+
+	bead, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:helper"},
+		Metadata: map[string]string{
+			"session_name":          "helper",
+			"session_name_explicit": "true",
+			"pending_create_claim":  "true",
+			"template":              "helper",
+			"state":                 "creating",
+			"generation":            "1",
+			"continuation_epoch":    "1",
+			"instance_token":        "test-token",
+			// last_woke_at deliberately empty — preWakeCommit never fired.
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(bead): %v", err)
+	}
+	// Force CreatedAt past the staleCreatingState window so the lease check
+	// flips from "fresh" to "expired". The reconciler reads CreatedAt from
+	// the passed bead slice, so modifying the local copy is sufficient.
+	bead.CreatedAt = clk.Now().Add(-5 * time.Minute)
+
+	var stdout, stderr bytes.Buffer
+	cfgNames := configuredSessionNames(cfg, "", store)
+	_ = reconcileSessionBeads(
+		context.Background(), []beads.Bead{bead}, desired, cfgNames,
+		cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{}, false, nil, "",
+		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
+	)
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(bead): %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed (stale lease + no runtime should rollback)", got.Status)
+	}
+	if got.Metadata["close_reason"] != "failed-create" {
+		t.Fatalf("close_reason = %q, want failed-create", got.Metadata["close_reason"])
+	}
+}
+
+func TestReconcileSessionBeads_PreservesPendingCreateWhenLeaseRecentNoRuntime(t *testing.T) {
+	// Defensive: a session bead with pending_create_claim=true and no live
+	// runtime but a *fresh* last_woke_at lease (or recently CreatedAt) must
+	// NOT be rolled back — the spawn is genuinely in flight, just not yet
+	// observable. Rolling back here would race with the async start pipeline.
+	store := beads.NewMemStore()
+	sp := runtime.NewFake() // no runtime
+	clk := &clock.Fake{Time: time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)}
+	cfg := &config.City{Agents: []config.Agent{{Name: "helper"}}}
+	desired := map[string]TemplateParams{
+		"helper": {
+			Command:      "test-cmd",
+			SessionName:  "helper",
+			TemplateName: "helper",
+		},
+	}
+
+	bead, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:helper"},
+		Metadata: map[string]string{
+			"session_name":          "helper",
+			"session_name_explicit": "true",
+			"pending_create_claim":  "true",
+			"template":              "helper",
+			"state":                 "creating",
+			"generation":            "1",
+			"continuation_epoch":    "1",
+			"instance_token":        "test-token",
+			"last_woke_at":          clk.Now().Add(-10 * time.Second).Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(bead): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	cfgNames := configuredSessionNames(cfg, "", store)
+	_ = reconcileSessionBeads(
+		context.Background(), []beads.Bead{bead}, desired, cfgNames,
+		cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{}, false, nil, "",
+		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
+	)
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(bead): %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("status = closed, want preserved (lease still fresh)")
+	}
+	if strings.TrimSpace(got.Metadata["pending_create_claim"]) != "true" {
+		t.Fatalf("pending_create_claim = %q, want still 'true'", got.Metadata["pending_create_claim"])
 	}
 }
 
@@ -4262,6 +4609,23 @@ func TestResolvePoolSlot_NamepoolThemedName(t *testing.T) {
 }
 
 func TestResolveResumeCommand(t *testing.T) {
+	codexBase := "builtin:codex"
+	codexMini, err := config.ResolveProvider(&config.Agent{Name: "codex-mini", Provider: "codex-mini"}, nil, map[string]config.ProviderSpec{
+		"codex-mini": {
+			Base:    &codexBase,
+			Command: "aimux",
+			Args: []string{
+				"run", "codex", "--",
+				"--dangerously-bypass-approvals-and-sandbox",
+				"-m", "gpt-5.3-codex-spark",
+				"-c", "model_reasoning_effort=\"medium\"",
+			},
+			ResumeCommand: "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex-spark resume {{.SessionKey}}",
+		},
+	}, func(name string) (string, error) { return "/usr/bin/" + name, nil })
+	if err != nil {
+		t.Fatalf("ResolveProvider(codex-mini): %v", err)
+	}
 	tests := []struct {
 		name       string
 		command    string
@@ -4315,6 +4679,13 @@ func TestResolveResumeCommand(t *testing.T) {
 				ResumeCommand: "my-agent --continue",
 			},
 			want: "my-agent --continue",
+		},
+		{
+			name:       "explicit wrapped codex resume command includes inferred defaults",
+			command:    "aimux run codex -- --dangerously-bypass-approvals-and-sandbox --model gpt-5.3-codex-spark -c model_reasoning_effort=medium",
+			sessionKey: "def-456",
+			provider:   codexMini,
+			want:       "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex-spark resume -c model_reasoning_effort=medium def-456",
 		},
 	}
 	for _, tt := range tests {

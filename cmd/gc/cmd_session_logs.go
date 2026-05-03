@@ -53,6 +53,7 @@ Use -f to follow new messages as they arrive.`,
 			}
 			return nil
 		},
+		ValidArgsFunction: completeSessionIDs,
 	}
 	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "Follow new messages as they arrive")
 	cmd.Flags().IntVar(&tail, "tail", 10, "Number of most recent transcript entries to show (0 = all; compact dividers count as entries)")

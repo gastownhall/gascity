@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -80,7 +81,7 @@ func TestFileRecorderPayloadRoundTrip(t *testing.T) {
 	payload := json.RawMessage(`{"type":"merge-request","title":"Fix bug","labels":["urgent"]}`)
 	rec.Record(Event{
 		Type:    BeadCreated,
-		Actor:   "polecat",
+		Actor:   "actor-payload",
 		Subject: "gc-42",
 		Payload: payload,
 	})
@@ -335,7 +336,7 @@ func TestFakeList(t *testing.T) {
 	f := NewFake()
 	f.Record(Event{Type: BeadCreated, Actor: "human", Subject: "gc-1"})
 	f.Record(Event{Type: BeadClosed, Actor: "human", Subject: "gc-1"})
-	f.Record(Event{Type: SessionWoke, Actor: "gc", Subject: "mayor"})
+	f.Record(Event{Type: SessionWoke, Actor: "gc", Subject: "session-alpha"})
 
 	all, err := f.List(Filter{})
 	if err != nil {
@@ -495,7 +496,7 @@ func TestReadFiltered(t *testing.T) {
 	past := now.Add(-2 * time.Hour)
 	rec.Record(Event{Type: BeadCreated, Actor: "human", Subject: "gc-1", Ts: past})
 	rec.Record(Event{Type: BeadClosed, Actor: "human", Subject: "gc-1", Ts: past})
-	rec.Record(Event{Type: SessionWoke, Actor: "gc", Subject: "mayor", Ts: now})
+	rec.Record(Event{Type: SessionWoke, Actor: "gc", Subject: "session-alpha", Ts: now})
 	rec.Close() //nolint:errcheck // test cleanup
 
 	t.Run("by_type", func(t *testing.T) {
@@ -557,6 +558,85 @@ func TestReadFiltered(t *testing.T) {
 			t.Errorf("got %v, want nil", got)
 		}
 	})
+}
+
+func TestReadFilteredMissingFile(t *testing.T) {
+	got, err := ReadFiltered(filepath.Join(t.TempDir(), "missing.jsonl"), Filter{})
+	if err != nil {
+		t.Fatalf("ReadFiltered(missing): %v", err)
+	}
+	if got != nil {
+		t.Fatalf("ReadFiltered(missing) = %v, want nil", got)
+	}
+}
+
+func TestReadFilteredSkipsMalformedLines(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	data := strings.Join([]string{
+		`not-json`,
+		`{"seq":1,"type":"bead.created","ts":"2025-06-15T10:30:00Z","actor":"actor-a","subject":"gc-1"}`,
+		``,
+	}, "\n")
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ReadFiltered(path, Filter{})
+	if err != nil {
+		t.Fatalf("ReadFiltered: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d events, want 1", len(got))
+	}
+	if got[0].Subject != "gc-1" {
+		t.Errorf("Subject = %q, want gc-1", got[0].Subject)
+	}
+}
+
+func TestReadFilteredScannerError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	first := `{"seq":1,"type":"bead.created","ts":"2025-06-15T10:30:00Z","actor":"actor-a","subject":"gc-1"}` + "\n"
+	oversizedLine := strings.Repeat("x", 1024*1024+1)
+	if err := os.WriteFile(path, []byte(first+oversizedLine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ReadFiltered(path, Filter{})
+	if err == nil {
+		t.Fatal("ReadFiltered returned nil error, want scanner error")
+	}
+	if !strings.Contains(err.Error(), "scanning events") {
+		t.Fatalf("ReadFiltered error = %q, want scanning events context", err.Error())
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d partial events, want 1", len(got))
+	}
+	if got[0].Subject != "gc-1" {
+		t.Errorf("partial Subject = %q, want gc-1", got[0].Subject)
+	}
+}
+
+func TestReadFilteredLimitStopsScanning(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	first := `{"seq":1,"type":"bead.created","ts":"2025-06-15T10:30:00Z","actor":"actor-a","subject":"gc-1"}` + "\n"
+	oversizedLine := strings.Repeat("x", 1024*1024+1) + "\n"
+	if err := os.WriteFile(path, []byte(first+oversizedLine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ReadFiltered(path, Filter{Limit: 1})
+	if err != nil {
+		t.Fatalf("ReadFiltered: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d events, want 1", len(got))
+	}
+	if got[0].Seq != 1 {
+		t.Errorf("got[0].Seq = %d, want 1", got[0].Seq)
+	}
 }
 
 func TestReadFilteredAfterSeq(t *testing.T) {
@@ -835,7 +915,7 @@ func TestReadFrom(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec2.Record(Event{Type: SessionWoke, Actor: "gc", Subject: "mayor"})
+	rec2.Record(Event{Type: SessionWoke, Actor: "gc", Subject: "session-alpha"})
 	rec2.Close() //nolint:errcheck // test cleanup
 
 	// Read from mid-file offset → only new event
@@ -911,7 +991,7 @@ func TestFileRecorderList(t *testing.T) {
 
 	rec.Record(Event{Type: BeadCreated, Actor: "human", Subject: "gc-1"})
 	rec.Record(Event{Type: BeadClosed, Actor: "human", Subject: "gc-1"})
-	rec.Record(Event{Type: SessionWoke, Actor: "gc", Subject: "mayor"})
+	rec.Record(Event{Type: SessionWoke, Actor: "gc", Subject: "session-alpha"})
 
 	// List all
 	all, err := rec.List(Filter{})

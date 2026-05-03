@@ -80,3 +80,68 @@ func TestBuildAwakeInputFromReconcilerPopulatesPendingInteractions(t *testing.T)
 		t.Fatalf("decision = %+v, want pending wake", got)
 	}
 }
+
+// TestBuildAwakeInputFromReconcilerNamedAlwaysPostChurnRewakes pins the
+// contract for a mode=always named session that was put to sleep after churn:
+// if named-session metadata survives, the next awake-set pass must re-wake it.
+func TestBuildAwakeInputFromReconcilerNamedAlwaysPostChurnRewakes(t *testing.T) {
+	now := time.Now().UTC()
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "worker"}},
+		NamedSessions: []config.NamedSession{
+			{Name: "worker", Template: "worker", Mode: "always"},
+		},
+	}
+	postChurnBead := beads.Bead{
+		ID:     "mc-session-1",
+		Status: "open",
+		Type:   "session",
+		Metadata: map[string]string{
+			"state":                      "asleep",
+			"sleep_reason":               "",
+			"state_reason":               "creation_complete",
+			"last_woke_at":               "",
+			"wake_attempts":              "0",
+			"churn_count":                "1",
+			"session_key":                "",
+			"continuation_reset_pending": "",
+			"pending_create_claim":       "",
+			"pin_awake":                  "",
+			"session_name":               "worker",
+			"template":                   "worker",
+			"configured_named_identity":  "worker",
+			"configured_named_mode":      "always",
+		},
+	}
+
+	input := buildAwakeInputFromReconciler(
+		cfg,
+		[]beads.Bead{postChurnBead},
+		nil, nil, nil, nil, nil,
+		runtime.NewFake(),
+		now,
+	)
+
+	if len(input.SessionBeads) != 1 {
+		t.Fatalf("SessionBeads length = %d, want 1", len(input.SessionBeads))
+	}
+	bead := input.SessionBeads[0]
+	if bead.NamedIdentity != "worker" {
+		t.Errorf("projected NamedIdentity = %q, want worker (configured_named_identity should survive churn)", bead.NamedIdentity)
+	}
+	if bead.State != "asleep" {
+		t.Errorf("projected State = %q, want asleep", bead.State)
+	}
+
+	decisions := ComputeAwakeSet(input)
+	got, ok := decisions["worker"]
+	if !ok {
+		t.Fatal("decision for 'worker' missing from awake set")
+	}
+	if !got.ShouldWake {
+		t.Fatalf("post-churn named-always session should wake; got decision = %+v", got)
+	}
+	if got.Reason != "named-always" {
+		t.Errorf("wake reason = %q, want named-always", got.Reason)
+	}
+}

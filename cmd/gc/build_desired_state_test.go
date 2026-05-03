@@ -204,7 +204,7 @@ func TestCollectAssignedWorkBeads_PreservesPartialInProgressSurvivors(t *testing
 		t.Fatalf("reload work bead: %v", err)
 	}
 
-	got, stores, partial := collectAssignedWorkBeadsWithStores(&config.City{}, store, nil, nil)
+	got, stores, storeRefs, partial := collectAssignedWorkBeadsWithStores(&config.City{}, store, nil, nil)
 	if !partial {
 		t.Fatal("partial = false, want true")
 	}
@@ -213,6 +213,9 @@ func TestCollectAssignedWorkBeads_PreservesPartialInProgressSurvivors(t *testing
 	}
 	if len(stores) != 1 || stores[0] != store {
 		t.Fatalf("stores = %#v, want source store for partial survivor", stores)
+	}
+	if len(storeRefs) != 1 || storeRefs[0] != "" {
+		t.Fatalf("storeRefs = %#v, want city store ref for partial survivor", storeRefs)
 	}
 }
 
@@ -232,7 +235,7 @@ func TestCollectAssignedWorkBeads_PreservesPartialReadySurvivors(t *testing.T) {
 		t.Fatalf("create work bead: %v", err)
 	}
 
-	got, stores, partial := collectAssignedWorkBeadsWithStores(&config.City{}, store, nil, nil)
+	got, stores, storeRefs, partial := collectAssignedWorkBeadsWithStores(&config.City{}, store, nil, nil)
 	if !partial {
 		t.Fatal("partial = false, want true")
 	}
@@ -241,6 +244,9 @@ func TestCollectAssignedWorkBeads_PreservesPartialReadySurvivors(t *testing.T) {
 	}
 	if len(stores) != 1 || stores[0] != store {
 		t.Fatalf("stores = %#v, want source store for partial survivor", stores)
+	}
+	if len(storeRefs) != 1 || storeRefs[0] != "" {
+		t.Fatalf("storeRefs = %#v, want city store ref for partial survivor", storeRefs)
 	}
 }
 
@@ -264,7 +270,7 @@ func TestCollectAssignedWorkBeadsWithStores_TracksRigStore(t *testing.T) {
 		t.Fatalf("reload rig work bead: %v", err)
 	}
 
-	got, stores, partial := collectAssignedWorkBeadsWithStores(
+	got, stores, storeRefs, partial := collectAssignedWorkBeadsWithStores(
 		&config.City{Rigs: []config.Rig{{Name: "repo", Path: "/repo"}}},
 		cityStore,
 		map[string]beads.Store{"repo": rigStore},
@@ -278,6 +284,9 @@ func TestCollectAssignedWorkBeadsWithStores_TracksRigStore(t *testing.T) {
 	}
 	if len(stores) != 1 || stores[0] != rigStore {
 		t.Fatalf("stores = %#v, want [rig store]", stores)
+	}
+	if len(storeRefs) != 1 || storeRefs[0] != "repo" {
+		t.Fatalf("storeRefs = %#v, want [repo]", storeRefs)
 	}
 }
 
@@ -320,7 +329,7 @@ func TestCollectAssignedWorkBeadsWithStores_PreservesCrossStoreIDCollisions(t *t
 		t.Fatalf("test setup expected overlapping city/rig IDs, got city %q rig %q", cityWork.ID, rigWork.ID)
 	}
 
-	got, stores, partial := collectAssignedWorkBeadsWithStores(
+	got, stores, storeRefs, partial := collectAssignedWorkBeadsWithStores(
 		&config.City{Rigs: []config.Rig{{Name: "repo", Path: "/repo"}}},
 		cityStore,
 		map[string]beads.Store{"repo": rigStore},
@@ -335,11 +344,20 @@ func TestCollectAssignedWorkBeadsWithStores_PreservesCrossStoreIDCollisions(t *t
 	if len(stores) != len(got) {
 		t.Fatalf("stores length = %d, want %d", len(stores), len(got))
 	}
+	if len(storeRefs) != len(got) {
+		t.Fatalf("storeRefs length = %d, want %d", len(storeRefs), len(got))
+	}
 	if got[0].ID != cityWork.ID || stores[0] != cityStore {
 		t.Fatalf("first collected work = (%s, %#v), want city work/store", got[0].ID, stores[0])
 	}
+	if storeRefs[0] != "" {
+		t.Fatalf("first store ref = %q, want city ref", storeRefs[0])
+	}
 	if got[1].ID != rigWork.ID || stores[1] != rigStore {
 		t.Fatalf("second collected work = (%s, %#v), want rig work/store", got[1].ID, stores[1])
+	}
+	if storeRefs[1] != "repo" {
+		t.Fatalf("second store ref = %q, want repo", storeRefs[1])
 	}
 }
 
@@ -761,6 +779,169 @@ func TestBuildDesiredState_OnDemandNamedSession_DirectAssigneeMaterializes(t *te
 	}
 	if !found {
 		t.Fatal("direct assignee should materialize on-demand named session")
+	}
+}
+
+func TestBuildDesiredState_OnDemandNamedSession_IgnoresUnreachableAssignedWork(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "riga")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("create rig dir: %v", err)
+	}
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	if _, err := cityStore.Create(beads.Bead{
+		Title:    "assigned mayor work in city store",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "riga/mayor",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "riga", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name:              "mayor",
+			Dir:               "riga",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "mayor",
+			Dir:      "riga",
+			Mode:     "on_demand",
+		}},
+	}
+
+	dsResult := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(),
+		cityStore, map[string]beads.Store{"riga": rigStore}, nil, nil, io.Discard,
+	)
+	for _, tp := range dsResult.State {
+		if tp.TemplateName == "riga/mayor" || tp.ConfiguredNamedIdentity == "riga/mayor" {
+			t.Fatalf("unreachable city-store assignee should not materialize rig named session: %+v", tp)
+		}
+	}
+	if dsResult.NamedSessionDemand["riga/mayor"] {
+		t.Fatal("unreachable city-store assignee should not record named-session demand")
+	}
+}
+
+func TestBuildDesiredState_OnDemandNamedSession_ReachabilityUsesPerBeadSourceNotID(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "riga")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("create rig dir: %v", err)
+	}
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	cityWork, err := cityStore.Create(beads.Bead{
+		Title:    "phantom city work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "riga/mayor",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rigWork, err := rigStore.Create(beads.Bead{
+		Title:    "same ID rig work for another session",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "riga/other",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cityWork.ID != rigWork.ID {
+		t.Fatalf("test setup expected overlapping city/rig IDs, got city %q rig %q", cityWork.ID, rigWork.ID)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "riga", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name:              "mayor",
+			Dir:               "riga",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "mayor",
+			Dir:      "riga",
+			Mode:     "on_demand",
+		}},
+	}
+
+	dsResult := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(),
+		cityStore, map[string]beads.Store{"riga": rigStore}, nil, nil, io.Discard,
+	)
+	if dsResult.NamedSessionDemand["riga/mayor"] {
+		t.Fatal("same-ID rig bead should not make the city-store assignment reachable")
+	}
+}
+
+func TestBuildDesiredState_RigPoolIgnoresAssignedWorkInUnreachableStore(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "riga")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("create rig dir: %v", err)
+	}
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	sessionBead, err := cityStore.Create(beads.Bead{
+		Title:  "asleep rig worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:riga/worker"},
+		Metadata: map[string]string{
+			"template":     "riga/worker",
+			"session_name": "worker-gc-1",
+			"state":        "asleep",
+			"pool_managed": "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	work, err := cityStore.Create(beads.Bead{
+		Title:    "unreachable city work for rig worker",
+		Type:     "task",
+		Assignee: sessionBead.ID,
+		Metadata: map[string]string{"gc.routed_to": "riga/worker"},
+	})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	if err := cityStore.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("set work in_progress: %v", err)
+	}
+	sessionSnapshot, err := loadSessionBeadSnapshot(cityStore)
+	if err != nil {
+		t.Fatalf("load session snapshot: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "riga", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "riga",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(5),
+			ScaleCheck:        "printf 0",
+		}},
+	}
+
+	dsResult := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(),
+		cityStore, map[string]beads.Store{"riga": rigStore}, sessionSnapshot, nil, io.Discard,
+	)
+	for _, tp := range dsResult.State {
+		if tp.TemplateName == "riga/worker" {
+			t.Fatalf("unreachable city-store work should not resume rig pool session: %+v", tp)
+		}
 	}
 }
 

@@ -7,8 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `proxy_process` services now receive a `GC_SERVICE_URL_PREFIX` that the
+  supervisor's public listener actually routes. Previously the prefix was
+  the per-city-relative `/svc/<name>`, so any service that composed
+  `CallbackURL = $GC_API_BASE_URL + $GC_SERVICE_URL_PREFIX` (the documented
+  shape for adapter self-registration) would 404 on inbound calls. The
+  prefix is now the full `/v0/city/<cityName>/svc/<svcName>` path. The
+  per-city router contract (`config.Service.MountPathOrDefault`) is
+  unchanged.
+
 ### Changed
 
+- `[[orders.overrides]]` rig matching is stricter and clearer. A rigless
+  override (`rig` unset) still matches **only** city-level orders; if the
+  named order exists only as per-rig instances, the error now names every
+  matching rig so it's obvious what to type. `rig = "*"` is a new wildcard
+  that targets every instance of the named order (city-level + per-rig).
+  The literal `"*"` is reserved and rejected as a real rig name by config
+  validation.
 - Managed Dolt config now emits listener backlog and connection-timeout keys.
   Existing managed cities may see a `dolt-config` doctor warning until
   `gc dolt restart` or the next managed server start regenerates
@@ -24,6 +42,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Stop/session-end hooks. Fresh managed hook configs no longer install it;
   routed work pickup should happen through the SessionStart claim protocol or
   an explicit non-inject `gc hook` call.
+- The built-in Claude provider's `model = "opus"` option now emits
+  `claude-opus-4-7`. Cities that rely on the `opus` alias should expect the
+  new model target after upgrading.
 
 ## [1.0.0] - 2026-04-21
 

@@ -47,6 +47,14 @@ type Message struct {
 	Rig       string    `json:"rig,omitempty"`
 }
 
+// ArchiveResult is one message's outcome in a batch [Provider.ArchiveMany] or
+// [Provider.DeleteMany] call. Err is nil for a newly-closed message,
+// [ErrAlreadyArchived] for an idempotent re-close, or a provider error.
+type ArchiveResult struct {
+	ID  string
+	Err error
+}
+
 // Provider is the internal interface for mail backends. Implementations
 // include beadmail (built-in default backed by beads.Store) and exec
 // (user-supplied script via fork/exec).
@@ -74,8 +82,19 @@ type Provider interface {
 	// Archive closes a message bead (removes from all views).
 	Archive(id string) error
 
+	// ArchiveMany archives a batch of messages in one round-trip where the
+	// backend supports it, returning per-id results in input order.
+	// Implementations MUST preserve per-id error reporting.
+	ArchiveMany(ids []string) ([]ArchiveResult, error)
+
 	// Delete is an alias for Archive (closes the bead).
 	Delete(id string) error
+
+	// DeleteMany deletes a batch of messages in one round-trip where the
+	// backend supports it, returning per-id results in input order.
+	// Implementations MUST preserve delete semantics and per-id error
+	// reporting.
+	DeleteMany(ids []string) ([]ArchiveResult, error)
 
 	// Check returns unread messages without marking them read.
 	Check(recipient string) ([]Message, error)

@@ -25,6 +25,24 @@ type noImmediateProvider struct {
 	runtime.Provider
 }
 
+type nonRunningStopRecorder struct {
+	*runtime.Fake
+	stopCalls int
+	stopErr   error
+}
+
+func (p *nonRunningStopRecorder) IsRunning(string) bool {
+	return false
+}
+
+func (p *nonRunningStopRecorder) Stop(name string) error {
+	p.stopCalls++
+	if p.stopErr != nil {
+		return p.stopErr
+	}
+	return p.Fake.Stop(name)
+}
+
 func (p *startOverrideProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	if p.startErr != nil {
 		return p.startErr
@@ -1301,6 +1319,50 @@ func TestSuspendCrashedSession(t *testing.T) {
 	}
 	if got.State != StateSuspended {
 		t.Errorf("State = %q, want %q", got.State, StateSuspended)
+	}
+}
+
+func TestSuspendCleansDeadRuntimeArtifact(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &nonRunningStopRecorder{Fake: runtime.NewFake()}
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	if sp.stopCalls != 1 {
+		t.Fatalf("Stop calls = %d, want 1 to clean dead runtime artifact", sp.stopCalls)
+	}
+}
+
+func TestSuspendKeepsNonRunningCleanupBestEffort(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &nonRunningStopRecorder{Fake: runtime.NewFake(), stopErr: errors.New("cleanup unavailable")}
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	if sp.stopCalls != 1 {
+		t.Fatalf("Stop calls = %d, want 1", sp.stopCalls)
+	}
+	got, err := mgr.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.State != StateSuspended {
+		t.Fatalf("State = %q, want %q", got.State, StateSuspended)
 	}
 }
 

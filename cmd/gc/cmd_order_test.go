@@ -721,6 +721,133 @@ func TestOrderRun(t *testing.T) {
 	}
 }
 
+func TestOrderRunEventExecAdvancesCursor(t *testing.T) {
+	cityDir := t.TempDir()
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+`)
+	store := beads.NewMemStore()
+	eventLog := events.NewFake()
+	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+	headSeq, err := eventLog.LatestSeq()
+	if err != nil {
+		t.Fatalf("LatestSeq(): %v", err)
+	}
+	aa := []orders.Order{{
+		Name:    "release-exec",
+		Trigger: "event",
+		On:      events.BeadClosed,
+		Exec:    "printf ok",
+	}}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "release-exec", "", cityDir, store, eventLog, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	results, err := store.ListByLabel("order-run:release-exec", 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
+	}
+	for _, want := range []string{"order:release-exec", fmt.Sprintf("seq:%d", headSeq), "exec"} {
+		if !slicesContain(results[0].Labels, want) {
+			t.Fatalf("tracking bead labels = %v, want %s", results[0].Labels, want)
+		}
+	}
+}
+
+func TestCmdOrderRunEventExecAdvancesCursor(t *testing.T) {
+	cityDir := t.TempDir()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_EVENTS", "")
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_CITY_ROOT", cityDir)
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	t.Chdir(cityDir)
+
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+`)
+	if err := os.MkdirAll(filepath.Join(cityDir, "orders"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cityDir, "orders", "release-exec.toml"), `[order]
+exec = "printf ok"
+trigger = "event"
+on = "bead.closed"
+`)
+	var eventStderr bytes.Buffer
+	eventLog, err := events.NewFileRecorder(filepath.Join(cityDir, ".gc", "events.jsonl"), &eventStderr)
+	if err != nil {
+		t.Fatalf("NewFileRecorder(): %v", err)
+	}
+	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+	headSeq, err := eventLog.LatestSeq()
+	if err != nil {
+		t.Fatalf("LatestSeq(): %v", err)
+	}
+	if err := eventLog.Close(); err != nil {
+		t.Fatalf("Close(): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderRun("release-exec", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdOrderRun = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(): %v", err)
+	}
+	results, err := store.ListByLabel("order-run:release-exec", 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
+	}
+	for _, want := range []string{"order:release-exec", fmt.Sprintf("seq:%d", headSeq), "exec"} {
+		if !slicesContain(results[0].Labels, want) {
+			t.Fatalf("tracking bead labels = %v, want %s", results[0].Labels, want)
+		}
+	}
+}
+
+func TestOrderRunEventFormulaLatestSeqErrorDoesNotInstantiate(t *testing.T) {
+	aa := []orders.Order{{
+		Name:         "release-watch",
+		Trigger:      "event",
+		On:           events.BeadClosed,
+		Formula:      "test-formula",
+		FormulaLayer: sharedTestFormulaDir,
+	}}
+	store := beads.NewMemStore()
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "release-watch", "", "/city", store, events.NewFailFake(), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doOrderRun = %d, want 1 when event cursor cannot be read; stdout: %s", code, stdout.String())
+	}
+	results, err := store.ListByLabel("order-run:release-watch", 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("store.ListByLabel() len = %d, want 0 (%#v)", len(results), results)
+	}
+	if !strings.Contains(stderr.String(), "reading event cursor for release-watch") {
+		t.Fatalf("stderr = %q, want event cursor read failure", stderr.String())
+	}
+}
+
 func TestOrderRunResolvesPackBindingForPool(t *testing.T) {
 	aa := []orders.Order{
 		{Name: "digest", Formula: "mol-digest", Trigger: "cooldown", Interval: "24h", Pool: "dog", FormulaLayer: sharedTestFormulaDir},

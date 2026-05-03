@@ -97,6 +97,92 @@ exit 0
 	}
 }
 
+func TestOrphanSweepPreservesQualifiedRigAssignees(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+case "$1" in
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: gastown.deacon
+  source: pack
+Agent: project/gastown.refinery
+  source: pack
+Agent: project/gastown.polecat
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true},{"name":"project","hq":false}]}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      case "$*" in
+        *"--rig project"*)
+          cat <<'EOF'
+[
+  {"id":"ga-valid","status":"in_progress","assignee":"project/gastown.refinery"},
+  {"id":"ga-pool","status":"in_progress","assignee":"project/gastown.polecat-3"},
+  {"id":"ga-orphan","status":"in_progress","assignee":"project/gastown.missing"}
+]
+EOF
+          ;;
+        *)
+          printf '[]\n'
+          ;;
+      esac
+      exit 0
+    fi
+    if [ "$2" = "update" ]; then
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if !strings.Contains(string(out), "orphan-sweep: reset 1 orphaned beads") {
+		t.Fatalf("unexpected orphan-sweep output:\n%s", out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	log := string(logData)
+	if !strings.Contains(log, "bd update ga-orphan --status=open --assignee=") {
+		t.Fatalf("orphan bead was not reset:\n%s", log)
+	}
+	for _, preserved := range []string{"ga-valid", "ga-pool"} {
+		if strings.Contains(log, "bd update "+preserved+" ") {
+			t.Fatalf("valid assignee %s was reset:\n%s", preserved, log)
+		}
+	}
+}
+
 func TestMaintenanceDoltScriptsFallbackToManagedRuntimePorts(t *testing.T) {
 	scripts := []struct {
 		name   string

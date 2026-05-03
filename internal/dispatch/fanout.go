@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
 )
@@ -135,6 +136,7 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 				return ControlResult{}, fmt.Errorf("%s: preparing fragment %d: %w", bead.ID, index+1, err)
 			}
 		}
+		routeFanoutFragmentSteps(fragment, bead, opts, store)
 		externalDeps := expectedFragmentExternalDeps(fragment, mode, previousSinkIDs)
 		existingMapping, err := resolveExistingFragmentInstanceFromBeads(store, workflowBeads, rootID, fragment, externalDeps)
 		if err != nil {
@@ -175,6 +177,63 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 		return ControlResult{}, fmt.Errorf("%s: recording fanout state: %w", bead.ID, err)
 	}
 	return ControlResult{Processed: true, Action: "fanout-spawn", Created: totalCreated}, nil
+}
+
+func routeFanoutFragmentSteps(fragment *formula.FragmentRecipe, control beads.Bead, opts ProcessOptions, store beads.Store) {
+	if fragment == nil {
+		return
+	}
+	executionRoute := strings.TrimSpace(control.Metadata["gc.execution_routed_to"])
+	if executionRoute == "" {
+		executionRoute = strings.TrimSpace(control.Metadata["gc.routed_to"])
+	}
+	routeCfg := loadAttemptRouteConfig(opts.CityPath)
+	for i := range fragment.Steps {
+		step := &fragment.Steps[i]
+		if step.Metadata["gc.kind"] == "spec" {
+			continue
+		}
+		if isAttemptControlKind(step.Metadata["gc.kind"]) {
+			target := strings.TrimSpace(step.Metadata["gc.execution_routed_to"])
+			if target == "" {
+				target = fanoutFragmentStepTarget(*step, executionRoute, routeCfg)
+			}
+			applyAttemptControlStepRoute(step, target, routeCfg, store)
+			continue
+		}
+		if fanoutFragmentStepHasRoute(*step) {
+			continue
+		}
+		target := fanoutFragmentStepTarget(*step, executionRoute, routeCfg)
+		if target == "" {
+			continue
+		}
+		applyAttemptStepRoute(step, target, routeCfg, store)
+	}
+}
+
+func fanoutFragmentStepTarget(step formula.RecipeStep, executionRoute string, routeCfg *config.City) string {
+	target := strings.TrimSpace(step.Metadata["gc.run_target"])
+	if target == "" {
+		target = strings.TrimSpace(step.Metadata["gc.routed_to"])
+	}
+	if target == "" {
+		target = strings.TrimSpace(step.Assignee)
+	}
+	if target == "" {
+		return executionRoute
+	}
+	return qualifyAttemptTargetWithSourceRoute(target, executionRoute, routeCfg)
+}
+
+func fanoutFragmentStepHasRoute(step formula.RecipeStep) bool {
+	if strings.TrimSpace(step.Metadata["gc.execution_routed_to"]) != "" {
+		return true
+	}
+	if strings.TrimSpace(step.Metadata["gc.routed_to"]) != "" {
+		return true
+	}
+	return strings.TrimSpace(step.Assignee) != ""
 }
 
 func resolveExistingFragmentInstanceFromBeads(store beads.Store, all []beads.Bead, _ string, fragment *formula.FragmentRecipe, externalDeps []molecule.ExternalDep) (map[string]string, error) {

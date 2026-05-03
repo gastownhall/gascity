@@ -91,3 +91,18 @@ func PackRuntimeEnvMap(cityRoot, packName string) map[string]string {
 	}
 	return env
 }
+
+// PublicServiceMountPath returns the supervisor-routable public path for a
+// workspace service: /v0/city/<cityName>/svc/<serviceName>. This is the
+// path the supervisor's public listener actually mounts;
+// internal/api/supervisor.go strips the /v0/city/<cityName> prefix before
+// forwarding the remaining /svc/... segment to the per-city router.
+//
+// Use this when composing a URL that an external service or out-of-process
+// adapter will hit inbound (e.g. as a registered CallbackURL). For paths
+// inside the per-city router (where the /v0/city/<name> prefix is already
+// stripped), use the per-city-relative form returned by
+// config.Service.MountPathOrDefault instead.
+func PublicServiceMountPath(cityName, serviceName string) string {
+	return "/v0/city/" + cityName + "/svc/" + serviceName
+}

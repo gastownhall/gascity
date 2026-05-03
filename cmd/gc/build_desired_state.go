@@ -33,6 +33,11 @@ type DesiredStateResult struct {
 	// mutation paths update rig-owned work in the right store even when
 	// independent stores produce overlapping bead IDs.
 	AssignedWorkStores []beads.Store
+	// AssignedWorkStoreRefs is aligned by index with AssignedWorkBeads.
+	// The empty string means city store; non-empty values are rig names.
+	// Consumers that decide whether a specific agent should run must use
+	// this scope before treating a bead as reachable work for that agent.
+	AssignedWorkStoreRefs []string
 	// NamedSessionDemand records which named-session identities have active
 	// demand — either direct assignee demand (Assignee == identity) or
 	// work_query-detected ready work. The reconciler merges this into
@@ -269,9 +274,10 @@ func buildDesiredStateWithSessionBeads(
 	// the named session section can also use it.
 	var assignedWorkBeads []beads.Bead
 	var assignedWorkStores []beads.Store
+	var assignedWorkStoreRefs []string
 	var storePartial bool
 	if store != nil {
-		assignedWorkBeads, assignedWorkStores, storePartial = collectAssignedWorkBeadsWithStores(cfg, store, rigStores, suspendedRigPaths)
+		assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, storePartial = collectAssignedWorkBeadsWithStores(cfg, store, rigStores, suspendedRigPaths)
 		if storePartial {
 			fmt.Fprintf(stderr, "assignedWorkBeads: PARTIAL — store query failed, drain decisions suppressed\n") //nolint:errcheck
 		}
@@ -283,7 +289,8 @@ func buildDesiredStateWithSessionBeads(
 		} else {
 			fmt.Fprintf(stderr, "assignedWorkBeads: 0 beads (rigStores=%d)\n", len(rigStores)) //nolint:errcheck
 		}
-		poolDesiredStates := ComputePoolDesiredStatesTraced(cfg, assignedWorkBeads, sessionBeads.Open(), scaleCheckCounts, trace)
+		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, sessionBeads.Open(), assignedWorkBeads, assignedWorkStoreRefs)
+		poolDesiredStates := ComputePoolDesiredStatesTraced(cfg, poolWorkBeads, sessionBeads.Open(), scaleCheckCounts, trace)
 		for _, poolState := range poolDesiredStates {
 			cfgAgent := findAgentByTemplate(cfg, poolState.Template)
 			if cfgAgent == nil {
@@ -345,17 +352,21 @@ func buildDesiredStateWithSessionBeads(
 	// on-demand session only materializes from that path once the work is
 	// actually actionable. This keeps blocked or merely routed work from
 	// waking/materializing the named session prematurely.
-	for identity := range namedSpecs {
-		for _, wb := range assignedWorkBeads {
+	for identity, spec := range namedSpecs {
+		for i, wb := range assignedWorkBeads {
 			if wb.Status != "open" && wb.Status != "in_progress" {
 				continue
 			}
 			assignee := strings.TrimSpace(wb.Assignee)
-			if assignee == identity {
-				fmt.Fprintf(stderr, "namedWorkReady: %s matched by bead %s (assignee=%s status=%s)\n", identity, wb.ID, assignee, wb.Status) //nolint:errcheck
-				namedWorkReady[identity] = true
-				break
+			if assignee != identity {
+				continue
 			}
+			if !assignedWorkIndexReachableFromAgent(cityPath, cfg, spec.Agent, assignedWorkStoreRefs, i) {
+				continue
+			}
+			fmt.Fprintf(stderr, "namedWorkReady: %s matched by bead %s (assignee=%s status=%s)\n", identity, wb.ID, assignee, wb.Status) //nolint:errcheck
+			namedWorkReady[identity] = true
+			break
 		}
 	}
 	if len(assignedWorkBeads) > 0 {
@@ -436,14 +447,15 @@ func buildDesiredStateWithSessionBeads(
 	applySessionBeadDesiredOverlay(bp, cfg, desired, suspendedRigPaths, stderr)
 
 	return DesiredStateResult{
-		State:              desired,
-		BaseState:          baseDesired,
-		ScaleCheckCounts:   scaleCheckCounts,
-		AssignedWorkBeads:  assignedWorkBeads,
-		AssignedWorkStores: assignedWorkStores,
-		NamedSessionDemand: namedWorkReady,
-		StoreQueryPartial:  storePartial,
-		BeaconTime:         beaconTime,
+		State:                 desired,
+		BaseState:             baseDesired,
+		ScaleCheckCounts:      scaleCheckCounts,
+		AssignedWorkBeads:     assignedWorkBeads,
+		AssignedWorkStores:    assignedWorkStores,
+		AssignedWorkStoreRefs: assignedWorkStoreRefs,
+		NamedSessionDemand:    namedWorkReady,
+		StoreQueryPartial:     storePartial,
+		BeaconTime:            beaconTime,
 	}
 }
 
@@ -520,7 +532,7 @@ func collectAssignedWorkBeads(
 	cfg *config.City,
 	cityStore beads.Store,
 ) ([]beads.Bead, bool) {
-	result, _, partial := collectAssignedWorkBeadsWithStores(cfg, cityStore, nil, nil)
+	result, _, _, partial := collectAssignedWorkBeadsWithStores(cfg, cityStore, nil, nil)
 	return result, partial
 }
 
@@ -529,73 +541,81 @@ func collectAssignedWorkBeadsWithStores(
 	cityStore beads.Store,
 	rigStores map[string]beads.Store,
 	suspendedRigPaths map[string]bool,
-) ([]beads.Bead, []beads.Store, bool) {
+) ([]beads.Bead, []beads.Store, []string, bool) {
 	// Use CachingStore-wrapped stores. Creating raw bdStoreForCity per rig
 	// spawns bd subprocesses on every tick, saturating dolt.
-	stores := []beads.Store{cityStore}
+	type workStore struct {
+		store beads.Store
+		ref   string
+	}
+	stores := []workStore{{store: cityStore}}
 	for _, rig := range cfg.Rigs {
 		if suspendedRigPaths[filepath.Clean(rig.Path)] {
 			continue
 		}
 		if s, ok := rigStores[rig.Name]; ok {
-			stores = append(stores, s)
+			stores = append(stores, workStore{store: s, ref: rig.Name})
 		}
 	}
 
 	type storeAssignedWorkResult struct {
-		beads  []beads.Bead
-		stores []beads.Store
-		errs   []error
+		beads     []beads.Bead
+		stores    []beads.Store
+		storeRefs []string
+		errs      []error
 	}
 	results := make([]storeAssignedWorkResult, len(stores))
 	var wg sync.WaitGroup
-	for idx, s := range stores {
-		idx, s := idx, s
+	for idx, source := range stores {
+		idx, source := idx, source
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			var result []beads.Bead
 			var resultStores []beads.Store
+			var resultStoreRefs []string
 			var errs []error
 			seen := make(map[string]struct{})
 			// In-progress beads with an assignee (active work), plus stranded
 			// unassigned pool work that needs to be reopened.
-			if inProgress, err := s.List(beads.ListQuery{Status: "in_progress", Live: true}); err == nil {
-				appendInProgressWorkUnique(cfg, &result, &resultStores, inProgress, seen, s)
+			if inProgress, err := source.store.List(beads.ListQuery{Status: "in_progress", Live: true}); err == nil {
+				appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, inProgress, seen, source.store, source.ref)
 			} else {
 				errs = append(errs, fmt.Errorf("List(in_progress): %w", err))
 				if beads.IsPartialResult(err) && len(inProgress) > 0 {
-					appendInProgressWorkUnique(cfg, &result, &resultStores, inProgress, seen, s)
+					appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, inProgress, seen, source.store, source.ref)
 				}
 			}
 			// Ready beads with an assignee (queued direct handoff work that is
 			// actually runnable, not merely open). This is a lifecycle gate, so
 			// bypass the cache when a CachingStore wrapper is present.
-			if ready, err := beads.ReadyLive(s); err == nil {
-				appendAssignedUnique(&result, &resultStores, ready, seen, s)
+			if ready, err := beads.ReadyLive(source.store); err == nil {
+				appendAssignedUnique(&result, &resultStores, &resultStoreRefs, ready, seen, source.store, source.ref)
 			} else {
 				errs = append(errs, fmt.Errorf("Ready(): %w", err))
 				if beads.IsPartialResult(err) && len(ready) > 0 {
-					appendAssignedUnique(&result, &resultStores, ready, seen, s)
+					appendAssignedUnique(&result, &resultStores, &resultStoreRefs, ready, seen, source.store, source.ref)
 				}
 			}
-			results[idx] = storeAssignedWorkResult{beads: result, stores: resultStores, errs: errs}
+			results[idx] = storeAssignedWorkResult{beads: result, stores: resultStores, storeRefs: resultStoreRefs, errs: errs}
 		}()
 	}
 	wg.Wait()
 
 	var result []beads.Bead
 	var resultStores []beads.Store
+	var resultStoreRefs []string
 	var partial bool
 	for _, r := range results {
 		result = append(result, r.beads...)
 		resultStores = append(resultStores, r.stores...)
+		resultStoreRefs = append(resultStoreRefs, r.storeRefs...)
 		for _, err := range r.errs {
 			log.Printf("collectAssignedWorkBeads: %v", err)
 			partial = true
 		}
 	}
-	return result, resultStores, partial
+	return result, resultStores, resultStoreRefs, partial
 }
 
 // mergeNamedSessionDemand ensures that named-session assignee demand is
@@ -623,25 +643,27 @@ func mergeNamedSessionDemand(poolDesired map[string]int, namedDemand map[string]
 	}
 }
 
-func appendInProgressWorkUnique(cfg *config.City, dst *[]beads.Bead, stores *[]beads.Store, beadList []beads.Bead, seen map[string]struct{}, store beads.Store) {
+func appendInProgressWorkUnique(cfg *config.City, dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
 	for _, b := range beadList {
 		if strings.TrimSpace(b.Assignee) == "" && !isRecoverableUnassignedInProgressPoolWork(cfg, b) {
 			continue
 		}
-		appendWorkUnique(dst, stores, b, seen, store)
+		appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef)
 	}
 }
 
-func appendAssignedUnique(dst *[]beads.Bead, stores *[]beads.Store, beadList []beads.Bead, seen map[string]struct{}, store beads.Store) {
+func appendAssignedUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
 	for _, b := range beadList {
 		if strings.TrimSpace(b.Assignee) == "" {
 			continue
 		}
-		appendWorkUnique(dst, stores, b, seen, store)
+		appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef)
 	}
 }
 
-func appendWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, b beads.Bead, seen map[string]struct{}, store beads.Store) {
+func appendWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, b beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
+	// Invariant: dst, stores, and storeRefs are kept index-aligned by this
+	// shared growth path and the shared seen guard.
 	// Session beads are not actionable work — filter them at the source
 	// so all consumers see only real tasks. Message beads are NOT filtered
 	// here because they represent mail that should wake/materialize sessions;
@@ -657,6 +679,9 @@ func appendWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, b beads.Bead, se
 	*dst = append(*dst, b)
 	if stores != nil {
 		*stores = append(*stores, store)
+	}
+	if storeRefs != nil {
+		*storeRefs = append(*storeRefs, storeRef)
 	}
 }
 

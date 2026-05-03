@@ -1037,37 +1037,50 @@ func stopStaleAsyncStartRuntime(result startResult, sp runtime.Provider, stderr 
 	}
 }
 
+// asyncStartSessionStillCurrent decides whether an async start result should
+// commit against the current bead. Identity is established by instance_token:
+// when the prepared and current tokens both exist and match, the bead is the
+// same session we spawned for, even if the generation has been bumped by a
+// concurrent reconciler phase (which is normal when a wave runs long enough
+// for other phases to write metadata between enqueue and result completion).
+//
+// Rejecting on generation drift alone caused stuck-creating zombies: the
+// process spawned successfully, but the result was discarded as "stale", so
+// pending_create_claim never cleared and the session never advanced past
+// state=creating. Falling back to generation only when the token is absent
+// preserves the prior behavior for callers that pre-date instance_token.
 func asyncStartSessionStillCurrent(prepared, current beads.Bead) bool {
 	if strings.TrimSpace(current.Status) == "closed" {
 		return false
 	}
-	preparedGeneration := strings.TrimSpace(prepared.Metadata["generation"])
-	if preparedGeneration != "" && strings.TrimSpace(current.Metadata["generation"]) != preparedGeneration {
+	if !asyncStartIdentityMatches(prepared, current) {
 		return false
 	}
-	preparedToken := strings.TrimSpace(prepared.Metadata["instance_token"])
-	if preparedToken != "" && strings.TrimSpace(current.Metadata["instance_token"]) != preparedToken {
-		return false
+	currentState := sessionpkg.State(strings.TrimSpace(current.Metadata["state"]))
+	// If the bead has progressed to a live state (active or awake), the spawn
+	// already succeeded and another phase (typically ensureRunning via attach)
+	// has cleared pending_create_claim. The async result still carries useful
+	// metadata (creation_complete_at, runtime_epoch, etc.) — commit it instead
+	// of discarding as "stale", which leaves the bead missing fields the rest
+	// of the system relies on.
+	if currentState == sessionpkg.StateAwake || currentState == sessionpkg.StateActive {
+		return true
 	}
+	// For sessions still mid-flight (creating/asleep/drained/empty), reject if
+	// pending_create_claim was cleared from under us — that means a different
+	// reconciler phase already rolled the create back, and our result would
+	// stomp on its decision.
 	if shouldRollbackPendingCreate(&prepared) && !shouldRollbackPendingCreate(&current) {
 		return false
 	}
-	currentState := strings.TrimSpace(current.Metadata["state"])
-	return confirmPendingStart(currentState) ||
-		sessionpkg.State(currentState) == sessionpkg.StateAwake ||
-		sessionpkg.State(currentState) == sessionpkg.StateActive
+	return confirmPendingStart(string(currentState))
 }
 
 func asyncStartStaleRuntimeCleanupAllowed(prepared, current beads.Bead) bool {
 	if strings.TrimSpace(current.Status) == "closed" {
 		return true
 	}
-	preparedGeneration := strings.TrimSpace(prepared.Metadata["generation"])
-	if preparedGeneration != "" && strings.TrimSpace(current.Metadata["generation"]) != preparedGeneration {
-		return true
-	}
-	preparedToken := strings.TrimSpace(prepared.Metadata["instance_token"])
-	if preparedToken != "" && strings.TrimSpace(current.Metadata["instance_token"]) != preparedToken {
+	if !asyncStartIdentityMatches(prepared, current) {
 		return true
 	}
 	currentState := sessionpkg.State(strings.TrimSpace(current.Metadata["state"]))
@@ -1077,6 +1090,24 @@ func asyncStartStaleRuntimeCleanupAllowed(prepared, current beads.Bead) bool {
 	return !confirmPendingStart(string(currentState)) &&
 		currentState != sessionpkg.StateAwake &&
 		currentState != sessionpkg.StateActive
+}
+
+// asyncStartIdentityMatches reports whether prepared and current describe the
+// same session bead. instance_token is authoritative when both sides have one;
+// only fall back to generation when the prepared bead has no token (legacy
+// pre-instance_token snapshots). Generation drift with a matching token is a
+// normal consequence of concurrent reconciler phases and must not invalidate
+// an in-flight start result.
+func asyncStartIdentityMatches(prepared, current beads.Bead) bool {
+	preparedToken := strings.TrimSpace(prepared.Metadata["instance_token"])
+	if preparedToken != "" {
+		return strings.TrimSpace(current.Metadata["instance_token"]) == preparedToken
+	}
+	preparedGeneration := strings.TrimSpace(prepared.Metadata["generation"])
+	if preparedGeneration == "" {
+		return true
+	}
+	return strings.TrimSpace(current.Metadata["generation"]) == preparedGeneration
 }
 
 func clonePreparedStartForAsync(item preparedStart) preparedStart {
@@ -1452,6 +1483,12 @@ func executePlannedStartsTraced(
 			apply(&startOpts)
 		}
 	}
+	cbCfg, cbEnabled := sessionCircuitBreakerConfigFromCity(cfg)
+	var cb *sessionCircuitBreaker
+	if cbEnabled {
+		cb = defaultSessionCircuitBreaker()
+		cb.configure(cbCfg)
+	}
 	asyncLimiter := startOpts.asyncLimiter
 	maxWakes := maxParallelStartsPerTick(cfg)
 	if startOpts.async && asyncLimiter == nil {
@@ -1527,6 +1564,60 @@ func executePlannedStartsTraced(
 						done()
 						logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), outcome, time.Time{}, time.Time{}, nil)
 						continue
+					}
+				}
+				if cbEnabled {
+					identity := ""
+					if candidate.session != nil {
+						identity = namedSessionIdentity(*candidate.session)
+					}
+					if identity != "" {
+						cbNow := clk.Now().UTC()
+						if cb.IsOpen(identity, cbNow) {
+							if release != nil {
+								release()
+							}
+							if done != nil {
+								done()
+							}
+							if err := persistSessionCircuitBreakerMetadata(store, candidate.session, cb, identity, cbNow); err != nil {
+								fmt.Fprintf(stderr, "session reconciler: %v\n", err) //nolint:errcheck // best-effort stderr
+							}
+							cb.LogOpenOnce(identity, stderr)
+							if trace != nil {
+								trace.recordDecision("reconciler.session.circuit_open", candidate.tp.TemplateName, candidate.name(), "circuit_open", "skipped", traceRecordPayload{
+									"identity": identity,
+								}, nil, "")
+							}
+							continue
+						}
+						state, err := recordSessionCircuitBreakerRestart(store, candidate.session, cb, identity, cbNow)
+						if err != nil {
+							if release != nil {
+								release()
+							}
+							if done != nil {
+								done()
+							}
+							fmt.Fprintf(stderr, "session reconciler: %v\n", err) //nolint:errcheck // best-effort stderr
+							logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "circuit_metadata_failed", time.Time{}, time.Time{}, err)
+							continue
+						}
+						if state == circuitOpen {
+							if release != nil {
+								release()
+							}
+							if done != nil {
+								done()
+							}
+							cb.LogOpenOnce(identity, stderr)
+							if trace != nil {
+								trace.recordDecision("reconciler.session.circuit_trip", candidate.tp.TemplateName, candidate.name(), "circuit_trip", "skipped", traceRecordPayload{
+									"identity": identity,
+								}, nil, "")
+							}
+							continue
+						}
 					}
 				}
 				item, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr)

@@ -72,12 +72,16 @@ func (m *Multiplexer) snapshot() map[string]Provider {
 }
 
 // ListAll returns events from all cities matching the filter, sorted by
-// timestamp. Each event is tagged with its source city.
+// timestamp, city, and sequence. Each event is tagged with its source city.
+// A positive filter Limit returns the earliest matching events after that
+// global sort; callers needing the latest matching events should use ListTail.
 func (m *Multiplexer) ListAll(filter Filter) ([]TaggedEvent, error) {
 	providers := m.snapshot()
+	providerFilter := filter
+	providerFilter.Limit = 0
 	var all []TaggedEvent
 	for city, p := range providers {
-		evts, err := p.List(filter)
+		evts, err := p.List(providerFilter)
 		if err != nil {
 			continue // best-effort: skip cities with errors
 		}
@@ -86,8 +90,11 @@ func (m *Multiplexer) ListAll(filter Filter) ([]TaggedEvent, error) {
 		}
 	}
 	sort.Slice(all, func(i, j int) bool {
-		return all[i].Ts.Before(all[j].Ts)
+		return taggedEventLess(all[i], all[j])
 	})
+	if filter.Limit > 0 && len(all) > filter.Limit {
+		all = all[:filter.Limit]
+	}
 	return all, nil
 }
 
@@ -99,14 +106,16 @@ func (m *Multiplexer) ListTail(filter Filter, limit int) ([]TaggedEvent, error) 
 		return m.ListAll(filter)
 	}
 	providers := m.snapshot()
+	providerFilter := filter
+	providerFilter.Limit = 0
 	var all []TaggedEvent
 	for city, p := range providers {
 		var evts []Event
 		var err error
 		if tail, ok := p.(TailProvider); ok {
-			evts, err = tail.ListTail(filter, limit)
+			evts, err = tail.ListTail(providerFilter, limit)
 		} else {
-			evts, err = p.List(filter)
+			evts, err = p.List(providerFilter)
 			if limit < len(evts) {
 				evts = evts[len(evts)-limit:]
 			}
@@ -120,12 +129,22 @@ func (m *Multiplexer) ListTail(filter Filter, limit int) ([]TaggedEvent, error) 
 		}
 	}
 	sort.Slice(all, func(i, j int) bool {
-		return all[i].Ts.Before(all[j].Ts)
+		return taggedEventLess(all[i], all[j])
 	})
 	if limit < len(all) {
 		all = all[len(all)-limit:]
 	}
 	return all, nil
+}
+
+func taggedEventLess(left, right TaggedEvent) bool {
+	if !left.Ts.Equal(right.Ts) {
+		return left.Ts.Before(right.Ts)
+	}
+	if left.City != right.City {
+		return left.City < right.City
+	}
+	return left.Seq < right.Seq
 }
 
 // LatestCursor returns the current highest sequence number for each provider.

@@ -142,7 +142,7 @@ Wrong. The issue is about beads code, so it goes in the beads rig.
 - **Strategic decisions**: Architecture, priorities, integration planning
 
 **NOT your job**: Per-worker cleanup, session killing, routine nudging (Witness handles that)
-**Exception**: If refinery/witness is stuck, use `{{ cmd }} nudge refinery "Process MQ"`
+**Exception**: If refinery/witness is stuck, use `{{ cmd }} session nudge refinery "Process MQ"`
 
 ## Rig Wake/Sleep Protocol
 
@@ -199,12 +199,12 @@ gh pr create --repo $(git remote get-url origin | sed 's/.*github.com[:/]\(.*\)\
 {{ cmd }} mail inbox                                  # Check your messages
 {{ cmd }} mail read <id>                              # Read a specific message
 {{ cmd }} mail send <addr> -s "Subject" -m "Message"  # Send mail
-{{ cmd }} nudge <target> "message"                    # Wake an agent
+{{ cmd }} session nudge <target> "message"            # Wake an agent
 {{ cmd }} agent list                                  # List all agents
 {{ cmd }} rig list                                    # List all rigs
 ```
 
-**ALWAYS use gc nudge, NEVER tmux send-keys** (drops Enter key)
+**ALWAYS use `gc session nudge`, NEVER `tmux send-keys`** (drops Enter key)
 
 ---
 

@@ -57,6 +57,7 @@ This command owns the rig's canonical .beads/config.yaml topology state.`,
 			}
 			return nil
 		},
+		ValidArgsFunction: completeRigNames,
 	}
 	cmd.Flags().BoolVar(&opts.Inherit, "inherit", false, "inherit the city endpoint")
 	cmd.Flags().BoolVar(&opts.External, "external", false, "set an explicit external endpoint for the rig")

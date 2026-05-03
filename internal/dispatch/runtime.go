@@ -422,6 +422,9 @@ func (s scopeSnapshot) hasOpenScopeMembers(ignoreIDs ...string) bool {
 		if _, skip := ignored[member.ID]; skip {
 			continue
 		}
+		if member.Metadata["gc.kind"] == "spec" {
+			continue
+		}
 		switch member.Metadata["gc.scope_role"] {
 		case "body", "teardown":
 			continue
@@ -500,6 +503,9 @@ func (s scopeSnapshot) skipOpenScopeMembers(store beads.Store, skipControlID str
 	pending := make(map[string]beads.Bead)
 	for _, member := range s.members {
 		if member.ID == skipControlID || member.Status != "open" {
+			continue
+		}
+		if member.Metadata["gc.kind"] == "spec" {
 			continue
 		}
 		switch member.Metadata["gc.scope_role"] {
@@ -613,6 +619,12 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 	// so retryable scan failures keep the root live for singleton scans, but
 	// source beads are not mutated until the root is durably closed.
 	if err := setOutcomeAndClose(store, rootID, outcome); err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			if closeErr := setOutcomeAndClose(store, bead.ID, "missing_root"); closeErr != nil {
+				return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: closing orphaned finalizer (root %s missing): %w", bead.ID, rootID, closeErr))
+			}
+			return ControlResult{Processed: true, Action: "workflow-missing_root"}, nil
+		}
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: completing workflow head: %w", rootID, err))
 	}
 	if outcome == "pass" {
@@ -715,11 +727,14 @@ func walkSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptio
 				stopWalk = true
 				return nil
 			}
-			if loaded.Status == "closed" {
-				opts.tracef("close-source-chain root=%s skip reason=already_closed source=%s ref=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef))
+			if !mutate {
 				return nil
 			}
-			if !mutate {
+			if err := propagateSourceBeadTerminalMetadata(nextStore, loaded.ID, current.Metadata); err != nil {
+				return fmt.Errorf("propagating source bead metadata %s in %s: %w", nextID, sourceChainStoreLabel(effectiveRef), err)
+			}
+			if loaded.Status == "closed" {
+				opts.tracef("close-source-chain root=%s skip reason=already_closed source=%s ref=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef))
 				return nil
 			}
 			if err := closeSourceBeadPreservingOutcome(nextStore, loaded); err != nil {
@@ -922,6 +937,15 @@ func closeSourceBeadPreservingOutcome(store beads.Store, bead beads.Bead) error 
 		opts.Metadata = map[string]string{"gc.outcome": "pass"}
 	}
 	return store.Update(bead.ID, opts)
+}
+
+func propagateSourceBeadTerminalMetadata(store beads.Store, beadID string, metadata map[string]string) error {
+	batch := make(map[string]string)
+	copyNonGCMetadata(batch, metadata)
+	if len(batch) == 0 {
+		return nil
+	}
+	return store.SetMetadataBatch(beadID, batch)
 }
 
 func recordWorkflowFinalizeError(store beads.Store, finalizerID string, err error) error {

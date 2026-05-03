@@ -140,6 +140,51 @@ prompt_template = "agents/mayor/prompt.template.md"
 	}
 }
 
+func TestRenderPromptAgentBlockAppendFragmentsAffectRenderedPrompt(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+prompt_template = "agents/mayor/prompt.template.md"
+append_fragments = ["footer"]
+`)
+	cfg, err := config.Parse(data)
+	if err != nil {
+		t.Fatalf("config.Parse: %v", err)
+	}
+	var mayor config.Agent
+	found := false
+	for _, a := range cfg.Agents {
+		if a.Name == "mayor" {
+			mayor = a
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf(`expected [[agent]] with name "mayor" in parsed config`)
+	}
+	if got := mayor.AppendFragments; len(got) != 1 || got[0] != "footer" {
+		t.Fatalf("[[agent]] AppendFragments = %v, want [footer]", got)
+	}
+	f := fsys.NewFake()
+	f.Files["/city/agents/mayor/prompt.template.md"] = []byte("Hello")
+	f.Files["/city/agents/mayor/template-fragments/footer.template.md"] = []byte(`{{ define "footer" }}Goodbye{{ end }}`)
+	fragments := effectivePromptFragments(
+		cfg.Workspace.GlobalFragments,
+		mayor.InjectFragments,
+		mayor.AppendFragments,
+		mayor.InheritedAppendFragments,
+		cfg.AgentDefaults.AppendFragments,
+	)
+	got := renderPrompt(f, "/city", "", "agents/mayor/prompt.template.md", PromptContext{}, "", io.Discard, nil, fragments, nil)
+	if got != "Hello\n\nGoodbye" {
+		t.Errorf("renderPrompt([[agent]] append_fragments) = %q, want %q", got, "Hello\n\nGoodbye")
+	}
+}
+
 func TestRenderPromptPatchedTemplateSuffixRenders(t *testing.T) {
 	f := fsys.NewFake()
 	f.Files["/city/patches/gastown-mayor-prompt.template.md"] = []byte("Hello {{ .AgentName }}")

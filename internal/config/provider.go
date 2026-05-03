@@ -97,9 +97,13 @@ type ProviderSpec struct {
 	//   "subcommand" → command resume <key>
 	ResumeStyle string `toml:"resume_style,omitempty"`
 	// ResumeCommand is the full shell command to run when resuming a session.
-	// Supports {{.SessionKey}} template variable. When set, takes precedence
-	// over ResumeFlag/ResumeStyle. Example:
+	// Supports only the {{.SessionKey}} template variable. When set, takes precedence
+	// over ResumeFlag/ResumeStyle. When schema-managed defaults are inserted, the
+	// resolver tokenizes and re-emits the command; for subcommand-style resume it
+	// inserts after the ResumeFlag token that precedes {{.SessionKey}}. Example:
 	//   "claude --resume {{.SessionKey}} --dangerously-skip-permissions"
+	// Schema-managed defaults missing from a subcommand-style resume command
+	// are inserted before {{.SessionKey}} during provider resolution.
 	ResumeCommand string `toml:"resume_command,omitempty"`
 	// SessionIDFlag is the CLI flag for creating a session with a specific ID.
 	// Enables the Generate & Pass strategy for session key management.
