@@ -30,7 +30,10 @@ func TestPingNudgeWakeSocketNoListenerIsNoOp(t *testing.T) {
 	pingNudgeWakeSocket(dir)
 }
 
-func TestPingNudgeWakeSocketEmptyCityPathIsNoOp(t *testing.T) {
+func TestPingNudgeWakeSocketEmptyCityPathIsNoOp(_ *testing.T) {
+	// No assertion needed — test passes if pingNudgeWakeSocket does not
+	// panic on an empty cityPath. The function dials a derived socket path
+	// and exits silently on dial failure, which is the legacy-mode contract.
 	pingNudgeWakeSocket("")
 }
 

@@ -855,7 +855,7 @@ func TestDispatchReadyWaitNudges_EnqueuesDeterministicNudge(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	if err := dispatchReadyWaitNudges(dir, nil, store, sp, time.Now().UTC()); err != nil {
+	if err := dispatchReadyWaitNudges(dir, store, sp, time.Now().UTC()); err != nil {
 		t.Fatalf("dispatchReadyWaitNudges: %v", err)
 	}
 	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now().UTC())
@@ -1043,7 +1043,7 @@ func TestDispatchReadyWaitNudges_StartsCodexPoller(t *testing.T) {
 	}
 	t.Cleanup(func() { startNudgePoller = prev })
 
-	if err := dispatchReadyWaitNudges(dir, nil, store, sp, time.Now().UTC()); err != nil {
+	if err := dispatchReadyWaitNudges(dir, store, sp, time.Now().UTC()); err != nil {
 		t.Fatalf("dispatchReadyWaitNudges: %v", err)
 	}
 	if !called {
@@ -1088,7 +1088,7 @@ func TestDispatchReadyWaitNudges_PropagatesNudgeIDMetadataFailure(t *testing.T) 
 		t.Fatalf("Start: %v", err)
 	}
 
-	err = dispatchReadyWaitNudges(dir, nil, store, sp, time.Now().UTC())
+	err = dispatchReadyWaitNudges(dir, store, sp, time.Now().UTC())
 	if err == nil || !strings.Contains(err.Error(), "setting wait nudge_id") {
 		t.Fatalf("dispatchReadyWaitNudges error = %v, want nudge_id failure", err)
 	}
@@ -1137,7 +1137,7 @@ func TestDispatchReadyWaitNudges_PropagatesPollerFailure(t *testing.T) {
 	}
 	t.Cleanup(func() { startNudgePoller = prev })
 
-	err = dispatchReadyWaitNudges(dir, nil, store, sp, time.Now().UTC())
+	err = dispatchReadyWaitNudges(dir, store, sp, time.Now().UTC())
 	if err == nil || !strings.Contains(err.Error(), "starting wait nudge poller") {
 		t.Fatalf("dispatchReadyWaitNudges error = %v, want poller failure", err)
 	}
