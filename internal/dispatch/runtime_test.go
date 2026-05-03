@@ -834,8 +834,9 @@ func TestProcessWorkflowFinalizeClosesCrossStoreSourceBead(t *testing.T) {
 		Title: "Adopt PR: gastownhall/example#1",
 		Type:  "task",
 		Metadata: map[string]string{
-			"pr_review.pr_number": "1",
-			"pr_review.repo_slug": "gastownhall/example",
+			"pr_review.pr_number":       "1",
+			"pr_review.repo_slug":       "gastownhall/example",
+			"pr_review.workflow_status": "running",
 		},
 	})
 
@@ -843,8 +844,11 @@ func TestProcessWorkflowFinalizeClosesCrossStoreSourceBead(t *testing.T) {
 		Title: "Adopt PR workflow: gastownhall/example#1",
 		Type:  "task",
 		Metadata: map[string]string{
-			"gc.source_bead_id":   citySource.ID,
-			"gc.source_store_ref": "city:test",
+			"gc.source_bead_id":         citySource.ID,
+			"gc.source_store_ref":       "city:test",
+			"pr_review.final_pr_url":    "https://github.com/gastownhall/example/pull/1",
+			"pr_review.workflow_status": "completed",
+			"workflow_id":               "wf-1",
 		},
 	})
 
@@ -928,6 +932,15 @@ func TestProcessWorkflowFinalizeClosesCrossStoreSourceBead(t *testing.T) {
 	}
 	if got := citySourceAfter.Metadata["gc.outcome"]; got != "pass" {
 		t.Errorf("city source bead gc.outcome = %q, want %q", got, "pass")
+	}
+	if got := citySourceAfter.Metadata["pr_review.workflow_status"]; got != "completed" {
+		t.Errorf("city source bead pr_review.workflow_status = %q, want completed", got)
+	}
+	if got := citySourceAfter.Metadata["pr_review.final_pr_url"]; got != "https://github.com/gastownhall/example/pull/1" {
+		t.Errorf("city source bead final PR URL = %q, want propagated final PR URL", got)
+	}
+	if got := citySourceAfter.Metadata["workflow_id"]; got != "wf-1" {
+		t.Errorf("city source bead workflow_id = %q, want propagated workflow id", got)
 	}
 }
 

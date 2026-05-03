@@ -715,11 +715,14 @@ func walkSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptio
 				stopWalk = true
 				return nil
 			}
-			if loaded.Status == "closed" {
-				opts.tracef("close-source-chain root=%s skip reason=already_closed source=%s ref=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef))
+			if !mutate {
 				return nil
 			}
-			if !mutate {
+			if err := propagateSourceBeadTerminalMetadata(nextStore, loaded.ID, current.Metadata); err != nil {
+				return fmt.Errorf("propagating source bead metadata %s in %s: %w", nextID, sourceChainStoreLabel(effectiveRef), err)
+			}
+			if loaded.Status == "closed" {
+				opts.tracef("close-source-chain root=%s skip reason=already_closed source=%s ref=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef))
 				return nil
 			}
 			if err := closeSourceBeadPreservingOutcome(nextStore, loaded); err != nil {
@@ -922,6 +925,15 @@ func closeSourceBeadPreservingOutcome(store beads.Store, bead beads.Bead) error 
 		opts.Metadata = map[string]string{"gc.outcome": "pass"}
 	}
 	return store.Update(bead.ID, opts)
+}
+
+func propagateSourceBeadTerminalMetadata(store beads.Store, beadID string, metadata map[string]string) error {
+	batch := make(map[string]string)
+	copyNonGCMetadata(batch, metadata)
+	if len(batch) == 0 {
+		return nil
+	}
+	return store.SetMetadataBatch(beadID, batch)
 }
 
 func recordWorkflowFinalizeError(store beads.Store, finalizerID string, err error) error {
