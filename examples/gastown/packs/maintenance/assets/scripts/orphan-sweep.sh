@@ -62,6 +62,16 @@ is_known_agent() {
     # Pool instance: strip trailing -<digits> and check template name.
     local base="${name%-[0-9]*}"
     if [ "$base" != "$name" ] && [ -n "${KNOWN_AGENTS[$base]+x}" ]; then return 0; fi
+    # City-qualified assignee (gastown.deacon, partcl.witness): strip the
+    # prefix and re-check. Defense-in-depth for older binaries that fall
+    # through to `gc config show` and emit unqualified names. Also covers
+    # pool patterns like "gastown.dog-3" by re-stripping the -N suffix.
+    local short="${name##*.}"
+    if [ "$short" != "$name" ]; then
+        if [ -n "${KNOWN_AGENTS[$short]+x}" ]; then return 0; fi
+        local short_base="${short%-[0-9]*}"
+        if [ "$short_base" != "$short" ] && [ -n "${KNOWN_AGENTS[$short_base]+x}" ]; then return 0; fi
+    fi
     return 1
 }
 
