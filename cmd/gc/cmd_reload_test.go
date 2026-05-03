@@ -375,6 +375,40 @@ func TestHandleReloadSocketCmdWaitsForAcceptedAfterHandoff(t *testing.T) {
 	}
 }
 
+func TestControllerReloadAcceptTimeoutDefault(t *testing.T) {
+	if controllerReloadAcceptTimeout != 60*time.Second {
+		t.Fatalf("controllerReloadAcceptTimeout = %s, want 60s", controllerReloadAcceptTimeout)
+	}
+}
+
+func TestReloadControlReadTimeoutAsyncOutlastsAcceptAndAckWindow(t *testing.T) {
+	readTimeout, err := reloadControlReadTimeout(reloadControlRequest{Wait: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readTimeout <= 15*time.Second {
+		t.Fatalf("async read timeout = %s, want above old 15s client deadline", readTimeout)
+	}
+	if wantMin := 2*controllerReloadAcceptTimeout + 5*time.Second; readTimeout <= wantMin {
+		t.Fatalf("async read timeout = %s, want above controller window %s", readTimeout, wantMin)
+	}
+}
+
+func TestReloadControlReadTimeoutWaitIncludesRequestedTimeout(t *testing.T) {
+	oldAccept := controllerReloadAcceptTimeout
+	controllerReloadAcceptTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { controllerReloadAcceptTimeout = oldAccept })
+
+	readTimeout, err := reloadControlReadTimeout(reloadControlRequest{Wait: true, Timeout: "40ms"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := 2*controllerReloadAcceptTimeout + 40*time.Millisecond + 10*time.Second
+	if readTimeout != want {
+		t.Fatalf("read timeout = %s, want %s", readTimeout, want)
+	}
+}
+
 func TestSendReloadControlRequestNoChange(t *testing.T) {
 	sp := runtime.NewFake()
 

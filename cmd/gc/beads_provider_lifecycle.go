@@ -322,7 +322,8 @@ func defaultScopeDoltDatabase(cityPath, dir, prefix string) string {
 }
 
 func isReservedManagedDoltDatabase(name string) bool {
-	return strings.EqualFold(strings.TrimSpace(name), managedDoltProbeDatabase)
+	_, ok := managedDoltSystemDatabases[strings.ToLower(strings.TrimSpace(name))]
+	return ok
 }
 
 func canonicalScopeDoltDatabase(cityPath, dir, prefix string) string {
@@ -952,6 +953,10 @@ func validateManagedDoltDatabaseName(path, doltDatabase string) (string, error) 
 	return doltDatabase, nil
 }
 
+func isLegacyManagedDoltProbeDatabase(name string) bool {
+	return strings.EqualFold(strings.TrimSpace(name), managedDoltProbeDatabase)
+}
+
 func ensureCanonicalScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase string, preserveExisting bool) error {
 	path := filepath.Join(scopeRoot, ".beads", "metadata.json")
 	preserveReservedExisting := false
@@ -962,9 +967,10 @@ func ensureCanonicalScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase string, pr
 			doltDatabase = strings.TrimSpace(existing)
 			if isReservedManagedDoltDatabase(doltDatabase) {
 				// New init paths reject this reserved name, but existing metadata
-				// may predate the reservation. Preserve it during startup
-				// normalization so operators can migrate the scope deliberately.
-				preserveReservedExisting = true
+				// may use the legacy probe database as its real bead store.
+				// Preserve only that one migration case; Dolt system databases
+				// are unsafe bead-store targets even when already pinned.
+				preserveReservedExisting = isLegacyManagedDoltProbeDatabase(doltDatabase)
 			}
 		}
 	}

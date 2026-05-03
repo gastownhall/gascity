@@ -344,7 +344,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 
 	// Step 10: Merge environment layers.
-	env := convergence.ScrubTokenEnv(mergeEnv(passthroughEnv(), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env), agentEnv))
+	env := mergeEnv(passthroughEnv(), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env), agentEnv)
+	prependGCBinDirToPATH(env, env["GC_BIN"])
+	env = convergence.ScrubTokenEnv(env)
 
 	// Step 11: Expand session setup templates.
 	configDir := p.cityPath

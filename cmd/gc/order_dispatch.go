@@ -376,6 +376,13 @@ func orderTriggerUsesLastRun(a orders.Order) bool {
 	return a.Trigger == "cooldown" || a.Trigger == "cron"
 }
 
+func eventCursorLabels(scoped string, headSeq uint64) []string {
+	return []string{
+		fmt.Sprintf("order:%s", scoped),
+		fmt.Sprintf("seq:%d", headSeq),
+	}
+}
+
 // dispatchOne runs a single order dispatch in its own goroutine.
 // For exec orders, runs the script directly. For formula orders,
 // instantiates a wisp. Emits events and updates the tracking bead.
@@ -407,33 +414,91 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string) {
 	scoped := a.ScopedName()
 	labels := []string{"exec"}
+	var headSeq uint64
+	var hasEventCursor bool
+	if a.Trigger == "event" && m.ep != nil {
+		var err error
+		headSeq, err = m.ep.LatestSeq()
+		if err != nil {
+			errMsg := fmt.Sprintf("reading event cursor: %v", err)
+			labels = []string{"exec-failed"}
+			logDispatchError(m.stderr, "gc: order dispatch: reading event cursor for %s: %v", scoped, err)
+			if updateErr := store.Update(trackingID, beads.UpdateOpts{Labels: labels}); updateErr != nil {
+				logDispatchError(m.stderr, "gc: order %s: failed to label exec tracking bead %s: %v", scoped, trackingID, updateErr)
+			}
+			m.rec.Record(events.Event{
+				Type:    events.OrderFailed,
+				Actor:   "controller",
+				Subject: scoped,
+				Message: errMsg,
+			})
+			return
+		}
+		hasEventCursor = true
+		// Event-triggered exec orders persist the cursor before the command
+		// runs; otherwise a crash after the side effect can replay the event.
+		if err := store.Update(trackingID, beads.UpdateOpts{Labels: eventCursorLabels(scoped, headSeq)}); err != nil {
+			logDispatchError(m.stderr, "gc: order %s: failed to label exec event cursor on tracking bead %s: %v", scoped, trackingID, err)
+			labels = []string{"exec-failed"}
+			if updateErr := store.Update(trackingID, beads.UpdateOpts{Labels: labels}); updateErr != nil {
+				logDispatchError(m.stderr, "gc: order %s: failed to label exec tracking bead %s: %v", scoped, trackingID, updateErr)
+			}
+			m.rec.Record(events.Event{
+				Type:    events.OrderFailed,
+				Actor:   "controller",
+				Subject: scoped,
+				Message: fmt.Sprintf("exec tracking bead %s event cursor label failed for seq=%d: %v", trackingID, headSeq, err),
+			})
+			return
+		}
+	}
 
 	env := orderExecEnv(cityPath, m.cfg, target, a)
 	output, err := m.execRun(ctx, a.Exec, target.ScopeRoot, env)
+	var execErrMsg string
 	if err != nil {
 		redactionEnv := append(os.Environ(), env...)
-		errMsg := execenv.RedactText(err.Error(), redactionEnv)
-		labels = append(labels, "exec-failed")
-		logDispatchError(m.stderr, "gc: order exec %s failed: %s", scoped, errMsg)
+		execErrMsg = execenv.RedactText(err.Error(), redactionEnv)
+		labels = []string{"exec-failed"}
+		logDispatchError(m.stderr, "gc: order exec %s failed: %s", scoped, execErrMsg)
 		if len(output) > 0 {
 			logDispatchError(m.stderr, "gc: order exec %s output: %s", scoped, execenv.RedactText(string(output), redactionEnv))
+		}
+	}
+
+	// Label tracking bead with outcome via store (not CLI). For event execs,
+	// cursor labels were already persisted before the command ran.
+	if err := store.Update(trackingID, beads.UpdateOpts{Labels: labels}); err != nil {
+		logDispatchError(m.stderr, "gc: order %s: failed to label exec tracking bead %s: %v", scoped, trackingID, err)
+		msg := fmt.Sprintf("exec tracking bead %s label failed: %v", trackingID, err)
+		if hasEventCursor {
+			msg = fmt.Sprintf("seq=%d: %s", headSeq, msg)
 		}
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
 			Actor:   "controller",
 			Subject: scoped,
-			Message: errMsg,
+			Message: msg,
 		})
-	} else {
+		return
+	}
+	if execErrMsg != "" {
+		if hasEventCursor {
+			execErrMsg = fmt.Sprintf("seq=%d: %s", headSeq, execErrMsg)
+		}
 		m.rec.Record(events.Event{
-			Type:    events.OrderCompleted,
+			Type:    events.OrderFailed,
 			Actor:   "controller",
 			Subject: scoped,
+			Message: execErrMsg,
 		})
+		return
 	}
-
-	// Label tracking bead with outcome via store (not CLI).
-	store.Update(trackingID, beads.UpdateOpts{Labels: labels}) //nolint:errcheck // best-effort
+	m.rec.Record(events.Event{
+		Type:    events.OrderCompleted,
+		Actor:   "controller",
+		Subject: scoped,
+	})
 }
 
 // dispatchWisp instantiates a wisp from the order's formula.
@@ -451,10 +516,24 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		return
 	}
 
-	// Capture event head before wisp creation for event triggers.
+	// Capture event head before wisp creation for event triggers. Event runs
+	// fail closed when the cursor cannot be read.
 	var headSeq uint64
 	if a.Trigger == "event" && m.ep != nil {
-		headSeq, _ = m.ep.LatestSeq()
+		var err error
+		headSeq, err = m.ep.LatestSeq()
+		if err != nil {
+			errMsg := fmt.Sprintf("reading event cursor: %v", err)
+			logDispatchError(m.stderr, "gc: order dispatch: reading event cursor for %s: %v", scoped, err)
+			m.rec.Record(events.Event{
+				Type:    events.OrderFailed,
+				Actor:   "controller",
+				Subject: scoped,
+				Message: errMsg,
+			})
+			m.markTrackingFailure(store, trackingID, scoped, a, 0)
+			return
+		}
 	}
 
 	var searchPaths []string
@@ -579,10 +658,7 @@ func (m *memoryOrderDispatcher) orderRigSuspended(a orders.Order) bool {
 func (m *memoryOrderDispatcher) markTrackingFailure(store beads.Store, trackingID, scoped string, a orders.Order, headSeq uint64) {
 	labels := []string{"wisp", "wisp-failed"}
 	if a.Trigger == "event" && headSeq > 0 {
-		labels = append(labels,
-			fmt.Sprintf("order:%s", scoped),
-			fmt.Sprintf("seq:%d", headSeq),
-		)
+		labels = append(labels, eventCursorLabels(scoped, headSeq)...)
 	}
 	if err := store.Update(trackingID, beads.UpdateOpts{Labels: labels}); err != nil {
 		logDispatchError(m.stderr, "gc: order %s: failed to mark tracking bead %s as failed: %v", scoped, trackingID, err)

@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"text/tabwriter"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -24,6 +26,12 @@ import (
 // replying to mail. When non-nil, it is called with the recipient name.
 // Errors are non-fatal.
 type nudgeFunc func(recipient string) error
+
+const (
+	mailInjectMaxMessages     = 3
+	mailInjectBodyPreviewSize = 240
+	mailInjectPreviewScanSize = 4096
+)
 
 func newMailNudgeFunc(sender string) nudgeFunc {
 	return func(recipient string) error {
@@ -270,18 +278,86 @@ func formatInjectOutput(messages []mail.Message) string {
 	var sb strings.Builder
 	sb.WriteString("<system-reminder>\n")
 	fmt.Fprintf(&sb, "You have %d unread message(s).\n\n", len(messages))
-	for _, m := range messages {
-		subject := strings.TrimSpace(m.Subject)
-		body := strings.TrimSpace(m.Body)
+	limit := len(messages)
+	if limit > mailInjectMaxMessages {
+		limit = mailInjectMaxMessages
+		fmt.Fprintf(&sb, "Showing the first %d message(s) here; run 'gc mail inbox' for the full list.\n\n", limit)
+	}
+	for _, m := range messages[:limit] {
+		subject, subjectTruncated := mailInjectSubjectPreview(m.Subject)
+		body, bodyTruncated := mailInjectBodyPreview(m.Body)
 		if subject != "" && subject != body {
-			fmt.Fprintf(&sb, "- %s from %s [%s]: %s\n", m.ID, m.From, m.Subject, m.Body)
+			fmt.Fprintf(&sb, "- %s from %s [%s", m.ID, m.From, subject)
+			if subjectTruncated {
+				sb.WriteString(" ... [subject truncated]")
+			}
+			fmt.Fprintf(&sb, "]: %s", body)
 		} else {
-			fmt.Fprintf(&sb, "- %s from %s: %s\n", m.ID, m.From, m.Body)
+			fmt.Fprintf(&sb, "- %s from %s: %s", m.ID, m.From, body)
 		}
+		if bodyTruncated {
+			sb.WriteString(" ... [preview truncated]")
+		}
+		sb.WriteByte('\n')
 	}
 	sb.WriteString("\nRun 'gc mail read <id>' for full details, or 'gc mail inbox' to see all.\n")
 	sb.WriteString("</system-reminder>\n")
 	return sb.String()
+}
+
+func mailInjectSubjectPreview(subject string) (string, bool) {
+	return mailInjectTextPreview(subject, mailInjectBodyPreviewSize)
+}
+
+func mailInjectBodyPreview(body string) (string, bool) {
+	return mailInjectTextPreview(body, mailInjectBodyPreviewSize)
+}
+
+func mailInjectTextPreview(text string, limit int) (string, bool) {
+	if limit <= 0 {
+		return "", strings.TrimSpace(text) != ""
+	}
+
+	var sb strings.Builder
+	scanned := 0
+	pendingSpace := false
+	for len(text) > 0 {
+		if scanned >= mailInjectPreviewScanSize {
+			return sb.String(), true
+		}
+
+		r, size := utf8.DecodeRuneInString(text)
+		if scanned+size > mailInjectPreviewScanSize {
+			return sb.String(), true
+		}
+		text = text[size:]
+		scanned += size
+
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			if sb.Len() > 0 {
+				pendingSpace = true
+			}
+			continue
+		}
+
+		encodedLen := utf8.RuneLen(r)
+		if encodedLen < 0 {
+			encodedLen = len(string(r))
+		}
+		needed := encodedLen
+		if pendingSpace && sb.Len() > 0 {
+			needed++
+		}
+		if sb.Len()+needed > limit {
+			return sb.String(), true
+		}
+		if pendingSpace && sb.Len() > 0 {
+			sb.WriteByte(' ')
+			pendingSpace = false
+		}
+		sb.WriteRune(r)
+	}
+	return sb.String(), false
 }
 
 func defaultMailIdentity() string {

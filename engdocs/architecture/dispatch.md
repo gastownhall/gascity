@@ -2,12 +2,12 @@
 title: "Dispatch (Sling)"
 ---
 
-> Last verified against code: 2026-03-01
+> Last verified against code: 2026-04-25
 
 ## Summary
 
 Dispatch is Gas City's work routing mechanism -- a Layer 2-4 derived
-mechanism that composes primitives (Agent Protocol, Bead Store, Event Bus,
+mechanism that composes primitives (Session, Bead Store, Event Bus,
 Config) to route work to agents. The `gc sling` command resolves a target
 agent or pool, optionally instantiates a formula as a wisp, executes the
 agent's sling query to route each bead, optionally wraps single beads in
@@ -183,7 +183,8 @@ CLI layer (cmd/gc/cmd_sling.go)
 | `internal/beads` (Store) | `MolCook` for wisp instantiation, `Create` for auto-convoy, `Get`/`Children` for container expansion, `Update` for ParentID linking, `SetMetadata` for merge strategy |
 | `internal/config` | Agent resolution, `EffectiveSlingQuery`, pool detection via `IsPool`, `PoolConfig` for sizing, `Suspended` flag |
 | `internal/runtime` | `Provider.IsRunning` and `Provider.Nudge` for agent nudging via `doSlingNudge` |
-| `internal/agent` | `SessionNameFor` to compute session names, `agent.New` + `Nudge` to deliver nudge text |
+| `internal/agent` | `SessionNameFor` to compute session names |
+| `internal/worker` | `Handle.Nudge` at the worker boundary for direct nudge delivery |
 | `internal/telemetry` | `RecordSling` for metrics and log events on every dispatch |
 | `cmd/gc/cmd_agent.go` | `resolveAgentIdentity` for 2-step target resolution (literal then contextual) |
 

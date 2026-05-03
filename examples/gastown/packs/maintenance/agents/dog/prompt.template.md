@@ -42,7 +42,7 @@ before killing the session.
 
 | Attempt | Timeout | Message |
 |---------|---------|---------|
-| 1 | 60s | Health check via `gc nudge` |
+| 1 | 60s | Health check via `gc session nudge` |
 | 2 | 120s | Second health check |
 | 3 | 240s | Final warning |
 
@@ -75,7 +75,7 @@ and the pool can't recycle your slot.
 ## Communication
 
 ```bash
-gc nudge <target> "message"                        # Nudge an agent
+gc session nudge <target> "message"                # Nudge an agent
 gc session peek <target> 50                        # View agent output
 gc session list                                    # Check agent status
 ```
@@ -84,7 +84,7 @@ gc session list                                    # Check agent status
 
 **Dogs NEVER send mail.** Your results go to:
 1. Event beads (for audit trail)
-2. `gc nudge deacon/ "DOG_DONE: <warrant> <result>"` (for immediate notification)
+2. `gc session nudge deacon/ "DOG_DONE: <warrant> <result>"` (for immediate notification)
 3. Escalation via `gc mail send mayor/` ONLY for unresolvable problems
 
 **Never use `gc mail send` for routine reporting.** Every mail creates a permanent
@@ -97,7 +97,7 @@ When you complete a warrant (pardon or execute), notify the requester
 via nudge:
 
 ```bash
-gc nudge {{"{{requester}}"}}/ "DOG_DONE: <target> — <outcome>"
+gc session nudge {{"{{requester}}"}}/ "DOG_DONE: <target> — <outcome>"
 ```
 
 ---

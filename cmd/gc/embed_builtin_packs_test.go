@@ -111,18 +111,20 @@ func TestBuiltinDatabaseEnumeratorsSkipManagedProbeDatabase(t *testing.T) {
 		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
 	}
 
+	doltSystemNeedle := "information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe"
+	maintenanceSystemNeedle := "^information_schema$\\|^mysql$\\|^dolt_cluster$\\|^performance_schema$\\|^sys$\\|^__gc_probe$"
 	for _, tt := range []struct {
 		pack     string
 		rel      string
 		needle   string
 		minCount int
 	}{
-		{"maintenance", filepath.Join("assets", "scripts", "jsonl-export.sh"), "^dolt_cluster$\\|^__gc_probe$", 1},
-		{"maintenance", filepath.Join("assets", "scripts", "reaper.sh"), "^dolt_cluster$\\|^__gc_probe$", 1},
-		{"dolt", filepath.Join("commands", "list", "run.sh"), "information_schema|mysql|dolt_cluster|__gc_probe", 1},
-		{"dolt", filepath.Join("commands", "cleanup", "run.sh"), "information_schema|mysql|dolt_cluster|__gc_probe", 1},
-		{"dolt", filepath.Join("commands", "health", "run.sh"), "information_schema|mysql|dolt_cluster|__gc_probe", 2},
-		{"dolt", filepath.Join("commands", "sync", "run.sh"), "information_schema|mysql|dolt_cluster|__gc_probe", 2},
+		{"maintenance", filepath.Join("assets", "scripts", "jsonl-export.sh"), maintenanceSystemNeedle, 1},
+		{"maintenance", filepath.Join("assets", "scripts", "reaper.sh"), maintenanceSystemNeedle, 1},
+		{"dolt", filepath.Join("commands", "list", "run.sh"), doltSystemNeedle, 1},
+		{"dolt", filepath.Join("commands", "cleanup", "run.sh"), doltSystemNeedle, 1},
+		{"dolt", filepath.Join("commands", "health", "run.sh"), doltSystemNeedle, 2},
+		{"dolt", filepath.Join("commands", "sync", "run.sh"), doltSystemNeedle, 2},
 		{"dolt", filepath.Join("formulas", "mol-dog-stale-db.toml"), "__gc_probe", 1},
 		{"dolt", filepath.Join("formulas", "mol-dog-doctor.toml"), "__gc_probe", 1},
 	} {
@@ -138,7 +140,16 @@ func TestBuiltinDatabaseEnumeratorsSkipManagedProbeDatabase(t *testing.T) {
 }
 
 func TestDoltSyncRejectsManagedProbeDatabaseFilter(t *testing.T) {
-	for _, dbName := range []string{managedDoltProbeDatabase, strings.ToUpper(managedDoltProbeDatabase), " " + managedDoltProbeDatabase + " "} {
+	for _, dbName := range []string{
+		managedDoltProbeDatabase,
+		strings.ToUpper(managedDoltProbeDatabase),
+		" " + managedDoltProbeDatabase + " ",
+		"information_schema",
+		"mysql",
+		"dolt_cluster",
+		"performance_schema",
+		"sys",
+	} {
 		t.Run(dbName, func(t *testing.T) {
 			dir := t.TempDir()
 			if err := MaterializeBuiltinPacks(dir); err != nil {
@@ -152,14 +163,14 @@ func TestDoltSyncRejectsManagedProbeDatabaseFilter(t *testing.T) {
 			if err == nil {
 				t.Fatalf("gc dolt sync unexpectedly accepted %s:\n%s", dbName, out)
 			}
-			if !strings.Contains(string(out), "reserved Dolt database name: "+managedDoltProbeDatabase) {
+			if !strings.Contains(string(out), "reserved Dolt database name: "+strings.TrimSpace(dbName)) {
 				t.Fatalf("gc dolt sync output = %s, want reserved database error", out)
 			}
 		})
 	}
 }
 
-func TestBuiltinDoltDoctorAllowsOlderVersionWhenProbeSucceeds(t *testing.T) {
+func TestBuiltinDoltDoctorAllowsAtMinimumVersionWhenProbeSucceeds(t *testing.T) {
 	dir := t.TempDir()
 	if err := MaterializeBuiltinPacks(dir); err != nil {
 		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
@@ -170,7 +181,7 @@ func TestBuiltinDoltDoctorAllowsOlderVersionWhenProbeSucceeds(t *testing.T) {
 		name string
 		body string
 	}{
-		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 1.75.2\\n'\n"},
+		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 1.86.2\\n'\n"},
 		{name: "flock", body: "#!/bin/sh\nexit 0\n"},
 		{name: "lsof", body: "#!/bin/sh\nexit 0\n"},
 	} {
@@ -184,9 +195,9 @@ func TestBuiltinDoltDoctorAllowsOlderVersionWhenProbeSucceeds(t *testing.T) {
 	cmd.Env = append(sanitizedBaseEnv(), "PATH="+binDir+":"+os.Getenv("PATH"))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("check-dolt unexpectedly rejected old Dolt probe: %v\n%s", err, out)
+		t.Fatalf("check-dolt unexpectedly rejected Dolt probe at minimum: %v\n%s", err, out)
 	}
-	if !strings.Contains(string(out), "dolt available (dolt version 1.75.2)") {
+	if !strings.Contains(string(out), "dolt available (dolt version 1.86.2)") {
 		t.Fatalf("check-dolt output = %s, want successful version probe", out)
 	}
 }
@@ -207,7 +218,7 @@ func TestBuiltinDoltDoctorBoundsVersionProbe(t *testing.T) {
 			name: "timeout",
 			body: "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$TIMEOUT_CAPTURE\"\nif [ \"$1\" = \"--kill-after=2\" ]; then\n  shift\nfi\nshift\nexec \"$@\"\n",
 		},
-		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 1.86.1\\n'\n"},
+		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 1.86.10\\n'\n"},
 		{name: "flock", body: "#!/bin/sh\nexit 0\n"},
 		{name: "lsof", body: "#!/bin/sh\nexit 0\n"},
 	} {

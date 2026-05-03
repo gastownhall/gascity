@@ -652,6 +652,79 @@ func TestCachingStoreApplyEventRechecksLocalMutationBeforeCommit(t *testing.T) {
 	}
 }
 
+func TestCachingStoreApplyEventRechecksRecentLocalAfterGetRefresh(t *testing.T) {
+	backing := NewMemStore()
+	bead, err := backing.Create(Bead{Title: "base"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	localTitle := "local"
+	if err := cache.Update(bead.ID, UpdateOpts{Title: &localTitle}); err != nil {
+		t.Fatalf("Update local title: %v", err)
+	}
+	cache.mu.Lock()
+	cache.dirty[bead.ID] = struct{}{}
+	cache.mu.Unlock()
+	if _, err := cache.Get(bead.ID); err != nil {
+		t.Fatalf("Get refresh after local update: %v", err)
+	}
+
+	cache.mu.RLock()
+	_, locallyMutated := cache.beadSeq[bead.ID]
+	recentlyLocal := recentLocalMutation(cache.localBeadAt[bead.ID], time.Now())
+	cache.mu.RUnlock()
+	if locallyMutated || !recentlyLocal {
+		t.Fatalf("markers after Get refresh: locallyMutated=%v recentlyLocal=%v, want false/true", locallyMutated, recentlyLocal)
+	}
+
+	externalTitle := "external"
+	if err := backing.Update(bead.ID, UpdateOpts{Title: &externalTitle}); err != nil {
+		t.Fatalf("Update backing external title: %v", err)
+	}
+	payload := json.RawMessage(fmt.Sprintf(`{"id":%q,"title":%q}`, bead.ID, externalTitle))
+
+	beforeCommit := make(chan struct{})
+	releaseCommit := make(chan struct{})
+	cache.applyEventBeforeCommitForTest = func() {
+		close(beforeCommit)
+		<-releaseCommit
+	}
+
+	done := make(chan struct{})
+	go func() {
+		cache.ApplyEvent("bead.updated", payload)
+		close(done)
+	}()
+
+	<-beforeCommit
+	newerTitle := "newer local cache"
+	if err := backing.Update(bead.ID, UpdateOpts{Title: &newerTitle}); err != nil {
+		t.Fatalf("Update backing newer title: %v", err)
+	}
+	cache.mu.Lock()
+	cache.dirty[bead.ID] = struct{}{}
+	cache.mu.Unlock()
+	if _, err := cache.Get(bead.ID); err != nil {
+		t.Fatalf("Get refresh before event commit: %v", err)
+	}
+	close(releaseCommit)
+	<-done
+
+	got, err := cache.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get after stale event race: %v", err)
+	}
+	if got.Title != newerTitle {
+		t.Fatalf("Title after stale event race = %q, want %q", got.Title, newerTitle)
+	}
+}
+
 func TestCachingStoreRunReconciliationRecordsProblemAndDegrades(t *testing.T) {
 	t.Parallel()
 

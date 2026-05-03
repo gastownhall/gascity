@@ -3,7 +3,7 @@ title: "Health Patrol"
 ---
 
 
-> Last verified against code: 2026-03-18
+> Last verified against code: 2026-04-25
 
 ## Summary
 
@@ -76,11 +76,11 @@ use):
                      │  └──────────────┬──────────────┘   │
                      │                 ▼                   │
                      │  ┌─────────────────────────────┐   │
-                     │  │ doReconcileAgents()          │   │
-                     │  │ (reconcile.go)               │   │
+                     │  │ reconcileSessionBeads()      │   │
+                     │  │ (session_reconciler.go)      │   │
                      │  │   ├─ crashTracker            │   │
                      │  │   ├─ idleTracker             │   │
-                     │  │   ├─ reconcileOps (drift)    │   │
+                     │  │   ├─ config drift repair     │   │
                      │  │   └─ drainOps (pool scaling) │   │
                      │  └──────────────┬──────────────┘   │
                      │                 ▼                   │
@@ -108,7 +108,7 @@ A single controller tick proceeds as follows:
 2. **Agent list build**. `buildFn(cfg)` re-evaluates the desired agent
    set, including pool `check` commands for elastic scaling.
 
-3. **Reconciliation** (`doReconcileAgents()`). The core state machine.
+3. **Reconciliation** (`reconcileSessionBeads()`). The core state machine.
    For each desired agent, determines the correct action. See the
    Reconciliation State Machine below.
 
@@ -121,18 +121,17 @@ A single controller tick proceeds as follows:
 
 ### Reconciliation State Machine
 
-`doReconcileAgents()` in `cmd/gc/reconcile.go` classifies each agent
-into one of four states and takes action:
+`reconcileSessionBeads()` in `cmd/gc/session_reconciler.go` reconciles
+session beads, runtime liveness, and desired config state:
 
 ```
 ┌──────────────────────────────────────────────────────────┐
 │ State              │ Condition         │ Action          │
 ├──────────────────────────────────────────────────────────┤
-│ Not running        │ !IsRunning()      │ Start           │
-│ Healthy            │ hash matches      │ Skip            │
-│ Orphan             │ running, not in   │ Stop            │
-│                    │ desired set       │                 │
-│ Drifted            │ hash differs      │ Stop + Start    │
+│ Not alive          │ should wake       │ Start           │
+│ Healthy            │ alive + desired   │ Skip            │
+│ Orphan/suspended   │ not desired       │ Drain or close  │
+│ Drifted            │ hash differs      │ Drain + restart │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -141,18 +140,24 @@ Additional sub-states within "running" are checked in order:
 1. **Restart requested**: Agent self-requested restart (context
    exhaustion). Stop + start.
 2. **Idle timeout exceeded**: `idleTracker.checkIdle()` returns true.
-   Stop + start, emit `agent.idle_killed` event.
+   Stop the idle session and emit `session.idle_killed`.
 3. **Config drift**: Stored hash differs from current. Stop + start.
 
 Agents not running are subject to **crash loop quarantine**: if
 `crashTracker.isQuarantined()` returns true, the agent is skipped
-silently (the quarantine event was emitted when the threshold was first
-hit).
+silently. `session.quarantined` is a registered/reserved event type, but
+there is no production emitter today. Operators that need this signal
+must read the crash tracker quarantine state; subscribing to
+`session.quarantined` will not observe transitions yet.
 
 **Orphan cleanup** (Phase 2) handles sessions with the city prefix that
 are not in the desired set:
 - Pool excess members are drained gracefully via `drainOps`.
-- Suspended agents are stopped with an `agent.suspended` event.
+- Suspended agents are drained or closed as not desired; `session.suspended`
+  is a registered/reserved event type, but there is no production emitter
+  today. Suspension state is derived from `workspace.suspended`, rig
+  suspension, and agent suspension through `isAgentEffectivelySuspended()`,
+  not from `session.suspended` events.
 - True orphans are killed immediately.
 
 **Dependency-aware bounded parallel starts** (Phase 1b): The bead-driven
@@ -177,10 +182,9 @@ waves with bounded parallelism.
   `runtime.Provider.GetLastActivity()` and compares against per-agent
   timeout durations.
 
-- **`reconcileOps`** (`cmd/gc/reconcile.go`): Interface for
-  session-level operations needed by reconciliation: `listRunning()`,
-  `storeConfigHash()`, `configHash()`. Backed by
-  `runtime.Provider.SetMeta()`/`GetMeta()` for hash persistence.
+- **Session bead reconciler** (`cmd/gc/session_reconciler.go`):
+  Bead-driven convergence over desired config, session bead state, runtime
+  liveness, drain metadata, config hashes, and wake decisions.
 
 - **`orderDispatcher`** (`cmd/gc/order_dispatch.go`): Interface
   for order trigger evaluation and dispatch. Production impl
@@ -201,7 +205,7 @@ indicate bugs.
   by `flock(LOCK_EX|LOCK_NB)` on `.gc/controller.lock`. A second
   `gc start` fails immediately.
 
-- **Reconciliation is idempotent**: Running `doReconcileAgents()` with
+- **Reconciliation is idempotent**: Running `reconcileSessionBeads()` with
   the same config and same running set produces no side effects. A
   healthy running agent with a matching hash is always skipped.
 
@@ -251,7 +255,7 @@ Health Patrol follows Erlang/OTP patterns mapped to Gas City:
 | Erlang/OTP concept       | Gas City equivalent                       |
 |--------------------------|-------------------------------------------|
 | Supervisor               | Controller (`controllerLoop`)             |
-| Worker                   | Agent (any role)                          |
+| Worker                   | Session running an `[[agent]]` role       |
 | Child spec               | `[[agent]]` entry in `city.toml`         |
 | one_for_one restart      | Restart dead agent only (no cascade)      |
 | max_restarts/max_seconds | `max_restarts` / `restart_window`         |
@@ -267,10 +271,10 @@ Health Patrol follows Erlang/OTP patterns mapped to Gas City:
 |---|---|
 | `internal/config` | Parses `DaemonConfig` for patrol interval, max restarts, restart window, shutdown timeout. Provides `Revision()` for config reload detection. |
 | `internal/runtime` | `Provider` interface for Start/Stop/IsRunning/ListRunning/GetLastActivity/SetMeta/GetMeta. `ConfigFingerprint()` for drift detection. |
-| `internal/events` | `Recorder` interface for emitting lifecycle events (`agent.started`, `agent.stopped`, `agent.crashed`, `agent.quarantined`, `agent.idle_killed`, `agent.suspended`, `controller.started`, `controller.stopped`, `order.fired`, `order.completed`, `order.failed`). `Provider` interface for event trigger queries. |
+| `internal/events` | `Recorder` interface for emitted lifecycle events (`session.woke`, `session.stopped`, `session.crashed`, `session.draining`, `session.undrained`, `session.idle_killed`, `session.updated`, `controller.started`, `controller.stopped`, `order.fired`, `order.completed`, `order.failed`). `session.quarantined` and `session.suspended` are registered/reserved but currently un-emitted. `Provider` interface for event trigger queries. Event names were renamed from the `agent.*` prefix by commit `be8debd8`. |
 | `internal/beads` | `Store` interface for order tracking beads (create, update, list by label). `CommandRunner` for bd CLI invocation. |
 | `internal/orders` | `Scan()` to discover orders from formula layers. `CheckTrigger()` to evaluate trigger conditions. `Order` struct for dispatch metadata. |
-| `internal/agent` | `Agent` interface wrapping config + session provider for `Start()`/`Stop()`/`IsRunning()`/`SessionName()` operations. |
+| `internal/agent` | `SessionNameFor()` for session name computation and `StartupHints` for runtime config assembly (`internal/agent/` is now a small helper package; the former `Agent` / `Handle` interfaces were removed by `dd90ac0a`). |
 | `github.com/fsnotify/fsnotify` | File system watcher for config directory change detection. |
 
 | Depended on by | How |
@@ -285,7 +289,8 @@ All Health Patrol implementation lives in `cmd/gc/`:
 | File | Responsibility |
 |---|---|
 | `cmd/gc/controller.go` | Controller lock, Unix socket, fsnotify config watcher, `controllerLoop()`, `tryReloadConfig()`, `runController()`, `gracefulStopAll()` |
-| `cmd/gc/reconcile.go` | `reconcileOps` interface, `doReconcileAgents()` (4-state reconciliation + parallel starts + orphan cleanup), `doStopOrphans()` |
+| `cmd/gc/session_reconciler.go` | `reconcileSessionBeads()` bead-driven state machine for desired/live convergence, orphan/suspended drains, crash handling, idle drains, config-drift repair, and pool slot cleanup |
+| `cmd/gc/session_lifecycle_parallel.go` | Dependency-aware bounded parallel session starts and force-stops |
 | `cmd/gc/crash_tracker.go` | `crashTracker` interface, `memoryCrashTracker` (in-memory restart history with sliding window pruning) |
 | `cmd/gc/idle_tracker.go` | `idleTracker` interface, `memoryIdleTracker` (per-agent timeout + GetLastActivity query) |
 | `cmd/gc/order_dispatch.go` | `orderDispatcher` interface, `memoryOrderDispatcher` (trigger evaluation, exec dispatch, wisp dispatch, tracking bead lifecycle) |
@@ -329,7 +334,8 @@ Each Health Patrol component has dedicated unit tests:
 | Test file | Coverage |
 |---|---|
 | `cmd/gc/controller_test.go` | Controller loop tick behavior, config reload, dirty flag, fsnotify debounce, order dispatch integration |
-| `cmd/gc/reconcile_test.go` | All four reconciliation states (not running/healthy/orphan/drifted), parallel starts, zombie capture, crash loop quarantine integration, idle restart, pool drain, suspended agent handling |
+| `cmd/gc/session_reconciler_test.go` | Session reconciliation states, zombie capture, crash loop quarantine integration, idle drains, pool drain, suspended session handling |
+| `cmd/gc/session_lifecycle_parallel_test.go` | Dependency-aware bounded parallel starts and force-stops |
 | `cmd/gc/crash_tracker_test.go` | Sliding window pruning, quarantine threshold, clear history, nil-guard (disabled tracker) |
 | `cmd/gc/idle_tracker_test.go` | Timeout detection, zero time handling, per-agent timeout configuration, nil-guard |
 | `cmd/gc/order_dispatch_test.go` | Trigger evaluation (cooldown, cron, condition, event, manual), exec dispatch, wisp dispatch, tracking bead creation, timeout capping, rig-scoped orders |

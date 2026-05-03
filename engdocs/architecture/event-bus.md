@@ -3,7 +3,7 @@ title: "Event Bus"
 ---
 
 
-> Last verified against code: 2026-03-01
+> Last verified against code: 2026-04-25
 
 ## Summary
 
@@ -223,13 +223,16 @@ are enforced by the conformance suite in
 | Depended on by | How |
 |---|---|
 | `cmd/gc/controller.go` | Records `controller.started` and `controller.stopped` events at lifecycle boundaries; passes `Recorder` to reconciliation and shutdown |
-| `cmd/gc/reconcile.go` | Records `agent.started`, `agent.stopped`, `agent.crashed`, `agent.idle_killed`, `agent.quarantined`, `agent.suspended` events during reconciliation |
+| `cmd/gc/session_lifecycle_parallel.go` | Records `session.woke` and parallel lifecycle `session.stopped` events (renamed from `agent.*` by `be8debd8`) |
+| `cmd/gc/session_reconciler.go` | Records `session.crashed`, `session.draining`, `session.idle_killed`, `session.stopped`, and `session.updated` while reconciling session beads |
+| `cmd/gc/cmd_runtime_drain.go` | Records manual `session.draining` and `session.undrained` events |
+| `cmd/gc/cmd_handoff.go` | Records handoff-related `session.draining` and `session.stopped` events |
 | `cmd/gc/order_dispatch.go` | Records `order.fired`, `order.completed`, `order.failed` events during order dispatch |
 | `cmd/gc/cmd_events.go` | CLI `gc events` command: reads and displays events with filtering (`--type`, `--since`), watch mode (`--watch`), and sequence query (`--seq`) |
 | `cmd/gc/cmd_event_emit.go` | CLI `gc event emit` command: records custom events from scripts and bd hooks (best-effort, always exits 0) |
-| `cmd/gc/cmd_agent.go` | Records agent lifecycle events during start/stop/restart operations |
+| `cmd/gc/cmd_agent.go` | Records session lifecycle events during start/stop/restart operations |
 | `cmd/gc/cmd_suspend.go` | Records `city.suspended` and `city.resumed` events |
-| `cmd/gc/cmd_mail.go` | Records `mail.sent` and `mail.read` events |
+| `cmd/gc/cmd_mail.go` | Records CLI `mail.*` events for send, read, archive, reply, mark-read/unread, and delete operations |
 | `cmd/gc/cmd_convoy.go` | Records `convoy.created` and `convoy.closed` events |
 | `internal/orders/triggers.go` | Event triggers query the Provider via `List(Filter{Type, AfterSeq})` to check if matching events exist since the last cursor position |
 
@@ -252,32 +255,57 @@ are enforced by the conformance suite in
 
 ### Event Type Constants
 
-All event type constants are defined in `internal/events/events.go`:
+All event type constants in `events.KnownEventTypes` are defined in
+`internal/events/events.go` and must have a registered payload for the
+API/SSE projection:
 
 | Constant | Value | Emitted by |
 |---|---|---|
-| `AgentStarted` | `agent.started` | Controller reconciliation on agent start |
-| `AgentStopped` | `agent.stopped` | Controller reconciliation on agent stop, shutdown, or drain completion |
-| `AgentCrashed` | `agent.crashed` | Controller reconciliation when a running agent's process is gone |
-| `AgentDraining` | `agent.draining` | Agent drain command |
-| `AgentUndrained` | `agent.undrained` | Agent undrain command |
-| `AgentQuarantined` | `agent.quarantined` | Controller when crash loop threshold exceeded |
-| `AgentIdleKilled` | `agent.idle_killed` | Controller when idle timeout exceeded |
-| `AgentSuspended` | `agent.suspended` | Controller when agent is suspended via config |
+| `SessionWoke` | `session.woke` | `cmd/gc/session_lifecycle_parallel.go` when a reconciler start succeeds |
+| `SessionStopped` | `session.stopped` | `cmd/gc/session_lifecycle_parallel.go`, `cmd/gc/session_reconciler.go`, `cmd/gc/controller.go`, `cmd/gc/cmd_handoff.go`, `cmd/gc/cmd_session.go` |
+| `SessionCrashed` | `session.crashed` | `cmd/gc/session_reconciler.go` when a runtime exists but the expected child process is gone |
+| `SessionDraining` | `session.draining` | `cmd/gc/session_reconciler.go`, `cmd/gc/cmd_runtime_drain.go`, `cmd/gc/cmd_handoff.go` |
+| `SessionUndrained` | `session.undrained` | `cmd/gc/cmd_runtime_drain.go` |
+| `SessionQuarantined` | `session.quarantined` | Registered/reserved; no production emitter today |
+| `SessionIdleKilled` | `session.idle_killed` | `cmd/gc/session_reconciler.go` when idle timeout handling stops a session |
+| `SessionSuspended` | `session.suspended` | Registered/reserved; no production emitter today |
+| `SessionUpdated` | `session.updated` | `cmd/gc/session_reconciler.go` on live-only config drift repair |
 | `BeadCreated` | `bead.created` | Bead creation hooks |
 | `BeadClosed` | `bead.closed` | Bead close hooks |
 | `BeadUpdated` | `bead.updated` | Bead update hooks |
-| `MailSent` | `mail.sent` | Mail send command |
+| `MailSent` | `mail.sent` | Mail send/API handlers and handoff command |
 | `MailRead` | `mail.read` | Mail read command |
+| `MailArchived` | `mail.archived` | Mail archive command and API handler |
+| `MailMarkedRead` | `mail.marked_read` | Mail mark-read command and API handler |
+| `MailMarkedUnread` | `mail.marked_unread` | Mail mark-unread command and API handler |
+| `MailReplied` | `mail.replied` | Mail reply command and API handler |
+| `MailDeleted` | `mail.deleted` | Mail delete command and API handler |
 | `ConvoyCreated` | `convoy.created` | Convoy creation |
 | `ConvoyClosed` | `convoy.closed` | Convoy close |
 | `ControllerStarted` | `controller.started` | Controller startup |
 | `ControllerStopped` | `controller.stopped` | Controller shutdown |
 | `CitySuspended` | `city.suspended` | City suspend command |
 | `CityResumed` | `city.resumed` | City resume command |
-| `AutomationFired` | `order.fired` | Order dispatch when a trigger is due |
-| `AutomationCompleted` | `order.completed` | Order dispatch on successful completion |
-| `AutomationFailed` | `order.failed` | Order dispatch on failure |
+| `RequestResultCityCreate` | `request.result.city.create` | Supervisor/API city create completion |
+| `RequestResultCityUnregister` | `request.result.city.unregister` | Supervisor city unregister completion |
+| `RequestResultSessionCreate` | `request.result.session.create` | API async session create completion |
+| `RequestResultSessionMessage` | `request.result.session.message` | API async session message completion |
+| `RequestResultSessionSubmit` | `request.result.session.submit` | API async session submit completion |
+| `RequestFailed` | `request.failed` | Supervisor/API async request failure handlers |
+| `CityCreated` | `city.created` | City init lifecycle diagnostics |
+| `CityUnregisterRequested` | `city.unregister_requested` | City unregister lifecycle diagnostics |
+| `OrderFired` | `order.fired` | Order dispatch when a trigger is due |
+| `OrderCompleted` | `order.completed` | Order dispatch on successful completion |
+| `OrderFailed` | `order.failed` | Order dispatch on failure |
+| `ProviderSwapped` | `provider.swapped` | Controller provider-swap reload path |
+| `WorkerOperation` | `worker.operation` | Worker session handle and runtime handle operation tracing |
+| `ExtMsgBound` | `extmsg.bound` | External messaging bind handler |
+| `ExtMsgUnbound` | `extmsg.unbound` | External messaging unbind handler |
+| `ExtMsgGroupCreated` | `extmsg.group_created` | External messaging group ensure handler |
+| `ExtMsgAdapterAdded` | `extmsg.adapter_added` | External messaging adapter registration handler |
+| `ExtMsgAdapterRemoved` | `extmsg.adapter_removed` | External messaging adapter unregister handler |
+| `ExtMsgInbound` | `extmsg.inbound` | External messaging inbound adapter pipeline |
+| `ExtMsgOutbound` | `extmsg.outbound` | External messaging outbound adapter pipeline |
 
 ## Configuration
 
@@ -303,7 +331,7 @@ is a complete, self-contained JSON object:
 
 ```json
 {"seq":1,"type":"controller.started","ts":"2026-03-01T10:00:00Z","actor":"gc"}
-{"seq":2,"type":"agent.started","ts":"2026-03-01T10:00:01Z","actor":"gc","subject":"worker-1","message":"agent started successfully"}
+{"seq":2,"type":"session.woke","ts":"2026-03-01T10:00:01Z","actor":"gc","subject":"worker-1","message":"session woke successfully"}
 {"seq":3,"type":"bead.created","ts":"2026-03-01T10:00:05Z","actor":"human","subject":"gc-42","payload":{"title":"Fix bug","labels":["urgent"]}}
 ```
 
@@ -393,19 +421,22 @@ suite against a stateful jq-based mock script.
   compaction. For long-running cities, manual truncation or external
   log rotation is needed.
 
-- **ReadFiltered scans the entire file.** Every `List` call reads all
-  events from disk and filters in memory. There are no indexes. This
-  is acceptable at current scale but will degrade with very large event
-  logs. `ReadFrom` with byte offsets provides incremental reading for
-  the Watch path.
+- **ReadFiltered streams without indexes.** `ReadFiltered` scans the
+  JSONL file once, applies `Filter` as it reads, and stops early when a
+  positive direct-provider `Limit` is reached. There are still no
+  indexes, so broad time/type/actor/subject queries remain linear in the
+  event log until their limit is satisfied. `ReadFrom` with byte offsets
+  provides incremental reading for the Watch path.
 
 - **No event schema validation.** Event types are string constants with
   no runtime validation. Recording an event with a misspelled type
   succeeds silently.
 
-- **Filter does not support Subject.** The Filter struct supports Type,
-  Actor, Since, and AfterSeq but not Subject. Filtering by subject
-  requires post-filtering in the caller.
+- **Multiplexer limits are global post-merge caps.** The multiplexer
+  clears per-provider `Filter.Limit`, merges and sorts provider results,
+  then applies the global limit so cross-city ordering stays correct.
+  This means a multiplexer `Limit` does not cap work inside each
+  provider.
 
 - **Exec provider Watch is subprocess-lifetime-bound.** The exec
   watcher reads from a long-running subprocess's stdout. If the
@@ -416,8 +447,11 @@ suite against a stateful jq-based mock script.
 
 - [Architecture glossary](glossary.md) -- authoritative definitions of
   event bus, order, trigger, and other terms used in this document
+- [Event query primitives](event-query.md) -- `Filter` fields,
+  streaming read semantics, multiplexer limit behavior, and aggregation
+  helpers
 - [Health Patrol architecture](health-patrol.md) -- how the controller
-  reconciliation loop records agent lifecycle events on every tick
+  reconciliation loop records session lifecycle events on every tick
 - [Bead Store architecture](beads.md) -- the other Layer 0-1 primitive;
   events and beads together provide persistence + observation
 - [Config architecture](config.md) -- how `[events].provider` is

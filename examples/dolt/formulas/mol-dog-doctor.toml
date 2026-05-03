@@ -100,7 +100,8 @@ Check data directory size. Warn if exceeding configured threshold.
 SHOW DATABASES;
 ```
 Count databases matching orphan patterns: testdb_*, beads_t*, beads_pt*, doctest_*.
-Ignore Dolt internals: information_schema, mysql, dolt_cluster, __gc_probe.
+Ignore Dolt internals: information_schema, mysql, dolt_cluster,
+performance_schema, sys, __gc_probe.
 If orphan count > threshold, recommend cleanup:
 ```bash
 gc dolt cleanup
@@ -142,7 +143,7 @@ gc mail send mayor/ -s "ESCALATION: Dolt health critical [CRITICAL]" \\
 
 **3. Signal completion:**
 ```bash
-gc nudge deacon/ "DOG_DONE: doctor — server: <status>, conns: <count>/<max>, orphans: <count>"
+gc session nudge deacon/ "DOG_DONE: doctor — server: <status>, conns: <count>/<max>, orphans: <count>"
 ```
 
 **4. Close work and exit:**

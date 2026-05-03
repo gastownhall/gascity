@@ -570,7 +570,7 @@ func TestNoKnownStaleDocReferences(t *testing.T) {
 		"agent.NewFake",
 		"session.Fake",
 		"agent.Fake",
-		"internal/dolt",
+		"internal/dolt/",
 	}
 
 	var hits []string

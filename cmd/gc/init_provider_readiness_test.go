@@ -670,6 +670,39 @@ func TestCheckHardDependenciesAcceptsPythonFallbackForBdContract(t *testing.T) {
 	}
 }
 
+func TestCheckHardDependenciesRejectsDoltPreReleaseAtFloor(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	oldLookPath := initLookPath
+	initLookPath = func(name string) (string, error) {
+		return "/usr/bin/" + name, nil
+	}
+	t.Cleanup(func() { initLookPath = oldLookPath })
+
+	oldRunVersion := initRunVersion
+	initRunVersion = func(binary string) (string, error) {
+		switch binary {
+		case "dolt":
+			return "dolt version 1.86.2-rc1", nil
+		case "bd":
+			return "bd version " + bdMinVersion, nil
+		case "flock", "tmux", "jq", "git", "pgrep", "lsof":
+			return binary + " version", nil
+		default:
+			return binary + " version " + doltMinVersion, nil
+		}
+	}
+	t.Cleanup(func() { initRunVersion = oldRunVersion })
+
+	missing := checkHardDependencies(t.TempDir())
+	if len(missing) != 1 {
+		t.Fatalf("missing deps = %#v, want only dolt prerelease rejection", missing)
+	}
+	if !strings.Contains(missing[0].name, "dolt") || !strings.Contains(missing[0].name, "1.86.2-rc1") {
+		t.Fatalf("missing dep = %#v, want dolt prerelease version in dependency name", missing[0])
+	}
+}
+
 func TestCheckHardDependenciesRequiresBdToolsForBdRigUnderFileCity(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "frontend")

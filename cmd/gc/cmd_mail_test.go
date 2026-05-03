@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -2534,6 +2535,143 @@ func TestMailCheckInjectFormatsMessages(t *testing.T) {
 	}
 	if !strings.Contains(out, "gc mail read <id>") {
 		t.Errorf("stdout missing read hint:\n%s", out)
+	}
+}
+
+func TestMailCheckInjectLimitsMessageCount(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	mp.Send("sender-a", "recipient", "", "first")  //nolint:errcheck
+	mp.Send("sender-b", "recipient", "", "second") //nolint:errcheck
+	mp.Send("sender-c", "recipient", "", "third")  //nolint:errcheck
+	mp.Send("sender-d", "recipient", "", "fourth") //nolint:errcheck
+
+	var stdout bytes.Buffer
+	code := doMailCheck(mp, "recipient", true, &stdout, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("doMailCheck = %d, want 0", code)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{"4 unread message(s)", "gc-1 from sender-a", "gc-2 from sender-b", "gc-3 from sender-c", "Showing the first 3 message(s)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "gc-4") || strings.Contains(out, "fourth") {
+		t.Errorf("stdout should not include the fourth message:\n%s", out)
+	}
+}
+
+func TestMailCheckInjectTruncatesLongBodies(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	longBody := "prefix " + strings.Repeat("x", mailInjectBodyPreviewSize+100)
+	mp.Send("sender-a", "recipient", "Long body", longBody) //nolint:errcheck
+
+	var stdout bytes.Buffer
+	code := doMailCheck(mp, "recipient", true, &stdout, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("doMailCheck = %d, want 0", code)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Long body") {
+		t.Errorf("stdout missing subject:\n%s", out)
+	}
+	if !strings.Contains(out, "... [preview truncated]") {
+		t.Errorf("stdout missing truncation marker:\n%s", out)
+	}
+	if strings.Contains(out, strings.Repeat("x", mailInjectBodyPreviewSize+80)) {
+		t.Errorf("stdout includes too much of the long body:\n%s", out)
+	}
+}
+
+func TestMailCheckInjectCompactsAndBoundsLongSubjects(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	longSubject := "subject\n\tline " + strings.Repeat("x", mailInjectBodyPreviewSize+100) + " tail"
+	mp.Send("sender-a", "recipient", longSubject, "short body") //nolint:errcheck
+
+	var stdout bytes.Buffer
+	code := doMailCheck(mp, "recipient", true, &stdout, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("doMailCheck = %d, want 0", code)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "[subject line ") {
+		t.Fatalf("stdout missing compacted subject prefix:\n%s", out)
+	}
+	if strings.Contains(out, "subject\n\tline") {
+		t.Fatalf("stdout contains raw multiline subject:\n%s", out)
+	}
+	if strings.Contains(out, strings.Repeat("x", mailInjectBodyPreviewSize+80)) {
+		t.Fatalf("stdout includes too much of the long subject:\n%s", out)
+	}
+	if !strings.Contains(out, "... [subject truncated]") {
+		t.Fatalf("stdout missing subject truncation marker:\n%s", out)
+	}
+}
+
+func TestMailCheckInjectOmitsSubjectWhenFullBodyMatches(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	longBody := strings.Repeat("x", mailInjectBodyPreviewSize+100)
+	mp.Send("sender-a", "recipient", longBody, longBody) //nolint:errcheck
+
+	var stdout bytes.Buffer
+	code := doMailCheck(mp, "recipient", true, &stdout, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("doMailCheck = %d, want 0", code)
+	}
+
+	out := stdout.String()
+	if strings.Contains(out, "["+longBody+"]") {
+		t.Errorf("stdout should not repeat a matching subject after body truncation:\n%s", out)
+	}
+	if !strings.Contains(out, "gc-1 from sender-a: ") {
+		t.Errorf("stdout missing compact message format:\n%s", out)
+	}
+	if !strings.Contains(out, "... [preview truncated]") {
+		t.Errorf("stdout missing truncation marker:\n%s", out)
+	}
+}
+
+func TestMailInjectBodyPreviewUsesBoundedScan(t *testing.T) {
+	body := strings.Repeat(" ", mailInjectPreviewScanSize+1) + "tail"
+	preview, truncated := mailInjectBodyPreview(body)
+	if !truncated {
+		t.Fatalf("mailInjectBodyPreview did not truncate after scan budget")
+	}
+	if preview != "" {
+		t.Fatalf("mailInjectBodyPreview = %q, want empty preview after leading-space budget", preview)
+	}
+}
+
+func TestMailInjectBodyPreviewCompactsWhitespace(t *testing.T) {
+	preview, truncated := mailInjectBodyPreview(" first\n\tsecond   third ")
+	if truncated {
+		t.Fatalf("mailInjectBodyPreview truncated short body")
+	}
+	if preview != "first second third" {
+		t.Fatalf("mailInjectBodyPreview = %q, want %q", preview, "first second third")
+	}
+}
+
+func TestMailInjectBodyPreviewKeepsUTF8Boundary(t *testing.T) {
+	prefix := strings.Repeat("a", mailInjectBodyPreviewSize-1)
+	compact := prefix + "界tail"
+
+	preview, truncated := mailInjectBodyPreview(compact)
+	if !truncated {
+		t.Fatalf("mailInjectBodyPreview did not truncate long body")
+	}
+	if preview != prefix {
+		t.Fatalf("mailInjectBodyPreview = %q, want %q", preview, prefix)
+	}
+	if !utf8.ValidString(preview) {
+		t.Fatalf("mailInjectBodyPreview returned invalid UTF-8: %q", preview)
 	}
 }
 

@@ -79,6 +79,68 @@ connect_host() {
     fi
 }
 
+trim_space() {
+    printf '%s' "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+lower_dolt_database_name() {
+    trim_space "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+is_system_dolt_database_name() {
+    case "$(lower_dolt_database_name "$1")" in
+        information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+is_legacy_managed_probe_database_name() {
+    [ "$(lower_dolt_database_name "$1")" = "__gc_probe" ]
+}
+
+csv_unquote_single_field() {
+    local value
+    value="$1"
+    case "$value" in
+        \"*\")
+            case "$value" in
+                *\") ;;
+                *) return 1 ;;
+            esac
+            value=${value#\"}
+            value=${value%\"}
+            printf '%s\n' "$value" | sed 's/""/"/g'
+            ;;
+        *)
+            printf '%s\n' "$value"
+            ;;
+    esac
+}
+
+first_user_database_from_show_databases_csv() {
+    local line name
+    while IFS= read -r line || [ -n "$line" ]; do
+        name=$(csv_unquote_single_field "$line") || return 1
+        name=$(trim_space "$name")
+        [ -n "$name" ] || continue
+        [ "$(lower_dolt_database_name "$name")" = "database" ] && continue
+        if is_system_dolt_database_name "$name"; then
+            continue
+        fi
+        printf '%s\n' "$name"
+        return 0
+    done <<GC_SHOW_DATABASES_CSV
+$1
+GC_SHOW_DATABASES_CSV
+    return 0
+}
+
+quote_dolt_identifier() {
+    local escaped
+    escaped=$(printf '%s' "$1" | sed 's/`/``/g')
+    printf '`%s`' "$escaped"
+}
+
 # tcp_check_port returns 0 if the given port is reachable.
 tcp_check_port() {
     local port="$1"
@@ -1012,28 +1074,62 @@ get_connection_count() {
 }
 
 # check_read_only tests if the dolt server is in read-only mode.
-# Returns 0 if read-only, 1 if writable.
+# Returns 0 if read-only, 1 if writable, 2 if the write probe is inconclusive.
 check_read_only() {
-    local host gc_bin
+    local host gc_bin db quoted_db probe_table sql output err_file err_text status
     host=$(connect_host)
     gc_bin=$(resolve_gc_helper_bin)
     if [ -n "$gc_bin" ]; then
-        "$gc_bin" dolt-state read-only-check --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" >/dev/null 2>&1
-        case $? in
-            0) return 0 ;;
-            *) return 1 ;;
-        esac
+        err_file=$(mktemp "${TMPDIR:-/tmp}/gc-dolt-read-only-check.XXXXXX") || return 2
+        if "$gc_bin" dolt-state read-only-check --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" >/dev/null 2>"$err_file"; then
+            rm -f "$err_file"
+            return 0
+        fi
+        err_text=$(cat "$err_file" 2>/dev/null || true)
+        rm -f "$err_file"
+        if [ -n "$err_text" ]; then
+            echo "$err_text" >&2
+            return 2
+        fi
+        return 1
     fi
-    local output
-    # Keep __gc_probe stable. Dropping Dolt databases leaves
-    # .dolt_dropped_databases backups behind.
-    output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls         sql -q "CREATE DATABASE IF NOT EXISTS __gc_probe; CREATE TABLE IF NOT EXISTS __gc_probe.__probe (k INT PRIMARY KEY); REPLACE INTO __gc_probe.__probe VALUES (1);" 2>&1) || true
+    err_file=$(mktemp "${TMPDIR:-/tmp}/gc-dolt-show-databases.XXXXXX") || return 2
+    if output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+        sql -r csv -q "SHOW DATABASES" 2>"$err_file"); then
+        status=0
+    else
+        status=$?
+    fi
+    err_text=$(cat "$err_file" 2>/dev/null || true)
+    rm -f "$err_file"
+    if [ "$status" -ne 0 ]; then
+        case "$err_text" in
+            *"read only"*|*"READ ONLY"*|*"Read-only"*)
+                return 0
+                ;;
+        esac
+        [ -n "$err_text" ] && echo "dolt SHOW DATABASES failed: $err_text" >&2
+        return 2
+    fi
+    db=$(first_user_database_from_show_databases_csv "$output") || return 2
+    if [ -z "$db" ]; then
+        echo "dolt read-only probe inconclusive: no user database available" >&2
+        return 2
+    fi
+    quoted_db=$(quote_dolt_identifier "$db")
+    probe_table='`__gc_read_only_probe`'
+    sql="CREATE TABLE IF NOT EXISTS ${quoted_db}.${probe_table} (k INT PRIMARY KEY); REPLACE INTO ${quoted_db}.${probe_table} VALUES (1);"
+    if output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+        sql -q "$sql" 2>&1); then
+        return 1
+    fi
     case "$output" in
         *"read only"*|*"READ ONLY"*|*"Read-only"*)
             return 0  # Is read-only.
             ;;
     esac
-    return 1  # Writable.
+    [ -n "$output" ] && echo "dolt write probe failed: $output" >&2
+    return 2
 }
 
 load_health_check_from_gc() {
@@ -1479,10 +1575,7 @@ valid_sql_name() {
 }
 
 is_reserved_dolt_database_name() {
-    case "$(printf '%s' "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')" in
-        __gc_probe) return 0 ;;
-        *) return 1 ;;
-    esac
+    is_system_dolt_database_name "$1"
 }
 
 # clean_stale_sockets removes stale Unix domain sockets left by a crashed
@@ -1929,7 +2022,7 @@ op_init() {
 
     if [ -f "$metadata_path" ]; then
         existing_db=$(read_existing_dolt_database "$metadata_path")
-        if [ -n "$existing_db" ] && is_reserved_dolt_database_name "$existing_db"; then
+        if [ -n "$existing_db" ] && is_legacy_managed_probe_database_name "$existing_db"; then
             allow_reserved_existing=true
         fi
     fi
@@ -2104,7 +2197,7 @@ op_store_bridge() {
     return $?
 }
 op_health() {
-    local conn_count=""
+    local conn_count="" read_only_status
 
     # TCP check.
     if ! tcp_check; then
@@ -2117,6 +2210,9 @@ op_health() {
         fi
         if ! is_remote && [ "$GC_HEALTH_READ_ONLY" = "true" ]; then
             die "dolt server is in read-only mode"
+        fi
+        if ! is_remote && [ "$GC_HEALTH_READ_ONLY" = "unknown" ]; then
+            echo "warning: dolt read-only probe inconclusive" >&2
         fi
         conn_count="$GC_HEALTH_CONNECTION_COUNT"
     else
@@ -2132,9 +2228,15 @@ op_health() {
 
         # Read-only detection (local only).
         if ! is_remote; then
-            if check_read_only; then
-                die "dolt server is in read-only mode"
-            fi
+            set +e
+            check_read_only
+            read_only_status=$?
+            set -e
+            case "$read_only_status" in
+                0) die "dolt server is in read-only mode" ;;
+                1) ;;
+                *) echo "warning: dolt read-only probe inconclusive" >&2 ;;
+            esac
         fi
 
         # Connection capacity warning (non-fatal, single query).
@@ -2192,6 +2294,8 @@ op_probe() {
 
 # op_recover stops the dolt server, restarts it, and verifies health.
 op_recover() {
+    local read_only_status
+
     if is_remote; then
         die "recovery not supported for remote dolt servers"
     fi
@@ -2216,8 +2320,15 @@ op_recover() {
             if [ "$GC_HEALTH_READ_ONLY" = "true" ]; then
                 echo "detected read-only dolt server — restarting" >&2
             fi
-        elif check_read_only; then
-            echo "detected read-only dolt server — restarting" >&2
+        else
+            set +e
+            check_read_only
+            read_only_status=$?
+            set -e
+            case "$read_only_status" in
+                0) echo "detected read-only dolt server — restarting" >&2 ;;
+                2) echo "dolt read-only probe inconclusive before recovery" >&2 ;;
+            esac
         fi
     fi
 

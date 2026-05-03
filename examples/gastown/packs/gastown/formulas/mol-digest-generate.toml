@@ -102,9 +102,9 @@ gc bd list --label=incident --created-after=$SINCE --json
 
 **3. Collect town-level data:**
 
-a) **Agent events:**
+a) **Session lifecycle events:**
 ```bash
-gc events --since=$SINCE --type=agent.started,agent.stopped,agent.crashed --json
+gc events --since=$SINCE --type=session.woke,session.stopped,session.crashed --json
 ```
 
 b) **Escalations:**
