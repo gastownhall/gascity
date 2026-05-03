@@ -184,9 +184,6 @@ func routeFanoutFragmentSteps(fragment *formula.FragmentRecipe, control beads.Be
 		return
 	}
 	executionRoute := strings.TrimSpace(control.Metadata["gc.execution_routed_to"])
-	if executionRoute == "" {
-		executionRoute = strings.TrimSpace(control.Metadata["gc.routed_to"])
-	}
 	routeCfg := loadAttemptRouteConfig(opts.CityPath)
 	for i := range fragment.Steps {
 		step := &fragment.Steps[i]
@@ -309,6 +306,9 @@ func fragmentInstanceComplete(store beads.Store, fragment *formula.FragmentRecip
 		if bead.Assignee != step.Assignee {
 			return false, nil
 		}
+		if !fragmentRouteMetadataMatches(bead, step) {
+			return false, nil
+		}
 	}
 
 	for _, dep := range fragment.Deps {
@@ -361,6 +361,15 @@ func fragmentInstanceComplete(store beads.Store, fragment *formula.FragmentRecip
 	}
 
 	return true, nil
+}
+
+func fragmentRouteMetadataMatches(bead beads.Bead, step formula.RecipeStep) bool {
+	for _, key := range []string{"gc.routed_to", "gc.execution_routed_to"} {
+		if strings.TrimSpace(bead.Metadata[key]) != strings.TrimSpace(step.Metadata[key]) {
+			return false
+		}
+	}
+	return true
 }
 
 func expectedFragmentExternalDeps(fragment *formula.FragmentRecipe, mode string, previousSinkIDs []string) []molecule.ExternalDep {
