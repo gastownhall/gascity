@@ -135,6 +135,7 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 				return ControlResult{}, fmt.Errorf("%s: preparing fragment %d: %w", bead.ID, index+1, err)
 			}
 		}
+		routeFanoutFragmentSteps(fragment, bead, opts, store)
 		externalDeps := expectedFragmentExternalDeps(fragment, mode, previousSinkIDs)
 		existingMapping, err := resolveExistingFragmentInstanceFromBeads(store, workflowBeads, rootID, fragment, externalDeps)
 		if err != nil {
@@ -175,6 +176,42 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 		return ControlResult{}, fmt.Errorf("%s: recording fanout state: %w", bead.ID, err)
 	}
 	return ControlResult{Processed: true, Action: "fanout-spawn", Created: totalCreated}, nil
+}
+
+func routeFanoutFragmentSteps(fragment *formula.FragmentRecipe, control beads.Bead, opts ProcessOptions, store beads.Store) {
+	if fragment == nil {
+		return
+	}
+	executionRoute := strings.TrimSpace(control.Metadata["gc.execution_routed_to"])
+	if executionRoute == "" {
+		executionRoute = strings.TrimSpace(control.Metadata["gc.routed_to"])
+	}
+	routeCfg := loadAttemptRouteConfig(opts.CityPath)
+	for i := range fragment.Steps {
+		if fragment.Steps[i].Metadata["gc.kind"] == "spec" {
+			continue
+		}
+		target := strings.TrimSpace(fragment.Steps[i].Metadata["gc.run_target"])
+		if target == "" {
+			target = strings.TrimSpace(fragment.Steps[i].Metadata["gc.routed_to"])
+		}
+		if target == "" {
+			target = strings.TrimSpace(fragment.Steps[i].Assignee)
+		}
+		if target == "" {
+			target = executionRoute
+		} else {
+			target = qualifyAttemptTargetWithSourceRoute(target, executionRoute, routeCfg)
+		}
+		if isAttemptControlKind(fragment.Steps[i].Metadata["gc.kind"]) {
+			applyAttemptControlStepRoute(&fragment.Steps[i], target, routeCfg, store)
+			continue
+		}
+		if target == "" {
+			continue
+		}
+		applyAttemptStepRoute(&fragment.Steps[i], target, routeCfg, store)
+	}
 }
 
 func resolveExistingFragmentInstanceFromBeads(store beads.Store, all []beads.Bead, _ string, fragment *formula.FragmentRecipe, externalDeps []molecule.ExternalDep) (map[string]string, error) {
