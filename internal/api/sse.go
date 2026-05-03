@@ -326,7 +326,17 @@ func beginSSEStream(hctx huma.Context) (bw any, encoder *json.Encoder, flusher h
 	hctx.SetHeader("Cache-Control", "no-cache")
 	hctx.SetHeader("Connection", "keep-alive")
 	body := hctx.BodyWriter()
-	return body, json.NewEncoder(body), findFlusher(body)
+	flusher = findFlusher(body)
+	if flusher != nil {
+		flusher.Flush()
+	}
+	return body, json.NewEncoder(body), flusher
+}
+
+func flushSSEHeaders(hctx huma.Context) {
+	if flusher := findFlusher(hctx.BodyWriter()); flusher != nil {
+		flusher.Flush()
+	}
 }
 
 // writeSSEFrame emits one SSE frame (id/event/data/blank line) to bw and

@@ -107,13 +107,38 @@ func handleClientLog(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close() //nolint:errcheck
 
-	var entry clientLogEntry
-	if err := json.NewDecoder(io.LimitReader(r.Body, maxClientLogBody)).Decode(&entry); err != nil {
-		log.Printf("dashboard: client log decode failed from %s: %v", r.RemoteAddr, err)
-		http.Error(w, "invalid client log payload", http.StatusBadRequest)
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxClientLogBody))
+	if err != nil {
+		http.Error(w, "read body failed", http.StatusBadRequest)
 		return
 	}
 
+	var entries []clientLogEntry
+	if len(raw) > 0 && raw[0] == '[' {
+		if err := json.Unmarshal(raw, &entries); err != nil {
+			log.Printf("dashboard: client log batch decode failed from %s: %v", r.RemoteAddr, err)
+			http.Error(w, "invalid client log payload", http.StatusBadRequest)
+			return
+		}
+	} else {
+		var entry clientLogEntry
+		if err := json.Unmarshal(raw, &entry); err != nil {
+			log.Printf("dashboard: client log decode failed from %s: %v", r.RemoteAddr, err)
+			http.Error(w, "invalid client log payload", http.StatusBadRequest)
+			return
+		}
+		entries = []clientLogEntry{entry}
+	}
+
+	ua := r.UserAgent()
+	for i := range entries {
+		logClientEntry(&entries[i], ua)
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func logClientEntry(entry *clientLogEntry, ua string) {
 	level := strings.TrimSpace(entry.Level)
 	if level == "" {
 		level = "info"
@@ -123,27 +148,17 @@ func handleClientLog(w http.ResponseWriter, r *http.Request) {
 		scope = "client"
 	}
 	if strings.TrimSpace(entry.Message) == "" {
-		http.Error(w, "missing client log message", http.StatusBadRequest)
 		return
 	}
 	ts := strings.TrimSpace(entry.TS)
 	if ts == "" {
 		ts = time.Now().UTC().Format(time.RFC3339Nano)
 	}
-
 	log.Printf(
 		"dashboard: client[%s] ts=%s scope=%s city=%q url=%q msg=%q details=%s ua=%q",
-		level,
-		ts,
-		scope,
-		entry.City,
-		entry.URL,
-		entry.Message,
-		rawJSONDetails(entry.Details),
-		r.UserAgent(),
+		level, ts, scope, entry.City, entry.URL, entry.Message,
+		rawJSONDetails(entry.Details), ua,
 	)
-
-	w.WriteHeader(http.StatusNoContent)
 }
 
 // injectSupervisorURL rewrites the `<meta name="supervisor-url" content="…">`

@@ -21,7 +21,7 @@ jobs:
 
   ubuntu_fast_tests:
     name: ubuntu / fast tests / ${{ matrix.label }}
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       fail-fast: false
@@ -67,7 +67,7 @@ jobs:
 
   ubuntu_make_check_docs:
     name: ubuntu / make check-docs
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -81,7 +81,7 @@ jobs:
 
   ubuntu_acceptance_a:
     name: ubuntu / acceptance A / ${{ matrix.label }}
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       fail-fast: false
@@ -142,7 +142,7 @@ jobs:
 
   ubuntu_acceptance_b:
     name: ubuntu / acceptance B / ${{ matrix.shard_index }} of 3
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -160,7 +160,7 @@ jobs:
 
   ubuntu_acceptance_c:
     name: ubuntu / acceptance C / ${{ matrix.shard_index }} of 5
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -193,7 +193,7 @@ jobs:
 
   ubuntu_integration_shards:
     name: ubuntu / integration / ${{ matrix.shard_name }}
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       fail-fast: false
@@ -314,7 +314,7 @@ jobs:
 
   ubuntu_tutorial:
     name: ubuntu / tutorial goldens / ${{ matrix.shard_index }} of 6
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 110
     strategy:
       fail-fast: false
@@ -348,7 +348,7 @@ jobs:
 
   ubuntu_goreleaser_snapshot:
     name: ubuntu / goreleaser snapshot
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -373,7 +373,7 @@ jobs:
 
   macos_fast_tests:
     name: macOS / fast tests / ${{ matrix.label }}
-    runs-on: blacksmith-12vcpu-macos-15
+    runs-on: macos-15
     timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       fail-fast: false
@@ -421,7 +421,7 @@ jobs:
   rc_summary:
     name: RC summary
     if: ${{ always() }}
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     needs:
       - ci_parity
       - ubuntu_fast_tests

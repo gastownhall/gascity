@@ -204,15 +204,8 @@ the PR is open and matches the branch, base, and origin repository.
 
 **5. Reassign to refinery:**
 ```bash
-REFINERY_TARGET="${GC_RIG:+$GC_RIG/}refinery"
-gc bd update {{issue}} --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to="$REFINERY_TARGET"
+gc bd update {{issue}} --status=open --assignee={{rig_name}}/{{binding_prefix}}refinery --set-metadata gc.routed_to={{rig_name}}/{{binding_prefix}}refinery
 ```
-
-`${GC_RIG:+$GC_RIG/}refinery` resolves to `$GC_RIG/refinery` when
-running inside a rig session, or bare `refinery` when running in an
-HQ-only city (where the workspace IS the rig). Writing the literal
-`<rig>/refinery` produced `/refinery` in HQ setups and stranded beads
-outside the refinery pool.
 
 Update both `assignee` AND `gc.routed_to` so the reconciler stops
 counting this bead for the polecat pool and starts counting it for

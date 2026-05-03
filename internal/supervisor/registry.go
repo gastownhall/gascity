@@ -5,6 +5,7 @@
 package supervisor
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -21,6 +22,10 @@ import (
 // Must start with alphanumeric and contain only alphanumerics, hyphens,
 // underscores, and dots.
 var validCityName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
+
+// ErrPendingCityRequestExists indicates a city path already has an in-flight
+// async request waiting for a terminal request-result event.
+var ErrPendingCityRequestExists = errors.New("pending city request already exists")
 
 // CityEntry is one registered city in the supervisor registry.
 type CityEntry struct {
@@ -41,10 +46,18 @@ type RigEntry struct {
 	DefaultCity string `toml:"default_city,omitempty"` // absolute path to default city (empty = unset)
 }
 
+// PendingCityRequestEntry stores async request correlation while the
+// supervisor reconciler completes city-scoped infrastructure work.
+type PendingCityRequestEntry struct {
+	Path      string `toml:"path"`
+	RequestID string `toml:"request_id"`
+}
+
 // registryFile is the TOML structure of ~/.gc/cities.toml.
 type registryFile struct {
-	Cities []CityEntry `toml:"cities"`
-	Rigs   []RigEntry  `toml:"rigs,omitempty"`
+	Cities              []CityEntry               `toml:"cities"`
+	Rigs                []RigEntry                `toml:"rigs,omitempty"`
+	PendingCityRequests []PendingCityRequestEntry `toml:"pending_city_requests,omitempty"`
 }
 
 // Registry manages the set of registered cities. Thread-safe.
@@ -175,6 +188,86 @@ func (r *Registry) Unregister(cityPath string) error {
 		return fmt.Errorf("city at %s is not registered", abs)
 	}
 	return r.saveLocked(filtered)
+}
+
+// StorePendingCityRequestID records a request_id for later supervisor
+// reconciliation. The entry is persisted in the supervisor registry so a
+// restarted supervisor can still emit the terminal async result event.
+func (r *Registry) StorePendingCityRequestID(cityPath, requestID string) error {
+	r.refuseHostRegistryDuringTests()
+
+	abs, err := resolveAbsPath(cityPath)
+	if err != nil {
+		return err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	unlock, err := r.fileLock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	rf, err := r.loadAllLocked()
+	if err != nil {
+		return err
+	}
+	for _, pending := range rf.PendingCityRequests {
+		if sameRegistryPath(pending.Path, abs) {
+			return fmt.Errorf("%w: %s", ErrPendingCityRequestExists, abs)
+		}
+	}
+	rf.PendingCityRequests = append(rf.PendingCityRequests, PendingCityRequestEntry{
+		Path:      abs,
+		RequestID: requestID,
+	})
+	return r.saveAllLocked(rf)
+}
+
+// ConsumePendingCityRequestID returns and removes the pending request_id for a
+// city path from the persisted supervisor registry.
+func (r *Registry) ConsumePendingCityRequestID(cityPath string) (string, bool, error) {
+	r.refuseHostRegistryDuringTests()
+
+	abs, err := resolveAbsPath(cityPath)
+	if err != nil {
+		return "", false, err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	unlock, err := r.fileLock()
+	if err != nil {
+		return "", false, err
+	}
+	defer unlock()
+
+	rf, err := r.loadAllLocked()
+	if err != nil {
+		return "", false, err
+	}
+	kept := rf.PendingCityRequests[:0]
+	var requestID string
+	found := false
+	for _, pending := range rf.PendingCityRequests {
+		if sameRegistryPath(pending.Path, abs) {
+			requestID = pending.RequestID
+			found = true
+			continue
+		}
+		kept = append(kept, pending)
+	}
+	if !found {
+		return "", false, nil
+	}
+	rf.PendingCityRequests = kept
+	if err := r.saveAllLocked(rf); err != nil {
+		return "", false, err
+	}
+	return requestID, true, nil
 }
 
 // loadAllLocked reads the full registry file. Caller must hold at least r.mu.RLock.

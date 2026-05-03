@@ -199,6 +199,7 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	if cfgErr == nil {
 		d.Register(doctor.NewBDSplitStoreCheck(cityPath))
 		d.Register(doctor.NewBeadsStoreCheck(cityPath, storeFactory))
+		d.Register(newV2RoutedToNamespaceCheck(cfg, cityPath, storeFactory))
 		d.Register(&sessionModelDoctorCheck{cfg: cfg, cityPath: cityPath, newStore: storeFactory})
 	}
 	skipCityDoltCheck := os.Getenv("GC_DOLT") == "skip" || (!scopeUsesManagedBdStoreContract(cityPath, cityPath) && !workspaceNeedsCityDoltCheck(cityPath, cfg))
@@ -214,6 +215,16 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	d.Register(doctor.NewScopedDoltVersionCheckForConfig(cityPath, skipManagedDoltCheck, cfg, cfgErr))
 	d.Register(&doctor.EventsLogCheck{})
 	d.Register(doctor.NewEventLogSizeCheck())
+	// Worktree checks deliberately run even when cfgErr != nil — they
+	// only need the city path, and a broken city.toml is exactly when
+	// silent disk-fill is most likely. The zero-value DoctorConfig
+	// produces sensible 10/50 GB defaults via its accessor methods.
+	var doctorCfg config.DoctorConfig
+	if cfg != nil {
+		doctorCfg = cfg.Doctor
+	}
+	d.Register(doctor.NewWorktreeDiskSizeCheck(doctorCfg))
+	d.Register(doctor.NewNestedWorktreePruneCheck(doctorCfg))
 
 	// Custom types check — city store.
 	d.Register(doctor.NewCustomTypesCheck(cityPath, "city"))

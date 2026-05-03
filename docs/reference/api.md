@@ -100,6 +100,11 @@ the per-operation `responses.200.content.text/event-stream` entry.
 Clients should follow the standard SSE reconnection protocol
 (`Last-Event-ID` header) where the server supports it; the event bus
 stream (`/v0/events/stream`) replays from the last received index.
+When no cursor is supplied, event streams start at the current event
+head and deliver future events only. Async `202 Accepted` responses
+include an `event_cursor` captured before the operation starts; pass
+that value as `after_cursor` or `after_seq` to wait for the operation's
+request-result event without replaying unrelated historical backlog.
 
 Fatal setup errors are returned as normal Problem Details responses
 *before* the stream's 200 headers commit, never as a 200 stream that
@@ -121,46 +126,39 @@ is nothing to poll.
 
 ```json
 {
-  "ok": true,
-  "name": "my-city",
-  "path": "/abs/path/to/my-city"
+  "request_id": "req-...",
+  "event_cursor": "__supervisor__:42,my-city:17"
 }
 ```
 
-The `name` field is the city's resolved runtime identity
-(`workspace.name` from `city.toml`, or the directory basename).
-Use it to filter the event stream for completion.
+Use `request_id` to correlate the completion event. Use `event_cursor`
+as the `after_cursor` value on the supervisor event stream.
 
 ### Completion events
 
-On the same `/v0/events/stream` the client will see (in order):
+On the same `/v0/events/stream` the client will see:
 
-- `city.created` (`CityCreatedPayload`) — emitted by the scaffold
+- `city.created` (`CityLifecyclePayload`) — emitted by the scaffold
   step before `POST` returns. `subject` and payload `name` equal
-  the response's `name`.
-- `city.ready` (`CityReadyPayload`) — the reconciler finished
-  `prepareCityForSupervisor` successfully. Matching event:
-  `subject == name` and `type == "city.ready"`.
-- `city.init_failed` (`CityInitFailedPayload`) — the reconciler
-  gave up. The payload's `error` field describes why, including
-  deferred dependency or provider-readiness blockers that the async
-  API does not fail synchronously.
+  the resolved city name.
+- `request.result.city.create` (`CityCreateSucceededPayload`) — the
+  reconciler finished `prepareCityForSupervisor` successfully.
+- `request.failed` (`RequestFailedPayload`) — the reconciler failed
+  the async operation. Match `payload.request_id` to the 202 response.
 
-Exactly one of `city.ready` or `city.init_failed` lands per
-successful `POST`. Clients wait for either; no polling of
-`GET /v0/cities` or `GET /v0/city/{cityName}/readiness` is
-required.
+Exactly one terminal event (`request.result.city.create` or
+`request.failed`) lands per successful `POST`. Clients wait for the
+returned `request_id`; no polling of `GET /v0/cities` or
+`GET /v0/city/{cityName}/readiness` is required.
 
 ### Subscribe before or after POST
 
 Either order works. The recommended flow is:
 
-1. `POST /v0/city` and wait for `202`.
-2. `GET /v0/events/stream?after_cursor=0` — request replay from
-   the start so `city.created` (and possibly `city.ready`) are
-   delivered even if they fired before subscribe.
-3. Read frames until `subject == response.name` and
-   `type ∈ {"city.ready", "city.init_failed"}`.
+1. `POST /v0/city` and wait for `202 {request_id, event_cursor}`.
+2. `GET /v0/events/stream?after_cursor=<event_cursor>`.
+3. Read frames until `payload.request_id == response.request_id` and
+   `type ∈ {"request.result.city.create", "request.failed"}`.
 
 **Empty supervisor is fine.** The event stream works even when
 no cities existed before the `POST`. `POST` writes the city to
@@ -199,28 +197,30 @@ simple `gc register`.
 
 ```json
 {
-  "ok": true,
-  "name": "my-city",
-  "path": "/abs/path/to/my-city"
+  "request_id": "req-...",
+  "event_cursor": "__supervisor__:43,my-city:21"
 }
 ```
+
+Pass `event_cursor` as `after_cursor` on `/v0/events/stream` and wait
+for the terminal event whose payload contains the returned `request_id`.
 
 ### Completion events
 
 On `/v0/events/stream` the client will see (in order):
 
 - `city.unregister_requested`
-  (`CityUnregisterRequestedPayload`) — emitted by the handler
+  (`CityLifecyclePayload`) — emitted by the handler
   before the registry write so subscribers see the teardown start.
-- `city.unregistered` (`CityUnregisteredPayload`) — emitted by the
-  reconciler once the city's controller has stopped. Matching
-  event: `subject == name` and `type == "city.unregistered"`.
-- `city.unregister_failed` (`CityUnregisterFailedPayload`) — emitted
-  by the reconciler if the controller did not stop cleanly. The
-  payload's `error` field describes the failure.
+- `request.result.city.unregister`
+  (`CityUnregisterSucceededPayload`) — emitted by the reconciler once
+  the city's controller has stopped.
+- `request.failed` (`RequestFailedPayload`) — emitted by the
+  reconciler if the controller did not stop cleanly. Match
+  `payload.request_id`.
 
-Exactly one of `city.unregistered` or `city.unregister_failed`
-lands per successful unregister. Clients wait for either.
+Exactly one terminal event lands per successful unregister. Clients
+wait for the returned `request_id`.
 
 ### Errors
 
@@ -247,9 +247,15 @@ behavior, heartbeat suppression, and the `--seq` plain-text cursor format, see
   emits:
   - `event: event` with `EventStreamEnvelope`
   - `event: heartbeat` with `HeartbeatEvent`
+- Async session mutations in that city (`session.create`,
+  `session.message`, `session.submit`) complete on this stream. Match
+  terminal `request.result.session.*` or `request.failed` events by
+  `payload.request_id`.
 - Resume:
-  - `Last-Event-ID` or `after_seq`
-- `gc events` in city scope outputs one `WireEvent` JSON object per line.
+  - `Last-Event-ID` or `after_seq`; omit both to start from the
+    current city event head.
+- `gc events` in city scope outputs one `TypedEventStreamEnvelope` JSON
+  object per line.
 - `gc events --watch` and `gc events --follow` in city scope output one
   `EventStreamEnvelope` JSON object per line.
 - `gc events --seq` in city scope prints the API's `X-GC-Index` value.
@@ -262,10 +268,14 @@ behavior, heartbeat suppression, and the `--seq` plain-text cursor format, see
   emits:
   - `event: tagged_event` with `TaggedEventStreamEnvelope`
   - `event: heartbeat` with `HeartbeatEvent`
+- Async supervisor mutations (`city.create`, `city.unregister`) complete
+  on this stream. Match terminal `request.result.city.*` or
+  `request.failed` events by `payload.request_id`.
 - Resume:
-  - `Last-Event-ID` or `after_cursor`
-- `gc events` in supervisor scope outputs one `WireTaggedEvent` JSON object
-  per line.
+  - `Last-Event-ID` or `after_cursor`; omit both to start from the
+    current supervisor event head.
+- `gc events` in supervisor scope outputs one `TypedTaggedEventStreamEnvelope`
+  JSON object per line.
 - `gc events --watch` and `gc events --follow` in supervisor scope
   output one `TaggedEventStreamEnvelope` JSON object per line.
 - `gc events --seq` in supervisor scope prints the current composite

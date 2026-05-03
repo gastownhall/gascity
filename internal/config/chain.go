@@ -20,7 +20,7 @@ type chainResolveContext struct {
 	builtins   map[string]ProviderSpec
 	visited    map[HopIdentity]bool
 	chain      []HopIdentity
-	chainSpecs []ProviderSpec // raw spec per hop, parallel to chain
+	chainSpecs []ProviderSpec // normalized spec per hop, parallel to chain
 	chainPath  []string       // human-readable chain names for error messages
 }
 
@@ -42,6 +42,10 @@ type chainResolveContext struct {
 // The returned ResolvedProvider carries the fully merged ProviderSpec
 // (via embedded fields), BuiltinAncestor, and Chain (leaf → root).
 func ResolveProviderChain(leafName string, leaf ProviderSpec, customProviders map[string]ProviderSpec) (ResolvedProvider, error) {
+	return resolveProviderChain(leafName, leaf, customProviders, true)
+}
+
+func resolveProviderChain(leafName string, leaf ProviderSpec, customProviders map[string]ProviderSpec, completeResumeDefaults bool) (ResolvedProvider, error) {
 	ctx := &chainResolveContext{
 		all:       customProviders,
 		builtins:  BuiltinProviders(),
@@ -59,7 +63,7 @@ func ResolveProviderChain(leafName string, leaf ProviderSpec, customProviders ma
 	ctx.chainSpecs = append(ctx.chainSpecs, leaf)
 	ctx.chainPath = append(ctx.chainPath, leafName)
 
-	merged, err := ctx.walkFromLeaf(leafName, leaf)
+	merged, err := ctx.walkFromLeaf(leafName, leaf, 0)
 	if err != nil {
 		return ResolvedProvider{}, err
 	}
@@ -84,6 +88,9 @@ func ResolveProviderChain(leafName string, leaf ProviderSpec, customProviders ma
 	}
 
 	resolvedPtr := specToResolved(leafName, &merged)
+	if completeResumeDefaults {
+		completeResolvedProviderResumeCommand(resolvedPtr)
+	}
 	resolvedPtr.BuiltinAncestor = ancestor
 	resolvedPtr.Chain = ctx.chain
 	resolvedPtr.Provenance = buildProviderProvenance(ctx, customProviders)
@@ -96,15 +103,19 @@ func ResolveProviderChain(leafName string, leaf ProviderSpec, customProviders ma
 
 // walkFromLeaf does the recursive merge: resolve parent (if any), then
 // merge leaf over parent.
-func (ctx *chainResolveContext) walkFromLeaf(name string, spec ProviderSpec) (ProviderSpec, error) {
+func (ctx *chainResolveContext) walkFromLeaf(name string, spec ProviderSpec, chainIndex int) (ProviderSpec, error) {
 	if spec.Base == nil {
 		// No base declared — this is a chain root. Return as-is.
-		return spec, nil
+		normalized := normalizeProviderLayerArgsForSchema(spec, spec.OptionsSchema)
+		ctx.chainSpecs[chainIndex] = normalized
+		return normalized, nil
 	}
 	baseValue := strings.TrimSpace(*spec.Base)
 	if baseValue == "" {
 		// Explicit empty opt-out — no inheritance.
-		return spec, nil
+		normalized := normalizeProviderLayerArgsForSchema(spec, spec.OptionsSchema)
+		ctx.chainSpecs[chainIndex] = normalized
+		return normalized, nil
 	}
 
 	parentKind, parentName, err := classifyBase(baseValue)
@@ -137,15 +148,19 @@ func (ctx *chainResolveContext) walkFromLeaf(name string, spec ProviderSpec) (Pr
 	ctx.chain = append(ctx.chain, parentID)
 	ctx.chainSpecs = append(ctx.chainSpecs, parentSpec)
 	ctx.chainPath = append(ctx.chainPath, formatHopName(parentID))
+	parentIndex := len(ctx.chain) - 1
 
 	// Recurse: resolve the parent's own chain first.
-	parentMerged, err := ctx.walkFromLeaf(parentName, parentSpec)
+	parentMerged, err := ctx.walkFromLeaf(parentName, parentSpec, parentIndex)
 	if err != nil {
 		return ProviderSpec{}, err
 	}
 
 	// Merge leaf over parent (parent is the "base", leaf is the "city").
-	return MergeProviderOverBuiltin(parentMerged, spec), nil
+	layerSchema := providerSchemaForLayerArgs(parentMerged, spec)
+	child := normalizeProviderLayerArgsForSchema(spec, layerSchema)
+	ctx.chainSpecs[chainIndex] = child
+	return MergeProviderOverBuiltin(parentMerged, child), nil
 }
 
 // lookupBase resolves a base reference to a ProviderSpec and confirms its
@@ -316,7 +331,9 @@ func buildProviderProvenance(ctx *chainResolveContext, customProviders map[strin
 		MapKeyLayer: make(map[string]map[string]string),
 	}
 	// Walk leaf → root; record the FIRST layer (leaf-most) that sets
-	// each scalar field. For additive maps, record per-key leaf-most.
+	// each scalar field. For additive maps, record per-key leaf-most. Specs are
+	// post-normalization so option_defaults inferred from args can be attributed to
+	// the layer that declared those args.
 	for i, hop := range ctx.chain {
 		spec := ctx.chainSpecs[i]
 		layer := provenanceSource(hop)

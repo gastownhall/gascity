@@ -1555,27 +1555,31 @@ while True:
 
 func startUnixSocketProcess(t *testing.T, socketPath string) *exec.Cmd {
 	t.Helper()
+	readyPath := filepath.Join(t.TempDir(), "ready")
 	proc := exec.Command("python3", "-c", `
 import os
 import socket
 import sys
 import time
 path = sys.argv[1]
+ready_path = sys.argv[2]
 if os.path.exists(path):
     os.remove(path)
 sock = socket.socket(socket.AF_UNIX)
 sock.bind(path)
 sock.listen(1)
+with open(ready_path, "w") as f:
+    f.write("ready\n")
 while True:
     time.sleep(1)
-`, socketPath)
+`, socketPath, readyPath)
 	if err := proc.Start(); err != nil {
 		t.Fatalf("start unix socket process: %v", err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if _, err := os.Stat(socketPath); err == nil {
-			if open, openErr := fileOpenedByAnyProcess(socketPath); openErr == nil && open {
+			if _, readyErr := os.Stat(readyPath); readyErr == nil {
 				return proc
 			}
 		}
@@ -1593,24 +1597,28 @@ func startOpenFileProcess(t *testing.T, path string) *exec.Cmd {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	readyPath := filepath.Join(t.TempDir(), "ready")
 	proc := exec.Command("python3", "-c", `
 import os
 import sys
 import time
 path = sys.argv[1]
+ready_path = sys.argv[2]
 f = open(path, "a+")
 f.write("held")
 f.flush()
+with open(ready_path, "w") as f_ready:
+    f_ready.write("ready\n")
 while True:
     time.sleep(1)
-`, path)
+`, path, readyPath)
 	if err := proc.Start(); err != nil {
 		t.Fatalf("start open-file process: %v", err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if _, err := os.Stat(path); err == nil {
-			if open, openErr := fileOpenedByAnyProcess(path); openErr == nil && open {
+			if _, readyErr := os.Stat(readyPath); readyErr == nil {
 				return proc
 			}
 		}
@@ -1628,6 +1636,7 @@ func startOpenFileAndTCPListenerProcess(t *testing.T, path string, port int, dir
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	readyPath := filepath.Join(t.TempDir(), "ready")
 	proc := exec.Command("python3", "-c", `
 import os
 import signal
@@ -1636,6 +1645,7 @@ import sys
 import time
 path = sys.argv[1]
 port = int(sys.argv[2])
+ready_path = sys.argv[3]
 f = open(path, "a+")
 f.write("held")
 f.flush()
@@ -1643,13 +1653,15 @@ sock = socket.socket()
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 sock.bind(("127.0.0.1", port))
 sock.listen(5)
+with open(ready_path, "w") as f_ready:
+    f_ready.write("ready\n")
 def _stop(*_args):
     raise SystemExit(0)
 signal.signal(signal.SIGTERM, _stop)
 signal.signal(signal.SIGINT, _stop)
 while True:
     time.sleep(1)
-`, path, strconv.Itoa(port))
+`, path, strconv.Itoa(port), readyPath)
 	if strings.TrimSpace(dir) != "" {
 		proc.Dir = dir
 	}
@@ -1659,7 +1671,7 @@ while True:
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(path); err == nil {
-			if open, openErr := fileOpenedByAnyProcess(path); openErr == nil && open {
+			if _, readyErr := os.Stat(readyPath); readyErr == nil {
 				conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 200*time.Millisecond)
 				if err == nil {
 					_ = conn.Close()
@@ -1766,8 +1778,20 @@ func TestDoltStateReadOnlyCheckCmdDetectsReadOnly(t *testing.T) {
 	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
 set -eu
 printf '%s\n' "$*" >> "$INVOCATION_FILE"
-echo 'database is read only' >&2
-exit 1
+case "$*" in
+  *"sql -r csv -q SHOW DATABASES"*)
+    printf 'Database\ngascity\ninformation_schema\nmysql\ndolt_cluster\n__gc_probe\n'
+    exit 0
+    ;;
+  *"CREATE TABLE IF NOT EXISTS"*"__gc_read_only_probe"*)
+    echo 'database is read only' >&2
+    exit 1
+    ;;
+  *)
+    echo "unexpected command: $*" >&2
+    exit 2
+    ;;
+esac
 `)
 	t.Setenv("INVOCATION_FILE", invocationFile)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -1781,8 +1805,14 @@ exit 1
 	if err != nil {
 		t.Fatalf("ReadFile(invocation): %v", err)
 	}
-	assertNoManagedDoltProbeDrop(t, "read-only-check invocation", string(invocation))
-	assertManagedDoltProbeWrites(t, "read-only-check invocation", string(invocation))
+	text := string(invocation)
+	bt := "`"
+	assertNoManagedDoltProbeDrop(t, "read-only-check invocation", text)
+	assertNoManagedDoltProbeLegacyTarget(t, "read-only-check invocation", text)
+	wantWrite := "REPLACE INTO " + bt + "gascity" + bt + "." + bt + managedDoltProbeTable + bt + " VALUES (1)"
+	if !strings.Contains(text, wantWrite) {
+		t.Fatalf("read-only-check invocation = %s, want %q", text, wantWrite)
+	}
 }
 
 func TestDoltStateReadOnlyCheckCmdReturnsErrExitWhenWritable(t *testing.T) {
@@ -1791,7 +1821,15 @@ func TestDoltStateReadOnlyCheckCmdReturnsErrExitWhenWritable(t *testing.T) {
 	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
 set -eu
 printf '%s\n' "$*" >> "$INVOCATION_FILE"
-exit 0
+case "$*" in
+  *"sql -r csv -q SHOW DATABASES"*)
+    printf 'Database\ngascity\n'
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
 `)
 	t.Setenv("INVOCATION_FILE", invocationFile)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -1801,6 +1839,52 @@ exit 0
 	if code != 1 {
 		t.Fatalf("run() = %d, want 1; stderr = %s", code, stderr.String())
 	}
+	invocation, err := os.ReadFile(invocationFile)
+	if err != nil {
+		t.Fatalf("ReadFile(invocation): %v", err)
+	}
+	assertNoManagedDoltProbeLegacyTarget(t, "read-only-check writable invocation", string(invocation))
+}
+
+func TestDoltStateReadOnlyCheckCmdNoUserDatabaseReturnsDiagnostic(t *testing.T) {
+	binDir := t.TempDir()
+	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation.txt")
+	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$INVOCATION_FILE"
+case "$*" in
+  *"sql -r csv -q SHOW DATABASES"*)
+    printf 'Database\ninformation_schema\nmysql\ndolt_cluster\nperformance_schema\nsys\n__gc_probe\n'
+    exit 0
+    ;;
+  *"CREATE TABLE IF NOT EXISTS"*"__gc_read_only_probe"*)
+    echo "unexpected write probe without a user database" >&2
+    exit 2
+    ;;
+  *)
+    echo "unexpected command: $*" >&2
+    exit 2
+    ;;
+esac
+`)
+	t.Setenv("INVOCATION_FILE", invocationFile)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "read-only-check", "--host", "127.0.0.1", "--port", "3311", "--user", "root"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("run() = %d, want 1; stdout = %s stderr = %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "no user database") {
+		t.Fatalf("stderr = %q, want no-user-database diagnostic", stderr.String())
+	}
+	invocation, err := os.ReadFile(invocationFile)
+	if err != nil {
+		t.Fatalf("ReadFile(invocation): %v", err)
+	}
+	if strings.Contains(string(invocation), "CREATE TABLE IF NOT EXISTS") {
+		t.Fatalf("read-only-check ran write probe without user database:\n%s", invocation)
+	}
 }
 
 func TestDoltStateResetProbeCmdDropsManagedProbeDatabase(t *testing.T) {
@@ -1809,7 +1893,22 @@ func TestDoltStateResetProbeCmdDropsManagedProbeDatabase(t *testing.T) {
 	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
 set -eu
 printf '%s\n' "$*" >> "$INVOCATION_FILE"
-exit 0
+case "$*" in
+  *"sql -r csv -q SHOW DATABASES"*)
+    printf 'Database\ngascity\ninformation_schema\nbeads\n__gc_probe\n'
+    exit 0
+    ;;
+  *"DROP DATABASE IF EXISTS __gc_probe"*)
+    exit 0
+    ;;
+  *"DROP TABLE IF EXISTS"*"__gc_read_only_probe"*)
+    exit 0
+    ;;
+  *)
+    echo "unexpected command: $*" >&2
+    exit 2
+    ;;
+esac
 `)
 	t.Setenv("INVOCATION_FILE", invocationFile)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -1827,6 +1926,11 @@ exit 0
 	if !strings.Contains(text, "DROP DATABASE IF EXISTS "+managedDoltProbeDatabase) {
 		t.Fatalf("reset-probe invocation = %s, want managed probe drop", text)
 	}
+	for _, want := range []string{"DROP TABLE IF EXISTS `gascity`.`" + managedDoltProbeTable + "`", "DROP TABLE IF EXISTS `beads`.`" + managedDoltProbeTable + "`"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("reset-probe invocation = %s, want %q", text, want)
+		}
+	}
 }
 
 func TestDoltStateResetProbeCmdRequiresForce(t *testing.T) {
@@ -1835,7 +1939,8 @@ func TestDoltStateResetProbeCmdRequiresForce(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("run() = %d, want 1; stderr = %s", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "refusing to drop "+managedDoltProbeDatabase+" without --force") ||
+	if !strings.Contains(stderr.String(), "refusing to reset health probe artifacts without --force") ||
+		!strings.Contains(stderr.String(), managedDoltProbeDatabase) ||
 		!strings.Contains(stderr.String(), "legacy bead store") {
 		t.Fatalf("stderr = %q, want force warning with legacy bead store context", stderr.String())
 	}
@@ -1889,7 +1994,11 @@ case "$*" in
   *"sql -q SELECT active_branch()"*)
     exit 0
     ;;
-  *"sql -q CREATE DATABASE IF NOT EXISTS __gc_probe; CREATE TABLE IF NOT EXISTS __gc_probe.__probe (k INT PRIMARY KEY); REPLACE INTO __gc_probe.__probe VALUES (1);"*)
+  *"sql -r csv -q SHOW DATABASES"*)
+    printf 'Database\ngascity\ninformation_schema\nmysql\ndolt_cluster\n__gc_probe\n'
+    exit 0
+    ;;
+  *"CREATE TABLE IF NOT EXISTS"*"__gc_read_only_probe"*)
     echo 'database is read only' >&2
     exit 1
     ;;
@@ -1927,11 +2036,71 @@ esac
 	}
 	text := string(invocation)
 	assertNoManagedDoltProbeDrop(t, "health-check read-only probe", text)
-	assertManagedDoltProbeWrites(t, "health-check read-only probe", text)
-	for _, want := range []string{"--host 127.0.0.1", "--port 3311", "--user root", "SELECT active_branch()", "information_schema.PROCESSLIST"} {
+	assertNoManagedDoltProbeLegacyTarget(t, "health-check read-only probe", text)
+	bt := "`"
+	wantWrite := "REPLACE INTO " + bt + "gascity" + bt + "." + bt + managedDoltProbeTable + bt + " VALUES (1)"
+	if !strings.Contains(text, wantWrite) {
+		t.Fatalf("health-check probe = %s, want %q", text, wantWrite)
+	}
+	for _, want := range []string{"--host 127.0.0.1", "--port 3311", "--user root", "SELECT active_branch()", "information_schema.PROCESSLIST", "SHOW DATABASES"} {
 		if strings.Contains(text, want) == false {
 			t.Fatalf("dolt invocation missing %q: %s", want, text)
 		}
+	}
+}
+
+func TestDoltStateHealthCheckCmdNoUserDatabaseReportsUnknown(t *testing.T) {
+	binDir := t.TempDir()
+	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation.txt")
+	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$INVOCATION_FILE"
+case "$*" in
+  *"sql -q SELECT active_branch()"*)
+    exit 0
+    ;;
+  *"sql -r csv -q SHOW DATABASES"*)
+    printf 'Database\ninformation_schema\nmysql\ndolt_cluster\nperformance_schema\nsys\n__gc_probe\n'
+    exit 0
+    ;;
+  *"sql -r csv -q SELECT COUNT(*) AS cnt FROM information_schema.PROCESSLIST"*)
+    printf 'cnt\n0\n'
+    exit 0
+    ;;
+  *"CREATE TABLE IF NOT EXISTS"*)
+    echo "unexpected write probe without a user database" >&2
+    exit 2
+    ;;
+  *)
+    echo "unexpected command: $*" >&2
+    exit 2
+    ;;
+esac
+`)
+	t.Setenv("INVOCATION_FILE", invocationFile)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "health-check", "--host", "0.0.0.0", "--port", "3311", "--user", "root", "--check-read-only"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, stdout = %s stderr = %s", code, stdout.String(), stderr.String())
+	}
+	got := parseDoltStateOutput(t, stdout.String())
+	if got["query_ready"] != "true" {
+		t.Fatalf("query_ready = %q, want true", got["query_ready"])
+	}
+	if got["read_only"] != "unknown" {
+		t.Fatalf("read_only = %q, want unknown", got["read_only"])
+	}
+	if got["connection_count"] != "0" {
+		t.Fatalf("connection_count = %q, want 0", got["connection_count"])
+	}
+	invocation, err := os.ReadFile(invocationFile)
+	if err != nil {
+		t.Fatalf("ReadFile(invocation): %v", err)
+	}
+	if strings.Contains(string(invocation), "CREATE TABLE IF NOT EXISTS") {
+		t.Fatalf("health-check ran write probe without user database:\n%s", invocation)
 	}
 }
 
@@ -1974,9 +2143,13 @@ esac
 		t.Fatalf("ReadFile(invocation): %v", err)
 	}
 	text := string(invocation)
-	if strings.Contains(text, "CREATE DATABASE IF NOT EXISTS __gc_probe") {
+	if strings.Contains(text, "CREATE TABLE IF NOT EXISTS") && strings.Contains(text, managedDoltProbeTable) {
 		t.Fatalf("health-check unexpectedly ran read-only probe: %s", text)
 	}
+	if strings.Contains(text, "SHOW DATABASES") {
+		t.Fatalf("health-check unexpectedly enumerated databases without --check-read-only: %s", text)
+	}
+	assertNoManagedDoltProbeLegacyTarget(t, "health-check skip-read-only probe", text)
 	for _, want := range []string{"SELECT active_branch()", "information_schema.PROCESSLIST"} {
 		if strings.Contains(text, want) == false {
 			t.Fatalf("dolt invocation missing %q: %s", want, text)
@@ -2013,7 +2186,11 @@ case "$*" in
   *"sql -q SELECT active_branch()"*)
     exit 0
     ;;
-  *"sql -q CREATE DATABASE IF NOT EXISTS __gc_probe; CREATE TABLE IF NOT EXISTS __gc_probe.__probe (k INT PRIMARY KEY); REPLACE INTO __gc_probe.__probe VALUES (1);"*)
+  *"sql -r csv -q SHOW DATABASES"*)
+    printf 'Database\ngascity\n'
+    exit 0
+    ;;
+  *"CREATE TABLE IF NOT EXISTS"*"__gc_read_only_probe"*)
     echo 'probe exploded' >&2
     exit 1
     ;;
@@ -2374,7 +2551,7 @@ set -eu
 printf '%s\n' "$*" >> "$INVOCATION_FILE"
 case "$*" in
   "sql-server --config "*)
-    config_file=${*#sql-server --config }
+    config_file=$3
     port=$(awk '/port:/ {print $2; exit}' "$config_file")
     data_dir=$(awk '/data_dir:/ {print $2; exit}' "$config_file" | tr -d '"')
     exec python3 - "$port" "$data_dir" <<'INNERPY'
@@ -2406,7 +2583,11 @@ INNERPY
   *"SELECT active_branch()"*)
     exit 0
     ;;
-  *"CREATE DATABASE IF NOT EXISTS __gc_probe;"*)
+  *"sql -r csv -q SHOW DATABASES"*)
+    printf 'Database\ngascity\n'
+    exit 0
+    ;;
+  *"CREATE TABLE IF NOT EXISTS"*"__gc_read_only_probe"*)
     if [ -f "$READ_ONLY_ONCE" ]; then
       rm -f "$READ_ONLY_ONCE"
       echo "read only" >&2
@@ -2472,6 +2653,127 @@ esac
 	}
 	if managedStopPIDAlive(original.Process.Pid) {
 		t.Fatalf("original pid %d still alive after recovery", original.Process.Pid)
+	}
+}
+
+func TestDoltStateRecoverManagedCmdNoUserDatabaseHealthSucceeds(t *testing.T) {
+	skipSlowCmdGCTest(t, "spawns managed dolt recovery processes; run make test-cmd-gc-process for full coverage")
+	cityPath := t.TempDir()
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(layout.PIDFile), 0o755); err != nil {
+		t.Fatalf("MkdirAll(runtime dir): %v", err)
+	}
+	if err := os.MkdirAll(layout.DataDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(data dir): %v", err)
+	}
+
+	port := reserveRandomTCPPort(t)
+	original := startTCPListenerProcessInDir(t, port, layout.DataDir)
+	defer func() {
+		_ = original.Process.Kill()
+		_ = original.Wait()
+	}()
+	if err := os.WriteFile(layout.PIDFile, []byte(strconv.Itoa(original.Process.Pid)+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pid): %v", err)
+	}
+	if err := writeDoltRuntimeStateFile(layout.StateFile, doltRuntimeState{
+		Running:   true,
+		PID:       original.Process.Pid,
+		Port:      port,
+		DataDir:   layout.DataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile: %v", err)
+	}
+
+	binDir := t.TempDir()
+	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation.txt")
+	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$INVOCATION_FILE"
+case "$*" in
+  "sql-server --config "*)
+    config_file=$3
+    port=$(awk '/port:/ {print $2; exit}' "$config_file")
+    data_dir=$(awk '/data_dir:/ {print $2; exit}' "$config_file" | tr -d '"')
+    exec python3 - "$port" "$data_dir" <<'INNERPY'
+import os
+import signal
+import socket
+import sys
+import time
+
+port = int(sys.argv[1])
+data_dir = sys.argv[2]
+if data_dir:
+    os.chdir(data_dir)
+sock = socket.socket()
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind(("127.0.0.1", port))
+sock.listen(5)
+def _stop(*_args):
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, _stop)
+signal.signal(signal.SIGINT, _stop)
+while True:
+    time.sleep(1)
+INNERPY
+    ;;
+  *"SELECT COUNT(*) AS cnt FROM information_schema.PROCESSLIST"*)
+    printf 'cnt\n0\n'
+    ;;
+  *"SELECT active_branch()"*)
+    exit 0
+    ;;
+  *"sql -r csv -q SHOW DATABASES"*)
+    printf 'Database\ninformation_schema\nmysql\ndolt_cluster\nperformance_schema\nsys\n__gc_probe\n'
+    exit 0
+    ;;
+  *"CREATE TABLE IF NOT EXISTS"*)
+    echo "unexpected write probe without a user database" >&2
+    exit 2
+    ;;
+  *)
+    echo "unexpected command: $*" >&2
+    exit 2
+    ;;
+esac
+`)
+	t.Setenv("INVOCATION_FILE", invocationFile)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Cleanup(func() {
+		if state, err := readDoltRuntimeStateFile(layout.StateFile); err == nil && state.PID > 0 {
+			_ = terminateManagedDoltPID(state.PID)
+		}
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "recover-managed", "--city", cityPath, "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--user", "root", "--timeout-ms", "5000"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, stdout = %s stderr = %s", code, stdout.String(), stderr.String())
+	}
+	got := parseDoltStateOutput(t, stdout.String())
+	if got["diagnosed_read_only"] != "false" {
+		t.Fatalf("diagnosed_read_only = %q, want false", got["diagnosed_read_only"])
+	}
+	if got["had_pid"] != "true" {
+		t.Fatalf("had_pid = %q, want true", got["had_pid"])
+	}
+	if got["ready"] != "true" {
+		t.Fatalf("ready = %q, want true", got["ready"])
+	}
+	if got["healthy"] != "true" {
+		t.Fatalf("healthy = %q, want true", got["healthy"])
+	}
+	invocation, err := os.ReadFile(invocationFile)
+	if err != nil {
+		t.Fatalf("ReadFile(invocation): %v", err)
+	}
+	if strings.Contains(string(invocation), "CREATE TABLE IF NOT EXISTS") {
+		t.Fatalf("recover-managed ran write probe without user database:\n%s", invocation)
 	}
 }
 
@@ -2803,7 +3105,7 @@ set -eu
 printf '%s\n' "$*" >> "$INVOCATION_FILE"
 case "$*" in
   "sql-server --config "*)
-    config_file=${*#sql-server --config }
+    config_file=$3
     port=$(awk '/port:/ {print $2; exit}' "$config_file")
     data_dir=$(awk '/data_dir:/ {print $2; exit}' "$config_file" | tr -d '"')
     exec python3 - "$port" "$data_dir" <<'INNERPY'
@@ -2845,7 +3147,11 @@ INNERPY
     echo "final health probe failed" >&2
     exit 1
     ;;
-  *"CREATE DATABASE IF NOT EXISTS __gc_probe;"*)
+  *"sql -r csv -q SHOW DATABASES"*)
+    printf 'Database\ngascity\n'
+    exit 0
+    ;;
+  *"CREATE TABLE IF NOT EXISTS"*"__gc_read_only_probe"*)
     exit 0
     ;;
   *)

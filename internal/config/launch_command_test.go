@@ -103,6 +103,24 @@ func TestBuildProviderLaunchCommandUsesACPCommand(t *testing.T) {
 			t.Fatalf("Command = %q, want %q", got.Command, want)
 		}
 	})
+
+	t.Run("tmux transport uses CommandString", func(t *testing.T) {
+		got, err := BuildProviderLaunchCommand("", rp, nil, "tmux")
+		if err != nil {
+			t.Fatalf("BuildProviderLaunchCommand: %v", err)
+		}
+		want := "custom-opencode"
+		if got.Command != want {
+			t.Fatalf("Command = %q, want %q", got.Command, want)
+		}
+	})
+
+	t.Run("unknown transport errors", func(t *testing.T) {
+		_, err := BuildProviderLaunchCommand("", rp, nil, "stdio")
+		if err == nil {
+			t.Fatal("BuildProviderLaunchCommand() error = nil, want unknown transport error")
+		}
+	})
 }
 
 func TestBuildProviderLaunchCommandWithoutOptionsSkipsDefaultsButKeepsSettings(t *testing.T) {

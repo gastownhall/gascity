@@ -19,7 +19,7 @@ func TestAgentFieldSync(t *testing.T) {
 	// Add to this list with a comment explaining why.
 	excluded := map[string]string{
 		"Name":        "identity field, not overridable",
-		"Description": "display field for MC session creation UI, not overridable via patch",
+		"Description": "display field for real-world app session creation UI, not overridable via patch",
 		// Provider-level fields: set during ResolveProvider, not typically
 		// overridden per-rig. Agent-level overrides happen in the Agent
 		// struct itself (which feeds into ResolveProvider).

@@ -156,6 +156,9 @@ provider = "file"
 	if got := rawBeadsProviderForScope(cityDir, cityDir); got != "file" {
 		t.Fatalf("rawBeadsProviderForScope(city) = %q, want file outside scoped override", got)
 	}
+	if got := beadsProvider(cityDir); got != "file" {
+		t.Fatalf("beadsProvider(city) = %q, want file outside scoped override", got)
+	}
 }
 
 func TestRawBeadsProviderForScopeIgnoresConfigYamlWithoutMetadata(t *testing.T) {

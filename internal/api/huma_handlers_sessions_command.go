@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -23,6 +24,15 @@ import (
 // Command-side session handlers (create, patch, submit, message, stop, kill,
 // respond, suspend, close, wake, rename). Split out of huma_handlers_sessions.go
 // to isolate mutation logic from reads and streaming.
+
+var (
+	sessionMessageAsyncTimeout      = sessionMessageTimeout
+	sessionCreateCommandableTimeout = 120 * time.Second
+)
+
+type sessionCommandableWaiter interface {
+	WaitForSessionCommandable(context.Context, string) (session.Info, error)
+}
 
 func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCreateInput) (*SessionCreateOutput, error) {
 	store := s.state.CityBeadStore()
@@ -102,39 +112,33 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 	}
 	command := launchCommand.Command
 	extraMeta := sessionTemplateOverridesMetadata(body.Options, body.Message)
+	if extraMeta == nil {
+		extraMeta = make(map[string]string)
+	}
+	extraMeta["agent_name"] = workDirQualifiedName
+	extraMeta["session_origin"] = "manual"
 	mcpServers, err := s.sessionMCPServers(template, resolved.Name, workDirQualifiedName, workDir, transport, kind)
 	if err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
 
-	var info session.Info
-	reservationIDs := []string{alias, explicitName}
-	reserveConcreteIdentity := agentCfg.SupportsMultipleSessions() && strings.TrimSpace(workDirQualifiedName) != ""
-	if reserveConcreteIdentity {
-		reservationIDs = append(reservationIDs, workDirQualifiedName)
+	reqID, reqIDErr := newRequestID()
+	if reqIDErr != nil {
+		return nil, huma.Error500InternalServerError(reqIDErr.Error())
 	}
-	err = session.WithCitySessionIdentifierLocks(s.state.CityPath(), reservationIDs, func() error {
-		if aliasErr := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), alias, ""); aliasErr != nil {
-			return aliasErr
-		}
-		if reserveConcreteIdentity && workDirQualifiedName != alias {
-			if aliasErr := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), workDirQualifiedName, ""); aliasErr != nil {
-				return aliasErr
-			}
-		}
-		if nameErr := session.EnsureSessionNameAvailableWithConfig(store, s.state.Config(), explicitName, ""); nameErr != nil {
-			return nameErr
-		}
-		if extraMeta == nil {
-			extraMeta = make(map[string]string)
-		}
-		extraMeta["agent_name"] = workDirQualifiedName
-		extraMeta["session_origin"] = "manual"
+	eventCursor, cursorErr := s.currentCityEventCursor()
+	if cursorErr != nil {
+		return nil, huma.Error500InternalServerError(cursorErr.Error())
+	}
+
+	go func() {
+		defer s.recoverAsRequestFailed(reqID, RequestOperationSessionCreate)
 		if transport == "acp" {
 			var mcpMetaErr error
 			extraMeta, mcpMetaErr = session.WithStoredMCPMetadata(extraMeta, workDirQualifiedName, mcpServers)
 			if mcpMetaErr != nil {
-				return mcpMetaErr
+				s.emitSessionCreateFailed(reqID, "mcp_metadata_failed", mcpMetaErr.Error())
+				return
 			}
 		}
 		resolvedCfg, cfgErr := resolvedSessionConfigForProvider(
@@ -150,43 +154,80 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 			mcpServers,
 		)
 		if cfgErr != nil {
-			return cfgErr
+			s.emitSessionCreateFailed(reqID, "create_failed", cfgErr.Error())
+			return
 		}
 		handle, handleErr := s.newResolvedWorkerSessionHandle(store, resolvedCfg)
 		if handleErr != nil {
-			return handleErr
+			s.emitSessionCreateFailed(reqID, "create_failed", handleErr.Error())
+			return
 		}
-		var createErr error
-		info, createErr = handle.Create(ctx, worker.CreateModeDeferred)
-		return createErr
-	})
-	if err != nil {
-		return nil, humaSessionManagerError(err)
-	}
+		var info session.Info
+		createMode := worker.CreateModeStarted
+		waiter, waitForCommandable := s.state.(sessionCommandableWaiter)
+		if waitForCommandable {
+			createMode = worker.CreateModeDeferred
+		}
+		reservationIDs := []string{alias, explicitName}
+		reserveConcreteIdentity := agentCfg.SupportsMultipleSessions() && strings.TrimSpace(workDirQualifiedName) != ""
+		if reserveConcreteIdentity {
+			reservationIDs = append(reservationIDs, workDirQualifiedName)
+		}
+		createErr := session.WithCitySessionIdentifierLocks(s.state.CityPath(), reservationIDs, func() error {
+			if aliasErr := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), alias, ""); aliasErr != nil {
+				return aliasErr
+			}
+			if reserveConcreteIdentity && workDirQualifiedName != alias {
+				if aliasErr := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), workDirQualifiedName, ""); aliasErr != nil {
+					return aliasErr
+				}
+			}
+			if nameErr := session.EnsureSessionNameAvailableWithConfig(store, s.state.Config(), explicitName, ""); nameErr != nil {
+				return nameErr
+			}
+			var err error
+			info, err = handle.Create(context.Background(), createMode)
+			return err
+		})
+		if createErr != nil {
+			s.emitSessionCreateFailed(reqID, "create_failed", createErr.Error())
+			return
+		}
+		if waitForCommandable {
+			s.state.Poke()
+			waitCtx, cancel := context.WithTimeout(context.Background(), sessionCreateCommandableTimeout)
+			info, createErr = waiter.WaitForSessionCommandable(waitCtx, info.ID)
+			cancel()
+			if createErr != nil {
+				s.emitSessionCreateFailed(reqID, "create_failed", createErr.Error())
+				return
+			}
+		}
 
-	s.persistSessionMeta(store, info.ID, "agent", body.ProjectID, nil)
-	s.state.Poke()
+		resp := sessionToResponse(info, s.state.Config())
+		resp.Kind = "agent"
+		s.emitSessionCreateSucceeded(reqID, resp)
+		s.persistSessionMeta(store, info.ID, "agent", body.ProjectID, nil)
+		if !waitForCommandable {
+			s.state.Poke()
+		}
 
-	titleProvider := s.resolveTitleProvider()
-	MaybeGenerateTitleAsync(store, info.ID, body.Title, body.Message, titleProvider, info.WorkDir, func(format string, args ...any) {
-		fmt.Fprintf(os.Stderr, "session %s: "+format+"\n", append([]any{info.ID}, args...)...)
-	})
-
-	resp := sessionToResponse(info, s.state.Config())
-	resp.Kind = "agent"
-	if caps, capErr := s.sessionManager(store).SubmissionCapabilities(info.ID); capErr == nil {
-		resp.SubmissionCapabilities = caps
-	}
-	s.enrichSessionResponse(&resp, info, s.state.Config(), s.state.SessionProvider(), false, true, true)
+		titleProvider := s.resolveTitleProvider()
+		MaybeGenerateTitleAsync(store, info.ID, body.Title, body.Message, titleProvider, info.WorkDir, func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, "session %s: "+format+"\n", append([]any{info.ID}, args...)...)
+		})
+	}()
 
 	out := &SessionCreateOutput{Status: http.StatusAccepted}
-	out.Body = resp
+	out.Body.Status = "accepted"
+	out.Body.RequestID = reqID
+	out.Body.EventCursor = eventCursor
 	return out, nil
 }
 
 // humaCreateProviderSession handles the "provider" kind session creation.
 
-func (s *Server) humaCreateProviderSession(ctx context.Context, store beads.Store, body sessionCreateBody, providerName string) (*SessionCreateOutput, error) {
+func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Store, body sessionCreateBody, providerName string) (*SessionCreateOutput, error) {
 	cfg := s.state.Config()
 	if cfg == nil {
 		return nil, huma.Error503ServiceUnavailable("city config not loaded yet")
@@ -236,12 +277,6 @@ func (s *Server) humaCreateProviderSession(ctx context.Context, store beads.Stor
 
 	workDir := s.state.CityPath()
 
-	resume := session.ProviderResume{
-		ResumeFlag:    resolved.ResumeFlag,
-		ResumeStyle:   resolved.ResumeStyle,
-		ResumeCommand: resolved.ResumeCommand,
-		SessionIDFlag: resolved.SessionIDFlag,
-	}
 	alias, err := session.ValidateAlias(body.Alias)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
@@ -274,63 +309,64 @@ func (s *Server) humaCreateProviderSession(ctx context.Context, store beads.Stor
 		}
 	}
 
-	mgr := s.sessionManager(store)
-	hints := sessionCreateHints(resolved, mcpServers)
-	var info session.Info
-	err = session.WithCitySessionAliasLock(s.state.CityPath(), alias, func() error {
-		if aliasErr := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), alias, ""); aliasErr != nil {
-			return aliasErr
-		}
-		var createErr error
-		info, createErr = mgr.CreateAliasedNamedWithTransportAndMetadata(
-			ctx,
-			alias,
-			"",
-			template,
-			title,
-			command,
-			workDir,
-			resolved.Name,
-			transport,
-			resolved.Env,
-			resume,
-			hints,
-			extraMeta,
-		)
-		return createErr
-	})
-	if err != nil {
-		return nil, humaSessionManagerError(err)
+	reqID, reqIDErr := newRequestID()
+	if reqIDErr != nil {
+		return nil, huma.Error500InternalServerError(reqIDErr.Error())
 	}
-
-	s.persistSessionMeta(store, info.ID, "provider", body.ProjectID, optMeta)
-
-	titleProvider := s.resolveTitleProvider()
-	MaybeGenerateTitleAsync(store, info.ID, body.Title, body.Message, titleProvider, info.WorkDir, func(format string, args ...any) {
-		fmt.Fprintf(os.Stderr, "session %s: "+format+"\n", append([]any{info.ID}, args...)...)
-	})
-
-	if msg := strings.TrimSpace(body.Message); msg != "" {
-		if _, sendErr := s.submitMessageToSession(ctx, store, info.ID, msg, session.SubmitIntentDefault); sendErr != nil {
-			log.Printf("session %s: initial message delivery failed: %v", info.ID, sendErr)
-			if rollbackErr := s.rollbackCreatedSession(store, info.ID); rollbackErr != nil {
-				return nil, huma.Error500InternalServerError(
-					fmt.Sprintf("initial message delivery failed: %v (rollback failed: %v)", sendErr, rollbackErr))
+	eventCursor, cursorErr := s.currentCityEventCursor()
+	if cursorErr != nil {
+		return nil, huma.Error500InternalServerError(cursorErr.Error())
+	}
+	go func() {
+		defer s.recoverAsRequestFailed(reqID, RequestOperationSessionCreate)
+		resolvedCfg, cfgErr := resolvedSessionConfigForProvider(alias, "", template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
+		if cfgErr != nil {
+			s.emitSessionCreateFailed(reqID, "create_failed", cfgErr.Error())
+			return
+		}
+		handle, handleErr := s.newResolvedWorkerSessionHandle(store, resolvedCfg)
+		if handleErr != nil {
+			s.emitSessionCreateFailed(reqID, "create_failed", handleErr.Error())
+			return
+		}
+		var info session.Info
+		createErr := session.WithCitySessionAliasLock(s.state.CityPath(), alias, func() error {
+			if aliasErr := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), alias, ""); aliasErr != nil {
+				return aliasErr
 			}
-			return nil, huma.Error500InternalServerError(
-				fmt.Sprintf("initial message delivery failed: %v", sendErr))
+			var err error
+			info, err = handle.Create(context.Background(), worker.CreateModeStarted)
+			return err
+		})
+		if createErr != nil {
+			s.emitSessionCreateFailed(reqID, "create_failed", createErr.Error())
+			return
 		}
-	}
+		if msg := strings.TrimSpace(body.Message); msg != "" {
+			if _, sendErr := s.submitMessageToSession(context.Background(), store, info.ID, msg, session.SubmitIntentDefault); sendErr != nil {
+				if rollbackErr := s.rollbackCreatedSession(store, info.ID); rollbackErr != nil {
+					s.emitSessionCreateFailed(reqID, "message_delivery_failed",
+						fmt.Sprintf("initial message delivery failed: %v (rollback failed: %v)", sendErr, rollbackErr))
+					return
+				}
+				s.emitSessionCreateFailed(reqID, "message_delivery_failed", fmt.Sprintf("initial message delivery failed: %v", sendErr))
+				return
+			}
+		}
+		resp := sessionToResponse(info, s.state.Config())
+		resp.Kind = "provider"
+		s.emitSessionCreateSucceeded(reqID, resp)
+		s.persistSessionMeta(store, info.ID, "provider", body.ProjectID, optMeta)
+		titleProvider := s.resolveTitleProvider()
+		MaybeGenerateTitleAsync(store, info.ID, body.Title, body.Message, titleProvider, info.WorkDir, func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, "session %s: "+format+"\n", append([]any{info.ID}, args...)...)
+		})
+	}()
 
-	resp := sessionToResponse(info, s.state.Config())
-	resp.Kind = "provider"
-	if caps, capErr := s.sessionManager(store).SubmissionCapabilities(info.ID); capErr == nil {
-		resp.SubmissionCapabilities = caps
-	}
-	s.enrichSessionResponse(&resp, info, s.state.Config(), s.state.SessionProvider(), false, true, true)
-
-	out := &SessionCreateOutput{Status: http.StatusCreated}
-	out.Body = resp
+	out := &SessionCreateOutput{Status: http.StatusAccepted}
+	out.Body.Status = "accepted"
+	out.Body.RequestID = reqID
+	out.Body.EventCursor = eventCursor
 	return out, nil
 }
 
@@ -422,34 +458,46 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 
 // humaHandleSessionSubmit is the Huma-typed handler for POST /v0/session/{id}/submit.
 
-func (s *Server) humaHandleSessionSubmit(ctx context.Context, input *SessionSubmitInput) (*SessionSubmitOutput, error) {
+func (s *Server) humaHandleSessionSubmit(_ context.Context, input *SessionSubmitInput) (*SessionSubmitOutput, error) {
 	store := s.state.CityBeadStore()
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
 
-	// Huma validates Body.Message (minLength:1) and Body.Intent (enum).
-	// Handler-side guards are redundant; keep only the default-intent fill.
 	intent := input.Body.Intent
 	if intent == "" {
 		intent = session.SubmitIntentDefault
 	}
 
-	id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store, input.ID)
-	if err != nil {
-		return nil, humaResolveError(err)
+	reqID, reqIDErr := newRequestID()
+	if reqIDErr != nil {
+		return nil, huma.Error500InternalServerError(reqIDErr.Error())
 	}
-
-	outcome, err := s.submitMessageToSession(ctx, store, id, input.Body.Message, intent)
-	if err != nil {
-		return nil, humaSessionManagerError(err)
+	eventCursor, cursorErr := s.currentCityEventCursor()
+	if cursorErr != nil {
+		return nil, huma.Error500InternalServerError(cursorErr.Error())
 	}
+	message := input.Body.Message
+	sessionTarget := input.ID
+	go func() {
+		defer s.recoverAsRequestFailed(reqID, RequestOperationSessionSubmit)
+		id, err := s.resolveSessionIDMaterializingNamedWithContext(context.Background(), store, sessionTarget)
+		if err != nil {
+			s.emitSessionSubmitFailed(reqID, "resolve_failed", err.Error())
+			return
+		}
+		outcome, submitErr := s.submitMessageToSession(context.Background(), store, id, message, intent)
+		if submitErr != nil {
+			s.emitSessionSubmitFailed(reqID, "submit_failed", submitErr.Error())
+		} else {
+			s.emitSessionSubmitSucceeded(reqID, id, outcome.Queued, string(intent))
+		}
+	}()
 
 	out := &SessionSubmitOutput{}
 	out.Body.Status = "accepted"
-	out.Body.ID = id
-	out.Body.Queued = outcome.Queued
-	out.Body.Intent = string(intent)
+	out.Body.RequestID = reqID
+	out.Body.EventCursor = eventCursor
 	return out, nil
 }
 
@@ -457,25 +505,100 @@ func (s *Server) humaHandleSessionSubmit(ctx context.Context, input *SessionSubm
 
 // humaHandleSessionMessage is the Huma-typed handler for POST /v0/session/{id}/messages.
 
-func (s *Server) humaHandleSessionMessage(ctx context.Context, input *SessionMessageInput) (*SessionMessageOutput, error) {
+func (s *Server) humaHandleSessionMessage(_ context.Context, input *SessionMessageInput) (*SessionMessageOutput, error) {
 	store := s.state.CityBeadStore()
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
 
-	// Huma validates Body.Message (minLength:1); no handler guard needed.
-	id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store, input.ID)
-	if err != nil {
-		return nil, humaResolveError(err)
+	reqID, reqIDErr := newRequestID()
+	if reqIDErr != nil {
+		return nil, huma.Error500InternalServerError(reqIDErr.Error())
 	}
+	eventCursor, cursorErr := s.currentCityEventCursor()
+	if cursorErr != nil {
+		return nil, huma.Error500InternalServerError(cursorErr.Error())
+	}
+	message := input.Body.Message
+	sessionTarget := input.ID
+	go func() {
+		defer s.recoverAsRequestFailed(reqID, RequestOperationSessionMessage)
 
-	if err := s.sendUserMessageToSession(ctx, store, id, input.Body.Message); err != nil {
-		return nil, humaSessionManagerError(err)
-	}
+		type messageResult struct {
+			sessionID string
+			errorCode string
+			err       error
+		}
+
+		resultCh := make(chan messageResult, 1)
+		var terminalEmitted atomic.Bool
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		sendResult := func(result messageResult) {
+			if terminalEmitted.Load() {
+				if result.err != nil {
+					log.Printf("api: late session.message result after timeout request_id=%s target=%s error_code=%s err=%v", reqID, sessionTarget, result.errorCode, result.err)
+				} else {
+					log.Printf("api: late session.message result after timeout request_id=%s target=%s session_id=%s", reqID, sessionTarget, result.sessionID)
+				}
+				return
+			}
+			resultCh <- result
+		}
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					sendResult(messageResult{errorCode: "internal_error", err: fmt.Errorf("panic: %v", r)})
+				}
+			}()
+			id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store, sessionTarget)
+			if err != nil {
+				sendResult(messageResult{errorCode: "resolve_failed", err: err})
+				return
+			}
+			if err := s.sendUserMessageToSession(ctx, store, id, message); err != nil {
+				code := "message_failed"
+				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+					code = "timeout"
+				}
+				sendResult(messageResult{sessionID: id, errorCode: code, err: err})
+				return
+			}
+			sendResult(messageResult{sessionID: id})
+		}()
+
+		timer := time.NewTimer(sessionMessageAsyncTimeout)
+		defer timer.Stop()
+		select {
+		case result := <-resultCh:
+			terminalEmitted.Store(true)
+			if result.err != nil {
+				s.emitSessionMessageFailed(reqID, result.errorCode, result.err.Error())
+				return
+			}
+			s.emitSessionMessageSucceeded(reqID, result.sessionID)
+		case <-timer.C:
+			cancel()
+			select {
+			case result := <-resultCh:
+				terminalEmitted.Store(true)
+				if result.err != nil {
+					s.emitSessionMessageFailed(reqID, result.errorCode, result.err.Error())
+					return
+				}
+				s.emitSessionMessageSucceeded(reqID, result.sessionID)
+				return
+			default:
+			}
+			terminalEmitted.Store(true)
+			s.emitSessionMessageFailed(reqID, "timeout", fmt.Sprintf("session.message timed out after %s", sessionMessageAsyncTimeout))
+		}
+	}()
 
 	out := &SessionMessageOutput{}
 	out.Body.Status = "accepted"
-	out.Body.ID = id
+	out.Body.RequestID = reqID
+	out.Body.EventCursor = eventCursor
 	return out, nil
 }
 
@@ -521,6 +644,12 @@ func (s *Server) humaHandleSessionKill(_ context.Context, input *SessionIDInput)
 
 	mgr := s.sessionManager(store)
 	if err := mgr.Kill(id); err != nil {
+		if errors.Is(err, session.ErrSessionClosed) {
+			out := &OKWithIDResponse{}
+			out.Body.Status = "ok"
+			out.Body.ID = id
+			return out, nil
+		}
 		return nil, humaSessionManagerError(err)
 	}
 	out := &OKWithIDResponse{}
@@ -619,7 +748,7 @@ func (s *Server) humaHandleSessionClose(_ context.Context, input *SessionCloseIn
 
 	// Optional: permanently delete the bead after closing.
 	if input.Delete {
-		if err := store.Delete(id); err != nil {
+		if err := deleteSessionBeadAfterClose(store, id); err != nil {
 			log.Printf("gc api: deleting bead after close %s: %v", id, err)
 			return nil, huma.Error500InternalServerError("closed but delete failed: " + err.Error())
 		}
@@ -668,6 +797,15 @@ func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInpu
 	if sessionName != "" {
 		s.state.ClearCrashHistory(sessionName)
 	}
+	handle, err := s.workerHandleForSession(store, id)
+	if err != nil {
+		return nil, humaSessionManagerError(err)
+	}
+	go func() {
+		if err := handle.Start(context.Background()); err != nil {
+			log.Printf("gc api: waking session %s: %v", id, err)
+		}
+	}()
 
 	out := &OKWithIDResponse{}
 	out.Body.Status = "ok"

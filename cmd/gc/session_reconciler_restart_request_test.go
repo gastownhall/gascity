@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,7 +39,7 @@ func newRestartRequestTestEnv() *restartRequestTestEnv {
 	}
 }
 
-func (e *restartRequestTestEnv) createSessionBead(name, template string) beads.Bead {
+func (e *restartRequestTestEnv) createSessionBead(name string) beads.Bead {
 	b, err := e.store.Create(beads.Bead{
 		Title:  name,
 		Type:   sessionBeadType,
@@ -45,7 +47,7 @@ func (e *restartRequestTestEnv) createSessionBead(name, template string) beads.B
 		Metadata: map[string]string{
 			"session_name":   name,
 			"agent_name":     name,
-			"template":       template,
+			"template":       "worker",
 			"generation":     "1",
 			"instance_token": "test-token",
 			"state":          "asleep",
@@ -115,7 +117,7 @@ func TestReconcileSessionBeads_RestartRequestRotatesKeyForSessionIDProviders(t *
 		},
 	}
 
-	session := env.createSessionBead(sessionName, "worker")
+	session := env.createSessionBead(sessionName)
 	env.setSessionMetadata(&session, map[string]string{
 		namedSessionMetadataKey:      "true",
 		namedSessionIdentityMetadata: "worker",
@@ -160,7 +162,7 @@ func TestReconcileSessionBeads_RestartRequestClearsKeyForResumeOnlyProviders(t *
 		},
 	}
 
-	session := env.createSessionBead(sessionName, "worker")
+	session := env.createSessionBead(sessionName)
 	env.setSessionMetadata(&session, map[string]string{
 		namedSessionMetadataKey:      "true",
 		namedSessionIdentityMetadata: "worker",
@@ -201,7 +203,7 @@ func TestReconcileSessionBeads_RestartRequestPreservesLiveHashesDuringHandoff(t 
 		},
 	}
 
-	session := env.createSessionBead(sessionName, "worker")
+	session := env.createSessionBead(sessionName)
 	env.setSessionMetadata(&session, map[string]string{
 		namedSessionMetadataKey:      "true",
 		namedSessionIdentityMetadata: "worker",
@@ -241,6 +243,64 @@ func TestReconcileSessionBeads_RestartRequestPreservesLiveHashesDuringHandoff(t 
 	}
 	if got.Metadata["startup_dialog_verified"] != "true" {
 		t.Fatalf("startup_dialog_verified = %q, want preserved until next successful start", got.Metadata["startup_dialog_verified"])
+	}
+}
+
+func TestReconcileSessionBeads_RestartRequestPreservesIntentWhenKillFails(t *testing.T) {
+	env := newRestartRequestTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "true",
+		SessionName:  sessionName,
+		TemplateName: "worker",
+		ResolvedProvider: &config.ResolvedProvider{
+			SessionIDFlag: "--session-id",
+		},
+	}
+
+	session := env.createSessionBead(sessionName)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "on_demand",
+		"state":                      "active",
+		"restart_requested":          "true",
+		"session_key":                "original-key",
+		"started_config_hash":        "hash-before-restart",
+	})
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	if err := env.sp.SetMeta(sessionName, "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	env.sp.StopErrors[sessionName] = errors.New("kill denied")
+
+	env.reconcile([]beads.Bead{session})
+
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatal("session should remain running when kill fails")
+	}
+	got, _ := env.store.Get(session.ID)
+	if got.Metadata["restart_requested"] != "true" {
+		t.Fatalf("restart_requested = %q, want preserved", got.Metadata["restart_requested"])
+	}
+	if got.Metadata["session_key"] != "original-key" {
+		t.Fatalf("session_key = %q, want original-key", got.Metadata["session_key"])
+	}
+	if got.Metadata["started_config_hash"] != "hash-before-restart" {
+		t.Fatalf("started_config_hash = %q, want preserved", got.Metadata["started_config_hash"])
+	}
+	if got.Metadata["continuation_reset_pending"] != "" {
+		t.Fatalf("continuation_reset_pending = %q, want empty until kill succeeds", got.Metadata["continuation_reset_pending"])
+	}
+	if got := env.stderr.String(); !strings.Contains(got, "stopping restart-requested") || !strings.Contains(got, "kill denied") {
+		t.Fatalf("stderr = %q, want kill failure diagnostic", got)
 	}
 }
 

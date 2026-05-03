@@ -327,8 +327,40 @@ schedule = "0 6 * * *"
 ```
 
 Overrides can change `enabled`, `trigger`, `interval`, `schedule`, `check`, `on`,
-`pool`, and `timeout`. The override matches by order name — if no order with
-that name exists, it's an error (fail-fast, not silent).
+`pool`, and `timeout`. The override matches by order name. An override that
+targets a nonexistent order produces an error rather than silently no-opping
+— `gc order` CLI commands fail; `gc start` logs the error and continues
+running with the unmatched override skipped.
+
+### Rig scoping
+
+Many orders expand at scan time into one instance per rig (anything in a
+rig's `orders/` directory or a pack imported into a rig). When the same
+order appears city-wide AND per-rig, an override must say which:
+
+```toml
+# Targets ONLY the city-level instance. Per-rig copies are unaffected.
+[[orders.overrides]]
+name = "patrol"
+enabled = false
+
+# Targets ONLY the demo-repo rig's copy.
+[[orders.overrides]]
+name = "patrol"
+rig = "demo-repo"
+enabled = false
+
+# Wildcard: targets every instance — city-level + all rig copies.
+[[orders.overrides]]
+name = "patrol"
+rig = "*"
+enabled = false
+```
+
+A rigless override against a name that exists ONLY as per-rig copies is an
+error; the message names the rigs so you know what to type. The literal
+`"*"` is reserved as the wildcard token and may not be used as a real rig
+name.
 
 ## Order history
 

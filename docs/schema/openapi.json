@@ -724,6 +724,50 @@
         ],
         "type": "object"
       },
+      "AsyncAcceptedBody": {
+        "additionalProperties": false,
+        "properties": {
+          "event_cursor": {
+            "description": "City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or the event log is empty.",
+            "type": "string"
+          },
+          "request_id": {
+            "description": "Correlation ID. Watch the city event stream for request.result.session.create, request.result.session.message, request.result.session.submit, or request.failed with this request_id.",
+            "type": "string"
+          },
+          "status": {
+            "description": "Async request status.",
+            "examples": [
+              "accepted"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "request_id",
+          "event_cursor"
+        ],
+        "type": "object"
+      },
+      "AsyncAcceptedResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "event_cursor": {
+            "description": "Supervisor event-stream cursor captured before the async request was accepted. Pass this value as after_cursor to /v0/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or every event log is empty.",
+            "type": "string"
+          },
+          "request_id": {
+            "description": "Correlation ID. Watch /v0/events/stream for request.result.city.create, request.result.city.unregister, or request.failed with this request_id.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "event_cursor"
+        ],
+        "type": "object"
+      },
       "Bead": {
         "additionalProperties": false,
         "properties": {
@@ -1045,35 +1089,38 @@
             "type": "string"
           },
           "provider": {
-            "description": "Provider name for the city's default session template.",
+            "description": "Provider name for the city's default session template. Mutually exclusive with start_command.",
             "minLength": 1,
+            "type": "string"
+          },
+          "start_command": {
+            "description": "Custom workspace start command for the city's default session template. Mutually exclusive with provider.",
             "type": "string"
           }
         },
         "required": [
-          "dir",
-          "provider"
+          "dir"
         ],
         "type": "object"
       },
-      "CityCreateResponse": {
+      "CityCreateSucceededPayload": {
         "additionalProperties": false,
         "properties": {
           "name": {
-            "description": "Resolved city name as persisted in city.toml. Use this to filter the event stream for completion.",
+            "description": "Resolved city name.",
             "type": "string"
           },
-          "ok": {
-            "description": "True when scaffolding + registration succeeded. Does not imply the city is ready yet; watch /v0/events/stream for city.ready.",
-            "type": "boolean"
-          },
           "path": {
-            "description": "Resolved absolute path of the created city directory.",
+            "description": "Resolved absolute city directory path.",
+            "type": "string"
+          },
+          "request_id": {
+            "description": "Correlation ID from the 202 response.",
             "type": "string"
           }
         },
         "required": [
-          "ok",
+          "request_id",
           "name",
           "path"
         ],
@@ -1161,23 +1208,11 @@
       "CityLifecyclePayload": {
         "additionalProperties": false,
         "properties": {
-          "error": {
-            "type": "string"
-          },
           "name": {
             "type": "string"
           },
           "path": {
             "type": "string"
-          },
-          "phases_completed": {
-            "items": {
-              "type": "string"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
           }
         },
         "required": [
@@ -1196,24 +1231,24 @@
         },
         "type": "object"
       },
-      "CityUnregisterResponse": {
+      "CityUnregisterSucceededPayload": {
         "additionalProperties": false,
         "properties": {
           "name": {
-            "description": "Resolved registry name. Filter the event stream by this to observe completion.",
+            "description": "City name that was unregistered.",
             "type": "string"
           },
-          "ok": {
-            "description": "True when the registry entry was removed and the supervisor was signaled. Does not imply the city's controller has stopped yet; watch /v0/events/stream for city.unregistered.",
-            "type": "boolean"
-          },
           "path": {
-            "description": "Resolved absolute city directory. The directory itself is not modified; unregister only affects the supervisor's registry.",
+            "description": "Absolute city directory path.",
+            "type": "string"
+          },
+          "request_id": {
+            "description": "Correlation ID from the 202 response.",
             "type": "string"
           }
         },
         "required": [
-          "ok",
+          "request_id",
           "name",
           "path"
         ],
@@ -1958,7 +1993,13 @@
             "$ref": "#/components/schemas/BoundEventPayload"
           },
           {
+            "$ref": "#/components/schemas/CityCreateSucceededPayload"
+          },
+          {
             "$ref": "#/components/schemas/CityLifecyclePayload"
+          },
+          {
+            "$ref": "#/components/schemas/CityUnregisterSucceededPayload"
           },
           {
             "$ref": "#/components/schemas/GroupCreatedEventPayload"
@@ -1974,6 +2015,18 @@
           },
           {
             "$ref": "#/components/schemas/OutboundEventPayload"
+          },
+          {
+            "$ref": "#/components/schemas/RequestFailedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/SessionCreateSucceededPayload"
+          },
+          {
+            "$ref": "#/components/schemas/SessionMessageSucceededPayload"
+          },
+          {
+            "$ref": "#/components/schemas/SessionSubmitSucceededPayload"
           },
           {
             "$ref": "#/components/schemas/UnboundEventPayload"
@@ -2562,10 +2615,16 @@
           "partial": {
             "description": "Whether the list is partial.",
             "type": "boolean"
+          },
+          "total": {
+            "description": "Total number of formulas in the list.",
+            "format": "int64",
+            "type": "integer"
           }
         },
         "required": [
           "items",
+          "total",
           "partial"
         ],
         "type": "object"
@@ -3546,7 +3605,7 @@
           "items": {
             "description": "The list of items.",
             "items": {
-              "$ref": "#/components/schemas/WireEvent"
+              "$ref": "#/components/schemas/TypedEventStreamEnvelope"
             },
             "type": [
               "array",
@@ -5150,6 +5209,41 @@
         ],
         "type": "object"
       },
+      "RequestFailedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "error_code": {
+            "description": "Machine-readable error code.",
+            "type": "string"
+          },
+          "error_message": {
+            "description": "Human-readable error description.",
+            "type": "string"
+          },
+          "operation": {
+            "description": "Which operation failed.",
+            "enum": [
+              "city.create",
+              "city.unregister",
+              "session.create",
+              "session.message",
+              "session.submit"
+            ],
+            "type": "string"
+          },
+          "request_id": {
+            "description": "Correlation ID from the 202 response.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "operation",
+          "error_code",
+          "error_message"
+        ],
+        "type": "object"
+      },
       "RigActionBody": {
         "additionalProperties": false,
         "properties": {
@@ -5539,6 +5633,24 @@
         },
         "type": "object"
       },
+      "SessionCreateSucceededPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "request_id": {
+            "description": "Correlation ID from the 202 response.",
+            "type": "string"
+          },
+          "session": {
+            "$ref": "#/components/schemas/SessionResponse",
+            "description": "Full session state as returned by GET /session/{id}. For session.create, this result is emitted only after the session has left creating and can accept normal metadata and lifecycle commands."
+          }
+        },
+        "required": [
+          "request_id",
+          "session"
+        ],
+        "type": "object"
+      },
       "SessionInfo": {
         "additionalProperties": false,
         "properties": {
@@ -5574,24 +5686,21 @@
         ],
         "type": "object"
       },
-      "SessionMessageOutputBody": {
+      "SessionMessageSucceededPayload": {
         "additionalProperties": false,
         "properties": {
-          "id": {
-            "description": "Session ID.",
+          "request_id": {
+            "description": "Correlation ID from the 202 response.",
             "type": "string"
           },
-          "status": {
-            "description": "Operation result.",
-            "examples": [
-              "accepted"
-            ],
+          "session_id": {
+            "description": "Session ID that received the message.",
             "type": "string"
           }
         },
         "required": [
-          "status",
-          "id"
+          "request_id",
+          "session_id"
         ],
         "type": "object"
       },
@@ -5912,32 +6021,29 @@
         ],
         "type": "object"
       },
-      "SessionSubmitOutputBody": {
+      "SessionSubmitSucceededPayload": {
         "additionalProperties": false,
         "properties": {
-          "id": {
-            "description": "Session ID.",
-            "type": "string"
-          },
           "intent": {
-            "description": "Resolved submit intent.",
+            "description": "Resolved submit intent (default, follow_up, interrupt_now).",
             "type": "string"
           },
           "queued": {
-            "description": "Whether the message was queued.",
+            "description": "Whether the message was queued for later delivery.",
             "type": "boolean"
           },
-          "status": {
-            "description": "Operation result.",
-            "examples": [
-              "accepted"
-            ],
+          "request_id": {
+            "description": "Correlation ID from the 202 response.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Session ID that received the submission.",
             "type": "string"
           }
         },
         "required": [
-          "status",
-          "id",
+          "request_id",
+          "session_id",
           "queued",
           "intent"
         ],
@@ -6201,6 +6307,20 @@
             "description": "City name.",
             "type": "string"
           },
+          "partial": {
+            "description": "True when one or more status backing reads returned incomplete data.",
+            "type": "boolean"
+          },
+          "partial_errors": {
+            "description": "Human-readable errors from incomplete status backing reads.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "path": {
             "description": "City directory path.",
             "type": "string"
@@ -6373,7 +6493,7 @@
         "properties": {
           "items": {
             "items": {
-              "$ref": "#/components/schemas/WireTaggedEvent"
+              "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelope"
             },
             "type": [
               "array",
@@ -6525,13 +6645,9 @@
             "bead.created": "#/components/schemas/TypedEventStreamEnvelopeBeadCreated",
             "bead.updated": "#/components/schemas/TypedEventStreamEnvelopeBeadUpdated",
             "city.created": "#/components/schemas/TypedEventStreamEnvelopeCityCreated",
-            "city.init_failed": "#/components/schemas/TypedEventStreamEnvelopeCityInitFailed",
-            "city.ready": "#/components/schemas/TypedEventStreamEnvelopeCityReady",
             "city.resumed": "#/components/schemas/TypedEventStreamEnvelopeCityResumed",
             "city.suspended": "#/components/schemas/TypedEventStreamEnvelopeCitySuspended",
-            "city.unregister_failed": "#/components/schemas/TypedEventStreamEnvelopeCityUnregisterFailed",
             "city.unregister_requested": "#/components/schemas/TypedEventStreamEnvelopeCityUnregisterRequested",
-            "city.unregistered": "#/components/schemas/TypedEventStreamEnvelopeCityUnregistered",
             "controller.started": "#/components/schemas/TypedEventStreamEnvelopeControllerStarted",
             "controller.stopped": "#/components/schemas/TypedEventStreamEnvelopeControllerStopped",
             "convoy.closed": "#/components/schemas/TypedEventStreamEnvelopeConvoyClosed",
@@ -6554,6 +6670,12 @@
             "order.failed": "#/components/schemas/TypedEventStreamEnvelopeOrderFailed",
             "order.fired": "#/components/schemas/TypedEventStreamEnvelopeOrderFired",
             "provider.swapped": "#/components/schemas/TypedEventStreamEnvelopeProviderSwapped",
+            "request.failed": "#/components/schemas/TypedEventStreamEnvelopeRequestFailed",
+            "request.result.city.create": "#/components/schemas/TypedEventStreamEnvelopeRequestResultCityCreate",
+            "request.result.city.unregister": "#/components/schemas/TypedEventStreamEnvelopeRequestResultCityUnregister",
+            "request.result.session.create": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionCreate",
+            "request.result.session.message": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionMessage",
+            "request.result.session.submit": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionSubmit",
             "session.crashed": "#/components/schemas/TypedEventStreamEnvelopeSessionCrashed",
             "session.draining": "#/components/schemas/TypedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionIdleKilled",
@@ -6581,25 +6703,13 @@
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeCityCreated"
           },
           {
-            "$ref": "#/components/schemas/TypedEventStreamEnvelopeCityInitFailed"
-          },
-          {
-            "$ref": "#/components/schemas/TypedEventStreamEnvelopeCityReady"
-          },
-          {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeCityResumed"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeCitySuspended"
           },
           {
-            "$ref": "#/components/schemas/TypedEventStreamEnvelopeCityUnregisterFailed"
-          },
-          {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeCityUnregisterRequested"
-          },
-          {
-            "$ref": "#/components/schemas/TypedEventStreamEnvelopeCityUnregistered"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeControllerStarted"
@@ -6668,6 +6778,24 @@
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeProviderSwapped"
           },
           {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeRequestFailed"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeRequestResultCityCreate"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeRequestResultCityUnregister"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionCreate"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionMessage"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionSubmit"
+          },
+          {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionCrashed"
           },
           {
@@ -6696,6 +6824,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeWorkerOperation"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeCustom"
           }
         ],
         "title": "Typed city event stream envelope"
@@ -6868,90 +6999,6 @@
         "title": "TypedEventStreamEnvelope city.created",
         "type": "object"
       },
-      "TypedEventStreamEnvelopeCityInitFailed": {
-        "additionalProperties": false,
-        "properties": {
-          "actor": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          },
-          "payload": {
-            "$ref": "#/components/schemas/CityLifecyclePayload"
-          },
-          "seq": {
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "subject": {
-            "type": "string"
-          },
-          "ts": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "type": {
-            "const": "city.init_failed",
-            "type": "string"
-          },
-          "workflow": {
-            "$ref": "#/components/schemas/WorkflowEventProjection"
-          }
-        },
-        "required": [
-          "seq",
-          "type",
-          "ts",
-          "actor",
-          "payload"
-        ],
-        "title": "TypedEventStreamEnvelope city.init_failed",
-        "type": "object"
-      },
-      "TypedEventStreamEnvelopeCityReady": {
-        "additionalProperties": false,
-        "properties": {
-          "actor": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          },
-          "payload": {
-            "$ref": "#/components/schemas/CityLifecyclePayload"
-          },
-          "seq": {
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "subject": {
-            "type": "string"
-          },
-          "ts": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "type": {
-            "const": "city.ready",
-            "type": "string"
-          },
-          "workflow": {
-            "$ref": "#/components/schemas/WorkflowEventProjection"
-          }
-        },
-        "required": [
-          "seq",
-          "type",
-          "ts",
-          "actor",
-          "payload"
-        ],
-        "title": "TypedEventStreamEnvelope city.ready",
-        "type": "object"
-      },
       "TypedEventStreamEnvelopeCityResumed": {
         "additionalProperties": false,
         "properties": {
@@ -7036,48 +7083,6 @@
         "title": "TypedEventStreamEnvelope city.suspended",
         "type": "object"
       },
-      "TypedEventStreamEnvelopeCityUnregisterFailed": {
-        "additionalProperties": false,
-        "properties": {
-          "actor": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          },
-          "payload": {
-            "$ref": "#/components/schemas/CityLifecyclePayload"
-          },
-          "seq": {
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "subject": {
-            "type": "string"
-          },
-          "ts": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "type": {
-            "const": "city.unregister_failed",
-            "type": "string"
-          },
-          "workflow": {
-            "$ref": "#/components/schemas/WorkflowEventProjection"
-          }
-        },
-        "required": [
-          "seq",
-          "type",
-          "ts",
-          "actor",
-          "payload"
-        ],
-        "title": "TypedEventStreamEnvelope city.unregister_failed",
-        "type": "object"
-      },
       "TypedEventStreamEnvelopeCityUnregisterRequested": {
         "additionalProperties": false,
         "properties": {
@@ -7118,48 +7123,6 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope city.unregister_requested",
-        "type": "object"
-      },
-      "TypedEventStreamEnvelopeCityUnregistered": {
-        "additionalProperties": false,
-        "properties": {
-          "actor": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          },
-          "payload": {
-            "$ref": "#/components/schemas/CityLifecyclePayload"
-          },
-          "seq": {
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "subject": {
-            "type": "string"
-          },
-          "ts": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "type": {
-            "const": "city.unregistered",
-            "type": "string"
-          },
-          "workflow": {
-            "$ref": "#/components/schemas/WorkflowEventProjection"
-          }
-        },
-        "required": [
-          "seq",
-          "type",
-          "ts",
-          "actor",
-          "payload"
-        ],
-        "title": "TypedEventStreamEnvelope city.unregistered",
         "type": "object"
       },
       "TypedEventStreamEnvelopeControllerStarted": {
@@ -7328,6 +7291,94 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope convoy.created",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeCustom": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {},
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "not": {
+              "enum": [
+                "session.woke",
+                "session.stopped",
+                "session.crashed",
+                "session.draining",
+                "session.undrained",
+                "session.quarantined",
+                "session.idle_killed",
+                "session.suspended",
+                "session.updated",
+                "bead.created",
+                "bead.closed",
+                "bead.updated",
+                "mail.sent",
+                "mail.read",
+                "mail.archived",
+                "mail.marked_read",
+                "mail.marked_unread",
+                "mail.replied",
+                "mail.deleted",
+                "convoy.created",
+                "convoy.closed",
+                "controller.started",
+                "controller.stopped",
+                "city.suspended",
+                "city.resumed",
+                "request.result.city.create",
+                "request.result.city.unregister",
+                "request.result.session.create",
+                "request.result.session.message",
+                "request.result.session.submit",
+                "request.failed",
+                "city.created",
+                "city.unregister_requested",
+                "order.fired",
+                "order.completed",
+                "order.failed",
+                "provider.swapped",
+                "worker.operation",
+                "extmsg.bound",
+                "extmsg.unbound",
+                "extmsg.group_created",
+                "extmsg.adapter_added",
+                "extmsg.adapter_removed",
+                "extmsg.inbound",
+                "extmsg.outbound"
+              ]
+            },
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope custom",
         "type": "object"
       },
       "TypedEventStreamEnvelopeExtmsgAdapterAdded": {
@@ -8086,6 +8137,258 @@
         "title": "TypedEventStreamEnvelope provider.swapped",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeRequestFailed": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/RequestFailedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "request.failed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope request.failed",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeRequestResultCityCreate": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/CityCreateSucceededPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "request.result.city.create",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope request.result.city.create",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeRequestResultCityUnregister": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/CityUnregisterSucceededPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "request.result.city.unregister",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope request.result.city.unregister",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeRequestResultSessionCreate": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionCreateSucceededPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "request.result.session.create",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope request.result.session.create",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeRequestResultSessionMessage": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionMessageSucceededPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "request.result.session.message",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope request.result.session.message",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeRequestResultSessionSubmit": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionSubmitSucceededPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "request.result.session.submit",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope request.result.session.submit",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionCrashed": {
         "additionalProperties": false,
         "properties": {
@@ -8514,13 +8817,9 @@
             "bead.created": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadCreated",
             "bead.updated": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadUpdated",
             "city.created": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityCreated",
-            "city.init_failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityInitFailed",
-            "city.ready": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityReady",
             "city.resumed": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityResumed",
             "city.suspended": "#/components/schemas/TypedTaggedEventStreamEnvelopeCitySuspended",
-            "city.unregister_failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityUnregisterFailed",
             "city.unregister_requested": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityUnregisterRequested",
-            "city.unregistered": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityUnregistered",
             "controller.started": "#/components/schemas/TypedTaggedEventStreamEnvelopeControllerStarted",
             "controller.stopped": "#/components/schemas/TypedTaggedEventStreamEnvelopeControllerStopped",
             "convoy.closed": "#/components/schemas/TypedTaggedEventStreamEnvelopeConvoyClosed",
@@ -8543,6 +8842,12 @@
             "order.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFailed",
             "order.fired": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFired",
             "provider.swapped": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderSwapped",
+            "request.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestFailed",
+            "request.result.city.create": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultCityCreate",
+            "request.result.city.unregister": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultCityUnregister",
+            "request.result.session.create": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionCreate",
+            "request.result.session.message": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionMessage",
+            "request.result.session.submit": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit",
             "session.crashed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionCrashed",
             "session.draining": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionIdleKilled",
@@ -8570,25 +8875,13 @@
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityCreated"
           },
           {
-            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityInitFailed"
-          },
-          {
-            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityReady"
-          },
-          {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityResumed"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeCitySuspended"
           },
           {
-            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityUnregisterFailed"
-          },
-          {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityUnregisterRequested"
-          },
-          {
-            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityUnregistered"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeControllerStarted"
@@ -8657,6 +8950,24 @@
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderSwapped"
           },
           {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestFailed"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultCityCreate"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultCityUnregister"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionCreate"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionMessage"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit"
+          },
+          {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionCrashed"
           },
           {
@@ -8685,6 +8996,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkerOperation"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeCustom"
           }
         ],
         "title": "Typed supervisor event stream envelope"
@@ -8873,98 +9187,6 @@
         "title": "TypedTaggedEventStreamEnvelope city.created",
         "type": "object"
       },
-      "TypedTaggedEventStreamEnvelopeCityInitFailed": {
-        "additionalProperties": false,
-        "properties": {
-          "actor": {
-            "type": "string"
-          },
-          "city": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          },
-          "payload": {
-            "$ref": "#/components/schemas/CityLifecyclePayload"
-          },
-          "seq": {
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "subject": {
-            "type": "string"
-          },
-          "ts": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "type": {
-            "const": "city.init_failed",
-            "type": "string"
-          },
-          "workflow": {
-            "$ref": "#/components/schemas/WorkflowEventProjection"
-          }
-        },
-        "required": [
-          "seq",
-          "type",
-          "ts",
-          "actor",
-          "payload",
-          "city"
-        ],
-        "title": "TypedTaggedEventStreamEnvelope city.init_failed",
-        "type": "object"
-      },
-      "TypedTaggedEventStreamEnvelopeCityReady": {
-        "additionalProperties": false,
-        "properties": {
-          "actor": {
-            "type": "string"
-          },
-          "city": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          },
-          "payload": {
-            "$ref": "#/components/schemas/CityLifecyclePayload"
-          },
-          "seq": {
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "subject": {
-            "type": "string"
-          },
-          "ts": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "type": {
-            "const": "city.ready",
-            "type": "string"
-          },
-          "workflow": {
-            "$ref": "#/components/schemas/WorkflowEventProjection"
-          }
-        },
-        "required": [
-          "seq",
-          "type",
-          "ts",
-          "actor",
-          "payload",
-          "city"
-        ],
-        "title": "TypedTaggedEventStreamEnvelope city.ready",
-        "type": "object"
-      },
       "TypedTaggedEventStreamEnvelopeCityResumed": {
         "additionalProperties": false,
         "properties": {
@@ -9057,52 +9279,6 @@
         "title": "TypedTaggedEventStreamEnvelope city.suspended",
         "type": "object"
       },
-      "TypedTaggedEventStreamEnvelopeCityUnregisterFailed": {
-        "additionalProperties": false,
-        "properties": {
-          "actor": {
-            "type": "string"
-          },
-          "city": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          },
-          "payload": {
-            "$ref": "#/components/schemas/CityLifecyclePayload"
-          },
-          "seq": {
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "subject": {
-            "type": "string"
-          },
-          "ts": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "type": {
-            "const": "city.unregister_failed",
-            "type": "string"
-          },
-          "workflow": {
-            "$ref": "#/components/schemas/WorkflowEventProjection"
-          }
-        },
-        "required": [
-          "seq",
-          "type",
-          "ts",
-          "actor",
-          "payload",
-          "city"
-        ],
-        "title": "TypedTaggedEventStreamEnvelope city.unregister_failed",
-        "type": "object"
-      },
       "TypedTaggedEventStreamEnvelopeCityUnregisterRequested": {
         "additionalProperties": false,
         "properties": {
@@ -9147,52 +9323,6 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope city.unregister_requested",
-        "type": "object"
-      },
-      "TypedTaggedEventStreamEnvelopeCityUnregistered": {
-        "additionalProperties": false,
-        "properties": {
-          "actor": {
-            "type": "string"
-          },
-          "city": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          },
-          "payload": {
-            "$ref": "#/components/schemas/CityLifecyclePayload"
-          },
-          "seq": {
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "subject": {
-            "type": "string"
-          },
-          "ts": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "type": {
-            "const": "city.unregistered",
-            "type": "string"
-          },
-          "workflow": {
-            "$ref": "#/components/schemas/WorkflowEventProjection"
-          }
-        },
-        "required": [
-          "seq",
-          "type",
-          "ts",
-          "actor",
-          "payload",
-          "city"
-        ],
-        "title": "TypedTaggedEventStreamEnvelope city.unregistered",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeControllerStarted": {
@@ -9377,6 +9507,98 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope convoy.created",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeCustom": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {},
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "not": {
+              "enum": [
+                "session.woke",
+                "session.stopped",
+                "session.crashed",
+                "session.draining",
+                "session.undrained",
+                "session.quarantined",
+                "session.idle_killed",
+                "session.suspended",
+                "session.updated",
+                "bead.created",
+                "bead.closed",
+                "bead.updated",
+                "mail.sent",
+                "mail.read",
+                "mail.archived",
+                "mail.marked_read",
+                "mail.marked_unread",
+                "mail.replied",
+                "mail.deleted",
+                "convoy.created",
+                "convoy.closed",
+                "controller.started",
+                "controller.stopped",
+                "city.suspended",
+                "city.resumed",
+                "request.result.city.create",
+                "request.result.city.unregister",
+                "request.result.session.create",
+                "request.result.session.message",
+                "request.result.session.submit",
+                "request.failed",
+                "city.created",
+                "city.unregister_requested",
+                "order.fired",
+                "order.completed",
+                "order.failed",
+                "provider.swapped",
+                "worker.operation",
+                "extmsg.bound",
+                "extmsg.unbound",
+                "extmsg.group_created",
+                "extmsg.adapter_added",
+                "extmsg.adapter_removed",
+                "extmsg.inbound",
+                "extmsg.outbound"
+              ]
+            },
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope custom",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded": {
@@ -10207,6 +10429,282 @@
         "title": "TypedTaggedEventStreamEnvelope provider.swapped",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeRequestFailed": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/RequestFailedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "request.failed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope request.failed",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeRequestResultCityCreate": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/CityCreateSucceededPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "request.result.city.create",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope request.result.city.create",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeRequestResultCityUnregister": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/CityUnregisterSucceededPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "request.result.city.unregister",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope request.result.city.unregister",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeRequestResultSessionCreate": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionCreateSucceededPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "request.result.session.create",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope request.result.session.create",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeRequestResultSessionMessage": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionMessageSucceededPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "request.result.session.message",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope request.result.session.message",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionSubmitSucceededPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "request.result.session.submit",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope request.result.session.submit",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelopeSessionCrashed": {
         "additionalProperties": false,
         "properties": {
@@ -10681,82 +11179,6 @@
         "required": [
           "session_id",
           "count"
-        ],
-        "type": "object"
-      },
-      "WireEvent": {
-        "additionalProperties": false,
-        "properties": {
-          "actor": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          },
-          "payload": {
-            "$ref": "#/components/schemas/EventPayload"
-          },
-          "seq": {
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "subject": {
-            "type": "string"
-          },
-          "ts": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "type": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "seq",
-          "type",
-          "ts",
-          "actor"
-        ],
-        "type": "object"
-      },
-      "WireTaggedEvent": {
-        "additionalProperties": false,
-        "properties": {
-          "actor": {
-            "type": "string"
-          },
-          "city": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          },
-          "payload": {
-            "$ref": "#/components/schemas/EventPayload"
-          },
-          "seq": {
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "subject": {
-            "type": "string"
-          },
-          "ts": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "type": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "city",
-          "seq",
-          "type",
-          "ts",
-          "actor"
         ],
         "type": "object"
       },
@@ -11279,7 +11701,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CityCreateResponse"
+                  "$ref": "#/components/schemas/AsyncAcceptedResponse"
                 }
               }
             },
@@ -14738,7 +15160,7 @@
     },
     "/v0/city/{cityName}/events/stream": {
       "get": {
-        "description": "Server-Sent Events stream of city events with optional workflow projections. Supports reconnection via Last-Event-ID header or after_seq query param.",
+        "description": "Server-Sent Events stream of city events with optional workflow projections. Supports reconnection via Last-Event-ID header or after_seq query param; omitting both starts at the current city event head.",
         "operationId": "stream-events",
         "parameters": [
           {
@@ -14754,21 +15176,21 @@
             }
           },
           {
-            "description": "Reconnect position: only deliver events after this sequence number.",
+            "description": "Reconnect position: only deliver events after this sequence number. Omit after_seq and Last-Event-ID to start at the current city event head.",
             "explode": false,
             "in": "query",
             "name": "after_seq",
             "schema": {
-              "description": "Reconnect position: only deliver events after this sequence number.",
+              "description": "Reconnect position: only deliver events after this sequence number. Omit after_seq and Last-Event-ID to start at the current city event head.",
               "type": "string"
             }
           },
           {
-            "description": "SSE reconnect position from the last received event ID.",
+            "description": "SSE reconnect position from the last received event ID. Omit Last-Event-ID and after_seq to start at the current city event head.",
             "in": "header",
             "name": "Last-Event-ID",
             "schema": {
-              "description": "SSE reconnect position from the last received event ID.",
+              "description": "SSE reconnect position from the last received event ID. Omit Last-Event-ID and after_seq to start at the current city event head.",
               "type": "string"
             }
           }
@@ -20753,7 +21175,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SessionMessageOutputBody"
+                  "$ref": "#/components/schemas/AsyncAcceptedBody"
                 }
               }
             },
@@ -21375,7 +21797,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SessionSubmitOutputBody"
+                  "$ref": "#/components/schemas/AsyncAcceptedBody"
                 }
               }
             },
@@ -21531,6 +21953,16 @@
             "name": "before",
             "schema": {
               "description": "Pagination cursor: return entries before this UUID.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Pagination cursor: return entries after this UUID.",
+            "explode": false,
+            "in": "query",
+            "name": "after",
+            "schema": {
+              "description": "Pagination cursor: return entries after this UUID.",
               "type": "string"
             }
           }
@@ -21804,7 +22236,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SessionResponse"
+                  "$ref": "#/components/schemas/AsyncAcceptedBody"
                 }
               }
             },
@@ -22018,7 +22450,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CityUnregisterResponse"
+                  "$ref": "#/components/schemas/AsyncAcceptedResponse"
                 }
               }
             },
@@ -22323,24 +22755,25 @@
     },
     "/v0/events/stream": {
       "get": {
+        "description": "Server-Sent Events stream of supervisor-tagged events. Supports reconnection via Last-Event-ID header or after_cursor query param; omitting both starts at the current supervisor event head.",
         "operationId": "stream-supervisor-events",
         "parameters": [
           {
-            "description": "Reconnect cursor (composite per-city cursor).",
+            "description": "Reconnect cursor (composite per-city cursor). Omit Last-Event-ID and after_cursor to start at the current supervisor event head.",
             "in": "header",
             "name": "Last-Event-ID",
             "schema": {
-              "description": "Reconnect cursor (composite per-city cursor).",
+              "description": "Reconnect cursor (composite per-city cursor). Omit Last-Event-ID and after_cursor to start at the current supervisor event head.",
               "type": "string"
             }
           },
           {
-            "description": "Alternative to Last-Event-ID for browsers that can't set custom headers.",
+            "description": "Alternative to Last-Event-ID for browsers that can't set custom headers. Omit after_cursor and Last-Event-ID to start at the current supervisor event head.",
             "explode": false,
             "in": "query",
             "name": "after_cursor",
             "schema": {
-              "description": "Alternative to Last-Event-ID for browsers that can't set custom headers.",
+              "description": "Alternative to Last-Event-ID for browsers that can't set custom headers. Omit after_cursor and Last-Event-ID to start at the current supervisor event head.",
               "type": "string"
             }
           }

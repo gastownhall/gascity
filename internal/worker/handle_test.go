@@ -551,6 +551,22 @@ func TestCanonicalProfileIdentity(t *testing.T) {
 	}
 }
 
+func TestCanonicalProfileIdentityOpenCode(t *testing.T) {
+	identity, ok := CanonicalProfileIdentity(ProfileOpenCodeTmuxCLI)
+	if !ok {
+		t.Fatal("CanonicalProfileIdentity(ProfileOpenCodeTmuxCLI) = false, want true")
+	}
+	if identity.ProviderFamily != "opencode" {
+		t.Fatalf("ProviderFamily = %q, want opencode", identity.ProviderFamily)
+	}
+	if identity.TransportClass != "tmux-cli" {
+		t.Fatalf("TransportClass = %q, want tmux-cli", identity.TransportClass)
+	}
+	if identity.CertificationFingerprint == "" {
+		t.Fatal("CertificationFingerprint is empty")
+	}
+}
+
 func TestSessionHandleMessageInterruptNowUsesWorkerBoundary(t *testing.T) {
 	handle, _, sp, mgr := newTestSessionHandle(t, SessionSpec{
 		Profile:  ProfileClaudeTmuxCLI,

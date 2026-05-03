@@ -52,7 +52,7 @@
         },
         "description": {
           "type": "string",
-          "description": "Description is a human-readable description shown in MC's session creation UI."
+          "description": "Description is a human-readable description shown in a real-world app's session creation UI."
         },
         "dir": {
           "type": "string",
@@ -92,9 +92,10 @@
         "session": {
           "type": "string",
           "enum": [
-            "acp"
+            "acp",
+            "tmux"
           ],
-          "description": "Session overrides the session transport for this agent.\n\"\" (default) uses the city-level session provider (typically tmux).\n\"acp\" uses the Agent Client Protocol (JSON-RPC over stdio).\nThe agent's resolved provider must have supports_acp = true."
+          "description": "Session overrides the session transport for this agent.\n\"\" (default) uses the provider default.\n\"tmux\" uses the tmux-backed CLI path even when the provider supports ACP.\n\"acp\" uses the Agent Client Protocol (JSON-RPC over stdio); the agent's\nresolved provider must have supports_acp = true."
         },
         "provider": {
           "type": "string",
@@ -419,7 +420,7 @@
         },
         "session": {
           "type": "string",
-          "description": "Session overrides the session transport (\"acp\")."
+          "description": "Session overrides the session transport (\"acp\" or \"tmux\")."
         },
         "provider": {
           "type": "string",
@@ -662,7 +663,7 @@
         },
         "session": {
           "type": "string",
-          "description": "Session overrides the session transport (\"acp\")."
+          "description": "Session overrides the session transport (\"acp\" or \"tmux\")."
         },
         "provider": {
           "type": "string",
@@ -983,6 +984,10 @@
           "$ref": "#/$defs/ConvergenceConfig",
           "description": "Convergence configures convergence loop limits."
         },
+        "doctor": {
+          "$ref": "#/$defs/DoctorConfig",
+          "description": "Doctor configures gc doctor thresholds and policy toggles\n(worktree size warnings, nested-worktree auto-prune)."
+        },
         "service": {
           "items": {
             "$ref": "#/$defs/Service"
@@ -1045,6 +1050,24 @@
           "description": "RestartWindow is the sliding time window for counting restarts.\nDuration string (e.g., \"30s\", \"5m\", \"1h\"). Defaults to \"1h\".",
           "default": "1h"
         },
+        "session_circuit_breaker": {
+          "type": "boolean",
+          "description": "SessionCircuitBreaker enables the named-session respawn circuit breaker.\nWhen enabled, the controller suppresses no-progress named-session respawns\nafter the configured restart threshold is exceeded."
+        },
+        "session_circuit_breaker_max_restarts": {
+          "type": "integer",
+          "description": "SessionCircuitBreakerMaxRestarts overrides MaxRestarts for the\nnamed-session respawn circuit breaker. Nil reuses MaxRestartsOrDefault.\n0 disables the circuit breaker even when SessionCircuitBreaker is true.",
+          "default": 5
+        },
+        "session_circuit_breaker_window": {
+          "type": "string",
+          "description": "SessionCircuitBreakerWindow overrides RestartWindow for the named-session\nrespawn circuit breaker. Empty reuses RestartWindowDuration.",
+          "default": "1h"
+        },
+        "session_circuit_breaker_reset_after": {
+          "type": "string",
+          "description": "SessionCircuitBreakerResetAfter is the cooldown before an open named-session\nbreaker resets automatically. Empty defaults to 2 * SessionCircuitBreakerWindowDuration."
+        },
         "shutdown_timeout": {
           "type": "string",
           "description": "ShutdownTimeout is the time to wait after sending Ctrl-C before force-killing\nagents during shutdown. Duration string (e.g., \"5s\", \"30s\"). Set to \"0s\"\nfor immediate kill. Defaults to \"5s\".",
@@ -1084,6 +1107,28 @@
       "additionalProperties": false,
       "type": "object",
       "description": "DaemonConfig holds controller daemon settings."
+    },
+    "DoctorConfig": {
+      "properties": {
+        "worktree_rig_warn_size": {
+          "type": "string",
+          "description": "WorktreeRigWarnSize is the per-rig warning threshold for the total\ndisk footprint under .gc/worktrees/\u003crig\u003e/. Reported by the\nworktree-disk-size check. Go-style human size string (\"10GB\", \"500MB\").\nEmpty or unparseable falls back to the default (10 GB).",
+          "default": "10GB"
+        },
+        "worktree_rig_error_size": {
+          "type": "string",
+          "description": "WorktreeRigErrorSize is the per-rig error threshold. When any rig\nexceeds this, the worktree-disk-size check reports an error rather\nthan a warning. Empty or unparseable falls back to the default\n(50 GB).",
+          "default": "50GB"
+        },
+        "nested_worktree_prune": {
+          "type": "boolean",
+          "description": "NestedWorktreePrune escalates the nested-worktree-prune check\nfrom warning to error severity when safely-prunable nested\nworktrees are present, so CI / scripted doctor runs fail until\nthe operator runs `gc doctor --fix`. Actual removal still\nrequires --fix; this flag does not auto-prune. Safety is\nenforced by mechanical checks (no uncommitted changes, no\nunpushed commits, no stashes) — never by role identity.",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "DoctorConfig holds settings for the gc doctor surface."
     },
     "DoltConfig": {
       "properties": {
@@ -1295,7 +1340,7 @@
         },
         "rig": {
           "type": "string",
-          "description": "Rig scopes the override to a specific rig's order.\nEmpty matches city-level orders."
+          "description": "Rig scopes the override to a specific rig's order. Empty matches\nONLY city-level orders (those with no rig); it does NOT match\nper-rig instances of the same name — those expand at scan time\nand require an explicit rig. Use rig = \"*\" as a wildcard to match\nevery instance of the named order (city-level + every rig-scoped\ncopy). The literal \"*\" is reserved and rejected as a real rig\nname by config validation."
         },
         "enabled": {
           "type": "boolean",
@@ -1677,7 +1722,7 @@
         },
         "resume_command": {
           "type": "string",
-          "description": "ResumeCommand is the full shell command to run when resuming a session.\nSupports {{.SessionKey}} template variable. When set, takes precedence\nover ResumeFlag/ResumeStyle. Example:\n  \"claude --resume {{.SessionKey}} --dangerously-skip-permissions\""
+          "description": "ResumeCommand is the full shell command to run when resuming a session.\nSupports only the {{.SessionKey}} template variable. When set, takes precedence\nover ResumeFlag/ResumeStyle. When schema-managed defaults are inserted, the\nresolver tokenizes and re-emits the command; for subcommand-style resume it\ninserts after the ResumeFlag token that precedes {{.SessionKey}}. Example:\n  \"claude --resume {{.SessionKey}} --dangerously-skip-permissions\"\nSchema-managed defaults missing from a subcommand-style resume command\nare inserted before {{.SessionKey}} during provider resolution."
         },
         "session_id_flag": {
           "type": "string",
@@ -1688,7 +1733,7 @@
             "type": "string"
           },
           "type": "object",
-          "description": "PermissionModes maps permission mode names to CLI flags.\nExample: {\"unrestricted\": \"--dangerously-skip-permissions\", \"plan\": \"--permission-mode plan\"}\nThis is a config-only lookup table consumed by external clients\n(e.g., Mission Control) to populate permission mode dropdowns.\nLaunch-time flag substitution is planned for a follow-up PR —\ncurrently no runtime code reads this field."
+          "description": "PermissionModes maps permission mode names to CLI flags.\nExample: {\"unrestricted\": \"--dangerously-skip-permissions\", \"plan\": \"--permission-mode plan\"}\nThis is a config-only lookup table consumed by external clients\n(e.g., real-world app) to populate permission mode dropdowns.\nLaunch-time flag substitution is planned for a follow-up PR —\ncurrently no runtime code reads this field."
         },
         "option_defaults": {
           "additionalProperties": {

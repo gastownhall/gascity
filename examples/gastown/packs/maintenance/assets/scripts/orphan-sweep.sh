@@ -13,14 +13,35 @@ set -euo pipefail
 
 CITY="${GC_CITY:-.}"
 
-# Step 1: Get all in-progress beads with assignees.
-IN_PROGRESS=$(bd list --status=in_progress --json --limit=0 2>/dev/null) || exit 0
-if [ -z "$IN_PROGRESS" ] || [ "$IN_PROGRESS" = "[]" ]; then
+# Step 1: Collect in-progress beads from HQ and every rig.
+# `gc bd list` without --rig is HQ-scoped from the city cwd, so per-rig
+# beads are invisible to a bare query — walk every rig explicitly.
+TMP=$(mktemp) || exit 0
+trap 'rm -f "$TMP"' EXIT
+
+gc bd list --status=in_progress --json --limit=0 2>/dev/null >>"$TMP" || true
+
+RIG_LIST=$(gc rig list --json 2>/dev/null) || RIG_LIST=""
+if [ -n "$RIG_LIST" ]; then
+    RIG_NAMES=$(echo "$RIG_LIST" | jq -r '.rigs[] | select(.hq == false) | .name' 2>/dev/null) || RIG_NAMES=""
+    while IFS= read -r rig; do
+        [ -z "$rig" ] && continue
+        gc bd list --rig "$rig" --status=in_progress --json --limit=0 2>/dev/null >>"$TMP" || true
+    done <<<"$RIG_NAMES"
+fi
+
+IN_PROGRESS=$(jq -c -s 'add // []' "$TMP" 2>/dev/null) || IN_PROGRESS="[]"
+if [ "$IN_PROGRESS" = "[]" ]; then
     exit 0
 fi
 
-# Step 2: Get all known agent names (from config, scoped to [[agent]] blocks).
-AGENTS=$(gc config show 2>/dev/null | awk '/^\[\[agent\]\]/{a=1} a && /^\s*name\s*=/{print; a=0}' | sed 's/.*=\s*"\(.*\)"/\1/') || exit 0
+# Step 2: Get all known agent identities from resolved config.
+# `gc config explain` prints Agent.QualifiedName(), including import binding
+# and rig scope. Fall back to the older config-show parser for older binaries.
+AGENTS=$(gc config explain 2>/dev/null | awk '/^Agent: /{print $2}') || AGENTS=""
+if [ -z "$AGENTS" ]; then
+    AGENTS=$(gc config show 2>/dev/null | awk '/^\[\[agent\]\]/{a=1} a && /^\s*name\s*=/{print; a=0}' | sed 's/.*=\s*"\(.*\)"/\1/') || exit 0
+fi
 if [ -z "$AGENTS" ]; then
     exit 0
 fi
@@ -45,12 +66,16 @@ is_known_agent() {
 }
 
 ORPHANED=0
-echo "$IN_PROGRESS" | jq -r '.[] | select(.assignee != null and .assignee != "") | "\(.id)\t\(.assignee)"' 2>/dev/null | while IFS=$'\t' read -r bead_id assignee; do
+# Process substitution (not a pipe) keeps the loop body in the parent
+# shell so $ORPHANED survives for the summary message below.
+while IFS=$'\t' read -r bead_id assignee; do
     if ! is_known_agent "$assignee"; then
-        bd update "$bead_id" --status=open --assignee="" 2>/dev/null || true
+        # `gc bd update` auto-resolves the bead's prefix to the right rig
+        # store, so HQ and rig beads update in the correct database.
+        gc bd update "$bead_id" --status=open --assignee="" 2>/dev/null || true
         ORPHANED=$((ORPHANED + 1))
     fi
-done
+done < <(echo "$IN_PROGRESS" | jq -r '.[] | select(.assignee != null and .assignee != "") | "\(.id)\t\(.assignee)"' 2>/dev/null)
 
 if [ "$ORPHANED" -gt 0 ]; then
     echo "orphan-sweep: reset $ORPHANED orphaned beads"

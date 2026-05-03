@@ -76,6 +76,7 @@ quick way to force-refresh all agents working on a particular project.`,
 			}
 			return nil
 		},
+		ValidArgsFunction: completeRigNames,
 	}
 }
 

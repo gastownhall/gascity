@@ -21,27 +21,30 @@ func TestSessionWake_StateTransitionsAndMetadata(t *testing.T) {
 		metadata        map[string]string
 		wantState       string
 		wantSleepReason string
+		wantPending     string
 	}{
 		{
-			name: "suspended becomes asleep",
+			name: "suspended requests start",
 			metadata: map[string]string{
 				"template":     "worker",
 				"state":        "suspended",
 				"held_until":   future,
 				"sleep_reason": "user-hold",
 			},
-			wantState:       "asleep",
+			wantState:       "creating",
 			wantSleepReason: "",
+			wantPending:     "true",
 		},
 		{
-			name: "drained becomes asleep",
+			name: "drained requests start",
 			metadata: map[string]string{
 				"template":     "worker",
 				"state":        "drained",
 				"sleep_reason": "drained",
 			},
-			wantState:       "asleep",
+			wantState:       "creating",
 			wantSleepReason: "",
+			wantPending:     "true",
 		},
 		{
 			name: "creating clears quarantine but stays creating",
@@ -54,6 +57,7 @@ func TestSessionWake_StateTransitionsAndMetadata(t *testing.T) {
 			},
 			wantState:       "creating",
 			wantSleepReason: "",
+			wantPending:     "",
 		},
 		{
 			name: "active stays active",
@@ -64,6 +68,7 @@ func TestSessionWake_StateTransitionsAndMetadata(t *testing.T) {
 			},
 			wantState:       "active",
 			wantSleepReason: "idle",
+			wantPending:     "",
 		},
 	}
 
@@ -92,6 +97,9 @@ func TestSessionWake_StateTransitionsAndMetadata(t *testing.T) {
 			}
 			if got := updated.Metadata["sleep_reason"]; got != tt.wantSleepReason {
 				t.Fatalf("sleep_reason = %q, want %q", got, tt.wantSleepReason)
+			}
+			if got := updated.Metadata["pending_create_claim"]; got != tt.wantPending {
+				t.Fatalf("pending_create_claim = %q, want %q", got, tt.wantPending)
 			}
 			if got := updated.Metadata["held_until"]; got != "" {
 				t.Fatalf("held_until = %q, want empty", got)
@@ -225,7 +233,7 @@ func TestCmdSessionWake_ManagedBdPokesControllerAndMovesSuspendedToAsleep(t *tes
 	}
 }
 
-func TestCmdSessionWake_PokesManagedControllerAndMovesSuspendedToAsleep(t *testing.T) {
+func TestCmdSessionWake_PokesManagedControllerAndRequestsSuspendedStart(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
 
@@ -329,8 +337,11 @@ func TestCmdSessionWake_PokesManagedControllerAndMovesSuspendedToAsleep(t *testi
 	if err != nil {
 		t.Fatalf("store.Get(%s): %v", sessionID, err)
 	}
-	if got := updated.Metadata["state"]; got != "asleep" {
-		t.Fatalf("state = %q, want asleep", got)
+	if got := updated.Metadata["state"]; got != "creating" {
+		t.Fatalf("state = %q, want creating", got)
+	}
+	if got := updated.Metadata["pending_create_claim"]; got != "true" {
+		t.Fatalf("pending_create_claim = %q, want true", got)
 	}
 	if got := updated.Metadata["held_until"]; got != "" {
 		t.Fatalf("held_until = %q, want empty", got)

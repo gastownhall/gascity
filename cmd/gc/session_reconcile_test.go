@@ -21,7 +21,9 @@ import (
 // testStore wraps a bead slice for SetMetadata tracking in tests.
 type testStore struct {
 	beads.Store
-	metadata map[string]map[string]string // id -> key -> value
+	metadata             map[string]map[string]string // id -> key -> value
+	metadataBatchCalls   int
+	metadataBatchPatches []map[string]string
 }
 
 func newTestStore() *testStore {
@@ -37,6 +39,12 @@ func (s *testStore) SetMetadata(id, key, value string) error {
 }
 
 func (s *testStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	s.metadataBatchCalls++
+	patch := make(map[string]string, len(kvs))
+	for k, v := range kvs {
+		patch[k] = v
+	}
+	s.metadataBatchPatches = append(s.metadataBatchPatches, patch)
 	for k, v := range kvs {
 		if err := s.SetMetadata(id, k, v); err != nil {
 			return err
@@ -693,7 +701,7 @@ func TestComputeWorkSet_ResolvesRigDir(t *testing.T) {
 	runner := func(_ string, dir string, _ map[string]string) (string, error) {
 		// The dir must be the resolved absolute path, not the relative "myrig".
 		if dir == rigDir {
-			return "MC-1\n", nil
+			return "real-world app-1\n", nil
 		}
 		return "", fmt.Errorf("unexpected dir %q, want %q", dir, rigDir)
 	}
@@ -717,7 +725,7 @@ func TestComputeWorkSet_UsesConfiguredRigRoot(t *testing.T) {
 
 	runner := func(_ string, dir string, _ map[string]string) (string, error) {
 		if dir == rigDir {
-			return "MC-1\n", nil
+			return "real-world app-1\n", nil
 		}
 		return "", fmt.Errorf("unexpected dir %q, want %q", dir, rigDir)
 	}
@@ -1094,44 +1102,69 @@ func TestClearWakeFailures(t *testing.T) {
 	}
 }
 
-func TestClearWakeFailures_SkipsWriteWhenAlreadyClear(t *testing.T) {
+func TestClearWakeFailuresSkipsNoOpClear(t *testing.T) {
 	tests := []struct {
-		name    string
-		meta    map[string]string
-		wantNil bool
+		name     string
+		metadata map[string]string
 	}{
-		{
-			name:    "zero attempts and empty quarantine",
-			meta:    map[string]string{"wake_attempts": "0", "quarantined_until": ""},
-			wantNil: true,
-		},
-		{
-			name:    "missing attempts and empty quarantine",
-			meta:    map[string]string{},
-			wantNil: true,
-		},
-		{
-			name:    "nonzero attempts triggers write",
-			meta:    map[string]string{"wake_attempts": "3", "quarantined_until": ""},
-			wantNil: false,
-		},
-		{
-			name:    "quarantine set triggers write",
-			meta:    map[string]string{"wake_attempts": "0", "quarantined_until": "2026-03-08T12:00:00Z"},
-			wantNil: false,
-		},
+		{name: "absent"},
+		{name: "already clear wake attempts", metadata: map[string]string{"wake_attempts": "0"}},
+		{name: "already clear quarantine", metadata: map[string]string{"quarantined_until": ""}},
+		{name: "already clear both", metadata: map[string]string{"wake_attempts": "0", "quarantined_until": ""}},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store := newTestStore()
-			session := makeBead("b1", tt.meta)
+			session := makeBead("b1", tt.metadata)
+
 			clearWakeFailures(&session, store)
-			wrote := len(store.metadata["b1"]) > 0
-			if tt.wantNil && wrote {
-				t.Errorf("expected no store write, but got %v", store.metadata["b1"])
+
+			if store.metadataBatchCalls != 0 {
+				t.Fatalf("SetMetadataBatch called %d times with %v, want 0", store.metadataBatchCalls, store.metadataBatchPatches)
 			}
-			if !tt.wantNil && !wrote {
-				t.Error("expected a store write, but none occurred")
+			if len(store.metadata) != 0 {
+				t.Fatalf("metadata writes = %v, want none", store.metadata)
+			}
+		})
+	}
+}
+
+func TestClearWakeFailuresWritesOnlyChangedFields(t *testing.T) {
+	tests := []struct {
+		name      string
+		metadata  map[string]string
+		wantPatch map[string]string
+	}{
+		{
+			name:      "wake attempts only",
+			metadata:  map[string]string{"wake_attempts": "3", "quarantined_until": ""},
+			wantPatch: map[string]string{"wake_attempts": "0"},
+		},
+		{
+			name:      "quarantine only",
+			metadata:  map[string]string{"wake_attempts": "0", "quarantined_until": "2026-03-08T12:00:00Z"},
+			wantPatch: map[string]string{"quarantined_until": ""},
+		},
+		{
+			name:      "both fields",
+			metadata:  map[string]string{"wake_attempts": "3", "quarantined_until": "2026-03-08T12:00:00Z"},
+			wantPatch: map[string]string{"wake_attempts": "0", "quarantined_until": ""},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newTestStore()
+			session := makeBead("b1", tt.metadata)
+
+			clearWakeFailures(&session, store)
+
+			if store.metadataBatchCalls != 1 {
+				t.Fatalf("SetMetadataBatch called %d times, want 1", store.metadataBatchCalls)
+			}
+			if !reflect.DeepEqual(store.metadataBatchPatches[0], tt.wantPatch) {
+				t.Fatalf("metadata patch = %v, want %v", store.metadataBatchPatches[0], tt.wantPatch)
 			}
 		})
 	}

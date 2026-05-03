@@ -1406,9 +1406,9 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	time.Sleep(500 * time.Millisecond)
 
 	// 3. Send Escape only for TUIs where it's an insert-mode escape, not a
-	// semantic input key. Claude, Codex, and Gemini all treat Escape as a
-	// semantic control key in some busy states, so default submit must not
-	// synthesize it for them.
+	// semantic input key. Claude, Codex, Gemini, and OpenCode all treat
+	// Escape as a semantic control key in some busy states, so default submit
+	// must not synthesize it for them.
 	if t.shouldSendEscapeBeforeEnter(target) {
 		// See: https://github.com/anthropics/gastown/issues/307
 		_, _ = t.run("send-keys", "-t", target, "Escape")
@@ -1487,7 +1487,7 @@ func (t *Tmux) shouldSendEscapeBeforeEnter(target string) bool {
 	provider, err := t.GetEnvironment(target, "GC_PROVIDER")
 	if err == nil {
 		switch strings.TrimSpace(provider) {
-		case "claude", "codex", "gemini":
+		case "claude", "codex", "gemini", "opencode":
 			return false
 		default:
 			// Unrecognized provider (custom alias) — fall through to
@@ -1501,7 +1501,7 @@ func (t *Tmux) shouldSendEscapeBeforeEnter(target string) bool {
 }
 
 func (t *Tmux) targetLooksLikeNoEscapeProvider(target string) bool {
-	noEscapeProviders := []string{"claude", "codex", "gemini"}
+	noEscapeProviders := []string{"claude", "codex", "gemini", "opencode"}
 	return t.targetLooksLikeAnyProvider(target, noEscapeProviders...)
 }
 
@@ -1697,6 +1697,28 @@ func (t *Tmux) IsPaneDead(target string) (bool, error) {
 	default:
 		return false, fmt.Errorf("unexpected pane_dead value %q for target %s", out, target)
 	}
+}
+
+func (t *Tmux) sessionPanesDead(session string) (bool, error) {
+	out, err := t.run("list-panes", "-s", "-t", "="+session, "-F", "#{pane_dead}")
+	if err != nil {
+		return false, err
+	}
+	values := strings.Fields(out)
+	if len(values) == 0 {
+		return false, fmt.Errorf("empty pane_dead list for session %s", session)
+	}
+	for _, value := range values {
+		switch value {
+		case "0":
+			return false, nil
+		case "1":
+			continue
+		default:
+			return false, fmt.Errorf("unexpected pane_dead value %q for session %s", value, session)
+		}
+	}
+	return true, nil
 }
 
 // IsSessionRunning reports whether the tmux session exists and its primary pane

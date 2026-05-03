@@ -68,6 +68,17 @@ func TestLiveFailureResultClassifiesProviderIncidents(t *testing.T) {
 	require.Equal(t, workertest.ResultProviderIssue, result.Status)
 }
 
+func TestLiveFailureResultClassifiesOpenCodeGeminiCapacity(t *testing.T) {
+	result := liveFailureResult(
+		workertest.ProfileID("opencode/tmux-cli"),
+		workertest.RequirementInferenceFreshTask,
+		"live worker did not complete within timeout",
+		map[string]string{"pane_tail": "gemini is way too hot right now (click to expand) [retrying in 31s attempt 4]"},
+	)
+
+	require.Equal(t, workertest.ResultProviderIssue, result.Status)
+}
+
 func TestLiveFailureResultClassifiesAuthErrorsFromPaneTail(t *testing.T) {
 	result := liveFailureResult(
 		workertest.ProfileID("claude/tmux-cli"),
@@ -122,6 +133,15 @@ purchase more credits or try again at 11:26 PM.
 
   Approaching rate limits
   Switch to gpt-5.1-codex-mini for lower credit usage?
+`)
+
+	require.NotNil(t, blocked)
+	require.Equal(t, "rate_limit", blocked.Kind)
+}
+
+func TestClassifyLivePaneBlockedOpenCodeGeminiCapacity(t *testing.T) {
+	blocked := classifyLivePaneBlocked(`
+gemini is way too hot right now (click to expand) [retrying in 31s attempt 4]
 `)
 
 	require.NotNil(t, blocked)
@@ -463,6 +483,45 @@ func TestStageCodexAuthFromFile(t *testing.T) {
 	require.FileExists(t, filepath.Join(gcHome, ".codex", "auth.json"))
 }
 
+func TestStageOpenCodeGeminiAuthFromEnv(t *testing.T) {
+	gcHome := t.TempDir()
+	env := helpers.NewEnv("", gcHome, t.TempDir())
+	t.Setenv("GEMINI_API_KEY", "gemini-key")
+
+	source, err := stageOpenCodeGeminiAuth(gcHome, env)
+	require.NoError(t, err)
+	require.Equal(t, "env:GEMINI_API_KEY", source)
+	require.Equal(t, "gemini-key", env.Get("GEMINI_API_KEY"))
+	require.Equal(t, filepath.Join(gcHome, ".local", "share"), env.Get("XDG_DATA_HOME"))
+	require.Equal(t, filepath.Join(gcHome, ".config"), env.Get("XDG_CONFIG_HOME"))
+	require.Equal(t, filepath.Join(gcHome, ".cache"), env.Get("XDG_CACHE_HOME"))
+	require.Equal(t, filepath.Join(gcHome, ".local", "state"), env.Get("XDG_STATE_HOME"))
+	require.Equal(t, filepath.Join(gcHome, ".local", "share", "gascity", "opencode-transcripts"), env.Get("GC_OPENCODE_TRANSCRIPT_DIR"))
+}
+
+func TestStageOpenCodeGeminiAuthUsesGoogleGenerativeAIEnv(t *testing.T) {
+	gcHome := t.TempDir()
+	env := helpers.NewEnv("", gcHome, t.TempDir())
+	t.Setenv("GOOGLE_GENERATIVE_AI_API_KEY", "google-generative-key")
+
+	source, err := stageOpenCodeGeminiAuth(gcHome, env)
+	require.NoError(t, err)
+	require.Equal(t, "env:GOOGLE_GENERATIVE_AI_API_KEY", source)
+	require.Equal(t, "google-generative-key", env.Get("GOOGLE_GENERATIVE_AI_API_KEY"))
+}
+
+func TestStageOpenCodeGeminiAuthMapsGoogleAPIKey(t *testing.T) {
+	gcHome := t.TempDir()
+	env := helpers.NewEnv("", gcHome, t.TempDir())
+	t.Setenv("GOOGLE_API_KEY", "google-key")
+
+	source, err := stageOpenCodeGeminiAuth(gcHome, env)
+	require.NoError(t, err)
+	require.Equal(t, "env:GOOGLE_API_KEY", source)
+	require.Equal(t, "google-key", env.Get("GOOGLE_API_KEY"))
+	require.Equal(t, "google-key", env.Get("GEMINI_API_KEY"))
+}
+
 func TestSeedLiveProviderStateCodexMarksTrustedProject(t *testing.T) {
 	gcHome := t.TempDir()
 	prevEnv := liveEnv
@@ -792,6 +851,35 @@ install_agent_hooks = ["gemini"]`)
 	require.Equal(t, 1, strings.Count(text, `install_agent_hooks = ["gemini"]`))
 }
 
+func TestInstallInferenceProbeAgentEnablesOpenCodeHooks(t *testing.T) {
+	cityDir := t.TempDir()
+	cityToml := filepath.Join(cityDir, "city.toml")
+	require.NoError(t, os.WriteFile(cityToml, []byte(`
+[workspace]
+name = "worker-inference-test"
+provider = "opencode"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+`), 0o644))
+
+	require.NoError(t, installInferenceProbeAgent(cityDir, true))
+	require.NoError(t, installInferenceProbeAgent(cityDir, true))
+
+	data, err := os.ReadFile(cityToml)
+	require.NoError(t, err)
+	text := string(data)
+	require.Contains(t, text, `[workspace]
+name = "worker-inference-test"
+provider = "opencode"
+install_agent_hooks = ["opencode"]`)
+	require.Contains(t, text, `[[agent]]
+name = "probe"
+session = "tmux"`)
+	require.Equal(t, 1, strings.Count(text, `install_agent_hooks = ["opencode"]`))
+}
+
 func TestInstallLiveProviderCommandOverride(t *testing.T) {
 	cityDir := t.TempDir()
 	cityToml := filepath.Join(cityDir, "city.toml")
@@ -826,6 +914,26 @@ provider = "claude"
 	require.NoError(t, err)
 	text := string(data)
 	require.Contains(t, text, `process_names = ["aimux", "claude"]`)
+}
+
+func TestInstallLiveProviderCommandOverrideIncludesArgsAppend(t *testing.T) {
+	cityDir := t.TempDir()
+	cityToml := filepath.Join(cityDir, "city.toml")
+	require.NoError(t, os.WriteFile(cityToml, []byte(`
+[workspace]
+name = "worker-inference-test"
+provider = "opencode"
+`), 0o644))
+
+	require.NoError(t, installLiveProviderCommandOverrideWithArgs(cityDir, "opencode", "/tmp/provider-bin/opencode", []string{"opencode", "node", "bun"}, []string{"--model", "google/gemini-2.5-flash"}))
+
+	data, err := os.ReadFile(cityToml)
+	require.NoError(t, err)
+	text := string(data)
+	require.Contains(t, text, `[providers.opencode]`)
+	require.Contains(t, text, `command = "/tmp/provider-bin/opencode"`)
+	require.Contains(t, text, `process_names = ["opencode", "node", "bun"]`)
+	require.Contains(t, text, `args_append = ["--model", "google/gemini-2.5-flash"]`)
 }
 
 func TestSetNamedSessionMode(t *testing.T) {

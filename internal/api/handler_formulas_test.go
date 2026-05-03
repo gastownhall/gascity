@@ -49,12 +49,16 @@ title = "Review PR"
 
 	var resp struct {
 		Items []formulaSummaryResponse `json:"items"`
+		Total int                      `json:"total"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("Decode(catalog): %v", err)
 	}
 	if len(resp.Items) != 1 {
 		t.Fatalf("items = %+v, want 1 entry", resp.Items)
+	}
+	if resp.Total != len(resp.Items) {
+		t.Fatalf("total = %d, want len(items)=%d", resp.Total, len(resp.Items))
 	}
 	item := resp.Items[0]
 	if item.Name != "mol-adopt-pr-v2" {

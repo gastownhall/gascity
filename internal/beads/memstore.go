@@ -174,6 +174,20 @@ func (m *MemStore) Close(id string) error {
 	return fmt.Errorf("closing bead %q: %w", id, ErrNotFound)
 }
 
+// Reopen sets a bead's status to "open". Returns a wrapped ErrNotFound if the
+// ID does not exist.
+func (m *MemStore) Reopen(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.beads {
+		if m.beads[i].ID == id {
+			m.beads[i].Status = "open"
+			return nil
+		}
+	}
+	return fmt.Errorf("reopening bead %q: %w", id, ErrNotFound)
+}
+
 // CloseAll closes multiple beads in a single batch and sets metadata on each.
 func (m *MemStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
 	m.mu.Lock()

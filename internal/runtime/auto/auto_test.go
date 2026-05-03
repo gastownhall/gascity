@@ -22,6 +22,29 @@ func (p *falseNegativeStopProvider) Stop(string) error { return p.stopErr }
 
 func (p *falseNegativeStopProvider) IsRunning(string) bool { return false }
 
+type deadRuntimeCheckProvider struct {
+	*runtime.Fake
+	dead   map[string]bool
+	errs   map[string]error
+	checks []string
+}
+
+func newDeadRuntimeCheckProvider() *deadRuntimeCheckProvider {
+	return &deadRuntimeCheckProvider{
+		Fake: runtime.NewFake(),
+		dead: make(map[string]bool),
+		errs: make(map[string]error),
+	}
+}
+
+func (p *deadRuntimeCheckProvider) IsDeadRuntimeSession(name string) (bool, error) {
+	p.checks = append(p.checks, name)
+	if err := p.errs[name]; err != nil {
+		return false, err
+	}
+	return p.dead[name], nil
+}
+
 func TestRouteDefaultAndACP(t *testing.T) {
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
@@ -343,6 +366,46 @@ func TestIsRunningFallsThrough(t *testing.T) {
 	_ = acpSP.Start(context.Background(), "lost-route", runtime.Config{})
 	if !p.IsRunning("lost-route") {
 		t.Fatal("IsRunning should fall through to ACP when default reports not running")
+	}
+}
+
+func TestIsDeadRuntimeSessionChecksUnroutedFallbackChecker(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	acpSP := newDeadRuntimeCheckProvider()
+	acpSP.dead["lost-route"] = true
+	p := New(defaultSP, acpSP)
+
+	dead, err := p.IsDeadRuntimeSession("lost-route")
+	if err != nil {
+		t.Fatalf("IsDeadRuntimeSession: %v", err)
+	}
+	if !dead {
+		t.Fatal("IsDeadRuntimeSession = false, want true from fallback checker")
+	}
+	if got := acpSP.checks; len(got) != 1 || got[0] != "lost-route" {
+		t.Fatalf("fallback checks = %v, want [lost-route]", got)
+	}
+}
+
+func TestIsDeadRuntimeSessionFindsDefaultCorpseBehindStaleACPRoute(t *testing.T) {
+	defaultSP := newDeadRuntimeCheckProvider()
+	acpSP := newDeadRuntimeCheckProvider()
+	defaultSP.dead["agent"] = true
+	p := New(defaultSP, acpSP)
+	p.RouteACP("agent")
+
+	dead, err := p.IsDeadRuntimeSession("agent")
+	if err != nil {
+		t.Fatalf("IsDeadRuntimeSession: %v", err)
+	}
+	if !dead {
+		t.Fatal("IsDeadRuntimeSession = false, want true from default backend")
+	}
+	if got := acpSP.checks; len(got) != 1 || got[0] != "agent" {
+		t.Fatalf("primary checks = %v, want [agent]", got)
+	}
+	if got := defaultSP.checks; len(got) != 1 || got[0] != "agent" {
+		t.Fatalf("fallback checks = %v, want [agent]", got)
 	}
 }
 

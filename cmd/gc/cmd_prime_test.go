@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 func TestBuildPrimeContextFallsBackToConfiguredRigRoot(t *testing.T) {
@@ -65,6 +66,43 @@ func TestBuildPrimeContextLogsTemplateExpansionWarning(t *testing.T) {
 	}
 	if strings.Contains(stderr.String(), "echo {{.Rig") {
 		t.Fatalf("stderr should redact raw template, got %q", stderr.String())
+	}
+}
+
+func TestBuildPrimeContextRendersBindingQualifiedRoute(t *testing.T) {
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	t.Setenv("GC_DIR", "")
+	t.Setenv("GC_BRANCH", "")
+	t.Setenv("GC_AGENT", "")
+	t.Setenv("GC_ALIAS", "")
+
+	cityPath := t.TempDir()
+	promptDir := filepath.Join(cityPath, "prompts")
+	if err := os.MkdirAll(promptDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(promptDir): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(promptDir, "polecat.template.md"), []byte("route={{ .RigName }}/{{ .BindingPrefix }}refinery\nbinding={{ .BindingName }}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(prompt): %v", err)
+	}
+
+	ctx := buildPrimeContext(cityPath, "test-city", &config.Agent{
+		Name:        "polecat",
+		Dir:         "demo",
+		BindingName: "gastown",
+	}, []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}}, nil)
+
+	if ctx.BindingName != "gastown" {
+		t.Fatalf("BindingName = %q, want gastown", ctx.BindingName)
+	}
+	if ctx.BindingPrefix != "gastown." {
+		t.Fatalf("BindingPrefix = %q, want gastown.", ctx.BindingPrefix)
+	}
+	var stderr bytes.Buffer
+	got := renderPrompt(fsys.OSFS{}, cityPath, "test-city", "prompts/polecat.template.md", ctx, "", &stderr, nil, nil, nil)
+	want := "route=demo/gastown.refinery\nbinding=gastown\n"
+	if got != want {
+		t.Fatalf("rendered prompt = %q, want %q; stderr=%q", got, want, stderr.String())
 	}
 }
 

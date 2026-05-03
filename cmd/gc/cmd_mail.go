@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"text/tabwriter"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -24,6 +26,12 @@ import (
 // replying to mail. When non-nil, it is called with the recipient name.
 // Errors are non-fatal.
 type nudgeFunc func(recipient string) error
+
+const (
+	mailInjectMaxMessages     = 3
+	mailInjectBodyPreviewSize = 240
+	mailInjectPreviewScanSize = 4096
+)
 
 func newMailNudgeFunc(sender string) nudgeFunc {
 	return func(recipient string) error {
@@ -73,12 +81,13 @@ hooks to deliver mail notifications into agent prompts.`,
 
 func newMailArchiveCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
-		Use:   "archive <id>",
-		Short: "Archive a message without reading it",
-		Long: `Close a message bead without displaying its contents.
+		Use:   "archive <id>...",
+		Short: "Archive one or more messages without reading them",
+		Long: `Close one or more message beads without displaying their contents.
 
-Use this to dismiss a message without reading it. The message is marked
-as closed and will no longer appear in mail check or inbox results.`,
+Use this to dismiss messages without reading them. Each message is marked
+as closed and will no longer appear in mail check or inbox results. When
+multiple IDs are passed, they are archived in a single batch round-trip.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdMailArchive(args, stdout, stderr) != 0 {
@@ -99,15 +108,22 @@ func cmdMailArchive(args []string, stdout, stderr io.Writer) int {
 	return doMailArchive(mp, rec, args, stdout, stderr)
 }
 
-// doMailArchive closes a message without displaying it. Accepts an
-// injected provider and recorder for testability.
+// doMailArchive closes one or more message beads. For a single ID the
+// behavior matches the pre-batch CLI byte-for-byte; for two or more IDs it
+// delegates to mp.ArchiveMany for a single-round-trip close and prints one
+// result line per id.
 func doMailArchive(mp mail.Provider, rec events.Recorder, args []string, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "gc mail archive: missing message ID") //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	id := args[0]
+	if len(args) == 1 {
+		return doMailArchiveSingle(mp, rec, args[0], stdout, stderr)
+	}
+	return doMailArchiveMany(mp, rec, args, stdout, stderr)
+}
 
+func doMailArchiveSingle(mp mail.Provider, rec events.Recorder, id string, stdout, stderr io.Writer) int {
 	if err := mp.Archive(id); err != nil {
 		if errors.Is(err, mail.ErrAlreadyArchived) {
 			fmt.Fprintf(stdout, "Already archived %s\n", id) //nolint:errcheck // best-effort stdout
@@ -126,6 +142,36 @@ func doMailArchive(mp mail.Provider, rec events.Recorder, args []string, stdout,
 	})
 	fmt.Fprintf(stdout, "Archived message %s\n", id) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+func doMailArchiveMany(mp mail.Provider, rec events.Recorder, ids []string, stdout, stderr io.Writer) int {
+	results, err := mp.ArchiveMany(ids)
+	if err != nil {
+		telemetry.RecordMailOp(context.Background(), "archive", err)
+		fmt.Fprintf(stderr, "gc mail archive: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	exit := 0
+	for _, r := range results {
+		switch {
+		case r.Err == nil:
+			telemetry.RecordMailOp(context.Background(), "archive", nil)
+			rec.Record(events.Event{
+				Type:    events.MailArchived,
+				Actor:   eventActor(),
+				Subject: r.ID,
+				Payload: mailEventPayload(nil),
+			})
+			fmt.Fprintf(stdout, "Archived message %s\n", r.ID) //nolint:errcheck // best-effort stdout
+		case errors.Is(r.Err, mail.ErrAlreadyArchived):
+			fmt.Fprintf(stdout, "Already archived %s\n", r.ID) //nolint:errcheck // best-effort stdout
+		default:
+			telemetry.RecordMailOp(context.Background(), "archive", r.Err)
+			fmt.Fprintf(stderr, "gc mail archive %s: %v\n", r.ID, r.Err) //nolint:errcheck // best-effort stderr
+			exit = 1
+		}
+	}
+	return exit
 }
 
 func newMailCheckCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -232,18 +278,86 @@ func formatInjectOutput(messages []mail.Message) string {
 	var sb strings.Builder
 	sb.WriteString("<system-reminder>\n")
 	fmt.Fprintf(&sb, "You have %d unread message(s).\n\n", len(messages))
-	for _, m := range messages {
-		subject := strings.TrimSpace(m.Subject)
-		body := strings.TrimSpace(m.Body)
+	limit := len(messages)
+	if limit > mailInjectMaxMessages {
+		limit = mailInjectMaxMessages
+		fmt.Fprintf(&sb, "Showing the first %d message(s) here; run 'gc mail inbox' for the full list.\n\n", limit)
+	}
+	for _, m := range messages[:limit] {
+		subject, subjectTruncated := mailInjectSubjectPreview(m.Subject)
+		body, bodyTruncated := mailInjectBodyPreview(m.Body)
 		if subject != "" && subject != body {
-			fmt.Fprintf(&sb, "- %s from %s [%s]: %s\n", m.ID, m.From, m.Subject, m.Body)
+			fmt.Fprintf(&sb, "- %s from %s [%s", m.ID, m.From, subject)
+			if subjectTruncated {
+				sb.WriteString(" ... [subject truncated]")
+			}
+			fmt.Fprintf(&sb, "]: %s", body)
 		} else {
-			fmt.Fprintf(&sb, "- %s from %s: %s\n", m.ID, m.From, m.Body)
+			fmt.Fprintf(&sb, "- %s from %s: %s", m.ID, m.From, body)
 		}
+		if bodyTruncated {
+			sb.WriteString(" ... [preview truncated]")
+		}
+		sb.WriteByte('\n')
 	}
 	sb.WriteString("\nRun 'gc mail read <id>' for full details, or 'gc mail inbox' to see all.\n")
 	sb.WriteString("</system-reminder>\n")
 	return sb.String()
+}
+
+func mailInjectSubjectPreview(subject string) (string, bool) {
+	return mailInjectTextPreview(subject, mailInjectBodyPreviewSize)
+}
+
+func mailInjectBodyPreview(body string) (string, bool) {
+	return mailInjectTextPreview(body, mailInjectBodyPreviewSize)
+}
+
+func mailInjectTextPreview(text string, limit int) (string, bool) {
+	if limit <= 0 {
+		return "", strings.TrimSpace(text) != ""
+	}
+
+	var sb strings.Builder
+	scanned := 0
+	pendingSpace := false
+	for len(text) > 0 {
+		if scanned >= mailInjectPreviewScanSize {
+			return sb.String(), true
+		}
+
+		r, size := utf8.DecodeRuneInString(text)
+		if scanned+size > mailInjectPreviewScanSize {
+			return sb.String(), true
+		}
+		text = text[size:]
+		scanned += size
+
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			if sb.Len() > 0 {
+				pendingSpace = true
+			}
+			continue
+		}
+
+		encodedLen := utf8.RuneLen(r)
+		if encodedLen < 0 {
+			encodedLen = len(string(r))
+		}
+		needed := encodedLen
+		if pendingSpace && sb.Len() > 0 {
+			needed++
+		}
+		if sb.Len()+needed > limit {
+			return sb.String(), true
+		}
+		if pendingSpace && sb.Len() > 0 {
+			sb.WriteByte(' ')
+			pendingSpace = false
+		}
+		sb.WriteRune(r)
+	}
+	return sb.String(), false
 }
 
 func defaultMailIdentity() string {
@@ -901,10 +1015,12 @@ func newMailMarkUnreadCmd(stdout, stderr io.Writer) *cobra.Command {
 
 func newMailDeleteCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
-		Use:   "delete <id>",
-		Short: "Delete a message (closes the bead)",
-		Long:  `Delete a message by closing the bead. Same effect as archive but with different user intent.`,
-		Args:  cobra.ArbitraryArgs,
+		Use:   "delete <id>...",
+		Short: "Delete one or more messages (closes the beads)",
+		Long: `Delete one or more messages by closing the beads. Same effect as archive
+but with different user intent. When multiple IDs are passed, they are
+deleted in a single batch round-trip.`,
+		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdMailDelete(args, stdout, stderr) != 0 {
 				return errExit
@@ -1424,13 +1540,22 @@ func cmdMailDelete(args []string, stdout, stderr io.Writer) int {
 	return doMailDelete(mp, rec, args, stdout, stderr)
 }
 
-// doMailDelete closes a message bead (same as archive but different intent).
+// doMailDelete closes one or more message beads (same as archive but
+// different intent). Single-id behavior matches the pre-batch CLI
+// byte-for-byte; multi-id uses mp.DeleteMany to preserve provider delete
+// semantics.
 func doMailDelete(mp mail.Provider, rec events.Recorder, args []string, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "gc mail delete: missing message ID") //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	id := args[0]
+	if len(args) == 1 {
+		return doMailDeleteSingle(mp, rec, args[0], stdout, stderr)
+	}
+	return doMailDeleteMany(mp, rec, args, stdout, stderr)
+}
+
+func doMailDeleteSingle(mp mail.Provider, rec events.Recorder, id string, stdout, stderr io.Writer) int {
 	if err := mp.Delete(id); err != nil {
 		if errors.Is(err, mail.ErrAlreadyArchived) {
 			fmt.Fprintf(stdout, "Already deleted %s\n", id) //nolint:errcheck // best-effort stdout
@@ -1449,6 +1574,36 @@ func doMailDelete(mp mail.Provider, rec events.Recorder, args []string, stdout, 
 	})
 	fmt.Fprintf(stdout, "Deleted message %s\n", id) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+func doMailDeleteMany(mp mail.Provider, rec events.Recorder, ids []string, stdout, stderr io.Writer) int {
+	results, err := mp.DeleteMany(ids)
+	if err != nil {
+		telemetry.RecordMailOp(context.Background(), "delete", err)
+		fmt.Fprintf(stderr, "gc mail delete: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	exit := 0
+	for _, r := range results {
+		switch {
+		case r.Err == nil:
+			telemetry.RecordMailOp(context.Background(), "delete", nil)
+			rec.Record(events.Event{
+				Type:    events.MailDeleted,
+				Actor:   eventActor(),
+				Subject: r.ID,
+				Payload: mailEventPayload(nil),
+			})
+			fmt.Fprintf(stdout, "Deleted message %s\n", r.ID) //nolint:errcheck // best-effort stdout
+		case errors.Is(r.Err, mail.ErrAlreadyArchived):
+			fmt.Fprintf(stdout, "Already deleted %s\n", r.ID) //nolint:errcheck // best-effort stdout
+		default:
+			telemetry.RecordMailOp(context.Background(), "delete", r.Err)
+			fmt.Fprintf(stderr, "gc mail delete %s: %v\n", r.ID, r.Err) //nolint:errcheck // best-effort stderr
+			exit = 1
+		}
+	}
+	return exit
 }
 
 // cmdMailThread lists messages in a thread.

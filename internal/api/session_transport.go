@@ -14,8 +14,21 @@ type acpRoutingProvider interface {
 
 func validateSessionTransport(resolved *config.ResolvedProvider, transport string, sp runtime.Provider) (string, error) {
 	transport = strings.TrimSpace(transport)
-	if transport != "acp" {
+	switch transport {
+	case "":
 		return transport, nil
+	case config.SessionTransportTmux:
+		if transportSupportsTmux(sp) {
+			return transport, nil
+		}
+		providerName := transport
+		if resolved != nil && resolved.Name != "" {
+			providerName = resolved.Name
+		}
+		return "", fmt.Errorf("provider %q requires tmux transport but the session provider cannot route tmux sessions", providerName)
+	case config.SessionTransportACP:
+	default:
+		return "", fmt.Errorf("unknown session transport %q", transport)
 	}
 	providerName := ""
 	if resolved != nil {
@@ -48,10 +61,17 @@ func transportSupportsACP(sp runtime.Provider) bool {
 		return false
 	}
 	if provider, ok := sp.(runtime.TransportCapabilityProvider); ok {
-		return provider.SupportsTransport("acp")
+		return provider.SupportsTransport(config.SessionTransportACP)
 	}
 	if _, ok := sp.(acpRoutingProvider); ok {
 		return true
 	}
 	return false
+}
+
+func transportSupportsTmux(sp runtime.Provider) bool {
+	if provider, ok := sp.(runtime.TransportCapabilityProvider); ok {
+		return provider.SupportsTransport(config.SessionTransportTmux)
+	}
+	return true
 }

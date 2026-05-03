@@ -30,6 +30,7 @@ func createPoolSessionBead(
 	if store == nil {
 		return beads.Bead{}, fmt.Errorf("session store unavailable for pool template %q", template)
 	}
+	instanceToken := sessionpkg.NewInstanceToken()
 	meta := map[string]string{
 		"template":             template,
 		"agent_name":           template,
@@ -38,7 +39,8 @@ func createPoolSessionBead(
 		"session_origin":       "ephemeral",
 		"generation":           "1",
 		"continuation_epoch":   "1",
-		"instance_token":       sessionpkg.NewInstanceToken(),
+		"instance_token":       instanceToken,
+		"session_name":         pendingPoolSessionName(template, instanceToken),
 		poolManagedMetadataKey: boolMetadata(true),
 	}
 	bead, err := store.Create(beads.Bead{

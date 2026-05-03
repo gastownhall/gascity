@@ -97,6 +97,92 @@ exit 0
 	}
 }
 
+func TestOrphanSweepPreservesQualifiedRigAssignees(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+case "$1" in
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: gastown.deacon
+  source: pack
+Agent: project/gastown.refinery
+  source: pack
+Agent: project/gastown.polecat
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true},{"name":"project","hq":false}]}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      case "$*" in
+        *"--rig project"*)
+          cat <<'EOF'
+[
+  {"id":"ga-valid","status":"in_progress","assignee":"project/gastown.refinery"},
+  {"id":"ga-pool","status":"in_progress","assignee":"project/gastown.polecat-3"},
+  {"id":"ga-orphan","status":"in_progress","assignee":"project/gastown.missing"}
+]
+EOF
+          ;;
+        *)
+          printf '[]\n'
+          ;;
+      esac
+      exit 0
+    fi
+    if [ "$2" = "update" ]; then
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if !strings.Contains(string(out), "orphan-sweep: reset 1 orphaned beads") {
+		t.Fatalf("unexpected orphan-sweep output:\n%s", out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	log := string(logData)
+	if !strings.Contains(log, "bd update ga-orphan --status=open --assignee=") {
+		t.Fatalf("orphan bead was not reset:\n%s", log)
+	}
+	for _, preserved := range []string{"ga-valid", "ga-pool"} {
+		if strings.Contains(log, "bd update "+preserved+" ") {
+			t.Fatalf("valid assignee %s was reset:\n%s", preserved, log)
+		}
+	}
+}
+
 func TestMaintenanceDoltScriptsFallbackToManagedRuntimePorts(t *testing.T) {
 	scripts := []struct {
 		name   string
@@ -604,6 +690,100 @@ func TestMaintenanceDoltScriptsRejectInvalidManagedPort(t *testing.T) {
 	}
 }
 
+func TestMaintenanceDoltScriptsSkipTestPatternDatabases(t *testing.T) {
+	tests := []struct {
+		name   string
+		script string
+		env    map[string]string
+	}{
+		{
+			name:   "reaper",
+			script: filepath.Join("packs", "maintenance", "assets", "scripts", "reaper.sh"),
+			env: map[string]string{
+				"GC_REAPER_DRY_RUN": "1",
+			},
+		},
+		{
+			name:   "jsonl export",
+			script: filepath.Join("packs", "maintenance", "assets", "scripts", "jsonl-export.sh"),
+			env: map[string]string{
+				"GC_JSONL_ARCHIVE_REPO":      "archive",
+				"GC_JSONL_MAX_PUSH_FAILURES": "99",
+			},
+		},
+	}
+
+	excludedDBs := []string{
+		"benchdb",
+		"testdb_foo",
+		"beads_tbar",
+		"beads_ptbaz",
+		"beads_vrqux",
+		"doctest_xyz",
+		"doctortest_abc",
+	}
+	includedDBs := []string{"beads", "customdb"}
+
+	allDBs := append([]string{}, includedDBs...)
+	allDBs = append(allDBs, excludedDBs...)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			binDir := t.TempDir()
+			stateDir := t.TempDir()
+			doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+			gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+			writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
+			writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+			env := map[string]string{
+				"DOLT_ARGS_LOG":       doltLog,
+				"DOLT_DBS":            strings.Join(allDBs, " "),
+				"GC_CALL_LOG":         gcLog,
+				"GC_CITY":             cityDir,
+				"GC_CITY_PATH":        cityDir,
+				"GC_PACK_STATE_DIR":   stateDir,
+				"GC_DOLT_HOST":        "127.0.0.1",
+				"GC_DOLT_PORT":        "3307",
+				"GC_DOLT_USER":        "root",
+				"GC_DOLT_PASSWORD":    "",
+				"GIT_CONFIG_GLOBAL":   filepath.Join(t.TempDir(), "gitconfig"),
+				"GIT_CONFIG_NOSYSTEM": "1",
+				"PATH":                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			}
+			for key, value := range tt.env {
+				if key == "GC_JSONL_ARCHIVE_REPO" {
+					value = filepath.Join(cityDir, value)
+				}
+				env[key] = value
+			}
+
+			runScript(t, filepath.Join(exampleDir(), tt.script), env)
+
+			logData, err := os.ReadFile(doltLog)
+			if err != nil {
+				t.Fatalf("ReadFile(dolt log): %v", err)
+			}
+			log := string(logData)
+			for _, excluded := range excludedDBs {
+				if strings.Contains(log, "`"+excluded+"`") {
+					t.Errorf("dolt log references excluded test-pattern database %q:\n%s", excluded, log)
+				}
+			}
+			for _, included := range includedDBs {
+				if !strings.Contains(log, "`"+included+"`") {
+					t.Errorf("dolt log missing included database %q:\n%s", included, log)
+				}
+			}
+		})
+	}
+}
+
 func listenManagedDoltPort(t *testing.T) net.Listener {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -972,7 +1152,14 @@ func writeMaintenanceDoltStub(t *testing.T, path string) {
 printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
 case "$*" in
   *"SHOW DATABASES"*)
-    printf 'Database\nbeads\n'
+    printf 'Database\n'
+    if [ -n "${DOLT_DBS:-}" ]; then
+      for db in $DOLT_DBS; do
+        printf '%s\n' "$db"
+      done
+    else
+      printf 'beads\n'
+    fi
     ;;
   *"SELECT *"*)
     printf '{"id":"ga-1","title":"sample"}\n'

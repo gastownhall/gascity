@@ -75,22 +75,112 @@ func TestHandoffSuccess(t *testing.T) {
 	}
 }
 
+func TestCmdHandoffAutoSendsMailWithoutBlocking(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_ALIAS", "mayor")
+	t.Setenv("GC_SESSION_NAME", "mayor")
+
+	var stdout, stderr bytes.Buffer
+	cmd := newHandoffCmd(&stdout, &stderr)
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetArgs([]string{"--auto", "context cycle"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("gc handoff --auto failed: %v; stderr=%s", err, stderr.String())
+	}
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	all, err := store.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("got %d open beads, want 1", len(all))
+	}
+	if got := all[0].Title; got != "context cycle" {
+		t.Fatalf("mail title = %q, want context cycle", got)
+	}
+	if got := all[0].Type; got != "message" {
+		t.Fatalf("mail type = %q, want message", got)
+	}
+	if strings.Contains(stdout.String(), "requesting restart") {
+		t.Fatalf("stdout = %q, --auto must not request restart", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "auto") {
+		t.Fatalf("stdout = %q, want auto handoff confirmation", stdout.String())
+	}
+}
+
+func TestCmdHandoffAutoUsesDefaultSubject(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_ALIAS", "mayor")
+	t.Setenv("GC_SESSION_NAME", "mayor")
+
+	var stdout, stderr bytes.Buffer
+	cmd := newHandoffCmd(&stdout, &stderr)
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetArgs([]string{"--auto"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("gc handoff --auto failed: %v; stderr=%s", err, stderr.String())
+	}
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	all, err := store.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("got %d open beads, want 1", len(all))
+	}
+	if got := all[0].Title; got != "context cycle" {
+		t.Fatalf("mail title = %q, want context cycle", got)
+	}
+}
+
+func TestCmdHandoffAutoRejectsTarget(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := cmdHandoff([]string{"context cycle"}, "mayor", true, &stdout, &stderr); code == 0 {
+		t.Fatal("cmdHandoff returned 0 for --auto with --target")
+	}
+	if !strings.Contains(stderr.String(), "--auto cannot be used with --target") {
+		t.Fatalf("stderr = %q, want --auto/--target conflict", stderr.String())
+	}
+}
+
 // Regression for gastownhall/gascity#744:
 // gc handoff on a named (human-attended) session used to call
 // setRestartRequested unconditionally. The controller cannot respawn a
-// user-started session, so the PreCompact hook crashed the mayor to the
-// user's shell on every context compaction. doHandoff must recognize the
-// named-session case, still send the handoff mail, and skip both the
-// tmux and bead restart flags.
+// user-started session, so the PreCompact hook crashed the user to their shell
+// on every context compaction. doHandoff must recognize the named-session
+// case, still send the handoff mail, and skip both the tmux and bead restart
+// flags.
 func TestDoHandoff_Regression744_NamedSessionSkipsRestart(t *testing.T) {
 	store := beads.NewMemStore()
 	rec := events.NewFake()
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
 
-	// Seed a session bead marked as a configured named session (i.e. the
-	// mayor). IsNamedSessionBead returns true for beads whose metadata
-	// contains configured_named_session="true".
 	b, err := store.Create(beads.Bead{
 		Type:   sessionBeadType,
 		Labels: []string{"gc:session"},
@@ -119,8 +209,7 @@ func TestDoHandoff_Regression744_NamedSessionSkipsRestart(t *testing.T) {
 	outcome := doHandoffWithOutcome(store, rec, dops, func() error {
 		persistCalled = true
 		return nil
-	}, "mayor", "mayor",
-		[]string{"HANDOFF: context full"}, &stdout, &stderr)
+	}, "mayor", "mayor", []string{"HANDOFF: context full"}, &stdout, &stderr)
 	if outcome.code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", outcome.code, stderr.String())
 	}
@@ -128,7 +217,6 @@ func TestDoHandoff_Regression744_NamedSessionSkipsRestart(t *testing.T) {
 		t.Fatal("restartRequested = true, want false for on-demand named session")
 	}
 
-	// Mail must still be sent — context preservation is the whole point.
 	mailFound := false
 	all, _ := store.ListOpen()
 	for _, got := range all {
@@ -140,18 +228,12 @@ func TestDoHandoff_Regression744_NamedSessionSkipsRestart(t *testing.T) {
 	if !mailFound {
 		t.Fatalf("handoff mail not created; beads=%v", all)
 	}
-
-	// Restart must NOT be requested — the controller can't respawn a
-	// user-started named session.
 	if dops.restartRequested["mayor"] {
-		t.Errorf("restart-requested flag is still set — named sessions must skip restart (gascity#744)")
+		t.Errorf("restart-requested flag is still set; named sessions must skip restart")
 	}
 	if persistCalled {
-		t.Error("persistRestart was called — named sessions must skip persisted restart requests")
+		t.Error("persistRestart was called; named sessions must skip persisted restart requests")
 	}
-
-	// Bead-level restart flags must also be absent, including stale flags
-	// left behind by older handoff implementations.
 	refreshed, err := store.Get(b.ID)
 	if err != nil {
 		t.Fatalf("fetching seeded bead: %v", err)
@@ -162,8 +244,6 @@ func TestDoHandoff_Regression744_NamedSessionSkipsRestart(t *testing.T) {
 	if refreshed.Metadata["continuation_reset_pending"] != "" {
 		t.Errorf("continuation_reset_pending = %q, want cleared for named session", refreshed.Metadata["continuation_reset_pending"])
 	}
-
-	// Stdout should not promise a restart the controller can't deliver.
 	if strings.Contains(stdout.String(), "requesting restart") {
 		t.Errorf("stdout = %q, must not promise a restart for named sessions", stdout.String())
 	}
@@ -263,12 +343,36 @@ func TestDoHandoff_NamedAlwaysSessionRequestsRestart(t *testing.T) {
 	}
 }
 
+func TestHandoffWithMessage(t *testing.T) {
+	store := beads.NewMemStore()
+	rec := events.NewFake()
+	dops := newFakeDrainOps()
+	var stdout, stderr bytes.Buffer
+
+	code := doHandoff(store, rec, dops, nil, "polecat-1", "gc-city-polecat-1",
+		[]string{"HANDOFF: PR review needed", "PR #42 is open, tests passing, needs review from refinery"},
+		&stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	all, _ := store.ListOpen()
+	if len(all) != 1 {
+		t.Fatalf("got %d beads, want 1", len(all))
+	}
+	b := all[0]
+	if b.Description != "PR #42 is open, tests passing, needs review from refinery" {
+		t.Errorf("Description = %q, want body text", b.Description)
+	}
+}
+
 func TestCmdHandoff_Regression744_NamedSessionReturnsWithoutBlocking(t *testing.T) {
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_CITY_PATH", cityDir)
 	t.Setenv("GC_ALIAS", "mayor")
@@ -298,7 +402,7 @@ func TestCmdHandoff_Regression744_NamedSessionReturnsWithoutBlocking(t *testing.
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- cmdHandoff([]string{"HANDOFF: context full"}, "", &stdout, &stderr)
+		done <- cmdHandoff([]string{"HANDOFF: context full"}, "", false, &stdout, &stderr)
 	}()
 
 	select {
@@ -311,29 +415,6 @@ func TestCmdHandoff_Regression744_NamedSessionReturnsWithoutBlocking(t *testing.
 	}
 	if !strings.Contains(stdout.String(), "restart skipped") {
 		t.Fatalf("stdout = %q, want restart skipped confirmation", stdout.String())
-	}
-}
-
-func TestHandoffWithMessage(t *testing.T) {
-	store := beads.NewMemStore()
-	rec := events.NewFake()
-	dops := newFakeDrainOps()
-	var stdout, stderr bytes.Buffer
-
-	code := doHandoff(store, rec, dops, nil, "polecat-1", "gc-city-polecat-1",
-		[]string{"HANDOFF: PR review needed", "PR #42 is open, tests passing, needs review from refinery"},
-		&stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
-	}
-
-	all, _ := store.ListOpen()
-	if len(all) != 1 {
-		t.Fatalf("got %d beads, want 1", len(all))
-	}
-	b := all[0]
-	if b.Description != "PR #42 is open, tests passing, needs review from refinery" {
-		t.Errorf("Description = %q, want body text", b.Description)
 	}
 }
 
@@ -537,6 +618,7 @@ func TestHandoffRemoteNotRunning(t *testing.T) {
 
 func TestCmdHandoffRemoteDefaultSenderFallsBackToGCAliasWhenSessionIDMissing(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	t.Setenv("GC_MAIL", "")
 
 	cityPath := t.TempDir()

@@ -358,7 +358,7 @@ func TestHandleConfigGet_V2BindingNameIncludedInAgentName(t *testing.T) {
 	// V2 imported agents carry a BindingName that's runtime-only (json:"-").
 	// The config response still needs to expose it so clients can
 	// reconstruct the same qualified identity that appears in
-	// session.template — otherwise downstream filters (e.g. gasworks-gui's
+	// session.template — otherwise downstream filters (e.g. a real-world app's
 	// CityInfo session bucket) compare "mayor" against "gastown.mayor" and
 	// drop the session.
 	fs := newFakeState(t)

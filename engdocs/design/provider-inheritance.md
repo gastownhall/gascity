@@ -266,6 +266,27 @@ loudly.
 | `OptionsSchema` | Merge mode per `options_schema_merge`: `"replace"` (default) = current slice-replace; `"by_key"` = merge by `Key` with `omit = true` removal. | **New opt-in** |
 | `ResumeCommand` | Non-zero child replaces. Inherited by default. | Unchanged (field semantic new) |
 
+Schema-managed flags in `args` or `args_append` are normalized at the
+provider layer that declares them before the layer is merged. For a single
+layer, explicit `args` / `args_append` choices override that same layer's
+`option_defaults`. Across inheritance, child `option_defaults` still beat
+parent defaults inferred from parent args. Effective precedence is:
+
+```
+agent option_defaults >
+child provider args / args_append >
+child provider option_defaults >
+parent provider args / args_append >
+parent provider option_defaults >
+schema defaults
+```
+
+Migration note: this intentionally changes redundant same-layer configs
+where `option_defaults` and schema-managed `args` set different values for
+the same key. The `args` value now wins inside that layer, so operators
+should remove the stale duplicate or update `option_defaults` before relying
+on the new precedence.
+
 #### `args` + `args_append` interaction
 
 Same-layer order: `args ++ args_append`. Per-layer accumulation across
@@ -365,10 +386,24 @@ For the aimux-codex case:
 [providers.codex-mini]
 base = "builtin:codex"
 command = "aimux"
-args = ["run", "codex", "--", ...]
-resume_command = "aimux run codex -- resume {{.SessionKey}}"
+args = ["run", "codex", "--",
+  "--dangerously-bypass-approvals-and-sandbox",
+  "-m", "gpt-5.3-codex-spark",
+  "-c", "model_reasoning_effort=\"medium\""]
+resume_command = "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex-spark resume {{.SessionKey}}"
 process_names = ["aimux", "codex"]
 ```
+
+If a wrapper's explicit `resume_command` omits a schema-managed default that
+startup inferred from `args`, the resolver inserts the missing default into the
+subcommand resume invocation before `{{.SessionKey}}`. An explicit
+schema-managed flag already present in `resume_command` wins, so wrappers can
+intentionally use a different resume-time value.
+
+`resume_command` supports only the `{{.SessionKey}}` template variable. When
+the resolver inserts missing schema-managed defaults, it tokenizes and re-emits
+the command. For subcommand-style providers with repeated resume tokens, the
+insertion point is the resume token that precedes `{{.SessionKey}}`.
 
 End-to-end test required: spawn wrapped codex → kill → reconcile →
 assert actual executed resume command matches the declared template.
