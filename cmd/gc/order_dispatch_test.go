@@ -854,6 +854,74 @@ func TestOrderDispatchResolvesImportedPackPoolAgainstSiblingImportCollision(t *t
 	}
 }
 
+func TestDoltPackDogOrdersResolveWithNonGastownMaintenanceBinding(t *testing.T) {
+	cityDir := t.TempDir()
+	opsDir := filepath.Join(cityDir, "packs", "ops")
+	if err := os.MkdirAll(opsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `
+[workspace]
+name = "portable-city"
+`)
+	writeFile(t, filepath.Join(opsDir, "pack.toml"), `
+[pack]
+name = "ops"
+schema = 2
+
+[[agent]]
+name = "dog"
+scope = "city"
+`)
+	doltDir, err := filepath.Abs(filepath.Join("..", "..", "examples", "dolt"))
+	if err != nil {
+		t.Fatalf("Abs(examples/dolt): %v", err)
+	}
+	writeFile(t, filepath.Join(cityDir, "pack.toml"), `
+[pack]
+name = "portable-city"
+schema = 2
+
+[imports.ops]
+source = "./packs/ops"
+
+[imports.dolt]
+source = "`+doltDir+`"
+`)
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	var stderr bytes.Buffer
+	aa, err := scanAllOrders(cityDir, cfg, &stderr, "gc order list")
+	if err != nil {
+		t.Fatalf("scanAllOrders: %v; stderr: %s", err, stderr.String())
+	}
+
+	const wantDogOrders = 5
+	var gotDogOrders int
+	for _, a := range aa {
+		if !strings.HasPrefix(a.Name, "mol-dog-") {
+			continue
+		}
+		gotDogOrders++
+		if a.Pool != "dog" {
+			t.Fatalf("%s pool = %q, want portable bare dog", a.Name, a.Pool)
+		}
+		got, err := qualifyOrderPool(a, cfg)
+		if err != nil {
+			t.Fatalf("qualifyOrderPool(%s): %v", a.Name, err)
+		}
+		if got != "ops.dog" {
+			t.Fatalf("qualifyOrderPool(%s) = %q, want ops.dog", a.Name, got)
+		}
+	}
+	if gotDogOrders != wantDogOrders {
+		t.Fatalf("Dolt dog order count = %d, want %d", gotDogOrders, wantDogOrders)
+	}
+}
+
 func TestOrderDispatchCooldownNotDue(t *testing.T) {
 	store := beads.NewMemStore()
 

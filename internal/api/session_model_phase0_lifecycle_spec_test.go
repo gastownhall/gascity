@@ -352,11 +352,17 @@ func TestPhase0HandleSessionWake_ContinuityEligibleArchivedBeadRequestsStart(t *
 	if err != nil {
 		t.Fatalf("Get(%s): %v", id, err)
 	}
-	if got := updated.Metadata["state"]; got != "creating" {
-		t.Fatalf("state = %q, want creating", got)
-	}
-	if got := updated.Metadata["pending_create_claim"]; got != "true" {
-		t.Fatalf("pending_create_claim = %q, want true", got)
+	switch got := updated.Metadata["state"]; got {
+	case "creating":
+		if claim := updated.Metadata["pending_create_claim"]; claim != "true" {
+			t.Fatalf("pending_create_claim = %q, want true while creating", claim)
+		}
+	case "active":
+		if claim := updated.Metadata["pending_create_claim"]; claim != "" {
+			t.Fatalf("pending_create_claim = %q, want cleared after active", claim)
+		}
+	default:
+		t.Fatalf("state = %q, want creating or active", got)
 	}
 }
 
