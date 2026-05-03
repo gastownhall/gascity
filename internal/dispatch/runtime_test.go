@@ -3388,6 +3388,193 @@ on_exhausted = "hard_fail"
 	}
 }
 
+func TestProcessFanoutRoutesFragmentMemberSteps(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(`
+[workspace]
+name = "maintainer-city"
+
+[[rig]]
+name = "gascity"
+path = "/tmp/gascity"
+
+[[agent]]
+name = "reviewer"
+dir = "gascity"
+`), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	expansion := `
+formula = "expansion-review"
+type = "expansion"
+version = 2
+contract = "graph.v2"
+
+[[template]]
+id = "{target}.review"
+title = "Review {reviewer}"
+metadata = { "gc.run_target" = "{reviewer}", "gc.scope_ref" = "body", "gc.scope_role" = "member" }
+`
+	if err := os.WriteFile(filepath.Join(dir, "expansion-review.toml"), []byte(expansion), 0o644); err != nil {
+		t.Fatalf("write expansion formula: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	source := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "survey",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "demo.survey",
+			"gc.outcome":      "pass",
+			"gc.output_json":  `{"items":[{"name":"gascity/reviewer"}]}`,
+		},
+	})
+	fanout := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Expand fanout for survey",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":                "fanout",
+			"gc.root_bead_id":        workflow.ID,
+			"gc.control_for":         "demo.survey",
+			"gc.execution_routed_to": "gascity/reviewer",
+			"gc.for_each":            "output.items",
+			"gc.bond":                "expansion-review",
+			"gc.bond_vars":           `{"reviewer":"{item.name}"}`,
+			"gc.fanout_mode":         "parallel",
+		},
+	})
+	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
+
+	result, err := ProcessControl(store, fanout, ProcessOptions{
+		CityPath:           dir,
+		FormulaSearchPaths: []string{dir},
+	})
+	if err != nil {
+		t.Fatalf("ProcessControl(fanout spawn): %v", err)
+	}
+	if !result.Processed || result.Action != "fanout-spawn" {
+		t.Fatalf("result = %+v, want processed fanout-spawn", result)
+	}
+
+	member := findAttemptByRef(t, store, workflow.ID, "expansion-review.demo.survey.item.1.review")
+	if member.ID == "" {
+		t.Fatal("member step not created")
+	}
+	if got := member.Assignee; got != "" {
+		t.Fatalf("member assignee = %q, want empty metadata-routed assignee", got)
+	}
+	if got := member.Metadata["gc.routed_to"]; got != "gascity/reviewer" {
+		t.Fatalf("member gc.routed_to = %q, want gascity/reviewer", got)
+	}
+	if got := member.Metadata["gc.execution_routed_to"]; got != "gascity/reviewer" {
+		t.Fatalf("member gc.execution_routed_to = %q, want gascity/reviewer", got)
+	}
+}
+
+func TestProcessFanoutDoesNotUseControlRoutedToAsExecutionRoute(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(`
+[workspace]
+name = "maintainer-city"
+
+[[rig]]
+name = "gascity"
+path = "/tmp/gascity"
+
+[[agent]]
+name = "control-dispatcher"
+dir = "gascity"
+max_active_sessions = 1
+`), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	expansion := `
+formula = "expansion-review"
+type = "expansion"
+version = 2
+contract = "graph.v2"
+
+[[template]]
+id = "{target}.review"
+title = "Review"
+
+[template.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"
+`
+	if err := os.WriteFile(filepath.Join(dir, "expansion-review.toml"), []byte(expansion), 0o644); err != nil {
+		t.Fatalf("write expansion formula: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	source := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "survey",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "demo.survey",
+			"gc.outcome":      "pass",
+			"gc.output_json":  `{"items":[{}]}`,
+		},
+	})
+	fanout := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Expand fanout for survey",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "fanout",
+			"gc.root_bead_id": workflow.ID,
+			"gc.control_for":  "demo.survey",
+			"gc.routed_to":    "gascity/control-dispatcher",
+			"gc.for_each":     "output.items",
+			"gc.bond":         "expansion-review",
+			"gc.fanout_mode":  "parallel",
+		},
+	})
+	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
+
+	result, err := ProcessControl(store, fanout, ProcessOptions{
+		CityPath:           dir,
+		FormulaSearchPaths: []string{dir},
+	})
+	if err != nil {
+		t.Fatalf("ProcessControl(fanout spawn): %v", err)
+	}
+	if !result.Processed || result.Action != "fanout-spawn" {
+		t.Fatalf("result = %+v, want processed fanout-spawn", result)
+	}
+
+	logical := findAttemptByRef(t, store, workflow.ID, "expansion-review.demo.survey.item.1.review")
+	if logical.ID == "" {
+		t.Fatal("logical retry control not created")
+	}
+	if got := logical.Metadata["gc.execution_routed_to"]; got != "" {
+		t.Fatalf("logical retry gc.execution_routed_to = %q, want empty when control has no execution route", got)
+	}
+}
+
 func TestProcessFanoutPreservesPreparedControlExecutionRoutes(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 
@@ -3531,6 +3718,132 @@ on_exhausted = "hard_fail"
 	}
 	if got := scopeCheck.Metadata["gc.execution_routed_to"]; got != "gascity/reviewer" {
 		t.Fatalf("scope-check gc.execution_routed_to = %q, want gascity/reviewer", got)
+	}
+}
+
+func TestProcessFanoutRecreatesExistingFragmentWithStaleRouteMetadata(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(`
+[workspace]
+name = "maintainer-city"
+
+[[rig]]
+name = "gascity"
+path = "/tmp/gascity"
+
+[[agent]]
+name = "reviewer"
+dir = "gascity"
+
+[[agent]]
+name = "control-dispatcher"
+dir = "gascity"
+max_active_sessions = 1
+`), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	expansion := `
+formula = "expansion-review"
+type = "expansion"
+version = 2
+contract = "graph.v2"
+
+[[template]]
+id = "{target}.review"
+title = "Review {reviewer}"
+metadata = { "gc.run_target" = "{reviewer}", "gc.scope_ref" = "body", "gc.scope_role" = "member" }
+
+[template.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"
+`
+	if err := os.WriteFile(filepath.Join(dir, "expansion-review.toml"), []byte(expansion), 0o644); err != nil {
+		t.Fatalf("write expansion formula: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	source := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "survey",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "demo.survey",
+			"gc.outcome":      "pass",
+			"gc.output_json":  `{"items":[{"name":"gascity/reviewer"}]}`,
+		},
+	})
+	fanout := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Expand fanout for survey",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":                "fanout",
+			"gc.root_bead_id":        workflow.ID,
+			"gc.control_for":         "demo.survey",
+			"gc.execution_routed_to": "gascity/reviewer",
+			"gc.for_each":            "output.items",
+			"gc.bond":                "expansion-review",
+			"gc.bond_vars":           `{"reviewer":"{item.name}"}`,
+			"gc.fanout_mode":         "parallel",
+			"gc.fanout_state":        "spawning",
+		},
+	})
+	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
+
+	fragment, err := formula.CompileExpansionFragment(context.Background(), "expansion-review", []string{dir}, &formula.Step{
+		ID:          "demo.survey.item.1",
+		Title:       source.Title,
+		Description: source.Description,
+	}, map[string]string{"reviewer": "gascity/reviewer"})
+	if err != nil {
+		t.Fatalf("CompileExpansionFragment: %v", err)
+	}
+	routeFanoutFragmentSteps(fragment, fanout, ProcessOptions{CityPath: dir}, store)
+	if _, err := molecule.InstantiateFragment(context.Background(), store, fragment, molecule.FragmentOptions{RootID: workflow.ID}); err != nil {
+		t.Fatalf("InstantiateFragment: %v", err)
+	}
+	staleRetryControl := findAttemptByRef(t, store, workflow.ID, "expansion-review.demo.survey.item.1.review")
+	if staleRetryControl.ID == "" {
+		t.Fatal("stale retry control not created")
+	}
+	if err := store.SetMetadataBatch(staleRetryControl.ID, map[string]string{"gc.execution_routed_to": "gascity/old-reviewer"}); err != nil {
+		t.Fatalf("stale route metadata: %v", err)
+	}
+
+	result, err := ProcessControl(store, fanout, ProcessOptions{
+		CityPath:           dir,
+		FormulaSearchPaths: []string{dir},
+	})
+	if err != nil {
+		t.Fatalf("ProcessControl(fanout resume): %v", err)
+	}
+	if !result.Processed || result.Action != "fanout-spawn" {
+		t.Fatalf("result = %+v, want processed fanout-spawn", result)
+	}
+	if result.Created == 0 {
+		t.Fatal("expected stale fragment to be discarded and recreated")
+	}
+
+	staleAfter := mustGetBead(t, store, staleRetryControl.ID)
+	if staleAfter.Status != "closed" || staleAfter.Metadata["gc.partial_fragment"] != "true" || staleAfter.Metadata["gc.outcome"] != "skipped" {
+		t.Fatalf("stale retry control = status %q partial=%q outcome=%q, want closed/true/skipped", staleAfter.Status, staleAfter.Metadata["gc.partial_fragment"], staleAfter.Metadata["gc.outcome"])
+	}
+	recreated := findAttemptByRef(t, store, workflow.ID, "expansion-review.demo.survey.item.1.review")
+	if recreated.ID == "" || recreated.ID == staleRetryControl.ID {
+		t.Fatalf("recreated retry control ID = %q, stale ID = %q", recreated.ID, staleRetryControl.ID)
+	}
+	if got := recreated.Metadata["gc.execution_routed_to"]; got != "gascity/reviewer" {
+		t.Fatalf("recreated retry control gc.execution_routed_to = %q, want gascity/reviewer", got)
 	}
 }
 
@@ -5349,6 +5662,97 @@ func TestProcessScopeCheckIgnoresOpenSpecBeadsWhenCompletingScope(t *testing.T) 
 	bodyAfter := mustGetBead(t, store, body.ID)
 	if bodyAfter.Status != "closed" || bodyAfter.Metadata["gc.outcome"] != "pass" {
 		t.Fatalf("scope body = status %q outcome %q, want closed/pass", bodyAfter.Status, bodyAfter.Metadata["gc.outcome"])
+	}
+}
+
+func TestProcessScopeCheckDoesNotSkipOpenSpecBeadsWhenFailingScope(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	body := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "iteration 1",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "review-loop.iteration.1",
+		},
+	})
+	spec := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Step spec for apply",
+		Type:  "spec",
+		Metadata: map[string]string{
+			"gc.kind":         "spec",
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "review-loop.iteration.1",
+			"gc.scope_role":   "member",
+			"gc.step_ref":     "review-loop.iteration.1.apply.spec",
+		},
+	})
+	openMember := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "apply",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "review-loop.iteration.1",
+			"gc.scope_role":   "member",
+		},
+	})
+	failedMember := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "review",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "review-loop.iteration.1",
+			"gc.scope_role":   "member",
+			"gc.outcome":      "fail",
+		},
+	})
+	scopeCheck := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize review",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope-check",
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "review-loop.iteration.1",
+			"gc.scope_role":   "control",
+		},
+	})
+	mustDepAdd(t, store, scopeCheck.ID, failedMember.ID, "blocks")
+	mustDepAdd(t, store, body.ID, scopeCheck.ID, "blocks")
+
+	result, err := ProcessControl(store, mustGetBead(t, store, scopeCheck.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(scope-check): %v", err)
+	}
+	if result.Action != "scope-fail" {
+		t.Fatalf("scope-check action = %q, want scope-fail", result.Action)
+	}
+	if result.Skipped != 1 {
+		t.Fatalf("scope-check skipped = %d, want 1 non-spec member", result.Skipped)
+	}
+
+	specAfter := mustGetBead(t, store, spec.ID)
+	if specAfter.Status != "open" {
+		t.Fatalf("spec status = %q, want open", specAfter.Status)
+	}
+	openMemberAfter := mustGetBead(t, store, openMember.ID)
+	if openMemberAfter.Status != "closed" || openMemberAfter.Metadata["gc.outcome"] != "skipped" {
+		t.Fatalf("open member = status %q outcome %q, want closed/skipped", openMemberAfter.Status, openMemberAfter.Metadata["gc.outcome"])
+	}
+	bodyAfter := mustGetBead(t, store, body.ID)
+	if bodyAfter.Status != "closed" || bodyAfter.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("body = status %q outcome %q, want closed/fail", bodyAfter.Status, bodyAfter.Metadata["gc.outcome"])
 	}
 }
 
