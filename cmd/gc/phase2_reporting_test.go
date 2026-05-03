@@ -25,15 +25,19 @@ func newPhase2Reporter(t *testing.T, suite string) *workertest.SuiteReporter {
 
 func startupCommandMaterializationResult(tc phase2ProviderCase, tp TemplateParams) workertest.Result {
 	evidence := phase2TemplateEvidence(tc, tp)
+	wantPromptMode := tc.wantPromptMode
+	if wantPromptMode == "" {
+		wantPromptMode = "arg"
+	}
 	switch {
 	case tp.ResolvedProvider == nil:
 		return workertest.Fail(tc.profileID, workertest.RequirementStartupCommandMaterialization, "ResolvedProvider = nil").WithEvidence(evidence)
 	case tp.ResolvedProvider.Name != tc.family:
 		return workertest.Fail(tc.profileID, workertest.RequirementStartupCommandMaterialization,
 			fmt.Sprintf("ResolvedProvider.Name = %q, want %q", tp.ResolvedProvider.Name, tc.family)).WithEvidence(evidence)
-	case tp.ResolvedProvider.PromptMode != "arg":
+	case tp.ResolvedProvider.PromptMode != wantPromptMode:
 		return workertest.Fail(tc.profileID, workertest.RequirementStartupCommandMaterialization,
-			fmt.Sprintf("PromptMode = %q, want arg", tp.ResolvedProvider.PromptMode)).WithEvidence(evidence)
+			fmt.Sprintf("PromptMode = %q, want %s", tp.ResolvedProvider.PromptMode, wantPromptMode)).WithEvidence(evidence)
 	case tc.wantCommand != "" && tp.Command != tc.wantCommand:
 		return workertest.Fail(tc.profileID, workertest.RequirementStartupCommandMaterialization,
 			fmt.Sprintf("Command = %q, want %q", tp.Command, tc.wantCommand)).WithEvidence(evidence)
@@ -73,7 +77,10 @@ func startupRuntimeConfigMaterializationResult(tc phase2ProviderCase, tp Templat
 	case cfg.PromptSuffix == "":
 		return workertest.Fail(tc.profileID, workertest.RequirementStartupRuntimeConfigMaterialization,
 			"cfg.PromptSuffix = empty, want beacon prompt materialized").WithEvidence(evidence)
-	case cfg.PromptFlag != "":
+	case tc.wantPromptFlag != "" && cfg.PromptFlag != tc.wantPromptFlag:
+		return workertest.Fail(tc.profileID, workertest.RequirementStartupRuntimeConfigMaterialization,
+			fmt.Sprintf("cfg.PromptFlag = %q, want %q", cfg.PromptFlag, tc.wantPromptFlag)).WithEvidence(evidence)
+	case tc.wantPromptFlag == "" && cfg.PromptFlag != "":
 		return workertest.Fail(tc.profileID, workertest.RequirementStartupRuntimeConfigMaterialization,
 			fmt.Sprintf("cfg.PromptFlag = %q, want empty for arg-mode provider", cfg.PromptFlag)).WithEvidence(evidence)
 	case cfg.Env["GC_DIR"] != tp.WorkDir:
@@ -267,6 +274,7 @@ func phase2ConfigEvidence(tc phase2ProviderCase, tp TemplateParams, cfg runtime.
 	evidence["cfg_workdir"] = cfg.WorkDir
 	evidence["cfg_prompt_flag"] = cfg.PromptFlag
 	evidence["cfg_prompt_suffix"] = cfg.PromptSuffix
+	evidence["cfg_nudge"] = cfg.Nudge
 	evidence["cfg_ready_delay_ms"] = strconv.Itoa(cfg.ReadyDelayMs)
 	evidence["cfg_ready_prompt_prefix"] = cfg.ReadyPromptPrefix
 	evidence["cfg_process_names"] = strings.Join(cfg.ProcessNames, ",")

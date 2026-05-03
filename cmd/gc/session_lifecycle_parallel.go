@@ -614,7 +614,7 @@ func buildPreparedStart(
 		}
 		session.Metadata["session_key"] = sessionKey
 	}
-	if sk := session.Metadata["session_key"]; sk != "" && tp.ResolvedProvider != nil {
+	if sk := session.Metadata["session_key"]; sk != "" && tp.ResolvedProvider != nil && !tp.IsACP {
 		firstStart := session.Metadata["started_config_hash"] == ""
 		forceFresh := session.Metadata["wake_mode"] == "fresh"
 		agentCfg.Command = resolveSessionCommand(agentCfg.Command, sk, tp.ResolvedProvider, firstStart, forceFresh)
