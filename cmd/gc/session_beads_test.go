@@ -1900,8 +1900,8 @@ func TestSyncSessionBeads_RecreatesDriftedNamedSessionRuntimeName(t *testing.T) 
 	if closedOld.ID == "" {
 		t.Fatalf("did not find closed drifted bead among %+v", all)
 	}
-	if closedOld.Status != "closed" || closedOld.Metadata["close_reason"] != "reconfigured" {
-		t.Fatalf("drifted bead status=%q close_reason=%q, want closed/reconfigured", closedOld.Status, closedOld.Metadata["close_reason"])
+	if want := session.CanonicalCloseReason("reconfigured"); closedOld.Status != "closed" || closedOld.Metadata["close_reason"] != want {
+		t.Fatalf("drifted bead status=%q close_reason=%q, want closed/%q", closedOld.Status, closedOld.Metadata["close_reason"], want)
 	}
 	if openNew.ID == "" {
 		t.Fatalf("did not find recreated canonical bead with session_name %q", expectedName)
@@ -2792,8 +2792,8 @@ func TestSyncSessionBeads_DuplicatePoolSessionNameKeepsVisibleOwner(t *testing.T
 	if duplicateAfter.Status != "closed" {
 		t.Fatalf("duplicate bead %s status = %q, want closed", duplicate.ID, duplicateAfter.Status)
 	}
-	if got := duplicateAfter.Metadata["close_reason"]; got != "duplicate" {
-		t.Fatalf("duplicate close_reason = %q, want duplicate", got)
+	if want := session.CanonicalCloseReason("duplicate"); duplicateAfter.Metadata["close_reason"] != want {
+		t.Fatalf("duplicate close_reason = %q, want %q", duplicateAfter.Metadata["close_reason"], want)
 	}
 }
 
@@ -3417,8 +3417,8 @@ func TestSyncSessionBeads_PoolSessionNameFailureLeavesReachableFailedCreate(t *t
 	if got := strings.TrimSpace(failed.Metadata["session_name"]); got == "" {
 		t.Fatalf("failed-create bead session_name is empty: %+v", failed)
 	}
-	if got := failed.Metadata["close_reason"]; got != "failed-create" {
-		t.Fatalf("failed-create close_reason = %q, want failed-create", got)
+	if want := session.CanonicalCloseReason("failed-create"); failed.Metadata["close_reason"] != want {
+		t.Fatalf("failed-create close_reason = %q, want %q", failed.Metadata["close_reason"], want)
 	}
 	if got := failed.Metadata["pending_create_claim"]; got != "" {
 		t.Fatalf("failed-create pending_create_claim = %q, want cleared", got)
@@ -3565,8 +3565,8 @@ func TestSyncSessionBeads_OrphanDetection(t *testing.T) {
 	if oldBead.Metadata["state"] != "orphaned" {
 		t.Errorf("old-agent state = %q, want %q", oldBead.Metadata["state"], "orphaned")
 	}
-	if oldBead.Metadata["close_reason"] != "orphaned" {
-		t.Errorf("old-agent close_reason = %q, want %q", oldBead.Metadata["close_reason"], "orphaned")
+	if want := session.CanonicalCloseReason("orphaned"); oldBead.Metadata["close_reason"] != want {
+		t.Errorf("old-agent close_reason = %q, want %q", oldBead.Metadata["close_reason"], want)
 	}
 	if oldBead.Metadata["closed_at"] == "" {
 		t.Error("old-agent closed_at is empty")
@@ -3733,9 +3733,9 @@ func TestSyncSessionBeads_PoolInstanceOrphaned(t *testing.T) {
 			t.Errorf("pool instance %s state = %q, want %q",
 				b.Metadata["session_name"], b.Metadata["state"], "orphaned")
 		}
-		if b.Metadata["close_reason"] != "orphaned" {
+		if want := session.CanonicalCloseReason("orphaned"); b.Metadata["close_reason"] != want {
 			t.Errorf("pool instance %s close_reason = %q, want %q",
-				b.Metadata["session_name"], b.Metadata["close_reason"], "orphaned")
+				b.Metadata["session_name"], b.Metadata["close_reason"], want)
 		}
 	}
 }
@@ -3884,8 +3884,8 @@ func TestSyncSessionBeads_SuspendedAgentNotOrphaned(t *testing.T) {
 	if workerBead.Metadata["state"] != "suspended" {
 		t.Errorf("worker state = %q, want %q", workerBead.Metadata["state"], "suspended")
 	}
-	if workerBead.Metadata["close_reason"] != "suspended" {
-		t.Errorf("worker close_reason = %q, want %q", workerBead.Metadata["close_reason"], "suspended")
+	if want := session.CanonicalCloseReason("suspended"); workerBead.Metadata["close_reason"] != want {
+		t.Errorf("worker close_reason = %q, want %q", workerBead.Metadata["close_reason"], want)
 	}
 }
 
@@ -4370,8 +4370,8 @@ func TestSyncSessionBeads_OrphansLegacyPoolBaseSession(t *testing.T) {
 	if closedLegacy.Status != "closed" {
 		t.Fatalf("legacy bead status = %q, want closed", closedLegacy.Status)
 	}
-	if closedLegacy.Metadata["close_reason"] != "orphaned" {
-		t.Fatalf("legacy bead close_reason = %q, want orphaned", closedLegacy.Metadata["close_reason"])
+	if want := session.CanonicalCloseReason("orphaned"); closedLegacy.Metadata["close_reason"] != want {
+		t.Fatalf("legacy bead close_reason = %q, want %q", closedLegacy.Metadata["close_reason"], want)
 	}
 	if openPool.ID == "" {
 		t.Fatalf("did not find new pool session bead in %+v", all)
@@ -4934,9 +4934,9 @@ func TestReapStaleSessionBeads(t *testing.T) {
 			if tt.wantReaped > 0 {
 				all := allSessionBeads(t, store)
 				for _, b := range all {
-					if b.Status == "closed" && b.Metadata["close_reason"] != "stale-session" {
+					if want := session.CanonicalCloseReason("stale-session"); b.Status == "closed" && b.Metadata["close_reason"] != want {
 						t.Errorf("closed bead %s has close_reason=%q, want %q",
-							b.ID, b.Metadata["close_reason"], "stale-session")
+							b.ID, b.Metadata["close_reason"], want)
 					}
 				}
 				if !strings.Contains(stderr.String(), "WARN: reconciler: reaped stuck-creating session bead") {
