@@ -860,8 +860,26 @@ func (s *BdStore) CloseAll(ids []string, metadata map[string]string) (int, error
 
 // Close sets a bead's status to closed via bd close.
 // Idempotent: closing an already-closed bead returns nil.
+//
+// Reads metadata.close_reason from the bead (set by callers like the
+// session reconciler or convoy autoclose via SetMetadata or
+// SetMetadataBatch before invoking Close) and forwards it as the
+// --reason argument to bd close. Without this, bd assigns its default
+// reason "Closed", silently discarding caller intent and (when the city
+// runs with validation.on-close=error) failing the close outright.
+//
+// Callers are responsible for providing a reason that satisfies any
+// configured validator — e.g. bd's validation.on-close=error rejects
+// reasons under 20 characters. This function does not pad or rewrite
+// the supplied reason; it forwards what the caller set, or omits
+// --reason entirely when no metadata is set.
 func (s *BdStore) Close(id string) error {
-	_, err := s.runner(s.dir, "bd", "close", "--force", "--json", id)
+	args := []string{"close", "--force", "--json"}
+	if reason := s.systemCloseReason(id); reason != "" {
+		args = append(args, "--reason", reason)
+	}
+	args = append(args, id)
+	_, err := s.runner(s.dir, "bd", args...)
 	if err != nil {
 		// Some bd error paths collapse to a bare exit status without a helpful
 		// not-found string. Re-read the bead to distinguish "already closed" from
@@ -874,6 +892,17 @@ func (s *BdStore) Close(id string) error {
 		return fmt.Errorf("closing bead %q: %w", id, err)
 	}
 	return nil
+}
+
+// systemCloseReason returns the trimmed value of metadata.close_reason
+// for the bead, or "" if the bead can't be read or the field is unset.
+// Used by Close to forward a caller-supplied reason as bd close --reason.
+func (s *BdStore) systemCloseReason(id string) string {
+	b, err := s.Get(id)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(b.Metadata["close_reason"])
 }
 
 // Reopen sets a closed bead's status to open via bd reopen.

@@ -824,6 +824,30 @@ func hasLabel(labels []string, target string) bool { //nolint:unparam // general
 	return false
 }
 
+// convoyAutocloseReason is the close_reason metadata value stamped on
+// convoys auto-closed because all of their children are closed. The
+// 38-character form satisfies bd's validation.on-close=error length
+// requirement while remaining a meaningful audit-trail entry.
+const convoyAutocloseReason = "convoy autoclose: all children closed"
+
+// closeConvoyWithReason stamps a close_reason metadata key on the
+// convoy bead before closing it. BdStore.Close() forwards
+// metadata.close_reason as `bd close --reason ...`, which lets cities
+// running with validation.on-close=error accept system-driven
+// auto-closes (whose default reason "Closed" would otherwise be
+// rejected as terse). For stores whose Close path does not consult
+// the metadata, the field still serves as a permanent audit trail of
+// why the convoy was auto-closed.
+func closeConvoyWithReason(store beads.Store, id, reason string) error {
+	// Best-effort metadata write: if it fails (transient store error,
+	// race with another writer), continue to Close anyway. Close still
+	// commits the status change; under strict validation it'll surface
+	// the failure there rather than here, where the caller already has
+	// error-handling for the close.
+	_ = store.SetMetadata(id, "close_reason", reason)
+	return store.Close(id)
+}
+
 // doConvoyCheck auto-closes convoys where all children are closed.
 // Convoys with the "owned" label are skipped — their lifecycle is
 // managed manually.
@@ -859,7 +883,7 @@ func doConvoyCheckAcrossStores(stores []convoyStoreView, rec events.Recorder, st
 			}
 		}
 		if allClosed {
-			if err := item.store.Close(item.bead.ID); err != nil {
+			if err := closeConvoyWithReason(item.store, item.bead.ID, convoyAutocloseReason); err != nil {
 				fmt.Fprintf(stderr, "gc convoy check: closing %s: %v\n", item.bead.ID, err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
@@ -1162,7 +1186,7 @@ func doConvoyAutocloseWith(store beads.Store, rec events.Recorder, beadID string
 		}
 	}
 
-	if err := store.Close(parent.ID); err != nil {
+	if err := closeConvoyWithReason(store, parent.ID, convoyAutocloseReason); err != nil {
 		return
 	}
 
