@@ -90,6 +90,65 @@ func TestTemplateParamsToConfigFlagModePrependsFlag(t *testing.T) {
 	}
 }
 
+func TestTemplateParamsToConfigACPUsesProtocolNudgeForStartupPrompt(t *testing.T) {
+	tp := TemplateParams{
+		Command: "opencode acp",
+		Prompt:  "You are an agent.",
+		IsACP:   true,
+		ResolvedProvider: &config.ResolvedProvider{
+			Name:       "opencode",
+			Command:    "opencode",
+			PromptMode: "flag",
+			PromptFlag: "--prompt",
+		},
+	}
+
+	cfg := templateParamsToConfig(tp)
+
+	if cfg.Command != "opencode acp" {
+		t.Fatalf("Command = %q, want ACP server command unchanged", cfg.Command)
+	}
+	if cfg.PromptSuffix != "" {
+		t.Fatalf("PromptSuffix = %q, want empty for ACP startup prompt", cfg.PromptSuffix)
+	}
+	if cfg.PromptFlag != "" {
+		t.Fatalf("PromptFlag = %q, want empty for ACP startup prompt", cfg.PromptFlag)
+	}
+	if cfg.Nudge != "You are an agent." {
+		t.Fatalf("Nudge = %q, want startup prompt delivered over ACP", cfg.Nudge)
+	}
+	if cfg.Env[startupPromptDeliveredEnv] != "1" {
+		t.Fatalf("%s not marked for ACP startup prompt delivery", startupPromptDeliveredEnv)
+	}
+}
+
+func TestTemplateParamsToConfigACPCombinesStartupPromptWithExistingNudge(t *testing.T) {
+	tp := TemplateParams{
+		Command: "opencode acp",
+		Prompt:  "startup prompt",
+		IsACP:   true,
+		Hints: agent.StartupHints{
+			Nudge: "existing nudge",
+		},
+		ResolvedProvider: &config.ResolvedProvider{
+			Name:       "opencode",
+			Command:    "opencode",
+			PromptMode: "flag",
+			PromptFlag: "--prompt",
+		},
+	}
+
+	cfg := templateParamsToConfig(tp)
+
+	if cfg.PromptSuffix != "" {
+		t.Fatalf("PromptSuffix = %q, want empty for ACP startup prompt", cfg.PromptSuffix)
+	}
+	want := "startup prompt\n\n---\n\nexisting nudge"
+	if cfg.Nudge != want {
+		t.Fatalf("Nudge = %q, want %q", cfg.Nudge, want)
+	}
+}
+
 func TestTemplateParamsToConfigFlagModeMissingFlagDoesNotMarkPromptDelivered(t *testing.T) {
 	tp := TemplateParams{
 		Command: "myprovider",
