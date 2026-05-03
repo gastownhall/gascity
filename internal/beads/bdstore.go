@@ -77,13 +77,42 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 			}
 			return out, timeoutErr
 		}
-		if err != nil && stderr.Len() > 0 {
-			trace("error", err)
-			return out, fmt.Errorf("%w: %s", err, stderr.String())
+		if err != nil {
+			// bd writes structured errors to stdout (JSON envelope) when
+			// invoked with --json, while stderr is often empty. Surface
+			// whichever stream has content so supervisor logs become
+			// actionable instead of bare "exit status 1".
+			detail := strings.TrimSpace(stderr.String())
+			if detail == "" && name == "bd" {
+				detail = bdStdoutErrorDetail(out)
+			}
+			if detail != "" {
+				trace("error", err)
+				return out, fmt.Errorf("%w: %s", err, detail)
+			}
 		}
 		trace("done", err)
 		return out, err
 	}
+}
+
+// bdStdoutErrorDetail extracts a human-readable error description from
+// bd's JSON error envelope on stdout. bd writes structured errors as
+// {"error": "...", "schema_version": N} on stdout when invoked with
+// --json, while stderr is often empty. Returns "" when the output does
+// not look like a bd error envelope so callers can fall through.
+func bdStdoutErrorDetail(out []byte) string {
+	trimmed := bytes.TrimSpace(extractJSON(out))
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return ""
+	}
+	var env struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(trimmed, &env); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(env.Error)
 }
 
 // PurgeRunnerFunc executes a bd purge command with custom dir and env.

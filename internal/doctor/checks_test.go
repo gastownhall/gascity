@@ -3293,22 +3293,25 @@ func TestManagedDoltChecksSkipInvalidCityConfig(t *testing.T) {
 
 func TestParseDoltVersion(t *testing.T) {
 	cases := []struct {
-		name    string
-		in      string
-		wantMaj int
-		wantMin int
-		wantPat int
-		wantErr bool
+		name       string
+		in         string
+		wantMaj    int
+		wantMin    int
+		wantPat    int
+		wantPreRel bool
+		wantErr    bool
 	}{
-		{"plain", "dolt version 1.75.2", 1, 75, 2, false},
-		{"with_warning", "dolt version 1.75.2\nWarning: some deprecation", 1, 75, 2, false},
-		{"no_prefix", "1.50.0", 1, 50, 0, false},
-		{"with_v_prefix", "v1.50.0", 1, 50, 0, false},
-		{"prerelease", "dolt version 1.76.0-rc1", 1, 76, 0, false},
-		{"build_suffix", "dolt version 1.76.0+build.5", 1, 76, 0, false},
-		{"empty", "", 0, 0, 0, true},
-		{"garbage", "hello world", 0, 0, 0, true},
-		{"too_few_parts", "dolt version 1.50", 0, 0, 0, true},
+		{"plain", "dolt version 1.75.2", 1, 75, 2, false, false},
+		{"with_warning", "dolt version 1.75.2\nWarning: some deprecation", 1, 75, 2, false, false},
+		{"no_prefix", "1.50.0", 1, 50, 0, false, false},
+		{"with_v_prefix", "v1.50.0", 1, 50, 0, false, false},
+		{"prerelease", "dolt version 1.76.0-rc1", 1, 76, 0, true, false},
+		{"dev_prerelease", "dolt version 1.86.2-dev.0", 1, 86, 2, true, false},
+		{"build_suffix", "dolt version 1.76.0+build.5", 1, 76, 0, false, false},
+		{"hyphenated_build_suffix", "dolt version 1.76.0+build-5", 1, 76, 0, false, false},
+		{"empty", "", 0, 0, 0, false, true},
+		{"garbage", "hello world", 0, 0, 0, false, true},
+		{"too_few_parts", "dolt version 1.50", 0, 0, 0, false, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -3325,6 +3328,9 @@ func TestParseDoltVersion(t *testing.T) {
 			if got.Major != tc.wantMaj || got.Minor != tc.wantMin || got.Patch != tc.wantPat {
 				t.Errorf("parseDoltVersion(%q) = %d.%d.%d, want %d.%d.%d",
 					tc.in, got.Major, got.Minor, got.Patch, tc.wantMaj, tc.wantMin, tc.wantPat)
+			}
+			if got.PreRelease != tc.wantPreRel {
+				t.Errorf("parseDoltVersion(%q).PreRelease = %v, want %v", tc.in, got.PreRelease, tc.wantPreRel)
 			}
 		})
 	}
@@ -3364,12 +3370,12 @@ func TestDoltVersionCheck_OK(t *testing.T) {
 
 func TestDoltVersionCheck_OK_AtMinimum(t *testing.T) {
 	c := NewDoltVersionCheck()
-	c.versionOutput = func() (string, error) { return "dolt version 1.86.1\n", nil }
+	c.versionOutput = func() (string, error) { return "dolt version 1.86.2\n", nil }
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
 	}
-	if !strings.Contains(r.Message, "1.86.1") {
+	if !strings.Contains(r.Message, "1.86.2") {
 		t.Errorf("message = %q, want version in message", r.Message)
 	}
 }
@@ -3388,7 +3394,42 @@ func TestDoltVersionCheck_Error_BelowManagedConfigFloor(t *testing.T) {
 
 func TestDoltVersionCheck_Error_BelowMinimum(t *testing.T) {
 	c := NewDoltVersionCheck()
-	c.versionOutput = func() (string, error) { return "dolt version 1.86.0\n", nil }
+	c.versionOutput = func() (string, error) { return "dolt version 1.86.1\n", nil }
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusError {
+		t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "below minimum") {
+		t.Errorf("message = %q, want below-minimum text", r.Message)
+	}
+}
+
+func TestDoltVersionCheck_Error_PreReleaseAtFloor(t *testing.T) {
+	cases := []string{
+		"dolt version 1.86.2-rc1\n",
+		"dolt version 1.86.2-rc1+build.5\n",
+		"dolt version 1.86.2-dev.0\n",
+		"dolt version 1.99.0-rc1\n",
+		"dolt version 2.0.0-rc1\n",
+	}
+	for _, version := range cases {
+		t.Run(strings.TrimSpace(version), func(t *testing.T) {
+			c := NewDoltVersionCheck()
+			c.versionOutput = func() (string, error) { return version, nil }
+			r := c.Run(&CheckContext{})
+			if r.Status != StatusError {
+				t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
+			}
+			if !strings.Contains(r.Message, "pre-release") || !strings.Contains(r.Message, "1.86.2") {
+				t.Errorf("message = %q, want pre-release and minimum version text", r.Message)
+			}
+		})
+	}
+}
+
+func TestDoltVersionCheck_Error_LeadingWhitespaceBelowMinimum(t *testing.T) {
+	c := NewDoltVersionCheck()
+	c.versionOutput = func() (string, error) { return "  dolt version 1.85.9\n", nil }
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusError {
 		t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)

@@ -316,7 +316,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 			fmt.Fprintf(stdout, "Session %s created from template %q (reconciler will start it).\n", info.ID, canonicalTemplate) //nolint:errcheck // best-effort stdout
 
 			if !shouldAttachNewSession(noAttach, sessionTransport) {
-				if sessionTransport == "acp" && !noAttach {
+				if sessionTransport == config.SessionTransportACP && !noAttach {
 					fmt.Fprintln(stdout, "Session uses ACP transport; not attaching.") //nolint:errcheck // best-effort stdout
 				}
 				return 0
@@ -410,7 +410,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 	fmt.Fprintf(stdout, "Session %s created from template %q.\n", info.ID, canonicalTemplate) //nolint:errcheck // best-effort stdout
 
 	if !shouldAttachNewSession(noAttach, sessionTransport) {
-		if sessionTransport == "acp" && !noAttach {
+		if sessionTransport == config.SessionTransportACP && !noAttach {
 			fmt.Fprintln(stdout, "Session uses ACP transport; not attaching.") //nolint:errcheck // best-effort stdout
 		}
 		return 0
@@ -430,7 +430,7 @@ func newSessionStoredMCPMetadata(
 	alias, template, provider, workDir, transport string,
 	metadata map[string]string,
 ) (map[string]string, error) {
-	if strings.TrimSpace(transport) != "acp" {
+	if strings.TrimSpace(transport) != config.SessionTransportACP {
 		return metadata, nil
 	}
 	mcpServers, err := resolvedRuntimeMCPServersWithConfig(
@@ -470,8 +470,21 @@ type acpRouteRegistrar interface {
 
 func validateResolvedSessionTransport(resolved *config.ResolvedProvider, transport string, sp runtime.Provider) error {
 	transport = strings.TrimSpace(transport)
-	if transport != "acp" {
+	switch transport {
+	case "":
 		return nil
+	case config.SessionTransportTmux:
+		if sessionProviderSupportsTmux(sp) {
+			return nil
+		}
+		providerName := transport
+		if resolved != nil && resolved.Name != "" {
+			providerName = resolved.Name
+		}
+		return fmt.Errorf("provider %q requires tmux transport but the session provider cannot route tmux sessions", providerName)
+	case config.SessionTransportACP:
+	default:
+		return fmt.Errorf("unknown session transport %q", transport)
 	}
 	providerName := ""
 	if resolved != nil {
@@ -497,12 +510,19 @@ func sessionProviderSupportsACP(sp runtime.Provider) bool {
 		return false
 	}
 	if provider, ok := sp.(runtime.TransportCapabilityProvider); ok {
-		return provider.SupportsTransport("acp")
+		return provider.SupportsTransport(config.SessionTransportACP)
 	}
 	if _, ok := sp.(acpRouteRegistrar); ok {
 		return true
 	}
 	return false
+}
+
+func sessionProviderSupportsTmux(sp runtime.Provider) bool {
+	if provider, ok := sp.(runtime.TransportCapabilityProvider); ok {
+		return provider.SupportsTransport(config.SessionTransportTmux)
+	}
+	return true
 }
 
 func resolvedSessionCommand(cityPath string, resolved *config.ResolvedProvider, optionOverrides map[string]string, transport string) (string, error) {
@@ -1660,7 +1680,7 @@ func sessionExplicitNameForNewSession(agent *config.Agent, alias string) (string
 }
 
 func shouldAttachNewSession(noAttach bool, transport string) bool {
-	return !noAttach && transport != "acp"
+	return !noAttach && transport != config.SessionTransportACP
 }
 
 // formatDuration formats a duration for human display.

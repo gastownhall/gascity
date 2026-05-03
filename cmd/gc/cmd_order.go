@@ -422,6 +422,18 @@ func cmdOrderRun(name, rig string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if a.IsExec() {
+		if a.Trigger == "event" {
+			store, storeCode := openOrderStoreForOrder(cityPath, cfg, a, stderr, "gc order run")
+			if store == nil {
+				return storeCode
+			}
+			ep, epCode := openCityEventsProvider(stderr, "gc order run")
+			if ep == nil {
+				return epCode
+			}
+			defer ep.Close() //nolint:errcheck // best-effort
+			return doOrderRunExecTracked(a, cityPath, cfg, store, ep, stdout, stderr)
+		}
 		return doOrderRunExec(a, cityPath, cfg, stdout, stderr)
 	}
 	store, storeCode := openOrderStoreForOrder(cityPath, cfg, a, stderr, "gc order run")
@@ -454,13 +466,19 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 			fmt.Fprintf(stderr, "gc order run: %v\n", cfgErr) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		return doOrderRunExec(a, cityPath, cfg, stdout, stderr)
+		return doOrderRunExecTracked(a, cityPath, cfg, store, ep, stdout, stderr)
 	}
 
-	// Capture event head before wisp creation (race-free cursor).
+	// Capture event head before wisp creation (race-free cursor). Event runs
+	// fail closed when the cursor cannot be read.
 	var headSeq uint64
 	if a.Trigger == "event" && ep != nil {
-		headSeq, _ = ep.LatestSeq()
+		var err error
+		headSeq, err = ep.LatestSeq()
+		if err != nil {
+			fmt.Fprintf(stderr, "gc order run: reading event cursor for %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 
 	scoped := a.ScopedName()
@@ -539,6 +557,46 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 	}
 	fmt.Fprintln(stdout) //nolint:errcheck
 	return 0
+}
+
+func doOrderRunExecTracked(a orders.Order, cityPath string, cfg *config.City, store beads.Store, ep events.Provider, stdout, stderr io.Writer) int {
+	if a.Trigger != "event" || ep == nil {
+		return doOrderRunExec(a, cityPath, cfg, stdout, stderr)
+	}
+
+	scoped := a.ScopedName()
+	headSeq, err := ep.LatestSeq()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc order run: reading event cursor for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	tracking, err := store.Create(beads.Bead{
+		Title:  "order:" + scoped,
+		Labels: []string{"order-run:" + scoped, labelOrderTracking},
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "gc order run: creating exec tracking bead for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	defer store.Close(tracking.ID) //nolint:errcheck // best-effort close
+
+	// Persist the event cursor before running the command so manual event execs
+	// do not leave the controller cursor stale after the side effect.
+	if err := store.Update(tracking.ID, beads.UpdateOpts{Labels: eventCursorLabels(scoped, headSeq)}); err != nil {
+		fmt.Fprintf(stderr, "gc order run: labeling exec event cursor for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	code := doOrderRunExec(a, cityPath, cfg, stdout, stderr)
+	labels := []string{"exec"}
+	if code != 0 {
+		labels = []string{"exec-failed"}
+	}
+	if err := store.Update(tracking.ID, beads.UpdateOpts{Labels: labels}); err != nil {
+		fmt.Fprintf(stderr, "gc order run: labeling exec tracking bead for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return code
 }
 
 // doOrderRunExec runs an exec order directly via shell.

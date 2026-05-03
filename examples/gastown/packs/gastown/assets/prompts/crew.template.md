@@ -193,22 +193,22 @@ ONE exception where branches are created. But the rule still applies:
 - Submit to that rig's Refinery immediately when done
 - Never leave cross-rig work sitting on an unmerged branch
 
-## gc nudge: Waking Agents
+## gc session nudge: Waking Agents
 
-`{{ cmd }} nudge` is the **core mechanism for inter-agent communication**. It sends a message
+`{{ cmd }} session nudge` is the **core mechanism for inter-agent communication**. It sends a message
 directly to another agent's Claude Code session via tmux.
 
 **When to use nudge vs mail:**
 | Use Case | Tool | Why |
 |----------|------|-----|
-| Wake a sleeping agent | `{{ cmd }} nudge` | Immediate delivery to their session |
+| Wake a sleeping agent | `{{ cmd }} session nudge` | Immediate delivery to their session |
 | Send task for later | `{{ cmd }} mail send` | Queued, they'll see it on next check |
-| Both: assign + wake | `{{ cmd }} mail send` then `{{ cmd }} nudge` | Mail carries payload, nudge wakes them |
+| Both: assign + wake | `{{ cmd }} mail send` then `{{ cmd }} session nudge` | Mail carries payload, nudge wakes them |
 
 **Common patterns:**
 ```bash
-gc nudge {{ .RigName }}/crew/alice "Check your mail - PR review waiting"
-gc nudge {{ .RigName }}/<polecat-name> "Run gc hook; it checks assigned work before routed pool work"
+gc session nudge {{ .RigName }}/crew/alice "Check your mail - PR review waiting"
+gc session nudge {{ .RigName }}/<polecat-name> "Run gc hook; it checks assigned work before routed pool work"
 gc mail send {{ .RigName }}/alice -s "Urgent" -m "..." --notify
 ```
 
@@ -237,8 +237,8 @@ EOF
 - Forgetting the address format: `<rig>/<agent>` for rig agents, `mayor/` for city agents
 - Unquoted multi-line text (shell eats newlines) — use `"$(cat <<'EOF' ... EOF)"` pattern
 
-**Important:** `{{ cmd }} nudge` is the ONLY reliable way to send text to Claude sessions.
-Raw `tmux send-keys` is unreliable. Always use `{{ cmd }} nudge` for agent-to-agent communication.
+**Important:** `{{ cmd }} session nudge` is the ONLY reliable way to send text to Claude sessions.
+Raw `tmux send-keys` is unreliable. Always use `{{ cmd }} session nudge` for agent-to-agent communication.
 
 ### Nudge Delivery Modes
 

@@ -285,6 +285,7 @@ func TestRegisterCityWithSupervisorFailsFastWhenSupervisorStopsDuringWait(t *tes
 	}
 
 	aliveChecks := 0
+	var waitStarted time.Time
 	withSupervisorTestHooks(
 		t,
 		func(_, _ io.Writer) int { return 0 },
@@ -292,6 +293,7 @@ func TestRegisterCityWithSupervisorFailsFastWhenSupervisorStopsDuringWait(t *tes
 		func() int {
 			aliveChecks++
 			if aliveChecks <= 1 {
+				waitStarted = time.Now()
 				return 4242
 			}
 			return 0
@@ -302,7 +304,6 @@ func TestRegisterCityWithSupervisorFailsFastWhenSupervisorStopsDuringWait(t *tes
 	)
 
 	var stdout, stderr bytes.Buffer
-	started := time.Now()
 	code := registerCityWithSupervisor(cityPath, &stdout, &stderr, "gc register", true)
 	if code != 1 {
 		t.Fatalf("registerCityWithSupervisor code = %d, want 1", code)
@@ -310,7 +311,10 @@ func TestRegisterCityWithSupervisorFailsFastWhenSupervisorStopsDuringWait(t *tes
 	if !strings.Contains(stderr.String(), "supervisor stopped before city became ready") {
 		t.Fatalf("stderr = %q, want supervisor-stopped message", stderr.String())
 	}
-	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+	if waitStarted.IsZero() {
+		t.Fatal("supervisor wait path was not reached")
+	}
+	if elapsed := time.Since(waitStarted); elapsed > 250*time.Millisecond {
 		t.Fatalf("registerCityWithSupervisor took %v, want fast failure when supervisor stops", elapsed)
 	}
 	if !strings.Contains(stderr.String(), "keeping registration") {

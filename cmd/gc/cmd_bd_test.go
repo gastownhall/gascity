@@ -1338,6 +1338,38 @@ func TestResolveBdScopeTargetUsesEnclosingRig(t *testing.T) {
 	}
 }
 
+func TestResolveBdScopeTargetRoutesExistingCityBeadFromRigCwd(t *testing.T) {
+	origProbe := bdBeadExists
+	defer func() { bdBeadExists = origProbe }()
+	bdBeadExists = func(_ string, target execStoreTarget, beadID string) bool {
+		return target.ScopeKind == "city" && beadID == "mc-city1"
+	}
+
+	cityDir := filepath.Join(t.TempDir(), "city")
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(filepath.Join(rigDir, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "maintainer-city", Prefix: "mc"},
+		Rigs:      []config.Rig{{Name: "frontend", Path: "frontend", Prefix: "fr"}},
+	}
+	setCwd(t, filepath.Join(rigDir, "nested"))
+
+	got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"show", "mc-city1"})
+	if err != nil {
+		t.Fatalf("resolveBdScopeTarget() error = %v", err)
+	}
+	want := execStoreTarget{
+		ScopeRoot: cityDir,
+		ScopeKind: "city",
+		Prefix:    "mc",
+	}
+	if got != want {
+		t.Fatalf("resolveBdScopeTarget() = %#v, want %#v", got, want)
+	}
+}
+
 func TestGcBdRespectsRawCityFlag(t *testing.T) {
 	origCityFlag := cityFlag
 	origRigFlag := rigFlag

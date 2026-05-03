@@ -31,7 +31,15 @@ const (
 )
 
 var (
-	controllerReloadAcceptTimeout = 5 * time.Second
+	// controllerReloadAcceptTimeout is how long a reload request waits for
+	// the controller's main goroutine to drain it from reloadReqCh. The
+	// main goroutine is blocked while a reconcile tick runs, and ticks can
+	// take 30s–90s+ under bead-store churn (see issue #1560). 5s was
+	// dramatically too short and produced "controller is busy" rejections
+	// for many minutes at a time. 60s gives the controller enough headroom
+	// to finish a tick before the reload is rejected, while still bounding
+	// the wait for genuinely deadlocked controllers.
+	controllerReloadAcceptTimeout = 60 * time.Second
 	sendReloadControlRequestHook  = sendReloadControlRequest
 	reloadUnavailableMessageHook  = reloadUnavailableMessage
 	supervisorAPIBaseURLHook      = supervisorAPIBaseURL
@@ -168,13 +176,9 @@ func sendReloadControlRequest(cityPath string, req reloadControlRequest) (reload
 	if err != nil {
 		return reloadControlReply{}, fmt.Errorf("marshaling request: %w", err)
 	}
-	readTimeout := 15 * time.Second
-	if req.Wait && req.Timeout != "" {
-		timeout, err := time.ParseDuration(req.Timeout)
-		if err != nil {
-			return reloadControlReply{}, fmt.Errorf("parsing request timeout: %w", err)
-		}
-		readTimeout = controllerReloadAcceptTimeout + timeout + 10*time.Second
+	readTimeout, err := reloadControlReadTimeout(req)
+	if err != nil {
+		return reloadControlReply{}, err
 	}
 	resp, err := sendControllerCommandWithReadTimeout(cityPath, "reload:"+string(data), readTimeout)
 	if err != nil {
@@ -185,6 +189,18 @@ func sendReloadControlRequest(cityPath string, req reloadControlRequest) (reload
 		return reloadControlReply{}, fmt.Errorf("parsing response: %w", err)
 	}
 	return reply, nil
+}
+
+func reloadControlReadTimeout(req reloadControlRequest) (time.Duration, error) {
+	readTimeout := 2*controllerReloadAcceptTimeout + 10*time.Second
+	if req.Wait && req.Timeout != "" {
+		timeout, err := time.ParseDuration(req.Timeout)
+		if err != nil {
+			return 0, fmt.Errorf("parsing request timeout: %w", err)
+		}
+		readTimeout += timeout
+	}
+	return readTimeout, nil
 }
 
 func reloadUnavailableMessage(cityPath string) string {

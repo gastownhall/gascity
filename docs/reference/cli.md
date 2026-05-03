@@ -2677,6 +2677,10 @@ gc supervisor stop [flags]
 
 Remove the platform service and stop the machine-wide supervisor.
 
+On systemd, uninstall refuses to remove an active unit when the supervisor
+control socket is unavailable. Start the supervisor first so it can re-adopt
+preserved sessions, then retry uninstall.
+
 ```
 gc supervisor uninstall
 ```

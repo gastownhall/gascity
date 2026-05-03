@@ -20,20 +20,6 @@ type noBroadAPISessionRetireStore struct {
 	t *testing.T
 }
 
-type blockingStartProvider struct {
-	*runtime.Fake
-	unblock <-chan struct{}
-}
-
-func (p *blockingStartProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
-	select {
-	case <-p.unblock:
-		return p.Fake.Start(ctx, name, cfg)
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
 func (s *noBroadAPISessionRetireStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	if query.Label == session.LabelSession && len(query.Metadata) == 0 {
 		s.t.Fatalf("continuity retirement used broad session label scan: %+v", query)

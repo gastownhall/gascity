@@ -1789,6 +1789,35 @@ func TestExecCommandRunnerWithEnvOverridesInheritedValues(t *testing.T) {
 	}
 }
 
+func TestExecCommandRunnerWithEnvSurfacesBdJSONErrorFromStdout(t *testing.T) {
+	binDir := t.TempDir()
+	bdPath := filepath.Join(binDir, "bd")
+	script := `#!/bin/sh
+printf '%s\n' 'bd warning before json'
+printf '%s\n' '{"error":"resolving dependency: no issue found bd-missing","schema_version":1}'
+exit 1
+`
+	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	runner := beads.ExecCommandRunnerWithEnv(map[string]string{
+		"GC_CITY_PATH": "/city",
+	})
+
+	out, err := runner(t.TempDir(), "bd", "dep", "list", "bd-missing", "--json")
+	if err == nil {
+		t.Fatal("runner error = nil, want bd exit error")
+	}
+	if !strings.Contains(err.Error(), "resolving dependency: no issue found bd-missing") {
+		t.Fatalf("runner error = %q, want stdout JSON error detail", err.Error())
+	}
+	if !strings.Contains(string(out), `"schema_version":1`) {
+		t.Fatalf("runner stdout = %q, want original bd stdout preserved", string(out))
+	}
+}
+
 func TestBdStoreApplyGraphPlan(t *testing.T) {
 	dir := t.TempDir()
 	var capturedPlan beads.GraphApplyPlan

@@ -14,8 +14,55 @@ import (
 type Filter struct {
 	Type     string    // match events with this Type
 	Actor    string    // match events with this Actor
+	Subject  string    // match events with this Subject
 	Since    time.Time // match events at or after this time
+	Until    time.Time // match events at or before this time
 	AfterSeq uint64    // match events with Seq > AfterSeq (0 = no filter)
+	Limit    int       // cap results at this count (0 or negative = unlimited)
+}
+
+// matchesFilter reports whether e satisfies all non-zero predicates in f.
+// It does not enforce Limit — that is applied by the caller.
+func matchesFilter(e Event, f Filter) bool {
+	if f.AfterSeq > 0 && e.Seq <= f.AfterSeq {
+		return false
+	}
+	if f.Type != "" && e.Type != f.Type {
+		return false
+	}
+	if f.Actor != "" && e.Actor != f.Actor {
+		return false
+	}
+	if f.Subject != "" && e.Subject != f.Subject {
+		return false
+	}
+	if !f.Since.IsZero() && e.Ts.Before(f.Since) {
+		return false
+	}
+	if !f.Until.IsZero() && e.Ts.After(f.Until) {
+		return false
+	}
+	return true
+}
+
+// ApplyFilter returns events matching all non-zero predicates in filter.
+// It preserves input order and applies a positive Limit after matching.
+func ApplyFilter(evts []Event, filter Filter) []Event {
+	var result []Event
+	for _, e := range evts {
+		if !matchesFilter(e, filter) {
+			continue
+		}
+		result = append(result, e)
+		if limitReached(len(result), filter) {
+			break
+		}
+	}
+	return result
+}
+
+func limitReached(count int, filter Filter) bool {
+	return filter.Limit > 0 && count >= filter.Limit
 }
 
 // ReadAll reads all events from the JSONL file at path.
@@ -48,18 +95,36 @@ func ReadAll(path string) ([]Event, error) {
 
 // ReadFiltered reads events from path and returns only those matching
 // all non-zero fields in filter. Returns (nil, nil) if the file is
-// missing or empty.
+// missing or empty. Scanner errors return the events parsed before the
+// error alongside the error.
 func ReadFiltered(path string, filter Filter) ([]Event, error) {
-	all, err := ReadAll(path)
+	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading events: %w", err)
 	}
+	defer f.Close() //nolint:errcheck // read-only file
 
 	var result []Event
-	for _, e := range all {
-		if eventMatchesFilter(e, filter) {
-			result = append(result, e)
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // handle lines up to 1MB
+	for scanner.Scan() {
+		var e Event
+		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
+			continue // skip malformed lines
 		}
+		if !matchesFilter(e, filter) {
+			continue
+		}
+		result = append(result, e)
+		if limitReached(len(result), filter) {
+			break
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return result, fmt.Errorf("scanning events: %w", err)
 	}
 	return result, nil
 }
@@ -125,7 +190,7 @@ func readFilteredTailFromFile(f *os.File, size int64, filter Filter, limit int) 
 			if err := json.Unmarshal(line, &e); err != nil {
 				continue
 			}
-			if eventMatchesFilter(e, filter) {
+			if matchesFilter(e, filter) {
 				reversed = append(reversed, e)
 			}
 		}
@@ -135,22 +200,6 @@ func readFilteredTailFromFile(f *os.File, size int64, filter Filter, limit int) 
 		reversed[i], reversed[j] = reversed[j], reversed[i]
 	}
 	return reversed, nil
-}
-
-func eventMatchesFilter(e Event, filter Filter) bool {
-	if filter.AfterSeq > 0 && e.Seq <= filter.AfterSeq {
-		return false
-	}
-	if filter.Type != "" && e.Type != filter.Type {
-		return false
-	}
-	if filter.Actor != "" && e.Actor != filter.Actor {
-		return false
-	}
-	if !filter.Since.IsZero() && e.Ts.Before(filter.Since) {
-		return false
-	}
-	return true
 }
 
 // ReadLatestSeq returns the latest complete event Seq in the events file, or

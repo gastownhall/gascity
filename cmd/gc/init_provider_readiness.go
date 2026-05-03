@@ -558,13 +558,11 @@ func checkHardDependencies(cityPath string) []missingDep {
 			continue
 		}
 		if d.minVersion != "" {
-			if ver := parseDepVersion(d.name); ver != "" {
-				if compareVersions(ver, d.minVersion) < 0 {
-					missing = append(missing, missingDep{
-						name:        fmt.Sprintf("%s (found v%s, need v%s+)", d.name, ver, d.minVersion),
-						installHint: d.installHint,
-					})
-				}
+			if ver, ok := depMeetsMinVersion(d.name, d.minVersion); ver != "" && !ok {
+				missing = append(missing, missingDep{
+					name:        fmt.Sprintf("%s (found v%s, need v%s+)", d.name, ver, d.minVersion),
+					installHint: d.installHint,
+				})
 			}
 		}
 	}
@@ -600,13 +598,29 @@ func initNeedsBdTooling(cityPath string) bool {
 	return workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs)
 }
 
-// parseDepVersion runs "<binary> version" and extracts a semver-like version string.
-// Returns "" if the version cannot be determined (non-fatal).
-func parseDepVersion(binary string) string {
+func depMeetsMinVersion(binary, minVersion string) (string, bool) {
 	line, err := initRunVersion(binary)
 	if err != nil {
-		return ""
+		return "", true
 	}
+	if binary == "dolt" {
+		info, err := doltversion.CheckFinalMinimum(line, minVersion)
+		if errors.Is(err, doltversion.ErrPreRelease) || errors.Is(err, doltversion.ErrBelowMinimum) {
+			return info.Raw, false
+		}
+		if err != nil {
+			return "", true
+		}
+		return info.Raw, true
+	}
+	ver := parseDepVersionLine(line)
+	if ver == "" {
+		return "", true
+	}
+	return ver, compareVersions(ver, minVersion) >= 0
+}
+
+func parseDepVersionLine(line string) string {
 	// Patterns: "dolt version 1.86.1", "bd version 1.0.0 (3ac028bf: ...)"
 	for _, field := range strings.Fields(line) {
 		if len(field) > 0 && field[0] >= '0' && field[0] <= '9' && strings.Contains(field, ".") {

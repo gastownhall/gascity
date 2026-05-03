@@ -217,6 +217,16 @@ func (s *cachedOnlyListStoreForSessionTest) CachedList(query beads.ListQuery) ([
 	return rows, true
 }
 
+type apiListQueryCaptureStore struct {
+	beads.Store
+	listCalls []beads.ListQuery
+}
+
+func (s *apiListQueryCaptureStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.listCalls = append(s.listCalls, query)
+	return s.Store.List(query)
+}
+
 type partialPrimeSessionStore struct {
 	*beads.MemStore
 	partialRows    []beads.Bead
@@ -362,6 +372,29 @@ type transportCapableProvider struct {
 
 func (p *transportCapableProvider) SupportsTransport(transport string) bool {
 	return transport == "acp"
+}
+
+type blockingStartProvider struct {
+	*runtime.Fake
+	started chan struct{}
+	unblock chan struct{}
+	once    sync.Once
+}
+
+func (p *blockingStartProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if p.started != nil {
+		p.once.Do(func() {
+			close(p.started)
+		})
+	}
+	if p.unblock != nil {
+		select {
+		case <-p.unblock:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return p.Fake.Start(ctx, name, cfg)
 }
 
 type blockingNudgeProvider struct {
@@ -1919,6 +1952,42 @@ func TestHandleSessionCreateRejectsACPAgentWithoutACPRouting(t *testing.T) {
 	}
 }
 
+func TestHandleSessionCreateRejectsExplicitTmuxAgentWhenCitySessionProviderIsACP(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg.Session.Provider = "acp"
+	fs.cfg.Agents[0].Provider = "opencode"
+	fs.cfg.Agents[0].Session = "tmux"
+	fs.cfg.Providers["opencode"] = config.ProviderSpec{
+		DisplayName: "OpenCode",
+		Command:     "/bin/echo",
+		PathCheck:   "true",
+	}
+	state := &stateWithSessionProvider{
+		fakeState: fs,
+		provider:  &transportCapableProvider{Fake: runtime.NewFake()},
+	}
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"agent","name":"myrig/worker"}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "requires tmux transport") {
+		t.Fatalf("body = %q, want tmux transport error", rec.Body.String())
+	}
+	items, err := fs.cityBeadStore.ListByLabel(session.LabelSession, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("session bead count = %d, want 0", len(items))
+	}
+}
+
 func TestHumaHandleSessionCreateRejectsACPAgentWithoutACPRouting(t *testing.T) {
 	supportsACP := true
 	fs := newSessionFakeState(t)
@@ -3377,8 +3446,6 @@ func TestHandleSessionMessageMaterializedNamedSessionUsesLaunchCommandDefaults(t
 
 func TestHandleSessionMessageQueuesSuspendedSessionMessage(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
-	h := newTestCityHandlerWith(t, fs, srv)
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Resume Me")
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -3386,23 +3453,52 @@ func TestHandleSessionMessageQueuesSuspendedSessionMessage(t *testing.T) {
 		t.Fatalf("Suspend: %v", err)
 	}
 
-	callsBefore := len(fs.sp.Calls)
+	blocker := &blockingStartProvider{
+		Fake:    fs.sp,
+		started: make(chan struct{}),
+		unblock: make(chan struct{}),
+	}
+	var unblockOnce sync.Once
+	unblock := func() {
+		unblockOnce.Do(func() {
+			close(blocker.unblock)
+		})
+	}
+	t.Cleanup(unblock)
+
+	srv := New(&stateWithSessionProvider{fakeState: fs, provider: blocker})
+	h := newTestCityHandlerWith(t, fs, srv)
 
 	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/messages", strings.NewReader(`{"message":"hello"}`))
 	req.Header.Set("Idempotency-Key", "sess-msg-1")
 	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(w, req)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler blocked on suspended-session start instead of returning accepted")
+	}
 
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
 	}
-	for _, call := range fs.sp.Calls[callsBefore:] {
-		if call.Method == "Start" {
-			t.Fatalf("sp.Start should not be called synchronously — message should be queued for async delivery")
-		}
-		if call.Method == "Nudge" {
-			t.Fatalf("sp.Nudge should not be called synchronously — message should be queued for async delivery")
-		}
+	accepted := decodeAsyncAccepted(t, w.Body)
+
+	select {
+	case <-blocker.started:
+	case <-time.After(testEventTimeout):
+		t.Fatal("provider start was not reached")
+	}
+	unblock()
+
+	success, failure := waitForSessionMessageResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session message failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
 	}
 }
 
@@ -3804,6 +3900,115 @@ func TestResolveSessionIDMaterializingNamed_QualifiedAliasBasenameDoesNotStealNa
 	}
 	if got := bead.Metadata[apiNamedSessionMetadataKey]; got != "true" {
 		t.Fatalf("configured_named_session = %q, want true", got)
+	}
+}
+
+func TestResolveConfiguredNamedSessionIDWithContext_BoundedListCalls(t *testing.T) {
+	fs := newSessionFakeState(t)
+	store := &apiListQueryCaptureStore{Store: beads.NewMemStore()}
+	fs.cityBeadStore = store
+	srv := New(fs)
+
+	spec, ok, err := srv.findNamedSessionSpecForTarget(store, "worker")
+	if err != nil {
+		t.Fatalf("findNamedSessionSpecForTarget(worker): %v", err)
+	}
+	if !ok {
+		t.Fatal("expected named session spec for worker")
+	}
+	for i := 0; i < 200; i++ {
+		if _, err := store.Create(beads.Bead{
+			Type:   session.BeadType,
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"session_name": fmt.Sprintf("worker-%d", i),
+			},
+		}); err != nil {
+			t.Fatalf("create irrelevant session %d: %v", i, err)
+		}
+	}
+	target, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name":             spec.SessionName,
+			"alias":                    spec.Identity,
+			apiNamedSessionMetadataKey: "true",
+			apiNamedSessionIdentityKey: spec.Identity,
+			apiNamedSessionModeKey:     spec.Mode,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create canonical named session: %v", err)
+	}
+
+	id, matched, err := srv.resolveConfiguredNamedSessionIDWithContext(context.Background(), store, "worker", apiSessionResolveOptions{})
+	if err != nil {
+		t.Fatalf("resolveConfiguredNamedSessionIDWithContext(worker): %v", err)
+	}
+	if !matched {
+		t.Fatal("matched = false, want true")
+	}
+	if id != target.ID {
+		t.Fatalf("id = %q, want canonical %q", id, target.ID)
+	}
+	if len(store.listCalls) != 1 {
+		t.Fatalf("List calls = %d, want 1 canonical lookup", len(store.listCalls))
+	}
+	assertSessionResolverMetadataFilteredListCalls(t, store.listCalls)
+}
+
+func TestResolveConfiguredNamedSessionIDWithContext_BoundedConflictListCalls(t *testing.T) {
+	fs := newSessionFakeState(t)
+	store := &apiListQueryCaptureStore{Store: beads.NewMemStore()}
+	fs.cityBeadStore = store
+	srv := New(fs)
+
+	spec, ok, err := srv.findNamedSessionSpecForTarget(store, "worker")
+	if err != nil {
+		t.Fatalf("findNamedSessionSpecForTarget(worker): %v", err)
+	}
+	if !ok {
+		t.Fatal("expected named session spec for worker")
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": spec.SessionName,
+			"template":     "other/worker",
+			"agent_name":   "other/worker",
+			"state":        "asleep",
+		},
+	}); err != nil {
+		t.Fatalf("create wrong-template runtime bead: %v", err)
+	}
+
+	_, matched, err := srv.resolveConfiguredNamedSessionIDWithContext(context.Background(), store, "worker", apiSessionResolveOptions{})
+	if err == nil {
+		t.Fatal("resolveConfiguredNamedSessionIDWithContext(worker) succeeded, want conflict")
+	}
+	if !matched {
+		t.Fatal("matched = false, want true")
+	}
+	if !errors.Is(err, errConfiguredNamedSessionConflict) {
+		t.Fatalf("error = %v, want errConfiguredNamedSessionConflict", err)
+	}
+	if len(store.listCalls) > 4 {
+		t.Fatalf("List calls = %d, want bounded small constant without duplicate session_name lookup", len(store.listCalls))
+	}
+	assertSessionResolverMetadataFilteredListCalls(t, store.listCalls)
+}
+
+func assertSessionResolverMetadataFilteredListCalls(t *testing.T, calls []beads.ListQuery) {
+	t.Helper()
+	if len(calls) == 0 {
+		t.Fatal("expected at least one List call")
+	}
+	for i, query := range calls {
+		if len(query.Metadata) == 0 {
+			t.Fatalf("List call #%d has no metadata filter (would scan broad bead sets): %+v", i, query)
+		}
 	}
 }
 

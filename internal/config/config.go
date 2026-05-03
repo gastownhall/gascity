@@ -15,6 +15,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/orders"
 )
 
 // validAgentName matches names safe for use in session identifiers.
@@ -483,7 +484,7 @@ type AgentOverride struct {
 	// PromptTemplate overrides the prompt template path.
 	// Relative paths resolve against the city directory.
 	PromptTemplate *string `toml:"prompt_template,omitempty"`
-	// Session overrides the session transport ("acp").
+	// Session overrides the session transport ("acp" or "tmux").
 	Session *string `toml:"session,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
@@ -1088,8 +1089,13 @@ type OrdersConfig struct {
 type OrderOverride struct {
 	// Name is the order name to target (required).
 	Name string `toml:"name" jsonschema:"required"`
-	// Rig scopes the override to a specific rig's order.
-	// Empty matches city-level orders.
+	// Rig scopes the override to a specific rig's order. Empty matches
+	// ONLY city-level orders (those with no rig); it does NOT match
+	// per-rig instances of the same name — those expand at scan time
+	// and require an explicit rig. Use rig = "*" as a wildcard to match
+	// every instance of the named order (city-level + every rig-scoped
+	// copy). The literal "*" is reserved and rejected as a real rig
+	// name by config validation.
 	Rig string `toml:"rig,omitempty"`
 	// Enabled overrides whether the order is active.
 	Enabled *bool `toml:"enabled,omitempty"`
@@ -1330,6 +1336,20 @@ type DaemonConfig struct {
 	// RestartWindow is the sliding time window for counting restarts.
 	// Duration string (e.g., "30s", "5m", "1h"). Defaults to "1h".
 	RestartWindow string `toml:"restart_window,omitempty" jsonschema:"default=1h"`
+	// SessionCircuitBreaker enables the named-session respawn circuit breaker.
+	// When enabled, the controller suppresses no-progress named-session respawns
+	// after the configured restart threshold is exceeded.
+	SessionCircuitBreaker bool `toml:"session_circuit_breaker,omitempty"`
+	// SessionCircuitBreakerMaxRestarts overrides MaxRestarts for the
+	// named-session respawn circuit breaker. Nil reuses MaxRestartsOrDefault.
+	// 0 disables the circuit breaker even when SessionCircuitBreaker is true.
+	SessionCircuitBreakerMaxRestarts *int `toml:"session_circuit_breaker_max_restarts,omitempty" jsonschema:"default=5"`
+	// SessionCircuitBreakerWindow overrides RestartWindow for the named-session
+	// respawn circuit breaker. Empty reuses RestartWindowDuration.
+	SessionCircuitBreakerWindow string `toml:"session_circuit_breaker_window,omitempty" jsonschema:"default=1h"`
+	// SessionCircuitBreakerResetAfter is the cooldown before an open named-session
+	// breaker resets automatically. Empty defaults to 2 * SessionCircuitBreakerWindowDuration.
+	SessionCircuitBreakerResetAfter string `toml:"session_circuit_breaker_reset_after,omitempty"`
 	// ShutdownTimeout is the time to wait after sending Ctrl-C before force-killing
 	// agents during shutdown. Duration string (e.g., "5s", "30s"). Set to "0s"
 	// for immediate kill. Defaults to "5s".
@@ -1393,6 +1413,42 @@ func (d *DaemonConfig) RestartWindowDuration() time.Duration {
 	dur, err := time.ParseDuration(d.RestartWindow)
 	if err != nil {
 		return time.Hour
+	}
+	return dur
+}
+
+// SessionCircuitBreakerMaxRestartsOrDefault returns the named-session respawn
+// circuit-breaker threshold. Nil reuses MaxRestartsOrDefault; zero disables it.
+func (d *DaemonConfig) SessionCircuitBreakerMaxRestartsOrDefault() int {
+	if d.SessionCircuitBreakerMaxRestarts == nil {
+		return d.MaxRestartsOrDefault()
+	}
+	return *d.SessionCircuitBreakerMaxRestarts
+}
+
+// SessionCircuitBreakerWindowDuration returns the named-session respawn
+// circuit-breaker rolling window. Empty reuses RestartWindowDuration.
+func (d *DaemonConfig) SessionCircuitBreakerWindowDuration() time.Duration {
+	if d.SessionCircuitBreakerWindow == "" {
+		return d.RestartWindowDuration()
+	}
+	dur, err := time.ParseDuration(d.SessionCircuitBreakerWindow)
+	if err != nil {
+		return d.RestartWindowDuration()
+	}
+	return dur
+}
+
+// SessionCircuitBreakerResetAfterDuration returns the named-session respawn
+// circuit-breaker cooldown. Empty or invalid values default to 2 * window.
+func (d *DaemonConfig) SessionCircuitBreakerResetAfterDuration() time.Duration {
+	window := d.SessionCircuitBreakerWindowDuration()
+	if d.SessionCircuitBreakerResetAfter == "" {
+		return 2 * window
+	}
+	dur, err := time.ParseDuration(d.SessionCircuitBreakerResetAfter)
+	if err != nil {
+		return 2 * window
 	}
 	return dur
 }
@@ -1607,10 +1663,11 @@ type Agent struct {
 	// Used for CLI agents that don't accept command-line prompts.
 	Nudge string `toml:"nudge,omitempty"`
 	// Session overrides the session transport for this agent.
-	// "" (default) uses the city-level session provider (typically tmux).
-	// "acp" uses the Agent Client Protocol (JSON-RPC over stdio).
-	// The agent's resolved provider must have supports_acp = true.
-	Session string `toml:"session,omitempty" jsonschema:"enum=acp"`
+	// "" (default) uses the provider default.
+	// "tmux" uses the tmux-backed CLI path even when the provider supports ACP.
+	// "acp" uses the Agent Client Protocol (JSON-RPC over stdio); the agent's
+	// resolved provider must have supports_acp = true.
+	Session string `toml:"session,omitempty" jsonschema:"enum=acp,enum=tmux"`
 	// Provider names the provider preset to use for this agent.
 	Provider string `toml:"provider,omitempty"`
 	// StartCommand overrides the provider's command for this agent.
@@ -2716,6 +2773,11 @@ func ValidateRigs(rigs []Rig, hqPrefix string) error {
 	for i, r := range rigs {
 		if r.Name == "" {
 			return fmt.Errorf("rig[%d]: name is required", i)
+		}
+		// orders.RigWildcard is reserved as the [[orders.overrides]]
+		// token; a real rig with that name would be silently shadowed.
+		if r.Name == orders.RigWildcard {
+			return fmt.Errorf("rig[%d]: name %q is reserved as the [[orders.overrides]] wildcard", i, r.Name)
 		}
 		if r.Path == "" {
 			return fmt.Errorf("rig %q: path is required", r.Name)

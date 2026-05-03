@@ -1699,6 +1699,28 @@ func (t *Tmux) IsPaneDead(target string) (bool, error) {
 	}
 }
 
+func (t *Tmux) sessionPanesDead(session string) (bool, error) {
+	out, err := t.run("list-panes", "-s", "-t", "="+session, "-F", "#{pane_dead}")
+	if err != nil {
+		return false, err
+	}
+	values := strings.Fields(out)
+	if len(values) == 0 {
+		return false, fmt.Errorf("empty pane_dead list for session %s", session)
+	}
+	for _, value := range values {
+		switch value {
+		case "0":
+			return false, nil
+		case "1":
+			continue
+		default:
+			return false, fmt.Errorf("unexpected pane_dead value %q for session %s", value, session)
+		}
+	}
+	return true, nil
+}
+
 // IsSessionRunning reports whether the tmux session exists and its primary pane
 // still has a live process. Dead panes kept by remain-on-exit are treated as
 // not running.

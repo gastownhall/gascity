@@ -140,7 +140,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				Type:  "select",
 				Choices: []BuiltinOptionChoice{
 					{Value: "", Label: "Default"},
-					{Value: "opus", Label: "Opus", FlagArgs: []string{"--model", "claude-opus-4-6"}, FlagAliases: [][]string{{"-m", "claude-opus-4-6"}}},
+					{Value: "opus", Label: "Opus", FlagArgs: []string{"--model", "claude-opus-4-7"}, FlagAliases: [][]string{{"-m", "claude-opus-4-7"}}},
 					{Value: "sonnet", Label: "Sonnet", FlagArgs: []string{"--model", "claude-sonnet-4-6"}, FlagAliases: [][]string{{"-m", "claude-sonnet-4-6"}}},
 					{Value: "haiku", Label: "Haiku", FlagArgs: []string{"--model", "claude-haiku-4-5-20251001"}, FlagAliases: [][]string{{"-m", "claude-haiku-4-5-20251001"}}},
 				},
@@ -189,6 +189,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				Choices: []BuiltinOptionChoice{
 					{Value: "", Label: "Default"},
 					{Value: "gpt-5.5", Label: "GPT-5.5", FlagArgs: []string{"--model", "gpt-5.5"}, FlagAliases: [][]string{{"-m", "gpt-5.5"}}},
+					{Value: "gpt-5.3-codex-spark", Label: "GPT-5.3 Codex Spark", FlagArgs: []string{"--model", "gpt-5.3-codex-spark"}, FlagAliases: [][]string{{"-m", "gpt-5.3-codex-spark"}}},
 					{Value: "o3", Label: "o3", FlagArgs: []string{"--model", "o3"}, FlagAliases: [][]string{{"-m", "o3"}}},
 					{Value: "o4-mini", Label: "o4-mini", FlagArgs: []string{"--model", "o4-mini"}, FlagAliases: [][]string{{"-m", "o4-mini"}}},
 				},

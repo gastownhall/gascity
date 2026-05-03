@@ -166,7 +166,7 @@ func TestProviderLifecycleProcessEnvProjectsResolvedGCBin(t *testing.T) {
 	}
 }
 
-func TestGcBeadsBdReadOnlyFallbackDoesNotDropProbeDatabase(t *testing.T) {
+func TestGcBeadsBdReadOnlyFallbackDoesNotTargetLegacyProbeDatabase(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := MaterializeBuiltinPacks(cityPath); err != nil {
 		t.Fatalf("MaterializeBuiltinPacks: %v", err)
@@ -177,14 +177,25 @@ func TestGcBeadsBdReadOnlyFallbackDoesNotDropProbeDatabase(t *testing.T) {
 	}
 	script := string(scriptData)
 	assertNoManagedDoltProbeDrop(t, "gc-beads-bd read-only fallback", script)
-	if !strings.Contains(script, "CREATE TABLE IF NOT EXISTS __gc_probe.__probe") {
-		t.Fatalf("gc-beads-bd read-only fallback missing qualified persistent probe table")
+	assertNoManagedDoltProbeLegacyTarget(t, "gc-beads-bd read-only fallback", script)
+	for _, want := range []string{"SHOW DATABASES", managedDoltProbeTable, "performance_schema", "sys"} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("gc-beads-bd read-only fallback missing %q", want)
+		}
 	}
-	assertManagedDoltProbeWrites(t, "gc-beads-bd read-only fallback", script)
 }
 
 func TestGcBeadsBdInitRejectsManagedProbeDatabaseName(t *testing.T) {
-	for _, dbName := range []string{managedDoltProbeDatabase, strings.ToUpper(managedDoltProbeDatabase), " " + managedDoltProbeDatabase + " "} {
+	for _, dbName := range []string{
+		managedDoltProbeDatabase,
+		strings.ToUpper(managedDoltProbeDatabase),
+		" " + managedDoltProbeDatabase + " ",
+		"information_schema",
+		"mysql",
+		"dolt_cluster",
+		"performance_schema",
+		"sys",
+	} {
 		t.Run(dbName, func(t *testing.T) {
 			cityPath := t.TempDir()
 			scopePath := filepath.Join(cityPath, "rigs", "frontend")
@@ -210,14 +221,25 @@ func TestGcBeadsBdInitRejectsManagedProbeDatabaseName(t *testing.T) {
 	}
 }
 
-func TestEnsureCanonicalScopeMetadataRejectsManagedProbeDatabase(t *testing.T) {
-	scopePath := t.TempDir()
-	err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, scopePath, managedDoltProbeDatabase)
-	if err == nil {
-		t.Fatalf("ensureCanonicalScopeMetadataForInit unexpectedly accepted %s", managedDoltProbeDatabase)
-	}
-	if !strings.Contains(err.Error(), "reserved pinned dolt_database") || !strings.Contains(err.Error(), "choose a different dolt_database") {
-		t.Fatalf("ensureCanonicalScopeMetadataForInit error = %v, want reserved database remediation", err)
+func TestEnsureCanonicalScopeMetadataRejectsManagedSystemDatabases(t *testing.T) {
+	for _, dbName := range []string{
+		managedDoltProbeDatabase,
+		"information_schema",
+		"mysql",
+		"dolt_cluster",
+		"performance_schema",
+		"sys",
+	} {
+		t.Run(dbName, func(t *testing.T) {
+			scopePath := t.TempDir()
+			err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, scopePath, dbName)
+			if err == nil {
+				t.Fatalf("ensureCanonicalScopeMetadataForInit unexpectedly accepted %s", dbName)
+			}
+			if !strings.Contains(err.Error(), "reserved pinned dolt_database") || !strings.Contains(err.Error(), "choose a different dolt_database") {
+				t.Fatalf("ensureCanonicalScopeMetadataForInit error = %v, want reserved database remediation", err)
+			}
+		})
 	}
 }
 
@@ -252,6 +274,34 @@ func TestNormalizeCanonicalBdScopeFilesPreservesExistingManagedProbeDatabase(t *
 	}
 }
 
+func TestNormalizeCanonicalBdScopeFilesRejectsExistingManagedSystemDatabase(t *testing.T) {
+	cityPath := t.TempDir()
+	metadataPath := filepath.Join(cityPath, ".beads", "metadata.json")
+	if err := os.MkdirAll(filepath.Dir(metadataPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := contract.EnsureCanonicalMetadata(fsys.OSFS{}, metadataPath, contract.MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "server",
+		DoltDatabase: "mysql",
+	}); err != nil {
+		t.Fatalf("EnsureCanonicalMetadata: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte("issue_prefix: hq\nissue-prefix: hq\ndolt.auto-start: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{Workspace: config.Workspace{Name: "dogfood-city"}}
+	err := normalizeCanonicalBdScopeFiles(cityPath, cfg)
+	if err == nil {
+		t.Fatal("normalizeCanonicalBdScopeFiles() error = nil, want reserved metadata rejection")
+	}
+	if !strings.Contains(err.Error(), "reserved pinned dolt_database") || !strings.Contains(err.Error(), "mysql") {
+		t.Fatalf("normalizeCanonicalBdScopeFiles() error = %v, want mysql reserved metadata rejection", err)
+	}
+}
+
 func TestNormalizeCanonicalBdScopeFilesForInitPreservesExistingManagedProbeDatabase(t *testing.T) {
 	cityPath := t.TempDir()
 	metadataPath := filepath.Join(cityPath, ".beads", "metadata.json")
@@ -280,6 +330,224 @@ func TestNormalizeCanonicalBdScopeFilesForInitPreservesExistingManagedProbeDatab
 	}
 	if !ok || got != strings.ToUpper(managedDoltProbeDatabase) {
 		t.Fatalf("dolt_database = %q, ok=%v; want existing reserved name preserved", got, ok)
+	}
+}
+
+func TestGcBeadsBdReadOnlyFallbackNoUserDatabaseIsDiagnostic(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
+	}
+	scriptData, err := os.ReadFile(gcBeadsBdScriptPath(cityPath))
+	if err != nil {
+		t.Fatalf("ReadFile(gc-beads-bd): %v", err)
+	}
+	prelude, _, ok := strings.Cut(string(scriptData), "# --- Main ---")
+	if !ok {
+		t.Fatal("gc-beads-bd script missing main marker")
+	}
+
+	binDir := t.TempDir()
+	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation.txt")
+	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(`#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$INVOCATION_FILE"
+case "$*" in
+  *"sql -r csv -q SHOW DATABASES"*)
+    printf 'Database\ninformation_schema\nmysql\ndolt_cluster\nperformance_schema\nsys\n__gc_probe\n'
+    exit 0
+    ;;
+  *"CREATE TABLE IF NOT EXISTS"*"__gc_read_only_probe"*)
+    echo "unexpected write probe without a user database" >&2
+    exit 2
+    ;;
+  *)
+    echo "unexpected command: $*" >&2
+    exit 2
+    ;;
+esac
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile(dolt): %v", err)
+	}
+
+	harness := filepath.Join(t.TempDir(), "read-only-fallback.sh")
+	body := prelude + `
+GC_BIN=""
+GC_DOLT_HOST=""
+DOLT_PORT=3311
+DOLT_USER=root
+set +e
+check_read_only
+status=$?
+set -e
+printf 'status=%s\n' "$status"
+`
+	if err := os.WriteFile(harness, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("sh", harness)
+	cmd.Env = append(sanitizedBaseEnv(
+		"INVOCATION_FILE="+invocationFile,
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+	), "GC_BIN=")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("check_read_only harness failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "status=2") {
+		t.Fatalf("check_read_only output = %s, want diagnostic status 2", out)
+	}
+	if !strings.Contains(string(out), "no user database") {
+		t.Fatalf("check_read_only output = %s, want no-user-database diagnostic", out)
+	}
+	invocation, err := os.ReadFile(invocationFile)
+	if err != nil {
+		t.Fatalf("ReadFile(invocation): %v", err)
+	}
+	if strings.Contains(string(invocation), "CREATE TABLE IF NOT EXISTS") {
+		t.Fatalf("check_read_only ran write probe without user database:\n%s", invocation)
+	}
+}
+
+func TestGcBeadsBdHealthNoUserDatabaseWarnsAndContinues(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
+	}
+	scriptData, err := os.ReadFile(gcBeadsBdScriptPath(cityPath))
+	if err != nil {
+		t.Fatalf("ReadFile(gc-beads-bd): %v", err)
+	}
+	prelude, _, ok := strings.Cut(string(scriptData), "# --- Main ---")
+	if !ok {
+		t.Fatal("gc-beads-bd script missing main marker")
+	}
+
+	binDir := t.TempDir()
+	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation.txt")
+	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(`#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$INVOCATION_FILE"
+case "$*" in
+  *"sql -r csv -q SHOW DATABASES"*)
+    printf 'Database\ninformation_schema\nmysql\ndolt_cluster\nperformance_schema\nsys\n__gc_probe\n'
+    exit 0
+    ;;
+  *"CREATE TABLE IF NOT EXISTS"*)
+    echo "unexpected write probe without a user database" >&2
+    exit 2
+    ;;
+  *)
+    echo "unexpected command: $*" >&2
+    exit 2
+    ;;
+esac
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile(dolt): %v", err)
+	}
+
+	harness := filepath.Join(t.TempDir(), "health-fallback.sh")
+	body := prelude + `
+GC_BIN=""
+GC_DOLT_HOST=""
+DOLT_PORT=3311
+DOLT_USER=root
+tcp_check() { return 0; }
+do_query_probe() { return 0; }
+get_connection_count() { return 1; }
+set +e
+op_health
+status=$?
+set -e
+printf 'status=%s\n' "$status"
+`
+	if err := os.WriteFile(harness, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("sh", harness)
+	cmd.Env = append(sanitizedBaseEnv(
+		"INVOCATION_FILE="+invocationFile,
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+	), "GC_BIN=")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("op_health harness failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "status=0") {
+		t.Fatalf("op_health output = %s, want success status", out)
+	}
+	if !strings.Contains(string(out), "warning: dolt read-only probe inconclusive") {
+		t.Fatalf("op_health output = %s, want warning", out)
+	}
+	invocation, err := os.ReadFile(invocationFile)
+	if err != nil {
+		t.Fatalf("ReadFile(invocation): %v", err)
+	}
+	if strings.Contains(string(invocation), "CREATE TABLE IF NOT EXISTS") {
+		t.Fatalf("op_health ran write probe without user database:\n%s", invocation)
+	}
+}
+
+func TestGcBeadsBdReadOnlyHelperErrorIsDiagnostic(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
+	}
+	scriptData, err := os.ReadFile(gcBeadsBdScriptPath(cityPath))
+	if err != nil {
+		t.Fatalf("ReadFile(gc-beads-bd): %v", err)
+	}
+	prelude, _, ok := strings.Cut(string(scriptData), "# --- Main ---")
+	if !ok {
+		t.Fatal("gc-beads-bd script missing main marker")
+	}
+
+	gcBin := filepath.Join(t.TempDir(), "gc")
+	if err := os.WriteFile(gcBin, []byte(`#!/bin/sh
+set -eu
+case "$1 $2" in
+  "dolt-state read-only-check")
+    echo "gc dolt-state read-only-check: no user database available for managed Dolt read-only probe" >&2
+    exit 1
+    ;;
+  *)
+    echo "unexpected gc command: $*" >&2
+    exit 66
+    ;;
+esac
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile(gc): %v", err)
+	}
+
+	harness := filepath.Join(t.TempDir(), "read-only-helper.sh")
+	body := prelude + fmt.Sprintf(`
+GC_BIN=%q
+GC_DOLT_HOST=""
+DOLT_PORT=3311
+DOLT_USER=root
+set +e
+check_read_only
+status=$?
+set -e
+printf 'status=%%s\n' "$status"
+`, gcBin)
+	if err := os.WriteFile(harness, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("sh", harness)
+	cmd.Env = sanitizedBaseEnv("PATH=" + os.Getenv("PATH"))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("check_read_only harness failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "status=2") {
+		t.Fatalf("check_read_only output = %s, want diagnostic status 2", out)
+	}
+	if !strings.Contains(string(out), "no user database") {
+		t.Fatalf("check_read_only output = %s, want helper diagnostic", out)
 	}
 }
 
@@ -2935,7 +3203,11 @@ case "$cmd" in
     exit 0
     ;;
   --host)
-    exit 0
+    count=0
+    if [ -f "$attempts_file" ]; then
+      count=$(cat "$attempts_file")
+    fi
+    [ "$count" -ge 2 ]
     ;;
   sql-server)
     config_file=""

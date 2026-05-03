@@ -214,7 +214,7 @@ prompt:
 
 ## See Also
 
-- [Agent Protocol](agent-protocol.md) — how rendered prompts are
+- [Session](session.md) — how rendered prompts are
   delivered to agents via runtime.Provider
 - [Config System](config.md) — how Agent.PromptTemplate and Agent.Env
   are resolved through override layers

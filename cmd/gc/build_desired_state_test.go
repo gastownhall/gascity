@@ -34,6 +34,14 @@ type partialAssignedWorkStore struct {
 	partialReady      bool
 }
 
+type acpOnlyDesiredStateProvider struct {
+	*runtime.Fake
+}
+
+func (p *acpOnlyDesiredStateProvider) SupportsTransport(transport string) bool {
+	return transport == config.SessionTransportACP
+}
+
 func (s *partialAssignedWorkStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	rows, err := s.MemStore.List(query)
 	if err != nil {
@@ -387,6 +395,49 @@ func TestBuildDesiredState_UsesAgentHookOverride(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(cityPath, ".gemini", "settings.json")); !os.IsNotExist(err) {
 		t.Fatalf("workspace gemini hook should not be installed for agent override: %v", err)
+	}
+}
+
+func TestBuildDesiredStateRejectsExplicitTmuxAgentWhenSessionProviderCannotRouteTmux(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city", Provider: "opencode"},
+		Session:   config.SessionConfig{Provider: config.SessionTransportACP},
+		Providers: map[string]config.ProviderSpec{
+			"opencode": {
+				Command:     "echo",
+				Args:        []string{"provider"},
+				ACPCommand:  "echo",
+				ACPArgs:     []string{"acp"},
+				PromptMode:  "none",
+				SupportsACP: boolPtr(true),
+			},
+		},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Provider:          "opencode",
+			Session:           config.SessionTransportTmux,
+			MaxActiveSessions: intPtr(1),
+			ScaleCheck:        "printf 1",
+		}},
+	}
+	store := beads.NewMemStore()
+	sp := &acpOnlyDesiredStateProvider{Fake: runtime.NewFake()}
+	var stderr strings.Builder
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, sp, store, &stderr)
+	if len(dsResult.State) != 0 {
+		t.Fatalf("desired state size = %d, want 0: %#v", len(dsResult.State), dsResult.State)
+	}
+	beads, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel(%q): %v", sessionBeadLabel, err)
+	}
+	if len(beads) != 0 {
+		t.Fatalf("session bead count = %d, want 0: %#v", len(beads), beads)
+	}
+	if got := stderr.String(); !strings.Contains(got, "cannot route tmux sessions") {
+		t.Fatalf("stderr = %q, want tmux routing rejection", got)
 	}
 }
 
