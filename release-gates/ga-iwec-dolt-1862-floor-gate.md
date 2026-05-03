@@ -1,51 +1,53 @@
-# Release gate — dolt 1.86.2 version floor (ga-iwec + ga-kmb4)
+# Release gate - dolt 1.86.2 version floor (ga-iwec + ga-kmb4)
 
 **Verdict:** PASS
 
-Branch: `release/ga-iwec-dolt-1862-floor` (cut fresh off `origin/main` @ `73f52d59`)
-Commits (rebased SHAs on this branch):
-- `2a498497` — feat(dolt): require dolt >= 1.86.2 in pack guards (ga-iwec)
-- `ed7ba1ea` — test(dolt/doctor): cover dolt 1.86.2 version-floor + missing prereqs (ga-kmb4)
+Branch: `release/ga-iwec-dolt-1862-floor`
+Base: `refs/adopt-pr/ga-uc3d3j/upstream-base` at `936dea150ca8`
 
-Source SHAs on `tracking/ga-iwec-rebased` (fork): `31dc90d4`, `bd9050b5`. Cherry-picked clean (zero conflicts).
+Commits present at review input:
+- `c4cbec40d` - feat(dolt): require dolt >= 1.86.2 in pack guards (ga-iwec)
+- `6defe1dd3` - test(dolt/doctor): cover dolt 1.86.2 version-floor + missing prereqs (ga-kmb4)
+- `5e9b00932` - chore: release gate PASS for ga-iwec-dolt-1862-floor
+- `da662ea00` - fix: address Dolt floor review findings
 
-Diff vs `origin/main`: +313 lines across 4 files (run.sh, doctor_test.go, mol-dog-backup.toml, pack.toml).
+Maintainer review-loop fixup in this commit:
+- Reject `1.86.2-rc*` and `1.86.2-dev*` Dolt builds in both the shell pack doctor and Go `DoltVersionCheck`.
+- Keep final releases with build metadata such as `1.86.2+build.5` accepted.
+- Correct `mol-dog-backup` preflight text so it no longer claims framework-enforced `abort_scope` behavior.
+- Add shell and Go regression coverage for prerelease/dev versions plus parser edge cases.
 
-## Review beads bundled in this PR
+Diff vs base after the maintainer fixup: 9 files changed, 580 insertions, 32 deletions.
 
-| Review bead | Reviews            | Verdict | Reviewer            |
-|-------------|--------------------|---------|---------------------|
-| ga-zguq     | ga-iwec (run.sh + mol-dog-backup.toml + pack.toml) | PASS | gascity/reviewer-1 |
-| ga-245m     | ga-iwec (same surface, second review pass)         | PASS | gascity/reviewer-1 |
-| ga-57v7     | ga-kmb4 (examples/dolt/doctor_test.go)             | PASS | gascity/reviewer-1 |
+Changed files:
+- `cmd/gc/embed_builtin_packs_test.go`
+- `examples/dolt/doctor/check-dolt/run.sh`
+- `examples/dolt/doctor_test.go`
+- `examples/dolt/formulas/mol-dog-backup.toml`
+- `examples/dolt/pack.toml`
+- `internal/doctor/checks.go`
+- `internal/doctor/checks_test.go`
+- `internal/doltversion/doltversion.go`
+- `release-gates/ga-iwec-dolt-1862-floor-gate.md`
+
+## Review Beads Bundled In This PR
+
+| Review bead | Reviews | Verdict | Reviewer |
+|-------------|---------|---------|----------|
+| ga-zguq | ga-iwec (`run.sh` + `mol-dog-backup.toml` + `pack.toml`) | PASS | gascity/reviewer-1 |
+| ga-245m | ga-iwec second review pass | PASS | gascity/reviewer-1 |
+| ga-57v7 | ga-kmb4 (`examples/dolt/doctor_test.go`) | PASS | gascity/reviewer-1 |
 
 ## Criteria
 
-| # | Criterion                                  | Verdict | Evidence                                                                                       |
-|---|--------------------------------------------|---------|------------------------------------------------------------------------------------------------|
-| 1 | Review PASS present                        | PASS    | All three review beads carry an explicit reviewer-1 PASS verdict (see notes on each bead).     |
-| 2 | Acceptance criteria met                    | PASS    | run.sh rejects dolt <1.86.2 with upstream-commit explainer; mol-dog-backup.toml has `preflight` step before `sync` (`sync.needs = ["preflight"]`); pack.toml notes 1.86.2 floor; doctor_test.go covers all 9 documented branches. |
-| 3 | Tests pass                                 | PASS    | `go test -count=1 ./examples/dolt/... ./internal/formula/...` → ok 11.0s + 0.04s. Full `./...` has 4 failures in `internal/runtime/k8s` (`TestControllerScriptDeploy*`) — verified pre-existing on `origin/main` @ `73f52d59`, unrelated to dolt floor (errors mention `GC_DOLT_HOST`/`GC_DOLT_PORT` controller bootstrap, not pack guards). |
-| 4 | No high-severity review findings open      | PASS    | All three review beads list "Findings: None blocking." Informational notes about empty-version fall-through were addressed by the rebase (`unrecognized dolt version output` exit-1 path now lives upstream in run.sh on main; ga-kmb4 sandbox tracks it). |
-| 5 | Final branch is clean                      | PASS    | `git status` clean (only this gate file untracked at write time).                              |
-| 6 | Branch diverges cleanly from main          | PASS    | `git cherry-pick 31dc90d4 bd9050b5` applied cleanly with zero conflicts onto fresh branch off `origin/main`. The previous run.sh conflict from `c5128407` is resolved by builder's rebase commit `31dc90d4`. |
+| # | Criterion | Verdict | Evidence |
+|---|-----------|---------|----------|
+| 1 | Review PASS present | PASS | All three source review beads carry reviewer-1 PASS verdicts. |
+| 2 | Acceptance criteria met | PASS | The pack doctor rejects Dolt below `1.86.2`, rejects prerelease/dev builds at the floor, accepts `1.86.2` final and later versions, and reports the upstream `ccf7bde206` context. The backup formula still runs a preflight before `sync`, and the text now matches the actual dependency semantics. |
+| 3 | Tests pass | PASS | `git diff --check`; `bash -n examples/dolt/doctor/check-dolt/run.sh`; `go test -run 'TestDoctorCheckVersionFloor|TestDoctorCheckVersionFloorDoesNotRequireVersionSort|TestBuiltinDoltDoctorAllowsAtMinimumVersionWhenProbeSucceeds|TestBuiltinDoltDoctorBoundsVersionProbe|TestDoltVersionCheck|TestParseDoltVersion' -count=1 ./examples/dolt ./cmd/gc ./internal/doctor`; `go test -count=1 ./internal/formula/...`. |
+| 4 | No high-severity review findings open | PASS after maintainer fixup | The review-loop fixup addresses the major prerelease acceptance finding and the scorecard-required formula wording, gate refresh, and parser edge coverage. A fresh review pass must confirm this before `review.verdict=done`. |
+| 5 | Branch evidence matches current reviewed state | PASS | Base, commit stack, diff summary, changed file list, and validation evidence above reflect the reviewed worktree after the maintainer fixup. |
 
-## Build / vet
+## Notes
 
-- `go build ./...` → clean
-- `go vet ./...` → clean
-
-## Pre-existing failures (not introduced)
-
-`internal/runtime/k8s` controller-script tests fail on baseline:
-- `TestControllerScriptDeployUsesResolvedConfigPrefixesForBootstrap`
-- `TestControllerScriptDeployBootstrapsAfterStartSignalAndLogProbe`
-- `TestControllerScriptDeployBootstrapsWhenLogsNeverMatch`
-- `TestControllerScriptDeployFailsWhenBootstrapFails`
-
-Cause is unrelated controller bootstrap env-var validation (`GC_DOLT_HOST`/`GC_DOLT_PORT`). Not in scope for this PR.
-
-## Push target
-
-`fork` (quad341/gascity) — `origin` (gastownhall/gascity) is read-only from this rig (verified via `git push --dry-run origin HEAD` → 403).
-PR cross-repo: `--head quad341:release/ga-iwec-dolt-1862-floor --base main`.
+The broader repository suite was not rerun in this review-loop step. The prior scorecard noted unrelated broader failures in environment/config harness areas, so this gate records the scoped checks that cover the changed Dolt floor and formula surfaces.

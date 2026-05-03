@@ -31,11 +31,11 @@ func strPtr(s string) *string { return &s }
 // success so callers can chain alternatives.
 func lookPathInto(t *testing.T, bin, host, linkName string) bool {
 	t.Helper()
-	real, err := exec.LookPath(host)
+	hostPath, err := exec.LookPath(host)
 	if err != nil {
 		return false
 	}
-	if err := os.Symlink(real, filepath.Join(bin, linkName)); err != nil {
+	if err := os.Symlink(hostPath, filepath.Join(bin, linkName)); err != nil {
 		t.Fatalf("symlink %q -> %q: %v", host, linkName, err)
 	}
 	return true
@@ -56,7 +56,7 @@ type doctorSandboxOpts struct {
 
 // doctorSandbox builds an isolated PATH directory for run.sh.
 //
-// The script invokes head, sed, sort, and a timeout binary
+// The script invokes head, sed, and a timeout binary
 // (timeout/gtimeout) externally. Because the sandbox replaces PATH
 // wholesale (rather than prepending), we symlink real coreutils into
 // the sandbox so those calls still succeed; otherwise PATH isolation
@@ -67,12 +67,12 @@ type doctorSandboxOpts struct {
 func doctorSandbox(t *testing.T, opts doctorSandboxOpts) string {
 	t.Helper()
 	bin := t.TempDir()
-	for _, tool := range []string{"head", "sed", "sort"} {
-		real, err := exec.LookPath(tool)
+	for _, tool := range []string{"head", "sed"} {
+		hostPath, err := exec.LookPath(tool)
 		if err != nil {
 			t.Fatalf("LookPath(%q): %v", tool, err)
 		}
-		if err := os.Symlink(real, filepath.Join(bin, tool)); err != nil {
+		if err := os.Symlink(hostPath, filepath.Join(bin, tool)); err != nil {
 			t.Fatalf("symlink %q: %v", tool, err)
 		}
 	}
@@ -137,13 +137,15 @@ func runDoctorCheck(t *testing.T, sandboxBin string) (int, string) {
 //     ccf7bde206 so on-call has the upstream context.
 //  2. Accept the boundary 1.86.2 exactly.
 //  3. Accept versions where the minor segment is multi-digit
-//     (1.86.10) — sort -V is the only correct comparator here;
-//     lexical sort would order 1.86.10 before 1.86.2 and reject it.
+//     (1.86.10); lexical string comparison would order 1.86.10
+//     before 1.86.2 and reject it.
 //  4. Accept the next major (2.0.0).
-//  5. Fall through harmlessly when `dolt version` produces empty
-//     or unparseable output, rather than false-positive blocking.
-//     The "no dolt at all" path is already covered by the
-//     command-not-found branch at the top of the script.
+//  5. Reject pre-release/dev builds at the floor, while accepting
+//     build metadata on a final release.
+//  6. Fail closed when `dolt version` produces empty or
+//     unparseable output. The "no dolt at all" path is already
+//     covered by the command-not-found branch at the top of the
+//     script.
 func TestDoctorCheckVersionFloor(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -186,6 +188,62 @@ func TestDoctorCheckVersionFloor(t *testing.T) {
 			wantOmit:    []string{"too old"},
 		},
 		{
+			name:        "pre-release 1.86.2-rc1 rejected",
+			version:     "dolt version 1.86.2-rc1",
+			wantExit:    2,
+			wantContain: []string{"pre-release", "1.86.2-rc1", "1.86.2"},
+			wantOmit:    []string{"dolt available"},
+		},
+		{
+			name:        "pre-release with build metadata 1.86.2-rc1+build.5 rejected",
+			version:     "dolt version 1.86.2-rc1+build.5",
+			wantExit:    2,
+			wantContain: []string{"pre-release", "1.86.2-rc1+build.5", "1.86.2"},
+			wantOmit:    []string{"dolt available"},
+		},
+		{
+			name:        "dev build 1.86.2-dev rejected",
+			version:     "dolt version 1.86.2-dev.0",
+			wantExit:    2,
+			wantContain: []string{"pre-release", "1.86.2-dev.0", "1.86.2"},
+			wantOmit:    []string{"dolt available"},
+		},
+		{
+			name:        "pre-release above floor 1.99.0-rc1 rejected",
+			version:     "dolt version 1.99.0-rc1",
+			wantExit:    2,
+			wantContain: []string{"pre-release", "1.99.0-rc1", "1.86.2"},
+			wantOmit:    []string{"dolt available"},
+		},
+		{
+			name:        "pre-release next major 2.0.0-rc1 rejected",
+			version:     "dolt version 2.0.0-rc1",
+			wantExit:    2,
+			wantContain: []string{"pre-release", "2.0.0-rc1", "1.86.2"},
+			wantOmit:    []string{"dolt available"},
+		},
+		{
+			name:        "build metadata on 1.86.2 accepted",
+			version:     "dolt version 1.86.2+build.5",
+			wantExit:    0,
+			wantContain: []string{"dolt available", "1.86.2+build.5"},
+			wantOmit:    []string{"too old", "pre-release"},
+		},
+		{
+			name:        "hyphenated build metadata on 1.86.2 accepted",
+			version:     "dolt version 1.86.2+build-5",
+			wantExit:    0,
+			wantContain: []string{"dolt available", "1.86.2+build-5"},
+			wantOmit:    []string{"too old", "pre-release"},
+		},
+		{
+			name:        "v-prefixed 1.86.2 accepted",
+			version:     "dolt version v1.86.2",
+			wantExit:    0,
+			wantContain: []string{"dolt available", "v1.86.2", "flock ok", "lsof ok"},
+			wantOmit:    []string{"too old", "unrecognized"},
+		},
+		{
 			// Empty `dolt version` output is rejected at the top
 			// of the script (origin/main commit 885d07c2 added the
 			// "unrecognized dolt version output" branch). The
@@ -199,11 +257,25 @@ func TestDoctorCheckVersionFloor(t *testing.T) {
 			wantOmit:    []string{"too old"},
 		},
 		{
-			name:        "non-version output falls through",
+			name:        "non-version output fails closed",
 			version:     "weird-binary-junk",
-			wantExit:    0,
-			wantContain: []string{"dolt available", "flock ok", "lsof ok"},
+			wantExit:    1,
+			wantContain: []string{"unrecognized dolt version output"},
 			wantOmit:    []string{"too old"},
+		},
+		{
+			name:        "two-component 1.86 rejected",
+			version:     "dolt version 1.86",
+			wantExit:    1,
+			wantContain: []string{"unrecognized dolt version output"},
+			wantOmit:    []string{"too old", "pre-release"},
+		},
+		{
+			name:        "leading whitespace output rejected",
+			version:     "  dolt version 1.85.9",
+			wantExit:    1,
+			wantContain: []string{"unrecognized dolt version output"},
+			wantOmit:    []string{"too old", "pre-release"},
 		},
 	}
 	for _, tt := range tests {
@@ -228,6 +300,27 @@ func TestDoctorCheckVersionFloor(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDoctorCheckVersionFloorDoesNotRequireVersionSort(t *testing.T) {
+	bin := doctorSandbox(t, doctorSandboxOpts{
+		dolt:         strPtr("dolt version 1.86.10"),
+		includeFlock: true,
+		includeLsof:  true,
+	})
+	sortPath := filepath.Join(bin, "sort")
+	if err := os.Remove(sortPath); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("remove sort shim: %v", err)
+	}
+	writeExecutable(t, sortPath, "#!/bin/sh\necho 'sort -V unsupported' >&2\nexit 64\n")
+
+	code, out := runDoctorCheck(t, bin)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 without sort -V\noutput:\n%s", code, out)
+	}
+	if !strings.Contains(out, "dolt available") {
+		t.Fatalf("output = %s, want successful version probe", out)
 	}
 }
 

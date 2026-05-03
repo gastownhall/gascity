@@ -170,7 +170,7 @@ func TestDoltSyncRejectsManagedProbeDatabaseFilter(t *testing.T) {
 	}
 }
 
-func TestBuiltinDoltDoctorAllowsOlderVersionWhenProbeSucceeds(t *testing.T) {
+func TestBuiltinDoltDoctorAllowsAtMinimumVersionWhenProbeSucceeds(t *testing.T) {
 	dir := t.TempDir()
 	if err := MaterializeBuiltinPacks(dir); err != nil {
 		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
@@ -181,7 +181,7 @@ func TestBuiltinDoltDoctorAllowsOlderVersionWhenProbeSucceeds(t *testing.T) {
 		name string
 		body string
 	}{
-		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 1.75.2\\n'\n"},
+		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 1.86.2\\n'\n"},
 		{name: "flock", body: "#!/bin/sh\nexit 0\n"},
 		{name: "lsof", body: "#!/bin/sh\nexit 0\n"},
 	} {
@@ -195,9 +195,9 @@ func TestBuiltinDoltDoctorAllowsOlderVersionWhenProbeSucceeds(t *testing.T) {
 	cmd.Env = append(sanitizedBaseEnv(), "PATH="+binDir+":"+os.Getenv("PATH"))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("check-dolt unexpectedly rejected old Dolt probe: %v\n%s", err, out)
+		t.Fatalf("check-dolt unexpectedly rejected Dolt probe at minimum: %v\n%s", err, out)
 	}
-	if !strings.Contains(string(out), "dolt available (dolt version 1.75.2)") {
+	if !strings.Contains(string(out), "dolt available (dolt version 1.86.2)") {
 		t.Fatalf("check-dolt output = %s, want successful version probe", out)
 	}
 }
@@ -218,7 +218,7 @@ func TestBuiltinDoltDoctorBoundsVersionProbe(t *testing.T) {
 			name: "timeout",
 			body: "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$TIMEOUT_CAPTURE\"\nif [ \"$1\" = \"--kill-after=2\" ]; then\n  shift\nfi\nshift\nexec \"$@\"\n",
 		},
-		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 1.86.1\\n'\n"},
+		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 1.86.10\\n'\n"},
 		{name: "flock", body: "#!/bin/sh\nexit 0\n"},
 		{name: "lsof", body: "#!/bin/sh\nexit 0\n"},
 	} {
