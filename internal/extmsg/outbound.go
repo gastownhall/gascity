@@ -9,6 +9,18 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 )
 
+// MetadataKeySourceSessionID is the reserved metadata key used to propagate
+// the originating gc session id across the publish wire to adapters.
+//
+// PublishRequest itself does not carry a SessionID field (intentional —
+// keeps the request shape provider-neutral). Adapters that need the
+// session id (e.g. for per-session identity overrides like Slack
+// chat:write.customize) read it from PublishRequest.Metadata using this
+// key. The key is unprefixed because user-supplied metadata is namespaced
+// under "meta." (see metadataPrefix); system-controlled keys live in the
+// bare namespace.
+const MetadataKeySourceSessionID = "source_session_id"
+
 // OutboundRequest specifies what to publish to an external conversation.
 type OutboundRequest struct {
 	SessionID        string
@@ -102,12 +114,25 @@ func HandleOutbound(ctx context.Context, deps OutboundDeps, caller Caller, req O
 	}
 
 	// Step 4: Publish.
+	//
+	// Inject the originating session id into wire metadata so adapters
+	// can route per-session behavior (e.g. Slack identity overrides)
+	// without PublishRequest needing a SessionID field. Done by copying
+	// the caller's metadata onto a new map so we don't mutate it.
+	wireMetadata := req.Metadata
+	if req.SessionID != "" {
+		wireMetadata = make(map[string]string, len(req.Metadata)+1)
+		for k, v := range req.Metadata {
+			wireMetadata[k] = v
+		}
+		wireMetadata[MetadataKeySourceSessionID] = req.SessionID
+	}
 	receipt, err := adapter.Publish(ctx, PublishRequest{
 		Conversation:     req.Conversation,
 		Text:             req.Text,
 		ReplyToMessageID: req.ReplyToMessageID,
 		IdempotencyKey:   req.IdempotencyKey,
-		Metadata:         req.Metadata,
+		Metadata:         wireMetadata,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("adapter publish: %w", err)
