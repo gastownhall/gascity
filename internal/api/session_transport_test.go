@@ -1,6 +1,7 @@
 package api
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -46,12 +47,21 @@ func TestProviderSessionTransportSupportsACPAloneStaysDefault(t *testing.T) {
 func TestValidateSessionTransportAcceptsTmuxTransport(t *testing.T) {
 	transport, err := validateSessionTransport(&config.ResolvedProvider{
 		Name: "custom",
-	}, "tmux", runtime.NewFake())
+	}, config.SessionTransportTmux, runtime.NewFake())
 	if err != nil {
 		t.Fatalf("validateSessionTransport: %v", err)
 	}
-	if transport != "tmux" {
-		t.Fatalf("validateSessionTransport() = %q, want %q", transport, "tmux")
+	if transport != config.SessionTransportTmux {
+		t.Fatalf("validateSessionTransport() = %q, want %q", transport, config.SessionTransportTmux)
+	}
+}
+
+func TestValidateSessionTransportRejectsTmuxWhenSessionProviderIsACPOnly(t *testing.T) {
+	_, err := validateSessionTransport(&config.ResolvedProvider{
+		Name: "custom",
+	}, config.SessionTransportTmux, &createTransportCapableProvider{Fake: runtime.NewFake()})
+	if err == nil || !strings.Contains(err.Error(), "requires tmux transport") {
+		t.Fatalf("validateSessionTransport() error = %v, want tmux routing error", err)
 	}
 }
 

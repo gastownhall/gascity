@@ -75,7 +75,7 @@ type TemplateParams struct {
 	RigRoot string
 	// WakeMode controls whether the next wake resumes or starts fresh conversation state.
 	WakeMode string
-	// IsACP is true if session = "acp".
+	// IsACP is true when the resolved session transport is SessionTransportACP.
 	IsACP bool
 	// HookEnabled reports whether provider hooks are installed for this agent.
 	// Hooks complement startup delivery but do not replace the initial

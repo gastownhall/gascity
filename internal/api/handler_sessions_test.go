@@ -1952,6 +1952,42 @@ func TestHandleSessionCreateRejectsACPAgentWithoutACPRouting(t *testing.T) {
 	}
 }
 
+func TestHandleSessionCreateRejectsExplicitTmuxAgentWhenCitySessionProviderIsACP(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg.Session.Provider = "acp"
+	fs.cfg.Agents[0].Provider = "opencode"
+	fs.cfg.Agents[0].Session = "tmux"
+	fs.cfg.Providers["opencode"] = config.ProviderSpec{
+		DisplayName: "OpenCode",
+		Command:     "/bin/echo",
+		PathCheck:   "true",
+	}
+	state := &stateWithSessionProvider{
+		fakeState: fs,
+		provider:  &transportCapableProvider{Fake: runtime.NewFake()},
+	}
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"agent","name":"myrig/worker"}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "requires tmux transport") {
+		t.Fatalf("body = %q, want tmux transport error", rec.Body.String())
+	}
+	items, err := fs.cityBeadStore.ListByLabel(session.LabelSession, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("session bead count = %d, want 0", len(items))
+	}
+}
+
 func TestHumaHandleSessionCreateRejectsACPAgentWithoutACPRouting(t *testing.T) {
 	supportsACP := true
 	fs := newSessionFakeState(t)
