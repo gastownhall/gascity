@@ -410,6 +410,46 @@ func TestSupervisorPerCityEventStream(t *testing.T) {
 	}
 }
 
+func TestSupervisorEventStreamsFlushHeadersBeforeFirstEvent(t *testing.T) {
+	s := newFakeState(t)
+	s.cityName = "gc-work"
+
+	sm := newTestSupervisorMux(t, map[string]*fakeState{
+		"gc-work": s,
+	})
+	srv := httptest.NewServer(sm)
+	t.Cleanup(srv.Close)
+
+	for _, path := range []string{
+		"/v0/events/stream",
+		"/v0/city/gc-work/events/stream",
+	} {
+		t.Run(path, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+path, nil)
+			if err != nil {
+				t.Fatalf("build request: %v", err)
+			}
+			req.Header.Set("Accept", "text/event-stream")
+
+			resp, err := srv.Client().Do(req)
+			if err != nil {
+				t.Fatalf("GET %s: %v", path, err)
+			}
+			defer resp.Body.Close() //nolint:errcheck
+
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+			}
+			if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
+				t.Fatalf("Content-Type = %q, want text/event-stream", ct)
+			}
+		})
+	}
+}
+
 func TestSupervisorPerCityEventStreamEmitsTypedEnvelopePayloadObject(t *testing.T) {
 	s := newFakeState(t)
 	s.cityName = "gc-work"

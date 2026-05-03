@@ -329,6 +329,12 @@ func beginSSEStream(hctx huma.Context) (bw any, encoder *json.Encoder, flusher h
 	return body, json.NewEncoder(body), findFlusher(body)
 }
 
+func flushSSEHeaders(hctx huma.Context) {
+	if flusher := findFlusher(hctx.BodyWriter()); flusher != nil {
+		flusher.Flush()
+	}
+}
+
 // writeSSEFrame emits one SSE frame (id/event/data/blank line) to bw and
 // flushes. Returns the first I/O error so the caller can terminate the
 // stream on client disconnect.
