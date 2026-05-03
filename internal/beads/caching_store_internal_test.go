@@ -1660,14 +1660,14 @@ func TestCachingStoreBdReconcileRefreshesListDependenciesForCachedReady(t *testi
 
 	runner.deps["bd-1"] = nil
 	cache.runReconciliation()
-	assertCachedReadyContains(false)
+	assertCachedReadyContains(true)
 
 	if runner.depScanCalls != 0 {
 		t.Fatalf("dep scan calls = %d, want 0", runner.depScanCalls)
 	}
 }
 
-func TestCachingStoreBdReconcilePreservesCachedDepsWhenListOmitsDependencies(t *testing.T) {
+func TestCachingStoreBdReconcileClearsCachedDepsWhenListOmitsDependencies(t *testing.T) {
 	t.Parallel()
 
 	runner := newCachingStoreBdDepRunner(t)
@@ -1688,8 +1688,8 @@ func TestCachingStoreBdReconcilePreservesCachedDepsWhenListOmitsDependencies(t *
 	for _, bead := range ready {
 		readyByID[bead.ID] = true
 	}
-	if readyByID["bd-1"] {
-		t.Fatalf("CachedReady includes bd-1 after omitted deps, ready=%v", readyByID)
+	if !readyByID["bd-1"] {
+		t.Fatalf("CachedReady excludes bd-1 after omitted deps, ready=%v", readyByID)
 	}
 }
 

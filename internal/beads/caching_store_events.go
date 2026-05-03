@@ -89,9 +89,11 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 	}
 
 	b := patch
+	refreshedFromBacking := false
 	if !cached {
 		if fresh, err := c.backing.Get(patch.ID); err == nil {
 			b = fresh
+			refreshedFromBacking = true
 		} else if errors.Is(err, ErrNotFound) {
 			if eventType != "bead.created" && locallyDeleted {
 				return
@@ -144,7 +146,7 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 		if _, exists := c.beads[b.ID]; !exists {
 			c.noteMutationLocked(b.ID)
 			c.beads[b.ID] = cloneBead(b)
-			c.updateEventDepsLocked(eventType, b, fields)
+			c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking)
 			delete(c.dirty, b.ID)
 			delete(c.deletedSeq, b.ID)
 		}
@@ -153,7 +155,7 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 	case "bead.updated":
 		c.noteMutationLocked(b.ID)
 		c.beads[b.ID] = cloneBead(b)
-		c.updateEventDepsLocked(eventType, b, fields)
+		c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking)
 		delete(c.dirty, b.ID)
 		delete(c.deletedSeq, b.ID)
 		mutated = true
@@ -163,7 +165,7 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 			c.updateStatsLocked()
 		}
 		c.beads[b.ID] = cloneBead(b)
-		c.updateEventDepsLocked(eventType, b, fields)
+		c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking)
 		delete(c.dirty, b.ID)
 		delete(c.deletedSeq, b.ID)
 		mutated = true
@@ -176,7 +178,7 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 	}
 }
 
-func (c *CachingStore) updateEventDepsLocked(eventType string, b Bead, fields map[string]json.RawMessage) {
+func (c *CachingStore) updateEventDepsLocked(eventType string, b Bead, fields map[string]json.RawMessage, refreshedFromBacking bool) {
 	if hasCacheEventField(fields, "dependencies") || hasCacheEventField(fields, "needs") {
 		c.deps[b.ID] = depsFromBeadFields(b)
 		return
@@ -186,11 +188,16 @@ func (c *CachingStore) updateEventDepsLocked(eventType string, b Bead, fields ma
 		return
 	}
 	if eventType == "bead.updated" && cacheEventLooksComplete(fields) {
-		// A complete field update without dependency fields is ordinarily a
-		// bead-field change, not a dependency mutation. Preserve known dep
-		// coverage so unrelated status/title updates do not force store-wide
-		// live-ready fallback. Real dependency changes arrive via explicit dep
-		// events or write-through mutation paths.
+		if refreshedFromBacking {
+			c.deps[b.ID] = depsFromBeadFields(b)
+			return
+		}
+		// bd dependency mutations arrive through the same on_update hook as
+		// field changes, and the hook payload omits dependencies after removals.
+		// Treat the bead's dependency coverage as unknown until the backing
+		// store or reconciliation supplies an explicit dependency snapshot.
+		delete(c.deps, b.ID)
+		c.depsComplete = false
 		return
 	}
 	if _, ok := c.deps[b.ID]; ok {

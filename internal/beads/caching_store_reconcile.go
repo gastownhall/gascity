@@ -286,6 +286,9 @@ func (c *CachingStore) depsForReconcileLocked(id string, freshBead Bead, depMap 
 		return cloneDeps(depMap[id])
 	}
 	freshDeps := depsFromBeadFields(freshBead)
+	if _, ok := c.backing.(*BdStore); ok {
+		return freshDeps
+	}
 	if len(freshDeps) == 0 {
 		if cachedDeps, ok := c.deps[id]; ok && len(cachedDeps) > 0 {
 			return cloneDeps(cachedDeps)

@@ -1318,6 +1318,130 @@ func TestBuildDesiredState_OnDemandNamedSession_DefaultRoutedWorkMaterializesNam
 	}
 }
 
+func TestBuildDesiredState_OnDemandNamedSession_DefaultRoutedTemplateMaterializesSingletonIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "queued worker work",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": "worker",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Name:     "primary",
+			Template: "worker",
+			Mode:     "on_demand",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	foundNamed := false
+	for _, tp := range dsResult.State {
+		if tp.TemplateName != "worker" {
+			continue
+		}
+		if tp.ConfiguredNamedIdentity == "primary" {
+			foundNamed = true
+			continue
+		}
+		t.Fatalf("routed singleton template created generic worker session: %+v", tp)
+	}
+	if !foundNamed {
+		t.Fatal("default routed work should materialize the singleton named identity for worker")
+	}
+	if !dsResult.NamedSessionDemand["primary"] {
+		t.Fatal("NamedSessionDemand should record singleton identity demand")
+	}
+}
+
+func TestBuildDesiredState_OnDemandNamedSession_DefaultRoutedTemplateDoesNotPickAmbiguousIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "queued worker work",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": "worker",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{
+			{Name: "primary", Template: "worker", Mode: "on_demand"},
+			{Name: "secondary", Template: "worker", Mode: "on_demand"},
+		},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	if dsResult.NamedSessionDemand["primary"] || dsResult.NamedSessionDemand["secondary"] {
+		t.Fatalf("ambiguous template route recorded named demand: %v", dsResult.NamedSessionDemand)
+	}
+	for _, tp := range dsResult.State {
+		switch tp.ConfiguredNamedIdentity {
+		case "primary", "secondary":
+			t.Fatalf("ambiguous template route materialized named identity: %+v", tp)
+		}
+	}
+}
+
+func TestBuildDesiredState_OnDemandNamedSession_DefaultRoutedNoMatchDoesNotMaterialize(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "queued unmatched work",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": "missing",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Name:     "primary",
+			Template: "worker",
+			Mode:     "on_demand",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	if dsResult.NamedSessionDemand["primary"] {
+		t.Fatal("unmatched route should not record named-session demand")
+	}
+	if len(dsResult.State) != 0 {
+		t.Fatalf("unmatched route should not materialize sessions: %+v", dsResult.State)
+	}
+}
+
 func TestBuildDesiredState_OnDemandNamedSession_DirectAssigneeMaterializes(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
