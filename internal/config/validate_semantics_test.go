@@ -77,6 +77,33 @@ func TestValidateSemanticsStartCommandSkipsProviderCheck(t *testing.T) {
 	}
 }
 
+func TestValidateSemanticsAgentSessionTransportAllowsTmux(t *testing.T) {
+	cfg := &City{
+		Agents: []Agent{
+			{Name: "worker", Provider: "claude", Session: "tmux"},
+		},
+	}
+	warnings := ValidateSemantics(cfg, "city.toml")
+	if len(warnings) != 0 {
+		t.Fatalf("expected no warnings for tmux session transport, got: %v", warnings)
+	}
+}
+
+func TestValidateSemanticsAgentSessionTransportRejectsUnknown(t *testing.T) {
+	cfg := &City{
+		Agents: []Agent{
+			{Name: "worker", Provider: "claude", Session: "stdio"},
+		},
+	}
+	warnings := ValidateSemantics(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "stdio") || !strings.Contains(warnings[0], "tmux") {
+		t.Fatalf("warning should mention bad value and allowed transports: %s", warnings[0])
+	}
+}
+
 func TestValidateSemanticsProviderPromptModeBad(t *testing.T) {
 	cfg := &City{
 		Providers: map[string]ProviderSpec{

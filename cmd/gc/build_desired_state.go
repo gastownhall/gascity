@@ -903,6 +903,11 @@ func ensureDependencyOnlyTemplate(
 	if cfgAgent == nil || !cfgAgent.SupportsGenericEphemeralSessions() || desiredHasTemplate(desired, cfgAgent.QualifiedName()) {
 		return
 	}
+	qualifiedName := cfgAgent.QualifiedName()
+	if err := validateAgentSessionTransportForBuild(bp, cfgAgent, qualifiedName); err != nil {
+		fmt.Fprintf(stderr, "buildDesiredState: dependency floor %q: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
+		return
+	}
 
 	if bp.beadStore == nil {
 		name := cfgAgent.Name
@@ -927,7 +932,6 @@ func ensureDependencyOnlyTemplate(
 	// Bead selection keys off the configured base template, not the pool-
 	// instance form, because normalizedSessionTemplate reads the bead's
 	// "template" metadata which is always the base.
-	qualifiedName := cfgAgent.QualifiedName()
 	sessionBead, err := selectOrCreateDependencyPoolSessionBead(bp, cfgAgent, qualifiedName)
 	if err != nil {
 		fmt.Fprintf(stderr, "buildDesiredState: dependency floor %q: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
@@ -997,6 +1001,10 @@ func realizePoolDesiredSessions(
 	stderr io.Writer,
 ) {
 	qualifiedName := cfgAgent.QualifiedName()
+	if err := validateAgentSessionTransportForBuild(bp, cfgAgent, qualifiedName); err != nil {
+		fmt.Fprintf(stderr, "buildDesiredState: pool %q: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
+		return
+	}
 	used := make(map[string]bool)
 	usedSlots := make(map[int]bool)
 	for _, request := range poolState.Requests {
@@ -1346,8 +1354,26 @@ func prepareTemplateResolution(bp *agentBuildParams, cfgAgent *config.Agent, qua
 }
 
 func resolveTemplatePrepared(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, fpExtra map[string]string) (TemplateParams, error) {
+	if err := validateAgentSessionTransportForBuild(bp, cfgAgent, qualifiedName); err != nil {
+		return TemplateParams{}, err
+	}
 	prepareTemplateResolution(bp, cfgAgent, qualifiedName, bp.stderr)
 	return resolveTemplate(bp, cfgAgent, qualifiedName, fpExtra)
+}
+
+func validateAgentSessionTransportForBuild(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string) error {
+	if bp == nil || cfgAgent == nil {
+		return nil
+	}
+	resolved, err := config.ResolveProvider(cfgAgent, bp.workspace, bp.providers, bp.lookPath)
+	if err != nil {
+		return fmt.Errorf("agent %q: %w", qualifiedName, err)
+	}
+	transport := config.ResolveSessionCreateTransport(cfgAgent.Session, resolved)
+	if err := validateResolvedSessionTransport(resolved, transport, bp.sp); err != nil {
+		return fmt.Errorf("agent %q: %w", qualifiedName, err)
+	}
+	return nil
 }
 
 // installAgentSideEffects performs idempotent side effects for a resolved

@@ -211,6 +211,24 @@ type ResolvedProvider struct {
 	EffectiveDefaults map[string]string
 }
 
+const (
+	// SessionTransportACP creates sessions through the Agent Client Protocol.
+	SessionTransportACP = "acp"
+	// SessionTransportTmux creates sessions through the tmux-backed CLI path.
+	SessionTransportTmux = "tmux"
+)
+
+// IsValidSessionTransport reports whether transport is a recognized explicit
+// session transport. The empty string is valid and means provider default.
+func IsValidSessionTransport(transport string) bool {
+	switch strings.TrimSpace(transport) {
+	case "", SessionTransportACP, SessionTransportTmux:
+		return true
+	default:
+		return false
+	}
+}
+
 // CommandString returns the full command line: command followed by args.
 func (rp *ResolvedProvider) CommandString() string {
 	if len(rp.Args) == 0 {
@@ -251,7 +269,7 @@ func (rp *ResolvedProvider) DefaultSessionTransport() string {
 		family = strings.TrimSpace(rp.Name)
 	}
 	if family == "opencode" {
-		return "acp"
+		return SessionTransportACP
 	}
 	return ""
 }
@@ -266,7 +284,7 @@ func (rp *ResolvedProvider) ProviderSessionCreateTransport() string {
 		return transport
 	}
 	if strings.TrimSpace(rp.ACPCommand) != "" || rp.ACPArgs != nil {
-		return "acp"
+		return SessionTransportACP
 	}
 	return ""
 }
@@ -275,13 +293,19 @@ func (rp *ResolvedProvider) ProviderSessionCreateTransport() string {
 // fresh session from an agent/template configuration.
 func ResolveSessionCreateTransport(agentSession string, resolved *ResolvedProvider) string {
 	agentSession = strings.TrimSpace(agentSession)
-	if agentSession != "" {
+	switch agentSession {
+	case SessionTransportACP:
+		return SessionTransportACP
+	case SessionTransportTmux:
+		return SessionTransportTmux
+	case "":
+		if resolved == nil {
+			return ""
+		}
+		return strings.TrimSpace(resolved.ProviderSessionCreateTransport())
+	default:
 		return agentSession
 	}
-	if resolved == nil {
-		return ""
-	}
-	return strings.TrimSpace(resolved.ProviderSessionCreateTransport())
 }
 
 // TitleModelFlagArgs resolves the TitleModel key against the "model"

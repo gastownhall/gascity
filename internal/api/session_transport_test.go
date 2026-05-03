@@ -1,6 +1,7 @@
 package api
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -40,6 +41,36 @@ func TestProviderSessionTransportSupportsACPAloneStaysDefault(t *testing.T) {
 	}
 	if transport != "" {
 		t.Fatalf("providerSessionTransport() = %q, want empty transport", transport)
+	}
+}
+
+func TestValidateSessionTransportAcceptsTmuxTransport(t *testing.T) {
+	transport, err := validateSessionTransport(&config.ResolvedProvider{
+		Name: "custom",
+	}, config.SessionTransportTmux, runtime.NewFake())
+	if err != nil {
+		t.Fatalf("validateSessionTransport: %v", err)
+	}
+	if transport != config.SessionTransportTmux {
+		t.Fatalf("validateSessionTransport() = %q, want %q", transport, config.SessionTransportTmux)
+	}
+}
+
+func TestValidateSessionTransportRejectsTmuxWhenSessionProviderIsACPOnly(t *testing.T) {
+	_, err := validateSessionTransport(&config.ResolvedProvider{
+		Name: "custom",
+	}, config.SessionTransportTmux, &createTransportCapableProvider{Fake: runtime.NewFake()})
+	if err == nil || !strings.Contains(err.Error(), "requires tmux transport") {
+		t.Fatalf("validateSessionTransport() error = %v, want tmux routing error", err)
+	}
+}
+
+func TestValidateSessionTransportRejectsUnknownTransport(t *testing.T) {
+	_, err := validateSessionTransport(&config.ResolvedProvider{
+		Name: "custom",
+	}, "stdio", runtime.NewFake())
+	if err == nil {
+		t.Fatal("validateSessionTransport() error = nil, want unknown transport error")
 	}
 }
 

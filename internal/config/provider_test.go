@@ -457,6 +457,17 @@ func TestResolveSessionCreateTransportPrefersAgentSessionOverride(t *testing.T) 
 	}
 }
 
+func TestResolveSessionCreateTransportExplicitTmuxOverridesProviderACPDefault(t *testing.T) {
+	got := ResolveSessionCreateTransport("tmux", &ResolvedProvider{
+		Name:        "opencode",
+		SupportsACP: true,
+		ACPArgs:     []string{"acp"},
+	})
+	if got != "tmux" {
+		t.Fatalf("ResolveSessionCreateTransport() = %q, want %q", got, "tmux")
+	}
+}
+
 func TestResolveSessionCreateTransportFallsBackToProviderCreateTransport(t *testing.T) {
 	got := ResolveSessionCreateTransport("", &ResolvedProvider{
 		Name:        "custom-acp",

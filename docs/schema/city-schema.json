@@ -92,9 +92,10 @@
         "session": {
           "type": "string",
           "enum": [
-            "acp"
+            "acp",
+            "tmux"
           ],
-          "description": "Session overrides the session transport for this agent.\n\"\" (default) uses the city-level session provider (typically tmux).\n\"acp\" uses the Agent Client Protocol (JSON-RPC over stdio).\nThe agent's resolved provider must have supports_acp = true."
+          "description": "Session overrides the session transport for this agent.\n\"\" (default) uses the provider default.\n\"tmux\" uses the tmux-backed CLI path even when the provider supports ACP.\n\"acp\" uses the Agent Client Protocol (JSON-RPC over stdio); the agent's\nresolved provider must have supports_acp = true."
         },
         "provider": {
           "type": "string",
@@ -419,7 +420,7 @@
         },
         "session": {
           "type": "string",
-          "description": "Session overrides the session transport (\"acp\")."
+          "description": "Session overrides the session transport (\"acp\" or \"tmux\")."
         },
         "provider": {
           "type": "string",
@@ -662,7 +663,7 @@
         },
         "session": {
           "type": "string",
-          "description": "Session overrides the session transport (\"acp\")."
+          "description": "Session overrides the session transport (\"acp\" or \"tmux\")."
         },
         "provider": {
           "type": "string",
