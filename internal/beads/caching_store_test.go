@@ -1383,6 +1383,49 @@ func TestCachingStoreCachedReadyUsesCompleteCreatedEventDependencies(t *testing.
 	}
 }
 
+func TestCachingStoreCachedReadyUsesCompleteUpdatedEventDependencies(t *testing.T) {
+	t.Parallel()
+	mem := beads.NewMemStore()
+	blocker, err := mem.Create(beads.Bead{Title: "Blocker"})
+	if err != nil {
+		t.Fatalf("Create(blocker): %v", err)
+	}
+	target, err := mem.Create(beads.Bead{Title: "Event target"})
+	if err != nil {
+		t.Fatalf("Create(target): %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(mem, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	cache.ApplyEvent("bead.updated", []byte(`{"id":"`+target.ID+`","title":"Event target","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z","dependencies":[{"issue_id":"`+target.ID+`","depends_on_id":"`+blocker.ID+`","type":"blocks"}]}`))
+	ready, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable after dependency update")
+	}
+	ids := map[string]bool{}
+	for _, b := range ready {
+		ids[b.ID] = true
+	}
+	if ids[target.ID] {
+		t.Fatalf("CachedReady ids = %v, want target blocked by updated dependencies", ids)
+	}
+
+	cache.ApplyEvent("bead.updated", []byte(`{"id":"`+target.ID+`","title":"Retitled target","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z"}`))
+	ready, ok = cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable after dependency-omitting title update")
+	}
+	ids = map[string]bool{}
+	for _, b := range ready {
+		ids[b.ID] = true
+	}
+	if ids[target.ID] {
+		t.Fatalf("CachedReady ids = %v, want dependency-omitting update to preserve blocker", ids)
+	}
+}
+
 func TestCachingStoreCachedReadyUnavailableForPartialEventDependencies(t *testing.T) {
 	t.Parallel()
 	cache := beads.NewCachingStoreForTest(beads.NewMemStore(), nil)
@@ -1427,16 +1470,41 @@ func TestCachingStoreCachedReadyRefreshesEventNeedsDependencies(t *testing.T) {
 	}
 
 	cache.ApplyEvent("bead.updated", []byte(`{"id":"`+target.ID+`","title":"Event target","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z"}`))
-	if ready, ok = cache.CachedReady(); ok {
-		t.Fatalf("CachedReady available after dependency-omitting update, ready=%v", ready)
+	ready, ok = cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable after dependency-omitting update")
+	}
+	ids = map[string]bool{}
+	for _, b := range ready {
+		ids[b.ID] = true
+	}
+	if ids[target.ID] {
+		t.Fatalf("CachedReady ids = %v, want dependency-omitting update to preserve blocker", ids)
+	}
+}
+
+func TestCachingStoreCachedReadyClearsExplicitEventNeeds(t *testing.T) {
+	t.Parallel()
+	mem := beads.NewMemStore()
+	blocker, err := mem.Create(beads.Bead{Title: "Blocker"})
+	if err != nil {
+		t.Fatalf("Create(blocker): %v", err)
+	}
+	target, err := mem.Create(beads.Bead{Title: "Event target", Needs: []string{blocker.ID}})
+	if err != nil {
+		t.Fatalf("Create(target): %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(mem, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
 	}
 
-	cache.ApplyEvent("bead.updated", []byte(`{"id":"`+target.ID+`","title":"Event target","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z","needs":[]}`))
-	ready, ok = cache.CachedReady()
+	cache.ApplyEvent("bead.updated", []byte(`{"id":"`+target.ID+`","title":"Event target","status":"open","issue_type":"task","needs":[]}`))
+	ready, ok := cache.CachedReady()
 	if !ok {
 		t.Fatal("CachedReady reported cache unavailable after explicit needs clear")
 	}
-	ids = map[string]bool{}
+	ids := map[string]bool{}
 	for _, b := range ready {
 		ids[b.ID] = true
 	}

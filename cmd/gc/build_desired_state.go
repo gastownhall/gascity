@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -231,6 +232,7 @@ func buildDesiredStateWithSessionBeads(
 	desired := make(map[string]TemplateParams)
 	var pendingPools []poolEvalWork
 	var defaultScaleTargets []defaultScaleCheckTarget
+	var defaultNamedScaleTargets []defaultScaleCheckTarget
 
 	for i := range cfg.Agents {
 		if cfg.Agents[i].Suspended {
@@ -259,12 +261,12 @@ func buildDesiredStateWithSessionBeads(
 			}
 			// Named-session materialization is handled in the named-session pass,
 			// but explicit scale_check/min demand for the backing template still
-			// creates ephemeral capacity through the pool pipeline. The default
-			// routed-work scale_check is skipped here so routed metadata alone
-			// does not create a parallel generic worker for the same backing
-			// template.
+			// creates ephemeral capacity through the pool pipeline. The implicit
+			// routed-work scale_check feeds named demand separately so it does
+			// not create a parallel generic worker for the same backing template.
 			poolDir := agentCommandDir(cityPath, &cfg.Agents[i], cfg.Rigs)
 			if store != nil && strings.TrimSpace(cfg.Agents[i].ScaleCheck) == "" {
+				defaultNamedScaleTargets = append(defaultNamedScaleTargets, defaultScaleCheckTargetForAgent(cityPath, cfg, &cfg.Agents[i], store, rigStores))
 				continue
 			}
 			pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, newDemand: store != nil})
@@ -294,6 +296,7 @@ func buildDesiredStateWithSessionBeads(
 	var assignedWorkStoreRefs []string
 	var storePartial bool
 	var scaleCheckCounts map[string]int
+	var namedDefaultDemand map[string]bool
 	if store != nil {
 		assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, storePartial = collectAssignedWorkBeadsWithStores(cfg, store, rigStores, suspendedRigPaths)
 		if storePartial {
@@ -315,6 +318,13 @@ func buildDesiredStateWithSessionBeads(
 			}
 			for template, count := range defaultCounts {
 				scaleCheckCounts[template] = count
+			}
+		}
+		if len(defaultNamedScaleTargets) > 0 {
+			var namedErrs []error
+			namedDefaultDemand, namedErrs = defaultNamedSessionDemand(defaultNamedScaleTargets, cfg, cityName)
+			for _, err := range namedErrs {
+				fmt.Fprintf(stderr, "buildDesiredState: %v (using named demand=false)\n", err) //nolint:errcheck
 			}
 		}
 		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, sessionBeads.Open(), assignedWorkBeads, assignedWorkStoreRefs)
@@ -373,6 +383,11 @@ func buildDesiredStateWithSessionBeads(
 		namedSpecs[identity] = spec
 	}
 	namedWorkReady := make(map[string]bool, len(namedSpecs))
+	for identity := range namedDefaultDemand {
+		if _, ok := namedSpecs[identity]; ok {
+			namedWorkReady[identity] = true
+		}
+	}
 	// Check assigned work beads: if any work bead's Assignee matches a named
 	// session's identity, that session has direct demand.
 	//
@@ -716,8 +731,10 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 	for key, group := range groups {
 		ready, err := readyForControllerDemand(group.store)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("default scale_check %s: Ready(): %w", key, err))
-			continue
+			errs = append(errs, fmt.Errorf("default scale_check %s templates=%s: Ready(): %w", key, strings.Join(sortedStringSet(group.templates), ","), err))
+			if !beads.IsPartialResult(err) || len(ready) == 0 {
+				continue
+			}
 		}
 		for _, b := range ready {
 			if strings.TrimSpace(b.Assignee) != "" {
@@ -730,6 +747,104 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 		}
 	}
 	return counts, errs
+}
+
+func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, cfg *config.City, cityName string) (map[string]bool, []error) {
+	demand := make(map[string]bool)
+	if len(targets) == 0 || cfg == nil {
+		return demand, nil
+	}
+
+	type scaleStoreGroup struct {
+		store     beads.Store
+		templates map[string]struct{}
+	}
+	groups := make(map[string]*scaleStoreGroup)
+	var errs []error
+	for _, target := range targets {
+		template := strings.TrimSpace(target.template)
+		if template == "" {
+			continue
+		}
+		if target.err != nil {
+			errs = append(errs, target.err)
+		}
+		if target.store == nil {
+			if target.err == nil {
+				errs = append(errs, fmt.Errorf("default scale_check %s: store unavailable", template))
+			}
+			continue
+		}
+		key := strings.TrimSpace(target.storeKey)
+		if key == "" {
+			key = fmt.Sprintf("%p", target.store)
+		}
+		group := groups[key]
+		if group == nil {
+			group = &scaleStoreGroup{store: target.store, templates: make(map[string]struct{})}
+			groups[key] = group
+		}
+		group.templates[template] = struct{}{}
+	}
+
+	namedByIdentity := make(map[string]namedSessionSpec)
+	identitiesByTemplate := make(map[string][]string)
+	for i := range cfg.NamedSessions {
+		identity := cfg.NamedSessions[i].QualifiedName()
+		spec, ok := findNamedSessionSpec(cfg, cityName, identity)
+		if !ok || spec.Mode == "always" {
+			continue
+		}
+		template := strings.TrimSpace(namedSessionBackingTemplate(spec))
+		if template == "" {
+			continue
+		}
+		namedByIdentity[spec.Identity] = spec
+		identitiesByTemplate[template] = append(identitiesByTemplate[template], spec.Identity)
+	}
+
+	for key, group := range groups {
+		ready, err := readyForControllerDemand(group.store)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("default scale_check %s templates=%s: Ready(): %w", key, strings.Join(sortedStringSet(group.templates), ","), err))
+			if !beads.IsPartialResult(err) || len(ready) == 0 {
+				continue
+			}
+		}
+		for _, b := range ready {
+			if strings.TrimSpace(b.Assignee) != "" {
+				continue
+			}
+			routedTo := strings.TrimSpace(b.Metadata["gc.routed_to"])
+			if routedTo == "" {
+				continue
+			}
+			if spec, ok := namedByIdentity[routedTo]; ok {
+				template := strings.TrimSpace(namedSessionBackingTemplate(spec))
+				if _, targetTemplate := group.templates[template]; targetTemplate {
+					demand[spec.Identity] = true
+				}
+				continue
+			}
+			if _, targetTemplate := group.templates[routedTo]; !targetTemplate {
+				continue
+			}
+			identities := identitiesByTemplate[routedTo]
+			if len(identities) == 1 {
+				demand[identities[0]] = true
+			}
+		}
+	}
+	return demand, errs
+}
+
+func sortedStringSet(values map[string]struct{}) []string {
+	out := make([]string, 0, len(values))
+	for value := range values {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func listForControllerDemand(store beads.Store, query beads.ListQuery) ([]beads.Bead, error) {

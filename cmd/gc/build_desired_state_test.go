@@ -421,6 +421,50 @@ func TestDefaultScaleCheckCountsFallsBackWhenCachedEventDepsUnknown(t *testing.T
 	}
 }
 
+func TestDefaultScaleCheckCountsUsesPartialReadyRows(t *testing.T) {
+	store := &partialAssignedWorkStore{MemStore: beads.NewMemStore(), partialReady: true}
+	if _, err := store.Create(beads.Bead{
+		Title:  "queued routed work",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": "gascity/workflows.codex-max",
+		},
+	}); err != nil {
+		t.Fatalf("create routed bead: %v", err)
+	}
+
+	counts, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: "gascity/workflows.codex-max",
+		storeKey: "rig:gascity",
+		store:    store,
+	}})
+	if got := counts["gascity/workflows.codex-max"]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts = %d, want survivor row counted", got)
+	}
+	if len(errs) != 1 || !beads.IsPartialResult(errs[0]) {
+		t.Fatalf("defaultScaleCheckCounts errs = %v, want partial-result diagnostic", errs)
+	}
+}
+
+func TestDefaultScaleCheckCountsReadyErrorNamesAffectedTemplates(t *testing.T) {
+	store := &readyFailStore{Store: beads.NewMemStore()}
+
+	_, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{
+		{template: "gascity/workflows.codex-min", storeKey: "rig:gascity", store: store},
+		{template: "gascity/workflows.codex-max", storeKey: "rig:gascity", store: store},
+	})
+	if len(errs) != 1 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v, want one grouped Ready diagnostic", errs)
+	}
+	msg := errs[0].Error()
+	for _, want := range []string{"rig:gascity", "gascity/workflows.codex-min", "gascity/workflows.codex-max"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("defaultScaleCheckCounts err = %q, want affected template %q", msg, want)
+		}
+	}
+}
+
 func TestDefaultScaleCheckCountsReportsMissingRigStore(t *testing.T) {
 	cityPath := t.TempDir()
 	cfg := &config.City{
@@ -1224,7 +1268,7 @@ func TestBuildDesiredState_PoolInFlightSessionsPreservePartialScaleDemand(t *tes
 	}
 }
 
-func TestBuildDesiredState_OnDemandNamedSession_RoutedMetadataAloneDoesNotMaterialize(t *testing.T) {
+func TestBuildDesiredState_OnDemandNamedSession_DefaultRoutedWorkMaterializesNamedSession(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	if _, err := store.Create(beads.Bead{
@@ -1252,10 +1296,25 @@ func TestBuildDesiredState_OnDemandNamedSession_RoutedMetadataAloneDoesNotMateri
 	}
 
 	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	foundNamed := false
+	foundGeneric := false
 	for _, tp := range dsResult.State {
 		if tp.TemplateName == "mayor" {
-			t.Fatalf("routed metadata alone should not materialize on-demand named session: %+v", tp)
+			if tp.ConfiguredNamedIdentity == "mayor" {
+				foundNamed = true
+				continue
+			}
+			foundGeneric = true
 		}
+	}
+	if !foundNamed {
+		t.Fatal("default routed work should materialize the on-demand named session")
+	}
+	if foundGeneric {
+		t.Fatal("default routed work should not create a parallel generic session for the named template")
+	}
+	if !dsResult.NamedSessionDemand["mayor"] {
+		t.Fatal("NamedSessionDemand should record default routed work for mayor")
 	}
 }
 
@@ -1481,6 +1540,12 @@ func TestBuildDesiredState_AlwaysNamedSession_MaterializesWithoutWorkBeads(t *te
 	found := false
 	for _, tp := range dsResult.State {
 		if tp.TemplateName == "mayor" {
+			if tp.ConfiguredNamedIdentity != "mayor" {
+				t.Fatalf("ConfiguredNamedIdentity = %q, want mayor", tp.ConfiguredNamedIdentity)
+			}
+			if tp.ConfiguredNamedMode != "always" {
+				t.Fatalf("ConfiguredNamedMode = %q, want always", tp.ConfiguredNamedMode)
+			}
 			found = true
 			break
 		}

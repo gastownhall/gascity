@@ -41,7 +41,6 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 	currentDeps = cloneDeps(currentDeps)
 	_, locallyMutated := c.beadSeq[patch.ID]
 	localBeadAt := c.localBeadAt[patch.ID]
-	locallyChanged := !localBeadAt.IsZero()
 	recentlyLocal := recentLocalMutation(localBeadAt, now)
 	_, locallyDeleted := c.deletedSeq[patch.ID]
 	fieldConflictCached := cached && cacheEventConflictsCurrent(current, patch, fields)
@@ -74,7 +73,7 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 	if fieldConflictCached && eventType != "bead.closed" && locallyMutated && !verifiedConflict {
 		return
 	}
-	if dependencyConflictCached && eventType != "bead.closed" && (locallyChanged || locallyMutated) && !verifiedConflict {
+	if dependencyConflictCached && eventType != "bead.closed" && locallyMutated && !verifiedConflict {
 		return
 	}
 	if conflictsCached && recentlyLocal && !verifiedConflict {
@@ -187,14 +186,17 @@ func (c *CachingStore) updateEventDepsLocked(eventType string, b Bead, fields ma
 		return
 	}
 	if eventType == "bead.updated" && cacheEventLooksComplete(fields) {
-		// bd dep add/remove update hooks can send complete bead fields without
-		// dependencies. Treat dependency coverage as unknown so demand reads
-		// fall back to live readiness until reconciliation refreshes the cache.
-		delete(c.deps, b.ID)
-		c.depsComplete = false
+		// A complete field update without dependency fields is ordinarily a
+		// bead-field change, not a dependency mutation. Preserve known dep
+		// coverage so unrelated status/title updates do not force store-wide
+		// live-ready fallback. Real dependency changes arrive via explicit dep
+		// events or write-through mutation paths.
 		return
 	}
 	if _, ok := c.deps[b.ID]; ok {
+		return
+	}
+	if eventType == "bead.updated" && c.depsComplete {
 		return
 	}
 	c.depsComplete = false

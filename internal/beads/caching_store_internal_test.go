@@ -1660,10 +1660,36 @@ func TestCachingStoreBdReconcileRefreshesListDependenciesForCachedReady(t *testi
 
 	runner.deps["bd-1"] = nil
 	cache.runReconciliation()
-	assertCachedReadyContains(true)
+	assertCachedReadyContains(false)
 
 	if runner.depScanCalls != 0 {
 		t.Fatalf("dep scan calls = %d, want 0", runner.depScanCalls)
+	}
+}
+
+func TestCachingStoreBdReconcilePreservesCachedDepsWhenListOmitsDependencies(t *testing.T) {
+	t.Parallel()
+
+	runner := newCachingStoreBdDepRunner(t)
+	runner.deps["bd-1"] = []Dep{{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks"}}
+	cache := NewCachingStore(NewBdStore("/city", runner.run), nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	runner.deps["bd-1"] = nil
+	cache.runReconciliation()
+
+	ready, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable")
+	}
+	readyByID := make(map[string]bool, len(ready))
+	for _, bead := range ready {
+		readyByID[bead.ID] = true
+	}
+	if readyByID["bd-1"] {
+		t.Fatalf("CachedReady includes bd-1 after omitted deps, ready=%v", readyByID)
 	}
 }
 
