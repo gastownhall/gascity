@@ -131,6 +131,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 					{Value: "low", Label: "Low", FlagArgs: []string{"--effort", "low"}},
 					{Value: "medium", Label: "Medium", FlagArgs: []string{"--effort", "medium"}},
 					{Value: "high", Label: "High", FlagArgs: []string{"--effort", "high"}},
+					{Value: "xhigh", Label: "Extra High", FlagArgs: []string{"--effort", "xhigh"}},
 					{Value: "max", Label: "Max", FlagArgs: []string{"--effort", "max"}},
 				},
 			},
