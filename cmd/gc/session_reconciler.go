@@ -325,15 +325,52 @@ func reconcileSessionBeadsTraced(
 	// Topo-order sessions by template dependencies.
 	ordered := topoOrder(sessions, deps)
 
-	// Phase 0.5: Feed the respawn circuit breaker the current progress
-	// signature for every named-session identity. A change in the
-	// aggregate status of an identity's assigned work beads is treated as
-	// an observable progress signal and keeps the breaker CLOSED even if
-	// restarts accumulate. See session_circuit_breaker.go.
-	cb := defaultSessionCircuitBreaker()
 	cbNow := clk.Now().UTC()
-	for identity, sig := range computeNamedSessionProgressSignatures(ordered, assignedWorkBeads) {
-		cb.ObserveProgressSignature(identity, sig, cbNow)
+	cbCfg, cbEnabled := sessionCircuitBreakerConfigFromCity(cfg)
+	var cb *sessionCircuitBreaker
+	var circuitSessionByIdentity map[string]*beads.Bead
+	if cbEnabled {
+		// Phase 0.5: Feed the respawn circuit breaker persisted state and the
+		// current progress signature for every named-session identity. A change
+		// in the aggregate status of an identity's assigned work beads is treated
+		// as an observable progress signal and keeps the breaker CLOSED even if
+		// restarts accumulate. See session_circuit_breaker.go.
+		cb = defaultSessionCircuitBreaker()
+		cb.configure(cbCfg)
+		circuitSessionByIdentity = make(map[string]*beads.Bead, len(ordered))
+		for i := range ordered {
+			identity := namedSessionIdentity(ordered[i])
+			if identity == "" {
+				continue
+			}
+			circuitSessionByIdentity[identity] = &ordered[i]
+			if err := cb.observeResetGenerationFromMetadata(identity, ordered[i].Metadata); err != nil {
+				fmt.Fprintf(stderr, "session reconciler: loading session circuit breaker reset generation for %s: %v\n", identity, err) //nolint:errcheck // best-effort stderr
+			}
+		}
+		for i := range ordered {
+			identity := namedSessionIdentity(ordered[i])
+			if identity == "" {
+				continue
+			}
+			if reset, err := cb.restoreFromMetadata(identity, ordered[i].Metadata, cbNow); err != nil {
+				fmt.Fprintf(stderr, "session reconciler: loading session circuit breaker state for %s: %v\n", identity, err) //nolint:errcheck // best-effort stderr
+			} else if reset {
+				if err := persistSessionCircuitBreakerMetadata(store, &ordered[i], cb, identity, cbNow); err != nil {
+					fmt.Fprintf(stderr, "session reconciler: %v\n", err) //nolint:errcheck // best-effort stderr
+				}
+			}
+		}
+		for identity, sig := range computeNamedSessionProgressSignatures(ordered, assignedWorkBeads) {
+			if cb.ObserveProgressSignature(identity, sig, cbNow) {
+				if session := circuitSessionByIdentity[identity]; session != nil {
+					if err := persistSessionCircuitBreakerMetadata(store, session, cb, identity, cbNow); err != nil {
+						fmt.Fprintf(stderr, "session reconciler: %v\n", err) //nolint:errcheck // best-effort stderr
+					}
+				}
+			}
+		}
+		cb.pruneIdle(cbNow)
 	}
 
 	// Build session ID -> *beads.Bead lookup for advanceSessionDrains.
@@ -1080,28 +1117,24 @@ func reconcileSessionBeadsTraced(
 				continue
 			}
 			// Respawn circuit breaker: for named sessions the supervisor
-			// will otherwise retry indefinitely. Check and (if still
-			// CLOSED) record the restart attempt BEFORE scheduling the
-			// spawn. This is the sole materialization gate for the
-			// breaker — see session_circuit_breaker.go.
-			if identity := namedSessionIdentity(*target.session); identity != "" {
-				if cb.IsOpen(identity, cbNow) {
-					cb.LogOpenOnce(identity, stderr)
-					if trace != nil {
-						trace.recordDecision("reconciler.session.circuit_open", target.tp.TemplateName, name, "circuit_open", "skipped", traceRecordPayload{
-							"identity": identity,
-						}, nil, "")
+			// will otherwise retry indefinitely. This phase only blocks
+			// already-OPEN breakers; restart accounting happens at the
+			// prepared-start boundary after dependency and wake-budget gates.
+			if cbEnabled {
+				identity := namedSessionIdentity(*target.session)
+				if identity != "" {
+					if cb.IsOpen(identity, cbNow) {
+						if err := persistSessionCircuitBreakerMetadata(store, target.session, cb, identity, cbNow); err != nil {
+							fmt.Fprintf(stderr, "session reconciler: %v\n", err) //nolint:errcheck // best-effort stderr
+						}
+						cb.LogOpenOnce(identity, stderr)
+						if trace != nil {
+							trace.recordDecision("reconciler.session.circuit_open", target.tp.TemplateName, name, "circuit_open", "skipped", traceRecordPayload{
+								"identity": identity,
+							}, nil, "")
+						}
+						continue
 					}
-					continue
-				}
-				if cb.RecordRestart(identity, cbNow) == circuitOpen {
-					cb.LogOpenOnce(identity, stderr)
-					if trace != nil {
-						trace.recordDecision("reconciler.session.circuit_trip", target.tp.TemplateName, name, "circuit_trip", "skipped", traceRecordPayload{
-							"identity": identity,
-						}, nil, "")
-					}
-					continue
 				}
 			}
 			if trace != nil {

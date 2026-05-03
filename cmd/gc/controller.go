@@ -74,7 +74,8 @@ const (
 )
 
 type sessionCircuitResetRequest struct {
-	Identity string `json:"identity"`
+	Identity  string `json:"identity"`
+	SessionID string `json:"session_id,omitempty"`
 }
 
 type sessionCircuitResetReply struct {
@@ -200,7 +201,7 @@ func handleControllerConn(
 			}
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
 		case strings.HasPrefix(line, sessionCircuitResetCommandPrefix):
-			handleSessionCircuitResetSocketCmd(conn, line[len(sessionCircuitResetCommandPrefix):])
+			handleSessionCircuitResetSocketCmd(conn, cityPath, line[len(sessionCircuitResetCommandPrefix):])
 		case strings.HasPrefix(line, "converge:"):
 			handleConvergeSocketCmd(conn, line[len("converge:"):], convergenceReqCh)
 		case strings.HasPrefix(line, "trace-arm:"):
@@ -223,7 +224,7 @@ func handleControllerConn(
 	}
 }
 
-func handleSessionCircuitResetSocketCmd(conn net.Conn, payload string) {
+func handleSessionCircuitResetSocketCmd(conn net.Conn, cityPath, payload string) {
 	var req sessionCircuitResetRequest
 	if err := json.Unmarshal([]byte(payload), &req); err != nil {
 		writeJSONLine(conn, sessionCircuitResetReply{
@@ -240,16 +241,76 @@ func handleSessionCircuitResetSocketCmd(conn net.Conn, payload string) {
 		})
 		return
 	}
-	defaultSessionCircuitBreaker().Reset(identity)
+	sessionID := strings.TrimSpace(req.SessionID)
+	if sessionID == "" {
+		writeJSONLine(conn, sessionCircuitResetReply{
+			Outcome: "failed",
+			Error:   "session_id is required; upgrade gc to clear persisted session circuit breaker metadata",
+		})
+		return
+	}
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		writeJSONLine(conn, sessionCircuitResetReply{
+			Outcome: "failed",
+			Error:   fmt.Sprintf("opening city store: %v", err),
+		})
+		return
+	}
+	if err := resetSessionCircuitBreakerState(store, sessionID, identity, defaultSessionCircuitBreaker()); err != nil {
+		writeJSONLine(conn, sessionCircuitResetReply{
+			Outcome: "failed",
+			Error:   err.Error(),
+		})
+		return
+	}
 	writeJSONLine(conn, sessionCircuitResetReply{Outcome: "ok"})
 }
 
-func resetSessionCircuitBreakerOnController(cityPath, identity string) error {
+func resetSessionCircuitBreakerState(store beads.Store, sessionID string, identity string, cb *sessionCircuitBreaker) error {
 	identity = strings.TrimSpace(identity)
 	if identity == "" {
 		return nil
 	}
-	payload, err := json.Marshal(sessionCircuitResetRequest{Identity: identity})
+	if cb == nil {
+		cb = defaultSessionCircuitBreaker()
+	}
+	if err := loadPersistedSessionCircuitResetGeneration(store, sessionID, identity, cb); err != nil {
+		return err
+	}
+	initialSnapshot := cb.snapshotIdentity(identity)
+	if strings.TrimSpace(sessionID) == "" {
+		cb.Reset(identity)
+		return nil
+	}
+	if err := resetAndClearSessionCircuitBreakerState(store, sessionID, identity, cb, initialSnapshot); err != nil {
+		return err
+	}
+	// The second cycle invalidates an OPEN persist that may race through
+	// the first clear window. If the second clear fails, restore the pre-reset
+	// snapshot so the controller never leaves memory CLOSED while storage still
+	// says OPEN. TestResetSessionCircuitBreakerStateClearsRacingOpenPersist
+	// guards this from being collapsed into a single reset.
+	return resetAndClearSessionCircuitBreakerState(store, sessionID, identity, cb, initialSnapshot)
+}
+
+func resetAndClearSessionCircuitBreakerState(store beads.Store, sessionID string, identity string, cb *sessionCircuitBreaker, restoreSnapshot sessionCircuitBreakerIdentitySnapshot) error {
+	resetGeneration := cb.Reset(identity)
+	if err := clearPersistedSessionCircuitBreakerMetadata(store, sessionID, resetGeneration); err != nil {
+		cb.restoreIdentity(identity, restoreSnapshot)
+		// Restore the pre-reset snapshot rather than the just-reset one so a
+		// durable clear failure cannot strand the breaker CLOSED in memory.
+		return err
+	}
+	return nil
+}
+
+func resetSessionCircuitBreakerOnController(cityPath, sessionID, identity string) error {
+	identity = strings.TrimSpace(identity)
+	if identity == "" {
+		return nil
+	}
+	payload, err := json.Marshal(sessionCircuitResetRequest{Identity: identity, SessionID: sessionID})
 	if err != nil {
 		return fmt.Errorf("encoding session circuit reset request: %w", err)
 	}

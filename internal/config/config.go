@@ -1330,6 +1330,20 @@ type DaemonConfig struct {
 	// RestartWindow is the sliding time window for counting restarts.
 	// Duration string (e.g., "30s", "5m", "1h"). Defaults to "1h".
 	RestartWindow string `toml:"restart_window,omitempty" jsonschema:"default=1h"`
+	// SessionCircuitBreaker enables the named-session respawn circuit breaker.
+	// When enabled, the controller suppresses no-progress named-session respawns
+	// after the configured restart threshold is exceeded.
+	SessionCircuitBreaker bool `toml:"session_circuit_breaker,omitempty"`
+	// SessionCircuitBreakerMaxRestarts overrides MaxRestarts for the
+	// named-session respawn circuit breaker. Nil reuses MaxRestartsOrDefault.
+	// 0 disables the circuit breaker even when SessionCircuitBreaker is true.
+	SessionCircuitBreakerMaxRestarts *int `toml:"session_circuit_breaker_max_restarts,omitempty" jsonschema:"default=5"`
+	// SessionCircuitBreakerWindow overrides RestartWindow for the named-session
+	// respawn circuit breaker. Empty reuses RestartWindowDuration.
+	SessionCircuitBreakerWindow string `toml:"session_circuit_breaker_window,omitempty" jsonschema:"default=1h"`
+	// SessionCircuitBreakerResetAfter is the cooldown before an open named-session
+	// breaker resets automatically. Empty defaults to 2 * SessionCircuitBreakerWindowDuration.
+	SessionCircuitBreakerResetAfter string `toml:"session_circuit_breaker_reset_after,omitempty"`
 	// ShutdownTimeout is the time to wait after sending Ctrl-C before force-killing
 	// agents during shutdown. Duration string (e.g., "5s", "30s"). Set to "0s"
 	// for immediate kill. Defaults to "5s".
@@ -1393,6 +1407,42 @@ func (d *DaemonConfig) RestartWindowDuration() time.Duration {
 	dur, err := time.ParseDuration(d.RestartWindow)
 	if err != nil {
 		return time.Hour
+	}
+	return dur
+}
+
+// SessionCircuitBreakerMaxRestartsOrDefault returns the named-session respawn
+// circuit-breaker threshold. Nil reuses MaxRestartsOrDefault; zero disables it.
+func (d *DaemonConfig) SessionCircuitBreakerMaxRestartsOrDefault() int {
+	if d.SessionCircuitBreakerMaxRestarts == nil {
+		return d.MaxRestartsOrDefault()
+	}
+	return *d.SessionCircuitBreakerMaxRestarts
+}
+
+// SessionCircuitBreakerWindowDuration returns the named-session respawn
+// circuit-breaker rolling window. Empty reuses RestartWindowDuration.
+func (d *DaemonConfig) SessionCircuitBreakerWindowDuration() time.Duration {
+	if d.SessionCircuitBreakerWindow == "" {
+		return d.RestartWindowDuration()
+	}
+	dur, err := time.ParseDuration(d.SessionCircuitBreakerWindow)
+	if err != nil {
+		return d.RestartWindowDuration()
+	}
+	return dur
+}
+
+// SessionCircuitBreakerResetAfterDuration returns the named-session respawn
+// circuit-breaker cooldown. Empty or invalid values default to 2 * window.
+func (d *DaemonConfig) SessionCircuitBreakerResetAfterDuration() time.Duration {
+	window := d.SessionCircuitBreakerWindowDuration()
+	if d.SessionCircuitBreakerResetAfter == "" {
+		return 2 * window
+	}
+	dur, err := time.ParseDuration(d.SessionCircuitBreakerResetAfter)
+	if err != nil {
+		return 2 * window
 	}
 	return dur
 }

@@ -1654,6 +1654,119 @@ func TestExecutePlannedStartsTraced_AsyncPrepareFailureClearsPreWakeLease(t *tes
 	}
 }
 
+func TestExecutePlannedStartsTraced_CircuitTripDoesNotCommitPreWakeMetadata(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 28, 0, time.UTC)}
+	const identity = "test-city/worker"
+	originalLastWokeAt := clk.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	session, err := store.Create(beads.Bead{
+		ID:     "gc-worker",
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: creatingMeta(map[string]string{
+			"session_name":               "worker",
+			"template":                   "worker",
+			"generation":                 "7",
+			"continuation_epoch":         "3",
+			"continuation_reset_pending": "true",
+			"instance_token":             "tok-worker",
+			"last_woke_at":               originalLastWokeAt,
+			"pending_create_claim":       "true",
+			"wake_mode":                  "fresh",
+			"session_key":                "fresh-key-123",
+			"started_config_hash":        "started-config-before-reset",
+			"started_live_hash":          "started-live-before-reset",
+			"live_hash":                  "live-before-reset",
+			"startup_dialog_verified":    "true",
+			namedSessionIdentityMetadata: identity,
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cb := newSessionCircuitBreaker(sessionCircuitBreakerConfig{
+		Window:      10 * time.Minute,
+		MaxRestarts: 1,
+		ResetAfter:  20 * time.Minute,
+	})
+	defer setSessionCircuitBreakerForTest(cb)()
+	cb.RecordRestart(identity, clk.Now().Add(-time.Minute))
+	sp := newGatedStartProvider()
+	t.Cleanup(func() { sp.release("worker") })
+	maxRestarts := 1
+	cfg := &config.City{
+		Daemon: config.DaemonConfig{
+			SessionCircuitBreaker:            true,
+			SessionCircuitBreakerMaxRestarts: &maxRestarts,
+			SessionCircuitBreakerWindow:      "10m",
+			SessionCircuitBreakerResetAfter:  "20m",
+		},
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	tp := TemplateParams{Command: "worker", SessionName: "worker", TemplateName: "worker"}
+
+	if got := executePlannedStartsTraced(
+		context.Background(),
+		[]startCandidate{{session: &session, tp: tp}},
+		cfg,
+		map[string]TemplateParams{"worker": tp},
+		sp,
+		store,
+		"test-city",
+		"",
+		clk,
+		events.Discard,
+		time.Minute,
+		ioDiscard{},
+		ioDiscard{},
+		nil,
+	); got != 0 {
+		t.Fatalf("woken = %d, want 0 when circuit trip suppresses start", got)
+	}
+	sp.ensureNoFurtherStart(t, 100*time.Millisecond)
+	updated, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := updated.Metadata["generation"]; got != "7" {
+		t.Fatalf("generation = %q, want unchanged", got)
+	}
+	if got := updated.Metadata["instance_token"]; got != "tok-worker" {
+		t.Fatalf("instance_token = %q, want unchanged", got)
+	}
+	if got := updated.Metadata["continuation_epoch"]; got != "3" {
+		t.Fatalf("continuation_epoch = %q, want unchanged", got)
+	}
+	if got := updated.Metadata["continuation_reset_pending"]; got != "true" {
+		t.Fatalf("continuation_reset_pending = %q, want unchanged", got)
+	}
+	if got := updated.Metadata["pending_create_claim"]; got != "true" {
+		t.Fatalf("pending_create_claim = %q, want unchanged", got)
+	}
+	if got := updated.Metadata["wake_mode"]; got != "fresh" {
+		t.Fatalf("wake_mode = %q, want unchanged", got)
+	}
+	if got := updated.Metadata["last_woke_at"]; got != originalLastWokeAt {
+		t.Fatalf("last_woke_at = %q, want unchanged %q", got, originalLastWokeAt)
+	}
+	if got := updated.Metadata["session_key"]; got != "fresh-key-123" {
+		t.Fatalf("session_key = %q, want unchanged", got)
+	}
+	if got := updated.Metadata["started_config_hash"]; got != "started-config-before-reset" {
+		t.Fatalf("started_config_hash = %q, want unchanged", got)
+	}
+	if got := updated.Metadata["started_live_hash"]; got != "started-live-before-reset" {
+		t.Fatalf("started_live_hash = %q, want unchanged", got)
+	}
+	if got := updated.Metadata["live_hash"]; got != "live-before-reset" {
+		t.Fatalf("live_hash = %q, want unchanged", got)
+	}
+	if got := updated.Metadata["startup_dialog_verified"]; got != "true" {
+		t.Fatalf("startup_dialog_verified = %q, want unchanged", got)
+	}
+}
+
 func TestExecutePlannedStartsTraced_AsyncRequestsFollowUpAfterCommit(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 30, 0, time.UTC)}

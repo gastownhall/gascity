@@ -69,27 +69,24 @@ func cmdSessionReset(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc session reset: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := handle.Reset(context.Background()); err != nil {
-		fmt.Fprintf(stderr, "gc session reset: %v\n", err) //nolint:errcheck // best-effort stderr
+
+	bead, err := store.Get(sessionID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session reset: loading session %s: %v\n", sessionID, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	identity := namedSessionIdentity(bead)
+	if identity == "" {
+		identity = args[0]
+	}
+	if err := resetSessionCircuitBreakerOnController(cityPath, sessionID, identity); err != nil {
+		fmt.Fprintf(stderr, "gc session reset: clearing session circuit breaker for %q: %v\n", identity, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	identities := []string{args[0]}
-	if bead, err := store.Get(sessionID); err == nil {
-		if identity := namedSessionIdentity(bead); identity != "" {
-			identities = append(identities, identity)
-		}
-	}
-	seen := make(map[string]bool, len(identities))
-	for _, identity := range identities {
-		if identity == "" || seen[identity] {
-			continue
-		}
-		seen[identity] = true
-		if err := resetSessionCircuitBreakerOnController(cityPath, identity); err != nil {
-			fmt.Fprintf(stderr, "gc session reset: clearing session circuit breaker for %q: %v\n", identity, err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
+	if err := handle.Reset(context.Background()); err != nil {
+		fmt.Fprintf(stderr, "gc session reset: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 
 	_ = pokeController(cityPath)

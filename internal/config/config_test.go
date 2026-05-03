@@ -2092,6 +2092,41 @@ name = "mayor"
 	}
 }
 
+func TestParseDaemonSessionCircuitBreaker(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test"
+
+[daemon]
+session_circuit_breaker = true
+session_circuit_breaker_max_restarts = 2
+session_circuit_breaker_window = "10m"
+session_circuit_breaker_reset_after = "25m"
+
+[[agent]]
+name = "worker"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !cfg.Daemon.SessionCircuitBreaker {
+		t.Fatal("Daemon.SessionCircuitBreaker = false, want true")
+	}
+	if cfg.Daemon.SessionCircuitBreakerMaxRestarts == nil || *cfg.Daemon.SessionCircuitBreakerMaxRestarts != 2 {
+		t.Fatalf("Daemon.SessionCircuitBreakerMaxRestarts = %v, want 2", cfg.Daemon.SessionCircuitBreakerMaxRestarts)
+	}
+	if got := cfg.Daemon.SessionCircuitBreakerMaxRestartsOrDefault(); got != 2 {
+		t.Fatalf("SessionCircuitBreakerMaxRestartsOrDefault() = %d, want 2", got)
+	}
+	if got := cfg.Daemon.SessionCircuitBreakerWindowDuration(); got != 10*time.Minute {
+		t.Fatalf("SessionCircuitBreakerWindowDuration() = %v, want 10m", got)
+	}
+	if got := cfg.Daemon.SessionCircuitBreakerResetAfterDuration(); got != 25*time.Minute {
+		t.Fatalf("SessionCircuitBreakerResetAfterDuration() = %v, want 25m", got)
+	}
+}
+
 func TestMarshalOmitsEmptyDaemonSection(t *testing.T) {
 	c := DefaultCity("test")
 	data, err := c.Marshal()

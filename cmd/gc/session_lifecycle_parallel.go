@@ -1452,6 +1452,12 @@ func executePlannedStartsTraced(
 			apply(&startOpts)
 		}
 	}
+	cbCfg, cbEnabled := sessionCircuitBreakerConfigFromCity(cfg)
+	var cb *sessionCircuitBreaker
+	if cbEnabled {
+		cb = defaultSessionCircuitBreaker()
+		cb.configure(cbCfg)
+	}
 	asyncLimiter := startOpts.asyncLimiter
 	maxWakes := maxParallelStartsPerTick(cfg)
 	if startOpts.async && asyncLimiter == nil {
@@ -1527,6 +1533,60 @@ func executePlannedStartsTraced(
 						done()
 						logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), outcome, time.Time{}, time.Time{}, nil)
 						continue
+					}
+				}
+				if cbEnabled {
+					identity := ""
+					if candidate.session != nil {
+						identity = namedSessionIdentity(*candidate.session)
+					}
+					if identity != "" {
+						cbNow := clk.Now().UTC()
+						if cb.IsOpen(identity, cbNow) {
+							if release != nil {
+								release()
+							}
+							if done != nil {
+								done()
+							}
+							if err := persistSessionCircuitBreakerMetadata(store, candidate.session, cb, identity, cbNow); err != nil {
+								fmt.Fprintf(stderr, "session reconciler: %v\n", err) //nolint:errcheck // best-effort stderr
+							}
+							cb.LogOpenOnce(identity, stderr)
+							if trace != nil {
+								trace.recordDecision("reconciler.session.circuit_open", candidate.tp.TemplateName, candidate.name(), "circuit_open", "skipped", traceRecordPayload{
+									"identity": identity,
+								}, nil, "")
+							}
+							continue
+						}
+						state, err := recordSessionCircuitBreakerRestart(store, candidate.session, cb, identity, cbNow)
+						if err != nil {
+							if release != nil {
+								release()
+							}
+							if done != nil {
+								done()
+							}
+							fmt.Fprintf(stderr, "session reconciler: %v\n", err) //nolint:errcheck // best-effort stderr
+							logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "circuit_metadata_failed", time.Time{}, time.Time{}, err)
+							continue
+						}
+						if state == circuitOpen {
+							if release != nil {
+								release()
+							}
+							if done != nil {
+								done()
+							}
+							cb.LogOpenOnce(identity, stderr)
+							if trace != nil {
+								trace.recordDecision("reconciler.session.circuit_trip", candidate.tp.TemplateName, candidate.name(), "circuit_trip", "skipped", traceRecordPayload{
+									"identity": identity,
+								}, nil, "")
+							}
+							continue
+						}
 					}
 				}
 				item, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr)
