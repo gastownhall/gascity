@@ -422,6 +422,9 @@ func (s scopeSnapshot) hasOpenScopeMembers(ignoreIDs ...string) bool {
 		if _, skip := ignored[member.ID]; skip {
 			continue
 		}
+		if member.Metadata["gc.kind"] == "spec" {
+			continue
+		}
 		switch member.Metadata["gc.scope_role"] {
 		case "body", "teardown":
 			continue
@@ -500,6 +503,9 @@ func (s scopeSnapshot) skipOpenScopeMembers(store beads.Store, skipControlID str
 	pending := make(map[string]beads.Bead)
 	for _, member := range s.members {
 		if member.ID == skipControlID || member.Status != "open" {
+			continue
+		}
+		if member.Metadata["gc.kind"] == "spec" {
 			continue
 		}
 		switch member.Metadata["gc.scope_role"] {

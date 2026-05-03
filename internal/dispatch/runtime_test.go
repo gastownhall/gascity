@@ -5281,6 +5281,77 @@ func TestFullMetadataPropagationChain(t *testing.T) {
 	}
 }
 
+func TestProcessScopeCheckIgnoresOpenSpecBeadsWhenCompletingScope(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	body := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "iteration 1",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "review-loop.iteration.1",
+		},
+	})
+	mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Step spec for apply",
+		Type:  "spec",
+		Metadata: map[string]string{
+			"gc.kind":         "spec",
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "review-loop.iteration.1",
+			"gc.scope_role":   "member",
+			"gc.step_ref":     "review-loop.iteration.1.apply.spec",
+		},
+	})
+	member := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "apply",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "review-loop.iteration.1",
+			"gc.scope_role":   "member",
+			"gc.outcome":      "pass",
+		},
+	})
+	scopeCheck := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize apply",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope-check",
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "review-loop.iteration.1",
+			"gc.scope_role":   "control",
+		},
+	})
+	mustDepAdd(t, store, scopeCheck.ID, member.ID, "blocks")
+	mustDepAdd(t, store, body.ID, scopeCheck.ID, "blocks")
+
+	result, err := ProcessControl(store, mustGetBead(t, store, scopeCheck.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(scope-check): %v", err)
+	}
+	if result.Action != "scope-pass" {
+		t.Fatalf("scope-check action = %q, want scope-pass", result.Action)
+	}
+
+	bodyAfter := mustGetBead(t, store, body.ID)
+	if bodyAfter.Status != "closed" || bodyAfter.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("scope body = status %q outcome %q, want closed/pass", bodyAfter.Status, bodyAfter.Metadata["gc.outcome"])
+	}
+}
+
 // TestProcessControlEmitsSkipReasonWhenNotOpen is the regression guard for
 // the 20-minute silent stall on ga-ttn5z. When a rogue worker had flipped
 // a retry-control bead (ga-fw2fm) to status=in_progress, ProcessControl
