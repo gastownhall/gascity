@@ -237,14 +237,14 @@ func initBd(t *testing.T, dir string) string {
 	}
 	cmd := exec.Command(binary, "init", "-p", prefix, "--skip-hooks", "-q")
 	cmd.Dir = dir
-	cmd.Env = standaloneBdInitEnv()
+	cmd.Env = standaloneBdEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("bd init in %s failed: %v\noutput: %s", dir, err, out)
 	}
 	return prefix
 }
 
-func standaloneBdInitEnv() []string {
+func standaloneBdEnv() []string {
 	return filterEnvMany(os.Environ(),
 		"BEADS_DIR",
 		"BEADS_DOLT_AUTO_START",

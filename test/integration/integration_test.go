@@ -394,11 +394,30 @@ func gcDolt(dir string, args ...string) (string, error) {
 // bd runs the bd binary with the given args. If dir is non-empty, it sets
 // the working directory. Returns combined stdout+stderr and any error.
 func bd(dir string, args ...string) (string, error) {
+	if usesStandaloneBdStore(dir, args) {
+		return runCommand(dir, standaloneBdEnv(), integrationBDCommandTimeout, realBDBinary, args...)
+	}
 	out, err := runCommand(dir, commandEnvForDir(dir, false), integrationBDCommandTimeout, bdBinary, args...)
 	if err == nil || !shouldUseFileStoreBDFallback(dir, out, args) {
 		return out, err
 	}
 	return runFileStoreBD(dir, args...)
+}
+
+func usesStandaloneBdStore(dir string, args []string) bool {
+	if dir == "" || len(args) == 0 || args[0] == "init" {
+		return false
+	}
+	if strings.TrimSpace(realBDBinary) == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".beads")); err != nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".gc", "beads.json")); err == nil {
+		return false
+	}
+	return true
 }
 
 // bdDolt runs bd against a Dolt-backed city using the same isolated runtime
