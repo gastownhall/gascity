@@ -76,6 +76,11 @@ func TestMailLifecycle(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("get status = %d, want %d", rec.Code, http.StatusOK)
 	}
+	var readMsg mail.Message
+	json.NewDecoder(rec.Body).Decode(&readMsg) //nolint:errcheck
+	if !readMsg.Read {
+		t.Fatalf("get after read: Read = false, want true")
+	}
 
 	// Archive.
 	req = newPostRequest(cityURL(state, "/mail/")+sent.ID+"/archive", nil)
@@ -84,6 +89,50 @@ func TestMailLifecycle(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("archive status = %d, want %d", rec.Code, http.StatusOK)
+	}
+}
+
+func TestMailMarkUnread(t *testing.T) {
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+
+	body := `{"from":"mayor","to":"worker","subject":"Unread test","body":"check this"}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/mail"), bytes.NewBufferString(body)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("send status = %d, want %d; body: %s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	var sent mail.Message
+	json.NewDecoder(rec.Body).Decode(&sent) //nolint:errcheck
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/mail/")+sent.ID+"/read", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("read status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/mail/")+sent.ID+"/mark-unread", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("mark-unread status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/mail?agent=myrig/worker"), nil))
+	var inbox struct {
+		Items []mail.Message `json:"items"`
+		Total int            `json:"total"`
+	}
+	json.NewDecoder(rec.Body).Decode(&inbox) //nolint:errcheck
+	if inbox.Total != 1 {
+		t.Fatalf("inbox after mark-unread: Total = %d, want 1 (message should reappear)", inbox.Total)
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/mail/")+sent.ID, nil))
+	var unread mail.Message
+	json.NewDecoder(rec.Body).Decode(&unread) //nolint:errcheck
+	if unread.Read {
+		t.Fatalf("get after mark-unread: Read = true, want false")
 	}
 }
 

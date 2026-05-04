@@ -243,13 +243,25 @@ func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, 
 	}
 	for _, assignee := range unique {
 		for _, rn := range rigNames {
-			matches, err := stores[rn].List(beads.ListQuery{
+			query := beads.ListQuery{
 				Assignee: assignee,
 				Status:   "in_progress",
 				Live:     live,
 				Limit:    1,
 				Sort:     beads.SortCreatedDesc,
-			})
+			}
+			if !live {
+				if cached, ok := stores[rn].(cachedListStore); ok {
+					matches, cacheOK := cached.CachedList(query)
+					if cacheOK {
+						if len(matches) > 0 {
+							return matches[0].ID
+						}
+						continue
+					}
+				}
+			}
+			matches, err := stores[rn].List(query)
 			if err != nil {
 				continue
 			}

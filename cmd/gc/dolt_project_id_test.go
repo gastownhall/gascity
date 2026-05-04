@@ -23,6 +23,7 @@ func TestEnsureManagedDoltProjectIDGeneratesLocalIdentityWhenMetadataAndDatabase
 			t.Skip("dolt not installed")
 		}
 	}
+	bdPath := waitTestRealBDPath(t)
 
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
@@ -48,7 +49,7 @@ func TestEnsureManagedDoltProjectIDGeneratesLocalIdentityWhenMetadataAndDatabase
 	t.Setenv("GC_CITY_PATH", cityDir)
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "")
-	t.Setenv("PATH", strings.Join([]string{"/home/ubuntu/.local/bin", filepath.Dir(doltPath), os.Getenv("PATH")}, string(os.PathListSeparator)))
+	t.Setenv("PATH", strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(doltPath), os.Getenv("PATH")}, string(os.PathListSeparator)))
 
 	if err := ensureBeadsProvider(cityDir); err != nil {
 		t.Fatalf("ensureBeadsProvider: %v", err)

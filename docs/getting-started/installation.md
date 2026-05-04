@@ -30,7 +30,7 @@ require manual installation of the rows that match your setup.
 | pgrep          | Always                                                | —           | (built-in)           | `apt install procps`                                      | Process discovery for runtime checks                           |
 | lsof           | Always                                                | —           | (built-in)           | `apt install lsof`                                        | Process/port inspection                                        |
 | tmux           | Default session backend only (`""`, `tmux`, `hybrid`) | —           | `brew install tmux`  | `apt install tmux`                                        | Skip when using `subprocess`, `acp`, `exec:<script>`, or `k8s` |
-| dolt           | Default beads backend only (`""`, `bd`)               | 1.86.1      | `brew install dolt`  | [releases](https://github.com/dolthub/dolt/releases)      | Skip when `[beads].provider = "file"`                          |
+| dolt           | Default beads backend only (`""`, `bd`)               | 1.86.2+     | `brew install dolt`  | [releases](https://github.com/dolthub/dolt/releases)      | Skip when `[beads].provider = "file"`                          |
 | bd (Beads CLI) | Default beads backend only (`""`, `bd`)               | 1.0.0       | `brew install beads` | [releases](https://github.com/gastownhall/beads/releases) | Skip when `[beads].provider = "file"`                          |
 | flock          | Default beads backend only (`""`, `bd`)               | —           | `brew install flock` | (built-in via util-linux)                                 | File locking for the `bd` backend                              |
 | Go 1.25+       | Source only                                           | 1.25        | `brew install go`    | [golang.org](https://go.dev/dl/)                          | Compiler                                                       |
@@ -38,6 +38,11 @@ require manual installation of the rows that match your setup.
 
 If you plan to follow the Quickstart exactly as written, install the default
 stack: `tmux` for sessions plus `bd`, `dolt`, and `flock` for beads.
+
+Use a final Dolt 1.86.2 or newer. Gas City's managed Dolt checks reject older
+and pre-release builds because they can miss the upstream GC/writer deadlock
+fix in dolthub/dolt commit `ccf7bde206`, which can hang `dolt_backup sync`
+under heavy write load.
 
 The exact versions CI pins are in [`deps.env`](https://github.com/gastownhall/gascity/blob/main/deps.env).
 
@@ -110,7 +115,7 @@ Release tarballs are published for every tagged version. Supported platforms:
 
 ```bash
 # Set the version you want (check https://github.com/gastownhall/gascity/releases)
-VERSION=0.13.3
+VERSION=1.0.0
 
 # Detect platform
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -129,6 +134,39 @@ sudo install -m 755 gc /usr/local/bin/gc
 
 # Verify
 gc version
+```
+
+### Verify release artifacts
+
+Homebrew verifies release checksums from the formula automatically. For direct
+downloads, verify the archive before installing it:
+
+```bash
+ARCHIVE="gascity_${VERSION}_${OS}_${ARCH}.tar.gz"
+CHECKSUMS="gascity_${VERSION}_checksums.txt"
+
+curl -fsSLO "https://github.com/gastownhall/gascity/releases/download/v${VERSION}/${CHECKSUMS}"
+grep "  ${ARCHIVE}$" "${CHECKSUMS}" > "${ARCHIVE}.sha256"
+
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256sum -c "${ARCHIVE}.sha256"
+else
+  shasum -a 256 -c "${ARCHIVE}.sha256"
+fi
+```
+
+Release archives are also published with GitHub artifact attestations. If you
+have the GitHub CLI installed, verify the downloaded archive against the
+`gastownhall/gascity` repository:
+
+```bash
+gh attestation verify "${ARCHIVE}" --repo gastownhall/gascity
+```
+
+Each release also includes an SPDX SBOM asset:
+
+```bash
+curl -fsSLO "https://github.com/gastownhall/gascity/releases/download/v${VERSION}/gascity-v${VERSION}.spdx.json"
 ```
 
 ### Upgrading a direct-download install

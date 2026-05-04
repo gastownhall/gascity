@@ -2562,87 +2562,14 @@ func (c *DoltConfigCheck) CanFix() bool { return false }
 // Fix is a no-op. See TODO on CanFix.
 func (c *DoltConfigCheck) Fix(_ *CheckContext) error { return nil }
 
-// doltVersionInfo is the parsed semantic version of the installed `dolt`.
-type doltVersionInfo struct {
-	Major, Minor, Patch int
-	Raw                 string
-}
+type doltVersionInfo = doltversion.Info
 
-// parseDoltVersion parses the first version-like token from `dolt version`
-// output. Accepted formats:
-//
-//	"dolt version 1.75.2\nWarning: ..."
-//	"dolt version 1.75.2"
-//	"1.75.2"
-//
-// Any suffix after patch (e.g. "-rc1") is ignored.
 func parseDoltVersion(out string) (doltVersionInfo, error) {
-	out = strings.TrimSpace(out)
-	if out == "" {
-		return doltVersionInfo{}, fmt.Errorf("empty version output")
-	}
-	// Only look at the first line — dolt sometimes emits a "Warning: ..."
-	// second line for deprecated flags.
-	if i := strings.IndexByte(out, '\n'); i >= 0 {
-		out = out[:i]
-	}
-	out = strings.TrimSpace(out)
-	// Strip the "dolt version " prefix if present.
-	const prefix = "dolt version "
-	if strings.HasPrefix(strings.ToLower(out), prefix) {
-		out = out[len(prefix):]
-	}
-	// Take the first whitespace-delimited token.
-	if i := strings.IndexAny(out, " \t"); i >= 0 {
-		out = out[:i]
-	}
-	out = strings.TrimPrefix(out, "v")
-	// Strip any pre-release / build suffix after MAJOR.MINOR.PATCH.
-	core := out
-	for _, sep := range []string{"-", "+"} {
-		if i := strings.Index(core, sep); i >= 0 {
-			core = core[:i]
-		}
-	}
-	parts := strings.Split(core, ".")
-	if len(parts) < 3 {
-		return doltVersionInfo{}, fmt.Errorf("unrecognized version %q", out)
-	}
-	major, err := strconv.Atoi(parts[0])
-	if err != nil {
-		return doltVersionInfo{}, fmt.Errorf("unrecognized major in %q: %w", out, err)
-	}
-	minor, err := strconv.Atoi(parts[1])
-	if err != nil {
-		return doltVersionInfo{}, fmt.Errorf("unrecognized minor in %q: %w", out, err)
-	}
-	patch, err := strconv.Atoi(parts[2])
-	if err != nil {
-		return doltVersionInfo{}, fmt.Errorf("unrecognized patch in %q: %w", out, err)
-	}
-	return doltVersionInfo{Major: major, Minor: minor, Patch: patch, Raw: fmt.Sprintf("%d.%d.%d", major, minor, patch)}, nil
+	return doltversion.Parse(out)
 }
 
-// compareDoltVersion returns -1 if a<b, 0 if a==b, 1 if a>b.
 func compareDoltVersion(a, b doltVersionInfo) int {
-	switch {
-	case a.Major != b.Major:
-		if a.Major < b.Major {
-			return -1
-		}
-		return 1
-	case a.Minor != b.Minor:
-		if a.Minor < b.Minor {
-			return -1
-		}
-		return 1
-	case a.Patch != b.Patch:
-		if a.Patch < b.Patch {
-			return -1
-		}
-		return 1
-	}
-	return 0
+	return doltversion.Compare(a, b)
 }
 
 // DoltVersionCheck shells out to `dolt version` and verifies the managed-Dolt
@@ -2730,21 +2657,24 @@ func (c *DoltVersionCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 
-	info, err := parseDoltVersion(out)
-	if err != nil {
+	info, err := doltversion.CheckFinalMinimum(out, doltversion.ManagedMin)
+	switch {
+	case errors.Is(err, doltversion.ErrPreRelease):
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("dolt version %s is a pre-release; final release %s or newer is required for managed config", info.Raw, doltversion.ManagedMin)
+		r.FixHint = "upgrade dolt: https://docs.dolthub.com/introduction/installation"
+		return r
+	case errors.Is(err, doltversion.ErrBelowMinimum):
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("dolt version %s is below minimum %s required for managed config", info.Raw, doltversion.ManagedMin)
+		r.FixHint = "upgrade dolt: https://docs.dolthub.com/introduction/installation"
+		return r
+	case err != nil:
 		r.Status = StatusWarning
 		r.Message = fmt.Sprintf("parse dolt version: %v", err)
 		return r
 	}
 
-	minVer, _ := parseDoltVersion(doltversion.ManagedMin)
-
-	if compareDoltVersion(info, minVer) < 0 {
-		r.Status = StatusError
-		r.Message = fmt.Sprintf("dolt version %s is below minimum %s required for managed config", info.Raw, doltversion.ManagedMin)
-		r.FixHint = "upgrade dolt: https://docs.dolthub.com/introduction/installation"
-		return r
-	}
 	r.Status = StatusOK
 	r.Message = fmt.Sprintf("dolt %s", info.Raw)
 	return r

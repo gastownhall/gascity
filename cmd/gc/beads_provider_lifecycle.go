@@ -47,6 +47,7 @@ var (
 	initDirIfReadyEnsureBeadsProvider = ensureBeadsProvider
 	initDirIfReadyInitAndHookDir      = initAndHookDir
 	initDirIfReadyRetryDelay          = time.Second
+	initAndHookDirWaitForScopeReady   = waitForBeadsScopeReadyAfterRecovery
 )
 
 const initDirIfReadyRetryLimit = 2
@@ -58,7 +59,9 @@ func isRetryableManagedDoltLifecycleError(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "dolt server exited during startup") ||
 		strings.Contains(msg, "did not become query-ready") ||
-		strings.Contains(msg, "signal: terminated")
+		strings.Contains(msg, "signal: terminated") ||
+		strings.Contains(msg, "table not found: issues") ||
+		strings.Contains(msg, "table not found: config")
 }
 
 // ── Consolidated lifecycle operations ────────────────────────────────────
@@ -319,7 +322,8 @@ func defaultScopeDoltDatabase(cityPath, dir, prefix string) string {
 }
 
 func isReservedManagedDoltDatabase(name string) bool {
-	return strings.EqualFold(strings.TrimSpace(name), managedDoltProbeDatabase)
+	_, ok := managedDoltSystemDatabases[strings.ToLower(strings.TrimSpace(name))]
+	return ok
 }
 
 func canonicalScopeDoltDatabase(cityPath, dir, prefix string) string {
@@ -363,11 +367,26 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 	if err := normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase); err != nil {
 		return err
 	}
+	if cityUsesBdStoreContract(cityPath) && currentManagedDoltPort(cityPath) != "" {
+		if err := syncManagedDoltPortMirrors(cityPath); err != nil {
+			return fmt.Errorf("sync managed dolt port mirrors after init: %w", err)
+		}
+		if err := initAndHookDirWaitForScopeReady(dir, cityPath, time.Now().Add(10*time.Second)); err != nil {
+			return fmt.Errorf("waiting for initialized bead scope readiness: %w", err)
+		}
+	}
 	// Non-fatal: hooks are convenience (event forwarding), not critical.
 	if err := installBeadHooks(dir); err != nil {
 		return fmt.Errorf("install hooks at %s: %w", dir, err)
 	}
 	return nil
+}
+
+func shouldRetryExecBdInit(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "bd schema not visible")
 }
 
 // resolveRigPaths resolves relative rig paths to absolute (relative to
@@ -492,7 +511,21 @@ func initBeadsForDir(cityPath, dir, prefix, doltDatabase string) error {
 					return err
 				}
 			}
-			if err := runProviderOpWithEnv(script, overlayEnvEntries(baseEnv, overrides), args...); err != nil {
+			env := overlayEnvEntries(baseEnv, overrides)
+			if err := runProviderOpWithEnv(script, env, args...); err != nil {
+				if shouldRetryExecBdInit(err) {
+					for attempt := 0; attempt < 3; attempt++ {
+						time.Sleep(time.Second)
+						retryErr := runProviderOpWithEnv(script, env, args...)
+						if retryErr == nil {
+							return finalizeCanonicalBdScopeInit(cityPath, dir, prefix, canonicalDoltDatabase)
+						}
+						if !shouldRetryExecBdInit(retryErr) {
+							return retryErr
+						}
+						err = retryErr
+					}
+				}
 				return err
 			}
 			return finalizeCanonicalBdScopeInit(cityPath, dir, prefix, canonicalDoltDatabase)
@@ -505,7 +538,23 @@ func initBeadsForDir(cityPath, dir, prefix, doltDatabase string) error {
 			env := overlayEnvEntries(baseEnv, map[string]string{
 				"BEADS_DIR": filepath.Join(dir, ".beads"),
 			})
-			return runProviderOpWithEnv(script, env, args...)
+			if err := runProviderOpWithEnv(script, env, args...); err != nil {
+				if shouldRetryExecBdInit(err) {
+					for attempt := 0; attempt < 3; attempt++ {
+						time.Sleep(time.Second)
+						retryErr := runProviderOpWithEnv(script, env, args...)
+						if retryErr == nil {
+							return nil
+						}
+						if !shouldRetryExecBdInit(retryErr) {
+							return retryErr
+						}
+						err = retryErr
+					}
+				}
+				return err
+			}
+			return nil
 		}
 		target, err := resolveConfiguredExecStoreTarget(cityPath, dir)
 		if err != nil {
@@ -904,6 +953,10 @@ func validateManagedDoltDatabaseName(path, doltDatabase string) (string, error) 
 	return doltDatabase, nil
 }
 
+func isLegacyManagedDoltProbeDatabase(name string) bool {
+	return strings.EqualFold(strings.TrimSpace(name), managedDoltProbeDatabase)
+}
+
 func ensureCanonicalScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase string, preserveExisting bool) error {
 	path := filepath.Join(scopeRoot, ".beads", "metadata.json")
 	preserveReservedExisting := false
@@ -914,9 +967,10 @@ func ensureCanonicalScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase string, pr
 			doltDatabase = strings.TrimSpace(existing)
 			if isReservedManagedDoltDatabase(doltDatabase) {
 				// New init paths reject this reserved name, but existing metadata
-				// may predate the reservation. Preserve it during startup
-				// normalization so operators can migrate the scope deliberately.
-				preserveReservedExisting = true
+				// may use the legacy probe database as its real bead store.
+				// Preserve only that one migration case; Dolt system databases
+				// are unsafe bead-store targets even when already pinned.
+				preserveReservedExisting = isLegacyManagedDoltProbeDatabase(doltDatabase)
 			}
 		}
 	}

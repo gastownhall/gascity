@@ -8,7 +8,6 @@
 // Events:
 //   session_start    → gc prime --hook (load context side effects)
 //   session_compact  → gc prime --hook (reload after compaction)
-//   session_shutdown → gc hook --inject on process quit
 //   before_agent_start → gc nudge drain --inject + gc mail check --inject
 
 const { execFileSync } = require("node:child_process");
@@ -43,12 +42,6 @@ module.exports = function gascityPiExtension(pi) {
 
   pi.on("session_compact", (_event, ctx) => {
     run(["prime", "--hook"], ctx.cwd);
-  });
-
-  pi.on("session_shutdown", (event, ctx) => {
-    if (event.reason === "quit") {
-      run(["hook", "--inject"], ctx.cwd);
-    }
   });
 
   pi.on("before_agent_start", (event, ctx) => {

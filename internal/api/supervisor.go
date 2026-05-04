@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net"
 	"net/http"
@@ -34,15 +35,36 @@ type CityResolver interface {
 	CityState(name string) State
 }
 
+// ErrPendingRequestExists indicates that a matching async request is already
+// waiting for a terminal request-result event.
+var ErrPendingRequestExists = errors.New("pending request already exists")
+
+// PendingRequestStore is an optional CityResolver extension that
+// lets async handlers store correlation request IDs for later
+// retrieval by the reconciler when emitting request.result events.
+type PendingRequestStore interface {
+	StorePendingRequestID(cityPath, requestID string) error
+	ConsumePendingRequestID(cityPath string) (string, bool, error)
+}
+
+// SupervisorEventSource is an optional CityResolver extension that
+// provides a supervisor-level event recorder for city lifecycle events
+// (create/unregister completion). These events belong on the supervisor
+// scope because the city doesn't exist during create and goes away
+// during unregister.
+type SupervisorEventSource interface {
+	SupervisorEventRecorder() events.Recorder
+}
+
 // TransientCityEventSource is an optional CityResolver extension
 // that lets the supervisor-scope event multiplexer include event
 // providers for cities that are registered but not yet (or no
 // longer) in the Running set — newly scaffolded cities whose
 // reconciler hasn't picked them up, cities currently running
 // prepareCityForSupervisor, and cities whose init failed. Without
-// this, /v0/events/stream subscribers can't observe city.created,
-// city.ready, or city.init_failed for cities that aren't yet
-// reporting Running=true through ListCities.
+// this, /v0/events/stream subscribers can't observe diagnostic
+// city.created/city.unregister_requested events for cities that aren't
+// yet reporting Running=true through ListCities.
 //
 // Resolvers that implement this return one entry per transient
 // city; the key is the city name, the value is an event provider
@@ -51,6 +73,15 @@ type CityResolver interface {
 // already picks up via ListCities + CityState.
 type TransientCityEventSource interface {
 	TransientCityEventProviders() map[string]events.Provider
+}
+
+type cityInitializer interface {
+	Scaffold(context.Context, cityinit.InitRequest) (*cityinit.InitResult, error)
+	Unregister(context.Context, cityinit.UnregisterRequest) (*cityinit.UnregisterResult, error)
+}
+
+type registeredCityFinder interface {
+	FindRegisteredCity(context.Context, string) (cityinit.RegisteredCity, error)
 }
 
 // cachedCityServer pairs a State with its pre-built Server for caching.
@@ -74,7 +105,7 @@ type cachedCityServer struct {
 // contracts and are explicitly excluded from the typed control plane.
 type SupervisorMux struct {
 	resolver    CityResolver
-	initializer cityinit.Initializer
+	initializer cityInitializer
 	readOnly    bool
 	version     string
 	startedAt   time.Time
@@ -101,7 +132,7 @@ type SupervisorMux struct {
 // POST /v0/city handler to scaffold new cities in-process; passing nil
 // is allowed for tests that don't exercise city creation (the handler
 // returns 501 Not Implemented in that case).
-func NewSupervisorMux(resolver CityResolver, initializer cityinit.Initializer, readOnly bool, version string, startedAt time.Time) *SupervisorMux {
+func NewSupervisorMux(resolver CityResolver, initializer cityInitializer, readOnly bool, version string, startedAt time.Time) *SupervisorMux {
 	humaMux := http.NewServeMux()
 	sm := &SupervisorMux{
 		resolver:    resolver,
@@ -271,11 +302,10 @@ func (sm *SupervisorMux) getCityServer(name string, state State) *Server {
 // buildMultiplexer creates a Multiplexer from all running cities'
 // event providers plus any transient-city providers surfaced by a
 // resolver that implements TransientCityEventSource. Including
-// transient (pending init, in-progress, or failed) cities matters
-// for clients that POST /v0/city and wait for city.created /
-// city.ready / city.init_failed events on /v0/events/stream without
-// polling — the city's own events.jsonl exists from Scaffold
-// onward, but the city isn't in Running=true yet.
+// transient (pending init, in-progress, or failed) cities matters for
+// clients that POST /v0/city and watch diagnostics on
+// /v0/events/stream without polling — the city's own events.jsonl
+// exists from Scaffold onward, but the city isn't in Running=true yet.
 func (sm *SupervisorMux) buildMultiplexer() *events.Multiplexer {
 	mux := events.NewMultiplexer()
 	cities := sm.resolver.ListCities()
@@ -299,6 +329,13 @@ func (sm *SupervisorMux) buildMultiplexer() *events.Multiplexer {
 				continue
 			}
 			mux.Add(name, ep)
+		}
+	}
+	if supSrc, ok := sm.resolver.(SupervisorEventSource); ok {
+		if rec := supSrc.SupervisorEventRecorder(); rec != nil {
+			if prov, ok := rec.(events.Provider); ok {
+				mux.Add("__supervisor__", prov)
+			}
 		}
 	}
 	return mux

@@ -102,7 +102,7 @@ only requires `bd` / `dolt` / `flock` when the beads backend is `bd`.
 
 | Tool  | Min version | macOS                                                    | Linux                                                    | Skip when                         |
 | ----- | ----------- | -------------------------------------------------------- | -------------------------------------------------------- | --------------------------------- |
-| dolt  | 1.86.1      | `brew install dolt`                                      | [releases](https://github.com/dolthub/dolt/releases)     | Using `[beads].provider = "file"` |
+| dolt  | 1.86.2+     | `brew install dolt`                                      | [releases](https://github.com/dolthub/dolt/releases)     | Using `[beads].provider = "file"` |
 | bd    | 1.0.0       | [releases](https://github.com/gastownhall/beads/releases) | [releases](https://github.com/gastownhall/beads/releases) | Using `[beads].provider = "file"` |
 | flock | --          | `brew install flock`                                     | `apt install util-linux`                                 | Using `[beads].provider = "file"` |
 
@@ -125,7 +125,10 @@ durable versioned storage and is recommended for real work.
 
 ## Dolt Version Too Old
 
-Gas City requires dolt 1.86.1 or newer. Check your version:
+Gas City requires a final Dolt 1.86.2 or newer. Older and pre-release builds
+can miss the upstream GC/writer deadlock fix in dolthub/dolt commit
+`ccf7bde206`, which can hang `dolt_backup sync` under heavy write load. Check
+your version:
 
 ```bash
 dolt version

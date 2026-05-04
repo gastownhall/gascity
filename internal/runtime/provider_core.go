@@ -48,6 +48,15 @@ func IsPartialListError(err error) bool {
 	return errors.As(err, &target)
 }
 
+// DeadRuntimeSessionChecker is an optional provider capability for destructive
+// cleanup paths that need positive proof a visible runtime artifact is dead.
+// A false result means either the session is live, absent, or unsupported by
+// the backend; a non-nil error means liveness could not be confirmed.
+type DeadRuntimeSessionChecker interface {
+	// IsDeadRuntimeSession reports whether name is visible but confirmed dead.
+	IsDeadRuntimeSession(name string) (bool, error)
+}
+
 // MergeBackendListResults merges provider ListRunning results. On partial
 // backend failure it returns the best-effort merged names plus a
 // [PartialListError] so callers can continue with partial results while still

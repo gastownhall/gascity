@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -270,7 +271,7 @@ func TestCheckHardDependenciesRespectsMinVersions(t *testing.T) {
 
 	t.Run("sufficient versions", func(t *testing.T) {
 		withInitRunVersion(t, map[string]string{
-			"dolt": "dolt version 1.86.1",
+			"dolt": "dolt version " + doltMinVersion,
 			"bd":   "bd version 2.0.0",
 		})
 
@@ -287,7 +288,7 @@ func TestCheckHardDependenciesRespectsMinVersions(t *testing.T) {
 		})
 
 		missing := checkHardDependencies(cityPath)
-		if !hasMissingDep(missing, "dolt (found v1.10.0, need v1.86.1+)") {
+		if !hasMissingDep(missing, fmt.Sprintf("dolt (found v1.10.0, need v%s+)", doltMinVersion)) {
 			t.Fatalf("expected dolt version gap, missing=%v", missing)
 		}
 		if !hasMissingDep(missing, "bd (found v0.9.9, need v1.0.0+)") {

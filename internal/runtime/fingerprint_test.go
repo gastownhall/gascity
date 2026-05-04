@@ -453,6 +453,194 @@ func TestHashPathContentDirectory(t *testing.T) {
 	}
 }
 
+func TestHashPathContentDirectoryIgnoresRuntimeGeneratedArtifacts(t *testing.T) {
+	tests := []struct {
+		name  string
+		write func(t *testing.T, dir string)
+	}{
+		{
+			name: "__pycache__",
+			write: func(t *testing.T, dir string) {
+				t.Helper()
+				cacheDir := filepath.Join(dir, "__pycache__")
+				if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(cacheDir, "check.cpython-312.pyc"), []byte("cache-a"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: ".pytest_cache",
+			write: func(t *testing.T, dir string) {
+				t.Helper()
+				cacheDir := filepath.Join(dir, ".pytest_cache", "v")
+				if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(cacheDir, "cache"), []byte("pytest"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: ".mypy_cache",
+			write: func(t *testing.T, dir string) {
+				t.Helper()
+				cacheDir := filepath.Join(dir, ".mypy_cache", "3.12")
+				if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(cacheDir, "module.data.json"), []byte("mypy"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: ".ruff_cache",
+			write: func(t *testing.T, dir string) {
+				t.Helper()
+				cacheDir := filepath.Join(dir, ".ruff_cache")
+				if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(cacheDir, "CACHEDIR.TAG"), []byte("ruff"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: ".pyc file",
+			write: func(t *testing.T, dir string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(dir, "check.pyc"), []byte("cache-a"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: ".pyo file",
+			write: func(t *testing.T, dir string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(dir, "check.pyo"), []byte("cache-a"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "editor backup suffix",
+			write: func(t *testing.T, dir string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(dir, "check.py~"), []byte("backup"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "vim swap file",
+			write: func(t *testing.T, dir string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(dir, ".check.py.swp"), []byte("swap"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "vim swap extension file",
+			write: func(t *testing.T, dir string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(dir, ".check.py.swx"), []byte("swap"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			sub := filepath.Join(dir, "scripts")
+			if err := os.MkdirAll(sub, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(sub, "check.py"), []byte("print('ok')\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			h1 := HashPathContent(sub)
+			if h1 == "" {
+				t.Fatal("expected non-empty hash for directory")
+			}
+
+			tt.write(t, sub)
+			h2 := HashPathContent(sub)
+			if h2 != h1 {
+				t.Fatalf("%s changed directory hash: %s vs %s", tt.name, h1, h2)
+			}
+		})
+	}
+}
+
+func TestHashPathContentDirectoryFingerprintsUserAuthoredTempExtensionFiles(t *testing.T) {
+	tests := []string{
+		"payload.tmp",
+		"fixture.temp",
+		"notes.swp",
+		"notes.swx",
+	}
+
+	for _, name := range tests {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			sub := filepath.Join(dir, "scripts")
+			if err := os.MkdirAll(sub, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(sub, "check.py"), []byte("print('ok')\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			h1 := HashPathContent(sub)
+			if h1 == "" {
+				t.Fatal("expected non-empty hash for directory")
+			}
+
+			if err := os.WriteFile(filepath.Join(sub, name), []byte("user-authored"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			h2 := HashPathContent(sub)
+			if h2 == h1 {
+				t.Fatalf("user-authored %s should change directory hash", name)
+			}
+		})
+	}
+}
+
+func TestHashPathContentDirectoryFingerprintsSourceFileChanges(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "scripts")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "check.py"), []byte("print('ok')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	h1 := HashPathContent(sub)
+	if h1 == "" {
+		t.Fatal("expected non-empty hash for directory")
+	}
+
+	if err := os.WriteFile(filepath.Join(sub, "check.py"), []byte("print('changed')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h2 := HashPathContent(sub)
+	if h2 == h1 {
+		t.Fatal("source file changes should change directory hash")
+	}
+}
+
 func TestHashPathContentMissingPath(t *testing.T) {
 	h := HashPathContent("/nonexistent/path/that/does/not/exist")
 	if h != "" {
@@ -505,5 +693,23 @@ func TestLogCoreFingerprintDriftCopyFiles(t *testing.T) {
 	}
 	if !bytes.Contains([]byte(out), []byte("RelDst")) {
 		t.Errorf("expected RelDst detail in CopyFiles drift output, got: %s", out)
+	}
+}
+
+func TestCoreFingerprintDriftFields(t *testing.T) {
+	current := Config{
+		Command:   "claude",
+		CopyFiles: []CopyEntry{{RelDst: "bar", Probed: true, ContentHash: "newhash"}},
+	}
+	stored := CoreFingerprintBreakdown(current)
+	stored["CopyFiles"] = "oldhash"
+
+	got := CoreFingerprintDriftFields(stored, current)
+	if len(got) != 1 || got[0] != "CopyFiles" {
+		t.Fatalf("CoreFingerprintDriftFields = %v, want [CopyFiles]", got)
+	}
+
+	if got := CoreFingerprintDriftFields(nil, current); len(got) != 0 {
+		t.Fatalf("CoreFingerprintDriftFields with missing breakdown = %v, want empty", got)
 	}
 }

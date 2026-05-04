@@ -140,6 +140,51 @@ prompt_template = "agents/mayor/prompt.template.md"
 	}
 }
 
+func TestRenderPromptAgentBlockAppendFragmentsAffectRenderedPrompt(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+prompt_template = "agents/mayor/prompt.template.md"
+append_fragments = ["footer"]
+`)
+	cfg, err := config.Parse(data)
+	if err != nil {
+		t.Fatalf("config.Parse: %v", err)
+	}
+	var mayor config.Agent
+	found := false
+	for _, a := range cfg.Agents {
+		if a.Name == "mayor" {
+			mayor = a
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf(`expected [[agent]] with name "mayor" in parsed config`)
+	}
+	if got := mayor.AppendFragments; len(got) != 1 || got[0] != "footer" {
+		t.Fatalf("[[agent]] AppendFragments = %v, want [footer]", got)
+	}
+	f := fsys.NewFake()
+	f.Files["/city/agents/mayor/prompt.template.md"] = []byte("Hello")
+	f.Files["/city/agents/mayor/template-fragments/footer.template.md"] = []byte(`{{ define "footer" }}Goodbye{{ end }}`)
+	fragments := effectivePromptFragments(
+		cfg.Workspace.GlobalFragments,
+		mayor.InjectFragments,
+		mayor.AppendFragments,
+		mayor.InheritedAppendFragments,
+		cfg.AgentDefaults.AppendFragments,
+	)
+	got := renderPrompt(f, "/city", "", "agents/mayor/prompt.template.md", PromptContext{}, "", io.Discard, nil, fragments, nil)
+	if got != "Hello\n\nGoodbye" {
+		t.Errorf("renderPrompt([[agent]] append_fragments) = %q, want %q", got, "Hello\n\nGoodbye")
+	}
+}
+
 func TestRenderPromptPatchedTemplateSuffixRenders(t *testing.T) {
 	f := fsys.NewFake()
 	f.Files["/city/patches/gastown-mayor-prompt.template.md"] = []byte("Hello {{ .AgentName }}")
@@ -302,12 +347,15 @@ Branch: {{ .Branch }}
 Run {{ cmd }} to start
 Session: {{ session "deacon" }}
 Custom: {{ .DefaultBranch }}
+Binding: {{ .BindingName }} {{ .BindingPrefix }}
 `
 	f.Files["/city/prompts/full.md.tmpl"] = []byte(tmpl)
 	ctx := PromptContext{
 		CityRoot:      "/home/user/city",
 		AgentName:     "myrig/polecat-1",
 		TemplateName:  "polecat",
+		BindingName:   "gastown",
+		BindingPrefix: "gastown.",
 		RigName:       "myrig",
 		WorkDir:       "/home/user/city/myrig/polecats/polecat-1",
 		IssuePrefix:   "mr-",
@@ -342,6 +390,9 @@ Custom: {{ .DefaultBranch }}
 	if !strings.Contains(got, "Custom: main") {
 		t.Errorf("missing env var: %q", got)
 	}
+	if !strings.Contains(got, "Binding: gastown gastown.") {
+		t.Errorf("missing binding namespace: %q", got)
+	}
 }
 
 func TestRenderPromptWorkQuery(t *testing.T) {
@@ -359,6 +410,8 @@ func TestBuildTemplateData(t *testing.T) {
 		CityRoot:      "/city",
 		AgentName:     "a/b",
 		TemplateName:  "b",
+		BindingName:   "dep",
+		BindingPrefix: "dep.",
 		RigName:       "a",
 		WorkDir:       "/city/a",
 		IssuePrefix:   "te-",
@@ -376,6 +429,12 @@ func TestBuildTemplateData(t *testing.T) {
 	}
 	if data["TemplateName"] != "b" {
 		t.Errorf("TemplateName = %q, want %q", data["TemplateName"], "b")
+	}
+	if data["BindingName"] != "dep" {
+		t.Errorf("BindingName = %q, want %q", data["BindingName"], "dep")
+	}
+	if data["BindingPrefix"] != "dep." {
+		t.Errorf("BindingPrefix = %q, want %q", data["BindingPrefix"], "dep.")
 	}
 	if data["DefaultBranch"] != "main" {
 		t.Errorf("DefaultBranch = %q, want %q", data["DefaultBranch"], "main")

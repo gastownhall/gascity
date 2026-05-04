@@ -286,6 +286,7 @@ func TestDoBeadsCityUseExternalStopsManagedLocalProvider(t *testing.T) {
 	verifyCityExternalEndpoint = func(contract.ConfigState, string, string) error { return nil }
 
 	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityDir)
 	var stdout, stderr bytes.Buffer
 	code := doBeadsCityEndpoint(fsys.OSFS{}, cityDir, cityEndpointOptions{
 		External:        true,
@@ -331,6 +332,7 @@ func TestDoBeadsCityUseExternalValidationFailureDoesNotStopManagedLocalProvider(
 	verifyCityExternalEndpoint = func(contract.ConfigState, string, string) error { return fmt.Errorf("nope") }
 
 	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityDir)
 	var stdout, stderr bytes.Buffer
 	code := doBeadsCityEndpoint(fsys.OSFS{}, cityDir, cityEndpointOptions{
 		External: true,
@@ -387,6 +389,7 @@ func TestDoBeadsCityUseExternalStopFailureKeepsExternalConfig(t *testing.T) {
 	verifyCityExternalEndpoint = func(contract.ConfigState, string, string) error { return nil }
 
 	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityDir)
 	var stdout, stderr bytes.Buffer
 	code := doBeadsCityEndpoint(fsys.OSFS{}, cityDir, cityEndpointOptions{
 		External:        true,

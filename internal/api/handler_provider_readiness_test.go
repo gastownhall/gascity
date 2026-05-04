@@ -148,8 +148,8 @@ func TestFindProbeBinaryUsesNVMInstallDir(t *testing.T) {
 
 	originalPathEnv := providerProbePathEnv
 	originalGOOS := providerProbeGOOS
-	providerProbePathEnv = "/usr/local/bin:/usr/bin:/bin"
-	providerProbeGOOS = "darwin"
+	providerProbePathEnv = filepath.Join(homeDir, "empty-path")
+	providerProbeGOOS = "test"
 	defer func() {
 		providerProbePathEnv = originalPathEnv
 		providerProbeGOOS = originalGOOS

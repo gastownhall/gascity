@@ -1241,6 +1241,43 @@ func TestInstantiateRootOnly(t *testing.T) {
 	}
 }
 
+func TestInstantiateRunnableWispRootPreservesTaskType(t *testing.T) {
+	store := beads.NewMemStore()
+	recipe := &formula.Recipe{
+		Name:     "patrol",
+		RootOnly: true,
+		Steps: []formula.RecipeStep{
+			{ID: "patrol", Title: "Patrol", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "wisp"}},
+			{ID: "patrol.scan", Title: "Scan", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "patrol.scan", DependsOnID: "patrol", Type: "parent-child"},
+		},
+	}
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	root, err := store.Get(result.RootID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", result.RootID, err)
+	}
+	if root.Type != "task" {
+		t.Fatalf("root Type = %q, want task", root.Type)
+	}
+	if got := root.Metadata["gc.kind"]; got != "wisp" {
+		t.Fatalf("root gc.kind = %q, want wisp", got)
+	}
+	ready, err := store.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	if len(ready) != 1 || ready[0].ID != result.RootID {
+		t.Fatalf("Ready() = %+v, want only root %s", ready, result.RootID)
+	}
+}
+
 func TestInstantiateVarDefaults(t *testing.T) {
 	store := beads.NewMemStore()
 	defaultVal := "default-branch"

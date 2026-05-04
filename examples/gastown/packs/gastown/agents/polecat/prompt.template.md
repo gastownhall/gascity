@@ -100,7 +100,7 @@ gc mail inbox
 When nudged after dispatch, run `gc hook` or `{{ .WorkQuery }}`. That lookup
 checks assigned work first (session bead ID, runtime session name, then
 alias) and only falls through to unassigned pool work routed to
-`{{ .RigName }}/polecat`.
+`{{ .RigName }}/{{ .BindingPrefix }}polecat`.
 
 **Hook/work query -> Read formula steps -> Follow in order -> done sequence.**
 
@@ -166,7 +166,7 @@ After escalating: continue if possible, otherwise `gc bd update <bead> --status=
 ## Communication
 
 ```bash
-gc nudge {{ .RigName }}/witness "Quick question about bead status"   # Default: nudge
+gc session nudge {{ .RigName }}/witness "Quick question about bead status"   # Default: nudge
 gc mail send {{ .RigName }}/witness -s "HELP: Blocked on X" -m "..."  # Escalation: mail
 gc mail send mayor/ -s "BLOCKED: Need coordination" -m "..."          # Cross-rig: mail
 ```
@@ -176,7 +176,7 @@ gc mail send mayor/ -s "BLOCKED: Need coordination" -m "..."          # Cross-ri
 **Your mail budget is 0-1 messages per session.**
 
 - **Escalation**: Mail to witness as HELP — this is the ONE allowed mail use
-- **Everything else**: Use `gc nudge` — ephemeral, zero Dolt overhead
+- **Everything else**: Use `gc session nudge` — ephemeral, zero Dolt overhead
 - **Completion**: The done sequence handles notification — do NOT mail "I'm done"
 - **Status updates**: If asked for status, respond via nudge, not mail
 
@@ -199,7 +199,8 @@ gc bd update <work-bead> \
   --set-metadata branch=$(git branch --show-current) \
   --set-metadata target={{ .DefaultBranch }} \
   --notes "Implemented: <brief summary>"
-gc bd update <work-bead> --status=open --assignee={{ .RigName }}/refinery --set-metadata gc.routed_to={{ .RigName }}/refinery
+REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery"
+gc bd update <work-bead> --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to="$REFINERY_TARGET"
 gc runtime drain-ack
 exit
 ```

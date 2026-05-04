@@ -57,6 +57,49 @@ func TestResolveWorkDirPathUsesPoolInstanceBase(t *testing.T) {
 	}
 }
 
+// TestResolveWorkDirPathGivesEachPoolSlotUniqueWorktree is the #774 regression
+// guard: N pool workers sharing one template must each resolve to a distinct
+// worktree path derived from their namepool slot, not the template base.
+func TestResolveWorkDirPathGivesEachPoolSlotUniqueWorktree(t *testing.T) {
+	cityPath := t.TempDir()
+	rigs := []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}}
+	agent := config.Agent{
+		Name:              "ant",
+		Dir:               "demo",
+		WorkDir:           ".gc/worktrees/{{.Rig}}/ants/{{.AgentBase}}",
+		MinActiveSessions: intPtr(0),
+		MaxActiveSessions: intPtr(4),
+	}
+
+	cases := []struct {
+		slot string
+		want string
+	}{
+		{slot: "demo/ant-fenrir", want: filepath.Join(cityPath, ".gc", "worktrees", "demo", "ants", "ant-fenrir")},
+		{slot: "demo/ant-grendel", want: filepath.Join(cityPath, ".gc", "worktrees", "demo", "ants", "ant-grendel")},
+		{slot: "demo/ant-hati", want: filepath.Join(cityPath, ".gc", "worktrees", "demo", "ants", "ant-hati")},
+		{slot: "demo/ant-skoll", want: filepath.Join(cityPath, ".gc", "worktrees", "demo", "ants", "ant-skoll")},
+	}
+
+	seen := make(map[string]string, len(cases))
+	for _, tc := range cases {
+		t.Run(tc.slot, func(t *testing.T) {
+			got := ResolveWorkDirPath(cityPath, "gastown", tc.slot, agent, rigs)
+			if got != tc.want {
+				t.Fatalf("ResolveWorkDirPath(%q) = %q, want %q", tc.slot, got, tc.want)
+			}
+			if prev, dup := seen[got]; dup {
+				t.Fatalf("slot %q collided with %q on path %q", tc.slot, prev, got)
+			}
+			seen[got] = tc.slot
+		})
+	}
+
+	if len(seen) != len(cases) {
+		t.Fatalf("unique paths = %d, want %d", len(seen), len(cases))
+	}
+}
+
 func TestSessionQualifiedNameCanonicalizesBareAndQualifiedPoolAliases(t *testing.T) {
 	cityPath := t.TempDir()
 	rigs := []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}}

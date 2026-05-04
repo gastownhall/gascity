@@ -92,6 +92,13 @@ func TestSlingWithBead(t *testing.T) {
 	if resp["mode"] != "direct" {
 		t.Fatalf("mode = %q, want %q", resp["mode"], "direct")
 	}
+	updated, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", b.ID, err)
+	}
+	if got := updated.Metadata["gc.routed_to"]; got != "myrig/worker" {
+		t.Fatalf("gc.routed_to = %q, want myrig/worker", got)
+	}
 }
 
 func TestSlingWithMissingBeadReturnsBadRequest(t *testing.T) {

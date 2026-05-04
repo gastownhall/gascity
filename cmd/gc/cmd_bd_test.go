@@ -614,6 +614,61 @@ provider = "file"
 	}
 }
 
+// TestGcBdRejectsStaleFileMarkerWithDiagnosticHint asserts the error when
+// a scope has a stale .gc/beads.json (file-store marker) but no
+// .beads/metadata.json (bd-store marker): gc rejects with a hint that
+// names the offending marker and suggests the fix. Regression for the
+// post-#899 behavior change where stale migration artifacts silently
+// reclassified rigs as file-backed with no diagnostic.
+func TestGcBdRejectsStaleFileMarkerWithDiagnosticHint(t *testing.T) {
+	origCityFlag := cityFlag
+	origRigFlag := rigFlag
+	defer func() {
+		cityFlag = origCityFlag
+		rigFlag = origRigFlag
+	}()
+	cityFlag = ""
+	rigFlag = ""
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "legacy-rig")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "bd"
+
+[[rigs]]
+name = "legacy-rig"
+path = "legacy-rig"
+prefix = "lg"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".gc", "beads.json"), []byte(`{"seq":1,"beads":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY_PATH", cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"--rig", "legacy-rig", "list"}, &stdout, &stderr); got == 0 {
+		t.Fatalf("doBd() = %d, want non-zero", got)
+	}
+	out := stderr.String()
+	if !strings.Contains(out, `resolved "file"`) {
+		t.Fatalf("stderr = %q, want named provider in error", out)
+	}
+	if !strings.Contains(out, ".gc/beads.json") {
+		t.Fatalf("stderr = %q, want named marker in hint", out)
+	}
+	if !strings.Contains(out, ".beads/metadata.json") {
+		t.Fatalf("stderr = %q, want named fix in hint", out)
+	}
+}
+
 func TestGcBdAllowsRigPassthroughForBdBackedRigUnderFileCity(t *testing.T) {
 	origCityFlag := cityFlag
 	origRigFlag := rigFlag
@@ -831,7 +886,7 @@ func TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind(t *testing.T) 
 	if err != nil {
 		t.Fatalf("providerStore.Create after rebind: %v", err)
 	}
-	if got := beadPrefix(rebound.ID); got != "fe" {
+	if got := beadPrefix(nil, rebound.ID); got != "fe" {
 		t.Fatalf("provider rebind bead prefix = %q, want %q", got, "fe")
 	}
 
@@ -882,7 +937,7 @@ func TestManagedBdRigStoreConsistentAcrossRawBdGcBdAndProviderStore(t *testing.T
 	if err != nil {
 		t.Fatalf("providerStore.Create: %v", err)
 	}
-	if got := beadPrefix(providerBead.ID); got != "fe" {
+	if got := beadPrefix(nil, providerBead.ID); got != "fe" {
 		t.Fatalf("provider rig bead prefix = %q, want %q", got, "fe")
 	}
 	rawShow := runRawBDFromDir(t, bdPath, rawDir, "show", "--json", providerBead.ID)
@@ -1010,7 +1065,7 @@ func TestManagedBdCityStoreConsistentAcrossRawBdGcBdAndProviderStore(t *testing.
 	}
 
 	rawID := parseCreatedBeadID(t, runRawBDFromDir(t, bdPath, rawDir, "create", "--json", "raw city bead", "-t", "task"))
-	if got := beadPrefix(rawID); got != "gc" {
+	if got := beadPrefix(nil, rawID); got != "gc" {
 		t.Fatalf("raw city bead prefix = %q, want %q", got, "gc")
 	}
 	providerStore, err := openStoreAtForCity(cityPath, cityPath)
@@ -1036,7 +1091,7 @@ func TestManagedBdCityStoreConsistentAcrossRawBdGcBdAndProviderStore(t *testing.
 	if err != nil {
 		t.Fatalf("providerStore.Create: %v", err)
 	}
-	if got := beadPrefix(providerBead.ID); got != "gc" {
+	if got := beadPrefix(nil, providerBead.ID); got != "gc" {
 		t.Fatalf("provider city bead prefix = %q, want %q", got, "gc")
 	}
 	rawShow := runRawBDFromDir(t, bdPath, rawDir, "show", "--json", providerBead.ID)
@@ -1072,7 +1127,7 @@ func TestFreshManagedBdCityInitSeedsPinnedHQDatabaseAndKeepsGCPrefix(t *testing.
 		t.Fatalf("MkdirAll(rawDir): %v", err)
 	}
 	rawID := parseCreatedBeadID(t, runRawBDFromDir(t, bdPath, rawDir, "create", "--json", "fresh city bead", "-t", "task"))
-	if got := beadPrefix(rawID); got != "gc" {
+	if got := beadPrefix(nil, rawID); got != "gc" {
 		t.Fatalf("raw city bead prefix = %q, want %q", got, "gc")
 	}
 	providerStore, err := openStoreAtForCity(cityPath, cityPath)
@@ -1083,7 +1138,7 @@ func TestFreshManagedBdCityInitSeedsPinnedHQDatabaseAndKeepsGCPrefix(t *testing.
 	if err != nil {
 		t.Fatalf("providerStore.Create: %v", err)
 	}
-	if got := beadPrefix(providerBead.ID); got != "gc" {
+	if got := beadPrefix(nil, providerBead.ID); got != "gc" {
 		t.Fatalf("provider city bead prefix = %q, want %q", got, "gc")
 	}
 }
@@ -1277,6 +1332,38 @@ func TestResolveBdScopeTargetUsesEnclosingRig(t *testing.T) {
 		ScopeKind: "rig",
 		Prefix:    "fr",
 		RigName:   "frontend",
+	}
+	if got != want {
+		t.Fatalf("resolveBdScopeTarget() = %#v, want %#v", got, want)
+	}
+}
+
+func TestResolveBdScopeTargetRoutesExistingCityBeadFromRigCwd(t *testing.T) {
+	origProbe := bdBeadExists
+	defer func() { bdBeadExists = origProbe }()
+	bdBeadExists = func(_ string, target execStoreTarget, beadID string) bool {
+		return target.ScopeKind == "city" && beadID == "mc-city1"
+	}
+
+	cityDir := filepath.Join(t.TempDir(), "city")
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(filepath.Join(rigDir, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "maintainer-city", Prefix: "mc"},
+		Rigs:      []config.Rig{{Name: "frontend", Path: "frontend", Prefix: "fr"}},
+	}
+	setCwd(t, filepath.Join(rigDir, "nested"))
+
+	got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"show", "mc-city1"})
+	if err != nil {
+		t.Fatalf("resolveBdScopeTarget() error = %v", err)
+	}
+	want := execStoreTarget{
+		ScopeRoot: cityDir,
+		ScopeKind: "city",
+		Prefix:    "mc",
 	}
 	if got != want {
 		t.Fatalf("resolveBdScopeTarget() = %#v, want %#v", got, want)
@@ -1490,6 +1577,8 @@ set -eu
 	origPath := os.Getenv("PATH")
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+origPath)
 	t.Setenv("CAPTURE_PATH", capture)
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	t.Setenv("GC_DOLT_PORT", "9999")
 
 	var stdout, stderr bytes.Buffer

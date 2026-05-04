@@ -2,8 +2,8 @@ package dispatch
 
 import (
 	"encoding/json"
+	"errors"
 	"strconv"
-	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -69,6 +69,69 @@ func TestProcessRetryControlPass(t *testing.T) {
 	}
 	if after.Metadata["review.verdict"] != "approved" {
 		t.Fatalf("control review.verdict = %q, want approved", after.Metadata["review.verdict"])
+	}
+}
+
+func TestProcessRetryControlPassClosesWithSingleFinalMetadataUpdate(t *testing.T) {
+	t.Parallel()
+	base := beads.NewMemStore()
+
+	root := mustCreate(t, base, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, base, beads.Bead{
+		Title: "review",
+		Metadata: map[string]string{
+			"gc.kind":             "retry",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-test.review",
+			"gc.step_id":          "review",
+			"gc.max_attempts":     "3",
+			"gc.on_exhausted":     "hard_fail",
+			"gc.source_step_spec": `{"id":"review","title":"Review","type":"task","retry":{"max_attempts":3}}`,
+			"gc.control_epoch":    "1",
+		},
+	})
+	attempt1 := mustCreate(t, base, beads.Bead{
+		Title: "review attempt 1",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review.attempt.1",
+			"gc.attempt":      "1",
+			"gc.outcome":      "pass",
+			"gc.output_json":  `{"ok":true}`,
+			"review.verdict":  "approved",
+		},
+	})
+	mustClose(t, base, attempt1.ID)
+	mustDep(t, base, control.ID, attempt1.ID, "blocks")
+
+	store := &controlCloseTrackingStore{Store: base, targetID: control.ID}
+	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("processRetryControl: %v", err)
+	}
+	if !result.Processed || result.Action != "pass" {
+		t.Fatalf("result = %+v, want processed pass", result)
+	}
+	if store.setMetadataCalls != 0 || store.setMetadataBatchCalls != 0 {
+		t.Fatalf("metadata calls before close = SetMetadata:%d SetMetadataBatch:%d, want none", store.setMetadataCalls, store.setMetadataBatchCalls)
+	}
+	if store.closeUpdateCalls != 1 {
+		t.Fatalf("close update calls = %d, want 1", store.closeUpdateCalls)
+	}
+	for key, want := range map[string]string{
+		"gc.outcome":     "pass",
+		"gc.output_json": `{"ok":true}`,
+		"review.verdict": "approved",
+	} {
+		if got := store.closeUpdateMetadata[key]; got != want {
+			t.Fatalf("close metadata %s = %q, want %q", key, got, want)
+		}
+	}
+	if store.closeUpdateMetadata["gc.attempt_log"] == "" {
+		t.Fatal("close metadata missing gc.attempt_log")
 	}
 }
 
@@ -439,11 +502,8 @@ func TestProcessRetryControlInvariantViolation(t *testing.T) {
 	mustDep(t, store, control.ID, attempt1.ID, "blocks")
 
 	_, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
-	if err == nil {
-		t.Fatal("expected invariant violation error")
-	}
-	if !strings.Contains(err.Error(), "invariant violation") {
-		t.Fatalf("error = %v, want invariant violation", err)
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("error = %v, want %v", err, ErrControlPending)
 	}
 }
 
@@ -847,6 +907,42 @@ func TestProcessRalphControlClosesEnclosingScopeOnIterationFailure(t *testing.T)
 	}
 }
 
+func TestProcessRalphControlReturnsPendingForOpenIteration(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review loop",
+		Metadata: map[string]string{
+			"gc.kind":         "ralph",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review-loop",
+			"gc.step_id":      "review-loop",
+			"gc.max_attempts": "2",
+		},
+	})
+	iteration := mustCreate(t, store, beads.Bead{
+		Title: "review loop iteration 1",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review-loop.iteration.1",
+			"gc.scope_role":   "body",
+			"gc.attempt":      "1",
+		},
+	})
+	mustDep(t, store, control.ID, iteration.ID, "blocks")
+
+	_, err := processRalphControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("error = %v, want %v", err, ErrControlPending)
+	}
+}
+
 // TestReconcileClosedScopeMemberRalphPass covers the pass-side symmetry of
 // TestProcessRalphControlClosesEnclosingScopeOnIterationFailure: when a scoped
 // ralph control closes with gc.outcome=pass, reconcileClosedScopeMember must
@@ -1202,6 +1298,40 @@ func mustDep(t *testing.T, store beads.Store, from, to, depType string) { //noli
 	if err := store.DepAdd(from, to, depType); err != nil {
 		t.Fatalf("dep %s -> %s: %v", from, to, err)
 	}
+}
+
+type controlCloseTrackingStore struct {
+	beads.Store
+	targetID              string
+	setMetadataCalls      int
+	setMetadataBatchCalls int
+	closeUpdateCalls      int
+	closeUpdateMetadata   map[string]string
+}
+
+func (s *controlCloseTrackingStore) SetMetadata(id, key, value string) error {
+	if id == s.targetID {
+		s.setMetadataCalls++
+	}
+	return s.Store.SetMetadata(id, key, value)
+}
+
+func (s *controlCloseTrackingStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if id == s.targetID {
+		s.setMetadataBatchCalls++
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+func (s *controlCloseTrackingStore) Update(id string, opts beads.UpdateOpts) error {
+	if id == s.targetID && opts.Status != nil && *opts.Status == "closed" {
+		s.closeUpdateCalls++
+		s.closeUpdateMetadata = make(map[string]string, len(opts.Metadata))
+		for key, value := range opts.Metadata {
+			s.closeUpdateMetadata[key] = value
+		}
+	}
+	return s.Store.Update(id, opts)
 }
 
 // ---------------------------------------------------------------------------

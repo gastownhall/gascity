@@ -39,6 +39,8 @@ export interface SSEHandle {
 export type SSEStatus = "connecting" | "live" | "reconnecting";
 
 export interface SSEOptions {
+  afterCursor?: string;
+  afterSeq?: string;
   onStatus?: (status: SSEStatus) => void;
 }
 
@@ -136,6 +138,7 @@ export function connectEvents(
   opts?: SSEOptions,
 ): SSEHandle {
   const controller = new AbortController();
+  let afterCursor = opts?.afterCursor;
   opts?.onStatus?.("connecting");
   (async () => {
     let attempt = 0;
@@ -148,6 +151,7 @@ export function connectEvents(
       try {
         const { stream } = await streamSupervisorEvents({
           client,
+          query: afterCursor ? { after_cursor: afterCursor } : undefined,
           signal: controller.signal,
           onSseEvent: (frame) => {
             // Any frame = live connection; reset backoff and the
@@ -157,12 +161,16 @@ export function connectEvents(
             errorReported = false;
             opts?.onStatus?.("live");
             const eventName = frame.event ?? "tagged_event";
+            const id = frame.id !== undefined ? String(frame.id) : undefined;
+            if (id) {
+              afterCursor = id;
+            }
             if (eventName === "heartbeat") {
               if (!isHeartbeat(frame.data)) {
                 reportUIError("Invalid supervisor heartbeat frame", frame);
                 return;
               }
-              onEvent({ event: "heartbeat", id: frame.id, data: frame.data });
+              onEvent({ event: "heartbeat", id, data: frame.data });
               return;
             }
             if (eventName === "tagged_event") {
@@ -170,7 +178,7 @@ export function connectEvents(
                 reportUIError("Invalid supervisor event frame", frame);
                 return;
               }
-              onEvent({ event: "tagged_event", id: frame.id, data: frame.data });
+              onEvent({ event: "tagged_event", id, data: frame.data });
               return;
             }
             reportUIError(`Unexpected supervisor SSE event: ${eventName}`, frame);
@@ -215,6 +223,7 @@ export function connectCityEvents(
   opts?: SSEOptions,
 ): SSEHandle {
   const controller = new AbortController();
+  let afterSeq = opts?.afterSeq;
   opts?.onStatus?.("connecting");
   (async () => {
     let attempt = 0;
@@ -223,34 +232,38 @@ export function connectCityEvents(
     while (!controller.signal.aborted) {
       try {
         const { stream } = await streamEvents({
-        client,
-        path: { cityName: city },
-        signal: controller.signal,
-        onSseEvent: (frame) => {
-          attempt = 0;
-          errorReported = false;
-          opts?.onStatus?.("live");
-          const eventName = frame.event ?? "event";
-          const id = frame.id !== undefined ? String(frame.id) : undefined;
-          if (eventName === "heartbeat") {
-            if (!isHeartbeat(frame.data)) {
-              reportUIError("Invalid city heartbeat frame", frame);
+          client,
+          path: { cityName: city },
+          query: afterSeq ? { after_seq: afterSeq } : undefined,
+          signal: controller.signal,
+          onSseEvent: (frame) => {
+            attempt = 0;
+            errorReported = false;
+            opts?.onStatus?.("live");
+            const eventName = frame.event ?? "event";
+            const id = frame.id !== undefined ? String(frame.id) : undefined;
+            if (id) {
+              afterSeq = id;
+            }
+            if (eventName === "heartbeat") {
+              if (!isHeartbeat(frame.data)) {
+                reportUIError("Invalid city heartbeat frame", frame);
+                return;
+              }
+              onEvent({ event: "heartbeat", id, data: frame.data });
               return;
             }
-            onEvent({ event: "heartbeat", id, data: frame.data });
-            return;
-          }
-          if (eventName === "event") {
-            if (!isCityEventEnvelope(frame.data)) {
-              reportUIError("Invalid city event frame", frame);
+            if (eventName === "event") {
+              if (!isCityEventEnvelope(frame.data)) {
+                reportUIError("Invalid city event frame", frame);
+                return;
+              }
+              onEvent({ event: "event", id, data: frame.data });
               return;
             }
-            onEvent({ event: "event", id, data: frame.data });
-            return;
-          }
-          reportUIError(`Unexpected city SSE event: ${eventName}`, frame);
-        },
-      });
+            reportUIError(`Unexpected city SSE event: ${eventName}`, frame);
+          },
+        });
         for await (const _ of stream) {
           void _;
         }

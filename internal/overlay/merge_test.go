@@ -70,7 +70,7 @@ func TestMergeSettingsJSON_SameMatcherReplacement(t *testing.T) {
 	}`
 	over := `{
 		"hooks": {
-			"PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": "gc handoff \"context cycle\""}]}]
+			"PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": "gc handoff --auto \"context cycle\""}]}]
 		}
 	}`
 
@@ -91,7 +91,7 @@ func TestMergeSettingsJSON_SameMatcherReplacement(t *testing.T) {
 	entry := arr[0].(map[string]any)
 	innerHooks := entry["hooks"].([]any)
 	cmd := innerHooks[0].(map[string]any)["command"].(string)
-	if cmd != `gc handoff "context cycle"` {
+	if cmd != `gc handoff --auto "context cycle"` {
 		t.Errorf("PreCompact command = %q, want gc handoff", cmd)
 	}
 }
@@ -333,7 +333,7 @@ func TestMergeSettingsJSON_CrewScenario(t *testing.T) {
 	}`
 	over := `{
 		"hooks": {
-			"PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": "gc handoff \"context cycle\""}]}]
+			"PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": "gc handoff --auto \"context cycle\""}]}]
 		}
 	}`
 
@@ -362,7 +362,7 @@ func TestMergeSettingsJSON_CrewScenario(t *testing.T) {
 	entry := arr[0].(map[string]any)
 	innerHooks := entry["hooks"].([]any)
 	cmd := innerHooks[0].(map[string]any)["command"].(string)
-	if cmd != `gc handoff "context cycle"` {
+	if cmd != `gc handoff --auto "context cycle"` {
 		t.Errorf("PreCompact command = %q, want gc handoff", cmd)
 	}
 }
@@ -372,7 +372,7 @@ func TestMergeSettingsJSON_BackwardCompat_FullOverlay(t *testing.T) {
 	full := `{
 		"hooks": {
 			"SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "gc prime"}]}],
-			"PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": "gc handoff \"context cycle\""}]}],
+			"PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": "gc handoff --auto \"context cycle\""}]}],
 			"UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": "gc mail check --inject"}]}],
 			"Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "gc hook --inject"}]}]
 		}

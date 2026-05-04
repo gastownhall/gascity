@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -28,51 +29,176 @@ type MailEventPayload struct {
 // IsEventPayload marks MailEventPayload as an events.Payload variant.
 func (MailEventPayload) IsEventPayload() {}
 
-// CityLifecyclePayload is emitted by city lifecycle events. Keeping all
-// same-shaped city lifecycle payloads on one Go type keeps the generated
-// EventPayload oneOf unambiguous for validators that only see the payload
-// object, not the enclosing event type.
+// Operation constants used by RequestFailedPayload.
+const (
+	RequestOperationCityCreate     = "city.create"
+	RequestOperationCityUnregister = "city.unregister"
+	RequestOperationSessionCreate  = "session.create"
+	RequestOperationSessionMessage = "session.message"
+	RequestOperationSessionSubmit  = "session.submit"
+)
+
+// --- Typed async request result payloads ---
+//
+// 5 success types (one per operation, fully typed) + 1 shared failure
+// type. The event type encodes operation and outcome; no string
+// discriminator fields on success payloads.
+
+// CityCreateSucceededPayload is emitted on request.result.city.create.
+type CityCreateSucceededPayload struct {
+	RequestID string `json:"request_id" doc:"Correlation ID from the 202 response."`
+	Name      string `json:"name" doc:"Resolved city name."`
+	Path      string `json:"path" doc:"Resolved absolute city directory path."`
+}
+
+// IsEventPayload marks CityCreateSucceededPayload as an events.Payload variant.
+func (CityCreateSucceededPayload) IsEventPayload() {}
+
+// CityUnregisterSucceededPayload is emitted on request.result.city.unregister.
+type CityUnregisterSucceededPayload struct {
+	RequestID string `json:"request_id" doc:"Correlation ID from the 202 response."`
+	Name      string `json:"name" doc:"City name that was unregistered."`
+	Path      string `json:"path" doc:"Absolute city directory path."`
+}
+
+// IsEventPayload marks CityUnregisterSucceededPayload as an events.Payload variant.
+func (CityUnregisterSucceededPayload) IsEventPayload() {}
+
+// SessionCreateSucceededPayload is emitted on request.result.session.create.
+type SessionCreateSucceededPayload struct {
+	RequestID string          `json:"request_id" doc:"Correlation ID from the 202 response."`
+	Session   sessionResponse `json:"session" doc:"Full session state as returned by GET /session/{id}. For session.create, this result is emitted only after the session has left creating and can accept normal metadata and lifecycle commands."`
+}
+
+// IsEventPayload marks SessionCreateSucceededPayload as an events.Payload variant.
+func (SessionCreateSucceededPayload) IsEventPayload() {}
+
+// SessionMessageSucceededPayload is emitted on request.result.session.message.
+type SessionMessageSucceededPayload struct {
+	RequestID string `json:"request_id" doc:"Correlation ID from the 202 response."`
+	SessionID string `json:"session_id" doc:"Session ID that received the message."`
+}
+
+// IsEventPayload marks SessionMessageSucceededPayload as an events.Payload variant.
+func (SessionMessageSucceededPayload) IsEventPayload() {}
+
+// SessionSubmitSucceededPayload is emitted on request.result.session.submit.
+type SessionSubmitSucceededPayload struct {
+	RequestID string `json:"request_id" doc:"Correlation ID from the 202 response."`
+	SessionID string `json:"session_id" doc:"Session ID that received the submission."`
+	Queued    bool   `json:"queued" doc:"Whether the message was queued for later delivery."`
+	Intent    string `json:"intent" doc:"Resolved submit intent (default, follow_up, interrupt_now)."`
+}
+
+// IsEventPayload marks SessionSubmitSucceededPayload as an events.Payload variant.
+func (SessionSubmitSucceededPayload) IsEventPayload() {}
+
+// RequestFailedPayload is emitted on request.failed for any async
+// operation that fails. The operation enum identifies which operation.
+type RequestFailedPayload struct {
+	RequestID    string `json:"request_id" doc:"Correlation ID from the 202 response."`
+	Operation    string `json:"operation" enum:"city.create,city.unregister,session.create,session.message,session.submit" doc:"Which operation failed."`
+	ErrorCode    string `json:"error_code" doc:"Machine-readable error code."`
+	ErrorMessage string `json:"error_message" doc:"Human-readable error description."`
+}
+
+// IsEventPayload marks RequestFailedPayload as an events.Payload variant.
+func (RequestFailedPayload) IsEventPayload() {}
+
+// CityLifecyclePayload is the shape of non-terminal city.created and
+// city.unregister_requested events recorded in the per-city event log
+// during init/unregister for diagnostics.
 type CityLifecyclePayload struct {
-	Name            string   `json:"name"`
-	Path            string   `json:"path"`
-	Error           string   `json:"error,omitempty"`
-	PhasesCompleted []string `json:"phases_completed,omitempty"`
+	Name string `json:"name"`
+	Path string `json:"path"`
 }
 
 // IsEventPayload marks CityLifecyclePayload as an events.Payload variant.
 func (CityLifecyclePayload) IsEventPayload() {}
 
-// CityCreatedPayload is emitted on city.created when the supervisor's
-// POST /v0/city handler has scaffolded and registered a new city.
-type CityCreatedPayload = CityLifecyclePayload
-
-// CityReadyPayload is emitted on city.ready when the supervisor
-// reconciler has finished preparing a city.
-type CityReadyPayload = CityLifecyclePayload
-
-// CityInitFailedPayload is emitted on city.init_failed when the
-// supervisor reconciler fails to bring up a city.
-type CityInitFailedPayload = CityLifecyclePayload
-
-// CityUnregisterRequestedPayload is emitted when unregister starts.
-type CityUnregisterRequestedPayload = CityLifecyclePayload
-
-// CityUnregisteredPayload is emitted when unregister completes.
-type CityUnregisteredPayload = CityLifecyclePayload
-
-// CityUnregisterFailedPayload is emitted when unregister fails.
-type CityUnregisterFailedPayload = CityLifecyclePayload
-
 // BeadEventPayload is the shape of every bead.* event payload
 // (BeadCreated, BeadUpdated, BeadClosed). The payload carries a full
-// snapshot of the bead as of the event; it is emitted by the beads
-// CachingStore's reconcile loop when external changes are detected.
+// snapshot of the bead as of the event; it is emitted by bd hooks and by
+// the beads CachingStore's reconcile loop when external changes are detected.
 type BeadEventPayload struct {
 	Bead beads.Bead `json:"bead"`
 }
 
 // IsEventPayload marks BeadEventPayload as an events.Payload variant.
 func (BeadEventPayload) IsEventPayload() {}
+
+// UnmarshalJSON accepts the current {"bead": ...} payload shape and the
+// legacy raw-bead shape emitted by older bd hook scripts.
+func (p *BeadEventPayload) UnmarshalJSON(data []byte) error {
+	var wrapped struct {
+		Bead *json.RawMessage `json:"bead"`
+	}
+	if err := json.Unmarshal(data, &wrapped); err != nil {
+		return err
+	}
+	if wrapped.Bead != nil {
+		bead, err := decodeBeadEventPayloadBead(*wrapped.Bead)
+		if err != nil {
+			return err
+		}
+		p.Bead = bead
+		return nil
+	}
+
+	bead, err := decodeBeadEventPayloadBead(data)
+	if err != nil {
+		return err
+	}
+	p.Bead = bead
+	return nil
+}
+
+func decodeBeadEventPayloadBead(data []byte) (beads.Bead, error) {
+	var wire struct {
+		ID           string          `json:"id"`
+		Title        string          `json:"title"`
+		Status       string          `json:"status"`
+		Type         string          `json:"issue_type"`
+		TypeCompat   string          `json:"type,omitempty"`
+		Priority     *int            `json:"priority,omitempty"`
+		CreatedAt    time.Time       `json:"created_at"`
+		Assignee     string          `json:"assignee,omitempty"`
+		From         string          `json:"from,omitempty"`
+		ParentID     string          `json:"parent,omitempty"`
+		Ref          string          `json:"ref,omitempty"`
+		Needs        []string        `json:"needs,omitempty"`
+		Description  string          `json:"description,omitempty"`
+		Labels       []string        `json:"labels,omitempty"`
+		Metadata     beads.StringMap `json:"metadata,omitempty"`
+		Dependencies []beads.Dep     `json:"dependencies,omitempty"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return beads.Bead{}, err
+	}
+	bead := beads.Bead{
+		ID:           wire.ID,
+		Title:        wire.Title,
+		Status:       wire.Status,
+		Type:         wire.Type,
+		Priority:     wire.Priority,
+		CreatedAt:    wire.CreatedAt,
+		Assignee:     wire.Assignee,
+		From:         wire.From,
+		ParentID:     wire.ParentID,
+		Ref:          wire.Ref,
+		Needs:        wire.Needs,
+		Description:  wire.Description,
+		Labels:       wire.Labels,
+		Dependencies: wire.Dependencies,
+	}
+	if bead.Type == "" {
+		bead.Type = wire.TypeCompat
+	}
+	if wire.Metadata != nil {
+		bead.Metadata = map[string]string(wire.Metadata)
+	}
+	return bead, nil
+}
 
 // WorkerOperationEventPayload is the typed payload projected for
 // worker.operation events on the supervisor event stream.
@@ -132,15 +258,21 @@ func init() {
 	events.RegisterPayload(events.ControllerStopped, events.NoPayload{})
 	events.RegisterPayload(events.CitySuspended, events.NoPayload{})
 	events.RegisterPayload(events.CityResumed, events.NoPayload{})
-	events.RegisterPayload(events.CityCreated, CityCreatedPayload{})
-	events.RegisterPayload(events.CityReady, CityReadyPayload{})
-	events.RegisterPayload(events.CityInitFailed, CityInitFailedPayload{})
+	// Typed async request result events.
+	events.RegisterPayload(events.RequestResultCityCreate, CityCreateSucceededPayload{})
+	events.RegisterPayload(events.RequestResultCityUnregister, CityUnregisterSucceededPayload{})
+	events.RegisterPayload(events.RequestResultSessionCreate, SessionCreateSucceededPayload{})
+	events.RegisterPayload(events.RequestResultSessionMessage, SessionMessageSucceededPayload{})
+	events.RegisterPayload(events.RequestResultSessionSubmit, SessionSubmitSucceededPayload{})
+	events.RegisterPayload(events.RequestFailed, RequestFailedPayload{})
+
+	// Non-terminal city lifecycle events (diagnostics only).
+	events.RegisterPayload(events.CityCreated, CityLifecyclePayload{})
+	events.RegisterPayload(events.CityUnregisterRequested, CityLifecyclePayload{})
+
 	events.RegisterPayload(events.OrderFired, events.NoPayload{})
 	events.RegisterPayload(events.OrderCompleted, events.NoPayload{})
 	events.RegisterPayload(events.OrderFailed, events.NoPayload{})
 	events.RegisterPayload(events.ProviderSwapped, events.NoPayload{})
 	events.RegisterPayload(events.WorkerOperation, WorkerOperationEventPayload{})
-	events.RegisterPayload(events.CityUnregisterRequested, CityUnregisterRequestedPayload{})
-	events.RegisterPayload(events.CityUnregistered, CityUnregisteredPayload{})
-	events.RegisterPayload(events.CityUnregisterFailed, CityUnregisterFailedPayload{})
 }

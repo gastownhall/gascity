@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 env:
-  DOLT_VERSION: "1.86.1"
-  BD_VERSION: "v1.0.0"
+  DOLT_VERSION: "1.86.6"
+  BD_VERSION: "v1.0.3"
 
 jobs:
   tier-b:
@@ -28,23 +28,11 @@ jobs:
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
         with:
-          go-version: "1.25.8"
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y tmux jq
-      - name: Install dolt
-        run: |
-          curl -fsSL https://github.com/dolthub/dolt/releases/download/v${{ env.DOLT_VERSION }}/install.sh | sudo bash
-
-      - name: Install released bd v${{ env.BD_VERSION }}
-        run: |
-          archive="beads_${BD_VERSION#v}_linux_amd64.tar.gz"
-          mkdir -p "$RUNNER_TEMP/beads"
-          curl -fsSL -o "$RUNNER_TEMP/$archive" \
-            "https://github.com/gastownhall/beads/releases/download/${BD_VERSION}/${archive}"
-          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/beads" bd
-          sudo install -m 0755 "$RUNNER_TEMP/beads/bd" /usr/local/bin/bd
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "true"
 
       - name: Validate Synthetic Claude configuration
         run: |
@@ -60,9 +48,6 @@ jobs:
           printf 'ANTHROPIC_DEFAULT_OPUS_MODEL=%s\n' "$ANTHROPIC_DEFAULT_OPUS_MODEL"
           printf 'CLAUDE_CODE_SUBAGENT_MODEL=%s\n' "$CLAUDE_CODE_SUBAGENT_MODEL"
 
-      - name: Install Claude CLI
-        run: npm install -g @anthropic-ai/claude-code
-
       - name: Tier B acceptance tests
         run: make test-acceptance-b
 
@@ -71,11 +56,7 @@ jobs:
 
   mac-inference:
     name: Mac / Tier B+C inference tests
-    runs-on:
-      - self-hosted
-      - macOS
-      - ARM64
-      - macstadium
+    runs-on: macos-15
     timeout-minutes: 180
     env:
       ANTHROPIC_BASE_URL: https://api.synthetic.new/anthropic
@@ -134,17 +115,16 @@ jobs:
           repository: gastownhall/beads
           ref: ${{ env.BD_COMMIT }}
           path: .beads-src
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
-          go-version: "1.25.8"
+          go-version: "1.25.9"
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y tmux jq
       - name: Install dolt
-        run: |
-          curl -fsSL https://github.com/dolthub/dolt/releases/download/v${{ env.DOLT_VERSION }}/install.sh | sudo bash
+        run: .github/scripts/install-dolt-archive.sh "${{ env.DOLT_VERSION }}"
       - name: Build bd
         working-directory: .beads-src
         run: |
@@ -201,17 +181,16 @@ jobs:
           repository: gastownhall/beads
           ref: ${{ env.BD_COMMIT }}
           path: .beads-src
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
-          go-version: "1.25.8"
+          go-version: "1.25.9"
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y tmux jq
       - name: Install dolt
-        run: |
-          curl -fsSL https://github.com/dolthub/dolt/releases/download/v${{ env.DOLT_VERSION }}/install.sh | sudo bash
+        run: .github/scripts/install-dolt-archive.sh "${{ env.DOLT_VERSION }}"
       - name: Build bd
         working-directory: .beads-src
         run: |
@@ -259,17 +238,16 @@ jobs:
           repository: gastownhall/beads
           ref: ${{ env.BD_COMMIT }}
           path: .beads-src
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
-          go-version: "1.25.8"
+          go-version: "1.25.9"
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y tmux jq
       - name: Install dolt
-        run: |
-          curl -fsSL https://github.com/dolthub/dolt/releases/download/v${{ env.DOLT_VERSION }}/install.sh | sudo bash
+        run: .github/scripts/install-dolt-archive.sh "${{ env.DOLT_VERSION }}"
       - name: Build bd
         working-directory: .beads-src
         run: |

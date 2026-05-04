@@ -136,13 +136,10 @@ func (s *Server) findCanonicalNamedSession(store beads.Store, spec apiNamedSessi
 	if store == nil {
 		return beads.Bead{}, false, nil
 	}
-	all, err := store.List(beads.ListQuery{
-		Label: session.LabelSession,
-	})
+	bead, ok, err := session.FindCanonicalConfiguredNamedSessionBead(store, spec)
 	if err != nil {
-		return beads.Bead{}, false, fmt.Errorf("listing sessions: %w", err)
+		return beads.Bead{}, false, fmt.Errorf("looking up canonical named session: %w", err)
 	}
-	bead, ok := session.FindCanonicalNamedSessionBead(all, spec)
 	return bead, ok, nil
 }
 
@@ -150,9 +147,11 @@ func (s *Server) retireContinuityIneligibleNamedSessionIdentifiers(store beads.S
 	if store == nil {
 		return nil, nil
 	}
-	all, err := store.List(beads.ListQuery{Label: session.LabelSession})
+	all, err := session.ExactMetadataSessionCandidates(store, false, map[string]string{
+		session.NamedSessionIdentityMetadata: spec.Identity,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("listing sessions: %w", err)
+		return nil, fmt.Errorf("listing named session candidates: %w", err)
 	}
 	retired := make([]beads.Bead, 0)
 	now := time.Now().UTC()
@@ -227,22 +226,15 @@ func (s *Server) resolveConfiguredNamedSessionIDWithContext(ctx context.Context,
 	if !ok {
 		return "", false, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
-	bead, hasCanonical, err := s.findCanonicalNamedSession(store, spec)
+	lookup, err := session.LookupConfiguredNamedSession(store, spec)
 	if err != nil {
-		return "", true, err
+		return "", true, fmt.Errorf("looking up configured named session: %w", err)
 	}
-	if hasCanonical {
-		return bead.ID, true, nil
+	if lookup.HasCanonical {
+		return lookup.Canonical.ID, true, nil
 	}
-
-	all, err := store.List(beads.ListQuery{
-		Label: session.LabelSession,
-	})
-	if err != nil {
-		return "", true, fmt.Errorf("listing sessions: %w", err)
-	}
-	if bead, conflict := session.FindNamedSessionConflict(all, spec); conflict {
-		return "", true, fmt.Errorf("%w: %q conflicts with configured named session %q via live bead %s", errConfiguredNamedSessionConflict, identifier, spec.Identity, bead.ID)
+	if lookup.HasConflict {
+		return "", true, fmt.Errorf("%w: %q conflicts with configured named session %q via live bead %s", errConfiguredNamedSessionConflict, identifier, spec.Identity, lookup.Conflict.ID)
 	}
 
 	if !opts.materialize {

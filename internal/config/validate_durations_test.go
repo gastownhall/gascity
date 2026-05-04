@@ -79,14 +79,16 @@ func TestValidateDurationsBadSessionTimeout(t *testing.T) {
 func TestValidateDurationsBadDaemonFields(t *testing.T) {
 	cfg := &City{
 		Daemon: DaemonConfig{
-			PatrolInterval:  "30sec",
-			RestartWindow:   "one hour",
-			ShutdownTimeout: "5 seconds",
+			PatrolInterval:                  "30sec",
+			RestartWindow:                   "one hour",
+			ShutdownTimeout:                 "5 seconds",
+			SessionCircuitBreakerWindow:     "ten minutes",
+			SessionCircuitBreakerResetAfter: "twenty minutes",
 		},
 	}
 	warnings := ValidateDurations(cfg, "city.toml")
-	if len(warnings) != 3 {
-		t.Fatalf("expected 3 warnings, got %d: %v", len(warnings), warnings)
+	if len(warnings) != 5 {
+		t.Fatalf("expected 5 warnings, got %d: %v", len(warnings), warnings)
 	}
 }
 

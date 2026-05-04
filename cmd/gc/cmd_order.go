@@ -32,7 +32,7 @@ tick and dispatches work when a trigger opens.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				fmt.Fprintln(stderr, "gc order: missing subcommand (list, show, run, check, history)") //nolint:errcheck // best-effort stderr
+				fmt.Fprintln(stderr, "gc order: missing subcommand (list, show, run, check, history, sweep-tracking)") //nolint:errcheck // best-effort stderr
 			} else {
 				fmt.Fprintf(stderr, "gc order: unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
 			}
@@ -45,6 +45,7 @@ tick and dispatches work when a trigger opens.`,
 		newOrderRunCmd(stdout, stderr),
 		newOrderCheckCmd(stdout, stderr),
 		newOrderHistoryCmd(stdout, stderr),
+		newOrderSweepTrackingCmd(stdout, stderr),
 	)
 	return cmd
 }
@@ -84,8 +85,10 @@ Use --rig to disambiguate same-name orders in different rigs.`,
 			}
 			return nil
 		},
+		ValidArgsFunction: completeOrderNames,
 	}
 	cmd.Flags().StringVar(&rig, "rig", "", "rig name to disambiguate same-name orders")
+	_ = cmd.RegisterFlagCompletionFunc("rig", completeRigFlagNames)
 	return cmd
 }
 
@@ -107,8 +110,10 @@ Use --rig to disambiguate same-name orders in different rigs.`,
 			}
 			return nil
 		},
+		ValidArgsFunction: completeOrderNames,
 	}
 	cmd.Flags().StringVar(&rig, "rig", "", "rig name to disambiguate same-name orders")
+	_ = cmd.RegisterFlagCompletionFunc("rig", completeRigFlagNames)
 	return cmd
 }
 
@@ -150,8 +155,33 @@ name. Use --rig to filter by rig.`,
 			}
 			return nil
 		},
+		ValidArgsFunction: completeOrderNames,
 	}
 	cmd.Flags().StringVar(&rig, "rig", "", "rig name to filter order history")
+	_ = cmd.RegisterFlagCompletionFunc("rig", completeRigFlagNames)
+	return cmd
+}
+
+func newOrderSweepTrackingCmd(stdout, stderr io.Writer) *cobra.Command {
+	staleAfter := defaultOrderTrackingSweepStaleAfter
+	quiet := false
+	cmd := &cobra.Command{
+		Use:   "sweep-tracking",
+		Short: "Close stale order-tracking beads",
+		Long: `Close stale open order-tracking beads.
+
+This is intended for maintenance exec orders. It only closes tracking beads
+older than --stale-after so a fresh in-flight order is not interrupted.`,
+		Args: cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if cmdOrderSweepTracking(staleAfter, quiet, stdout, stderr) != 0 {
+				return errExit
+			}
+			return nil
+		},
+	}
+	cmd.Flags().DurationVar(&staleAfter, "stale-after", defaultOrderTrackingSweepStaleAfter, "minimum age for an open tracking bead to be closed")
+	cmd.Flags().BoolVar(&quiet, "quiet", false, "suppress success output")
 	return cmd
 }
 
@@ -416,6 +446,18 @@ func cmdOrderRun(name, rig string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if a.IsExec() {
+		if a.Trigger == "event" {
+			store, storeCode := openOrderStoreForOrder(cityPath, cfg, a, stderr, "gc order run")
+			if store == nil {
+				return storeCode
+			}
+			ep, epCode := openCityEventsProvider(stderr, "gc order run")
+			if ep == nil {
+				return epCode
+			}
+			defer ep.Close() //nolint:errcheck // best-effort
+			return doOrderRunExecTracked(a, cityPath, cfg, store, ep, stdout, stderr)
+		}
 		return doOrderRunExec(a, cityPath, cfg, stdout, stderr)
 	}
 	store, storeCode := openOrderStoreForOrder(cityPath, cfg, a, stderr, "gc order run")
@@ -448,13 +490,19 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 			fmt.Fprintf(stderr, "gc order run: %v\n", cfgErr) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		return doOrderRunExec(a, cityPath, cfg, stdout, stderr)
+		return doOrderRunExecTracked(a, cityPath, cfg, store, ep, stdout, stderr)
 	}
 
-	// Capture event head before wisp creation (race-free cursor).
+	// Capture event head before wisp creation (race-free cursor). Event runs
+	// fail closed when the cursor cannot be read.
 	var headSeq uint64
 	if a.Trigger == "event" && ep != nil {
-		headSeq, _ = ep.LatestSeq()
+		var err error
+		headSeq, err = ep.LatestSeq()
+		if err != nil {
+			fmt.Fprintf(stderr, "gc order run: reading event cursor for %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 
 	scoped := a.ScopedName()
@@ -486,8 +534,16 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 		return 1
 	}
 
+	var pool string
+	if a.Pool != "" {
+		pool, err = qualifyOrderPool(a, cfg)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
+
 	if a.Pool != "" && cfg != nil {
-		pool := qualifyPool(a.Pool, a.Rig)
 		if err := applyGraphRouting(recipe, nil, pool, nil, "", "", "", "", store, cityName, cityPath, cfg); err != nil {
 			fmt.Fprintf(stderr, "gc order run: routing decoration failed: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
@@ -512,9 +568,7 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 		)
 	}
 	if a.Pool != "" {
-		update.Metadata = map[string]string{
-			"gc.routed_to": qualifyPool(a.Pool, a.Rig),
-		}
+		update.Metadata = map[string]string{"gc.routed_to": pool}
 	}
 	if err := store.Update(rootID, update); err != nil {
 		fmt.Fprintf(stderr, "gc order run: labeling wisp: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -523,10 +577,50 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 
 	fmt.Fprintf(stdout, "Order %q executed: wisp %s", name, rootID) //nolint:errcheck
 	if a.Pool != "" {
-		fmt.Fprintf(stdout, " → gc.routed_to=%s", qualifyPool(a.Pool, a.Rig)) //nolint:errcheck
+		fmt.Fprintf(stdout, " → gc.routed_to=%s", pool) //nolint:errcheck
 	}
 	fmt.Fprintln(stdout) //nolint:errcheck
 	return 0
+}
+
+func doOrderRunExecTracked(a orders.Order, cityPath string, cfg *config.City, store beads.Store, ep events.Provider, stdout, stderr io.Writer) int {
+	if a.Trigger != "event" || ep == nil {
+		return doOrderRunExec(a, cityPath, cfg, stdout, stderr)
+	}
+
+	scoped := a.ScopedName()
+	headSeq, err := ep.LatestSeq()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc order run: reading event cursor for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	tracking, err := store.Create(beads.Bead{
+		Title:  "order:" + scoped,
+		Labels: []string{"order-run:" + scoped, labelOrderTracking},
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "gc order run: creating exec tracking bead for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	defer store.Close(tracking.ID) //nolint:errcheck // best-effort close
+
+	// Persist the event cursor before running the command so manual event execs
+	// do not leave the controller cursor stale after the side effect.
+	if err := store.Update(tracking.ID, beads.UpdateOpts{Labels: eventCursorLabels(scoped, headSeq)}); err != nil {
+		fmt.Fprintf(stderr, "gc order run: labeling exec event cursor for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	code := doOrderRunExec(a, cityPath, cfg, stdout, stderr)
+	labels := []string{"exec"}
+	if code != 0 {
+		labels = []string{"exec-failed"}
+	}
+	if err := store.Update(tracking.ID, beads.UpdateOpts{Labels: labels}); err != nil {
+		fmt.Fprintf(stderr, "gc order run: labeling exec tracking bead for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return code
 }
 
 // doOrderRunExec runs an exec order directly via shell.
@@ -574,7 +668,7 @@ func cmdOrderCheck(stdout, stderr io.Writer) int {
 		return epCode
 	}
 	defer ep.Close() //nolint:errcheck // best-effort
-	return doOrderCheckWithStoresResolver(aa, time.Now(), ep, cachedOrderStoresResolver(cityPath, cfg), stdout, stderr)
+	return doOrderCheckWithStoresResolverScoped(cityPath, cfg, aa, time.Now(), ep, cachedOrderStoresResolver(cityPath, cfg), stdout, stderr)
 }
 
 // orderLastRunFn returns a LastRunFunc that queries BdStore for the most
@@ -638,6 +732,10 @@ func doOrderCheck(aa []orders.Order, now time.Time, lastRunFn orders.LastRunFunc
 }
 
 func doOrderCheckWithStoresResolver(aa []orders.Order, now time.Time, ep events.Provider, resolveStores orderStoresResolver, stdout, stderr io.Writer) int {
+	return doOrderCheckWithStoresResolverScoped("", nil, aa, now, ep, resolveStores, stdout, stderr)
+}
+
+func doOrderCheckWithStoresResolverScoped(cityPath string, cfg *config.City, aa []orders.Order, now time.Time, ep events.Provider, resolveStores orderStoresResolver, stdout, stderr io.Writer) int {
 	if len(aa) == 0 {
 		fmt.Fprintln(stdout, "No orders found.") //nolint:errcheck // best-effort stdout
 		return 1
@@ -676,7 +774,12 @@ func doOrderCheckWithStoresResolver(aa []orders.Order, now time.Time, ep events.
 				return cursor
 			}
 		}
-		result := orders.CheckTrigger(a, now, lastRunFn, ep, cursorFn)
+		triggerOpts, err := orderTriggerOptions(cityPath, cfg, a)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		result := orders.CheckTriggerWithOptions(a, now, lastRunFn, ep, cursorFn, triggerOpts)
 		if lastRunErr != nil {
 			fmt.Fprintf(stderr, "gc order check: reading last run for %s: %v\n", a.ScopedName(), lastRunErr) //nolint:errcheck // best-effort stderr
 			return 1
@@ -831,6 +934,34 @@ func doOrderHistoryWithStoresResolver(name, rig string, aa []orders.Order, resol
 		for _, e := range entries {
 			fmt.Fprintf(stdout, "%-20s %-15s %s\n", e.order, e.id, e.createdAt.Format(time.RFC3339)) //nolint:errcheck
 		}
+	}
+	return 0
+}
+
+// --- gc order sweep-tracking ---
+
+func cmdOrderSweepTracking(staleAfter time.Duration, quiet bool, stdout, stderr io.Writer) int {
+	if staleAfter <= 0 {
+		fmt.Fprintln(stderr, "gc order sweep-tracking: --stale-after must be positive") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	store, err := openStoreAtForCity(cityPath, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	closed, err := sweepStaleOrderTracking(store, time.Now(), staleAfter, nil, orderTrackingSweepMetadataInitiator)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if !quiet {
+		fmt.Fprintf(stdout, "closed %d stale order-tracking bead(s)\n", closed) //nolint:errcheck // best-effort stdout
 	}
 	return 0
 }

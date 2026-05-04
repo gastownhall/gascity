@@ -450,6 +450,36 @@ esac
 	}
 }
 
+func TestUpdate_typeReachesScript(t *testing.T) {
+	dir := t.TempDir()
+	outFile := filepath.Join(dir, "stdin.json")
+
+	script := writeScript(t, dir, `
+op="$1"
+case "$op" in
+  update)
+    cat > "`+outFile+`"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	beadType := "bug"
+	if err := s.Update("EX-1", beads.UpdateOpts{Type: &beadType}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("read captured stdin: %v", err)
+	}
+	stdin := string(data)
+	if !strings.Contains(stdin, `"type":"bug"`) {
+		t.Errorf("stdin missing type, got: %s", stdin)
+	}
+}
+
 func TestGet(t *testing.T) {
 	dir := t.TempDir()
 	script := writeScript(t, dir, allOpsScript())

@@ -4,7 +4,6 @@
 // Events:
 //   session.created    → gc prime (load context)
 //   session.compacted  → gc prime (reload after compaction)
-//   session.deleted    → gc hook --inject (pick up work on exit)
 //   chat.system.transform → gc nudge drain --inject + gc mail check --inject
 
 import { execSync } from "child_process";
@@ -30,7 +29,6 @@ export default {
   events: {
     "session.created": () => run("gc prime --hook"),
     "session.compacted": () => run("gc prime --hook"),
-    "session.deleted": () => run("gc hook --inject"),
   },
 
   hooks: {

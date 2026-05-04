@@ -125,32 +125,39 @@ export function currentCityStatus(): CurrentCityStatus {
   return city.running ? { kind: "running", city } : { kind: "not-running", city };
 }
 
-export function invalidateForEventType(type: string): void {
-  if (!type) return;
+export function invalidateForEventType(type: string): boolean {
+  if (!type) return false;
+  const hasCityScope = currentCity !== "";
   if (type.startsWith("session.") || type.startsWith("agent.")) {
+    if (!hasCityScope) return false;
     invalidate("status", "crew", "options");
-    return;
+    return true;
   }
   if (type.startsWith("bead.")) {
-    invalidate("status", "issues", "convoys", "admin", "options");
-    return;
+    if (!hasCityScope) return false;
+    invalidate("status", "issues");
+    return true;
   }
   if (type.startsWith("mail.")) {
-    invalidate("status", "mail", "options");
-    return;
+    if (!hasCityScope) return false;
+    invalidate("status", "mail");
+    return true;
   }
   if (type.startsWith("convoy.")) {
+    if (!hasCityScope) return false;
     invalidate("status", "convoys");
-    return;
+    return true;
   }
-  if (type.startsWith("city.")) {
+  if (type.startsWith("city.") || type.startsWith("request.result.") || type === "request.failed") {
     invalidate("cities", "status", "supervisor");
-    return;
+    return true;
   }
   if (type.startsWith("service.") || type.startsWith("provider.") || type.startsWith("rig.")) {
+    if (!hasCityScope) return false;
     invalidate("admin");
-    return;
+    return true;
   }
+  return false;
 }
 
 function readCityScope(search: string): string {

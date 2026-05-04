@@ -1172,6 +1172,7 @@ func TestVerifyExternalDoltEndpointRejectsProjectIdentityMismatch(t *testing.T) 
 	if err != nil {
 		t.Skip("dolt not installed")
 	}
+	bdPath := waitTestRealBDPath(t)
 	oldResolve := resolveProviderLifecycleGCBinary
 	resolveProviderLifecycleGCBinary = func() string { return currentGCBinaryForTests(t) }
 	t.Cleanup(func() { resolveProviderLifecycleGCBinary = oldResolve })
@@ -1200,7 +1201,7 @@ func TestVerifyExternalDoltEndpointRejectsProjectIdentityMismatch(t *testing.T) 
 	t.Setenv("GC_CITY_PATH", cityDir)
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "")
-	t.Setenv("PATH", strings.Join([]string{"/home/ubuntu/.local/bin", filepath.Dir(doltPath), os.Getenv("PATH")}, string(os.PathListSeparator)))
+	t.Setenv("PATH", strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(doltPath), os.Getenv("PATH")}, string(os.PathListSeparator)))
 
 	if err := ensureBeadsProvider(cityDir); err != nil {
 		t.Fatalf("ensureBeadsProvider: %v", err)
@@ -1276,6 +1277,7 @@ func TestVerifyExternalDoltEndpointRejectsMissingLocalProjectID(t *testing.T) {
 	if err != nil {
 		t.Skip("dolt not installed")
 	}
+	bdPath := waitTestRealBDPath(t)
 	oldResolve := resolveProviderLifecycleGCBinary
 	resolveProviderLifecycleGCBinary = func() string { return currentGCBinaryForTests(t) }
 	t.Cleanup(func() { resolveProviderLifecycleGCBinary = oldResolve })
@@ -1304,7 +1306,7 @@ func TestVerifyExternalDoltEndpointRejectsMissingLocalProjectID(t *testing.T) {
 	t.Setenv("GC_CITY_PATH", cityDir)
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "")
-	t.Setenv("PATH", strings.Join([]string{"/home/ubuntu/.local/bin", filepath.Dir(doltPath), os.Getenv("PATH")}, string(os.PathListSeparator)))
+	t.Setenv("PATH", strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(doltPath), os.Getenv("PATH")}, string(os.PathListSeparator)))
 
 	if err := ensureBeadsProvider(cityDir); err != nil {
 		t.Fatalf("ensureBeadsProvider: %v", err)

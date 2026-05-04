@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/bootstrap"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doltversion"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -510,8 +511,8 @@ var initRunVersion = func(binary string) (string, error) {
 
 // Minimum versions for beads-provider binaries.
 const (
-	doltMinVersion = "1.86.1" // sql-server features used by gc-beads-bd
-	bdMinVersion   = "1.0.0"  // BdStore shell-out interface
+	doltMinVersion = doltversion.ManagedMin // sql-server features used by gc-beads-bd
+	bdMinVersion   = "1.0.0"                // BdStore shell-out interface
 )
 
 // checkHardDependencies verifies that all required binaries are available
@@ -566,13 +567,11 @@ func checkHardDependencies(cityPath string) []missingDep {
 			continue
 		}
 		if d.minVersion != "" {
-			if ver := parseDepVersion(d.name); ver != "" {
-				if compareVersions(ver, d.minVersion) < 0 {
-					missing = append(missing, missingDep{
-						name:        fmt.Sprintf("%s (found v%s, need v%s+)", d.name, ver, d.minVersion),
-						installHint: d.installHint,
-					})
-				}
+			if ver, ok := depMeetsMinVersion(d.name, d.minVersion); ver != "" && !ok {
+				missing = append(missing, missingDep{
+					name:        fmt.Sprintf("%s (found v%s, need v%s+)", d.name, ver, d.minVersion),
+					installHint: d.installHint,
+				})
 			}
 		}
 	}
@@ -588,6 +587,26 @@ func initAnyToolAvailable(names ...string) bool {
 	return false
 }
 
+func initNeedsBdTooling(cityPath string) bool {
+	if providerUsesBdStoreContract(rawBeadsProvider(cityPath)) {
+		return true
+	}
+
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		return false
+	}
+	cfg, err := config.Parse(data)
+	if err != nil {
+		return false
+	}
+	if _, err := config.ApplySiteBindings(fsys.OSFS{}, cityPath, cfg); err != nil {
+		return false
+	}
+	resolveRigPaths(cityPath, cfg.Rigs)
+	return workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs)
+}
+
 // parseDepVersion runs "<binary> version" and extracts a semver-like version string.
 // Returns "" if the version cannot be determined (non-fatal).
 func parseDepVersion(binary string) string {
@@ -595,6 +614,32 @@ func parseDepVersion(binary string) string {
 	if err != nil {
 		return ""
 	}
+	return parseDepVersionLine(line)
+}
+
+func depMeetsMinVersion(binary, minVersion string) (string, bool) {
+	line, err := initRunVersion(binary)
+	if err != nil {
+		return "", true
+	}
+	if binary == "dolt" {
+		info, err := doltversion.CheckFinalMinimum(line, minVersion)
+		if errors.Is(err, doltversion.ErrPreRelease) || errors.Is(err, doltversion.ErrBelowMinimum) {
+			return info.Raw, false
+		}
+		if err != nil {
+			return "", true
+		}
+		return info.Raw, true
+	}
+	ver := parseDepVersionLine(line)
+	if ver == "" {
+		return "", true
+	}
+	return ver, compareVersions(ver, minVersion) >= 0
+}
+
+func parseDepVersionLine(line string) string {
 	// Patterns: "dolt version 1.86.1", "bd version 1.0.0 (3ac028bf: ...)"
 	for _, field := range strings.Fields(line) {
 		if len(field) > 0 && field[0] >= '0' && field[0] <= '9' && strings.Contains(field, ".") {
