@@ -110,6 +110,7 @@ func (s *Server) streamSession(hctx huma.Context, input *SessionStreamInput, sen
 	if !running {
 		hctx.SetHeader("GC-Session-Status", "stopped")
 	}
+	flushSSEHeaders(hctx)
 
 	if info.Closed {
 		if format == "raw" {

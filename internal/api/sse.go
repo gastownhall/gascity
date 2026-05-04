@@ -318,20 +318,27 @@ func sseContractSamples(v any) (any, any) {
 	return v, v
 }
 
-// beginSSEStream sets and flushes the standard SSE headers before the
-// handler callback performs stream-specific setup that may block waiting
-// for the first event. All SSE header-commit behavior belongs here so new
-// streams do not need handler-local flush calls.
+// beginSSEStream sets the standard SSE headers on the huma response and
+// returns the underlying writer + JSON encoder + flusher the send
+// function will use per frame. It intentionally does not flush: stream
+// callbacks that emit custom headers must set them before committing the
+// response with flushSSEHeaders or the first SSE frame.
 func beginSSEStream(hctx huma.Context) (bw any, encoder *json.Encoder, flusher http.Flusher) {
 	hctx.SetHeader("Content-Type", "text/event-stream")
 	hctx.SetHeader("Cache-Control", "no-cache")
 	hctx.SetHeader("Connection", "keep-alive")
 	body := hctx.BodyWriter()
 	flusher = findFlusher(body)
-	if flusher != nil {
+	return body, json.NewEncoder(body), flusher
+}
+
+// flushSSEHeaders commits the current header set without writing an SSE frame.
+// Stream callbacks call this after setting stream-specific response headers
+// and before any wait that could delay the first event.
+func flushSSEHeaders(hctx huma.Context) {
+	if flusher := findFlusher(hctx.BodyWriter()); flusher != nil {
 		flusher.Flush()
 	}
-	return body, json.NewEncoder(body), flusher
 }
 
 // writeSSEFrame emits one SSE frame (id/event/data/blank line) to bw and
