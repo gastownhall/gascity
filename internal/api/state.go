@@ -142,11 +142,13 @@ type RawConfigProvider interface {
 }
 
 // AgentVisibilityWaiter is an optional capability for states whose Config()
-// snapshot may briefly lag a successful agent mutation under concurrent
-// runtime reloads. Callers that need strict read-after-write semantics for
-// agent target resolution can type-assert this interface after CreateAgent
-// to ensure the new agent is visible through findAgent before returning a
-// success response. Mirrors the beads.ParentProjectionWaiter pattern.
+// snapshot may briefly lag a successful agent mutation. Callers that need
+// strict read-after-write semantics for agent target resolution can type-assert
+// this interface after CreateAgent to ensure the new agent is visible through
+// findAgent before returning a success response. The interface is deliberately
+// agent-scoped because POST /sling resolves targets through the agent
+// projection immediately after create; rig and provider create endpoints do not
+// currently expose the same follow-up target-resolution contract.
 type AgentVisibilityWaiter interface {
 	// WaitForAgentVisibility blocks until findAgent in the current Config()
 	// resolves the given qualified agent name, or returns an error if the

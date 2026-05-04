@@ -3241,7 +3241,15 @@ esac
 		t.Fatal(err)
 	}
 	fakeNC := filepath.Join(binDir, "nc")
-	if err := os.WriteFile(fakeNC, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+	fakeNCScript := fmt.Sprintf(`#!/bin/sh
+set -eu
+attempts_file=%q
+if [ -f "$attempts_file" ] && [ "$(cat "$attempts_file")" -ge 2 ]; then
+  exit 0
+fi
+exit 1
+`, attemptsFile)
+	if err := os.WriteFile(fakeNC, []byte(fakeNCScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
 

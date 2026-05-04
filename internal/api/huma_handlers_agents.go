@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"errors"
+	"log"
 	"strings"
 	"time"
 
@@ -255,18 +257,33 @@ func (s *Server) humaHandleAgentCreate(ctx context.Context, input *AgentCreateIn
 	// Block until the new agent is reachable through findAgent, so the
 	// 201 response is a strict read-after-write signal: a follow-up
 	// POST /sling against the same target will not race a stale runtime
-	// config snapshot. See beads.ParentProjectionWaiter for the matching
-	// pattern in POST /bead/{id}/update.
+	// config snapshot. This is intentionally scoped to agents because sling
+	// target resolution reads the agent projection immediately after create.
 	qualifiedName := a.QualifiedName()
 	if waiter, ok := s.state.(AgentVisibilityWaiter); ok {
-		if err := waiter.WaitForAgentVisibility(ctx, qualifiedName); err != nil {
-			return nil, huma.Error500InternalServerError(err.Error())
+		waitCtx, cancel := context.WithTimeout(ctx, agentVisibilityWaitTimeout)
+		err := waiter.WaitForAgentVisibility(waitCtx, qualifiedName)
+		cancel()
+		if err != nil {
+			log.Printf("api: agent %s visibility confirmation failed after create: %v", qualifiedName, err)
+			return nil, agentVisibilityWaitHTTPError(err)
 		}
 	}
 	resp := &AgentCreatedOutput{}
 	resp.Body.Status = "created"
 	resp.Body.Agent = qualifiedName
 	return resp, nil
+}
+
+func agentVisibilityWaitHTTPError(err error) error {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return huma.Error503ServiceUnavailable("agent was created, but visibility confirmation was canceled")
+	case errors.Is(err, context.DeadlineExceeded):
+		return huma.Error504GatewayTimeout("agent was created, but visibility was not confirmed before timeout")
+	default:
+		return huma.Error500InternalServerError("agent was created, but visibility confirmation failed")
+	}
 }
 
 // humaHandleAgentUpdate is the Huma-typed handler for
