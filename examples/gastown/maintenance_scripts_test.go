@@ -4751,10 +4751,15 @@ func pruneBranchesRig(t *testing.T, setup func(rigPath, originPath string)) (str
 	setup(rigPath, originPath)
 
 	binDir := t.TempDir()
+	// Stub mirrors the real `gc rig list --json` schema (RigListJSON in
+	// cmd/gc/cmd_rig.go: {"city_path":..., "city_name":..., "rigs":[...]}).
+	// Older versions of prune-branches.sh used `.[].path` against this
+	// output and silently no-op'd via `|| exit 0`; pinning the real schema
+	// here means the test actually catches that regression now.
 	writeExecutable(t, filepath.Join(binDir, "gc"), fmt.Sprintf(`#!/bin/sh
 case "$1 $2 $3" in
   "rig list --json")
-    printf '[{"path":"%s"}]\n'
+    printf '{"city_path":"/tmp","city_name":"test","rigs":[{"name":"r","path":"%s","prefix":"r","hq":true,"suspended":false,"beads":""}]}\n'
     exit 0
     ;;
 esac
