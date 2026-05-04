@@ -4486,6 +4486,58 @@ func TestLockedWriterSerializesConcurrentWrites(t *testing.T) {
 	}
 }
 
+// TestOrderExecEnvSetsBeadsActorToOrderName verifies that exec orders
+// spawned by the controller carry an order-scoped BEADS_ACTOR into their
+// subprocess env, so any bd shell-out from inside the order's command
+// (e.g., `gc order sweep-tracking` → `bd close`) is audit-logged as
+// "order:<name>" rather than the controller default. This is what gives
+// the dashboard fine-grained attribution per order.
+func TestOrderExecEnvSetsBeadsActorToOrderName(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	_ = os.Unsetenv("BEADS_ACTOR")
+
+	cityDir := t.TempDir()
+	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
+	a := orders.Order{Name: "order-tracking-sweep", Trigger: "cooldown", Interval: "1m", Exec: "true"}
+
+	envSlice := orderExecEnv(cityDir, nil, target, a)
+
+	want := "BEADS_ACTOR=order:order-tracking-sweep"
+	found := false
+	for _, entry := range envSlice {
+		if entry == want {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("orderExecEnv missing %q; env=%v", want, envSlice)
+	}
+}
+
+// TestOrderExecEnvSkipsBeadsActorForUnnamedOrder guards against accidentally
+// emitting "BEADS_ACTOR=order:" (empty suffix) when an order has no name.
+// The conditional in orderExecEnv prevents that — verified here so future
+// edits don't regress.
+func TestOrderExecEnvSkipsBeadsActorForUnnamedOrder(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	_ = os.Unsetenv("BEADS_ACTOR")
+
+	cityDir := t.TempDir()
+	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
+	a := orders.Order{Trigger: "cooldown", Interval: "1m", Exec: "true"} // no Name
+
+	envSlice := orderExecEnv(cityDir, nil, target, a)
+
+	for _, entry := range envSlice {
+		if entry == "BEADS_ACTOR=order:" {
+			t.Fatalf("orderExecEnv emitted bare order: prefix for unnamed order; env=%v", envSlice)
+		}
+	}
+}
+
 func TestLockedStderrPreservesNil(t *testing.T) {
 	if got := lockedStderr(nil); got != nil {
 		t.Fatalf("lockedStderr(nil): got %v, want nil", got)

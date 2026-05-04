@@ -742,7 +742,11 @@ func openCityRecorderAt(cityPath string, stderr io.Writer) events.Recorder {
 
 // eventActor returns the public actor identity for events.
 // Prefer the session alias when present, but preserve GC_AGENT fallback for
-// managed-session hooks and older event-emitting contexts.
+// managed-session hooks and older event-emitting contexts. BEADS_ACTOR is
+// the cross-process identity signal shared with bd; falling through to it
+// before "human" lets supervisor-spawned hooks (e.g., bd on_close →
+// `gc event emit`) be attributed correctly to the controller or the order
+// that triggered the close.
 func eventActor() string {
 	if alias := strings.TrimSpace(os.Getenv("GC_ALIAS")); alias != "" {
 		return alias
@@ -752,6 +756,9 @@ func eventActor() string {
 	}
 	if sessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID")); sessionID != "" {
 		return sessionID
+	}
+	if beadsActor := strings.TrimSpace(os.Getenv("BEADS_ACTOR")); beadsActor != "" {
+		return beadsActor
 	}
 	return "human"
 }

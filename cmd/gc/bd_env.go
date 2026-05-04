@@ -524,6 +524,16 @@ func bdRuntimeEnv(cityPath string) map[string]string {
 	// dolt.auto-start:false config (beads resolveAutoStart priority bug) and
 	// starts rogue servers from the agent's cwd with the wrong data_dir.
 	env["BEADS_DOLT_AUTO_START"] = "0"
+	// Default actor for bd shell-outs that originate from the controller
+	// process or any gc subprocess lacking an explicit identity. Without
+	// this, bd falls through its own resolution chain (BEADS_ACTOR →
+	// BD_ACTOR → git config user.name → $USER) and audit-logs supervisor
+	// activity as the OS user. Conditional so session contexts that already
+	// set BEADS_ACTOR (template_resolve.go) and order subprocesses that
+	// inherit BEADS_ACTOR via orderExecEnv pass through unchanged.
+	if os.Getenv("BEADS_ACTOR") == "" {
+		env["BEADS_ACTOR"] = "controller"
+	}
 	if !cityUsesBdStoreContract(cityPath) {
 		return env
 	}

@@ -2652,3 +2652,39 @@ dolt.port: 3307
 		t.Fatalf("recoverCalls = %d, want 0", recoverCalls)
 	}
 }
+
+// TestBdRuntimeEnvDefaultsBeadsActorToControllerWhenUnset verifies that the
+// supervisor (and any gc context lacking an explicit identity) gets a
+// non-OS-user actor for bd shell-outs. Without this default, bd's actor
+// resolution falls through to git config user.name and supervisor activity
+// is audit-logged as if the human typed it.
+func TestBdRuntimeEnvDefaultsBeadsActorToControllerWhenUnset(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	_ = os.Unsetenv("BEADS_ACTOR")
+
+	cityPath := t.TempDir()
+	env := bdRuntimeEnv(cityPath)
+
+	if got := env["BEADS_ACTOR"]; got != "controller" {
+		t.Fatalf("BEADS_ACTOR = %q, want %q (supervisor should default to controller)", got, "controller")
+	}
+}
+
+// TestBdRuntimeEnvPreservesInheritedBeadsActor verifies that session
+// contexts (template_resolve.go sets BEADS_ACTOR=<sessname>) and exec
+// orders (orderExecEnv sets BEADS_ACTOR=order:<name>) are not clobbered by
+// the controller default. The override is conditional precisely so the
+// inherited value passes through mergeEnv unchanged.
+func TestBdRuntimeEnvPreservesInheritedBeadsActor(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("BEADS_ACTOR", "mayor")
+
+	cityPath := t.TempDir()
+	env := bdRuntimeEnv(cityPath)
+
+	if _, present := env["BEADS_ACTOR"]; present {
+		t.Fatalf("env[BEADS_ACTOR] = %q, expected key absent so parent value passes through", env["BEADS_ACTOR"])
+	}
+}
