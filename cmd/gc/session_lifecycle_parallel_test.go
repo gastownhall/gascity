@@ -395,6 +395,77 @@ func (p *staleIsRunningAfterInterruptProvider) IsRunning(name string) bool {
 	return p.Fake.IsRunning(name)
 }
 
+type exitedArtifactAfterInterruptProvider struct {
+	*runtime.Fake
+	mu                     sync.Mutex
+	exited                 map[string]bool
+	stopCalls              map[string]int
+	keepRunningOnInterrupt map[string]bool
+	listExited             bool
+	listErr                error
+}
+
+func newExitedArtifactAfterInterruptProvider() *exitedArtifactAfterInterruptProvider {
+	return &exitedArtifactAfterInterruptProvider{
+		Fake:                   runtime.NewFake(),
+		exited:                 make(map[string]bool),
+		stopCalls:              make(map[string]int),
+		keepRunningOnInterrupt: make(map[string]bool),
+	}
+}
+
+func (p *exitedArtifactAfterInterruptProvider) markExited(name string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.exited[name] = true
+}
+
+func (p *exitedArtifactAfterInterruptProvider) Interrupt(name string) error {
+	if err := p.Fake.Interrupt(name); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	keepRunning := p.keepRunningOnInterrupt[name]
+	p.mu.Unlock()
+	if keepRunning {
+		return nil
+	}
+	p.markExited(name)
+	return nil
+}
+
+func (p *exitedArtifactAfterInterruptProvider) IsRunning(name string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.exited[name] {
+		return false
+	}
+	return p.Fake.IsRunning(name)
+}
+
+func (p *exitedArtifactAfterInterruptProvider) ListRunning(prefix string) ([]string, error) {
+	names, err := p.Fake.ListRunning(prefix)
+	if err != nil {
+		return nil, err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	filtered := names[:0]
+	for _, name := range names {
+		if p.listExited || !p.exited[name] {
+			filtered = append(filtered, name)
+		}
+	}
+	return filtered, p.listErr
+}
+
+func (p *exitedArtifactAfterInterruptProvider) Stop(name string) error {
+	p.mu.Lock()
+	p.stopCalls[name]++
+	p.mu.Unlock()
+	return p.Fake.Stop(name)
+}
+
 type dropDependencyAfterNStartsProvider struct {
 	*runtime.Fake
 	mu        sync.Mutex
@@ -415,6 +486,24 @@ func (p *dropDependencyAfterNStartsProvider) Start(ctx context.Context, name str
 		_ = p.Stop(p.depName)
 	}
 	return nil
+}
+
+func (p *dropDependencyAfterNStartsProvider) waitForStarts(t *testing.T, want int) {
+	t.Helper()
+	deadline := time.After(3 * time.Second)
+	for {
+		p.mu.Lock()
+		got := p.starts
+		p.mu.Unlock()
+		if got >= want {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for %d starts, got %d", want, got)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 }
 
 type panicStartProvider struct {
@@ -785,6 +874,47 @@ func TestPrepareStartCandidate_GeneratesMissingSessionKeyBeforeWake(t *testing.T
 	}
 }
 
+func TestPrepareStartCandidate_DoesNotAppendCLIResumeFlagForACP(t *testing.T) {
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "mayor",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:mayor"},
+		Metadata: map[string]string{
+			"template":            "mayor",
+			"session_name":        "mayor",
+			"session_key":         "opencode-provider-session",
+			"started_config_hash": "previous-start",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prepared, err := prepareStartCandidate(startCandidate{
+		session: &session,
+		tp: TemplateParams{
+			TemplateName: "mayor",
+			SessionName:  "mayor",
+			Command:      "opencode acp",
+			IsACP:        true,
+			ResolvedProvider: &config.ResolvedProvider{
+				Name:        "opencode",
+				ResumeFlag:  "--session",
+				ResumeStyle: "flag",
+			},
+		},
+		order: 0,
+	}, &config.City{}, store, &clock.Fake{Time: time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatalf("prepareStartCandidate: %v", err)
+	}
+
+	if prepared.cfg.Command != "opencode acp" {
+		t.Fatalf("prepared.cfg.Command = %q, want ACP command without CLI resume flag", prepared.cfg.Command)
+	}
+}
+
 func TestReconcileSessionBeads_BlockedCandidatesDoNotConsumeWakeBudget(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
@@ -948,15 +1078,18 @@ func TestPrepareStartCandidate_NoneModeInitialMessageStaysInNudge(t *testing.T) 
 }
 
 func TestExecutePlannedStarts_RevalidatesDependenciesBetweenWaveBatches(t *testing.T) {
+	maxWakes := 8
+	dropAfter := 3
 	sp := &dropDependencyAfterNStartsProvider{
 		Fake:      runtime.NewFake(),
-		dropAfter: defaultMaxParallelStartsPerWave,
+		dropAfter: dropAfter,
 		depName:   "db",
 	}
 	if err := sp.Start(context.Background(), "db", runtime.Config{}); err != nil {
 		t.Fatal(err)
 	}
 	cfg := &config.City{
+		Daemon: config.DaemonConfig{MaxWakesPerTick: &maxWakes},
 		Agents: []config.Agent{
 			{Name: "app-1", DependsOn: []string{"db"}},
 			{Name: "app-2", DependsOn: []string{"db"}},
@@ -991,14 +1124,15 @@ func TestExecutePlannedStarts_RevalidatesDependenciesBetweenWaveBatches(t *testi
 	}
 
 	poolDesired := map[string]int{"app-1": 1, "app-2": 1, "app-3": 1, "app-4": 1}
+	var stderr bytes.Buffer
 	woken := reconcileSessionBeads(
 		context.Background(), sessions, desired, configuredSessionNames(cfg, "", store),
 		cfg, sp, store, nil, nil, nil, newDrainTracker(), poolDesired, false, nil, "",
-		nil, clk, events.Discard, 5*time.Second, 0, ioDiscard{}, ioDiscard{},
+		nil, clk, events.Discard, 5*time.Second, 0, ioDiscard{}, &stderr,
 	)
 
-	if woken != defaultMaxParallelStartsPerWave {
-		t.Fatalf("woken = %d, want %d", woken, defaultMaxParallelStartsPerWave)
+	if woken != dropAfter {
+		t.Fatalf("woken = %d, want %d", woken, dropAfter)
 	}
 	for _, name := range []string{"app-1", "app-2", "app-3"} {
 		if !sp.IsRunning(name) {
@@ -1007,6 +1141,125 @@ func TestExecutePlannedStarts_RevalidatesDependenciesBetweenWaveBatches(t *testi
 	}
 	if sp.IsRunning("app-4") {
 		t.Fatal("app-4 should be blocked after db dies between wave batches")
+	}
+	gotLog := stderr.String()
+	if !strings.Contains(gotLog, "session=app-4") || !strings.Contains(gotLog, "outcome=blocked_on_dependencies") {
+		t.Fatalf("app-4 log = %q, want blocked_on_dependencies", gotLog)
+	}
+	if strings.Contains(gotLog, "session=app-4 template=app-4 outcome=deferred_by_wake_budget") {
+		t.Fatalf("app-4 was deferred by wake budget instead of dependency recheck: %q", gotLog)
+	}
+}
+
+func TestExecutePlannedStartsTraced_AsyncRevalidatesDependenciesBetweenBatches(t *testing.T) {
+	maxWakes := 8
+	dropAfter := 3
+	sp := &dropDependencyAfterNStartsProvider{
+		Fake:      runtime.NewFake(),
+		dropAfter: dropAfter,
+		depName:   "db",
+	}
+	if err := sp.Start(context.Background(), "db", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Daemon: config.DaemonConfig{MaxWakesPerTick: &maxWakes},
+		Agents: []config.Agent{
+			{Name: "app-1", DependsOn: []string{"db"}},
+			{Name: "app-2", DependsOn: []string{"db"}},
+			{Name: "app-3", DependsOn: []string{"db"}},
+			{Name: "app-4", DependsOn: []string{"db"}},
+			{Name: "db", MaxActiveSessions: intPtr(1)},
+		},
+	}
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC)}
+	desired := map[string]TemplateParams{}
+	candidates := make([]startCandidate, 0, 4)
+	for _, name := range []string{"app-1", "app-2", "app-3", "app-4"} {
+		tp := TemplateParams{Command: name, SessionName: name, TemplateName: name}
+		desired[name] = tp
+		created, err := store.Create(beads.Bead{
+			ID:     name + "-id",
+			Title:  name,
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: creatingMeta(map[string]string{
+				"session_name":         name,
+				"template":             name,
+				"generation":           "1",
+				"continuation_epoch":   "1",
+				"instance_token":       "tok-" + name,
+				"pending_create_claim": "true",
+			}),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		candidate := created
+		candidates = append(candidates, startCandidate{session: &candidate, tp: tp})
+	}
+
+	woken := executePlannedStartsTraced(
+		context.Background(),
+		candidates,
+		cfg,
+		desired,
+		sp,
+		store,
+		"test-city",
+		"",
+		clk,
+		events.Discard,
+		5*time.Second,
+		ioDiscard{},
+		ioDiscard{},
+		nil,
+		withAsyncStartExecution(),
+	)
+	if woken != defaultStartDependencyRecheckBatchSize {
+		t.Fatalf("first async woken = %d, want dependency-recheck batch size %d", woken, defaultStartDependencyRecheckBatchSize)
+	}
+	sp.waitForStarts(t, 1+defaultStartDependencyRecheckBatchSize)
+	for _, name := range []string{"app-1", "app-2", "app-3"} {
+		if !sp.IsRunning(name) {
+			t.Fatalf("%s should have started before dependency loss was observed", name)
+		}
+	}
+	if sp.IsRunning("db") {
+		t.Fatal("db should have stopped after the dependency provider drop point")
+	}
+	if sp.IsRunning("app-4") {
+		t.Fatal("app-4 should not be enqueued in the async batch after db dies")
+	}
+
+	var secondStderr bytes.Buffer
+	woken = executePlannedStartsTraced(
+		context.Background(),
+		[]startCandidate{candidates[3]},
+		cfg,
+		desired,
+		sp,
+		store,
+		"test-city",
+		"",
+		clk,
+		events.Discard,
+		5*time.Second,
+		ioDiscard{},
+		&secondStderr,
+		nil,
+		withAsyncStartExecution(),
+	)
+	if woken != 0 {
+		t.Fatalf("second async woken = %d, want 0 after dependency loss", woken)
+	}
+	if sp.IsRunning("app-4") {
+		t.Fatal("app-4 should remain blocked after dependency loss")
+	}
+	gotLog := secondStderr.String()
+	if !strings.Contains(gotLog, "session=app-4") || !strings.Contains(gotLog, "outcome=blocked_on_dependencies") {
+		t.Fatalf("app-4 log = %q, want blocked_on_dependencies", gotLog)
 	}
 }
 
@@ -1107,10 +1360,11 @@ func TestExecutePlannedStartsTraced_AsyncLimitsEnqueuedStartsPerTick(t *testing.
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 0, 0, time.UTC)}
 	sp := newGatedStartProvider()
-	cfg := &config.City{}
+	maxWakes := 4
+	cfg := &config.City{Daemon: config.DaemonConfig{MaxWakesPerTick: &maxWakes}}
 	desired := map[string]TemplateParams{}
 	var candidates []startCandidate
-	for _, name := range []string{"worker-1", "worker-2", "worker-3", "worker-4"} {
+	for _, name := range []string{"worker-1", "worker-2", "worker-3", "worker-4", "worker-5"} {
 		session, err := store.Create(beads.Bead{
 			ID:     "gc-" + name,
 			Title:  name,
@@ -1152,13 +1406,14 @@ func TestExecutePlannedStartsTraced_AsyncLimitsEnqueuedStartsPerTick(t *testing.
 		nil,
 		withAsyncStartExecution(),
 	)
-	if woken != defaultMaxParallelStartsPerWave {
-		t.Fatalf("woken = %d, want one bounded async batch of %d", woken, defaultMaxParallelStartsPerWave)
+	wantWoken := maxWakes
+	if woken != wantWoken {
+		t.Fatalf("woken = %d, want configured wake budget %d", woken, wantWoken)
 	}
-	sp.waitForStarts(t, defaultMaxParallelStartsPerWave)
+	sp.waitForStarts(t, wantWoken)
 	sp.ensureNoFurtherStart(t, 100*time.Millisecond)
-	if sp.maxInFlight > defaultMaxParallelStartsPerWave {
-		t.Fatalf("max in-flight starts = %d, want <= %d", sp.maxInFlight, defaultMaxParallelStartsPerWave)
+	if sp.maxInFlight > wantWoken {
+		t.Fatalf("max in-flight starts = %d, want <= %d", sp.maxInFlight, wantWoken)
 	}
 }
 
@@ -1193,7 +1448,7 @@ func TestExecutePlannedStartsTraced_AsyncLimiterSharedAcrossTicks(t *testing.T) 
 		desired[name] = tp
 		return startCandidate{session: &session, tp: tp}
 	}
-	limiter := make(chan struct{}, 1)
+	limiter := newAsyncStartLimiter(1)
 	first := makeCandidate("worker-1")
 	second := makeCandidate("worker-2")
 
@@ -1312,8 +1567,11 @@ func TestExecutePlannedStartsTraced_AsyncLimiterDeferredStartDoesNotRunAfterCanc
 	t.Cleanup(func() { sp.release("worker") })
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	tp := TemplateParams{Command: "worker", SessionName: "worker", TemplateName: "worker"}
-	limiter := make(chan struct{}, 1)
-	limiter <- struct{}{}
+	limiter := newAsyncStartLimiter(1)
+	releaseLimiter, reserved, outcome := reserveAsyncStartSlot(context.Background(), limiter)
+	if !reserved {
+		t.Fatalf("reserve limiter = %s, want success", outcome)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 
 	if got := executePlannedStartsTraced(
@@ -1337,7 +1595,7 @@ func TestExecutePlannedStartsTraced_AsyncLimiterDeferredStartDoesNotRunAfterCanc
 		t.Fatalf("woken = %d, want 0 while async limiter is full", got)
 	}
 	cancel()
-	<-limiter
+	releaseLimiter()
 	sp.ensureNoFurtherStart(t, 100*time.Millisecond)
 	updated, err := store.Get(session.ID)
 	if err != nil {
@@ -1346,6 +1604,19 @@ func TestExecutePlannedStartsTraced_AsyncLimiterDeferredStartDoesNotRunAfterCanc
 	if got := updated.Metadata["last_woke_at"]; got != "" {
 		t.Fatalf("last_woke_at = %q, want empty because no async start was queued", got)
 	}
+}
+
+func TestAsyncStartLimiterNilReceiverMethodsAreNoops(t *testing.T) {
+	var limiter *asyncStartLimiter
+	limiter.resize(5)
+	if got := limiter.capacity(); got != 0 {
+		t.Fatalf("nil limiter capacity = %d, want 0", got)
+	}
+	release, reserved, outcome := reserveAsyncStartSlot(context.Background(), limiter)
+	if !reserved || outcome != "" {
+		t.Fatalf("nil limiter reserve = reserved %v outcome %q, want success", reserved, outcome)
+	}
+	release()
 }
 
 func TestCityRuntimeShutdownWaitsForTrackedAsyncStartsBeforeStopSnapshot(t *testing.T) {
@@ -1379,7 +1650,7 @@ func TestCityRuntimeShutdownWaitsForTrackedAsyncStartsBeforeStopSnapshot(t *test
 		sp:                  sp,
 		rec:                 events.Discard,
 		standaloneCityStore: store,
-		asyncStartLimiter:   make(chan struct{}, defaultMaxParallelStartsPerWave),
+		asyncStartLimiter:   newAsyncStartLimiter(maxParallelStartsPerTick(cfg)),
 		logPrefix:           "gc test",
 		stdout:              ioDiscard{},
 		stderr:              ioDiscard{},
@@ -1492,6 +1763,119 @@ func TestExecutePlannedStartsTraced_AsyncPrepareFailureClearsPreWakeLease(t *tes
 	}
 	if got := updated.Metadata["last_woke_at"]; got != "" {
 		t.Fatalf("last_woke_at = %q, want cleared after async preparation failure", got)
+	}
+}
+
+func TestExecutePlannedStartsTraced_CircuitTripDoesNotCommitPreWakeMetadata(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 28, 0, time.UTC)}
+	const identity = "test-city/worker"
+	originalLastWokeAt := clk.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	session, err := store.Create(beads.Bead{
+		ID:     "gc-worker",
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: creatingMeta(map[string]string{
+			"session_name":               "worker",
+			"template":                   "worker",
+			"generation":                 "7",
+			"continuation_epoch":         "3",
+			"continuation_reset_pending": "true",
+			"instance_token":             "tok-worker",
+			"last_woke_at":               originalLastWokeAt,
+			"pending_create_claim":       "true",
+			"wake_mode":                  "fresh",
+			"session_key":                "fresh-key-123",
+			"started_config_hash":        "started-config-before-reset",
+			"started_live_hash":          "started-live-before-reset",
+			"live_hash":                  "live-before-reset",
+			"startup_dialog_verified":    "true",
+			namedSessionIdentityMetadata: identity,
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cb := newSessionCircuitBreaker(sessionCircuitBreakerConfig{
+		Window:      10 * time.Minute,
+		MaxRestarts: 1,
+		ResetAfter:  20 * time.Minute,
+	})
+	defer setSessionCircuitBreakerForTest(cb)()
+	cb.RecordRestart(identity, clk.Now().Add(-time.Minute))
+	sp := newGatedStartProvider()
+	t.Cleanup(func() { sp.release("worker") })
+	maxRestarts := 1
+	cfg := &config.City{
+		Daemon: config.DaemonConfig{
+			SessionCircuitBreaker:            true,
+			SessionCircuitBreakerMaxRestarts: &maxRestarts,
+			SessionCircuitBreakerWindow:      "10m",
+			SessionCircuitBreakerResetAfter:  "20m",
+		},
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	tp := TemplateParams{Command: "worker", SessionName: "worker", TemplateName: "worker"}
+
+	if got := executePlannedStartsTraced(
+		context.Background(),
+		[]startCandidate{{session: &session, tp: tp}},
+		cfg,
+		map[string]TemplateParams{"worker": tp},
+		sp,
+		store,
+		"test-city",
+		"",
+		clk,
+		events.Discard,
+		time.Minute,
+		ioDiscard{},
+		ioDiscard{},
+		nil,
+	); got != 0 {
+		t.Fatalf("woken = %d, want 0 when circuit trip suppresses start", got)
+	}
+	sp.ensureNoFurtherStart(t, 100*time.Millisecond)
+	updated, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := updated.Metadata["generation"]; got != "7" {
+		t.Fatalf("generation = %q, want unchanged", got)
+	}
+	if got := updated.Metadata["instance_token"]; got != "tok-worker" {
+		t.Fatalf("instance_token = %q, want unchanged", got)
+	}
+	if got := updated.Metadata["continuation_epoch"]; got != "3" {
+		t.Fatalf("continuation_epoch = %q, want unchanged", got)
+	}
+	if got := updated.Metadata["continuation_reset_pending"]; got != "true" {
+		t.Fatalf("continuation_reset_pending = %q, want unchanged", got)
+	}
+	if got := updated.Metadata["pending_create_claim"]; got != "true" {
+		t.Fatalf("pending_create_claim = %q, want unchanged", got)
+	}
+	if got := updated.Metadata["wake_mode"]; got != "fresh" {
+		t.Fatalf("wake_mode = %q, want unchanged", got)
+	}
+	if got := updated.Metadata["last_woke_at"]; got != originalLastWokeAt {
+		t.Fatalf("last_woke_at = %q, want unchanged %q", got, originalLastWokeAt)
+	}
+	if got := updated.Metadata["session_key"]; got != "fresh-key-123" {
+		t.Fatalf("session_key = %q, want unchanged", got)
+	}
+	if got := updated.Metadata["started_config_hash"]; got != "started-config-before-reset" {
+		t.Fatalf("started_config_hash = %q, want unchanged", got)
+	}
+	if got := updated.Metadata["started_live_hash"]; got != "started-live-before-reset" {
+		t.Fatalf("started_live_hash = %q, want unchanged", got)
+	}
+	if got := updated.Metadata["live_hash"]; got != "live-before-reset" {
+		t.Fatalf("live_hash = %q, want unchanged", got)
+	}
+	if got := updated.Metadata["startup_dialog_verified"]; got != "true" {
+		t.Fatalf("startup_dialog_verified = %q, want unchanged", got)
 	}
 }
 
@@ -2035,6 +2419,228 @@ func TestCommitAsyncStartResult_StopsMatchingRuntimeForStaleSnapshot(t *testing.
 	}
 	if sp.IsRunning("worker") {
 		t.Fatal("stale runtime with matching old session metadata should be stopped")
+	}
+}
+
+func TestAsyncStartIdentityMatches(t *testing.T) {
+	cases := []struct {
+		name     string
+		prepared map[string]string
+		current  map[string]string
+		want     bool
+	}{
+		{
+			name:     "matching token wins over generation drift",
+			prepared: map[string]string{"generation": "2", "instance_token": "tok-X"},
+			current:  map[string]string{"generation": "5", "instance_token": "tok-X"},
+			want:     true,
+		},
+		{
+			name:     "token mismatch is stale",
+			prepared: map[string]string{"generation": "2", "instance_token": "tok-old"},
+			current:  map[string]string{"generation": "2", "instance_token": "tok-new"},
+			want:     false,
+		},
+		{
+			name:     "matching tokens with no generation",
+			prepared: map[string]string{"instance_token": "tok-X"},
+			current:  map[string]string{"instance_token": "tok-X"},
+			want:     true,
+		},
+		{
+			name:     "missing current token with prepared token is stale",
+			prepared: map[string]string{"instance_token": "tok-X"},
+			current:  map[string]string{},
+			want:     false,
+		},
+		{
+			name:     "no prepared token falls back to generation match",
+			prepared: map[string]string{"generation": "2"},
+			current:  map[string]string{"generation": "2"},
+			want:     true,
+		},
+		{
+			name:     "no prepared token falls back to generation mismatch",
+			prepared: map[string]string{"generation": "2"},
+			current:  map[string]string{"generation": "3"},
+			want:     false,
+		},
+		{
+			name:     "no prepared metadata at all matches anything",
+			prepared: map[string]string{},
+			current:  map[string]string{"generation": "9", "instance_token": "tok-Z"},
+			want:     true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prepared := beads.Bead{Metadata: tc.prepared}
+			current := beads.Bead{Metadata: tc.current}
+			if got := asyncStartIdentityMatches(prepared, current); got != tc.want {
+				t.Fatalf("asyncStartIdentityMatches = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAsyncStartSessionStillCurrent_GenerationDriftWithMatchingToken(t *testing.T) {
+	// Regression test: a wave that runs longer than concurrent reconciler
+	// phases will see the bead's generation bumped (e.g. healing writes)
+	// before the async result returns. Generation drift alone must not
+	// invalidate the result — the instance_token is the authoritative
+	// session identity. Without this guarantee, pool sessions stay stuck
+	// in state=creating with pending_create_claim=true forever.
+	prepared := beads.Bead{Metadata: map[string]string{
+		"generation":     "2",
+		"instance_token": "tok-X",
+		"state":          "creating",
+	}}
+	current := beads.Bead{Metadata: map[string]string{
+		"generation":     "7",
+		"instance_token": "tok-X",
+		"state":          "creating",
+	}}
+	if !asyncStartSessionStillCurrent(prepared, current) {
+		t.Fatal("generation drift with matching instance_token must not be considered stale")
+	}
+	if asyncStartStaleRuntimeCleanupAllowed(prepared, current) {
+		t.Fatal("matching instance_token must protect the runtime from cleanup despite generation drift")
+	}
+}
+
+func TestAsyncStartSessionStillCurrent_TokenMismatchIsStale(t *testing.T) {
+	prepared := beads.Bead{Metadata: map[string]string{
+		"generation":     "2",
+		"instance_token": "tok-old",
+		"state":          "creating",
+	}}
+	current := beads.Bead{Metadata: map[string]string{
+		"generation":     "3",
+		"instance_token": "tok-new",
+		"state":          "creating",
+	}}
+	if asyncStartSessionStillCurrent(prepared, current) {
+		t.Fatal("instance_token mismatch must be detected as stale")
+	}
+	if !asyncStartStaleRuntimeCleanupAllowed(prepared, current) {
+		t.Fatal("instance_token mismatch must allow runtime cleanup")
+	}
+}
+
+func TestAsyncStartSessionStillCurrent_PendingCreateClearedAfterAttachIsNotStale(t *testing.T) {
+	// Regression test: confirmLiveSessionState (called by ensureRunning when
+	// an attach finds the session already running) advances state to "active"
+	// and clears pending_create_claim. If that race wins against the async
+	// start result commit, the prepared bead still carries pcc="true" but
+	// current has pcc="" and state="active". The previous logic rejected the
+	// commit on the rollback drift check. The result was a stuck bead missing
+	// creation_complete_at and other start metadata, even though the spawn
+	// had succeeded.
+	//
+	// Fix: when current state has advanced to active or awake, the spawn
+	// already succeeded; commit the start result regardless of pcc drift.
+	prepared := beads.Bead{Metadata: map[string]string{
+		"instance_token":       "tok-Z",
+		"generation":           "2",
+		"state":                "creating",
+		"pending_create_claim": "true",
+	}}
+	current := beads.Bead{Metadata: map[string]string{
+		"instance_token": "tok-Z",
+		"generation":     "3",
+		"state":          "active",
+		// pending_create_claim cleared by confirmLiveSessionState
+		"pending_create_claim": "",
+	}}
+	if !asyncStartSessionStillCurrent(prepared, current) {
+		t.Fatal("session that advanced to active mid-flight must not be considered stale even when pcc was cleared")
+	}
+	if asyncStartStaleRuntimeCleanupAllowed(prepared, current) {
+		t.Fatal("session that advanced to active must not allow runtime cleanup")
+	}
+}
+
+func TestAsyncStartSessionStillCurrent_RollbackPendingCreateStillWorksWhenNotActive(t *testing.T) {
+	// Defensive: if pcc was cleared but state has NOT advanced to active/awake
+	// (still creating/asleep), the original rollback drift check still fires.
+	// This protects the prior intent: another phase decided to roll back the
+	// spawn, our result must not stomp on that decision.
+	prepared := beads.Bead{Metadata: map[string]string{
+		"instance_token":       "tok-Y",
+		"generation":           "2",
+		"state":                "creating",
+		"pending_create_claim": "true",
+	}}
+	current := beads.Bead{Metadata: map[string]string{
+		"instance_token":       "tok-Y",
+		"generation":           "3",
+		"state":                "creating",
+		"pending_create_claim": "",
+	}}
+	if asyncStartSessionStillCurrent(prepared, current) {
+		t.Fatal("pcc cleared while state still creating must be treated as rollback (stale)")
+	}
+}
+
+func TestCommitAsyncStartResult_GenerationDriftWithMatchingTokenCommits(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)}
+	session, err := store.Create(beads.Bead{
+		ID:     "gc-worker",
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: creatingMeta(map[string]string{
+			"session_name":         "worker",
+			"template":             "worker",
+			"generation":           "2",
+			"continuation_epoch":   "1",
+			"instance_token":       "tok-X",
+			"pending_create_claim": "true",
+			"last_woke_at":         clk.Now().Format(time.RFC3339),
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Concurrent reconciler phase bumps the generation while the async
+	// start is in flight. Token does not change.
+	if err := store.SetMetadata(session.ID, "generation", "5"); err != nil {
+		t.Fatal(err)
+	}
+	result := startResult{
+		prepared: preparedStart{
+			candidate: startCandidate{
+				session: &session,
+				tp: TemplateParams{
+					Command:      "worker",
+					SessionName:  "worker",
+					TemplateName: "worker",
+				},
+			},
+			coreHash: "core-abc",
+			liveHash: "live-xyz",
+		},
+		outcome:  "success",
+		started:  clk.Now(),
+		finished: clk.Now(),
+	}
+
+	if !commitAsyncStartResultWithContext(context.Background(), result, nil, store, clk, events.Discard, 0, ioDiscard{}, ioDiscard{}, nil) {
+		t.Fatal("generation drift with matching instance_token must commit; otherwise pool sessions stay stuck in creating")
+	}
+	updated, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := updated.Metadata["state"]; got != "active" {
+		t.Fatalf("state = %q, want active (creating→active transition)", got)
+	}
+	if got := updated.Metadata["pending_create_claim"]; got != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared after successful start", got)
+	}
+	if got := updated.Metadata["instance_token"]; got != "tok-X" {
+		t.Fatalf("instance_token = %q, want preserved", got)
 	}
 }
 
@@ -2841,15 +3447,18 @@ func TestCommitStartResult_AtomicBatchLandsStateAndClaimClearTogether(t *testing
 }
 
 func TestExecutePlannedStarts_UsesLogicalTemplateForDependencyRechecks(t *testing.T) {
+	maxWakes := 8
+	dropAfter := 3
 	sp := &dropDependencyAfterNStartsProvider{
 		Fake:      runtime.NewFake(),
-		dropAfter: defaultMaxParallelStartsPerWave,
+		dropAfter: dropAfter,
 		depName:   "db",
 	}
 	if err := sp.Start(context.Background(), "db", runtime.Config{}); err != nil {
 		t.Fatal(err)
 	}
 	cfg := &config.City{
+		Daemon: config.DaemonConfig{MaxWakesPerTick: &maxWakes},
 		Agents: []config.Agent{
 			{Name: "app-1", DependsOn: []string{"db"}},
 			{Name: "app-2", DependsOn: []string{"db"}},
@@ -2890,13 +3499,14 @@ func TestExecutePlannedStarts_UsesLogicalTemplateForDependencyRechecks(t *testin
 		})
 	}
 
+	var stderr bytes.Buffer
 	woken := executePlannedStarts(
 		context.Background(), candidates, cfg, desired, sp, store, "",
-		clk, events.Discard, 5*time.Second, ioDiscard{}, ioDiscard{},
+		clk, events.Discard, 5*time.Second, ioDiscard{}, &stderr,
 	)
 
-	if woken != defaultMaxParallelStartsPerWave {
-		t.Fatalf("woken = %d, want %d", woken, defaultMaxParallelStartsPerWave)
+	if woken != dropAfter {
+		t.Fatalf("woken = %d, want %d", woken, dropAfter)
 	}
 	for _, name := range []string{"app-1", "app-2", "app-3"} {
 		if !sp.IsRunning(name) {
@@ -2905,6 +3515,13 @@ func TestExecutePlannedStarts_UsesLogicalTemplateForDependencyRechecks(t *testin
 	}
 	if sp.IsRunning("app-4") {
 		t.Fatal("app-4 should be blocked after db dies between batches even when bead template is stale")
+	}
+	gotLog := stderr.String()
+	if !strings.Contains(gotLog, "session=app-4") || !strings.Contains(gotLog, "template=app-4") || !strings.Contains(gotLog, "outcome=blocked_on_dependencies") {
+		t.Fatalf("app-4 log = %q, want logical template dependency block", gotLog)
+	}
+	if strings.Contains(gotLog, "session=app-4 template=app-4 outcome=deferred_by_wake_budget") {
+		t.Fatalf("app-4 was deferred by wake budget instead of dependency recheck: %q", gotLog)
 	}
 }
 
@@ -3251,6 +3868,102 @@ func TestGracefulStopAll_UsesListRunningToStopLingeringSessions(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Stopped agent 'custom-worker'") {
 		t.Fatalf("stdout = %q, want forced stop message", stdout.String())
+	}
+}
+
+func TestGracefulStopAll_CleansExitedRuntimeArtifact(t *testing.T) {
+	sp := newExitedArtifactAfterInterruptProvider()
+	if err := sp.Start(context.Background(), "custom-worker", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := events.NewFake()
+	var stdout, stderr bytes.Buffer
+
+	gracefulStopAll([]string{"custom-worker"}, sp, 20*time.Millisecond, rec, nil, nil, &stdout, &stderr)
+
+	if sp.stopCalls["custom-worker"] == 0 {
+		t.Fatalf("expected gracefulStopAll to cleanup exited runtime artifact, calls=%+v", sp.Calls)
+	}
+	if !strings.Contains(stdout.String(), "Agent 'custom-worker' exited gracefully") {
+		t.Fatalf("stdout = %q, want graceful exit message", stdout.String())
+	}
+}
+
+func TestGracefulStopAll_CleansExitedRuntimeArtifactAlongsideLiveSurvivor(t *testing.T) {
+	sp := newExitedArtifactAfterInterruptProvider()
+	for _, name := range []string{"corpse-worker", "live-worker"} {
+		if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+			t.Fatalf("Start(%s): %v", name, err)
+		}
+	}
+	sp.keepRunningOnInterrupt["live-worker"] = true
+
+	rec := events.NewFake()
+	var stdout, stderr bytes.Buffer
+
+	gracefulStopAll([]string{"corpse-worker", "live-worker"}, sp, 20*time.Millisecond, rec, nil, nil, &stdout, &stderr)
+
+	if sp.stopCalls["corpse-worker"] == 0 {
+		t.Fatalf("expected cleanup Stop for exited runtime artifact, calls=%+v", sp.Calls)
+	}
+	if sp.stopCalls["live-worker"] == 0 {
+		t.Fatalf("expected forced Stop for live survivor, calls=%+v", sp.Calls)
+	}
+	if !strings.Contains(stdout.String(), "Agent 'corpse-worker' exited gracefully") {
+		t.Fatalf("stdout = %q, want corpse graceful-exit message", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Stopped agent 'live-worker'") {
+		t.Fatalf("stdout = %q, want live forced-stop message", stdout.String())
+	}
+}
+
+func TestDoStopCleansExitedRuntimeArtifact(t *testing.T) {
+	sp := newExitedArtifactAfterInterruptProvider()
+	if err := sp.Start(context.Background(), "custom-worker", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	sp.markExited("custom-worker")
+	sp.listExited = true
+
+	var stdout, stderr bytes.Buffer
+
+	doStop([]string{"custom-worker"}, sp, nil, nil, 20*time.Millisecond, events.Discard, &stdout, &stderr)
+
+	if sp.stopCalls["custom-worker"] == 0 {
+		t.Fatalf("expected doStop to cleanup exited runtime artifact, calls=%+v", sp.Calls)
+	}
+}
+
+func TestDoStopCleansVisibleExitedRuntimeArtifactWithPartialListError(t *testing.T) {
+	sp := newExitedArtifactAfterInterruptProvider()
+	if err := sp.Start(context.Background(), "custom-worker", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	sp.markExited("custom-worker")
+	sp.listExited = true
+	sp.listErr = &runtime.PartialListError{Err: errors.New("remote backend down")}
+
+	var stdout, stderr bytes.Buffer
+
+	doStop([]string{"custom-worker"}, sp, nil, nil, 20*time.Millisecond, events.Discard, &stdout, &stderr)
+
+	if sp.stopCalls["custom-worker"] == 0 {
+		t.Fatalf("expected doStop to cleanup exited runtime artifact despite partial list error, calls=%+v", sp.Calls)
+	}
+	if !strings.Contains(stderr.String(), "listing sessions partially failed") {
+		t.Fatalf("stderr = %q, want partial-list warning", stderr.String())
+	}
+}
+
+func TestDoStopSkipsExplicitNameThatIsNeitherAliveNorVisible(t *testing.T) {
+	sp := newExitedArtifactAfterInterruptProvider()
+	var stdout, stderr bytes.Buffer
+
+	doStop([]string{"absent-worker"}, sp, nil, nil, 20*time.Millisecond, events.Discard, &stdout, &stderr)
+
+	if sp.stopCalls["absent-worker"] != 0 {
+		t.Fatalf("Stop calls for absent-worker = %d, want 0", sp.stopCalls["absent-worker"])
 	}
 }
 

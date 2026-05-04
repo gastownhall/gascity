@@ -108,8 +108,11 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if !providerUsesBdStoreContract(rawBeadsProviderForScope(target.ScopeRoot, cityPath)) {
-		fmt.Fprintln(stderr, "gc bd: only supported for bd-backed beads providers") //nolint:errcheck // best-effort stderr
+	if provider := rawBeadsProviderForScope(target.ScopeRoot, cityPath); !providerUsesBdStoreContract(provider) {
+		fmt.Fprintf(stderr, "gc bd: only supported for bd-backed beads providers (resolved %q for %s)\n", provider, target.ScopeRoot) //nolint:errcheck // best-effort stderr
+		if hint := bdProviderMismatchHint(target.ScopeRoot, provider); hint != "" {
+			fmt.Fprintf(stderr, "  hint: %s\n", hint) //nolint:errcheck // best-effort stderr
+		}
 		return 1
 	}
 
@@ -204,6 +207,19 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 		return bdRigScopeTarget(cityPath, rig), nil
 	}
 
+	cityTarget := bdCityScopeTarget(cityPath, cfg)
+	cityPrefix := config.EffectiveHQPrefix(cfg)
+	if cityPrefix != "" {
+		for _, arg := range args {
+			if strings.HasPrefix(arg, "-") || beadPrefix(cfg, arg) != cityPrefix {
+				continue
+			}
+			if bdBeadExists(cityPath, cityTarget, arg) {
+				return cityTarget, nil
+			}
+		}
+	}
+
 	// Auto-detect from bead IDs in args, but only accept candidates that
 	// actually exist in the resolved rig store. This keeps hyphenated flag
 	// values and other non-ID args from silently retargeting the command.
@@ -231,11 +247,7 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 		return bdRigScopeTarget(cityPath, rig), nil
 	}
 
-	return execStoreTarget{
-		ScopeRoot: resolveStoreScopeRoot(cityPath, cityPath),
-		ScopeKind: "city",
-		Prefix:    config.EffectiveHQPrefix(cfg),
-	}, nil
+	return cityTarget, nil
 }
 
 func bdRigForArg(cfg *config.City, arg string) (config.Rig, bool) {
@@ -259,5 +271,13 @@ func bdRigScopeTarget(cityPath string, rig config.Rig) execStoreTarget {
 		ScopeKind: "rig",
 		Prefix:    rig.EffectivePrefix(),
 		RigName:   rig.Name,
+	}
+}
+
+func bdCityScopeTarget(cityPath string, cfg *config.City) execStoreTarget {
+	return execStoreTarget{
+		ScopeRoot: resolveStoreScopeRoot(cityPath, cityPath),
+		ScopeKind: "city",
+		Prefix:    config.EffectiveHQPrefix(cfg),
 	}
 }

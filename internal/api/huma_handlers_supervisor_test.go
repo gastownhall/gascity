@@ -231,6 +231,41 @@ func TestSupervisorCityCreateReturnsRequestID(t *testing.T) {
 	}
 }
 
+func TestSupervisorCityCreateReturnsCurrentEventCursor(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cityPath := filepath.Join(home, "mc-city")
+	recorder := events.NewFake()
+	recorder.Record(events.Event{Type: events.SessionWoke, Actor: "seed"})
+	resolver := &fakeCityResolver{
+		cities:             map[string]*fakeState{},
+		supervisorRecorder: recorder,
+	}
+	init := &fakeInitializer{
+		scaffoldResult: &cityinit.InitResult{
+			CityName:     "mc-city",
+			CityPath:     cityPath,
+			ProviderUsed: "codex",
+		},
+	}
+	sm := NewSupervisorMux(resolver, init, false, "test", time.Now())
+
+	req := httptest.NewRequest(http.MethodPost, "/v0/city", strings.NewReader(`{"dir":"mc-city","provider":"codex"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GC-Request", "test")
+	rec := httptest.NewRecorder()
+
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	accepted := decodeAsyncAccepted(t, rec.Body)
+	if accepted.EventCursor != "__supervisor__:1" {
+		t.Fatalf("event_cursor = %q, want __supervisor__:1", accepted.EventCursor)
+	}
+}
+
 func TestSupervisorCityCreateStoresPendingRequestForReconciler(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -523,6 +558,35 @@ func TestSupervisorCityUnregisterUsesInitializer(t *testing.T) {
 	}
 	if body := rec.Body.String(); !strings.Contains(body, `"request_id"`) {
 		t.Fatalf("body = %s, want request_id", body)
+	}
+}
+
+func TestSupervisorCityUnregisterReturnsCurrentEventCursor(t *testing.T) {
+	recorder := events.NewFake()
+	recorder.Record(events.Event{Type: events.SessionWoke, Actor: "seed"})
+	resolver := &fakeCityResolver{
+		cities:             map[string]*fakeState{},
+		supervisorRecorder: recorder,
+	}
+	init := &fakeInitializer{
+		unregisterResult: &cityinit.UnregisterResult{
+			CityName: "mc-city",
+			CityPath: "/tmp/mc-city",
+		},
+	}
+	sm := NewSupervisorMux(resolver, init, false, "test", time.Now())
+	req := httptest.NewRequest(http.MethodPost, "/v0/city/mc-city/unregister", nil)
+	req.Header.Set("X-GC-Request", "test")
+	rec := httptest.NewRecorder()
+
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	accepted := decodeAsyncAccepted(t, rec.Body)
+	if accepted.EventCursor != "__supervisor__:1" {
+		t.Fatalf("event_cursor = %q, want __supervisor__:1", accepted.EventCursor)
 	}
 }
 

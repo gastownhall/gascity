@@ -336,7 +336,7 @@ export const emitEvent = <ThrowOnError extends boolean = false>(options: Options
 /**
  * Stream city events in real time
  *
- * Server-Sent Events stream of city events with optional workflow projections. Supports reconnection via Last-Event-ID header or after_seq query param.
+ * Server-Sent Events stream of city events with optional workflow projections. Supports reconnection via Last-Event-ID header or after_seq query param; omitting both starts at the current city event head.
  */
 export const streamEvents = <ThrowOnError extends boolean = false>(options: Options<StreamEventsData, ThrowOnError, StreamEventsResponse>) => (options.client ?? client).sse.get<StreamEventsResponses, StreamEventsErrors, ThrowOnError>({ url: '/v0/city/{cityName}/events/stream', ...options });
 
@@ -1008,6 +1008,8 @@ export const getV0Events = <ThrowOnError extends boolean = false>(options?: Opti
 
 /**
  * Stream tagged events from all running cities.
+ *
+ * Server-Sent Events stream of supervisor-tagged events. Supports reconnection via Last-Event-ID header or after_cursor query param; omitting both starts at the current supervisor event head.
  */
 export const streamSupervisorEvents = <ThrowOnError extends boolean = false>(options?: Options<StreamSupervisorEventsData, ThrowOnError, StreamSupervisorEventsResponse>) => (options?.client ?? client).sse.get<StreamSupervisorEventsResponses, StreamSupervisorEventsErrors, ThrowOnError>({ url: '/v0/events/stream', ...options });
 

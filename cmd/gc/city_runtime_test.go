@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 )
@@ -253,10 +255,67 @@ func TestCityRuntimeDemandSnapshotReusesStablePatrolDemand(t *testing.T) {
 	}
 }
 
+func TestCityRuntimeAsyncStartLimiterUsesMaxWakesPerTick(t *testing.T) {
+	maxWakes := 7
+	cfg := &config.City{Daemon: config.DaemonConfig{MaxWakesPerTick: &maxWakes}}
+	cr := &CityRuntime{cfg: cfg}
+
+	if got := cr.ensureAsyncStartLimiter().capacity(); got != maxWakes {
+		t.Fatalf("limiter cap = %d, want %d", got, maxWakes)
+	}
+
+	maxWakes = 2
+	if got := cr.ensureAsyncStartLimiter().capacity(); got != maxWakes {
+		t.Fatalf("limiter cap after config change = %d, want %d", got, maxWakes)
+	}
+}
+
+func TestCityRuntimeAsyncStartLimiterResizePreservesInFlightBudget(t *testing.T) {
+	maxWakes := 3
+	cfg := &config.City{Daemon: config.DaemonConfig{MaxWakesPerTick: &maxWakes}}
+	cr := &CityRuntime{cfg: cfg}
+	limiter := cr.ensureAsyncStartLimiter()
+
+	var releases []func()
+	for i := 0; i < maxWakes; i++ {
+		release, reserved, outcome := reserveAsyncStartSlot(context.Background(), limiter)
+		if !reserved {
+			t.Fatalf("reserve initial slot = %s, want success", outcome)
+		}
+		releases = append(releases, release)
+	}
+
+	maxWakes = 2
+	resized := cr.ensureAsyncStartLimiter()
+	if resized != limiter {
+		t.Fatal("resized limiter should preserve the same in-flight reservation counter")
+	}
+	if got := resized.capacity(); got != maxWakes {
+		t.Fatalf("resized cap = %d, want %d", got, maxWakes)
+	}
+	if _, reserved, outcome := reserveAsyncStartSlot(context.Background(), resized); reserved || outcome != "deferred_by_async_start_limit" {
+		t.Fatalf("reserve while old slots exceed resized cap = reserved %v outcome %q, want deferred", reserved, outcome)
+	}
+
+	releases[0]()
+	if _, reserved, outcome := reserveAsyncStartSlot(context.Background(), resized); reserved || outcome != "deferred_by_async_start_limit" {
+		t.Fatalf("reserve at resized cap = reserved %v outcome %q, want deferred", reserved, outcome)
+	}
+	releases[1]()
+	release, reserved, outcome := reserveAsyncStartSlot(context.Background(), resized)
+	if !reserved {
+		t.Fatalf("reserve below resized cap = %s, want success", outcome)
+	}
+	release()
+	releases[2]()
+}
+
 type recordingOrderDispatcher struct {
-	called     atomic.Bool
-	calls      atomic.Int32
-	onDispatch func(context.Context, string, time.Time)
+	called      atomic.Bool
+	calls       atomic.Int32
+	onDispatch  func(context.Context, string, time.Time)
+	drainCalls  int
+	drainCtxErr error
 }
 
 func (r *recordingOrderDispatcher) dispatch(ctx context.Context, cityRoot string, now time.Time) {
@@ -265,6 +324,67 @@ func (r *recordingOrderDispatcher) dispatch(ctx context.Context, cityRoot string
 	if r.onDispatch != nil {
 		r.onDispatch(ctx, cityRoot, now)
 	}
+}
+
+func (r *recordingOrderDispatcher) drain(ctx context.Context) bool {
+	r.drainCalls++
+	r.drainCtxErr = ctx.Err()
+	return true
+}
+
+type blockingOrderDispatcher struct {
+	mu         sync.Mutex
+	drainCalls int
+	ctxErrs    []error
+	release    chan struct{}
+	drained    chan struct{}
+}
+
+func newBlockingOrderDispatcher() *blockingOrderDispatcher {
+	return &blockingOrderDispatcher{
+		release: make(chan struct{}),
+		drained: make(chan struct{}, 16),
+	}
+}
+
+func (b *blockingOrderDispatcher) dispatch(context.Context, string, time.Time) {}
+
+func (b *blockingOrderDispatcher) drain(ctx context.Context) bool {
+	b.mu.Lock()
+	b.drainCalls++
+	b.ctxErrs = append(b.ctxErrs, ctx.Err())
+	b.mu.Unlock()
+	b.drained <- struct{}{}
+	select {
+	case <-b.release:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (b *blockingOrderDispatcher) waitForDrainCalls(t *testing.T, want int) {
+	t.Helper()
+	deadline := time.After(500 * time.Millisecond)
+	for {
+		b.mu.Lock()
+		got := b.drainCalls
+		b.mu.Unlock()
+		if got >= want {
+			return
+		}
+		select {
+		case <-b.drained:
+		case <-deadline:
+			t.Fatalf("drainCalls = %d, want at least %d", got, want)
+		}
+	}
+}
+
+func (b *blockingOrderDispatcher) drainContextErrors() []error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]error(nil), b.ctxErrs...)
 }
 
 func TestCityRuntimeTickDispatchesOrdersBeforeDemandSnapshot(t *testing.T) {
@@ -408,6 +528,49 @@ func TestCityRuntimeRunStartupOrderDispatchPanicIsRecovered(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "startup order boom") {
 		t.Fatalf("stderr = %q, want recovered panic detail", stderr.String())
+	}
+}
+
+func TestOrderTrackingSweepWatchdogOnlyClosesSweepOrderTracking(t *testing.T) {
+	store := beads.NewMemStore()
+	sweepTracking, err := store.Create(beads.Bead{
+		Title:  "order:" + orderTrackingSweepOrder,
+		Labels: []string{"order-run:" + orderTrackingSweepOrder, labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create(sweep): %v", err)
+	}
+	mergeTracking, err := store.Create(beads.Bead{
+		Title:  "order:pr-merge-queue",
+		Labels: []string{"order-run:pr-merge-queue", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create(merge): %v", err)
+	}
+
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		standaloneCityStore: store,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+		logPrefix:           "gc test",
+	}
+	cr.runOrderTrackingSweepWatchdog(time.Now().Add(orderTrackingSweepWatchdogStaleAfter + time.Second))
+
+	gotSweep, err := store.Get(sweepTracking.ID)
+	if err != nil {
+		t.Fatalf("Get(sweep): %v", err)
+	}
+	if gotSweep.Status != "closed" {
+		t.Fatalf("sweep tracking status = %s, want closed", gotSweep.Status)
+	}
+	gotMerge, err := store.Get(mergeTracking.ID)
+	if err != nil {
+		t.Fatalf("Get(merge): %v", err)
+	}
+	if gotMerge.Status != "open" {
+		t.Fatalf("merge tracking status = %s, want open", gotMerge.Status)
 	}
 }
 
@@ -2372,11 +2535,7 @@ func TestCityRuntimeReloadSameRevisionIsNoOp(t *testing.T) {
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	writeCityRuntimeConfig(t, tomlPath, "fake")
 
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
-	configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
 
 	sp := runtime.NewFake()
 	var stdout bytes.Buffer
@@ -2414,6 +2573,135 @@ func TestCityRuntimeReloadSameRevisionIsNoOp(t *testing.T) {
 	}
 }
 
+func TestCityRuntimeReloadRetainsTimedOutDispatcherForShutdownDrain(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
+
+	od := newBlockingOrderDispatcher()
+	var stdout bytes.Buffer
+	cr := &CityRuntime{
+		cityPath:   cityPath,
+		cityName:   "test-city",
+		tomlPath:   tomlPath,
+		configRev:  configRev,
+		cfg:        cfg,
+		sp:         runtime.NewFake(),
+		dops:       newDrainOps(runtime.NewFake()),
+		od:         od,
+		rec:        events.Discard,
+		logPrefix:  "gc start",
+		stdout:     &stdout,
+		stderr:     io.Discard,
+		configName: "test-city",
+	}
+
+	writeCityRuntimeConfigWithShutdownTimeout(t, tomlPath, "fake", "1s")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	lastProviderName := "fake"
+	cr.reloadConfig(ctx, &lastProviderName, cityPath)
+	od.waitForDrainCalls(t, 1)
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		cr.shutdown()
+		close(shutdownDone)
+	}()
+	od.waitForDrainCalls(t, 2)
+	close(od.release)
+	select {
+	case <-shutdownDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdown did not return after retained dispatcher was released")
+	}
+}
+
+func TestCityRuntimeReloadDrainShortCircuitsOnTickContextCancel(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
+
+	od := newBlockingOrderDispatcher()
+	cr := &CityRuntime{
+		cityPath:   cityPath,
+		cityName:   "test-city",
+		tomlPath:   tomlPath,
+		configRev:  configRev,
+		cfg:        cfg,
+		sp:         runtime.NewFake(),
+		dops:       newDrainOps(runtime.NewFake()),
+		od:         od,
+		rec:        events.Discard,
+		logPrefix:  "gc start",
+		stdout:     io.Discard,
+		stderr:     io.Discard,
+		configName: "test-city",
+	}
+
+	writeCityRuntimeConfigWithShutdownTimeout(t, tomlPath, "fake", "1s")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	lastProviderName := "fake"
+	start := time.Now()
+	cr.reloadConfig(ctx, &lastProviderName, cityPath)
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Fatalf("reload drain took %s after tick context cancellation, want <200ms", elapsed)
+	}
+	errs := od.drainContextErrors()
+	if len(errs) == 0 || !errors.Is(errs[0], context.Canceled) {
+		t.Fatalf("drain ctx error = %v, want context.Canceled", errs)
+	}
+	close(od.release)
+}
+
+func TestCityRuntimeReloadDrainBoundedByTimeout(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
+
+	od := newBlockingOrderDispatcher()
+	cr := &CityRuntime{
+		cityPath:   cityPath,
+		cityName:   "test-city",
+		tomlPath:   tomlPath,
+		configRev:  configRev,
+		cfg:        cfg,
+		sp:         runtime.NewFake(),
+		dops:       newDrainOps(runtime.NewFake()),
+		od:         od,
+		rec:        events.Discard,
+		logPrefix:  "gc start",
+		stdout:     io.Discard,
+		stderr:     io.Discard,
+		configName: "test-city",
+	}
+
+	writeCityRuntimeConfigWithShutdownTimeout(t, tomlPath, "fake", "1s")
+	lastProviderName := "fake"
+	start := time.Now()
+	cr.reloadConfig(context.Background(), &lastProviderName, cityPath)
+	elapsed := time.Since(start)
+	if elapsed < reloadOrderDrainTimeout || elapsed > reloadOrderDrainTimeout+500*time.Millisecond {
+		t.Fatalf("reload elapsed = %s, want bounded near %s", elapsed, reloadOrderDrainTimeout)
+	}
+	close(od.release)
+}
+
 func TestCityRuntimeRunReloadsConfigBeforeStartupReconcile(t *testing.T) {
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
@@ -2444,7 +2732,7 @@ name = "fresh-agent"
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	var startupAgentCount atomic.Int32
+	var sawFreshAgent atomic.Bool
 	cr := newCityRuntime(CityRuntimeParams{
 		CityPath:  cityPath,
 		CityName:  "test-city",
@@ -2453,7 +2741,11 @@ name = "fresh-agent"
 		Cfg:       cfg,
 		SP:        sp,
 		BuildFn: func(cfg *config.City, _ runtime.Provider, _ beads.Store) DesiredStateResult {
-			startupAgentCount.Store(int32(len(cfg.Agents)))
+			for _, agent := range cfg.Agents {
+				if agent.Name == "fresh-agent" {
+					sawFreshAgent.Store(true)
+				}
+			}
 			cancel()
 			return DesiredStateResult{State: map[string]TemplateParams{}}
 		},
@@ -2468,11 +2760,8 @@ name = "fresh-agent"
 
 	cr.run(ctx)
 
-	if got := startupAgentCount.Load(); got != 1 {
-		t.Fatalf("startup saw %d agent(s), want reloaded config with 1 agent", got)
-	}
-	if got := cr.cfg.Agents[0].Name; got != "fresh-agent" {
-		t.Fatalf("reloaded agent = %q, want fresh-agent", got)
+	if !sawFreshAgent.Load() {
+		t.Fatalf("startup did not see reloaded fresh-agent; agents = %#v", cr.cfg.Agents)
 	}
 }
 
@@ -2518,11 +2807,7 @@ func TestCityRuntimeReloadKeepsRegisteredAliasForEffectiveIdentity(t *testing.T)
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	writeCityRuntimeConfigNamed(t, tomlPath, "declared-city", "fake")
 
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
-	configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
 
 	sp := runtime.NewFake()
 	cr := newTestCityRuntime(t, CityRuntimeParams{
@@ -2571,11 +2856,7 @@ func TestCityRuntimeManualReloadReplyWaitsForTickCompletion(t *testing.T) {
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	writeCityRuntimeConfig(t, tomlPath, "fake")
 
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
-	configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
 
 	doneCh := make(chan reloadControlReply, 1)
 	dirty := &atomic.Bool{}
@@ -2718,11 +2999,7 @@ func TestCityRuntimeManualReloadPanicAfterReloadKeepsReloadReplyAndClears(t *tes
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	writeCityRuntimeConfig(t, tomlPath, "fake")
 
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
-	configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
 
 	doneCh := make(chan reloadControlReply, 1)
 	dirty := &atomic.Bool{}
@@ -3286,6 +3563,253 @@ func TestCityRuntimeRunShutsDownSessionsOnContextCancel(t *testing.T) {
 	}
 }
 
+// orderingFakeProvider appends "stop:<name>" to seq when Stop is called so
+// tests can assert ordering relative to other lifecycle events.
+type orderingFakeProvider struct {
+	*runtime.Fake
+	mu  sync.Mutex
+	seq []string
+}
+
+func (p *orderingFakeProvider) Stop(name string) error {
+	p.mu.Lock()
+	p.seq = append(p.seq, "stop:"+name)
+	p.mu.Unlock()
+	return p.Fake.Stop(name)
+}
+
+func (p *orderingFakeProvider) events() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.seq...)
+}
+
+type interruptStopsProvider struct {
+	*runtime.Fake
+}
+
+func (p *interruptStopsProvider) Interrupt(name string) error {
+	if err := p.Fake.Interrupt(name); err != nil {
+		return err
+	}
+	return p.Stop(name)
+}
+
+// TestCityRuntimeShutdownDrainsOrderDispatch verifies shutdown invokes
+// orderDispatcher.drain with a fresh (non-canceled) context before
+// stopping sessions — regression for #991.
+func TestCityRuntimeShutdownDrainsOrderDispatch(t *testing.T) {
+	cfg := &config.City{}
+	cfg.Daemon.ShutdownTimeout = "1s"
+
+	sp := runtime.NewFake()
+	od := &recordingOrderDispatcher{}
+
+	var stdout, stderr bytes.Buffer
+	cr := &CityRuntime{
+		cfg:       cfg,
+		sp:        sp,
+		od:        od,
+		rec:       events.Discard,
+		logPrefix: "gc start",
+		stdout:    &stdout,
+		stderr:    &stderr,
+	}
+
+	cr.shutdown()
+
+	if od.drainCalls != 1 {
+		t.Fatalf("drainCalls = %d, want 1", od.drainCalls)
+	}
+	if od.drainCtxErr != nil {
+		t.Fatalf("drain received a canceled ctx (%v); shutdown must pass a fresh context", od.drainCtxErr)
+	}
+}
+
+func TestCityRuntimeShutdownPreservesFullGracefulBudgetWithOrders(t *testing.T) {
+	cfg := &config.City{}
+	cfg.Daemon.ShutdownTimeout = "1s"
+
+	sp := &interruptStopsProvider{Fake: runtime.NewFake()}
+	if err := sp.Start(context.Background(), "probe", runtime.Config{}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	od := &recordingOrderDispatcher{}
+
+	var stdout, stderr bytes.Buffer
+	cr := &CityRuntime{
+		cfg:       cfg,
+		sp:        sp,
+		od:        od,
+		rec:       events.Discard,
+		logPrefix: "gc start",
+		stdout:    &stdout,
+		stderr:    &stderr,
+	}
+
+	cr.shutdown()
+
+	if !strings.Contains(stdout.String(), "waiting 1s") {
+		t.Fatalf("stdout = %q, want full 1s graceful session budget", stdout.String())
+	}
+}
+
+// TestCityRuntimeShutdownBlockedDispatchPersistsOutcomeBeforeGracefulStop
+// is the AC regression for #991: "a blocked/fake dispatch cannot let
+// controller exit before the tracking bead is closed or failure metadata
+// is persisted." It starts a real memoryOrderDispatcher, wedges its exec
+// until after shutdown is invoked, and asserts both that the tracking
+// bead is closed before shutdown returns AND that session Stop happens
+// AFTER the dispatch finishes — proving drain blocks gracefulStopAll.
+func TestCityRuntimeShutdownBlockedDispatchPersistsOutcomeBeforeGracefulStop(t *testing.T) {
+	store := beads.NewMemStore()
+	release := make(chan struct{})
+	execStarted := make(chan struct{})
+	execDone := make(chan struct{})
+
+	fakeExec := func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
+		close(execStarted)
+		<-release
+		close(execDone)
+		return []byte("ok\n"), nil
+	}
+
+	ad := buildOrderDispatcherFromListExec(
+		[]orders.Order{{Name: "blocked", Trigger: "cooldown", Interval: "2m", Exec: "scripts/blocked.sh"}},
+		store, nil, fakeExec, nil,
+	)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	<-execStarted
+
+	sp := &orderingFakeProvider{Fake: runtime.NewFake()}
+	if err := sp.Start(context.Background(), "probe", runtime.Config{}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+
+	cfg := &config.City{}
+	cfg.Daemon.ShutdownTimeout = "200ms"
+
+	var stdout, stderr bytes.Buffer
+	cr := &CityRuntime{
+		cfg:       cfg,
+		sp:        sp,
+		od:        ad,
+		rec:       events.Discard,
+		logPrefix: "gc start",
+		stdout:    &stdout,
+		stderr:    &stderr,
+	}
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		cr.shutdown()
+		close(shutdownDone)
+	}()
+
+	// shutdown must not return while exec is blocked.
+	select {
+	case <-shutdownDone:
+		t.Fatal("shutdown returned before drain waited for in-flight dispatch")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Session must not have been stopped yet — drain is still waiting.
+	if got := sp.events(); len(got) != 0 {
+		t.Fatalf("session lifecycle ran before drain completed: %v", got)
+	}
+
+	close(release)
+	<-execDone
+
+	select {
+	case <-shutdownDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown did not return after dispatch completed")
+	}
+
+	// Tracking bead outcome must be persisted before shutdown returned.
+	all, err := store.ListByLabel("order-run:blocked", 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	foundExecLabel := false
+	for _, b := range all {
+		for _, l := range b.Labels {
+			if l == "exec" {
+				foundExecLabel = true
+			}
+		}
+	}
+	if !foundExecLabel {
+		t.Fatalf("tracking bead missing exec outcome label after shutdown; beads=%+v", all)
+	}
+
+	// gracefulStopAll must have run after drain.
+	got := sp.events()
+	if len(got) == 0 || got[0] != "stop:probe" {
+		t.Fatalf("expected stop:probe after drain, got %v", got)
+	}
+}
+
+func TestCityRuntimeShutdownPreservesFullGracefulBudgetWhenNoOrders(t *testing.T) {
+	cfg := &config.City{}
+	cfg.Daemon.ShutdownTimeout = "1s"
+
+	sp := &interruptStopsProvider{Fake: runtime.NewFake()}
+	if err := sp.Start(context.Background(), "probe", runtime.Config{}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	cr := &CityRuntime{
+		cfg:       cfg,
+		sp:        sp,
+		rec:       events.Discard,
+		logPrefix: "gc start",
+		stdout:    &stdout,
+		stderr:    &stderr,
+	}
+
+	cr.shutdown()
+
+	if !strings.Contains(stdout.String(), "waiting 1s") {
+		t.Fatalf("stdout = %q, want full 1s graceful session budget", stdout.String())
+	}
+}
+
+func TestCityRuntimeShutdownZeroTimeoutDoesNotWaitForOrderDrain(t *testing.T) {
+	cfg := &config.City{}
+	cfg.Daemon.ShutdownTimeout = "0s"
+
+	od := newBlockingOrderDispatcher()
+	var stdout, stderr bytes.Buffer
+	cr := &CityRuntime{
+		cfg:       cfg,
+		sp:        runtime.NewFake(),
+		od:        od,
+		rec:       events.Discard,
+		logPrefix: "gc start",
+		stdout:    &stdout,
+		stderr:    &stderr,
+	}
+
+	done := make(chan struct{})
+	go func() {
+		cr.shutdown()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("shutdown waited on order drain despite shutdown_timeout=0s")
+	}
+	close(od.release)
+}
+
 func TestCityRuntimeShutdownWarnsWhenSessionListingIsPartial(t *testing.T) {
 	sp := &partialListPoolProvider{
 		Fake:      runtime.NewFake(),
@@ -3328,12 +3852,32 @@ func TestCityRuntimeShutdownWarnsWhenSessionListingIsPartial(t *testing.T) {
 
 func writeCityRuntimeConfig(t *testing.T, tomlPath, provider string) {
 	t.Helper()
+	clearInheritedBeadsEnv(t)
 	writeCityRuntimeConfigNamed(t, tomlPath, "test-city", provider)
+}
+
+func loadCityRuntimeControllerConfig(t *testing.T, cityPath string) (*config.City, string) {
+	t.Helper()
+	cfg, prov, err := loadCityConfigWithBuiltinPacks(cityPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	applyFeatureFlags(cfg)
+	return cfg, config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
 }
 
 func writeCityRuntimeConfigNamed(t *testing.T, tomlPath, name, provider string) {
 	t.Helper()
+	clearInheritedBeadsEnv(t)
 	data := []byte("[workspace]\nname = \"" + name + "\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"" + provider + "\"\n")
+	if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+}
+
+func writeCityRuntimeConfigWithShutdownTimeout(t *testing.T, tomlPath, provider, timeout string) {
+	t.Helper()
+	data := []byte("[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"" + provider + "\"\n\n[daemon]\nshutdown_timeout = \"" + timeout + "\"\n")
 	if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -3350,6 +3894,7 @@ func warningsContain(warnings []string, substr string) bool {
 
 func writeCityRuntimeConfigWithIncludes(t *testing.T, tomlPath string, includes []string) {
 	t.Helper()
+	clearInheritedBeadsEnv(t)
 	var quoted []string
 	for _, include := range includes {
 		quoted = append(quoted, fmt.Sprintf("%q", include))

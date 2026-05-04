@@ -9,9 +9,11 @@
 package acceptance_test
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/session"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
@@ -90,38 +92,52 @@ func TestSessionErrors(t *testing.T) {
 	})
 }
 
-func TestSessionEmptyCity(t *testing.T) {
+func TestSessionDefaultNamedSession(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
 	c.Init("claude")
 
-	t.Run("List_Empty", func(t *testing.T) {
+	t.Run("List_DefaultNamedSession", func(t *testing.T) {
 		out, err := c.GC("session", "list")
 		if err != nil {
 			t.Fatalf("gc session list: %v\n%s", err, out)
 		}
-		if !strings.Contains(out, "No sessions found") {
-			t.Errorf("expected 'No sessions found' on fresh city, got:\n%s", out)
+		if strings.Contains(out, "No sessions found") {
+			t.Errorf("expected default named session on fresh city, got:\n%s", out)
+		}
+		for _, want := range []string{"mayor", "creating"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("expected %q in default named session list, got:\n%s", want, out)
+			}
 		}
 	})
 
-	t.Run("List_JSON", func(t *testing.T) {
+	t.Run("List_JSON_DefaultNamedSession", func(t *testing.T) {
 		out, err := c.GC("session", "list", "--json")
 		if err != nil {
 			t.Fatalf("gc session list --json: %v\n%s", err, out)
 		}
-		trimmed := strings.TrimSpace(out)
-		if trimmed != "[]" && trimmed != "null" && !strings.HasPrefix(trimmed, "[") {
-			t.Errorf("expected JSON array on fresh city, got:\n%s", out)
+		var got []session.Info
+		if err := json.Unmarshal([]byte(out), &got); err != nil {
+			t.Fatalf("gc session list --json output is not a session array: %v\n%s", err, out)
+		}
+		if len(got) != 1 {
+			t.Fatalf("session count = %d, want 1 default named session\n%s", len(got), out)
+		}
+		if got[0].Template != "mayor" {
+			t.Errorf("template = %q, want mayor\n%s", got[0].Template, out)
+		}
+		if got[0].State != session.StateCreating {
+			t.Errorf("state = %q, want creating\n%s", got[0].State, out)
 		}
 	})
 
-	t.Run("Prune_Empty", func(t *testing.T) {
+	t.Run("Prune_NoClosedSessions", func(t *testing.T) {
 		out, err := c.GC("session", "prune")
 		if err != nil {
 			t.Fatalf("gc session prune: %v\n%s", err, out)
 		}
 		if !strings.Contains(out, "No sessions to prune") {
-			t.Errorf("expected 'No sessions to prune' on fresh city, got:\n%s", out)
+			t.Errorf("expected 'No sessions to prune' with only default named session, got:\n%s", out)
 		}
 	})
 }

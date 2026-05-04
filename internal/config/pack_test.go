@@ -641,6 +641,38 @@ func TestPackContentHashRecursive(t *testing.T) {
 	}
 }
 
+func TestPackContentHashRecursiveIgnoresRuntimeDirs(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "pack.toml", "test")
+	writeFile(t, dir, "prompts/a.md", "prompt a")
+
+	h1 := PackContentHashRecursive(fsys.OSFS{}, dir)
+	writeFile(t, dir, "state/triage/runs/audit.json", `{"status":"running"}`)
+	writeFile(t, dir, "tmp/scratch.txt", "scratch")
+	writeFile(t, dir, "__pycache__/helper.pyc", "compiled")
+	writeFile(t, dir, ".gc/runtime.json", `{"pid":123}`)
+	writeFile(t, dir, ".beads/db", "runtime state")
+	writeFile(t, dir, ".cache/tool/result.json", `{"cached":true}`)
+	writeFile(t, dir, ".git/HEAD", "ref: refs/heads/main")
+	writeFile(t, dir, "nested/__pycache__/helper.pyc", "compiled")
+	h2 := PackContentHashRecursive(fsys.OSFS{}, dir)
+	if h2 != h1 {
+		t.Fatalf("hash changed after runtime output writes: %q vs %q", h1, h2)
+	}
+
+	writeFile(t, dir, "prompts/state/example.md", "state prompt")
+	hPromptState := PackContentHashRecursive(fsys.OSFS{}, dir)
+	if hPromptState == h1 {
+		t.Fatal("hash should change for config content below a non-runtime state path")
+	}
+
+	writeFile(t, dir, "prompts/a.md", "modified prompt a")
+	h3 := PackContentHashRecursive(fsys.OSFS{}, dir)
+	if h3 == h1 {
+		t.Fatal("hash should still change when config-bearing pack content changes")
+	}
+}
+
 func TestExpandPacks_ViaLoadWithIncludes(t *testing.T) {
 	dir := t.TempDir()
 

@@ -74,6 +74,45 @@ func TestRequestIDFromPayloadCoversAsyncPayloads(t *testing.T) {
 	}
 }
 
+func TestCurrentCityEventCursor(t *testing.T) {
+	t.Run("no provider", func(t *testing.T) {
+		fs := newFakeState(t)
+		fs.eventProv = nil
+		srv := &Server{state: fs}
+		got, err := srv.currentCityEventCursor()
+		if err != nil {
+			t.Fatalf("currentCityEventCursor() error = %v", err)
+		}
+		if got != "0" {
+			t.Fatalf("currentCityEventCursor() = %q, want 0", got)
+		}
+	})
+
+	t.Run("latest seq", func(t *testing.T) {
+		fs := newFakeState(t)
+		ep := fs.eventProv.(*events.Fake)
+		ep.Record(events.Event{Type: events.SessionWoke, Actor: "test"})
+		ep.Record(events.Event{Type: events.SessionStopped, Actor: "test"})
+		srv := &Server{state: fs}
+		got, err := srv.currentCityEventCursor()
+		if err != nil {
+			t.Fatalf("currentCityEventCursor() error = %v", err)
+		}
+		if got != "2" {
+			t.Fatalf("currentCityEventCursor() = %q, want 2", got)
+		}
+	})
+
+	t.Run("provider error", func(t *testing.T) {
+		fs := newFakeState(t)
+		fs.eventProv = events.NewFailFake()
+		srv := &Server{state: fs}
+		if got, err := srv.currentCityEventCursor(); err == nil {
+			t.Fatalf("currentCityEventCursor() = %q, nil error; want provider error", got)
+		}
+	})
+}
+
 func TestEmitRequestFailedRecordsTypedPayload(t *testing.T) {
 	rec := events.NewFake()
 

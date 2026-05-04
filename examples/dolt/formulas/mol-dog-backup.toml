@@ -33,22 +33,58 @@ description = "List of databases to back up (comma-separated, or empty for auto-
 default = ""
 
 [[steps]]
+id = "preflight"
+title = "Verify dolt version compatible with backup sync"
+description = """
+**Required:** dolt >= 1.86.2.
+
+Older dolt versions have a GC/writer deadlock that hangs the sql-server
+during dolt_backup sync against databases under heavy concurrent write
+load (e.g. the gm bead store). The watchdog will kill the hung server
+and disrupt every dependent agent.
+
+Run:
+```bash
+dolt version | head -1
+```
+
+If the version is < 1.86.2, abort the molecule and nudge the mayor to
+upgrade dolt. Do NOT proceed to the sync step or close it as successful.
+
+Close this bead with:
+```bash
+bd update "$GC_BEAD_ID" --set-metadata gc.outcome=fail --set-metadata gc.failure_class=hard --set-metadata gc.failure_reason=dolt-too-old --status closed
+```
+This formula does not wire scoped-abort metadata; the failed preflight outcome
+is the stop signal. Check the preflight outcome before acting on `sync`.
+"""
+
+[[steps]]
 id = "sync"
 title = "Sync databases to backup remotes"
+needs = ["preflight"]
 description = """
 Run dolt backup sync for each production database.
 
-**1. Determine databases:**
+**1. Verify preflight passed:**
+Before running any `dolt backup sync`, read the `preflight` bead in this
+molecule and verify its `gc.outcome` metadata is `pass`. If the preflight
+outcome is `fail` or missing, close this bead with `gc.outcome=fail`,
+`gc.failure_class=hard`, and `gc.failure_reason=preflight-failed`. Do not run
+sync. This formula does not wire scoped-abort metadata; this check is the
+enforcement point.
+
+**2. Determine databases:**
 Use configured databases list, or auto-discover databases with
 `<name>-backup` remotes configured.
 
-**2. For each database:**
+**3. For each database:**
 ```bash
 cd <data_dir>/<db>
 dolt backup sync <db>-backup
 ```
 
-**3. Record results:**
+**4. Record results:**
 - Databases synced successfully
 - Databases that failed (with error)
 - Duration per database
@@ -94,7 +130,7 @@ Generate summary and signal completion.
 
 **2. Signal completion:**
 ```bash
-gc nudge deacon/ "DOG_DONE: backup — synced <count>/<total>, offsite: <status>"
+gc session nudge deacon/ "DOG_DONE: backup — synced <count>/<total>, offsite: <status>"
 ```
 
 **3. Close work and exit:**

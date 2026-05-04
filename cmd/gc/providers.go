@@ -189,7 +189,7 @@ func newSessionProviderFromContext(ctx sessionProviderContext, sessionBeads *ses
 }
 
 func newSessionProviderFromContextWithError(ctx sessionProviderContext, sessionBeads *sessionBeadSnapshot) (runtime.Provider, error) {
-	sp, err := newSessionProviderByName(ctx.providerName, ctx.sc, ctx.cityName, ctx.cityPath)
+	sp, err := buildSessionProviderByName(ctx.providerName, ctx.sc, ctx.cityName, ctx.cityPath)
 	if err != nil {
 		return nil, err
 	}
@@ -566,6 +566,27 @@ func scopeUsesFileStoreContract(scopeRoot string) bool {
 	}
 	_, err := os.Stat(filepath.Join(scopeRoot, ".gc", "beads.json"))
 	return err == nil
+}
+
+// bdProviderMismatchHint returns an actionable diagnostic when gc bd
+// rejects a scope as non-bd-backed. It names the marker that tipped
+// the resolver and suggests a fix. Returns "" when the cause is not
+// a local scope-marker issue (e.g., explicit city/env provider).
+func bdProviderMismatchHint(scopeRoot, resolvedProvider string) string {
+	if resolvedProvider == "file" && scopeUsesFileStoreContract(scopeRoot) {
+		return fmt.Sprintf(
+			"%s/.gc/beads.json exists, which marks this scope as file-backed. "+
+				"If it is a stale artifact from a previous city or pre-migration "+
+				"layout, move it aside (e.g., rename to .gc/beads.json.bak). To "+
+				"positively mark this scope as bd-backed, add "+
+				"%s/.beads/metadata.json (with backend=dolt and the dolt_database "+
+				"name).",
+			scopeRoot, scopeRoot)
+	}
+	if strings.TrimSpace(os.Getenv("GC_BEADS")) != "" {
+		return "GC_BEADS env var overrides the provider. Unset it, or set GC_BEADS=bd for this scope."
+	}
+	return "check city.toml [beads].provider and any per-rig provider overrides."
 }
 
 // beadsProvider returns the bead store provider name for lifecycle operations.

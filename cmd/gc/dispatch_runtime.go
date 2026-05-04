@@ -187,10 +187,14 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 	}
 	workDir := agentCommandDir(cityPath, &agentCfg, cfg.Rigs)
 	workEnv := controllerWorkQueryEnv(cityPath, cfg, &agentCfg)
+	cityName := loadedCityName(cfg, cityPath)
 	// Expand {{.Rig}}/{{.AgentBase}} once so the long-poll drain reuses the
 	// rig-scoped command instead of passing the literal template to the shell
 	// on every iteration. #793.
-	workQuery := expandAgentCommandTemplate(cityPath, loadedCityName(cfg, cityPath), &agentCfg, cfg.Rigs, "work_query", agentCfg.EffectiveWorkQuery(), stderr)
+	workQuery := expandAgentCommandTemplate(cityPath, cityName, &agentCfg, cfg.Rigs, "work_query", agentCfg.EffectiveWorkQuery(), stderr)
+	if agentCfg.WorkQuery == "" && isWorkflowServeControlDispatcherAgent(agentCfg) {
+		workQuery = workflowServeControlReadyQuery(agentCfg, config.NamedSessionRuntimeName(cityName, cfg.Workspace, agentCfg.QualifiedName()))
+	}
 	workflowTracef("serve start agent=%s city=%s dir=%s", agentCfg.QualifiedName(), cityPath, workDir)
 	if !follow {
 		_, err := drainWorkflowServeWork(agentCfg, cityPath, workDir, workQuery, workEnv, stderr)
@@ -265,7 +269,6 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 			workflowTracef("serve processed bead=%s kind=%s", beadID, kind)
 			result.processedAny = true
 			processedThisCycle = true
-			break
 		}
 		if processedThisCycle {
 			continue
@@ -420,13 +423,13 @@ func workflowServeQuery(workQuery string) string {
 }
 
 func workflowServeWorkQuery(agentCfg config.Agent, expandedWorkQuery ...string) string {
+	if len(expandedWorkQuery) > 0 {
+		return workflowServeQuery(expandedWorkQuery[0])
+	}
 	if agentCfg.WorkQuery == "" && isWorkflowServeControlDispatcherAgent(agentCfg) {
 		return workflowServeControlReadyQuery(agentCfg)
 	}
 	workQuery := agentCfg.EffectiveWorkQuery()
-	if len(expandedWorkQuery) > 0 {
-		workQuery = expandedWorkQuery[0]
-	}
 	return workflowServeQuery(workQuery)
 }
 
@@ -436,30 +439,38 @@ func isWorkflowServeControlDispatcherAgent(agentCfg config.Agent) bool {
 		strings.HasSuffix(qualified, "/"+config.ControlDispatcherAgentName)
 }
 
-func workflowServeControlReadyQuery(agentCfg config.Agent) string {
+func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames ...string) string {
 	target := strings.TrimSpace(agentCfg.QualifiedName())
 	if target == "" {
 		target = config.ControlDispatcherAgentName
 	}
 	limit := fmt.Sprintf("%d", workflowServeScanLimit)
-	queryPrefix := `GC_CONTROL_TARGET=` + shellquote.Quote(target)
+	queryPrefix := `BD_EXPORT_AUTO=false GC_CONTROL_TARGET=` + shellquote.Quote(target)
+	for _, name := range controlSessionNames {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		queryPrefix += ` GC_CONTROL_SESSION_NAME=` + shellquote.Quote(name)
+		break
+	}
 	if legacy := workflowServeLegacyControlRoute(target); legacy != "" {
 		queryPrefix += ` GC_CONTROL_LEGACY_TARGET=` + shellquote.Quote(legacy)
 	}
 	query := queryPrefix + ` sh -c '` +
-		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS" "$GC_CONTROL_TARGET"; do ` +
+		`for id in "$GC_CONTROL_SESSION_NAME" "$GC_SESSION_NAME" "$GC_ALIAS" "$GC_CONTROL_TARGET" "$GC_SESSION_ID"; do ` +
 		`[ -z "$id" ] && continue; ` +
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
-		`r=$(bd ready --assignee="$cand" --json --limit=` + limit + ` 2>/dev/null); ` +
+		`r=$(bd --readonly --sandbox ready --assignee="$cand" --json --limit=` + limit + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`done; ` +
 		`done; ` +
-		`r=$(bd ready --metadata-field "gc.routed_to=$GC_CONTROL_TARGET" --unassigned --json --limit=` + limit + ` 2>/dev/null); ` +
+		`r=$(bd --readonly --sandbox ready --metadata-field "gc.routed_to=$GC_CONTROL_TARGET" --unassigned --json --limit=` + limit + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `
 	if legacy := workflowServeLegacyControlRoute(target); legacy != "" {
-		query += `bd ready --metadata-field "gc.routed_to=$GC_CONTROL_LEGACY_TARGET" --unassigned --json --limit=` + limit + ` 2>/dev/null'`
+		query += `bd --readonly --sandbox ready --metadata-field "gc.routed_to=$GC_CONTROL_LEGACY_TARGET" --unassigned --json --limit=` + limit + ` 2>/dev/null'`
 	} else {
 		query += `printf "[]"` + `'`
 	}

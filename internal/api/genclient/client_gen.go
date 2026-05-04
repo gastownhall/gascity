@@ -415,6 +415,9 @@ type AnnotatedProviderResponse struct {
 
 // AsyncAcceptedBody defines model for AsyncAcceptedBody.
 type AsyncAcceptedBody struct {
+	// EventCursor City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or the event log is empty.
+	EventCursor string `json:"event_cursor"`
+
 	// RequestId Correlation ID. Watch the city event stream for request.result.session.create, request.result.session.message, request.result.session.submit, or request.failed with this request_id.
 	RequestId string `json:"request_id"`
 
@@ -424,6 +427,9 @@ type AsyncAcceptedBody struct {
 
 // AsyncAcceptedResponse defines model for AsyncAcceptedResponse.
 type AsyncAcceptedResponse struct {
+	// EventCursor Supervisor event-stream cursor captured before the async request was accepted. Pass this value as after_cursor to /v0/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or every event log is empty.
+	EventCursor string `json:"event_cursor"`
+
 	// RequestId Correlation ID. Watch /v0/events/stream for request.result.city.create, request.result.city.unregister, or request.failed with this request_id.
 	RequestId string `json:"request_id"`
 }
@@ -4164,10 +4170,10 @@ type EmitEventParams struct {
 
 // StreamEventsParams defines parameters for StreamEvents.
 type StreamEventsParams struct {
-	// AfterSeq Reconnect position: only deliver events after this sequence number.
+	// AfterSeq Reconnect position: only deliver events after this sequence number. Omit after_seq and Last-Event-ID to start at the current city event head.
 	AfterSeq *string `form:"after_seq,omitempty" json:"after_seq,omitempty"`
 
-	// LastEventID SSE reconnect position from the last received event ID.
+	// LastEventID SSE reconnect position from the last received event ID. Omit Last-Event-ID and after_seq to start at the current city event head.
 	LastEventID *string `json:"Last-Event-ID,omitempty"`
 }
 
@@ -4788,10 +4794,10 @@ type GetV0EventsParams struct {
 
 // StreamSupervisorEventsParams defines parameters for StreamSupervisorEvents.
 type StreamSupervisorEventsParams struct {
-	// AfterCursor Alternative to Last-Event-ID for browsers that can't set custom headers.
+	// AfterCursor Alternative to Last-Event-ID for browsers that can't set custom headers. Omit after_cursor and Last-Event-ID to start at the current supervisor event head.
 	AfterCursor *string `form:"after_cursor,omitempty" json:"after_cursor,omitempty"`
 
-	// LastEventID Reconnect cursor (composite per-city cursor).
+	// LastEventID Reconnect cursor (composite per-city cursor). Omit Last-Event-ID and after_cursor to start at the current supervisor event head.
 	LastEventID *string `json:"Last-Event-ID,omitempty"`
 }
 

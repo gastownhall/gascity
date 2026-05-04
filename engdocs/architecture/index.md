@@ -28,8 +28,8 @@ multi-agent orchestration system.
    activity
 5. **[Config System](./config.md)** — TOML loading, progressive activation,
    multi-layer override resolution
-6. **[Agent Protocol](./agent-protocol.md)** — agent lifecycle backed by
-   session providers (tmux, subprocess, k8s)
+6. **[Session](./session.md)** — session lifecycle backed by runtime
+   providers (tmux, subprocess, exec, k8s)
 7. **[Prompt Templates](./prompt-templates.md)** — Go `text/template` in
    Markdown defining role behavior
 
@@ -38,7 +38,7 @@ multi-agent orchestration system.
 Each is provably composable from the primitives.
 
 8. **[Messaging](./messaging.md)** — inter-agent mail via beads + nudge
-   via agent protocol
+   via the Session primitive
 9. **[Formulas & Molecules](./formulas.md)** — work definitions (TOML) and
    their runtime instances (bead trees)
 10. **[Dispatch](./dispatch.md)** — sling: agent selection + formula

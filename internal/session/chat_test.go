@@ -56,10 +56,10 @@ func TestStripResumeFlag(t *testing.T) {
 	}{
 		{
 			name:       "removes resume flag and key",
-			cmd:        "claude --model claude-opus-4-6 --resume abc-123",
+			cmd:        "claude --model claude-opus-4-7 --resume abc-123",
 			resumeFlag: "--resume",
 			sessionKey: "abc-123",
-			want:       "claude --model claude-opus-4-6",
+			want:       "claude --model claude-opus-4-7",
 		},
 		{
 			name:       "resume flag at end",

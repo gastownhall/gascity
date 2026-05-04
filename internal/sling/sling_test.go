@@ -2603,6 +2603,19 @@ func TestSourceWorkflowLockScopeUsesStorePath(t *testing.T) {
 	}); got != filepath.Join("/city", "rigs", "alpha") {
 		t.Fatalf("rig scope = %q, want %q", got, filepath.Join("/city", "rigs", "alpha"))
 	}
+	wantShared := sourceworkflow.LockScopeForStoreRef("/city", "", "rig:alpha", func(rigName string) (string, bool) {
+		if rigName != "alpha" {
+			return "", false
+		}
+		return "rigs/alpha", true
+	})
+	if got := sourceWorkflowLockScope(SlingDeps{
+		CityPath: "/city",
+		StoreRef: "rig:alpha",
+		Cfg:      cfg,
+	}); got != wantShared {
+		t.Fatalf("rig scope = %q, want shared helper scope %q", got, wantShared)
+	}
 }
 
 func TestSlingExpandConvoy(t *testing.T) {

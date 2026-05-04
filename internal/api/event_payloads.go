@@ -67,7 +67,7 @@ func (CityUnregisterSucceededPayload) IsEventPayload() {}
 // SessionCreateSucceededPayload is emitted on request.result.session.create.
 type SessionCreateSucceededPayload struct {
 	RequestID string          `json:"request_id" doc:"Correlation ID from the 202 response."`
-	Session   sessionResponse `json:"session" doc:"Full session state as returned by GET /session/{id}."`
+	Session   sessionResponse `json:"session" doc:"Full session state as returned by GET /session/{id}. For session.create, this result is emitted only after the session has left creating and can accept normal metadata and lifecycle commands."`
 }
 
 // IsEventPayload marks SessionCreateSucceededPayload as an events.Payload variant.

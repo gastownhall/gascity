@@ -1384,6 +1384,25 @@ func TestBdStoreSetMetadataError(t *testing.T) {
 	}
 }
 
+func TestBdStoreSetMetadataBatchRetriesDoltSerializationFailure(t *testing.T) {
+	calls := 0
+	runner := func(_, _ string, _ ...string) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			return nil, fmt.Errorf("exit status 1: Error updating bd-42: dolt commit: Error 1213 (40001): serialization failure: this transaction conflicts with a committed transaction from another client, try restarting transaction")
+		}
+		return []byte(`{"id":"bd-42"}`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	err := s.SetMetadataBatch("bd-42", map[string]string{"state": "active"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2", calls)
+	}
+}
+
 func TestBdStoreSetMetadataCLINotFound(t *testing.T) {
 	runner := func(_, _ string, _ ...string) ([]byte, error) {
 		return nil, fmt.Errorf("exit status 1: Error updating x: issue not found: bd-42")
@@ -1767,6 +1786,35 @@ func TestExecCommandRunnerWithEnvOverridesInheritedValues(t *testing.T) {
 	}
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("runner should preserve working dir usability: %v", err)
+	}
+}
+
+func TestExecCommandRunnerWithEnvSurfacesBdJSONErrorFromStdout(t *testing.T) {
+	binDir := t.TempDir()
+	bdPath := filepath.Join(binDir, "bd")
+	script := `#!/bin/sh
+printf '%s\n' 'bd warning before json'
+printf '%s\n' '{"error":"resolving dependency: no issue found bd-missing","schema_version":1}'
+exit 1
+`
+	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	runner := beads.ExecCommandRunnerWithEnv(map[string]string{
+		"GC_CITY_PATH": "/city",
+	})
+
+	out, err := runner(t.TempDir(), "bd", "dep", "list", "bd-missing", "--json")
+	if err == nil {
+		t.Fatal("runner error = nil, want bd exit error")
+	}
+	if !strings.Contains(err.Error(), "resolving dependency: no issue found bd-missing") {
+		t.Fatalf("runner error = %q, want stdout JSON error detail", err.Error())
+	}
+	if !strings.Contains(string(out), `"schema_version":1`) {
+		t.Fatalf("runner stdout = %q, want original bd stdout preserved", string(out))
 	}
 }
 

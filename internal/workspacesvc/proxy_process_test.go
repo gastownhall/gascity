@@ -177,6 +177,7 @@ func TestProxyProcessHelper(t *testing.T) {
 			"GC_CITY_RUNTIME_DIR":       os.Getenv("GC_CITY_RUNTIME_DIR"),
 			"GC_SERVICE_NAME":           os.Getenv("GC_SERVICE_NAME"),
 			"GC_SERVICE_STATE_ROOT":     os.Getenv("GC_SERVICE_STATE_ROOT"),
+			"GC_SERVICE_URL_PREFIX":     os.Getenv("GC_SERVICE_URL_PREFIX"),
 			"GC_SERVICE_PUBLIC_URL":     os.Getenv("GC_SERVICE_PUBLIC_URL"),
 			"GC_SERVICE_VISIBILITY":     os.Getenv("GC_SERVICE_VISIBILITY"),
 			"GC_PUBLISHED_SERVICES_DIR": os.Getenv("GC_PUBLISHED_SERVICES_DIR"),
@@ -280,6 +281,11 @@ func TestProxyProcessPublishesServiceEnv(t *testing.T) {
 	}
 	if env["GC_PUBLISHED_SERVICES_DIR"] != citylayout.PublishedServicesDir(rt.cityPath) {
 		t.Fatalf("GC_PUBLISHED_SERVICES_DIR = %q, want %q", env["GC_PUBLISHED_SERVICES_DIR"], citylayout.PublishedServicesDir(rt.cityPath))
+	}
+	// Must be supervisor-routable; the per-city /svc/<name> form 404s on inbound.
+	wantPrefix := citylayout.PublicServiceMountPath(rt.cityName, "bridge")
+	if env["GC_SERVICE_URL_PREFIX"] != wantPrefix {
+		t.Fatalf("GC_SERVICE_URL_PREFIX = %q, want %q", env["GC_SERVICE_URL_PREFIX"], wantPrefix)
 	}
 }
 

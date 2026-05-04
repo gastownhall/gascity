@@ -29,20 +29,57 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 
 	now := time.Now()
 	c.mu.RLock()
-	if c.state != cacheLive {
+	if c.state != cacheLive && c.state != cachePartial {
 		c.mu.RUnlock()
 		return
 	}
 	current, cached := c.beads[patch.ID]
+	currentDeps, depsKnown := c.deps[patch.ID]
+	if !depsKnown && c.depsComplete {
+		depsKnown = true
+	}
+	currentDeps = cloneDeps(currentDeps)
 	_, locallyMutated := c.beadSeq[patch.ID]
-	recentlyLocal := recentLocalMutation(c.localBeadAt[patch.ID], now)
+	localBeadAt := c.localBeadAt[patch.ID]
+	locallyChanged := !localBeadAt.IsZero()
+	recentlyLocal := recentLocalMutation(localBeadAt, now)
+	_, locallyDeleted := c.deletedSeq[patch.ID]
+	fieldConflictCached := cached && cacheEventConflictsCurrent(current, patch, fields)
+	dependencyConflictCached := cached && cacheEventDependencyConflict(currentDeps, depsKnown, patch, fields)
+	conflictsCached := fieldConflictCached || dependencyConflictCached
+	var conflictBase Bead
+	if conflictsCached {
+		conflictBase = cloneBead(current)
+	}
 	c.mu.RUnlock()
 
-	conflictsCached := eventType != "bead.closed" && cached && cacheEventConflictsCurrent(current, patch, fields)
-	if conflictsCached && locallyMutated {
+	verifiedConflict := false
+	var verifiedClosedBase Bead
+	verifiedRecentLocal := false
+	var verifiedRecentLocalBase Bead
+	if conflictsCached && eventType == "bead.closed" {
+		matchesBacking, verifyErr := c.cacheClosedEventMatchesBacking(patch.ID)
+		if verifyErr != nil {
+			c.recordProblem(fmt.Sprintf("verify %s event", eventType), verifyErr)
+			// Drop destructive close events on verification failure; reconciliation
+			// can catch up without overwriting a local reopen with a stale close.
+			return
+		}
+		if !matchesBacking {
+			return
+		}
+		verifiedConflict = true
+		verifiedClosedBase = conflictBase
+	}
+	if fieldConflictCached && eventType != "bead.closed" && locallyMutated && !verifiedConflict {
 		return
 	}
-	if conflictsCached && recentlyLocal {
+	if dependencyConflictCached && eventType != "bead.closed" && (locallyChanged || locallyMutated) && !verifiedConflict {
+		return
+	}
+	if conflictsCached && recentlyLocal && !verifiedConflict {
+		verifiedRecentLocal = true
+		verifiedRecentLocalBase = conflictBase
 		matchesBacking, verifyErr := c.cacheEventMatchesBacking(patch.ID, patch, fields)
 		if verifyErr == nil && !matchesBacking {
 			return
@@ -56,6 +93,10 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 	if !cached {
 		if fresh, err := c.backing.Get(patch.ID); err == nil {
 			b = fresh
+		} else if errors.Is(err, ErrNotFound) {
+			if eventType != "bead.created" && locallyDeleted {
+				return
+			}
 		} else if !errors.Is(err, ErrNotFound) {
 			c.recordProblem(fmt.Sprintf("refresh %s event", eventType), err)
 		}
@@ -67,13 +108,32 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.state != cacheLive {
+	if c.state != cacheLive && c.state != cachePartial {
 		return
 	}
 	if current, ok := c.beads[patch.ID]; ok {
-		if eventType != "bead.closed" && cacheEventConflictsCurrent(current, patch, fields) {
-			if _, locallyMutated := c.beadSeq[patch.ID]; locallyMutated || recentLocalMutation(c.localBeadAt[patch.ID], time.Now()) {
-				return
+		currentDeps, depsKnown := c.deps[patch.ID]
+		if !depsKnown && c.depsComplete {
+			depsKnown = true
+		}
+		fieldConflict := cacheEventConflictsCurrent(current, patch, fields)
+		dependencyConflict := cacheEventDependencyConflict(currentDeps, depsKnown, patch, fields)
+		if fieldConflict || dependencyConflict {
+			if eventType == "bead.closed" {
+				if !verifiedConflict || beadChanged(current, verifiedClosedBase) {
+					return
+				}
+			} else {
+				if _, locallyMutated := c.beadSeq[patch.ID]; fieldConflict && locallyMutated {
+					return
+				}
+				if _, locallyMutated := c.beadSeq[patch.ID]; dependencyConflict && locallyMutated {
+					return
+				}
+				if recentLocalMutation(c.localBeadAt[patch.ID], time.Now()) &&
+					(!verifiedRecentLocal || beadChanged(current, verifiedRecentLocalBase)) {
+					return
+				}
 			}
 		}
 		b = mergeCacheEventPatch(current, patch, fields)
@@ -85,6 +145,7 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 		if _, exists := c.beads[b.ID]; !exists {
 			c.noteMutationLocked(b.ID)
 			c.beads[b.ID] = cloneBead(b)
+			c.updateEventDepsLocked(eventType, b, fields)
 			delete(c.dirty, b.ID)
 			delete(c.deletedSeq, b.ID)
 		}
@@ -93,6 +154,7 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 	case "bead.updated":
 		c.noteMutationLocked(b.ID)
 		c.beads[b.ID] = cloneBead(b)
+		c.updateEventDepsLocked(eventType, b, fields)
 		delete(c.dirty, b.ID)
 		delete(c.deletedSeq, b.ID)
 		mutated = true
@@ -102,6 +164,7 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 			c.updateStatsLocked()
 		}
 		c.beads[b.ID] = cloneBead(b)
+		c.updateEventDepsLocked(eventType, b, fields)
 		delete(c.dirty, b.ID)
 		delete(c.deletedSeq, b.ID)
 		mutated = true
@@ -114,12 +177,35 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 	}
 }
 
+func (c *CachingStore) updateEventDepsLocked(eventType string, b Bead, fields map[string]json.RawMessage) {
+	if hasCacheEventField(fields, "dependencies") || hasCacheEventField(fields, "needs") {
+		c.deps[b.ID] = depsFromBeadFields(b)
+		return
+	}
+	if eventType == "bead.created" && cacheEventLooksComplete(fields) {
+		c.deps[b.ID] = depsFromBeadFields(b)
+		return
+	}
+	if eventType == "bead.updated" && cacheEventLooksComplete(fields) {
+		// bd dep add/remove update hooks can send complete bead fields without
+		// dependencies. Treat dependency coverage as unknown so demand reads
+		// fall back to live readiness until reconciliation refreshes the cache.
+		delete(c.deps, b.ID)
+		c.depsComplete = false
+		return
+	}
+	if _, ok := c.deps[b.ID]; ok {
+		return
+	}
+	c.depsComplete = false
+}
+
 // ApplyDepEvent updates the dep cache for a bead. Call after dep
 // mutations are detected via events or write-through.
 func (c *CachingStore) ApplyDepEvent(beadID string, deps []Dep) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.state != cacheLive {
+	if c.state != cacheLive && c.state != cachePartial {
 		return
 	}
 	c.noteMutationLocked(beadID)
@@ -216,6 +302,17 @@ func cacheEventConflictsCurrent(current, patch Bead, fields map[string]json.RawM
 	return false
 }
 
+func cacheEventConflictsCached(current Bead, currentDeps []Dep, depsKnown bool, patch Bead, fields map[string]json.RawMessage) bool {
+	if cacheEventConflictsCurrent(current, patch, fields) {
+		return true
+	}
+	return cacheEventDependencyConflict(currentDeps, depsKnown, patch, fields)
+}
+
+func cacheEventDependencyConflict(currentDeps []Dep, depsKnown bool, patch Bead, fields map[string]json.RawMessage) bool {
+	return cacheEventHasDependencyField(fields) && depsKnown && depsChanged(currentDeps, depsFromBeadFields(patch))
+}
+
 func (c *CachingStore) cacheEventMatchesBacking(id string, patch Bead, fields map[string]json.RawMessage) (bool, error) {
 	fresh, err := c.backing.Get(id)
 	if err != nil {
@@ -224,8 +321,16 @@ func (c *CachingStore) cacheEventMatchesBacking(id string, patch Bead, fields ma
 	return cacheEventPatchMatchesBead(fresh, patch, fields), nil
 }
 
+func (c *CachingStore) cacheClosedEventMatchesBacking(id string) (bool, error) {
+	fresh, err := c.backing.Get(id)
+	if err != nil {
+		return false, err
+	}
+	return fresh.Status == "closed", nil
+}
+
 func cacheEventPatchMatchesBead(current, patch Bead, fields map[string]json.RawMessage) bool {
-	return !cacheEventConflictsCurrent(current, patch, fields)
+	return !cacheEventConflictsCached(current, depsFromBeadFields(current), true, patch, fields)
 }
 
 func recentLocalMutation(mutatedAt time.Time, now time.Time) bool {
@@ -261,6 +366,17 @@ func (c *CachingStore) carryRecentLocalMutationLocked(id string, nextDirty map[s
 func hasCacheEventField(fields map[string]json.RawMessage, name string) bool {
 	_, ok := fields[name]
 	return ok
+}
+
+func cacheEventHasDependencyField(fields map[string]json.RawMessage) bool {
+	return hasCacheEventField(fields, "dependencies") || hasCacheEventField(fields, "needs")
+}
+
+func cacheEventLooksComplete(fields map[string]json.RawMessage) bool {
+	return hasCacheEventField(fields, "title") &&
+		hasCacheEventField(fields, "status") &&
+		hasCacheEventField(fields, "created_at") &&
+		(hasCacheEventField(fields, "issue_type") || hasCacheEventField(fields, "type"))
 }
 
 func decodeCacheEvent(payload json.RawMessage) (Bead, map[string]json.RawMessage, error) {

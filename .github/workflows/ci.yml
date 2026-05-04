@@ -21,7 +21,7 @@ concurrency:
 jobs:
   runner-policy:
     name: Runner policy
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'pull_request' && contains(fromJSON('["julianknutsen","csells","sjarmak","quad341"]'), github.event.pull_request.user.login) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     outputs:
       use_blacksmith: ${{ steps.policy.outputs.use_blacksmith }}
       reason: ${{ steps.policy.outputs.reason }}
@@ -30,97 +30,14 @@ jobs:
       runner_16vcpu: ${{ steps.policy.outputs.runner_16vcpu }}
       runner_32vcpu: ${{ steps.policy.outputs.runner_32vcpu }}
     steps:
-      # Read the allowlist from the trusted base revision, not from PR code.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        if: ${{ github.event_name == 'pull_request' }}
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        if: ${{ github.event_name != 'pull_request' }}
       - name: Select runner backend
         id: policy
         env:
           EVENT_NAME: ${{ github.event_name }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          PR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
-          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
         run: |
-          python3 - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          event_name = os.environ["EVENT_NAME"]
-          author = os.environ.get("PR_AUTHOR", "").strip()
-          association = os.environ.get("PR_ASSOCIATION", "").strip().upper()
-          try:
-              labels_payload = json.loads(os.environ.get("PR_LABELS_JSON", "[]") or "[]")
-          except json.JSONDecodeError:
-              labels_payload = []
-          if labels_payload is None:
-              labels_payload = []
-          labels = {str(label).strip() for label in labels_payload if str(label).strip()}
-
-          allowlist_path = Path(".github/blacksmith-allowlist.txt")
-          allowlist = set()
-          if allowlist_path.exists():
-              for raw_line in allowlist_path.read_text(encoding="utf-8").splitlines():
-                  line = raw_line.split("#", 1)[0].strip()
-                  if line:
-                      allowlist.add(line.lower())
-
-          use_blacksmith = False
-          reason = ""
-          if event_name != "pull_request":
-              use_blacksmith = True
-              reason = f"{event_name} event"
-          elif "ok-to-blacksmith" in labels:
-              use_blacksmith = True
-              reason = "ok-to-blacksmith label"
-          elif association in {"OWNER", "MEMBER", "COLLABORATOR"}:
-              use_blacksmith = True
-              reason = f"trusted author association: {association}"
-          elif author.lower() in allowlist:
-              use_blacksmith = True
-              reason = "author is in .github/blacksmith-allowlist.txt"
-          else:
-              reason = (
-                  f"author {author or '<unknown>'} is not on the Blacksmith allowlist; "
-                  "using GitHub-hosted runners"
-              )
-
-          if use_blacksmith:
-              runners = {
-                  "runner_2vcpu": "blacksmith-2vcpu-ubuntu-2404",
-                  "runner_8vcpu": "blacksmith-8vcpu-ubuntu-2404",
-                  "runner_16vcpu": "blacksmith-16vcpu-ubuntu-2404",
-                  "runner_32vcpu": "blacksmith-32vcpu-ubuntu-2404",
-              }
-              backend = "Blacksmith"
-          else:
-              runners = {
-                  "runner_2vcpu": "ubuntu-latest",
-                  "runner_8vcpu": "ubuntu-latest",
-                  "runner_16vcpu": "ubuntu-latest",
-                  "runner_32vcpu": "ubuntu-latest",
-              }
-              backend = "GitHub-hosted"
-
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
-              out.write(f"use_blacksmith={str(use_blacksmith).lower()}\n")
-              out.write(f"reason={reason}\n")
-              for name, runner in runners.items():
-                  out.write(f"{name}={runner}\n")
-
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
-              summary.write("## Runner policy\n\n")
-              summary.write(f"- backend: `{backend}`\n")
-              summary.write(f"- use_blacksmith: `{str(use_blacksmith).lower()}`\n")
-              summary.write(f"- reason: {reason}\n")
-              if event_name == "pull_request":
-                  summary.write(f"- author: `{author}`\n")
-                  summary.write(f"- association: `{association or '<empty>'}`\n")
-          PY
+          python3 .github/workflows/scripts/runner_policy.py
 
   # Detect which paths changed to gate conditional jobs.
   changes:
@@ -193,49 +110,38 @@ jobs:
               - 'internal/**'
               - 'examples/gastown/packs/**'
 
-  preflight-lint:
-    name: Preflight / lint
+  preflight-smoke:
+    name: Preflight / lint and smoke
     needs: runner-policy
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
+    env:
+      DOLT_VERSION: "1.86.6"
+      BD_VERSION: "v1.0.3"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
         with:
-          go-version-file: go.mod
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "false"
       - name: Install tools
         run: make install-tools
       - name: Lint
         run: make lint
-
-  preflight-format:
-    name: Preflight / format
-    needs: runner-policy
-    runs-on: ${{ needs.runner-policy.outputs.runner_8vcpu }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
-        with:
-          go-version-file: go.mod
-      - name: Install tools
-        run: make install-tools
       - name: Format
         run: make fmt-check
-
-  preflight-vet:
-    name: Preflight / vet
-    needs: runner-policy
-    runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
-        with:
-          go-version-file: go.mod
       - name: Vet
         run: make vet
+      - name: Docs
+        run: make check-docs
+      - name: Smoke unit tests
+        run: make test
 
   preflight-unit-cover:
     name: Preflight / unit cover
-    needs: runner-policy
+    needs:
+      - runner-policy
+      - preflight-smoke
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
       DOLT_VERSION: "1.86.6"
@@ -258,21 +164,11 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           verbose: true
 
-  preflight-docs:
-    name: Preflight / docs
-    needs: runner-policy
-    runs-on: ${{ needs.runner-policy.outputs.runner_8vcpu }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
-        with:
-          go-version-file: go.mod
-      - name: Docs
-        run: make check-docs
-
   preflight-acceptance:
     name: Preflight / acceptance A
-    needs: runner-policy
+    needs:
+      - runner-policy
+      - preflight-smoke
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
       DOLT_VERSION: "1.86.6"
@@ -287,24 +183,11 @@ jobs:
       - name: Acceptance tests (Tier A)
         run: make test-acceptance
 
-  preflight-dashboard:
-    name: Preflight / dashboard drift
-    needs: runner-policy
-    runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
-        with:
-          go-version-file: go.mod
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "22"
-      - name: Dashboard bundle drift check
-        run: make dashboard-ci
-
-  preflight-spec:
-    name: Preflight / spec drift
-    needs: runner-policy
+  preflight-generated:
+    name: Preflight / generated artifacts
+    needs:
+      - runner-policy
+      - preflight-smoke
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
       # Make TestGeneratedClientInSync fatal on missing oapi-codegen so the
@@ -315,6 +198,11 @@ jobs:
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - name: Dashboard bundle drift check
+        run: make dashboard-ci
       - name: OpenAPI spec + client drift check
         run: make spec-ci
 
@@ -324,14 +212,10 @@ jobs:
     name: Check
     needs:
       - runner-policy
-      - preflight-lint
-      - preflight-format
-      - preflight-vet
+      - preflight-smoke
       - preflight-unit-cover
-      - preflight-docs
       - preflight-acceptance
-      - preflight-dashboard
-      - preflight-spec
+      - preflight-generated
     if: ${{ always() }}
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     env:
@@ -376,17 +260,24 @@ jobs:
           args: check
 
   cmd-gc-process:
-    name: cmd/gc process / ${{ matrix.shard_index }} of 6
+    name: cmd/gc process / shards ${{ matrix.shard_group }}
     needs:
       - runner-policy
       - changes
+      - preflight-smoke
     if: needs.changes.outputs.cmd_gc_process == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
-    timeout-minutes: 20
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
-        shard_index: [1, 2, 3, 4, 5, 6]
+        include:
+          - shard_group: 1-2 of 6
+            shards: 1 2
+          - shard_group: 3-4 of 6
+            shards: 3 4
+          - shard_group: 5-6 of 6
+            shards: 5 6
     env:
       DOLT_VERSION: "1.86.6"
       BD_VERSION: "v1.0.3"
@@ -400,103 +291,79 @@ jobs:
       - name: Install tools
         run: make install-tools
       - name: Run cmd/gc process suite
-        run: make test-cmd-gc-process-shard CMD_GC_PROCESS_SHARD=${{ matrix.shard_index }} CMD_GC_PROCESS_TOTAL=6
+        run: |
+          for shard in ${{ matrix.shards }}; do
+            make test-cmd-gc-process-shard CMD_GC_PROCESS_SHARD="$shard" CMD_GC_PROCESS_TOTAL=6
+          done
 
   integration-shards:
     name: Integration / ${{ matrix.shard_name }}
-    needs: runner-policy
+    needs:
+      - runner-policy
+      - preflight-smoke
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - shard_name: packages-core-1-of-4
-            timeout_minutes: 20
-            command: ./scripts/test-integration-shard packages-core-1-of-4
-          - shard_name: packages-core-2-of-4
-            timeout_minutes: 20
-            command: ./scripts/test-integration-shard packages-core-2-of-4
-          - shard_name: packages-core-3-of-4
-            timeout_minutes: 20
-            command: ./scripts/test-integration-shard packages-core-3-of-4
-          - shard_name: packages-core-4-of-4
-            timeout_minutes: 20
-            command: ./scripts/test-integration-shard packages-core-4-of-4
-          - shard_name: packages-cmd-gc-1-of-6
-            timeout_minutes: 20
-            command: ./scripts/test-integration-shard packages-cmd-gc-1-of-6
-          - shard_name: packages-cmd-gc-2-of-6
-            timeout_minutes: 20
-            command: ./scripts/test-integration-shard packages-cmd-gc-2-of-6
-          - shard_name: packages-cmd-gc-3-of-6
-            timeout_minutes: 20
-            command: ./scripts/test-integration-shard packages-cmd-gc-3-of-6
-          - shard_name: packages-cmd-gc-4-of-6
-            timeout_minutes: 20
-            command: ./scripts/test-integration-shard packages-cmd-gc-4-of-6
-          - shard_name: packages-cmd-gc-5-of-6
-            timeout_minutes: 20
-            command: ./scripts/test-integration-shard packages-cmd-gc-5-of-6
-          - shard_name: packages-cmd-gc-6-of-6
-            timeout_minutes: 20
-            command: ./scripts/test-integration-shard packages-cmd-gc-6-of-6
-          - shard_name: packages-runtime-tmux-1-of-3
-            timeout_minutes: 20
-            command: ./scripts/test-integration-shard packages-runtime-tmux-1-of-3
-          - shard_name: packages-runtime-tmux-2-of-3
-            timeout_minutes: 20
-            command: ./scripts/test-integration-shard packages-runtime-tmux-2-of-3
-          - shard_name: packages-runtime-tmux-3-of-3
-            timeout_minutes: 20
-            command: ./scripts/test-integration-shard packages-runtime-tmux-3-of-3
-          - shard_name: review-formulas-basic-1-of-2
-            timeout_minutes: 20
-            command: ./scripts/test-integration-shard review-formulas-basic-1-of-2
-          - shard_name: review-formulas-basic-2-of-2
-            timeout_minutes: 20
-            command: ./scripts/test-integration-shard review-formulas-basic-2-of-2
-          - shard_name: review-formulas-retries-1-of-2
-            timeout_minutes: 20
-            command: ./scripts/test-integration-shard review-formulas-retries-1-of-2
-          - shard_name: review-formulas-retries-2-of-2
-            timeout_minutes: 20
-            command: ./scripts/test-integration-shard review-formulas-retries-2-of-2
+          - shard_name: packages-core
+            timeout_minutes: 35
+            command: |
+              ./scripts/test-integration-shard packages-core-1-of-4
+              ./scripts/test-integration-shard packages-core-2-of-4
+              ./scripts/test-integration-shard packages-core-3-of-4
+              ./scripts/test-integration-shard packages-core-4-of-4
+          - shard_name: packages-cmd-gc
+            timeout_minutes: 45
+            command: |
+              ./scripts/test-integration-shard packages-cmd-gc-1-of-6
+              ./scripts/test-integration-shard packages-cmd-gc-2-of-6
+              ./scripts/test-integration-shard packages-cmd-gc-3-of-6
+              ./scripts/test-integration-shard packages-cmd-gc-4-of-6
+              ./scripts/test-integration-shard packages-cmd-gc-5-of-6
+              ./scripts/test-integration-shard packages-cmd-gc-6-of-6
+          - shard_name: packages-runtime-tmux
+            timeout_minutes: 30
+            command: |
+              ./scripts/test-integration-shard packages-runtime-tmux-1-of-3
+              ./scripts/test-integration-shard packages-runtime-tmux-2-of-3
+              ./scripts/test-integration-shard packages-runtime-tmux-3-of-3
+          - shard_name: review-formulas-basic
+            timeout_minutes: 30
+            command: make test-integration-review-formulas-basic
+          - shard_name: review-formulas-retries
+            timeout_minutes: 30
+            command: make test-integration-review-formulas-retries
           - shard_name: review-formulas-recovery
             timeout_minutes: 25
             command: make test-integration-review-formulas-recovery
           - shard_name: bdstore
             timeout_minutes: 15
             command: make test-integration-bdstore
-          - shard_name: rest-smoke-1-of-2
-            timeout_minutes: 20
-            command: ./scripts/test-integration-shard rest-smoke-1-of-2
-          - shard_name: rest-smoke-2-of-2
-            timeout_minutes: 20
-            command: ./scripts/test-integration-shard rest-smoke-2-of-2
-          - shard_name: rest-full-1-of-8
-            timeout_minutes: 20
-            command: ./scripts/test-integration-shard rest-full-1-of-8
-          - shard_name: rest-full-2-of-8
-            timeout_minutes: 20
-            command: ./scripts/test-integration-shard rest-full-2-of-8
-          - shard_name: rest-full-3-of-8
-            timeout_minutes: 20
-            command: ./scripts/test-integration-shard rest-full-3-of-8
-          - shard_name: rest-full-4-of-8
-            timeout_minutes: 20
-            command: ./scripts/test-integration-shard rest-full-4-of-8
-          - shard_name: rest-full-5-of-8
-            timeout_minutes: 20
-            command: ./scripts/test-integration-shard rest-full-5-of-8
-          - shard_name: rest-full-6-of-8
-            timeout_minutes: 20
-            command: ./scripts/test-integration-shard rest-full-6-of-8
+          - shard_name: rest-smoke
+            timeout_minutes: 25
+            command: make test-integration-rest-smoke
+          - shard_name: rest-full-1-2-of-8
+            timeout_minutes: 35
+            command: |
+              ./scripts/test-integration-shard rest-full-1-of-8
+              ./scripts/test-integration-shard rest-full-2-of-8
+          - shard_name: rest-full-3-4-of-8
+            timeout_minutes: 35
+            command: |
+              ./scripts/test-integration-shard rest-full-3-of-8
+              ./scripts/test-integration-shard rest-full-4-of-8
+          - shard_name: rest-full-5-6-of-8
+            timeout_minutes: 35
+            command: |
+              ./scripts/test-integration-shard rest-full-5-of-8
+              ./scripts/test-integration-shard rest-full-6-of-8
           - shard_name: rest-full-7-of-8
-            timeout_minutes: 20
+            timeout_minutes: 35
             command: ./scripts/test-integration-shard rest-full-7-of-8
           - shard_name: rest-full-8-of-8
-            timeout_minutes: 20
+            timeout_minutes: 35
             command: ./scripts/test-integration-shard rest-full-8-of-8
     env:
       DOLT_VERSION: "1.86.6"
@@ -518,6 +385,7 @@ jobs:
     needs:
       - runner-policy
       - changes
+      - preflight-smoke
     if: needs.changes.outputs.worker == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
@@ -552,6 +420,7 @@ jobs:
     needs:
       - runner-policy
       - changes
+      - preflight-smoke
     if: needs.changes.outputs.worker == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
@@ -586,6 +455,7 @@ jobs:
     needs:
       - runner-policy
       - changes
+      - preflight-smoke
     if: needs.changes.outputs.worker == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
@@ -620,6 +490,7 @@ jobs:
     needs:
       - runner-policy
       - changes
+      - preflight-smoke
       - worker-core-claude
       - worker-core-codex
       - worker-core-gemini
@@ -729,6 +600,7 @@ jobs:
     needs:
       - runner-policy
       - changes
+      - preflight-smoke
     if: needs.changes.outputs.worker_phase2 == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
@@ -767,6 +639,7 @@ jobs:
     needs:
       - runner-policy
       - changes
+      - preflight-smoke
     if: needs.changes.outputs.worker_phase2 == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
@@ -805,6 +678,7 @@ jobs:
     needs:
       - runner-policy
       - changes
+      - preflight-smoke
     if: needs.changes.outputs.worker_phase2 == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
@@ -979,7 +853,9 @@ jobs:
   # load-bearing discipline step.
   dashboard:
     name: Dashboard SPA
-    needs: runner-policy
+    needs:
+      - runner-policy
+      - preflight-smoke
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -1016,6 +892,7 @@ jobs:
     needs:
       - runner-policy
       - changes
+      - preflight-smoke
     if: needs.changes.outputs.mail == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_8vcpu }}
     continue-on-error: true  # upstream mcp_agent_mail API may drift
@@ -1045,6 +922,7 @@ jobs:
     needs:
       - runner-policy
       - changes
+      - preflight-smoke
     if: needs.changes.outputs.docker == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     steps:
@@ -1073,6 +951,7 @@ jobs:
     needs:
       - runner-policy
       - changes
+      - preflight-smoke
     if: needs.changes.outputs.k8s == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_8vcpu }}
     steps:

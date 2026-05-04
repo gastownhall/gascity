@@ -44,8 +44,8 @@ type EventEmitOutput struct {
 // EventStreamInput is the Huma input for GET /v0/city/{cityName}/events/stream.
 type EventStreamInput struct {
 	CityScope
-	AfterSeq    string `query:"after_seq" required:"false" doc:"Reconnect position: only deliver events after this sequence number."`
-	LastEventID string `header:"Last-Event-ID" required:"false" doc:"SSE reconnect position from the last received event ID."`
+	AfterSeq    string `query:"after_seq" required:"false" doc:"Reconnect position: only deliver events after this sequence number. Omit after_seq and Last-Event-ID to start at the current city event head."`
+	LastEventID string `header:"Last-Event-ID" required:"false" doc:"SSE reconnect position from the last received event ID. Omit Last-Event-ID and after_seq to start at the current city event head."`
 }
 
 // HeartbeatEvent is an empty event emitted periodically on SSE streams to keep

@@ -216,6 +216,126 @@ func TestControllerStateRuntimeUpdateDoesNotDropPendingMutationAgents(t *testing
 	}
 }
 
+func TestControllerStateRuntimeUpdateIgnoresEmptyRevisionDuringPendingMutation(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"city1\"\n\n[beads]\nprovider = \"file\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	rigDir := t.TempDir()
+	current := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+		Rigs:      []config.Rig{{Name: "alpha", Path: rigDir}},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "alpha", Provider: "bash"},
+			{Name: "helper", Dir: "alpha", Provider: "bash"},
+		},
+	}
+	stale := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+		Rigs:      []config.Rig{{Name: "alpha", Path: rigDir}},
+		Agents:    []config.Agent{{Name: "worker", Dir: "alpha", Provider: "bash"}},
+	}
+
+	cs := newControllerState(context.Background(), current, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	cs.markConfigMutationPending("current-rev")
+
+	cs.updateFromRuntime(stale, runtime.NewFake(), "")
+
+	if got := cs.Config(); got != current {
+		t.Fatalf("Config() = %+v, want pending mutation config with helper agent", got)
+	}
+	if !cs.configMutationPending.Load() {
+		t.Fatal("pending mutation marker cleared by empty-revision runtime update")
+	}
+}
+
+func TestControllerStateRuntimeUpdateAcceptsBuiltinAwareRevision(t *testing.T) {
+	configureTestDoltIdentityEnv(t)
+	t.Setenv("GC_BEADS", "")
+
+	cityDir := shortSocketTempDir(t, "gc-state-runtime-builtin-")
+	tomlPath := filepath.Join(cityDir, "city.toml")
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
+		t.Fatalf("write initial city.toml: %v", err)
+	}
+
+	initial, err := tryReloadConfig(tomlPath, "test", cityDir)
+	if err != nil {
+		t.Fatalf("initial tryReloadConfig: %v", err)
+	}
+	applyRuntimeCityIdentity(initial.Cfg, "test")
+	cs := newControllerState(context.Background(), initial.Cfg, runtime.NewFake(), events.NewFake(), "test", cityDir)
+
+	rigDir := t.TempDir()
+	updatedToml := fmt.Sprintf("[workspace]\nname = \"test\"\n\n[[rigs]]\nname = \"alpha\"\npath = %q\n", rigDir)
+	if err := os.WriteFile(tomlPath, []byte(updatedToml), 0o644); err != nil {
+		t.Fatalf("write updated city.toml: %v", err)
+	}
+	reloaded, err := tryReloadConfig(tomlPath, "test", cityDir)
+	if err != nil {
+		t.Fatalf("reloaded tryReloadConfig: %v", err)
+	}
+	applyRuntimeCityIdentity(reloaded.Cfg, "test")
+
+	cs.updateFromRuntime(reloaded.Cfg, runtime.NewFake(), reloaded.Revision)
+
+	if got := cs.Config().Rigs; len(got) != 1 || got[0].Name != "alpha" {
+		t.Fatalf("runtime update was not accepted; rigs = %#v", got)
+	}
+	requireControllerStateOrder(t, cs, "gate-sweep")
+}
+
+func TestControllerStateMutationRefreshKeepsBuiltinOrdersAndClearsPending(t *testing.T) {
+	configureTestDoltIdentityEnv(t)
+	t.Setenv("GC_BEADS", "")
+
+	cityDir := shortSocketTempDir(t, "gc-state-mutation-builtin-")
+	tomlPath := filepath.Join(cityDir, "city.toml")
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	initial, err := tryReloadConfig(tomlPath, "test", cityDir)
+	if err != nil {
+		t.Fatalf("tryReloadConfig: %v", err)
+	}
+	applyRuntimeCityIdentity(initial.Cfg, "test")
+	cs := newControllerState(context.Background(), initial.Cfg, runtime.NewFake(), events.NewFake(), "test", cityDir)
+
+	if err := cs.EnableOrder("gate-sweep", ""); err != nil {
+		t.Fatalf("EnableOrder: %v", err)
+	}
+	requireControllerStateOrder(t, cs, "gate-sweep")
+	if !cs.configMutationPending.Load() {
+		t.Fatal("pending mutation marker was not set")
+	}
+
+	reloaded, err := tryReloadConfig(tomlPath, "test", cityDir)
+	if err != nil {
+		t.Fatalf("tryReloadConfig after mutation: %v", err)
+	}
+	applyRuntimeCityIdentity(reloaded.Cfg, "test")
+	cs.updateFromRuntime(reloaded.Cfg, runtime.NewFake(), reloaded.Revision)
+
+	if cs.configMutationPending.Load() {
+		t.Fatal("pending mutation marker was not cleared by matching runtime update")
+	}
+	requireControllerStateOrder(t, cs, "gate-sweep")
+}
+
+func requireControllerStateOrder(t *testing.T, cs *controllerState, want string) {
+	t.Helper()
+
+	for _, order := range cs.Orders() {
+		if order.Name == want {
+			return
+		}
+	}
+	t.Fatalf("Orders() missing %q", want)
+}
+
 func TestControllerStateRuntimeUpdateAfterMutationPreservesCurrentStores(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "alpha")

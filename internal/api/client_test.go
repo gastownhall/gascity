@@ -76,7 +76,7 @@ func TestClientWaitForEventRequestsReplayCursorForCityStream(t *testing.T) {
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
-	_, _ = c.waitForEvent(t.Context(), "req-never", "request.result.session.message", RequestOperationSessionMessage)
+	_, _ = c.waitForEvent(t.Context(), "req-never", "request.result.session.message", RequestOperationSessionMessage, "")
 
 	query := <-seen
 	if got := query.Get("after_seq"); got != "0" {
@@ -96,11 +96,51 @@ func TestClientWaitForEventRequestsReplayCursorForSupervisorStream(t *testing.T)
 	defer ts.Close()
 
 	c := NewClient(ts.URL)
-	_, _ = c.waitForEvent(t.Context(), "req-never", "request.result.city.create", RequestOperationCityCreate)
+	_, _ = c.waitForEvent(t.Context(), "req-never", "request.result.city.create", RequestOperationCityCreate, "")
 
 	query := <-seen
 	if got := query.Get("after_cursor"); got != "0" {
 		t.Fatalf("after_cursor = %q, want 0", got)
+	}
+}
+
+func TestClientWaitForEventUsesAcceptedCursorForCityStream(t *testing.T) {
+	seen := make(chan url.Values, 1)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/city/alpha/events/stream" {
+			t.Fatalf("path = %q, want /v0/city/alpha/events/stream", r.URL.Path)
+		}
+		seen <- r.URL.Query()
+		w.Header().Set("Content-Type", "text/event-stream")
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	_, _ = c.waitForEvent(t.Context(), "req-never", "request.result.session.message", RequestOperationSessionMessage, "42")
+
+	query := <-seen
+	if got := query.Get("after_seq"); got != "42" {
+		t.Fatalf("after_seq = %q, want 42", got)
+	}
+}
+
+func TestClientWaitForEventUsesAcceptedCursorForSupervisorStream(t *testing.T) {
+	seen := make(chan url.Values, 1)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/events/stream" {
+			t.Fatalf("path = %q, want /v0/events/stream", r.URL.Path)
+		}
+		seen <- r.URL.Query()
+		w.Header().Set("Content-Type", "text/event-stream")
+	}))
+	defer ts.Close()
+
+	c := NewClient(ts.URL)
+	_, _ = c.waitForEvent(t.Context(), "req-never", "request.result.city.create", RequestOperationCityCreate, "alpha:7,__supervisor__:9")
+
+	query := <-seen
+	if got := query.Get("after_cursor"); got != "alpha:7,__supervisor__:9" {
+		t.Fatalf("after_cursor = %q, want alpha:7,__supervisor__:9", got)
 	}
 }
 
@@ -111,7 +151,7 @@ func TestClientWaitForEventReportsNonOKSSEStatus(t *testing.T) {
 	defer ts.Close()
 
 	c := NewClient(ts.URL)
-	_, err := c.waitForEvent(t.Context(), "req-never", "request.result.city.create", RequestOperationCityCreate)
+	_, err := c.waitForEvent(t.Context(), "req-never", "request.result.city.create", RequestOperationCityCreate, "")
 	if err == nil {
 		t.Fatal("waitForEvent succeeded for non-OK SSE response")
 	}
@@ -129,7 +169,7 @@ func TestClientWaitForEventReportsScannerError(t *testing.T) {
 	defer ts.Close()
 
 	c := NewClient(ts.URL)
-	_, err := c.waitForEvent(t.Context(), "req-never", "request.result.city.create", RequestOperationCityCreate)
+	_, err := c.waitForEvent(t.Context(), "req-never", "request.result.city.create", RequestOperationCityCreate, "")
 	if err == nil {
 		t.Fatal("waitForEvent succeeded after scanner failure")
 	}
@@ -149,7 +189,7 @@ func TestClientWaitForEventHandlesMultiLineDataFrames(t *testing.T) {
 	defer ts.Close()
 
 	c := NewClient(ts.URL)
-	env, err := c.waitForEvent(t.Context(), "req-1", "request.result.session.message", RequestOperationSessionMessage)
+	env, err := c.waitForEvent(t.Context(), "req-1", "request.result.session.message", RequestOperationSessionMessage, "")
 	if err != nil {
 		t.Fatalf("waitForEvent: %v", err)
 	}
@@ -168,7 +208,7 @@ func TestClientWaitForEventHandlesEventFieldWithoutSpace(t *testing.T) {
 	defer ts.Close()
 
 	c := NewClient(ts.URL)
-	env, err := c.waitForEvent(t.Context(), "req-1", "request.result.session.message", RequestOperationSessionMessage)
+	env, err := c.waitForEvent(t.Context(), "req-1", "request.result.session.message", RequestOperationSessionMessage, "")
 	if err != nil {
 		t.Fatalf("waitForEvent: %v", err)
 	}
@@ -186,7 +226,7 @@ func TestClientWaitForEventReportsMalformedMatchingSuccessPayload(t *testing.T) 
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
-	_, err := c.waitForEvent(t.Context(), "req-1", "request.result.session.message", RequestOperationSessionMessage)
+	_, err := c.waitForEvent(t.Context(), "req-1", "request.result.session.message", RequestOperationSessionMessage, "")
 	if err == nil {
 		t.Fatal("waitForEvent succeeded with malformed matching success payload")
 	}
@@ -204,7 +244,7 @@ func TestClientWaitForEventReportsMalformedRequestFailedPayload(t *testing.T) {
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
-	_, err := c.waitForEvent(t.Context(), "req-1", "request.result.session.message", RequestOperationSessionMessage)
+	_, err := c.waitForEvent(t.Context(), "req-1", "request.result.session.message", RequestOperationSessionMessage, "")
 	if err == nil {
 		t.Fatal("waitForEvent succeeded with malformed request.failed payload")
 	}
@@ -223,7 +263,7 @@ func TestClientWaitForEventHonorsContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	c := NewClient(ts.URL)
-	_, err := c.waitForEvent(ctx, "req-never", "request.result.city.create", RequestOperationCityCreate)
+	_, err := c.waitForEvent(ctx, "req-never", "request.result.city.create", RequestOperationCityCreate, "")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
 	}
@@ -629,13 +669,13 @@ func TestClientSendSessionMessageWaitsForResultEvent(t *testing.T) {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusAccepted)
-			json.NewEncoder(w).Encode(map[string]string{"request_id": "req-msg"}) //nolint:errcheck
+			json.NewEncoder(w).Encode(map[string]string{"request_id": "req-msg", "event_cursor": "17"}) //nolint:errcheck
 		case r.Method == http.MethodGet && r.URL.Path == "/v0/city/alpha/events/stream":
 			if !sawPost {
 				t.Fatal("event stream opened before message POST")
 			}
-			if got := r.URL.Query().Get("after_seq"); got != "0" {
-				t.Fatalf("after_seq = %q, want 0", got)
+			if got := r.URL.Query().Get("after_seq"); got != "17" {
+				t.Fatalf("after_seq = %q, want 17", got)
 			}
 			writeSSEEnvelope(t, w, events.RequestResultSessionMessage, SessionMessageSucceededPayload{
 				RequestID: "req-msg",
@@ -665,7 +705,7 @@ func TestClientSendSessionMessageReportsAsyncFailure(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/v0/city/alpha/session/sess-123/messages":
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusAccepted)
-			json.NewEncoder(w).Encode(map[string]string{"request_id": "req-msg"}) //nolint:errcheck
+			json.NewEncoder(w).Encode(map[string]string{"request_id": "req-msg", "event_cursor": "18"}) //nolint:errcheck
 		case r.Method == http.MethodGet && r.URL.Path == "/v0/city/alpha/events/stream":
 			writeSSEEnvelope(t, w, events.RequestFailed, RequestFailedPayload{
 				RequestID:    "req-msg",
@@ -704,13 +744,13 @@ func TestClientSubmitSessionWaitsForResultEvent(t *testing.T) {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusAccepted)
-			json.NewEncoder(w).Encode(map[string]string{"request_id": "req-submit"}) //nolint:errcheck
+			json.NewEncoder(w).Encode(map[string]string{"request_id": "req-submit", "event_cursor": "21"}) //nolint:errcheck
 		case r.Method == http.MethodGet && r.URL.Path == "/v0/city/alpha/events/stream":
 			if !sawPost {
 				t.Fatal("event stream opened before submit POST")
 			}
-			if got := r.URL.Query().Get("after_seq"); got != "0" {
-				t.Fatalf("after_seq = %q, want 0", got)
+			if got := r.URL.Query().Get("after_seq"); got != "21" {
+				t.Fatalf("after_seq = %q, want 21", got)
 			}
 			writeSSEEnvelope(t, w, events.RequestResultSessionSubmit, SessionSubmitSucceededPayload{
 				RequestID: "req-submit",
@@ -746,7 +786,7 @@ func TestClientSubmitSessionReportsAsyncFailure(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/v0/city/alpha/session/sess-123/submit":
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusAccepted)
-			json.NewEncoder(w).Encode(map[string]string{"request_id": "req-submit"}) //nolint:errcheck
+			json.NewEncoder(w).Encode(map[string]string{"request_id": "req-submit", "event_cursor": "22"}) //nolint:errcheck
 		case r.Method == http.MethodGet && r.URL.Path == "/v0/city/alpha/events/stream":
 			writeSSEEnvelope(t, w, events.RequestFailed, RequestFailedPayload{
 				RequestID:    "req-submit",

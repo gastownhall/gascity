@@ -146,6 +146,7 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
 	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 		store,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}}},
+		"",
 		nil,
 		DesiredStateResult{
 			AssignedWorkBeads:  []beads.Bead{work},
@@ -168,6 +169,7 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
 	released = releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 		store,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}}},
+		"",
 		nil,
 		DesiredStateResult{
 			AssignedWorkBeads:   []beads.Bead{work},
@@ -190,6 +192,7 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
 	released = releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 		store,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}}},
+		"",
 		nil,
 		DesiredStateResult{
 			AssignedWorkBeads:  []beads.Bead{work},

@@ -60,7 +60,7 @@ env:
 jobs:
   runner-policy:
     name: Runner policy
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'pull_request' && contains(fromJSON('["julianknutsen","csells","sjarmak","quad341"]'), github.event.pull_request.user.login) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     outputs:
       use_blacksmith: ${{ steps.policy.outputs.use_blacksmith }}
       reason: ${{ steps.policy.outputs.reason }}
@@ -70,99 +70,14 @@ jobs:
       runner_32vcpu: ${{ steps.policy.outputs.runner_32vcpu }}
       runner_macos: ${{ steps.policy.outputs.runner_macos }}
     steps:
-      # Read the allowlist from the trusted base revision, not from PR code.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        if: ${{ github.event_name == 'pull_request' }}
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        if: ${{ github.event_name != 'pull_request' }}
       - name: Select runner backend
         id: policy
         env:
           EVENT_NAME: ${{ github.event_name }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          PR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
-          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
         run: |
-          python3 - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          event_name = os.environ["EVENT_NAME"]
-          author = os.environ.get("PR_AUTHOR", "").strip()
-          association = os.environ.get("PR_ASSOCIATION", "").strip().upper()
-          try:
-              labels_payload = json.loads(os.environ.get("PR_LABELS_JSON", "[]") or "[]")
-          except json.JSONDecodeError:
-              labels_payload = []
-          if labels_payload is None:
-              labels_payload = []
-          labels = {str(label).strip() for label in labels_payload if str(label).strip()}
-
-          allowlist_path = Path(".github/blacksmith-allowlist.txt")
-          allowlist = set()
-          if allowlist_path.exists():
-              for raw_line in allowlist_path.read_text(encoding="utf-8").splitlines():
-                  line = raw_line.split("#", 1)[0].strip()
-                  if line:
-                      allowlist.add(line.lower())
-
-          use_blacksmith = False
-          reason = ""
-          if event_name != "pull_request":
-              use_blacksmith = True
-              reason = f"{event_name} event"
-          elif "ok-to-blacksmith" in labels:
-              use_blacksmith = True
-              reason = "ok-to-blacksmith label"
-          elif association in {"OWNER", "MEMBER", "COLLABORATOR"}:
-              use_blacksmith = True
-              reason = f"trusted author association: {association}"
-          elif author.lower() in allowlist:
-              use_blacksmith = True
-              reason = "author is in .github/blacksmith-allowlist.txt"
-          else:
-              reason = (
-                  f"author {author or '<unknown>'} is not on the Blacksmith allowlist; "
-                  "using GitHub-hosted runners"
-              )
-
-          if use_blacksmith:
-              runners = {
-                  "runner_2vcpu": "blacksmith-2vcpu-ubuntu-2404",
-                  "runner_8vcpu": "blacksmith-8vcpu-ubuntu-2404",
-                  "runner_16vcpu": "blacksmith-16vcpu-ubuntu-2404",
-                  "runner_32vcpu": "blacksmith-32vcpu-ubuntu-2404",
-                  "runner_macos": "blacksmith-12vcpu-macos-15",
-              }
-              backend = "Blacksmith"
-          else:
-              runners = {
-                  "runner_2vcpu": "ubuntu-latest",
-                  "runner_8vcpu": "ubuntu-latest",
-                  "runner_16vcpu": "ubuntu-latest",
-                  "runner_32vcpu": "ubuntu-latest",
-                  "runner_macos": "macos-15",
-              }
-              backend = "GitHub-hosted"
-
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
-              out.write(f"use_blacksmith={str(use_blacksmith).lower()}\n")
-              out.write(f"reason={reason}\n")
-              for name, runner in runners.items():
-                  out.write(f"{name}={runner}\n")
-
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
-              summary.write("## Runner policy\n\n")
-              summary.write(f"- backend: `{backend}`\n")
-              summary.write(f"- use_blacksmith: `{str(use_blacksmith).lower()}`\n")
-              summary.write(f"- reason: {reason}\n")
-              if event_name == "pull_request":
-                  summary.write(f"- author: `{author}`\n")
-                  summary.write(f"- association: `{association or '<empty>'}`\n")
-          PY
+          python3 .github/workflows/scripts/runner_policy.py
 
   # Fast quality gates that Linux runs on every PR. Keep these cheap so a
   # Mac-parity loop stays interactive.
@@ -319,7 +234,11 @@ jobs:
   # shard stays separate so it can gate on nightly / full-dispatch only.
   mac-integration-packages:
     name: Mac / integration packages / ${{ matrix.shard_name }}
-    needs: runner-policy
+    needs:
+      - runner-policy
+      - mac-quality
+      - mac-unit
+      - mac-acceptance
     if: >-
       github.event_name == 'schedule' ||
       (
@@ -333,37 +252,33 @@ jobs:
         contains(github.event.pull_request.labels.*.name, 'needs-mac')
       )
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
-    timeout-minutes: 30
+    timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - shard_name: core-1-of-4
-            shard: packages-core-1-of-4
-          - shard_name: core-2-of-4
-            shard: packages-core-2-of-4
-          - shard_name: core-3-of-4
-            shard: packages-core-3-of-4
-          - shard_name: core-4-of-4
-            shard: packages-core-4-of-4
-          - shard_name: cmd-gc-1-of-6
-            shard: packages-cmd-gc-1-of-6
-          - shard_name: cmd-gc-2-of-6
-            shard: packages-cmd-gc-2-of-6
-          - shard_name: cmd-gc-3-of-6
-            shard: packages-cmd-gc-3-of-6
-          - shard_name: cmd-gc-4-of-6
-            shard: packages-cmd-gc-4-of-6
-          - shard_name: cmd-gc-5-of-6
-            shard: packages-cmd-gc-5-of-6
-          - shard_name: cmd-gc-6-of-6
-            shard: packages-cmd-gc-6-of-6
-          - shard_name: tmux-1-of-3
-            shard: packages-runtime-tmux-1-of-3
-          - shard_name: tmux-2-of-3
-            shard: packages-runtime-tmux-2-of-3
-          - shard_name: tmux-3-of-3
-            shard: packages-runtime-tmux-3-of-3
+          - shard_name: core
+            timeout_minutes: 60
+            command: |
+              ./scripts/test-integration-shard packages-core-1-of-4
+              ./scripts/test-integration-shard packages-core-2-of-4
+              ./scripts/test-integration-shard packages-core-3-of-4
+              ./scripts/test-integration-shard packages-core-4-of-4
+          - shard_name: cmd-gc
+            timeout_minutes: 75
+            command: |
+              ./scripts/test-integration-shard packages-cmd-gc-1-of-6
+              ./scripts/test-integration-shard packages-cmd-gc-2-of-6
+              ./scripts/test-integration-shard packages-cmd-gc-3-of-6
+              ./scripts/test-integration-shard packages-cmd-gc-4-of-6
+              ./scripts/test-integration-shard packages-cmd-gc-5-of-6
+              ./scripts/test-integration-shard packages-cmd-gc-6-of-6
+          - shard_name: tmux
+            timeout_minutes: 45
+            command: |
+              ./scripts/test-integration-shard packages-runtime-tmux-1-of-3
+              ./scripts/test-integration-shard packages-runtime-tmux-2-of-3
+              ./scripts/test-integration-shard packages-runtime-tmux-3-of-3
     env:
       ANTHROPIC_BASE_URL: https://api.synthetic.new/anthropic
       ANTHROPIC_AUTH_TOKEN: ${{ secrets.SYNTHETIC_API_KEY }}
@@ -388,11 +303,15 @@ jobs:
         run: make install-tools
       - name: Run integration shard
         id: shard
-        run: ./scripts/test-integration-shard ${{ matrix.shard }}
+        run: ${{ matrix.command }}
 
   mac-integration-bdstore:
     name: Mac / integration (bdstore)
-    needs: runner-policy
+    needs:
+      - runner-policy
+      - mac-quality
+      - mac-unit
+      - mac-acceptance
     if: >-
       github.event_name == 'schedule' ||
       (
@@ -438,7 +357,11 @@ jobs:
 
   mac-integration-rest:
     name: Mac / integration rest / ${{ matrix.shard_name }}
-    needs: runner-policy
+    needs:
+      - runner-policy
+      - mac-quality
+      - mac-unit
+      - mac-acceptance
     if: >-
       github.event_name == 'schedule' ||
       (
@@ -452,31 +375,35 @@ jobs:
         contains(github.event.pull_request.labels.*.name, 'needs-mac')
       )
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
-    timeout-minutes: 30
+    timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - shard_name: smoke-1-of-2
-            shard: rest-smoke-1-of-2
-          - shard_name: smoke-2-of-2
-            shard: rest-smoke-2-of-2
-          - shard_name: full-1-of-8
-            shard: rest-full-1-of-8
-          - shard_name: full-2-of-8
-            shard: rest-full-2-of-8
-          - shard_name: full-3-of-8
-            shard: rest-full-3-of-8
-          - shard_name: full-4-of-8
-            shard: rest-full-4-of-8
-          - shard_name: full-5-of-8
-            shard: rest-full-5-of-8
-          - shard_name: full-6-of-8
-            shard: rest-full-6-of-8
+          - shard_name: smoke
+            timeout_minutes: 45
+            command: make test-integration-rest-smoke
+          - shard_name: full-1-2-of-8
+            timeout_minutes: 45
+            command: |
+              ./scripts/test-integration-shard rest-full-1-of-8
+              ./scripts/test-integration-shard rest-full-2-of-8
+          - shard_name: full-3-4-of-8
+            timeout_minutes: 45
+            command: |
+              ./scripts/test-integration-shard rest-full-3-of-8
+              ./scripts/test-integration-shard rest-full-4-of-8
+          - shard_name: full-5-6-of-8
+            timeout_minutes: 45
+            command: |
+              ./scripts/test-integration-shard rest-full-5-of-8
+              ./scripts/test-integration-shard rest-full-6-of-8
           - shard_name: full-7-of-8
-            shard: rest-full-7-of-8
+            timeout_minutes: 45
+            command: ./scripts/test-integration-shard rest-full-7-of-8
           - shard_name: full-8-of-8
-            shard: rest-full-8-of-8
+            timeout_minutes: 45
+            command: ./scripts/test-integration-shard rest-full-8-of-8
     env:
       ANTHROPIC_BASE_URL: https://api.synthetic.new/anthropic
       ANTHROPIC_AUTH_TOKEN: ${{ secrets.SYNTHETIC_API_KEY }}
@@ -501,12 +428,16 @@ jobs:
         run: make install-tools
       - name: Run integration shard
         id: shard
-        run: ./scripts/test-integration-shard ${{ matrix.shard }}
+        run: ${{ matrix.command }}
 
   # Long-running review-formulas shard — nightly / full dispatch only.
   mac-integration-review-formulas:
     name: Mac / integration (review-formulas)
-    needs: runner-policy
+    needs:
+      - runner-policy
+      - mac-quality
+      - mac-unit
+      - mac-acceptance
     if: >-
       github.event_name == 'schedule' ||
       (github.event_name == 'workflow_dispatch' && inputs.suite == 'full')

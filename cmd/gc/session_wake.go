@@ -232,6 +232,15 @@ func cancelSessionDrainForPending(session beads.Bead, sp runtime.Provider, dt *d
 	return cancelSessionDrainIf(session, sp, dt, pendingDrainReasonCancelable)
 }
 
+func cancelSessionConfigDriftDrain(session beads.Bead, sp runtime.Provider, dt *drainTracker) bool {
+	if dt == nil {
+		return false
+	}
+	return cancelSessionDrainIf(session, sp, dt, func(reason string) bool {
+		return reason == "config-drift"
+	})
+}
+
 func cancelSessionDrainIf(session beads.Bead, sp runtime.Provider, dt *drainTracker, canCancel func(string) bool) bool {
 	ds := dt.get(session.ID)
 	if ds == nil {

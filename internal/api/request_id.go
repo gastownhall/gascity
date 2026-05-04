@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strconv"
 
 	"github.com/gastownhall/gascity/internal/events"
 )
@@ -16,6 +17,18 @@ func newRequestID() (string, error) {
 		return "", fmt.Errorf("generating request ID: %w", err)
 	}
 	return "req-" + hex.EncodeToString(b), nil
+}
+
+func (s *Server) currentCityEventCursor() (string, error) {
+	ep := s.state.EventProvider()
+	if ep == nil {
+		return "0", nil
+	}
+	seq, err := ep.LatestSeq()
+	if err != nil {
+		return "", fmt.Errorf("capturing city event cursor: %w", err)
+	}
+	return strconv.FormatUint(seq, 10), nil
 }
 
 // EmitTypedEvent records a typed async result event to the given recorder.

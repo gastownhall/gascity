@@ -25,6 +25,7 @@ canonical bead so the reconciler can start it when unblocked.`,
 			}
 			return nil
 		},
+		ValidArgsFunction: completeSessionIDs,
 	}
 }
 
@@ -43,6 +44,7 @@ normal wake/sleep rules on its next pass.`,
 			}
 			return nil
 		},
+		ValidArgsFunction: completeSessionIDs,
 	}
 }
 

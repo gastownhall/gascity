@@ -575,7 +575,7 @@ export interface paths {
         };
         /**
          * Stream city events in real time
-         * @description Server-Sent Events stream of city events with optional workflow projections. Supports reconnection via Last-Event-ID header or after_seq query param.
+         * @description Server-Sent Events stream of city events with optional workflow projections. Supports reconnection via Last-Event-ID header or after_seq query param; omitting both starts at the current city event head.
          */
         get: operations["stream-events"];
         put?: never;
@@ -1859,7 +1859,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Stream tagged events from all running cities. */
+        /**
+         * Stream tagged events from all running cities.
+         * @description Server-Sent Events stream of supervisor-tagged events. Supports reconnection via Last-Event-ID header or after_cursor query param; omitting both starts at the current supervisor event head.
+         */
         get: operations["stream-supervisor-events"];
         put?: never;
         post?: never;
@@ -2084,6 +2087,8 @@ export interface components {
             ready_delay_ms?: number;
         };
         AsyncAcceptedBody: {
+            /** @description City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or the event log is empty. */
+            event_cursor: string;
             /** @description Correlation ID. Watch the city event stream for request.result.session.create, request.result.session.message, request.result.session.submit, or request.failed with this request_id. */
             request_id: string;
             /**
@@ -2093,6 +2098,8 @@ export interface components {
             status: string;
         };
         AsyncAcceptedResponse: {
+            /** @description Supervisor event-stream cursor captured before the async request was accepted. Pass this value as after_cursor to /v0/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or every event log is empty. */
+            event_cursor: string;
             /** @description Correlation ID. Watch /v0/events/stream for request.result.city.create, request.result.city.unregister, or request.failed with this request_id. */
             request_id: string;
         };
@@ -3636,7 +3643,7 @@ export interface components {
         SessionCreateSucceededPayload: {
             /** @description Correlation ID from the 202 response. */
             request_id: string;
-            /** @description Full session state as returned by GET /session/{id}. */
+            /** @description Full session state as returned by GET /session/{id}. For session.create, this result is emitted only after the session has left creating and can accept normal metadata and lifecycle commands. */
             session: components["schemas"]["SessionResponse"];
         };
         SessionInfo: {
@@ -7588,11 +7595,11 @@ export interface operations {
     "stream-events": {
         parameters: {
             query?: {
-                /** @description Reconnect position: only deliver events after this sequence number. */
+                /** @description Reconnect position: only deliver events after this sequence number. Omit after_seq and Last-Event-ID to start at the current city event head. */
                 after_seq?: string;
             };
             header?: {
-                /** @description SSE reconnect position from the last received event ID. */
+                /** @description SSE reconnect position from the last received event ID. Omit Last-Event-ID and after_seq to start at the current city event head. */
                 "Last-Event-ID"?: string;
             };
             path: {
@@ -11526,11 +11533,11 @@ export interface operations {
     "stream-supervisor-events": {
         parameters: {
             query?: {
-                /** @description Alternative to Last-Event-ID for browsers that can't set custom headers. */
+                /** @description Alternative to Last-Event-ID for browsers that can't set custom headers. Omit after_cursor and Last-Event-ID to start at the current supervisor event head. */
                 after_cursor?: string;
             };
             header?: {
-                /** @description Reconnect cursor (composite per-city cursor). */
+                /** @description Reconnect cursor (composite per-city cursor). Omit Last-Event-ID and after_cursor to start at the current supervisor event head. */
                 "Last-Event-ID"?: string;
             };
             path?: never;

@@ -7,8 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `proxy_process` services now receive a `GC_SERVICE_URL_PREFIX` that the
+  supervisor's public listener actually routes. Previously the prefix was
+  the per-city-relative `/svc/<name>`, so any service that composed
+  `CallbackURL = $GC_API_BASE_URL + $GC_SERVICE_URL_PREFIX` (the documented
+  shape for adapter self-registration) would 404 on inbound calls. The
+  prefix is now the full `/v0/city/<cityName>/svc/<svcName>` path. The
+  per-city router contract (`config.Service.MountPathOrDefault`) is
+  unchanged.
+
 ### Changed
 
+- `[[orders.overrides]]` rig matching is stricter and clearer. A rigless
+  override (`rig` unset) still matches **only** city-level orders; if the
+  named order exists only as per-rig instances, the error now names every
+  matching rig so it's obvious what to type. `rig = "*"` is a new wildcard
+  that targets every instance of the named order (city-level + per-rig).
+  The literal `"*"` is reserved and rejected as a real rig name by config
+  validation.
 - Managed Dolt config now emits listener backlog and connection-timeout keys.
   Existing managed cities may see a `dolt-config` doctor warning until
   `gc dolt restart` or the next managed server start regenerates
@@ -24,6 +42,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Stop/session-end hooks. Fresh managed hook configs no longer install it;
   routed work pickup should happen through the SessionStart claim protocol or
   an explicit non-inject `gc hook` call.
+- The built-in Claude provider's `model = "opus"` option now emits
+  `claude-opus-4-7`. Cities that rely on the `opus` alias should expect the
+  new model target after upgrading.
+
+### Fixed
+
+- Linux systemd supervisor service restarts now preserve managed tmux sessions
+  for re-adoption. Linux users should rerun `gc supervisor install` after
+  upgrading so the user unit is regenerated with `KillMode=process` and the
+  preserve-on-signal environment. If the currently active Linux supervisor
+  predates the preserve-on-signal environment, `gc supervisor install` now
+  refuses the warm refresh before sending a signal and tells operators to stop
+  or drain agents intentionally with `gc supervisor stop --wait`, then rerun the
+  install. Once the active supervisor already supports preserve mode, Linux warm
+  refresh sends the main supervisor PID `SIGTERM` first so preserve-mode
+  shutdown can close workspace services and flush traces, with a bounded
+  `SIGKILL` fallback if the process does not exit. The Linux refresh also stops
+  orphan-prone workspace service process groups owned by registered cities
+  before starting the replacement supervisor; supervisor startup repeats the
+  same owned-service cleanup after crashes. Service-managed `SIGTERM` preserves
+  sessions for re-adoption, while `SIGINT` remains a destructive escalation
+  path. Preserve mode intentionally leaves the beads provider running so
+  preserved sessions can keep using the store; the bundled managed-Dolt start
+  path is idempotent when it finds an already-running server, but custom exec
+  providers must make `start` reattach or no-op safely after preserve-mode
+  restarts. macOS launchd upgrades still use launchd unload/load rather than the
+  Linux main-PID refresh path; macOS supervisor startup now warns that automatic
+  orphaned workspace-service cleanup is Linux-only, lists the registered
+  `GC_SERVICE_STATE_ROOT` roots to inspect, and tells operators to stop stale
+  workspace-service processes before restarting affected cities after
+  non-graceful exits.
 
 ## [1.0.0] - 2026-04-21
 

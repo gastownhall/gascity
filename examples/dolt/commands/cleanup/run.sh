@@ -97,7 +97,7 @@ orphan_count=0
 for d in "$data_dir"/*/; do
   [ ! -d "$d/.dolt" ] && continue
   name="$(basename "$d")"
-  case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|__gc_probe) continue ;; esac
+  case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe) continue ;; esac
   case "$referenced" in
     *" $name "*) continue ;; # referenced, not orphan
   esac

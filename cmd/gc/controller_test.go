@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -378,6 +381,7 @@ func TestSendControllerCommandWithTimeoutsTimesOutOnRead(t *testing.T) {
 // writeCityTOML is a test helper that writes a city.toml with the given agents.
 func writeCityTOML(t *testing.T, dir string, cityName string, agentNames ...string) string {
 	t.Helper()
+	clearInheritedBeadsEnv(t)
 	tomlPath := filepath.Join(dir, "city.toml")
 	var buf bytes.Buffer
 	buf.WriteString("[workspace]\nname = " + `"` + cityName + `"` + "\n\n")
@@ -394,10 +398,12 @@ func writeCityTOML(t *testing.T, dir string, cityName string, agentNames ...stri
 
 func writeControllerNamedSessionCityTOML(t *testing.T, dir, cityName, mode, idleTimeout string) string {
 	t.Helper()
+	clearInheritedBeadsEnv(t)
 	tomlPath := filepath.Join(dir, "city.toml")
 	var buf bytes.Buffer
 	buf.WriteString("[workspace]\nname = " + `"` + cityName + `"` + "\n\n")
 	buf.WriteString("[beads]\nprovider = \"file\"\n\n")
+	buf.WriteString("[daemon]\nshutdown_timeout = \"0s\"\n\n")
 	buf.WriteString("[[agent]]\nname = \"mayor\"\nstart_command = \"echo hello\"\n")
 	if idleTimeout != "" {
 		buf.WriteString("idle_timeout = " + `"` + idleTimeout + `"` + "\n")
@@ -493,12 +499,12 @@ func TestControllerReloadsConfig(t *testing.T) {
 	deadline = time.After(1500 * time.Millisecond)
 	for {
 		names, _ := lastAgentNames.Load().([]string)
-		if len(names) == 2 && names[0] == "mayor" && names[1] == "worker" {
+		if containsAgentNames(names, "mayor", "worker") {
 			break
 		}
 		select {
 		case <-deadline:
-			t.Errorf("expected [mayor worker], got %v", names)
+			t.Errorf("expected mayor and worker, got %v", names)
 			return
 		default:
 			time.Sleep(10 * time.Millisecond)
@@ -580,12 +586,12 @@ func TestControllerReloadsConfigImmediatelyOnWatchEvent(t *testing.T) {
 	deadline = time.After(5 * time.Second)
 	for {
 		names, _ := lastAgentNames.Load().([]string)
-		if len(names) == 2 && names[0] == "mayor" && names[1] == "worker" {
+		if containsAgentNames(names, "mayor", "worker") {
 			break
 		}
 		select {
 		case <-deadline:
-			t.Errorf("expected [mayor worker], got %v", names)
+			t.Errorf("expected mayor and worker, got %v", names)
 			return
 		default:
 			time.Sleep(10 * time.Millisecond)
@@ -652,15 +658,21 @@ func TestControllerReloadsConventionDiscoveredAgentOnWatchEvent(t *testing.T) {
 		t.Fatalf("revision did not change after convention-discovered agent was added: %s", result.Revision)
 	}
 
-	var names []string
+	found := false
 	for _, a := range result.Cfg.Agents {
-		if a.Implicit {
-			continue
+		if !a.Implicit && a.Name == "noreen" {
+			found = true
+			break
 		}
-		names = append(names, a.Name)
 	}
-	if len(names) != 1 || names[0] != "noreen" {
-		t.Fatalf("reloaded agent names = %v, want [noreen]", names)
+	if !found {
+		var names []string
+		for _, a := range result.Cfg.Agents {
+			if !a.Implicit {
+				names = append(names, a.Name)
+			}
+		}
+		t.Fatalf("reloaded agents = %v, want noreen among them", names)
 	}
 }
 
@@ -1071,8 +1083,11 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 	}
 
 	buildFn := func(c *config.City, _ runtime.Provider, _ beads.Store) DesiredStateResult {
-		if len(c.Agents) > 0 {
-			lastIdleTimeout.Store(c.Agents[0].IdleTimeout)
+		for _, agent := range c.Agents {
+			if agent.Name == "mayor" {
+				lastIdleTimeout.Store(agent.IdleTimeout)
+				break
+			}
 		}
 		ds := make(map[string]TemplateParams)
 		for _, a := range c.Agents {
@@ -1244,6 +1259,470 @@ func TestHandleControllerConnControlDispatcher(t *testing.T) {
 	}
 }
 
+func TestHandleSessionCircuitResetSocketCmd(t *testing.T) {
+	tests := []struct {
+		name        string
+		payload     string
+		wantOutcome string
+		wantError   string
+	}{
+		{
+			name:        "invalid json",
+			payload:     `{"identity":`,
+			wantOutcome: "failed",
+			wantError:   "invalid session circuit reset request",
+		},
+		{
+			name:        "empty identity",
+			payload:     `{"identity":"   "}`,
+			wantOutcome: "failed",
+			wantError:   "identity is required",
+		},
+		{
+			name:        "missing session id",
+			payload:     `{"identity":"rig-a/session-a"}`,
+			wantOutcome: "failed",
+			wantError:   "session_id is required",
+		},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			server, client := net.Pipe()
+			defer client.Close() //nolint:errcheck
+
+			done := make(chan struct{})
+			go func() {
+				handleSessionCircuitResetSocketCmd(server, t.TempDir(), tc.payload)
+				close(done)
+			}()
+
+			reply := readSessionCircuitResetSocketReply(t, client)
+			if reply.Outcome != tc.wantOutcome {
+				t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, tc.wantOutcome)
+			}
+			if tc.wantError != "" && !strings.Contains(reply.Error, tc.wantError) {
+				t.Fatalf("reply.Error = %q, want containing %q", reply.Error, tc.wantError)
+			}
+			<-done
+		})
+	}
+}
+
+func TestResetSessionCircuitBreakerStateResetsMemoryBeforeClearingMetadata(t *testing.T) {
+	t0 := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	const identity = "rig-a/session-a"
+	cb := breakerAt(30*time.Minute, 5)
+	for i := 0; i < 6; i++ {
+		cb.RecordRestart(identity, t0.Add(time.Duration(i)*time.Minute))
+	}
+	if !cb.IsOpen(identity, t0.Add(6*time.Minute)) {
+		t.Fatal("precondition: breaker should be open")
+	}
+
+	store := &metadataCallbackStore{
+		Store: beads.NewMemStore(),
+		beforeBatch: func() {
+			if cb.IsOpen(identity, t0.Add(6*time.Minute)) {
+				t.Error("breaker was still open while persisted metadata was being cleared")
+			}
+		},
+	}
+	session, err := store.Create(beads.Bead{
+		Title: "session-a",
+		Type:  sessionBeadType,
+		Metadata: map[string]string{
+			namedSessionIdentityMetadata:   identity,
+			sessionCircuitStateMetadata:    circuitOpen.String(),
+			sessionCircuitRestartsMetadata: `["2026-04-01T12:00:00Z"]`,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	if err := resetSessionCircuitBreakerState(store, session.ID, identity, cb); err != nil {
+		t.Fatalf("resetSessionCircuitBreakerState: %v", err)
+	}
+	if cb.IsOpen(identity, t0.Add(6*time.Minute)) {
+		t.Fatal("breaker should be closed after reset")
+	}
+	updated, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("get session bead: %v", err)
+	}
+	assertSessionCircuitStateMetadataCleared(t, updated.Metadata)
+	if got := updated.Metadata[sessionCircuitResetGenerationMetadata]; got != "2" {
+		t.Fatalf("%s = %q, want 2", sessionCircuitResetGenerationMetadata, got)
+	}
+}
+
+func TestResetSessionCircuitBreakerStateClearsRacingOpenPersist(t *testing.T) {
+	t0 := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	const identity = "rig-a/session-a"
+	cb := breakerAt(30*time.Minute, 5)
+	for i := 0; i < 6; i++ {
+		cb.RecordRestart(identity, t0.Add(time.Duration(i)*time.Minute))
+	}
+	if !cb.IsOpen(identity, t0.Add(6*time.Minute)) {
+		t.Fatal("precondition: breaker should be open")
+	}
+
+	store := &blockingOpenMetadataBatchStore{
+		Store:   beads.NewMemStore(),
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+		cleared: make(chan struct{}),
+	}
+	session, err := store.Create(beads.Bead{
+		Title: "session-a",
+		Type:  sessionBeadType,
+		Metadata: map[string]string{
+			namedSessionIdentityMetadata: identity,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	persistErr := make(chan error, 1)
+	go func() {
+		persistErr <- persistSessionCircuitBreakerMetadata(store, &session, cb, identity, t0.Add(6*time.Minute))
+	}()
+
+	select {
+	case <-store.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("persist did not reach blocked OPEN metadata write")
+	}
+
+	resetErr := make(chan error, 1)
+	go func() {
+		resetErr <- resetSessionCircuitBreakerState(store, session.ID, identity, cb)
+	}()
+
+	select {
+	case <-store.cleared:
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(store.release)
+	if err := <-persistErr; err != nil {
+		t.Fatalf("persistSessionCircuitBreakerMetadata: %v", err)
+	}
+	if err := <-resetErr; err != nil {
+		t.Fatalf("resetSessionCircuitBreakerState: %v", err)
+	}
+	if cb.IsOpen(identity, t0.Add(6*time.Minute)) {
+		t.Fatal("breaker should be closed after racing persist and reset")
+	}
+	updated, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("get session bead: %v", err)
+	}
+	assertSessionCircuitStateMetadataCleared(t, updated.Metadata)
+	if got := updated.Metadata[sessionCircuitResetGenerationMetadata]; got != "2" {
+		t.Fatalf("%s = %q, want 2 after racing persist", sessionCircuitResetGenerationMetadata, got)
+	}
+}
+
+func TestResetSessionCircuitBreakerStateRestoresOpenStateOnMetadataClearFailure(t *testing.T) {
+	t0 := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	const identity = "rig-a/session-a"
+	cb := breakerAt(30*time.Minute, 5)
+	for i := 0; i < 6; i++ {
+		cb.RecordRestart(identity, t0.Add(time.Duration(i)*time.Minute))
+	}
+	if !cb.IsOpen(identity, t0.Add(6*time.Minute)) {
+		t.Fatal("precondition: breaker should be open")
+	}
+
+	store := &failingClearMetadataStore{Store: beads.NewMemStore()}
+	session, err := store.Create(beads.Bead{
+		Title: "session-a",
+		Type:  sessionBeadType,
+		Metadata: map[string]string{
+			namedSessionIdentityMetadata:           identity,
+			sessionCircuitStateMetadata:            circuitOpen.String(),
+			sessionCircuitRestartsMetadata:         `["2026-04-01T12:00:00Z"]`,
+			sessionCircuitLastRestartMetadata:      t0.Format(time.RFC3339Nano),
+			sessionCircuitOpenedAtMetadata:         t0.Format(time.RFC3339Nano),
+			sessionCircuitOpenRestartCountMetadata: "6",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	err = resetSessionCircuitBreakerState(store, session.ID, identity, cb)
+	if err == nil {
+		t.Fatal("resetSessionCircuitBreakerState: expected clear failure")
+	}
+	if !strings.Contains(err.Error(), "injected clear failure") {
+		t.Fatalf("resetSessionCircuitBreakerState error = %v, want injected failure", err)
+	}
+	if !cb.IsOpen(identity, t0.Add(6*time.Minute)) {
+		t.Fatal("breaker should remain open after failed durable clear")
+	}
+	updated, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("get session bead: %v", err)
+	}
+	if got := updated.Metadata[sessionCircuitStateMetadata]; got != circuitOpen.String() {
+		t.Fatalf("%s = %q, want %q", sessionCircuitStateMetadata, got, circuitOpen.String())
+	}
+	if got := updated.Metadata[sessionCircuitResetGenerationMetadata]; got != "" {
+		t.Fatalf("%s = %q, want unchanged", sessionCircuitResetGenerationMetadata, got)
+	}
+}
+
+func TestResetSessionCircuitBreakerStateRestoresOpenStateOnRacingSecondClearFailure(t *testing.T) {
+	t0 := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	const identity = "rig-a/session-a"
+	cb := breakerAt(30*time.Minute, 5)
+	for i := 0; i < 6; i++ {
+		cb.RecordRestart(identity, t0.Add(time.Duration(i)*time.Minute))
+	}
+	if !cb.IsOpen(identity, t0.Add(6*time.Minute)) {
+		t.Fatal("precondition: breaker should be open")
+	}
+
+	store := &failingNthClearMetadataStore{Store: beads.NewMemStore(), failOn: 2}
+	session, err := store.Create(beads.Bead{
+		Title: "session-a",
+		Type:  sessionBeadType,
+		Metadata: map[string]string{
+			namedSessionIdentityMetadata:           identity,
+			sessionCircuitStateMetadata:            circuitOpen.String(),
+			sessionCircuitRestartsMetadata:         `["2026-04-01T12:00:00Z"]`,
+			sessionCircuitLastRestartMetadata:      t0.Format(time.RFC3339Nano),
+			sessionCircuitOpenedAtMetadata:         t0.Format(time.RFC3339Nano),
+			sessionCircuitOpenRestartCountMetadata: "6",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	err = resetSessionCircuitBreakerState(store, session.ID, identity, cb)
+	if err == nil {
+		t.Fatal("resetSessionCircuitBreakerState: expected racing clear failure")
+	}
+	if !strings.Contains(err.Error(), "injected clear failure") {
+		t.Fatalf("resetSessionCircuitBreakerState error = %v, want injected failure", err)
+	}
+	if !cb.IsOpen(identity, t0.Add(6*time.Minute)) {
+		t.Fatal("breaker should remain open after failed racing clear")
+	}
+	updated, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("get session bead: %v", err)
+	}
+	if got := updated.Metadata[sessionCircuitStateMetadata]; got != "" {
+		t.Fatalf("%s = %q, want cleared durable metadata", sessionCircuitStateMetadata, got)
+	}
+	if got := updated.Metadata[sessionCircuitResetGenerationMetadata]; got != "1" {
+		t.Fatalf("%s = %q, want first reset generation preserved", sessionCircuitResetGenerationMetadata, got)
+	}
+}
+
+func TestResetSessionCircuitBreakerStateRejectsStaleRestoreSnapshot(t *testing.T) {
+	t0 := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	const identity = "rig-a/session-a"
+	cb := breakerAt(30*time.Minute, 5)
+	for i := 0; i < 6; i++ {
+		cb.RecordRestart(identity, t0.Add(time.Duration(i)*time.Minute))
+	}
+	if !cb.IsOpen(identity, t0.Add(6*time.Minute)) {
+		t.Fatal("precondition: breaker should be open")
+	}
+
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title: "session-a",
+		Type:  sessionBeadType,
+		Metadata: map[string]string{
+			namedSessionIdentityMetadata:           identity,
+			sessionCircuitStateMetadata:            circuitOpen.String(),
+			sessionCircuitRestartsMetadata:         `["2026-04-01T12:00:00Z"]`,
+			sessionCircuitLastRestartMetadata:      t0.Format(time.RFC3339Nano),
+			sessionCircuitOpenedAtMetadata:         t0.Format(time.RFC3339Nano),
+			sessionCircuitOpenRestartCountMetadata: "6",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	staleSnapshot := make(map[string]string, len(session.Metadata))
+	for k, v := range session.Metadata {
+		staleSnapshot[k] = v
+	}
+
+	if err := resetSessionCircuitBreakerState(store, session.ID, identity, cb); err != nil {
+		t.Fatalf("resetSessionCircuitBreakerState: %v", err)
+	}
+	updated, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("get session bead: %v", err)
+	}
+	if got := updated.Metadata[sessionCircuitResetGenerationMetadata]; got != "2" {
+		t.Fatalf("%s = %q, want 2", sessionCircuitResetGenerationMetadata, got)
+	}
+	if reset, err := cb.restoreFromMetadata(identity, staleSnapshot, t0.Add(7*time.Minute)); err != nil || reset {
+		t.Fatalf("restoreFromMetadata stale reset=%v err=%v", reset, err)
+	}
+	if cb.IsOpen(identity, t0.Add(7*time.Minute)) {
+		t.Fatal("stale pre-reset metadata should not reopen breaker after reset")
+	}
+}
+
+func TestResetSessionCircuitBreakerStateRejectsHigherGenerationStaleRestoreSnapshot(t *testing.T) {
+	t0 := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	const identity = "rig-a/session-a"
+	cb := breakerAt(30*time.Minute, 5)
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title: "session-a",
+		Type:  sessionBeadType,
+		Metadata: map[string]string{
+			namedSessionIdentityMetadata:           identity,
+			sessionCircuitStateMetadata:            circuitOpen.String(),
+			sessionCircuitRestartsMetadata:         `["2026-04-01T12:00:00Z"]`,
+			sessionCircuitLastRestartMetadata:      t0.Format(time.RFC3339Nano),
+			sessionCircuitOpenedAtMetadata:         t0.Format(time.RFC3339Nano),
+			sessionCircuitOpenRestartCountMetadata: "6",
+			sessionCircuitResetGenerationMetadata:  "3",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	staleSnapshot := make(map[string]string, len(session.Metadata))
+	for k, v := range session.Metadata {
+		staleSnapshot[k] = v
+	}
+
+	if err := resetSessionCircuitBreakerState(store, session.ID, identity, cb); err != nil {
+		t.Fatalf("resetSessionCircuitBreakerState: %v", err)
+	}
+	updated, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("get session bead: %v", err)
+	}
+	if got := updated.Metadata[sessionCircuitResetGenerationMetadata]; got != "5" {
+		t.Fatalf("%s = %q, want 5", sessionCircuitResetGenerationMetadata, got)
+	}
+	if reset, err := cb.restoreFromMetadata(identity, staleSnapshot, t0.Add(7*time.Minute)); err != nil || reset {
+		t.Fatalf("restoreFromMetadata stale reset=%v err=%v", reset, err)
+	}
+	if cb.IsOpen(identity, t0.Add(7*time.Minute)) {
+		t.Fatal("higher-generation stale pre-reset metadata should not reopen breaker after reset")
+	}
+}
+
+type metadataCallbackStore struct {
+	beads.Store
+	beforeBatch func()
+}
+
+func (s *metadataCallbackStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if s.beforeBatch != nil {
+		s.beforeBatch()
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+type blockingOpenMetadataBatchStore struct {
+	beads.Store
+	entered chan struct{}
+	release chan struct{}
+	cleared chan struct{}
+	once    sync.Once
+}
+
+func (s *blockingOpenMetadataBatchStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if kvs[sessionCircuitStateMetadata] == circuitOpen.String() {
+		s.once.Do(func() { close(s.entered) })
+		<-s.release
+	}
+	if sessionCircuitStateMetadataAllCleared(kvs) {
+		select {
+		case <-s.cleared:
+		default:
+			close(s.cleared)
+		}
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+type failingClearMetadataStore struct {
+	beads.Store
+}
+
+func (s *failingClearMetadataStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if sessionCircuitStateMetadataAllCleared(kvs) {
+		return errors.New("injected clear failure")
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+type failingNthClearMetadataStore struct {
+	beads.Store
+	failOn int
+	calls  int
+}
+
+func (s *failingNthClearMetadataStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if sessionCircuitStateMetadataAllCleared(kvs) {
+		s.calls++
+		if s.calls == s.failOn {
+			return errors.New("injected clear failure")
+		}
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+func assertSessionCircuitStateMetadataCleared(t *testing.T, kvs map[string]string) {
+	t.Helper()
+	for _, key := range sessionCircuitMetadataKeys {
+		if key == sessionCircuitResetGenerationMetadata {
+			continue
+		}
+		if kvs[key] != "" {
+			t.Fatalf("%s = %q, want cleared", key, kvs[key])
+		}
+	}
+}
+
+func sessionCircuitStateMetadataAllCleared(kvs map[string]string) bool {
+	for _, key := range sessionCircuitMetadataKeys {
+		if key == sessionCircuitResetGenerationMetadata {
+			continue
+		}
+		if kvs[key] != "" {
+			return false
+		}
+	}
+	return true
+}
+
+func readSessionCircuitResetSocketReply(t *testing.T, conn net.Conn) sessionCircuitResetReply {
+	t.Helper()
+	scanner := bufio.NewScanner(conn)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			t.Fatalf("read reply: %v", err)
+		}
+		t.Fatal("read reply: connection closed")
+	}
+	var reply sessionCircuitResetReply
+	if err := json.Unmarshal(scanner.Bytes(), &reply); err != nil {
+		t.Fatalf("decode reply: %v", err)
+	}
+	return reply
+}
+
 func TestControllerReloadInvalidConfig(t *testing.T) {
 	old := debounceDelay
 	debounceDelay = 5 * time.Millisecond
@@ -1289,13 +1768,12 @@ func TestControllerReloadInvalidConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Wait for a tick to process the bad config.
-	target := reconcileCount.Load() + 2
 	deadline := time.After(3 * time.Second)
-	for reconcileCount.Load() < target {
+	for !strings.Contains(stderr.String(), "config reload") {
 		select {
 		case <-deadline:
-			t.Fatal("timed out waiting for tick after invalid config")
+			t.Fatalf("timed out waiting for invalid config reload; reconciles=%d stdout=%q stderr=%q",
+				reconcileCount.Load(), stdout.String(), stderr.String())
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
@@ -1465,7 +1943,8 @@ func TestControllerReloadCommandReloadsConfigImmediately(t *testing.T) {
 		}
 	}
 
-	writeCityTOML(t, dir, "test", "mayor", "worker")
+	expectedAgentNames := []string{"mayor", "worker"}
+	writeCityTOML(t, dir, "test", expectedAgentNames...)
 
 	before := reconcileCount.Load()
 	resp, err := sendControllerCommand(dir, "reload")
@@ -1476,20 +1955,43 @@ func TestControllerReloadCommandReloadsConfigImmediately(t *testing.T) {
 		t.Fatalf("reload response = %q, want %q", string(resp), "ok")
 	}
 
+	agentNamesMatch := func(names []string) bool {
+		return containsAgentNames(names, expectedAgentNames...)
+	}
+
+	var names []string
 	deadline = time.After(1500 * time.Millisecond)
-	for reconcileCount.Load() <= before || !strings.Contains(stdout.String(), "Config reloaded") {
+	for {
+		names, _ = lastAgentNames.Load().([]string)
+		if reconcileCount.Load() > before &&
+			strings.Contains(stdout.String(), "Config reloaded") &&
+			agentNamesMatch(names) {
+			break
+		}
 		select {
 		case <-deadline:
-			t.Fatalf("timed out waiting for reload command to apply config; reconciles=%d stdout=%q stderr=%q", reconcileCount.Load(), stdout.String(), stderr.String())
+			t.Fatalf("timed out waiting for reload command to apply config; reconciles=%d agents=%v stdout=%q stderr=%q", reconcileCount.Load(), names, stdout.String(), stderr.String())
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
 
-	names, _ := lastAgentNames.Load().([]string)
-	if len(names) != 2 || names[0] != "mayor" || names[1] != "worker" {
-		t.Fatalf("expected [mayor worker], got %v", names)
+	if !agentNamesMatch(names) {
+		t.Fatalf("expected %v, got %v", expectedAgentNames, names)
 	}
+}
+
+func containsAgentNames(got []string, want ...string) bool {
+	seen := make(map[string]bool, len(got))
+	for _, name := range got {
+		seen[name] = true
+	}
+	for _, name := range want {
+		if !seen[name] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestControllerPokeTriggersImmediate(t *testing.T) {
@@ -1607,4 +2109,53 @@ func (osFS) Lstat(name string) (os.FileInfo, error)               { return os.Ls
 func (osFS) ReadDir(name string) ([]os.DirEntry, error)           { return os.ReadDir(name) }
 func (osFS) Rename(oldpath, newpath string) error                 { return os.Rename(oldpath, newpath) }
 func (osFS) Remove(name string) error                             { return os.Remove(name) }
-func (osFS) Chmod(name string, mode os.FileMode) error            { return os.Chmod(name, mode) }
+
+// TestTryReloadConfig_IncludesBuiltinPackOrders verifies that the controller's
+// config reload path includes builtin pack formula layers so the order
+// dispatcher sees orders from all embedded packs (core, maintenance, bd, dolt).
+// Regression test for gc-4624: dolt pack orders never fired because
+// tryReloadConfig did not pass builtinPackIncludes to LoadWithIncludes.
+func TestTryReloadConfig_IncludesBuiltinPackOrders(t *testing.T) {
+	configureTestDoltIdentityEnv(t)
+	t.Setenv("GC_BEADS", "")
+
+	dir := shortSocketTempDir(t, "gc-reload-orders-")
+	tomlPath := filepath.Join(dir, "city.toml")
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte("[pack]\nname = \"test\"\nschema = 1\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+
+	result, err := tryReloadConfig(tomlPath, "test", dir)
+	if err != nil {
+		t.Fatalf("tryReloadConfig() error = %v", err)
+	}
+
+	var stderr bytes.Buffer
+	aa, err := scanAllOrders(dir, result.Cfg, &stderr, "test")
+	if err != nil {
+		t.Fatalf("scanAllOrders: %v", err)
+	}
+
+	names := make(map[string]bool, len(aa))
+	for _, a := range aa {
+		names[a.Name] = true
+	}
+
+	// Maintenance pack orders (always included).
+	for _, want := range []string{"gate-sweep", "wisp-compact"} {
+		if !names[want] {
+			t.Errorf("missing maintenance order %q; got %v", want, names)
+		}
+	}
+	// Dolt pack orders (included transitively via bd pack).
+	for _, want := range []string{"dolt-health", "dolt-gc-nudge", "dolt-remotes-patrol"} {
+		if !names[want] {
+			t.Errorf("missing dolt order %q; got %v", want, names)
+		}
+	}
+}
+
+func (osFS) Chmod(name string, mode os.FileMode) error { return os.Chmod(name, mode) }

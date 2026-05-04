@@ -61,19 +61,21 @@ const (
 
 // CacheStats exposes cache freshness, reconciliation, and problem state.
 type CacheStats struct {
-	TotalBeads      int
-	TotalDeps       int
-	LastFreshAt     time.Time
-	LastReconcileAt time.Time
-	LastReconcileMs float64
-	Adds            int64
-	Removes         int64
-	Updates         int64
-	SyncFailures    int
-	ProblemCount    int64
-	LastProblemAt   time.Time
-	LastProblem     string
-	State           string
+	TotalBeads              int
+	TotalDeps               int
+	LastFreshAt             time.Time
+	LastReconcileAt         time.Time
+	LastReconcileMs         float64
+	Adds                    int64
+	Removes                 int64
+	Updates                 int64
+	ReconcileRecoveries     int64
+	ReconcileCloseDeferrals int64
+	SyncFailures            int
+	ProblemCount            int64
+	LastProblemAt           time.Time
+	LastProblem             string
+	State                   string
 }
 
 const (
@@ -192,6 +194,16 @@ func (c *CachingStore) PrimeActive() error {
 		all = append(all, beads...)
 	}
 
+	beadMap := make(map[string]Bead, len(all))
+	for _, b := range all {
+		beadMap[b.ID] = cloneBead(b)
+	}
+	depMap, depsComplete, depErr := c.fetchDepsForIDs(beadIDs(beadMap))
+	if depErr != nil {
+		partialErr = errors.Join(partialErr, depErr)
+		c.recordProblem("prime active dep cache", depErr)
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := time.Now()
@@ -208,6 +220,11 @@ func (c *CachingStore) PrimeActive() error {
 			continue
 		}
 		c.beads[b.ID] = cloneBead(b)
+		if depsComplete && depErr == nil {
+			c.deps[b.ID] = cloneDeps(depMap[b.ID])
+		} else {
+			c.deps[b.ID] = depsFromBeadFields(b)
+		}
 		delete(c.deletedSeq, b.ID)
 		if !recentLocalMutation(c.localBeadAt[b.ID], now) {
 			delete(c.beadSeq, b.ID)
@@ -269,7 +286,7 @@ func (c *CachingStore) Prime(_ context.Context) error {
 	defer c.mu.Unlock()
 	if c.mutationSeq == startSeq {
 		nextBeads := beadMap
-		nextDeps := depMap
+		nextDeps := depsFromBeads(beadMap, depMap, depsComplete && depErr == nil)
 		nextDirty := make(map[string]struct{})
 		nextBeadSeq := make(map[string]uint64)
 		nextLocalBeadAt := make(map[string]time.Time)
@@ -312,8 +329,10 @@ func (c *CachingStore) Prime(_ context.Context) error {
 			c.beads[id] = b
 			delete(c.deletedSeq, id)
 			delete(c.beadSeq, id)
-			if deps, ok := depMap[id]; ok {
-				c.deps[id] = deps
+			if depsComplete && depErr == nil {
+				c.deps[id] = cloneDeps(depMap[id])
+			} else {
+				c.deps[id] = depsFromBeadFields(b)
 			}
 		}
 		c.depsComplete = false
@@ -433,6 +452,44 @@ func (c *CachingStore) fetchDepsForIDs(ids []string) (map[string][]Dep, bool, er
 		depMap[id] = cloneDeps(deps)
 	}
 	return depMap, true, nil
+}
+
+func depsFromBeads(beadMap map[string]Bead, depMap map[string][]Dep, useDepMap bool) map[string][]Dep {
+	deps := make(map[string][]Dep, len(beadMap))
+	for id, b := range beadMap {
+		if useDepMap {
+			deps[id] = cloneDeps(depMap[id])
+			continue
+		}
+		deps[id] = depsFromBeadFields(b)
+	}
+	return deps
+}
+
+func depsFromBeadFields(b Bead) []Dep {
+	// Structured dependencies are the authoritative bead representation when
+	// present; Needs is the legacy shorthand used when no dependency objects
+	// were carried on the bead payload.
+	if len(b.Dependencies) > 0 {
+		return cloneDeps(b.Dependencies)
+	}
+	if len(b.Needs) == 0 {
+		return nil
+	}
+	deps := make([]Dep, 0, len(b.Needs))
+	for _, need := range b.Needs {
+		depType := "blocks"
+		dependsOnID := need
+		if strings.Contains(need, ":") {
+			parts := strings.SplitN(need, ":", 2)
+			if parts[0] != "" && parts[1] != "" {
+				depType = parts[0]
+				dependsOnID = parts[1]
+			}
+		}
+		deps = append(deps, Dep{IssueID: b.ID, DependsOnID: dependsOnID, Type: depType})
+	}
+	return deps
 }
 
 func cloneDeps(deps []Dep) []Dep {

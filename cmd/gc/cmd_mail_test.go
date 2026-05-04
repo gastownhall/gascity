@@ -10,12 +10,14 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	mailexec "github.com/gastownhall/gascity/internal/mail/exec"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -36,7 +38,13 @@ func (countOnlyMailProvider) Read(string) (mail.Message, error)    { panic("unex
 func (countOnlyMailProvider) MarkRead(string) error                { panic("unexpected MarkRead") }
 func (countOnlyMailProvider) MarkUnread(string) error              { panic("unexpected MarkUnread") }
 func (countOnlyMailProvider) Archive(string) error                 { panic("unexpected Archive") }
-func (countOnlyMailProvider) Delete(string) error                  { panic("unexpected Delete") }
+func (countOnlyMailProvider) ArchiveMany([]string) ([]mail.ArchiveResult, error) {
+	panic("unexpected ArchiveMany")
+}
+func (countOnlyMailProvider) Delete(string) error { panic("unexpected Delete") }
+func (countOnlyMailProvider) DeleteMany([]string) ([]mail.ArchiveResult, error) {
+	panic("unexpected DeleteMany")
+}
 func (countOnlyMailProvider) Check(string) ([]mail.Message, error) { panic("unexpected Check") }
 func (countOnlyMailProvider) Reply(string, string, string, string) (mail.Message, error) {
 	panic("unexpected Reply")
@@ -1782,6 +1790,105 @@ func TestMailDeleteSuccess(t *testing.T) {
 	}
 }
 
+func TestMailDeleteMultiSuccess(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	for i := 0; i < 3; i++ {
+		if _, err := mp.Send("human", "mayor", "", "batch me"); err != nil {
+			t.Fatalf("Send %d: %v", i, err)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	rec := &memRecorder{}
+	code := doMailDelete(mp, rec, []string{"gc-1", "gc-2", "gc-3"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailDelete = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"Deleted message gc-1", "Deleted message gc-2", "Deleted message gc-3"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout missing %q:\n%s", want, out)
+		}
+	}
+	if n := len(rec.events); n != 3 {
+		t.Errorf("recorded events = %d, want 3", n)
+	}
+	for _, id := range []string{"gc-1", "gc-2", "gc-3"} {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if b.Status != "closed" {
+			t.Errorf("bead %s Status = %q, want closed", id, b.Status)
+		}
+	}
+}
+
+func TestMailDeleteMultiPartialFailure(t *testing.T) {
+	mp := mail.NewFake()
+	m1, _ := mp.Send("human", "mayor", "", "one")
+	m2, _ := mp.Send("human", "mayor", "", "two")
+	if err := mp.Archive(m2.ID); err != nil {
+		t.Fatalf("pre-archive m2: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doMailDelete(mp, events.Discard, []string{m1.ID, m2.ID, "ghost"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doMailDelete = %d, want 1; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Deleted message "+m1.ID) {
+		t.Errorf("stdout missing Deleted for m1:\n%s", out)
+	}
+	if !strings.Contains(out, "Already deleted "+m2.ID) {
+		t.Errorf("stdout missing Already deleted for m2:\n%s", out)
+	}
+	if !strings.Contains(stderr.String(), "gc mail delete ghost") {
+		t.Errorf("stderr missing per-id error for ghost:\n%s", stderr.String())
+	}
+}
+
+func TestMailDeleteMultiExecProviderUsesDeleteCommand(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "ops.log")
+	scriptPath := filepath.Join(dir, "mail-provider")
+	script := fmt.Sprintf(`#!/bin/sh
+set -eu
+op="$1"
+case "$op" in
+  ensure-running)
+    ;;
+  archive|delete)
+    printf '%%s %%s\n' "$op" "$2" >> %q
+    ;;
+  *)
+    echo "unexpected op $op" >&2
+    exit 2
+    ;;
+esac
+`, logPath)
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(script): %v", err)
+	}
+
+	mp := mailexec.NewProvider(scriptPath)
+	var stdout, stderr bytes.Buffer
+	code := doMailDelete(mp, events.Discard, []string{"msg-1", "msg-2"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailDelete = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	gotBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(log): %v", err)
+	}
+	want := "delete msg-1\ndelete msg-2\n"
+	if got := string(gotBytes); got != want {
+		t.Fatalf("exec operations = %q, want %q", got, want)
+	}
+}
+
 // --- gc mail thread ---
 
 func TestMailThreadSuccess(t *testing.T) {
@@ -1982,6 +2089,57 @@ func TestMailArchiveAlreadyClosed(t *testing.T) {
 	// Already-closed messages report as already archived.
 	if !strings.Contains(stdout.String(), "Already archived gc-1") {
 		t.Errorf("stdout = %q, want 'Already archived'", stdout.String())
+	}
+}
+
+func TestMailArchiveMultiSuccess(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	for i := 0; i < 3; i++ {
+		if _, err := mp.Send("human", "mayor", "", "batch"); err != nil {
+			t.Fatalf("Send %d: %v", i, err)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	rec := &memRecorder{}
+	code := doMailArchive(mp, rec, []string{"gc-1", "gc-2", "gc-3"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailArchive = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"Archived message gc-1", "Archived message gc-2", "Archived message gc-3"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout missing %q:\n%s", want, out)
+		}
+	}
+	if n := len(rec.events); n != 3 {
+		t.Errorf("recorded events = %d, want 3", n)
+	}
+}
+
+func TestMailArchiveMultiPartialFailure(t *testing.T) {
+	mp := mail.NewFake()
+	m1, _ := mp.Send("human", "mayor", "", "one")
+	m2, _ := mp.Send("human", "mayor", "", "two")
+	if err := mp.Archive(m2.ID); err != nil {
+		t.Fatalf("pre-archive: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doMailArchive(mp, events.Discard, []string{m1.ID, m2.ID, "ghost"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doMailArchive = %d, want 1; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Archived message "+m1.ID) {
+		t.Errorf("stdout missing Archived for m1:\n%s", out)
+	}
+	if !strings.Contains(out, "Already archived "+m2.ID) {
+		t.Errorf("stdout missing Already archived for m2:\n%s", out)
+	}
+	if !strings.Contains(stderr.String(), "gc mail archive ghost") {
+		t.Errorf("stderr missing per-id error for ghost:\n%s", stderr.String())
 	}
 }
 
@@ -2377,6 +2535,143 @@ func TestMailCheckInjectFormatsMessages(t *testing.T) {
 	}
 	if !strings.Contains(out, "gc mail read <id>") {
 		t.Errorf("stdout missing read hint:\n%s", out)
+	}
+}
+
+func TestMailCheckInjectLimitsMessageCount(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	mp.Send("sender-a", "recipient", "", "first")  //nolint:errcheck
+	mp.Send("sender-b", "recipient", "", "second") //nolint:errcheck
+	mp.Send("sender-c", "recipient", "", "third")  //nolint:errcheck
+	mp.Send("sender-d", "recipient", "", "fourth") //nolint:errcheck
+
+	var stdout bytes.Buffer
+	code := doMailCheck(mp, "recipient", true, &stdout, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("doMailCheck = %d, want 0", code)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{"4 unread message(s)", "gc-1 from sender-a", "gc-2 from sender-b", "gc-3 from sender-c", "Showing the first 3 message(s)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "gc-4") || strings.Contains(out, "fourth") {
+		t.Errorf("stdout should not include the fourth message:\n%s", out)
+	}
+}
+
+func TestMailCheckInjectTruncatesLongBodies(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	longBody := "prefix " + strings.Repeat("x", mailInjectBodyPreviewSize+100)
+	mp.Send("sender-a", "recipient", "Long body", longBody) //nolint:errcheck
+
+	var stdout bytes.Buffer
+	code := doMailCheck(mp, "recipient", true, &stdout, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("doMailCheck = %d, want 0", code)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Long body") {
+		t.Errorf("stdout missing subject:\n%s", out)
+	}
+	if !strings.Contains(out, "... [preview truncated]") {
+		t.Errorf("stdout missing truncation marker:\n%s", out)
+	}
+	if strings.Contains(out, strings.Repeat("x", mailInjectBodyPreviewSize+80)) {
+		t.Errorf("stdout includes too much of the long body:\n%s", out)
+	}
+}
+
+func TestMailCheckInjectCompactsAndBoundsLongSubjects(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	longSubject := "subject\n\tline " + strings.Repeat("x", mailInjectBodyPreviewSize+100) + " tail"
+	mp.Send("sender-a", "recipient", longSubject, "short body") //nolint:errcheck
+
+	var stdout bytes.Buffer
+	code := doMailCheck(mp, "recipient", true, &stdout, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("doMailCheck = %d, want 0", code)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "[subject line ") {
+		t.Fatalf("stdout missing compacted subject prefix:\n%s", out)
+	}
+	if strings.Contains(out, "subject\n\tline") {
+		t.Fatalf("stdout contains raw multiline subject:\n%s", out)
+	}
+	if strings.Contains(out, strings.Repeat("x", mailInjectBodyPreviewSize+80)) {
+		t.Fatalf("stdout includes too much of the long subject:\n%s", out)
+	}
+	if !strings.Contains(out, "... [subject truncated]") {
+		t.Fatalf("stdout missing subject truncation marker:\n%s", out)
+	}
+}
+
+func TestMailCheckInjectOmitsSubjectWhenFullBodyMatches(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	longBody := strings.Repeat("x", mailInjectBodyPreviewSize+100)
+	mp.Send("sender-a", "recipient", longBody, longBody) //nolint:errcheck
+
+	var stdout bytes.Buffer
+	code := doMailCheck(mp, "recipient", true, &stdout, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("doMailCheck = %d, want 0", code)
+	}
+
+	out := stdout.String()
+	if strings.Contains(out, "["+longBody+"]") {
+		t.Errorf("stdout should not repeat a matching subject after body truncation:\n%s", out)
+	}
+	if !strings.Contains(out, "gc-1 from sender-a: ") {
+		t.Errorf("stdout missing compact message format:\n%s", out)
+	}
+	if !strings.Contains(out, "... [preview truncated]") {
+		t.Errorf("stdout missing truncation marker:\n%s", out)
+	}
+}
+
+func TestMailInjectBodyPreviewUsesBoundedScan(t *testing.T) {
+	body := strings.Repeat(" ", mailInjectPreviewScanSize+1) + "tail"
+	preview, truncated := mailInjectBodyPreview(body)
+	if !truncated {
+		t.Fatalf("mailInjectBodyPreview did not truncate after scan budget")
+	}
+	if preview != "" {
+		t.Fatalf("mailInjectBodyPreview = %q, want empty preview after leading-space budget", preview)
+	}
+}
+
+func TestMailInjectBodyPreviewCompactsWhitespace(t *testing.T) {
+	preview, truncated := mailInjectBodyPreview(" first\n\tsecond   third ")
+	if truncated {
+		t.Fatalf("mailInjectBodyPreview truncated short body")
+	}
+	if preview != "first second third" {
+		t.Fatalf("mailInjectBodyPreview = %q, want %q", preview, "first second third")
+	}
+}
+
+func TestMailInjectBodyPreviewKeepsUTF8Boundary(t *testing.T) {
+	prefix := strings.Repeat("a", mailInjectBodyPreviewSize-1)
+	compact := prefix + "界tail"
+
+	preview, truncated := mailInjectBodyPreview(compact)
+	if !truncated {
+		t.Fatalf("mailInjectBodyPreview did not truncate long body")
+	}
+	if preview != prefix {
+		t.Fatalf("mailInjectBodyPreview = %q, want %q", preview, prefix)
+	}
+	if !utf8.ValidString(preview) {
+		t.Fatalf("mailInjectBodyPreview returned invalid UTF-8: %q", preview)
 	}
 }
 

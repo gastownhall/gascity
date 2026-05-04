@@ -165,6 +165,35 @@ func TestFindClosedNamedSessionBeadForSessionName_PrefersMatchingCanonicalCandid
 	}
 }
 
+func TestFindClosedNamedSessionBeadForSessionName_SkipsTerminalRetiredCandidate(t *testing.T) {
+	store := beads.NewMemStore()
+	orphaned, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name":               "test-city--mayor",
+			"close_reason":               "orphaned",
+			"state":                      "orphaned",
+			NamedSessionMetadataKey:      "true",
+			NamedSessionIdentityMetadata: "mayor",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(orphaned): %v", err)
+	}
+	if err := store.Close(orphaned.ID); err != nil {
+		t.Fatalf("Close(orphaned): %v", err)
+	}
+
+	found, ok, err := FindClosedNamedSessionBeadForSessionName(store, "mayor", "test-city--mayor")
+	if err != nil {
+		t.Fatalf("FindClosedNamedSessionBeadForSessionName: %v", err)
+	}
+	if ok {
+		t.Fatalf("FindClosedNamedSessionBeadForSessionName returned %q, want no reusable bead", found.ID)
+	}
+}
+
 func TestFindClosedNamedSessionBead_PrefersNewestClosedCanonical(t *testing.T) {
 	store := beads.NewMemStore()
 	older, err := store.Create(beads.Bead{
@@ -362,6 +391,133 @@ type listCountingStore struct {
 func (s *listCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	s.queries = append(s.queries, query)
 	return s.MemStore.List(query)
+}
+
+func TestLookupConfiguredNamedSession_BoundedConflictQueries(t *testing.T) {
+	store := &listCountingStore{MemStore: beads.NewMemStore()}
+	spec := NamedSessionSpec{
+		Identity:    "mayor",
+		SessionName: "test-city--mayor",
+	}
+	conflict, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name": spec.SessionName,
+			"template":     "other",
+			"agent_name":   "other",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(conflict): %v", err)
+	}
+
+	lookup, err := LookupConfiguredNamedSession(store, spec)
+	if err != nil {
+		t.Fatalf("LookupConfiguredNamedSession: %v", err)
+	}
+	if !lookup.HasConflict {
+		t.Fatal("HasConflict = false, want true")
+	}
+	if lookup.Conflict.ID != conflict.ID {
+		t.Fatalf("Conflict.ID = %q, want %q", lookup.Conflict.ID, conflict.ID)
+	}
+	if len(store.queries) > 4 {
+		t.Fatalf("List calls = %d, want bounded small constant without duplicate session_name lookup", len(store.queries))
+	}
+	for i, query := range store.queries {
+		if len(query.Metadata) == 0 {
+			t.Fatalf("query #%d has no metadata filter: %+v", i, query)
+		}
+	}
+}
+
+func TestLookupConfiguredNamedSession_AcceptsTypeOnlyCanonicalBead(t *testing.T) {
+	store := beads.NewMemStore()
+	spec := NamedSessionSpec{
+		Identity:    "mayor",
+		SessionName: "test-city--mayor",
+	}
+	canonical, err := store.Create(beads.Bead{
+		Type: BeadType,
+		Metadata: map[string]string{
+			NamedSessionMetadataKey:      "true",
+			NamedSessionIdentityMetadata: spec.Identity,
+			"session_name":               spec.SessionName,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(canonical): %v", err)
+	}
+
+	lookup, err := LookupConfiguredNamedSession(store, spec)
+	if err != nil {
+		t.Fatalf("LookupConfiguredNamedSession: %v", err)
+	}
+	if !lookup.HasCanonical {
+		t.Fatal("HasCanonical = false, want true")
+	}
+	if lookup.Canonical.ID != canonical.ID {
+		t.Fatalf("Canonical.ID = %q, want %q", lookup.Canonical.ID, canonical.ID)
+	}
+}
+
+func TestLookupConfiguredNamedSession_ReportsSessionNameConflictBeforeAliasConflict(t *testing.T) {
+	store := beads.NewMemStore()
+	spec := NamedSessionSpec{
+		Identity:    "mayor",
+		SessionName: "test-city--mayor",
+	}
+	aliasConflict, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"alias":      spec.Identity,
+			"template":   "other",
+			"agent_name": "other",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(alias conflict): %v", err)
+	}
+	sessionNameConflict, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name": spec.SessionName,
+			"template":     "other",
+			"agent_name":   "other",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(session_name conflict): %v", err)
+	}
+
+	lookup, err := LookupConfiguredNamedSession(store, spec)
+	if err != nil {
+		t.Fatalf("LookupConfiguredNamedSession: %v", err)
+	}
+	if !lookup.HasConflict {
+		t.Fatal("HasConflict = false, want true")
+	}
+	if lookup.Conflict.ID != sessionNameConflict.ID {
+		t.Fatalf("Conflict.ID = %q, want session_name conflict %q before alias conflict %q", lookup.Conflict.ID, sessionNameConflict.ID, aliasConflict.ID)
+	}
+}
+
+func TestLookupConfiguredNamedSession_EmptySpecNoListCall(t *testing.T) {
+	store := &listCountingStore{MemStore: beads.NewMemStore()}
+
+	lookup, err := LookupConfiguredNamedSession(store, NamedSessionSpec{})
+	if err != nil {
+		t.Fatalf("LookupConfiguredNamedSession(empty): %v", err)
+	}
+	if lookup.HasCanonical || lookup.HasConflict {
+		t.Fatalf("lookup = %+v, want empty result", lookup)
+	}
+	if len(store.queries) != 0 {
+		t.Fatalf("List calls = %d, want 0", len(store.queries))
+	}
 }
 
 func TestNamedSessionResolutionCandidates_SingleListByLabel(t *testing.T) {

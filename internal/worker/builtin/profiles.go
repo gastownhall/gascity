@@ -140,7 +140,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				Type:  "select",
 				Choices: []BuiltinOptionChoice{
 					{Value: "", Label: "Default"},
-					{Value: "opus", Label: "Opus", FlagArgs: []string{"--model", "claude-opus-4-6"}, FlagAliases: [][]string{{"-m", "claude-opus-4-6"}}},
+					{Value: "opus", Label: "Opus", FlagArgs: []string{"--model", "claude-opus-4-7"}, FlagAliases: [][]string{{"-m", "claude-opus-4-7"}}},
 					{Value: "sonnet", Label: "Sonnet", FlagArgs: []string{"--model", "claude-sonnet-4-6"}, FlagAliases: [][]string{{"-m", "claude-sonnet-4-6"}}},
 					{Value: "haiku", Label: "Haiku", FlagArgs: []string{"--model", "claude-haiku-4-5-20251001"}, FlagAliases: [][]string{{"-m", "claude-haiku-4-5-20251001"}}},
 				},
@@ -189,6 +189,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				Choices: []BuiltinOptionChoice{
 					{Value: "", Label: "Default"},
 					{Value: "gpt-5.5", Label: "GPT-5.5", FlagArgs: []string{"--model", "gpt-5.5"}, FlagAliases: [][]string{{"-m", "gpt-5.5"}}},
+					{Value: "gpt-5.3-codex-spark", Label: "GPT-5.3 Codex Spark", FlagArgs: []string{"--model", "gpt-5.3-codex-spark"}, FlagAliases: [][]string{{"-m", "gpt-5.3-codex-spark"}}},
 					{Value: "o3", Label: "o3", FlagArgs: []string{"--model", "o3"}, FlagAliases: [][]string{{"-m", "o3"}}},
 					{Value: "o4-mini", Label: "o4-mini", FlagArgs: []string{"--model", "o4-mini"}, FlagAliases: [][]string{{"-m", "o4-mini"}}},
 				},
@@ -306,13 +307,16 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		DisplayName:      "OpenCode",
 		Command:          "opencode",
 		Args:             []string{},
-		PromptMode:       "none",
+		PromptMode:       "flag",
+		PromptFlag:       "--prompt",
 		ReadyDelayMs:     8000,
 		ProcessNames:     []string{"opencode", "node", "bun"},
 		Env:              map[string]string{"OPENCODE_PERMISSION": `{"*":"allow"}`},
 		SupportsACP:      true,
 		SupportsHooks:    true,
 		InstructionsFile: "AGENTS.md",
+		ResumeFlag:       "--session",
+		ResumeStyle:      "flag",
 		ACPArgs:          []string{"acp"},
 	},
 	"auggie": {
@@ -369,23 +373,25 @@ func BuiltinProviders() map[string]BuiltinProviderSpec {
 func CanonicalProfileIdentity(profile string) (ProfileIdentity, bool) {
 	switch profile {
 	case "claude/tmux-cli":
-		return newProfileIdentity(profile, "claude", "tmux-cli"), true
+		return newProfileIdentity(profile, "claude"), true
 	case "codex/tmux-cli":
-		return newProfileIdentity(profile, "codex", "tmux-cli"), true
+		return newProfileIdentity(profile, "codex"), true
 	case "gemini/tmux-cli":
-		return newProfileIdentity(profile, "gemini", "tmux-cli"), true
+		return newProfileIdentity(profile, "gemini"), true
+	case "opencode/tmux-cli":
+		return newProfileIdentity(profile, "opencode"), true
 	default:
 		return ProfileIdentity{}, false
 	}
 }
 
-func newProfileIdentity(profile, family, transport string) ProfileIdentity {
+func newProfileIdentity(profile, family string) ProfileIdentity {
 	compatibility := fmt.Sprintf("%s|behavior=%s|transcript=%s", profile, canonicalBehaviorClaimsVersion, canonicalTranscriptAdapterVersion)
 	sum := sha256.Sum256([]byte(compatibility))
 	return ProfileIdentity{
 		Profile:                  profile,
 		ProviderFamily:           family,
-		TransportClass:           transport,
+		TransportClass:           "tmux-cli",
 		BehaviorClaimsVersion:    canonicalBehaviorClaimsVersion,
 		TranscriptAdapterVersion: canonicalTranscriptAdapterVersion,
 		CompatibilityVersion:     compatibility,

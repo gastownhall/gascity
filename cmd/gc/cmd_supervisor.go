@@ -182,6 +182,97 @@ type reconcileRequest struct {
 	done chan struct{}
 }
 
+type supervisorShutdownMode int32
+
+const (
+	supervisorShutdownNone supervisorShutdownMode = iota
+	supervisorShutdownPreserveSessions
+	supervisorShutdownDestructive
+)
+
+const supervisorPreserveSessionsOnSignalEnv = "GC_SUPERVISOR_PRESERVE_SESSIONS_ON_SIGNAL"
+
+var supervisorShutdownSettleDelay = 50 * time.Millisecond
+
+var supervisorSignalNotify = signal.Notify
+
+func supervisorPreserveSessionsOnSignal() bool {
+	return os.Getenv(supervisorPreserveSessionsOnSignalEnv) == "1"
+}
+
+func supervisorShutdownModeForSignal(sig os.Signal) supervisorShutdownMode {
+	if sig == syscall.SIGTERM && supervisorPreserveSessionsOnSignal() {
+		return supervisorShutdownPreserveSessions
+	}
+	return supervisorShutdownDestructive
+}
+
+type supervisorShutdownController struct {
+	mode                 atomic.Int32
+	destructiveRequested atomic.Bool
+	destructiveOnce      sync.Once
+	destructiveCh        chan struct{}
+}
+
+func newSupervisorShutdownController() *supervisorShutdownController {
+	return &supervisorShutdownController{destructiveCh: make(chan struct{})}
+}
+
+func supervisorSignalLoop(sigCh <-chan os.Signal, done <-chan struct{}, requestShutdown func(supervisorShutdownMode), requestReconcile func()) {
+	for {
+		select {
+		case sig := <-sigCh:
+			if sig == nil {
+				continue
+			}
+			if sig == syscall.SIGHUP {
+				requestReconcile()
+				continue
+			}
+			requestShutdown(supervisorShutdownModeForSignal(sig))
+		case <-done:
+			return
+		}
+	}
+}
+
+func (c *supervisorShutdownController) request(mode supervisorShutdownMode) {
+	if mode == supervisorShutdownDestructive {
+		c.destructiveRequested.Store(true)
+		c.mode.Store(int32(supervisorShutdownDestructive))
+		c.destructiveOnce.Do(func() {
+			if c.destructiveCh != nil {
+				close(c.destructiveCh)
+			}
+		})
+		return
+	}
+	if mode == supervisorShutdownPreserveSessions {
+		c.mode.CompareAndSwap(int32(supervisorShutdownNone), int32(supervisorShutdownPreserveSessions))
+	}
+}
+
+func (c *supervisorShutdownController) preservesSessions() bool {
+	if c.destructiveRequested.Load() {
+		return false
+	}
+	return supervisorShutdownMode(c.mode.Load()) == supervisorShutdownPreserveSessions
+}
+
+func (c *supervisorShutdownController) preservesSessionsAfterSettle(timeout time.Duration) bool {
+	if !c.preservesSessions() || timeout <= 0 {
+		return c.preservesSessions()
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-c.destructiveCh:
+		return false
+	case <-timer.C:
+		return c.preservesSessions()
+	}
+}
+
 var (
 	supervisorReloadQueueTimeout = 5 * time.Second
 	supervisorReloadWaitTimeout  = 5 * time.Minute
@@ -210,7 +301,7 @@ func (s *shutdownState) finish(err error) {
 	close(s.done)
 }
 
-func startSupervisorSocket(sockPath string, cancelFn context.CancelFunc, reconcileCh chan reconcileRequest, shut *shutdownState) (net.Listener, error) {
+func startSupervisorSocket(sockPath string, requestShutdown func(supervisorShutdownMode), reconcileCh chan reconcileRequest, shut *shutdownState) (net.Listener, error) {
 	os.Remove(sockPath) //nolint:errcheck // remove stale socket from previous crash
 	lis, err := net.Listen("unix", sockPath)
 	if err != nil {
@@ -228,7 +319,7 @@ func startSupervisorSocket(sockPath string, cancelFn context.CancelFunc, reconci
 				fmt.Fprintf(os.Stderr, "gc supervisor: socket accept: %v\n", err) //nolint:errcheck
 				continue
 			}
-			go handleSupervisorConn(conn, cancelFn, reconcileCh, shut)
+			go handleSupervisorConn(conn, requestShutdown, reconcileCh, shut)
 		}
 	}()
 	return lis, nil
@@ -242,14 +333,14 @@ func startSupervisorSocket(sockPath string, cancelFn context.CancelFunc, reconci
 // then — if the client keeps the connection open — blocks until shutdown
 // completes and sends a second line "done:ok\n" or "done:err:<detail>\n"
 // so --wait clients can distinguish clean shutdown from partial failure.
-func handleSupervisorConn(conn net.Conn, cancelFn context.CancelFunc, reconcileCh chan reconcileRequest, shut *shutdownState) {
+func handleSupervisorConn(conn net.Conn, requestShutdown func(supervisorShutdownMode), reconcileCh chan reconcileRequest, shut *shutdownState) {
 	defer conn.Close()                                     //nolint:errcheck
 	conn.SetReadDeadline(time.Now().Add(60 * time.Second)) //nolint:errcheck
 	scanner := bufio.NewScanner(conn)
 	if scanner.Scan() {
 		switch scanner.Text() {
 		case "stop":
-			cancelFn()
+			requestShutdown(supervisorShutdownDestructive)
 			if _, err := conn.Write([]byte("ok\n")); err != nil {
 				return
 			}
@@ -369,13 +460,10 @@ func stopSupervisor(stdout, stderr io.Writer) int {
 // it stops answering. This is the shape tests and shell scripts want: on
 // return, the supervisor has fully shut down and any failure is visible.
 //
-// It also unloads the platform service (without removing the unit file) so
-// launchd/systemd doesn't immediately restart the supervisor.
+// It also unloads the platform service (without removing the unit file) after
+// the supervisor acknowledges the destructive socket stop, so launchd/systemd
+// will not restart it when the process exits.
 func stopSupervisorWithWait(stdout, stderr io.Writer, wait bool, waitTimeout time.Duration) int {
-	// Unload the platform service first so the service manager doesn't
-	// restart the supervisor after we send the stop command.
-	unloadSupervisorService()
-
 	sockPath, _ := runningSupervisorSocket()
 	if sockPath == "" {
 		fmt.Fprintln(stderr, "gc supervisor stop: supervisor is not running") //nolint:errcheck
@@ -396,6 +484,7 @@ func stopSupervisorWithWait(stdout, stderr io.Writer, wait bool, waitTimeout tim
 		return 1
 	}
 	fmt.Fprintln(stdout, "Supervisor stopping...") //nolint:errcheck
+	unloadSupervisorService()
 	if !wait {
 		return 0
 	}
@@ -628,6 +717,47 @@ func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) error {
 	return stopErr
 }
 
+func stopManagedCityPreservingSessions(mc *managedCity, _ string, stderr io.Writer) error {
+	if mc == nil {
+		return nil
+	}
+	if mc.cr != nil {
+		mc.cr.preserveSessionsOnShutdown()
+	}
+	mc.cancel()
+	timeout := managedCityStopTimeout(mc)
+	var stopErr error
+	waitForRuntimeShutdown := timeout <= 0
+	if timeout > 0 {
+		select {
+		case <-mc.done:
+		case <-time.After(timeout):
+			fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after preserve-mode cancel\n", mc.name, timeout) //nolint:errcheck
+			stopErr = fmt.Errorf("city %q did not exit within %s after preserve-mode cancel", mc.name, timeout)
+			waitForRuntimeShutdown = true
+		}
+	}
+	if waitForRuntimeShutdown && mc.cr != nil {
+		func() {
+			defer func() { recover() }() //nolint:errcheck
+			mc.cr.shutdown()
+		}()
+		if timeout > 0 {
+			select {
+			case <-mc.done:
+				stopErr = nil
+			case <-time.After(timeout):
+				fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after preserve-mode shutdown wait\n", mc.name, timeout) //nolint:errcheck
+				stopErr = fmt.Errorf("city %q did not exit within %s after preserve-mode shutdown wait", mc.name, timeout)
+			}
+		}
+	}
+	if mc.closer != nil {
+		mc.closer.Close() //nolint:errcheck
+	}
+	return stopErr
+}
+
 // runSupervisor is the main supervisor loop. It acquires the lock,
 // starts a control socket, reads the registry, starts CityRuntimes,
 // and runs until canceled.
@@ -646,35 +776,29 @@ func runSupervisor(stdout, stderr io.Writer) int {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	shutdownCtl := newSupervisorShutdownController()
+	requestShutdown := func(mode supervisorShutdownMode) {
+		shutdownCtl.request(mode)
+		cancel()
+	}
 
 	// Reconcile channel — triggers immediate reconciliation from SIGHUP
 	// or the "reload" socket command.
 	reconcileCh := make(chan reconcileRequest, 1)
 
 	// Signal handler: SIGINT/SIGTERM → shutdown, SIGHUP → immediate reconcile.
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	sigCh := make(chan os.Signal, 2)
+	supervisorSignalNotify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(sigCh)
-	go func() {
-		for {
-			select {
-			case sig := <-sigCh:
-				if sig == syscall.SIGHUP {
-					fmt.Fprintln(stderr, "SIGHUP received, triggering reconciliation...") //nolint:errcheck
-					select {
-					case reconcileCh <- reconcileRequest{}:
-					default: // reconcile already pending
-					}
-					continue
-				}
-				// SIGINT/SIGTERM → shutdown.
-				cancel()
-				return
-			case <-ctx.Done():
-				return
-			}
+	shutdownSignalsDone := make(chan struct{})
+	defer close(shutdownSignalsDone)
+	go supervisorSignalLoop(sigCh, shutdownSignalsDone, requestShutdown, func() {
+		fmt.Fprintln(stderr, "SIGHUP received, triggering reconciliation...") //nolint:errcheck
+		select {
+		case reconcileCh <- reconcileRequest{}:
+		default: // reconcile already pending
 		}
-	}()
+	})
 
 	// Load supervisor config.
 	supCfg, err := supervisor.LoadConfig(supervisor.ConfigPath())
@@ -684,6 +808,10 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	}
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := cleanupSupervisorWorkspaceServicesForSupervisorStart(supervisor.DefaultHome()); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: workspace-service startup cleanup: %v\n", err) //nolint:errcheck
+		return 1
+	}
 
 	// Track managed cities via atomic-snapshot registry. API reads are
 	// lock-free (atomic pointer load); mutations go through citiesMu.
@@ -747,7 +875,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		return 1
 	}
 	shut := newShutdownState()
-	lis, err := startSupervisorSocket(sockPath, cancel, reconcileCh, shut)
+	lis, err := startSupervisorSocket(sockPath, requestShutdown, reconcileCh, shut)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: %v\n", err) //nolint:errcheck
 		return 1
@@ -832,14 +960,27 @@ func runSupervisor(stdout, stderr io.Writer) int {
 					delete(cities, k)
 				}
 			})
+			preserveSessions := shutdownCtl.preservesSessionsAfterSettle(supervisorShutdownSettleDelay)
 			var stopFailures []string
 			for name, mc := range toStop {
-				fmt.Fprintf(stdout, "Stopping city '%s'...\n", name) //nolint:errcheck
-				if err := stopManagedCity(mc, name, stderr); err != nil {
+				if preserveSessions {
+					fmt.Fprintf(stdout, "Preserving city '%s' sessions for re-adoption...\n", name) //nolint:errcheck
+				} else {
+					fmt.Fprintf(stdout, "Stopping city '%s'...\n", name) //nolint:errcheck
+				}
+				stopFn := stopManagedCity
+				if preserveSessions {
+					stopFn = stopManagedCityPreservingSessions
+				}
+				if err := stopFn(mc, name, stderr); err != nil {
 					stopFailures = append(stopFailures, fmt.Sprintf("%s: %s", name, err.Error()))
 					fmt.Fprintf(stdout, "City '%s' stop reported error (see stderr).\n", name) //nolint:errcheck
 				} else {
-					fmt.Fprintf(stdout, "City '%s' stopped.\n", name) //nolint:errcheck
+					if preserveSessions {
+						fmt.Fprintf(stdout, "City '%s' preserved.\n", name) //nolint:errcheck
+					} else {
+						fmt.Fprintf(stdout, "City '%s' stopped.\n", name) //nolint:errcheck
+					}
 				}
 			}
 			var shutErr error

@@ -11,6 +11,18 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
+type noBroadAPISessionListStore struct {
+	beads.Store
+	t *testing.T
+}
+
+func (s noBroadAPISessionListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == session.LabelSession && len(query.Metadata) == 0 {
+		s.t.Fatalf("API mail used broad session label scan: %+v", query)
+	}
+	return s.Store.List(query)
+}
+
 // Phase 0 spec coverage from engdocs/design/session-model-unification.md:
 // - Surface matrix / session-targeting API
 // - template: scope is factory-targeting only
@@ -245,6 +257,88 @@ func TestPhase0APIMailSend_BareNamedSessionUsesExistingLiveMailboxWithoutMateria
 	}
 	if count := phase0APISessionCount(t, fs.cityBeadStore); count != 1 {
 		t.Fatalf("POST /v0/mail left %d session(s), want only existing live session %s", count, live.ID)
+	}
+}
+
+func TestPhase0APIMailSend_BareNamedSessionUsesTargetedLiveMailboxLookup(t *testing.T) {
+	fs := newPhase0APINamedWorkerState(t)
+	baseStore := fs.cityBeadStore
+	if _, err := baseStore.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			apiNamedSessionMetadataKey: "true",
+			apiNamedSessionIdentityKey: "myrig/worker",
+			apiNamedSessionModeKey:     "always",
+			"alias":                    "live-worker",
+			"session_name":             "s-gc-test-city-worker",
+			"state":                    "asleep",
+		},
+	}); err != nil {
+		t.Fatalf("create live named session: %v", err)
+	}
+	fs.cityBeadStore = noBroadAPISessionListStore{Store: baseStore, t: t}
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	body := `{"from":"human","to":"worker","subject":"hello","body":"test"}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(fs, "/mail"), strings.NewReader(body)))
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST /v0/mail status = %d, want %d; body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	msgs, err := fs.cityMailProv.Inbox("live-worker")
+	if err != nil {
+		t.Fatalf("Inbox(live-worker): %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("live named mailbox got %d message(s), want 1", len(msgs))
+	}
+}
+
+func TestPhase0APIMailQuery_BareNamedSessionUsesTargetedRecipientLookup(t *testing.T) {
+	fs := newPhase0APINamedWorkerState(t)
+	baseStore := fs.cityBeadStore
+	live, err := baseStore.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			apiNamedSessionMetadataKey: "true",
+			apiNamedSessionIdentityKey: "myrig/worker",
+			apiNamedSessionModeKey:     "always",
+			"alias":                    "live-worker",
+			"session_name":             "s-gc-test-city-worker",
+			"state":                    "asleep",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create live named session: %v", err)
+	}
+	closed, err := baseStore.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			apiNamedSessionMetadataKey: "true",
+			apiNamedSessionIdentityKey: "myrig/worker",
+			apiNamedSessionModeKey:     "always",
+			"session_name":             "s-gc-test-city-worker-old",
+			"state":                    "closed",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create closed named session: %v", err)
+	}
+	if err := baseStore.Close(closed.ID); err != nil {
+		t.Fatalf("close named session: %v", err)
+	}
+	fs.cityBeadStore = noBroadAPISessionListStore{Store: baseStore, t: t}
+	srv := New(fs)
+
+	recipients := srv.resolveMailQueryRecipientsWithContext(t.Context(), "worker")
+	want := []string{live.ID, closed.ID, "worker"}
+	if strings.Join(recipients, ",") != strings.Join(want, ",") {
+		t.Fatalf("recipients = %#v, want %#v", recipients, want)
 	}
 }
 

@@ -727,6 +727,10 @@
       "AsyncAcceptedBody": {
         "additionalProperties": false,
         "properties": {
+          "event_cursor": {
+            "description": "City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or the event log is empty.",
+            "type": "string"
+          },
           "request_id": {
             "description": "Correlation ID. Watch the city event stream for request.result.session.create, request.result.session.message, request.result.session.submit, or request.failed with this request_id.",
             "type": "string"
@@ -741,20 +745,26 @@
         },
         "required": [
           "status",
-          "request_id"
+          "request_id",
+          "event_cursor"
         ],
         "type": "object"
       },
       "AsyncAcceptedResponse": {
         "additionalProperties": false,
         "properties": {
+          "event_cursor": {
+            "description": "Supervisor event-stream cursor captured before the async request was accepted. Pass this value as after_cursor to /v0/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or every event log is empty.",
+            "type": "string"
+          },
           "request_id": {
             "description": "Correlation ID. Watch /v0/events/stream for request.result.city.create, request.result.city.unregister, or request.failed with this request_id.",
             "type": "string"
           }
         },
         "required": [
-          "request_id"
+          "request_id",
+          "event_cursor"
         ],
         "type": "object"
       },
@@ -5632,7 +5642,7 @@
           },
           "session": {
             "$ref": "#/components/schemas/SessionResponse",
-            "description": "Full session state as returned by GET /session/{id}."
+            "description": "Full session state as returned by GET /session/{id}. For session.create, this result is emitted only after the session has left creating and can accept normal metadata and lifecycle commands."
           }
         },
         "required": [
@@ -15150,7 +15160,7 @@
     },
     "/v0/city/{cityName}/events/stream": {
       "get": {
-        "description": "Server-Sent Events stream of city events with optional workflow projections. Supports reconnection via Last-Event-ID header or after_seq query param.",
+        "description": "Server-Sent Events stream of city events with optional workflow projections. Supports reconnection via Last-Event-ID header or after_seq query param; omitting both starts at the current city event head.",
         "operationId": "stream-events",
         "parameters": [
           {
@@ -15166,21 +15176,21 @@
             }
           },
           {
-            "description": "Reconnect position: only deliver events after this sequence number.",
+            "description": "Reconnect position: only deliver events after this sequence number. Omit after_seq and Last-Event-ID to start at the current city event head.",
             "explode": false,
             "in": "query",
             "name": "after_seq",
             "schema": {
-              "description": "Reconnect position: only deliver events after this sequence number.",
+              "description": "Reconnect position: only deliver events after this sequence number. Omit after_seq and Last-Event-ID to start at the current city event head.",
               "type": "string"
             }
           },
           {
-            "description": "SSE reconnect position from the last received event ID.",
+            "description": "SSE reconnect position from the last received event ID. Omit Last-Event-ID and after_seq to start at the current city event head.",
             "in": "header",
             "name": "Last-Event-ID",
             "schema": {
-              "description": "SSE reconnect position from the last received event ID.",
+              "description": "SSE reconnect position from the last received event ID. Omit Last-Event-ID and after_seq to start at the current city event head.",
               "type": "string"
             }
           }
@@ -22745,24 +22755,25 @@
     },
     "/v0/events/stream": {
       "get": {
+        "description": "Server-Sent Events stream of supervisor-tagged events. Supports reconnection via Last-Event-ID header or after_cursor query param; omitting both starts at the current supervisor event head.",
         "operationId": "stream-supervisor-events",
         "parameters": [
           {
-            "description": "Reconnect cursor (composite per-city cursor).",
+            "description": "Reconnect cursor (composite per-city cursor). Omit Last-Event-ID and after_cursor to start at the current supervisor event head.",
             "in": "header",
             "name": "Last-Event-ID",
             "schema": {
-              "description": "Reconnect cursor (composite per-city cursor).",
+              "description": "Reconnect cursor (composite per-city cursor). Omit Last-Event-ID and after_cursor to start at the current supervisor event head.",
               "type": "string"
             }
           },
           {
-            "description": "Alternative to Last-Event-ID for browsers that can't set custom headers.",
+            "description": "Alternative to Last-Event-ID for browsers that can't set custom headers. Omit after_cursor and Last-Event-ID to start at the current supervisor event head.",
             "explode": false,
             "in": "query",
             "name": "after_cursor",
             "schema": {
-              "description": "Alternative to Last-Event-ID for browsers that can't set custom headers.",
+              "description": "Alternative to Last-Event-ID for browsers that can't set custom headers. Omit after_cursor and Last-Event-ID to start at the current supervisor event head.",
               "type": "string"
             }
           }

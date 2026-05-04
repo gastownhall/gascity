@@ -22,6 +22,8 @@ import (
 // The dir argument sets the working directory; name and args specify the command.
 type CommandRunner func(dir, name string, args ...string) ([]byte, error)
 
+var bdCommandTimeout = 120 * time.Second
+
 // ExecCommandRunner returns a CommandRunner that uses os/exec to run commands.
 // Captures stdout for parsing and stderr for error diagnostics.
 // When the command is "bd", records telemetry (duration, status, output).
@@ -53,11 +55,15 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 				time.Now().UTC().Format(time.RFC3339Nano), status, time.Since(start), dir, name, args, msg)
 		}
 		trace("start", nil)
-		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), bdCommandTimeout)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, name, args...)
 		cmd.WaitDelay = 2 * time.Second
+		prepareCommandForTimeout(cmd)
 		cmd.Dir = dir
+		cmd.Cancel = func() error {
+			return killCommandTree(cmd)
+		}
 		if len(env) > 0 {
 			cmd.Env = mergeEnv(os.Environ(), env)
 		}
@@ -70,20 +76,49 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 				err, out, stderr.String())
 		}
 		if ctx.Err() == context.DeadlineExceeded {
-			timeoutErr := fmt.Errorf("timed out after 120s")
+			timeoutErr := fmt.Errorf("timed out after %s", bdCommandTimeout)
 			trace("timeout", timeoutErr)
 			if stderr.Len() > 0 {
 				return out, fmt.Errorf("%w: %s", timeoutErr, stderr.String())
 			}
 			return out, timeoutErr
 		}
-		if err != nil && stderr.Len() > 0 {
-			trace("error", err)
-			return out, fmt.Errorf("%w: %s", err, stderr.String())
+		if err != nil {
+			// bd writes structured errors to stdout (JSON envelope) when
+			// invoked with --json, while stderr is often empty. Surface
+			// whichever stream has content so supervisor logs become
+			// actionable instead of bare "exit status 1".
+			detail := strings.TrimSpace(stderr.String())
+			if detail == "" && name == "bd" {
+				detail = bdStdoutErrorDetail(out)
+			}
+			if detail != "" {
+				trace("error", err)
+				return out, fmt.Errorf("%w: %s", err, detail)
+			}
 		}
 		trace("done", err)
 		return out, err
 	}
+}
+
+// bdStdoutErrorDetail extracts a human-readable error description from
+// bd's JSON error envelope on stdout. bd writes structured errors as
+// {"error": "...", "schema_version": N} on stdout when invoked with
+// --json, while stderr is often empty. Returns "" when the output does
+// not look like a bd error envelope so callers can fall through.
+func bdStdoutErrorDetail(out []byte) string {
+	trimmed := bytes.TrimSpace(extractJSON(out))
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return ""
+	}
+	var env struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(trimmed, &env); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(env.Error)
 }
 
 // PurgeRunnerFunc executes a bd purge command with custom dir and env.
@@ -104,6 +139,8 @@ type BdStore struct {
 	purgeRunner PurgeRunnerFunc // injectable for testing; nil uses exec default
 	idPrefix    string          // bead ID prefix owned by this store, without trailing "-"
 }
+
+const bdTransientWriteAttempts = 3
 
 // NewBdStore creates a BdStore rooted at dir using the given runner.
 func NewBdStore(dir string, runner CommandRunner) *BdStore {
@@ -640,7 +677,7 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 
 // SetMetadata sets a key-value metadata pair on a bead via bd update.
 func (s *BdStore) SetMetadata(id, key, value string) error {
-	_, err := s.runner(s.dir, "bd", "update", "--json", id,
+	err := s.runBDTransientWrite("update", "--json", id,
 		"--set-metadata", key+"="+value)
 	if err != nil {
 		if isBdNotFound(err) {
@@ -667,7 +704,7 @@ func (s *BdStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	for _, k := range keys {
 		args = append(args, "--set-metadata", k+"="+kvs[k])
 	}
-	_, err := s.runner(s.dir, "bd", args...)
+	err := s.runBDTransientWrite(args...)
 	if err != nil {
 		if isBdNotFound(err) {
 			return fmt.Errorf("setting metadata on %q: %w", id, ErrNotFound)
@@ -675,6 +712,27 @@ func (s *BdStore) SetMetadataBatch(id string, kvs map[string]string) error {
 		return fmt.Errorf("setting metadata on %q: %w", id, err)
 	}
 	return nil
+}
+
+func (s *BdStore) runBDTransientWrite(args ...string) error {
+	var err error
+	for attempt := 1; attempt <= bdTransientWriteAttempts; attempt++ {
+		_, err = s.runner(s.dir, "bd", args...)
+		if err == nil || !isBdTransientWriteConflict(err) || attempt == bdTransientWriteAttempts {
+			return err
+		}
+		time.Sleep(time.Duration(attempt) * 25 * time.Millisecond)
+	}
+	return err
+}
+
+func isBdTransientWriteConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "Error 1213 (40001): serialization failure") ||
+		strings.Contains(msg, "this transaction conflicts with a committed transaction")
 }
 
 // Ping verifies the bd binary is accessible by running a no-op command.
