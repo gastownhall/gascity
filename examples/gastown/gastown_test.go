@@ -658,12 +658,12 @@ func TestGastownRoutedToTargetsUseBindingPrefix(t *testing.T) {
 		want string
 	}{
 		{"packs/gastown/formulas/mol-deacon-patrol.toml", "gc.routed_to={{binding_prefix}}dog"},
-		{"packs/gastown/formulas/mol-polecat-work.toml", "{{rig_name}}/{{binding_prefix}}refinery"},
+		{"packs/gastown/formulas/mol-polecat-work.toml", `${GC_RIG:+$GC_RIG/}{{binding_prefix}}refinery`},
 		{"packs/gastown/formulas/mol-refinery-patrol.toml", "gc.routed_to={{rig_name}}/{{binding_prefix}}polecat"},
 		{"packs/gastown/formulas/mol-idea-to-plan.toml", "$GC_RIG/{{binding_prefix}}polecat"},
 		{"packs/gastown/agents/mayor/prompt.template.md", "gc.routed_to=<rig>/{{ .BindingPrefix }}polecat"},
-		{"packs/gastown/agents/polecat/prompt.template.md", "{{ .RigName }}/{{ .BindingPrefix }}refinery"},
-		{"packs/gastown/template-fragments/approval-fallacy.template.md", "{{ .RigName }}/{{ .BindingPrefix }}refinery"},
+		{"packs/gastown/agents/polecat/prompt.template.md", `${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery`},
+		{"packs/gastown/template-fragments/approval-fallacy.template.md", `${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery`},
 	}
 	for _, check := range checks {
 		data, err := os.ReadFile(filepath.Join(dir, check.rel))
@@ -679,6 +679,8 @@ func TestGastownRoutedToTargetsUseBindingPrefix(t *testing.T) {
 			"gc.routed_to=<rig>/polecat",
 			"gc.routed_to=<rig>/refinery",
 			"gc.routed_to={{ .RigName }}/refinery",
+			"gc.routed_to={{rig_name}}/{{binding_prefix}}refinery",
+			"gc.routed_to={{ .RigName }}/{{ .BindingPrefix }}refinery",
 		} {
 			if strings.Contains(body, bad) {
 				t.Errorf("%s still contains short-form route %q", check.rel, bad)
