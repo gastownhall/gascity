@@ -14,6 +14,17 @@ import (
 const (
 	nudgeBeadType  = "chore"
 	nudgeBeadLabel = "gc:nudge"
+
+	// nudgeEnqueueRollbackCloseReason is the close_reason metadata value
+	// stamped on partially-created nudge beads when enqueueQueuedNudgeWithStore's
+	// withNudgeQueueState transaction returns an error after the backing
+	// bead was successfully created. The rollback path closes the bead to
+	// avoid leaking it; the close goes through BdStore.Close (per #1644)
+	// which forwards metadata.close_reason as `bd close --reason`. Without
+	// this stamp, cities running with validation.on-close=error reject the
+	// rollback close and the bead leaks open with metadata.state="queued".
+	// The 42-character form satisfies the >=20 char validator floor.
+	nudgeEnqueueRollbackCloseReason = "nudge rollback: enqueue transaction failed"
 )
 
 type nudgeReference = nudgequeue.Reference
@@ -129,6 +140,7 @@ func markQueuedNudgeTerminal(store beads.Store, item queuedNudge, state, reason,
 		"terminal_reason": reason,
 		"commit_boundary": commitBoundary,
 		"terminal_at":     now.UTC().Format(time.RFC3339),
+		"close_reason":    nudgeCanonicalCloseReason(state),
 	}
 
 	tryTerminalize := func(beadID string) error {
@@ -167,6 +179,44 @@ func markQueuedNudgeTerminal(store beads.Store, item queuedNudge, state, reason,
 		return err
 	}
 	return nil
+}
+
+// nudgeCanonicalCloseReason maps a nudge queue terminalization state code
+// to a human-readable close_reason of at least 20 characters, suitable for
+// use as `bd close --reason` under validation.on-close=error.
+//
+// markQueuedNudgeTerminal stamps the result in metadata.close_reason
+// before invoking store.Close. BdStore.Close (per #1644) forwards
+// metadata.close_reason as the --reason argument, which is what allows
+// cities running with validation.on-close=error to accept the close.
+// Without the canonical reason, the validator rejects close calls with
+// reason <20 chars, the close fails, the entire withNudgeQueueState
+// transaction rolls back, and the nudge bounces between InFlight and
+// Pending forever (one bead.updated event per claim attempt) until
+// expires_at cuts in.
+//
+// Unknown codes fall back to "nudge terminated: <code>" which is always
+// >=20 characters for non-empty short codes. Codes already 20+ chars
+// pass through unchanged.
+func nudgeCanonicalCloseReason(stateCode string) string {
+	switch stateCode {
+	case "failed":
+		return "nudge failed: queue terminalization rejected delivery"
+	case "expired":
+		return "nudge expired past deliver-by deadline"
+	case "superseded":
+		return "nudge superseded by newer queued entry"
+	case "injected":
+		return "nudge delivered via provider injection"
+	case "accepted_for_injection":
+		return "nudge accepted for hook-transport injection"
+	}
+	if len(stateCode) >= 20 {
+		return stateCode
+	}
+	// Prefix is exactly 20 chars so that the empty-code fallback meets
+	// the validator threshold and any non-empty addition exceeds it.
+	return "nudge terminalized: " + stateCode
 }
 
 func isMissingQueuedNudgeBeadErr(err error, beadID string) bool {
