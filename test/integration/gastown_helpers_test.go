@@ -245,7 +245,7 @@ func initBd(t *testing.T, dir string) string {
 }
 
 func standaloneBdEnv() []string {
-	return filterEnvMany(os.Environ(),
+	env := filterEnvMany(os.Environ(),
 		"BEADS_DIR",
 		"BEADS_DOLT_AUTO_START",
 		"BEADS_DOLT_PASSWORD",
@@ -266,6 +266,32 @@ func standaloneBdEnv() []string {
 		"GC_RIG",
 		"GC_RIG_ROOT",
 	)
+	return append(env, "GC_DOLT=skip")
+}
+
+func TestStandaloneBdEnvForcesNonDoltMode(t *testing.T) {
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "0")
+	t.Setenv("GC_DOLT", "server")
+	t.Setenv("GC_DOLT_HOST", "127.0.0.1")
+	t.Setenv("GC_DOLT_PORT", "0")
+
+	got := parseEnvList(standaloneBdEnv())
+	if got["GC_DOLT"] != "skip" {
+		t.Fatalf("GC_DOLT = %q, want skip", got["GC_DOLT"])
+	}
+	for _, key := range []string{
+		"BEADS_DOLT_AUTO_START",
+		"BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_SERVER_PORT",
+		"GC_DOLT_HOST",
+		"GC_DOLT_PORT",
+	} {
+		if got[key] != "" {
+			t.Fatalf("%s should be scrubbed, got %q", key, got[key])
+		}
+	}
 }
 
 func TestInitBdIgnoresAmbientDoltEndpoint(t *testing.T) {
