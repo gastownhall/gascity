@@ -394,11 +394,41 @@ func gcDolt(dir string, args ...string) (string, error) {
 // bd runs the bd binary with the given args. If dir is non-empty, it sets
 // the working directory. Returns combined stdout+stderr and any error.
 func bd(dir string, args ...string) (string, error) {
-	out, err := runCommand(dir, commandEnvForDir(dir, false), integrationBDCommandTimeout, bdBinary, args...)
+	env := commandEnvForDir(dir, false)
+	if hasStandaloneBDWorkspace(dir) {
+		env = standaloneBDEnvForDir(dir)
+	}
+	out, err := runCommand(dir, env, integrationBDCommandTimeout, bdBinary, args...)
 	if err == nil || !shouldUseFileStoreBDFallback(dir, out, args) {
 		return out, err
 	}
 	return runFileStoreBD(dir, args...)
+}
+
+func standaloneBDEnvForDir(dir string) []string {
+	env := commandEnvForDir(dir, false)
+	return filterEnvMany(
+		env,
+		"BEADS_DOLT_AUTO_START",
+		"GC_DOLT",
+		"GC_DOLT_HOST",
+		"GC_DOLT_PORT",
+		"BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_SERVER_PORT",
+	)
+}
+
+func hasStandaloneBDWorkspace(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".beads", "config.yaml")); err == nil {
+		return true
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".beads")); err == nil {
+		return true
+	}
+	return false
 }
 
 // bdDolt runs bd against a Dolt-backed city using the same isolated runtime
@@ -1161,6 +1191,31 @@ func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
 	} {
 		if _, ok := got[key]; ok {
 			t.Fatalf("%s leaked into integration env: %v", key, got[key])
+		}
+	}
+}
+
+func TestStandaloneBDEnvAllowsBDAutoStart(t *testing.T) {
+	t.Setenv("GC_DOLT_HOST", "ambient-host")
+	t.Setenv("GC_DOLT_PORT", "1234")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient-beads-host")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "5678")
+
+	dir := t.TempDir()
+	env := standaloneBDEnvForDir(dir)
+	got := parseEnvList(env)
+
+	if _, ok := got["BEADS_DOLT_AUTO_START"]; ok {
+		t.Fatalf("BEADS_DOLT_AUTO_START leaked into standalone bd env: %q", got["BEADS_DOLT_AUTO_START"])
+	}
+	for _, key := range []string{
+		"GC_DOLT_HOST",
+		"GC_DOLT_PORT",
+		"BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_SERVER_PORT",
+	} {
+		if _, ok := got[key]; ok {
+			t.Fatalf("%s leaked into standalone bd env: %v", key, got[key])
 		}
 	}
 }
