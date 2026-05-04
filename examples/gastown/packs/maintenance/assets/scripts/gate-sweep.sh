@@ -8,9 +8,9 @@
 # controller log only on non-zero exit (cmd/gc/order_dispatch.go:466-475),
 # so the suppression also hides real bd errors — diagnose by hand.
 #
-# Bead-type gates are skipped: checkBeadGate is hard-coded to fail in
-# beads v1.0.2 (cmd/bd/gate.go:732, multi-rig routing removed). Restore
-# `bd gate check --type=bead --escalate` when beads adds it back.
+# Bead-type gates are skipped: in beads v1.0.2, checkBeadGate is
+# hard-coded to fail because cross-rig routing was removed upstream.
+# Restore `bd gate check --type=bead --escalate` when beads adds it back.
 set -euo pipefail
 
 bd gate check --type=timer --escalate || true
