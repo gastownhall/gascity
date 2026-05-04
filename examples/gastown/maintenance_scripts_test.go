@@ -4679,37 +4679,50 @@ exit 1
 	}
 }
 
+// hermeticGitEnv builds a git invocation env that strips any pre-existing
+// GIT_* control variables from the parent environment before applying the
+// overrides — same approach as mergeTestEnv. This avoids duplicate keys
+// where libc's getenv may return the first (parent) occurrence and silently
+// defeat the intended hermeticity.
+func hermeticGitEnv(t *testing.T, overrides map[string]string) []string {
+	t.Helper()
+	return mergeTestEnv(overrides)
+}
+
 // runGit runs a git subcommand in the given directory and fails the test on
 // non-zero exit. The git binary used is whatever the developer has on PATH.
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
-		"GIT_AUTHOR_NAME=Test",
-		"GIT_AUTHOR_EMAIL=test@example.com",
-		"GIT_COMMITTER_NAME=Test",
-		"GIT_COMMITTER_EMAIL=test@example.com",
-		"GIT_CONFIG_NOSYSTEM=1",
-		"GIT_CONFIG_GLOBAL="+filepath.Join(t.TempDir(), "gitconfig"),
-	)
+	cmd.Env = hermeticGitEnv(t, map[string]string{
+		"GIT_AUTHOR_NAME":     "Test",
+		"GIT_AUTHOR_EMAIL":    "test@example.com",
+		"GIT_COMMITTER_NAME":  "Test",
+		"GIT_COMMITTER_EMAIL": "test@example.com",
+		"GIT_CONFIG_NOSYSTEM": "1",
+		"GIT_CONFIG_GLOBAL":   filepath.Join(t.TempDir(), "gitconfig"),
+	})
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %s in %s: %v\n%s", strings.Join(args, " "), dir, err, out)
 	}
 }
 
-// runGitOut is runGit but returns trimmed stdout.
+// runGitOut is runGit but returns trimmed stdout. On failure the test fatal
+// includes combined stderr+stdout so CI-only git failures are diagnosable.
 func runGitOut(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
-		"GIT_CONFIG_NOSYSTEM=1",
-		"GIT_CONFIG_GLOBAL="+filepath.Join(t.TempDir(), "gitconfig"),
-	)
+	cmd.Env = hermeticGitEnv(t, map[string]string{
+		"GIT_CONFIG_NOSYSTEM": "1",
+		"GIT_CONFIG_GLOBAL":   filepath.Join(t.TempDir(), "gitconfig"),
+	})
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("git %s in %s: %v", strings.Join(args, " "), dir, err)
+		t.Fatalf("git %s in %s: %v\nstderr: %s", strings.Join(args, " "), dir, err, stderr.String())
 	}
 	return strings.TrimSpace(string(out))
 }
