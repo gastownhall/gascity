@@ -173,6 +173,9 @@ func sessionStartRequested(session beads.Bead, clk clock.Clock) bool {
 	return !staleCreatingState(session, clk)
 }
 
+// staleCreatingStateTimeout is the legacy cleanup window for generic creating
+// metadata and corrupt start leases. Pending creates that never reached
+// preWakeCommit use pendingCreateNeverStartedTimeout instead.
 const staleCreatingStateTimeout = time.Minute
 
 func sessionMetadataState(session beads.Bead) string {
