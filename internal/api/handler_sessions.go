@@ -62,7 +62,7 @@ type sessionResponse struct {
 	// template_overrides bead metadata (e.g., {"permission_mode":"unrestricted"}).
 	Options map[string]string `json:"options,omitempty"`
 
-	// Metadata exposes mc_-prefixed bead metadata for external consumers.
+	// Metadata exposes real_world_app_-prefixed bead metadata for external consumers.
 	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
@@ -142,24 +142,24 @@ func sessionResponseWithReason(info session.Info, b *beads.Bead, cfg *config.Cit
 		return r
 	}
 	// Populate kind from persisted metadata.
-	if k := b.Metadata["mc_session_kind"]; k != "" {
+	if k := b.Metadata["real_world_app_session_kind"]; k != "" {
 		r.Kind = k
 	}
 	r.Reason = session.LifecycleDisplayReason(b.Status, b.Metadata, time.Now().UTC())
 	r.ConfiguredNamedSession = strings.TrimSpace(b.Metadata[apiNamedSessionMetadataKey]) == "true"
 	r.SubmissionCapabilities = session.SubmissionCapabilitiesForMetadata(b.Metadata, hasDeferredQueue)
-	// Expose only mc_* prefixed metadata keys to API consumers.
+	// Expose only real_world_app_* prefixed metadata keys to API consumers.
 	// Internal fields (session_key, command, work_dir, etc.) are redacted.
 	r.Metadata = filterMetadata(b.Metadata)
 	return r
 }
 
-// filterMetadataAllowedKeys lists non-mc_ metadata keys that are safe to expose.
+// filterMetadataAllowedKeys lists non-real_world_app_ metadata keys that are safe to expose.
 var filterMetadataAllowedKeys = map[string]bool{
 	"template_overrides": true,
 }
 
-// filterMetadata returns only metadata keys with the "mc_" prefix plus
+// filterMetadata returns only metadata keys with the "real_world_app_" prefix plus
 // explicitly allowlisted keys. This prevents leaking internal bead fields
 // (session_key, command, work_dir, quarantine state) to API consumers.
 func filterMetadata(m map[string]string) map[string]string {
@@ -168,7 +168,7 @@ func filterMetadata(m map[string]string) map[string]string {
 	}
 	filtered := make(map[string]string)
 	for k, v := range m {
-		if strings.HasPrefix(k, "mc_") || filterMetadataAllowedKeys[k] {
+		if strings.HasPrefix(k, "real_world_app_") || filterMetadataAllowedKeys[k] {
 			filtered[k] = v
 		}
 	}
@@ -208,7 +208,7 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	templateFilter := q.Get("template")
 	wantPeek := q.Get("peek") == "true"
 
-	all, err := listSessionBeadsForReadModel(store)
+	all, partialErrors, err := sessionReadModelRows(store)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
@@ -234,14 +234,25 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 		if pp.Limit < len(items) {
 			items = items[:pp.Limit]
 		}
-		writeJSON(w, http.StatusOK, listResponse{Items: items, Total: len(items)})
+		writeJSON(w, http.StatusOK, listResponse{
+			Items:         items,
+			Total:         len(items),
+			Partial:       len(partialErrors) > 0,
+			PartialErrors: partialErrors,
+		})
 		return
 	}
 	page, total, nextCursor := paginate(items, pp)
 	if page == nil {
 		page = []sessionResponse{}
 	}
-	writeJSON(w, http.StatusOK, listResponse{Items: page, Total: total, NextCursor: nextCursor})
+	writeJSON(w, http.StatusOK, listResponse{
+		Items:         page,
+		Total:         total,
+		NextCursor:    nextCursor,
+		Partial:       len(partialErrors) > 0,
+		PartialErrors: partialErrors,
+	})
 }
 
 func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
@@ -332,7 +343,7 @@ func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
 
 	// Optional: permanently delete the bead after closing.
 	if r.URL.Query().Get("delete") == "true" {
-		if err := store.Delete(id); err != nil {
+		if err := deleteSessionBeadAfterClose(store, id); err != nil {
 			log.Printf("gc api: deleting bead after close %s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "internal", "closed but delete failed: "+err.Error())
 			return
@@ -340,6 +351,36 @@ func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func deleteSessionBeadAfterClose(store beads.Store, id string) error {
+	const maxAttempts = 5
+	var err error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		err = store.Delete(id)
+		if err == nil {
+			return nil
+		}
+		if errors.Is(err, beads.ErrNotFound) {
+			log.Printf("gc api: deleting bead after close %s: already gone", id)
+			return nil
+		}
+		if !isTransientBeadDeleteConflict(err) {
+			return err
+		}
+		time.Sleep(time.Duration(attempt+1) * 25 * time.Millisecond)
+	}
+	return err
+}
+
+func isTransientBeadDeleteConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "Error 1213") ||
+		strings.Contains(msg, "40001") ||
+		strings.Contains(msg, "serialization failure")
 }
 
 // handleSessionWake clears hold and quarantine on a session.

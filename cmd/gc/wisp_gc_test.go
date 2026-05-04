@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -50,6 +51,7 @@ func TestWispGC_PurgesExpiredMolecules(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{
 		makeGCBead("mol-1", now.Add(-2*time.Hour), "closed", "molecule"),
+		makeGCBeadWithMetadata("wisp-1", now.Add(-2*time.Hour), "closed", "task", map[string]string{"gc.kind": "wisp"}),
 		makeGCBead("mol-2", now.Add(-30*time.Minute), "closed", "molecule"),
 		makeGCBead("mol-3", now.Add(-3*time.Hour), "closed", "molecule"),
 	})
@@ -59,10 +61,10 @@ func TestWispGC_PurgesExpiredMolecules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runGC: %v", err)
 	}
-	if purged != 2 {
-		t.Fatalf("purged = %d, want 2", purged)
+	if purged != 3 {
+		t.Fatalf("purged = %d, want 3", purged)
 	}
-	assertDeletedIDs(t, store.deletedIDs, "mol-1", "mol-3")
+	assertDeletedIDs(t, store.deletedIDs, "mol-1", "wisp-1", "mol-3")
 }
 
 func TestWispGC_NothingExpired(t *testing.T) {
@@ -427,9 +429,10 @@ func TestWispGC_ListErrorFailsRun(t *testing.T) {
 }
 
 type gcQueryKey struct {
-	Status string
-	Type   string
-	Label  string
+	Status   string
+	Type     string
+	Label    string
+	Metadata string
 }
 
 type gcTestStore struct {
@@ -448,7 +451,7 @@ func newGCStore(existing []beads.Bead) *gcTestStore {
 }
 
 func (s *gcTestStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	if err := s.listErrors[gcQueryKey{Status: query.Status, Type: query.Type, Label: query.Label}]; err != nil {
+	if err := s.listErrors[gcQueryKey{Status: query.Status, Type: query.Type, Label: query.Label, Metadata: metadataQueryKey(query.Metadata)}]; err != nil {
 		return nil, err
 	}
 	return s.MemStore.List(query)
@@ -478,6 +481,28 @@ func makeGCBeadWithLabels(id string, createdAt time.Time, status, beadType strin
 		CreatedAt: createdAt,
 		Labels:    labels,
 	}
+}
+
+func makeGCBeadWithMetadata(id string, createdAt time.Time, status, beadType string, metadata map[string]string) beads.Bead {
+	bead := makeGCBead(id, createdAt, status, beadType)
+	bead.Metadata = metadata
+	return bead
+}
+
+func metadataQueryKey(metadata map[string]string) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(metadata))
+	for key := range metadata {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, key+"="+metadata[key])
+	}
+	return strings.Join(parts, "\x00")
 }
 
 func assertDeletedIDs(t *testing.T, deleted []string, want ...string) {

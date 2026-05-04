@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -21,23 +20,21 @@ func TestPhase0ProviderCompatibility_CreateKeepsResponseKindButDoesNotPersistSpe
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusCreated, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
 
-	var resp sessionResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Kind != "provider" {
-		t.Fatalf("resp.Kind = %q, want provider", resp.Kind)
+	accepted := decodeAsyncAccepted(t, rec.Body)
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
 	}
 
-	bead, err := fs.cityBeadStore.Get(resp.ID)
+	bead, err := fs.cityBeadStore.Get(success.Session.ID)
 	if err != nil {
-		t.Fatalf("Get(%s): %v", resp.ID, err)
+		t.Fatalf("Get(%s): %v", success.Session.ID, err)
 	}
-	if got := bead.Metadata["mc_session_kind"]; got != "" {
-		t.Fatalf("mc_session_kind = %q, want empty", got)
+	if got := bead.Metadata["real_world_app_session_kind"]; got != "" {
+		t.Fatalf("real_world_app_session_kind = %q, want empty", got)
 	}
 }

@@ -68,7 +68,20 @@ func (e controllerCommandError) Is(target error) bool {
 		(target == errControllerUnresponsive && e.unresponsive)
 }
 
-const controllerSocketPathLimit = 100
+const (
+	controllerSocketPathLimit        = 100
+	sessionCircuitResetCommandPrefix = "session-circuit-reset:"
+)
+
+type sessionCircuitResetRequest struct {
+	Identity  string `json:"identity"`
+	SessionID string `json:"session_id,omitempty"`
+}
+
+type sessionCircuitResetReply struct {
+	Outcome string `json:"outcome"`
+	Error   string `json:"error,omitempty"`
+}
 
 // controllerSocketPath returns the Unix socket path for controller commands.
 // It preserves the legacy .gc/controller.sock location for short city paths,
@@ -187,6 +200,8 @@ func handleControllerConn(
 			default:
 			}
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
+		case strings.HasPrefix(line, sessionCircuitResetCommandPrefix):
+			handleSessionCircuitResetSocketCmd(conn, cityPath, line[len(sessionCircuitResetCommandPrefix):])
 		case strings.HasPrefix(line, "converge:"):
 			handleConvergeSocketCmd(conn, line[len("converge:"):], convergenceReqCh)
 		case strings.HasPrefix(line, "trace-arm:"):
@@ -207,6 +222,113 @@ func handleControllerConn(
 			handleTraceStatusSocketCmd(conn, cityPath)
 		}
 	}
+}
+
+func handleSessionCircuitResetSocketCmd(conn net.Conn, cityPath, payload string) {
+	var req sessionCircuitResetRequest
+	if err := json.Unmarshal([]byte(payload), &req); err != nil {
+		writeJSONLine(conn, sessionCircuitResetReply{
+			Outcome: "failed",
+			Error:   fmt.Sprintf("invalid session circuit reset request: %v", err),
+		})
+		return
+	}
+	identity := strings.TrimSpace(req.Identity)
+	if identity == "" {
+		writeJSONLine(conn, sessionCircuitResetReply{
+			Outcome: "failed",
+			Error:   "identity is required",
+		})
+		return
+	}
+	sessionID := strings.TrimSpace(req.SessionID)
+	if sessionID == "" {
+		writeJSONLine(conn, sessionCircuitResetReply{
+			Outcome: "failed",
+			Error:   "session_id is required; upgrade gc to clear persisted session circuit breaker metadata",
+		})
+		return
+	}
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		writeJSONLine(conn, sessionCircuitResetReply{
+			Outcome: "failed",
+			Error:   fmt.Sprintf("opening city store: %v", err),
+		})
+		return
+	}
+	if err := resetSessionCircuitBreakerState(store, sessionID, identity, defaultSessionCircuitBreaker()); err != nil {
+		writeJSONLine(conn, sessionCircuitResetReply{
+			Outcome: "failed",
+			Error:   err.Error(),
+		})
+		return
+	}
+	writeJSONLine(conn, sessionCircuitResetReply{Outcome: "ok"})
+}
+
+func resetSessionCircuitBreakerState(store beads.Store, sessionID string, identity string, cb *sessionCircuitBreaker) error {
+	identity = strings.TrimSpace(identity)
+	if identity == "" {
+		return nil
+	}
+	if cb == nil {
+		cb = defaultSessionCircuitBreaker()
+	}
+	if err := loadPersistedSessionCircuitResetGeneration(store, sessionID, identity, cb); err != nil {
+		return err
+	}
+	initialSnapshot := cb.snapshotIdentity(identity)
+	if strings.TrimSpace(sessionID) == "" {
+		cb.Reset(identity)
+		return nil
+	}
+	if err := resetAndClearSessionCircuitBreakerState(store, sessionID, identity, cb, initialSnapshot); err != nil {
+		return err
+	}
+	// The second cycle invalidates an OPEN persist that may race through
+	// the first clear window. If the second clear fails, restore the pre-reset
+	// snapshot so the controller never leaves memory CLOSED while storage still
+	// says OPEN. TestResetSessionCircuitBreakerStateClearsRacingOpenPersist
+	// guards this from being collapsed into a single reset.
+	return resetAndClearSessionCircuitBreakerState(store, sessionID, identity, cb, initialSnapshot)
+}
+
+func resetAndClearSessionCircuitBreakerState(store beads.Store, sessionID string, identity string, cb *sessionCircuitBreaker, restoreSnapshot sessionCircuitBreakerIdentitySnapshot) error {
+	resetGeneration := cb.Reset(identity)
+	if err := clearPersistedSessionCircuitBreakerMetadata(store, sessionID, resetGeneration); err != nil {
+		cb.restoreIdentity(identity, restoreSnapshot)
+		// Restore the pre-reset snapshot rather than the just-reset one so a
+		// durable clear failure cannot strand the breaker CLOSED in memory.
+		return err
+	}
+	return nil
+}
+
+func resetSessionCircuitBreakerOnController(cityPath, sessionID, identity string) error {
+	identity = strings.TrimSpace(identity)
+	if identity == "" {
+		return nil
+	}
+	payload, err := json.Marshal(sessionCircuitResetRequest{Identity: identity, SessionID: sessionID})
+	if err != nil {
+		return fmt.Errorf("encoding session circuit reset request: %w", err)
+	}
+	resp, err := sendControllerCommand(cityPath, sessionCircuitResetCommandPrefix+string(payload))
+	if err != nil {
+		return err
+	}
+	var reply sessionCircuitResetReply
+	if err := json.Unmarshal(resp, &reply); err != nil {
+		return fmt.Errorf("decoding session circuit reset reply: %w", err)
+	}
+	if reply.Outcome != "ok" {
+		if reply.Error != "" {
+			return fmt.Errorf("%s", reply.Error)
+		}
+		return fmt.Errorf("session circuit reset failed")
+	}
+	return nil
 }
 
 func handleReloadSocketCmd(conn net.Conn, payload string, ch chan reloadRequest) {
@@ -773,7 +895,11 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 		return nil, fmt.Errorf("fetching packs: %w", err)
 	}
 
-	newCfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, extraConfigFiles...)
+	allIncludes, err := cityConfigIncludesWithBuiltinPacks(cityRoot, extraConfigFiles...)
+	if err != nil {
+		return nil, err
+	}
+	newCfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, allIncludes...)
 	if err != nil {
 		return nil, fmt.Errorf("parsing city.toml: %w", err)
 	}
@@ -893,6 +1019,9 @@ func gracefulStopAll(
 			running, _ = workerSessionTargetRunningWithConfig("", nil, sp, nil, name)
 		}
 		if !running {
+			if err := sp.Stop(name); err != nil && !runtime.IsSessionGone(err) {
+				fmt.Fprintf(stderr, "cleaning exited agent '%s': %v\n", name, err) //nolint:errcheck // best-effort stderr
+			}
 			fmt.Fprintf(stdout, "Agent '%s' exited gracefully\n", name) //nolint:errcheck // best-effort stdout
 			subject := name
 			if target, ok := targetByName[name]; ok && target.subject != "" {

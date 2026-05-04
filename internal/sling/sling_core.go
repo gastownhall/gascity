@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"slices"
 	"strings"
 
@@ -16,6 +15,14 @@ import (
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
+
+func depsTracef(deps SlingDeps, format string, args ...any) {
+	if deps.Tracer != nil {
+		deps.Tracer(format, args...)
+		return
+	}
+	SlingTracef(format, args...)
+}
 
 // validateDeps checks that required SlingDeps fields are non-nil.
 func validateDeps(deps SlingDeps) error {
@@ -331,13 +338,17 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 			Target:  a.QualifiedName(),
 			WorkDir: rigDir,
 			Env:     slingEnv,
+			Force:   opts.Force,
 		}
 		if err := deps.Router.Route(context.Background(), req); err != nil {
 			telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
 			return result, fmt.Errorf("%w", err)
 		}
 	} else {
-		slingCmd := BuildSlingCommandForAgent("sling_query", a.EffectiveSlingQuery(), beadID, deps.CityPath, deps.CityName, a, deps.Cfg.Rigs, deps.Stderr)
+		slingCmd, slingWarn := BuildSlingCommandForAgent("sling_query", a.EffectiveSlingQuery(), beadID, deps.CityPath, deps.CityName, a, deps.Cfg.Rigs)
+		if slingWarn != "" {
+			depsTracef(deps, "sling-core: %s", slingWarn)
+		}
 		if _, err := deps.Runner(rigDir, slingCmd, slingEnv); err != nil {
 			telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
 			return result, fmt.Errorf("%w", err)
@@ -790,30 +801,17 @@ func validateBatchSlingFormulaRuntimeVars(ctx context.Context, formulaName strin
 }
 
 func sourceWorkflowLockScope(deps SlingDeps) string {
-	cityPath := strings.TrimSpace(deps.CityPath)
-	if cityPath == "" {
-		return strings.TrimSpace(deps.StoreRef)
-	}
-	storeRef := strings.TrimSpace(deps.StoreRef)
-	switch {
-	case storeRef == "", strings.HasPrefix(storeRef, "city:"):
-		return filepath.Clean(cityPath)
-	case strings.HasPrefix(storeRef, "rig:"):
-		rigName := strings.TrimPrefix(storeRef, "rig:")
+	return sourceworkflow.LockScopeForStoreRef(deps.CityPath, "", deps.StoreRef, func(rigName string) (string, bool) {
 		if deps.Cfg != nil {
 			for _, rig := range deps.Cfg.Rigs {
 				if rig.Name != rigName {
 					continue
 				}
-				rigPath := rig.Path
-				if !filepath.IsAbs(rigPath) {
-					rigPath = filepath.Join(cityPath, rigPath)
-				}
-				return filepath.Clean(rigPath)
+				return rig.Path, true
 			}
 		}
-	}
-	return storeRef
+		return "", false
+	})
 }
 
 // DoSlingBatch handles convoy expansion before delegating to DoSling.
@@ -1009,6 +1007,7 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 				Target:  a.QualifiedName(),
 				WorkDir: rigDir,
 				Env:     childEnv,
+				Force:   opts.Force,
 			}
 			if err := deps.Router.Route(context.Background(), req); err != nil {
 				childResult.Failed = true
@@ -1020,7 +1019,10 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 				continue
 			}
 		} else {
-			slingCmd := BuildSlingCommandForAgent("sling_query", a.EffectiveSlingQuery(), child.ID, deps.CityPath, deps.CityName, a, deps.Cfg.Rigs, deps.Stderr)
+			slingCmd, slingWarn := BuildSlingCommandForAgent("sling_query", a.EffectiveSlingQuery(), child.ID, deps.CityPath, deps.CityName, a, deps.Cfg.Rigs)
+			if slingWarn != "" {
+				depsTracef(deps, "sling-core: %s", slingWarn)
+			}
 			if _, err := deps.Runner(rigDir, slingCmd, childEnv); err != nil {
 				childResult.Failed = true
 				childResult.FailReason = err.Error()

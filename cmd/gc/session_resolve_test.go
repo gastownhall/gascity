@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,6 +13,139 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
+
+type listQueryCaptureStore struct {
+	beads.Store
+	listCalls []beads.ListQuery
+}
+
+func (s *listQueryCaptureStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.listCalls = append(s.listCalls, q)
+	return s.Store.List(q)
+}
+
+func TestResolveConfiguredNamedSessionID_BoundedListCalls(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city", SessionTemplate: "{{.City}}--{{.Agent}}"},
+		Agents: []config.Agent{{
+			Name:         "mayor",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "mayor",
+		}},
+	}
+	cityName := config.EffectiveCityName(cfg, filepath.Base(cityPath))
+	spec, ok := findNamedSessionSpec(cfg, cityName, "mayor")
+	if !ok {
+		t.Fatal("findNamedSessionSpec(mayor) = false")
+	}
+
+	inner := beads.NewMemStore()
+	for i := 0; i < 200; i++ {
+		_, _ = inner.Create(beads.Bead{
+			Type:   session.BeadType,
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"session_name": fmt.Sprintf("worker-%d", i),
+			},
+		})
+	}
+	target, err := inner.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name":               spec.SessionName,
+			"alias":                      "mayor",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "mayor",
+			namedSessionModeMetadata:     spec.Mode,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(canonical): %v", err)
+	}
+
+	store := &listQueryCaptureStore{Store: inner}
+	id, matched, err := resolveConfiguredNamedSessionID(cityPath, cfg, store, "mayor", namedSessionResolveOptions{})
+	if err != nil {
+		t.Fatalf("resolveConfiguredNamedSessionID: %v", err)
+	}
+	if !matched {
+		t.Fatalf("matched = false, want true")
+	}
+	if id != target.ID {
+		t.Fatalf("got %q, want canonical %q", id, target.ID)
+	}
+	if len(store.listCalls) == 0 {
+		t.Fatalf("expected at least one List call")
+	}
+	if len(store.listCalls) != 1 {
+		t.Fatalf("List calls = %d, want 1 canonical lookup", len(store.listCalls))
+	}
+	for i, q := range store.listCalls {
+		if len(q.Metadata) == 0 {
+			t.Fatalf("List call #%d has no metadata filter (would scan all beads): %+v", i, q)
+		}
+	}
+}
+
+func TestResolveConfiguredNamedSessionID_BoundedConflictListCalls(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city", SessionTemplate: "{{.City}}--{{.Agent}}"},
+		Agents: []config.Agent{{
+			Name:         "mayor",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "mayor",
+		}},
+	}
+	cityName := config.EffectiveCityName(cfg, filepath.Base(cityPath))
+	spec, ok := findNamedSessionSpec(cfg, cityName, "mayor")
+	if !ok {
+		t.Fatal("findNamedSessionSpec(mayor) = false")
+	}
+
+	inner := beads.NewMemStore()
+	_, err := inner.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": spec.SessionName,
+			"template":     "other",
+			"agent_name":   "other",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(conflict): %v", err)
+	}
+
+	store := &listQueryCaptureStore{Store: inner}
+	_, matched, err := resolveConfiguredNamedSessionID(cityPath, cfg, store, "mayor", namedSessionResolveOptions{})
+	if err == nil {
+		t.Fatal("resolveConfiguredNamedSessionID succeeded, want conflict")
+	}
+	if !matched {
+		t.Fatalf("matched = false, want true")
+	}
+	if !errors.Is(err, errNamedSessionConflict) {
+		t.Fatalf("error = %v, want errNamedSessionConflict", err)
+	}
+	if len(store.listCalls) == 0 {
+		t.Fatalf("expected at least one List call")
+	}
+	if len(store.listCalls) > 4 {
+		t.Fatalf("List calls = %d, want bounded small constant without duplicate session_name lookup", len(store.listCalls))
+	}
+	for i, q := range store.listCalls {
+		if len(q.Metadata) == 0 {
+			t.Fatalf("List call #%d has no metadata filter (would scan all beads): %+v", i, q)
+		}
+	}
+}
 
 func TestResolveSessionID_BeadID(t *testing.T) {
 	store := beads.NewMemStore()
@@ -88,7 +222,13 @@ func TestResolveSessionID_QualifiedAliasBasename(t *testing.T) {
 }
 
 func TestResolveSessionIDWithConfig_UsesTargetedConfiguredNamedLookup(t *testing.T) {
-	store := noBroadSessionNameLookupStore{MemStore: beads.NewMemStore(), t: t}
+	// The configured-named-session lookup must stay bounded so wake/dispatch
+	// don't fan out under reconciler load. Pre-collapse this issued four
+	// metadata-field List calls per resolution; the fix for ga-pa57 folded
+	// them into one label-scoped scan with in-process filtering. The
+	// assertion has been relaxed from "no broad scan" to "≤2 List calls"
+	// because the fan-out budget — not the query shape — is what mattered.
+	store := &countingSessionListStore{MemStore: beads.NewMemStore()}
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
@@ -116,6 +256,7 @@ func TestResolveSessionIDWithConfig_UsesTargetedConfiguredNamedLookup(t *testing
 		t.Fatalf("Create(canonical): %v", err)
 	}
 
+	startCalls := store.calls
 	id, err := resolveSessionIDWithConfig(cityPath, cfg, store, "mayor")
 	if err != nil {
 		t.Fatalf("resolveSessionIDWithConfig(mayor): %v", err)
@@ -123,6 +264,19 @@ func TestResolveSessionIDWithConfig_UsesTargetedConfiguredNamedLookup(t *testing
 	if id != b.ID {
 		t.Fatalf("got %q, want %q", id, b.ID)
 	}
+	if delta := store.calls - startCalls; delta > 2 {
+		t.Fatalf("resolveSessionIDWithConfig issued %d List calls, want ≤2 (regression risk for ga-pa57 contention)", delta)
+	}
+}
+
+type countingSessionListStore struct {
+	*beads.MemStore
+	calls int
+}
+
+func (s *countingSessionListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.calls++
+	return s.MemStore.List(query)
 }
 
 func TestResolveSessionID_DoesNotResolveHistoricalAlias(t *testing.T) {
@@ -601,6 +755,50 @@ func TestResolveSessionIDMaterializingNamed_AdoptsCanonicalRuntimeSessionNameBea
 	id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, "mayor")
 	if err != nil {
 		t.Fatalf("resolveSessionIDMaterializingNamed(mayor): %v", err)
+	}
+	if id != bead.ID {
+		t.Fatalf("resolved ID = %q, want adopted bead %q", id, bead.ID)
+	}
+}
+
+func TestResolveConfiguredNamedSessionID_AdoptsCanonicalRuntimeSessionNameBeadWithoutIdentityMetadata(t *testing.T) {
+	store := beads.NewMemStore()
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "mayor",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "mayor",
+		}},
+	}
+	spec, ok := findNamedSessionSpec(cfg, config.EffectiveCityName(cfg, filepath.Base(cityPath)), "mayor")
+	if !ok {
+		t.Fatal("findNamedSessionSpec(mayor) = false")
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:  "mayor",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": spec.SessionName,
+			"template":     "mayor",
+			"agent_name":   "mayor",
+			"state":        "asleep",
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(): %v", err)
+	}
+
+	id, matched, err := resolveConfiguredNamedSessionID(cityPath, cfg, store, "mayor", namedSessionResolveOptions{})
+	if err != nil {
+		t.Fatalf("resolveConfiguredNamedSessionID(mayor): %v", err)
+	}
+	if !matched {
+		t.Fatalf("matched = false, want true")
 	}
 	if id != bead.ID {
 		t.Fatalf("resolved ID = %q, want adopted bead %q", id, bead.ID)

@@ -15,7 +15,7 @@ env:
 jobs:
   tier-b:
     name: Tier B acceptance tests
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     env:
       ANTHROPIC_BASE_URL: https://api.synthetic.new/anthropic
       ANTHROPIC_API_KEY: ${{ secrets.SYNTHETIC_API_KEY }}
@@ -56,7 +56,7 @@ jobs:
 
   mac-inference:
     name: Mac / Tier B+C inference tests
-    runs-on: blacksmith-12vcpu-macos-15
+    runs-on: macos-15
     timeout-minutes: 180
     env:
       ANTHROPIC_BASE_URL: https://api.synthetic.new/anthropic
@@ -94,7 +94,7 @@ jobs:
 
   worker-inference-claude:
     name: WorkerInference claude/tmux-cli
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     env:
       PROFILE: claude/tmux-cli
       WORKER_REPORT_DIR: ${{ github.workspace }}/.nightly-tmp/worker-inference-claude-reports
@@ -166,7 +166,7 @@ jobs:
 
   worker-inference-codex:
     name: WorkerInference codex/tmux-cli
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     env:
       PROFILE: codex/tmux-cli
       WORKER_REPORT_DIR: ${{ github.workspace }}/.nightly-tmp/worker-inference-codex-reports
@@ -220,7 +220,7 @@ jobs:
 
   worker-inference-gemini:
     name: WorkerInference gemini/tmux-cli
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     env:
       PROFILE: gemini/tmux-cli
       WORKER_REPORT_DIR: ${{ github.workspace }}/.nightly-tmp/worker-inference-gemini-reports
@@ -277,7 +277,7 @@ jobs:
 
   worker-inference-summary:
     name: Worker inference summary
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     if: ${{ always() }}
     needs:
       - worker-inference-claude

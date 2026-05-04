@@ -34,9 +34,10 @@ and verifying the result.
 - **Free disk space.** Dolt GC rewrites chunks into a new store before
   swapping; budget at least **2× the current `.dolt/` size** in free space
   on the same filesystem.
-- **Dolt 1.86.1 or newer.** This matches the floor enforced by Gas City's
-  managed Dolt tooling and ensures the listener/config knobs used by the
-  pack plus modern auto-GC behavior are available. Check with
+- **Final Dolt 1.86.2 or newer.** This matches the floor enforced by Gas
+  City's managed Dolt tooling and avoids the upstream GC/writer deadlock fixed
+  in dolthub/dolt commit `ccf7bde206`, which can hang `dolt_backup sync` under
+  heavy write load. Check with
   `dolt version`. If your binary rejects `--archive-level=1` (rare on
   modern releases), drop the flag and run plain
   `dolt gc` — archive compression is default-on in 1.75+ so the flag is
@@ -81,9 +82,9 @@ If GC finishes but the size barely moves, the chunks are nearly all live
 
 ## Prevention
 
-- **Keep Dolt at 1.86.1 or newer.** This matches Gas City's managed-Dolt
-  floor; newer releases ship improved auto-GC
-  heuristics and default archive compression.
+- **Keep Dolt at a final 1.86.2 or newer.** This matches Gas City's
+  managed-Dolt floor; newer releases ship improved auto-GC heuristics and
+  default archive compression.
 - **Let the dolt pack's `dolt-gc-nudge` order run continuously.** It
   ships embedded in the dolt pack and fires `CALL DOLT_GC()` every 1h
   by default, unconditionally. Gas City's managed-Dolt launch path now

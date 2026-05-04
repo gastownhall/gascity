@@ -477,7 +477,10 @@ func claudeFileNeedsUpgrade(existing []byte) bool {
 	}
 	transforms := []func(string) string{
 		func(s string) string {
-			return strings.Replace(s, `gc handoff \"context cycle\"`, `gc prime --hook`, 1)
+			return strings.Replace(s, `gc handoff --auto \"context cycle\"`, `gc handoff \"context cycle\"`, 1)
+		},
+		func(s string) string {
+			return strings.Replace(s, `gc handoff --auto \"context cycle\"`, `gc prime --hook`, 1)
 		},
 		func(s string) string {
 			return strings.Replace(s, `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook`, `gc prime --hook`, 1)

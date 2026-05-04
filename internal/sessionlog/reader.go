@@ -140,7 +140,7 @@ func ReadFile(path string, tailCompactions int) (*Session, error) {
 
 	// Apply compact-boundary pagination.
 	if tailCompactions > 0 {
-		paginated, info := sliceAtCompactBoundaries(messages, tailCompactions, "")
+		paginated, info := sliceAtCompactBoundaries(messages, tailCompactions, "", "")
 		sess.Messages = paginated
 		sess.Pagination = info
 	}
@@ -155,6 +155,8 @@ func ReadProviderFile(provider, path string, tailCompactions int) (*Session, err
 		return ReadCodexFile(path, tailCompactions)
 	case "gemini":
 		return ReadGeminiFile(path, tailCompactions)
+	case "opencode":
+		return ReadOpenCodeFile(path, tailCompactions)
 	default:
 		return ReadFile(path, tailCompactions)
 	}
@@ -184,7 +186,7 @@ func ReadFileRaw(path string, tailCompactions int) (*Session, error) {
 	}
 
 	if tailCompactions > 0 {
-		paginated, info := sliceAtCompactBoundaries(messages, tailCompactions, "")
+		paginated, info := sliceAtCompactBoundaries(messages, tailCompactions, "", "")
 		sess.Messages = paginated
 		sess.Pagination = info
 	}
@@ -202,6 +204,8 @@ func ReadProviderFileRaw(provider, path string, tailCompactions int) (*Session, 
 		return ReadCodexFile(path, tailCompactions)
 	case "gemini":
 		return ReadGeminiFile(path, tailCompactions)
+	case "opencode":
+		return ReadOpenCodeFile(path, tailCompactions)
 	default:
 		return ReadFileRaw(path, tailCompactions)
 	}
@@ -227,7 +231,7 @@ func ReadFileOlder(path string, tailCompactions int, beforeMessageID string) (*S
 	base := filepath.Base(path)
 	sessionID := strings.TrimSuffix(base, filepath.Ext(base))
 
-	paginated, info := sliceAtCompactBoundaries(messages, tailCompactions, beforeMessageID)
+	paginated, info := sliceAtCompactBoundaries(messages, tailCompactions, beforeMessageID, "")
 
 	return &Session{
 		ID:                 sessionID,
@@ -252,7 +256,7 @@ func ReadFileRawOlder(path string, tailCompactions int, beforeMessageID string) 
 	base := filepath.Base(path)
 	sessionID := strings.TrimSuffix(base, filepath.Ext(base))
 
-	paginated, info := sliceAtCompactBoundaries(messages, tailCompactions, beforeMessageID)
+	paginated, info := sliceAtCompactBoundaries(messages, tailCompactions, beforeMessageID, "")
 
 	return &Session{
 		ID:                 sessionID,
@@ -273,6 +277,8 @@ func ReadProviderFileOlder(provider, path string, tailCompactions int, beforeMes
 		return ReadCodexFile(path, tailCompactions)
 	case "gemini":
 		return ReadGeminiFile(path, tailCompactions)
+	case "opencode":
+		return ReadOpenCodeFile(path, tailCompactions)
 	default:
 		return ReadFileOlder(path, tailCompactions, beforeMessageID)
 	}
@@ -287,8 +293,98 @@ func ReadProviderFileRawOlder(provider, path string, tailCompactions int, before
 		return ReadCodexFile(path, tailCompactions)
 	case "gemini":
 		return ReadGeminiFile(path, tailCompactions)
+	case "opencode":
+		return ReadOpenCodeFile(path, tailCompactions)
 	default:
 		return ReadFileRawOlder(path, tailCompactions, beforeMessageID)
+	}
+}
+
+// ReadFileNewer loads newer messages after a cursor.
+func ReadFileNewer(path string, tailCompactions int, afterMessageID string) (*Session, error) {
+	entries, diagnostics, err := parseFileDetailed(path)
+	if err != nil {
+		return nil, err
+	}
+
+	dag := BuildDag(entries)
+
+	var messages []*Entry
+	for _, e := range dag.ActiveBranch {
+		if displayTypes[e.Type] {
+			messages = append(messages, e)
+		}
+	}
+
+	base := filepath.Base(path)
+	sessionID := strings.TrimSuffix(base, filepath.Ext(base))
+
+	paginated, info := sliceAtCompactBoundaries(messages, tailCompactions, "", afterMessageID)
+
+	return &Session{
+		ID:                 sessionID,
+		Messages:           paginated,
+		OrphanedToolUseIDs: dag.OrphanedToolUseIDs,
+		HasBranches:        dag.HasBranches,
+		Pagination:         info,
+		Diagnostics:        diagnostics,
+	}, nil
+}
+
+// ReadFileRawNewer loads newer raw (unfiltered) messages after a cursor.
+func ReadFileRawNewer(path string, tailCompactions int, afterMessageID string) (*Session, error) {
+	entries, diagnostics, err := parseFileDetailed(path)
+	if err != nil {
+		return nil, err
+	}
+
+	dag := BuildDag(entries)
+	messages := dag.ActiveBranch
+
+	base := filepath.Base(path)
+	sessionID := strings.TrimSuffix(base, filepath.Ext(base))
+
+	paginated, info := sliceAtCompactBoundaries(messages, tailCompactions, "", afterMessageID)
+
+	return &Session{
+		ID:                 sessionID,
+		Messages:           paginated,
+		OrphanedToolUseIDs: dag.OrphanedToolUseIDs,
+		HasBranches:        dag.HasBranches,
+		Pagination:         info,
+		Diagnostics:        diagnostics,
+	}, nil
+}
+
+// ReadProviderFileNewer reads a newer page of a provider-specific transcript.
+// Codex sessions do not currently support message-ID pagination, so the full
+// provider transcript is returned.
+func ReadProviderFileNewer(provider, path string, tailCompactions int, afterMessageID string) (*Session, error) {
+	switch providerFamily(provider) {
+	case "codex":
+		return ReadCodexFile(path, tailCompactions)
+	case "gemini":
+		return ReadGeminiFile(path, tailCompactions)
+	case "opencode":
+		return ReadOpenCodeFile(path, tailCompactions)
+	default:
+		return ReadFileNewer(path, tailCompactions, afterMessageID)
+	}
+}
+
+// ReadProviderFileRawNewer reads a newer page of a provider-specific raw
+// transcript. Codex sessions do not currently support message-ID pagination, so
+// the full provider transcript is returned.
+func ReadProviderFileRawNewer(provider, path string, tailCompactions int, afterMessageID string) (*Session, error) {
+	switch providerFamily(provider) {
+	case "codex":
+		return ReadCodexFile(path, tailCompactions)
+	case "gemini":
+		return ReadGeminiFile(path, tailCompactions)
+	case "opencode":
+		return ReadOpenCodeFile(path, tailCompactions)
+	default:
+		return ReadFileRawNewer(path, tailCompactions, afterMessageID)
 	}
 }
 
@@ -345,7 +441,7 @@ func parseFileDetailed(path string) ([]*Entry, SessionDiagnostics, error) {
 // sliceAtCompactBoundaries returns the tail portion of messages starting
 // from the Nth-from-last compact boundary. The boundary itself is
 // included so consumers can render a "Context compacted" divider.
-func sliceAtCompactBoundaries(messages []*Entry, tailCompactions int, beforeMessageID string) ([]*Entry, *PaginationInfo) {
+func sliceAtCompactBoundaries(messages []*Entry, tailCompactions int, beforeMessageID, afterMessageID string) ([]*Entry, *PaginationInfo) {
 	totalCount := len(messages)
 
 	// For "load older" requests: truncate at cursor first.
@@ -354,6 +450,16 @@ func sliceAtCompactBoundaries(messages []*Entry, tailCompactions int, beforeMess
 		for i, m := range messages {
 			if m.UUID == beforeMessageID {
 				working = messages[:i]
+				break
+			}
+		}
+	}
+
+	// For "load newer" requests: truncate at cursor, keeping entries after it.
+	if afterMessageID != "" {
+		for i, m := range working {
+			if m.UUID == afterMessageID {
+				working = working[i+1:]
 				break
 			}
 		}
@@ -427,6 +533,8 @@ func FindSessionFileForProvider(searchPaths []string, provider, workDir string) 
 		return FindCodexSessionFile(searchPaths, workDir)
 	case "gemini":
 		return FindGeminiSessionFile(searchPaths, workDir)
+	case "opencode":
+		return FindOpenCodeSessionFile(searchPaths, workDir)
 	case "", "auto":
 		return FindSessionFile(searchPaths, workDir)
 	default:
@@ -444,6 +552,8 @@ func FindProviderFallbackSessionFile(searchPaths []string, provider, workDir str
 		return FindCodexSessionFile(searchPaths, workDir)
 	case "gemini":
 		return FindGeminiSessionFile(searchPaths, workDir)
+	case "opencode":
+		return FindOpenCodeSessionFile(searchPaths, workDir)
 	default:
 		return findClaudeLatestSessionFile(searchPaths, workDir)
 	}
@@ -817,6 +927,8 @@ func providerFamily(provider string) string {
 		return "codex"
 	case strings.Contains(p, "gemini"):
 		return "gemini"
+	case strings.Contains(p, "opencode"):
+		return "opencode"
 	default:
 		return p
 	}

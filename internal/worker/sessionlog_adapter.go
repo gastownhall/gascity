@@ -28,6 +28,7 @@ type TranscriptRequest struct {
 	TranscriptPath  string
 	TailCompactions int
 	BeforeEntryID   string
+	AfterEntryID    string
 	Raw             bool
 }
 
@@ -135,11 +136,16 @@ func (a SessionLogAdapter) ReadTranscript(req TranscriptRequest) (*TranscriptRes
 		err  error
 	)
 	beforeID := strings.TrimSpace(req.BeforeEntryID)
+	afterID := strings.TrimSpace(req.AfterEntryID)
 	switch {
+	case req.Raw && afterID != "":
+		sess, err = sessionlog.ReadProviderFileRawNewer(req.Provider, path, req.TailCompactions, afterID)
 	case req.Raw && beforeID != "":
 		sess, err = sessionlog.ReadProviderFileRawOlder(req.Provider, path, req.TailCompactions, beforeID)
 	case req.Raw:
 		sess, err = sessionlog.ReadProviderFileRaw(req.Provider, path, req.TailCompactions)
+	case afterID != "":
+		sess, err = sessionlog.ReadProviderFileNewer(req.Provider, path, req.TailCompactions, afterID)
 	case beforeID != "":
 		sess, err = sessionlog.ReadProviderFileOlder(req.Provider, path, req.TailCompactions, beforeID)
 	default:

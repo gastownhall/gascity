@@ -5,7 +5,6 @@ import type {
   SupervisorEventStreamEnvelope,
 } from "../api";
 import { api, cityScope } from "../api";
-import { logDebug } from "../logger";
 import { byId, clear, el } from "../util/dom";
 import {
   connectCityEvents,
@@ -38,6 +37,7 @@ let handle: SSEHandle | null = null;
 let categoryFilter = "all";
 let rigFilter = "all";
 let agentFilter = "all";
+let streamCursor: { afterCursor?: string; afterSeq?: string } = {};
 
 export async function seedActivity(entriesFromAPI: ActivityEntry[]): Promise<void> {
   entries.splice(0, entries.length, ...normalizeEntries(entriesFromAPI));
@@ -56,6 +56,7 @@ export async function loadActivityHistory(): Promise<void> {
   const normalized = (res.data?.items ?? [])
     .map((item) => toEntryFromRecord(item))
     .filter((item): item is ActivityEntry => item !== null);
+  streamCursor = cursorFromRecords(res.data?.items ?? [], city);
   await seedActivity(normalized);
 }
 
@@ -65,7 +66,10 @@ export function startActivityStream(
 ): void {
   const city = cityScope();
   handle?.close();
-  const opts = onStatus ? { onStatus } : undefined;
+  const opts = {
+    ...streamCursor,
+    ...(onStatus ? { onStatus } : {}),
+  };
   const connect = city
     ? (listener: (msg: DashboardEventMessage) => void) => connectCityEvents(city, listener, opts)
     : (listener: (msg: DashboardEventMessage) => void) => connectEvents(listener, opts);
@@ -75,12 +79,22 @@ export function startActivityStream(
     const entry = toEntryFromMessage(msg);
     if (!entry) return;
     if (entries.some((current) => current.id === entry.id)) {
-      logDebug("activity", "Duplicate stream event ignored", { id: entry.id, type: entry.type });
       return;
     }
     entries.splice(0, entries.length, ...normalizeEntries([entry, ...entries]));
     renderActivity();
   });
+}
+
+export function activityStreamCursorForTest(): { afterCursor?: string; afterSeq?: string } {
+  return { ...streamCursor };
+}
+
+export function activityStreamCursorFromRecordsForTest(
+  records: DashboardEventRecord[],
+  city: string,
+): { afterCursor?: string; afterSeq?: string } {
+  return cursorFromRecords(records, city);
 }
 
 export function stopActivityStream(): void {
@@ -190,8 +204,8 @@ function renderFilters(): void {
       filterButton("comms", "Comms"),
       filterButton("system", "System"),
     ]),
-    el("div", { class: "tl-filter-group" }, [el("label", {}, ["Rig:"]), rigSelect]),
-    el("div", { class: "tl-filter-group" }, [el("label", {}, ["Agent:"]), agentSelect]),
+    el("div", { class: "tl-filter-group" }, [el("label", { for: "tl-rig-filter" }, ["Rig:"]), rigSelect]),
+    el("div", { class: "tl-filter-group" }, [el("label", { for: "tl-agent-filter" }, ["Agent:"]), agentSelect]),
   ]));
 }
 
@@ -273,6 +287,27 @@ function recordCity(record: DashboardEventRecord): string | undefined {
     return record.city;
   }
   return undefined;
+}
+
+function cursorFromRecords(records: DashboardEventRecord[], city: string): { afterCursor?: string; afterSeq?: string } {
+  if (city) {
+    const maxSeq = records.reduce((max, record) => Math.max(max, record.seq ?? 0), 0);
+    return maxSeq > 0 ? { afterSeq: String(maxSeq) } : {};
+  }
+
+  const seqsByCity = new Map<string, number>();
+  records.forEach((record) => {
+    const recordScope = recordCity(record);
+    if (!recordScope || !record.seq) return;
+    seqsByCity.set(recordScope, Math.max(seqsByCity.get(recordScope) ?? 0, record.seq));
+  });
+  if (seqsByCity.size === 0) return {};
+  return {
+    afterCursor: [...seqsByCity.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([scope, seq]) => `${scope}:${seq}`)
+      .join(","),
+  };
 }
 
 function stableEventID(record: DashboardEventRecord, eventID?: string): string {

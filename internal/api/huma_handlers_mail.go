@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -372,7 +373,7 @@ func (s *Server) humaHandleMailThread(_ context.Context, input *MailThreadInput)
 }
 
 // humaHandleMailRead is the Huma-typed handler for POST /v0/mail/{id}/read.
-func (s *Server) humaHandleMailRead(_ context.Context, input *MailReadInput) (*OKResponse, error) {
+func (s *Server) humaHandleMailRead(ctx context.Context, input *MailReadInput) (*OKResponse, error) {
 	id := input.ID
 	rig := input.Rig
 	mp, resolvedRig, err := s.findMailProviderForMessage(id, rig)
@@ -385,6 +386,9 @@ func (s *Server) humaHandleMailRead(_ context.Context, input *MailReadInput) (*O
 	if err := mp.MarkRead(id); err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
+	if err := waitForMailReadState(ctx, mp, id, true); err != nil {
+		return nil, huma.Error500InternalServerError(err.Error())
+	}
 	s.recordMailEvent(events.MailMarkedRead, "api", id, resolvedRig, nil)
 	resp := &OKResponse{}
 	resp.Body.Status = "read"
@@ -392,7 +396,7 @@ func (s *Server) humaHandleMailRead(_ context.Context, input *MailReadInput) (*O
 }
 
 // humaHandleMailMarkUnread is the Huma-typed handler for POST /v0/mail/{id}/mark-unread.
-func (s *Server) humaHandleMailMarkUnread(_ context.Context, input *MailMarkUnreadInput) (*OKResponse, error) {
+func (s *Server) humaHandleMailMarkUnread(ctx context.Context, input *MailMarkUnreadInput) (*OKResponse, error) {
 	id := input.ID
 	rig := input.Rig
 	mp, resolvedRig, err := s.findMailProviderForMessage(id, rig)
@@ -405,10 +409,37 @@ func (s *Server) humaHandleMailMarkUnread(_ context.Context, input *MailMarkUnre
 	if err := mp.MarkUnread(id); err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
+	if err := waitForMailReadState(ctx, mp, id, false); err != nil {
+		return nil, huma.Error500InternalServerError(err.Error())
+	}
 	s.recordMailEvent(events.MailMarkedUnread, "api", id, resolvedRig, nil)
 	resp := &OKResponse{}
 	resp.Body.Status = "unread"
 	return resp, nil
+}
+
+func waitForMailReadState(ctx context.Context, mp mail.Provider, id string, want bool) error {
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(20 * time.Millisecond)
+	defer tick.Stop()
+
+	for {
+		msg, err := mp.Get(id)
+		if err != nil {
+			return err
+		}
+		if msg.Read == want {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return errors.New("mail read state did not become visible")
+		case <-tick.C:
+		}
+	}
 }
 
 // humaHandleMailArchive is the Huma-typed handler for POST /v0/mail/{id}/archive.
@@ -471,6 +502,11 @@ func (s *Server) humaHandleMailDelete(_ context.Context, input *MailDeleteInput)
 	if err := mp.Delete(id); err != nil {
 		if errors.Is(err, mail.ErrNotFound) || errors.Is(err, beads.ErrNotFound) {
 			return nil, huma.Error404NotFound("message " + id + " not found")
+		}
+		if errors.Is(err, mail.ErrAlreadyArchived) {
+			resp := &OKResponse{}
+			resp.Body.Status = "deleted"
+			return resp, nil
 		}
 		return nil, huma.Error500InternalServerError(err.Error())
 	}

@@ -299,7 +299,8 @@ type CopyEntry struct {
 
 // HashPathContent returns a hex-encoded SHA-256 of the content at path.
 // For a regular file, hashes the file content. For a directory, hashes
-// a sorted manifest of relative paths and their contents. Returns empty
+// a sorted manifest of relative paths and their contents while ignoring
+// runtime-generated Python cache and editor backup artifacts. Returns empty
 // string on any error (caller should treat as "unknown").
 func HashPathContent(path string) string {
 	info, err := os.Stat(path)
@@ -325,10 +326,19 @@ func HashPathContent(path string) string {
 			walkErr = true
 			return nil
 		}
+		rel, _ := filepath.Rel(path, p)
+		if rel == "." {
+			return nil
+		}
+		if hashPathContentSkipEntry(d) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		if d.IsDir() {
 			return nil
 		}
-		rel, _ := filepath.Rel(path, p)
 		entries = append(entries, rel)
 		return nil
 	})
@@ -347,6 +357,25 @@ func HashPathContent(path string) string {
 		h.Write([]byte{0}) //nolint:errcheck // hash.Write never errors
 	}
 	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+func hashPathContentSkipEntry(d fs.DirEntry) bool {
+	base := d.Name()
+	if d.IsDir() {
+		switch base {
+		case "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache":
+			return true
+		default:
+			return false
+		}
+	}
+	switch filepath.Ext(base) {
+	case ".pyc", ".pyo":
+		return true
+	case ".swp", ".swx":
+		return strings.HasPrefix(base, ".")
+	}
+	return strings.HasSuffix(base, "~")
 }
 
 // Config holds the parameters for starting a new session.

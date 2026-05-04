@@ -342,7 +342,7 @@ func workflowRootScope(root beads.Bead) (string, string) {
 }
 
 // collectWorkflowDeps returns the physical bead-to-bead dependencies.
-// Logical edge computation is handled by the MC server's presentation layer.
+// Logical edge computation is handled by the real-world app server's presentation layer.
 func collectWorkflowDeps(store beads.Store, beadIndex map[string]beads.Bead) ([]workflowDepResponse, bool) {
 	workflowDeps := make([]workflowDepResponse, 0)
 	seen := map[string]bool{}

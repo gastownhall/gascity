@@ -18,14 +18,14 @@ import (
 )
 
 func TestDoEventsCityDefaultUsesJSONLItems(t *testing.T) {
-	items := []genclient.WireEvent{
-		{Actor: "human", Seq: 1, Subject: stringPtr("gc-1"), Ts: time.Unix(1700000000, 0).UTC(), Type: "bead.created"},
-		{Actor: "gc", Seq: 2, Subject: stringPtr("mayor"), Ts: time.Unix(1700000010, 0).UTC(), Type: "session.woke"},
+	items := []cliWireEvent{
+		{Actor: "human", Seq: 1, Subject: "gc-1", Ts: time.Unix(1700000000, 0).UTC(), Type: "bead.created"},
+		{Actor: "gc", Seq: 2, Subject: "mayor", Ts: time.Unix(1700000010, 0).UTC(), Type: "session.woke"},
 	}
 	server := newEventsTestServer(t, testEventRoutes{
 		cityEvents: func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("X-GC-Index", "2")
-			writeJSONResponse(t, w, genclient.ListBodyWireEvent{Items: &items, Total: int64(len(items))})
+			writeJSONResponse(t, w, cityEventsListResponse(t, items))
 		},
 	})
 	defer server.Close()
@@ -40,9 +40,9 @@ func TestDoEventsCityDefaultUsesJSONLItems(t *testing.T) {
 	if len(lines) != 2 {
 		t.Fatalf("got %d JSONL lines, want 2; output=%q", len(lines), stdout.String())
 	}
-	var got []genclient.WireEvent
+	var got []cliWireEvent
 	for _, line := range lines {
-		var item genclient.WireEvent
+		var item cliWireEvent
 		if err := json.Unmarshal([]byte(line), &item); err != nil {
 			t.Fatalf("unmarshal line: %v; line=%q", err, line)
 		}
@@ -54,12 +54,12 @@ func TestDoEventsCityDefaultUsesJSONLItems(t *testing.T) {
 }
 
 func TestDoEventsSupervisorDefaultUsesTaggedJSONLItems(t *testing.T) {
-	items := []genclient.WireTaggedEvent{
-		{Actor: "human", City: "alpha", Seq: 3, Subject: stringPtr("gc-1"), Ts: time.Unix(1700000000, 0).UTC(), Type: "bead.created"},
+	items := []cliWireTaggedEvent{
+		{Actor: "human", City: "alpha", Seq: 3, Subject: "gc-1", Ts: time.Unix(1700000000, 0).UTC(), Type: "bead.created"},
 	}
 	server := newEventsTestServer(t, testEventRoutes{
 		supervisorEvents: func(w http.ResponseWriter, _ *http.Request) {
-			writeJSONResponse(t, w, genclient.SupervisorEventListOutputBody{Items: &items, Total: int64(len(items))})
+			writeJSONResponse(t, w, supervisorEventsListResponse(t, items))
 		},
 	})
 	defer server.Close()
@@ -70,7 +70,7 @@ func TestDoEventsSupervisorDefaultUsesTaggedJSONLItems(t *testing.T) {
 		t.Fatalf("doEvents = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
-	var got genclient.WireTaggedEvent
+	var got cliWireTaggedEvent
 	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
 		t.Fatalf("unmarshal stdout: %v; output=%s", err, stdout.String())
 	}
@@ -83,8 +83,8 @@ func TestDoEventsSeqCityUsesIndexHeader(t *testing.T) {
 	server := newEventsTestServer(t, testEventRoutes{
 		cityEvents: func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("X-GC-Index", "7")
-			items := []genclient.WireEvent{}
-			writeJSONResponse(t, w, genclient.ListBodyWireEvent{Items: &items, Total: 0})
+			items := []cliWireEvent{}
+			writeJSONResponse(t, w, cityEventsListResponse(t, items))
 		},
 	})
 	defer server.Close()
@@ -100,13 +100,13 @@ func TestDoEventsSeqCityUsesIndexHeader(t *testing.T) {
 }
 
 func TestDoEventsSeqSupervisorPrintsCompositeCursor(t *testing.T) {
-	items := []genclient.WireTaggedEvent{
+	items := []cliWireTaggedEvent{
 		{Actor: "human", City: "beta", Seq: 9, Ts: time.Unix(1700000001, 0).UTC(), Type: "mail.sent"},
 		{Actor: "human", City: "alpha", Seq: 4, Ts: time.Unix(1700000000, 0).UTC(), Type: "bead.created"},
 	}
 	server := newEventsTestServer(t, testEventRoutes{
 		supervisorEvents: func(w http.ResponseWriter, _ *http.Request) {
-			writeJSONResponse(t, w, genclient.SupervisorEventListOutputBody{Items: &items, Total: int64(len(items))})
+			writeJSONResponse(t, w, supervisorEventsListResponse(t, items))
 		},
 	})
 	defer server.Close()
@@ -152,7 +152,7 @@ func TestDoEventsFallsBackToLocalCityEventsWhenCityStopped(t *testing.T) {
 		t.Fatalf("doEvents = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
-	var got genclient.WireEvent
+	var got cliWireEvent
 	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
 		t.Fatalf("unmarshal stdout: %v; output=%s", err, stdout.String())
 	}
@@ -192,7 +192,7 @@ func TestDoEventsFallsBackToLocalCityEventsOnTypedStoppedCityNotFound(t *testing
 		t.Fatalf("doEvents = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
-	var got genclient.WireEvent
+	var got cliWireEvent
 	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
 		t.Fatalf("unmarshal stdout: %v; output=%s", err, stdout.String())
 	}
@@ -311,7 +311,7 @@ func TestDoEventsFallsBackToLocalCityEventsForExplicitLocalSupervisorAPI(t *test
 		t.Fatalf("doEvents = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
-	var got genclient.WireEvent
+	var got cliWireEvent
 	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
 		t.Fatalf("unmarshal stdout: %v; output=%s", err, stdout.String())
 	}
@@ -346,12 +346,85 @@ func TestDoEventsFallsBackToLocalCityEventsForExplicitLocalSupervisorAPITranspor
 		t.Fatalf("doEvents = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
-	var got genclient.WireEvent
+	var got cliWireEvent
 	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
 		t.Fatalf("unmarshal stdout: %v; output=%s", err, stdout.String())
 	}
 	if got.Type != events.SessionStopped || got.Seq != 1 {
 		t.Fatalf("fallback event = %+v, want session.stopped seq=1", got)
+	}
+}
+
+func TestDoEventsReadsCustomCityEventTypesThroughAPI(t *testing.T) {
+	cityDir := t.TempDir()
+	items := []cliWireEvent{{
+		Actor:   "human",
+		Seq:     1,
+		Subject: "fixture",
+		Ts:      time.Unix(1700000000, 0).UTC(),
+		Type:    "app.custom",
+		Message: "custom event",
+		Payload: json.RawMessage(`{"source":"test"}`),
+	}}
+
+	server := newEventsTestServer(t, testEventRoutes{
+		cityEvents: func(w http.ResponseWriter, r *http.Request) {
+			if got := r.URL.Query().Get("type"); got != "app.custom" {
+				t.Fatalf("type query = %q, want app.custom", got)
+			}
+			w.Header().Set("X-GC-Index", "1")
+			writeJSONResponse(t, w, cityEventsListResponse(t, items))
+		},
+	})
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := doEvents(eventsAPIScope{
+		apiURL:   server.URL,
+		cityName: "mc-city",
+		cityPath: cityDir,
+	}, "app.custom", "", nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doEvents = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	var got cliWireEvent
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
+		t.Fatalf("unmarshal stdout: %v; output=%s", err, stdout.String())
+	}
+	if got.Type != "app.custom" || got.Subject != "fixture" || got.Message != "custom event" {
+		t.Fatalf("custom event = %+v", got)
+	}
+	if string(got.Payload) != `{"source":"test"}` {
+		t.Fatalf("custom event payload = %s", got.Payload)
+	}
+}
+
+func TestDoEventsDoesNotReadLocalUntypedCityEventsForExplicitRemoteAPI(t *testing.T) {
+	cityDir := t.TempDir()
+	rec := newTestProvider(t, filepath.Join(cityDir, ".gc"))
+	rec.Record(events.Event{Type: "app.custom", Actor: "human"})
+
+	server := newEventsTestServer(t, testEventRoutes{
+		cityEvents: func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("X-GC-Index", "0")
+			writeJSONResponse(t, w, cityEventsListResponse(t, []cliWireEvent{}))
+		},
+	})
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := doEvents(eventsAPIScope{
+		apiURL:      server.URL,
+		cityName:    "mc-city",
+		cityPath:    cityDir,
+		explicitAPI: true,
+	}, "app.custom", "", nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doEvents = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != "" {
+		t.Fatalf("stdout = %q, want explicit remote API result", stdout.String())
 	}
 }
 
@@ -554,14 +627,14 @@ func TestDoEventsWatchStoppedCityAfterSeqRequiresRunningAPI(t *testing.T) {
 }
 
 func TestDoEventsWatchCityBufferedReplayUsesEnvelopeSchema(t *testing.T) {
-	items := []genclient.WireEvent{
-		{Actor: "human", Seq: 1, Subject: stringPtr("gc-1"), Ts: time.Unix(1700000000, 0).UTC(), Type: "bead.created"},
-		{Actor: "human", Message: stringPtr("hello"), Seq: 2, Subject: stringPtr("gc-2"), Ts: time.Unix(1700000010, 0).UTC(), Type: "mail.sent"},
+	items := []cliWireEvent{
+		{Actor: "human", Seq: 1, Subject: "gc-1", Ts: time.Unix(1700000000, 0).UTC(), Type: "bead.created"},
+		{Actor: "human", Message: "hello", Seq: 2, Subject: "gc-2", Ts: time.Unix(1700000010, 0).UTC(), Type: "mail.sent"},
 	}
 	server := newEventsTestServer(t, testEventRoutes{
 		cityEvents: func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("X-GC-Index", "2")
-			writeJSONResponse(t, w, genclient.ListBodyWireEvent{Items: &items, Total: int64(len(items))})
+			writeJSONResponse(t, w, cityEventsListResponse(t, items))
 		},
 	})
 	defer server.Close()
@@ -586,15 +659,15 @@ func TestDoEventsWatchCityBufferedReplayUsesEnvelopeSchema(t *testing.T) {
 }
 
 func TestDoEventsWatchCityBufferedReplayAfterSeqSkipsHeadProbe(t *testing.T) {
-	items := []genclient.WireEvent{
-		{Actor: "human", Seq: 1, Subject: stringPtr("gc-1"), Ts: time.Unix(1700000000, 0).UTC(), Type: "bead.created"},
-		{Actor: "human", Message: stringPtr("hello"), Seq: 2, Subject: stringPtr("gc-2"), Ts: time.Unix(1700000010, 0).UTC(), Type: "mail.sent"},
+	items := []cliWireEvent{
+		{Actor: "human", Seq: 1, Subject: "gc-1", Ts: time.Unix(1700000000, 0).UTC(), Type: "bead.created"},
+		{Actor: "human", Message: "hello", Seq: 2, Subject: "gc-2", Ts: time.Unix(1700000010, 0).UTC(), Type: "mail.sent"},
 	}
 	server := newEventsTestServer(t, testEventRoutes{
 		cityEvents: func(w http.ResponseWriter, _ *http.Request) {
 			// Buffered replay for --after only needs the JSON body; a missing
 			// X-GC-Index header should not block replay.
-			writeJSONResponse(t, w, genclient.ListBodyWireEvent{Items: &items, Total: int64(len(items))})
+			writeJSONResponse(t, w, cityEventsListResponse(t, items))
 		},
 	})
 	defer server.Close()
@@ -619,13 +692,13 @@ func TestDoEventsWatchCityBufferedReplayAfterSeqSkipsHeadProbe(t *testing.T) {
 }
 
 func TestDoEventsWatchSupervisorBufferedReplayUsesTaggedEnvelopeSchema(t *testing.T) {
-	items := []genclient.WireTaggedEvent{
+	items := []cliWireTaggedEvent{
 		{Actor: "human", City: "alpha", Seq: 2, Ts: time.Unix(1700000000, 0).UTC(), Type: "bead.created"},
 		{Actor: "gc", City: "beta", Seq: 5, Ts: time.Unix(1700000010, 0).UTC(), Type: "session.woke"},
 	}
 	server := newEventsTestServer(t, testEventRoutes{
 		supervisorEvents: func(w http.ResponseWriter, _ *http.Request) {
-			writeJSONResponse(t, w, genclient.SupervisorEventListOutputBody{Items: &items, Total: int64(len(items))})
+			writeJSONResponse(t, w, supervisorEventsListResponse(t, items))
 		},
 	})
 	defer server.Close()
@@ -653,8 +726,8 @@ func TestDoEventsWatchTimesOutWithoutMatch(t *testing.T) {
 	server := newEventsTestServer(t, testEventRoutes{
 		cityEvents: func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("X-GC-Index", "3")
-			items := []genclient.WireEvent{}
-			writeJSONResponse(t, w, genclient.ListBodyWireEvent{Items: &items, Total: 0})
+			items := []cliWireEvent{}
+			writeJSONResponse(t, w, cityEventsListResponse(t, items))
 		},
 		cityStream: func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/event-stream")
@@ -790,6 +863,40 @@ func writeJSONResponse(t *testing.T, w http.ResponseWriter, body any) {
 	if err := json.NewEncoder(w).Encode(body); err != nil {
 		t.Fatalf("encode JSON response: %v", err)
 	}
+}
+
+func cityEventsListResponse(t *testing.T, items []cliWireEvent) genclient.ListBodyWireEvent {
+	t.Helper()
+	typed := make([]genclient.TypedEventStreamEnvelope, 0, len(items))
+	for _, item := range items {
+		data, err := json.Marshal(item)
+		if err != nil {
+			t.Fatalf("marshal city event item: %v", err)
+		}
+		var envelope genclient.TypedEventStreamEnvelope
+		if err := envelope.UnmarshalJSON(data); err != nil {
+			t.Fatalf("unmarshal typed city event item: %v; item=%s", err, data)
+		}
+		typed = append(typed, envelope)
+	}
+	return genclient.ListBodyWireEvent{Items: &typed, Total: int64(len(typed))}
+}
+
+func supervisorEventsListResponse(t *testing.T, items []cliWireTaggedEvent) genclient.SupervisorEventListOutputBody {
+	t.Helper()
+	typed := make([]genclient.TypedTaggedEventStreamEnvelope, 0, len(items))
+	for _, item := range items {
+		data, err := json.Marshal(item)
+		if err != nil {
+			t.Fatalf("marshal supervisor event item: %v", err)
+		}
+		var envelope genclient.TypedTaggedEventStreamEnvelope
+		if err := envelope.UnmarshalJSON(data); err != nil {
+			t.Fatalf("unmarshal typed supervisor event item: %v; item=%s", err, data)
+		}
+		typed = append(typed, envelope)
+	}
+	return genclient.SupervisorEventListOutputBody{Items: &typed, Total: int64(len(typed))}
 }
 
 func writeProblemResponse(t *testing.T, w http.ResponseWriter, body any) {

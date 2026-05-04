@@ -123,3 +123,32 @@ func TestGCBeadsBDScript_UsesPortableSleepMS(t *testing.T) {
 		t.Fatalf("gc-beads-bd.sh must allow slow bd runtime schema visibility after init")
 	}
 }
+
+func TestGCBeadsBDScript_QuarantinesRetiredReplacementDatabases(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller(0) failed")
+	}
+	scriptPath := filepath.Join(filepath.Dir(thisFile), "..", "..", "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
+	data, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", scriptPath, err)
+	}
+	script := string(data)
+
+	required := []string{
+		"retired_replacement_db_name()",
+		"?*.replaced-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z)",
+		`reason="retired replacement"`,
+		`quarantining unservable database`,
+		`mv -f "$dir" "$quarantine_dir"`,
+	}
+	for _, want := range required {
+		if !strings.Contains(script, want) {
+			t.Fatalf("gc-beads-bd.sh missing retired replacement fallback fragment %q", want)
+		}
+	}
+	if strings.Contains(script, "quarantining phantom database") {
+		t.Fatal("gc-beads-bd.sh still logs the broader fallback as phantom-only")
+	}
+}

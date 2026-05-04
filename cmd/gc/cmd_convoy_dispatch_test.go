@@ -98,6 +98,183 @@ func TestOpenSourceWorkflowStoresFailsOnlyWhenEverythingBroken(t *testing.T) {
 	}
 }
 
+func TestWorkflowFinalizeRetriesWhenSourceWorkflowStoreScanSkipsLiveRoot(t *testing.T) {
+	cityPath := "/city"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "alpha", Path: "rigs/alpha"},
+			{Name: "broken", Path: "rigs/broken"},
+		},
+	}
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	brokenStore := beads.NewMemStore()
+
+	citySource, err := cityStore.Create(beads.Bead{Title: "Adopt PR", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create(city source): %v", err)
+	}
+	rigLaunch, err := rigStore.Create(beads.Bead{
+		Title: "Rig launch",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.source_bead_id":   citySource.ID,
+			"gc.source_store_ref": "city:test-city",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(rig launch): %v", err)
+	}
+	workflow, err := rigStore.Create(beads.Bead{
+		Title: "mol-adopt-pr-v2",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.source_bead_id":   rigLaunch.ID,
+			"gc.source_store_ref": "rig:alpha",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(workflow): %v", err)
+	}
+	cleanup, err := rigStore.Create(beads.Bead{
+		Title: "cleanup",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.outcome": "pass",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(cleanup): %v", err)
+	}
+	if err := rigStore.Close(cleanup.ID); err != nil {
+		t.Fatalf("Close(cleanup): %v", err)
+	}
+	finalizer, err := rigStore.Create(beads.Bead{
+		Title: "Finalize workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(finalizer): %v", err)
+	}
+	if err := rigStore.DepAdd(finalizer.ID, cleanup.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd(finalizer->cleanup): %v", err)
+	}
+	if err := rigStore.DepAdd(workflow.ID, finalizer.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd(workflow->finalizer): %v", err)
+	}
+	hiddenRoot, err := brokenStore.Create(beads.Bead{
+		Title: "hidden live workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":                                "workflow",
+			"gc.formula_contract":                    "graph.v2",
+			"gc.source_bead_id":                      citySource.ID,
+			sourceworkflow.SourceStoreRefMetadataKey: "city:test-city",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(hidden root): %v", err)
+	}
+
+	openStore := func(dir string) (beads.Store, error) {
+		switch filepath.Clean(dir) {
+		case filepath.Clean(cityPath):
+			return cityStore, nil
+		case filepath.Clean(filepath.Join(cityPath, "rigs/alpha")):
+			return rigStore, nil
+		case filepath.Clean(filepath.Join(cityPath, "rigs/broken")):
+			return nil, fmt.Errorf("simulated broken rig with live root %s", hiddenRoot.ID)
+		default:
+			return nil, fmt.Errorf("unexpected store path %s", dir)
+		}
+	}
+	resolver := func(ref string) (beads.Store, error) {
+		switch ref {
+		case "city:test-city":
+			return cityStore, nil
+		case "rig:alpha":
+			return rigStore, nil
+		default:
+			return nil, fmt.Errorf("unknown ref %s", ref)
+		}
+	}
+
+	_, err = dispatch.ProcessControl(rigStore, finalizer, dispatch.ProcessOptions{
+		ResolveStoreRef:      resolver,
+		SourceWorkflowStores: makeSourceWorkflowStoresListerWithOpenStore(cityPath, cfg, openStore),
+		SourceWorkflowLock:   func(_ string, _ string, fn func() error) error { return fn() },
+	})
+	if err == nil {
+		t.Fatal("ProcessControl(workflow-finalize) err = nil, want retryable skipped-store error")
+	}
+	if !strings.Contains(err.Error(), "source-workflow singleton scan skipped") {
+		t.Fatalf("ProcessControl error = %v, want skipped-store scan error", err)
+	}
+
+	workflowAfter, err := rigStore.Get(workflow.ID)
+	if err != nil {
+		t.Fatalf("Get(workflow): %v", err)
+	}
+	if workflowAfter.Status == "closed" {
+		t.Fatal("workflow status = closed; want open so singleton scans still see the retrying root")
+	}
+	finalizerAfter, err := rigStore.Get(finalizer.ID)
+	if err != nil {
+		t.Fatalf("Get(finalizer): %v", err)
+	}
+	if finalizerAfter.Status == "closed" {
+		t.Fatal("finalizer status = closed; want open so source-chain closure retries after skipped scan")
+	}
+	rigLaunchAfter, err := rigStore.Get(rigLaunch.ID)
+	if err != nil {
+		t.Fatalf("Get(rig launch): %v", err)
+	}
+	if rigLaunchAfter.Status == "closed" {
+		t.Fatal("rig launch status = closed; want open until all source-workflow stores are scanned")
+	}
+	citySourceAfter, err := cityStore.Get(citySource.ID)
+	if err != nil {
+		t.Fatalf("Get(city source): %v", err)
+	}
+	if citySourceAfter.Status == "closed" {
+		t.Fatal("city source status = closed; want open while a skipped store may contain a live root")
+	}
+	hiddenRootAfter, err := brokenStore.Get(hiddenRoot.ID)
+	if err != nil {
+		t.Fatalf("Get(hidden root): %v", err)
+	}
+	if hiddenRootAfter.Status == "closed" {
+		t.Fatal("hidden root status = closed; want unchanged")
+	}
+}
+
+func TestSourceWorkflowLockScopeForStoreRefUsesSharedHelper(t *testing.T) {
+	cityPath := "/city"
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "alpha", Path: "rigs/alpha"},
+		},
+	}
+
+	got := sourceWorkflowLockScopeForStoreRef(cityPath, cfg, "", "rig:alpha")
+	want := sourceworkflow.LockScopeForStoreRef(cityPath, "", "rig:alpha", func(rigName string) (string, bool) {
+		if rigName != "alpha" {
+			return "", false
+		}
+		return "rigs/alpha", true
+	})
+	if got != want {
+		t.Fatalf("sourceWorkflowLockScopeForStoreRef = %q, want shared helper scope %q", got, want)
+	}
+}
+
 type closeAllFailStore struct {
 	beads.Store
 	failOn map[string]struct{}
@@ -418,6 +595,7 @@ func TestCmdWorkflowDeleteSourceClosesMatchedRootsAndClearsWorkflowID(t *testing
 	}
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	prevCityFlag := cityFlag
 	cityFlag = ""
 	t.Cleanup(func() { cityFlag = prevCityFlag })
@@ -492,6 +670,139 @@ func TestCmdWorkflowDeleteSourceClosesMatchedRootsAndClearsWorkflowID(t *testing
 	}
 }
 
+func TestCmdWorkflowDeleteSourceFollowsRigLaunchSourceChain(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rigs", "alpha")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rigDir): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "test-city"
+
+[daemon]
+formula_v2 = true
+
+[[rigs]]
+name = "alpha"
+path = "rigs/alpha"
+prefix = "BL"
+`), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	prevCityFlag := cityFlag
+	cityFlag = ""
+	t.Cleanup(func() { cityFlag = prevCityFlag })
+
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatalf("ensureScopedFileStoreLayout: %v", err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
+		t.Fatalf("ensurePersistedScopeLocalFileStore(city): %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(rig .gc): %v", err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(rigDir); err != nil {
+		t.Fatalf("ensurePersistedScopeLocalFileStore(rig): %v", err)
+	}
+
+	cityStore, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(city): %v", err)
+	}
+	rigStore, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig): %v", err)
+	}
+	citySource, err := cityStore.Create(beads.Bead{Title: "City source", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("Create(city source): %v", err)
+	}
+	if err := cityStore.SetMetadata(citySource.ID, "workflow_id", "wf-stale"); err != nil {
+		t.Fatalf("SetMetadata(city workflow_id): %v", err)
+	}
+	rigLaunch, err := rigStore.Create(beads.Bead{
+		Title:  "Rig launch",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.source_bead_id":                      citySource.ID,
+			sourceworkflow.SourceStoreRefMetadataKey: "city:test-city",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(rig launch): %v", err)
+	}
+	root, err := rigStore.Create(beads.Bead{
+		Title:  "Workflow",
+		Type:   "task",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			"gc.formula_contract":                    "graph.v2",
+			"gc.source_bead_id":                      rigLaunch.ID,
+			sourceworkflow.SourceStoreRefMetadataKey: "rig:alpha",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	child, err := rigStore.Create(beads.Bead{
+		Title:  "Child",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	selector := sourceWorkflowStoreSelector{storeRef: "city:test-city"}
+	if code := cmdWorkflowDeleteSource(citySource.ID, selector, true, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdWorkflowDeleteSource returned %d; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "result=cleaned") {
+		t.Fatalf("stdout = %q, want cleaned result", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	reloadedRig, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig reload): %v", err)
+	}
+	updatedRoot, err := reloadedRig.Get(root.ID)
+	if err != nil {
+		t.Fatalf("Get(root): %v", err)
+	}
+	if updatedRoot.Status != "closed" {
+		t.Fatalf("root status = %q, want closed", updatedRoot.Status)
+	}
+	updatedChild, err := reloadedRig.Get(child.ID)
+	if err != nil {
+		t.Fatalf("Get(child): %v", err)
+	}
+	if updatedChild.Status != "closed" {
+		t.Fatalf("child status = %q, want closed", updatedChild.Status)
+	}
+	reloadedCity, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(city reload): %v", err)
+	}
+	updatedCitySource, err := reloadedCity.Get(citySource.ID)
+	if err != nil {
+		t.Fatalf("Get(city source): %v", err)
+	}
+	if got := strings.TrimSpace(updatedCitySource.Metadata["workflow_id"]); got != "" {
+		t.Fatalf("city source workflow_id = %q, want empty", got)
+	}
+}
+
 func TestCmdWorkflowDeleteSourceClosesGraphV2OnlyRoot(t *testing.T) {
 	// Regression: after the ListLiveRoots contract fix, the singleton
 	// scanner surfaces graph.v2-only roots (marked with
@@ -506,6 +817,7 @@ func TestCmdWorkflowDeleteSourceClosesGraphV2OnlyRoot(t *testing.T) {
 	}
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	prevCityFlag := cityFlag
 	cityFlag = ""
 	t.Cleanup(func() { cityFlag = prevCityFlag })
@@ -596,6 +908,7 @@ func TestCmdWorkflowReopenSourceClearsRoutedToForResling(t *testing.T) {
 	}
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	prevCityFlag := cityFlag
 	cityFlag = ""
 	t.Cleanup(func() { cityFlag = prevCityFlag })
@@ -654,6 +967,7 @@ func TestCmdWorkflowReopenSourceConflictsWhenLiveRootExists(t *testing.T) {
 	}
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	prevCityFlag := cityFlag
 	cityFlag = ""
 	t.Cleanup(func() { cityFlag = prevCityFlag })
@@ -695,6 +1009,7 @@ func TestCmdWorkflowDeleteSourcePreviewDoesNotClearStaleMetadata(t *testing.T) {
 	}
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	prevCityFlag := cityFlag
 	cityFlag = ""
 	t.Cleanup(func() { cityFlag = prevCityFlag })
@@ -791,6 +1106,7 @@ func TestRunWorkflowReopenSourceConflictPropagatesExitCode(t *testing.T) {
 	}
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	prevCityFlag := cityFlag
 	cityFlag = ""
 	t.Cleanup(func() { cityFlag = prevCityFlag })
@@ -1043,7 +1359,7 @@ func TestRunWorkflowServeProcessesReadyControlBeadsThenExits(t *testing.T) {
 	})
 
 	cdAgent := config.Agent{Name: config.ControlDispatcherAgentName}
-	wantQuery := workflowServeWorkQuery(cdAgent)
+	wantQuery := workflowServeControlReadyQuery(cdAgent, "control-dispatcher")
 	var gotQueries []string
 	var gotDirs []string
 	var gotEnv []map[string]string
@@ -1099,6 +1415,60 @@ func TestRunWorkflowServeProcessesReadyControlBeadsThenExits(t *testing.T) {
 	}
 }
 
+func TestRunWorkflowServeDrainsReadyBatchBeforeRequery(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+
+	prevCityFlag := cityFlag
+	prevList := workflowServeList
+	prevControl := controlDispatcherServe
+	prevInterval := workflowServeIdlePollInterval
+	prevAttempts := workflowServeIdlePollAttempts
+	cityFlag = ""
+	workflowServeIdlePollInterval = 0
+	workflowServeIdlePollAttempts = 0
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+		workflowServeList = prevList
+		controlDispatcherServe = prevControl
+		workflowServeIdlePollInterval = prevInterval
+		workflowServeIdlePollAttempts = prevAttempts
+	})
+
+	var controlled []string
+	calls := 0
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		calls++
+		switch calls {
+		case 1:
+			return []hookBead{
+				{ID: "gc-ctrl-1", Metadata: map[string]string{"gc.kind": "scope-check"}},
+				{ID: "gc-ctrl-2", Metadata: map[string]string{"gc.kind": "workflow-finalize"}},
+			}, nil
+		default:
+			return nil, nil
+		}
+	}
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+		controlled = append(controlled, beadID)
+		return nil
+	}
+
+	if err := runWorkflowServe("", false, io.Discard, io.Discard); err != nil {
+		t.Fatalf("runWorkflowServe: %v", err)
+	}
+
+	if !slices.Equal(controlled, []string{"gc-ctrl-1", "gc-ctrl-2"}) {
+		t.Fatalf("controlled beads = %#v, want ready batch drained in order", controlled)
+	}
+	if calls != 2 {
+		t.Fatalf("workflowServeList calls = %d, want first ready batch plus idle check", calls)
+	}
+}
+
 func TestWorkflowServeControlReadyQueryUsesControlTiers(t *testing.T) {
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName})
 	if strings.Contains(query, "GC_SESSION_ORIGIN") {
@@ -1107,10 +1477,13 @@ func TestWorkflowServeControlReadyQueryUsesControlTiers(t *testing.T) {
 	if strings.Contains(query, "bd list --status in_progress") {
 		t.Fatalf("workflowServeControlReadyQuery should not return in-progress control beads: %q", query)
 	}
+	if !strings.Contains(query, "BD_EXPORT_AUTO=false") {
+		t.Fatalf("workflowServeControlReadyQuery should disable bd auto-export: %q", query)
+	}
 	for _, want := range []string{
-		`bd ready --assignee="$cand"`,
-		`bd ready --metadata-field "gc.routed_to=$GC_CONTROL_TARGET" --unassigned`,
-		`bd ready --metadata-field "gc.routed_to=$GC_CONTROL_LEGACY_TARGET" --unassigned`,
+		`bd --readonly --sandbox ready --assignee="$cand"`,
+		`bd --readonly --sandbox ready --metadata-field "gc.routed_to=$GC_CONTROL_TARGET" --unassigned`,
+		`bd --readonly --sandbox ready --metadata-field "gc.routed_to=$GC_CONTROL_LEGACY_TARGET" --unassigned`,
 	} {
 		if !strings.Contains(query, want) {
 			t.Fatalf("workflowServeControlReadyQuery missing %q in %q", want, query)
@@ -1133,10 +1506,10 @@ case "$*" in
   "list --status in_progress --assignee=gascity--control-dispatcher --json --limit=20")
     printf '[{"id":"ga-in-progress"}]'
     ;;
-  "ready --assignee=gascity--control-dispatcher --json --limit=20")
+  "--readonly --sandbox ready --assignee=gascity--control-dispatcher --json --limit=20")
     printf '[{"id":"ga-ready"}]'
     ;;
-  "ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --json --limit=20")
+  "--readonly --sandbox ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --json --limit=20")
     printf '[{"id":"ga-routed"}]'
     ;;
   *)
@@ -1149,21 +1522,117 @@ esac
 	}
 }
 
-func TestWorkflowServeControlReadyQueryQuotesMetadataFallbackTarget(t *testing.T) {
-	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "my rig"})
-	out := runWorkflowServeShellQueryForTest(t, query, map[string]string{}, `#!/bin/sh
+func TestWorkflowServeControlReadyQueryUsesConfiguredRuntimeNameWhenEnvIsManualSession(t *testing.T) {
+	query := workflowServeControlReadyQuery(
+		config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"},
+		"gascity--control-dispatcher",
+	)
+	out := runWorkflowServeShellQueryForTest(t, query, map[string]string{
+		"GC_SESSION_ID":     "mc-manual",
+		"GC_SESSION_NAME":   "s-mc-manual",
+		"GC_AGENT":          "s-mc-manual",
+		"GC_SESSION_ORIGIN": "manual",
+	}, `#!/bin/sh
 set -eu
-case "$1|$2|$3|$4|$5|$6" in
-  "ready|--metadata-field|gc.routed_to=my rig/control-dispatcher|--unassigned|--json|--limit=20")
-    printf '[{"id":"ga-routed"}]'
+case "$*" in
+  "--readonly --sandbox ready --assignee=gascity--control-dispatcher --json --limit=20")
+    printf '[{"id":"ga-control-ready"}]'
+    ;;
+  *)
+    echo "unexpected first control query: $*" >&2
+    exit 42
+    ;;
+esac
+`)
+	if got, want := strings.TrimSpace(out), `[{"id":"ga-control-ready"}]`; got != want {
+		t.Fatalf("control query output = %q, want %q", got, want)
+	}
+}
+
+func TestWorkflowServeControlReadyQueryPrioritizesConfiguredRuntimeName(t *testing.T) {
+	query := workflowServeControlReadyQuery(
+		config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"},
+		"gascity--control-dispatcher",
+	)
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "bd.log")
+	bdPath := filepath.Join(tmp, "bd")
+	if err := os.WriteFile(bdPath, []byte(`#!/bin/sh
+set -eu
+[ "${BD_EXPORT_AUTO:-}" = "false" ] || {
+  echo "BD_EXPORT_AUTO=${BD_EXPORT_AUTO:-}" >&2
+  exit 43
+}
+printf '%s\n' "$*" >> "$BD_LOG"
+case "$*" in
+  "--readonly --sandbox ready --assignee=gascity--control-dispatcher --json --limit=20")
+    printf '[{"id":"ga-control-ready"}]'
     ;;
   *)
     printf '[]'
     ;;
 esac
+`), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	out, err := shellWorkQueryWithEnv(query, t.TempDir(), []string{
+		"PATH=" + tmp + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"BD_LOG=" + logPath,
+		"GC_SESSION_ID=mc-manual",
+		"GC_SESSION_NAME=s-mc-manual",
+		"GC_AGENT=s-mc-manual",
+		"GC_SESSION_ORIGIN=manual",
+	})
+	if err != nil {
+		t.Fatalf("run workflow serve query: %v", err)
+	}
+	if got, want := strings.TrimSpace(out), `[{"id":"ga-control-ready"}]`; got != want {
+		t.Fatalf("control query output = %q, want %q", got, want)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read bd log: %v", err)
+	}
+	firstCall, _, _ := strings.Cut(strings.TrimSpace(string(logData)), "\n")
+	if want := "--readonly --sandbox ready --assignee=gascity--control-dispatcher --json --limit=20"; firstCall != want {
+		t.Fatalf("first bd call = %q, want %q; all calls:\n%s", firstCall, want, string(logData))
+	}
+}
+
+func TestWorkflowServeControlReadyQueryQuotesMetadataFallbackTarget(t *testing.T) {
+	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "my rig"})
+	tmp := t.TempDir()
+	argsPath := filepath.Join(tmp, "matched.args")
+	out := runWorkflowServeShellQueryForTest(t, query, map[string]string{
+		"BD_MATCHED_ARGS": argsPath,
+	}, `#!/bin/sh
+set -eu
+if [ "$#" -eq 8 ] &&
+   [ "$1" = "--readonly" ] &&
+   [ "$2" = "--sandbox" ] &&
+   [ "$3" = "ready" ] &&
+   [ "$4" = "--metadata-field" ] &&
+   [ "$5" = "gc.routed_to=my rig/control-dispatcher" ] &&
+   [ "$6" = "--unassigned" ] &&
+   [ "$7" = "--json" ] &&
+   [ "$8" = "--limit=20" ]; then
+  printf '%s\n' "$@" > "$BD_MATCHED_ARGS"
+  printf '[{"id":"ga-routed"}]'
+  exit 0
+fi
+printf '[]'
 `)
 	if got, want := strings.TrimSpace(out), `[{"id":"ga-routed"}]`; got != want {
 		t.Fatalf("control query output = %q, want %q", got, want)
+	}
+	argsData, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read matched args: %v", err)
+	}
+	gotArgs := strings.Split(strings.TrimSpace(string(argsData)), "\n")
+	wantArgs := []string{"--readonly", "--sandbox", "ready", "--metadata-field", "gc.routed_to=my rig/control-dispatcher", "--unassigned", "--json", "--limit=20"}
+	if !slices.Equal(gotArgs, wantArgs) {
+		t.Fatalf("matched bd args = %#v, want %#v", gotArgs, wantArgs)
 	}
 }
 
@@ -1176,7 +1645,7 @@ func TestWorkflowServeControlReadyQueryUsesLegacyRouteForNamedSessions(t *testin
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "ready --metadata-field gc.routed_to=gascity/workflow-control --unassigned --json --limit=20")
+  "--readonly --sandbox ready --metadata-field gc.routed_to=gascity/workflow-control --unassigned --json --limit=20")
     printf '[{"id":"ga-legacy-route"}]'
     ;;
   *)
@@ -1356,6 +1825,192 @@ path = %q
 	}
 	if gotBeadID != "gc-rig-control" {
 		t.Fatalf("control beadID = %q, want gc-rig-control", gotBeadID)
+	}
+}
+
+func TestOpenControlStoreDisablesAutoExportWithoutSandboxingWrites(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "myrig-repo")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "myrig", Path: rigDir}},
+	}
+	t.Setenv("GC_BEADS", "bd")
+
+	var calls [][]string
+	var envs []map[string]string
+	prevRunner := beadsExecCommandRunnerWithEnv
+	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
+		envs = append(envs, maps.Clone(env))
+		return func(_ string, name string, args ...string) ([]byte, error) {
+			if name != "bd" {
+				return nil, fmt.Errorf("unexpected command %q", name)
+			}
+			calls = append(calls, append([]string(nil), args...))
+			return []byte(`[]`), nil
+		}
+	}
+	t.Cleanup(func() { beadsExecCommandRunnerWithEnv = prevRunner })
+
+	status := "closed"
+	cityStore, err := openControlStoreAtForCity(cityDir, cityDir, cfg)
+	if err != nil {
+		t.Fatalf("openControlStoreAtForCity(city): %v", err)
+	}
+	if err := cityStore.Update("ga-city-control", beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("city control update: %v", err)
+	}
+	rigStore, err := openControlStoreAtForCity(rigDir, cityDir, cfg)
+	if err != nil {
+		t.Fatalf("openControlStoreAtForCity(rig): %v", err)
+	}
+	if err := rigStore.Update("ga-rig-control", beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("rig control update: %v", err)
+	}
+
+	if len(calls) != 2 {
+		t.Fatalf("bd calls = %#v, want two update calls", calls)
+	}
+	if len(envs) != 2 {
+		t.Fatalf("bd envs = %#v, want two command environments", envs)
+	}
+	for i, call := range calls {
+		if len(call) < 1 || call[0] != "update" {
+			t.Fatalf("bd call = %#v, want update ...", call)
+		}
+		if slices.Contains(call, "--sandbox") {
+			t.Fatalf("bd call = %#v, write-capable control stores must not use --sandbox", call)
+		}
+		if got := envs[i]["BD_EXPORT_AUTO"]; got != "false" {
+			t.Fatalf("bd env %d BD_EXPORT_AUTO = %q, want false", i, got)
+		}
+	}
+}
+
+func TestOpenControlStoreAtForCityPreservesFileAndExecProviderStores(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rigs", "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExecStoreCityConfig(t, cityDir, "metro-city", "ct", []config.Rig{{
+		Name:   "frontend",
+		Path:   "rigs/frontend",
+		Prefix: "fe",
+	}})
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "metro-city", Prefix: "ct"},
+		Rigs: []config.Rig{{
+			Name:   "frontend",
+			Path:   "rigs/frontend",
+			Prefix: "fe",
+		}},
+	}
+
+	t.Run("file", func(t *testing.T) {
+		t.Setenv("GC_BEADS", "file")
+		t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+		store, err := openControlStoreAtForCity(rigDir, cityDir, cfg)
+		if err != nil {
+			t.Fatalf("openControlStoreAtForCity(file): %v", err)
+		}
+		if _, ok := store.(*beads.FileStore); !ok {
+			t.Fatalf("control store = %T, want *beads.FileStore for file provider", store)
+		}
+	})
+
+	t.Run("exec", func(t *testing.T) {
+		captureDir := t.TempDir()
+		script := writeExecCaptureScript(t, captureDir)
+		provider := "exec:" + script
+		t.Setenv("GC_BEADS", provider)
+		t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+		store, err := openControlStoreAtForCity(rigDir, cityDir, cfg)
+		if err != nil {
+			t.Fatalf("openControlStoreAtForCity(exec): %v", err)
+		}
+		if _, err := store.Create(beads.Bead{Title: "rig"}); err != nil {
+			t.Fatalf("exec control Create: %v", err)
+		}
+		env := readExecCaptureEnv(t, filepath.Join(captureDir, "frontend.env"))
+		if got := env["GC_PROVIDER"]; got != provider {
+			t.Fatalf("exec GC_PROVIDER = %q, want %q", got, provider)
+		}
+		if got := env["GC_STORE_SCOPE"]; got != "rig" {
+			t.Fatalf("exec GC_STORE_SCOPE = %q, want rig", got)
+		}
+	})
+}
+
+func TestOpenControlStoreAtForCityUsesControlRunnerForStaleBdScope(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	staleRigDir := filepath.Join(cityDir, "rigs", "removed")
+	if err := os.MkdirAll(filepath.Join(staleRigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staleRigDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"removed"}`), 0o644); err != nil {
+		t.Fatalf("write stale rig metadata: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "active", Path: "rigs/active"}},
+	}
+	t.Setenv("GC_BEADS", "bd")
+
+	var calls [][]string
+	var envs []map[string]string
+	prevRunner := beadsExecCommandRunnerWithEnv
+	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
+		envs = append(envs, maps.Clone(env))
+		return func(_ string, name string, args ...string) ([]byte, error) {
+			if name != "bd" {
+				return nil, fmt.Errorf("unexpected command %q", name)
+			}
+			calls = append(calls, append([]string(nil), args...))
+			return []byte(`[]`), nil
+		}
+	}
+	t.Cleanup(func() { beadsExecCommandRunnerWithEnv = prevRunner })
+
+	status := "closed"
+	store, err := openControlStoreAtForCity(staleRigDir, cityDir, cfg)
+	if err != nil {
+		t.Fatalf("openControlStoreAtForCity(stale rig): %v", err)
+	}
+	if err := store.Update("ga-stale-control", beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("stale rig control update: %v", err)
+	}
+
+	if len(calls) != 1 {
+		t.Fatalf("bd calls = %#v, want one update call", calls)
+	}
+	if len(envs) != 1 {
+		t.Fatalf("bd envs = %#v, want one command environment", envs)
+	}
+	if call := calls[0]; len(call) < 1 || call[0] != "update" {
+		t.Fatalf("bd call = %#v, want update ...", calls[0])
+	}
+	if slices.Contains(calls[0], "--sandbox") {
+		t.Fatalf("bd call = %#v, write-capable control stores must not use --sandbox", calls[0])
+	}
+	if got := envs[0]["BD_EXPORT_AUTO"]; got != "false" {
+		t.Fatalf("BD_EXPORT_AUTO = %q, want false", got)
+	}
+	if got := envs[0]["BEADS_DIR"]; got != filepath.Join(staleRigDir, ".beads") {
+		t.Fatalf("BEADS_DIR = %q, want stale rig store", got)
+	}
+	if got := envs[0]["GC_RIG_ROOT"]; got != staleRigDir {
+		t.Fatalf("GC_RIG_ROOT = %q, want stale rig root", got)
 	}
 }
 
@@ -2242,6 +2897,7 @@ prefix = "BL"
 	}
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	prevCityFlag := cityFlag
 	cityFlag = ""
 	t.Cleanup(func() { cityFlag = prevCityFlag })
@@ -2360,6 +3016,7 @@ prefix = "BL"
 	}
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	prevCityFlag := cityFlag
 	cityFlag = ""
 	t.Cleanup(func() { cityFlag = prevCityFlag })
@@ -2481,6 +3138,7 @@ prefix = "BL"
 	}
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	prevCityFlag := cityFlag
 	cityFlag = ""
 	t.Cleanup(func() { cityFlag = prevCityFlag })
@@ -2622,6 +3280,72 @@ func TestDeleteWorkflowBeadsRemovesDepsBeforeDelete(t *testing.T) {
 		} else if len(up) != 0 {
 			t.Fatalf("up deps for %s = %#v, want none", id, up)
 		}
+	}
+}
+
+func TestApplySourceWorkflowMatchCleanupDeletesOnlyCollectedWorkflowBeads(t *testing.T) {
+	store := beads.NewMemStore()
+	first, err := store.Create(beads.Bead{Title: "workflow first", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create(first): %v", err)
+	}
+	second, err := store.Create(beads.Bead{Title: "workflow second", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create(second): %v", err)
+	}
+	outside, err := store.Create(beads.Bead{Title: "outside follow-up", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create(outside): %v", err)
+	}
+	if err := store.DepAdd(first.ID, outside.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd(first->outside): %v", err)
+	}
+	if err := store.DepAdd(outside.ID, second.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd(outside->second): %v", err)
+	}
+
+	runnerCalled := false
+	runner := func(_ string, _ string, _ ...string) ([]byte, error) {
+		runnerCalled = true
+		return []byte("ok"), nil
+	}
+
+	var stderr bytes.Buffer
+	closed, deleted, incomplete := applySourceWorkflowMatchCleanup(sourceWorkflowStoreMatch{
+		label:  "rig:gascity",
+		store:  store,
+		beads:  []beads.Bead{first, second},
+		path:   "/repo",
+		runner: runner,
+	}, true, &stderr)
+	if incomplete {
+		t.Fatalf("cleanup incomplete; stderr=%s", stderr.String())
+	}
+	if closed != 2 || deleted != 2 {
+		t.Fatalf("closed/deleted = %d/%d, want 2/2", closed, deleted)
+	}
+	if runnerCalled {
+		t.Fatal("cleanup used bd cascade runner; want explicit in-process deletion of collected IDs")
+	}
+	for _, id := range []string{first.ID, second.ID} {
+		if _, err := store.Get(id); err == nil {
+			t.Fatalf("Get(%s) succeeded after delete", id)
+		}
+	}
+	if got, err := store.Get(outside.ID); err != nil {
+		t.Fatalf("Get(outside): %v", err)
+	} else if got.Status != "open" {
+		t.Fatalf("outside status = %q, want open", got.Status)
+	}
+	if down, err := store.DepList(outside.ID, "down"); err != nil {
+		t.Fatalf("DepList(outside, down): %v", err)
+	} else if len(down) != 0 {
+		t.Fatalf("outside down deps = %#v, want none after collected bead deletion", down)
+	}
+	if up, err := store.DepList(outside.ID, "up"); err != nil {
+		t.Fatalf("DepList(outside, up): %v", err)
+	} else if len(up) != 0 {
+		t.Fatalf("outside up deps = %#v, want none after collected bead deletion", up)
 	}
 }
 

@@ -763,6 +763,7 @@ database remains accessible. Use "gc rig resume" to restore.`,
 			}
 			return nil
 		},
+		ValidArgsFunction: completeRigNames,
 	}
 }
 
@@ -843,6 +844,7 @@ The reconciler will start the rig's agents on its next tick.`,
 			}
 			return nil
 		},
+		ValidArgsFunction: completeRigNames,
 	}
 }
 
@@ -925,6 +927,7 @@ binding from .gc/site.toml.`,
 			}
 			return nil
 		},
+		ValidArgsFunction: completeRigNames,
 	}
 }
 

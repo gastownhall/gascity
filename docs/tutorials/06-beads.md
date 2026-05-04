@@ -381,18 +381,20 @@ Set target of convoy mc-zk1 to develop
 
 ## How agents find work
 
-This is where beads connect to the runtime. Agents discover work through _hooks_
-— shell commands that run between turns and check for available beads.
+This is where beads connect to the runtime. Routed agents discover work through
+the claim protocol rendered into their session startup prompt. The protocol asks
+`gc hook` for eligible work, claims one bead with `bd update --claim`, and then
+the agent runs exactly that bead. The legacy Stop-hook form, `gc hook --inject`,
+is silent compatibility behavior and no longer injects work into the agent.
 
 The typical flow:
 
 1. Work is created (via `bd create`, `gc sling`, formula cook, etc.)
 2. Work is routed to an agent (via assignee or `gc.routed_to` metadata)
-3. Agent's hook runs a _work query_ and looks for matching ready beads
-4. If work is found, the hook injects it into the agent's context as a system
-   reminder
-5. The agent sees the work and acts on it (GUPP: "if you find work on your hook,
-   you run it")
+3. Session startup runs the agent's _work query_ through `gc hook`
+4. The claim protocol atomically claims one ready bead
+5. The agent sees the claimed work and acts on it (GUPP: "if you find work on
+   your hook, you run it")
 
 For routed pool work, the query checks metadata instead of assignee:
 

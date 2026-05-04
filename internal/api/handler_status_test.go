@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -82,6 +83,69 @@ func TestHandleStatusEnriched(t *testing.T) {
 	// Rig counts.
 	if resp.Rigs.Total != 1 {
 		t.Errorf("Rigs.Total = %d, want 1", resp.Rigs.Total)
+	}
+}
+
+func TestHandleStatusPreservesPartialWorkCountSurvivors(t *testing.T) {
+	state := newFakeState(t)
+	store := beads.NewMemStore()
+	open, err := store.Create(beads.Bead{Type: "task", Title: "open survivor", Status: "open"})
+	if err != nil {
+		t.Fatalf("Create(open): %v", err)
+	}
+	ready, err := store.Create(beads.Bead{Type: "task", Title: "ready survivor", Status: "ready"})
+	if err != nil {
+		t.Fatalf("Create(ready): %v", err)
+	}
+	readyStatus := "ready"
+	if err := store.Update(ready.ID, beads.UpdateOpts{Status: &readyStatus}); err != nil {
+		t.Fatalf("Update(ready): %v", err)
+	}
+	ready, err = store.Get(ready.ID)
+	if err != nil {
+		t.Fatalf("Get(ready): %v", err)
+	}
+	inProgress, err := store.Create(beads.Bead{Type: "task", Title: "claimed survivor", Status: "in_progress"})
+	if err != nil {
+		t.Fatalf("Create(in_progress): %v", err)
+	}
+	inProgressStatus := "in_progress"
+	if err := store.Update(inProgress.ID, beads.UpdateOpts{Status: &inProgressStatus}); err != nil {
+		t.Fatalf("Update(in_progress): %v", err)
+	}
+	inProgress, err = store.Get(inProgress.ID)
+	if err != nil {
+		t.Fatalf("Get(in_progress): %v", err)
+	}
+	state.stores["myrig"] = &failingBeadStore{
+		Store:      store,
+		listResult: []beads.Bead{open, ready, inProgress},
+		listErr: &beads.PartialResultError{
+			Op:  "bd list",
+			Err: errors.New("skipped 1 corrupt bead"),
+		},
+	}
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/status"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var resp statusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Work.Open != 1 || resp.Work.Ready != 1 || resp.Work.InProgress != 1 {
+		t.Fatalf("Work = %+v, want partial survivors counted", resp.Work)
+	}
+	if !resp.Partial {
+		t.Fatalf("Partial = false, want true for partial work count")
+	}
+	if len(resp.PartialErrors) == 0 {
+		t.Fatalf("PartialErrors empty")
 	}
 }
 
@@ -177,6 +241,57 @@ func TestHandleStatusUsesCachedSessionStateForSuspendedAgents(t *testing.T) {
 	}
 	if resp.Running != 1 {
 		t.Fatalf("Running = %d, want raw liveness count 1", resp.Running)
+	}
+}
+
+func TestHandleStatusUsesPartialSessionRows(t *testing.T) {
+	state := newFakeState(t)
+	store := &partialPrimeSessionStore{MemStore: beads.NewMemStore()}
+	state.cityBeadStore = store
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Status: "open",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"state":        string(session.StateSuspended),
+			"template":     "myrig/worker",
+			"session_name": "myrig--worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+	store.partialRows = []beads.Bead{sessionBead}
+	if err := state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/status"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var resp statusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Agents.Suspended != 1 {
+		t.Fatalf("Agents.Suspended = %d, want partial survivor to mark session suspended", resp.Agents.Suspended)
+	}
+	if resp.Agents.Running != 0 {
+		t.Fatalf("Agents.Running = %d, want 0 for suspended partial survivor", resp.Agents.Running)
+	}
+	if resp.Running != 1 {
+		t.Fatalf("Running = %d, want raw liveness count 1", resp.Running)
+	}
+	if !resp.Partial {
+		t.Fatalf("Partial = false, want true for partial session snapshot")
+	}
+	if len(resp.PartialErrors) == 0 {
+		t.Fatalf("PartialErrors empty")
 	}
 }
 

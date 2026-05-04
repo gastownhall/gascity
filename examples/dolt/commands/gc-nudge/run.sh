@@ -209,7 +209,7 @@ valid_database_name() {
 is_system_database() {
   name=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
   case "$name" in
-    information_schema|mysql|dolt_cluster|__gc_probe) return 0 ;;
+    information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe) return 0 ;;
     *) return 1 ;;
   esac
 }

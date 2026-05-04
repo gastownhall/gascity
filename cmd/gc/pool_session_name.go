@@ -45,6 +45,25 @@ func GCSweepSessionBeads(store beads.Store, rigStores map[string]beads.Store, se
 	return closed
 }
 
+// releaseOrphanedPoolAssignmentsWhenSnapshotsComplete skips orphan release
+// unless both the assigned-work and open-session snapshots are complete.
+func releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
+	store beads.Store,
+	cfg *config.City,
+	cityPath string,
+	openSessionBeads []beads.Bead,
+	result DesiredStateResult,
+	rigStores map[string]beads.Store,
+) []releasedPoolAssignment {
+	// Partial input snapshots can make active work look orphaned for this
+	// tick only: missing work affects drain decisions, and missing sessions
+	// affects assigned-work orphan release.
+	if result.snapshotQueryPartial() {
+		return nil
+	}
+	return releaseOrphanedPoolAssignments(store, cfg, cityPath, openSessionBeads, result.AssignedWorkBeads, result.AssignedWorkStores, result.AssignedWorkStoreRefs, rigStores)
+}
+
 // releaseOrphanedPoolAssignments reopens active pool-routed work whose
 // assignee no longer maps to any open session bead. This also recovers
 // pool-routed work left in_progress with no assignee, which cannot be claimed
@@ -52,9 +71,11 @@ func GCSweepSessionBeads(store beads.Store, rigStores map[string]beads.Store, se
 func releaseOrphanedPoolAssignments(
 	store beads.Store,
 	cfg *config.City,
+	cityPath string,
 	openSessionBeads []beads.Bead,
 	assignedWorkBeads []beads.Bead,
 	assignedWorkStores []beads.Store,
+	assignedWorkStoreRefs []string,
 	rigStores map[string]beads.Store,
 ) []releasedPoolAssignment {
 	if store == nil || cfg == nil || len(assignedWorkBeads) == 0 {
@@ -64,20 +85,25 @@ func releaseOrphanedPoolAssignments(
 	if storeAware && len(assignedWorkStores) != len(assignedWorkBeads) {
 		log.Printf("releaseOrphanedPoolAssignments: assigned work/store length mismatch: work=%d stores=%d", len(assignedWorkBeads), len(assignedWorkStores))
 	}
+	storeRefAware := len(assignedWorkStoreRefs) == len(assignedWorkBeads)
+	if len(assignedWorkStoreRefs) > 0 && !storeRefAware {
+		log.Printf("releaseOrphanedPoolAssignments: assigned work/store-ref length mismatch: work=%d storeRefs=%d", len(assignedWorkBeads), len(assignedWorkStoreRefs))
+	}
 
-	openIdentifiers := make(map[string]struct{}, len(openSessionBeads)*3)
+	openIdentifiers := makeOpenSessionStoreRefIndex(cityPath, cfg, openSessionBeads, storeRefAware)
+	legacyOpenIdentifiers := make(map[string]struct{}, len(openSessionBeads)*3)
 	for _, sb := range openSessionBeads {
 		if sb.Status == "closed" {
 			continue
 		}
 		if id := strings.TrimSpace(sb.ID); id != "" {
-			openIdentifiers[id] = struct{}{}
+			legacyOpenIdentifiers[id] = struct{}{}
 		}
 		if sn := strings.TrimSpace(sb.Metadata["session_name"]); sn != "" {
-			openIdentifiers[sn] = struct{}{}
+			legacyOpenIdentifiers[sn] = struct{}{}
 		}
 		if ni := strings.TrimSpace(sb.Metadata["configured_named_identity"]); ni != "" {
-			openIdentifiers[ni] = struct{}{}
+			legacyOpenIdentifiers[ni] = struct{}{}
 		}
 	}
 
@@ -100,10 +126,14 @@ func releaseOrphanedPoolAssignments(
 				continue
 			}
 		} else {
-			if _, ok := openIdentifiers[assignee]; ok {
+			workStoreRef := ""
+			if storeRefAware {
+				workStoreRef = assignedWorkStoreRefs[i]
+			}
+			if openSessionOwnsWork(legacyOpenIdentifiers, openIdentifiers, assignee, workStoreRef, storeRefAware) {
 				continue
 			}
-			if assigneePreservesNamedSessionRoute(cfg, template, assignee) {
+			if assigneePreservesNamedSessionRoute(cfg, cityPath, template, assignee, workStoreRef, storeRefAware) {
 				continue
 			}
 		}
@@ -127,6 +157,57 @@ func releaseOrphanedPoolAssignments(
 		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
 	}
 	return released
+}
+
+const unresolvedOpenSessionStoreRef = "\x00unresolved"
+
+func makeOpenSessionStoreRefIndex(cityPath string, cfg *config.City, openSessionBeads []beads.Bead, storeRefAware bool) map[string]map[string]struct{} {
+	index := make(map[string]map[string]struct{}, len(openSessionBeads)*3)
+	if !storeRefAware {
+		return index
+	}
+	for _, sb := range openSessionBeads {
+		if sb.Status == "closed" {
+			continue
+		}
+		storeRef, ok := assignedWorkStoreRefForSession(cityPath, cfg, sb)
+		if !ok {
+			storeRef = unresolvedOpenSessionStoreRef
+		}
+		addOpenSessionStoreRef(index, sb.ID, storeRef)
+		addOpenSessionStoreRef(index, sb.Metadata["session_name"], storeRef)
+		addOpenSessionStoreRef(index, sb.Metadata["configured_named_identity"], storeRef)
+	}
+	return index
+}
+
+func addOpenSessionStoreRef(index map[string]map[string]struct{}, identifier, storeRef string) {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return
+	}
+	refs := index[identifier]
+	if refs == nil {
+		refs = make(map[string]struct{}, 1)
+		index[identifier] = refs
+	}
+	refs[storeRef] = struct{}{}
+}
+
+func openSessionOwnsWork(legacyIdentifiers map[string]struct{}, scopedIdentifiers map[string]map[string]struct{}, assignee, workStoreRef string, storeRefAware bool) bool {
+	if !storeRefAware {
+		_, ok := legacyIdentifiers[assignee]
+		return ok
+	}
+	refs := scopedIdentifiers[assignee]
+	if refs == nil {
+		return false
+	}
+	if _, ok := refs[unresolvedOpenSessionStoreRef]; ok {
+		return true
+	}
+	_, ok := refs[workStoreRef]
+	return ok
 }
 
 func storeForPoolAssignment(cfg *config.City, cityStore beads.Store, rigStores map[string]beads.Store, wb beads.Bead) beads.Store {
@@ -182,7 +263,7 @@ func releaseOrphanedPoolAssignment(store beads.Store, id string) bool {
 	return store.Update(id, opts) == nil
 }
 
-func assigneePreservesNamedSessionRoute(cfg *config.City, template, assignee string) bool {
+func assigneePreservesNamedSessionRoute(cfg *config.City, cityPath, template, assignee, workStoreRef string, storeRefAware bool) bool {
 	if cfg == nil {
 		return false
 	}
@@ -190,7 +271,13 @@ func assigneePreservesNamedSessionRoute(cfg *config.City, template, assignee str
 	if !ok {
 		return false
 	}
-	return namedSessionBackingTemplate(spec) == template
+	if namedSessionBackingTemplate(spec) != template {
+		return false
+	}
+	if !storeRefAware {
+		return true
+	}
+	return assignedWorkStoreRefForAgent(cityPath, cfg, spec.Agent) == workStoreRef
 }
 
 func stringPtr(s string) *string { return &s }

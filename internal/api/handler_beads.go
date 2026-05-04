@@ -182,6 +182,21 @@ func (s *Server) resolveStoreByPrefix(prefix string) beads.Store {
 	stores := s.state.BeadStores()
 	cityPath := strings.TrimSpace(s.state.CityPath())
 
+	if prefix == config.EffectiveHQPrefix(cfg) {
+		if cityStore := s.state.CityBeadStore(); cityStore != nil {
+			return cityStore
+		}
+	}
+	for _, rig := range cfg.Rigs {
+		if prefix != rig.EffectivePrefix() {
+			continue
+		}
+		if store, exists := stores[rig.Name]; exists {
+			return store
+		}
+		return nil
+	}
+
 	// Build rig path → name map for reverse lookup (used by both city
 	// and rig route resolution below).
 	rigPathToName := make(map[string]string, len(cfg.Rigs))
@@ -369,13 +384,17 @@ func mergeWorkflowDeps(primary, extra []workflowDepResponse) []workflowDepRespon
 	return primary
 }
 
-// beadPrefix extracts the alphabetic prefix from a bead ID (e.g., "ga" from "ga-5b8i").
+// beadPrefix extracts the configured prefix from a bead ID (e.g., "ga" from
+// "ga-5b8i"). bd prefixes may contain digits after the first character.
 func beadPrefix(id string) string {
 	for i, c := range id {
 		if c == '-' {
 			return id[:i]
 		}
 		if c < 'a' || c > 'z' {
+			if i > 0 && c >= '0' && c <= '9' {
+				continue
+			}
 			return ""
 		}
 	}

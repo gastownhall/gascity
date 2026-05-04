@@ -582,12 +582,15 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	rigStores := buildStandaloneRigStores(cfg, cityPath, stderr)
 
 	// One-shot bead reconciliation: same code path as the daemon.
+	sessionQueryPartial := false
 	sessionBeads, err := loadSessionBeadSnapshot(oneShotStore)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: loading session beads: %v\n", err) //nolint:errcheck
 		sessionBeads = nil
+		sessionQueryPartial = true
 	}
 	dsResult := buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, oneShotStore, rigStores, sessionBeads, nil, stderr)
+	dsResult.SessionQueryPartial = dsResult.SessionQueryPartial || sessionQueryPartial
 	ds := dsResult.State
 	cfgNames := configuredSessionNamesWithSnapshot(cfg, cityName, sessionBeads)
 	_, sessionBeads = syncSessionBeadsWithSnapshotAndRigStores(
@@ -595,7 +598,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	)
 
 	open := sessionBeads.Open()
-	if released := releaseOrphanedPoolAssignments(oneShotStore, cfg, open, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStores, rigStores); len(released) > 0 {
+	if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(oneShotStore, cfg, cityPath, open, dsResult, rigStores); len(released) > 0 {
 		for _, r := range released {
 			fmt.Fprintf(stderr, "released orphaned pool work: %s\n", r.ID) //nolint:errcheck
 		}
@@ -612,16 +615,18 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	}
 
 	dt := newDrainTracker()
+	poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, open, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
 	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(
-		cfg, dsResult.AssignedWorkBeads, open, dsResult.ScaleCheckCounts))
+		cfg, poolWorkBeads, open, dsResult.ScaleCheckCounts))
 	if poolDesired == nil {
 		poolDesired = make(map[string]int)
 	}
 	mergeNamedSessionDemand(poolDesired, dsResult.NamedSessionDemand, cfg)
+	awakeAssignedWorkBeads := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, open, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
 	reconcileSessionBeadsAtPath(
 		sigCtx, cityPath, open, ds, cfgNames, cfg, sp, oneShotStore,
-		nil, dsResult.AssignedWorkBeads, rigStores, nil, dt, poolDesired,
-		dsResult.StoreQueryPartial,
+		nil, awakeAssignedWorkBeads, rigStores, nil, dt, poolDesired,
+		dsResult.snapshotQueryPartial(),
 		nil, cityName,
 		nil, clock.Real{}, recorder, cfg.Session.StartupTimeoutDuration(), 0,
 		stdout, stderr,

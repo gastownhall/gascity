@@ -193,7 +193,7 @@ func launchPhase2RealTransportSession(t *testing.T, tc phase2ProviderCase, mater
 		`printf "%s" "${GC_SESSION_ORIGIN:-}" > "$GC_REAL_TRANSPORT_SESSION_ORIGIN_PATH"`,
 		`printf "%s" "${GC_STARTUP_PROMPT_DELIVERED:-}" > "$GC_REAL_TRANSPORT_STARTUP_DELIVERED_PATH"`,
 		`printf "started\n" > "$GC_REAL_TRANSPORT_STARTED_PATH"`,
-		`printf "%s" "$0" > "$GC_REAL_TRANSPORT_STARTUP_PROMPT_PATH"`,
+		`if [ -n "${GC_REAL_TRANSPORT_STARTUP_PROMPT_FLAG:-}" ]; then printf "%s" "${1:-}" > "$GC_REAL_TRANSPORT_STARTUP_PROMPT_PATH"; else printf "%s" "$0" > "$GC_REAL_TRANSPORT_STARTUP_PROMPT_PATH"; fi`,
 		`if cmp -s "$GC_REAL_TRANSPORT_STARTUP_PROMPT_PATH" "$GC_REAL_TRANSPORT_EXPECTED_PROMPT_PATH"; then printf "launch-prompt\n" > "$GC_REAL_TRANSPORT_AUTONOMOUS_PATH"; fi`,
 		`IFS= read -r line`,
 		`printf "%s\n" "$line" > "$GC_REAL_TRANSPORT_INPUT_PATH"`,
@@ -223,6 +223,9 @@ func launchPhase2RealTransportSession(t *testing.T, tc phase2ProviderCase, mater
 	cfg.Env["GC_REAL_TRANSPORT_EXPECTED_PROMPT_PATH"] = expectedPromptPath
 	cfg.Env["GC_REAL_TRANSPORT_AUTONOMOUS_PATH"] = autonomousPath
 	cfg.Env["GC_REAL_TRANSPORT_STOP_PATH"] = stopPath
+	if cfg.PromptFlag != "" {
+		cfg.Env["GC_REAL_TRANSPORT_STARTUP_PROMPT_FLAG"] = cfg.PromptFlag
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), phase2RealTransportBound)
 	defer cancel()

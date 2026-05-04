@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/extmsg"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -332,7 +333,6 @@ func TestPhase0RetireContinuityIneligibleNamedSessionIdentifiersDoesNotRestampRe
 func TestPhase0HandleSessionWake_ContinuityEligibleArchivedBeadRequestsStart(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
-	h := newTestCityHandlerWith(t, fs, srv)
 	id := phase0MaterializeCityScopedNamedWorker(t, srv, fs)
 	if err := fs.cityBeadStore.SetMetadataBatch(id, map[string]string{
 		"state":               "archived",
@@ -342,6 +342,13 @@ func TestPhase0HandleSessionWake_ContinuityEligibleArchivedBeadRequestsStart(t *
 		t.Fatalf("SetMetadataBatch(archived): %v", err)
 	}
 
+	unblockStart := make(chan struct{})
+	provider := &blockingStartProvider{Fake: runtime.NewFake(), unblock: unblockStart}
+	wrappedState := &stateWithSessionProvider{fakeState: fs, provider: provider}
+	t.Cleanup(func() { close(unblockStart) })
+
+	srv = New(wrappedState)
+	h := newTestCityHandlerWith(t, wrappedState, srv)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, newPostRequest(cityURL(fs, "/session/"+id+"/wake"), nil))
 	if rec.Code != http.StatusOK {
@@ -352,11 +359,23 @@ func TestPhase0HandleSessionWake_ContinuityEligibleArchivedBeadRequestsStart(t *
 	if err != nil {
 		t.Fatalf("Get(%s): %v", id, err)
 	}
-	if got := updated.Metadata["state"]; got != "creating" {
-		t.Fatalf("state = %q, want creating", got)
+	switch got := updated.Metadata["state"]; got {
+	case "creating":
+		if claim := updated.Metadata["pending_create_claim"]; claim != "true" {
+			t.Fatalf("pending_create_claim = %q, want true while creating", claim)
+		}
+	case "active":
+		if claim := updated.Metadata["pending_create_claim"]; claim != "" {
+			t.Fatalf("pending_create_claim = %q, want cleared after active", claim)
+		}
+	default:
+		t.Fatalf("state = %q, want creating or active", got)
 	}
-	if got := updated.Metadata["pending_create_claim"]; got != "true" {
-		t.Fatalf("pending_create_claim = %q, want true", got)
+	if got := updated.Metadata["archived_at"]; got != "" {
+		t.Fatalf("archived_at = %q, want cleared after continuity wake", got)
+	}
+	if got := updated.Metadata["continuity_eligible"]; got != "true" {
+		t.Fatalf("continuity_eligible = %q, want true", got)
 	}
 }
 
@@ -483,17 +502,18 @@ func TestPhase0ProviderCompatibility_CreateWritesManualOrigin(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusCreated, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
 
-	var resp sessionResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	accepted := decodeAsyncAccepted(t, rec.Body)
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
 	}
-	bead, err := fs.cityBeadStore.Get(resp.ID)
+	bead, err := fs.cityBeadStore.Get(success.Session.ID)
 	if err != nil {
-		t.Fatalf("Get(%s): %v", resp.ID, err)
+		t.Fatalf("Get(%s): %v", success.Session.ID, err)
 	}
 	if got := bead.Metadata["session_origin"]; got != "manual" {
 		t.Fatalf("session_origin = %q, want manual", got)

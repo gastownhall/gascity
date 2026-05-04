@@ -437,7 +437,7 @@ func TestPrepareWaitWakeState_FinalizesFromNudge(t *testing.T) {
 	}
 }
 
-func TestPrepareWaitWakeState_SkipsMissingOpenSessionWithoutBackingGet(t *testing.T) {
+func TestPrepareWaitWakeState_UsesTargetedLookupForMissingSessionEpoch(t *testing.T) {
 	base := beads.NewMemStore()
 	store := &waitGetSpyStore{Store: base}
 	sessionBead, err := store.Create(beads.Bead{
@@ -477,10 +477,51 @@ func TestPrepareWaitWakeState_SkipsMissingOpenSessionWithoutBackingGet(t *testin
 	if len(readyWaitSet) != 0 {
 		t.Fatalf("readyWaitSet = %#v, want empty for non-open session", readyWaitSet)
 	}
-	for _, id := range store.getIDs {
-		if id == sessionBead.ID {
-			t.Fatalf("prepare used Get for non-open session %s; getIDs=%v", sessionBead.ID, store.getIDs)
-		}
+	if len(store.getIDs) != 1 || store.getIDs[0] != sessionBead.ID {
+		t.Fatalf("Get IDs = %v, want targeted lookup for %s", store.getIDs, sessionBead.ID)
+	}
+}
+
+func TestPrepareWaitWakeState_SkipsMissingOpenSessionWithoutEpochLookup(t *testing.T) {
+	base := beads.NewMemStore()
+	store := &waitGetSpyStore{Store: base}
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker",
+			"agent_name":   "worker",
+			"state":        string(sessionpkg.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	if err := store.Close(sessionBead.ID); err != nil {
+		t.Fatalf("close session bead: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:   waitBeadType,
+		Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
+		Metadata: map[string]string{
+			"session_id":   sessionBead.ID,
+			"session_name": "worker",
+			"kind":         "deps",
+			"state":        waitStateReady,
+		},
+	}); err != nil {
+		t.Fatalf("create wait bead: %v", err)
+	}
+
+	readyWaitSet, err := prepareWaitWakeState(store, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("prepareWaitWakeState: %v", err)
+	}
+	if len(readyWaitSet) != 0 {
+		t.Fatalf("readyWaitSet = %#v, want empty for non-open session", readyWaitSet)
+	}
+	if len(store.getIDs) != 0 {
+		t.Fatalf("Get IDs = %v, want no closed-session lookup without an epoch", store.getIDs)
 	}
 }
 
@@ -1319,7 +1360,7 @@ func TestCmdSessionWait_AllowsRigDependencyBeads(t *testing.T) {
 	if err := rigStore.Close(dep.ID); err != nil {
 		t.Fatalf("close rig dep bead: %v", err)
 	}
-	if got := beadPrefix(dep.ID); got != "fe" {
+	if got := beadPrefix(nil, dep.ID); got != "fe" {
 		t.Fatalf("rig dep prefix = %q, want %q", got, "fe")
 	}
 
@@ -1395,7 +1436,7 @@ func TestPrepareWaitWakeState_ResolvesRigDependencyBeads(t *testing.T) {
 	if err := rigStore.Close(dep.ID); err != nil {
 		t.Fatalf("close rig dep bead: %v", err)
 	}
-	if got := beadPrefix(dep.ID); got != "fe" {
+	if got := beadPrefix(nil, dep.ID); got != "fe" {
 		t.Fatalf("rig dep prefix = %q, want %q", got, "fe")
 	}
 	cityStore, err = openCityStoreAt(cityPath)

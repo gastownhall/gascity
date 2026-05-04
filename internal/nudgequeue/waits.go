@@ -1,6 +1,7 @@
 package nudgequeue
 
 import (
+	"errors"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -95,9 +96,15 @@ func markTerminal(store beads.Store, nudgeID, now string) error {
 			"commit_boundary": "delivery-withdrawn",
 			"terminal_at":     now,
 		}); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
 			return err
 		}
 		if err := store.Close(item.ID); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
 			return err
 		}
 	}

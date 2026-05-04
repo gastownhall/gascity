@@ -21,17 +21,34 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
-const labelOrderTracking = "order-tracking"
+const (
+	labelOrderTracking = "order-tracking"
+
+	orderTrackingSweepOrder                = "order-tracking-sweep"
+	defaultOrderTrackingSweepStaleAfter    = 10 * time.Minute
+	orderTrackingSweepWatchdogInterval     = 30 * time.Second
+	orderTrackingSweepWatchdogStaleAfter   = 2 * time.Minute
+	orderTrackingSweepMetadataReason       = "stale-order-tracking"
+	orderTrackingSweepMetadataInitiator    = "order-tracking-sweep"
+	orderTrackingWatchdogMetadataInitiator = "controller-watchdog"
+)
 
 // orderDispatcher evaluates order trigger conditions and dispatches due
 // orders as wisps or exec scripts. Follows the nil-guard tracker pattern:
 // nil means no auto-dispatchable orders exist.
 //
-// dispatch is fire-and-forget: trigger evaluation is synchronous, but each due
-// order's dispatch action runs in its own goroutine. The tracking bead
-// is created before the goroutine launches to prevent re-fire on the next tick.
+// dispatch runs trigger evaluation synchronously, then spawns a goroutine
+// per due order's dispatch action. The tracking bead is created before the
+// goroutine launches to prevent re-fire on the next tick.
+//
+// drain waits for all in-flight dispatch goroutines spawned by prior
+// dispatch calls to complete, bounded by ctx. It returns true when all
+// tracked dispatches completed. Callers use this on controller exit and
+// config reload to ensure tracking bead outcome metadata is persisted
+// before the dispatcher is replaced or discarded.
 type orderDispatcher interface {
 	dispatch(ctx context.Context, cityPath string, now time.Time)
+	drain(ctx context.Context) bool
 }
 
 // ExecRunner runs a shell command with context, working directory, and
@@ -68,19 +85,28 @@ func logDispatchError(stderr io.Writer, format string, args ...any) {
 type orderStoreFunc func(execStoreTarget) (beads.Store, error)
 
 // memoryOrderDispatcher is the production implementation.
+//
+// inflightN + inflightDone together track dispatchOne goroutines so
+// drain can select on either completion or ctx.Done without spawning an
+// orphaned waiter goroutine. dispatch is only ever called from the tick
+// goroutine, so addInflight's check-and-create happens-before any
+// concurrent drain call on the same instance.
 type memoryOrderDispatcher struct {
-	aa         []orders.Order
-	storeFn    orderStoreFunc
-	ep         events.Provider
-	execRun    ExecRunner
-	rec        events.Recorder
-	stderr     io.Writer
-	maxTimeout time.Duration
-	cfg        *config.City
-	cityName   string
-
+	aa           []orders.Order
+	storeFn      orderStoreFunc
+	ep           events.Provider
+	execRun      ExecRunner
+	rec          events.Recorder
+	stderr       io.Writer
+	maxTimeout   time.Duration
+	cfg          *config.City
+	cityName     string
 	cacheMu      sync.Mutex
 	lastRunCache map[string]time.Time
+
+	inflightMu   sync.Mutex
+	inflightN    int
+	inflightDone chan struct{} // closed when inflightN returns to 0; nil when idle
 }
 
 // buildOrderDispatcher scans formula layers for orders and returns a
@@ -249,9 +275,57 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		}
 		m.rememberLastRun(scoped, storeKeysForGate, trackingBead.CreatedAt)
 
-		// Fire and forget with timeout.
+		// Fire with timeout; inflight tracks the spawned goroutine so
+		// drain can wait for tracking-bead outcome persistence before
+		// controller exit or config reload.
 		a := a // capture loop variable
+		m.addInflight()
 		go m.dispatchOne(ctx, store, target, a, cityPath, trackingBead.ID)
+	}
+}
+
+// addInflight increments the in-flight count and lazily creates the done
+// signal. Called synchronously from dispatch on the tick goroutine.
+func (m *memoryOrderDispatcher) addInflight() {
+	m.inflightMu.Lock()
+	m.inflightN++
+	if m.inflightN == 1 {
+		m.inflightDone = make(chan struct{})
+	}
+	m.inflightMu.Unlock()
+}
+
+// doneInflight decrements the count and signals completion when the last
+// goroutine finishes. Called from dispatchOne's deferred cleanup.
+func (m *memoryOrderDispatcher) doneInflight() {
+	m.inflightMu.Lock()
+	m.inflightN--
+	if m.inflightN == 0 && m.inflightDone != nil {
+		close(m.inflightDone)
+		m.inflightDone = nil
+	}
+	m.inflightMu.Unlock()
+}
+
+// drain blocks until all in-flight dispatchOne goroutines complete or ctx
+// expires. It returns true when no work remains and returns immediately if
+// nothing is in flight. When ctx expires, any still-running dispatches keep
+// running (they will still write tracking-bead outcomes via ctx-unaware store
+// calls); the startup sweep closes orphaned tracking beads on the next boot if
+// drain did not have enough time to let them finish. The channel-signal design
+// spawns no waiter goroutine and cannot leak state past return.
+func (m *memoryOrderDispatcher) drain(ctx context.Context) bool {
+	m.inflightMu.Lock()
+	done := m.inflightDone
+	m.inflightMu.Unlock()
+	if done == nil {
+		return true
+	}
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 
@@ -312,10 +386,20 @@ func orderTriggerUsesLastRun(a orders.Order) bool {
 	return a.Trigger == "cooldown" || a.Trigger == "cron"
 }
 
+func eventCursorLabels(scoped string, headSeq uint64) []string {
+	return []string{
+		fmt.Sprintf("order:%s", scoped),
+		fmt.Sprintf("seq:%d", headSeq),
+	}
+}
+
 // dispatchOne runs a single order dispatch in its own goroutine.
 // For exec orders, runs the script directly. For formula orders,
 // instantiates a wisp. Emits events and updates the tracking bead.
 func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string) {
+	// Defer order matters: doneInflight runs last, after Close makes the
+	// tracking bead outcome observable to a waiting drain.
+	defer m.doneInflight()
 	defer store.Close(trackingID) //nolint:errcheck // best-effort close
 
 	timeout := effectiveTimeout(a, m.maxTimeout)
@@ -340,33 +424,91 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string) {
 	scoped := a.ScopedName()
 	labels := []string{"exec"}
+	var headSeq uint64
+	var hasEventCursor bool
+	if a.Trigger == "event" && m.ep != nil {
+		var err error
+		headSeq, err = m.ep.LatestSeq()
+		if err != nil {
+			errMsg := fmt.Sprintf("reading event cursor: %v", err)
+			labels = []string{"exec-failed"}
+			logDispatchError(m.stderr, "gc: order dispatch: reading event cursor for %s: %v", scoped, err)
+			if updateErr := store.Update(trackingID, beads.UpdateOpts{Labels: labels}); updateErr != nil {
+				logDispatchError(m.stderr, "gc: order %s: failed to label exec tracking bead %s: %v", scoped, trackingID, updateErr)
+			}
+			m.rec.Record(events.Event{
+				Type:    events.OrderFailed,
+				Actor:   "controller",
+				Subject: scoped,
+				Message: errMsg,
+			})
+			return
+		}
+		hasEventCursor = true
+		// Event-triggered exec orders persist the cursor before the command
+		// runs; otherwise a crash after the side effect can replay the event.
+		if err := store.Update(trackingID, beads.UpdateOpts{Labels: eventCursorLabels(scoped, headSeq)}); err != nil {
+			logDispatchError(m.stderr, "gc: order %s: failed to label exec event cursor on tracking bead %s: %v", scoped, trackingID, err)
+			labels = []string{"exec-failed"}
+			if updateErr := store.Update(trackingID, beads.UpdateOpts{Labels: labels}); updateErr != nil {
+				logDispatchError(m.stderr, "gc: order %s: failed to label exec tracking bead %s: %v", scoped, trackingID, updateErr)
+			}
+			m.rec.Record(events.Event{
+				Type:    events.OrderFailed,
+				Actor:   "controller",
+				Subject: scoped,
+				Message: fmt.Sprintf("exec tracking bead %s event cursor label failed for seq=%d: %v", trackingID, headSeq, err),
+			})
+			return
+		}
+	}
 
 	env := orderExecEnv(cityPath, m.cfg, target, a)
 	output, err := m.execRun(ctx, a.Exec, target.ScopeRoot, env)
+	var execErrMsg string
 	if err != nil {
 		redactionEnv := append(os.Environ(), env...)
-		errMsg := execenv.RedactText(err.Error(), redactionEnv)
-		labels = append(labels, "exec-failed")
-		logDispatchError(m.stderr, "gc: order exec %s failed: %s", scoped, errMsg)
+		execErrMsg = execenv.RedactText(err.Error(), redactionEnv)
+		labels = []string{"exec-failed"}
+		logDispatchError(m.stderr, "gc: order exec %s failed: %s", scoped, execErrMsg)
 		if len(output) > 0 {
 			logDispatchError(m.stderr, "gc: order exec %s output: %s", scoped, execenv.RedactText(string(output), redactionEnv))
+		}
+	}
+
+	// Label tracking bead with outcome via store (not CLI). For event execs,
+	// cursor labels were already persisted before the command ran.
+	if err := store.Update(trackingID, beads.UpdateOpts{Labels: labels}); err != nil {
+		logDispatchError(m.stderr, "gc: order %s: failed to label exec tracking bead %s: %v", scoped, trackingID, err)
+		msg := fmt.Sprintf("exec tracking bead %s label failed: %v", trackingID, err)
+		if hasEventCursor {
+			msg = fmt.Sprintf("seq=%d: %s", headSeq, msg)
 		}
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
 			Actor:   "controller",
 			Subject: scoped,
-			Message: errMsg,
+			Message: msg,
 		})
-	} else {
+		return
+	}
+	if execErrMsg != "" {
+		if hasEventCursor {
+			execErrMsg = fmt.Sprintf("seq=%d: %s", headSeq, execErrMsg)
+		}
 		m.rec.Record(events.Event{
-			Type:    events.OrderCompleted,
+			Type:    events.OrderFailed,
 			Actor:   "controller",
 			Subject: scoped,
+			Message: execErrMsg,
 		})
+		return
 	}
-
-	// Label tracking bead with outcome via store (not CLI).
-	store.Update(trackingID, beads.UpdateOpts{Labels: labels}) //nolint:errcheck // best-effort
+	m.rec.Record(events.Event{
+		Type:    events.OrderCompleted,
+		Actor:   "controller",
+		Subject: scoped,
+	})
 }
 
 // dispatchWisp instantiates a wisp from the order's formula.
@@ -384,10 +526,24 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		return
 	}
 
-	// Capture event head before wisp creation for event triggers.
+	// Capture event head before wisp creation for event triggers. Event runs
+	// fail closed when the cursor cannot be read.
 	var headSeq uint64
 	if a.Trigger == "event" && m.ep != nil {
-		headSeq, _ = m.ep.LatestSeq()
+		var err error
+		headSeq, err = m.ep.LatestSeq()
+		if err != nil {
+			errMsg := fmt.Sprintf("reading event cursor: %v", err)
+			logDispatchError(m.stderr, "gc: order dispatch: reading event cursor for %s: %v", scoped, err)
+			m.rec.Record(events.Event{
+				Type:    events.OrderFailed,
+				Actor:   "controller",
+				Subject: scoped,
+				Message: errMsg,
+			})
+			m.markTrackingFailure(store, trackingID, scoped, a, 0)
+			return
+		}
 	}
 
 	var searchPaths []string
@@ -512,10 +668,7 @@ func (m *memoryOrderDispatcher) orderRigSuspended(a orders.Order) bool {
 func (m *memoryOrderDispatcher) markTrackingFailure(store beads.Store, trackingID, scoped string, a orders.Order, headSeq uint64) {
 	labels := []string{"wisp", "wisp-failed"}
 	if a.Trigger == "event" && headSeq > 0 {
-		labels = append(labels,
-			fmt.Sprintf("order:%s", scoped),
-			fmt.Sprintf("seq:%d", headSeq),
-		)
+		labels = append(labels, eventCursorLabels(scoped, headSeq)...)
 	}
 	if err := store.Update(trackingID, beads.UpdateOpts{Labels: labels}); err != nil {
 		logDispatchError(m.stderr, "gc: order %s: failed to mark tracking bead %s as failed: %v", scoped, trackingID, err)
@@ -590,6 +743,63 @@ func sweepOrphanedOrderTracking(store beads.Store) (int, error) {
 		return n, fmt.Errorf("closing orphaned order-tracking beads: %w", err)
 	}
 	return n, nil
+}
+
+// sweepStaleOrderTracking closes open order-tracking beads whose creation
+// timestamp is older than staleAfter. When onlyOrders is non-empty, it only
+// closes tracking beads for those scoped order names.
+func sweepStaleOrderTracking(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string) (int, error) {
+	if staleAfter <= 0 {
+		return 0, fmt.Errorf("stale-after must be positive")
+	}
+	all, err := store.ListByLabel(labelOrderTracking, 0)
+	if err != nil {
+		return 0, fmt.Errorf("listing order-tracking beads: %w", err)
+	}
+
+	cutoff := now.Add(-staleAfter)
+	var ids []string
+	for _, b := range all {
+		if len(onlyOrders) > 0 {
+			name, ok := orderNameFromTrackingBead(b)
+			if !ok {
+				continue
+			}
+			if _, ok := onlyOrders[name]; !ok {
+				continue
+			}
+		}
+		if b.CreatedAt.IsZero() || b.CreatedAt.After(cutoff) {
+			continue
+		}
+		ids = append(ids, b.ID)
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	metadata := map[string]string{
+		"order_tracking_sweep": orderTrackingSweepMetadataReason,
+	}
+	if initiator != "" {
+		metadata["order_tracking_sweep_by"] = initiator
+	}
+	n, err := store.CloseAll(ids, metadata)
+	if err != nil {
+		return n, fmt.Errorf("closing stale order-tracking beads: %w", err)
+	}
+	return n, nil
+}
+
+func orderNameFromTrackingBead(b beads.Bead) (string, bool) {
+	for _, label := range b.Labels {
+		if name, ok := strings.CutPrefix(label, "order-run:"); ok && name != "" {
+			return name, true
+		}
+	}
+	if name, ok := strings.CutPrefix(b.Title, "order:"); ok && name != "" {
+		return name, true
+	}
+	return "", false
 }
 
 // sweepOrphanedOrderTrackingRetry calls sweepOrphanedOrderTracking with

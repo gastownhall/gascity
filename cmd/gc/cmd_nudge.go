@@ -1417,9 +1417,9 @@ func pruneExpiredQueuedNudges(state *nudgeQueueState, store beads.Store, now tim
 				item.LastError = "expired"
 			}
 			state.Dead = append(state.Dead, item)
-			if err := markQueuedNudgeTerminal(store, item, "expired", item.LastError, "", now); err != nil {
-				return err
-			}
+			// Best-effort: remove expired item from pending even if bead update fails.
+			// A failed bead update here would trap the item in pending forever.
+			_ = markQueuedNudgeTerminal(store, item, "expired", item.LastError, "", now)
 			continue
 		}
 		filtered = append(filtered, item)
@@ -1438,9 +1438,8 @@ func recoverExpiredInFlightNudges(state *nudgeQueueState, store beads.Store, now
 				item.LastError = "expired"
 			}
 			state.Dead = append(state.Dead, item)
-			if err := markQueuedNudgeTerminal(store, item, "expired", item.LastError, "", now); err != nil {
-				return err
-			}
+			// Best-effort: remove expired item from in-flight even if bead update fails.
+			_ = markQueuedNudgeTerminal(store, item, "expired", item.LastError, "", now)
 			continue
 		}
 		if item.LeaseUntil.IsZero() || !item.LeaseUntil.After(now) {
