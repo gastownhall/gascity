@@ -322,6 +322,7 @@ func TestBeadPrefixForCityLongestMatch(t *testing.T) {
 		want string
 	}{
 		{"agent-diagnostics-hnn", "agent-diagnostics"},
+		{"agent-diagnostics-spawn-storm", "agent-diagnostics"},
 		{"agent-x1", "agent"},
 		{"fe-42", "fe"},
 		{"unknown-7", "unknown"}, // falls back to BeadPrefix.

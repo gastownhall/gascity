@@ -244,6 +244,9 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 			return 1
 		}
 		bp := sling.BeadPrefixForCity(cfg, beadOrFormula)
+		if sourceBead.prefix != "" {
+			bp = sourceBead.prefix
+		}
 		if bp == "" {
 			fmt.Fprintf(stderr, "gc sling: cannot derive rig from bead %q (no prefix)\n", beadOrFormula) //nolint:errcheck // best-effort stderr
 			return 1
@@ -302,7 +305,7 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 	inlineText := false
 	if !isFormula {
 		inlineProbeStore := store
-		if !sourceBead.exists && looksLikeInlineText(cfg, beadOrFormula) {
+		if !sourceBead.exists && sourceBead.checked && looksLikeInlineText(cfg, beadOrFormula) {
 			inlineProbeStore = nil
 		}
 		createInlineBead, previewInlineText, err := resolveInlineBeadAction(cfg, beadOrFormula, dryRun, inlineProbeStore)
@@ -470,11 +473,13 @@ func openSlingStoreForSource(cfg *config.City, cityPath, beadOrFormula string, a
 
 type existingSlingSourceBead struct {
 	exists   bool
+	checked  bool
 	storeDir string
+	prefix   string
 }
 
 func probeExistingSlingSourceBead(cfg *config.City, cityPath, beadID string) (existingSlingSourceBead, error) {
-	storeDir, ok := slingSourceStoreRootForCandidate(cfg, cityPath, beadID)
+	storeDir, prefix, ok := slingSourceStoreRootForCandidate(cfg, cityPath, beadID)
 	if !ok {
 		return existingSlingSourceBead{}, nil
 	}
@@ -487,27 +492,27 @@ func probeExistingSlingSourceBead(cfg *config.City, cityPath, beadID string) (ex
 		return existingSlingSourceBead{}, fmt.Errorf("checking bead candidate %q: %w", beadID, err)
 	}
 	if !exists {
-		return existingSlingSourceBead{}, nil
+		return existingSlingSourceBead{checked: true, storeDir: storeDir, prefix: prefix}, nil
 	}
-	return existingSlingSourceBead{exists: true, storeDir: storeDir}, nil
+	return existingSlingSourceBead{exists: true, checked: true, storeDir: storeDir, prefix: prefix}, nil
 }
 
-func slingSourceStoreRootForCandidate(cfg *config.City, cityPath, beadID string) (string, bool) {
+func slingSourceStoreRootForCandidate(cfg *config.City, cityPath, beadID string) (string, string, bool) {
 	if cfg == nil || !isBeadIDCandidate(beadID) {
-		return "", false
+		return "", "", false
 	}
-	bp := beadPrefix(cfg, beadID)
+	bp := sling.BeadPrefixForCity(cfg, beadID)
 	if bp == "" {
-		return "", false
+		return "", "", false
 	}
 	if sling.IsHQPrefix(cfg, bp) {
-		return resolveStoreScopeRoot(cityPath, cityPath), true
+		return resolveStoreScopeRoot(cityPath, cityPath), bp, true
 	}
 	rig, found := findRigByPrefix(cfg, bp)
 	if !found || strings.TrimSpace(rig.Path) == "" {
-		return "", false
+		return "", "", false
 	}
-	return resolveStoreScopeRoot(cityPath, rig.Path), true
+	return resolveStoreScopeRoot(cityPath, rig.Path), bp, true
 }
 
 func canInferSlingDefaultTargetFromBead(cfg *config.City, beadOrFormula string) bool {
