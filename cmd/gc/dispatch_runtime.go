@@ -474,7 +474,7 @@ func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames .
 	} else {
 		query += `:; `
 	}
-	query += `[ -s "$tmp" ] && jq -s "add | unique_by(.id)" "$tmp" || printf "[]"` + `'`
+	query += `[ -s "$tmp" ] && jq -s "reduce add[] as \$item ([]; if any(.[]; .id == \$item.id) then . else . + [\$item] end)" "$tmp" || printf "[]"` + `'`
 	return query
 }
 
