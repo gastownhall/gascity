@@ -231,11 +231,15 @@ func tailText(s string, maxLines int) string {
 func initBd(t *testing.T, dir string) string {
 	t.Helper()
 	prefix := uniqueCityName()
-	cmd := exec.Command(bdBinary, "init", "-p", prefix, "--skip-hooks", "-q")
-	cmd.Dir = dir
-	cmd.Env = standaloneBDEnv()
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("bd init in %s failed: %v\noutput: %s", dir, err, out)
+	gcDir := filepath.Join(dir, ".gc")
+	if err := os.MkdirAll(filepath.Join(gcDir, "runtime"), 0o755); err != nil {
+		t.Fatalf("creating standalone bd runtime dir: %v", err)
+	}
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatalf("creating standalone bd gc dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(gcDir, "beads.json"), []byte("{\"seq\":0,\"beads\":[]}\n"), 0o644); err != nil {
+		t.Fatalf("seeding standalone bd store in %s: %v", dir, err)
 	}
 	return prefix
 }

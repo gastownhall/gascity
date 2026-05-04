@@ -56,6 +56,12 @@ var testGCHome string
 var testRuntimeDir string
 
 var cityCommandEnv sync.Map
+var (
+	standaloneBDEnvOnce    sync.Once
+	standaloneBDHome       string
+	standaloneBDRuntimeDir string
+	standaloneBDEnvErr     error
+)
 
 const (
 	integrationGCCommandTimeout     = 60 * time.Second
@@ -394,11 +400,10 @@ func gcDolt(dir string, args ...string) (string, error) {
 // bd runs the bd binary with the given args. If dir is non-empty, it sets
 // the working directory. Returns combined stdout+stderr and any error.
 func bd(dir string, args ...string) (string, error) {
-	env := commandEnvForDir(dir, false)
 	if isStandaloneBDDir(dir) {
-		env = standaloneBDEnv()
+		return runCommand(dir, standaloneBDEnv(dir), integrationBDCommandTimeout, bdBinary, args...)
 	}
-	out, err := runCommand(dir, env, integrationBDCommandTimeout, bdBinary, args...)
+	out, err := runCommand(dir, commandEnvForDir(dir, false), integrationBDCommandTimeout, bdBinary, args...)
 	if err == nil || !shouldUseFileStoreBDFallback(dir, out, args) {
 		return out, err
 	}
@@ -657,22 +662,15 @@ func integrationEnv() []string {
 	return integrationEnvFor(testGCHome, testRuntimeDir, false)
 }
 
-func standaloneBDEnv() []string {
-	env := integrationEnv()
-	env = filterEnv(env, "GC_DOLT")
-	env = filterEnv(env, "BEADS_DOLT_AUTO_START")
-	return env
-}
-
 func integrationEnvDolt() []string {
 	return integrationEnvFor(testGCHome, testRuntimeDir, true)
 }
 
 func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	env := filterEnv(os.Environ(), "GC_BEADS")
+	env = filterEnv(env, "GC_DOLT")
 	env = filterEnv(env, "BEADS_DIR")
 	env = filterEnv(env, "BEADS_ACTOR")
-	env = filterEnv(env, "GC_DOLT")
 	env = filterEnv(env, "PATH")
 	env = filterEnv(env, "GC_HOME")
 	env = filterEnv(env, "XDG_RUNTIME_DIR")
@@ -704,6 +702,19 @@ func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	// (resolveAutoStart priority bug), so the env var is the only
 	// reliable kill-switch. Mirrors bdRuntimeEnv in cmd/gc/bd_env.go.
 	env = append(env, "BEADS_DOLT_AUTO_START=0")
+	return env
+}
+
+func standaloneBDEnv(dir string) []string {
+	env := []string{"GC_BEADS=file", "GC_DOLT=skip"}
+	if dir != "" {
+		env = append(env,
+			"GC_CITY="+dir,
+			"GC_CITY_PATH="+dir,
+			"GC_CITY_RUNTIME_DIR="+filepath.Join(dir, ".gc", "runtime"),
+			"PWD="+dir,
+		)
+	}
 	return env
 }
 
@@ -1163,11 +1174,15 @@ func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
 	if got["BEADS_DOLT_AUTO_START"] != "0" {
 		t.Fatalf("BEADS_DOLT_AUTO_START = %q, want %q; tests must match bdRuntimeEnv and suppress bd's rogue auto-start", got["BEADS_DOLT_AUTO_START"], "0")
 	}
-	standalone := parseEnvList(standaloneBDEnv())
-	for _, key := range []string{"GC_DOLT", "BEADS_DOLT_AUTO_START"} {
-		if _, ok := standalone[key]; ok {
-			t.Fatalf("%s leaked into standalone bd env: %v", key, standalone)
-		}
+	standalone := parseEnvList(standaloneBDEnv(""))
+	if standalone["GC_BEADS"] != "file" {
+		t.Fatalf("GC_BEADS = %q, want %q; standalone bd init must use the file-backed shim", standalone["GC_BEADS"], "file")
+	}
+	if standalone["GC_DOLT"] != "skip" {
+		t.Fatalf("GC_DOLT = %q, want %q; standalone bd init must keep the file-store override", standalone["GC_DOLT"], "skip")
+	}
+	if _, ok := standalone["BEADS_DOLT_AUTO_START"]; ok {
+		t.Fatalf("BEADS_DOLT_AUTO_START leaked into standalone bd env: %v", standalone)
 	}
 	for _, key := range []string{
 		"GC_DOLT_HOST",

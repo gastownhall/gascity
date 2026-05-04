@@ -270,26 +270,27 @@ func TestGastown_MultiRig_BeadIsolation(t *testing.T) {
 	}
 	writeMultiRigToml(t, cityDir, cityName, rigDirs, agents)
 
-	// Initialize beads in each rig directory with unique prefixes.
-	prefix0 := initBd(t, rigDirs[0])
-	prefix1 := initBd(t, rigDirs[1])
-	assert.NotEqual(t, prefix0, prefix1, "rig bead prefixes should differ")
+	// Initialize standalone beads stores in each rig directory.
+	initBd(t, rigDirs[0])
+	initBd(t, rigDirs[1])
 
 	// Create a bead from rig-0's directory.
 	out, err := bd(rigDirs[0], "create", "multi-rig bead test alpha")
 	require.NoError(t, err, "bd create in rig-0: %s", out)
 	beadID := extractBeadID(t, out)
 
-	// The bead ID should carry rig-0's prefix.
-	require.NotEmpty(t, beadID, "bead ID should not be empty")
-	assert.True(t, strings.HasPrefix(beadID, prefix0),
-		"bead ID %q should start with rig-0 prefix %q", beadID, prefix0)
-
 	// Verify the bead is visible from rig-0.
+	require.NotEmpty(t, beadID, "bead ID should not be empty")
 	out, err = bd(rigDirs[0], "show", beadID)
 	require.NoError(t, err, "bd show from rig-0: %s", out)
 	assert.Contains(t, out, "multi-rig bead test alpha",
 		"bead should be visible from rig-0")
+
+	// Verify rig-1's store stayed empty.
+	rig1Store, readErr := os.ReadFile(filepath.Join(rigDirs[1], ".gc", "beads.json"))
+	require.NoError(t, readErr, "reading rig-1 bead store")
+	assert.NotContains(t, string(rig1Store), beadID, "rig-1 store should not contain rig-0 bead")
+	assert.NotContains(t, string(rig1Store), "multi-rig bead test alpha", "rig-1 store should not contain rig-0 title")
 }
 
 // TestGastown_MultiRig_IndependentLifecycle starts a city with 2 rigs, stops
