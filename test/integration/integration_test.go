@@ -659,6 +659,7 @@ func integrationEnvDolt() []string {
 
 func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	env := filterEnv(os.Environ(), "GC_BEADS")
+	env = filterEnv(env, "BEADS_DIR")
 	env = filterEnv(env, "GC_DOLT")
 	env = filterEnv(env, "PATH")
 	env = filterEnv(env, "GC_HOME")
@@ -1081,6 +1082,7 @@ func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
 	integrationToolBinDir = filepath.Join(t.TempDir(), "bin")
 
 	t.Setenv("HOME", "/host/home")
+	t.Setenv("BEADS_DIR", "/host/beads")
 	t.Setenv("GC_DOLT_HOST", "ambient-host")
 	t.Setenv("GC_DOLT_PORT", "0")
 	t.Setenv("GC_DOLT_USER", "ambient-user")
@@ -1111,6 +1113,7 @@ func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
 		t.Fatalf("BEADS_DOLT_AUTO_START = %q, want %q; tests must match bdRuntimeEnv and suppress bd's rogue auto-start", got["BEADS_DOLT_AUTO_START"], "0")
 	}
 	for _, key := range []string{
+		"BEADS_DIR",
 		"GC_DOLT_HOST",
 		"GC_DOLT_PORT",
 		"GC_DOLT_USER",

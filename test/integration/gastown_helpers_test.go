@@ -231,13 +231,62 @@ func tailText(s string, maxLines int) string {
 func initBd(t *testing.T, dir string) string {
 	t.Helper()
 	prefix := uniqueCityName()
-	cmd := exec.Command(bdBinary, "init", "-p", prefix, "--skip-hooks", "-q")
+	binary := realBDBinary
+	if strings.TrimSpace(binary) == "" {
+		binary = bdBinary
+	}
+	cmd := exec.Command(binary, "init", "-p", prefix, "--skip-hooks", "-q")
 	cmd.Dir = dir
-	cmd.Env = os.Environ()
+	cmd.Env = standaloneBdInitEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("bd init in %s failed: %v\noutput: %s", dir, err, out)
 	}
 	return prefix
+}
+
+func standaloneBdInitEnv() []string {
+	return filterEnvMany(os.Environ(),
+		"BEADS_DIR",
+		"BEADS_DOLT_AUTO_START",
+		"BEADS_DOLT_PASSWORD",
+		"BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_SERVER_USER",
+		"GC_BEADS",
+		"GC_BEADS_SCOPE_ROOT",
+		"GC_CITY",
+		"GC_CITY_PATH",
+		"GC_CITY_ROOT",
+		"GC_CITY_RUNTIME_DIR",
+		"GC_DOLT",
+		"GC_DOLT_HOST",
+		"GC_DOLT_PASSWORD",
+		"GC_DOLT_PORT",
+		"GC_DOLT_USER",
+		"GC_RIG",
+		"GC_RIG_ROOT",
+	)
+}
+
+func TestInitBdIgnoresAmbientDoltEndpoint(t *testing.T) {
+	t.Setenv("BEADS_DIR", filepath.Join(t.TempDir(), "ambient", ".beads"))
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "0")
+	t.Setenv("GC_DOLT_HOST", "127.0.0.1")
+	t.Setenv("GC_DOLT_PORT", "0")
+
+	dir := t.TempDir()
+	prefix := initBd(t, dir)
+
+	out, err := bd(dir, "create", "ambient dolt endpoint ignored")
+	if err != nil {
+		t.Fatalf("bd create after initBd failed: %v\noutput: %s", err, out)
+	}
+	beadID := extractBeadID(t, out)
+	if !strings.HasPrefix(beadID, prefix) {
+		t.Fatalf("bead ID %q should start with prefix %q", beadID, prefix)
+	}
 }
 
 // createBead creates a bead and returns its ID.
