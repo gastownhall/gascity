@@ -62,6 +62,9 @@ func bdCommandEnv(cityPath string, cfg *config.City, target execStoreTarget) []s
 	overrides["GC_STORE_ROOT"] = target.ScopeRoot
 	overrides["GC_STORE_SCOPE"] = target.ScopeKind
 	overrides["GC_BEADS_PREFIX"] = target.Prefix
+	// GC owns the Dolt-backed beads lifecycle; bd's git auto-export can run
+	// after command output and wedge the wrapper on git staging failures.
+	overrides["BD_EXPORT_AUTO"] = "false"
 	return mergeRuntimeEnv(os.Environ(), overrides)
 }
 
