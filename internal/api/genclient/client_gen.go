@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -74,6 +75,33 @@ func (e ConversationKind) Valid() bool {
 	case Room:
 		return true
 	case Thread:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RequestFailedPayloadOperation.
+const (
+	CityCreate     RequestFailedPayloadOperation = "city.create"
+	CityUnregister RequestFailedPayloadOperation = "city.unregister"
+	SessionCreate  RequestFailedPayloadOperation = "session.create"
+	SessionMessage RequestFailedPayloadOperation = "session.message"
+	SessionSubmit  RequestFailedPayloadOperation = "session.submit"
+)
+
+// Valid indicates whether the value is a known member of the RequestFailedPayloadOperation enum.
+func (e RequestFailedPayloadOperation) Valid() bool {
+	switch e {
+	case CityCreate:
+		return true
+	case CityUnregister:
+		return true
+	case SessionCreate:
+		return true
+	case SessionMessage:
+		return true
+	case SessionSubmit:
 		return true
 	default:
 		return false
@@ -371,6 +399,8 @@ type AnnotatedAgentResponse struct {
 
 // AnnotatedProviderResponse defines model for AnnotatedProviderResponse.
 type AnnotatedProviderResponse struct {
+	AcpArgs     *[]string          `json:"acp_args,omitempty"`
+	AcpCommand  *string            `json:"acp_command,omitempty"`
 	Args        *[]string          `json:"args,omitempty"`
 	Command     *string            `json:"command,omitempty"`
 	DisplayName *string            `json:"display_name,omitempty"`
@@ -381,6 +411,27 @@ type AnnotatedProviderResponse struct {
 	PromptFlag   *string `json:"prompt_flag,omitempty"`
 	PromptMode   *string `json:"prompt_mode,omitempty"`
 	ReadyDelayMs *int64  `json:"ready_delay_ms,omitempty"`
+}
+
+// AsyncAcceptedBody defines model for AsyncAcceptedBody.
+type AsyncAcceptedBody struct {
+	// EventCursor City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or the event log is empty.
+	EventCursor string `json:"event_cursor"`
+
+	// RequestId Correlation ID. Watch the city event stream for request.result.session.create, request.result.session.message, request.result.session.submit, or request.failed with this request_id.
+	RequestId string `json:"request_id"`
+
+	// Status Async request status.
+	Status string `json:"status"`
+}
+
+// AsyncAcceptedResponse defines model for AsyncAcceptedResponse.
+type AsyncAcceptedResponse struct {
+	// EventCursor Supervisor event-stream cursor captured before the async request was accepted. Pass this value as after_cursor to /v0/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or every event log is empty.
+	EventCursor string `json:"event_cursor"`
+
+	// RequestId Correlation ID. Watch /v0/events/stream for request.result.city.create, request.result.city.unregister, or request.failed with this request_id.
+	RequestId string `json:"request_id"`
 }
 
 // Bead defines model for Bead.
@@ -418,6 +469,12 @@ type BeadCreateInputBody struct {
 
 	// Labels Bead labels.
 	Labels *[]string `json:"labels,omitempty"`
+
+	// Metadata Metadata key-value pairs to set at create time.
+	Metadata *map[string]string `json:"metadata,omitempty"`
+
+	// Parent Parent bead ID.
+	Parent *string `json:"parent,omitempty"`
 
 	// Priority Bead priority.
 	Priority *int64 `json:"priority,omitempty"`
@@ -463,6 +520,9 @@ type BeadUpdateBody struct {
 	// Metadata Metadata key-value pairs to set.
 	Metadata *map[string]string `json:"metadata,omitempty"`
 
+	// Parent Parent bead ID. Use null or an empty string to clear.
+	Parent *string `json:"parent,omitempty"`
+
 	// Priority Bead priority.
 	Priority *int64 `json:"priority,omitempty"`
 
@@ -497,20 +557,26 @@ type CityCreateRequest struct {
 	// Dir Directory to create the city in. Absolute or relative to $HOME.
 	Dir string `json:"dir"`
 
-	// Provider Provider name for the city's default session template.
-	Provider string `json:"provider"`
+	// Provider Provider name for the city's default session template. Mutually exclusive with start_command.
+	Provider *string `json:"provider,omitempty"`
+
+	// StartCommand Custom workspace start command for the city's default session template. Mutually exclusive with provider.
+	StartCommand *string `json:"start_command,omitempty"`
 }
 
 // CityCreateRequestBootstrapProfile Optional bootstrap profile.
 type CityCreateRequestBootstrapProfile string
 
-// CityCreateResponse defines model for CityCreateResponse.
-type CityCreateResponse struct {
-	// Ok True on success.
-	Ok bool `json:"ok"`
+// CityCreateSucceededPayload defines model for CityCreateSucceededPayload.
+type CityCreateSucceededPayload struct {
+	// Name Resolved city name.
+	Name string `json:"name"`
 
-	// Path Resolved absolute path of the created city.
+	// Path Resolved absolute city directory path.
 	Path string `json:"path"`
+
+	// RequestId Correlation ID from the 202 response.
+	RequestId string `json:"request_id"`
 }
 
 // CityGetResponse defines model for CityGetResponse.
@@ -536,10 +602,28 @@ type CityInfo struct {
 	Status          *string   `json:"status,omitempty"`
 }
 
+// CityLifecyclePayload defines model for CityLifecyclePayload.
+type CityLifecyclePayload struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
 // CityPatchInputBody defines model for CityPatchInputBody.
 type CityPatchInputBody struct {
 	// Suspended Whether the city is suspended.
 	Suspended *bool `json:"suspended,omitempty"`
+}
+
+// CityUnregisterSucceededPayload defines model for CityUnregisterSucceededPayload.
+type CityUnregisterSucceededPayload struct {
+	// Name City name that was unregistered.
+	Name string `json:"name"`
+
+	// Path Absolute city directory path.
+	Path string `json:"path"`
+
+	// RequestId Correlation ID from the 202 response.
+	RequestId string `json:"request_id"`
 }
 
 // ConfigAgentResponse defines model for ConfigAgentResponse.
@@ -1027,6 +1111,9 @@ type FormulaListBody struct {
 
 	// Partial Whether the list is partial.
 	Partial bool `json:"partial"`
+
+	// Total Total number of formulas in the list.
+	Total int64 `json:"total"`
 }
 
 // FormulaPreviewBody defines model for FormulaPreviewBody.
@@ -1395,7 +1482,7 @@ type ListBodyStatus struct {
 // ListBodyWireEvent defines model for ListBodyWireEvent.
 type ListBodyWireEvent struct {
 	// Items The list of items.
-	Items *[]WireEvent `json:"items"`
+	Items *[]TypedEventStreamEnvelope `json:"items"`
 
 	// NextCursor Cursor for the next page of results.
 	NextCursor *string `json:"next_cursor,omitempty"`
@@ -1726,6 +1813,12 @@ type PoolOverride struct {
 
 // ProviderCreateInputBody defines model for ProviderCreateInputBody.
 type ProviderCreateInputBody struct {
+	// AcpArgs ACP transport command arguments override.
+	AcpArgs *[]string `json:"acp_args,omitempty"`
+
+	// AcpCommand ACP transport command binary override.
+	AcpCommand *string `json:"acp_command,omitempty"`
+
 	// Args Command arguments.
 	Args *[]string `json:"args,omitempty"`
 
@@ -1780,6 +1873,8 @@ type ProviderOptionDTO struct {
 
 // ProviderPatch defines model for ProviderPatch.
 type ProviderPatch struct {
+	ACPArgs            *[]string         `json:"ACPArgs"`
+	ACPCommand         *string           `json:"ACPCommand"`
 	Args               *[]string         `json:"Args"`
 	ArgsAppend         *[]string         `json:"ArgsAppend"`
 	Base               *string           `json:"Base"`
@@ -1796,6 +1891,12 @@ type ProviderPatch struct {
 
 // ProviderPatchSetInputBody defines model for ProviderPatchSetInputBody.
 type ProviderPatchSetInputBody struct {
+	// AcpArgs Override ACP transport command arguments.
+	AcpArgs *[]string `json:"acp_args,omitempty"`
+
+	// AcpCommand Override ACP transport command binary.
+	AcpCommand *string `json:"acp_command,omitempty"`
+
 	// Args Override command arguments.
 	Args *[]string `json:"args,omitempty"`
 
@@ -1854,6 +1955,8 @@ type ProviderReadinessResponse struct {
 
 // ProviderResponse defines model for ProviderResponse.
 type ProviderResponse struct {
+	AcpArgs      *[]string          `json:"acp_args,omitempty"`
+	AcpCommand   *string            `json:"acp_command,omitempty"`
 	Args         *[]string          `json:"args,omitempty"`
 	Builtin      bool               `json:"builtin"`
 	CityLevel    bool               `json:"city_level"`
@@ -1868,6 +1971,8 @@ type ProviderResponse struct {
 
 // ProviderSpecJSON defines model for ProviderSpecJSON.
 type ProviderSpecJSON struct {
+	AcpArgs      *[]string          `json:"acp_args,omitempty"`
+	AcpCommand   *string            `json:"acp_command,omitempty"`
 	Args         *[]string          `json:"args,omitempty"`
 	Command      *string            `json:"command,omitempty"`
 	DisplayName  *string            `json:"display_name,omitempty"`
@@ -1879,6 +1984,12 @@ type ProviderSpecJSON struct {
 
 // ProviderUpdateInputBody defines model for ProviderUpdateInputBody.
 type ProviderUpdateInputBody struct {
+	// AcpArgs ACP transport command arguments override.
+	AcpArgs *[]string `json:"acp_args,omitempty"`
+
+	// AcpCommand ACP transport command binary override.
+	AcpCommand *string `json:"acp_command,omitempty"`
+
 	// Args Command arguments.
 	Args *[]string `json:"args,omitempty"`
 
@@ -1933,6 +2044,24 @@ type ReadinessItem struct {
 type ReadinessResponse struct {
 	Items map[string]ReadinessItem `json:"items"`
 }
+
+// RequestFailedPayload defines model for RequestFailedPayload.
+type RequestFailedPayload struct {
+	// ErrorCode Machine-readable error code.
+	ErrorCode string `json:"error_code"`
+
+	// ErrorMessage Human-readable error description.
+	ErrorMessage string `json:"error_message"`
+
+	// Operation Which operation failed.
+	Operation RequestFailedPayloadOperation `json:"operation"`
+
+	// RequestId Correlation ID from the 202 response.
+	RequestId string `json:"request_id"`
+}
+
+// RequestFailedPayloadOperation Which operation failed.
+type RequestFailedPayloadOperation string
 
 // RigActionBody defines model for RigActionBody.
 type RigActionBody struct {
@@ -2097,6 +2226,13 @@ type SessionCreateBody struct {
 	Title *string `json:"title,omitempty"`
 }
 
+// SessionCreateSucceededPayload defines model for SessionCreateSucceededPayload.
+type SessionCreateSucceededPayload struct {
+	// RequestId Correlation ID from the 202 response.
+	RequestId string          `json:"request_id"`
+	Session   SessionResponse `json:"session"`
+}
+
 // SessionInfo defines model for SessionInfo.
 type SessionInfo struct {
 	Attached     bool       `json:"attached"`
@@ -2110,13 +2246,13 @@ type SessionMessageInputBody struct {
 	Message string `json:"message"`
 }
 
-// SessionMessageOutputBody defines model for SessionMessageOutputBody.
-type SessionMessageOutputBody struct {
-	// Id Session ID.
-	Id string `json:"id"`
+// SessionMessageSucceededPayload defines model for SessionMessageSucceededPayload.
+type SessionMessageSucceededPayload struct {
+	// RequestId Correlation ID from the 202 response.
+	RequestId string `json:"request_id"`
 
-	// Status Operation result.
-	Status string `json:"status"`
+	// SessionId Session ID that received the message.
+	SessionId string `json:"session_id"`
 }
 
 // SessionPatchBody defines model for SessionPatchBody.
@@ -2197,6 +2333,11 @@ type SessionResponse struct {
 	Title                  string                  `json:"title"`
 }
 
+// SessionStreamCommonEvent Non-message events emitted on the session SSE stream: activity transitions, pending interactions, and keepalive heartbeats. The concrete variant is identified by the SSE event name.
+type SessionStreamCommonEvent struct {
+	union json.RawMessage
+}
+
 // SessionStreamMessageEvent defines model for SessionStreamMessageEvent.
 type SessionStreamMessageEvent struct {
 	Format     string          `json:"format"`
@@ -2232,19 +2373,19 @@ type SessionSubmitInputBody struct {
 	Message string `json:"message"`
 }
 
-// SessionSubmitOutputBody defines model for SessionSubmitOutputBody.
-type SessionSubmitOutputBody struct {
-	// Id Session ID.
-	Id string `json:"id"`
-
-	// Intent Resolved submit intent.
+// SessionSubmitSucceededPayload defines model for SessionSubmitSucceededPayload.
+type SessionSubmitSucceededPayload struct {
+	// Intent Resolved submit intent (default, follow_up, interrupt_now).
 	Intent string `json:"intent"`
 
-	// Queued Whether the message was queued.
+	// Queued Whether the message was queued for later delivery.
 	Queued bool `json:"queued"`
 
-	// Status Operation result.
-	Status string `json:"status"`
+	// RequestId Correlation ID from the 202 response.
+	RequestId string `json:"request_id"`
+
+	// SessionId Session ID that received the submission.
+	SessionId string `json:"session_id"`
 }
 
 // SessionTranscriptGetResponse defines model for SessionTranscriptGetResponse.
@@ -2272,6 +2413,9 @@ type SlingInputBody struct {
 
 	// Bead Bead ID to sling.
 	Bead *string `json:"bead,omitempty"`
+
+	// Force Bypass cross-rig guards; for direct bead routes, also bypass missing-bead validation. Formula-backed graph routes may replace existing live workflow roots but still require the source bead to exist.
+	Force *bool `json:"force,omitempty"`
 
 	// Formula Formula name for workflow launch.
 	Formula *string `json:"formula,omitempty"`
@@ -2352,6 +2496,12 @@ type StatusBody struct {
 	// Name City name.
 	Name string `json:"name"`
 
+	// Partial True when one or more status backing reads returned incomplete data.
+	Partial *bool `json:"partial,omitempty"`
+
+	// PartialErrors Human-readable errors from incomplete status backing reads.
+	PartialErrors *[]string `json:"partial_errors,omitempty"`
+
 	// Path City directory path.
 	Path string `json:"path"`
 
@@ -2423,8 +2573,8 @@ type SupervisorCitiesOutputBody struct {
 
 // SupervisorEventListOutputBody defines model for SupervisorEventListOutputBody.
 type SupervisorEventListOutputBody struct {
-	Items *[]WireTaggedEvent `json:"items"`
-	Total int64              `json:"total"`
+	Items *[]TypedTaggedEventStreamEnvelope `json:"items"`
+	Total int64                             `json:"total"`
 }
 
 // SupervisorHealthOutputBody defines model for SupervisorHealthOutputBody.
@@ -2477,33 +2627,1170 @@ type TranscriptMessageKind string
 // TranscriptProvenance Provenance of a transcript entry (freshly observed vs. replayed from persisted history).
 type TranscriptProvenance string
 
+// TypedEventStreamEnvelope Discriminated union of city event stream envelopes. Each variant constrains the envelope type and payload schema together.
+type TypedEventStreamEnvelope struct {
+	union json.RawMessage
+}
+
+// TypedEventStreamEnvelopeBeadClosed defines model for TypedEventStreamEnvelopeBeadClosed.
+type TypedEventStreamEnvelopeBeadClosed struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  BeadEventPayload         `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeBeadCreated defines model for TypedEventStreamEnvelopeBeadCreated.
+type TypedEventStreamEnvelopeBeadCreated struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  BeadEventPayload         `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeBeadUpdated defines model for TypedEventStreamEnvelopeBeadUpdated.
+type TypedEventStreamEnvelopeBeadUpdated struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  BeadEventPayload         `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeCityCreated defines model for TypedEventStreamEnvelopeCityCreated.
+type TypedEventStreamEnvelopeCityCreated struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  CityLifecyclePayload     `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeCityResumed defines model for TypedEventStreamEnvelopeCityResumed.
+type TypedEventStreamEnvelopeCityResumed struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeCitySuspended defines model for TypedEventStreamEnvelopeCitySuspended.
+type TypedEventStreamEnvelopeCitySuspended struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeCityUnregisterRequested defines model for TypedEventStreamEnvelopeCityUnregisterRequested.
+type TypedEventStreamEnvelopeCityUnregisterRequested struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  CityLifecyclePayload     `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeControllerStarted defines model for TypedEventStreamEnvelopeControllerStarted.
+type TypedEventStreamEnvelopeControllerStarted struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeControllerStopped defines model for TypedEventStreamEnvelopeControllerStopped.
+type TypedEventStreamEnvelopeControllerStopped struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeConvoyClosed defines model for TypedEventStreamEnvelopeConvoyClosed.
+type TypedEventStreamEnvelopeConvoyClosed struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeConvoyCreated defines model for TypedEventStreamEnvelopeConvoyCreated.
+type TypedEventStreamEnvelopeConvoyCreated struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeCustom defines model for TypedEventStreamEnvelopeCustom.
+type TypedEventStreamEnvelopeCustom struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  interface{}              `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeExtmsgAdapterAdded defines model for TypedEventStreamEnvelopeExtmsgAdapterAdded.
+type TypedEventStreamEnvelopeExtmsgAdapterAdded struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  AdapterEventPayload      `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeExtmsgAdapterRemoved defines model for TypedEventStreamEnvelopeExtmsgAdapterRemoved.
+type TypedEventStreamEnvelopeExtmsgAdapterRemoved struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  AdapterEventPayload      `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeExtmsgBound defines model for TypedEventStreamEnvelopeExtmsgBound.
+type TypedEventStreamEnvelopeExtmsgBound struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  BoundEventPayload        `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeExtmsgGroupCreated defines model for TypedEventStreamEnvelopeExtmsgGroupCreated.
+type TypedEventStreamEnvelopeExtmsgGroupCreated struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  GroupCreatedEventPayload `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeExtmsgInbound defines model for TypedEventStreamEnvelopeExtmsgInbound.
+type TypedEventStreamEnvelopeExtmsgInbound struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  InboundEventPayload      `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeExtmsgOutbound defines model for TypedEventStreamEnvelopeExtmsgOutbound.
+type TypedEventStreamEnvelopeExtmsgOutbound struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  OutboundEventPayload     `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeExtmsgUnbound defines model for TypedEventStreamEnvelopeExtmsgUnbound.
+type TypedEventStreamEnvelopeExtmsgUnbound struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  UnboundEventPayload      `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeMailArchived defines model for TypedEventStreamEnvelopeMailArchived.
+type TypedEventStreamEnvelopeMailArchived struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  MailEventPayload         `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeMailDeleted defines model for TypedEventStreamEnvelopeMailDeleted.
+type TypedEventStreamEnvelopeMailDeleted struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  MailEventPayload         `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeMailMarkedRead defines model for TypedEventStreamEnvelopeMailMarkedRead.
+type TypedEventStreamEnvelopeMailMarkedRead struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  MailEventPayload         `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeMailMarkedUnread defines model for TypedEventStreamEnvelopeMailMarkedUnread.
+type TypedEventStreamEnvelopeMailMarkedUnread struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  MailEventPayload         `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeMailRead defines model for TypedEventStreamEnvelopeMailRead.
+type TypedEventStreamEnvelopeMailRead struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  MailEventPayload         `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeMailReplied defines model for TypedEventStreamEnvelopeMailReplied.
+type TypedEventStreamEnvelopeMailReplied struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  MailEventPayload         `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeMailSent defines model for TypedEventStreamEnvelopeMailSent.
+type TypedEventStreamEnvelopeMailSent struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  MailEventPayload         `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeOrderCompleted defines model for TypedEventStreamEnvelopeOrderCompleted.
+type TypedEventStreamEnvelopeOrderCompleted struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeOrderFailed defines model for TypedEventStreamEnvelopeOrderFailed.
+type TypedEventStreamEnvelopeOrderFailed struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeOrderFired defines model for TypedEventStreamEnvelopeOrderFired.
+type TypedEventStreamEnvelopeOrderFired struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeProviderSwapped defines model for TypedEventStreamEnvelopeProviderSwapped.
+type TypedEventStreamEnvelopeProviderSwapped struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeRequestFailed defines model for TypedEventStreamEnvelopeRequestFailed.
+type TypedEventStreamEnvelopeRequestFailed struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  RequestFailedPayload     `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeRequestResultCityCreate defines model for TypedEventStreamEnvelopeRequestResultCityCreate.
+type TypedEventStreamEnvelopeRequestResultCityCreate struct {
+	Actor    string                     `json:"actor"`
+	Message  *string                    `json:"message,omitempty"`
+	Payload  CityCreateSucceededPayload `json:"payload"`
+	Seq      int64                      `json:"seq"`
+	Subject  *string                    `json:"subject,omitempty"`
+	Ts       time.Time                  `json:"ts"`
+	Type     string                     `json:"type"`
+	Workflow *WorkflowEventProjection   `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeRequestResultCityUnregister defines model for TypedEventStreamEnvelopeRequestResultCityUnregister.
+type TypedEventStreamEnvelopeRequestResultCityUnregister struct {
+	Actor    string                         `json:"actor"`
+	Message  *string                        `json:"message,omitempty"`
+	Payload  CityUnregisterSucceededPayload `json:"payload"`
+	Seq      int64                          `json:"seq"`
+	Subject  *string                        `json:"subject,omitempty"`
+	Ts       time.Time                      `json:"ts"`
+	Type     string                         `json:"type"`
+	Workflow *WorkflowEventProjection       `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeRequestResultSessionCreate defines model for TypedEventStreamEnvelopeRequestResultSessionCreate.
+type TypedEventStreamEnvelopeRequestResultSessionCreate struct {
+	Actor    string                        `json:"actor"`
+	Message  *string                       `json:"message,omitempty"`
+	Payload  SessionCreateSucceededPayload `json:"payload"`
+	Seq      int64                         `json:"seq"`
+	Subject  *string                       `json:"subject,omitempty"`
+	Ts       time.Time                     `json:"ts"`
+	Type     string                        `json:"type"`
+	Workflow *WorkflowEventProjection      `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeRequestResultSessionMessage defines model for TypedEventStreamEnvelopeRequestResultSessionMessage.
+type TypedEventStreamEnvelopeRequestResultSessionMessage struct {
+	Actor    string                         `json:"actor"`
+	Message  *string                        `json:"message,omitempty"`
+	Payload  SessionMessageSucceededPayload `json:"payload"`
+	Seq      int64                          `json:"seq"`
+	Subject  *string                        `json:"subject,omitempty"`
+	Ts       time.Time                      `json:"ts"`
+	Type     string                         `json:"type"`
+	Workflow *WorkflowEventProjection       `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeRequestResultSessionSubmit defines model for TypedEventStreamEnvelopeRequestResultSessionSubmit.
+type TypedEventStreamEnvelopeRequestResultSessionSubmit struct {
+	Actor    string                        `json:"actor"`
+	Message  *string                       `json:"message,omitempty"`
+	Payload  SessionSubmitSucceededPayload `json:"payload"`
+	Seq      int64                         `json:"seq"`
+	Subject  *string                       `json:"subject,omitempty"`
+	Ts       time.Time                     `json:"ts"`
+	Type     string                        `json:"type"`
+	Workflow *WorkflowEventProjection      `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeSessionCrashed defines model for TypedEventStreamEnvelopeSessionCrashed.
+type TypedEventStreamEnvelopeSessionCrashed struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeSessionDraining defines model for TypedEventStreamEnvelopeSessionDraining.
+type TypedEventStreamEnvelopeSessionDraining struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeSessionIdleKilled defines model for TypedEventStreamEnvelopeSessionIdleKilled.
+type TypedEventStreamEnvelopeSessionIdleKilled struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeSessionQuarantined defines model for TypedEventStreamEnvelopeSessionQuarantined.
+type TypedEventStreamEnvelopeSessionQuarantined struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeSessionStopped defines model for TypedEventStreamEnvelopeSessionStopped.
+type TypedEventStreamEnvelopeSessionStopped struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeSessionSuspended defines model for TypedEventStreamEnvelopeSessionSuspended.
+type TypedEventStreamEnvelopeSessionSuspended struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeSessionUndrained defines model for TypedEventStreamEnvelopeSessionUndrained.
+type TypedEventStreamEnvelopeSessionUndrained struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeSessionUpdated defines model for TypedEventStreamEnvelopeSessionUpdated.
+type TypedEventStreamEnvelopeSessionUpdated struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeSessionWoke defines model for TypedEventStreamEnvelopeSessionWoke.
+type TypedEventStreamEnvelopeSessionWoke struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeWorkerOperation defines model for TypedEventStreamEnvelopeWorkerOperation.
+type TypedEventStreamEnvelopeWorkerOperation struct {
+	Actor    string                      `json:"actor"`
+	Message  *string                     `json:"message,omitempty"`
+	Payload  WorkerOperationEventPayload `json:"payload"`
+	Seq      int64                       `json:"seq"`
+	Subject  *string                     `json:"subject,omitempty"`
+	Ts       time.Time                   `json:"ts"`
+	Type     string                      `json:"type"`
+	Workflow *WorkflowEventProjection    `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelope Discriminated union of supervisor event stream envelopes. Each variant constrains the envelope type and payload schema together and includes the source city.
+type TypedTaggedEventStreamEnvelope struct {
+	union json.RawMessage
+}
+
+// TypedTaggedEventStreamEnvelopeBeadClosed defines model for TypedTaggedEventStreamEnvelopeBeadClosed.
+type TypedTaggedEventStreamEnvelopeBeadClosed struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  BeadEventPayload         `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeBeadCreated defines model for TypedTaggedEventStreamEnvelopeBeadCreated.
+type TypedTaggedEventStreamEnvelopeBeadCreated struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  BeadEventPayload         `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeBeadUpdated defines model for TypedTaggedEventStreamEnvelopeBeadUpdated.
+type TypedTaggedEventStreamEnvelopeBeadUpdated struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  BeadEventPayload         `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeCityCreated defines model for TypedTaggedEventStreamEnvelopeCityCreated.
+type TypedTaggedEventStreamEnvelopeCityCreated struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  CityLifecyclePayload     `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeCityResumed defines model for TypedTaggedEventStreamEnvelopeCityResumed.
+type TypedTaggedEventStreamEnvelopeCityResumed struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeCitySuspended defines model for TypedTaggedEventStreamEnvelopeCitySuspended.
+type TypedTaggedEventStreamEnvelopeCitySuspended struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeCityUnregisterRequested defines model for TypedTaggedEventStreamEnvelopeCityUnregisterRequested.
+type TypedTaggedEventStreamEnvelopeCityUnregisterRequested struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  CityLifecyclePayload     `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeControllerStarted defines model for TypedTaggedEventStreamEnvelopeControllerStarted.
+type TypedTaggedEventStreamEnvelopeControllerStarted struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeControllerStopped defines model for TypedTaggedEventStreamEnvelopeControllerStopped.
+type TypedTaggedEventStreamEnvelopeControllerStopped struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeConvoyClosed defines model for TypedTaggedEventStreamEnvelopeConvoyClosed.
+type TypedTaggedEventStreamEnvelopeConvoyClosed struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeConvoyCreated defines model for TypedTaggedEventStreamEnvelopeConvoyCreated.
+type TypedTaggedEventStreamEnvelopeConvoyCreated struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeCustom defines model for TypedTaggedEventStreamEnvelopeCustom.
+type TypedTaggedEventStreamEnvelopeCustom struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  interface{}              `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded defines model for TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded.
+type TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  AdapterEventPayload      `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeExtmsgAdapterRemoved defines model for TypedTaggedEventStreamEnvelopeExtmsgAdapterRemoved.
+type TypedTaggedEventStreamEnvelopeExtmsgAdapterRemoved struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  AdapterEventPayload      `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeExtmsgBound defines model for TypedTaggedEventStreamEnvelopeExtmsgBound.
+type TypedTaggedEventStreamEnvelopeExtmsgBound struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  BoundEventPayload        `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeExtmsgGroupCreated defines model for TypedTaggedEventStreamEnvelopeExtmsgGroupCreated.
+type TypedTaggedEventStreamEnvelopeExtmsgGroupCreated struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  GroupCreatedEventPayload `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeExtmsgInbound defines model for TypedTaggedEventStreamEnvelopeExtmsgInbound.
+type TypedTaggedEventStreamEnvelopeExtmsgInbound struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  InboundEventPayload      `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeExtmsgOutbound defines model for TypedTaggedEventStreamEnvelopeExtmsgOutbound.
+type TypedTaggedEventStreamEnvelopeExtmsgOutbound struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  OutboundEventPayload     `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeExtmsgUnbound defines model for TypedTaggedEventStreamEnvelopeExtmsgUnbound.
+type TypedTaggedEventStreamEnvelopeExtmsgUnbound struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  UnboundEventPayload      `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeMailArchived defines model for TypedTaggedEventStreamEnvelopeMailArchived.
+type TypedTaggedEventStreamEnvelopeMailArchived struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  MailEventPayload         `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeMailDeleted defines model for TypedTaggedEventStreamEnvelopeMailDeleted.
+type TypedTaggedEventStreamEnvelopeMailDeleted struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  MailEventPayload         `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeMailMarkedRead defines model for TypedTaggedEventStreamEnvelopeMailMarkedRead.
+type TypedTaggedEventStreamEnvelopeMailMarkedRead struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  MailEventPayload         `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeMailMarkedUnread defines model for TypedTaggedEventStreamEnvelopeMailMarkedUnread.
+type TypedTaggedEventStreamEnvelopeMailMarkedUnread struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  MailEventPayload         `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeMailRead defines model for TypedTaggedEventStreamEnvelopeMailRead.
+type TypedTaggedEventStreamEnvelopeMailRead struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  MailEventPayload         `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeMailReplied defines model for TypedTaggedEventStreamEnvelopeMailReplied.
+type TypedTaggedEventStreamEnvelopeMailReplied struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  MailEventPayload         `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeMailSent defines model for TypedTaggedEventStreamEnvelopeMailSent.
+type TypedTaggedEventStreamEnvelopeMailSent struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  MailEventPayload         `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeOrderCompleted defines model for TypedTaggedEventStreamEnvelopeOrderCompleted.
+type TypedTaggedEventStreamEnvelopeOrderCompleted struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeOrderFailed defines model for TypedTaggedEventStreamEnvelopeOrderFailed.
+type TypedTaggedEventStreamEnvelopeOrderFailed struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeOrderFired defines model for TypedTaggedEventStreamEnvelopeOrderFired.
+type TypedTaggedEventStreamEnvelopeOrderFired struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeProviderSwapped defines model for TypedTaggedEventStreamEnvelopeProviderSwapped.
+type TypedTaggedEventStreamEnvelopeProviderSwapped struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeRequestFailed defines model for TypedTaggedEventStreamEnvelopeRequestFailed.
+type TypedTaggedEventStreamEnvelopeRequestFailed struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  RequestFailedPayload     `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeRequestResultCityCreate defines model for TypedTaggedEventStreamEnvelopeRequestResultCityCreate.
+type TypedTaggedEventStreamEnvelopeRequestResultCityCreate struct {
+	Actor    string                     `json:"actor"`
+	City     string                     `json:"city"`
+	Message  *string                    `json:"message,omitempty"`
+	Payload  CityCreateSucceededPayload `json:"payload"`
+	Seq      int64                      `json:"seq"`
+	Subject  *string                    `json:"subject,omitempty"`
+	Ts       time.Time                  `json:"ts"`
+	Type     string                     `json:"type"`
+	Workflow *WorkflowEventProjection   `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeRequestResultCityUnregister defines model for TypedTaggedEventStreamEnvelopeRequestResultCityUnregister.
+type TypedTaggedEventStreamEnvelopeRequestResultCityUnregister struct {
+	Actor    string                         `json:"actor"`
+	City     string                         `json:"city"`
+	Message  *string                        `json:"message,omitempty"`
+	Payload  CityUnregisterSucceededPayload `json:"payload"`
+	Seq      int64                          `json:"seq"`
+	Subject  *string                        `json:"subject,omitempty"`
+	Ts       time.Time                      `json:"ts"`
+	Type     string                         `json:"type"`
+	Workflow *WorkflowEventProjection       `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeRequestResultSessionCreate defines model for TypedTaggedEventStreamEnvelopeRequestResultSessionCreate.
+type TypedTaggedEventStreamEnvelopeRequestResultSessionCreate struct {
+	Actor    string                        `json:"actor"`
+	City     string                        `json:"city"`
+	Message  *string                       `json:"message,omitempty"`
+	Payload  SessionCreateSucceededPayload `json:"payload"`
+	Seq      int64                         `json:"seq"`
+	Subject  *string                       `json:"subject,omitempty"`
+	Ts       time.Time                     `json:"ts"`
+	Type     string                        `json:"type"`
+	Workflow *WorkflowEventProjection      `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeRequestResultSessionMessage defines model for TypedTaggedEventStreamEnvelopeRequestResultSessionMessage.
+type TypedTaggedEventStreamEnvelopeRequestResultSessionMessage struct {
+	Actor    string                         `json:"actor"`
+	City     string                         `json:"city"`
+	Message  *string                        `json:"message,omitempty"`
+	Payload  SessionMessageSucceededPayload `json:"payload"`
+	Seq      int64                          `json:"seq"`
+	Subject  *string                        `json:"subject,omitempty"`
+	Ts       time.Time                      `json:"ts"`
+	Type     string                         `json:"type"`
+	Workflow *WorkflowEventProjection       `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit defines model for TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit.
+type TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit struct {
+	Actor    string                        `json:"actor"`
+	City     string                        `json:"city"`
+	Message  *string                       `json:"message,omitempty"`
+	Payload  SessionSubmitSucceededPayload `json:"payload"`
+	Seq      int64                         `json:"seq"`
+	Subject  *string                       `json:"subject,omitempty"`
+	Ts       time.Time                     `json:"ts"`
+	Type     string                        `json:"type"`
+	Workflow *WorkflowEventProjection      `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionCrashed defines model for TypedTaggedEventStreamEnvelopeSessionCrashed.
+type TypedTaggedEventStreamEnvelopeSessionCrashed struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionDraining defines model for TypedTaggedEventStreamEnvelopeSessionDraining.
+type TypedTaggedEventStreamEnvelopeSessionDraining struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionIdleKilled defines model for TypedTaggedEventStreamEnvelopeSessionIdleKilled.
+type TypedTaggedEventStreamEnvelopeSessionIdleKilled struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionQuarantined defines model for TypedTaggedEventStreamEnvelopeSessionQuarantined.
+type TypedTaggedEventStreamEnvelopeSessionQuarantined struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionStopped defines model for TypedTaggedEventStreamEnvelopeSessionStopped.
+type TypedTaggedEventStreamEnvelopeSessionStopped struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionSuspended defines model for TypedTaggedEventStreamEnvelopeSessionSuspended.
+type TypedTaggedEventStreamEnvelopeSessionSuspended struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionUndrained defines model for TypedTaggedEventStreamEnvelopeSessionUndrained.
+type TypedTaggedEventStreamEnvelopeSessionUndrained struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionUpdated defines model for TypedTaggedEventStreamEnvelopeSessionUpdated.
+type TypedTaggedEventStreamEnvelopeSessionUpdated struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionWoke defines model for TypedTaggedEventStreamEnvelopeSessionWoke.
+type TypedTaggedEventStreamEnvelopeSessionWoke struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeWorkerOperation defines model for TypedTaggedEventStreamEnvelopeWorkerOperation.
+type TypedTaggedEventStreamEnvelopeWorkerOperation struct {
+	Actor    string                      `json:"actor"`
+	City     string                      `json:"city"`
+	Message  *string                     `json:"message,omitempty"`
+	Payload  WorkerOperationEventPayload `json:"payload"`
+	Seq      int64                       `json:"seq"`
+	Subject  *string                     `json:"subject,omitempty"`
+	Ts       time.Time                   `json:"ts"`
+	Type     string                      `json:"type"`
+	Workflow *WorkflowEventProjection    `json:"workflow,omitempty"`
+}
+
 // UnboundEventPayload defines model for UnboundEventPayload.
 type UnboundEventPayload struct {
 	Count     int64  `json:"count"`
 	SessionId string `json:"session_id"`
-}
-
-// WireEvent defines model for WireEvent.
-type WireEvent struct {
-	Actor   string        `json:"actor"`
-	Message *string       `json:"message,omitempty"`
-	Payload *EventPayload `json:"payload,omitempty"`
-	Seq     int64         `json:"seq"`
-	Subject *string       `json:"subject,omitempty"`
-	Ts      time.Time     `json:"ts"`
-	Type    string        `json:"type"`
-}
-
-// WireTaggedEvent defines model for WireTaggedEvent.
-type WireTaggedEvent struct {
-	Actor   string        `json:"actor"`
-	City    string        `json:"city"`
-	Message *string       `json:"message,omitempty"`
-	Payload *EventPayload `json:"payload,omitempty"`
-	Seq     int64         `json:"seq"`
-	Subject *string       `json:"subject,omitempty"`
-	Ts      time.Time     `json:"ts"`
-	Type    string        `json:"type"`
 }
 
 // WorkerOperationEventPayload defines model for WorkerOperationEventPayload.
@@ -2620,6 +3907,30 @@ type WorkspaceResponse struct {
 	Suspended       bool    `json:"suspended"`
 }
 
+// PostV0CityParams defines parameters for PostV0City.
+type PostV0CityParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PatchV0CityByCityNameParams defines parameters for PatchV0CityByCityName.
+type PatchV0CityByCityNameParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// DeleteV0CityByCityNameAgentByBaseParams defines parameters for DeleteV0CityByCityNameAgentByBase.
+type DeleteV0CityByCityNameAgentByBaseParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PatchV0CityByCityNameAgentByBaseParams defines parameters for PatchV0CityByCityNameAgentByBase.
+type PatchV0CityByCityNameAgentByBaseParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // GetV0CityByCityNameAgentByBaseOutputParams defines parameters for GetV0CityByCityNameAgentByBaseOutput.
 type GetV0CityByCityNameAgentByBaseOutputParams struct {
 	// Tail Number of recent compaction segments to return. This API parameter keeps compaction-segment semantics even though gc session logs --tail counts displayed transcript entries. Omit for the endpoint default (usually 1); 0 returns all segments; N>0 returns the last N.
@@ -2629,8 +3940,26 @@ type GetV0CityByCityNameAgentByBaseOutputParams struct {
 	Before *string `form:"before,omitempty" json:"before,omitempty"`
 }
 
+// PostV0CityByCityNameAgentByBaseByActionParams defines parameters for PostV0CityByCityNameAgentByBaseByAction.
+type PostV0CityByCityNameAgentByBaseByActionParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // PostV0CityByCityNameAgentByBaseByActionParamsAction defines parameters for PostV0CityByCityNameAgentByBaseByAction.
 type PostV0CityByCityNameAgentByBaseByActionParamsAction string
+
+// DeleteV0CityByCityNameAgentByDirByBaseParams defines parameters for DeleteV0CityByCityNameAgentByDirByBase.
+type DeleteV0CityByCityNameAgentByDirByBaseParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PatchV0CityByCityNameAgentByDirByBaseParams defines parameters for PatchV0CityByCityNameAgentByDirByBase.
+type PatchV0CityByCityNameAgentByDirByBaseParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
 
 // GetV0CityByCityNameAgentByDirByBaseOutputParams defines parameters for GetV0CityByCityNameAgentByDirByBaseOutput.
 type GetV0CityByCityNameAgentByDirByBaseOutputParams struct {
@@ -2639,6 +3968,12 @@ type GetV0CityByCityNameAgentByDirByBaseOutputParams struct {
 
 	// Before Message UUID cursor for loading older messages.
 	Before *string `form:"before,omitempty" json:"before,omitempty"`
+}
+
+// PostV0CityByCityNameAgentByDirByBaseByActionParams defines parameters for PostV0CityByCityNameAgentByDirByBaseByAction.
+type PostV0CityByCityNameAgentByDirByBaseByActionParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // PostV0CityByCityNameAgentByDirByBaseByActionParamsAction defines parameters for PostV0CityByCityNameAgentByDirByBaseByAction.
@@ -2667,6 +4002,48 @@ type GetV0CityByCityNameAgentsParams struct {
 
 // GetV0CityByCityNameAgentsParamsRunning defines parameters for GetV0CityByCityNameAgents.
 type GetV0CityByCityNameAgentsParamsRunning string
+
+// CreateAgentParams defines parameters for CreateAgent.
+type CreateAgentParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// DeleteV0CityByCityNameBeadByIdParams defines parameters for DeleteV0CityByCityNameBeadById.
+type DeleteV0CityByCityNameBeadByIdParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PatchV0CityByCityNameBeadByIdParams defines parameters for PatchV0CityByCityNameBeadById.
+type PatchV0CityByCityNameBeadByIdParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameBeadByIdAssignParams defines parameters for PostV0CityByCityNameBeadByIdAssign.
+type PostV0CityByCityNameBeadByIdAssignParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameBeadByIdCloseParams defines parameters for PostV0CityByCityNameBeadByIdClose.
+type PostV0CityByCityNameBeadByIdCloseParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameBeadByIdReopenParams defines parameters for PostV0CityByCityNameBeadByIdReopen.
+type PostV0CityByCityNameBeadByIdReopenParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameBeadByIdUpdateParams defines parameters for PostV0CityByCityNameBeadByIdUpdate.
+type PostV0CityByCityNameBeadByIdUpdateParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
 
 // GetV0CityByCityNameBeadsParams defines parameters for GetV0CityByCityNameBeads.
 type GetV0CityByCityNameBeadsParams struct {
@@ -2700,6 +4077,9 @@ type GetV0CityByCityNameBeadsParams struct {
 
 // CreateBeadParams defines parameters for CreateBead.
 type CreateBeadParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+
 	// IdempotencyKey Idempotency key for safe retries.
 	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
@@ -2711,6 +4091,30 @@ type GetV0CityByCityNameBeadsReadyParams struct {
 
 	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
+}
+
+// DeleteV0CityByCityNameConvoyByIdParams defines parameters for DeleteV0CityByCityNameConvoyById.
+type DeleteV0CityByCityNameConvoyByIdParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameConvoyByIdAddParams defines parameters for PostV0CityByCityNameConvoyByIdAdd.
+type PostV0CityByCityNameConvoyByIdAddParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameConvoyByIdCloseParams defines parameters for PostV0CityByCityNameConvoyByIdClose.
+type PostV0CityByCityNameConvoyByIdCloseParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameConvoyByIdRemoveParams defines parameters for PostV0CityByCityNameConvoyByIdRemove.
+type PostV0CityByCityNameConvoyByIdRemoveParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // GetV0CityByCityNameConvoysParams defines parameters for GetV0CityByCityNameConvoys.
@@ -2726,6 +4130,12 @@ type GetV0CityByCityNameConvoysParams struct {
 
 	// Limit Maximum number of results to return. 0 = server default.
 	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// CreateConvoyParams defines parameters for CreateConvoy.
+type CreateConvoyParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // GetV0CityByCityNameEventsParams defines parameters for GetV0CityByCityNameEvents.
@@ -2752,13 +4162,37 @@ type GetV0CityByCityNameEventsParams struct {
 	Since *string `form:"since,omitempty" json:"since,omitempty"`
 }
 
+// EmitEventParams defines parameters for EmitEvent.
+type EmitEventParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // StreamEventsParams defines parameters for StreamEvents.
 type StreamEventsParams struct {
-	// AfterSeq Reconnect position: only deliver events after this sequence number.
+	// AfterSeq Reconnect position: only deliver events after this sequence number. Omit after_seq and Last-Event-ID to start at the current city event head.
 	AfterSeq *string `form:"after_seq,omitempty" json:"after_seq,omitempty"`
 
-	// LastEventID SSE reconnect position from the last received event ID.
+	// LastEventID SSE reconnect position from the last received event ID. Omit Last-Event-ID and after_seq to start at the current city event head.
 	LastEventID *string `json:"Last-Event-ID,omitempty"`
+}
+
+// DeleteV0CityByCityNameExtmsgAdaptersParams defines parameters for DeleteV0CityByCityNameExtmsgAdapters.
+type DeleteV0CityByCityNameExtmsgAdaptersParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// RegisterExtmsgAdapterParams defines parameters for RegisterExtmsgAdapter.
+type RegisterExtmsgAdapterParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameExtmsgBindParams defines parameters for PostV0CityByCityNameExtmsgBind.
+type PostV0CityByCityNameExtmsgBindParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // GetV0CityByCityNameExtmsgBindingsParams defines parameters for GetV0CityByCityNameExtmsgBindings.
@@ -2785,6 +4219,36 @@ type GetV0CityByCityNameExtmsgGroupsParams struct {
 	Kind *string `form:"kind,omitempty" json:"kind,omitempty"`
 }
 
+// EnsureExtmsgGroupParams defines parameters for EnsureExtmsgGroup.
+type EnsureExtmsgGroupParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameExtmsgInboundParams defines parameters for PostV0CityByCityNameExtmsgInbound.
+type PostV0CityByCityNameExtmsgInboundParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameExtmsgOutboundParams defines parameters for PostV0CityByCityNameExtmsgOutbound.
+type PostV0CityByCityNameExtmsgOutboundParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// DeleteV0CityByCityNameExtmsgParticipantsParams defines parameters for DeleteV0CityByCityNameExtmsgParticipants.
+type DeleteV0CityByCityNameExtmsgParticipantsParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameExtmsgParticipantsParams defines parameters for PostV0CityByCityNameExtmsgParticipants.
+type PostV0CityByCityNameExtmsgParticipantsParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // GetV0CityByCityNameExtmsgTranscriptParams defines parameters for GetV0CityByCityNameExtmsgTranscript.
 type GetV0CityByCityNameExtmsgTranscriptParams struct {
 	// ScopeId Scope ID.
@@ -2804,6 +4268,18 @@ type GetV0CityByCityNameExtmsgTranscriptParams struct {
 
 	// Kind Conversation kind.
 	Kind *string `form:"kind,omitempty" json:"kind,omitempty"`
+}
+
+// PostV0CityByCityNameExtmsgTranscriptAckParams defines parameters for PostV0CityByCityNameExtmsgTranscriptAck.
+type PostV0CityByCityNameExtmsgTranscriptAckParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameExtmsgUnbindParams defines parameters for PostV0CityByCityNameExtmsgUnbind.
+type PostV0CityByCityNameExtmsgUnbindParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // GetV0CityByCityNameFormulaByNameParams defines parameters for GetV0CityByCityNameFormulaByName.
@@ -2851,6 +4327,12 @@ type GetV0CityByCityNameFormulasByNameParams struct {
 	Target string `form:"target" json:"target"`
 }
 
+// PostV0CityByCityNameFormulasByNamePreviewParams defines parameters for PostV0CityByCityNameFormulasByNamePreview.
+type PostV0CityByCityNameFormulasByNamePreviewParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // GetV0CityByCityNameFormulasByNameRunsParams defines parameters for GetV0CityByCityNameFormulasByNameRuns.
 type GetV0CityByCityNameFormulasByNameRunsParams struct {
 	// ScopeKind Scope kind (city or rig).
@@ -2889,6 +4371,9 @@ type GetV0CityByCityNameMailParams struct {
 
 // SendMailParams defines parameters for SendMail.
 type SendMailParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+
 	// IdempotencyKey Idempotency key for safe retries.
 	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
@@ -2912,6 +4397,9 @@ type GetV0CityByCityNameMailThreadByIdParams struct {
 type DeleteV0CityByCityNameMailByIdParams struct {
 	// Rig Rig hint.
 	Rig *string `form:"rig,omitempty" json:"rig,omitempty"`
+
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // GetV0CityByCityNameMailByIdParams defines parameters for GetV0CityByCityNameMailById.
@@ -2924,30 +4412,60 @@ type GetV0CityByCityNameMailByIdParams struct {
 type PostV0CityByCityNameMailByIdArchiveParams struct {
 	// Rig Rig hint.
 	Rig *string `form:"rig,omitempty" json:"rig,omitempty"`
+
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // PostV0CityByCityNameMailByIdMarkUnreadParams defines parameters for PostV0CityByCityNameMailByIdMarkUnread.
 type PostV0CityByCityNameMailByIdMarkUnreadParams struct {
 	// Rig Rig hint.
 	Rig *string `form:"rig,omitempty" json:"rig,omitempty"`
+
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // PostV0CityByCityNameMailByIdReadParams defines parameters for PostV0CityByCityNameMailByIdRead.
 type PostV0CityByCityNameMailByIdReadParams struct {
 	// Rig Rig hint.
 	Rig *string `form:"rig,omitempty" json:"rig,omitempty"`
+
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // ReplyMailParams defines parameters for ReplyMail.
 type ReplyMailParams struct {
 	// Rig Rig hint.
 	Rig *string `form:"rig,omitempty" json:"rig,omitempty"`
+
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // GetV0CityByCityNameOrderHistoryByBeadIdParams defines parameters for GetV0CityByCityNameOrderHistoryByBeadId.
 type GetV0CityByCityNameOrderHistoryByBeadIdParams struct {
 	// StoreRef Store reference for disambiguating store-local bead IDs.
 	StoreRef *string `form:"store_ref,omitempty" json:"store_ref,omitempty"`
+}
+
+// PostV0CityByCityNameOrderByNameDisableParams defines parameters for PostV0CityByCityNameOrderByNameDisable.
+type PostV0CityByCityNameOrderByNameDisableParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameOrderByNameEnableParams defines parameters for PostV0CityByCityNameOrderByNameEnable.
+type PostV0CityByCityNameOrderByNameEnableParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// GetV0CityByCityNameOrdersCheckParams defines parameters for GetV0CityByCityNameOrdersCheck.
+type GetV0CityByCityNameOrdersCheckParams struct {
+	// Fresh Bypass cached order-check responses and cached order history.
+	Fresh *bool `form:"fresh,omitempty" json:"fresh,omitempty"`
 }
 
 // GetV0CityByCityNameOrdersFeedParams defines parameters for GetV0CityByCityNameOrdersFeed.
@@ -2974,6 +4492,48 @@ type GetV0CityByCityNameOrdersHistoryParams struct {
 	Before *string `form:"before,omitempty" json:"before,omitempty"`
 }
 
+// DeleteV0CityByCityNamePatchesAgentByBaseParams defines parameters for DeleteV0CityByCityNamePatchesAgentByBase.
+type DeleteV0CityByCityNamePatchesAgentByBaseParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// DeleteV0CityByCityNamePatchesAgentByDirByBaseParams defines parameters for DeleteV0CityByCityNamePatchesAgentByDirByBase.
+type DeleteV0CityByCityNamePatchesAgentByDirByBaseParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PutV0CityByCityNamePatchesAgentsParams defines parameters for PutV0CityByCityNamePatchesAgents.
+type PutV0CityByCityNamePatchesAgentsParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// DeleteV0CityByCityNamePatchesProviderByNameParams defines parameters for DeleteV0CityByCityNamePatchesProviderByName.
+type DeleteV0CityByCityNamePatchesProviderByNameParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PutV0CityByCityNamePatchesProvidersParams defines parameters for PutV0CityByCityNamePatchesProviders.
+type PutV0CityByCityNamePatchesProvidersParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// DeleteV0CityByCityNamePatchesRigByNameParams defines parameters for DeleteV0CityByCityNamePatchesRigByName.
+type DeleteV0CityByCityNamePatchesRigByNameParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PutV0CityByCityNamePatchesRigsParams defines parameters for PutV0CityByCityNamePatchesRigs.
+type PutV0CityByCityNamePatchesRigsParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // GetV0CityByCityNameProviderReadinessParams defines parameters for GetV0CityByCityNameProviderReadiness.
 type GetV0CityByCityNameProviderReadinessParams struct {
 	// Providers Comma-separated provider names to check (default: claude,codex,gemini).
@@ -2981,6 +4541,24 @@ type GetV0CityByCityNameProviderReadinessParams struct {
 
 	// Fresh Force fresh probe, bypassing cache.
 	Fresh *bool `form:"fresh,omitempty" json:"fresh,omitempty"`
+}
+
+// DeleteV0CityByCityNameProviderByNameParams defines parameters for DeleteV0CityByCityNameProviderByName.
+type DeleteV0CityByCityNameProviderByNameParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PatchV0CityByCityNameProviderByNameParams defines parameters for PatchV0CityByCityNameProviderByName.
+type PatchV0CityByCityNameProviderByNameParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// CreateProviderParams defines parameters for CreateProvider.
+type CreateProviderParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // GetV0CityByCityNameReadinessParams defines parameters for GetV0CityByCityNameReadiness.
@@ -2992,10 +4570,28 @@ type GetV0CityByCityNameReadinessParams struct {
 	Fresh *bool `form:"fresh,omitempty" json:"fresh,omitempty"`
 }
 
+// DeleteV0CityByCityNameRigByNameParams defines parameters for DeleteV0CityByCityNameRigByName.
+type DeleteV0CityByCityNameRigByNameParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // GetV0CityByCityNameRigByNameParams defines parameters for GetV0CityByCityNameRigByName.
 type GetV0CityByCityNameRigByNameParams struct {
 	// Git Include git status.
 	Git *bool `form:"git,omitempty" json:"git,omitempty"`
+}
+
+// PatchV0CityByCityNameRigByNameParams defines parameters for PatchV0CityByCityNameRigByName.
+type PatchV0CityByCityNameRigByNameParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameRigByNameByActionParams defines parameters for PostV0CityByCityNameRigByNameByAction.
+type PostV0CityByCityNameRigByNameByActionParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // GetV0CityByCityNameRigsParams defines parameters for GetV0CityByCityNameRigs.
@@ -3010,22 +4606,85 @@ type GetV0CityByCityNameRigsParams struct {
 	Git *bool `form:"git,omitempty" json:"git,omitempty"`
 }
 
+// CreateRigParams defines parameters for CreateRig.
+type CreateRigParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameServiceByNameRestartParams defines parameters for PostV0CityByCityNameServiceByNameRestart.
+type PostV0CityByCityNameServiceByNameRestartParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // GetV0CityByCityNameSessionByIdParams defines parameters for GetV0CityByCityNameSessionById.
 type GetV0CityByCityNameSessionByIdParams struct {
 	// Peek Include last output preview.
 	Peek *bool `form:"peek,omitempty" json:"peek,omitempty"`
 }
 
+// PatchV0CityByCityNameSessionByIdParams defines parameters for PatchV0CityByCityNameSessionById.
+type PatchV0CityByCityNameSessionByIdParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // PostV0CityByCityNameSessionByIdCloseParams defines parameters for PostV0CityByCityNameSessionByIdClose.
 type PostV0CityByCityNameSessionByIdCloseParams struct {
 	// Delete Permanently delete bead after closing.
 	Delete *bool `form:"delete,omitempty" json:"delete,omitempty"`
+
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameSessionByIdKillParams defines parameters for PostV0CityByCityNameSessionByIdKill.
+type PostV0CityByCityNameSessionByIdKillParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// SendSessionMessageParams defines parameters for SendSessionMessage.
+type SendSessionMessageParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameSessionByIdRenameParams defines parameters for PostV0CityByCityNameSessionByIdRename.
+type PostV0CityByCityNameSessionByIdRenameParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// RespondSessionParams defines parameters for RespondSession.
+type RespondSessionParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameSessionByIdStopParams defines parameters for PostV0CityByCityNameSessionByIdStop.
+type PostV0CityByCityNameSessionByIdStopParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // StreamSessionParams defines parameters for StreamSession.
 type StreamSessionParams struct {
 	// Format Transcript format: conversation (default) or raw.
 	Format *string `form:"format,omitempty" json:"format,omitempty"`
+}
+
+// SubmitSessionParams defines parameters for SubmitSession.
+type SubmitSessionParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameSessionByIdSuspendParams defines parameters for PostV0CityByCityNameSessionByIdSuspend.
+type PostV0CityByCityNameSessionByIdSuspendParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // GetV0CityByCityNameSessionByIdTranscriptParams defines parameters for GetV0CityByCityNameSessionByIdTranscript.
@@ -3038,6 +4697,15 @@ type GetV0CityByCityNameSessionByIdTranscriptParams struct {
 
 	// Before Pagination cursor: return entries before this UUID.
 	Before *string `form:"before,omitempty" json:"before,omitempty"`
+
+	// After Pagination cursor: return entries after this UUID.
+	After *string `form:"after,omitempty" json:"after,omitempty"`
+}
+
+// PostV0CityByCityNameSessionByIdWakeParams defines parameters for PostV0CityByCityNameSessionByIdWake.
+type PostV0CityByCityNameSessionByIdWakeParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // GetV0CityByCityNameSessionsParams defines parameters for GetV0CityByCityNameSessions.
@@ -3058,6 +4726,18 @@ type GetV0CityByCityNameSessionsParams struct {
 	Peek *bool `form:"peek,omitempty" json:"peek,omitempty"`
 }
 
+// CreateSessionParams defines parameters for CreateSession.
+type CreateSessionParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameSlingParams defines parameters for PostV0CityByCityNameSling.
+type PostV0CityByCityNameSlingParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // GetV0CityByCityNameStatusParams defines parameters for GetV0CityByCityNameStatus.
 type GetV0CityByCityNameStatusParams struct {
 	// Index Event sequence number; when provided, blocks until a newer event arrives.
@@ -3065,6 +4745,12 @@ type GetV0CityByCityNameStatusParams struct {
 
 	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
+}
+
+// PostV0CityByCityNameUnregisterParams defines parameters for PostV0CityByCityNameUnregister.
+type PostV0CityByCityNameUnregisterParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // DeleteV0CityByCityNameWorkflowByWorkflowIdParams defines parameters for DeleteV0CityByCityNameWorkflowByWorkflowId.
@@ -3077,6 +4763,9 @@ type DeleteV0CityByCityNameWorkflowByWorkflowIdParams struct {
 
 	// Delete Permanently delete beads from store.
 	Delete *bool `form:"delete,omitempty" json:"delete,omitempty"`
+
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // GetV0CityByCityNameWorkflowByWorkflowIdParams defines parameters for GetV0CityByCityNameWorkflowByWorkflowId.
@@ -3105,10 +4794,10 @@ type GetV0EventsParams struct {
 
 // StreamSupervisorEventsParams defines parameters for StreamSupervisorEvents.
 type StreamSupervisorEventsParams struct {
-	// AfterCursor Alternative to Last-Event-ID for browsers that can't set custom headers.
+	// AfterCursor Alternative to Last-Event-ID for browsers that can't set custom headers. Omit after_cursor and Last-Event-ID to start at the current supervisor event head.
 	AfterCursor *string `form:"after_cursor,omitempty" json:"after_cursor,omitempty"`
 
-	// LastEventID Reconnect cursor (composite per-city cursor).
+	// LastEventID Reconnect cursor (composite per-city cursor). Omit Last-Event-ID and after_cursor to start at the current supervisor event head.
 	LastEventID *string `json:"Last-Event-ID,omitempty"`
 }
 
@@ -3328,6 +5017,84 @@ func (t *EventPayload) MergeBoundEventPayload(v BoundEventPayload) error {
 	return err
 }
 
+// AsCityCreateSucceededPayload returns the union data inside the EventPayload as a CityCreateSucceededPayload
+func (t EventPayload) AsCityCreateSucceededPayload() (CityCreateSucceededPayload, error) {
+	var body CityCreateSucceededPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromCityCreateSucceededPayload overwrites any union data inside the EventPayload as the provided CityCreateSucceededPayload
+func (t *EventPayload) FromCityCreateSucceededPayload(v CityCreateSucceededPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeCityCreateSucceededPayload performs a merge with any union data inside the EventPayload, using the provided CityCreateSucceededPayload
+func (t *EventPayload) MergeCityCreateSucceededPayload(v CityCreateSucceededPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsCityLifecyclePayload returns the union data inside the EventPayload as a CityLifecyclePayload
+func (t EventPayload) AsCityLifecyclePayload() (CityLifecyclePayload, error) {
+	var body CityLifecyclePayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromCityLifecyclePayload overwrites any union data inside the EventPayload as the provided CityLifecyclePayload
+func (t *EventPayload) FromCityLifecyclePayload(v CityLifecyclePayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeCityLifecyclePayload performs a merge with any union data inside the EventPayload, using the provided CityLifecyclePayload
+func (t *EventPayload) MergeCityLifecyclePayload(v CityLifecyclePayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsCityUnregisterSucceededPayload returns the union data inside the EventPayload as a CityUnregisterSucceededPayload
+func (t EventPayload) AsCityUnregisterSucceededPayload() (CityUnregisterSucceededPayload, error) {
+	var body CityUnregisterSucceededPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromCityUnregisterSucceededPayload overwrites any union data inside the EventPayload as the provided CityUnregisterSucceededPayload
+func (t *EventPayload) FromCityUnregisterSucceededPayload(v CityUnregisterSucceededPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeCityUnregisterSucceededPayload performs a merge with any union data inside the EventPayload, using the provided CityUnregisterSucceededPayload
+func (t *EventPayload) MergeCityUnregisterSucceededPayload(v CityUnregisterSucceededPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsGroupCreatedEventPayload returns the union data inside the EventPayload as a GroupCreatedEventPayload
 func (t EventPayload) AsGroupCreatedEventPayload() (GroupCreatedEventPayload, error) {
 	var body GroupCreatedEventPayload
@@ -3458,6 +5225,110 @@ func (t *EventPayload) MergeOutboundEventPayload(v OutboundEventPayload) error {
 	return err
 }
 
+// AsRequestFailedPayload returns the union data inside the EventPayload as a RequestFailedPayload
+func (t EventPayload) AsRequestFailedPayload() (RequestFailedPayload, error) {
+	var body RequestFailedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromRequestFailedPayload overwrites any union data inside the EventPayload as the provided RequestFailedPayload
+func (t *EventPayload) FromRequestFailedPayload(v RequestFailedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeRequestFailedPayload performs a merge with any union data inside the EventPayload, using the provided RequestFailedPayload
+func (t *EventPayload) MergeRequestFailedPayload(v RequestFailedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionCreateSucceededPayload returns the union data inside the EventPayload as a SessionCreateSucceededPayload
+func (t EventPayload) AsSessionCreateSucceededPayload() (SessionCreateSucceededPayload, error) {
+	var body SessionCreateSucceededPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionCreateSucceededPayload overwrites any union data inside the EventPayload as the provided SessionCreateSucceededPayload
+func (t *EventPayload) FromSessionCreateSucceededPayload(v SessionCreateSucceededPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionCreateSucceededPayload performs a merge with any union data inside the EventPayload, using the provided SessionCreateSucceededPayload
+func (t *EventPayload) MergeSessionCreateSucceededPayload(v SessionCreateSucceededPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionMessageSucceededPayload returns the union data inside the EventPayload as a SessionMessageSucceededPayload
+func (t EventPayload) AsSessionMessageSucceededPayload() (SessionMessageSucceededPayload, error) {
+	var body SessionMessageSucceededPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionMessageSucceededPayload overwrites any union data inside the EventPayload as the provided SessionMessageSucceededPayload
+func (t *EventPayload) FromSessionMessageSucceededPayload(v SessionMessageSucceededPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionMessageSucceededPayload performs a merge with any union data inside the EventPayload, using the provided SessionMessageSucceededPayload
+func (t *EventPayload) MergeSessionMessageSucceededPayload(v SessionMessageSucceededPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionSubmitSucceededPayload returns the union data inside the EventPayload as a SessionSubmitSucceededPayload
+func (t EventPayload) AsSessionSubmitSucceededPayload() (SessionSubmitSucceededPayload, error) {
+	var body SessionSubmitSucceededPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionSubmitSucceededPayload overwrites any union data inside the EventPayload as the provided SessionSubmitSucceededPayload
+func (t *EventPayload) FromSessionSubmitSucceededPayload(v SessionSubmitSucceededPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionSubmitSucceededPayload performs a merge with any union data inside the EventPayload, using the provided SessionSubmitSucceededPayload
+func (t *EventPayload) MergeSessionSubmitSucceededPayload(v SessionSubmitSucceededPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsUnboundEventPayload returns the union data inside the EventPayload as a UnboundEventPayload
 func (t EventPayload) AsUnboundEventPayload() (UnboundEventPayload, error) {
 	var body UnboundEventPayload
@@ -3516,6 +5387,2912 @@ func (t EventPayload) MarshalJSON() ([]byte, error) {
 }
 
 func (t *EventPayload) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsSessionActivityEvent returns the union data inside the SessionStreamCommonEvent as a SessionActivityEvent
+func (t SessionStreamCommonEvent) AsSessionActivityEvent() (SessionActivityEvent, error) {
+	var body SessionActivityEvent
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionActivityEvent overwrites any union data inside the SessionStreamCommonEvent as the provided SessionActivityEvent
+func (t *SessionStreamCommonEvent) FromSessionActivityEvent(v SessionActivityEvent) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionActivityEvent performs a merge with any union data inside the SessionStreamCommonEvent, using the provided SessionActivityEvent
+func (t *SessionStreamCommonEvent) MergeSessionActivityEvent(v SessionActivityEvent) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsPendingInteraction returns the union data inside the SessionStreamCommonEvent as a PendingInteraction
+func (t SessionStreamCommonEvent) AsPendingInteraction() (PendingInteraction, error) {
+	var body PendingInteraction
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromPendingInteraction overwrites any union data inside the SessionStreamCommonEvent as the provided PendingInteraction
+func (t *SessionStreamCommonEvent) FromPendingInteraction(v PendingInteraction) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergePendingInteraction performs a merge with any union data inside the SessionStreamCommonEvent, using the provided PendingInteraction
+func (t *SessionStreamCommonEvent) MergePendingInteraction(v PendingInteraction) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsHeartbeatEvent returns the union data inside the SessionStreamCommonEvent as a HeartbeatEvent
+func (t SessionStreamCommonEvent) AsHeartbeatEvent() (HeartbeatEvent, error) {
+	var body HeartbeatEvent
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromHeartbeatEvent overwrites any union data inside the SessionStreamCommonEvent as the provided HeartbeatEvent
+func (t *SessionStreamCommonEvent) FromHeartbeatEvent(v HeartbeatEvent) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeHeartbeatEvent performs a merge with any union data inside the SessionStreamCommonEvent, using the provided HeartbeatEvent
+func (t *SessionStreamCommonEvent) MergeHeartbeatEvent(v HeartbeatEvent) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t SessionStreamCommonEvent) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *SessionStreamCommonEvent) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsTypedEventStreamEnvelopeBeadClosed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeBeadClosed
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeBeadClosed() (TypedEventStreamEnvelopeBeadClosed, error) {
+	var body TypedEventStreamEnvelopeBeadClosed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeBeadClosed overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeBeadClosed
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeBeadClosed(v TypedEventStreamEnvelopeBeadClosed) error {
+	v.Type = "bead.closed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeBeadClosed performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeBeadClosed
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBeadClosed(v TypedEventStreamEnvelopeBeadClosed) error {
+	v.Type = "bead.closed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeBeadCreated returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeBeadCreated
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeBeadCreated() (TypedEventStreamEnvelopeBeadCreated, error) {
+	var body TypedEventStreamEnvelopeBeadCreated
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeBeadCreated overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeBeadCreated
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeBeadCreated(v TypedEventStreamEnvelopeBeadCreated) error {
+	v.Type = "bead.created"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeBeadCreated performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeBeadCreated
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBeadCreated(v TypedEventStreamEnvelopeBeadCreated) error {
+	v.Type = "bead.created"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeBeadUpdated returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeBeadUpdated
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeBeadUpdated() (TypedEventStreamEnvelopeBeadUpdated, error) {
+	var body TypedEventStreamEnvelopeBeadUpdated
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeBeadUpdated overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeBeadUpdated
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeBeadUpdated(v TypedEventStreamEnvelopeBeadUpdated) error {
+	v.Type = "bead.updated"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeBeadUpdated performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeBeadUpdated
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBeadUpdated(v TypedEventStreamEnvelopeBeadUpdated) error {
+	v.Type = "bead.updated"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeCityCreated returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeCityCreated
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeCityCreated() (TypedEventStreamEnvelopeCityCreated, error) {
+	var body TypedEventStreamEnvelopeCityCreated
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeCityCreated overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeCityCreated
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeCityCreated(v TypedEventStreamEnvelopeCityCreated) error {
+	v.Type = "city.created"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeCityCreated performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeCityCreated
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeCityCreated(v TypedEventStreamEnvelopeCityCreated) error {
+	v.Type = "city.created"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeCityResumed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeCityResumed
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeCityResumed() (TypedEventStreamEnvelopeCityResumed, error) {
+	var body TypedEventStreamEnvelopeCityResumed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeCityResumed overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeCityResumed
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeCityResumed(v TypedEventStreamEnvelopeCityResumed) error {
+	v.Type = "city.resumed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeCityResumed performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeCityResumed
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeCityResumed(v TypedEventStreamEnvelopeCityResumed) error {
+	v.Type = "city.resumed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeCitySuspended returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeCitySuspended
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeCitySuspended() (TypedEventStreamEnvelopeCitySuspended, error) {
+	var body TypedEventStreamEnvelopeCitySuspended
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeCitySuspended overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeCitySuspended
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeCitySuspended(v TypedEventStreamEnvelopeCitySuspended) error {
+	v.Type = "city.suspended"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeCitySuspended performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeCitySuspended
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeCitySuspended(v TypedEventStreamEnvelopeCitySuspended) error {
+	v.Type = "city.suspended"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeCityUnregisterRequested returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeCityUnregisterRequested
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeCityUnregisterRequested() (TypedEventStreamEnvelopeCityUnregisterRequested, error) {
+	var body TypedEventStreamEnvelopeCityUnregisterRequested
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeCityUnregisterRequested overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeCityUnregisterRequested
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeCityUnregisterRequested(v TypedEventStreamEnvelopeCityUnregisterRequested) error {
+	v.Type = "city.unregister_requested"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeCityUnregisterRequested performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeCityUnregisterRequested
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeCityUnregisterRequested(v TypedEventStreamEnvelopeCityUnregisterRequested) error {
+	v.Type = "city.unregister_requested"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeControllerStarted returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeControllerStarted
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeControllerStarted() (TypedEventStreamEnvelopeControllerStarted, error) {
+	var body TypedEventStreamEnvelopeControllerStarted
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeControllerStarted overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeControllerStarted
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeControllerStarted(v TypedEventStreamEnvelopeControllerStarted) error {
+	v.Type = "controller.started"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeControllerStarted performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeControllerStarted
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeControllerStarted(v TypedEventStreamEnvelopeControllerStarted) error {
+	v.Type = "controller.started"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeControllerStopped returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeControllerStopped
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeControllerStopped() (TypedEventStreamEnvelopeControllerStopped, error) {
+	var body TypedEventStreamEnvelopeControllerStopped
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeControllerStopped overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeControllerStopped
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeControllerStopped(v TypedEventStreamEnvelopeControllerStopped) error {
+	v.Type = "controller.stopped"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeControllerStopped performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeControllerStopped
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeControllerStopped(v TypedEventStreamEnvelopeControllerStopped) error {
+	v.Type = "controller.stopped"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeConvoyClosed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeConvoyClosed
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeConvoyClosed() (TypedEventStreamEnvelopeConvoyClosed, error) {
+	var body TypedEventStreamEnvelopeConvoyClosed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeConvoyClosed overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeConvoyClosed
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeConvoyClosed(v TypedEventStreamEnvelopeConvoyClosed) error {
+	v.Type = "convoy.closed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeConvoyClosed performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeConvoyClosed
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeConvoyClosed(v TypedEventStreamEnvelopeConvoyClosed) error {
+	v.Type = "convoy.closed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeConvoyCreated returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeConvoyCreated
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeConvoyCreated() (TypedEventStreamEnvelopeConvoyCreated, error) {
+	var body TypedEventStreamEnvelopeConvoyCreated
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeConvoyCreated overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeConvoyCreated
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeConvoyCreated(v TypedEventStreamEnvelopeConvoyCreated) error {
+	v.Type = "convoy.created"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeConvoyCreated performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeConvoyCreated
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeConvoyCreated(v TypedEventStreamEnvelopeConvoyCreated) error {
+	v.Type = "convoy.created"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeExtmsgAdapterAdded returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeExtmsgAdapterAdded
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeExtmsgAdapterAdded() (TypedEventStreamEnvelopeExtmsgAdapterAdded, error) {
+	var body TypedEventStreamEnvelopeExtmsgAdapterAdded
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeExtmsgAdapterAdded overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeExtmsgAdapterAdded
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeExtmsgAdapterAdded(v TypedEventStreamEnvelopeExtmsgAdapterAdded) error {
+	v.Type = "extmsg.adapter_added"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeExtmsgAdapterAdded performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeExtmsgAdapterAdded
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExtmsgAdapterAdded(v TypedEventStreamEnvelopeExtmsgAdapterAdded) error {
+	v.Type = "extmsg.adapter_added"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeExtmsgAdapterRemoved returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeExtmsgAdapterRemoved
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeExtmsgAdapterRemoved() (TypedEventStreamEnvelopeExtmsgAdapterRemoved, error) {
+	var body TypedEventStreamEnvelopeExtmsgAdapterRemoved
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeExtmsgAdapterRemoved overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeExtmsgAdapterRemoved
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeExtmsgAdapterRemoved(v TypedEventStreamEnvelopeExtmsgAdapterRemoved) error {
+	v.Type = "extmsg.adapter_removed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeExtmsgAdapterRemoved performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeExtmsgAdapterRemoved
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExtmsgAdapterRemoved(v TypedEventStreamEnvelopeExtmsgAdapterRemoved) error {
+	v.Type = "extmsg.adapter_removed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeExtmsgBound returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeExtmsgBound
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeExtmsgBound() (TypedEventStreamEnvelopeExtmsgBound, error) {
+	var body TypedEventStreamEnvelopeExtmsgBound
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeExtmsgBound overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeExtmsgBound
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeExtmsgBound(v TypedEventStreamEnvelopeExtmsgBound) error {
+	v.Type = "extmsg.bound"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeExtmsgBound performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeExtmsgBound
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExtmsgBound(v TypedEventStreamEnvelopeExtmsgBound) error {
+	v.Type = "extmsg.bound"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeExtmsgGroupCreated returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeExtmsgGroupCreated
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeExtmsgGroupCreated() (TypedEventStreamEnvelopeExtmsgGroupCreated, error) {
+	var body TypedEventStreamEnvelopeExtmsgGroupCreated
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeExtmsgGroupCreated overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeExtmsgGroupCreated
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeExtmsgGroupCreated(v TypedEventStreamEnvelopeExtmsgGroupCreated) error {
+	v.Type = "extmsg.group_created"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeExtmsgGroupCreated performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeExtmsgGroupCreated
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExtmsgGroupCreated(v TypedEventStreamEnvelopeExtmsgGroupCreated) error {
+	v.Type = "extmsg.group_created"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeExtmsgInbound returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeExtmsgInbound
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeExtmsgInbound() (TypedEventStreamEnvelopeExtmsgInbound, error) {
+	var body TypedEventStreamEnvelopeExtmsgInbound
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeExtmsgInbound overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeExtmsgInbound
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeExtmsgInbound(v TypedEventStreamEnvelopeExtmsgInbound) error {
+	v.Type = "extmsg.inbound"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeExtmsgInbound performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeExtmsgInbound
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExtmsgInbound(v TypedEventStreamEnvelopeExtmsgInbound) error {
+	v.Type = "extmsg.inbound"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeExtmsgOutbound returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeExtmsgOutbound
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeExtmsgOutbound() (TypedEventStreamEnvelopeExtmsgOutbound, error) {
+	var body TypedEventStreamEnvelopeExtmsgOutbound
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeExtmsgOutbound overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeExtmsgOutbound
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeExtmsgOutbound(v TypedEventStreamEnvelopeExtmsgOutbound) error {
+	v.Type = "extmsg.outbound"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeExtmsgOutbound performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeExtmsgOutbound
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExtmsgOutbound(v TypedEventStreamEnvelopeExtmsgOutbound) error {
+	v.Type = "extmsg.outbound"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeExtmsgUnbound returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeExtmsgUnbound
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeExtmsgUnbound() (TypedEventStreamEnvelopeExtmsgUnbound, error) {
+	var body TypedEventStreamEnvelopeExtmsgUnbound
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeExtmsgUnbound overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeExtmsgUnbound
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeExtmsgUnbound(v TypedEventStreamEnvelopeExtmsgUnbound) error {
+	v.Type = "extmsg.unbound"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeExtmsgUnbound performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeExtmsgUnbound
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExtmsgUnbound(v TypedEventStreamEnvelopeExtmsgUnbound) error {
+	v.Type = "extmsg.unbound"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeMailArchived returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeMailArchived
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeMailArchived() (TypedEventStreamEnvelopeMailArchived, error) {
+	var body TypedEventStreamEnvelopeMailArchived
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeMailArchived overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeMailArchived
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeMailArchived(v TypedEventStreamEnvelopeMailArchived) error {
+	v.Type = "mail.archived"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeMailArchived performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeMailArchived
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeMailArchived(v TypedEventStreamEnvelopeMailArchived) error {
+	v.Type = "mail.archived"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeMailDeleted returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeMailDeleted
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeMailDeleted() (TypedEventStreamEnvelopeMailDeleted, error) {
+	var body TypedEventStreamEnvelopeMailDeleted
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeMailDeleted overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeMailDeleted
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeMailDeleted(v TypedEventStreamEnvelopeMailDeleted) error {
+	v.Type = "mail.deleted"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeMailDeleted performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeMailDeleted
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeMailDeleted(v TypedEventStreamEnvelopeMailDeleted) error {
+	v.Type = "mail.deleted"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeMailMarkedRead returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeMailMarkedRead
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeMailMarkedRead() (TypedEventStreamEnvelopeMailMarkedRead, error) {
+	var body TypedEventStreamEnvelopeMailMarkedRead
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeMailMarkedRead overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeMailMarkedRead
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeMailMarkedRead(v TypedEventStreamEnvelopeMailMarkedRead) error {
+	v.Type = "mail.marked_read"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeMailMarkedRead performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeMailMarkedRead
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeMailMarkedRead(v TypedEventStreamEnvelopeMailMarkedRead) error {
+	v.Type = "mail.marked_read"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeMailMarkedUnread returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeMailMarkedUnread
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeMailMarkedUnread() (TypedEventStreamEnvelopeMailMarkedUnread, error) {
+	var body TypedEventStreamEnvelopeMailMarkedUnread
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeMailMarkedUnread overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeMailMarkedUnread
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeMailMarkedUnread(v TypedEventStreamEnvelopeMailMarkedUnread) error {
+	v.Type = "mail.marked_unread"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeMailMarkedUnread performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeMailMarkedUnread
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeMailMarkedUnread(v TypedEventStreamEnvelopeMailMarkedUnread) error {
+	v.Type = "mail.marked_unread"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeMailRead returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeMailRead
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeMailRead() (TypedEventStreamEnvelopeMailRead, error) {
+	var body TypedEventStreamEnvelopeMailRead
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeMailRead overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeMailRead
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeMailRead(v TypedEventStreamEnvelopeMailRead) error {
+	v.Type = "mail.read"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeMailRead performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeMailRead
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeMailRead(v TypedEventStreamEnvelopeMailRead) error {
+	v.Type = "mail.read"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeMailReplied returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeMailReplied
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeMailReplied() (TypedEventStreamEnvelopeMailReplied, error) {
+	var body TypedEventStreamEnvelopeMailReplied
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeMailReplied overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeMailReplied
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeMailReplied(v TypedEventStreamEnvelopeMailReplied) error {
+	v.Type = "mail.replied"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeMailReplied performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeMailReplied
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeMailReplied(v TypedEventStreamEnvelopeMailReplied) error {
+	v.Type = "mail.replied"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeMailSent returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeMailSent
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeMailSent() (TypedEventStreamEnvelopeMailSent, error) {
+	var body TypedEventStreamEnvelopeMailSent
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeMailSent overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeMailSent
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeMailSent(v TypedEventStreamEnvelopeMailSent) error {
+	v.Type = "mail.sent"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeMailSent performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeMailSent
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeMailSent(v TypedEventStreamEnvelopeMailSent) error {
+	v.Type = "mail.sent"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeOrderCompleted returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeOrderCompleted
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeOrderCompleted() (TypedEventStreamEnvelopeOrderCompleted, error) {
+	var body TypedEventStreamEnvelopeOrderCompleted
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeOrderCompleted overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeOrderCompleted
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeOrderCompleted(v TypedEventStreamEnvelopeOrderCompleted) error {
+	v.Type = "order.completed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeOrderCompleted performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeOrderCompleted
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeOrderCompleted(v TypedEventStreamEnvelopeOrderCompleted) error {
+	v.Type = "order.completed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeOrderFailed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeOrderFailed
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeOrderFailed() (TypedEventStreamEnvelopeOrderFailed, error) {
+	var body TypedEventStreamEnvelopeOrderFailed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeOrderFailed overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeOrderFailed
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeOrderFailed(v TypedEventStreamEnvelopeOrderFailed) error {
+	v.Type = "order.failed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeOrderFailed performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeOrderFailed
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeOrderFailed(v TypedEventStreamEnvelopeOrderFailed) error {
+	v.Type = "order.failed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeOrderFired returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeOrderFired
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeOrderFired() (TypedEventStreamEnvelopeOrderFired, error) {
+	var body TypedEventStreamEnvelopeOrderFired
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeOrderFired overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeOrderFired
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeOrderFired(v TypedEventStreamEnvelopeOrderFired) error {
+	v.Type = "order.fired"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeOrderFired performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeOrderFired
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeOrderFired(v TypedEventStreamEnvelopeOrderFired) error {
+	v.Type = "order.fired"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeProviderSwapped returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeProviderSwapped
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeProviderSwapped() (TypedEventStreamEnvelopeProviderSwapped, error) {
+	var body TypedEventStreamEnvelopeProviderSwapped
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeProviderSwapped overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeProviderSwapped
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeProviderSwapped(v TypedEventStreamEnvelopeProviderSwapped) error {
+	v.Type = "provider.swapped"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeProviderSwapped performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeProviderSwapped
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeProviderSwapped(v TypedEventStreamEnvelopeProviderSwapped) error {
+	v.Type = "provider.swapped"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeRequestFailed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeRequestFailed
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeRequestFailed() (TypedEventStreamEnvelopeRequestFailed, error) {
+	var body TypedEventStreamEnvelopeRequestFailed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeRequestFailed overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeRequestFailed
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeRequestFailed(v TypedEventStreamEnvelopeRequestFailed) error {
+	v.Type = "request.failed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeRequestFailed performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeRequestFailed
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeRequestFailed(v TypedEventStreamEnvelopeRequestFailed) error {
+	v.Type = "request.failed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeRequestResultCityCreate returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeRequestResultCityCreate
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeRequestResultCityCreate() (TypedEventStreamEnvelopeRequestResultCityCreate, error) {
+	var body TypedEventStreamEnvelopeRequestResultCityCreate
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeRequestResultCityCreate overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeRequestResultCityCreate
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeRequestResultCityCreate(v TypedEventStreamEnvelopeRequestResultCityCreate) error {
+	v.Type = "request.result.city.create"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeRequestResultCityCreate performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeRequestResultCityCreate
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeRequestResultCityCreate(v TypedEventStreamEnvelopeRequestResultCityCreate) error {
+	v.Type = "request.result.city.create"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeRequestResultCityUnregister returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeRequestResultCityUnregister
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeRequestResultCityUnregister() (TypedEventStreamEnvelopeRequestResultCityUnregister, error) {
+	var body TypedEventStreamEnvelopeRequestResultCityUnregister
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeRequestResultCityUnregister overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeRequestResultCityUnregister
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeRequestResultCityUnregister(v TypedEventStreamEnvelopeRequestResultCityUnregister) error {
+	v.Type = "request.result.city.unregister"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeRequestResultCityUnregister performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeRequestResultCityUnregister
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeRequestResultCityUnregister(v TypedEventStreamEnvelopeRequestResultCityUnregister) error {
+	v.Type = "request.result.city.unregister"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeRequestResultSessionCreate returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeRequestResultSessionCreate
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeRequestResultSessionCreate() (TypedEventStreamEnvelopeRequestResultSessionCreate, error) {
+	var body TypedEventStreamEnvelopeRequestResultSessionCreate
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeRequestResultSessionCreate overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeRequestResultSessionCreate
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeRequestResultSessionCreate(v TypedEventStreamEnvelopeRequestResultSessionCreate) error {
+	v.Type = "request.result.session.create"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeRequestResultSessionCreate performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeRequestResultSessionCreate
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeRequestResultSessionCreate(v TypedEventStreamEnvelopeRequestResultSessionCreate) error {
+	v.Type = "request.result.session.create"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeRequestResultSessionMessage returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeRequestResultSessionMessage
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeRequestResultSessionMessage() (TypedEventStreamEnvelopeRequestResultSessionMessage, error) {
+	var body TypedEventStreamEnvelopeRequestResultSessionMessage
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeRequestResultSessionMessage overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeRequestResultSessionMessage
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeRequestResultSessionMessage(v TypedEventStreamEnvelopeRequestResultSessionMessage) error {
+	v.Type = "request.result.session.message"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeRequestResultSessionMessage performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeRequestResultSessionMessage
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeRequestResultSessionMessage(v TypedEventStreamEnvelopeRequestResultSessionMessage) error {
+	v.Type = "request.result.session.message"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeRequestResultSessionSubmit returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeRequestResultSessionSubmit
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeRequestResultSessionSubmit() (TypedEventStreamEnvelopeRequestResultSessionSubmit, error) {
+	var body TypedEventStreamEnvelopeRequestResultSessionSubmit
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeRequestResultSessionSubmit overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeRequestResultSessionSubmit
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeRequestResultSessionSubmit(v TypedEventStreamEnvelopeRequestResultSessionSubmit) error {
+	v.Type = "request.result.session.submit"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeRequestResultSessionSubmit performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeRequestResultSessionSubmit
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeRequestResultSessionSubmit(v TypedEventStreamEnvelopeRequestResultSessionSubmit) error {
+	v.Type = "request.result.session.submit"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeSessionCrashed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionCrashed
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionCrashed() (TypedEventStreamEnvelopeSessionCrashed, error) {
+	var body TypedEventStreamEnvelopeSessionCrashed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionCrashed overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionCrashed
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionCrashed(v TypedEventStreamEnvelopeSessionCrashed) error {
+	v.Type = "session.crashed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionCrashed performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionCrashed
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionCrashed(v TypedEventStreamEnvelopeSessionCrashed) error {
+	v.Type = "session.crashed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeSessionDraining returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionDraining
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionDraining() (TypedEventStreamEnvelopeSessionDraining, error) {
+	var body TypedEventStreamEnvelopeSessionDraining
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionDraining overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionDraining
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionDraining(v TypedEventStreamEnvelopeSessionDraining) error {
+	v.Type = "session.draining"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionDraining performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionDraining
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionDraining(v TypedEventStreamEnvelopeSessionDraining) error {
+	v.Type = "session.draining"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeSessionIdleKilled returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionIdleKilled
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionIdleKilled() (TypedEventStreamEnvelopeSessionIdleKilled, error) {
+	var body TypedEventStreamEnvelopeSessionIdleKilled
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionIdleKilled overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionIdleKilled
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionIdleKilled(v TypedEventStreamEnvelopeSessionIdleKilled) error {
+	v.Type = "session.idle_killed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionIdleKilled performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionIdleKilled
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionIdleKilled(v TypedEventStreamEnvelopeSessionIdleKilled) error {
+	v.Type = "session.idle_killed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeSessionQuarantined returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionQuarantined
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionQuarantined() (TypedEventStreamEnvelopeSessionQuarantined, error) {
+	var body TypedEventStreamEnvelopeSessionQuarantined
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionQuarantined overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionQuarantined
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionQuarantined(v TypedEventStreamEnvelopeSessionQuarantined) error {
+	v.Type = "session.quarantined"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionQuarantined performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionQuarantined
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionQuarantined(v TypedEventStreamEnvelopeSessionQuarantined) error {
+	v.Type = "session.quarantined"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeSessionStopped returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionStopped
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionStopped() (TypedEventStreamEnvelopeSessionStopped, error) {
+	var body TypedEventStreamEnvelopeSessionStopped
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionStopped overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionStopped
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionStopped(v TypedEventStreamEnvelopeSessionStopped) error {
+	v.Type = "session.stopped"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionStopped performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionStopped
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionStopped(v TypedEventStreamEnvelopeSessionStopped) error {
+	v.Type = "session.stopped"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeSessionSuspended returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionSuspended
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionSuspended() (TypedEventStreamEnvelopeSessionSuspended, error) {
+	var body TypedEventStreamEnvelopeSessionSuspended
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionSuspended overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionSuspended
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionSuspended(v TypedEventStreamEnvelopeSessionSuspended) error {
+	v.Type = "session.suspended"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionSuspended performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionSuspended
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionSuspended(v TypedEventStreamEnvelopeSessionSuspended) error {
+	v.Type = "session.suspended"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeSessionUndrained returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionUndrained
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionUndrained() (TypedEventStreamEnvelopeSessionUndrained, error) {
+	var body TypedEventStreamEnvelopeSessionUndrained
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionUndrained overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionUndrained
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionUndrained(v TypedEventStreamEnvelopeSessionUndrained) error {
+	v.Type = "session.undrained"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionUndrained performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionUndrained
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionUndrained(v TypedEventStreamEnvelopeSessionUndrained) error {
+	v.Type = "session.undrained"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeSessionUpdated returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionUpdated
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionUpdated() (TypedEventStreamEnvelopeSessionUpdated, error) {
+	var body TypedEventStreamEnvelopeSessionUpdated
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionUpdated overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionUpdated
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionUpdated(v TypedEventStreamEnvelopeSessionUpdated) error {
+	v.Type = "session.updated"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionUpdated performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionUpdated
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionUpdated(v TypedEventStreamEnvelopeSessionUpdated) error {
+	v.Type = "session.updated"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeSessionWoke returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionWoke
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionWoke() (TypedEventStreamEnvelopeSessionWoke, error) {
+	var body TypedEventStreamEnvelopeSessionWoke
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionWoke overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionWoke
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionWoke(v TypedEventStreamEnvelopeSessionWoke) error {
+	v.Type = "session.woke"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionWoke performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionWoke
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionWoke(v TypedEventStreamEnvelopeSessionWoke) error {
+	v.Type = "session.woke"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeWorkerOperation returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeWorkerOperation
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeWorkerOperation() (TypedEventStreamEnvelopeWorkerOperation, error) {
+	var body TypedEventStreamEnvelopeWorkerOperation
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeWorkerOperation overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeWorkerOperation
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeWorkerOperation(v TypedEventStreamEnvelopeWorkerOperation) error {
+	v.Type = "worker.operation"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeWorkerOperation performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeWorkerOperation
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeWorkerOperation(v TypedEventStreamEnvelopeWorkerOperation) error {
+	v.Type = "worker.operation"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeCustom returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeCustom
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeCustom() (TypedEventStreamEnvelopeCustom, error) {
+	var body TypedEventStreamEnvelopeCustom
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeCustom overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeCustom
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeCustom(v TypedEventStreamEnvelopeCustom) error {
+	v.Type = "TypedEventStreamEnvelopeCustom"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeCustom performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeCustom
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeCustom(v TypedEventStreamEnvelopeCustom) error {
+	v.Type = "TypedEventStreamEnvelopeCustom"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t TypedEventStreamEnvelope) Discriminator() (string, error) {
+	var discriminator struct {
+		Discriminator string `json:"type"`
+	}
+	err := json.Unmarshal(t.union, &discriminator)
+	return discriminator.Discriminator, err
+}
+
+func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
+	discriminator, err := t.Discriminator()
+	if err != nil {
+		return nil, err
+	}
+	switch discriminator {
+	case "TypedEventStreamEnvelopeCustom":
+		return t.AsTypedEventStreamEnvelopeCustom()
+	case "bead.closed":
+		return t.AsTypedEventStreamEnvelopeBeadClosed()
+	case "bead.created":
+		return t.AsTypedEventStreamEnvelopeBeadCreated()
+	case "bead.updated":
+		return t.AsTypedEventStreamEnvelopeBeadUpdated()
+	case "city.created":
+		return t.AsTypedEventStreamEnvelopeCityCreated()
+	case "city.resumed":
+		return t.AsTypedEventStreamEnvelopeCityResumed()
+	case "city.suspended":
+		return t.AsTypedEventStreamEnvelopeCitySuspended()
+	case "city.unregister_requested":
+		return t.AsTypedEventStreamEnvelopeCityUnregisterRequested()
+	case "controller.started":
+		return t.AsTypedEventStreamEnvelopeControllerStarted()
+	case "controller.stopped":
+		return t.AsTypedEventStreamEnvelopeControllerStopped()
+	case "convoy.closed":
+		return t.AsTypedEventStreamEnvelopeConvoyClosed()
+	case "convoy.created":
+		return t.AsTypedEventStreamEnvelopeConvoyCreated()
+	case "extmsg.adapter_added":
+		return t.AsTypedEventStreamEnvelopeExtmsgAdapterAdded()
+	case "extmsg.adapter_removed":
+		return t.AsTypedEventStreamEnvelopeExtmsgAdapterRemoved()
+	case "extmsg.bound":
+		return t.AsTypedEventStreamEnvelopeExtmsgBound()
+	case "extmsg.group_created":
+		return t.AsTypedEventStreamEnvelopeExtmsgGroupCreated()
+	case "extmsg.inbound":
+		return t.AsTypedEventStreamEnvelopeExtmsgInbound()
+	case "extmsg.outbound":
+		return t.AsTypedEventStreamEnvelopeExtmsgOutbound()
+	case "extmsg.unbound":
+		return t.AsTypedEventStreamEnvelopeExtmsgUnbound()
+	case "mail.archived":
+		return t.AsTypedEventStreamEnvelopeMailArchived()
+	case "mail.deleted":
+		return t.AsTypedEventStreamEnvelopeMailDeleted()
+	case "mail.marked_read":
+		return t.AsTypedEventStreamEnvelopeMailMarkedRead()
+	case "mail.marked_unread":
+		return t.AsTypedEventStreamEnvelopeMailMarkedUnread()
+	case "mail.read":
+		return t.AsTypedEventStreamEnvelopeMailRead()
+	case "mail.replied":
+		return t.AsTypedEventStreamEnvelopeMailReplied()
+	case "mail.sent":
+		return t.AsTypedEventStreamEnvelopeMailSent()
+	case "order.completed":
+		return t.AsTypedEventStreamEnvelopeOrderCompleted()
+	case "order.failed":
+		return t.AsTypedEventStreamEnvelopeOrderFailed()
+	case "order.fired":
+		return t.AsTypedEventStreamEnvelopeOrderFired()
+	case "provider.swapped":
+		return t.AsTypedEventStreamEnvelopeProviderSwapped()
+	case "request.failed":
+		return t.AsTypedEventStreamEnvelopeRequestFailed()
+	case "request.result.city.create":
+		return t.AsTypedEventStreamEnvelopeRequestResultCityCreate()
+	case "request.result.city.unregister":
+		return t.AsTypedEventStreamEnvelopeRequestResultCityUnregister()
+	case "request.result.session.create":
+		return t.AsTypedEventStreamEnvelopeRequestResultSessionCreate()
+	case "request.result.session.message":
+		return t.AsTypedEventStreamEnvelopeRequestResultSessionMessage()
+	case "request.result.session.submit":
+		return t.AsTypedEventStreamEnvelopeRequestResultSessionSubmit()
+	case "session.crashed":
+		return t.AsTypedEventStreamEnvelopeSessionCrashed()
+	case "session.draining":
+		return t.AsTypedEventStreamEnvelopeSessionDraining()
+	case "session.idle_killed":
+		return t.AsTypedEventStreamEnvelopeSessionIdleKilled()
+	case "session.quarantined":
+		return t.AsTypedEventStreamEnvelopeSessionQuarantined()
+	case "session.stopped":
+		return t.AsTypedEventStreamEnvelopeSessionStopped()
+	case "session.suspended":
+		return t.AsTypedEventStreamEnvelopeSessionSuspended()
+	case "session.undrained":
+		return t.AsTypedEventStreamEnvelopeSessionUndrained()
+	case "session.updated":
+		return t.AsTypedEventStreamEnvelopeSessionUpdated()
+	case "session.woke":
+		return t.AsTypedEventStreamEnvelopeSessionWoke()
+	case "worker.operation":
+		return t.AsTypedEventStreamEnvelopeWorkerOperation()
+	default:
+		return nil, errors.New("unknown discriminator value: " + discriminator)
+	}
+}
+
+func (t TypedEventStreamEnvelope) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *TypedEventStreamEnvelope) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeBeadClosed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeBeadClosed
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeBeadClosed() (TypedTaggedEventStreamEnvelopeBeadClosed, error) {
+	var body TypedTaggedEventStreamEnvelopeBeadClosed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeBeadClosed overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeBeadClosed
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeBeadClosed(v TypedTaggedEventStreamEnvelopeBeadClosed) error {
+	v.Type = "bead.closed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeBeadClosed performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeBeadClosed
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBeadClosed(v TypedTaggedEventStreamEnvelopeBeadClosed) error {
+	v.Type = "bead.closed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeBeadCreated returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeBeadCreated
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeBeadCreated() (TypedTaggedEventStreamEnvelopeBeadCreated, error) {
+	var body TypedTaggedEventStreamEnvelopeBeadCreated
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeBeadCreated overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeBeadCreated
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeBeadCreated(v TypedTaggedEventStreamEnvelopeBeadCreated) error {
+	v.Type = "bead.created"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeBeadCreated performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeBeadCreated
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBeadCreated(v TypedTaggedEventStreamEnvelopeBeadCreated) error {
+	v.Type = "bead.created"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeBeadUpdated returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeBeadUpdated
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeBeadUpdated() (TypedTaggedEventStreamEnvelopeBeadUpdated, error) {
+	var body TypedTaggedEventStreamEnvelopeBeadUpdated
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeBeadUpdated overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeBeadUpdated
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeBeadUpdated(v TypedTaggedEventStreamEnvelopeBeadUpdated) error {
+	v.Type = "bead.updated"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeBeadUpdated performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeBeadUpdated
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBeadUpdated(v TypedTaggedEventStreamEnvelopeBeadUpdated) error {
+	v.Type = "bead.updated"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeCityCreated returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeCityCreated
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeCityCreated() (TypedTaggedEventStreamEnvelopeCityCreated, error) {
+	var body TypedTaggedEventStreamEnvelopeCityCreated
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeCityCreated overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeCityCreated
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeCityCreated(v TypedTaggedEventStreamEnvelopeCityCreated) error {
+	v.Type = "city.created"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeCityCreated performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeCityCreated
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeCityCreated(v TypedTaggedEventStreamEnvelopeCityCreated) error {
+	v.Type = "city.created"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeCityResumed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeCityResumed
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeCityResumed() (TypedTaggedEventStreamEnvelopeCityResumed, error) {
+	var body TypedTaggedEventStreamEnvelopeCityResumed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeCityResumed overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeCityResumed
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeCityResumed(v TypedTaggedEventStreamEnvelopeCityResumed) error {
+	v.Type = "city.resumed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeCityResumed performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeCityResumed
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeCityResumed(v TypedTaggedEventStreamEnvelopeCityResumed) error {
+	v.Type = "city.resumed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeCitySuspended returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeCitySuspended
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeCitySuspended() (TypedTaggedEventStreamEnvelopeCitySuspended, error) {
+	var body TypedTaggedEventStreamEnvelopeCitySuspended
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeCitySuspended overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeCitySuspended
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeCitySuspended(v TypedTaggedEventStreamEnvelopeCitySuspended) error {
+	v.Type = "city.suspended"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeCitySuspended performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeCitySuspended
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeCitySuspended(v TypedTaggedEventStreamEnvelopeCitySuspended) error {
+	v.Type = "city.suspended"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeCityUnregisterRequested returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeCityUnregisterRequested
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeCityUnregisterRequested() (TypedTaggedEventStreamEnvelopeCityUnregisterRequested, error) {
+	var body TypedTaggedEventStreamEnvelopeCityUnregisterRequested
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeCityUnregisterRequested overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeCityUnregisterRequested
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeCityUnregisterRequested(v TypedTaggedEventStreamEnvelopeCityUnregisterRequested) error {
+	v.Type = "city.unregister_requested"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeCityUnregisterRequested performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeCityUnregisterRequested
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeCityUnregisterRequested(v TypedTaggedEventStreamEnvelopeCityUnregisterRequested) error {
+	v.Type = "city.unregister_requested"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeControllerStarted returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeControllerStarted
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeControllerStarted() (TypedTaggedEventStreamEnvelopeControllerStarted, error) {
+	var body TypedTaggedEventStreamEnvelopeControllerStarted
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeControllerStarted overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeControllerStarted
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeControllerStarted(v TypedTaggedEventStreamEnvelopeControllerStarted) error {
+	v.Type = "controller.started"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeControllerStarted performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeControllerStarted
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeControllerStarted(v TypedTaggedEventStreamEnvelopeControllerStarted) error {
+	v.Type = "controller.started"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeControllerStopped returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeControllerStopped
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeControllerStopped() (TypedTaggedEventStreamEnvelopeControllerStopped, error) {
+	var body TypedTaggedEventStreamEnvelopeControllerStopped
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeControllerStopped overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeControllerStopped
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeControllerStopped(v TypedTaggedEventStreamEnvelopeControllerStopped) error {
+	v.Type = "controller.stopped"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeControllerStopped performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeControllerStopped
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeControllerStopped(v TypedTaggedEventStreamEnvelopeControllerStopped) error {
+	v.Type = "controller.stopped"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeConvoyClosed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeConvoyClosed
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeConvoyClosed() (TypedTaggedEventStreamEnvelopeConvoyClosed, error) {
+	var body TypedTaggedEventStreamEnvelopeConvoyClosed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeConvoyClosed overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeConvoyClosed
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeConvoyClosed(v TypedTaggedEventStreamEnvelopeConvoyClosed) error {
+	v.Type = "convoy.closed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeConvoyClosed performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeConvoyClosed
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeConvoyClosed(v TypedTaggedEventStreamEnvelopeConvoyClosed) error {
+	v.Type = "convoy.closed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeConvoyCreated returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeConvoyCreated
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeConvoyCreated() (TypedTaggedEventStreamEnvelopeConvoyCreated, error) {
+	var body TypedTaggedEventStreamEnvelopeConvoyCreated
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeConvoyCreated overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeConvoyCreated
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeConvoyCreated(v TypedTaggedEventStreamEnvelopeConvoyCreated) error {
+	v.Type = "convoy.created"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeConvoyCreated performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeConvoyCreated
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeConvoyCreated(v TypedTaggedEventStreamEnvelopeConvoyCreated) error {
+	v.Type = "convoy.created"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeExtmsgAdapterAdded returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeExtmsgAdapterAdded() (TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded, error) {
+	var body TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeExtmsgAdapterAdded overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExtmsgAdapterAdded(v TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded) error {
+	v.Type = "extmsg.adapter_added"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeExtmsgAdapterAdded performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExtmsgAdapterAdded(v TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded) error {
+	v.Type = "extmsg.adapter_added"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeExtmsgAdapterRemoved returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeExtmsgAdapterRemoved
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeExtmsgAdapterRemoved() (TypedTaggedEventStreamEnvelopeExtmsgAdapterRemoved, error) {
+	var body TypedTaggedEventStreamEnvelopeExtmsgAdapterRemoved
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeExtmsgAdapterRemoved overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeExtmsgAdapterRemoved
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExtmsgAdapterRemoved(v TypedTaggedEventStreamEnvelopeExtmsgAdapterRemoved) error {
+	v.Type = "extmsg.adapter_removed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeExtmsgAdapterRemoved performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExtmsgAdapterRemoved
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExtmsgAdapterRemoved(v TypedTaggedEventStreamEnvelopeExtmsgAdapterRemoved) error {
+	v.Type = "extmsg.adapter_removed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeExtmsgBound returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeExtmsgBound
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeExtmsgBound() (TypedTaggedEventStreamEnvelopeExtmsgBound, error) {
+	var body TypedTaggedEventStreamEnvelopeExtmsgBound
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeExtmsgBound overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeExtmsgBound
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExtmsgBound(v TypedTaggedEventStreamEnvelopeExtmsgBound) error {
+	v.Type = "extmsg.bound"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeExtmsgBound performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExtmsgBound
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExtmsgBound(v TypedTaggedEventStreamEnvelopeExtmsgBound) error {
+	v.Type = "extmsg.bound"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeExtmsgGroupCreated returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeExtmsgGroupCreated
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeExtmsgGroupCreated() (TypedTaggedEventStreamEnvelopeExtmsgGroupCreated, error) {
+	var body TypedTaggedEventStreamEnvelopeExtmsgGroupCreated
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeExtmsgGroupCreated overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeExtmsgGroupCreated
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExtmsgGroupCreated(v TypedTaggedEventStreamEnvelopeExtmsgGroupCreated) error {
+	v.Type = "extmsg.group_created"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeExtmsgGroupCreated performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExtmsgGroupCreated
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExtmsgGroupCreated(v TypedTaggedEventStreamEnvelopeExtmsgGroupCreated) error {
+	v.Type = "extmsg.group_created"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeExtmsgInbound returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeExtmsgInbound
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeExtmsgInbound() (TypedTaggedEventStreamEnvelopeExtmsgInbound, error) {
+	var body TypedTaggedEventStreamEnvelopeExtmsgInbound
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeExtmsgInbound overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeExtmsgInbound
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExtmsgInbound(v TypedTaggedEventStreamEnvelopeExtmsgInbound) error {
+	v.Type = "extmsg.inbound"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeExtmsgInbound performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExtmsgInbound
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExtmsgInbound(v TypedTaggedEventStreamEnvelopeExtmsgInbound) error {
+	v.Type = "extmsg.inbound"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeExtmsgOutbound returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeExtmsgOutbound
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeExtmsgOutbound() (TypedTaggedEventStreamEnvelopeExtmsgOutbound, error) {
+	var body TypedTaggedEventStreamEnvelopeExtmsgOutbound
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeExtmsgOutbound overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeExtmsgOutbound
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExtmsgOutbound(v TypedTaggedEventStreamEnvelopeExtmsgOutbound) error {
+	v.Type = "extmsg.outbound"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeExtmsgOutbound performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExtmsgOutbound
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExtmsgOutbound(v TypedTaggedEventStreamEnvelopeExtmsgOutbound) error {
+	v.Type = "extmsg.outbound"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeExtmsgUnbound returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeExtmsgUnbound
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeExtmsgUnbound() (TypedTaggedEventStreamEnvelopeExtmsgUnbound, error) {
+	var body TypedTaggedEventStreamEnvelopeExtmsgUnbound
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeExtmsgUnbound overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeExtmsgUnbound
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExtmsgUnbound(v TypedTaggedEventStreamEnvelopeExtmsgUnbound) error {
+	v.Type = "extmsg.unbound"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeExtmsgUnbound performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExtmsgUnbound
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExtmsgUnbound(v TypedTaggedEventStreamEnvelopeExtmsgUnbound) error {
+	v.Type = "extmsg.unbound"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeMailArchived returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeMailArchived
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeMailArchived() (TypedTaggedEventStreamEnvelopeMailArchived, error) {
+	var body TypedTaggedEventStreamEnvelopeMailArchived
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeMailArchived overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeMailArchived
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeMailArchived(v TypedTaggedEventStreamEnvelopeMailArchived) error {
+	v.Type = "mail.archived"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeMailArchived performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeMailArchived
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeMailArchived(v TypedTaggedEventStreamEnvelopeMailArchived) error {
+	v.Type = "mail.archived"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeMailDeleted returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeMailDeleted
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeMailDeleted() (TypedTaggedEventStreamEnvelopeMailDeleted, error) {
+	var body TypedTaggedEventStreamEnvelopeMailDeleted
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeMailDeleted overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeMailDeleted
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeMailDeleted(v TypedTaggedEventStreamEnvelopeMailDeleted) error {
+	v.Type = "mail.deleted"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeMailDeleted performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeMailDeleted
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeMailDeleted(v TypedTaggedEventStreamEnvelopeMailDeleted) error {
+	v.Type = "mail.deleted"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeMailMarkedRead returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeMailMarkedRead
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeMailMarkedRead() (TypedTaggedEventStreamEnvelopeMailMarkedRead, error) {
+	var body TypedTaggedEventStreamEnvelopeMailMarkedRead
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeMailMarkedRead overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeMailMarkedRead
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeMailMarkedRead(v TypedTaggedEventStreamEnvelopeMailMarkedRead) error {
+	v.Type = "mail.marked_read"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeMailMarkedRead performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeMailMarkedRead
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeMailMarkedRead(v TypedTaggedEventStreamEnvelopeMailMarkedRead) error {
+	v.Type = "mail.marked_read"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeMailMarkedUnread returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeMailMarkedUnread
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeMailMarkedUnread() (TypedTaggedEventStreamEnvelopeMailMarkedUnread, error) {
+	var body TypedTaggedEventStreamEnvelopeMailMarkedUnread
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeMailMarkedUnread overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeMailMarkedUnread
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeMailMarkedUnread(v TypedTaggedEventStreamEnvelopeMailMarkedUnread) error {
+	v.Type = "mail.marked_unread"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeMailMarkedUnread performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeMailMarkedUnread
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeMailMarkedUnread(v TypedTaggedEventStreamEnvelopeMailMarkedUnread) error {
+	v.Type = "mail.marked_unread"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeMailRead returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeMailRead
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeMailRead() (TypedTaggedEventStreamEnvelopeMailRead, error) {
+	var body TypedTaggedEventStreamEnvelopeMailRead
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeMailRead overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeMailRead
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeMailRead(v TypedTaggedEventStreamEnvelopeMailRead) error {
+	v.Type = "mail.read"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeMailRead performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeMailRead
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeMailRead(v TypedTaggedEventStreamEnvelopeMailRead) error {
+	v.Type = "mail.read"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeMailReplied returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeMailReplied
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeMailReplied() (TypedTaggedEventStreamEnvelopeMailReplied, error) {
+	var body TypedTaggedEventStreamEnvelopeMailReplied
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeMailReplied overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeMailReplied
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeMailReplied(v TypedTaggedEventStreamEnvelopeMailReplied) error {
+	v.Type = "mail.replied"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeMailReplied performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeMailReplied
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeMailReplied(v TypedTaggedEventStreamEnvelopeMailReplied) error {
+	v.Type = "mail.replied"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeMailSent returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeMailSent
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeMailSent() (TypedTaggedEventStreamEnvelopeMailSent, error) {
+	var body TypedTaggedEventStreamEnvelopeMailSent
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeMailSent overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeMailSent
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeMailSent(v TypedTaggedEventStreamEnvelopeMailSent) error {
+	v.Type = "mail.sent"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeMailSent performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeMailSent
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeMailSent(v TypedTaggedEventStreamEnvelopeMailSent) error {
+	v.Type = "mail.sent"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeOrderCompleted returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeOrderCompleted
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeOrderCompleted() (TypedTaggedEventStreamEnvelopeOrderCompleted, error) {
+	var body TypedTaggedEventStreamEnvelopeOrderCompleted
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeOrderCompleted overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeOrderCompleted
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeOrderCompleted(v TypedTaggedEventStreamEnvelopeOrderCompleted) error {
+	v.Type = "order.completed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeOrderCompleted performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeOrderCompleted
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeOrderCompleted(v TypedTaggedEventStreamEnvelopeOrderCompleted) error {
+	v.Type = "order.completed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeOrderFailed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeOrderFailed
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeOrderFailed() (TypedTaggedEventStreamEnvelopeOrderFailed, error) {
+	var body TypedTaggedEventStreamEnvelopeOrderFailed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeOrderFailed overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeOrderFailed
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeOrderFailed(v TypedTaggedEventStreamEnvelopeOrderFailed) error {
+	v.Type = "order.failed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeOrderFailed performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeOrderFailed
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeOrderFailed(v TypedTaggedEventStreamEnvelopeOrderFailed) error {
+	v.Type = "order.failed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeOrderFired returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeOrderFired
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeOrderFired() (TypedTaggedEventStreamEnvelopeOrderFired, error) {
+	var body TypedTaggedEventStreamEnvelopeOrderFired
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeOrderFired overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeOrderFired
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeOrderFired(v TypedTaggedEventStreamEnvelopeOrderFired) error {
+	v.Type = "order.fired"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeOrderFired performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeOrderFired
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeOrderFired(v TypedTaggedEventStreamEnvelopeOrderFired) error {
+	v.Type = "order.fired"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeProviderSwapped returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeProviderSwapped
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeProviderSwapped() (TypedTaggedEventStreamEnvelopeProviderSwapped, error) {
+	var body TypedTaggedEventStreamEnvelopeProviderSwapped
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeProviderSwapped overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeProviderSwapped
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeProviderSwapped(v TypedTaggedEventStreamEnvelopeProviderSwapped) error {
+	v.Type = "provider.swapped"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeProviderSwapped performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeProviderSwapped
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeProviderSwapped(v TypedTaggedEventStreamEnvelopeProviderSwapped) error {
+	v.Type = "provider.swapped"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeRequestFailed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeRequestFailed
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeRequestFailed() (TypedTaggedEventStreamEnvelopeRequestFailed, error) {
+	var body TypedTaggedEventStreamEnvelopeRequestFailed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeRequestFailed overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeRequestFailed
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeRequestFailed(v TypedTaggedEventStreamEnvelopeRequestFailed) error {
+	v.Type = "request.failed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeRequestFailed performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeRequestFailed
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeRequestFailed(v TypedTaggedEventStreamEnvelopeRequestFailed) error {
+	v.Type = "request.failed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeRequestResultCityCreate returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeRequestResultCityCreate
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeRequestResultCityCreate() (TypedTaggedEventStreamEnvelopeRequestResultCityCreate, error) {
+	var body TypedTaggedEventStreamEnvelopeRequestResultCityCreate
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeRequestResultCityCreate overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeRequestResultCityCreate
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeRequestResultCityCreate(v TypedTaggedEventStreamEnvelopeRequestResultCityCreate) error {
+	v.Type = "request.result.city.create"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeRequestResultCityCreate performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeRequestResultCityCreate
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeRequestResultCityCreate(v TypedTaggedEventStreamEnvelopeRequestResultCityCreate) error {
+	v.Type = "request.result.city.create"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeRequestResultCityUnregister returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeRequestResultCityUnregister
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeRequestResultCityUnregister() (TypedTaggedEventStreamEnvelopeRequestResultCityUnregister, error) {
+	var body TypedTaggedEventStreamEnvelopeRequestResultCityUnregister
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeRequestResultCityUnregister overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeRequestResultCityUnregister
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeRequestResultCityUnregister(v TypedTaggedEventStreamEnvelopeRequestResultCityUnregister) error {
+	v.Type = "request.result.city.unregister"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeRequestResultCityUnregister performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeRequestResultCityUnregister
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeRequestResultCityUnregister(v TypedTaggedEventStreamEnvelopeRequestResultCityUnregister) error {
+	v.Type = "request.result.city.unregister"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeRequestResultSessionCreate returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeRequestResultSessionCreate
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeRequestResultSessionCreate() (TypedTaggedEventStreamEnvelopeRequestResultSessionCreate, error) {
+	var body TypedTaggedEventStreamEnvelopeRequestResultSessionCreate
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeRequestResultSessionCreate overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeRequestResultSessionCreate
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeRequestResultSessionCreate(v TypedTaggedEventStreamEnvelopeRequestResultSessionCreate) error {
+	v.Type = "request.result.session.create"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeRequestResultSessionCreate performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeRequestResultSessionCreate
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeRequestResultSessionCreate(v TypedTaggedEventStreamEnvelopeRequestResultSessionCreate) error {
+	v.Type = "request.result.session.create"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeRequestResultSessionMessage returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeRequestResultSessionMessage
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeRequestResultSessionMessage() (TypedTaggedEventStreamEnvelopeRequestResultSessionMessage, error) {
+	var body TypedTaggedEventStreamEnvelopeRequestResultSessionMessage
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeRequestResultSessionMessage overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeRequestResultSessionMessage
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeRequestResultSessionMessage(v TypedTaggedEventStreamEnvelopeRequestResultSessionMessage) error {
+	v.Type = "request.result.session.message"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeRequestResultSessionMessage performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeRequestResultSessionMessage
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeRequestResultSessionMessage(v TypedTaggedEventStreamEnvelopeRequestResultSessionMessage) error {
+	v.Type = "request.result.session.message"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeRequestResultSessionSubmit returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeRequestResultSessionSubmit() (TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit, error) {
+	var body TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeRequestResultSessionSubmit overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeRequestResultSessionSubmit(v TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit) error {
+	v.Type = "request.result.session.submit"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeRequestResultSessionSubmit performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeRequestResultSessionSubmit(v TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit) error {
+	v.Type = "request.result.session.submit"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeSessionCrashed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionCrashed
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionCrashed() (TypedTaggedEventStreamEnvelopeSessionCrashed, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionCrashed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionCrashed overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionCrashed
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionCrashed(v TypedTaggedEventStreamEnvelopeSessionCrashed) error {
+	v.Type = "session.crashed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionCrashed performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionCrashed
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionCrashed(v TypedTaggedEventStreamEnvelopeSessionCrashed) error {
+	v.Type = "session.crashed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeSessionDraining returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionDraining
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionDraining() (TypedTaggedEventStreamEnvelopeSessionDraining, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionDraining
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionDraining overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionDraining
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionDraining(v TypedTaggedEventStreamEnvelopeSessionDraining) error {
+	v.Type = "session.draining"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionDraining performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionDraining
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionDraining(v TypedTaggedEventStreamEnvelopeSessionDraining) error {
+	v.Type = "session.draining"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeSessionIdleKilled returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionIdleKilled
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionIdleKilled() (TypedTaggedEventStreamEnvelopeSessionIdleKilled, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionIdleKilled
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionIdleKilled overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionIdleKilled
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionIdleKilled(v TypedTaggedEventStreamEnvelopeSessionIdleKilled) error {
+	v.Type = "session.idle_killed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionIdleKilled performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionIdleKilled
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionIdleKilled(v TypedTaggedEventStreamEnvelopeSessionIdleKilled) error {
+	v.Type = "session.idle_killed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeSessionQuarantined returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionQuarantined
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionQuarantined() (TypedTaggedEventStreamEnvelopeSessionQuarantined, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionQuarantined
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionQuarantined overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionQuarantined
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionQuarantined(v TypedTaggedEventStreamEnvelopeSessionQuarantined) error {
+	v.Type = "session.quarantined"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionQuarantined performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionQuarantined
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionQuarantined(v TypedTaggedEventStreamEnvelopeSessionQuarantined) error {
+	v.Type = "session.quarantined"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeSessionStopped returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionStopped
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionStopped() (TypedTaggedEventStreamEnvelopeSessionStopped, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionStopped
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionStopped overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionStopped
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionStopped(v TypedTaggedEventStreamEnvelopeSessionStopped) error {
+	v.Type = "session.stopped"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionStopped performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionStopped
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionStopped(v TypedTaggedEventStreamEnvelopeSessionStopped) error {
+	v.Type = "session.stopped"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeSessionSuspended returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionSuspended
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionSuspended() (TypedTaggedEventStreamEnvelopeSessionSuspended, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionSuspended
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionSuspended overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionSuspended
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionSuspended(v TypedTaggedEventStreamEnvelopeSessionSuspended) error {
+	v.Type = "session.suspended"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionSuspended performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionSuspended
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionSuspended(v TypedTaggedEventStreamEnvelopeSessionSuspended) error {
+	v.Type = "session.suspended"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeSessionUndrained returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionUndrained
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionUndrained() (TypedTaggedEventStreamEnvelopeSessionUndrained, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionUndrained
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionUndrained overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionUndrained
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionUndrained(v TypedTaggedEventStreamEnvelopeSessionUndrained) error {
+	v.Type = "session.undrained"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionUndrained performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionUndrained
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionUndrained(v TypedTaggedEventStreamEnvelopeSessionUndrained) error {
+	v.Type = "session.undrained"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeSessionUpdated returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionUpdated
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionUpdated() (TypedTaggedEventStreamEnvelopeSessionUpdated, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionUpdated
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionUpdated overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionUpdated
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionUpdated(v TypedTaggedEventStreamEnvelopeSessionUpdated) error {
+	v.Type = "session.updated"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionUpdated performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionUpdated
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionUpdated(v TypedTaggedEventStreamEnvelopeSessionUpdated) error {
+	v.Type = "session.updated"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeSessionWoke returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionWoke
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionWoke() (TypedTaggedEventStreamEnvelopeSessionWoke, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionWoke
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionWoke overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionWoke
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionWoke(v TypedTaggedEventStreamEnvelopeSessionWoke) error {
+	v.Type = "session.woke"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionWoke performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionWoke
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionWoke(v TypedTaggedEventStreamEnvelopeSessionWoke) error {
+	v.Type = "session.woke"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeWorkerOperation returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeWorkerOperation
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeWorkerOperation() (TypedTaggedEventStreamEnvelopeWorkerOperation, error) {
+	var body TypedTaggedEventStreamEnvelopeWorkerOperation
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeWorkerOperation overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeWorkerOperation
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeWorkerOperation(v TypedTaggedEventStreamEnvelopeWorkerOperation) error {
+	v.Type = "worker.operation"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeWorkerOperation performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeWorkerOperation
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeWorkerOperation(v TypedTaggedEventStreamEnvelopeWorkerOperation) error {
+	v.Type = "worker.operation"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeCustom returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeCustom
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeCustom() (TypedTaggedEventStreamEnvelopeCustom, error) {
+	var body TypedTaggedEventStreamEnvelopeCustom
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeCustom overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeCustom
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeCustom(v TypedTaggedEventStreamEnvelopeCustom) error {
+	v.Type = "TypedTaggedEventStreamEnvelopeCustom"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeCustom performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeCustom
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeCustom(v TypedTaggedEventStreamEnvelopeCustom) error {
+	v.Type = "TypedTaggedEventStreamEnvelopeCustom"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t TypedTaggedEventStreamEnvelope) Discriminator() (string, error) {
+	var discriminator struct {
+		Discriminator string `json:"type"`
+	}
+	err := json.Unmarshal(t.union, &discriminator)
+	return discriminator.Discriminator, err
+}
+
+func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
+	discriminator, err := t.Discriminator()
+	if err != nil {
+		return nil, err
+	}
+	switch discriminator {
+	case "TypedTaggedEventStreamEnvelopeCustom":
+		return t.AsTypedTaggedEventStreamEnvelopeCustom()
+	case "bead.closed":
+		return t.AsTypedTaggedEventStreamEnvelopeBeadClosed()
+	case "bead.created":
+		return t.AsTypedTaggedEventStreamEnvelopeBeadCreated()
+	case "bead.updated":
+		return t.AsTypedTaggedEventStreamEnvelopeBeadUpdated()
+	case "city.created":
+		return t.AsTypedTaggedEventStreamEnvelopeCityCreated()
+	case "city.resumed":
+		return t.AsTypedTaggedEventStreamEnvelopeCityResumed()
+	case "city.suspended":
+		return t.AsTypedTaggedEventStreamEnvelopeCitySuspended()
+	case "city.unregister_requested":
+		return t.AsTypedTaggedEventStreamEnvelopeCityUnregisterRequested()
+	case "controller.started":
+		return t.AsTypedTaggedEventStreamEnvelopeControllerStarted()
+	case "controller.stopped":
+		return t.AsTypedTaggedEventStreamEnvelopeControllerStopped()
+	case "convoy.closed":
+		return t.AsTypedTaggedEventStreamEnvelopeConvoyClosed()
+	case "convoy.created":
+		return t.AsTypedTaggedEventStreamEnvelopeConvoyCreated()
+	case "extmsg.adapter_added":
+		return t.AsTypedTaggedEventStreamEnvelopeExtmsgAdapterAdded()
+	case "extmsg.adapter_removed":
+		return t.AsTypedTaggedEventStreamEnvelopeExtmsgAdapterRemoved()
+	case "extmsg.bound":
+		return t.AsTypedTaggedEventStreamEnvelopeExtmsgBound()
+	case "extmsg.group_created":
+		return t.AsTypedTaggedEventStreamEnvelopeExtmsgGroupCreated()
+	case "extmsg.inbound":
+		return t.AsTypedTaggedEventStreamEnvelopeExtmsgInbound()
+	case "extmsg.outbound":
+		return t.AsTypedTaggedEventStreamEnvelopeExtmsgOutbound()
+	case "extmsg.unbound":
+		return t.AsTypedTaggedEventStreamEnvelopeExtmsgUnbound()
+	case "mail.archived":
+		return t.AsTypedTaggedEventStreamEnvelopeMailArchived()
+	case "mail.deleted":
+		return t.AsTypedTaggedEventStreamEnvelopeMailDeleted()
+	case "mail.marked_read":
+		return t.AsTypedTaggedEventStreamEnvelopeMailMarkedRead()
+	case "mail.marked_unread":
+		return t.AsTypedTaggedEventStreamEnvelopeMailMarkedUnread()
+	case "mail.read":
+		return t.AsTypedTaggedEventStreamEnvelopeMailRead()
+	case "mail.replied":
+		return t.AsTypedTaggedEventStreamEnvelopeMailReplied()
+	case "mail.sent":
+		return t.AsTypedTaggedEventStreamEnvelopeMailSent()
+	case "order.completed":
+		return t.AsTypedTaggedEventStreamEnvelopeOrderCompleted()
+	case "order.failed":
+		return t.AsTypedTaggedEventStreamEnvelopeOrderFailed()
+	case "order.fired":
+		return t.AsTypedTaggedEventStreamEnvelopeOrderFired()
+	case "provider.swapped":
+		return t.AsTypedTaggedEventStreamEnvelopeProviderSwapped()
+	case "request.failed":
+		return t.AsTypedTaggedEventStreamEnvelopeRequestFailed()
+	case "request.result.city.create":
+		return t.AsTypedTaggedEventStreamEnvelopeRequestResultCityCreate()
+	case "request.result.city.unregister":
+		return t.AsTypedTaggedEventStreamEnvelopeRequestResultCityUnregister()
+	case "request.result.session.create":
+		return t.AsTypedTaggedEventStreamEnvelopeRequestResultSessionCreate()
+	case "request.result.session.message":
+		return t.AsTypedTaggedEventStreamEnvelopeRequestResultSessionMessage()
+	case "request.result.session.submit":
+		return t.AsTypedTaggedEventStreamEnvelopeRequestResultSessionSubmit()
+	case "session.crashed":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionCrashed()
+	case "session.draining":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionDraining()
+	case "session.idle_killed":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionIdleKilled()
+	case "session.quarantined":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionQuarantined()
+	case "session.stopped":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionStopped()
+	case "session.suspended":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionSuspended()
+	case "session.undrained":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionUndrained()
+	case "session.updated":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionUpdated()
+	case "session.woke":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionWoke()
+	case "worker.operation":
+		return t.AsTypedTaggedEventStreamEnvelopeWorkerOperation()
+	default:
+		return nil, errors.New("unknown discriminator value: " + discriminator)
+	}
+}
+
+func (t TypedTaggedEventStreamEnvelope) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *TypedTaggedEventStreamEnvelope) UnmarshalJSON(b []byte) error {
 	err := t.union.UnmarshalJSON(b)
 	return err
 }
@@ -3600,28 +8377,28 @@ type ClientInterface interface {
 	GetV0Cities(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityWithBody request with any body
-	PostV0CityWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityWithBody(ctx context.Context, params *PostV0CityParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PostV0City(ctx context.Context, body PostV0CityJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0City(ctx context.Context, params *PostV0CityParams, body PostV0CityJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityName request
 	GetV0CityByCityName(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PatchV0CityByCityNameWithBody request with any body
-	PatchV0CityByCityNameWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PatchV0CityByCityNameWithBody(ctx context.Context, cityName string, params *PatchV0CityByCityNameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PatchV0CityByCityName(ctx context.Context, cityName string, body PatchV0CityByCityNameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PatchV0CityByCityName(ctx context.Context, cityName string, params *PatchV0CityByCityNameParams, body PatchV0CityByCityNameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeleteV0CityByCityNameAgentByBase request
-	DeleteV0CityByCityNameAgentByBase(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	DeleteV0CityByCityNameAgentByBase(ctx context.Context, cityName string, base string, params *DeleteV0CityByCityNameAgentByBaseParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameAgentByBase request
 	GetV0CityByCityNameAgentByBase(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PatchV0CityByCityNameAgentByBaseWithBody request with any body
-	PatchV0CityByCityNameAgentByBaseWithBody(ctx context.Context, cityName string, base string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PatchV0CityByCityNameAgentByBaseWithBody(ctx context.Context, cityName string, base string, params *PatchV0CityByCityNameAgentByBaseParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PatchV0CityByCityNameAgentByBase(ctx context.Context, cityName string, base string, body PatchV0CityByCityNameAgentByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PatchV0CityByCityNameAgentByBase(ctx context.Context, cityName string, base string, params *PatchV0CityByCityNameAgentByBaseParams, body PatchV0CityByCityNameAgentByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameAgentByBaseOutput request
 	GetV0CityByCityNameAgentByBaseOutput(ctx context.Context, cityName string, base string, params *GetV0CityByCityNameAgentByBaseOutputParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3630,18 +8407,18 @@ type ClientInterface interface {
 	StreamAgentOutput(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameAgentByBaseByAction request
-	PostV0CityByCityNameAgentByBaseByAction(ctx context.Context, cityName string, base string, action PostV0CityByCityNameAgentByBaseByActionParamsAction, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameAgentByBaseByAction(ctx context.Context, cityName string, base string, action PostV0CityByCityNameAgentByBaseByActionParamsAction, params *PostV0CityByCityNameAgentByBaseByActionParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeleteV0CityByCityNameAgentByDirByBase request
-	DeleteV0CityByCityNameAgentByDirByBase(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	DeleteV0CityByCityNameAgentByDirByBase(ctx context.Context, cityName string, dir string, base string, params *DeleteV0CityByCityNameAgentByDirByBaseParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameAgentByDirByBase request
 	GetV0CityByCityNameAgentByDirByBase(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PatchV0CityByCityNameAgentByDirByBaseWithBody request with any body
-	PatchV0CityByCityNameAgentByDirByBaseWithBody(ctx context.Context, cityName string, dir string, base string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PatchV0CityByCityNameAgentByDirByBaseWithBody(ctx context.Context, cityName string, dir string, base string, params *PatchV0CityByCityNameAgentByDirByBaseParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PatchV0CityByCityNameAgentByDirByBase(ctx context.Context, cityName string, dir string, base string, body PatchV0CityByCityNameAgentByDirByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PatchV0CityByCityNameAgentByDirByBase(ctx context.Context, cityName string, dir string, base string, params *PatchV0CityByCityNameAgentByDirByBaseParams, body PatchV0CityByCityNameAgentByDirByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameAgentByDirByBaseOutput request
 	GetV0CityByCityNameAgentByDirByBaseOutput(ctx context.Context, cityName string, dir string, base string, params *GetV0CityByCityNameAgentByDirByBaseOutputParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3650,45 +8427,45 @@ type ClientInterface interface {
 	StreamAgentOutputQualified(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameAgentByDirByBaseByAction request
-	PostV0CityByCityNameAgentByDirByBaseByAction(ctx context.Context, cityName string, dir string, base string, action PostV0CityByCityNameAgentByDirByBaseByActionParamsAction, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameAgentByDirByBaseByAction(ctx context.Context, cityName string, dir string, base string, action PostV0CityByCityNameAgentByDirByBaseByActionParamsAction, params *PostV0CityByCityNameAgentByDirByBaseByActionParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameAgents request
 	GetV0CityByCityNameAgents(ctx context.Context, cityName string, params *GetV0CityByCityNameAgentsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// CreateAgentWithBody request with any body
-	CreateAgentWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	CreateAgentWithBody(ctx context.Context, cityName string, params *CreateAgentParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	CreateAgent(ctx context.Context, cityName string, body CreateAgentJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	CreateAgent(ctx context.Context, cityName string, params *CreateAgentParams, body CreateAgentJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeleteV0CityByCityNameBeadById request
-	DeleteV0CityByCityNameBeadById(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	DeleteV0CityByCityNameBeadById(ctx context.Context, cityName string, id string, params *DeleteV0CityByCityNameBeadByIdParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameBeadById request
 	GetV0CityByCityNameBeadById(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PatchV0CityByCityNameBeadByIdWithBody request with any body
-	PatchV0CityByCityNameBeadByIdWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PatchV0CityByCityNameBeadByIdWithBody(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameBeadByIdParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PatchV0CityByCityNameBeadById(ctx context.Context, cityName string, id string, body PatchV0CityByCityNameBeadByIdJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PatchV0CityByCityNameBeadById(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameBeadByIdParams, body PatchV0CityByCityNameBeadByIdJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameBeadByIdAssignWithBody request with any body
-	PostV0CityByCityNameBeadByIdAssignWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameBeadByIdAssignWithBody(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdAssignParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PostV0CityByCityNameBeadByIdAssign(ctx context.Context, cityName string, id string, body PostV0CityByCityNameBeadByIdAssignJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameBeadByIdAssign(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdAssignParams, body PostV0CityByCityNameBeadByIdAssignJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameBeadByIdClose request
-	PostV0CityByCityNameBeadByIdClose(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameBeadByIdClose(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameBeadByIdDeps request
 	GetV0CityByCityNameBeadByIdDeps(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameBeadByIdReopen request
-	PostV0CityByCityNameBeadByIdReopen(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameBeadByIdReopen(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdReopenParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameBeadByIdUpdateWithBody request with any body
-	PostV0CityByCityNameBeadByIdUpdateWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameBeadByIdUpdateWithBody(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdUpdateParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PostV0CityByCityNameBeadByIdUpdate(ctx context.Context, cityName string, id string, body PostV0CityByCityNameBeadByIdUpdateJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameBeadByIdUpdate(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdUpdateParams, body PostV0CityByCityNameBeadByIdUpdateJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameBeads request
 	GetV0CityByCityNameBeads(ctx context.Context, cityName string, params *GetV0CityByCityNameBeadsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3714,63 +8491,63 @@ type ClientInterface interface {
 	GetV0CityByCityNameConfigValidate(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeleteV0CityByCityNameConvoyById request
-	DeleteV0CityByCityNameConvoyById(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	DeleteV0CityByCityNameConvoyById(ctx context.Context, cityName string, id string, params *DeleteV0CityByCityNameConvoyByIdParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameConvoyById request
 	GetV0CityByCityNameConvoyById(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameConvoyByIdAddWithBody request with any body
-	PostV0CityByCityNameConvoyByIdAddWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameConvoyByIdAddWithBody(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdAddParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PostV0CityByCityNameConvoyByIdAdd(ctx context.Context, cityName string, id string, body PostV0CityByCityNameConvoyByIdAddJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameConvoyByIdAdd(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdAddParams, body PostV0CityByCityNameConvoyByIdAddJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameConvoyByIdCheck request
 	GetV0CityByCityNameConvoyByIdCheck(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameConvoyByIdClose request
-	PostV0CityByCityNameConvoyByIdClose(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameConvoyByIdClose(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdCloseParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameConvoyByIdRemoveWithBody request with any body
-	PostV0CityByCityNameConvoyByIdRemoveWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameConvoyByIdRemoveWithBody(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdRemoveParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PostV0CityByCityNameConvoyByIdRemove(ctx context.Context, cityName string, id string, body PostV0CityByCityNameConvoyByIdRemoveJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameConvoyByIdRemove(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdRemoveParams, body PostV0CityByCityNameConvoyByIdRemoveJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameConvoys request
 	GetV0CityByCityNameConvoys(ctx context.Context, cityName string, params *GetV0CityByCityNameConvoysParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// CreateConvoyWithBody request with any body
-	CreateConvoyWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	CreateConvoyWithBody(ctx context.Context, cityName string, params *CreateConvoyParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	CreateConvoy(ctx context.Context, cityName string, body CreateConvoyJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	CreateConvoy(ctx context.Context, cityName string, params *CreateConvoyParams, body CreateConvoyJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameEvents request
 	GetV0CityByCityNameEvents(ctx context.Context, cityName string, params *GetV0CityByCityNameEventsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// EmitEventWithBody request with any body
-	EmitEventWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	EmitEventWithBody(ctx context.Context, cityName string, params *EmitEventParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	EmitEvent(ctx context.Context, cityName string, body EmitEventJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	EmitEvent(ctx context.Context, cityName string, params *EmitEventParams, body EmitEventJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// StreamEvents request
 	StreamEvents(ctx context.Context, cityName string, params *StreamEventsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeleteV0CityByCityNameExtmsgAdaptersWithBody request with any body
-	DeleteV0CityByCityNameExtmsgAdaptersWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	DeleteV0CityByCityNameExtmsgAdaptersWithBody(ctx context.Context, cityName string, params *DeleteV0CityByCityNameExtmsgAdaptersParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	DeleteV0CityByCityNameExtmsgAdapters(ctx context.Context, cityName string, body DeleteV0CityByCityNameExtmsgAdaptersJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	DeleteV0CityByCityNameExtmsgAdapters(ctx context.Context, cityName string, params *DeleteV0CityByCityNameExtmsgAdaptersParams, body DeleteV0CityByCityNameExtmsgAdaptersJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameExtmsgAdapters request
 	GetV0CityByCityNameExtmsgAdapters(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// RegisterExtmsgAdapterWithBody request with any body
-	RegisterExtmsgAdapterWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	RegisterExtmsgAdapterWithBody(ctx context.Context, cityName string, params *RegisterExtmsgAdapterParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	RegisterExtmsgAdapter(ctx context.Context, cityName string, body RegisterExtmsgAdapterJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	RegisterExtmsgAdapter(ctx context.Context, cityName string, params *RegisterExtmsgAdapterParams, body RegisterExtmsgAdapterJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameExtmsgBindWithBody request with any body
-	PostV0CityByCityNameExtmsgBindWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameExtmsgBindWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgBindParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PostV0CityByCityNameExtmsgBind(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgBindJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameExtmsgBind(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgBindParams, body PostV0CityByCityNameExtmsgBindJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameExtmsgBindings request
 	GetV0CityByCityNameExtmsgBindings(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgBindingsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3779,42 +8556,42 @@ type ClientInterface interface {
 	GetV0CityByCityNameExtmsgGroups(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgGroupsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// EnsureExtmsgGroupWithBody request with any body
-	EnsureExtmsgGroupWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	EnsureExtmsgGroupWithBody(ctx context.Context, cityName string, params *EnsureExtmsgGroupParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	EnsureExtmsgGroup(ctx context.Context, cityName string, body EnsureExtmsgGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	EnsureExtmsgGroup(ctx context.Context, cityName string, params *EnsureExtmsgGroupParams, body EnsureExtmsgGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameExtmsgInboundWithBody request with any body
-	PostV0CityByCityNameExtmsgInboundWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameExtmsgInboundWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgInboundParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PostV0CityByCityNameExtmsgInbound(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgInboundJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameExtmsgInbound(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgInboundParams, body PostV0CityByCityNameExtmsgInboundJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameExtmsgOutboundWithBody request with any body
-	PostV0CityByCityNameExtmsgOutboundWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameExtmsgOutboundWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgOutboundParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PostV0CityByCityNameExtmsgOutbound(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgOutboundJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameExtmsgOutbound(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgOutboundParams, body PostV0CityByCityNameExtmsgOutboundJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeleteV0CityByCityNameExtmsgParticipantsWithBody request with any body
-	DeleteV0CityByCityNameExtmsgParticipantsWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	DeleteV0CityByCityNameExtmsgParticipantsWithBody(ctx context.Context, cityName string, params *DeleteV0CityByCityNameExtmsgParticipantsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	DeleteV0CityByCityNameExtmsgParticipants(ctx context.Context, cityName string, body DeleteV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	DeleteV0CityByCityNameExtmsgParticipants(ctx context.Context, cityName string, params *DeleteV0CityByCityNameExtmsgParticipantsParams, body DeleteV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameExtmsgParticipantsWithBody request with any body
-	PostV0CityByCityNameExtmsgParticipantsWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameExtmsgParticipantsWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgParticipantsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PostV0CityByCityNameExtmsgParticipants(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameExtmsgParticipants(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgParticipantsParams, body PostV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameExtmsgTranscript request
 	GetV0CityByCityNameExtmsgTranscript(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgTranscriptParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameExtmsgTranscriptAckWithBody request with any body
-	PostV0CityByCityNameExtmsgTranscriptAckWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameExtmsgTranscriptAckWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgTranscriptAckParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PostV0CityByCityNameExtmsgTranscriptAck(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgTranscriptAckJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameExtmsgTranscriptAck(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgTranscriptAckParams, body PostV0CityByCityNameExtmsgTranscriptAckJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameExtmsgUnbindWithBody request with any body
-	PostV0CityByCityNameExtmsgUnbindWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameExtmsgUnbindWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgUnbindParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PostV0CityByCityNameExtmsgUnbind(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgUnbindJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameExtmsgUnbind(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgUnbindParams, body PostV0CityByCityNameExtmsgUnbindJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameFormulaByName request
 	GetV0CityByCityNameFormulaByName(ctx context.Context, cityName string, name string, params *GetV0CityByCityNameFormulaByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3829,9 +8606,9 @@ type ClientInterface interface {
 	GetV0CityByCityNameFormulasByName(ctx context.Context, cityName string, name string, params *GetV0CityByCityNameFormulasByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameFormulasByNamePreviewWithBody request with any body
-	PostV0CityByCityNameFormulasByNamePreviewWithBody(ctx context.Context, cityName string, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameFormulasByNamePreviewWithBody(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameFormulasByNamePreviewParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PostV0CityByCityNameFormulasByNamePreview(ctx context.Context, cityName string, name string, body PostV0CityByCityNameFormulasByNamePreviewJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameFormulasByNamePreview(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameFormulasByNamePreviewParams, body PostV0CityByCityNameFormulasByNamePreviewJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameFormulasByNameRuns request
 	GetV0CityByCityNameFormulasByNameRuns(ctx context.Context, cityName string, name string, params *GetV0CityByCityNameFormulasByNameRunsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3880,16 +8657,16 @@ type ClientInterface interface {
 	GetV0CityByCityNameOrderByName(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameOrderByNameDisable request
-	PostV0CityByCityNameOrderByNameDisable(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameOrderByNameDisable(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameOrderByNameDisableParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameOrderByNameEnable request
-	PostV0CityByCityNameOrderByNameEnable(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameOrderByNameEnable(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameOrderByNameEnableParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameOrders request
 	GetV0CityByCityNameOrders(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameOrdersCheck request
-	GetV0CityByCityNameOrdersCheck(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	GetV0CityByCityNameOrdersCheck(ctx context.Context, cityName string, params *GetV0CityByCityNameOrdersCheckParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameOrdersFeed request
 	GetV0CityByCityNameOrdersFeed(ctx context.Context, cityName string, params *GetV0CityByCityNameOrdersFeedParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3901,13 +8678,13 @@ type ClientInterface interface {
 	GetV0CityByCityNamePacks(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeleteV0CityByCityNamePatchesAgentByBase request
-	DeleteV0CityByCityNamePatchesAgentByBase(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	DeleteV0CityByCityNamePatchesAgentByBase(ctx context.Context, cityName string, base string, params *DeleteV0CityByCityNamePatchesAgentByBaseParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNamePatchesAgentByBase request
 	GetV0CityByCityNamePatchesAgentByBase(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeleteV0CityByCityNamePatchesAgentByDirByBase request
-	DeleteV0CityByCityNamePatchesAgentByDirByBase(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	DeleteV0CityByCityNamePatchesAgentByDirByBase(ctx context.Context, cityName string, dir string, base string, params *DeleteV0CityByCityNamePatchesAgentByDirByBaseParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNamePatchesAgentByDirByBase request
 	GetV0CityByCityNamePatchesAgentByDirByBase(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3916,12 +8693,12 @@ type ClientInterface interface {
 	GetV0CityByCityNamePatchesAgents(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PutV0CityByCityNamePatchesAgentsWithBody request with any body
-	PutV0CityByCityNamePatchesAgentsWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PutV0CityByCityNamePatchesAgentsWithBody(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesAgentsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PutV0CityByCityNamePatchesAgents(ctx context.Context, cityName string, body PutV0CityByCityNamePatchesAgentsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PutV0CityByCityNamePatchesAgents(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesAgentsParams, body PutV0CityByCityNamePatchesAgentsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeleteV0CityByCityNamePatchesProviderByName request
-	DeleteV0CityByCityNamePatchesProviderByName(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	DeleteV0CityByCityNamePatchesProviderByName(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNamePatchesProviderByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNamePatchesProviderByName request
 	GetV0CityByCityNamePatchesProviderByName(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3930,12 +8707,12 @@ type ClientInterface interface {
 	GetV0CityByCityNamePatchesProviders(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PutV0CityByCityNamePatchesProvidersWithBody request with any body
-	PutV0CityByCityNamePatchesProvidersWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PutV0CityByCityNamePatchesProvidersWithBody(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesProvidersParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PutV0CityByCityNamePatchesProviders(ctx context.Context, cityName string, body PutV0CityByCityNamePatchesProvidersJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PutV0CityByCityNamePatchesProviders(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesProvidersParams, body PutV0CityByCityNamePatchesProvidersJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeleteV0CityByCityNamePatchesRigByName request
-	DeleteV0CityByCityNamePatchesRigByName(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	DeleteV0CityByCityNamePatchesRigByName(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNamePatchesRigByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNamePatchesRigByName request
 	GetV0CityByCityNamePatchesRigByName(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3944,31 +8721,31 @@ type ClientInterface interface {
 	GetV0CityByCityNamePatchesRigs(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PutV0CityByCityNamePatchesRigsWithBody request with any body
-	PutV0CityByCityNamePatchesRigsWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PutV0CityByCityNamePatchesRigsWithBody(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesRigsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PutV0CityByCityNamePatchesRigs(ctx context.Context, cityName string, body PutV0CityByCityNamePatchesRigsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PutV0CityByCityNamePatchesRigs(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesRigsParams, body PutV0CityByCityNamePatchesRigsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameProviderReadiness request
 	GetV0CityByCityNameProviderReadiness(ctx context.Context, cityName string, params *GetV0CityByCityNameProviderReadinessParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeleteV0CityByCityNameProviderByName request
-	DeleteV0CityByCityNameProviderByName(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	DeleteV0CityByCityNameProviderByName(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNameProviderByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameProviderByName request
 	GetV0CityByCityNameProviderByName(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PatchV0CityByCityNameProviderByNameWithBody request with any body
-	PatchV0CityByCityNameProviderByNameWithBody(ctx context.Context, cityName string, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PatchV0CityByCityNameProviderByNameWithBody(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameProviderByNameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PatchV0CityByCityNameProviderByName(ctx context.Context, cityName string, name string, body PatchV0CityByCityNameProviderByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PatchV0CityByCityNameProviderByName(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameProviderByNameParams, body PatchV0CityByCityNameProviderByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameProviders request
 	GetV0CityByCityNameProviders(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// CreateProviderWithBody request with any body
-	CreateProviderWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	CreateProviderWithBody(ctx context.Context, cityName string, params *CreateProviderParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	CreateProvider(ctx context.Context, cityName string, body CreateProviderJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	CreateProvider(ctx context.Context, cityName string, params *CreateProviderParams, body CreateProviderJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameProvidersPublic request
 	GetV0CityByCityNameProvidersPublic(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3977,32 +8754,32 @@ type ClientInterface interface {
 	GetV0CityByCityNameReadiness(ctx context.Context, cityName string, params *GetV0CityByCityNameReadinessParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeleteV0CityByCityNameRigByName request
-	DeleteV0CityByCityNameRigByName(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	DeleteV0CityByCityNameRigByName(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNameRigByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameRigByName request
 	GetV0CityByCityNameRigByName(ctx context.Context, cityName string, name string, params *GetV0CityByCityNameRigByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PatchV0CityByCityNameRigByNameWithBody request with any body
-	PatchV0CityByCityNameRigByNameWithBody(ctx context.Context, cityName string, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PatchV0CityByCityNameRigByNameWithBody(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameRigByNameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PatchV0CityByCityNameRigByName(ctx context.Context, cityName string, name string, body PatchV0CityByCityNameRigByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PatchV0CityByCityNameRigByName(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameRigByNameParams, body PatchV0CityByCityNameRigByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameRigByNameByAction request
-	PostV0CityByCityNameRigByNameByAction(ctx context.Context, cityName string, name string, action string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameRigByNameByAction(ctx context.Context, cityName string, name string, action string, params *PostV0CityByCityNameRigByNameByActionParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameRigs request
 	GetV0CityByCityNameRigs(ctx context.Context, cityName string, params *GetV0CityByCityNameRigsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// CreateRigWithBody request with any body
-	CreateRigWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	CreateRigWithBody(ctx context.Context, cityName string, params *CreateRigParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	CreateRig(ctx context.Context, cityName string, body CreateRigJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	CreateRig(ctx context.Context, cityName string, params *CreateRigParams, body CreateRigJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameServiceByName request
 	GetV0CityByCityNameServiceByName(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameServiceByNameRestart request
-	PostV0CityByCityNameServiceByNameRestart(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameServiceByNameRestart(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameServiceByNameRestartParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameServices request
 	GetV0CityByCityNameServices(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -4011,9 +8788,9 @@ type ClientInterface interface {
 	GetV0CityByCityNameSessionById(ctx context.Context, cityName string, id string, params *GetV0CityByCityNameSessionByIdParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PatchV0CityByCityNameSessionByIdWithBody request with any body
-	PatchV0CityByCityNameSessionByIdWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PatchV0CityByCityNameSessionByIdWithBody(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameSessionByIdParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PatchV0CityByCityNameSessionById(ctx context.Context, cityName string, id string, body PatchV0CityByCityNameSessionByIdJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PatchV0CityByCityNameSessionById(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameSessionByIdParams, body PatchV0CityByCityNameSessionByIdJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameSessionByIdAgents request
 	GetV0CityByCityNameSessionByIdAgents(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -4025,61 +8802,64 @@ type ClientInterface interface {
 	PostV0CityByCityNameSessionByIdClose(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdCloseParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameSessionByIdKill request
-	PostV0CityByCityNameSessionByIdKill(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameSessionByIdKill(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdKillParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// SendSessionMessageWithBody request with any body
-	SendSessionMessageWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	SendSessionMessageWithBody(ctx context.Context, cityName string, id string, params *SendSessionMessageParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	SendSessionMessage(ctx context.Context, cityName string, id string, body SendSessionMessageJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	SendSessionMessage(ctx context.Context, cityName string, id string, params *SendSessionMessageParams, body SendSessionMessageJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameSessionByIdPending request
 	GetV0CityByCityNameSessionByIdPending(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameSessionByIdRenameWithBody request with any body
-	PostV0CityByCityNameSessionByIdRenameWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameSessionByIdRenameWithBody(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PostV0CityByCityNameSessionByIdRename(ctx context.Context, cityName string, id string, body PostV0CityByCityNameSessionByIdRenameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameSessionByIdRename(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, body PostV0CityByCityNameSessionByIdRenameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// RespondSessionWithBody request with any body
-	RespondSessionWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	RespondSessionWithBody(ctx context.Context, cityName string, id string, params *RespondSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	RespondSession(ctx context.Context, cityName string, id string, body RespondSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	RespondSession(ctx context.Context, cityName string, id string, params *RespondSessionParams, body RespondSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameSessionByIdStop request
-	PostV0CityByCityNameSessionByIdStop(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameSessionByIdStop(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdStopParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// StreamSession request
 	StreamSession(ctx context.Context, cityName string, id string, params *StreamSessionParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// SubmitSessionWithBody request with any body
-	SubmitSessionWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	SubmitSessionWithBody(ctx context.Context, cityName string, id string, params *SubmitSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	SubmitSession(ctx context.Context, cityName string, id string, body SubmitSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	SubmitSession(ctx context.Context, cityName string, id string, params *SubmitSessionParams, body SubmitSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameSessionByIdSuspend request
-	PostV0CityByCityNameSessionByIdSuspend(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameSessionByIdSuspend(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdSuspendParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameSessionByIdTranscript request
 	GetV0CityByCityNameSessionByIdTranscript(ctx context.Context, cityName string, id string, params *GetV0CityByCityNameSessionByIdTranscriptParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameSessionByIdWake request
-	PostV0CityByCityNameSessionByIdWake(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameSessionByIdWake(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdWakeParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameSessions request
 	GetV0CityByCityNameSessions(ctx context.Context, cityName string, params *GetV0CityByCityNameSessionsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// CreateSessionWithBody request with any body
-	CreateSessionWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	CreateSessionWithBody(ctx context.Context, cityName string, params *CreateSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	CreateSession(ctx context.Context, cityName string, body CreateSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	CreateSession(ctx context.Context, cityName string, params *CreateSessionParams, body CreateSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameSlingWithBody request with any body
-	PostV0CityByCityNameSlingWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameSlingWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameSlingParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PostV0CityByCityNameSling(ctx context.Context, cityName string, body PostV0CityByCityNameSlingJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameSling(ctx context.Context, cityName string, params *PostV0CityByCityNameSlingParams, body PostV0CityByCityNameSlingJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameStatus request
 	GetV0CityByCityNameStatus(ctx context.Context, cityName string, params *GetV0CityByCityNameStatusParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PostV0CityByCityNameUnregister request
+	PostV0CityByCityNameUnregister(ctx context.Context, cityName string, params *PostV0CityByCityNameUnregisterParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeleteV0CityByCityNameWorkflowByWorkflowId request
 	DeleteV0CityByCityNameWorkflowByWorkflowId(ctx context.Context, cityName string, workflowId string, params *DeleteV0CityByCityNameWorkflowByWorkflowIdParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -4124,8 +8904,8 @@ func (c *Client) GetV0Cities(ctx context.Context, reqEditors ...RequestEditorFn)
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityRequestWithBody(c.Server, contentType, body)
+func (c *Client) PostV0CityWithBody(ctx context.Context, params *PostV0CityParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityRequestWithBody(c.Server, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4136,8 +8916,8 @@ func (c *Client) PostV0CityWithBody(ctx context.Context, contentType string, bod
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0City(ctx context.Context, body PostV0CityJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityRequest(c.Server, body)
+func (c *Client) PostV0City(ctx context.Context, params *PostV0CityParams, body PostV0CityJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityRequest(c.Server, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4160,8 +8940,8 @@ func (c *Client) GetV0CityByCityName(ctx context.Context, cityName string, reqEd
 	return c.Client.Do(req)
 }
 
-func (c *Client) PatchV0CityByCityNameWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPatchV0CityByCityNameRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) PatchV0CityByCityNameWithBody(ctx context.Context, cityName string, params *PatchV0CityByCityNameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchV0CityByCityNameRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4172,8 +8952,8 @@ func (c *Client) PatchV0CityByCityNameWithBody(ctx context.Context, cityName str
 	return c.Client.Do(req)
 }
 
-func (c *Client) PatchV0CityByCityName(ctx context.Context, cityName string, body PatchV0CityByCityNameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPatchV0CityByCityNameRequest(c.Server, cityName, body)
+func (c *Client) PatchV0CityByCityName(ctx context.Context, cityName string, params *PatchV0CityByCityNameParams, body PatchV0CityByCityNameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchV0CityByCityNameRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4184,8 +8964,8 @@ func (c *Client) PatchV0CityByCityName(ctx context.Context, cityName string, bod
 	return c.Client.Do(req)
 }
 
-func (c *Client) DeleteV0CityByCityNameAgentByBase(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteV0CityByCityNameAgentByBaseRequest(c.Server, cityName, base)
+func (c *Client) DeleteV0CityByCityNameAgentByBase(ctx context.Context, cityName string, base string, params *DeleteV0CityByCityNameAgentByBaseParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNameAgentByBaseRequest(c.Server, cityName, base, params)
 	if err != nil {
 		return nil, err
 	}
@@ -4208,8 +8988,8 @@ func (c *Client) GetV0CityByCityNameAgentByBase(ctx context.Context, cityName st
 	return c.Client.Do(req)
 }
 
-func (c *Client) PatchV0CityByCityNameAgentByBaseWithBody(ctx context.Context, cityName string, base string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPatchV0CityByCityNameAgentByBaseRequestWithBody(c.Server, cityName, base, contentType, body)
+func (c *Client) PatchV0CityByCityNameAgentByBaseWithBody(ctx context.Context, cityName string, base string, params *PatchV0CityByCityNameAgentByBaseParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchV0CityByCityNameAgentByBaseRequestWithBody(c.Server, cityName, base, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4220,8 +9000,8 @@ func (c *Client) PatchV0CityByCityNameAgentByBaseWithBody(ctx context.Context, c
 	return c.Client.Do(req)
 }
 
-func (c *Client) PatchV0CityByCityNameAgentByBase(ctx context.Context, cityName string, base string, body PatchV0CityByCityNameAgentByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPatchV0CityByCityNameAgentByBaseRequest(c.Server, cityName, base, body)
+func (c *Client) PatchV0CityByCityNameAgentByBase(ctx context.Context, cityName string, base string, params *PatchV0CityByCityNameAgentByBaseParams, body PatchV0CityByCityNameAgentByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchV0CityByCityNameAgentByBaseRequest(c.Server, cityName, base, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4256,8 +9036,8 @@ func (c *Client) StreamAgentOutput(ctx context.Context, cityName string, base st
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameAgentByBaseByAction(ctx context.Context, cityName string, base string, action PostV0CityByCityNameAgentByBaseByActionParamsAction, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameAgentByBaseByActionRequest(c.Server, cityName, base, action)
+func (c *Client) PostV0CityByCityNameAgentByBaseByAction(ctx context.Context, cityName string, base string, action PostV0CityByCityNameAgentByBaseByActionParamsAction, params *PostV0CityByCityNameAgentByBaseByActionParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameAgentByBaseByActionRequest(c.Server, cityName, base, action, params)
 	if err != nil {
 		return nil, err
 	}
@@ -4268,8 +9048,8 @@ func (c *Client) PostV0CityByCityNameAgentByBaseByAction(ctx context.Context, ci
 	return c.Client.Do(req)
 }
 
-func (c *Client) DeleteV0CityByCityNameAgentByDirByBase(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteV0CityByCityNameAgentByDirByBaseRequest(c.Server, cityName, dir, base)
+func (c *Client) DeleteV0CityByCityNameAgentByDirByBase(ctx context.Context, cityName string, dir string, base string, params *DeleteV0CityByCityNameAgentByDirByBaseParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNameAgentByDirByBaseRequest(c.Server, cityName, dir, base, params)
 	if err != nil {
 		return nil, err
 	}
@@ -4292,8 +9072,8 @@ func (c *Client) GetV0CityByCityNameAgentByDirByBase(ctx context.Context, cityNa
 	return c.Client.Do(req)
 }
 
-func (c *Client) PatchV0CityByCityNameAgentByDirByBaseWithBody(ctx context.Context, cityName string, dir string, base string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPatchV0CityByCityNameAgentByDirByBaseRequestWithBody(c.Server, cityName, dir, base, contentType, body)
+func (c *Client) PatchV0CityByCityNameAgentByDirByBaseWithBody(ctx context.Context, cityName string, dir string, base string, params *PatchV0CityByCityNameAgentByDirByBaseParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchV0CityByCityNameAgentByDirByBaseRequestWithBody(c.Server, cityName, dir, base, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4304,8 +9084,8 @@ func (c *Client) PatchV0CityByCityNameAgentByDirByBaseWithBody(ctx context.Conte
 	return c.Client.Do(req)
 }
 
-func (c *Client) PatchV0CityByCityNameAgentByDirByBase(ctx context.Context, cityName string, dir string, base string, body PatchV0CityByCityNameAgentByDirByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPatchV0CityByCityNameAgentByDirByBaseRequest(c.Server, cityName, dir, base, body)
+func (c *Client) PatchV0CityByCityNameAgentByDirByBase(ctx context.Context, cityName string, dir string, base string, params *PatchV0CityByCityNameAgentByDirByBaseParams, body PatchV0CityByCityNameAgentByDirByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchV0CityByCityNameAgentByDirByBaseRequest(c.Server, cityName, dir, base, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4340,8 +9120,8 @@ func (c *Client) StreamAgentOutputQualified(ctx context.Context, cityName string
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameAgentByDirByBaseByAction(ctx context.Context, cityName string, dir string, base string, action PostV0CityByCityNameAgentByDirByBaseByActionParamsAction, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameAgentByDirByBaseByActionRequest(c.Server, cityName, dir, base, action)
+func (c *Client) PostV0CityByCityNameAgentByDirByBaseByAction(ctx context.Context, cityName string, dir string, base string, action PostV0CityByCityNameAgentByDirByBaseByActionParamsAction, params *PostV0CityByCityNameAgentByDirByBaseByActionParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameAgentByDirByBaseByActionRequest(c.Server, cityName, dir, base, action, params)
 	if err != nil {
 		return nil, err
 	}
@@ -4364,8 +9144,8 @@ func (c *Client) GetV0CityByCityNameAgents(ctx context.Context, cityName string,
 	return c.Client.Do(req)
 }
 
-func (c *Client) CreateAgentWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewCreateAgentRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) CreateAgentWithBody(ctx context.Context, cityName string, params *CreateAgentParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateAgentRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4376,8 +9156,8 @@ func (c *Client) CreateAgentWithBody(ctx context.Context, cityName string, conte
 	return c.Client.Do(req)
 }
 
-func (c *Client) CreateAgent(ctx context.Context, cityName string, body CreateAgentJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewCreateAgentRequest(c.Server, cityName, body)
+func (c *Client) CreateAgent(ctx context.Context, cityName string, params *CreateAgentParams, body CreateAgentJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateAgentRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4388,8 +9168,8 @@ func (c *Client) CreateAgent(ctx context.Context, cityName string, body CreateAg
 	return c.Client.Do(req)
 }
 
-func (c *Client) DeleteV0CityByCityNameBeadById(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteV0CityByCityNameBeadByIdRequest(c.Server, cityName, id)
+func (c *Client) DeleteV0CityByCityNameBeadById(ctx context.Context, cityName string, id string, params *DeleteV0CityByCityNameBeadByIdParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNameBeadByIdRequest(c.Server, cityName, id, params)
 	if err != nil {
 		return nil, err
 	}
@@ -4412,8 +9192,8 @@ func (c *Client) GetV0CityByCityNameBeadById(ctx context.Context, cityName strin
 	return c.Client.Do(req)
 }
 
-func (c *Client) PatchV0CityByCityNameBeadByIdWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPatchV0CityByCityNameBeadByIdRequestWithBody(c.Server, cityName, id, contentType, body)
+func (c *Client) PatchV0CityByCityNameBeadByIdWithBody(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameBeadByIdParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchV0CityByCityNameBeadByIdRequestWithBody(c.Server, cityName, id, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4424,8 +9204,8 @@ func (c *Client) PatchV0CityByCityNameBeadByIdWithBody(ctx context.Context, city
 	return c.Client.Do(req)
 }
 
-func (c *Client) PatchV0CityByCityNameBeadById(ctx context.Context, cityName string, id string, body PatchV0CityByCityNameBeadByIdJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPatchV0CityByCityNameBeadByIdRequest(c.Server, cityName, id, body)
+func (c *Client) PatchV0CityByCityNameBeadById(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameBeadByIdParams, body PatchV0CityByCityNameBeadByIdJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchV0CityByCityNameBeadByIdRequest(c.Server, cityName, id, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4436,8 +9216,8 @@ func (c *Client) PatchV0CityByCityNameBeadById(ctx context.Context, cityName str
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameBeadByIdAssignWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameBeadByIdAssignRequestWithBody(c.Server, cityName, id, contentType, body)
+func (c *Client) PostV0CityByCityNameBeadByIdAssignWithBody(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdAssignParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameBeadByIdAssignRequestWithBody(c.Server, cityName, id, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4448,8 +9228,8 @@ func (c *Client) PostV0CityByCityNameBeadByIdAssignWithBody(ctx context.Context,
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameBeadByIdAssign(ctx context.Context, cityName string, id string, body PostV0CityByCityNameBeadByIdAssignJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameBeadByIdAssignRequest(c.Server, cityName, id, body)
+func (c *Client) PostV0CityByCityNameBeadByIdAssign(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdAssignParams, body PostV0CityByCityNameBeadByIdAssignJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameBeadByIdAssignRequest(c.Server, cityName, id, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4460,8 +9240,8 @@ func (c *Client) PostV0CityByCityNameBeadByIdAssign(ctx context.Context, cityNam
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameBeadByIdClose(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameBeadByIdCloseRequest(c.Server, cityName, id)
+func (c *Client) PostV0CityByCityNameBeadByIdClose(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameBeadByIdCloseRequest(c.Server, cityName, id, params)
 	if err != nil {
 		return nil, err
 	}
@@ -4484,8 +9264,8 @@ func (c *Client) GetV0CityByCityNameBeadByIdDeps(ctx context.Context, cityName s
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameBeadByIdReopen(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameBeadByIdReopenRequest(c.Server, cityName, id)
+func (c *Client) PostV0CityByCityNameBeadByIdReopen(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdReopenParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameBeadByIdReopenRequest(c.Server, cityName, id, params)
 	if err != nil {
 		return nil, err
 	}
@@ -4496,8 +9276,8 @@ func (c *Client) PostV0CityByCityNameBeadByIdReopen(ctx context.Context, cityNam
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameBeadByIdUpdateWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameBeadByIdUpdateRequestWithBody(c.Server, cityName, id, contentType, body)
+func (c *Client) PostV0CityByCityNameBeadByIdUpdateWithBody(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdUpdateParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameBeadByIdUpdateRequestWithBody(c.Server, cityName, id, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4508,8 +9288,8 @@ func (c *Client) PostV0CityByCityNameBeadByIdUpdateWithBody(ctx context.Context,
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameBeadByIdUpdate(ctx context.Context, cityName string, id string, body PostV0CityByCityNameBeadByIdUpdateJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameBeadByIdUpdateRequest(c.Server, cityName, id, body)
+func (c *Client) PostV0CityByCityNameBeadByIdUpdate(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdUpdateParams, body PostV0CityByCityNameBeadByIdUpdateJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameBeadByIdUpdateRequest(c.Server, cityName, id, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4616,8 +9396,8 @@ func (c *Client) GetV0CityByCityNameConfigValidate(ctx context.Context, cityName
 	return c.Client.Do(req)
 }
 
-func (c *Client) DeleteV0CityByCityNameConvoyById(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteV0CityByCityNameConvoyByIdRequest(c.Server, cityName, id)
+func (c *Client) DeleteV0CityByCityNameConvoyById(ctx context.Context, cityName string, id string, params *DeleteV0CityByCityNameConvoyByIdParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNameConvoyByIdRequest(c.Server, cityName, id, params)
 	if err != nil {
 		return nil, err
 	}
@@ -4640,8 +9420,8 @@ func (c *Client) GetV0CityByCityNameConvoyById(ctx context.Context, cityName str
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameConvoyByIdAddWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameConvoyByIdAddRequestWithBody(c.Server, cityName, id, contentType, body)
+func (c *Client) PostV0CityByCityNameConvoyByIdAddWithBody(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdAddParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameConvoyByIdAddRequestWithBody(c.Server, cityName, id, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4652,8 +9432,8 @@ func (c *Client) PostV0CityByCityNameConvoyByIdAddWithBody(ctx context.Context, 
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameConvoyByIdAdd(ctx context.Context, cityName string, id string, body PostV0CityByCityNameConvoyByIdAddJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameConvoyByIdAddRequest(c.Server, cityName, id, body)
+func (c *Client) PostV0CityByCityNameConvoyByIdAdd(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdAddParams, body PostV0CityByCityNameConvoyByIdAddJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameConvoyByIdAddRequest(c.Server, cityName, id, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4676,8 +9456,8 @@ func (c *Client) GetV0CityByCityNameConvoyByIdCheck(ctx context.Context, cityNam
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameConvoyByIdClose(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameConvoyByIdCloseRequest(c.Server, cityName, id)
+func (c *Client) PostV0CityByCityNameConvoyByIdClose(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdCloseParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameConvoyByIdCloseRequest(c.Server, cityName, id, params)
 	if err != nil {
 		return nil, err
 	}
@@ -4688,8 +9468,8 @@ func (c *Client) PostV0CityByCityNameConvoyByIdClose(ctx context.Context, cityNa
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameConvoyByIdRemoveWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameConvoyByIdRemoveRequestWithBody(c.Server, cityName, id, contentType, body)
+func (c *Client) PostV0CityByCityNameConvoyByIdRemoveWithBody(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdRemoveParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameConvoyByIdRemoveRequestWithBody(c.Server, cityName, id, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4700,8 +9480,8 @@ func (c *Client) PostV0CityByCityNameConvoyByIdRemoveWithBody(ctx context.Contex
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameConvoyByIdRemove(ctx context.Context, cityName string, id string, body PostV0CityByCityNameConvoyByIdRemoveJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameConvoyByIdRemoveRequest(c.Server, cityName, id, body)
+func (c *Client) PostV0CityByCityNameConvoyByIdRemove(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdRemoveParams, body PostV0CityByCityNameConvoyByIdRemoveJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameConvoyByIdRemoveRequest(c.Server, cityName, id, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4724,8 +9504,8 @@ func (c *Client) GetV0CityByCityNameConvoys(ctx context.Context, cityName string
 	return c.Client.Do(req)
 }
 
-func (c *Client) CreateConvoyWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewCreateConvoyRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) CreateConvoyWithBody(ctx context.Context, cityName string, params *CreateConvoyParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateConvoyRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4736,8 +9516,8 @@ func (c *Client) CreateConvoyWithBody(ctx context.Context, cityName string, cont
 	return c.Client.Do(req)
 }
 
-func (c *Client) CreateConvoy(ctx context.Context, cityName string, body CreateConvoyJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewCreateConvoyRequest(c.Server, cityName, body)
+func (c *Client) CreateConvoy(ctx context.Context, cityName string, params *CreateConvoyParams, body CreateConvoyJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateConvoyRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4760,8 +9540,8 @@ func (c *Client) GetV0CityByCityNameEvents(ctx context.Context, cityName string,
 	return c.Client.Do(req)
 }
 
-func (c *Client) EmitEventWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewEmitEventRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) EmitEventWithBody(ctx context.Context, cityName string, params *EmitEventParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEmitEventRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4772,8 +9552,8 @@ func (c *Client) EmitEventWithBody(ctx context.Context, cityName string, content
 	return c.Client.Do(req)
 }
 
-func (c *Client) EmitEvent(ctx context.Context, cityName string, body EmitEventJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewEmitEventRequest(c.Server, cityName, body)
+func (c *Client) EmitEvent(ctx context.Context, cityName string, params *EmitEventParams, body EmitEventJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEmitEventRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4796,8 +9576,8 @@ func (c *Client) StreamEvents(ctx context.Context, cityName string, params *Stre
 	return c.Client.Do(req)
 }
 
-func (c *Client) DeleteV0CityByCityNameExtmsgAdaptersWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteV0CityByCityNameExtmsgAdaptersRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) DeleteV0CityByCityNameExtmsgAdaptersWithBody(ctx context.Context, cityName string, params *DeleteV0CityByCityNameExtmsgAdaptersParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNameExtmsgAdaptersRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4808,8 +9588,8 @@ func (c *Client) DeleteV0CityByCityNameExtmsgAdaptersWithBody(ctx context.Contex
 	return c.Client.Do(req)
 }
 
-func (c *Client) DeleteV0CityByCityNameExtmsgAdapters(ctx context.Context, cityName string, body DeleteV0CityByCityNameExtmsgAdaptersJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteV0CityByCityNameExtmsgAdaptersRequest(c.Server, cityName, body)
+func (c *Client) DeleteV0CityByCityNameExtmsgAdapters(ctx context.Context, cityName string, params *DeleteV0CityByCityNameExtmsgAdaptersParams, body DeleteV0CityByCityNameExtmsgAdaptersJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNameExtmsgAdaptersRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4832,8 +9612,8 @@ func (c *Client) GetV0CityByCityNameExtmsgAdapters(ctx context.Context, cityName
 	return c.Client.Do(req)
 }
 
-func (c *Client) RegisterExtmsgAdapterWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRegisterExtmsgAdapterRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) RegisterExtmsgAdapterWithBody(ctx context.Context, cityName string, params *RegisterExtmsgAdapterParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRegisterExtmsgAdapterRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4844,8 +9624,8 @@ func (c *Client) RegisterExtmsgAdapterWithBody(ctx context.Context, cityName str
 	return c.Client.Do(req)
 }
 
-func (c *Client) RegisterExtmsgAdapter(ctx context.Context, cityName string, body RegisterExtmsgAdapterJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRegisterExtmsgAdapterRequest(c.Server, cityName, body)
+func (c *Client) RegisterExtmsgAdapter(ctx context.Context, cityName string, params *RegisterExtmsgAdapterParams, body RegisterExtmsgAdapterJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRegisterExtmsgAdapterRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4856,8 +9636,8 @@ func (c *Client) RegisterExtmsgAdapter(ctx context.Context, cityName string, bod
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameExtmsgBindWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameExtmsgBindRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) PostV0CityByCityNameExtmsgBindWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgBindParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgBindRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4868,8 +9648,8 @@ func (c *Client) PostV0CityByCityNameExtmsgBindWithBody(ctx context.Context, cit
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameExtmsgBind(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgBindJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameExtmsgBindRequest(c.Server, cityName, body)
+func (c *Client) PostV0CityByCityNameExtmsgBind(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgBindParams, body PostV0CityByCityNameExtmsgBindJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgBindRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4904,8 +9684,8 @@ func (c *Client) GetV0CityByCityNameExtmsgGroups(ctx context.Context, cityName s
 	return c.Client.Do(req)
 }
 
-func (c *Client) EnsureExtmsgGroupWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewEnsureExtmsgGroupRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) EnsureExtmsgGroupWithBody(ctx context.Context, cityName string, params *EnsureExtmsgGroupParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEnsureExtmsgGroupRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4916,8 +9696,8 @@ func (c *Client) EnsureExtmsgGroupWithBody(ctx context.Context, cityName string,
 	return c.Client.Do(req)
 }
 
-func (c *Client) EnsureExtmsgGroup(ctx context.Context, cityName string, body EnsureExtmsgGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewEnsureExtmsgGroupRequest(c.Server, cityName, body)
+func (c *Client) EnsureExtmsgGroup(ctx context.Context, cityName string, params *EnsureExtmsgGroupParams, body EnsureExtmsgGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEnsureExtmsgGroupRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4928,8 +9708,8 @@ func (c *Client) EnsureExtmsgGroup(ctx context.Context, cityName string, body En
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameExtmsgInboundWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameExtmsgInboundRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) PostV0CityByCityNameExtmsgInboundWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgInboundParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgInboundRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4940,8 +9720,8 @@ func (c *Client) PostV0CityByCityNameExtmsgInboundWithBody(ctx context.Context, 
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameExtmsgInbound(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgInboundJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameExtmsgInboundRequest(c.Server, cityName, body)
+func (c *Client) PostV0CityByCityNameExtmsgInbound(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgInboundParams, body PostV0CityByCityNameExtmsgInboundJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgInboundRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4952,8 +9732,8 @@ func (c *Client) PostV0CityByCityNameExtmsgInbound(ctx context.Context, cityName
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameExtmsgOutboundWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameExtmsgOutboundRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) PostV0CityByCityNameExtmsgOutboundWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgOutboundParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgOutboundRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4964,8 +9744,8 @@ func (c *Client) PostV0CityByCityNameExtmsgOutboundWithBody(ctx context.Context,
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameExtmsgOutbound(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgOutboundJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameExtmsgOutboundRequest(c.Server, cityName, body)
+func (c *Client) PostV0CityByCityNameExtmsgOutbound(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgOutboundParams, body PostV0CityByCityNameExtmsgOutboundJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgOutboundRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4976,8 +9756,8 @@ func (c *Client) PostV0CityByCityNameExtmsgOutbound(ctx context.Context, cityNam
 	return c.Client.Do(req)
 }
 
-func (c *Client) DeleteV0CityByCityNameExtmsgParticipantsWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteV0CityByCityNameExtmsgParticipantsRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) DeleteV0CityByCityNameExtmsgParticipantsWithBody(ctx context.Context, cityName string, params *DeleteV0CityByCityNameExtmsgParticipantsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNameExtmsgParticipantsRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4988,8 +9768,8 @@ func (c *Client) DeleteV0CityByCityNameExtmsgParticipantsWithBody(ctx context.Co
 	return c.Client.Do(req)
 }
 
-func (c *Client) DeleteV0CityByCityNameExtmsgParticipants(ctx context.Context, cityName string, body DeleteV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteV0CityByCityNameExtmsgParticipantsRequest(c.Server, cityName, body)
+func (c *Client) DeleteV0CityByCityNameExtmsgParticipants(ctx context.Context, cityName string, params *DeleteV0CityByCityNameExtmsgParticipantsParams, body DeleteV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNameExtmsgParticipantsRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5000,8 +9780,8 @@ func (c *Client) DeleteV0CityByCityNameExtmsgParticipants(ctx context.Context, c
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameExtmsgParticipantsWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameExtmsgParticipantsRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) PostV0CityByCityNameExtmsgParticipantsWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgParticipantsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgParticipantsRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5012,8 +9792,8 @@ func (c *Client) PostV0CityByCityNameExtmsgParticipantsWithBody(ctx context.Cont
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameExtmsgParticipants(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameExtmsgParticipantsRequest(c.Server, cityName, body)
+func (c *Client) PostV0CityByCityNameExtmsgParticipants(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgParticipantsParams, body PostV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgParticipantsRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5036,8 +9816,8 @@ func (c *Client) GetV0CityByCityNameExtmsgTranscript(ctx context.Context, cityNa
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameExtmsgTranscriptAckWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameExtmsgTranscriptAckRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) PostV0CityByCityNameExtmsgTranscriptAckWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgTranscriptAckParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgTranscriptAckRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5048,8 +9828,8 @@ func (c *Client) PostV0CityByCityNameExtmsgTranscriptAckWithBody(ctx context.Con
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameExtmsgTranscriptAck(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgTranscriptAckJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameExtmsgTranscriptAckRequest(c.Server, cityName, body)
+func (c *Client) PostV0CityByCityNameExtmsgTranscriptAck(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgTranscriptAckParams, body PostV0CityByCityNameExtmsgTranscriptAckJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgTranscriptAckRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5060,8 +9840,8 @@ func (c *Client) PostV0CityByCityNameExtmsgTranscriptAck(ctx context.Context, ci
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameExtmsgUnbindWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameExtmsgUnbindRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) PostV0CityByCityNameExtmsgUnbindWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgUnbindParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgUnbindRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5072,8 +9852,8 @@ func (c *Client) PostV0CityByCityNameExtmsgUnbindWithBody(ctx context.Context, c
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameExtmsgUnbind(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgUnbindJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameExtmsgUnbindRequest(c.Server, cityName, body)
+func (c *Client) PostV0CityByCityNameExtmsgUnbind(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgUnbindParams, body PostV0CityByCityNameExtmsgUnbindJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgUnbindRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5132,8 +9912,8 @@ func (c *Client) GetV0CityByCityNameFormulasByName(ctx context.Context, cityName
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameFormulasByNamePreviewWithBody(ctx context.Context, cityName string, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameFormulasByNamePreviewRequestWithBody(c.Server, cityName, name, contentType, body)
+func (c *Client) PostV0CityByCityNameFormulasByNamePreviewWithBody(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameFormulasByNamePreviewParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameFormulasByNamePreviewRequestWithBody(c.Server, cityName, name, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5144,8 +9924,8 @@ func (c *Client) PostV0CityByCityNameFormulasByNamePreviewWithBody(ctx context.C
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameFormulasByNamePreview(ctx context.Context, cityName string, name string, body PostV0CityByCityNameFormulasByNamePreviewJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameFormulasByNamePreviewRequest(c.Server, cityName, name, body)
+func (c *Client) PostV0CityByCityNameFormulasByNamePreview(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameFormulasByNamePreviewParams, body PostV0CityByCityNameFormulasByNamePreviewJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameFormulasByNamePreviewRequest(c.Server, cityName, name, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5348,8 +10128,8 @@ func (c *Client) GetV0CityByCityNameOrderByName(ctx context.Context, cityName st
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameOrderByNameDisable(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameOrderByNameDisableRequest(c.Server, cityName, name)
+func (c *Client) PostV0CityByCityNameOrderByNameDisable(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameOrderByNameDisableParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameOrderByNameDisableRequest(c.Server, cityName, name, params)
 	if err != nil {
 		return nil, err
 	}
@@ -5360,8 +10140,8 @@ func (c *Client) PostV0CityByCityNameOrderByNameDisable(ctx context.Context, cit
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameOrderByNameEnable(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameOrderByNameEnableRequest(c.Server, cityName, name)
+func (c *Client) PostV0CityByCityNameOrderByNameEnable(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameOrderByNameEnableParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameOrderByNameEnableRequest(c.Server, cityName, name, params)
 	if err != nil {
 		return nil, err
 	}
@@ -5384,8 +10164,8 @@ func (c *Client) GetV0CityByCityNameOrders(ctx context.Context, cityName string,
 	return c.Client.Do(req)
 }
 
-func (c *Client) GetV0CityByCityNameOrdersCheck(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetV0CityByCityNameOrdersCheckRequest(c.Server, cityName)
+func (c *Client) GetV0CityByCityNameOrdersCheck(ctx context.Context, cityName string, params *GetV0CityByCityNameOrdersCheckParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameOrdersCheckRequest(c.Server, cityName, params)
 	if err != nil {
 		return nil, err
 	}
@@ -5432,8 +10212,8 @@ func (c *Client) GetV0CityByCityNamePacks(ctx context.Context, cityName string, 
 	return c.Client.Do(req)
 }
 
-func (c *Client) DeleteV0CityByCityNamePatchesAgentByBase(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteV0CityByCityNamePatchesAgentByBaseRequest(c.Server, cityName, base)
+func (c *Client) DeleteV0CityByCityNamePatchesAgentByBase(ctx context.Context, cityName string, base string, params *DeleteV0CityByCityNamePatchesAgentByBaseParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNamePatchesAgentByBaseRequest(c.Server, cityName, base, params)
 	if err != nil {
 		return nil, err
 	}
@@ -5456,8 +10236,8 @@ func (c *Client) GetV0CityByCityNamePatchesAgentByBase(ctx context.Context, city
 	return c.Client.Do(req)
 }
 
-func (c *Client) DeleteV0CityByCityNamePatchesAgentByDirByBase(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteV0CityByCityNamePatchesAgentByDirByBaseRequest(c.Server, cityName, dir, base)
+func (c *Client) DeleteV0CityByCityNamePatchesAgentByDirByBase(ctx context.Context, cityName string, dir string, base string, params *DeleteV0CityByCityNamePatchesAgentByDirByBaseParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNamePatchesAgentByDirByBaseRequest(c.Server, cityName, dir, base, params)
 	if err != nil {
 		return nil, err
 	}
@@ -5492,8 +10272,8 @@ func (c *Client) GetV0CityByCityNamePatchesAgents(ctx context.Context, cityName 
 	return c.Client.Do(req)
 }
 
-func (c *Client) PutV0CityByCityNamePatchesAgentsWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPutV0CityByCityNamePatchesAgentsRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) PutV0CityByCityNamePatchesAgentsWithBody(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesAgentsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutV0CityByCityNamePatchesAgentsRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5504,8 +10284,8 @@ func (c *Client) PutV0CityByCityNamePatchesAgentsWithBody(ctx context.Context, c
 	return c.Client.Do(req)
 }
 
-func (c *Client) PutV0CityByCityNamePatchesAgents(ctx context.Context, cityName string, body PutV0CityByCityNamePatchesAgentsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPutV0CityByCityNamePatchesAgentsRequest(c.Server, cityName, body)
+func (c *Client) PutV0CityByCityNamePatchesAgents(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesAgentsParams, body PutV0CityByCityNamePatchesAgentsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutV0CityByCityNamePatchesAgentsRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5516,8 +10296,8 @@ func (c *Client) PutV0CityByCityNamePatchesAgents(ctx context.Context, cityName 
 	return c.Client.Do(req)
 }
 
-func (c *Client) DeleteV0CityByCityNamePatchesProviderByName(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteV0CityByCityNamePatchesProviderByNameRequest(c.Server, cityName, name)
+func (c *Client) DeleteV0CityByCityNamePatchesProviderByName(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNamePatchesProviderByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNamePatchesProviderByNameRequest(c.Server, cityName, name, params)
 	if err != nil {
 		return nil, err
 	}
@@ -5552,8 +10332,8 @@ func (c *Client) GetV0CityByCityNamePatchesProviders(ctx context.Context, cityNa
 	return c.Client.Do(req)
 }
 
-func (c *Client) PutV0CityByCityNamePatchesProvidersWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPutV0CityByCityNamePatchesProvidersRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) PutV0CityByCityNamePatchesProvidersWithBody(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesProvidersParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutV0CityByCityNamePatchesProvidersRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5564,8 +10344,8 @@ func (c *Client) PutV0CityByCityNamePatchesProvidersWithBody(ctx context.Context
 	return c.Client.Do(req)
 }
 
-func (c *Client) PutV0CityByCityNamePatchesProviders(ctx context.Context, cityName string, body PutV0CityByCityNamePatchesProvidersJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPutV0CityByCityNamePatchesProvidersRequest(c.Server, cityName, body)
+func (c *Client) PutV0CityByCityNamePatchesProviders(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesProvidersParams, body PutV0CityByCityNamePatchesProvidersJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutV0CityByCityNamePatchesProvidersRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5576,8 +10356,8 @@ func (c *Client) PutV0CityByCityNamePatchesProviders(ctx context.Context, cityNa
 	return c.Client.Do(req)
 }
 
-func (c *Client) DeleteV0CityByCityNamePatchesRigByName(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteV0CityByCityNamePatchesRigByNameRequest(c.Server, cityName, name)
+func (c *Client) DeleteV0CityByCityNamePatchesRigByName(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNamePatchesRigByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNamePatchesRigByNameRequest(c.Server, cityName, name, params)
 	if err != nil {
 		return nil, err
 	}
@@ -5612,8 +10392,8 @@ func (c *Client) GetV0CityByCityNamePatchesRigs(ctx context.Context, cityName st
 	return c.Client.Do(req)
 }
 
-func (c *Client) PutV0CityByCityNamePatchesRigsWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPutV0CityByCityNamePatchesRigsRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) PutV0CityByCityNamePatchesRigsWithBody(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesRigsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutV0CityByCityNamePatchesRigsRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5624,8 +10404,8 @@ func (c *Client) PutV0CityByCityNamePatchesRigsWithBody(ctx context.Context, cit
 	return c.Client.Do(req)
 }
 
-func (c *Client) PutV0CityByCityNamePatchesRigs(ctx context.Context, cityName string, body PutV0CityByCityNamePatchesRigsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPutV0CityByCityNamePatchesRigsRequest(c.Server, cityName, body)
+func (c *Client) PutV0CityByCityNamePatchesRigs(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesRigsParams, body PutV0CityByCityNamePatchesRigsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutV0CityByCityNamePatchesRigsRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5648,8 +10428,8 @@ func (c *Client) GetV0CityByCityNameProviderReadiness(ctx context.Context, cityN
 	return c.Client.Do(req)
 }
 
-func (c *Client) DeleteV0CityByCityNameProviderByName(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteV0CityByCityNameProviderByNameRequest(c.Server, cityName, name)
+func (c *Client) DeleteV0CityByCityNameProviderByName(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNameProviderByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNameProviderByNameRequest(c.Server, cityName, name, params)
 	if err != nil {
 		return nil, err
 	}
@@ -5672,8 +10452,8 @@ func (c *Client) GetV0CityByCityNameProviderByName(ctx context.Context, cityName
 	return c.Client.Do(req)
 }
 
-func (c *Client) PatchV0CityByCityNameProviderByNameWithBody(ctx context.Context, cityName string, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPatchV0CityByCityNameProviderByNameRequestWithBody(c.Server, cityName, name, contentType, body)
+func (c *Client) PatchV0CityByCityNameProviderByNameWithBody(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameProviderByNameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchV0CityByCityNameProviderByNameRequestWithBody(c.Server, cityName, name, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5684,8 +10464,8 @@ func (c *Client) PatchV0CityByCityNameProviderByNameWithBody(ctx context.Context
 	return c.Client.Do(req)
 }
 
-func (c *Client) PatchV0CityByCityNameProviderByName(ctx context.Context, cityName string, name string, body PatchV0CityByCityNameProviderByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPatchV0CityByCityNameProviderByNameRequest(c.Server, cityName, name, body)
+func (c *Client) PatchV0CityByCityNameProviderByName(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameProviderByNameParams, body PatchV0CityByCityNameProviderByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchV0CityByCityNameProviderByNameRequest(c.Server, cityName, name, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5708,8 +10488,8 @@ func (c *Client) GetV0CityByCityNameProviders(ctx context.Context, cityName stri
 	return c.Client.Do(req)
 }
 
-func (c *Client) CreateProviderWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewCreateProviderRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) CreateProviderWithBody(ctx context.Context, cityName string, params *CreateProviderParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateProviderRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5720,8 +10500,8 @@ func (c *Client) CreateProviderWithBody(ctx context.Context, cityName string, co
 	return c.Client.Do(req)
 }
 
-func (c *Client) CreateProvider(ctx context.Context, cityName string, body CreateProviderJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewCreateProviderRequest(c.Server, cityName, body)
+func (c *Client) CreateProvider(ctx context.Context, cityName string, params *CreateProviderParams, body CreateProviderJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateProviderRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5756,8 +10536,8 @@ func (c *Client) GetV0CityByCityNameReadiness(ctx context.Context, cityName stri
 	return c.Client.Do(req)
 }
 
-func (c *Client) DeleteV0CityByCityNameRigByName(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteV0CityByCityNameRigByNameRequest(c.Server, cityName, name)
+func (c *Client) DeleteV0CityByCityNameRigByName(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNameRigByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNameRigByNameRequest(c.Server, cityName, name, params)
 	if err != nil {
 		return nil, err
 	}
@@ -5780,8 +10560,8 @@ func (c *Client) GetV0CityByCityNameRigByName(ctx context.Context, cityName stri
 	return c.Client.Do(req)
 }
 
-func (c *Client) PatchV0CityByCityNameRigByNameWithBody(ctx context.Context, cityName string, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPatchV0CityByCityNameRigByNameRequestWithBody(c.Server, cityName, name, contentType, body)
+func (c *Client) PatchV0CityByCityNameRigByNameWithBody(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameRigByNameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchV0CityByCityNameRigByNameRequestWithBody(c.Server, cityName, name, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5792,8 +10572,8 @@ func (c *Client) PatchV0CityByCityNameRigByNameWithBody(ctx context.Context, cit
 	return c.Client.Do(req)
 }
 
-func (c *Client) PatchV0CityByCityNameRigByName(ctx context.Context, cityName string, name string, body PatchV0CityByCityNameRigByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPatchV0CityByCityNameRigByNameRequest(c.Server, cityName, name, body)
+func (c *Client) PatchV0CityByCityNameRigByName(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameRigByNameParams, body PatchV0CityByCityNameRigByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchV0CityByCityNameRigByNameRequest(c.Server, cityName, name, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5804,8 +10584,8 @@ func (c *Client) PatchV0CityByCityNameRigByName(ctx context.Context, cityName st
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameRigByNameByAction(ctx context.Context, cityName string, name string, action string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameRigByNameByActionRequest(c.Server, cityName, name, action)
+func (c *Client) PostV0CityByCityNameRigByNameByAction(ctx context.Context, cityName string, name string, action string, params *PostV0CityByCityNameRigByNameByActionParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameRigByNameByActionRequest(c.Server, cityName, name, action, params)
 	if err != nil {
 		return nil, err
 	}
@@ -5828,8 +10608,8 @@ func (c *Client) GetV0CityByCityNameRigs(ctx context.Context, cityName string, p
 	return c.Client.Do(req)
 }
 
-func (c *Client) CreateRigWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewCreateRigRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) CreateRigWithBody(ctx context.Context, cityName string, params *CreateRigParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateRigRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5840,8 +10620,8 @@ func (c *Client) CreateRigWithBody(ctx context.Context, cityName string, content
 	return c.Client.Do(req)
 }
 
-func (c *Client) CreateRig(ctx context.Context, cityName string, body CreateRigJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewCreateRigRequest(c.Server, cityName, body)
+func (c *Client) CreateRig(ctx context.Context, cityName string, params *CreateRigParams, body CreateRigJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateRigRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5864,8 +10644,8 @@ func (c *Client) GetV0CityByCityNameServiceByName(ctx context.Context, cityName 
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameServiceByNameRestart(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameServiceByNameRestartRequest(c.Server, cityName, name)
+func (c *Client) PostV0CityByCityNameServiceByNameRestart(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameServiceByNameRestartParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameServiceByNameRestartRequest(c.Server, cityName, name, params)
 	if err != nil {
 		return nil, err
 	}
@@ -5900,8 +10680,8 @@ func (c *Client) GetV0CityByCityNameSessionById(ctx context.Context, cityName st
 	return c.Client.Do(req)
 }
 
-func (c *Client) PatchV0CityByCityNameSessionByIdWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPatchV0CityByCityNameSessionByIdRequestWithBody(c.Server, cityName, id, contentType, body)
+func (c *Client) PatchV0CityByCityNameSessionByIdWithBody(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameSessionByIdParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchV0CityByCityNameSessionByIdRequestWithBody(c.Server, cityName, id, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5912,8 +10692,8 @@ func (c *Client) PatchV0CityByCityNameSessionByIdWithBody(ctx context.Context, c
 	return c.Client.Do(req)
 }
 
-func (c *Client) PatchV0CityByCityNameSessionById(ctx context.Context, cityName string, id string, body PatchV0CityByCityNameSessionByIdJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPatchV0CityByCityNameSessionByIdRequest(c.Server, cityName, id, body)
+func (c *Client) PatchV0CityByCityNameSessionById(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameSessionByIdParams, body PatchV0CityByCityNameSessionByIdJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchV0CityByCityNameSessionByIdRequest(c.Server, cityName, id, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5960,8 +10740,8 @@ func (c *Client) PostV0CityByCityNameSessionByIdClose(ctx context.Context, cityN
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameSessionByIdKill(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameSessionByIdKillRequest(c.Server, cityName, id)
+func (c *Client) PostV0CityByCityNameSessionByIdKill(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdKillParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameSessionByIdKillRequest(c.Server, cityName, id, params)
 	if err != nil {
 		return nil, err
 	}
@@ -5972,8 +10752,8 @@ func (c *Client) PostV0CityByCityNameSessionByIdKill(ctx context.Context, cityNa
 	return c.Client.Do(req)
 }
 
-func (c *Client) SendSessionMessageWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewSendSessionMessageRequestWithBody(c.Server, cityName, id, contentType, body)
+func (c *Client) SendSessionMessageWithBody(ctx context.Context, cityName string, id string, params *SendSessionMessageParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSendSessionMessageRequestWithBody(c.Server, cityName, id, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5984,8 +10764,8 @@ func (c *Client) SendSessionMessageWithBody(ctx context.Context, cityName string
 	return c.Client.Do(req)
 }
 
-func (c *Client) SendSessionMessage(ctx context.Context, cityName string, id string, body SendSessionMessageJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewSendSessionMessageRequest(c.Server, cityName, id, body)
+func (c *Client) SendSessionMessage(ctx context.Context, cityName string, id string, params *SendSessionMessageParams, body SendSessionMessageJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSendSessionMessageRequest(c.Server, cityName, id, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -6008,8 +10788,8 @@ func (c *Client) GetV0CityByCityNameSessionByIdPending(ctx context.Context, city
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameSessionByIdRenameWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameSessionByIdRenameRequestWithBody(c.Server, cityName, id, contentType, body)
+func (c *Client) PostV0CityByCityNameSessionByIdRenameWithBody(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameSessionByIdRenameRequestWithBody(c.Server, cityName, id, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -6020,8 +10800,8 @@ func (c *Client) PostV0CityByCityNameSessionByIdRenameWithBody(ctx context.Conte
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameSessionByIdRename(ctx context.Context, cityName string, id string, body PostV0CityByCityNameSessionByIdRenameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameSessionByIdRenameRequest(c.Server, cityName, id, body)
+func (c *Client) PostV0CityByCityNameSessionByIdRename(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, body PostV0CityByCityNameSessionByIdRenameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameSessionByIdRenameRequest(c.Server, cityName, id, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -6032,8 +10812,8 @@ func (c *Client) PostV0CityByCityNameSessionByIdRename(ctx context.Context, city
 	return c.Client.Do(req)
 }
 
-func (c *Client) RespondSessionWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRespondSessionRequestWithBody(c.Server, cityName, id, contentType, body)
+func (c *Client) RespondSessionWithBody(ctx context.Context, cityName string, id string, params *RespondSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRespondSessionRequestWithBody(c.Server, cityName, id, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -6044,8 +10824,8 @@ func (c *Client) RespondSessionWithBody(ctx context.Context, cityName string, id
 	return c.Client.Do(req)
 }
 
-func (c *Client) RespondSession(ctx context.Context, cityName string, id string, body RespondSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRespondSessionRequest(c.Server, cityName, id, body)
+func (c *Client) RespondSession(ctx context.Context, cityName string, id string, params *RespondSessionParams, body RespondSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRespondSessionRequest(c.Server, cityName, id, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -6056,8 +10836,8 @@ func (c *Client) RespondSession(ctx context.Context, cityName string, id string,
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameSessionByIdStop(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameSessionByIdStopRequest(c.Server, cityName, id)
+func (c *Client) PostV0CityByCityNameSessionByIdStop(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdStopParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameSessionByIdStopRequest(c.Server, cityName, id, params)
 	if err != nil {
 		return nil, err
 	}
@@ -6080,8 +10860,8 @@ func (c *Client) StreamSession(ctx context.Context, cityName string, id string, 
 	return c.Client.Do(req)
 }
 
-func (c *Client) SubmitSessionWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewSubmitSessionRequestWithBody(c.Server, cityName, id, contentType, body)
+func (c *Client) SubmitSessionWithBody(ctx context.Context, cityName string, id string, params *SubmitSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSubmitSessionRequestWithBody(c.Server, cityName, id, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -6092,8 +10872,8 @@ func (c *Client) SubmitSessionWithBody(ctx context.Context, cityName string, id 
 	return c.Client.Do(req)
 }
 
-func (c *Client) SubmitSession(ctx context.Context, cityName string, id string, body SubmitSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewSubmitSessionRequest(c.Server, cityName, id, body)
+func (c *Client) SubmitSession(ctx context.Context, cityName string, id string, params *SubmitSessionParams, body SubmitSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSubmitSessionRequest(c.Server, cityName, id, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -6104,8 +10884,8 @@ func (c *Client) SubmitSession(ctx context.Context, cityName string, id string, 
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameSessionByIdSuspend(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameSessionByIdSuspendRequest(c.Server, cityName, id)
+func (c *Client) PostV0CityByCityNameSessionByIdSuspend(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdSuspendParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameSessionByIdSuspendRequest(c.Server, cityName, id, params)
 	if err != nil {
 		return nil, err
 	}
@@ -6128,8 +10908,8 @@ func (c *Client) GetV0CityByCityNameSessionByIdTranscript(ctx context.Context, c
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameSessionByIdWake(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameSessionByIdWakeRequest(c.Server, cityName, id)
+func (c *Client) PostV0CityByCityNameSessionByIdWake(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdWakeParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameSessionByIdWakeRequest(c.Server, cityName, id, params)
 	if err != nil {
 		return nil, err
 	}
@@ -6152,8 +10932,8 @@ func (c *Client) GetV0CityByCityNameSessions(ctx context.Context, cityName strin
 	return c.Client.Do(req)
 }
 
-func (c *Client) CreateSessionWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewCreateSessionRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) CreateSessionWithBody(ctx context.Context, cityName string, params *CreateSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateSessionRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -6164,8 +10944,8 @@ func (c *Client) CreateSessionWithBody(ctx context.Context, cityName string, con
 	return c.Client.Do(req)
 }
 
-func (c *Client) CreateSession(ctx context.Context, cityName string, body CreateSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewCreateSessionRequest(c.Server, cityName, body)
+func (c *Client) CreateSession(ctx context.Context, cityName string, params *CreateSessionParams, body CreateSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateSessionRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -6176,8 +10956,8 @@ func (c *Client) CreateSession(ctx context.Context, cityName string, body Create
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameSlingWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameSlingRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) PostV0CityByCityNameSlingWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameSlingParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameSlingRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -6188,8 +10968,8 @@ func (c *Client) PostV0CityByCityNameSlingWithBody(ctx context.Context, cityName
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameSling(ctx context.Context, cityName string, body PostV0CityByCityNameSlingJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameSlingRequest(c.Server, cityName, body)
+func (c *Client) PostV0CityByCityNameSling(ctx context.Context, cityName string, params *PostV0CityByCityNameSlingParams, body PostV0CityByCityNameSlingJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameSlingRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -6202,6 +10982,18 @@ func (c *Client) PostV0CityByCityNameSling(ctx context.Context, cityName string,
 
 func (c *Client) GetV0CityByCityNameStatus(ctx context.Context, cityName string, params *GetV0CityByCityNameStatusParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV0CityByCityNameStatusRequest(c.Server, cityName, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0CityByCityNameUnregister(ctx context.Context, cityName string, params *PostV0CityByCityNameUnregisterParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameUnregisterRequest(c.Server, cityName, params)
 	if err != nil {
 		return nil, err
 	}
@@ -6339,18 +11131,18 @@ func NewGetV0CitiesRequest(server string) (*http.Request, error) {
 }
 
 // NewPostV0CityRequest calls the generic PostV0City builder with application/json body
-func NewPostV0CityRequest(server string, body PostV0CityJSONRequestBody) (*http.Request, error) {
+func NewPostV0CityRequest(server string, params *PostV0CityParams, body PostV0CityJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPostV0CityRequestWithBody(server, "application/json", bodyReader)
+	return NewPostV0CityRequestWithBody(server, params, "application/json", bodyReader)
 }
 
 // NewPostV0CityRequestWithBody generates requests for PostV0City with any type of body
-func NewPostV0CityRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPostV0CityRequestWithBody(server string, params *PostV0CityParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -6374,6 +11166,19 @@ func NewPostV0CityRequestWithBody(server string, contentType string, body io.Rea
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -6413,18 +11218,18 @@ func NewGetV0CityByCityNameRequest(server string, cityName string) (*http.Reques
 }
 
 // NewPatchV0CityByCityNameRequest calls the generic PatchV0CityByCityName builder with application/json body
-func NewPatchV0CityByCityNameRequest(server string, cityName string, body PatchV0CityByCityNameJSONRequestBody) (*http.Request, error) {
+func NewPatchV0CityByCityNameRequest(server string, cityName string, params *PatchV0CityByCityNameParams, body PatchV0CityByCityNameJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPatchV0CityByCityNameRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewPatchV0CityByCityNameRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewPatchV0CityByCityNameRequestWithBody generates requests for PatchV0CityByCityName with any type of body
-func NewPatchV0CityByCityNameRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPatchV0CityByCityNameRequestWithBody(server string, cityName string, params *PatchV0CityByCityNameParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -6456,11 +11261,24 @@ func NewPatchV0CityByCityNameRequestWithBody(server string, cityName string, con
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewDeleteV0CityByCityNameAgentByBaseRequest generates requests for DeleteV0CityByCityNameAgentByBase
-func NewDeleteV0CityByCityNameAgentByBaseRequest(server string, cityName string, base string) (*http.Request, error) {
+func NewDeleteV0CityByCityNameAgentByBaseRequest(server string, cityName string, base string, params *DeleteV0CityByCityNameAgentByBaseParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -6495,6 +11313,19 @@ func NewDeleteV0CityByCityNameAgentByBaseRequest(server string, cityName string,
 	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -6542,18 +11373,18 @@ func NewGetV0CityByCityNameAgentByBaseRequest(server string, cityName string, ba
 }
 
 // NewPatchV0CityByCityNameAgentByBaseRequest calls the generic PatchV0CityByCityNameAgentByBase builder with application/json body
-func NewPatchV0CityByCityNameAgentByBaseRequest(server string, cityName string, base string, body PatchV0CityByCityNameAgentByBaseJSONRequestBody) (*http.Request, error) {
+func NewPatchV0CityByCityNameAgentByBaseRequest(server string, cityName string, base string, params *PatchV0CityByCityNameAgentByBaseParams, body PatchV0CityByCityNameAgentByBaseJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPatchV0CityByCityNameAgentByBaseRequestWithBody(server, cityName, base, "application/json", bodyReader)
+	return NewPatchV0CityByCityNameAgentByBaseRequestWithBody(server, cityName, base, params, "application/json", bodyReader)
 }
 
 // NewPatchV0CityByCityNameAgentByBaseRequestWithBody generates requests for PatchV0CityByCityNameAgentByBase with any type of body
-func NewPatchV0CityByCityNameAgentByBaseRequestWithBody(server string, cityName string, base string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPatchV0CityByCityNameAgentByBaseRequestWithBody(server string, cityName string, base string, params *PatchV0CityByCityNameAgentByBaseParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -6591,6 +11422,19 @@ func NewPatchV0CityByCityNameAgentByBaseRequestWithBody(server string, cityName 
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -6716,7 +11560,7 @@ func NewStreamAgentOutputRequest(server string, cityName string, base string) (*
 }
 
 // NewPostV0CityByCityNameAgentByBaseByActionRequest generates requests for PostV0CityByCityNameAgentByBaseByAction
-func NewPostV0CityByCityNameAgentByBaseByActionRequest(server string, cityName string, base string, action PostV0CityByCityNameAgentByBaseByActionParamsAction) (*http.Request, error) {
+func NewPostV0CityByCityNameAgentByBaseByActionRequest(server string, cityName string, base string, action PostV0CityByCityNameAgentByBaseByActionParamsAction, params *PostV0CityByCityNameAgentByBaseByActionParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -6760,11 +11604,24 @@ func NewPostV0CityByCityNameAgentByBaseByActionRequest(server string, cityName s
 		return nil, err
 	}
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewDeleteV0CityByCityNameAgentByDirByBaseRequest generates requests for DeleteV0CityByCityNameAgentByDirByBase
-func NewDeleteV0CityByCityNameAgentByDirByBaseRequest(server string, cityName string, dir string, base string) (*http.Request, error) {
+func NewDeleteV0CityByCityNameAgentByDirByBaseRequest(server string, cityName string, dir string, base string, params *DeleteV0CityByCityNameAgentByDirByBaseParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -6806,6 +11663,19 @@ func NewDeleteV0CityByCityNameAgentByDirByBaseRequest(server string, cityName st
 	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -6860,18 +11730,18 @@ func NewGetV0CityByCityNameAgentByDirByBaseRequest(server string, cityName strin
 }
 
 // NewPatchV0CityByCityNameAgentByDirByBaseRequest calls the generic PatchV0CityByCityNameAgentByDirByBase builder with application/json body
-func NewPatchV0CityByCityNameAgentByDirByBaseRequest(server string, cityName string, dir string, base string, body PatchV0CityByCityNameAgentByDirByBaseJSONRequestBody) (*http.Request, error) {
+func NewPatchV0CityByCityNameAgentByDirByBaseRequest(server string, cityName string, dir string, base string, params *PatchV0CityByCityNameAgentByDirByBaseParams, body PatchV0CityByCityNameAgentByDirByBaseJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPatchV0CityByCityNameAgentByDirByBaseRequestWithBody(server, cityName, dir, base, "application/json", bodyReader)
+	return NewPatchV0CityByCityNameAgentByDirByBaseRequestWithBody(server, cityName, dir, base, params, "application/json", bodyReader)
 }
 
 // NewPatchV0CityByCityNameAgentByDirByBaseRequestWithBody generates requests for PatchV0CityByCityNameAgentByDirByBase with any type of body
-func NewPatchV0CityByCityNameAgentByDirByBaseRequestWithBody(server string, cityName string, dir string, base string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPatchV0CityByCityNameAgentByDirByBaseRequestWithBody(server string, cityName string, dir string, base string, params *PatchV0CityByCityNameAgentByDirByBaseParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -6916,6 +11786,19 @@ func NewPatchV0CityByCityNameAgentByDirByBaseRequestWithBody(server string, city
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -7055,7 +11938,7 @@ func NewStreamAgentOutputQualifiedRequest(server string, cityName string, dir st
 }
 
 // NewPostV0CityByCityNameAgentByDirByBaseByActionRequest generates requests for PostV0CityByCityNameAgentByDirByBaseByAction
-func NewPostV0CityByCityNameAgentByDirByBaseByActionRequest(server string, cityName string, dir string, base string, action PostV0CityByCityNameAgentByDirByBaseByActionParamsAction) (*http.Request, error) {
+func NewPostV0CityByCityNameAgentByDirByBaseByActionRequest(server string, cityName string, dir string, base string, action PostV0CityByCityNameAgentByDirByBaseByActionParamsAction, params *PostV0CityByCityNameAgentByDirByBaseByActionParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -7104,6 +11987,19 @@ func NewPostV0CityByCityNameAgentByDirByBaseByActionRequest(server string, cityN
 	req, err := http.NewRequest("POST", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -7246,18 +12142,18 @@ func NewGetV0CityByCityNameAgentsRequest(server string, cityName string, params 
 }
 
 // NewCreateAgentRequest calls the generic CreateAgent builder with application/json body
-func NewCreateAgentRequest(server string, cityName string, body CreateAgentJSONRequestBody) (*http.Request, error) {
+func NewCreateAgentRequest(server string, cityName string, params *CreateAgentParams, body CreateAgentJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewCreateAgentRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewCreateAgentRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewCreateAgentRequestWithBody generates requests for CreateAgent with any type of body
-func NewCreateAgentRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewCreateAgentRequestWithBody(server string, cityName string, params *CreateAgentParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -7289,11 +12185,24 @@ func NewCreateAgentRequestWithBody(server string, cityName string, contentType s
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewDeleteV0CityByCityNameBeadByIdRequest generates requests for DeleteV0CityByCityNameBeadById
-func NewDeleteV0CityByCityNameBeadByIdRequest(server string, cityName string, id string) (*http.Request, error) {
+func NewDeleteV0CityByCityNameBeadByIdRequest(server string, cityName string, id string, params *DeleteV0CityByCityNameBeadByIdParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -7328,6 +12237,19 @@ func NewDeleteV0CityByCityNameBeadByIdRequest(server string, cityName string, id
 	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -7375,18 +12297,18 @@ func NewGetV0CityByCityNameBeadByIdRequest(server string, cityName string, id st
 }
 
 // NewPatchV0CityByCityNameBeadByIdRequest calls the generic PatchV0CityByCityNameBeadById builder with application/json body
-func NewPatchV0CityByCityNameBeadByIdRequest(server string, cityName string, id string, body PatchV0CityByCityNameBeadByIdJSONRequestBody) (*http.Request, error) {
+func NewPatchV0CityByCityNameBeadByIdRequest(server string, cityName string, id string, params *PatchV0CityByCityNameBeadByIdParams, body PatchV0CityByCityNameBeadByIdJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPatchV0CityByCityNameBeadByIdRequestWithBody(server, cityName, id, "application/json", bodyReader)
+	return NewPatchV0CityByCityNameBeadByIdRequestWithBody(server, cityName, id, params, "application/json", bodyReader)
 }
 
 // NewPatchV0CityByCityNameBeadByIdRequestWithBody generates requests for PatchV0CityByCityNameBeadById with any type of body
-func NewPatchV0CityByCityNameBeadByIdRequestWithBody(server string, cityName string, id string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPatchV0CityByCityNameBeadByIdRequestWithBody(server string, cityName string, id string, params *PatchV0CityByCityNameBeadByIdParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -7425,22 +12347,35 @@ func NewPatchV0CityByCityNameBeadByIdRequestWithBody(server string, cityName str
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewPostV0CityByCityNameBeadByIdAssignRequest calls the generic PostV0CityByCityNameBeadByIdAssign builder with application/json body
-func NewPostV0CityByCityNameBeadByIdAssignRequest(server string, cityName string, id string, body PostV0CityByCityNameBeadByIdAssignJSONRequestBody) (*http.Request, error) {
+func NewPostV0CityByCityNameBeadByIdAssignRequest(server string, cityName string, id string, params *PostV0CityByCityNameBeadByIdAssignParams, body PostV0CityByCityNameBeadByIdAssignJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPostV0CityByCityNameBeadByIdAssignRequestWithBody(server, cityName, id, "application/json", bodyReader)
+	return NewPostV0CityByCityNameBeadByIdAssignRequestWithBody(server, cityName, id, params, "application/json", bodyReader)
 }
 
 // NewPostV0CityByCityNameBeadByIdAssignRequestWithBody generates requests for PostV0CityByCityNameBeadByIdAssign with any type of body
-func NewPostV0CityByCityNameBeadByIdAssignRequestWithBody(server string, cityName string, id string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPostV0CityByCityNameBeadByIdAssignRequestWithBody(server string, cityName string, id string, params *PostV0CityByCityNameBeadByIdAssignParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -7479,11 +12414,24 @@ func NewPostV0CityByCityNameBeadByIdAssignRequestWithBody(server string, cityNam
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewPostV0CityByCityNameBeadByIdCloseRequest generates requests for PostV0CityByCityNameBeadByIdClose
-func NewPostV0CityByCityNameBeadByIdCloseRequest(server string, cityName string, id string) (*http.Request, error) {
+func NewPostV0CityByCityNameBeadByIdCloseRequest(server string, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -7518,6 +12466,19 @@ func NewPostV0CityByCityNameBeadByIdCloseRequest(server string, cityName string,
 	req, err := http.NewRequest("POST", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -7565,7 +12526,7 @@ func NewGetV0CityByCityNameBeadByIdDepsRequest(server string, cityName string, i
 }
 
 // NewPostV0CityByCityNameBeadByIdReopenRequest generates requests for PostV0CityByCityNameBeadByIdReopen
-func NewPostV0CityByCityNameBeadByIdReopenRequest(server string, cityName string, id string) (*http.Request, error) {
+func NewPostV0CityByCityNameBeadByIdReopenRequest(server string, cityName string, id string, params *PostV0CityByCityNameBeadByIdReopenParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -7602,22 +12563,35 @@ func NewPostV0CityByCityNameBeadByIdReopenRequest(server string, cityName string
 		return nil, err
 	}
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewPostV0CityByCityNameBeadByIdUpdateRequest calls the generic PostV0CityByCityNameBeadByIdUpdate builder with application/json body
-func NewPostV0CityByCityNameBeadByIdUpdateRequest(server string, cityName string, id string, body PostV0CityByCityNameBeadByIdUpdateJSONRequestBody) (*http.Request, error) {
+func NewPostV0CityByCityNameBeadByIdUpdateRequest(server string, cityName string, id string, params *PostV0CityByCityNameBeadByIdUpdateParams, body PostV0CityByCityNameBeadByIdUpdateJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPostV0CityByCityNameBeadByIdUpdateRequestWithBody(server, cityName, id, "application/json", bodyReader)
+	return NewPostV0CityByCityNameBeadByIdUpdateRequestWithBody(server, cityName, id, params, "application/json", bodyReader)
 }
 
 // NewPostV0CityByCityNameBeadByIdUpdateRequestWithBody generates requests for PostV0CityByCityNameBeadByIdUpdate with any type of body
-func NewPostV0CityByCityNameBeadByIdUpdateRequestWithBody(server string, cityName string, id string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPostV0CityByCityNameBeadByIdUpdateRequestWithBody(server string, cityName string, id string, params *PostV0CityByCityNameBeadByIdUpdateParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -7655,6 +12629,19 @@ func NewPostV0CityByCityNameBeadByIdUpdateRequestWithBody(server string, cityNam
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -7889,15 +12876,24 @@ func NewCreateBeadRequestWithBody(server string, cityName string, params *Create
 
 	if params != nil {
 
-		if params.IdempotencyKey != nil {
-			var headerParam0 string
+		var headerParam0 string
 
-			headerParam0, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
 			if err != nil {
 				return nil, err
 			}
 
-			req.Header.Set("Idempotency-Key", headerParam0)
+			req.Header.Set("Idempotency-Key", headerParam1)
 		}
 
 	}
@@ -8121,7 +13117,7 @@ func NewGetV0CityByCityNameConfigValidateRequest(server string, cityName string)
 }
 
 // NewDeleteV0CityByCityNameConvoyByIdRequest generates requests for DeleteV0CityByCityNameConvoyById
-func NewDeleteV0CityByCityNameConvoyByIdRequest(server string, cityName string, id string) (*http.Request, error) {
+func NewDeleteV0CityByCityNameConvoyByIdRequest(server string, cityName string, id string, params *DeleteV0CityByCityNameConvoyByIdParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -8156,6 +13152,19 @@ func NewDeleteV0CityByCityNameConvoyByIdRequest(server string, cityName string, 
 	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -8203,18 +13212,18 @@ func NewGetV0CityByCityNameConvoyByIdRequest(server string, cityName string, id 
 }
 
 // NewPostV0CityByCityNameConvoyByIdAddRequest calls the generic PostV0CityByCityNameConvoyByIdAdd builder with application/json body
-func NewPostV0CityByCityNameConvoyByIdAddRequest(server string, cityName string, id string, body PostV0CityByCityNameConvoyByIdAddJSONRequestBody) (*http.Request, error) {
+func NewPostV0CityByCityNameConvoyByIdAddRequest(server string, cityName string, id string, params *PostV0CityByCityNameConvoyByIdAddParams, body PostV0CityByCityNameConvoyByIdAddJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPostV0CityByCityNameConvoyByIdAddRequestWithBody(server, cityName, id, "application/json", bodyReader)
+	return NewPostV0CityByCityNameConvoyByIdAddRequestWithBody(server, cityName, id, params, "application/json", bodyReader)
 }
 
 // NewPostV0CityByCityNameConvoyByIdAddRequestWithBody generates requests for PostV0CityByCityNameConvoyByIdAdd with any type of body
-func NewPostV0CityByCityNameConvoyByIdAddRequestWithBody(server string, cityName string, id string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPostV0CityByCityNameConvoyByIdAddRequestWithBody(server string, cityName string, id string, params *PostV0CityByCityNameConvoyByIdAddParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -8252,6 +13261,19 @@ func NewPostV0CityByCityNameConvoyByIdAddRequestWithBody(server string, cityName
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -8298,7 +13320,7 @@ func NewGetV0CityByCityNameConvoyByIdCheckRequest(server string, cityName string
 }
 
 // NewPostV0CityByCityNameConvoyByIdCloseRequest generates requests for PostV0CityByCityNameConvoyByIdClose
-func NewPostV0CityByCityNameConvoyByIdCloseRequest(server string, cityName string, id string) (*http.Request, error) {
+func NewPostV0CityByCityNameConvoyByIdCloseRequest(server string, cityName string, id string, params *PostV0CityByCityNameConvoyByIdCloseParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -8335,22 +13357,35 @@ func NewPostV0CityByCityNameConvoyByIdCloseRequest(server string, cityName strin
 		return nil, err
 	}
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewPostV0CityByCityNameConvoyByIdRemoveRequest calls the generic PostV0CityByCityNameConvoyByIdRemove builder with application/json body
-func NewPostV0CityByCityNameConvoyByIdRemoveRequest(server string, cityName string, id string, body PostV0CityByCityNameConvoyByIdRemoveJSONRequestBody) (*http.Request, error) {
+func NewPostV0CityByCityNameConvoyByIdRemoveRequest(server string, cityName string, id string, params *PostV0CityByCityNameConvoyByIdRemoveParams, body PostV0CityByCityNameConvoyByIdRemoveJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPostV0CityByCityNameConvoyByIdRemoveRequestWithBody(server, cityName, id, "application/json", bodyReader)
+	return NewPostV0CityByCityNameConvoyByIdRemoveRequestWithBody(server, cityName, id, params, "application/json", bodyReader)
 }
 
 // NewPostV0CityByCityNameConvoyByIdRemoveRequestWithBody generates requests for PostV0CityByCityNameConvoyByIdRemove with any type of body
-func NewPostV0CityByCityNameConvoyByIdRemoveRequestWithBody(server string, cityName string, id string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPostV0CityByCityNameConvoyByIdRemoveRequestWithBody(server string, cityName string, id string, params *PostV0CityByCityNameConvoyByIdRemoveParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -8388,6 +13423,19 @@ func NewPostV0CityByCityNameConvoyByIdRemoveRequestWithBody(server string, cityN
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -8497,18 +13545,18 @@ func NewGetV0CityByCityNameConvoysRequest(server string, cityName string, params
 }
 
 // NewCreateConvoyRequest calls the generic CreateConvoy builder with application/json body
-func NewCreateConvoyRequest(server string, cityName string, body CreateConvoyJSONRequestBody) (*http.Request, error) {
+func NewCreateConvoyRequest(server string, cityName string, params *CreateConvoyParams, body CreateConvoyJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewCreateConvoyRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewCreateConvoyRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewCreateConvoyRequestWithBody generates requests for CreateConvoy with any type of body
-func NewCreateConvoyRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewCreateConvoyRequestWithBody(server string, cityName string, params *CreateConvoyParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -8539,6 +13587,19 @@ func NewCreateConvoyRequestWithBody(server string, cityName string, contentType 
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -8696,18 +13757,18 @@ func NewGetV0CityByCityNameEventsRequest(server string, cityName string, params 
 }
 
 // NewEmitEventRequest calls the generic EmitEvent builder with application/json body
-func NewEmitEventRequest(server string, cityName string, body EmitEventJSONRequestBody) (*http.Request, error) {
+func NewEmitEventRequest(server string, cityName string, params *EmitEventParams, body EmitEventJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewEmitEventRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewEmitEventRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewEmitEventRequestWithBody generates requests for EmitEvent with any type of body
-func NewEmitEventRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewEmitEventRequestWithBody(server string, cityName string, params *EmitEventParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -8738,6 +13799,19 @@ func NewEmitEventRequestWithBody(server string, cityName string, contentType str
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -8814,18 +13888,18 @@ func NewStreamEventsRequest(server string, cityName string, params *StreamEvents
 }
 
 // NewDeleteV0CityByCityNameExtmsgAdaptersRequest calls the generic DeleteV0CityByCityNameExtmsgAdapters builder with application/json body
-func NewDeleteV0CityByCityNameExtmsgAdaptersRequest(server string, cityName string, body DeleteV0CityByCityNameExtmsgAdaptersJSONRequestBody) (*http.Request, error) {
+func NewDeleteV0CityByCityNameExtmsgAdaptersRequest(server string, cityName string, params *DeleteV0CityByCityNameExtmsgAdaptersParams, body DeleteV0CityByCityNameExtmsgAdaptersJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewDeleteV0CityByCityNameExtmsgAdaptersRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewDeleteV0CityByCityNameExtmsgAdaptersRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewDeleteV0CityByCityNameExtmsgAdaptersRequestWithBody generates requests for DeleteV0CityByCityNameExtmsgAdapters with any type of body
-func NewDeleteV0CityByCityNameExtmsgAdaptersRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewDeleteV0CityByCityNameExtmsgAdaptersRequestWithBody(server string, cityName string, params *DeleteV0CityByCityNameExtmsgAdaptersParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -8856,6 +13930,19 @@ func NewDeleteV0CityByCityNameExtmsgAdaptersRequestWithBody(server string, cityN
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -8895,18 +13982,18 @@ func NewGetV0CityByCityNameExtmsgAdaptersRequest(server string, cityName string)
 }
 
 // NewRegisterExtmsgAdapterRequest calls the generic RegisterExtmsgAdapter builder with application/json body
-func NewRegisterExtmsgAdapterRequest(server string, cityName string, body RegisterExtmsgAdapterJSONRequestBody) (*http.Request, error) {
+func NewRegisterExtmsgAdapterRequest(server string, cityName string, params *RegisterExtmsgAdapterParams, body RegisterExtmsgAdapterJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewRegisterExtmsgAdapterRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewRegisterExtmsgAdapterRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewRegisterExtmsgAdapterRequestWithBody generates requests for RegisterExtmsgAdapter with any type of body
-func NewRegisterExtmsgAdapterRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewRegisterExtmsgAdapterRequestWithBody(server string, cityName string, params *RegisterExtmsgAdapterParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -8938,22 +14025,35 @@ func NewRegisterExtmsgAdapterRequestWithBody(server string, cityName string, con
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewPostV0CityByCityNameExtmsgBindRequest calls the generic PostV0CityByCityNameExtmsgBind builder with application/json body
-func NewPostV0CityByCityNameExtmsgBindRequest(server string, cityName string, body PostV0CityByCityNameExtmsgBindJSONRequestBody) (*http.Request, error) {
+func NewPostV0CityByCityNameExtmsgBindRequest(server string, cityName string, params *PostV0CityByCityNameExtmsgBindParams, body PostV0CityByCityNameExtmsgBindJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPostV0CityByCityNameExtmsgBindRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewPostV0CityByCityNameExtmsgBindRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewPostV0CityByCityNameExtmsgBindRequestWithBody generates requests for PostV0CityByCityNameExtmsgBind with any type of body
-func NewPostV0CityByCityNameExtmsgBindRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPostV0CityByCityNameExtmsgBindRequestWithBody(server string, cityName string, params *PostV0CityByCityNameExtmsgBindParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -8984,6 +14084,19 @@ func NewPostV0CityByCityNameExtmsgBindRequestWithBody(server string, cityName st
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -9165,18 +14278,18 @@ func NewGetV0CityByCityNameExtmsgGroupsRequest(server string, cityName string, p
 }
 
 // NewEnsureExtmsgGroupRequest calls the generic EnsureExtmsgGroup builder with application/json body
-func NewEnsureExtmsgGroupRequest(server string, cityName string, body EnsureExtmsgGroupJSONRequestBody) (*http.Request, error) {
+func NewEnsureExtmsgGroupRequest(server string, cityName string, params *EnsureExtmsgGroupParams, body EnsureExtmsgGroupJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewEnsureExtmsgGroupRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewEnsureExtmsgGroupRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewEnsureExtmsgGroupRequestWithBody generates requests for EnsureExtmsgGroup with any type of body
-func NewEnsureExtmsgGroupRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewEnsureExtmsgGroupRequestWithBody(server string, cityName string, params *EnsureExtmsgGroupParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -9208,22 +14321,35 @@ func NewEnsureExtmsgGroupRequestWithBody(server string, cityName string, content
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewPostV0CityByCityNameExtmsgInboundRequest calls the generic PostV0CityByCityNameExtmsgInbound builder with application/json body
-func NewPostV0CityByCityNameExtmsgInboundRequest(server string, cityName string, body PostV0CityByCityNameExtmsgInboundJSONRequestBody) (*http.Request, error) {
+func NewPostV0CityByCityNameExtmsgInboundRequest(server string, cityName string, params *PostV0CityByCityNameExtmsgInboundParams, body PostV0CityByCityNameExtmsgInboundJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPostV0CityByCityNameExtmsgInboundRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewPostV0CityByCityNameExtmsgInboundRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewPostV0CityByCityNameExtmsgInboundRequestWithBody generates requests for PostV0CityByCityNameExtmsgInbound with any type of body
-func NewPostV0CityByCityNameExtmsgInboundRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPostV0CityByCityNameExtmsgInboundRequestWithBody(server string, cityName string, params *PostV0CityByCityNameExtmsgInboundParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -9255,22 +14381,35 @@ func NewPostV0CityByCityNameExtmsgInboundRequestWithBody(server string, cityName
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewPostV0CityByCityNameExtmsgOutboundRequest calls the generic PostV0CityByCityNameExtmsgOutbound builder with application/json body
-func NewPostV0CityByCityNameExtmsgOutboundRequest(server string, cityName string, body PostV0CityByCityNameExtmsgOutboundJSONRequestBody) (*http.Request, error) {
+func NewPostV0CityByCityNameExtmsgOutboundRequest(server string, cityName string, params *PostV0CityByCityNameExtmsgOutboundParams, body PostV0CityByCityNameExtmsgOutboundJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPostV0CityByCityNameExtmsgOutboundRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewPostV0CityByCityNameExtmsgOutboundRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewPostV0CityByCityNameExtmsgOutboundRequestWithBody generates requests for PostV0CityByCityNameExtmsgOutbound with any type of body
-func NewPostV0CityByCityNameExtmsgOutboundRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPostV0CityByCityNameExtmsgOutboundRequestWithBody(server string, cityName string, params *PostV0CityByCityNameExtmsgOutboundParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -9302,22 +14441,35 @@ func NewPostV0CityByCityNameExtmsgOutboundRequestWithBody(server string, cityNam
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewDeleteV0CityByCityNameExtmsgParticipantsRequest calls the generic DeleteV0CityByCityNameExtmsgParticipants builder with application/json body
-func NewDeleteV0CityByCityNameExtmsgParticipantsRequest(server string, cityName string, body DeleteV0CityByCityNameExtmsgParticipantsJSONRequestBody) (*http.Request, error) {
+func NewDeleteV0CityByCityNameExtmsgParticipantsRequest(server string, cityName string, params *DeleteV0CityByCityNameExtmsgParticipantsParams, body DeleteV0CityByCityNameExtmsgParticipantsJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewDeleteV0CityByCityNameExtmsgParticipantsRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewDeleteV0CityByCityNameExtmsgParticipantsRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewDeleteV0CityByCityNameExtmsgParticipantsRequestWithBody generates requests for DeleteV0CityByCityNameExtmsgParticipants with any type of body
-func NewDeleteV0CityByCityNameExtmsgParticipantsRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewDeleteV0CityByCityNameExtmsgParticipantsRequestWithBody(server string, cityName string, params *DeleteV0CityByCityNameExtmsgParticipantsParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -9349,22 +14501,35 @@ func NewDeleteV0CityByCityNameExtmsgParticipantsRequestWithBody(server string, c
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewPostV0CityByCityNameExtmsgParticipantsRequest calls the generic PostV0CityByCityNameExtmsgParticipants builder with application/json body
-func NewPostV0CityByCityNameExtmsgParticipantsRequest(server string, cityName string, body PostV0CityByCityNameExtmsgParticipantsJSONRequestBody) (*http.Request, error) {
+func NewPostV0CityByCityNameExtmsgParticipantsRequest(server string, cityName string, params *PostV0CityByCityNameExtmsgParticipantsParams, body PostV0CityByCityNameExtmsgParticipantsJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPostV0CityByCityNameExtmsgParticipantsRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewPostV0CityByCityNameExtmsgParticipantsRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewPostV0CityByCityNameExtmsgParticipantsRequestWithBody generates requests for PostV0CityByCityNameExtmsgParticipants with any type of body
-func NewPostV0CityByCityNameExtmsgParticipantsRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPostV0CityByCityNameExtmsgParticipantsRequestWithBody(server string, cityName string, params *PostV0CityByCityNameExtmsgParticipantsParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -9395,6 +14560,19 @@ func NewPostV0CityByCityNameExtmsgParticipantsRequestWithBody(server string, cit
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -9536,18 +14714,18 @@ func NewGetV0CityByCityNameExtmsgTranscriptRequest(server string, cityName strin
 }
 
 // NewPostV0CityByCityNameExtmsgTranscriptAckRequest calls the generic PostV0CityByCityNameExtmsgTranscriptAck builder with application/json body
-func NewPostV0CityByCityNameExtmsgTranscriptAckRequest(server string, cityName string, body PostV0CityByCityNameExtmsgTranscriptAckJSONRequestBody) (*http.Request, error) {
+func NewPostV0CityByCityNameExtmsgTranscriptAckRequest(server string, cityName string, params *PostV0CityByCityNameExtmsgTranscriptAckParams, body PostV0CityByCityNameExtmsgTranscriptAckJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPostV0CityByCityNameExtmsgTranscriptAckRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewPostV0CityByCityNameExtmsgTranscriptAckRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewPostV0CityByCityNameExtmsgTranscriptAckRequestWithBody generates requests for PostV0CityByCityNameExtmsgTranscriptAck with any type of body
-func NewPostV0CityByCityNameExtmsgTranscriptAckRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPostV0CityByCityNameExtmsgTranscriptAckRequestWithBody(server string, cityName string, params *PostV0CityByCityNameExtmsgTranscriptAckParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -9579,22 +14757,35 @@ func NewPostV0CityByCityNameExtmsgTranscriptAckRequestWithBody(server string, ci
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewPostV0CityByCityNameExtmsgUnbindRequest calls the generic PostV0CityByCityNameExtmsgUnbind builder with application/json body
-func NewPostV0CityByCityNameExtmsgUnbindRequest(server string, cityName string, body PostV0CityByCityNameExtmsgUnbindJSONRequestBody) (*http.Request, error) {
+func NewPostV0CityByCityNameExtmsgUnbindRequest(server string, cityName string, params *PostV0CityByCityNameExtmsgUnbindParams, body PostV0CityByCityNameExtmsgUnbindJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPostV0CityByCityNameExtmsgUnbindRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewPostV0CityByCityNameExtmsgUnbindRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewPostV0CityByCityNameExtmsgUnbindRequestWithBody generates requests for PostV0CityByCityNameExtmsgUnbind with any type of body
-func NewPostV0CityByCityNameExtmsgUnbindRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPostV0CityByCityNameExtmsgUnbindRequestWithBody(server string, cityName string, params *PostV0CityByCityNameExtmsgUnbindParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -9625,6 +14816,19 @@ func NewPostV0CityByCityNameExtmsgUnbindRequestWithBody(server string, cityName 
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -9972,18 +15176,18 @@ func NewGetV0CityByCityNameFormulasByNameRequest(server string, cityName string,
 }
 
 // NewPostV0CityByCityNameFormulasByNamePreviewRequest calls the generic PostV0CityByCityNameFormulasByNamePreview builder with application/json body
-func NewPostV0CityByCityNameFormulasByNamePreviewRequest(server string, cityName string, name string, body PostV0CityByCityNameFormulasByNamePreviewJSONRequestBody) (*http.Request, error) {
+func NewPostV0CityByCityNameFormulasByNamePreviewRequest(server string, cityName string, name string, params *PostV0CityByCityNameFormulasByNamePreviewParams, body PostV0CityByCityNameFormulasByNamePreviewJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPostV0CityByCityNameFormulasByNamePreviewRequestWithBody(server, cityName, name, "application/json", bodyReader)
+	return NewPostV0CityByCityNameFormulasByNamePreviewRequestWithBody(server, cityName, name, params, "application/json", bodyReader)
 }
 
 // NewPostV0CityByCityNameFormulasByNamePreviewRequestWithBody generates requests for PostV0CityByCityNameFormulasByNamePreview with any type of body
-func NewPostV0CityByCityNameFormulasByNamePreviewRequestWithBody(server string, cityName string, name string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPostV0CityByCityNameFormulasByNamePreviewRequestWithBody(server string, cityName string, name string, params *PostV0CityByCityNameFormulasByNamePreviewParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -10021,6 +15225,19 @@ func NewPostV0CityByCityNameFormulasByNamePreviewRequestWithBody(server string, 
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -10352,15 +15569,24 @@ func NewSendMailRequestWithBody(server string, cityName string, params *SendMail
 
 	if params != nil {
 
-		if params.IdempotencyKey != nil {
-			var headerParam0 string
+		var headerParam0 string
 
-			headerParam0, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
 			if err != nil {
 				return nil, err
 			}
 
-			req.Header.Set("Idempotency-Key", headerParam0)
+			req.Header.Set("Idempotency-Key", headerParam1)
 		}
 
 	}
@@ -10563,6 +15789,19 @@ func NewDeleteV0CityByCityNameMailByIdRequest(server string, cityName string, id
 		return nil, err
 	}
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
@@ -10689,6 +15928,19 @@ func NewPostV0CityByCityNameMailByIdArchiveRequest(server string, cityName strin
 		return nil, err
 	}
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
@@ -10752,6 +16004,19 @@ func NewPostV0CityByCityNameMailByIdMarkUnreadRequest(server string, cityName st
 		return nil, err
 	}
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
@@ -10813,6 +16078,19 @@ func NewPostV0CityByCityNameMailByIdReadRequest(server string, cityName string, 
 	req, err := http.NewRequest("POST", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -10890,6 +16168,19 @@ func NewReplyMailRequestWithBody(server string, cityName string, id string, para
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -10999,7 +16290,7 @@ func NewGetV0CityByCityNameOrderByNameRequest(server string, cityName string, na
 }
 
 // NewPostV0CityByCityNameOrderByNameDisableRequest generates requests for PostV0CityByCityNameOrderByNameDisable
-func NewPostV0CityByCityNameOrderByNameDisableRequest(server string, cityName string, name string) (*http.Request, error) {
+func NewPostV0CityByCityNameOrderByNameDisableRequest(server string, cityName string, name string, params *PostV0CityByCityNameOrderByNameDisableParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -11036,11 +16327,24 @@ func NewPostV0CityByCityNameOrderByNameDisableRequest(server string, cityName st
 		return nil, err
 	}
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewPostV0CityByCityNameOrderByNameEnableRequest generates requests for PostV0CityByCityNameOrderByNameEnable
-func NewPostV0CityByCityNameOrderByNameEnableRequest(server string, cityName string, name string) (*http.Request, error) {
+func NewPostV0CityByCityNameOrderByNameEnableRequest(server string, cityName string, name string, params *PostV0CityByCityNameOrderByNameEnableParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -11075,6 +16379,19 @@ func NewPostV0CityByCityNameOrderByNameEnableRequest(server string, cityName str
 	req, err := http.NewRequest("POST", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -11115,7 +16432,7 @@ func NewGetV0CityByCityNameOrdersRequest(server string, cityName string) (*http.
 }
 
 // NewGetV0CityByCityNameOrdersCheckRequest generates requests for GetV0CityByCityNameOrdersCheck
-func NewGetV0CityByCityNameOrdersCheckRequest(server string, cityName string) (*http.Request, error) {
+func NewGetV0CityByCityNameOrdersCheckRequest(server string, cityName string, params *GetV0CityByCityNameOrdersCheckParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -11138,6 +16455,28 @@ func NewGetV0CityByCityNameOrdersCheckRequest(server string, cityName string) (*
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Fresh != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "fresh", *params.Fresh, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -11355,7 +16694,7 @@ func NewGetV0CityByCityNamePacksRequest(server string, cityName string) (*http.R
 }
 
 // NewDeleteV0CityByCityNamePatchesAgentByBaseRequest generates requests for DeleteV0CityByCityNamePatchesAgentByBase
-func NewDeleteV0CityByCityNamePatchesAgentByBaseRequest(server string, cityName string, base string) (*http.Request, error) {
+func NewDeleteV0CityByCityNamePatchesAgentByBaseRequest(server string, cityName string, base string, params *DeleteV0CityByCityNamePatchesAgentByBaseParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -11390,6 +16729,19 @@ func NewDeleteV0CityByCityNamePatchesAgentByBaseRequest(server string, cityName 
 	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -11437,7 +16789,7 @@ func NewGetV0CityByCityNamePatchesAgentByBaseRequest(server string, cityName str
 }
 
 // NewDeleteV0CityByCityNamePatchesAgentByDirByBaseRequest generates requests for DeleteV0CityByCityNamePatchesAgentByDirByBase
-func NewDeleteV0CityByCityNamePatchesAgentByDirByBaseRequest(server string, cityName string, dir string, base string) (*http.Request, error) {
+func NewDeleteV0CityByCityNamePatchesAgentByDirByBaseRequest(server string, cityName string, dir string, base string, params *DeleteV0CityByCityNamePatchesAgentByDirByBaseParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -11479,6 +16831,19 @@ func NewDeleteV0CityByCityNamePatchesAgentByDirByBaseRequest(server string, city
 	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -11567,18 +16932,18 @@ func NewGetV0CityByCityNamePatchesAgentsRequest(server string, cityName string) 
 }
 
 // NewPutV0CityByCityNamePatchesAgentsRequest calls the generic PutV0CityByCityNamePatchesAgents builder with application/json body
-func NewPutV0CityByCityNamePatchesAgentsRequest(server string, cityName string, body PutV0CityByCityNamePatchesAgentsJSONRequestBody) (*http.Request, error) {
+func NewPutV0CityByCityNamePatchesAgentsRequest(server string, cityName string, params *PutV0CityByCityNamePatchesAgentsParams, body PutV0CityByCityNamePatchesAgentsJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPutV0CityByCityNamePatchesAgentsRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewPutV0CityByCityNamePatchesAgentsRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewPutV0CityByCityNamePatchesAgentsRequestWithBody generates requests for PutV0CityByCityNamePatchesAgents with any type of body
-func NewPutV0CityByCityNamePatchesAgentsRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPutV0CityByCityNamePatchesAgentsRequestWithBody(server string, cityName string, params *PutV0CityByCityNamePatchesAgentsParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -11610,11 +16975,24 @@ func NewPutV0CityByCityNamePatchesAgentsRequestWithBody(server string, cityName 
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewDeleteV0CityByCityNamePatchesProviderByNameRequest generates requests for DeleteV0CityByCityNamePatchesProviderByName
-func NewDeleteV0CityByCityNamePatchesProviderByNameRequest(server string, cityName string, name string) (*http.Request, error) {
+func NewDeleteV0CityByCityNamePatchesProviderByNameRequest(server string, cityName string, name string, params *DeleteV0CityByCityNamePatchesProviderByNameParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -11649,6 +17027,19 @@ func NewDeleteV0CityByCityNamePatchesProviderByNameRequest(server string, cityNa
 	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -11730,18 +17121,18 @@ func NewGetV0CityByCityNamePatchesProvidersRequest(server string, cityName strin
 }
 
 // NewPutV0CityByCityNamePatchesProvidersRequest calls the generic PutV0CityByCityNamePatchesProviders builder with application/json body
-func NewPutV0CityByCityNamePatchesProvidersRequest(server string, cityName string, body PutV0CityByCityNamePatchesProvidersJSONRequestBody) (*http.Request, error) {
+func NewPutV0CityByCityNamePatchesProvidersRequest(server string, cityName string, params *PutV0CityByCityNamePatchesProvidersParams, body PutV0CityByCityNamePatchesProvidersJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPutV0CityByCityNamePatchesProvidersRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewPutV0CityByCityNamePatchesProvidersRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewPutV0CityByCityNamePatchesProvidersRequestWithBody generates requests for PutV0CityByCityNamePatchesProviders with any type of body
-func NewPutV0CityByCityNamePatchesProvidersRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPutV0CityByCityNamePatchesProvidersRequestWithBody(server string, cityName string, params *PutV0CityByCityNamePatchesProvidersParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -11773,11 +17164,24 @@ func NewPutV0CityByCityNamePatchesProvidersRequestWithBody(server string, cityNa
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewDeleteV0CityByCityNamePatchesRigByNameRequest generates requests for DeleteV0CityByCityNamePatchesRigByName
-func NewDeleteV0CityByCityNamePatchesRigByNameRequest(server string, cityName string, name string) (*http.Request, error) {
+func NewDeleteV0CityByCityNamePatchesRigByNameRequest(server string, cityName string, name string, params *DeleteV0CityByCityNamePatchesRigByNameParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -11812,6 +17216,19 @@ func NewDeleteV0CityByCityNamePatchesRigByNameRequest(server string, cityName st
 	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -11893,18 +17310,18 @@ func NewGetV0CityByCityNamePatchesRigsRequest(server string, cityName string) (*
 }
 
 // NewPutV0CityByCityNamePatchesRigsRequest calls the generic PutV0CityByCityNamePatchesRigs builder with application/json body
-func NewPutV0CityByCityNamePatchesRigsRequest(server string, cityName string, body PutV0CityByCityNamePatchesRigsJSONRequestBody) (*http.Request, error) {
+func NewPutV0CityByCityNamePatchesRigsRequest(server string, cityName string, params *PutV0CityByCityNamePatchesRigsParams, body PutV0CityByCityNamePatchesRigsJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPutV0CityByCityNamePatchesRigsRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewPutV0CityByCityNamePatchesRigsRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewPutV0CityByCityNamePatchesRigsRequestWithBody generates requests for PutV0CityByCityNamePatchesRigs with any type of body
-func NewPutV0CityByCityNamePatchesRigsRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPutV0CityByCityNamePatchesRigsRequestWithBody(server string, cityName string, params *PutV0CityByCityNamePatchesRigsParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -11935,6 +17352,19 @@ func NewPutV0CityByCityNamePatchesRigsRequestWithBody(server string, cityName st
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -12012,7 +17442,7 @@ func NewGetV0CityByCityNameProviderReadinessRequest(server string, cityName stri
 }
 
 // NewDeleteV0CityByCityNameProviderByNameRequest generates requests for DeleteV0CityByCityNameProviderByName
-func NewDeleteV0CityByCityNameProviderByNameRequest(server string, cityName string, name string) (*http.Request, error) {
+func NewDeleteV0CityByCityNameProviderByNameRequest(server string, cityName string, name string, params *DeleteV0CityByCityNameProviderByNameParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -12047,6 +17477,19 @@ func NewDeleteV0CityByCityNameProviderByNameRequest(server string, cityName stri
 	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -12094,18 +17537,18 @@ func NewGetV0CityByCityNameProviderByNameRequest(server string, cityName string,
 }
 
 // NewPatchV0CityByCityNameProviderByNameRequest calls the generic PatchV0CityByCityNameProviderByName builder with application/json body
-func NewPatchV0CityByCityNameProviderByNameRequest(server string, cityName string, name string, body PatchV0CityByCityNameProviderByNameJSONRequestBody) (*http.Request, error) {
+func NewPatchV0CityByCityNameProviderByNameRequest(server string, cityName string, name string, params *PatchV0CityByCityNameProviderByNameParams, body PatchV0CityByCityNameProviderByNameJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPatchV0CityByCityNameProviderByNameRequestWithBody(server, cityName, name, "application/json", bodyReader)
+	return NewPatchV0CityByCityNameProviderByNameRequestWithBody(server, cityName, name, params, "application/json", bodyReader)
 }
 
 // NewPatchV0CityByCityNameProviderByNameRequestWithBody generates requests for PatchV0CityByCityNameProviderByName with any type of body
-func NewPatchV0CityByCityNameProviderByNameRequestWithBody(server string, cityName string, name string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPatchV0CityByCityNameProviderByNameRequestWithBody(server string, cityName string, name string, params *PatchV0CityByCityNameProviderByNameParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -12143,6 +17586,19 @@ func NewPatchV0CityByCityNameProviderByNameRequestWithBody(server string, cityNa
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -12182,18 +17638,18 @@ func NewGetV0CityByCityNameProvidersRequest(server string, cityName string) (*ht
 }
 
 // NewCreateProviderRequest calls the generic CreateProvider builder with application/json body
-func NewCreateProviderRequest(server string, cityName string, body CreateProviderJSONRequestBody) (*http.Request, error) {
+func NewCreateProviderRequest(server string, cityName string, params *CreateProviderParams, body CreateProviderJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewCreateProviderRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewCreateProviderRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewCreateProviderRequestWithBody generates requests for CreateProvider with any type of body
-func NewCreateProviderRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewCreateProviderRequestWithBody(server string, cityName string, params *CreateProviderParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -12224,6 +17680,19 @@ func NewCreateProviderRequestWithBody(server string, cityName string, contentTyp
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -12335,7 +17804,7 @@ func NewGetV0CityByCityNameReadinessRequest(server string, cityName string, para
 }
 
 // NewDeleteV0CityByCityNameRigByNameRequest generates requests for DeleteV0CityByCityNameRigByName
-func NewDeleteV0CityByCityNameRigByNameRequest(server string, cityName string, name string) (*http.Request, error) {
+func NewDeleteV0CityByCityNameRigByNameRequest(server string, cityName string, name string, params *DeleteV0CityByCityNameRigByNameParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -12370,6 +17839,19 @@ func NewDeleteV0CityByCityNameRigByNameRequest(server string, cityName string, n
 	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -12439,18 +17921,18 @@ func NewGetV0CityByCityNameRigByNameRequest(server string, cityName string, name
 }
 
 // NewPatchV0CityByCityNameRigByNameRequest calls the generic PatchV0CityByCityNameRigByName builder with application/json body
-func NewPatchV0CityByCityNameRigByNameRequest(server string, cityName string, name string, body PatchV0CityByCityNameRigByNameJSONRequestBody) (*http.Request, error) {
+func NewPatchV0CityByCityNameRigByNameRequest(server string, cityName string, name string, params *PatchV0CityByCityNameRigByNameParams, body PatchV0CityByCityNameRigByNameJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPatchV0CityByCityNameRigByNameRequestWithBody(server, cityName, name, "application/json", bodyReader)
+	return NewPatchV0CityByCityNameRigByNameRequestWithBody(server, cityName, name, params, "application/json", bodyReader)
 }
 
 // NewPatchV0CityByCityNameRigByNameRequestWithBody generates requests for PatchV0CityByCityNameRigByName with any type of body
-func NewPatchV0CityByCityNameRigByNameRequestWithBody(server string, cityName string, name string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPatchV0CityByCityNameRigByNameRequestWithBody(server string, cityName string, name string, params *PatchV0CityByCityNameRigByNameParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -12489,11 +17971,24 @@ func NewPatchV0CityByCityNameRigByNameRequestWithBody(server string, cityName st
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewPostV0CityByCityNameRigByNameByActionRequest generates requests for PostV0CityByCityNameRigByNameByAction
-func NewPostV0CityByCityNameRigByNameByActionRequest(server string, cityName string, name string, action string) (*http.Request, error) {
+func NewPostV0CityByCityNameRigByNameByActionRequest(server string, cityName string, name string, action string, params *PostV0CityByCityNameRigByNameByActionParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -12535,6 +18030,19 @@ func NewPostV0CityByCityNameRigByNameByActionRequest(server string, cityName str
 	req, err := http.NewRequest("POST", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -12629,18 +18137,18 @@ func NewGetV0CityByCityNameRigsRequest(server string, cityName string, params *G
 }
 
 // NewCreateRigRequest calls the generic CreateRig builder with application/json body
-func NewCreateRigRequest(server string, cityName string, body CreateRigJSONRequestBody) (*http.Request, error) {
+func NewCreateRigRequest(server string, cityName string, params *CreateRigParams, body CreateRigJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewCreateRigRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewCreateRigRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewCreateRigRequestWithBody generates requests for CreateRig with any type of body
-func NewCreateRigRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewCreateRigRequestWithBody(server string, cityName string, params *CreateRigParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -12671,6 +18179,19 @@ func NewCreateRigRequestWithBody(server string, cityName string, contentType str
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -12717,7 +18238,7 @@ func NewGetV0CityByCityNameServiceByNameRequest(server string, cityName string, 
 }
 
 // NewPostV0CityByCityNameServiceByNameRestartRequest generates requests for PostV0CityByCityNameServiceByNameRestart
-func NewPostV0CityByCityNameServiceByNameRestartRequest(server string, cityName string, name string) (*http.Request, error) {
+func NewPostV0CityByCityNameServiceByNameRestartRequest(server string, cityName string, name string, params *PostV0CityByCityNameServiceByNameRestartParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -12752,6 +18273,19 @@ func NewPostV0CityByCityNameServiceByNameRestartRequest(server string, cityName 
 	req, err := http.NewRequest("POST", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -12855,18 +18389,18 @@ func NewGetV0CityByCityNameSessionByIdRequest(server string, cityName string, id
 }
 
 // NewPatchV0CityByCityNameSessionByIdRequest calls the generic PatchV0CityByCityNameSessionById builder with application/json body
-func NewPatchV0CityByCityNameSessionByIdRequest(server string, cityName string, id string, body PatchV0CityByCityNameSessionByIdJSONRequestBody) (*http.Request, error) {
+func NewPatchV0CityByCityNameSessionByIdRequest(server string, cityName string, id string, params *PatchV0CityByCityNameSessionByIdParams, body PatchV0CityByCityNameSessionByIdJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPatchV0CityByCityNameSessionByIdRequestWithBody(server, cityName, id, "application/json", bodyReader)
+	return NewPatchV0CityByCityNameSessionByIdRequestWithBody(server, cityName, id, params, "application/json", bodyReader)
 }
 
 // NewPatchV0CityByCityNameSessionByIdRequestWithBody generates requests for PatchV0CityByCityNameSessionById with any type of body
-func NewPatchV0CityByCityNameSessionByIdRequestWithBody(server string, cityName string, id string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPatchV0CityByCityNameSessionByIdRequestWithBody(server string, cityName string, id string, params *PatchV0CityByCityNameSessionByIdParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -12904,6 +18438,19 @@ func NewPatchV0CityByCityNameSessionByIdRequestWithBody(server string, cityName 
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -13057,11 +18604,24 @@ func NewPostV0CityByCityNameSessionByIdCloseRequest(server string, cityName stri
 		return nil, err
 	}
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewPostV0CityByCityNameSessionByIdKillRequest generates requests for PostV0CityByCityNameSessionByIdKill
-func NewPostV0CityByCityNameSessionByIdKillRequest(server string, cityName string, id string) (*http.Request, error) {
+func NewPostV0CityByCityNameSessionByIdKillRequest(server string, cityName string, id string, params *PostV0CityByCityNameSessionByIdKillParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -13098,22 +18658,35 @@ func NewPostV0CityByCityNameSessionByIdKillRequest(server string, cityName strin
 		return nil, err
 	}
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewSendSessionMessageRequest calls the generic SendSessionMessage builder with application/json body
-func NewSendSessionMessageRequest(server string, cityName string, id string, body SendSessionMessageJSONRequestBody) (*http.Request, error) {
+func NewSendSessionMessageRequest(server string, cityName string, id string, params *SendSessionMessageParams, body SendSessionMessageJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewSendSessionMessageRequestWithBody(server, cityName, id, "application/json", bodyReader)
+	return NewSendSessionMessageRequestWithBody(server, cityName, id, params, "application/json", bodyReader)
 }
 
 // NewSendSessionMessageRequestWithBody generates requests for SendSessionMessage with any type of body
-func NewSendSessionMessageRequestWithBody(server string, cityName string, id string, contentType string, body io.Reader) (*http.Request, error) {
+func NewSendSessionMessageRequestWithBody(server string, cityName string, id string, params *SendSessionMessageParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -13151,6 +18724,19 @@ func NewSendSessionMessageRequestWithBody(server string, cityName string, id str
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -13197,18 +18783,18 @@ func NewGetV0CityByCityNameSessionByIdPendingRequest(server string, cityName str
 }
 
 // NewPostV0CityByCityNameSessionByIdRenameRequest calls the generic PostV0CityByCityNameSessionByIdRename builder with application/json body
-func NewPostV0CityByCityNameSessionByIdRenameRequest(server string, cityName string, id string, body PostV0CityByCityNameSessionByIdRenameJSONRequestBody) (*http.Request, error) {
+func NewPostV0CityByCityNameSessionByIdRenameRequest(server string, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, body PostV0CityByCityNameSessionByIdRenameJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPostV0CityByCityNameSessionByIdRenameRequestWithBody(server, cityName, id, "application/json", bodyReader)
+	return NewPostV0CityByCityNameSessionByIdRenameRequestWithBody(server, cityName, id, params, "application/json", bodyReader)
 }
 
 // NewPostV0CityByCityNameSessionByIdRenameRequestWithBody generates requests for PostV0CityByCityNameSessionByIdRename with any type of body
-func NewPostV0CityByCityNameSessionByIdRenameRequestWithBody(server string, cityName string, id string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPostV0CityByCityNameSessionByIdRenameRequestWithBody(server string, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -13247,22 +18833,35 @@ func NewPostV0CityByCityNameSessionByIdRenameRequestWithBody(server string, city
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewRespondSessionRequest calls the generic RespondSession builder with application/json body
-func NewRespondSessionRequest(server string, cityName string, id string, body RespondSessionJSONRequestBody) (*http.Request, error) {
+func NewRespondSessionRequest(server string, cityName string, id string, params *RespondSessionParams, body RespondSessionJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewRespondSessionRequestWithBody(server, cityName, id, "application/json", bodyReader)
+	return NewRespondSessionRequestWithBody(server, cityName, id, params, "application/json", bodyReader)
 }
 
 // NewRespondSessionRequestWithBody generates requests for RespondSession with any type of body
-func NewRespondSessionRequestWithBody(server string, cityName string, id string, contentType string, body io.Reader) (*http.Request, error) {
+func NewRespondSessionRequestWithBody(server string, cityName string, id string, params *RespondSessionParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -13301,11 +18900,24 @@ func NewRespondSessionRequestWithBody(server string, cityName string, id string,
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewPostV0CityByCityNameSessionByIdStopRequest generates requests for PostV0CityByCityNameSessionByIdStop
-func NewPostV0CityByCityNameSessionByIdStopRequest(server string, cityName string, id string) (*http.Request, error) {
+func NewPostV0CityByCityNameSessionByIdStopRequest(server string, cityName string, id string, params *PostV0CityByCityNameSessionByIdStopParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -13340,6 +18952,19 @@ func NewPostV0CityByCityNameSessionByIdStopRequest(server string, cityName strin
 	req, err := http.NewRequest("POST", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -13409,18 +19034,18 @@ func NewStreamSessionRequest(server string, cityName string, id string, params *
 }
 
 // NewSubmitSessionRequest calls the generic SubmitSession builder with application/json body
-func NewSubmitSessionRequest(server string, cityName string, id string, body SubmitSessionJSONRequestBody) (*http.Request, error) {
+func NewSubmitSessionRequest(server string, cityName string, id string, params *SubmitSessionParams, body SubmitSessionJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewSubmitSessionRequestWithBody(server, cityName, id, "application/json", bodyReader)
+	return NewSubmitSessionRequestWithBody(server, cityName, id, params, "application/json", bodyReader)
 }
 
 // NewSubmitSessionRequestWithBody generates requests for SubmitSession with any type of body
-func NewSubmitSessionRequestWithBody(server string, cityName string, id string, contentType string, body io.Reader) (*http.Request, error) {
+func NewSubmitSessionRequestWithBody(server string, cityName string, id string, params *SubmitSessionParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -13459,11 +19084,24 @@ func NewSubmitSessionRequestWithBody(server string, cityName string, id string, 
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewPostV0CityByCityNameSessionByIdSuspendRequest generates requests for PostV0CityByCityNameSessionByIdSuspend
-func NewPostV0CityByCityNameSessionByIdSuspendRequest(server string, cityName string, id string) (*http.Request, error) {
+func NewPostV0CityByCityNameSessionByIdSuspendRequest(server string, cityName string, id string, params *PostV0CityByCityNameSessionByIdSuspendParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -13498,6 +19136,19 @@ func NewPostV0CityByCityNameSessionByIdSuspendRequest(server string, cityName st
 	req, err := http.NewRequest("POST", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -13587,6 +19238,22 @@ func NewGetV0CityByCityNameSessionByIdTranscriptRequest(server string, cityName 
 
 		}
 
+		if params.After != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "after", *params.After, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -13599,7 +19266,7 @@ func NewGetV0CityByCityNameSessionByIdTranscriptRequest(server string, cityName 
 }
 
 // NewPostV0CityByCityNameSessionByIdWakeRequest generates requests for PostV0CityByCityNameSessionByIdWake
-func NewPostV0CityByCityNameSessionByIdWakeRequest(server string, cityName string, id string) (*http.Request, error) {
+func NewPostV0CityByCityNameSessionByIdWakeRequest(server string, cityName string, id string, params *PostV0CityByCityNameSessionByIdWakeParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -13634,6 +19301,19 @@ func NewPostV0CityByCityNameSessionByIdWakeRequest(server string, cityName strin
 	req, err := http.NewRequest("POST", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -13760,18 +19440,18 @@ func NewGetV0CityByCityNameSessionsRequest(server string, cityName string, param
 }
 
 // NewCreateSessionRequest calls the generic CreateSession builder with application/json body
-func NewCreateSessionRequest(server string, cityName string, body CreateSessionJSONRequestBody) (*http.Request, error) {
+func NewCreateSessionRequest(server string, cityName string, params *CreateSessionParams, body CreateSessionJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewCreateSessionRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewCreateSessionRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewCreateSessionRequestWithBody generates requests for CreateSession with any type of body
-func NewCreateSessionRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewCreateSessionRequestWithBody(server string, cityName string, params *CreateSessionParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -13803,22 +19483,35 @@ func NewCreateSessionRequestWithBody(server string, cityName string, contentType
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewPostV0CityByCityNameSlingRequest calls the generic PostV0CityByCityNameSling builder with application/json body
-func NewPostV0CityByCityNameSlingRequest(server string, cityName string, body PostV0CityByCityNameSlingJSONRequestBody) (*http.Request, error) {
+func NewPostV0CityByCityNameSlingRequest(server string, cityName string, params *PostV0CityByCityNameSlingParams, body PostV0CityByCityNameSlingJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPostV0CityByCityNameSlingRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewPostV0CityByCityNameSlingRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewPostV0CityByCityNameSlingRequestWithBody generates requests for PostV0CityByCityNameSling with any type of body
-func NewPostV0CityByCityNameSlingRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPostV0CityByCityNameSlingRequestWithBody(server string, cityName string, params *PostV0CityByCityNameSlingParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -13849,6 +19542,19 @@ func NewPostV0CityByCityNameSlingRequestWithBody(server string, cityName string,
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -13920,6 +19626,53 @@ func NewGetV0CityByCityNameStatusRequest(server string, cityName string, params 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewPostV0CityByCityNameUnregisterRequest generates requests for PostV0CityByCityNameUnregister
+func NewPostV0CityByCityNameUnregisterRequest(server string, cityName string, params *PostV0CityByCityNameUnregisterParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/unregister", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -14015,6 +19768,19 @@ func NewDeleteV0CityByCityNameWorkflowByWorkflowIdRequest(server string, cityNam
 	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -14440,28 +20206,28 @@ type ClientWithResponsesInterface interface {
 	GetV0CitiesWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetV0CitiesResponse, error)
 
 	// PostV0CityWithBodyWithResponse request with any body
-	PostV0CityWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityResponse, error)
+	PostV0CityWithBodyWithResponse(ctx context.Context, params *PostV0CityParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityResponse, error)
 
-	PostV0CityWithResponse(ctx context.Context, body PostV0CityJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityResponse, error)
+	PostV0CityWithResponse(ctx context.Context, params *PostV0CityParams, body PostV0CityJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityResponse, error)
 
 	// GetV0CityByCityNameWithResponse request
 	GetV0CityByCityNameWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameResponse, error)
 
 	// PatchV0CityByCityNameWithBodyWithResponse request with any body
-	PatchV0CityByCityNameWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameResponse, error)
+	PatchV0CityByCityNameWithBodyWithResponse(ctx context.Context, cityName string, params *PatchV0CityByCityNameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameResponse, error)
 
-	PatchV0CityByCityNameWithResponse(ctx context.Context, cityName string, body PatchV0CityByCityNameJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameResponse, error)
+	PatchV0CityByCityNameWithResponse(ctx context.Context, cityName string, params *PatchV0CityByCityNameParams, body PatchV0CityByCityNameJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameResponse, error)
 
 	// DeleteV0CityByCityNameAgentByBaseWithResponse request
-	DeleteV0CityByCityNameAgentByBaseWithResponse(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameAgentByBaseResponse, error)
+	DeleteV0CityByCityNameAgentByBaseWithResponse(ctx context.Context, cityName string, base string, params *DeleteV0CityByCityNameAgentByBaseParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameAgentByBaseResponse, error)
 
 	// GetV0CityByCityNameAgentByBaseWithResponse request
 	GetV0CityByCityNameAgentByBaseWithResponse(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameAgentByBaseResponse, error)
 
 	// PatchV0CityByCityNameAgentByBaseWithBodyWithResponse request with any body
-	PatchV0CityByCityNameAgentByBaseWithBodyWithResponse(ctx context.Context, cityName string, base string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameAgentByBaseResponse, error)
+	PatchV0CityByCityNameAgentByBaseWithBodyWithResponse(ctx context.Context, cityName string, base string, params *PatchV0CityByCityNameAgentByBaseParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameAgentByBaseResponse, error)
 
-	PatchV0CityByCityNameAgentByBaseWithResponse(ctx context.Context, cityName string, base string, body PatchV0CityByCityNameAgentByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameAgentByBaseResponse, error)
+	PatchV0CityByCityNameAgentByBaseWithResponse(ctx context.Context, cityName string, base string, params *PatchV0CityByCityNameAgentByBaseParams, body PatchV0CityByCityNameAgentByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameAgentByBaseResponse, error)
 
 	// GetV0CityByCityNameAgentByBaseOutputWithResponse request
 	GetV0CityByCityNameAgentByBaseOutputWithResponse(ctx context.Context, cityName string, base string, params *GetV0CityByCityNameAgentByBaseOutputParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameAgentByBaseOutputResponse, error)
@@ -14470,18 +20236,18 @@ type ClientWithResponsesInterface interface {
 	StreamAgentOutputWithResponse(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*StreamAgentOutputResponse, error)
 
 	// PostV0CityByCityNameAgentByBaseByActionWithResponse request
-	PostV0CityByCityNameAgentByBaseByActionWithResponse(ctx context.Context, cityName string, base string, action PostV0CityByCityNameAgentByBaseByActionParamsAction, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameAgentByBaseByActionResponse, error)
+	PostV0CityByCityNameAgentByBaseByActionWithResponse(ctx context.Context, cityName string, base string, action PostV0CityByCityNameAgentByBaseByActionParamsAction, params *PostV0CityByCityNameAgentByBaseByActionParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameAgentByBaseByActionResponse, error)
 
 	// DeleteV0CityByCityNameAgentByDirByBaseWithResponse request
-	DeleteV0CityByCityNameAgentByDirByBaseWithResponse(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameAgentByDirByBaseResponse, error)
+	DeleteV0CityByCityNameAgentByDirByBaseWithResponse(ctx context.Context, cityName string, dir string, base string, params *DeleteV0CityByCityNameAgentByDirByBaseParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameAgentByDirByBaseResponse, error)
 
 	// GetV0CityByCityNameAgentByDirByBaseWithResponse request
 	GetV0CityByCityNameAgentByDirByBaseWithResponse(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameAgentByDirByBaseResponse, error)
 
 	// PatchV0CityByCityNameAgentByDirByBaseWithBodyWithResponse request with any body
-	PatchV0CityByCityNameAgentByDirByBaseWithBodyWithResponse(ctx context.Context, cityName string, dir string, base string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameAgentByDirByBaseResponse, error)
+	PatchV0CityByCityNameAgentByDirByBaseWithBodyWithResponse(ctx context.Context, cityName string, dir string, base string, params *PatchV0CityByCityNameAgentByDirByBaseParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameAgentByDirByBaseResponse, error)
 
-	PatchV0CityByCityNameAgentByDirByBaseWithResponse(ctx context.Context, cityName string, dir string, base string, body PatchV0CityByCityNameAgentByDirByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameAgentByDirByBaseResponse, error)
+	PatchV0CityByCityNameAgentByDirByBaseWithResponse(ctx context.Context, cityName string, dir string, base string, params *PatchV0CityByCityNameAgentByDirByBaseParams, body PatchV0CityByCityNameAgentByDirByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameAgentByDirByBaseResponse, error)
 
 	// GetV0CityByCityNameAgentByDirByBaseOutputWithResponse request
 	GetV0CityByCityNameAgentByDirByBaseOutputWithResponse(ctx context.Context, cityName string, dir string, base string, params *GetV0CityByCityNameAgentByDirByBaseOutputParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameAgentByDirByBaseOutputResponse, error)
@@ -14490,45 +20256,45 @@ type ClientWithResponsesInterface interface {
 	StreamAgentOutputQualifiedWithResponse(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*StreamAgentOutputQualifiedResponse, error)
 
 	// PostV0CityByCityNameAgentByDirByBaseByActionWithResponse request
-	PostV0CityByCityNameAgentByDirByBaseByActionWithResponse(ctx context.Context, cityName string, dir string, base string, action PostV0CityByCityNameAgentByDirByBaseByActionParamsAction, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameAgentByDirByBaseByActionResponse, error)
+	PostV0CityByCityNameAgentByDirByBaseByActionWithResponse(ctx context.Context, cityName string, dir string, base string, action PostV0CityByCityNameAgentByDirByBaseByActionParamsAction, params *PostV0CityByCityNameAgentByDirByBaseByActionParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameAgentByDirByBaseByActionResponse, error)
 
 	// GetV0CityByCityNameAgentsWithResponse request
 	GetV0CityByCityNameAgentsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameAgentsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameAgentsResponse, error)
 
 	// CreateAgentWithBodyWithResponse request with any body
-	CreateAgentWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateAgentResponse, error)
+	CreateAgentWithBodyWithResponse(ctx context.Context, cityName string, params *CreateAgentParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateAgentResponse, error)
 
-	CreateAgentWithResponse(ctx context.Context, cityName string, body CreateAgentJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateAgentResponse, error)
+	CreateAgentWithResponse(ctx context.Context, cityName string, params *CreateAgentParams, body CreateAgentJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateAgentResponse, error)
 
 	// DeleteV0CityByCityNameBeadByIdWithResponse request
-	DeleteV0CityByCityNameBeadByIdWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameBeadByIdResponse, error)
+	DeleteV0CityByCityNameBeadByIdWithResponse(ctx context.Context, cityName string, id string, params *DeleteV0CityByCityNameBeadByIdParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameBeadByIdResponse, error)
 
 	// GetV0CityByCityNameBeadByIdWithResponse request
 	GetV0CityByCityNameBeadByIdWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadByIdResponse, error)
 
 	// PatchV0CityByCityNameBeadByIdWithBodyWithResponse request with any body
-	PatchV0CityByCityNameBeadByIdWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameBeadByIdResponse, error)
+	PatchV0CityByCityNameBeadByIdWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameBeadByIdParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameBeadByIdResponse, error)
 
-	PatchV0CityByCityNameBeadByIdWithResponse(ctx context.Context, cityName string, id string, body PatchV0CityByCityNameBeadByIdJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameBeadByIdResponse, error)
+	PatchV0CityByCityNameBeadByIdWithResponse(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameBeadByIdParams, body PatchV0CityByCityNameBeadByIdJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameBeadByIdResponse, error)
 
 	// PostV0CityByCityNameBeadByIdAssignWithBodyWithResponse request with any body
-	PostV0CityByCityNameBeadByIdAssignWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdAssignResponse, error)
+	PostV0CityByCityNameBeadByIdAssignWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdAssignParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdAssignResponse, error)
 
-	PostV0CityByCityNameBeadByIdAssignWithResponse(ctx context.Context, cityName string, id string, body PostV0CityByCityNameBeadByIdAssignJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdAssignResponse, error)
+	PostV0CityByCityNameBeadByIdAssignWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdAssignParams, body PostV0CityByCityNameBeadByIdAssignJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdAssignResponse, error)
 
 	// PostV0CityByCityNameBeadByIdCloseWithResponse request
-	PostV0CityByCityNameBeadByIdCloseWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdCloseResponse, error)
+	PostV0CityByCityNameBeadByIdCloseWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdCloseResponse, error)
 
 	// GetV0CityByCityNameBeadByIdDepsWithResponse request
 	GetV0CityByCityNameBeadByIdDepsWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadByIdDepsResponse, error)
 
 	// PostV0CityByCityNameBeadByIdReopenWithResponse request
-	PostV0CityByCityNameBeadByIdReopenWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdReopenResponse, error)
+	PostV0CityByCityNameBeadByIdReopenWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdReopenParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdReopenResponse, error)
 
 	// PostV0CityByCityNameBeadByIdUpdateWithBodyWithResponse request with any body
-	PostV0CityByCityNameBeadByIdUpdateWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdUpdateResponse, error)
+	PostV0CityByCityNameBeadByIdUpdateWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdUpdateParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdUpdateResponse, error)
 
-	PostV0CityByCityNameBeadByIdUpdateWithResponse(ctx context.Context, cityName string, id string, body PostV0CityByCityNameBeadByIdUpdateJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdUpdateResponse, error)
+	PostV0CityByCityNameBeadByIdUpdateWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdUpdateParams, body PostV0CityByCityNameBeadByIdUpdateJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdUpdateResponse, error)
 
 	// GetV0CityByCityNameBeadsWithResponse request
 	GetV0CityByCityNameBeadsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameBeadsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadsResponse, error)
@@ -14554,63 +20320,63 @@ type ClientWithResponsesInterface interface {
 	GetV0CityByCityNameConfigValidateWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameConfigValidateResponse, error)
 
 	// DeleteV0CityByCityNameConvoyByIdWithResponse request
-	DeleteV0CityByCityNameConvoyByIdWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameConvoyByIdResponse, error)
+	DeleteV0CityByCityNameConvoyByIdWithResponse(ctx context.Context, cityName string, id string, params *DeleteV0CityByCityNameConvoyByIdParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameConvoyByIdResponse, error)
 
 	// GetV0CityByCityNameConvoyByIdWithResponse request
 	GetV0CityByCityNameConvoyByIdWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameConvoyByIdResponse, error)
 
 	// PostV0CityByCityNameConvoyByIdAddWithBodyWithResponse request with any body
-	PostV0CityByCityNameConvoyByIdAddWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdAddResponse, error)
+	PostV0CityByCityNameConvoyByIdAddWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdAddParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdAddResponse, error)
 
-	PostV0CityByCityNameConvoyByIdAddWithResponse(ctx context.Context, cityName string, id string, body PostV0CityByCityNameConvoyByIdAddJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdAddResponse, error)
+	PostV0CityByCityNameConvoyByIdAddWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdAddParams, body PostV0CityByCityNameConvoyByIdAddJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdAddResponse, error)
 
 	// GetV0CityByCityNameConvoyByIdCheckWithResponse request
 	GetV0CityByCityNameConvoyByIdCheckWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameConvoyByIdCheckResponse, error)
 
 	// PostV0CityByCityNameConvoyByIdCloseWithResponse request
-	PostV0CityByCityNameConvoyByIdCloseWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdCloseResponse, error)
+	PostV0CityByCityNameConvoyByIdCloseWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdCloseParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdCloseResponse, error)
 
 	// PostV0CityByCityNameConvoyByIdRemoveWithBodyWithResponse request with any body
-	PostV0CityByCityNameConvoyByIdRemoveWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdRemoveResponse, error)
+	PostV0CityByCityNameConvoyByIdRemoveWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdRemoveParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdRemoveResponse, error)
 
-	PostV0CityByCityNameConvoyByIdRemoveWithResponse(ctx context.Context, cityName string, id string, body PostV0CityByCityNameConvoyByIdRemoveJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdRemoveResponse, error)
+	PostV0CityByCityNameConvoyByIdRemoveWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdRemoveParams, body PostV0CityByCityNameConvoyByIdRemoveJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdRemoveResponse, error)
 
 	// GetV0CityByCityNameConvoysWithResponse request
 	GetV0CityByCityNameConvoysWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameConvoysParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameConvoysResponse, error)
 
 	// CreateConvoyWithBodyWithResponse request with any body
-	CreateConvoyWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateConvoyResponse, error)
+	CreateConvoyWithBodyWithResponse(ctx context.Context, cityName string, params *CreateConvoyParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateConvoyResponse, error)
 
-	CreateConvoyWithResponse(ctx context.Context, cityName string, body CreateConvoyJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateConvoyResponse, error)
+	CreateConvoyWithResponse(ctx context.Context, cityName string, params *CreateConvoyParams, body CreateConvoyJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateConvoyResponse, error)
 
 	// GetV0CityByCityNameEventsWithResponse request
 	GetV0CityByCityNameEventsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameEventsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameEventsResponse, error)
 
 	// EmitEventWithBodyWithResponse request with any body
-	EmitEventWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EmitEventResponse, error)
+	EmitEventWithBodyWithResponse(ctx context.Context, cityName string, params *EmitEventParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EmitEventResponse, error)
 
-	EmitEventWithResponse(ctx context.Context, cityName string, body EmitEventJSONRequestBody, reqEditors ...RequestEditorFn) (*EmitEventResponse, error)
+	EmitEventWithResponse(ctx context.Context, cityName string, params *EmitEventParams, body EmitEventJSONRequestBody, reqEditors ...RequestEditorFn) (*EmitEventResponse, error)
 
 	// StreamEventsWithResponse request
 	StreamEventsWithResponse(ctx context.Context, cityName string, params *StreamEventsParams, reqEditors ...RequestEditorFn) (*StreamEventsResponse, error)
 
 	// DeleteV0CityByCityNameExtmsgAdaptersWithBodyWithResponse request with any body
-	DeleteV0CityByCityNameExtmsgAdaptersWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgAdaptersResponse, error)
+	DeleteV0CityByCityNameExtmsgAdaptersWithBodyWithResponse(ctx context.Context, cityName string, params *DeleteV0CityByCityNameExtmsgAdaptersParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgAdaptersResponse, error)
 
-	DeleteV0CityByCityNameExtmsgAdaptersWithResponse(ctx context.Context, cityName string, body DeleteV0CityByCityNameExtmsgAdaptersJSONRequestBody, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgAdaptersResponse, error)
+	DeleteV0CityByCityNameExtmsgAdaptersWithResponse(ctx context.Context, cityName string, params *DeleteV0CityByCityNameExtmsgAdaptersParams, body DeleteV0CityByCityNameExtmsgAdaptersJSONRequestBody, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgAdaptersResponse, error)
 
 	// GetV0CityByCityNameExtmsgAdaptersWithResponse request
 	GetV0CityByCityNameExtmsgAdaptersWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameExtmsgAdaptersResponse, error)
 
 	// RegisterExtmsgAdapterWithBodyWithResponse request with any body
-	RegisterExtmsgAdapterWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RegisterExtmsgAdapterResponse, error)
+	RegisterExtmsgAdapterWithBodyWithResponse(ctx context.Context, cityName string, params *RegisterExtmsgAdapterParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RegisterExtmsgAdapterResponse, error)
 
-	RegisterExtmsgAdapterWithResponse(ctx context.Context, cityName string, body RegisterExtmsgAdapterJSONRequestBody, reqEditors ...RequestEditorFn) (*RegisterExtmsgAdapterResponse, error)
+	RegisterExtmsgAdapterWithResponse(ctx context.Context, cityName string, params *RegisterExtmsgAdapterParams, body RegisterExtmsgAdapterJSONRequestBody, reqEditors ...RequestEditorFn) (*RegisterExtmsgAdapterResponse, error)
 
 	// PostV0CityByCityNameExtmsgBindWithBodyWithResponse request with any body
-	PostV0CityByCityNameExtmsgBindWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgBindResponse, error)
+	PostV0CityByCityNameExtmsgBindWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgBindParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgBindResponse, error)
 
-	PostV0CityByCityNameExtmsgBindWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgBindJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgBindResponse, error)
+	PostV0CityByCityNameExtmsgBindWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgBindParams, body PostV0CityByCityNameExtmsgBindJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgBindResponse, error)
 
 	// GetV0CityByCityNameExtmsgBindingsWithResponse request
 	GetV0CityByCityNameExtmsgBindingsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgBindingsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameExtmsgBindingsResponse, error)
@@ -14619,42 +20385,42 @@ type ClientWithResponsesInterface interface {
 	GetV0CityByCityNameExtmsgGroupsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgGroupsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameExtmsgGroupsResponse, error)
 
 	// EnsureExtmsgGroupWithBodyWithResponse request with any body
-	EnsureExtmsgGroupWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EnsureExtmsgGroupResponse, error)
+	EnsureExtmsgGroupWithBodyWithResponse(ctx context.Context, cityName string, params *EnsureExtmsgGroupParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EnsureExtmsgGroupResponse, error)
 
-	EnsureExtmsgGroupWithResponse(ctx context.Context, cityName string, body EnsureExtmsgGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*EnsureExtmsgGroupResponse, error)
+	EnsureExtmsgGroupWithResponse(ctx context.Context, cityName string, params *EnsureExtmsgGroupParams, body EnsureExtmsgGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*EnsureExtmsgGroupResponse, error)
 
 	// PostV0CityByCityNameExtmsgInboundWithBodyWithResponse request with any body
-	PostV0CityByCityNameExtmsgInboundWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgInboundResponse, error)
+	PostV0CityByCityNameExtmsgInboundWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgInboundParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgInboundResponse, error)
 
-	PostV0CityByCityNameExtmsgInboundWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgInboundJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgInboundResponse, error)
+	PostV0CityByCityNameExtmsgInboundWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgInboundParams, body PostV0CityByCityNameExtmsgInboundJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgInboundResponse, error)
 
 	// PostV0CityByCityNameExtmsgOutboundWithBodyWithResponse request with any body
-	PostV0CityByCityNameExtmsgOutboundWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgOutboundResponse, error)
+	PostV0CityByCityNameExtmsgOutboundWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgOutboundParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgOutboundResponse, error)
 
-	PostV0CityByCityNameExtmsgOutboundWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgOutboundJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgOutboundResponse, error)
+	PostV0CityByCityNameExtmsgOutboundWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgOutboundParams, body PostV0CityByCityNameExtmsgOutboundJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgOutboundResponse, error)
 
 	// DeleteV0CityByCityNameExtmsgParticipantsWithBodyWithResponse request with any body
-	DeleteV0CityByCityNameExtmsgParticipantsWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgParticipantsResponse, error)
+	DeleteV0CityByCityNameExtmsgParticipantsWithBodyWithResponse(ctx context.Context, cityName string, params *DeleteV0CityByCityNameExtmsgParticipantsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgParticipantsResponse, error)
 
-	DeleteV0CityByCityNameExtmsgParticipantsWithResponse(ctx context.Context, cityName string, body DeleteV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgParticipantsResponse, error)
+	DeleteV0CityByCityNameExtmsgParticipantsWithResponse(ctx context.Context, cityName string, params *DeleteV0CityByCityNameExtmsgParticipantsParams, body DeleteV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgParticipantsResponse, error)
 
 	// PostV0CityByCityNameExtmsgParticipantsWithBodyWithResponse request with any body
-	PostV0CityByCityNameExtmsgParticipantsWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgParticipantsResponse, error)
+	PostV0CityByCityNameExtmsgParticipantsWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgParticipantsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgParticipantsResponse, error)
 
-	PostV0CityByCityNameExtmsgParticipantsWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgParticipantsResponse, error)
+	PostV0CityByCityNameExtmsgParticipantsWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgParticipantsParams, body PostV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgParticipantsResponse, error)
 
 	// GetV0CityByCityNameExtmsgTranscriptWithResponse request
 	GetV0CityByCityNameExtmsgTranscriptWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgTranscriptParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameExtmsgTranscriptResponse, error)
 
 	// PostV0CityByCityNameExtmsgTranscriptAckWithBodyWithResponse request with any body
-	PostV0CityByCityNameExtmsgTranscriptAckWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgTranscriptAckResponse, error)
+	PostV0CityByCityNameExtmsgTranscriptAckWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgTranscriptAckParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgTranscriptAckResponse, error)
 
-	PostV0CityByCityNameExtmsgTranscriptAckWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgTranscriptAckJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgTranscriptAckResponse, error)
+	PostV0CityByCityNameExtmsgTranscriptAckWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgTranscriptAckParams, body PostV0CityByCityNameExtmsgTranscriptAckJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgTranscriptAckResponse, error)
 
 	// PostV0CityByCityNameExtmsgUnbindWithBodyWithResponse request with any body
-	PostV0CityByCityNameExtmsgUnbindWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgUnbindResponse, error)
+	PostV0CityByCityNameExtmsgUnbindWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgUnbindParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgUnbindResponse, error)
 
-	PostV0CityByCityNameExtmsgUnbindWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgUnbindJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgUnbindResponse, error)
+	PostV0CityByCityNameExtmsgUnbindWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgUnbindParams, body PostV0CityByCityNameExtmsgUnbindJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgUnbindResponse, error)
 
 	// GetV0CityByCityNameFormulaByNameWithResponse request
 	GetV0CityByCityNameFormulaByNameWithResponse(ctx context.Context, cityName string, name string, params *GetV0CityByCityNameFormulaByNameParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameFormulaByNameResponse, error)
@@ -14669,9 +20435,9 @@ type ClientWithResponsesInterface interface {
 	GetV0CityByCityNameFormulasByNameWithResponse(ctx context.Context, cityName string, name string, params *GetV0CityByCityNameFormulasByNameParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameFormulasByNameResponse, error)
 
 	// PostV0CityByCityNameFormulasByNamePreviewWithBodyWithResponse request with any body
-	PostV0CityByCityNameFormulasByNamePreviewWithBodyWithResponse(ctx context.Context, cityName string, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameFormulasByNamePreviewResponse, error)
+	PostV0CityByCityNameFormulasByNamePreviewWithBodyWithResponse(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameFormulasByNamePreviewParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameFormulasByNamePreviewResponse, error)
 
-	PostV0CityByCityNameFormulasByNamePreviewWithResponse(ctx context.Context, cityName string, name string, body PostV0CityByCityNameFormulasByNamePreviewJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameFormulasByNamePreviewResponse, error)
+	PostV0CityByCityNameFormulasByNamePreviewWithResponse(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameFormulasByNamePreviewParams, body PostV0CityByCityNameFormulasByNamePreviewJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameFormulasByNamePreviewResponse, error)
 
 	// GetV0CityByCityNameFormulasByNameRunsWithResponse request
 	GetV0CityByCityNameFormulasByNameRunsWithResponse(ctx context.Context, cityName string, name string, params *GetV0CityByCityNameFormulasByNameRunsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameFormulasByNameRunsResponse, error)
@@ -14720,16 +20486,16 @@ type ClientWithResponsesInterface interface {
 	GetV0CityByCityNameOrderByNameWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameOrderByNameResponse, error)
 
 	// PostV0CityByCityNameOrderByNameDisableWithResponse request
-	PostV0CityByCityNameOrderByNameDisableWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameOrderByNameDisableResponse, error)
+	PostV0CityByCityNameOrderByNameDisableWithResponse(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameOrderByNameDisableParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameOrderByNameDisableResponse, error)
 
 	// PostV0CityByCityNameOrderByNameEnableWithResponse request
-	PostV0CityByCityNameOrderByNameEnableWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameOrderByNameEnableResponse, error)
+	PostV0CityByCityNameOrderByNameEnableWithResponse(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameOrderByNameEnableParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameOrderByNameEnableResponse, error)
 
 	// GetV0CityByCityNameOrdersWithResponse request
 	GetV0CityByCityNameOrdersWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameOrdersResponse, error)
 
 	// GetV0CityByCityNameOrdersCheckWithResponse request
-	GetV0CityByCityNameOrdersCheckWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameOrdersCheckResponse, error)
+	GetV0CityByCityNameOrdersCheckWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameOrdersCheckParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameOrdersCheckResponse, error)
 
 	// GetV0CityByCityNameOrdersFeedWithResponse request
 	GetV0CityByCityNameOrdersFeedWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameOrdersFeedParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameOrdersFeedResponse, error)
@@ -14741,13 +20507,13 @@ type ClientWithResponsesInterface interface {
 	GetV0CityByCityNamePacksWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNamePacksResponse, error)
 
 	// DeleteV0CityByCityNamePatchesAgentByBaseWithResponse request
-	DeleteV0CityByCityNamePatchesAgentByBaseWithResponse(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesAgentByBaseResponse, error)
+	DeleteV0CityByCityNamePatchesAgentByBaseWithResponse(ctx context.Context, cityName string, base string, params *DeleteV0CityByCityNamePatchesAgentByBaseParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesAgentByBaseResponse, error)
 
 	// GetV0CityByCityNamePatchesAgentByBaseWithResponse request
 	GetV0CityByCityNamePatchesAgentByBaseWithResponse(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNamePatchesAgentByBaseResponse, error)
 
 	// DeleteV0CityByCityNamePatchesAgentByDirByBaseWithResponse request
-	DeleteV0CityByCityNamePatchesAgentByDirByBaseWithResponse(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesAgentByDirByBaseResponse, error)
+	DeleteV0CityByCityNamePatchesAgentByDirByBaseWithResponse(ctx context.Context, cityName string, dir string, base string, params *DeleteV0CityByCityNamePatchesAgentByDirByBaseParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesAgentByDirByBaseResponse, error)
 
 	// GetV0CityByCityNamePatchesAgentByDirByBaseWithResponse request
 	GetV0CityByCityNamePatchesAgentByDirByBaseWithResponse(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNamePatchesAgentByDirByBaseResponse, error)
@@ -14756,12 +20522,12 @@ type ClientWithResponsesInterface interface {
 	GetV0CityByCityNamePatchesAgentsWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNamePatchesAgentsResponse, error)
 
 	// PutV0CityByCityNamePatchesAgentsWithBodyWithResponse request with any body
-	PutV0CityByCityNamePatchesAgentsWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesAgentsResponse, error)
+	PutV0CityByCityNamePatchesAgentsWithBodyWithResponse(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesAgentsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesAgentsResponse, error)
 
-	PutV0CityByCityNamePatchesAgentsWithResponse(ctx context.Context, cityName string, body PutV0CityByCityNamePatchesAgentsJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesAgentsResponse, error)
+	PutV0CityByCityNamePatchesAgentsWithResponse(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesAgentsParams, body PutV0CityByCityNamePatchesAgentsJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesAgentsResponse, error)
 
 	// DeleteV0CityByCityNamePatchesProviderByNameWithResponse request
-	DeleteV0CityByCityNamePatchesProviderByNameWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesProviderByNameResponse, error)
+	DeleteV0CityByCityNamePatchesProviderByNameWithResponse(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNamePatchesProviderByNameParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesProviderByNameResponse, error)
 
 	// GetV0CityByCityNamePatchesProviderByNameWithResponse request
 	GetV0CityByCityNamePatchesProviderByNameWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNamePatchesProviderByNameResponse, error)
@@ -14770,12 +20536,12 @@ type ClientWithResponsesInterface interface {
 	GetV0CityByCityNamePatchesProvidersWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNamePatchesProvidersResponse, error)
 
 	// PutV0CityByCityNamePatchesProvidersWithBodyWithResponse request with any body
-	PutV0CityByCityNamePatchesProvidersWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesProvidersResponse, error)
+	PutV0CityByCityNamePatchesProvidersWithBodyWithResponse(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesProvidersParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesProvidersResponse, error)
 
-	PutV0CityByCityNamePatchesProvidersWithResponse(ctx context.Context, cityName string, body PutV0CityByCityNamePatchesProvidersJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesProvidersResponse, error)
+	PutV0CityByCityNamePatchesProvidersWithResponse(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesProvidersParams, body PutV0CityByCityNamePatchesProvidersJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesProvidersResponse, error)
 
 	// DeleteV0CityByCityNamePatchesRigByNameWithResponse request
-	DeleteV0CityByCityNamePatchesRigByNameWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesRigByNameResponse, error)
+	DeleteV0CityByCityNamePatchesRigByNameWithResponse(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNamePatchesRigByNameParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesRigByNameResponse, error)
 
 	// GetV0CityByCityNamePatchesRigByNameWithResponse request
 	GetV0CityByCityNamePatchesRigByNameWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNamePatchesRigByNameResponse, error)
@@ -14784,31 +20550,31 @@ type ClientWithResponsesInterface interface {
 	GetV0CityByCityNamePatchesRigsWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNamePatchesRigsResponse, error)
 
 	// PutV0CityByCityNamePatchesRigsWithBodyWithResponse request with any body
-	PutV0CityByCityNamePatchesRigsWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesRigsResponse, error)
+	PutV0CityByCityNamePatchesRigsWithBodyWithResponse(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesRigsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesRigsResponse, error)
 
-	PutV0CityByCityNamePatchesRigsWithResponse(ctx context.Context, cityName string, body PutV0CityByCityNamePatchesRigsJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesRigsResponse, error)
+	PutV0CityByCityNamePatchesRigsWithResponse(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesRigsParams, body PutV0CityByCityNamePatchesRigsJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesRigsResponse, error)
 
 	// GetV0CityByCityNameProviderReadinessWithResponse request
 	GetV0CityByCityNameProviderReadinessWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameProviderReadinessParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameProviderReadinessResponse, error)
 
 	// DeleteV0CityByCityNameProviderByNameWithResponse request
-	DeleteV0CityByCityNameProviderByNameWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameProviderByNameResponse, error)
+	DeleteV0CityByCityNameProviderByNameWithResponse(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNameProviderByNameParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameProviderByNameResponse, error)
 
 	// GetV0CityByCityNameProviderByNameWithResponse request
 	GetV0CityByCityNameProviderByNameWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameProviderByNameResponse, error)
 
 	// PatchV0CityByCityNameProviderByNameWithBodyWithResponse request with any body
-	PatchV0CityByCityNameProviderByNameWithBodyWithResponse(ctx context.Context, cityName string, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameProviderByNameResponse, error)
+	PatchV0CityByCityNameProviderByNameWithBodyWithResponse(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameProviderByNameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameProviderByNameResponse, error)
 
-	PatchV0CityByCityNameProviderByNameWithResponse(ctx context.Context, cityName string, name string, body PatchV0CityByCityNameProviderByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameProviderByNameResponse, error)
+	PatchV0CityByCityNameProviderByNameWithResponse(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameProviderByNameParams, body PatchV0CityByCityNameProviderByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameProviderByNameResponse, error)
 
 	// GetV0CityByCityNameProvidersWithResponse request
 	GetV0CityByCityNameProvidersWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameProvidersResponse, error)
 
 	// CreateProviderWithBodyWithResponse request with any body
-	CreateProviderWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateProviderResponse, error)
+	CreateProviderWithBodyWithResponse(ctx context.Context, cityName string, params *CreateProviderParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateProviderResponse, error)
 
-	CreateProviderWithResponse(ctx context.Context, cityName string, body CreateProviderJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateProviderResponse, error)
+	CreateProviderWithResponse(ctx context.Context, cityName string, params *CreateProviderParams, body CreateProviderJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateProviderResponse, error)
 
 	// GetV0CityByCityNameProvidersPublicWithResponse request
 	GetV0CityByCityNameProvidersPublicWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameProvidersPublicResponse, error)
@@ -14817,32 +20583,32 @@ type ClientWithResponsesInterface interface {
 	GetV0CityByCityNameReadinessWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameReadinessParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameReadinessResponse, error)
 
 	// DeleteV0CityByCityNameRigByNameWithResponse request
-	DeleteV0CityByCityNameRigByNameWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameRigByNameResponse, error)
+	DeleteV0CityByCityNameRigByNameWithResponse(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNameRigByNameParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameRigByNameResponse, error)
 
 	// GetV0CityByCityNameRigByNameWithResponse request
 	GetV0CityByCityNameRigByNameWithResponse(ctx context.Context, cityName string, name string, params *GetV0CityByCityNameRigByNameParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRigByNameResponse, error)
 
 	// PatchV0CityByCityNameRigByNameWithBodyWithResponse request with any body
-	PatchV0CityByCityNameRigByNameWithBodyWithResponse(ctx context.Context, cityName string, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameRigByNameResponse, error)
+	PatchV0CityByCityNameRigByNameWithBodyWithResponse(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameRigByNameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameRigByNameResponse, error)
 
-	PatchV0CityByCityNameRigByNameWithResponse(ctx context.Context, cityName string, name string, body PatchV0CityByCityNameRigByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameRigByNameResponse, error)
+	PatchV0CityByCityNameRigByNameWithResponse(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameRigByNameParams, body PatchV0CityByCityNameRigByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameRigByNameResponse, error)
 
 	// PostV0CityByCityNameRigByNameByActionWithResponse request
-	PostV0CityByCityNameRigByNameByActionWithResponse(ctx context.Context, cityName string, name string, action string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameRigByNameByActionResponse, error)
+	PostV0CityByCityNameRigByNameByActionWithResponse(ctx context.Context, cityName string, name string, action string, params *PostV0CityByCityNameRigByNameByActionParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameRigByNameByActionResponse, error)
 
 	// GetV0CityByCityNameRigsWithResponse request
 	GetV0CityByCityNameRigsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameRigsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRigsResponse, error)
 
 	// CreateRigWithBodyWithResponse request with any body
-	CreateRigWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateRigResponse, error)
+	CreateRigWithBodyWithResponse(ctx context.Context, cityName string, params *CreateRigParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateRigResponse, error)
 
-	CreateRigWithResponse(ctx context.Context, cityName string, body CreateRigJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateRigResponse, error)
+	CreateRigWithResponse(ctx context.Context, cityName string, params *CreateRigParams, body CreateRigJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateRigResponse, error)
 
 	// GetV0CityByCityNameServiceByNameWithResponse request
 	GetV0CityByCityNameServiceByNameWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameServiceByNameResponse, error)
 
 	// PostV0CityByCityNameServiceByNameRestartWithResponse request
-	PostV0CityByCityNameServiceByNameRestartWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameServiceByNameRestartResponse, error)
+	PostV0CityByCityNameServiceByNameRestartWithResponse(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameServiceByNameRestartParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameServiceByNameRestartResponse, error)
 
 	// GetV0CityByCityNameServicesWithResponse request
 	GetV0CityByCityNameServicesWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameServicesResponse, error)
@@ -14851,9 +20617,9 @@ type ClientWithResponsesInterface interface {
 	GetV0CityByCityNameSessionByIdWithResponse(ctx context.Context, cityName string, id string, params *GetV0CityByCityNameSessionByIdParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameSessionByIdResponse, error)
 
 	// PatchV0CityByCityNameSessionByIdWithBodyWithResponse request with any body
-	PatchV0CityByCityNameSessionByIdWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameSessionByIdResponse, error)
+	PatchV0CityByCityNameSessionByIdWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameSessionByIdParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameSessionByIdResponse, error)
 
-	PatchV0CityByCityNameSessionByIdWithResponse(ctx context.Context, cityName string, id string, body PatchV0CityByCityNameSessionByIdJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameSessionByIdResponse, error)
+	PatchV0CityByCityNameSessionByIdWithResponse(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameSessionByIdParams, body PatchV0CityByCityNameSessionByIdJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameSessionByIdResponse, error)
 
 	// GetV0CityByCityNameSessionByIdAgentsWithResponse request
 	GetV0CityByCityNameSessionByIdAgentsWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameSessionByIdAgentsResponse, error)
@@ -14865,61 +20631,64 @@ type ClientWithResponsesInterface interface {
 	PostV0CityByCityNameSessionByIdCloseWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdCloseParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdCloseResponse, error)
 
 	// PostV0CityByCityNameSessionByIdKillWithResponse request
-	PostV0CityByCityNameSessionByIdKillWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdKillResponse, error)
+	PostV0CityByCityNameSessionByIdKillWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdKillParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdKillResponse, error)
 
 	// SendSessionMessageWithBodyWithResponse request with any body
-	SendSessionMessageWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SendSessionMessageResponse, error)
+	SendSessionMessageWithBodyWithResponse(ctx context.Context, cityName string, id string, params *SendSessionMessageParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SendSessionMessageResponse, error)
 
-	SendSessionMessageWithResponse(ctx context.Context, cityName string, id string, body SendSessionMessageJSONRequestBody, reqEditors ...RequestEditorFn) (*SendSessionMessageResponse, error)
+	SendSessionMessageWithResponse(ctx context.Context, cityName string, id string, params *SendSessionMessageParams, body SendSessionMessageJSONRequestBody, reqEditors ...RequestEditorFn) (*SendSessionMessageResponse, error)
 
 	// GetV0CityByCityNameSessionByIdPendingWithResponse request
 	GetV0CityByCityNameSessionByIdPendingWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameSessionByIdPendingResponse, error)
 
 	// PostV0CityByCityNameSessionByIdRenameWithBodyWithResponse request with any body
-	PostV0CityByCityNameSessionByIdRenameWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRenameResponse, error)
+	PostV0CityByCityNameSessionByIdRenameWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRenameResponse, error)
 
-	PostV0CityByCityNameSessionByIdRenameWithResponse(ctx context.Context, cityName string, id string, body PostV0CityByCityNameSessionByIdRenameJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRenameResponse, error)
+	PostV0CityByCityNameSessionByIdRenameWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, body PostV0CityByCityNameSessionByIdRenameJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRenameResponse, error)
 
 	// RespondSessionWithBodyWithResponse request with any body
-	RespondSessionWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RespondSessionResponse, error)
+	RespondSessionWithBodyWithResponse(ctx context.Context, cityName string, id string, params *RespondSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RespondSessionResponse, error)
 
-	RespondSessionWithResponse(ctx context.Context, cityName string, id string, body RespondSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*RespondSessionResponse, error)
+	RespondSessionWithResponse(ctx context.Context, cityName string, id string, params *RespondSessionParams, body RespondSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*RespondSessionResponse, error)
 
 	// PostV0CityByCityNameSessionByIdStopWithResponse request
-	PostV0CityByCityNameSessionByIdStopWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdStopResponse, error)
+	PostV0CityByCityNameSessionByIdStopWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdStopParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdStopResponse, error)
 
 	// StreamSessionWithResponse request
 	StreamSessionWithResponse(ctx context.Context, cityName string, id string, params *StreamSessionParams, reqEditors ...RequestEditorFn) (*StreamSessionResponse, error)
 
 	// SubmitSessionWithBodyWithResponse request with any body
-	SubmitSessionWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SubmitSessionResponse, error)
+	SubmitSessionWithBodyWithResponse(ctx context.Context, cityName string, id string, params *SubmitSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SubmitSessionResponse, error)
 
-	SubmitSessionWithResponse(ctx context.Context, cityName string, id string, body SubmitSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*SubmitSessionResponse, error)
+	SubmitSessionWithResponse(ctx context.Context, cityName string, id string, params *SubmitSessionParams, body SubmitSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*SubmitSessionResponse, error)
 
 	// PostV0CityByCityNameSessionByIdSuspendWithResponse request
-	PostV0CityByCityNameSessionByIdSuspendWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdSuspendResponse, error)
+	PostV0CityByCityNameSessionByIdSuspendWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdSuspendParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdSuspendResponse, error)
 
 	// GetV0CityByCityNameSessionByIdTranscriptWithResponse request
 	GetV0CityByCityNameSessionByIdTranscriptWithResponse(ctx context.Context, cityName string, id string, params *GetV0CityByCityNameSessionByIdTranscriptParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameSessionByIdTranscriptResponse, error)
 
 	// PostV0CityByCityNameSessionByIdWakeWithResponse request
-	PostV0CityByCityNameSessionByIdWakeWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdWakeResponse, error)
+	PostV0CityByCityNameSessionByIdWakeWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdWakeParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdWakeResponse, error)
 
 	// GetV0CityByCityNameSessionsWithResponse request
 	GetV0CityByCityNameSessionsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameSessionsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameSessionsResponse, error)
 
 	// CreateSessionWithBodyWithResponse request with any body
-	CreateSessionWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateSessionResponse, error)
+	CreateSessionWithBodyWithResponse(ctx context.Context, cityName string, params *CreateSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateSessionResponse, error)
 
-	CreateSessionWithResponse(ctx context.Context, cityName string, body CreateSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateSessionResponse, error)
+	CreateSessionWithResponse(ctx context.Context, cityName string, params *CreateSessionParams, body CreateSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateSessionResponse, error)
 
 	// PostV0CityByCityNameSlingWithBodyWithResponse request with any body
-	PostV0CityByCityNameSlingWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSlingResponse, error)
+	PostV0CityByCityNameSlingWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameSlingParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSlingResponse, error)
 
-	PostV0CityByCityNameSlingWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameSlingJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSlingResponse, error)
+	PostV0CityByCityNameSlingWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameSlingParams, body PostV0CityByCityNameSlingJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSlingResponse, error)
 
 	// GetV0CityByCityNameStatusWithResponse request
 	GetV0CityByCityNameStatusWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameStatusParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameStatusResponse, error)
+
+	// PostV0CityByCityNameUnregisterWithResponse request
+	PostV0CityByCityNameUnregisterWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameUnregisterParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameUnregisterResponse, error)
 
 	// DeleteV0CityByCityNameWorkflowByWorkflowIdWithResponse request
 	DeleteV0CityByCityNameWorkflowByWorkflowIdWithResponse(ctx context.Context, cityName string, workflowId string, params *DeleteV0CityByCityNameWorkflowByWorkflowIdParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameWorkflowByWorkflowIdResponse, error)
@@ -14989,7 +20758,7 @@ func (r GetV0CitiesResponse) StatusCode() int {
 type PostV0CityResponse struct {
 	Body                          []byte
 	HTTPResponse                  *http.Response
-	JSON200                       *CityCreateResponse
+	JSON202                       *AsyncAcceptedResponse
 	ApplicationproblemJSONDefault *ErrorModel
 }
 
@@ -17746,7 +23515,7 @@ func (r PostV0CityByCityNameSessionByIdKillResponse) StatusCode() int {
 type SendSessionMessageResponse struct {
 	Body                          []byte
 	HTTPResponse                  *http.Response
-	JSON202                       *SessionMessageOutputBody
+	JSON202                       *AsyncAcceptedBody
 	ApplicationproblemJSONDefault *ErrorModel
 }
 
@@ -17883,7 +23652,7 @@ func (r StreamSessionResponse) StatusCode() int {
 type SubmitSessionResponse struct {
 	Body                          []byte
 	HTTPResponse                  *http.Response
-	JSON202                       *SessionSubmitOutputBody
+	JSON202                       *AsyncAcceptedBody
 	ApplicationproblemJSONDefault *ErrorModel
 }
 
@@ -17998,7 +23767,7 @@ func (r GetV0CityByCityNameSessionsResponse) StatusCode() int {
 type CreateSessionResponse struct {
 	Body                          []byte
 	HTTPResponse                  *http.Response
-	JSON202                       *SessionResponse
+	JSON202                       *AsyncAcceptedBody
 	ApplicationproblemJSONDefault *ErrorModel
 }
 
@@ -18058,6 +23827,29 @@ func (r GetV0CityByCityNameStatusResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetV0CityByCityNameStatusResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PostV0CityByCityNameUnregisterResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON202                       *AsyncAcceptedResponse
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r PostV0CityByCityNameUnregisterResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PostV0CityByCityNameUnregisterResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -18220,16 +24012,16 @@ func (c *ClientWithResponses) GetV0CitiesWithResponse(ctx context.Context, reqEd
 }
 
 // PostV0CityWithBodyWithResponse request with arbitrary body returning *PostV0CityResponse
-func (c *ClientWithResponses) PostV0CityWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityResponse, error) {
-	rsp, err := c.PostV0CityWithBody(ctx, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityWithBodyWithResponse(ctx context.Context, params *PostV0CityParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityResponse, error) {
+	rsp, err := c.PostV0CityWithBody(ctx, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePostV0CityResponse(rsp)
 }
 
-func (c *ClientWithResponses) PostV0CityWithResponse(ctx context.Context, body PostV0CityJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityResponse, error) {
-	rsp, err := c.PostV0City(ctx, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityWithResponse(ctx context.Context, params *PostV0CityParams, body PostV0CityJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityResponse, error) {
+	rsp, err := c.PostV0City(ctx, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18246,16 +24038,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameWithResponse(ctx context.Contex
 }
 
 // PatchV0CityByCityNameWithBodyWithResponse request with arbitrary body returning *PatchV0CityByCityNameResponse
-func (c *ClientWithResponses) PatchV0CityByCityNameWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameResponse, error) {
-	rsp, err := c.PatchV0CityByCityNameWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PatchV0CityByCityNameWithBodyWithResponse(ctx context.Context, cityName string, params *PatchV0CityByCityNameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameResponse, error) {
+	rsp, err := c.PatchV0CityByCityNameWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePatchV0CityByCityNameResponse(rsp)
 }
 
-func (c *ClientWithResponses) PatchV0CityByCityNameWithResponse(ctx context.Context, cityName string, body PatchV0CityByCityNameJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameResponse, error) {
-	rsp, err := c.PatchV0CityByCityName(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) PatchV0CityByCityNameWithResponse(ctx context.Context, cityName string, params *PatchV0CityByCityNameParams, body PatchV0CityByCityNameJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameResponse, error) {
+	rsp, err := c.PatchV0CityByCityName(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18263,8 +24055,8 @@ func (c *ClientWithResponses) PatchV0CityByCityNameWithResponse(ctx context.Cont
 }
 
 // DeleteV0CityByCityNameAgentByBaseWithResponse request returning *DeleteV0CityByCityNameAgentByBaseResponse
-func (c *ClientWithResponses) DeleteV0CityByCityNameAgentByBaseWithResponse(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameAgentByBaseResponse, error) {
-	rsp, err := c.DeleteV0CityByCityNameAgentByBase(ctx, cityName, base, reqEditors...)
+func (c *ClientWithResponses) DeleteV0CityByCityNameAgentByBaseWithResponse(ctx context.Context, cityName string, base string, params *DeleteV0CityByCityNameAgentByBaseParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameAgentByBaseResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNameAgentByBase(ctx, cityName, base, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18281,16 +24073,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameAgentByBaseWithResponse(ctx con
 }
 
 // PatchV0CityByCityNameAgentByBaseWithBodyWithResponse request with arbitrary body returning *PatchV0CityByCityNameAgentByBaseResponse
-func (c *ClientWithResponses) PatchV0CityByCityNameAgentByBaseWithBodyWithResponse(ctx context.Context, cityName string, base string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameAgentByBaseResponse, error) {
-	rsp, err := c.PatchV0CityByCityNameAgentByBaseWithBody(ctx, cityName, base, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PatchV0CityByCityNameAgentByBaseWithBodyWithResponse(ctx context.Context, cityName string, base string, params *PatchV0CityByCityNameAgentByBaseParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameAgentByBaseResponse, error) {
+	rsp, err := c.PatchV0CityByCityNameAgentByBaseWithBody(ctx, cityName, base, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePatchV0CityByCityNameAgentByBaseResponse(rsp)
 }
 
-func (c *ClientWithResponses) PatchV0CityByCityNameAgentByBaseWithResponse(ctx context.Context, cityName string, base string, body PatchV0CityByCityNameAgentByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameAgentByBaseResponse, error) {
-	rsp, err := c.PatchV0CityByCityNameAgentByBase(ctx, cityName, base, body, reqEditors...)
+func (c *ClientWithResponses) PatchV0CityByCityNameAgentByBaseWithResponse(ctx context.Context, cityName string, base string, params *PatchV0CityByCityNameAgentByBaseParams, body PatchV0CityByCityNameAgentByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameAgentByBaseResponse, error) {
+	rsp, err := c.PatchV0CityByCityNameAgentByBase(ctx, cityName, base, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18316,8 +24108,8 @@ func (c *ClientWithResponses) StreamAgentOutputWithResponse(ctx context.Context,
 }
 
 // PostV0CityByCityNameAgentByBaseByActionWithResponse request returning *PostV0CityByCityNameAgentByBaseByActionResponse
-func (c *ClientWithResponses) PostV0CityByCityNameAgentByBaseByActionWithResponse(ctx context.Context, cityName string, base string, action PostV0CityByCityNameAgentByBaseByActionParamsAction, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameAgentByBaseByActionResponse, error) {
-	rsp, err := c.PostV0CityByCityNameAgentByBaseByAction(ctx, cityName, base, action, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameAgentByBaseByActionWithResponse(ctx context.Context, cityName string, base string, action PostV0CityByCityNameAgentByBaseByActionParamsAction, params *PostV0CityByCityNameAgentByBaseByActionParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameAgentByBaseByActionResponse, error) {
+	rsp, err := c.PostV0CityByCityNameAgentByBaseByAction(ctx, cityName, base, action, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18325,8 +24117,8 @@ func (c *ClientWithResponses) PostV0CityByCityNameAgentByBaseByActionWithRespons
 }
 
 // DeleteV0CityByCityNameAgentByDirByBaseWithResponse request returning *DeleteV0CityByCityNameAgentByDirByBaseResponse
-func (c *ClientWithResponses) DeleteV0CityByCityNameAgentByDirByBaseWithResponse(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameAgentByDirByBaseResponse, error) {
-	rsp, err := c.DeleteV0CityByCityNameAgentByDirByBase(ctx, cityName, dir, base, reqEditors...)
+func (c *ClientWithResponses) DeleteV0CityByCityNameAgentByDirByBaseWithResponse(ctx context.Context, cityName string, dir string, base string, params *DeleteV0CityByCityNameAgentByDirByBaseParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameAgentByDirByBaseResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNameAgentByDirByBase(ctx, cityName, dir, base, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18343,16 +24135,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameAgentByDirByBaseWithResponse(ct
 }
 
 // PatchV0CityByCityNameAgentByDirByBaseWithBodyWithResponse request with arbitrary body returning *PatchV0CityByCityNameAgentByDirByBaseResponse
-func (c *ClientWithResponses) PatchV0CityByCityNameAgentByDirByBaseWithBodyWithResponse(ctx context.Context, cityName string, dir string, base string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameAgentByDirByBaseResponse, error) {
-	rsp, err := c.PatchV0CityByCityNameAgentByDirByBaseWithBody(ctx, cityName, dir, base, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PatchV0CityByCityNameAgentByDirByBaseWithBodyWithResponse(ctx context.Context, cityName string, dir string, base string, params *PatchV0CityByCityNameAgentByDirByBaseParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameAgentByDirByBaseResponse, error) {
+	rsp, err := c.PatchV0CityByCityNameAgentByDirByBaseWithBody(ctx, cityName, dir, base, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePatchV0CityByCityNameAgentByDirByBaseResponse(rsp)
 }
 
-func (c *ClientWithResponses) PatchV0CityByCityNameAgentByDirByBaseWithResponse(ctx context.Context, cityName string, dir string, base string, body PatchV0CityByCityNameAgentByDirByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameAgentByDirByBaseResponse, error) {
-	rsp, err := c.PatchV0CityByCityNameAgentByDirByBase(ctx, cityName, dir, base, body, reqEditors...)
+func (c *ClientWithResponses) PatchV0CityByCityNameAgentByDirByBaseWithResponse(ctx context.Context, cityName string, dir string, base string, params *PatchV0CityByCityNameAgentByDirByBaseParams, body PatchV0CityByCityNameAgentByDirByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameAgentByDirByBaseResponse, error) {
+	rsp, err := c.PatchV0CityByCityNameAgentByDirByBase(ctx, cityName, dir, base, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18378,8 +24170,8 @@ func (c *ClientWithResponses) StreamAgentOutputQualifiedWithResponse(ctx context
 }
 
 // PostV0CityByCityNameAgentByDirByBaseByActionWithResponse request returning *PostV0CityByCityNameAgentByDirByBaseByActionResponse
-func (c *ClientWithResponses) PostV0CityByCityNameAgentByDirByBaseByActionWithResponse(ctx context.Context, cityName string, dir string, base string, action PostV0CityByCityNameAgentByDirByBaseByActionParamsAction, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameAgentByDirByBaseByActionResponse, error) {
-	rsp, err := c.PostV0CityByCityNameAgentByDirByBaseByAction(ctx, cityName, dir, base, action, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameAgentByDirByBaseByActionWithResponse(ctx context.Context, cityName string, dir string, base string, action PostV0CityByCityNameAgentByDirByBaseByActionParamsAction, params *PostV0CityByCityNameAgentByDirByBaseByActionParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameAgentByDirByBaseByActionResponse, error) {
+	rsp, err := c.PostV0CityByCityNameAgentByDirByBaseByAction(ctx, cityName, dir, base, action, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18396,16 +24188,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameAgentsWithResponse(ctx context.
 }
 
 // CreateAgentWithBodyWithResponse request with arbitrary body returning *CreateAgentResponse
-func (c *ClientWithResponses) CreateAgentWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateAgentResponse, error) {
-	rsp, err := c.CreateAgentWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) CreateAgentWithBodyWithResponse(ctx context.Context, cityName string, params *CreateAgentParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateAgentResponse, error) {
+	rsp, err := c.CreateAgentWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseCreateAgentResponse(rsp)
 }
 
-func (c *ClientWithResponses) CreateAgentWithResponse(ctx context.Context, cityName string, body CreateAgentJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateAgentResponse, error) {
-	rsp, err := c.CreateAgent(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) CreateAgentWithResponse(ctx context.Context, cityName string, params *CreateAgentParams, body CreateAgentJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateAgentResponse, error) {
+	rsp, err := c.CreateAgent(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18413,8 +24205,8 @@ func (c *ClientWithResponses) CreateAgentWithResponse(ctx context.Context, cityN
 }
 
 // DeleteV0CityByCityNameBeadByIdWithResponse request returning *DeleteV0CityByCityNameBeadByIdResponse
-func (c *ClientWithResponses) DeleteV0CityByCityNameBeadByIdWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameBeadByIdResponse, error) {
-	rsp, err := c.DeleteV0CityByCityNameBeadById(ctx, cityName, id, reqEditors...)
+func (c *ClientWithResponses) DeleteV0CityByCityNameBeadByIdWithResponse(ctx context.Context, cityName string, id string, params *DeleteV0CityByCityNameBeadByIdParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameBeadByIdResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNameBeadById(ctx, cityName, id, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18431,16 +24223,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameBeadByIdWithResponse(ctx contex
 }
 
 // PatchV0CityByCityNameBeadByIdWithBodyWithResponse request with arbitrary body returning *PatchV0CityByCityNameBeadByIdResponse
-func (c *ClientWithResponses) PatchV0CityByCityNameBeadByIdWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameBeadByIdResponse, error) {
-	rsp, err := c.PatchV0CityByCityNameBeadByIdWithBody(ctx, cityName, id, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PatchV0CityByCityNameBeadByIdWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameBeadByIdParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameBeadByIdResponse, error) {
+	rsp, err := c.PatchV0CityByCityNameBeadByIdWithBody(ctx, cityName, id, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePatchV0CityByCityNameBeadByIdResponse(rsp)
 }
 
-func (c *ClientWithResponses) PatchV0CityByCityNameBeadByIdWithResponse(ctx context.Context, cityName string, id string, body PatchV0CityByCityNameBeadByIdJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameBeadByIdResponse, error) {
-	rsp, err := c.PatchV0CityByCityNameBeadById(ctx, cityName, id, body, reqEditors...)
+func (c *ClientWithResponses) PatchV0CityByCityNameBeadByIdWithResponse(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameBeadByIdParams, body PatchV0CityByCityNameBeadByIdJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameBeadByIdResponse, error) {
+	rsp, err := c.PatchV0CityByCityNameBeadById(ctx, cityName, id, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18448,16 +24240,16 @@ func (c *ClientWithResponses) PatchV0CityByCityNameBeadByIdWithResponse(ctx cont
 }
 
 // PostV0CityByCityNameBeadByIdAssignWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameBeadByIdAssignResponse
-func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdAssignWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdAssignResponse, error) {
-	rsp, err := c.PostV0CityByCityNameBeadByIdAssignWithBody(ctx, cityName, id, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdAssignWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdAssignParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdAssignResponse, error) {
+	rsp, err := c.PostV0CityByCityNameBeadByIdAssignWithBody(ctx, cityName, id, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameBeadByIdAssignResponse(rsp)
 }
 
-func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdAssignWithResponse(ctx context.Context, cityName string, id string, body PostV0CityByCityNameBeadByIdAssignJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdAssignResponse, error) {
-	rsp, err := c.PostV0CityByCityNameBeadByIdAssign(ctx, cityName, id, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdAssignWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdAssignParams, body PostV0CityByCityNameBeadByIdAssignJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdAssignResponse, error) {
+	rsp, err := c.PostV0CityByCityNameBeadByIdAssign(ctx, cityName, id, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18465,8 +24257,8 @@ func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdAssignWithResponse(ctx
 }
 
 // PostV0CityByCityNameBeadByIdCloseWithResponse request returning *PostV0CityByCityNameBeadByIdCloseResponse
-func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdCloseWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdCloseResponse, error) {
-	rsp, err := c.PostV0CityByCityNameBeadByIdClose(ctx, cityName, id, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdCloseWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdCloseResponse, error) {
+	rsp, err := c.PostV0CityByCityNameBeadByIdClose(ctx, cityName, id, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18483,8 +24275,8 @@ func (c *ClientWithResponses) GetV0CityByCityNameBeadByIdDepsWithResponse(ctx co
 }
 
 // PostV0CityByCityNameBeadByIdReopenWithResponse request returning *PostV0CityByCityNameBeadByIdReopenResponse
-func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdReopenWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdReopenResponse, error) {
-	rsp, err := c.PostV0CityByCityNameBeadByIdReopen(ctx, cityName, id, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdReopenWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdReopenParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdReopenResponse, error) {
+	rsp, err := c.PostV0CityByCityNameBeadByIdReopen(ctx, cityName, id, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18492,16 +24284,16 @@ func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdReopenWithResponse(ctx
 }
 
 // PostV0CityByCityNameBeadByIdUpdateWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameBeadByIdUpdateResponse
-func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdUpdateWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdUpdateResponse, error) {
-	rsp, err := c.PostV0CityByCityNameBeadByIdUpdateWithBody(ctx, cityName, id, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdUpdateWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdUpdateParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdUpdateResponse, error) {
+	rsp, err := c.PostV0CityByCityNameBeadByIdUpdateWithBody(ctx, cityName, id, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameBeadByIdUpdateResponse(rsp)
 }
 
-func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdUpdateWithResponse(ctx context.Context, cityName string, id string, body PostV0CityByCityNameBeadByIdUpdateJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdUpdateResponse, error) {
-	rsp, err := c.PostV0CityByCityNameBeadByIdUpdate(ctx, cityName, id, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdUpdateWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdUpdateParams, body PostV0CityByCityNameBeadByIdUpdateJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdUpdateResponse, error) {
+	rsp, err := c.PostV0CityByCityNameBeadByIdUpdate(ctx, cityName, id, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18580,8 +24372,8 @@ func (c *ClientWithResponses) GetV0CityByCityNameConfigValidateWithResponse(ctx 
 }
 
 // DeleteV0CityByCityNameConvoyByIdWithResponse request returning *DeleteV0CityByCityNameConvoyByIdResponse
-func (c *ClientWithResponses) DeleteV0CityByCityNameConvoyByIdWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameConvoyByIdResponse, error) {
-	rsp, err := c.DeleteV0CityByCityNameConvoyById(ctx, cityName, id, reqEditors...)
+func (c *ClientWithResponses) DeleteV0CityByCityNameConvoyByIdWithResponse(ctx context.Context, cityName string, id string, params *DeleteV0CityByCityNameConvoyByIdParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameConvoyByIdResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNameConvoyById(ctx, cityName, id, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18598,16 +24390,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameConvoyByIdWithResponse(ctx cont
 }
 
 // PostV0CityByCityNameConvoyByIdAddWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameConvoyByIdAddResponse
-func (c *ClientWithResponses) PostV0CityByCityNameConvoyByIdAddWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdAddResponse, error) {
-	rsp, err := c.PostV0CityByCityNameConvoyByIdAddWithBody(ctx, cityName, id, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameConvoyByIdAddWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdAddParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdAddResponse, error) {
+	rsp, err := c.PostV0CityByCityNameConvoyByIdAddWithBody(ctx, cityName, id, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameConvoyByIdAddResponse(rsp)
 }
 
-func (c *ClientWithResponses) PostV0CityByCityNameConvoyByIdAddWithResponse(ctx context.Context, cityName string, id string, body PostV0CityByCityNameConvoyByIdAddJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdAddResponse, error) {
-	rsp, err := c.PostV0CityByCityNameConvoyByIdAdd(ctx, cityName, id, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameConvoyByIdAddWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdAddParams, body PostV0CityByCityNameConvoyByIdAddJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdAddResponse, error) {
+	rsp, err := c.PostV0CityByCityNameConvoyByIdAdd(ctx, cityName, id, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18624,8 +24416,8 @@ func (c *ClientWithResponses) GetV0CityByCityNameConvoyByIdCheckWithResponse(ctx
 }
 
 // PostV0CityByCityNameConvoyByIdCloseWithResponse request returning *PostV0CityByCityNameConvoyByIdCloseResponse
-func (c *ClientWithResponses) PostV0CityByCityNameConvoyByIdCloseWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdCloseResponse, error) {
-	rsp, err := c.PostV0CityByCityNameConvoyByIdClose(ctx, cityName, id, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameConvoyByIdCloseWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdCloseParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdCloseResponse, error) {
+	rsp, err := c.PostV0CityByCityNameConvoyByIdClose(ctx, cityName, id, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18633,16 +24425,16 @@ func (c *ClientWithResponses) PostV0CityByCityNameConvoyByIdCloseWithResponse(ct
 }
 
 // PostV0CityByCityNameConvoyByIdRemoveWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameConvoyByIdRemoveResponse
-func (c *ClientWithResponses) PostV0CityByCityNameConvoyByIdRemoveWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdRemoveResponse, error) {
-	rsp, err := c.PostV0CityByCityNameConvoyByIdRemoveWithBody(ctx, cityName, id, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameConvoyByIdRemoveWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdRemoveParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdRemoveResponse, error) {
+	rsp, err := c.PostV0CityByCityNameConvoyByIdRemoveWithBody(ctx, cityName, id, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameConvoyByIdRemoveResponse(rsp)
 }
 
-func (c *ClientWithResponses) PostV0CityByCityNameConvoyByIdRemoveWithResponse(ctx context.Context, cityName string, id string, body PostV0CityByCityNameConvoyByIdRemoveJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdRemoveResponse, error) {
-	rsp, err := c.PostV0CityByCityNameConvoyByIdRemove(ctx, cityName, id, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameConvoyByIdRemoveWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdRemoveParams, body PostV0CityByCityNameConvoyByIdRemoveJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdRemoveResponse, error) {
+	rsp, err := c.PostV0CityByCityNameConvoyByIdRemove(ctx, cityName, id, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18659,16 +24451,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameConvoysWithResponse(ctx context
 }
 
 // CreateConvoyWithBodyWithResponse request with arbitrary body returning *CreateConvoyResponse
-func (c *ClientWithResponses) CreateConvoyWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateConvoyResponse, error) {
-	rsp, err := c.CreateConvoyWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) CreateConvoyWithBodyWithResponse(ctx context.Context, cityName string, params *CreateConvoyParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateConvoyResponse, error) {
+	rsp, err := c.CreateConvoyWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseCreateConvoyResponse(rsp)
 }
 
-func (c *ClientWithResponses) CreateConvoyWithResponse(ctx context.Context, cityName string, body CreateConvoyJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateConvoyResponse, error) {
-	rsp, err := c.CreateConvoy(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) CreateConvoyWithResponse(ctx context.Context, cityName string, params *CreateConvoyParams, body CreateConvoyJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateConvoyResponse, error) {
+	rsp, err := c.CreateConvoy(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18685,16 +24477,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameEventsWithResponse(ctx context.
 }
 
 // EmitEventWithBodyWithResponse request with arbitrary body returning *EmitEventResponse
-func (c *ClientWithResponses) EmitEventWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EmitEventResponse, error) {
-	rsp, err := c.EmitEventWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) EmitEventWithBodyWithResponse(ctx context.Context, cityName string, params *EmitEventParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EmitEventResponse, error) {
+	rsp, err := c.EmitEventWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseEmitEventResponse(rsp)
 }
 
-func (c *ClientWithResponses) EmitEventWithResponse(ctx context.Context, cityName string, body EmitEventJSONRequestBody, reqEditors ...RequestEditorFn) (*EmitEventResponse, error) {
-	rsp, err := c.EmitEvent(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) EmitEventWithResponse(ctx context.Context, cityName string, params *EmitEventParams, body EmitEventJSONRequestBody, reqEditors ...RequestEditorFn) (*EmitEventResponse, error) {
+	rsp, err := c.EmitEvent(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18711,16 +24503,16 @@ func (c *ClientWithResponses) StreamEventsWithResponse(ctx context.Context, city
 }
 
 // DeleteV0CityByCityNameExtmsgAdaptersWithBodyWithResponse request with arbitrary body returning *DeleteV0CityByCityNameExtmsgAdaptersResponse
-func (c *ClientWithResponses) DeleteV0CityByCityNameExtmsgAdaptersWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgAdaptersResponse, error) {
-	rsp, err := c.DeleteV0CityByCityNameExtmsgAdaptersWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) DeleteV0CityByCityNameExtmsgAdaptersWithBodyWithResponse(ctx context.Context, cityName string, params *DeleteV0CityByCityNameExtmsgAdaptersParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgAdaptersResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNameExtmsgAdaptersWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseDeleteV0CityByCityNameExtmsgAdaptersResponse(rsp)
 }
 
-func (c *ClientWithResponses) DeleteV0CityByCityNameExtmsgAdaptersWithResponse(ctx context.Context, cityName string, body DeleteV0CityByCityNameExtmsgAdaptersJSONRequestBody, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgAdaptersResponse, error) {
-	rsp, err := c.DeleteV0CityByCityNameExtmsgAdapters(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) DeleteV0CityByCityNameExtmsgAdaptersWithResponse(ctx context.Context, cityName string, params *DeleteV0CityByCityNameExtmsgAdaptersParams, body DeleteV0CityByCityNameExtmsgAdaptersJSONRequestBody, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgAdaptersResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNameExtmsgAdapters(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18737,16 +24529,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameExtmsgAdaptersWithResponse(ctx 
 }
 
 // RegisterExtmsgAdapterWithBodyWithResponse request with arbitrary body returning *RegisterExtmsgAdapterResponse
-func (c *ClientWithResponses) RegisterExtmsgAdapterWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RegisterExtmsgAdapterResponse, error) {
-	rsp, err := c.RegisterExtmsgAdapterWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) RegisterExtmsgAdapterWithBodyWithResponse(ctx context.Context, cityName string, params *RegisterExtmsgAdapterParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RegisterExtmsgAdapterResponse, error) {
+	rsp, err := c.RegisterExtmsgAdapterWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseRegisterExtmsgAdapterResponse(rsp)
 }
 
-func (c *ClientWithResponses) RegisterExtmsgAdapterWithResponse(ctx context.Context, cityName string, body RegisterExtmsgAdapterJSONRequestBody, reqEditors ...RequestEditorFn) (*RegisterExtmsgAdapterResponse, error) {
-	rsp, err := c.RegisterExtmsgAdapter(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) RegisterExtmsgAdapterWithResponse(ctx context.Context, cityName string, params *RegisterExtmsgAdapterParams, body RegisterExtmsgAdapterJSONRequestBody, reqEditors ...RequestEditorFn) (*RegisterExtmsgAdapterResponse, error) {
+	rsp, err := c.RegisterExtmsgAdapter(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18754,16 +24546,16 @@ func (c *ClientWithResponses) RegisterExtmsgAdapterWithResponse(ctx context.Cont
 }
 
 // PostV0CityByCityNameExtmsgBindWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameExtmsgBindResponse
-func (c *ClientWithResponses) PostV0CityByCityNameExtmsgBindWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgBindResponse, error) {
-	rsp, err := c.PostV0CityByCityNameExtmsgBindWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgBindWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgBindParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgBindResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgBindWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameExtmsgBindResponse(rsp)
 }
 
-func (c *ClientWithResponses) PostV0CityByCityNameExtmsgBindWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgBindJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgBindResponse, error) {
-	rsp, err := c.PostV0CityByCityNameExtmsgBind(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgBindWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgBindParams, body PostV0CityByCityNameExtmsgBindJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgBindResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgBind(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18789,16 +24581,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameExtmsgGroupsWithResponse(ctx co
 }
 
 // EnsureExtmsgGroupWithBodyWithResponse request with arbitrary body returning *EnsureExtmsgGroupResponse
-func (c *ClientWithResponses) EnsureExtmsgGroupWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EnsureExtmsgGroupResponse, error) {
-	rsp, err := c.EnsureExtmsgGroupWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) EnsureExtmsgGroupWithBodyWithResponse(ctx context.Context, cityName string, params *EnsureExtmsgGroupParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EnsureExtmsgGroupResponse, error) {
+	rsp, err := c.EnsureExtmsgGroupWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseEnsureExtmsgGroupResponse(rsp)
 }
 
-func (c *ClientWithResponses) EnsureExtmsgGroupWithResponse(ctx context.Context, cityName string, body EnsureExtmsgGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*EnsureExtmsgGroupResponse, error) {
-	rsp, err := c.EnsureExtmsgGroup(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) EnsureExtmsgGroupWithResponse(ctx context.Context, cityName string, params *EnsureExtmsgGroupParams, body EnsureExtmsgGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*EnsureExtmsgGroupResponse, error) {
+	rsp, err := c.EnsureExtmsgGroup(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18806,16 +24598,16 @@ func (c *ClientWithResponses) EnsureExtmsgGroupWithResponse(ctx context.Context,
 }
 
 // PostV0CityByCityNameExtmsgInboundWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameExtmsgInboundResponse
-func (c *ClientWithResponses) PostV0CityByCityNameExtmsgInboundWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgInboundResponse, error) {
-	rsp, err := c.PostV0CityByCityNameExtmsgInboundWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgInboundWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgInboundParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgInboundResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgInboundWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameExtmsgInboundResponse(rsp)
 }
 
-func (c *ClientWithResponses) PostV0CityByCityNameExtmsgInboundWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgInboundJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgInboundResponse, error) {
-	rsp, err := c.PostV0CityByCityNameExtmsgInbound(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgInboundWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgInboundParams, body PostV0CityByCityNameExtmsgInboundJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgInboundResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgInbound(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18823,16 +24615,16 @@ func (c *ClientWithResponses) PostV0CityByCityNameExtmsgInboundWithResponse(ctx 
 }
 
 // PostV0CityByCityNameExtmsgOutboundWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameExtmsgOutboundResponse
-func (c *ClientWithResponses) PostV0CityByCityNameExtmsgOutboundWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgOutboundResponse, error) {
-	rsp, err := c.PostV0CityByCityNameExtmsgOutboundWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgOutboundWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgOutboundParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgOutboundResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgOutboundWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameExtmsgOutboundResponse(rsp)
 }
 
-func (c *ClientWithResponses) PostV0CityByCityNameExtmsgOutboundWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgOutboundJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgOutboundResponse, error) {
-	rsp, err := c.PostV0CityByCityNameExtmsgOutbound(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgOutboundWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgOutboundParams, body PostV0CityByCityNameExtmsgOutboundJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgOutboundResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgOutbound(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18840,16 +24632,16 @@ func (c *ClientWithResponses) PostV0CityByCityNameExtmsgOutboundWithResponse(ctx
 }
 
 // DeleteV0CityByCityNameExtmsgParticipantsWithBodyWithResponse request with arbitrary body returning *DeleteV0CityByCityNameExtmsgParticipantsResponse
-func (c *ClientWithResponses) DeleteV0CityByCityNameExtmsgParticipantsWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgParticipantsResponse, error) {
-	rsp, err := c.DeleteV0CityByCityNameExtmsgParticipantsWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) DeleteV0CityByCityNameExtmsgParticipantsWithBodyWithResponse(ctx context.Context, cityName string, params *DeleteV0CityByCityNameExtmsgParticipantsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgParticipantsResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNameExtmsgParticipantsWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseDeleteV0CityByCityNameExtmsgParticipantsResponse(rsp)
 }
 
-func (c *ClientWithResponses) DeleteV0CityByCityNameExtmsgParticipantsWithResponse(ctx context.Context, cityName string, body DeleteV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgParticipantsResponse, error) {
-	rsp, err := c.DeleteV0CityByCityNameExtmsgParticipants(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) DeleteV0CityByCityNameExtmsgParticipantsWithResponse(ctx context.Context, cityName string, params *DeleteV0CityByCityNameExtmsgParticipantsParams, body DeleteV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgParticipantsResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNameExtmsgParticipants(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18857,16 +24649,16 @@ func (c *ClientWithResponses) DeleteV0CityByCityNameExtmsgParticipantsWithRespon
 }
 
 // PostV0CityByCityNameExtmsgParticipantsWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameExtmsgParticipantsResponse
-func (c *ClientWithResponses) PostV0CityByCityNameExtmsgParticipantsWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgParticipantsResponse, error) {
-	rsp, err := c.PostV0CityByCityNameExtmsgParticipantsWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgParticipantsWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgParticipantsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgParticipantsResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgParticipantsWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameExtmsgParticipantsResponse(rsp)
 }
 
-func (c *ClientWithResponses) PostV0CityByCityNameExtmsgParticipantsWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgParticipantsResponse, error) {
-	rsp, err := c.PostV0CityByCityNameExtmsgParticipants(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgParticipantsWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgParticipantsParams, body PostV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgParticipantsResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgParticipants(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18883,16 +24675,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameExtmsgTranscriptWithResponse(ct
 }
 
 // PostV0CityByCityNameExtmsgTranscriptAckWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameExtmsgTranscriptAckResponse
-func (c *ClientWithResponses) PostV0CityByCityNameExtmsgTranscriptAckWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgTranscriptAckResponse, error) {
-	rsp, err := c.PostV0CityByCityNameExtmsgTranscriptAckWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgTranscriptAckWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgTranscriptAckParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgTranscriptAckResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgTranscriptAckWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameExtmsgTranscriptAckResponse(rsp)
 }
 
-func (c *ClientWithResponses) PostV0CityByCityNameExtmsgTranscriptAckWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgTranscriptAckJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgTranscriptAckResponse, error) {
-	rsp, err := c.PostV0CityByCityNameExtmsgTranscriptAck(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgTranscriptAckWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgTranscriptAckParams, body PostV0CityByCityNameExtmsgTranscriptAckJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgTranscriptAckResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgTranscriptAck(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18900,16 +24692,16 @@ func (c *ClientWithResponses) PostV0CityByCityNameExtmsgTranscriptAckWithRespons
 }
 
 // PostV0CityByCityNameExtmsgUnbindWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameExtmsgUnbindResponse
-func (c *ClientWithResponses) PostV0CityByCityNameExtmsgUnbindWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgUnbindResponse, error) {
-	rsp, err := c.PostV0CityByCityNameExtmsgUnbindWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgUnbindWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgUnbindParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgUnbindResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgUnbindWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameExtmsgUnbindResponse(rsp)
 }
 
-func (c *ClientWithResponses) PostV0CityByCityNameExtmsgUnbindWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgUnbindJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgUnbindResponse, error) {
-	rsp, err := c.PostV0CityByCityNameExtmsgUnbind(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgUnbindWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgUnbindParams, body PostV0CityByCityNameExtmsgUnbindJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgUnbindResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgUnbind(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18953,16 +24745,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameFormulasByNameWithResponse(ctx 
 }
 
 // PostV0CityByCityNameFormulasByNamePreviewWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameFormulasByNamePreviewResponse
-func (c *ClientWithResponses) PostV0CityByCityNameFormulasByNamePreviewWithBodyWithResponse(ctx context.Context, cityName string, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameFormulasByNamePreviewResponse, error) {
-	rsp, err := c.PostV0CityByCityNameFormulasByNamePreviewWithBody(ctx, cityName, name, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameFormulasByNamePreviewWithBodyWithResponse(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameFormulasByNamePreviewParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameFormulasByNamePreviewResponse, error) {
+	rsp, err := c.PostV0CityByCityNameFormulasByNamePreviewWithBody(ctx, cityName, name, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameFormulasByNamePreviewResponse(rsp)
 }
 
-func (c *ClientWithResponses) PostV0CityByCityNameFormulasByNamePreviewWithResponse(ctx context.Context, cityName string, name string, body PostV0CityByCityNameFormulasByNamePreviewJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameFormulasByNamePreviewResponse, error) {
-	rsp, err := c.PostV0CityByCityNameFormulasByNamePreview(ctx, cityName, name, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameFormulasByNamePreviewWithResponse(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameFormulasByNamePreviewParams, body PostV0CityByCityNameFormulasByNamePreviewJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameFormulasByNamePreviewResponse, error) {
+	rsp, err := c.PostV0CityByCityNameFormulasByNamePreview(ctx, cityName, name, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19112,8 +24904,8 @@ func (c *ClientWithResponses) GetV0CityByCityNameOrderByNameWithResponse(ctx con
 }
 
 // PostV0CityByCityNameOrderByNameDisableWithResponse request returning *PostV0CityByCityNameOrderByNameDisableResponse
-func (c *ClientWithResponses) PostV0CityByCityNameOrderByNameDisableWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameOrderByNameDisableResponse, error) {
-	rsp, err := c.PostV0CityByCityNameOrderByNameDisable(ctx, cityName, name, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameOrderByNameDisableWithResponse(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameOrderByNameDisableParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameOrderByNameDisableResponse, error) {
+	rsp, err := c.PostV0CityByCityNameOrderByNameDisable(ctx, cityName, name, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19121,8 +24913,8 @@ func (c *ClientWithResponses) PostV0CityByCityNameOrderByNameDisableWithResponse
 }
 
 // PostV0CityByCityNameOrderByNameEnableWithResponse request returning *PostV0CityByCityNameOrderByNameEnableResponse
-func (c *ClientWithResponses) PostV0CityByCityNameOrderByNameEnableWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameOrderByNameEnableResponse, error) {
-	rsp, err := c.PostV0CityByCityNameOrderByNameEnable(ctx, cityName, name, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameOrderByNameEnableWithResponse(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameOrderByNameEnableParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameOrderByNameEnableResponse, error) {
+	rsp, err := c.PostV0CityByCityNameOrderByNameEnable(ctx, cityName, name, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19139,8 +24931,8 @@ func (c *ClientWithResponses) GetV0CityByCityNameOrdersWithResponse(ctx context.
 }
 
 // GetV0CityByCityNameOrdersCheckWithResponse request returning *GetV0CityByCityNameOrdersCheckResponse
-func (c *ClientWithResponses) GetV0CityByCityNameOrdersCheckWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameOrdersCheckResponse, error) {
-	rsp, err := c.GetV0CityByCityNameOrdersCheck(ctx, cityName, reqEditors...)
+func (c *ClientWithResponses) GetV0CityByCityNameOrdersCheckWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameOrdersCheckParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameOrdersCheckResponse, error) {
+	rsp, err := c.GetV0CityByCityNameOrdersCheck(ctx, cityName, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19175,8 +24967,8 @@ func (c *ClientWithResponses) GetV0CityByCityNamePacksWithResponse(ctx context.C
 }
 
 // DeleteV0CityByCityNamePatchesAgentByBaseWithResponse request returning *DeleteV0CityByCityNamePatchesAgentByBaseResponse
-func (c *ClientWithResponses) DeleteV0CityByCityNamePatchesAgentByBaseWithResponse(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesAgentByBaseResponse, error) {
-	rsp, err := c.DeleteV0CityByCityNamePatchesAgentByBase(ctx, cityName, base, reqEditors...)
+func (c *ClientWithResponses) DeleteV0CityByCityNamePatchesAgentByBaseWithResponse(ctx context.Context, cityName string, base string, params *DeleteV0CityByCityNamePatchesAgentByBaseParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesAgentByBaseResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNamePatchesAgentByBase(ctx, cityName, base, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19193,8 +24985,8 @@ func (c *ClientWithResponses) GetV0CityByCityNamePatchesAgentByBaseWithResponse(
 }
 
 // DeleteV0CityByCityNamePatchesAgentByDirByBaseWithResponse request returning *DeleteV0CityByCityNamePatchesAgentByDirByBaseResponse
-func (c *ClientWithResponses) DeleteV0CityByCityNamePatchesAgentByDirByBaseWithResponse(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesAgentByDirByBaseResponse, error) {
-	rsp, err := c.DeleteV0CityByCityNamePatchesAgentByDirByBase(ctx, cityName, dir, base, reqEditors...)
+func (c *ClientWithResponses) DeleteV0CityByCityNamePatchesAgentByDirByBaseWithResponse(ctx context.Context, cityName string, dir string, base string, params *DeleteV0CityByCityNamePatchesAgentByDirByBaseParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesAgentByDirByBaseResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNamePatchesAgentByDirByBase(ctx, cityName, dir, base, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19220,16 +25012,16 @@ func (c *ClientWithResponses) GetV0CityByCityNamePatchesAgentsWithResponse(ctx c
 }
 
 // PutV0CityByCityNamePatchesAgentsWithBodyWithResponse request with arbitrary body returning *PutV0CityByCityNamePatchesAgentsResponse
-func (c *ClientWithResponses) PutV0CityByCityNamePatchesAgentsWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesAgentsResponse, error) {
-	rsp, err := c.PutV0CityByCityNamePatchesAgentsWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PutV0CityByCityNamePatchesAgentsWithBodyWithResponse(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesAgentsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesAgentsResponse, error) {
+	rsp, err := c.PutV0CityByCityNamePatchesAgentsWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePutV0CityByCityNamePatchesAgentsResponse(rsp)
 }
 
-func (c *ClientWithResponses) PutV0CityByCityNamePatchesAgentsWithResponse(ctx context.Context, cityName string, body PutV0CityByCityNamePatchesAgentsJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesAgentsResponse, error) {
-	rsp, err := c.PutV0CityByCityNamePatchesAgents(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) PutV0CityByCityNamePatchesAgentsWithResponse(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesAgentsParams, body PutV0CityByCityNamePatchesAgentsJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesAgentsResponse, error) {
+	rsp, err := c.PutV0CityByCityNamePatchesAgents(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19237,8 +25029,8 @@ func (c *ClientWithResponses) PutV0CityByCityNamePatchesAgentsWithResponse(ctx c
 }
 
 // DeleteV0CityByCityNamePatchesProviderByNameWithResponse request returning *DeleteV0CityByCityNamePatchesProviderByNameResponse
-func (c *ClientWithResponses) DeleteV0CityByCityNamePatchesProviderByNameWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesProviderByNameResponse, error) {
-	rsp, err := c.DeleteV0CityByCityNamePatchesProviderByName(ctx, cityName, name, reqEditors...)
+func (c *ClientWithResponses) DeleteV0CityByCityNamePatchesProviderByNameWithResponse(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNamePatchesProviderByNameParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesProviderByNameResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNamePatchesProviderByName(ctx, cityName, name, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19264,16 +25056,16 @@ func (c *ClientWithResponses) GetV0CityByCityNamePatchesProvidersWithResponse(ct
 }
 
 // PutV0CityByCityNamePatchesProvidersWithBodyWithResponse request with arbitrary body returning *PutV0CityByCityNamePatchesProvidersResponse
-func (c *ClientWithResponses) PutV0CityByCityNamePatchesProvidersWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesProvidersResponse, error) {
-	rsp, err := c.PutV0CityByCityNamePatchesProvidersWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PutV0CityByCityNamePatchesProvidersWithBodyWithResponse(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesProvidersParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesProvidersResponse, error) {
+	rsp, err := c.PutV0CityByCityNamePatchesProvidersWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePutV0CityByCityNamePatchesProvidersResponse(rsp)
 }
 
-func (c *ClientWithResponses) PutV0CityByCityNamePatchesProvidersWithResponse(ctx context.Context, cityName string, body PutV0CityByCityNamePatchesProvidersJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesProvidersResponse, error) {
-	rsp, err := c.PutV0CityByCityNamePatchesProviders(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) PutV0CityByCityNamePatchesProvidersWithResponse(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesProvidersParams, body PutV0CityByCityNamePatchesProvidersJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesProvidersResponse, error) {
+	rsp, err := c.PutV0CityByCityNamePatchesProviders(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19281,8 +25073,8 @@ func (c *ClientWithResponses) PutV0CityByCityNamePatchesProvidersWithResponse(ct
 }
 
 // DeleteV0CityByCityNamePatchesRigByNameWithResponse request returning *DeleteV0CityByCityNamePatchesRigByNameResponse
-func (c *ClientWithResponses) DeleteV0CityByCityNamePatchesRigByNameWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesRigByNameResponse, error) {
-	rsp, err := c.DeleteV0CityByCityNamePatchesRigByName(ctx, cityName, name, reqEditors...)
+func (c *ClientWithResponses) DeleteV0CityByCityNamePatchesRigByNameWithResponse(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNamePatchesRigByNameParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesRigByNameResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNamePatchesRigByName(ctx, cityName, name, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19308,16 +25100,16 @@ func (c *ClientWithResponses) GetV0CityByCityNamePatchesRigsWithResponse(ctx con
 }
 
 // PutV0CityByCityNamePatchesRigsWithBodyWithResponse request with arbitrary body returning *PutV0CityByCityNamePatchesRigsResponse
-func (c *ClientWithResponses) PutV0CityByCityNamePatchesRigsWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesRigsResponse, error) {
-	rsp, err := c.PutV0CityByCityNamePatchesRigsWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PutV0CityByCityNamePatchesRigsWithBodyWithResponse(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesRigsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesRigsResponse, error) {
+	rsp, err := c.PutV0CityByCityNamePatchesRigsWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePutV0CityByCityNamePatchesRigsResponse(rsp)
 }
 
-func (c *ClientWithResponses) PutV0CityByCityNamePatchesRigsWithResponse(ctx context.Context, cityName string, body PutV0CityByCityNamePatchesRigsJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesRigsResponse, error) {
-	rsp, err := c.PutV0CityByCityNamePatchesRigs(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) PutV0CityByCityNamePatchesRigsWithResponse(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesRigsParams, body PutV0CityByCityNamePatchesRigsJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesRigsResponse, error) {
+	rsp, err := c.PutV0CityByCityNamePatchesRigs(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19334,8 +25126,8 @@ func (c *ClientWithResponses) GetV0CityByCityNameProviderReadinessWithResponse(c
 }
 
 // DeleteV0CityByCityNameProviderByNameWithResponse request returning *DeleteV0CityByCityNameProviderByNameResponse
-func (c *ClientWithResponses) DeleteV0CityByCityNameProviderByNameWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameProviderByNameResponse, error) {
-	rsp, err := c.DeleteV0CityByCityNameProviderByName(ctx, cityName, name, reqEditors...)
+func (c *ClientWithResponses) DeleteV0CityByCityNameProviderByNameWithResponse(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNameProviderByNameParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameProviderByNameResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNameProviderByName(ctx, cityName, name, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19352,16 +25144,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameProviderByNameWithResponse(ctx 
 }
 
 // PatchV0CityByCityNameProviderByNameWithBodyWithResponse request with arbitrary body returning *PatchV0CityByCityNameProviderByNameResponse
-func (c *ClientWithResponses) PatchV0CityByCityNameProviderByNameWithBodyWithResponse(ctx context.Context, cityName string, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameProviderByNameResponse, error) {
-	rsp, err := c.PatchV0CityByCityNameProviderByNameWithBody(ctx, cityName, name, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PatchV0CityByCityNameProviderByNameWithBodyWithResponse(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameProviderByNameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameProviderByNameResponse, error) {
+	rsp, err := c.PatchV0CityByCityNameProviderByNameWithBody(ctx, cityName, name, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePatchV0CityByCityNameProviderByNameResponse(rsp)
 }
 
-func (c *ClientWithResponses) PatchV0CityByCityNameProviderByNameWithResponse(ctx context.Context, cityName string, name string, body PatchV0CityByCityNameProviderByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameProviderByNameResponse, error) {
-	rsp, err := c.PatchV0CityByCityNameProviderByName(ctx, cityName, name, body, reqEditors...)
+func (c *ClientWithResponses) PatchV0CityByCityNameProviderByNameWithResponse(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameProviderByNameParams, body PatchV0CityByCityNameProviderByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameProviderByNameResponse, error) {
+	rsp, err := c.PatchV0CityByCityNameProviderByName(ctx, cityName, name, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19378,16 +25170,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameProvidersWithResponse(ctx conte
 }
 
 // CreateProviderWithBodyWithResponse request with arbitrary body returning *CreateProviderResponse
-func (c *ClientWithResponses) CreateProviderWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateProviderResponse, error) {
-	rsp, err := c.CreateProviderWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) CreateProviderWithBodyWithResponse(ctx context.Context, cityName string, params *CreateProviderParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateProviderResponse, error) {
+	rsp, err := c.CreateProviderWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseCreateProviderResponse(rsp)
 }
 
-func (c *ClientWithResponses) CreateProviderWithResponse(ctx context.Context, cityName string, body CreateProviderJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateProviderResponse, error) {
-	rsp, err := c.CreateProvider(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) CreateProviderWithResponse(ctx context.Context, cityName string, params *CreateProviderParams, body CreateProviderJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateProviderResponse, error) {
+	rsp, err := c.CreateProvider(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19413,8 +25205,8 @@ func (c *ClientWithResponses) GetV0CityByCityNameReadinessWithResponse(ctx conte
 }
 
 // DeleteV0CityByCityNameRigByNameWithResponse request returning *DeleteV0CityByCityNameRigByNameResponse
-func (c *ClientWithResponses) DeleteV0CityByCityNameRigByNameWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameRigByNameResponse, error) {
-	rsp, err := c.DeleteV0CityByCityNameRigByName(ctx, cityName, name, reqEditors...)
+func (c *ClientWithResponses) DeleteV0CityByCityNameRigByNameWithResponse(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNameRigByNameParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameRigByNameResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNameRigByName(ctx, cityName, name, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19431,16 +25223,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameRigByNameWithResponse(ctx conte
 }
 
 // PatchV0CityByCityNameRigByNameWithBodyWithResponse request with arbitrary body returning *PatchV0CityByCityNameRigByNameResponse
-func (c *ClientWithResponses) PatchV0CityByCityNameRigByNameWithBodyWithResponse(ctx context.Context, cityName string, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameRigByNameResponse, error) {
-	rsp, err := c.PatchV0CityByCityNameRigByNameWithBody(ctx, cityName, name, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PatchV0CityByCityNameRigByNameWithBodyWithResponse(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameRigByNameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameRigByNameResponse, error) {
+	rsp, err := c.PatchV0CityByCityNameRigByNameWithBody(ctx, cityName, name, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePatchV0CityByCityNameRigByNameResponse(rsp)
 }
 
-func (c *ClientWithResponses) PatchV0CityByCityNameRigByNameWithResponse(ctx context.Context, cityName string, name string, body PatchV0CityByCityNameRigByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameRigByNameResponse, error) {
-	rsp, err := c.PatchV0CityByCityNameRigByName(ctx, cityName, name, body, reqEditors...)
+func (c *ClientWithResponses) PatchV0CityByCityNameRigByNameWithResponse(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameRigByNameParams, body PatchV0CityByCityNameRigByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameRigByNameResponse, error) {
+	rsp, err := c.PatchV0CityByCityNameRigByName(ctx, cityName, name, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19448,8 +25240,8 @@ func (c *ClientWithResponses) PatchV0CityByCityNameRigByNameWithResponse(ctx con
 }
 
 // PostV0CityByCityNameRigByNameByActionWithResponse request returning *PostV0CityByCityNameRigByNameByActionResponse
-func (c *ClientWithResponses) PostV0CityByCityNameRigByNameByActionWithResponse(ctx context.Context, cityName string, name string, action string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameRigByNameByActionResponse, error) {
-	rsp, err := c.PostV0CityByCityNameRigByNameByAction(ctx, cityName, name, action, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameRigByNameByActionWithResponse(ctx context.Context, cityName string, name string, action string, params *PostV0CityByCityNameRigByNameByActionParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameRigByNameByActionResponse, error) {
+	rsp, err := c.PostV0CityByCityNameRigByNameByAction(ctx, cityName, name, action, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19466,16 +25258,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameRigsWithResponse(ctx context.Co
 }
 
 // CreateRigWithBodyWithResponse request with arbitrary body returning *CreateRigResponse
-func (c *ClientWithResponses) CreateRigWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateRigResponse, error) {
-	rsp, err := c.CreateRigWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) CreateRigWithBodyWithResponse(ctx context.Context, cityName string, params *CreateRigParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateRigResponse, error) {
+	rsp, err := c.CreateRigWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseCreateRigResponse(rsp)
 }
 
-func (c *ClientWithResponses) CreateRigWithResponse(ctx context.Context, cityName string, body CreateRigJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateRigResponse, error) {
-	rsp, err := c.CreateRig(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) CreateRigWithResponse(ctx context.Context, cityName string, params *CreateRigParams, body CreateRigJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateRigResponse, error) {
+	rsp, err := c.CreateRig(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19492,8 +25284,8 @@ func (c *ClientWithResponses) GetV0CityByCityNameServiceByNameWithResponse(ctx c
 }
 
 // PostV0CityByCityNameServiceByNameRestartWithResponse request returning *PostV0CityByCityNameServiceByNameRestartResponse
-func (c *ClientWithResponses) PostV0CityByCityNameServiceByNameRestartWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameServiceByNameRestartResponse, error) {
-	rsp, err := c.PostV0CityByCityNameServiceByNameRestart(ctx, cityName, name, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameServiceByNameRestartWithResponse(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameServiceByNameRestartParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameServiceByNameRestartResponse, error) {
+	rsp, err := c.PostV0CityByCityNameServiceByNameRestart(ctx, cityName, name, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19519,16 +25311,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameSessionByIdWithResponse(ctx con
 }
 
 // PatchV0CityByCityNameSessionByIdWithBodyWithResponse request with arbitrary body returning *PatchV0CityByCityNameSessionByIdResponse
-func (c *ClientWithResponses) PatchV0CityByCityNameSessionByIdWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameSessionByIdResponse, error) {
-	rsp, err := c.PatchV0CityByCityNameSessionByIdWithBody(ctx, cityName, id, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PatchV0CityByCityNameSessionByIdWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameSessionByIdParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameSessionByIdResponse, error) {
+	rsp, err := c.PatchV0CityByCityNameSessionByIdWithBody(ctx, cityName, id, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePatchV0CityByCityNameSessionByIdResponse(rsp)
 }
 
-func (c *ClientWithResponses) PatchV0CityByCityNameSessionByIdWithResponse(ctx context.Context, cityName string, id string, body PatchV0CityByCityNameSessionByIdJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameSessionByIdResponse, error) {
-	rsp, err := c.PatchV0CityByCityNameSessionById(ctx, cityName, id, body, reqEditors...)
+func (c *ClientWithResponses) PatchV0CityByCityNameSessionByIdWithResponse(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameSessionByIdParams, body PatchV0CityByCityNameSessionByIdJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameSessionByIdResponse, error) {
+	rsp, err := c.PatchV0CityByCityNameSessionById(ctx, cityName, id, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19563,8 +25355,8 @@ func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdCloseWithResponse(c
 }
 
 // PostV0CityByCityNameSessionByIdKillWithResponse request returning *PostV0CityByCityNameSessionByIdKillResponse
-func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdKillWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdKillResponse, error) {
-	rsp, err := c.PostV0CityByCityNameSessionByIdKill(ctx, cityName, id, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdKillWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdKillParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdKillResponse, error) {
+	rsp, err := c.PostV0CityByCityNameSessionByIdKill(ctx, cityName, id, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19572,16 +25364,16 @@ func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdKillWithResponse(ct
 }
 
 // SendSessionMessageWithBodyWithResponse request with arbitrary body returning *SendSessionMessageResponse
-func (c *ClientWithResponses) SendSessionMessageWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SendSessionMessageResponse, error) {
-	rsp, err := c.SendSessionMessageWithBody(ctx, cityName, id, contentType, body, reqEditors...)
+func (c *ClientWithResponses) SendSessionMessageWithBodyWithResponse(ctx context.Context, cityName string, id string, params *SendSessionMessageParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SendSessionMessageResponse, error) {
+	rsp, err := c.SendSessionMessageWithBody(ctx, cityName, id, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseSendSessionMessageResponse(rsp)
 }
 
-func (c *ClientWithResponses) SendSessionMessageWithResponse(ctx context.Context, cityName string, id string, body SendSessionMessageJSONRequestBody, reqEditors ...RequestEditorFn) (*SendSessionMessageResponse, error) {
-	rsp, err := c.SendSessionMessage(ctx, cityName, id, body, reqEditors...)
+func (c *ClientWithResponses) SendSessionMessageWithResponse(ctx context.Context, cityName string, id string, params *SendSessionMessageParams, body SendSessionMessageJSONRequestBody, reqEditors ...RequestEditorFn) (*SendSessionMessageResponse, error) {
+	rsp, err := c.SendSessionMessage(ctx, cityName, id, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19598,16 +25390,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameSessionByIdPendingWithResponse(
 }
 
 // PostV0CityByCityNameSessionByIdRenameWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameSessionByIdRenameResponse
-func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdRenameWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRenameResponse, error) {
-	rsp, err := c.PostV0CityByCityNameSessionByIdRenameWithBody(ctx, cityName, id, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdRenameWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRenameResponse, error) {
+	rsp, err := c.PostV0CityByCityNameSessionByIdRenameWithBody(ctx, cityName, id, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameSessionByIdRenameResponse(rsp)
 }
 
-func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdRenameWithResponse(ctx context.Context, cityName string, id string, body PostV0CityByCityNameSessionByIdRenameJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRenameResponse, error) {
-	rsp, err := c.PostV0CityByCityNameSessionByIdRename(ctx, cityName, id, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdRenameWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, body PostV0CityByCityNameSessionByIdRenameJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRenameResponse, error) {
+	rsp, err := c.PostV0CityByCityNameSessionByIdRename(ctx, cityName, id, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19615,16 +25407,16 @@ func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdRenameWithResponse(
 }
 
 // RespondSessionWithBodyWithResponse request with arbitrary body returning *RespondSessionResponse
-func (c *ClientWithResponses) RespondSessionWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RespondSessionResponse, error) {
-	rsp, err := c.RespondSessionWithBody(ctx, cityName, id, contentType, body, reqEditors...)
+func (c *ClientWithResponses) RespondSessionWithBodyWithResponse(ctx context.Context, cityName string, id string, params *RespondSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RespondSessionResponse, error) {
+	rsp, err := c.RespondSessionWithBody(ctx, cityName, id, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseRespondSessionResponse(rsp)
 }
 
-func (c *ClientWithResponses) RespondSessionWithResponse(ctx context.Context, cityName string, id string, body RespondSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*RespondSessionResponse, error) {
-	rsp, err := c.RespondSession(ctx, cityName, id, body, reqEditors...)
+func (c *ClientWithResponses) RespondSessionWithResponse(ctx context.Context, cityName string, id string, params *RespondSessionParams, body RespondSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*RespondSessionResponse, error) {
+	rsp, err := c.RespondSession(ctx, cityName, id, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19632,8 +25424,8 @@ func (c *ClientWithResponses) RespondSessionWithResponse(ctx context.Context, ci
 }
 
 // PostV0CityByCityNameSessionByIdStopWithResponse request returning *PostV0CityByCityNameSessionByIdStopResponse
-func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdStopWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdStopResponse, error) {
-	rsp, err := c.PostV0CityByCityNameSessionByIdStop(ctx, cityName, id, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdStopWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdStopParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdStopResponse, error) {
+	rsp, err := c.PostV0CityByCityNameSessionByIdStop(ctx, cityName, id, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19650,16 +25442,16 @@ func (c *ClientWithResponses) StreamSessionWithResponse(ctx context.Context, cit
 }
 
 // SubmitSessionWithBodyWithResponse request with arbitrary body returning *SubmitSessionResponse
-func (c *ClientWithResponses) SubmitSessionWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SubmitSessionResponse, error) {
-	rsp, err := c.SubmitSessionWithBody(ctx, cityName, id, contentType, body, reqEditors...)
+func (c *ClientWithResponses) SubmitSessionWithBodyWithResponse(ctx context.Context, cityName string, id string, params *SubmitSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SubmitSessionResponse, error) {
+	rsp, err := c.SubmitSessionWithBody(ctx, cityName, id, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseSubmitSessionResponse(rsp)
 }
 
-func (c *ClientWithResponses) SubmitSessionWithResponse(ctx context.Context, cityName string, id string, body SubmitSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*SubmitSessionResponse, error) {
-	rsp, err := c.SubmitSession(ctx, cityName, id, body, reqEditors...)
+func (c *ClientWithResponses) SubmitSessionWithResponse(ctx context.Context, cityName string, id string, params *SubmitSessionParams, body SubmitSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*SubmitSessionResponse, error) {
+	rsp, err := c.SubmitSession(ctx, cityName, id, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19667,8 +25459,8 @@ func (c *ClientWithResponses) SubmitSessionWithResponse(ctx context.Context, cit
 }
 
 // PostV0CityByCityNameSessionByIdSuspendWithResponse request returning *PostV0CityByCityNameSessionByIdSuspendResponse
-func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdSuspendWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdSuspendResponse, error) {
-	rsp, err := c.PostV0CityByCityNameSessionByIdSuspend(ctx, cityName, id, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdSuspendWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdSuspendParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdSuspendResponse, error) {
+	rsp, err := c.PostV0CityByCityNameSessionByIdSuspend(ctx, cityName, id, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19685,8 +25477,8 @@ func (c *ClientWithResponses) GetV0CityByCityNameSessionByIdTranscriptWithRespon
 }
 
 // PostV0CityByCityNameSessionByIdWakeWithResponse request returning *PostV0CityByCityNameSessionByIdWakeResponse
-func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdWakeWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdWakeResponse, error) {
-	rsp, err := c.PostV0CityByCityNameSessionByIdWake(ctx, cityName, id, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdWakeWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdWakeParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdWakeResponse, error) {
+	rsp, err := c.PostV0CityByCityNameSessionByIdWake(ctx, cityName, id, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19703,16 +25495,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameSessionsWithResponse(ctx contex
 }
 
 // CreateSessionWithBodyWithResponse request with arbitrary body returning *CreateSessionResponse
-func (c *ClientWithResponses) CreateSessionWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateSessionResponse, error) {
-	rsp, err := c.CreateSessionWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) CreateSessionWithBodyWithResponse(ctx context.Context, cityName string, params *CreateSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateSessionResponse, error) {
+	rsp, err := c.CreateSessionWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseCreateSessionResponse(rsp)
 }
 
-func (c *ClientWithResponses) CreateSessionWithResponse(ctx context.Context, cityName string, body CreateSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateSessionResponse, error) {
-	rsp, err := c.CreateSession(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) CreateSessionWithResponse(ctx context.Context, cityName string, params *CreateSessionParams, body CreateSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateSessionResponse, error) {
+	rsp, err := c.CreateSession(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19720,16 +25512,16 @@ func (c *ClientWithResponses) CreateSessionWithResponse(ctx context.Context, cit
 }
 
 // PostV0CityByCityNameSlingWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameSlingResponse
-func (c *ClientWithResponses) PostV0CityByCityNameSlingWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSlingResponse, error) {
-	rsp, err := c.PostV0CityByCityNameSlingWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameSlingWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameSlingParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSlingResponse, error) {
+	rsp, err := c.PostV0CityByCityNameSlingWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameSlingResponse(rsp)
 }
 
-func (c *ClientWithResponses) PostV0CityByCityNameSlingWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameSlingJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSlingResponse, error) {
-	rsp, err := c.PostV0CityByCityNameSling(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameSlingWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameSlingParams, body PostV0CityByCityNameSlingJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSlingResponse, error) {
+	rsp, err := c.PostV0CityByCityNameSling(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19743,6 +25535,15 @@ func (c *ClientWithResponses) GetV0CityByCityNameStatusWithResponse(ctx context.
 		return nil, err
 	}
 	return ParseGetV0CityByCityNameStatusResponse(rsp)
+}
+
+// PostV0CityByCityNameUnregisterWithResponse request returning *PostV0CityByCityNameUnregisterResponse
+func (c *ClientWithResponses) PostV0CityByCityNameUnregisterWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameUnregisterParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameUnregisterResponse, error) {
+	rsp, err := c.PostV0CityByCityNameUnregister(ctx, cityName, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameUnregisterResponse(rsp)
 }
 
 // DeleteV0CityByCityNameWorkflowByWorkflowIdWithResponse request returning *DeleteV0CityByCityNameWorkflowByWorkflowIdResponse
@@ -19879,12 +25680,12 @@ func ParsePostV0CityResponse(rsp *http.Response) (*PostV0CityResponse, error) {
 	}
 
 	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest CityCreateResponse
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest AsyncAcceptedResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
-		response.JSON200 = &dest
+		response.JSON202 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest ErrorModel
@@ -23819,7 +29620,7 @@ func ParseSendSessionMessageResponse(rsp *http.Response) (*SendSessionMessageRes
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
-		var dest SessionMessageOutputBody
+		var dest AsyncAcceptedBody
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -24010,7 +29811,7 @@ func ParseSubmitSessionResponse(rsp *http.Response) (*SubmitSessionResponse, err
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
-		var dest SessionSubmitOutputBody
+		var dest AsyncAcceptedBody
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -24175,7 +29976,7 @@ func ParseCreateSessionResponse(rsp *http.Response) (*CreateSessionResponse, err
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
-		var dest SessionResponse
+		var dest AsyncAcceptedBody
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -24246,6 +30047,39 @@ func ParseGetV0CityByCityNameStatusResponse(rsp *http.Response) (*GetV0CityByCit
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePostV0CityByCityNameUnregisterResponse parses an HTTP response from a PostV0CityByCityNameUnregisterWithResponse call
+func ParsePostV0CityByCityNameUnregisterResponse(rsp *http.Response) (*PostV0CityByCityNameUnregisterResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PostV0CityByCityNameUnregisterResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest AsyncAcceptedResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest ErrorModel

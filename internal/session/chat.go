@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"sync"
@@ -294,6 +295,9 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	}
 	if b.Metadata["transport"] == "" && (started || transportVerified) {
 		m.persistTransport(id, b.Metadata["provider"], transport)
+	}
+	if err := m.syncStoredMCPServers(id, &b, cfg.MCPServers); err != nil {
+		return fmt.Errorf("%w: %w", ErrStateSync, err)
 	}
 	if err := m.confirmLiveSessionState(id, &b); err != nil {
 		if started && !errors.Is(err, ErrStateSync) {
@@ -740,6 +744,10 @@ func (m *Manager) Pending(id string) (*runtime.PendingInteraction, bool, error) 
 		if errors.Is(err, runtime.ErrInteractionUnsupported) {
 			return nil, false, nil
 		}
+		if errors.Is(err, runtime.ErrSessionNotFound) {
+			log.Printf("session: pending interaction runtime session gone for %q: %v", sessName, err)
+			return nil, true, nil
+		}
 		return nil, true, fmt.Errorf("getting pending interaction: %w", err)
 	}
 	return pending, true, nil
@@ -761,6 +769,10 @@ func (m *Manager) Respond(id string, response runtime.InteractionResponse) error
 			if errors.Is(err, runtime.ErrInteractionUnsupported) {
 				return ErrInteractionUnsupported
 			}
+			if errors.Is(err, runtime.ErrSessionNotFound) {
+				log.Printf("session: respond pending probe runtime session gone for %q: %v", sessName, err)
+				return ErrNoPendingInteraction
+			}
 			return fmt.Errorf("getting pending interaction: %w", err)
 		}
 		if pending == nil {
@@ -778,6 +790,10 @@ func (m *Manager) Respond(id string, response runtime.InteractionResponse) error
 		if err := ip.Respond(sessName, response); err != nil {
 			if errors.Is(err, runtime.ErrInteractionUnsupported) {
 				return ErrInteractionUnsupported
+			}
+			if errors.Is(err, runtime.ErrSessionNotFound) {
+				log.Printf("session: respond runtime session gone for %q: %v", sessName, err)
+				return ErrNoPendingInteraction
 			}
 			return fmt.Errorf("responding to pending interaction: %w", err)
 		}

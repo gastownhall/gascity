@@ -61,7 +61,9 @@ type ProviderCreateInput struct {
 		DisplayName        string            `json:"display_name,omitempty" doc:"Human-readable display name."`
 		Base               *string           `json:"base,omitempty" doc:"Optional provider base for inheritance."`
 		Command            string            `json:"command,omitempty" doc:"Provider command binary. Omit for base-only descendants."`
+		ACPCommand         string            `json:"acp_command,omitempty" doc:"ACP transport command binary override."`
 		Args               []string          `json:"args,omitempty" doc:"Command arguments."`
+		ACPArgs            []string          `json:"acp_args,omitempty" doc:"ACP transport command arguments override."`
 		ArgsAppend         []string          `json:"args_append,omitempty" doc:"Arguments appended after inherited/base args."`
 		PromptMode         string            `json:"prompt_mode,omitempty" doc:"Prompt delivery mode."`
 		PromptFlag         string            `json:"prompt_flag,omitempty" doc:"Flag for prompt delivery."`
@@ -79,7 +81,9 @@ type ProviderUpdateInput struct {
 		DisplayName        *string           `json:"display_name,omitempty" doc:"Human-readable display name."`
 		Base               *string           `json:"base,omitempty" doc:"Provider base for inheritance."`
 		Command            *string           `json:"command,omitempty" doc:"Provider command binary."`
+		ACPCommand         *string           `json:"acp_command,omitempty" doc:"ACP transport command binary override."`
 		Args               []string          `json:"args,omitempty" doc:"Command arguments."`
+		ACPArgs            []string          `json:"acp_args,omitempty" doc:"ACP transport command arguments override."`
 		ArgsAppend         []string          `json:"args_append,omitempty" doc:"Arguments appended after inherited/base args."`
 		PromptMode         *string           `json:"prompt_mode,omitempty" doc:"Prompt delivery mode."`
 		PromptFlag         *string           `json:"prompt_flag,omitempty" doc:"Flag for prompt delivery."`

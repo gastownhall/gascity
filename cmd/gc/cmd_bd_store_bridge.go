@@ -196,6 +196,11 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 			return fmt.Errorf("usage: close <id>")
 		}
 		return store.Close(args[0])
+	case "reopen":
+		if len(args) < 1 {
+			return fmt.Errorf("usage: reopen <id>")
+		}
+		return store.Reopen(args[0])
 	case "list":
 		query := beads.ListQuery{AllowScan: true}
 		for _, arg := range args {
@@ -305,6 +310,7 @@ func bdStoreBridgeEnv(dir, host, port, user, password string) map[string]string 
 		"BEADS_DOLT_SERVER_HOST",
 		"BEADS_DOLT_SERVER_PORT",
 		"BEADS_DOLT_SERVER_USER",
+		"BD_EXPORT_AUTO",
 		"GC_BEADS",
 		"GC_BEADS_PREFIX",
 		"GC_DOLT_DATABASE",
@@ -325,6 +331,7 @@ func bdStoreBridgeEnv(dir, host, port, user, password string) map[string]string 
 	env["GC_DOLT_PASSWORD"] = password
 	env["BEADS_DOLT_PASSWORD"] = password
 	env["BEADS_DOLT_AUTO_START"] = "0"
+	env["BD_EXPORT_AUTO"] = "false"
 	return env
 }
 

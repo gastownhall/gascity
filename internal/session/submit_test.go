@@ -2,7 +2,11 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -396,6 +400,31 @@ func TestSubmitFollowUpQueuesDeferredMessageAndStartsCodexPoller(t *testing.T) {
 	}
 }
 
+func TestEnsureSessionSubmitPollerRejectsGoTestExecutable(t *testing.T) {
+	cityPath := t.TempDir()
+	exe := filepath.Join(t.TempDir(), "session.test")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(test executable): %v", err)
+	}
+
+	origExecutable := sessionSubmitPollerExecutable
+	sessionSubmitPollerExecutable = func() (string, error) {
+		return exe, nil
+	}
+	defer func() { sessionSubmitPollerExecutable = origExecutable }()
+
+	err := ensureSessionSubmitPoller(cityPath, "agent", "s-test")
+	if err == nil || !strings.Contains(err.Error(), "Go test binary") {
+		t.Fatalf("ensureSessionSubmitPoller error = %v, want Go test binary refusal", err)
+	}
+	if _, statErr := os.Stat(sessionSubmitPollerPIDPath(cityPath, "s-test")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("poller pid file stat error = %v, want not exist", statErr)
+	}
+	if _, statErr := os.Stat(sessionSubmitPollerLogPath(cityPath, "s-test")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("poller log file stat error = %v, want not exist", statErr)
+	}
+}
+
 func TestSubmitFollowUpQueuesDeferredMessageForPoolManagedSession(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -517,6 +546,54 @@ func TestSubmitFollowUpOnAsleepSessionFallsBackToImmediateSend(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("calls = %#v, want NudgeNow(wake and send)", sp.Calls)
+	}
+}
+
+func TestSubmitDefaultQueuesWhenWakeAlreadyRequested(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	cityPath := t.TempDir()
+	mgr := NewManagerWithCityPath(store, sp, cityPath)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", t.TempDir(), "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := sp.Stop(info.SessionName); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := store.SetMetadataBatch(info.ID, map[string]string{
+		"state":                string(StateCreating),
+		"pending_create_claim": "true",
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch: %v", err)
+	}
+	callsBefore := len(sp.Calls)
+
+	outcome, err := mgr.Submit(context.Background(), info.ID, "deliver after wake", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
+	if err != nil {
+		t.Fatalf("Submit(default): %v", err)
+	}
+	if !outcome.Queued {
+		t.Fatal("Submit(default) should queue while wake is already requested")
+	}
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(state.Pending) != 1 {
+		t.Fatalf("pending queued submits = %d, want 1", len(state.Pending))
+	}
+	if state.Pending[0].SessionID != info.ID {
+		t.Fatalf("SessionID = %q, want %q", state.Pending[0].SessionID, info.ID)
+	}
+	if state.Pending[0].Message != "deliver after wake" {
+		t.Fatalf("Message = %q, want deliver after wake", state.Pending[0].Message)
+	}
+	for _, call := range sp.Calls[callsBefore:] {
+		if call.Method == "Start" || call.Method == "Nudge" || call.Method == "NudgeNow" {
+			t.Fatalf("unexpected runtime call while queueing against requested wake: %#v", call)
+		}
 	}
 }
 

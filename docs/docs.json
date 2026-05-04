@@ -99,12 +99,19 @@
         ]
       },
       {
+        "group": "Troubleshooting",
+        "pages": [
+          "troubleshooting/dolt-bloat-recovery"
+        ]
+      },
+      {
         "group": "Reference",
         "pages": [
           "reference/index",
           "reference/cli",
           "reference/config",
           "reference/formula",
+          "reference/trust-boundaries",
           "reference/api",
           "reference/events",
           "schema/index",

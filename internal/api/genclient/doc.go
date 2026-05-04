@@ -2,7 +2,7 @@
 // API. It is produced by `cmd/gen-client` from the live OpenAPI 3.0
 // downgrade of the server's spec, processed through oapi-codegen v2.6.0.
 //
-// See specs/architecture.md §2 "The generated Go client" for the
+// See engdocs/architecture/api-control-plane.md §2 "The generated Go client" for the
 // three legitimate in-tree consumers of this package
 // (internal/api/client.go for CLI mutation coordination,
 // cmd/gc/cmd_events.go for direct event read/stream access, and

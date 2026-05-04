@@ -24,6 +24,8 @@ rules:
     resources: ["pods"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Pod exec — run commands inside agent containers (nudge, peek, meta).
+  # Gas City requires pods/exec to implement the k8s session protocol; the
+  # Trivy exception for this namespace-local Role lives in .trivyignore-config.
   - apiGroups: [""]
     resources: ["pods/exec"]
     verbs: ["create"]

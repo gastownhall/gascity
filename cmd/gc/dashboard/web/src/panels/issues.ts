@@ -1,5 +1,5 @@
 import type { BeadRecord } from "../api";
-import { api, cityScope } from "../api";
+import { api, cityScope, mutationHeaders } from "../api";
 import { promptActionDialog } from "../modals";
 import { byId, clear, el } from "../util/dom";
 import { beadPriority, formatTimestamp, priorityBadgeClass, truncate } from "../util/legacy";
@@ -27,7 +27,7 @@ export async function renderIssues(): Promise<void> {
     api.GET("/v0/city/{cityName}/beads", {
       params: { path: { cityName: city }, query: { status: "in_progress", limit: 500 } },
     }),
-    getOptions(true),
+    getOptions(),
   ]);
   if ((openR.error && progressR.error) || (!openR.data?.items && !progressR.data?.items)) {
     clear(issuesList);
@@ -35,14 +35,10 @@ export async function renderIssues(): Promise<void> {
     return;
   }
 
-  allIssues = [...(openR.data?.items ?? []), ...(progressR.data?.items ?? [])]
-    .filter((bead) => !isInternalBead(bead))
-    .sort((a, b) => {
-      const pa = beadPriority(a.priority);
-      const pb = beadPriority(b.priority);
-      if (pa !== pb) return pa - pb;
-      return (b.created_at ?? "").localeCompare(a.created_at ?? "");
-    });
+  allIssues = sortIssues(
+    [...(openR.data?.items ?? []), ...(progressR.data?.items ?? [])]
+      .filter((bead) => !isInternalBead(bead)),
+  );
   byId("issues-count")!.textContent = String(allIssues.length);
 
   const rigTabs = byId("rig-filter-tabs");
@@ -153,6 +149,15 @@ function inferRig(issue: BeadRecord): string {
 function isInternalBead(issue: BeadRecord): boolean {
   if ((issue.issue_type ?? "").toLowerCase() === "convoy") return true;
   return (issue.labels ?? []).some((label) => label.startsWith("gc:queue") || label.startsWith("gc:message"));
+}
+
+function sortIssues(issues: BeadRecord[]): BeadRecord[] {
+  return [...issues].sort((a, b) => {
+    const pa = beadPriority(a.priority);
+    const pb = beadPriority(b.priority);
+    if (pa !== pb) return pa - pb;
+    return (b.created_at ?? "").localeCompare(a.created_at ?? "");
+  });
 }
 
 export function installIssueInteractions(): void {
@@ -311,7 +316,7 @@ function actionButton(label: string, klass: string, onClick: () => void): HTMLEl
 }
 
 function prioritySelect(issueID: string, current: number | undefined): HTMLElement {
-  const select = el("select", { class: "issue-action-select", id: "issue-action-priority" }) as HTMLSelectElement;
+  const select = el("select", { class: "issue-action-select", id: "issue-action-priority", "aria-label": "Priority" }) as HTMLSelectElement;
   [1, 2, 3, 4].forEach((priority) => {
     const option = el("option", { value: priority, selected: beadPriority(current) === priority }, [`P${priority}`]) as HTMLOptionElement;
     select.append(option);
@@ -323,7 +328,7 @@ function prioritySelect(issueID: string, current: number | undefined): HTMLEleme
 }
 
 function assigneeSelect(issueID: string, current: string | undefined, agents: string[]): HTMLElement {
-  const select = el("select", { class: "issue-action-select", id: "issue-action-assignee" }) as HTMLSelectElement;
+  const select = el("select", { class: "issue-action-select", id: "issue-action-assignee", "aria-label": "Assignee" }) as HTMLSelectElement;
   select.append(el("option", { value: "" }, ["Unassigned"]));
   agents.forEach((agent) => {
     select.append(el("option", { value: agent, selected: current === agent }, [agent]));
@@ -347,7 +352,7 @@ async function closeIssue(issueID: string): Promise<void> {
   const city = cityScope();
   if (!city) return;
   const res = await api.POST("/v0/city/{cityName}/bead/{id}/close", {
-    params: { path: { cityName: city, id: issueID } },
+    params: { path: { cityName: city, id: issueID }, header: mutationHeaders },
   });
   if (res.error) {
     showToast("error", "Close failed", res.error.detail ?? "Could not close issue");
@@ -362,7 +367,7 @@ async function reopenIssue(issueID: string): Promise<void> {
   const city = cityScope();
   if (!city) return;
   const res = await api.POST("/v0/city/{cityName}/bead/{id}/reopen", {
-    params: { path: { cityName: city, id: issueID } },
+    params: { path: { cityName: city, id: issueID }, header: mutationHeaders },
   });
   if (res.error) {
     showToast("error", "Reopen failed", res.error.detail ?? "Could not reopen issue");
@@ -377,7 +382,7 @@ async function updateIssuePriority(issueID: string, priority: number): Promise<v
   const city = cityScope();
   if (!city) return;
   const res = await api.POST("/v0/city/{cityName}/bead/{id}/update", {
-    params: { path: { cityName: city, id: issueID } },
+    params: { path: { cityName: city, id: issueID }, header: mutationHeaders },
     body: { priority },
   });
   if (res.error) {
@@ -393,7 +398,7 @@ async function assignIssue(issueID: string, assignee: string): Promise<void> {
   const city = cityScope();
   if (!city) return;
   const res = await api.POST("/v0/city/{cityName}/bead/{id}/assign", {
-    params: { path: { cityName: city, id: issueID } },
+    params: { path: { cityName: city, id: issueID }, header: mutationHeaders },
     body: { assignee },
   });
   if (res.error) {
@@ -416,7 +421,7 @@ async function slingIssue(issueID: string): Promise<void> {
   });
   if (!selection) return;
   const res = await api.POST("/v0/city/{cityName}/sling", {
-    params: { path: { cityName: city } },
+    params: { path: { cityName: city }, header: mutationHeaders },
     body: { bead: issueID, target: selection.target, rig: selection.rig || undefined },
   });
   if (res.error) {
@@ -449,7 +454,7 @@ export async function createIssue(input: {
   const city = cityScope();
   if (!city) return { ok: false, error: "no city selected" };
   const { error } = await api.POST("/v0/city/{cityName}/beads", {
-    params: { path: { cityName: city } },
+    params: { path: { cityName: city }, header: mutationHeaders },
     body: {
       title: input.title,
       description: input.description,

@@ -53,6 +53,241 @@ func TestMultiplexerListAllWithFilter(t *testing.T) {
 	}
 }
 
+func TestMultiplexerListAllAppliesGlobalLimitAfterMerge(t *testing.T) {
+	m := NewMultiplexer()
+
+	f1 := NewFake()
+	f1.Record(Event{Type: SessionWoke, Actor: "a1", Subject: "first", Ts: time.Unix(1, 0)})
+	f1.Record(Event{Type: SessionWoke, Actor: "a1", Subject: "fourth", Ts: time.Unix(4, 0)})
+
+	f2 := NewFake()
+	f2.Record(Event{Type: SessionWoke, Actor: "b1", Subject: "second", Ts: time.Unix(2, 0)})
+	f2.Record(Event{Type: SessionWoke, Actor: "b1", Subject: "third", Ts: time.Unix(3, 0)})
+
+	m.Add("city-a", f1)
+	m.Add("city-b", f2)
+
+	evts, err := m.ListAll(Filter{Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evts) != 2 {
+		t.Fatalf("got %d events, want 2", len(evts))
+	}
+	if evts[0].Subject != "first" {
+		t.Errorf("evts[0].Subject = %q, want first", evts[0].Subject)
+	}
+	if evts[1].Subject != "second" {
+		t.Errorf("evts[1].Subject = %q, want second", evts[1].Subject)
+	}
+}
+
+func TestMultiplexerListAllOrdersEqualTimestampsDeterministically(t *testing.T) {
+	m := NewMultiplexer()
+	ts := time.Unix(1, 0)
+
+	alpha := NewFake()
+	alpha.Events = []Event{
+		{Seq: 5, Type: SessionWoke, Subject: "alpha", Ts: ts},
+	}
+
+	beta := NewFake()
+	beta.Events = []Event{
+		{Seq: 2, Type: SessionWoke, Subject: "beta-two", Ts: ts},
+		{Seq: 1, Type: SessionWoke, Subject: "beta-one", Ts: ts},
+	}
+
+	m.Add("beta", beta)
+	m.Add("alpha", alpha)
+
+	evts, err := m.ListAll(Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evts) != 3 {
+		t.Fatalf("got %d events, want 3", len(evts))
+	}
+	got := []string{
+		evts[0].City + ":" + evts[0].Subject,
+		evts[1].City + ":" + evts[1].Subject,
+		evts[2].City + ":" + evts[2].Subject,
+	}
+	want := []string{"alpha:alpha", "beta:beta-one", "beta:beta-two"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("events = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestMultiplexerListTailLimitsAcrossCities(t *testing.T) {
+	m := NewMultiplexer()
+
+	f1 := NewFake()
+	f1.Record(Event{Type: SessionWoke, Actor: "a1", Subject: "old-a", Ts: time.Unix(1, 0)})
+	f1.Record(Event{Type: SessionWoke, Actor: "a1", Subject: "new-a", Ts: time.Unix(3, 0)})
+
+	f2 := NewFake()
+	f2.Record(Event{Type: SessionWoke, Actor: "b1", Subject: "old-b", Ts: time.Unix(2, 0)})
+	f2.Record(Event{Type: SessionWoke, Actor: "b1", Subject: "new-b", Ts: time.Unix(4, 0)})
+
+	m.Add("city-a", f1)
+	m.Add("city-b", f2)
+
+	evts, err := m.ListTail(Filter{}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evts) != 2 {
+		t.Fatalf("got %d events, want 2", len(evts))
+	}
+	if evts[0].Subject != "new-a" || evts[1].Subject != "new-b" {
+		t.Fatalf("subjects = [%s %s], want [new-a new-b]", evts[0].Subject, evts[1].Subject)
+	}
+}
+
+func TestMultiplexerListTailOrdersEqualTimestampsDeterministically(t *testing.T) {
+	m := NewMultiplexer()
+	ts := time.Unix(1, 0)
+
+	alpha := NewFake()
+	alpha.Events = []Event{
+		{Seq: 5, Type: SessionWoke, Subject: "alpha", Ts: ts},
+	}
+
+	beta := NewFake()
+	beta.Events = []Event{
+		{Seq: 2, Type: SessionWoke, Subject: "beta-two", Ts: ts},
+		{Seq: 1, Type: SessionWoke, Subject: "beta-one", Ts: ts},
+	}
+
+	m.Add("beta", beta)
+	m.Add("alpha", alpha)
+
+	evts, err := m.ListTail(Filter{}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evts) != 2 {
+		t.Fatalf("got %d events, want 2", len(evts))
+	}
+	got := []string{
+		evts[0].City + ":" + evts[0].Subject,
+		evts[1].City + ":" + evts[1].Subject,
+	}
+	want := []string{"beta:beta-one", "beta:beta-two"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("events = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestMultiplexerListTailUsesFallbackAndSkipsErrors(t *testing.T) {
+	m := NewMultiplexer()
+
+	listOnly := NewFake()
+	listOnly.Record(Event{Type: SessionWoke, Actor: "a1", Subject: "list-old", Ts: time.Unix(1, 0)})
+	listOnly.Record(Event{Type: SessionWoke, Actor: "a1", Subject: "list-middle", Ts: time.Unix(4, 0)})
+	listOnly.Record(Event{Type: SessionWoke, Actor: "a1", Subject: "list-new", Ts: time.Unix(6, 0)})
+
+	tailCapable := NewFake()
+	tailCapable.Record(Event{Type: SessionWoke, Actor: "b1", Subject: "tail-old", Ts: time.Unix(2, 0)})
+	tailCapable.Record(Event{Type: SessionWoke, Actor: "b1", Subject: "tail-middle", Ts: time.Unix(3, 0)})
+	tailCapable.Record(Event{Type: SessionWoke, Actor: "b1", Subject: "tail-new", Ts: time.Unix(5, 0)})
+
+	m.Add("list-only", &providerWithoutTail{fake: listOnly})
+	m.Add("tail-capable", tailCapable)
+	m.Add("broken", NewFailFake())
+
+	evts, err := m.ListTail(Filter{Type: SessionWoke}, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evts) != 3 {
+		t.Fatalf("got %d events, want 3", len(evts))
+	}
+	got := []string{evts[0].Subject, evts[1].Subject, evts[2].Subject}
+	want := []string{"list-middle", "tail-new", "list-new"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("subjects = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestMultiplexerListTailIgnoresFilterLimitForListOnlyProviders(t *testing.T) {
+	m := NewMultiplexer()
+
+	listOnly := NewFake()
+	listOnly.Record(Event{Type: SessionWoke, Actor: "a1", Subject: "old", Ts: time.Unix(1, 0)})
+	listOnly.Record(Event{Type: SessionWoke, Actor: "a1", Subject: "middle", Ts: time.Unix(2, 0)})
+	listOnly.Record(Event{Type: SessionWoke, Actor: "a1", Subject: "new", Ts: time.Unix(3, 0)})
+	m.Add("list-only", &providerWithoutTail{fake: listOnly})
+
+	evts, err := m.ListTail(Filter{Type: SessionWoke, Limit: 1}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evts) != 2 {
+		t.Fatalf("got %d events, want 2", len(evts))
+	}
+	got := []string{evts[0].Subject, evts[1].Subject}
+	want := []string{"middle", "new"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("subjects = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestMultiplexerListTailLimitZeroDelegatesToListAll(t *testing.T) {
+	m := NewMultiplexer()
+	f := NewFake()
+	f.Record(Event{Type: SessionWoke, Actor: "a1", Subject: "old", Ts: time.Unix(1, 0)})
+	f.Record(Event{Type: SessionStopped, Actor: "a1", Subject: "ignored", Ts: time.Unix(2, 0)})
+	f.Record(Event{Type: SessionWoke, Actor: "a1", Subject: "new", Ts: time.Unix(3, 0)})
+	m.Add("city-a", f)
+
+	evts, err := m.ListTail(Filter{Type: SessionWoke}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evts) != 2 {
+		t.Fatalf("got %d events, want 2", len(evts))
+	}
+	if evts[0].Subject != "old" || evts[1].Subject != "new" {
+		t.Fatalf("subjects = [%s %s], want [old new]", evts[0].Subject, evts[1].Subject)
+	}
+}
+
+func TestMultiplexerLatestCursorSkipsBrokenProviders(t *testing.T) {
+	m := NewMultiplexer()
+	alpha := NewFake()
+	alpha.Record(Event{Type: SessionWoke, Actor: "a1"})
+	alpha.Record(Event{Type: SessionWoke, Actor: "a1"})
+	beta := NewFake()
+	beta.Record(Event{Type: SessionWoke, Actor: "b1"})
+
+	m.Add("alpha", alpha)
+	m.Add("beta", beta)
+	m.Add("broken", NewFailFake())
+
+	cursors, err := m.LatestCursor()
+	if err == nil {
+		t.Fatal("LatestCursor() error = nil, want broken provider error")
+	}
+	if len(cursors) != 2 {
+		t.Fatalf("cursor count = %d, want 2: %v", len(cursors), cursors)
+	}
+	if cursors["alpha"] != 2 || cursors["beta"] != 1 {
+		t.Fatalf("cursors = %v, want alpha:2 beta:1", cursors)
+	}
+	if _, ok := cursors["broken"]; ok {
+		t.Fatalf("broken provider included in cursor map: %v", cursors)
+	}
+}
+
 func TestMultiplexerWatch(t *testing.T) {
 	m := NewMultiplexer()
 
@@ -180,14 +415,14 @@ func TestWrapForSSE(t *testing.T) {
 	w := WrapForSSE(mw)
 	defer w.Close() //nolint:errcheck
 
-	f1.Record(Event{Type: SessionWoke, Actor: "mayor"})
+	f1.Record(Event{Type: SessionWoke, Actor: "actor-a"})
 
 	e, err := w.Next()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if e.Actor != "city-a/mayor" {
-		t.Errorf("Actor = %q, want %q", e.Actor, "city-a/mayor")
+	if e.Actor != "city-a/actor-a" {
+		t.Errorf("Actor = %q, want %q", e.Actor, "city-a/actor-a")
 	}
 }
 
@@ -209,4 +444,28 @@ func TestMultiplexerSkipsBrokenProvider(t *testing.T) {
 	if len(evts) != 1 {
 		t.Fatalf("got %d events, want 1", len(evts))
 	}
+}
+
+type providerWithoutTail struct {
+	fake *Fake
+}
+
+func (p *providerWithoutTail) Record(e Event) {
+	p.fake.Record(e)
+}
+
+func (p *providerWithoutTail) List(filter Filter) ([]Event, error) {
+	return p.fake.List(filter)
+}
+
+func (p *providerWithoutTail) LatestSeq() (uint64, error) {
+	return p.fake.LatestSeq()
+}
+
+func (p *providerWithoutTail) Watch(ctx context.Context, afterSeq uint64) (Watcher, error) {
+	return p.fake.Watch(ctx, afterSeq)
+}
+
+func (p *providerWithoutTail) Close() error {
+	return p.fake.Close()
 }

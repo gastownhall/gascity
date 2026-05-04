@@ -20,13 +20,13 @@ import (
 // non-default naming, use newTestSupervisorMux directly.
 func newTestCityHandler(t *testing.T, state State) http.Handler {
 	t.Helper()
-	return wrapTestSupervisorMiddleware(NewSupervisorMux(&stateCityResolver{state: state}, false, "test", time.Now()))
+	return wrapTestSupervisorMiddleware(NewSupervisorMux(&stateCityResolver{state: state}, nil, false, "test", time.Now()))
 }
 
 // newTestCityHandlerReadOnly is newTestCityHandler but with readOnly=true.
 func newTestCityHandlerReadOnly(t *testing.T, state State) http.Handler {
 	t.Helper()
-	return wrapTestSupervisorMiddleware(NewSupervisorMux(&stateCityResolver{state: state}, true, "test", time.Now()))
+	return wrapTestSupervisorMiddleware(NewSupervisorMux(&stateCityResolver{state: state}, nil, true, "test", time.Now()))
 }
 
 // wrapTestSupervisorMiddleware applies the same middleware the supervisor's
@@ -71,7 +71,7 @@ func cityURL(state State, path string) string {
 // Server so handler dispatch runs against that exact instance.
 func newTestCityHandlerWith(t *testing.T, state State, srv *Server) http.Handler {
 	t.Helper()
-	sm := NewSupervisorMux(&stateCityResolver{state: state}, false, "test", time.Now())
+	sm := NewSupervisorMux(&stateCityResolver{state: state}, nil, false, "test", time.Now())
 	sm.cacheMu.Lock()
 	sm.cache[state.CityName()] = cachedCityServer{state: state, srv: srv}
 	sm.cacheMu.Unlock()

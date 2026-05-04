@@ -579,32 +579,54 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		// Beads won't be persisted, but the reconciler still manages lifecycle.
 		oneShotStore = beads.NewMemStore()
 	}
+	rigStores := buildStandaloneRigStores(cfg, cityPath, stderr)
 
 	// One-shot bead reconciliation: same code path as the daemon.
+	sessionQueryPartial := false
 	sessionBeads, err := loadSessionBeadSnapshot(oneShotStore)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: loading session beads: %v\n", err) //nolint:errcheck
 		sessionBeads = nil
+		sessionQueryPartial = true
 	}
-	dsResult := buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, oneShotStore, nil, sessionBeads, nil, stderr)
+	dsResult := buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, oneShotStore, rigStores, sessionBeads, nil, stderr)
+	dsResult.SessionQueryPartial = dsResult.SessionQueryPartial || sessionQueryPartial
 	ds := dsResult.State
 	cfgNames := configuredSessionNamesWithSnapshot(cfg, cityName, sessionBeads)
-	_, sessionBeads = syncSessionBeadsWithSnapshot(
-		cityPath, oneShotStore, ds, sp, cfgNames, cfg, clock.Real{}, stderr, true, sessionBeads,
+	_, sessionBeads = syncSessionBeadsWithSnapshotAndRigStores(
+		cityPath, oneShotStore, rigStores, ds, sp, cfgNames, cfg, clock.Real{}, stderr, true, sessionBeads,
 	)
 
 	open := sessionBeads.Open()
+	if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(oneShotStore, cfg, cityPath, open, dsResult, rigStores); len(released) > 0 {
+		for _, r := range released {
+			fmt.Fprintf(stderr, "released orphaned pool work: %s\n", r.ID) //nolint:errcheck
+		}
+		// Standalone start has no follow-up patrol tick, so after reopening
+		// orphaned pool work we must immediately rebuild demand and sync once
+		// more so replacement session beads can be materialized in this run.
+		dsResult = buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, oneShotStore, rigStores, sessionBeads, nil, stderr)
+		ds = dsResult.State
+		cfgNames = configuredSessionNamesWithSnapshot(cfg, cityName, sessionBeads)
+		_, sessionBeads = syncSessionBeadsWithSnapshotAndRigStores(
+			cityPath, oneShotStore, rigStores, ds, sp, cfgNames, cfg, clock.Real{}, stderr, true, sessionBeads,
+		)
+		open = sessionBeads.Open()
+	}
+
 	dt := newDrainTracker()
+	poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, open, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
 	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(
-		cfg, nil, sessionBeads.Open(), dsResult.ScaleCheckCounts))
+		cfg, poolWorkBeads, open, dsResult.ScaleCheckCounts))
 	if poolDesired == nil {
 		poolDesired = make(map[string]int)
 	}
 	mergeNamedSessionDemand(poolDesired, dsResult.NamedSessionDemand, cfg)
+	awakeAssignedWorkBeads := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, open, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
 	reconcileSessionBeadsAtPath(
 		sigCtx, cityPath, open, ds, cfgNames, cfg, sp, oneShotStore,
-		nil, nil, nil, nil, dt, poolDesired,
-		dsResult.StoreQueryPartial,
+		nil, awakeAssignedWorkBeads, rigStores, nil, dt, poolDesired,
+		dsResult.snapshotQueryPartial(),
 		nil, cityName,
 		nil, clock.Real{}, recorder, cfg.Session.StartupTimeoutDuration(), 0,
 		stdout, stderr,
@@ -616,10 +638,12 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc start: loading session beads: %v\n", err) //nolint:errcheck
 		sessionBeads = nil
 	}
-	dsResult = buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, oneShotStore, nil, sessionBeads, nil, stderr)
+	dsResult = buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, oneShotStore, rigStores, sessionBeads, nil, stderr)
 	ds = dsResult.State
 	cfgNames = configuredSessionNamesWithSnapshot(cfg, cityName, sessionBeads)
-	syncSessionBeadsWithSnapshot(cityPath, oneShotStore, ds, sp, cfgNames, cfg, clock.Real{}, stderr, false, sessionBeads)
+	syncSessionBeadsWithSnapshotAndRigStores(
+		cityPath, oneShotStore, rigStores, ds, sp, cfgNames, cfg, clock.Real{}, stderr, false, sessionBeads,
+	)
 
 	fmt.Fprintln(stdout, "City started.") //nolint:errcheck // best-effort stdout
 	return 0
@@ -981,7 +1005,7 @@ func passthroughEnv() map[string]string {
 	} else if home := os.Getenv("HOME"); home != "" {
 		m["XDG_STATE_HOME"] = filepath.Join(home, ".local", "state")
 	}
-	// Pass through all GC_* and ANTHROPIC_* vars. Agent credentials are
+	// Pass through GC_* vars and provider credential env. Agent credentials are
 	// included in the global baseline because the SDK cannot know which
 	// agent uses which provider (zero hardcoded roles); the trust boundary
 	// is the managed session itself.
@@ -990,7 +1014,7 @@ func passthroughEnv() map[string]string {
 		if !ok || val == "" {
 			continue
 		}
-		if strings.HasPrefix(key, "GC_") || strings.HasPrefix(key, "ANTHROPIC_") {
+		if strings.HasPrefix(key, "GC_") || isProviderCredentialEnv(key) {
 			m[key] = val
 		}
 	}

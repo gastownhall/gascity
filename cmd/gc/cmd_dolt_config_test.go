@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/doctor"
+	"gopkg.in/yaml.v3"
 )
 
 func TestDoltConfigWriteManagedCmd(t *testing.T) {
@@ -34,11 +37,77 @@ func TestDoltConfigWriteManagedCmd(t *testing.T) {
 		"host: 127.0.0.1",
 		`data_dir: "/tmp/city/.beads/dolt"`,
 		"archive_level: 1",
+		"back_log: 50",
+		"max_connections_timeout_millis: 5000",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("config missing %q:\n%s", want, text)
 		}
 	}
+}
+
+func TestDoltConfigWriterIncludesDoctorExpectedCoreValues(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "packs", "dolt", "dolt-config.yaml")
+	if err := writeManagedDoltConfigFile(configPath, "127.0.0.1", "3311", "/tmp/city/.beads/dolt", "warning"); err != nil {
+		t.Fatalf("writeManagedDoltConfigFile: %v", err)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", configPath, err)
+	}
+	var doc map[string]any
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("Unmarshal config: %v", err)
+	}
+
+	for _, exp := range doctor.DoltConfigExpectedValues() {
+		got, ok := lookupTestYAMLPath(doc, exp.Path)
+		if !ok {
+			t.Fatalf("managed config missing doctor-expected core path %q:\n%s", exp.Path, data)
+		}
+		if !testYAMLValueEqual(got, exp.Value) {
+			t.Fatalf("managed config %s = %v (%T), want %v (%T)", exp.Path, got, got, exp.Value, exp.Value)
+		}
+	}
+}
+
+func lookupTestYAMLPath(doc map[string]any, dotted string) (any, bool) {
+	parts := strings.Split(dotted, ".")
+	var cur any = doc
+	for _, part := range parts {
+		m, ok := cur.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		cur, ok = m[part]
+		if !ok {
+			return nil, false
+		}
+	}
+	return cur, true
+}
+
+func testYAMLValueEqual(got, want any) bool {
+	switch want := want.(type) {
+	case int:
+		switch got := got.(type) {
+		case int:
+			return got == want
+		case int64:
+			return got == int64(want)
+		case uint64:
+			return got == uint64(want)
+		case float64:
+			return got == float64(want)
+		}
+	case bool:
+		gotBool, ok := got.(bool)
+		return ok && gotBool == want
+	default:
+		return got == want
+	}
+	return false
 }
 
 func TestDoltConfigNormalizeScopeCmd(t *testing.T) {

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 func TestBuildPrimeContextFallsBackToConfiguredRigRoot(t *testing.T) {
@@ -65,6 +66,43 @@ func TestBuildPrimeContextLogsTemplateExpansionWarning(t *testing.T) {
 	}
 	if strings.Contains(stderr.String(), "echo {{.Rig") {
 		t.Fatalf("stderr should redact raw template, got %q", stderr.String())
+	}
+}
+
+func TestBuildPrimeContextRendersBindingQualifiedRoute(t *testing.T) {
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	t.Setenv("GC_DIR", "")
+	t.Setenv("GC_BRANCH", "")
+	t.Setenv("GC_AGENT", "")
+	t.Setenv("GC_ALIAS", "")
+
+	cityPath := t.TempDir()
+	promptDir := filepath.Join(cityPath, "prompts")
+	if err := os.MkdirAll(promptDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(promptDir): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(promptDir, "polecat.template.md"), []byte("route={{ .RigName }}/{{ .BindingPrefix }}refinery\nbinding={{ .BindingName }}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(prompt): %v", err)
+	}
+
+	ctx := buildPrimeContext(cityPath, "test-city", &config.Agent{
+		Name:        "polecat",
+		Dir:         "demo",
+		BindingName: "gastown",
+	}, []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}}, nil)
+
+	if ctx.BindingName != "gastown" {
+		t.Fatalf("BindingName = %q, want gastown", ctx.BindingName)
+	}
+	if ctx.BindingPrefix != "gastown." {
+		t.Fatalf("BindingPrefix = %q, want gastown.", ctx.BindingPrefix)
+	}
+	var stderr bytes.Buffer
+	got := renderPrompt(fsys.OSFS{}, cityPath, "test-city", "prompts/polecat.template.md", ctx, "", &stderr, nil, nil, nil)
+	want := "route=demo/gastown.refinery\nbinding=gastown\n"
+	if got != want {
+		t.Fatalf("rendered prompt = %q, want %q; stderr=%q", got, want, stderr.String())
 	}
 }
 
@@ -425,6 +463,34 @@ prompt_template = "prompts/worker.md"
 	}
 	if !strings.Contains(context, "[gastown] worker") {
 		t.Fatalf("additionalContext = %q, want hook beacon", context)
+	}
+}
+
+func TestDoPrimeWithHookFormat_FormatsDefaultFallback(t *testing.T) {
+	t.Setenv("GC_CITY", filepath.Join(t.TempDir(), "missing-city"))
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_AGENT", "")
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithHookFormat(nil, &stdout, &stderr, true, hookOutputFormatCodex, false)
+	if code != 0 {
+		t.Fatalf("doPrimeWithHookFormat() = %d, want 0; stderr=%q", code, stderr.String())
+	}
+
+	var payload struct {
+		HookSpecificOutput struct {
+			HookEventName     string `json:"hookEventName"`
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not hook JSON: %v\n%s", err, stdout.String())
+	}
+	if got, want := payload.HookSpecificOutput.HookEventName, "SessionStart"; got != want {
+		t.Fatalf("hookEventName = %q, want %q", got, want)
+	}
+	if !strings.Contains(payload.HookSpecificOutput.AdditionalContext, "# Gas City Agent") {
+		t.Fatalf("additionalContext = %q, want default prime prompt", payload.HookSpecificOutput.AdditionalContext)
 	}
 }
 

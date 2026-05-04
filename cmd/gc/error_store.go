@@ -10,6 +10,7 @@ func (s unavailableStore) Create(beads.Bead) (beads.Bead, error)             { r
 func (s unavailableStore) Get(string) (beads.Bead, error)                    { return beads.Bead{}, s.err }
 func (s unavailableStore) Update(string, beads.UpdateOpts) error             { return s.err }
 func (s unavailableStore) Close(string) error                                { return s.err }
+func (s unavailableStore) Reopen(string) error                               { return s.err }
 func (s unavailableStore) CloseAll([]string, map[string]string) (int, error) { return 0, s.err }
 func (s unavailableStore) List(beads.ListQuery) ([]beads.Bead, error)        { return nil, s.err }
 func (s unavailableStore) ListOpen(...string) ([]beads.Bead, error)          { return nil, s.err }

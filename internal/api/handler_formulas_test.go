@@ -49,12 +49,16 @@ title = "Review PR"
 
 	var resp struct {
 		Items []formulaSummaryResponse `json:"items"`
+		Total int                      `json:"total"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("Decode(catalog): %v", err)
 	}
 	if len(resp.Items) != 1 {
 		t.Fatalf("items = %+v, want 1 entry", resp.Items)
+	}
+	if resp.Total != len(resp.Items) {
+		t.Fatalf("total = %d, want len(items)=%d", resp.Total, len(resp.Items))
 	}
 	item := resp.Items[0]
 	if item.Name != "mol-adopt-pr-v2" {
@@ -621,6 +625,96 @@ metadata = { "gc.kind" = "run", "gc.scope_ref" = "body" }
 	}
 	if detail.Preview.Nodes[1].Kind != "run" || detail.Preview.Nodes[1].ScopeRef != "body" {
 		t.Fatalf("preview node = %+v, want run node with scope_ref", detail.Preview.Nodes[1])
+	}
+}
+
+func TestFormulaPreviewRejectsMissingRequiredVars(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+
+	state := newFakeState(t)
+	state.cfg.Daemon.FormulaV2 = true
+	formulaDir := t.TempDir()
+	state.cfg.FormulaLayers.City = []string{formulaDir}
+
+	writeTestFormula(t, formulaDir, "mol-preview", `
+description = "Preview {{issue}}"
+formula = "mol-preview"
+version = 2
+
+[vars]
+[vars.issue]
+description = "Issue bead ID"
+required = true
+
+[[steps]]
+id = "prep"
+title = "Prep {{issue}}"
+`)
+
+	body := bytes.NewBufferString(`{"scope_kind":"city","scope_ref":"test-city","target":"worker","vars":{"other":"BD-123"}}`)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodPost, cityURL(state, "/formulas/mol-preview/preview"), body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GC-Request", "true")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+	var problem struct {
+		Detail string `json:"detail"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&problem); err != nil {
+		t.Fatalf("Decode(problem): %v", err)
+	}
+	if !strings.Contains(problem.Detail, `variable "issue" is required`) {
+		t.Fatalf("detail = %q, want missing issue validation error", problem.Detail)
+	}
+}
+
+func TestFormulaPreviewRejectsMissingRequiredVarsWithoutVarsBody(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+
+	state := newFakeState(t)
+	state.cfg.Daemon.FormulaV2 = true
+	formulaDir := t.TempDir()
+	state.cfg.FormulaLayers.City = []string{formulaDir}
+
+	writeTestFormula(t, formulaDir, "mol-preview", `
+description = "Preview {{issue}}"
+formula = "mol-preview"
+version = 2
+
+[vars]
+[vars.issue]
+description = "Issue bead ID"
+required = true
+
+[[steps]]
+id = "prep"
+title = "Prep {{issue}}"
+`)
+
+	body := bytes.NewBufferString(`{"scope_kind":"city","scope_ref":"test-city","target":"worker"}`)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodPost, cityURL(state, "/formulas/mol-preview/preview"), body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GC-Request", "true")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+	var problem struct {
+		Detail string `json:"detail"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&problem); err != nil {
+		t.Fatalf("Decode(problem): %v", err)
+	}
+	if !strings.Contains(problem.Detail, `variable "issue" is required`) {
+		t.Fatalf("detail = %q, want missing issue validation error", problem.Detail)
 	}
 }
 

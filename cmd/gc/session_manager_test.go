@@ -1,6 +1,8 @@
 package main
 
 import (
+	"strings"
+
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -12,11 +14,36 @@ func newSessionManagerWithConfig(cityPath string, store beads.Store, sp runtime.
 		return session.NewManagerWithCityPath(store, sp, cityPath)
 	}
 	rigContext := currentRigContext(cfg)
-	return session.NewManagerWithTransportResolverAndCityPath(store, sp, cityPath, func(template string) string {
+	return session.NewManagerWithTransportPolicyResolverAndCityPath(store, sp, cityPath, func(template, provider string) (string, bool) {
 		agentCfg, ok := resolveAgentIdentity(cfg, template, rigContext)
-		if !ok {
-			return ""
+		if ok {
+			resolved, err := config.ResolveProvider(
+				&agentCfg,
+				&cfg.Workspace,
+				cfg.Providers,
+				func(name string) (string, error) { return name, nil },
+			)
+			if err != nil {
+				return agentCfg.Session, strings.TrimSpace(agentCfg.Session) != ""
+			}
+			return config.ResolveSessionCreateTransport(agentCfg.Session, resolved), strings.TrimSpace(agentCfg.Session) != ""
 		}
-		return agentCfg.Session
+		provider = strings.TrimSpace(provider)
+		if provider == "" {
+			provider = strings.TrimSpace(template)
+		}
+		if provider == "" {
+			return "", false
+		}
+		resolved, err := config.ResolveProvider(
+			&config.Agent{Provider: provider},
+			&cfg.Workspace,
+			cfg.Providers,
+			func(name string) (string, error) { return name, nil },
+		)
+		if err != nil {
+			return "", false
+		}
+		return strings.TrimSpace(resolved.ProviderSessionCreateTransport()), false
 	})
 }

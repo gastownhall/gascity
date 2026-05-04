@@ -1,12 +1,19 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"io"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
 // cityView is a read-only projection of managedCity, built at snapshot time.
@@ -53,9 +60,12 @@ type cityRegistry struct {
 	snap     atomic.Pointer[citySnapshot]
 
 	// init/backoff state (co-protected by citiesMu)
-	initStatus   map[string]cityInitProgress
-	initFailures map[string]*initFailRecord
-	panicHistory map[string]*panicRecord
+	initStatus           map[string]cityInitProgress
+	initFailures         map[string]*initFailRecord
+	panicHistory         map[string]*panicRecord
+	pendingRequestIDs    map[string]string    // city path → request_id for async correlation
+	recentlyUnregistered map[string]time.Time // city path → unregister time (grace period for event delivery)
+	supervisorRecorder   events.Recorder      // supervisor-level event recorder for city lifecycle events
 
 	gen uint64 // monotonic generation counter
 }
@@ -63,10 +73,12 @@ type cityRegistry struct {
 // newCityRegistry creates a registry initialized with an empty snapshot.
 func newCityRegistry() *cityRegistry {
 	r := &cityRegistry{
-		cities:       make(map[string]*managedCity),
-		initStatus:   make(map[string]cityInitProgress),
-		initFailures: make(map[string]*initFailRecord),
-		panicHistory: make(map[string]*panicRecord),
+		cities:               make(map[string]*managedCity),
+		initStatus:           make(map[string]cityInitProgress),
+		initFailures:         make(map[string]*initFailRecord),
+		panicHistory:         make(map[string]*panicRecord),
+		pendingRequestIDs:    make(map[string]string),
+		recentlyUnregistered: make(map[string]time.Time),
 	}
 	// Initialize with empty snapshot to prevent nil-dereference panic
 	// if an API request arrives before the first reconciliation tick.
@@ -79,6 +91,74 @@ func newCityRegistry() *cityRegistry {
 	})
 	return r
 }
+
+// StorePendingRequestID stores a request_id for async correlation.
+func (r *cityRegistry) StorePendingRequestID(cityPath, requestID string) error {
+	key := pendingRequestKey(cityPath)
+	if err := supervisor.NewRegistry(supervisor.RegistryPath()).StorePendingCityRequestID(key, requestID); err != nil {
+		if errors.Is(err, supervisor.ErrPendingCityRequestExists) {
+			return api.ErrPendingRequestExists
+		}
+		return err
+	}
+
+	r.citiesMu.Lock()
+	r.pendingRequestIDs[key] = requestID
+	r.citiesMu.Unlock()
+	return nil
+}
+
+// ConsumePendingRequestID returns and removes the pending request_id for a city path.
+func (r *cityRegistry) ConsumePendingRequestID(cityPath string) (string, bool, error) {
+	key := pendingRequestKey(cityPath)
+	r.citiesMu.Lock()
+	id, ok := r.pendingRequestIDs[key]
+	if ok {
+		if _, _, err := supervisor.NewRegistry(supervisor.RegistryPath()).ConsumePendingCityRequestID(key); err != nil {
+			r.citiesMu.Unlock()
+			return id, true, err
+		}
+		delete(r.pendingRequestIDs, key)
+		r.citiesMu.Unlock()
+		return id, true, nil
+	}
+	r.citiesMu.Unlock()
+
+	id, ok, err := supervisor.NewRegistry(supervisor.RegistryPath()).ConsumePendingCityRequestID(key)
+	if err != nil {
+		return "", false, err
+	}
+	return id, ok, nil
+}
+
+func pendingRequestKey(cityPath string) string {
+	return pathutil.NormalizePathForCompare(cityPath)
+}
+
+// SetSupervisorRecorder installs the supervisor-level event recorder.
+func (r *cityRegistry) SetSupervisorRecorder(rec events.Recorder) {
+	r.citiesMu.Lock()
+	defer r.citiesMu.Unlock()
+	r.supervisorRecorder = rec
+}
+
+// SupervisorEventRecorder returns the supervisor-level event recorder.
+func (r *cityRegistry) SupervisorEventRecorder() events.Recorder {
+	r.citiesMu.Lock()
+	defer r.citiesMu.Unlock()
+	return r.supervisorRecorder
+}
+
+// MarkRecentlyUnregistered records a city path for transient event
+// provider inclusion so SSE clients can observe completion events
+// after the city is removed from the registry.
+func (r *cityRegistry) MarkRecentlyUnregistered(cityPath string) {
+	r.citiesMu.Lock()
+	defer r.citiesMu.Unlock()
+	r.recentlyUnregistered[cityPath] = time.Now()
+}
+
+const recentlyUnregisteredGrace = 2 * time.Minute
 
 // Add inserts or replaces a city. Caller must not hold citiesMu.
 func (r *cityRegistry) Add(path string, mc *managedCity) {
@@ -170,6 +250,137 @@ func (r *cityRegistry) BatchUpdate(fn func(
 // Snapshot returns the current read-only snapshot. Lock-free.
 func (r *cityRegistry) Snapshot() *citySnapshot {
 	return r.snap.Load()
+}
+
+// TransientCityEventProviders implements api.TransientCityEventSource
+// so the supervisor-scope event multiplexer can surface events from
+// every registered city's .gc/events.jsonl — including those that
+// aren't yet in the Running set. Covers four cases uniformly:
+//
+//   - Newly scaffolded: written to cities.toml by Scaffold, but the
+//     reconciler hasn't picked it up yet. Not in cityRegistry snap
+//     yet; discovered directly from the on-disk supervisor registry.
+//   - Pending: reconciler picked up, cityView exists in snap.all
+//     with Started=false.
+//   - In progress: reconciler is running prepareCityForSupervisor.
+//   - Failed: reconciler gave up; entry lives in initFailures.
+//
+// Reading cities.toml directly (not just snap.all) closes the race
+// between Scaffold returning 202 and the reconciler tick picking up
+// the city — a client that subscribes to /v0/events/stream
+// immediately after POST /v0/city sees the new city's event file in
+// the multiplexer without waiting for the reconciler.
+//
+// Best-effort: cities whose event file is missing or unreadable are
+// simply skipped.
+func (r *cityRegistry) TransientCityEventProviders() map[string]events.Provider {
+	snap := r.snap.Load()
+	// Collect non-Running cities known to the runtime registry.
+	paths := make(map[string]string, len(snap.all))
+	for _, v := range snap.all {
+		if v == nil || v.Started {
+			continue
+		}
+		name := v.Name
+		if name == "" {
+			name = filepath.Base(v.Path)
+		}
+		paths[name] = v.Path
+	}
+	// Also read cities.toml directly so cities Scaffold just
+	// registered — but the reconciler hasn't processed yet — are
+	// visible. Running cities already covered by the main
+	// multiplexer loop (via ListCities); skip them here.
+	running := make(map[string]struct{}, len(snap.byName))
+	for name, v := range snap.byName {
+		if v != nil && v.Started {
+			running[name] = struct{}{}
+		}
+	}
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if entries, err := reg.List(); err == nil {
+		for _, e := range entries {
+			name := e.EffectiveName()
+			if _, already := running[name]; already {
+				continue
+			}
+			if _, already := paths[name]; already {
+				continue
+			}
+			paths[name] = e.Path
+		}
+	}
+
+	// Include recently-unregistered cities so SSE clients can
+	// observe completion events after the city leaves the registry.
+	r.citiesMu.Lock()
+	now := time.Now()
+	for path, ts := range r.recentlyUnregistered {
+		if now.Sub(ts) > recentlyUnregisteredGrace {
+			delete(r.recentlyUnregistered, path)
+			continue
+		}
+		name := filepath.Base(path)
+		if _, already := running[name]; already {
+			continue
+		}
+		if _, already := paths[name]; already {
+			continue
+		}
+		paths[name] = path
+	}
+	r.citiesMu.Unlock()
+
+	out := make(map[string]events.Provider, len(paths))
+	for name, path := range paths {
+		evPath := filepath.Join(path, ".gc", "events.jsonl")
+		if _, err := os.Stat(evPath); err != nil {
+			continue
+		}
+		if _, err := events.ReadLatestSeq(evPath); err != nil {
+			continue
+		}
+		out[name] = transientCityEventProvider{path: evPath}
+	}
+	return out
+}
+
+type transientCityEventProvider struct {
+	path string
+}
+
+func (p transientCityEventProvider) Record(e events.Event) {
+	recorder, err := events.NewFileRecorder(p.path, io.Discard)
+	if err != nil {
+		return
+	}
+	recorder.Record(e)
+	recorder.Close() //nolint:errcheck // best-effort
+}
+
+func (p transientCityEventProvider) List(filter events.Filter) ([]events.Event, error) {
+	return events.ReadFiltered(p.path, filter)
+}
+
+func (p transientCityEventProvider) LatestSeq() (uint64, error) {
+	return events.ReadLatestSeq(p.path)
+}
+
+func (p transientCityEventProvider) Watch(ctx context.Context, afterSeq uint64) (events.Watcher, error) {
+	recorder, err := events.NewFileRecorder(p.path, io.Discard)
+	if err != nil {
+		return nil, err
+	}
+	watcher, err := recorder.Watch(ctx, afterSeq)
+	recorder.Close() //nolint:errcheck // watcher only needs the path
+	if err != nil {
+		return nil, err
+	}
+	return watcher, nil
+}
+
+func (transientCityEventProvider) Close() error {
+	return nil
 }
 
 // CityState returns the api.State for a named city, or nil if not found/not running.

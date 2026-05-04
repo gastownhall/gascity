@@ -15,24 +15,33 @@ import (
 	"path/filepath"
 	"regexp"
 	goruntime "runtime"
+	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"text/template"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/searchpath"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/spf13/cobra"
 )
 
 var (
-	ensureSupervisorRunningHook = ensureSupervisorRunning
-	reloadSupervisorHook        = reloadSupervisor
-	supervisorAliveHook         = supervisorAlive
-	supervisorReadyTimeout      = 15 * time.Second
-	supervisorReadyPollInterval = 100 * time.Millisecond
-	supervisorLaunchctlRun      = func(args ...string) error {
+	ensureSupervisorRunningHook              = ensureSupervisorRunning
+	reloadSupervisorHook                     = reloadSupervisor
+	supervisorAliveHook                      = supervisorAlive
+	supervisorReadyTimeout                   = 15 * time.Second
+	supervisorReadyPollInterval              = 100 * time.Millisecond
+	supervisorSystemdWarmRefreshStopTimeout  = 5 * time.Second
+	supervisorSystemdWarmRefreshPollInterval = 100 * time.Millisecond
+	supervisorLaunchctlRun                   = func(args ...string) error {
 		return exec.Command("launchctl", args...).Run()
+	}
+	supervisorLaunchdActive = func(label string) bool {
+		out, err := exec.Command("launchctl", "print", supervisorLaunchdServiceTarget(label)).Output()
+		return err == nil && launchdPrintReportsRunning(out)
 	}
 	supervisorSystemctlRun = func(args ...string) error {
 		return exec.Command("systemctl", args...).Run()
@@ -40,7 +49,292 @@ var (
 	supervisorSystemctlActive = func(service string) bool {
 		return exec.Command("systemctl", "--user", "is-active", "--quiet", service).Run() == nil
 	}
+	supervisorRunningPreserveSignalReady                = runningSupervisorPreserveSignalReady
+	supervisorProcRoot                                  = "/proc"
+	supervisorProcReadDir                               = os.ReadDir
+	supervisorProcReadFile                              = os.ReadFile
+	supervisorGetpgid                                   = syscall.Getpgid
+	supervisorGetpgrp                                   = syscall.Getpgrp
+	supervisorKill                                      = syscall.Kill
+	supervisorProcessGroupPollPeriod                    = 20 * time.Millisecond
+	supervisorRuntimeGOOS                               = goruntime.GOOS
+	supervisorWorkspaceServiceCleanupWarnings io.Writer = os.Stderr
 )
+
+const supervisorServiceFileMode os.FileMode = 0o600
+
+type supervisorWorkspaceServiceProcess struct {
+	pid  int
+	pgid int
+	name string
+}
+
+type supervisorWorkspaceServiceCleanupScope struct {
+	gcHome    string
+	cityPaths map[string]string
+}
+
+func launchdPrintReportsRunning(out []byte) bool {
+	scanner := bufio.NewScanner(bytes.NewReader(out))
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) == 3 && fields[0] == "state" && fields[1] == "=" && fields[2] == "running" {
+			return true
+		}
+	}
+	return false
+}
+
+func cleanupSupervisorWorkspaceServicesForWarmRefresh(gcHome string) error {
+	scope, err := supervisorWorkspaceServiceCleanupScopeFromRegistry(gcHome)
+	if err != nil {
+		return err
+	}
+	return cleanupSupervisorWorkspaceServices(scope)
+}
+
+func cleanupSupervisorWorkspaceServicesForSupervisorStart(gcHome string) error {
+	scope, err := supervisorWorkspaceServiceCleanupScopeFromRegistry(gcHome)
+	if err != nil {
+		return err
+	}
+	if supervisorRuntimeGOOS != "linux" {
+		if len(scope.cityPaths) > 0 {
+			warnSupervisorWorkspaceServiceCleanup("gc supervisor: workspace-service startup cleanup is not available on %s; after a non-graceful supervisor exit, stale workspace-service processes may keep sockets bound. Registered workspace-service roots: %s. Stop stale processes whose environment includes GC_SERVICE_STATE_ROOT under those roots, then restart those cities.\n", supervisorRuntimeGOOS, strings.Join(supervisorWorkspaceServiceStateRoots(scope), ", "))
+		}
+		return nil
+	}
+	if err := cleanupSupervisorWorkspaceServices(scope); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func warnSupervisorWorkspaceServiceCleanup(format string, args ...any) {
+	if supervisorWorkspaceServiceCleanupWarnings == nil {
+		return
+	}
+	fmt.Fprintf(supervisorWorkspaceServiceCleanupWarnings, format, args...) //nolint:errcheck // best-effort operator diagnostic
+}
+
+func supervisorWorkspaceServiceStateRoots(scope supervisorWorkspaceServiceCleanupScope) []string {
+	roots := make([]string, 0, len(scope.cityPaths))
+	for cityPath := range scope.cityPaths {
+		roots = append(roots, citylayout.RuntimeServicesDir(cityPath))
+	}
+	sort.Strings(roots)
+	return roots
+}
+
+func cleanupSupervisorWorkspaceServices(scope supervisorWorkspaceServiceCleanupScope) error {
+	procs, err := findSupervisorWorkspaceServiceProcesses(scope)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, proc := range procs {
+		if err := terminateProcessGroup(proc.pgid, 2*time.Second); err != nil {
+			errs = append(errs, fmt.Errorf("stopping workspace service %q pid %d pgid %d: %w", proc.name, proc.pid, proc.pgid, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func supervisorWorkspaceServiceCleanupScopeFromRegistry(gcHome string) (supervisorWorkspaceServiceCleanupScope, error) {
+	scope := supervisorWorkspaceServiceCleanupScope{
+		gcHome:    normalizePathForCompare(strings.TrimSpace(gcHome)),
+		cityPaths: make(map[string]string),
+	}
+	if scope.gcHome == "" {
+		return scope, errors.New("missing GC_HOME for workspace-service cleanup")
+	}
+	entries, err := supervisor.NewRegistry(supervisor.RegistryPath()).List()
+	if err != nil {
+		return scope, fmt.Errorf("reading supervisor registry for workspace-service cleanup: %w", err)
+	}
+	for _, entry := range entries {
+		cityPath := normalizePathForCompare(strings.TrimSpace(entry.Path))
+		if cityPath == "" {
+			continue
+		}
+		scope.cityPaths[cityPath] = cityPath
+	}
+	return scope, nil
+}
+
+func findSupervisorWorkspaceServiceProcesses(scope supervisorWorkspaceServiceCleanupScope) ([]supervisorWorkspaceServiceProcess, error) {
+	if strings.TrimSpace(scope.gcHome) == "" {
+		return nil, errors.New("missing GC_HOME for workspace-service cleanup")
+	}
+	if len(scope.cityPaths) == 0 {
+		return nil, nil
+	}
+	entries, err := supervisorProcReadDir(supervisorProcRoot)
+	if err != nil {
+		return nil, fmt.Errorf("reading /proc: %w", err)
+	}
+	seenPGID := make(map[int]supervisorWorkspaceServiceProcess)
+	var errs []error
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		env, err := supervisorProcReadFile(filepath.Join(supervisorProcRoot, entry.Name(), "environ"))
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) {
+				continue
+			}
+			continue
+		}
+		envMap := supervisorProcessEnvMap(env)
+		if !supervisorWorkspaceServiceCandidateOwnedByScope(scope, envMap) {
+			continue
+		}
+		pgid, err := supervisorGetpgid(pid)
+		if err != nil {
+			if errors.Is(err, syscall.ESRCH) {
+				continue
+			}
+			errs = append(errs, fmt.Errorf("workspace service %q pid %d pgid: %w", envMap["GC_SERVICE_NAME"], pid, err))
+			continue
+		}
+		confirmedEnv, err := supervisorProcReadFile(filepath.Join(supervisorProcRoot, entry.Name(), "environ"))
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) {
+				continue
+			}
+			continue
+		}
+		confirmedEnvMap := supervisorProcessEnvMap(confirmedEnv)
+		if !supervisorWorkspaceServiceCandidateOwnedByScope(scope, confirmedEnvMap) ||
+			!sameSupervisorWorkspaceServiceCandidate(envMap, confirmedEnvMap) {
+			continue
+		}
+		if pgid <= 1 || pgid == supervisorGetpgrp() {
+			warnSupervisorWorkspaceServiceCleanup("gc supervisor: skipping workspace service %q pid %d with unsafe process group %d; leaving it running\n", envMap["GC_SERVICE_NAME"], pid, pgid)
+			continue
+		}
+		if _, ok := seenPGID[pgid]; !ok {
+			seenPGID[pgid] = supervisorWorkspaceServiceProcess{
+				pid:  pid,
+				pgid: pgid,
+				name: envMap["GC_SERVICE_NAME"],
+			}
+		}
+	}
+	if len(errs) > 0 {
+		return nil, errors.Join(errs...)
+	}
+	procs := make([]supervisorWorkspaceServiceProcess, 0, len(seenPGID))
+	for _, proc := range seenPGID {
+		procs = append(procs, proc)
+	}
+	sort.Slice(procs, func(i, j int) bool {
+		return procs[i].pgid < procs[j].pgid
+	})
+	return procs, nil
+}
+
+func supervisorWorkspaceServiceCandidateOwnedByScope(scope supervisorWorkspaceServiceCleanupScope, envMap map[string]string) bool {
+	if envMap["GC_SERVICE_SOCKET"] == "" || envMap["GC_SERVICE_NAME"] == "" || envMap["GC_SERVICE_STATE_ROOT"] == "" {
+		return false
+	}
+	return supervisorWorkspaceServiceOwnedByScope(scope, envMap)
+}
+
+func sameSupervisorWorkspaceServiceCandidate(before, after map[string]string) bool {
+	for _, key := range []string{
+		"GC_HOME",
+		"GC_CITY_PATH",
+		"GC_SERVICE_NAME",
+		"GC_SERVICE_STATE_ROOT",
+		"GC_SERVICE_SOCKET",
+	} {
+		if before[key] != after[key] {
+			return false
+		}
+	}
+	return true
+}
+
+func supervisorWorkspaceServiceOwnedByScope(scope supervisorWorkspaceServiceCleanupScope, envMap map[string]string) bool {
+	envHome := normalizePathForCompare(strings.TrimSpace(envMap["GC_HOME"]))
+	if envHome == "" || envHome != scope.gcHome {
+		return false
+	}
+	cityPath := normalizePathForCompare(strings.TrimSpace(envMap["GC_CITY_PATH"]))
+	if cityPath == "" {
+		return false
+	}
+	cityPath, ok := scope.cityPaths[cityPath]
+	if !ok {
+		return false
+	}
+	stateRoot := strings.TrimSpace(envMap["GC_SERVICE_STATE_ROOT"])
+	if stateRoot == "" {
+		return false
+	}
+	return pathWithinOrSame(stateRoot, citylayout.RuntimeServicesDir(cityPath))
+}
+
+func supervisorProcessEnvMap(data []byte) map[string]string {
+	env := make(map[string]string)
+	for _, item := range bytes.Split(data, []byte{0}) {
+		if len(item) == 0 {
+			continue
+		}
+		key, value, ok := bytes.Cut(item, []byte("="))
+		if !ok {
+			continue
+		}
+		env[string(key)] = string(value)
+	}
+	return env
+}
+
+func terminateProcessGroup(pgid int, timeout time.Duration) error {
+	if pgid <= 1 || pgid == supervisorGetpgrp() {
+		return fmt.Errorf("refusing to signal unsafe process group %d", pgid)
+	}
+	if err := supervisorKill(-pgid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	if err := waitForProcessGroupExit(pgid, timeout); err == nil {
+		return nil
+	}
+	if err := supervisorKill(-pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	return waitForProcessGroupExit(pgid, timeout)
+}
+
+func waitForProcessGroupExit(pgid int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if !processGroupAlive(pgid) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("process group %d did not exit within %s", pgid, timeout)
+		}
+		time.Sleep(supervisorProcessGroupPollPeriod)
+	}
+}
+
+func processGroupAlive(pgid int) bool {
+	if pgid <= 0 {
+		return false
+	}
+	err := supervisorKill(-pgid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
 
 func newSupervisorRunCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
@@ -296,8 +590,12 @@ func newSupervisorUninstallCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "uninstall",
 		Short: "Remove the platform service",
-		Long:  `Remove the platform service and stop the machine-wide supervisor.`,
-		Args:  cobra.NoArgs,
+		Long: `Remove the platform service and stop the machine-wide supervisor.
+
+On systemd, uninstall refuses to remove an active unit when the supervisor
+control socket is unavailable. Start the supervisor first so it can re-adopt
+preserved sessions, then retry uninstall.`,
+		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if doSupervisorUninstall(stdout, stderr) != 0 {
 				return errExit
@@ -337,6 +635,12 @@ type supervisorServiceData struct {
 	LaunchdLabel  string
 	SafeName      string
 	Path          string
+	ExtraEnv      []supervisorServiceEnvVar
+}
+
+type supervisorServiceEnvVar struct {
+	Name  string
+	Value string
 }
 
 func buildSupervisorServiceData() (*supervisorServiceData, error) {
@@ -358,6 +662,7 @@ func buildSupervisorServiceData() (*supervisorServiceData, error) {
 		LaunchdLabel:  supervisorLaunchdLabel(),
 		SafeName:      sanitizeServiceName(filepath.Base(home)),
 		Path:          searchpath.ExpandPath(homeDir, goruntime.GOOS, os.Getenv("PATH")),
+		ExtraEnv:      supervisorServiceExtraEnv(),
 	}, nil
 }
 
@@ -366,6 +671,104 @@ func sanitizeServiceName(name string) string {
 	re := regexp.MustCompile(`[^a-z0-9]+`)
 	name = re.ReplaceAllString(name, "-")
 	return strings.Trim(name, "-")
+}
+
+var supervisorServiceEnvNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// Keep persistent service-file env narrow. Provider credentials and user
+// context need to survive launchd/systemd startup; arbitrary shell state can
+// be opted in with GC_SUPERVISOR_ENV.
+var supervisorServiceEnvKeys = map[string]bool{
+	"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": true,
+	"CLAUDE_CODE_EFFORT_LEVEL":                 true,
+	"CLAUDE_CODE_OAUTH_TOKEN":                  true,
+	"CLAUDE_CODE_SUBAGENT_MODEL":               true,
+	"CLAUDE_CONFIG_DIR":                        true,
+	"HOME":                                     true,
+	"LANG":                                     true,
+	"LC_ALL":                                   true,
+	"LC_CTYPE":                                 true,
+	"LOGNAME":                                  true,
+	"SHELL":                                    true,
+	"USER":                                     true,
+	"XDG_CONFIG_HOME":                          true,
+	"XDG_STATE_HOME":                           true,
+}
+
+var providerCredentialEnvPrefixes = []string{
+	"ANTHROPIC_",
+	"GEMINI_",
+	"GOOGLE_",
+	"OPENAI_",
+}
+
+var supervisorServiceFixedEnvKeys = map[string]bool{
+	"GC_HOME":                             true,
+	supervisorPreserveSessionsOnSignalEnv: true,
+	"PATH":                                true,
+	"XDG_RUNTIME_DIR":                     true,
+}
+
+func supervisorServiceExtraEnv() []supervisorServiceEnvVar {
+	env := make(map[string]string)
+	for _, entry := range os.Environ() {
+		key, val, ok := strings.Cut(entry, "=")
+		if !ok || val == "" || !shouldPersistSupervisorEnv(key) {
+			continue
+		}
+		env[key] = val
+	}
+	for _, key := range supervisorServiceExplicitEnvKeys(os.Getenv("GC_SUPERVISOR_ENV")) {
+		if val := os.Getenv(key); val != "" {
+			env[key] = val
+		}
+	}
+
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]supervisorServiceEnvVar, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, supervisorServiceEnvVar{Name: key, Value: env[key]})
+	}
+	return out
+}
+
+func shouldPersistSupervisorEnv(key string) bool {
+	if !supervisorServiceEnvNameRE.MatchString(key) || supervisorServiceFixedEnvKeys[key] {
+		return false
+	}
+	if supervisorServiceEnvKeys[key] {
+		return true
+	}
+	return isProviderCredentialEnv(key)
+}
+
+func isProviderCredentialEnv(key string) bool {
+	for _, prefix := range providerCredentialEnvPrefixes {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func supervisorServiceExplicitEnvKeys(raw string) []string {
+	fields := strings.Fields(strings.NewReplacer(",", " ", ";", " ").Replace(raw))
+	out := make([]string, 0, len(fields))
+	seen := make(map[string]bool, len(fields))
+	for _, field := range fields {
+		key := strings.TrimSpace(field)
+		if key == "" || seen[key] || !supervisorServiceEnvNameRE.MatchString(key) || supervisorServiceFixedEnvKeys[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out
 }
 
 const (
@@ -436,6 +839,12 @@ const supervisorLaunchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
         {{end}}
         <key>PATH</key>
         <string>{{xmlesc .Path}}</string>
+        <key>GC_SUPERVISOR_PRESERVE_SESSIONS_ON_SIGNAL</key>
+        <string>1</string>
+        {{range .ExtraEnv}}
+        <key>{{xmlesc .Name}}</key>
+        <string>{{xmlesc .Value}}</string>
+        {{end}}
     </dict>
 </dict>
 </plist>
@@ -446,6 +855,11 @@ Description=Gas City machine supervisor
 
 [Service]
 Type=simple
+# Signal only the main supervisor PID on stop. The systemd default
+# (control-group) would cascade SIGTERM to tmux servers spawned by
+# 'gc supervisor run' that live in this cgroup, killing one-per-bead
+# session conversation history. The reconciler re-adopts tmux on start.
+KillMode=process
 ExecStart={{.GCPath}} supervisor run
 Restart=always
 RestartSec=5s
@@ -454,6 +868,9 @@ StandardError=append:{{.LogPath}}
 Environment=GC_HOME="{{.GCHome}}"
 {{if .XDGRuntimeDir}}Environment=XDG_RUNTIME_DIR="{{.XDGRuntimeDir}}"
 {{end}}Environment=PATH="{{.Path}}"
+Environment=GC_SUPERVISOR_PRESERVE_SESSIONS_ON_SIGNAL="1"
+{{range .ExtraEnv}}Environment={{systemdenv .Name .Value}}
+{{end}}
 
 [Install]
 WantedBy=default.target
@@ -464,8 +881,12 @@ func xmlEscape(s string) string {
 	return r.Replace(s)
 }
 
+func systemdEnv(name, value string) string {
+	return name + "=" + strconv.Quote(value)
+}
+
 func renderSupervisorTemplate(tmplStr string, data *supervisorServiceData) (string, error) {
-	funcMap := template.FuncMap{"xmlesc": xmlEscape}
+	funcMap := template.FuncMap{"xmlesc": xmlEscape, "systemdenv": systemdEnv}
 	tmpl, err := template.New("service").Funcs(funcMap).Parse(tmplStr)
 	if err != nil {
 		return "", err
@@ -477,9 +898,65 @@ func renderSupervisorTemplate(tmplStr string, data *supervisorServiceData) (stri
 	return buf.String(), nil
 }
 
+func writeSupervisorServiceFile(path string, content []byte) error {
+	if _, err := os.Stat(path); err == nil {
+		if err := os.Chmod(path, supervisorServiceFileMode); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.WriteFile(path, content, supervisorServiceFileMode); err != nil {
+		return err
+	}
+	return os.Chmod(path, supervisorServiceFileMode)
+}
+
 func supervisorLaunchdPlistPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, "Library", "LaunchAgents", supervisorLaunchdLabel()+".plist")
+}
+
+func supervisorLaunchdServiceTarget(label string) string {
+	if label == "" {
+		label = supervisorLaunchdLabel()
+	}
+	return "gui/" + strconv.Itoa(os.Getuid()) + "/" + label
+}
+
+func loadAndStartSupervisorLaunchd(path, label string) error {
+	if err := supervisorLaunchctlRun("load", path); err != nil {
+		return fmt.Errorf("load %s: %w", path, err)
+	}
+	target := supervisorLaunchdServiceTarget(label)
+	if err := supervisorLaunchctlRun("enable", target); err != nil {
+		return fmt.Errorf("enable %s: %w", target, err)
+	}
+	if err := supervisorLaunchctlRun("kickstart", "-p", target); err != nil {
+		return fmt.Errorf("kickstart -p %s: %w", target, err)
+	}
+	return nil
+}
+
+func loadAndStartSupervisorLaunchdForRollback(path, label string, stderr io.Writer) error {
+	if err := supervisorLaunchctlRun("load", path); err != nil {
+		return fmt.Errorf("load %s: %w", path, err)
+	}
+	target := supervisorLaunchdServiceTarget(label)
+	if err := supervisorLaunchctlRun("enable", target); err != nil {
+		warnSupervisorLaunchdRollback(stderr, "enable %s: %v", target, err)
+	}
+	if err := supervisorLaunchctlRun("kickstart", "-p", target); err != nil {
+		warnSupervisorLaunchdRollback(stderr, "kickstart -p %s: %v", target, err)
+	}
+	return nil
+}
+
+func warnSupervisorLaunchdRollback(stderr io.Writer, format string, args ...any) {
+	if stderr == nil {
+		return
+	}
+	fmt.Fprintf(stderr, "gc supervisor install: warning: restoring launchd service: "+format+"\n", args...) //nolint:errcheck // best-effort stderr
 }
 
 func legacySupervisorLaunchdPlistPath() string {
@@ -655,6 +1132,7 @@ func unloadLegacySupervisorLaunchd(remove bool) error {
 	}
 	_ = supervisorLaunchctlRun("unload", path)
 	if remove {
+		_ = supervisorLaunchctlRun("disable", supervisorLaunchdServiceTarget(defaultSupervisorLaunchdLabel))
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("removing legacy plist %s: %w", path, err)
 		}
@@ -677,26 +1155,26 @@ func unloadLegacySupervisorSystemd(remove bool) error {
 	return nil
 }
 
-func rollbackNewSupervisorLaunchdInstall(path string, restoreLegacy bool) error {
+func rollbackNewSupervisorLaunchdInstall(path string, restoreLegacy bool, stderr io.Writer) error {
 	var errs []error
 	_ = supervisorLaunchctlRun("unload", path)
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		errs = append(errs, fmt.Errorf("removing failed plist %s during rollback: %w", path, err))
 	}
 	if restoreLegacy {
-		if err := supervisorLaunchctlRun("load", legacySupervisorLaunchdPlistPath()); err != nil {
+		if err := loadAndStartSupervisorLaunchdForRollback(legacySupervisorLaunchdPlistPath(), defaultSupervisorLaunchdLabel, stderr); err != nil {
 			errs = append(errs, fmt.Errorf("restoring legacy plist %s: %w", legacySupervisorLaunchdPlistPath(), err))
 		}
 	}
 	return errors.Join(errs...)
 }
 
-func restorePreviousSupervisorLaunchdInstall(path string, previousContent []byte) error {
+func restorePreviousSupervisorLaunchdInstall(path string, previousContent []byte, stderr io.Writer) error {
 	var errs []error
 	_ = supervisorLaunchctlRun("unload", path)
-	if err := os.WriteFile(path, previousContent, 0o644); err != nil {
+	if err := writeSupervisorServiceFile(path, previousContent); err != nil {
 		errs = append(errs, fmt.Errorf("restoring previous plist %s: %w", path, err))
-	} else if err := supervisorLaunchctlRun("load", path); err != nil {
+	} else if err := loadAndStartSupervisorLaunchdForRollback(path, supervisorLaunchdLabel(), stderr); err != nil {
 		errs = append(errs, fmt.Errorf("reloading previous plist %s: %w", path, err))
 	}
 	return errors.Join(errs...)
@@ -725,7 +1203,7 @@ func restorePreviousSupervisorSystemdInstall(path, service string, previousConte
 	if restart {
 		_ = supervisorSystemctlRun("--user", "stop", service)
 	}
-	if err := os.WriteFile(path, previousContent, 0o644); err != nil {
+	if err := writeSupervisorServiceFile(path, previousContent); err != nil {
 		errs = append(errs, fmt.Errorf("restoring previous unit %s: %w", path, err))
 		return errors.Join(errs...)
 	}
@@ -741,6 +1219,10 @@ func restorePreviousSupervisorSystemdInstall(path, service string, previousConte
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func warnSupervisorSystemdWarmRefreshPreservedUnit(stderr io.Writer, service string) {
+	fmt.Fprintf(stderr, "gc supervisor install: leaving refreshed systemd unit %s in place after warm-refresh failure; not restoring the previous unit because it may lack KillMode=process. Resolve the error, then run 'systemctl --user start %s' or rerun 'gc supervisor install'.\n", service, service) //nolint:errcheck // best-effort stderr
 }
 
 func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Writer) int {
@@ -762,7 +1244,7 @@ func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc supervisor install: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+	if err := writeSupervisorServiceFile(path, []byte(content)); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor install: writing plist: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -772,17 +1254,17 @@ func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Wri
 	}
 
 	_ = supervisorLaunchctlRun("unload", path)
-	if err := supervisorLaunchctlRun("load", path); err != nil {
+	if err := loadAndStartSupervisorLaunchd(path, data.LaunchdLabel); err != nil {
 		var rollbackErr error
 		if hadCurrent {
-			rollbackErr = restorePreviousSupervisorLaunchdInstall(path, existing)
+			rollbackErr = restorePreviousSupervisorLaunchdInstall(path, existing, stderr)
 		} else {
-			rollbackErr = rollbackNewSupervisorLaunchdInstall(path, legacyPresent)
+			rollbackErr = rollbackNewSupervisorLaunchdInstall(path, legacyPresent, stderr)
 		}
 		if rollbackErr != nil {
-			fmt.Fprintf(stderr, "gc supervisor install: rollback after launchctl load failure: %v\n", rollbackErr) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "gc supervisor install: rollback after launchctl failure: %v\n", rollbackErr) //nolint:errcheck // best-effort stderr
 		}
-		fmt.Fprintf(stderr, "gc supervisor install: launchctl load: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc supervisor install: launchctl %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if err := unloadLegacySupervisorLaunchd(true); err != nil {
@@ -795,7 +1277,17 @@ func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Wri
 
 func uninstallSupervisorLaunchd(_ *supervisorServiceData, stdout, stderr io.Writer) int {
 	path := supervisorLaunchdPlistPath()
+	active := supervisorLaunchdActive(supervisorLaunchdLabel())
+	if sockPath, _ := runningSupervisorSocket(); sockPath != "" {
+		if code := stopSupervisorWithWait(stdout, stderr, true, 30*time.Second); code != 0 {
+			return code
+		}
+	} else if active {
+		fmt.Fprintf(stderr, "gc supervisor uninstall: launchd service %s is active but the control socket is unavailable; run 'gc supervisor start' to re-adopt sessions, then retry uninstall\n", supervisorLaunchdLabel()) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	_ = supervisorLaunchctlRun("unload", path)
+	_ = supervisorLaunchctlRun("disable", supervisorLaunchdServiceTarget(supervisorLaunchdLabel()))
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		fmt.Fprintf(stderr, "gc supervisor uninstall: removing plist: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -806,6 +1298,54 @@ func uninstallSupervisorLaunchd(_ *supervisorServiceData, stdout, stderr io.Writ
 	}
 	fmt.Fprintf(stdout, "Uninstalled launchd service: %s\n", path) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+func waitSupervisorSystemdInactive(service string, timeout time.Duration) bool {
+	if !supervisorSystemctlActive(service) {
+		return true
+	}
+	if timeout <= 0 {
+		return false
+	}
+	poll := supervisorSystemdWarmRefreshPollInterval
+	if poll <= 0 {
+		poll = time.Millisecond
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(poll)
+		if !supervisorSystemctlActive(service) {
+			return true
+		}
+	}
+	return !supervisorSystemctlActive(service)
+}
+
+func runningSupervisorPreserveSignalReady() (int, bool, error) {
+	_, pid := runningSupervisorSocket()
+	if pid <= 0 {
+		return 0, false, errors.New("active supervisor control socket is unavailable")
+	}
+	env, err := supervisorProcReadFile(filepath.Join(supervisorProcRoot, strconv.Itoa(pid), "environ"))
+	if err != nil {
+		return pid, false, fmt.Errorf("reading active supervisor pid %d environment: %w", pid, err)
+	}
+	return pid, supervisorProcessEnvMap(env)[supervisorPreserveSessionsOnSignalEnv] == "1", nil
+}
+
+func stopSupervisorSystemdForWarmRefresh(service string) ([]string, error) {
+	termArgs := []string{"--user", "kill", "--kill-who=main", "--signal=SIGTERM", service}
+	if err := supervisorSystemctlRun(termArgs...); err != nil {
+		return termArgs, err
+	}
+	if waitSupervisorSystemdInactive(service, supervisorSystemdWarmRefreshStopTimeout) {
+		return termArgs, nil
+	}
+	killArgs := []string{"--user", "kill", "--kill-who=main", "--signal=SIGKILL", service}
+	if err := supervisorSystemctlRun(killArgs...); err != nil {
+		return killArgs, err
+	}
+	return killArgs, nil
 }
 
 func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Writer) int {
@@ -829,7 +1369,19 @@ func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Wri
 		return 1
 	}
 	contentChanged := string(existing) != content
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+	active := supervisorSystemctlActive(service)
+	if contentChanged && active {
+		pid, ready, err := supervisorRunningPreserveSignalReady()
+		if err != nil {
+			fmt.Fprintf(stderr, "gc supervisor install: cannot verify active supervisor preserve-mode readiness: %v. Refusing systemd warm refresh because signaling an older supervisor can stop managed sessions. Stop or drain agents intentionally with 'gc supervisor stop --wait', then rerun 'gc supervisor install'.\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if !ready {
+			fmt.Fprintf(stderr, "gc supervisor install: active supervisor pid %d does not have %s=1. Refusing systemd warm refresh because this first post-upgrade install would stop managed sessions. Stop or drain agents intentionally with 'gc supervisor stop --wait', then rerun 'gc supervisor install'.\n", pid, supervisorPreserveSessionsOnSignalEnv) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
+	if err := writeSupervisorServiceFile(path, []byte(content)); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor install: writing unit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -857,9 +1409,9 @@ func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Wri
 		return 1
 	}
 
-	if contentChanged && supervisorSystemctlActive(service) {
-		args := []string{"--user", "restart", service}
-		if err := supervisorSystemctlRun(args...); err != nil {
+	if contentChanged && active {
+		stopArgs, err := stopSupervisorSystemdForWarmRefresh(service)
+		if err != nil {
 			var rollbackErr error
 			if hadCurrent {
 				rollbackErr = restorePreviousSupervisorSystemdInstall(path, service, existing, true)
@@ -867,12 +1419,24 @@ func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Wri
 				rollbackErr = rollbackNewSupervisorSystemdInstall(path, service, legacyPresent)
 			}
 			if rollbackErr != nil {
-				fmt.Fprintf(stderr, "gc supervisor install: rollback after systemctl %s failure: %v\n", strings.Join(args, " "), rollbackErr) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "gc supervisor install: rollback after systemctl %s failure: %v\n", strings.Join(stopArgs, " "), rollbackErr) //nolint:errcheck // best-effort stderr
 			}
-			fmt.Fprintf(stderr, "gc supervisor install: systemctl %s: %v\n", strings.Join(args, " "), err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "gc supervisor install: systemctl %s: %v\n", strings.Join(stopArgs, " "), err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-	} else if !supervisorSystemctlActive(service) {
+		if err := cleanupSupervisorWorkspaceServicesForWarmRefresh(data.GCHome); err != nil {
+			warnSupervisorSystemdWarmRefreshPreservedUnit(stderr, service)
+			fmt.Fprintf(stderr, "gc supervisor install: workspace-service cleanup after systemctl %s: %v\n", strings.Join(stopArgs, " "), err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		_ = supervisorSystemctlRun("--user", "reset-failed", service)
+		startArgs := []string{"--user", "start", service}
+		if err := supervisorSystemctlRun(startArgs...); err != nil {
+			warnSupervisorSystemdWarmRefreshPreservedUnit(stderr, service)
+			fmt.Fprintf(stderr, "gc supervisor install: systemctl %s: %v\n", strings.Join(startArgs, " "), err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	} else if !active {
 		args := []string{"--user", "start", service}
 		if err := supervisorSystemctlRun(args...); err != nil {
 			var rollbackErr error
@@ -901,6 +1465,16 @@ func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Wri
 func uninstallSupervisorSystemd(_ *supervisorServiceData, stdout, stderr io.Writer) int {
 	path := supervisorSystemdServicePath()
 	service := supervisorSystemdServiceName()
+	active := supervisorSystemctlActive(service)
+	if active {
+		if sockPath, _ := runningSupervisorSocket(); sockPath == "" {
+			fmt.Fprintf(stderr, "gc supervisor uninstall: systemd service %s is active but the control socket is unavailable; run 'gc supervisor start' to re-adopt sessions, then retry uninstall\n", service) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if code := stopSupervisorWithWait(stdout, stderr, true, 30*time.Second); code != 0 {
+			return code
+		}
+	}
 	_ = supervisorSystemctlRun("--user", "stop", service)
 	_ = supervisorSystemctlRun("--user", "disable", service)
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {

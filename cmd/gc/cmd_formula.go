@@ -111,9 +111,14 @@ Examples:
 			if err != nil {
 				return err
 			}
-			recipe, err := formula.Compile(cmd.Context(), name, searchPaths, compileVars)
+			recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), name, searchPaths, compileVars)
 			if err != nil {
 				return err
+			}
+			if len(vars) > 0 {
+				if err := formula.ValidateProvidedVarDefs(recipe.Vars, vars); err != nil {
+					return err
+				}
 			}
 
 			// Apply var substitution for display only when --var flags were provided.
@@ -141,20 +146,48 @@ Examples:
 				_, _ = fmt.Fprintln(stdout, "Root only: true")
 			}
 			if len(recipe.Vars) > 0 {
-				_, _ = fmt.Fprintln(stdout, "\nVariables:")
-				for vname, def := range recipe.Vars {
-					var attrs []string
-					if def.Required {
-						attrs = append(attrs, "required")
+				names := make([]string, 0, len(recipe.Vars))
+				for name := range recipe.Vars {
+					names = append(names, name)
+				}
+				slices.Sort(names)
+
+				requiredNames := make([]string, 0, len(names))
+				optionalNames := make([]string, 0, len(names))
+				for _, name := range names {
+					def := recipe.Vars[name]
+					if def != nil && def.Required {
+						requiredNames = append(requiredNames, name)
+						continue
 					}
-					if def.Default != nil {
-						attrs = append(attrs, "default="+*def.Default)
+					optionalNames = append(optionalNames, name)
+				}
+
+				if len(requiredNames) > 0 {
+					_, _ = fmt.Fprintln(stdout, "\nRequired vars:")
+					for _, name := range requiredNames {
+						def := recipe.Vars[name]
+						_, _ = fmt.Fprintf(stdout, "  {{%s}}: %s\n", name, def.Description)
 					}
-					attrStr := ""
-					if len(attrs) > 0 {
-						attrStr = " (" + strings.Join(attrs, ", ") + ")"
+				}
+				if len(optionalNames) > 0 {
+					header := "\nVariables:"
+					if len(requiredNames) > 0 {
+						header = "\nOptional vars:"
 					}
-					_, _ = fmt.Fprintf(stdout, "  {{%s}}: %s%s\n", vname, def.Description, attrStr)
+					_, _ = fmt.Fprintln(stdout, header)
+					for _, name := range optionalNames {
+						def := recipe.Vars[name]
+						var attrs []string
+						if def != nil && def.Default != nil {
+							attrs = append(attrs, "default="+*def.Default)
+						}
+						attrStr := ""
+						if len(attrs) > 0 {
+							attrStr = " (" + strings.Join(attrs, ", ") + ")"
+						}
+						_, _ = fmt.Fprintf(stdout, "  {{%s}}: %s%s\n", name, def.Description, attrStr)
+					}
 				}
 			}
 
@@ -246,7 +279,7 @@ bead into a sub-workflow at runtime.`,
 			cookVars := parseFormulaVars(vars)
 
 			if attach != "" {
-				recipe, err := formula.Compile(cmd.Context(), args[0], scope.searchPaths, cookVars)
+				recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), args[0], scope.searchPaths, cookVars)
 				if err != nil {
 					return fmt.Errorf("compile: %w", err)
 				}

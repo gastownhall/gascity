@@ -663,6 +663,45 @@ func TestDoStartSession_ProcessNamesAndReadyPrefix(t *testing.T) {
 	})
 }
 
+func TestDoStartSession_CursorReadinessHintsTriggerRuntimeWait(t *testing.T) {
+	ops := &fakeStartOps{
+		hasSessionResult: true,
+	}
+
+	cfg := runtime.Config{
+		Command:           "cursor-agent",
+		ProcessNames:      []string{"cursor-agent"},
+		ReadyPromptPrefix: "\u2192 ",
+		ReadyDelayMs:      10000,
+	}
+
+	err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assertCallSequence(t, ops, []string{
+		"createSession",
+		"setRemainOnExit",
+		"waitForCommand",
+		"acceptStartupDialogs",
+		"waitForReady",
+		"acceptStartupDialogs",
+		"hasSession",
+	})
+
+	wfr := ops.calls[4]
+	if wfr.rc.Tmux.ReadyPromptPrefix != "\u2192 " {
+		t.Errorf("rc.ReadyPromptPrefix = %q, want %q", wfr.rc.Tmux.ReadyPromptPrefix, "\u2192 ")
+	}
+	if wfr.rc.Tmux.ReadyDelayMs != 10000 {
+		t.Errorf("rc.ReadyDelayMs = %d, want %d", wfr.rc.Tmux.ReadyDelayMs, 10000)
+	}
+	if len(wfr.rc.Tmux.ProcessNames) != 1 || wfr.rc.Tmux.ProcessNames[0] != "cursor-agent" {
+		t.Errorf("rc.ProcessNames = %v, want [cursor-agent]", wfr.rc.Tmux.ProcessNames)
+	}
+}
+
 func TestDoStartSession_ProcessNamesAndReadyDelayRechecksDialogs(t *testing.T) {
 	ops := &fakeStartOps{
 		hasSessionResult: true,

@@ -60,6 +60,24 @@ func configureIsolatedRuntimeEnv(t *testing.T) {
 	}
 }
 
+func TestRunDoesNotLeakPersistentCityOrRigFlags(t *testing.T) {
+	prevCityFlag, prevRigFlag := cityFlag, rigFlag
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+		rigFlag = prevRigFlag
+	})
+	cityFlag = "previous-city"
+	rigFlag = "previous-rig"
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--city", "/tmp/leaked-city", "--rig", "leaked-rig", "version"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("run(version) = %d; stderr: %s", code, stderr.String())
+	}
+	if cityFlag != "previous-city" || rigFlag != "previous-rig" {
+		t.Fatalf("persistent flags leaked after run: city=%q rig=%q", cityFlag, rigFlag)
+	}
+}
+
 func mustLoadTestSiteBinding(t *testing.T, fs fsys.FS, cityPath string) *config.SiteBinding {
 	t.Helper()
 	binding, err := config.LoadSiteBinding(fs, cityPath)
@@ -160,6 +178,7 @@ func TestMain(m *testing.M) {
 }
 
 func TestTutorial01(t *testing.T) {
+	skipSlowCmdGCTest(t, "runs tutorial testscript scenarios; run make test-cmd-gc-process for full coverage")
 	testscript.Run(t, newTestscriptParams(t))
 }
 
@@ -892,6 +911,95 @@ func TestResolveSessionNameWithStore(t *testing.T) {
 	want := "s-" + strings.ReplaceAll(b.ID, "/", "--")
 	if got != want {
 		t.Errorf("sessionNameFromBeadID(%q) = %q, want %q", b.ID, got, want)
+	}
+}
+
+type noBroadSessionNameLookupStore struct {
+	*beads.MemStore
+	t *testing.T
+}
+
+func (s noBroadSessionNameLookupStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == sessionBeadLabel && len(query.Metadata) == 0 {
+		s.t.Fatalf("session name lookup used broad session label scan: %+v", query)
+	}
+	return s.MemStore.List(query)
+}
+
+func TestFindSessionNameByTemplateUsesTargetedLookup(t *testing.T) {
+	store := noBroadSessionNameLookupStore{MemStore: beads.NewMemStore(), t: t}
+	_, err := store.Create(beads.Bead{
+		Title:  "worker-pool",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"agent_name":           "worker",
+			"template":             "worker",
+			"session_name":         "s-pool",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"agent_name":   "worker",
+			"session_name": "s-worker",
+			"state":        "asleep",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := findSessionNameByTemplate(store, "worker")
+	if got != "s-worker" {
+		t.Fatalf("findSessionNameByTemplate(worker) = %q, want s-worker", got)
+	}
+}
+
+func TestResolveTemplateSessionBeadIDUsesTargetedLookup(t *testing.T) {
+	store := noBroadSessionNameLookupStore{MemStore: beads.NewMemStore(), t: t}
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"agent_name":   "worker",
+			"session_name": "s-worker",
+			"state":        "asleep",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := &agentBuildParams{
+		cityName:   "phase0-city",
+		cityPath:   t.TempDir(),
+		workspace:  &config.Workspace{Provider: "test-agent"},
+		providers:  map[string]config.ProviderSpec{"test-agent": {DisplayName: "Test Agent", Command: "true"}},
+		lookPath:   func(string) (string, error) { return filepath.Join("/usr/bin", "true"), nil },
+		fs:         fsys.OSFS{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		beadStore:  store,
+		stderr:     io.Discard,
+	}
+	agentCfg := &config.Agent{
+		Name:     "worker",
+		Provider: "test-agent",
+	}
+
+	tp, err := resolveTemplate(params, agentCfg, agentCfg.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if got := tp.Env["GC_SESSION_ID"]; got != bead.ID {
+		t.Fatalf("GC_SESSION_ID = %q, want %q", got, bead.ID)
 	}
 }
 
@@ -1705,7 +1813,7 @@ func TestDoInitSettingsIsValidJSON(t *testing.T) {
 	if !ok {
 		t.Fatal("settings.json 'hooks' is not an object")
 	}
-	for _, event := range []string{"SessionStart", "PreCompact", "UserPromptSubmit", "Stop"} {
+	for _, event := range []string{"SessionStart", "PreCompact", "UserPromptSubmit"} {
 		if _, ok := hookMap[event]; !ok {
 			t.Errorf("settings.json missing hook event %q", event)
 		}
@@ -4764,6 +4872,59 @@ max = -1
 	}
 	if !strings.Contains(out, "GUPP") {
 		t.Error("pool-worker prompt missing GUPP")
+	}
+}
+
+func TestDoPrimeFormulaV2GraphWorkerPromptClaimsRoutedWork(t *testing.T) {
+	dir := t.TempDir()
+	if err := materializeBuiltinPrompts(dir); err != nil {
+		t.Fatalf("materializeBuiltinPrompts: %v", err)
+	}
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_DIR", "")
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	tomlContent := `[workspace]
+name = "test-city"
+
+[daemon]
+formula_v2 = true
+
+[[agent]]
+name = "worker"
+dir = "myrig"
+start_command = "echo"
+
+[agent.pool]
+min = 0
+max = -1
+`
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(tomlContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doPrime([]string{"worker"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doPrime = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "gc hook") {
+		t.Fatalf("graph-worker prompt missing gc hook routed-queue lookup:\n%s", out)
+	}
+	if !strings.Contains(out, "bd update <id> --claim") {
+		t.Fatalf("graph-worker prompt missing atomic claim instruction:\n%s", out)
+	}
+	if !strings.Contains(out, "Do not start work with `bd update --status in_progress`") {
+		t.Fatalf("graph-worker prompt missing guard against unassigned in_progress work:\n%s", out)
 	}
 }
 

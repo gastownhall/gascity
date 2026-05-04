@@ -45,8 +45,33 @@ func chooseManagedDoltPort(cityPath, stateFile string) (string, error) {
 			}
 			return strconv.Itoa(repaired.Port), nil
 		}
+		if hint, found, hintErr := readPublishedDoltRuntimeStateHint(cityPath); hintErr == nil && found {
+			if repaired, ok := repairedManagedDoltRuntimeState(cityPath, layout, hint); ok {
+				if err := writeDoltRuntimeStateFile(stateFile, repaired); err != nil {
+					return "", fmt.Errorf("repair provider runtime state from published hint: %w", err)
+				}
+				if samePath(stateFile, canonicalStateFile) {
+					if err := publishManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
+						return "", fmt.Errorf("publish repaired managed dolt runtime state: %w", err)
+					}
+				}
+				return strconv.Itoa(repaired.Port), nil
+			}
+		}
 	} else if !os.IsNotExist(err) {
 		return "", fmt.Errorf("read provider runtime state: %w", err)
+	} else if hint, found, hintErr := readPublishedDoltRuntimeStateHint(cityPath); hintErr == nil && found {
+		if repaired, ok := repairedManagedDoltRuntimeState(cityPath, layout, hint); ok {
+			if err := writeDoltRuntimeStateFile(stateFile, repaired); err != nil {
+				return "", fmt.Errorf("repair missing provider runtime state: %w", err)
+			}
+			if samePath(stateFile, canonicalStateFile) {
+				if err := publishManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
+					return "", fmt.Errorf("publish repaired managed dolt runtime state: %w", err)
+				}
+			}
+			return strconv.Itoa(repaired.Port), nil
+		}
 	}
 	seed := deterministicManagedDoltPortSeed(cityPath)
 	return strconv.Itoa(nextAvailableManagedDoltPort(seed)), nil

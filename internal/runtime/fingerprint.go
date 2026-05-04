@@ -123,6 +123,7 @@ func hashCoreFields(h hash.Hash, cfg Config) {
 	h.Write([]byte{0})           //nolint:errcheck // hash.Write never errors
 
 	hashSortedMapIncluded(h, cfg.Env, envFingerprintInclude)
+	hashMCPServers(h, cfg.MCPServers)
 
 	// FingerprintExtra carries additional identity fields (pool config, etc.)
 	// that aren't part of the session command but should
@@ -220,6 +221,28 @@ func hashSortedMap(h hash.Hash, m map[string]string) {
 	}
 }
 
+func hashMCPServers(h hash.Hash, servers []MCPServerConfig) {
+	for _, server := range NormalizeMCPServerConfigs(servers) {
+		h.Write([]byte(server.Name))      //nolint:errcheck // hash.Write never errors
+		h.Write([]byte{0})                //nolint:errcheck // hash.Write never errors
+		h.Write([]byte(server.Transport)) //nolint:errcheck // hash.Write never errors
+		h.Write([]byte{0})                //nolint:errcheck // hash.Write never errors
+		h.Write([]byte(server.Command))   //nolint:errcheck // hash.Write never errors
+		h.Write([]byte{0})                //nolint:errcheck // hash.Write never errors
+		for _, arg := range server.Args {
+			h.Write([]byte(arg)) //nolint:errcheck // hash.Write never errors
+			h.Write([]byte{0})   //nolint:errcheck // hash.Write never errors
+		}
+		h.Write([]byte{1}) //nolint:errcheck // sentinel between args/env
+		hashSortedMap(h, server.Env)
+		h.Write([]byte{1})          //nolint:errcheck // sentinel between env/url
+		h.Write([]byte(server.URL)) //nolint:errcheck // hash.Write never errors
+		h.Write([]byte{0})          //nolint:errcheck // hash.Write never errors
+		hashSortedMap(h, server.Headers)
+		h.Write([]byte{2}) //nolint:errcheck // sentinel between servers
+	}
+}
+
 // CoreFingerprintBreakdown returns per-field hash components of the core
 // fingerprint. Used to diagnose config-drift by comparing breakdowns
 // from session start vs reconcile time.
@@ -235,6 +258,9 @@ func CoreFingerprintBreakdown(cfg Config) map[string]string {
 		}),
 		"Env": fieldHash(func(h hash.Hash) {
 			hashSortedMapIncluded(h, cfg.Env, envFingerprintInclude)
+		}),
+		"MCPServers": fieldHash(func(h hash.Hash) {
+			hashMCPServers(h, cfg.MCPServers)
 		}),
 		"FPExtra": fieldHash(func(h hash.Hash) {
 			if len(cfg.FingerprintExtra) > 0 {
@@ -283,12 +309,16 @@ func CoreFingerprintBreakdown(cfg Config) map[string]string {
 	}
 }
 
-// LogCoreFingerprintDrift writes diagnostic output when config-drift is
-// detected, showing per-field hash breakdown and values for the current
-// config. Compare against stored breakdown (from session start metadata)
-// to identify which field changed.
-func LogCoreFingerprintDrift(w io.Writer, name string, storedBreakdown map[string]string, current Config) {
-	currentBreakdown := CoreFingerprintBreakdown(current)
+// CoreFingerprintDriftFields returns sorted core fingerprint field names whose
+// current hashes differ from the stored per-field breakdown.
+func CoreFingerprintDriftFields(storedBreakdown map[string]string, current Config) []string {
+	if len(storedBreakdown) == 0 {
+		return nil
+	}
+	return coreFingerprintDriftFields(storedBreakdown, CoreFingerprintBreakdown(current))
+}
+
+func coreFingerprintDriftFields(storedBreakdown, currentBreakdown map[string]string) []string {
 	var diffs []string
 	for field, ch := range currentBreakdown {
 		sh := storedBreakdown[field]
@@ -297,6 +327,16 @@ func LogCoreFingerprintDrift(w io.Writer, name string, storedBreakdown map[strin
 		}
 	}
 	sort.Strings(diffs)
+	return diffs
+}
+
+// LogCoreFingerprintDrift writes diagnostic output when config-drift is
+// detected, showing per-field hash breakdown and values for the current
+// config. Compare against stored breakdown (from session start metadata)
+// to identify which field changed.
+func LogCoreFingerprintDrift(w io.Writer, name string, storedBreakdown map[string]string, current Config) {
+	currentBreakdown := CoreFingerprintBreakdown(current)
+	diffs := coreFingerprintDriftFields(storedBreakdown, currentBreakdown)
 	if len(diffs) == 0 {
 		// No stored breakdown available or all fields match — log full breakdown.
 		if len(storedBreakdown) == 0 {
@@ -314,6 +354,8 @@ func LogCoreFingerprintDrift(w io.Writer, name string, storedBreakdown map[strin
 			fmt.Fprintf(w, "    Command: %q\n", current.Command) //nolint:errcheck // best-effort diag
 		case "Env":
 			fmt.Fprintf(w, "    Env: %v\n", filteredEnv(current.Env)) //nolint:errcheck // best-effort diag
+		case "MCPServers":
+			fmt.Fprintf(w, "    MCPServers: %+v\n", NormalizeMCPServerConfigs(current.MCPServers)) //nolint:errcheck // best-effort diag
 		case "FPExtra":
 			fmt.Fprintf(w, "    FPExtra: %v (len=%d)\n", current.FingerprintExtra, len(current.FingerprintExtra)) //nolint:errcheck // best-effort diag
 		case "PreStart":

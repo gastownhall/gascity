@@ -21,7 +21,7 @@ import (
 
 func preferRealBDOnPath(t *testing.T) {
 	t.Helper()
-	skipSlowCmdGCTest(t, "requires a live bd-managed session probe; run without -short")
+	skipSlowCmdGCTest(t, "requires a live bd-managed session probe; run make test-cmd-gc-process for full coverage")
 
 	currentPath := os.Getenv("PATH")
 	pathEntries := filepath.SplitList(currentPath)

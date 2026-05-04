@@ -1,7 +1,7 @@
 description = """
 Refinery patrol loop. Poured as a root-only wisp on startup:
 
-  gc bd mol wisp mol-refinery-patrol --root-only
+  gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}}
   gc bd update $WISP --assignee=$GC_AGENT
 
 Each wisp is ONE iteration: check for work, merge one branch, pour
@@ -167,13 +167,13 @@ gc workflow delete-source $WORK --apply && gc workflow reopen-source $WORK
 ```bash
 gc bd update $WORK \
   --set-metadata rejection_reason="Conflicts with $TARGET at $(git rev-parse origin/$TARGET)" \
-  --set-metadata gc.routed_to=<rig>/polecat
+  --set-metadata gc.routed_to={{rig_name}}/{{binding_prefix}}polecat
 ```
 4. Do NOT delete the branch (new polecat needs it for conflict resolution).
 5. Clean up temp branch: `git checkout {{target_branch}} && git branch -D temp`
 6. Pour next patrol iteration before burning:
 ```bash
-NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --json | jq -r '.new_epic_id')
+NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id')
 gc bd update "$NEXT" --assignee=$GC_AGENT
 ```
 7. Burn this wisp: `gc bd mol burn <wisp-id> --force`
@@ -242,7 +242,7 @@ TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{target_bran
    - Clean up: `git checkout "$TARGET" && git branch -D temp`
    - Pour next patrol iteration before burning:
      ```bash
-     NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --json | jq -r '.new_epic_id')
+     NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id')
      gc bd update "$NEXT" --assignee=$GC_AGENT
      ```
    - Burn this wisp: `gc bd mol burn <wisp-id> --force`
@@ -297,7 +297,7 @@ Work bead: $WORK
 Existing PR: $EXISTING_PR
 Branch: $BRANCH
 Target: $TARGET"
-  NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --json | jq -r '.new_epic_id')
+  NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id')
   gc bd update "$NEXT" --assignee=$GC_AGENT
   CURRENT_WISP=${GC_BEAD_ID:-}
   if [ -n "$CURRENT_WISP" ]; then
@@ -600,7 +600,7 @@ If auto_land = "false": skip this entirely.
 
 **2. Pour next iteration:**
 ```bash
-NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --json | jq -r '.new_epic_id')
+NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id')
 gc bd update "$NEXT" --assignee=$GC_AGENT
 ```
 

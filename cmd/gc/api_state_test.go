@@ -3,12 +3,16 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
@@ -134,6 +138,696 @@ func TestControllerStateUpdate(t *testing.T) {
 	}
 }
 
+func TestControllerStateRuntimeUpdateDoesNotDropPendingMutationRigs(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"city1\"\n\n[beads]\nprovider = \"file\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	current := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+		Rigs:      []config.Rig{{Name: "alpha", Path: t.TempDir()}},
+	}
+	stale := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+	}
+
+	cs := newControllerState(context.Background(), current, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	cs.markConfigMutationPending("current-rev")
+
+	cs.updateFromRuntime(stale, runtime.NewFake(), "stale-rev")
+
+	if got := cs.Config(); got != current {
+		t.Fatalf("Config() = %+v, want pending mutation config with rig alpha", got)
+	}
+	if !cs.configMutationPending.Load() {
+		t.Fatal("pending mutation marker cleared by stale runtime update")
+	}
+
+	cs.updateFromRuntime(current, runtime.NewFake(), "current-rev")
+
+	if cs.configMutationPending.Load() {
+		t.Fatal("pending mutation marker not cleared after matching runtime update")
+	}
+}
+
+func TestControllerStateRuntimeUpdateDoesNotDropPendingMutationAgents(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"city1\"\n\n[beads]\nprovider = \"file\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	rigDir := t.TempDir()
+	current := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+		Rigs:      []config.Rig{{Name: "alpha", Path: rigDir}},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "alpha", Provider: "bash"},
+			{Name: "helper", Dir: "alpha", Provider: "bash"},
+		},
+	}
+	stale := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+		Rigs:      []config.Rig{{Name: "alpha", Path: rigDir}},
+		Agents:    []config.Agent{{Name: "worker", Dir: "alpha", Provider: "bash"}},
+	}
+
+	cs := newControllerState(context.Background(), current, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	cs.markConfigMutationPending("current-rev")
+
+	cs.updateFromRuntime(stale, runtime.NewFake(), "stale-rev")
+
+	if got := cs.Config(); got != current {
+		t.Fatalf("Config() = %+v, want pending mutation config with helper agent", got)
+	}
+	if !cs.configMutationPending.Load() {
+		t.Fatal("pending mutation marker cleared by stale runtime update")
+	}
+
+	cs.updateFromRuntime(current, runtime.NewFake(), "current-rev")
+
+	if got := cs.Config(); got != current {
+		t.Fatalf("Config() = %+v, want matching runtime config applied", got)
+	}
+	if cs.configMutationPending.Load() {
+		t.Fatal("pending mutation marker not cleared after matching runtime update")
+	}
+}
+
+func TestControllerStateRuntimeUpdateIgnoresEmptyRevisionDuringPendingMutation(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"city1\"\n\n[beads]\nprovider = \"file\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	rigDir := t.TempDir()
+	current := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+		Rigs:      []config.Rig{{Name: "alpha", Path: rigDir}},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "alpha", Provider: "bash"},
+			{Name: "helper", Dir: "alpha", Provider: "bash"},
+		},
+	}
+	stale := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+		Rigs:      []config.Rig{{Name: "alpha", Path: rigDir}},
+		Agents:    []config.Agent{{Name: "worker", Dir: "alpha", Provider: "bash"}},
+	}
+
+	cs := newControllerState(context.Background(), current, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	cs.markConfigMutationPending("current-rev")
+
+	cs.updateFromRuntime(stale, runtime.NewFake(), "")
+
+	if got := cs.Config(); got != current {
+		t.Fatalf("Config() = %+v, want pending mutation config with helper agent", got)
+	}
+	if !cs.configMutationPending.Load() {
+		t.Fatal("pending mutation marker cleared by empty-revision runtime update")
+	}
+}
+
+func TestControllerStateRuntimeUpdateAcceptsBuiltinAwareRevision(t *testing.T) {
+	configureTestDoltIdentityEnv(t)
+	t.Setenv("GC_BEADS", "")
+
+	cityDir := shortSocketTempDir(t, "gc-state-runtime-builtin-")
+	tomlPath := filepath.Join(cityDir, "city.toml")
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
+		t.Fatalf("write initial city.toml: %v", err)
+	}
+
+	initial, err := tryReloadConfig(tomlPath, "test", cityDir)
+	if err != nil {
+		t.Fatalf("initial tryReloadConfig: %v", err)
+	}
+	applyRuntimeCityIdentity(initial.Cfg, "test")
+	cs := newControllerState(context.Background(), initial.Cfg, runtime.NewFake(), events.NewFake(), "test", cityDir)
+
+	rigDir := t.TempDir()
+	updatedToml := fmt.Sprintf("[workspace]\nname = \"test\"\n\n[[rigs]]\nname = \"alpha\"\npath = %q\n", rigDir)
+	if err := os.WriteFile(tomlPath, []byte(updatedToml), 0o644); err != nil {
+		t.Fatalf("write updated city.toml: %v", err)
+	}
+	reloaded, err := tryReloadConfig(tomlPath, "test", cityDir)
+	if err != nil {
+		t.Fatalf("reloaded tryReloadConfig: %v", err)
+	}
+	applyRuntimeCityIdentity(reloaded.Cfg, "test")
+
+	cs.updateFromRuntime(reloaded.Cfg, runtime.NewFake(), reloaded.Revision)
+
+	if got := cs.Config().Rigs; len(got) != 1 || got[0].Name != "alpha" {
+		t.Fatalf("runtime update was not accepted; rigs = %#v", got)
+	}
+	requireControllerStateOrder(t, cs, "gate-sweep")
+}
+
+func TestControllerStateMutationRefreshKeepsBuiltinOrdersAndClearsPending(t *testing.T) {
+	configureTestDoltIdentityEnv(t)
+	t.Setenv("GC_BEADS", "")
+
+	cityDir := shortSocketTempDir(t, "gc-state-mutation-builtin-")
+	tomlPath := filepath.Join(cityDir, "city.toml")
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	initial, err := tryReloadConfig(tomlPath, "test", cityDir)
+	if err != nil {
+		t.Fatalf("tryReloadConfig: %v", err)
+	}
+	applyRuntimeCityIdentity(initial.Cfg, "test")
+	cs := newControllerState(context.Background(), initial.Cfg, runtime.NewFake(), events.NewFake(), "test", cityDir)
+
+	if err := cs.EnableOrder("gate-sweep", ""); err != nil {
+		t.Fatalf("EnableOrder: %v", err)
+	}
+	requireControllerStateOrder(t, cs, "gate-sweep")
+	if !cs.configMutationPending.Load() {
+		t.Fatal("pending mutation marker was not set")
+	}
+
+	reloaded, err := tryReloadConfig(tomlPath, "test", cityDir)
+	if err != nil {
+		t.Fatalf("tryReloadConfig after mutation: %v", err)
+	}
+	applyRuntimeCityIdentity(reloaded.Cfg, "test")
+	cs.updateFromRuntime(reloaded.Cfg, runtime.NewFake(), reloaded.Revision)
+
+	if cs.configMutationPending.Load() {
+		t.Fatal("pending mutation marker was not cleared by matching runtime update")
+	}
+	requireControllerStateOrder(t, cs, "gate-sweep")
+}
+
+func requireControllerStateOrder(t *testing.T, cs *controllerState, want string) {
+	t.Helper()
+
+	for _, order := range cs.Orders() {
+		if order.Name == want {
+			return
+		}
+	}
+	t.Fatalf("Orders() missing %q", want)
+}
+
+func TestControllerStateRuntimeUpdateAfterMutationPreservesCurrentStores(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "alpha")
+	current := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+		Rigs: []config.Rig{{
+			Name:   "alpha",
+			Path:   rigDir,
+			Prefix: "al",
+		}},
+	}
+	rigStore := beads.NewMemStore()
+	cityStore := beads.NewMemStore()
+	cs := &controllerState{
+		cfg:           current,
+		sp:            runtime.NewFake(),
+		beadStores:    map[string]beads.Store{"alpha": rigStore},
+		cityBeadStore: cityStore,
+		cityName:      "city1",
+		cityPath:      cityDir,
+	}
+	cs.markConfigMutationPending("next-rev")
+
+	next := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+		Rigs: []config.Rig{{
+			Name:   "alpha",
+			Path:   rigDir,
+			Prefix: "al",
+		}},
+	}
+	cs.updateFromRuntime(next, runtime.NewFake(), "next-rev")
+
+	if got := cs.BeadStore("alpha"); got != rigStore {
+		t.Fatalf("BeadStore(alpha) = %T %p, want original store %T %p", got, got, rigStore, rigStore)
+	}
+	if got := cs.CityBeadStore(); got != cityStore {
+		t.Fatalf("CityBeadStore() = %T %p, want original store %T %p", got, got, cityStore, cityStore)
+	}
+	if cs.Config() != next {
+		t.Fatal("Config() was not advanced to runtime snapshot")
+	}
+	if cs.configMutationPending.Load() {
+		t.Fatal("pending mutation marker not cleared after matching runtime update")
+	}
+}
+
+func TestControllerStateRuntimeUpdatePreservesCurrentStoresWithoutPendingMutation(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "alpha")
+	current := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+		Rigs: []config.Rig{{
+			Name:   "alpha",
+			Path:   rigDir,
+			Prefix: "al",
+		}},
+	}
+	rigStore := beads.NewMemStore()
+	cityStore := beads.NewMemStore()
+	cs := &controllerState{
+		cfg:           current,
+		sp:            runtime.NewFake(),
+		beadStores:    map[string]beads.Store{"alpha": rigStore},
+		cityBeadStore: cityStore,
+		cityName:      "city1",
+		cityPath:      cityDir,
+	}
+
+	next := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+		Rigs: []config.Rig{{
+			Name:   "alpha",
+			Path:   rigDir,
+			Prefix: "al",
+		}},
+	}
+	nextProvider := runtime.NewFake()
+	cs.updateFromRuntime(next, nextProvider, "")
+
+	if got := cs.BeadStore("alpha"); got != rigStore {
+		t.Fatalf("BeadStore(alpha) = %T %p, want original store %T %p", got, got, rigStore, rigStore)
+	}
+	if got := cs.CityBeadStore(); got != cityStore {
+		t.Fatalf("CityBeadStore() = %T %p, want original store %T %p", got, got, cityStore, cityStore)
+	}
+	if cs.Config() != next {
+		t.Fatal("Config() was not advanced to runtime snapshot")
+	}
+	if cs.SessionProvider() != nextProvider {
+		t.Fatal("SessionProvider() was not advanced to runtime provider")
+	}
+}
+
+func TestControllerStateRuntimeUpdateIgnoresStaleRevisionWithoutPendingMutation(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "alpha")
+	cityToml := fmt.Sprintf(`[workspace]
+name = "city1"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "alpha"
+path = %q
+prefix = "al"
+
+[[agent]]
+name = "worker"
+dir = "alpha"
+provider = "bash"
+`, rigDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	current := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Rigs: []config.Rig{{
+			Name:   "alpha",
+			Path:   rigDir,
+			Prefix: "al",
+		}},
+		Agents: []config.Agent{{Name: "worker", Dir: "alpha", Provider: "bash"}},
+	}
+	stale := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Rigs: []config.Rig{{
+			Name:   "alpha",
+			Path:   rigDir,
+			Prefix: "al",
+		}},
+	}
+	originalProvider := runtime.NewFake()
+	cs := newControllerState(context.Background(), current, originalProvider, events.NewFake(), "city1", cityDir)
+
+	cs.updateFromRuntime(stale, runtime.NewFake(), "stale-rev")
+
+	if got := cs.Config(); got != current {
+		t.Fatalf("Config() = %+v, want current config with worker agent", got)
+	}
+	if cs.SessionProvider() != originalProvider {
+		t.Fatal("SessionProvider() advanced for stale runtime update")
+	}
+	if cs.configMutationPending.Load() {
+		t.Fatal("pending mutation marker set by stale runtime update")
+	}
+}
+
+func TestControllerStateCreateRigPokesReconciler(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+	}
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	cs.pokeCh = make(chan struct{}, 1)
+	cs.configDirty = &atomic.Bool{}
+
+	if err := cs.CreateRig(config.Rig{Name: "rig1", Path: t.TempDir()}); err != nil {
+		t.Fatalf("CreateRig: %v", err)
+	}
+
+	select {
+	case <-cs.pokeCh:
+	default:
+		t.Fatal("CreateRig did not poke the reconciler")
+	}
+	if !cs.configDirty.Load() {
+		t.Fatal("CreateRig did not mark config dirty")
+	}
+	if got := cs.Config(); got == nil || len(got.Rigs) != 1 || got.Rigs[0].Name != "rig1" {
+		t.Fatalf("Config() rigs = %+v, want in-memory rig snapshot to include rig1", got.Rigs)
+	}
+}
+
+func TestControllerStateCreateRigInitializesStoreBeforePublishing(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatalf("enable scoped file store layout: %v", err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
+		t.Fatalf("init city store: %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+	}
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+
+	rigDir := filepath.Join(cityDir, "alpha")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("mkdir rig: %v", err)
+	}
+	if err := cs.CreateRig(config.Rig{Name: "alpha", Path: rigDir, Prefix: "al"}); err != nil {
+		t.Fatalf("CreateRig: %v", err)
+	}
+
+	store := cs.BeadStore("alpha")
+	if store == nil {
+		t.Fatal("BeadStore(alpha) = nil")
+	}
+	created, err := store.Create(beads.Bead{Title: "first rig bead", Type: "task"})
+	if err != nil {
+		t.Fatalf("newly published rig store Create: %v", err)
+	}
+	if _, err := store.Get(created.ID); err != nil {
+		t.Fatalf("newly published rig store Get(%q): %v", created.ID, err)
+	}
+}
+
+func TestControllerStateMutationRollsBackWhenRefreshFails(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "broken.toml"), []byte("["), 0o644); err != nil {
+		t.Fatalf("write broken include: %v", err)
+	}
+
+	original := []byte("include = [\"broken.toml\"]\n\n[workspace]\nname = \"city1\"\n")
+	tomlPath := filepath.Join(cityDir, "city.toml")
+	if err := os.WriteFile(tomlPath, original, 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+	}
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	cs.pokeCh = make(chan struct{}, 1)
+	cs.configDirty = &atomic.Bool{}
+
+	err := cs.CreateRig(config.Rig{Name: "rig1", Path: t.TempDir()})
+	if err == nil {
+		t.Fatal("CreateRig should fail when refreshing the updated snapshot fails")
+	}
+
+	restored, readErr := os.ReadFile(tomlPath)
+	if readErr != nil {
+		t.Fatalf("read restored city.toml: %v", readErr)
+	}
+	if string(restored) != string(original) {
+		t.Fatalf("city.toml = %q, want rollback to %q", restored, original)
+	}
+	if _, err := os.Stat(filepath.Join(cityDir, ".gc", "site.toml")); !os.IsNotExist(err) {
+		t.Fatalf(".gc/site.toml stat err = %v, want file removed on rollback", err)
+	}
+
+	select {
+	case <-cs.pokeCh:
+		t.Fatal("CreateRig should not poke the reconciler after rollback")
+	default:
+	}
+	if cs.configDirty.Load() {
+		t.Fatal("CreateRig should not mark config dirty after rollback")
+	}
+	if got := cs.Config(); got == nil || len(got.Rigs) != 0 {
+		t.Fatalf("Config() rigs = %+v, want rollback to preserve in-memory config", got.Rigs)
+	}
+}
+
+func TestControllerStateMutationRollsBackAgentOverrideWhenRefreshFails(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "broken.toml"), []byte("["), 0o644); err != nil {
+		t.Fatalf("write broken include: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("[pack]\nname = \"city1\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatalf("write pack.toml: %v", err)
+	}
+	agentDir := filepath.Join(cityDir, "agents", "worker")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatalf("mkdir agent dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "prompt.template.md"), []byte("You are the worker.\n"), 0o644); err != nil {
+		t.Fatalf("write prompt template: %v", err)
+	}
+
+	original := []byte("include = [\"broken.toml\"]\n\n[workspace]\nname = \"city1\"\n")
+	tomlPath := filepath.Join(cityDir, "city.toml")
+	if err := os.WriteFile(tomlPath, original, 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	cs := newControllerState(context.Background(), &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+	}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	cs.pokeCh = make(chan struct{}, 1)
+	cs.configDirty = &atomic.Bool{}
+
+	err := cs.SuspendAgent("worker")
+	if err == nil {
+		t.Fatal("SuspendAgent should fail when refreshing the updated snapshot fails")
+	}
+
+	if _, err := os.Stat(filepath.Join(agentDir, "agent.toml")); !os.IsNotExist(err) {
+		t.Fatalf("agent.toml stat err = %v, want file removed on rollback", err)
+	}
+	restored, readErr := os.ReadFile(tomlPath)
+	if readErr != nil {
+		t.Fatalf("read restored city.toml: %v", readErr)
+	}
+	if string(restored) != string(original) {
+		t.Fatalf("city.toml = %q, want rollback to %q", restored, original)
+	}
+	if cs.configDirty.Load() {
+		t.Fatal("SuspendAgent should not mark config dirty after rollback")
+	}
+}
+
+func TestControllerStateAppliesCacheReconcileBeadEventsToStores(t *testing.T) {
+	backing := beads.NewMemStore()
+	created, err := backing.Create(beads.Bead{Title: "root"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cached := beads.NewCachingStoreForTest(backing, nil)
+	if err := cached.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	updated := created
+	updated.Status = "in_progress"
+	payload, err := json.Marshal(updated)
+	if err != nil {
+		t.Fatalf("marshal updated bead: %v", err)
+	}
+	cs := &controllerState{
+		beadStores: map[string]beads.Store{"alpha": cached},
+		pokeCh:     make(chan struct{}, 1),
+	}
+
+	cs.applyBeadEventToStores(events.Event{
+		Type:    events.BeadUpdated,
+		Actor:   "cache-reconcile",
+		Subject: created.ID,
+		Payload: payload,
+	})
+
+	items, err := cached.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != created.ID {
+		t.Fatalf("cached items = %+v, want only %s", items, created.ID)
+	}
+	if items[0].Status != "in_progress" {
+		t.Fatalf("status after cache-reconcile event = %q, want in_progress", items[0].Status)
+	}
+}
+
+func TestControllerStateBeadEventsRespectStorePrefixes(t *testing.T) {
+	cityBacking := beads.NewMemStore()
+	rigBacking := beads.NewMemStore()
+	cityCache := beads.NewCachingStoreForTestWithPrefix(cityBacking, "mc", nil)
+	rigCache := beads.NewCachingStoreForTestWithPrefix(rigBacking, "ga", nil)
+	for name, cache := range map[string]*beads.CachingStore{
+		"city": cityCache,
+		"rig":  rigCache,
+	} {
+		if err := cache.Prime(context.Background()); err != nil {
+			t.Fatalf("Prime(%s): %v", name, err)
+		}
+	}
+
+	payload, err := json.Marshal(beads.Bead{
+		ID:     "mc-source",
+		Title:  "city source",
+		Status: "open",
+	})
+	if err != nil {
+		t.Fatalf("marshal city bead: %v", err)
+	}
+	cs := &controllerState{
+		cityBeadStore: cityCache,
+		beadStores:    map[string]beads.Store{"gascity": rigCache},
+		pokeCh:        make(chan struct{}, 1),
+	}
+
+	cs.applyBeadEventToStores(events.Event{
+		Type:    events.BeadCreated,
+		Actor:   "bd-hook",
+		Subject: "mc-source",
+		Payload: payload,
+	})
+
+	cityItems, err := cityCache.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("List city cache: %v", err)
+	}
+	if len(cityItems) != 1 || cityItems[0].ID != "mc-source" {
+		t.Fatalf("city cache items = %+v, want mc-source", cityItems)
+	}
+	rigItems, err := rigCache.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("List rig cache: %v", err)
+	}
+	if len(rigItems) != 0 {
+		t.Fatalf("rig cache items = %+v, want no city bead", rigItems)
+	}
+
+	payload, err = json.Marshal(beads.Bead{
+		ID:     "ga-rig",
+		Title:  "rig work",
+		Status: "open",
+	})
+	if err != nil {
+		t.Fatalf("marshal rig bead: %v", err)
+	}
+
+	cs.applyBeadEventToStores(events.Event{
+		Type:    events.BeadCreated,
+		Actor:   "bd-hook",
+		Subject: "ga-rig",
+		Payload: payload,
+	})
+
+	cityItems, err = cityCache.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("List city cache after rig event: %v", err)
+	}
+	if len(cityItems) != 1 || cityItems[0].ID != "mc-source" {
+		t.Fatalf("city cache items after rig event = %+v, want only mc-source", cityItems)
+	}
+	rigItems, err = rigCache.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("List rig cache after rig event: %v", err)
+	}
+	if len(rigItems) != 1 || rigItems[0].ID != "ga-rig" {
+		t.Fatalf("rig cache items after rig event = %+v, want ga-rig", rigItems)
+	}
+}
+
+func TestControllerStateBeadEventsUseScopePrefixWhenConfiguredPrefixDrifts(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rigs", "repo")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte("issue_prefix: repo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "repo", Path: "rigs/repo", Prefix: "ga"}}}
+	bdStore := bdStoreForRig(rigDir, cityDir, cfg, cfg.Rigs[0].EffectivePrefix())
+	rigCache := beads.NewCachingStoreForTestWithPrefix(beads.NewMemStore(), bdStore.IDPrefix(), nil)
+	if err := rigCache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime rig cache: %v", err)
+	}
+
+	payload, err := json.Marshal(beads.Bead{
+		ID:     "repo-owned",
+		Title:  "rig-owned work",
+		Status: "open",
+	})
+	if err != nil {
+		t.Fatalf("marshal rig bead: %v", err)
+	}
+	cs := &controllerState{
+		beadStores: map[string]beads.Store{"repo": rigCache},
+		pokeCh:     make(chan struct{}, 1),
+	}
+
+	cs.applyBeadEventToStores(events.Event{
+		Type:    events.BeadCreated,
+		Actor:   "bd-hook",
+		Subject: "repo-owned",
+		Payload: payload,
+	})
+
+	rigItems, err := rigCache.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("List rig cache: %v", err)
+	}
+	if len(rigItems) != 1 || rigItems[0].ID != "repo-owned" {
+		t.Fatalf("rig cache items = %+v, want repo-owned", rigItems)
+	}
+}
+
 func TestControllerStateBuildStoresUsesScopeLocalFileStores(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 
@@ -188,6 +882,80 @@ func TestControllerStateBuildStoresUsesScopeLocalFileStores(t *testing.T) {
 	}
 	if len(rigList) != 1 || rigList[0].Title != "rig bead" {
 		t.Fatalf("rig store should still contain only its own bead, got %#v", rigList)
+	}
+}
+
+func TestControllerStateAppliesBeadEventsOnlyToOwningCache(t *testing.T) {
+	cityBacking := beads.NewMemStore()
+	rigBacking := beads.NewMemStore()
+	cityStore := beads.NewCachingStoreForTest(cityBacking, nil)
+	rigStore := beads.NewCachingStoreForTest(rigBacking, nil)
+	if err := cityStore.Prime(context.Background()); err != nil {
+		t.Fatalf("city Prime: %v", err)
+	}
+	if err := rigStore.Prime(context.Background()); err != nil {
+		t.Fatalf("rig Prime: %v", err)
+	}
+
+	cs := &controllerState{
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city", Prefix: "ct"},
+			Rigs:      []config.Rig{{Name: "rig1", Prefix: "rw"}},
+		},
+		cityName:      "test-city",
+		cityBeadStore: cityStore,
+		beadStores:    map[string]beads.Store{"rig1": rigStore},
+	}
+
+	cs.applyBeadEventToStores(events.Event{
+		Type:    events.BeadCreated,
+		Subject: "rw-1",
+		Payload: json.RawMessage(`{"id":"rw-1","title":"rig bead","status":"open","issue_type":"task","created_at":"2026-04-26T21:37:46Z"}`),
+	})
+
+	if _, err := cityStore.Get("rw-1"); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("city cache Get(rw-1) error = %v, want ErrNotFound", err)
+	}
+	if got, err := rigStore.Get("rw-1"); err != nil {
+		t.Fatalf("rig cache Get(rw-1): %v", err)
+	} else if got.Title != "rig bead" {
+		t.Fatalf("rig cache title = %q, want rig bead", got.Title)
+	}
+}
+
+func TestControllerStateAppliesHyphenatedPrefixEventsOnlyToOwningCache(t *testing.T) {
+	cityStore := beads.NewCachingStoreForTest(beads.NewMemStore(), nil)
+	rigStore := beads.NewCachingStoreForTest(beads.NewMemStore(), nil)
+	if err := cityStore.Prime(context.Background()); err != nil {
+		t.Fatalf("city Prime: %v", err)
+	}
+	if err := rigStore.Prime(context.Background()); err != nil {
+		t.Fatalf("rig Prime: %v", err)
+	}
+
+	cs := &controllerState{
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city", Prefix: "mlcm"},
+			Rigs:      []config.Rig{{Name: "rig1", Prefix: "mc-mogbzvrs"}},
+		},
+		cityName:      "test-city",
+		cityBeadStore: cityStore,
+		beadStores:    map[string]beads.Store{"rig1": rigStore},
+	}
+
+	cs.applyBeadEventToStores(events.Event{
+		Type:    events.BeadCreated,
+		Subject: "mc-mogbzvrs-hiv.1",
+		Payload: json.RawMessage(`{"id":"mc-mogbzvrs-hiv.1","title":"rig bead","status":"open","issue_type":"task","created_at":"2026-04-26T21:37:46Z"}`),
+	})
+
+	if _, err := cityStore.Get("mc-mogbzvrs-hiv.1"); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("city cache Get(hyphenated rig bead) error = %v, want ErrNotFound", err)
+	}
+	if got, err := rigStore.Get("mc-mogbzvrs-hiv.1"); err != nil {
+		t.Fatalf("rig cache Get(hyphenated rig bead): %v", err)
+	} else if got.Title != "rig bead" {
+		t.Fatalf("rig cache title = %q, want rig bead", got.Title)
 	}
 }
 
@@ -408,7 +1176,7 @@ func TestControllerStateOpenRigStoreFileOpenErrorDoesNotFallbackToBd(t *testing.
 	}
 
 	cs := &controllerState{cityPath: cityDir}
-	store := cs.openRigStore("file", "rig1", rigDir, "rg")
+	store := cs.openRigStore("file", "rig1", rigDir, "rg", nil)
 	if _, ok := store.(*beads.BdStore); ok {
 		t.Fatalf("openRigStore returned %T, want file-open failure instead of bd fallback", store)
 	}
@@ -649,6 +1417,247 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "enable order",
+			mutate: func(cs *controllerState) error {
+				return cs.EnableOrder("nightly", "rig1")
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if len(cfg.Orders.Overrides) != 1 || cfg.Orders.Overrides[0].Name != "nightly" || cfg.Orders.Overrides[0].Rig != "rig1" {
+					t.Fatalf("order overrides = %+v, want nightly/rig1", cfg.Orders.Overrides)
+				}
+				if cfg.Orders.Overrides[0].Enabled == nil || !*cfg.Orders.Overrides[0].Enabled {
+					t.Fatalf("order override enabled = %v, want true", cfg.Orders.Overrides[0].Enabled)
+				}
+			},
+		},
+		{
+			name: "disable order",
+			mutate: func(cs *controllerState) error {
+				return cs.DisableOrder("nightly", "rig1")
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if len(cfg.Orders.Overrides) != 1 || cfg.Orders.Overrides[0].Enabled == nil || *cfg.Orders.Overrides[0].Enabled {
+					t.Fatalf("order overrides = %+v, want disabled nightly override", cfg.Orders.Overrides)
+				}
+			},
+		},
+		{
+			name: "create agent",
+			mutate: func(cs *controllerState) error {
+				return cs.CreateAgent(config.Agent{Name: "helper", Dir: "rig1", Provider: "codex"})
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if len(cfg.Agents) != 2 {
+					t.Fatalf("agents = %+v, want two", cfg.Agents)
+				}
+				if cfg.Agents[1].QualifiedName() != "rig1/helper" || cfg.Agents[1].Provider != "codex" {
+					t.Fatalf("created agent = %+v, want rig1/helper with codex provider", cfg.Agents[1])
+				}
+			},
+		},
+		{
+			name: "update agent",
+			mutate: func(cs *controllerState) error {
+				return cs.UpdateAgent("rig1/worker", api.AgentUpdate{Provider: "codex", Scope: "rig", Suspended: boolPtr(true)})
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if cfg.Agents[0].Provider != "codex" || cfg.Agents[0].Scope != "rig" || !cfg.Agents[0].Suspended {
+					t.Fatalf("updated agent = %+v, want provider/scope/suspended", cfg.Agents[0])
+				}
+			},
+		},
+		{
+			name: "delete agent",
+			mutate: func(cs *controllerState) error {
+				return cs.DeleteAgent("rig1/worker")
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if len(cfg.Agents) != 0 {
+					t.Fatalf("agents = %+v, want none", cfg.Agents)
+				}
+			},
+		},
+		{
+			name: "create rig",
+			mutate: func(cs *controllerState) error {
+				return cs.CreateRig(config.Rig{Name: "rig2", Path: t.TempDir(), Prefix: "r2"})
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if len(cfg.Rigs) != 2 {
+					t.Fatalf("rigs = %+v, want two", cfg.Rigs)
+				}
+				if cfg.Rigs[1].Name != "rig2" || cfg.Rigs[1].Prefix != "r2" {
+					t.Fatalf("created rig = %+v, want rig2/r2", cfg.Rigs[1])
+				}
+			},
+		},
+		{
+			name: "update rig",
+			mutate: func(cs *controllerState) error {
+				return cs.UpdateRig("rig1", api.RigUpdate{Path: t.TempDir(), Prefix: "rg", Suspended: boolPtr(true)})
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if cfg.Rigs[0].Prefix != "rg" || !cfg.Rigs[0].Suspended {
+					t.Fatalf("updated rig = %+v, want prefix/suspended", cfg.Rigs[0])
+				}
+			},
+		},
+		{
+			name: "delete rig",
+			mutate: func(cs *controllerState) error {
+				return cs.DeleteRig("rig1")
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if len(cfg.Rigs) != 0 || len(cfg.Agents) != 0 {
+					t.Fatalf("config after DeleteRig: rigs=%+v agents=%+v, want none", cfg.Rigs, cfg.Agents)
+				}
+			},
+		},
+		{
+			name: "create provider",
+			mutate: func(cs *controllerState) error {
+				return cs.CreateProvider("codex-local", config.ProviderSpec{Command: "codex", PromptMode: "arg"})
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				spec, ok := cfg.Providers["codex-local"]
+				if !ok || spec.Command != "codex" || spec.PromptMode != "arg" {
+					t.Fatalf("providers = %+v, want codex-local provider", cfg.Providers)
+				}
+			},
+		},
+		{
+			name: "update provider",
+			initial: func(cfg *config.City) {
+				cfg.Providers = map[string]config.ProviderSpec{"codex-local": {Command: "codex"}}
+			},
+			mutate: func(cs *controllerState) error {
+				return cs.UpdateProvider("codex-local", api.ProviderUpdate{
+					DisplayName:  stringPtr("Codex Local"),
+					Command:      stringPtr("codex-wrapper"),
+					Args:         []string{"--quiet"},
+					PromptMode:   stringPtr("flag"),
+					PromptFlag:   stringPtr("--prompt"),
+					ReadyDelayMs: intPtr(25),
+					Env:          map[string]string{"GC_TEST": "1"},
+				})
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				spec := cfg.Providers["codex-local"]
+				if spec.DisplayName != "Codex Local" || spec.Command != "codex-wrapper" || spec.PromptMode != "flag" || spec.PromptFlag != "--prompt" || spec.ReadyDelayMs != 25 {
+					t.Fatalf("updated provider = %+v, want scalar updates", spec)
+				}
+				if len(spec.Args) != 1 || spec.Args[0] != "--quiet" || spec.Env["GC_TEST"] != "1" {
+					t.Fatalf("updated provider args/env = args:%+v env:%+v, want replacement args and merged env", spec.Args, spec.Env)
+				}
+			},
+		},
+		{
+			name: "delete provider",
+			initial: func(cfg *config.City) {
+				cfg.Providers = map[string]config.ProviderSpec{"codex-local": {Command: "codex"}}
+			},
+			mutate: func(cs *controllerState) error {
+				return cs.DeleteProvider("codex-local")
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if len(cfg.Providers) != 0 {
+					t.Fatalf("providers = %+v, want none", cfg.Providers)
+				}
+			},
+		},
+		{
+			name: "set agent patch",
+			mutate: func(cs *controllerState) error {
+				return cs.SetAgentPatch(config.AgentPatch{Dir: "rig1", Name: "worker", Suspended: boolPtr(true)})
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if len(cfg.Patches.Agents) != 1 || cfg.Patches.Agents[0].Suspended == nil || !*cfg.Patches.Agents[0].Suspended {
+					t.Fatalf("agent patches = %+v, want suspended patch", cfg.Patches.Agents)
+				}
+			},
+		},
+		{
+			name: "delete agent patch",
+			initial: func(cfg *config.City) {
+				cfg.Patches.Agents = []config.AgentPatch{{Dir: "rig1", Name: "worker", Suspended: boolPtr(true)}}
+			},
+			mutate: func(cs *controllerState) error {
+				return cs.DeleteAgentPatch("rig1/worker")
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if len(cfg.Patches.Agents) != 0 {
+					t.Fatalf("agent patches = %+v, want none", cfg.Patches.Agents)
+				}
+			},
+		},
+		{
+			name: "set rig patch",
+			mutate: func(cs *controllerState) error {
+				return cs.SetRigPatch(config.RigPatch{Name: "rig1", Prefix: stringPtr("rp")})
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if len(cfg.Patches.Rigs) != 1 || cfg.Patches.Rigs[0].Prefix == nil || *cfg.Patches.Rigs[0].Prefix != "rp" {
+					t.Fatalf("rig patches = %+v, want prefix patch", cfg.Patches.Rigs)
+				}
+			},
+		},
+		{
+			name: "delete rig patch",
+			initial: func(cfg *config.City) {
+				cfg.Patches.Rigs = []config.RigPatch{{Name: "rig1", Prefix: stringPtr("rp")}}
+			},
+			mutate: func(cs *controllerState) error {
+				return cs.DeleteRigPatch("rig1")
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if len(cfg.Patches.Rigs) != 0 {
+					t.Fatalf("rig patches = %+v, want none", cfg.Patches.Rigs)
+				}
+			},
+		},
+		{
+			name: "set provider patch",
+			mutate: func(cs *controllerState) error {
+				return cs.SetProviderPatch(config.ProviderPatch{Name: "codex-local", Command: stringPtr("codex-wrapper")})
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if len(cfg.Patches.Providers) != 1 || cfg.Patches.Providers[0].Command == nil || *cfg.Patches.Providers[0].Command != "codex-wrapper" {
+					t.Fatalf("provider patches = %+v, want command patch", cfg.Patches.Providers)
+				}
+			},
+		},
+		{
+			name: "delete provider patch",
+			initial: func(cfg *config.City) {
+				cfg.Patches.Providers = []config.ProviderPatch{{Name: "codex-local", Command: stringPtr("codex-wrapper")}}
+			},
+			mutate: func(cs *controllerState) error {
+				return cs.DeleteProviderPatch("codex-local")
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if len(cfg.Patches.Providers) != 0 {
+					t.Fatalf("provider patches = %+v, want none", cfg.Patches.Providers)
+				}
+			},
+		},
 	}
 
 	for _, tc := range cases {
@@ -677,6 +1686,9 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 			case <-cs.pokeCh:
 			default:
 				t.Fatal("expected controller mutation to poke reconciler")
+			}
+			if cs.configDirty == nil || !cs.configDirty.Load() {
+				t.Fatal("expected controller mutation to mark config dirty")
 			}
 
 			got, err := config.Load(fsys.OSFS{}, tomlPath)
@@ -767,8 +1779,9 @@ func newControllerStateMutationHarness(t *testing.T) (*controllerState, string) 
 	}
 
 	return &controllerState{
-		editor: configedit.NewEditor(fsys.OSFS{}, tomlPath),
-		pokeCh: make(chan struct{}, 1),
+		editor:      configedit.NewEditor(fsys.OSFS{}, tomlPath),
+		pokeCh:      make(chan struct{}, 1),
+		configDirty: &atomic.Bool{},
 	}, tomlPath
 }
 
@@ -898,6 +1911,62 @@ func TestBuildStores_ExecProviderSetsPerRigEnv(t *testing.T) {
 		t.Errorf("regression: alpha and bravo exec stores received the same "+
 			"GC_BEADS_PREFIX=%q — store identity is not being propagated per rig",
 			alphaPrefix)
+	}
+}
+
+func TestBuildStoresBdProviderUsesPassedConfigForRigEnv(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "alpha")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	capturePath := filepath.Join(t.TempDir(), "bd.env")
+	binDir := t.TempDir()
+	fakeBD := filepath.Join(binDir, "bd")
+	script := "#!/bin/sh\n" +
+		"printf 'GC_RIG=%s\\nGC_RIG_ROOT=%s\\nBEADS_DIR=%s\\n' \"${GC_RIG:-}\" \"${GC_RIG_ROOT:-}\" \"${BEADS_DIR:-}\" > \"$BD_ENV_CAPTURE\"\n" +
+		"printf '[]\\n'\n"
+	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_ENV_CAPTURE", capturePath)
+	t.Setenv("GC_BEADS", "bd")
+
+	staleCfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	nextCfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{{
+			Name:   "alpha",
+			Path:   rigDir,
+			Prefix: "al",
+		}},
+	}
+	cs := &controllerState{
+		cfg:      staleCfg,
+		cityName: "test-city",
+		cityPath: cityDir,
+	}
+
+	stores := cs.buildStores(nextCfg)
+	if stores["alpha"] == nil {
+		t.Fatal("buildStores did not create alpha store")
+	}
+
+	data, err := os.ReadFile(capturePath)
+	if err != nil {
+		t.Fatalf("read captured bd env: %v", err)
+	}
+	env := string(data)
+	if !strings.Contains(env, "GC_RIG=alpha\n") {
+		t.Fatalf("captured env missing GC_RIG=alpha; got:\n%s", env)
+	}
+	if !strings.Contains(env, "GC_RIG_ROOT="+rigDir+"\n") {
+		t.Fatalf("captured env missing rig root %q; got:\n%s", rigDir, env)
+	}
+	if !strings.Contains(env, "BEADS_DIR="+filepath.Join(rigDir, ".beads")+"\n") {
+		t.Fatalf("captured env missing rig BEADS_DIR; got:\n%s", env)
 	}
 }
 

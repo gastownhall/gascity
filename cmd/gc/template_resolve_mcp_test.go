@@ -90,6 +90,21 @@ args = ["notes-mcp"]
 		}
 	})
 
+	t.Run("non acp runtime excludes mcp servers", func(t *testing.T) {
+		agent := &config.Agent{Name: "mayor", Scope: "city", Provider: "gemini"}
+		tp, err := resolveTemplate(buildParams("tmux"), agent, agent.QualifiedName(), nil)
+		if err != nil {
+			t.Fatalf("resolveTemplate: %v", err)
+		}
+		if len(tp.MCPServers) != 0 {
+			t.Fatalf("TemplateParams.MCPServers len = %d, want 0", len(tp.MCPServers))
+		}
+		cfg := templateParamsToConfig(tp)
+		if len(cfg.MCPServers) != 0 {
+			t.Fatalf("runtime.Config.MCPServers len = %d, want 0", len(cfg.MCPServers))
+		}
+	})
+
 	t.Run("undeliverable runtime hard errors", func(t *testing.T) {
 		agent := &config.Agent{
 			Name:     "worker",

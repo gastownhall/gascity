@@ -36,7 +36,7 @@ Gas City requires the following tools on your system. `gc init` and
 | jq | Always | — | `brew install jq` | `apt install jq` |
 | pgrep | Always | — | (included in macOS) | `apt install procps` |
 | lsof | Always | — | (included in macOS) | `apt install lsof` |
-| dolt | Beads provider `bd` | 1.86.1 | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) |
+| dolt | Beads provider `bd` | 1.86.2 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) |
 | bd | Beads provider `bd` | 1.0.0 | [releases](https://github.com/gastownhall/beads/releases) | [releases](https://github.com/gastownhall/beads/releases) |
 | flock | Beads provider `bd` | — | `brew install flock` | `apt install util-linux` |
 | claude / codex / gemini | Per provider | — | See provider docs | See provider docs |
@@ -44,6 +44,11 @@ Gas City requires the following tools on your system. `gc init` and
 The `bd` (beads) provider is the default. To use a file-based store instead
 (no dolt/bd/flock needed), set `GC_BEADS=file` or add `[beads] provider = "file"`
 to your `city.toml`.
+
+Managed Dolt checks require a final Dolt 1.86.2 or newer. Earlier and
+pre-release builds can miss the upstream GC/writer deadlock fix in
+dolthub/dolt commit `ccf7bde206`, which can hang `dolt_backup sync` under
+heavy write load.
 
 Install from Homebrew:
 

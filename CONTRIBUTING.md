@@ -22,7 +22,10 @@ contributors. Before making changes, read:
 auto-formats staged Go files and, when any Go file is staged,
 regenerates `internal/api/openapi.json` and `docs/schema/openapi.json`
 from the live supervisor. The hook stages both spec copies so the
-committed spec never drifts from what the server actually serves.
+committed spec never drifts from what the server actually serves. It also
+runs the fast CI-equivalent gates for local changes: `make lint`,
+`make vet`, and `make test` for Go changes, and `make check-docs` for
+Markdown/docs/spec changes.
 
 **Dashboard SPA.** The dashboard at `cmd/gc/dashboard/web/` is a
 TypeScript SPA that talks directly to the supervisor's OpenAPI-typed
@@ -32,9 +35,14 @@ endpoints. When `internal/api/openapi.json` or files under
 spec) and rebuilds `cmd/gc/dashboard/web/dist/` (the compiled bundle
 that the Go static server embeds via `go:embed`). The hook needs
 Node / npm on your PATH; if npm is missing, the hook warns and
-skips the rebuild (CI enforces it). Run `make dashboard-dev` to
+skips the rebuild (CI enforces it). The hook runs dashboard typecheck,
+Vitest, and production build for dashboard/API-schema changes. Run
+`make dashboard-dev` to
 iterate with Vite HMR, `make dashboard-build` to produce a fresh
-bundle, `make dashboard-check` for typecheck + build + test.
+bundle, `make dashboard-check` for typecheck + build + test. For
+dashboard or API-schema changes, also smoke the built app with
+`npm run preview -- --host 127.0.0.1 --port <port>` from
+`cmd/gc/dashboard/web/` and load the served page before pushing.
 
 ## Development Workflow
 

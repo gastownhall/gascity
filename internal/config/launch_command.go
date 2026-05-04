@@ -22,12 +22,19 @@ type ProviderLaunchCommand struct {
 // for session startup. It starts from the raw provider command, applies
 // schema-managed defaults plus any explicit option overrides, and appends a
 // provider-owned settings file when present.
-func BuildProviderLaunchCommand(cityPath string, resolved *ResolvedProvider, optionOverrides map[string]string) (ProviderLaunchCommand, error) {
+//
+// When transport is "acp", the ACP-specific command (ACPCommand/ACPArgs) is
+// used as the base instead of the default Command/Args. Pass "" for the
+// provider default or "tmux" for the tmux-backed CLI transport.
+func BuildProviderLaunchCommand(cityPath string, resolved *ResolvedProvider, optionOverrides map[string]string, transport string) (ProviderLaunchCommand, error) {
 	if resolved == nil {
 		return ProviderLaunchCommand{}, fmt.Errorf("resolved provider is nil")
 	}
+	if !IsValidSessionTransport(transport) {
+		return ProviderLaunchCommand{}, fmt.Errorf("unknown session transport %q", strings.TrimSpace(transport))
+	}
 
-	command := resolved.CommandString()
+	command := providerLaunchBaseCommand(resolved, transport)
 	if len(resolved.OptionsSchema) > 0 {
 		mergedOptions := make(map[string]string, len(resolved.EffectiveDefaults)+len(optionOverrides))
 		for key, value := range resolved.EffectiveDefaults {
@@ -48,7 +55,40 @@ func BuildProviderLaunchCommand(cityPath string, resolved *ResolvedProvider, opt
 		}
 	}
 
-	settingsPath, settingsRel := ProviderSettingsSource(cityPath, resolved.Name)
+	return appendProviderSettings(cityPath, resolved.Name, command), nil
+}
+
+// BuildProviderLaunchCommandWithoutOptions composes the transport-specific
+// provider command plus any provider-owned settings file without applying
+// schema-managed defaults or explicit option overrides.
+//
+// Deferred agent-session creation uses this helper because option state is
+// stored separately in template_overrides and applied later at actual start
+// time, but the stored base command must still match the selected transport
+// and provider-owned settings semantics.
+func BuildProviderLaunchCommandWithoutOptions(cityPath string, resolved *ResolvedProvider, transport string) (ProviderLaunchCommand, error) {
+	if resolved == nil {
+		return ProviderLaunchCommand{}, fmt.Errorf("resolved provider is nil")
+	}
+	if !IsValidSessionTransport(transport) {
+		return ProviderLaunchCommand{}, fmt.Errorf("unknown session transport %q", strings.TrimSpace(transport))
+	}
+	return appendProviderSettings(cityPath, resolved.Name, providerLaunchBaseCommand(resolved, transport)), nil
+}
+
+func providerLaunchBaseCommand(resolved *ResolvedProvider, transport string) string {
+	switch strings.TrimSpace(transport) {
+	case SessionTransportACP:
+		return resolved.ACPCommandString()
+	case "", SessionTransportTmux:
+		return resolved.CommandString()
+	default:
+		return resolved.CommandString()
+	}
+}
+
+func appendProviderSettings(cityPath, providerName, command string) ProviderLaunchCommand {
+	settingsPath, settingsRel := ProviderSettingsSource(cityPath, providerName)
 	if settingsPath != "" {
 		command = command + " " + fmt.Sprintf("--settings %q", settingsPath)
 	}
@@ -57,7 +97,7 @@ func BuildProviderLaunchCommand(cityPath string, resolved *ResolvedProvider, opt
 		Command:      command,
 		SettingsPath: settingsPath,
 		SettingsRel:  settingsRel,
-	}, nil
+	}
 }
 
 // ProviderSettingsSource returns the provider-owned settings file that should

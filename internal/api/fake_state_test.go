@@ -302,9 +302,16 @@ func (f *fakeMutatorState) UpdateProvider(name string, patch ProviderUpdate) err
 	if patch.Command != nil {
 		spec.Command = *patch.Command
 	}
+	if patch.ACPCommand != nil {
+		spec.ACPCommand = *patch.ACPCommand
+	}
 	if patch.Args != nil {
 		spec.Args = make([]string, len(patch.Args))
 		copy(spec.Args, patch.Args)
+	}
+	if patch.ACPArgs != nil {
+		spec.ACPArgs = make([]string, len(patch.ACPArgs))
+		copy(spec.ACPArgs, patch.ACPArgs)
 	}
 	if patch.ArgsAppend != nil {
 		spec.ArgsAppend = make([]string, len(patch.ArgsAppend))

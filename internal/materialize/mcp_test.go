@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 func TestMCPIdentityForFilename(t *testing.T) {
@@ -193,6 +194,70 @@ func TestNormalizeMCPServerStableMapOrder(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("NormalizeMCPServer()=%#v, want %#v", got, want)
+	}
+}
+
+func TestRuntimeMCPServersPreservesTransport(t *testing.T) {
+	t.Parallel()
+
+	got := RuntimeMCPServers([]MCPServer{
+		{Name: "stdio", Transport: MCPTransportStdio, Command: "uvx"},
+		{Name: "http", Transport: MCPTransportHTTP, URL: "https://example.test/http"},
+		{Name: "sse", Transport: MCPTransportSSE, URL: "https://example.test/sse"},
+	})
+	want := []runtime.MCPServerConfig{
+		{Name: "http", Transport: runtime.MCPTransportHTTP, URL: "https://example.test/http"},
+		{Name: "sse", Transport: runtime.MCPTransportSSE, URL: "https://example.test/sse"},
+		{Name: "stdio", Transport: runtime.MCPTransportStdio, Command: "uvx"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("RuntimeMCPServers()=%#v, want %#v", got, want)
+	}
+}
+
+func TestMCPTemplateDataUsesBackingTemplateName(t *testing.T) {
+	t.Parallel()
+
+	agent := &config.Agent{
+		Name: "worker",
+		Dir:  "rig-a",
+		Env:  map[string]string{"TOKEN": "abc"},
+	}
+	got := MCPTemplateData(&config.City{}, "/tmp/city", agent, "rig-a/worker-7", "/tmp/work")
+	if got["AgentName"] != "rig-a/worker-7" {
+		t.Fatalf("AgentName = %q, want %q", got["AgentName"], "rig-a/worker-7")
+	}
+	if got["TemplateName"] != "rig-a/worker" {
+		t.Fatalf("TemplateName = %q, want %q", got["TemplateName"], "rig-a/worker")
+	}
+	if got["TOKEN"] != "abc" {
+		t.Fatalf("TOKEN = %q, want abc", got["TOKEN"])
+	}
+}
+
+func TestMCPTemplateDataUsesPoolNameForPoolInstances(t *testing.T) {
+	t.Parallel()
+
+	agent := &config.Agent{
+		Name:     "worker-3",
+		PoolName: "worker",
+	}
+	got := MCPTemplateData(&config.City{}, "/tmp/city", agent, "worker-3", "/tmp/work")
+	if got["TemplateName"] != "worker" {
+		t.Fatalf("TemplateName = %q, want %q", got["TemplateName"], "worker")
+	}
+}
+
+func TestMCPTemplateDataPreservesBranchAlias(t *testing.T) {
+	t.Parallel()
+
+	agent := &config.Agent{Name: "worker"}
+	got := MCPTemplateData(&config.City{}, "/tmp/city", agent, "worker-1", "")
+	if got["Branch"] == "" {
+		t.Fatal("Branch = empty, want default branch alias")
+	}
+	if got["Branch"] != got["DefaultBranch"] {
+		t.Fatalf("Branch = %q, want %q", got["Branch"], got["DefaultBranch"])
 	}
 }
 

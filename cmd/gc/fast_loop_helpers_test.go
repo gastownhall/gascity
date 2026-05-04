@@ -14,7 +14,10 @@ import (
 
 func skipSlowCmdGCTest(t *testing.T, reason string) {
 	t.Helper()
-	if os.Getenv("GC_FAST_UNIT") == "1" || testing.Short() {
+	if testing.Short() || strings.TrimSpace(os.Getenv("GC_FAST_UNIT")) != "0" {
+		if strings.TrimSpace(os.Getenv("GC_FAST_UNIT")) == "" && !strings.Contains(reason, "test-cmd-gc-process") {
+			reason += "; set GC_FAST_UNIT=0 or run make test-cmd-gc-process for full process coverage"
+		}
 		t.Skip(reason)
 	}
 }
@@ -80,6 +83,7 @@ func reserveRandomTCPPort(t *testing.T) int {
 
 func startTCPListenerProcess(t *testing.T, port int) *exec.Cmd {
 	t.Helper()
+	skipSlowCmdGCTest(t, "spawns a TCP listener process to emulate managed dolt; run make test-cmd-gc-process for full coverage")
 	cmd := exec.Command("python3", "-c", `
 import signal
 import socket

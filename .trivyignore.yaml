@@ -1,0 +1,61 @@
+vulnerabilities:
+  - id: CVE-2026-34986
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-05-29
+    statement: Latest Dolt 1.86.6 still embeds go-jose v4.1.3; remove after a Dolt release includes go-jose v4.1.4 or later.
+  - id: CVE-2026-39883
+    paths:
+      - "usr/local/bin/dolt"
+    expired_at: 2026-05-29
+    statement: Latest Dolt 1.86.6 still embeds opentelemetry-go v1.40.0; remove after a Dolt release includes otel/sdk v1.43.0 or later.
+  - id: CVE-2026-34986
+    paths:
+      - "usr/local/bin/bd"
+    expired_at: 2026-05-29
+    statement: Latest bd v1.0.3 still embeds go-jose v4.1.3; remove after a beads release includes go-jose v4.1.4 or later.
+  - id: CVE-2026-27962
+    paths:
+      - "usr/local/lib/python3.12/site-packages/authlib-1.5.2.dist-info/METADATA"
+    expired_at: 2026-05-13
+    statement: mcp-agent-mail v0.3.2 still requires authlib <1.6; remove after upstream accepts Authlib 1.6.9 or later.
+  - id: CVE-2025-59420
+    paths:
+      - "usr/local/lib/python3.12/site-packages/authlib-1.5.2.dist-info/METADATA"
+    expired_at: 2026-05-13
+    statement: mcp-agent-mail v0.3.2 still requires authlib <1.6; remove after upstream accepts Authlib 1.6.4 or later.
+  - id: CVE-2025-61920
+    paths:
+      - "usr/local/lib/python3.12/site-packages/authlib-1.5.2.dist-info/METADATA"
+    expired_at: 2026-05-13
+    statement: mcp-agent-mail v0.3.2 still requires authlib <1.6; remove after upstream accepts Authlib 1.6.5 or later.
+  - id: CVE-2026-28490
+    paths:
+      - "usr/local/lib/python3.12/site-packages/authlib-1.5.2.dist-info/METADATA"
+    expired_at: 2026-05-13
+    statement: mcp-agent-mail v0.3.2 still requires authlib <1.6; remove after upstream accepts Authlib 1.6.9 or later.
+  - id: CVE-2026-28498
+    paths:
+      - "usr/local/lib/python3.12/site-packages/authlib-1.5.2.dist-info/METADATA"
+    expired_at: 2026-05-13
+    statement: mcp-agent-mail v0.3.2 still requires authlib <1.6; remove after upstream accepts Authlib 1.6.9 or later.
+  - id: CVE-2026-32871
+    paths:
+      - "usr/local/lib/python3.12/site-packages/fastmcp-2.13.0.2.dist-info/METADATA"
+    expired_at: 2026-05-13
+    statement: mcp-agent-mail v0.3.2 Authlib constraint keeps FastMCP on 2.13.0.2; remove after upstream accepts FastMCP 3.2.0 or later.
+  - id: CVE-2025-69196
+    paths:
+      - "usr/local/lib/python3.12/site-packages/fastmcp-2.13.0.2.dist-info/METADATA"
+    expired_at: 2026-05-13
+    statement: mcp-agent-mail v0.3.2 Authlib constraint keeps FastMCP on 2.13.0.2; remove after upstream accepts FastMCP 2.14.2 or later.
+  - id: CVE-2026-27124
+    paths:
+      - "usr/local/lib/python3.12/site-packages/fastmcp-2.13.0.2.dist-info/METADATA"
+    expired_at: 2026-05-13
+    statement: mcp-agent-mail v0.3.2 Authlib constraint keeps FastMCP on 2.13.0.2; remove after upstream accepts FastMCP 3.2.0 or later.
+  - id: GHSA-rcfx-77hg-w2wv
+    paths:
+      - "usr/local/lib/python3.12/site-packages/fastmcp-2.13.0.2.dist-info/METADATA"
+    expired_at: 2026-05-13
+    statement: mcp-agent-mail v0.3.2 Authlib constraint keeps FastMCP on 2.13.0.2; remove after upstream accepts FastMCP 2.14.0 or later.

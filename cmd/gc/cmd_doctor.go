@@ -77,6 +77,13 @@ func workspaceNeedsCityDoltCheck(cityPath string, cfg *config.City) bool {
 	return false
 }
 
+func managedDoltOpsCheckSkip(cityPath string, cfg *config.City, cfgErr error) bool {
+	if os.Getenv("GC_DOLT") == "skip" {
+		return true
+	}
+	return !doctor.ManagedLocalDoltChecksApplicableForConfig(cityPath, cfg, cfgErr)
+}
+
 type doltTopologyCheck struct {
 	cityPath string
 	cfg      *config.City
@@ -165,6 +172,12 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	d.Register(doctor.NewBinaryCheck("jq", "", exec.LookPath))
 	d.Register(doctor.NewBinaryCheck("pgrep", "", exec.LookPath))
 	d.Register(doctor.NewBinaryCheck("lsof", "", exec.LookPath))
+	// beads.role must be set before any bd command runs; check it here so
+	// the missing-role error appears before the downstream data/Dolt checks
+	// that will all fail for the same root cause.
+	if initNeedsBdTooling(cityPath) {
+		d.Register(&doctor.BeadsRoleCheck{})
+	}
 
 	// Controller check + session checks (gated by controller state).
 	controllerRunning := doctor.IsControllerRunning(cityPath)
@@ -186,12 +199,32 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	if cfgErr == nil {
 		d.Register(doctor.NewBDSplitStoreCheck(cityPath))
 		d.Register(doctor.NewBeadsStoreCheck(cityPath, storeFactory))
+		d.Register(newV2RoutedToNamespaceCheck(cfg, cityPath, storeFactory))
 		d.Register(&sessionModelDoctorCheck{cfg: cfg, cityPath: cityPath, newStore: storeFactory})
 	}
 	skipCityDoltCheck := os.Getenv("GC_DOLT") == "skip" || (!scopeUsesManagedBdStoreContract(cityPath, cityPath) && !workspaceNeedsCityDoltCheck(cityPath, cfg))
 	d.Register(newDoctorDoltServerCheck(cityPath, skipCityDoltCheck))
+	// Managed Dolt ops checks (PR 3). Size + config drift are only
+	// meaningful when the workspace uses the managed bd/Dolt backend; rigs
+	// can inherit the city-managed server even when the city itself is not a
+	// managed bd scope. The version check follows the same gate so file-backed
+	// and external Dolt workspaces do not get irrelevant local-binary warnings.
+	skipManagedDoltCheck := managedDoltOpsCheckSkip(cityPath, cfg, cfgErr)
+	d.Register(doctor.NewDoltNomsSizeCheckForConfig(cityPath, skipManagedDoltCheck, cfg, cfgErr))
+	d.Register(doctor.NewDoltConfigCheckForConfig(cityPath, skipManagedDoltCheck, cfg, cfgErr))
+	d.Register(doctor.NewScopedDoltVersionCheckForConfig(cityPath, skipManagedDoltCheck, cfg, cfgErr))
 	d.Register(&doctor.EventsLogCheck{})
 	d.Register(doctor.NewEventLogSizeCheck())
+	// Worktree checks deliberately run even when cfgErr != nil — they
+	// only need the city path, and a broken city.toml is exactly when
+	// silent disk-fill is most likely. The zero-value DoctorConfig
+	// produces sensible 10/50 GB defaults via its accessor methods.
+	var doctorCfg config.DoctorConfig
+	if cfg != nil {
+		doctorCfg = cfg.Doctor
+	}
+	d.Register(doctor.NewWorktreeDiskSizeCheck(doctorCfg))
+	d.Register(doctor.NewNestedWorktreePruneCheck(doctorCfg))
 
 	// Custom types check — city store.
 	d.Register(doctor.NewCustomTypesCheck(cityPath, "city"))

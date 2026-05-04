@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestInstallBeadHooksCreatesScripts(t *testing.T) {
@@ -56,6 +57,12 @@ func TestInstallBeadHooksCreatesScripts(t *testing.T) {
 			if !strings.Contains(content, `"$GC_BIN" event emit`) {
 				t.Errorf("hook %s missing '\"$GC_BIN\" event emit':\n%s", tc.filename, content)
 			}
+			if !strings.Contains(content, `PAYLOAD=$(printf '{"bead":%s}' "$DATA")`) {
+				t.Errorf("hook %s does not wrap bd JSON as BeadEventPayload:\n%s", tc.filename, content)
+			}
+			if !strings.Contains(content, `--payload "$PAYLOAD"`) {
+				t.Errorf("hook %s emits raw DATA instead of wrapped PAYLOAD:\n%s", tc.filename, content)
+			}
 			// Best-effort: stderr redirected, || true.
 			if !strings.Contains(content, "|| true") {
 				t.Errorf("hook %s missing '|| true' (best-effort):\n%s", tc.filename, content)
@@ -95,6 +102,68 @@ func TestInstallBeadHooksIdempotent(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "bead.created") {
 		t.Errorf("hook content wrong after idempotent install")
+	}
+}
+
+func TestInstallBeadHooksDoesNotRewriteUnchangedHooks(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := installBeadHooks(dir); err != nil {
+		t.Fatalf("first install: %v", err)
+	}
+
+	path := filepath.Join(dir, ".beads", "hooks", "on_create")
+	past := time.Unix(123456789, 0)
+	if err := os.Chtimes(path, past, past); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+
+	if err := installBeadHooks(dir); err != nil {
+		t.Fatalf("second install: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.ModTime().Equal(past) {
+		t.Fatalf("unchanged hook was rewritten: modtime = %s, want %s", info.ModTime(), past)
+	}
+}
+
+func TestInstallBeadHooksReplacesMatchingSymlink(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := installBeadHooks(dir); err != nil {
+		t.Fatalf("first install: %v", err)
+	}
+
+	path := filepath.Join(dir, ".beads", "hooks", "on_create")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", path, err)
+	}
+	target := filepath.Join(dir, "outside-hook")
+	if err := os.WriteFile(target, data, 0o755); err != nil {
+		t.Fatalf("WriteFile(%s): %v", target, err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("Remove(%s): %v", path, err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Skipf("Symlink: %v", err)
+	}
+
+	if err := installBeadHooks(dir); err != nil {
+		t.Fatalf("second install: %v", err)
+	}
+
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("Lstat(%s): %v", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("matching symlink was preserved, want regular file")
 	}
 }
 

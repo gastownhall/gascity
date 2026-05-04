@@ -71,6 +71,47 @@ func TestCancelWaits_CancelsLegacyWaitBeadsWithoutLegacyTypeQuery(t *testing.T) 
 	}
 }
 
+func TestWakeSessionRequestsStartForSuspendedBead(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"state":        string(StateSuspended),
+			"state_reason": "user-hold",
+			"held_until":   time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+			"wait_hold":    "true",
+			"sleep_reason": "user-hold",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	if _, err := WakeSession(store, sessionBead, time.Now().UTC()); err != nil {
+		t.Fatalf("WakeSession: %v", err)
+	}
+
+	updated, err := store.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("Get(session): %v", err)
+	}
+	if got := updated.Metadata["state"]; got != string(StateCreating) {
+		t.Fatalf("state = %q, want creating", got)
+	}
+	if got := updated.Metadata["state_reason"]; got != string(WakeCauseExplicit) {
+		t.Fatalf("state_reason = %q, want explicit", got)
+	}
+	if got := updated.Metadata["pending_create_claim"]; got != "true" {
+		t.Fatalf("pending_create_claim = %q, want true", got)
+	}
+	for _, key := range []string{"held_until", "wait_hold", "sleep_reason"} {
+		if got := updated.Metadata[key]; got != "" {
+			t.Fatalf("%s = %q, want cleared", key, got)
+		}
+	}
+}
+
 func TestWakeSessionRejectsArchivedHistoricalBead(t *testing.T) {
 	store := beads.NewMemStore()
 	sessionBead, err := store.Create(beads.Bead{

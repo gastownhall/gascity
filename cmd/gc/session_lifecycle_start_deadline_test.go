@@ -12,12 +12,12 @@ import (
 )
 
 // ctxIgnoringStartProvider blocks inside Start until either startDelay
-// elapses or ctx is cancelled, then unconditionally marks the session as
+// elapses or ctx is canceled, then unconditionally marks the session as
 // running and returns nil. It mirrors a real-world failure shape: a provider
 // whose final stage (overlay copy, tmux handshake, ACP init) completes
 // "successfully" from its own point of view even though its caller's
 // deadline has already expired. The reconciler has no signal that anything
-// went wrong — no err, no outcome flag — so it records outcome=success
+// went wrong - no err, no outcome flag - so it records outcome=success
 // with a duration far larger than the configured startup timeout.
 type ctxIgnoringStartProvider struct {
 	*runtime.Fake
@@ -30,21 +30,21 @@ func (p *ctxIgnoringStartProvider) Start(ctx context.Context, name string, cfg r
 	case <-ctx.Done():
 	}
 	// Deliberately drop ctx.Err() and register the session anyway. This is
-	// the buggy provider behaviour we want to expose at the executePreparedStartWave
+	// the buggy provider behavior we want to expose at the executePreparedStartWave
 	// layer.
 	return p.Fake.Start(context.Background(), name, cfg)
 }
 
 // TestExecutePreparedStartWave_StartOutlivesDeadlineReportsSuccess documents
 // the bug in bead ga-ysse3: when a Provider.Start returns nil AFTER the
-// startup context deadline has already fired, the outcome switch at
-// cmd/gc/session_lifecycle_parallel.go:523 gives us outcome=success because
-// the err==nil case is checked BEFORE ctx.Err()==DeadlineExceeded.
+// startup context deadline has already fired, the outcome switch in
+// runPreparedStartCandidate gives us outcome=success when err==nil is
+// checked BEFORE ctx.Err()==DeadlineExceeded.
 //
 // Field symptom: sessions reporting outcome=success with
 // duration=1m9.4s (== startup_timeout + staleKeyDetectDelay + overhead).
 //
-// Expected behaviour (after fix): outcome should be deadline_exceeded
+// Expected behavior (after fix): outcome should be deadline_exceeded
 // whenever startCtx hit its deadline during Start, regardless of what
 // the provider itself reported.
 func TestExecutePreparedStartWave_StartOutlivesDeadlineReportsSuccess(t *testing.T) {
@@ -75,10 +75,8 @@ func TestExecutePreparedStartWave_StartOutlivesDeadlineReportsSuccess(t *testing
 		context.Background(),
 		[]preparedStart{item},
 		sp,
-		nil, // store == nil → RuntimeHandle path; skips bead-backed staleKey branch
-		nil,
+		nil, // store == nil uses RuntimeHandle path and skips bead-backed staleKey branch
 		startupTimeout,
-		1,
 	)
 	elapsed := time.Since(before)
 
@@ -87,7 +85,7 @@ func TestExecutePreparedStartWave_StartOutlivesDeadlineReportsSuccess(t *testing
 	}
 	r := results[0]
 
-	// Sanity: the work really outran the startup timeout — this is the
+	// Sanity: the work really outran the startup timeout - this is the
 	// observable symptom. If this assertion fails the test itself is wrong.
 	if elapsed <= startupTimeout {
 		t.Fatalf("wave returned in %v, which is <= startupTimeout %v; provider did not hold ctx open as intended", elapsed, startupTimeout)
@@ -102,7 +100,7 @@ func TestExecutePreparedStartWave_StartOutlivesDeadlineReportsSuccess(t *testing
 	if r.outcome == "success" {
 		t.Fatalf("outcome = %q with err=%v and recorded duration %v; "+
 			"startCtx deadline (%v) expired during Start but outcome masks it as success. "+
-			"See cmd/gc/session_lifecycle_parallel.go:523 — the `err == nil` case "+
+			"See runPreparedStartCandidate - the `err == nil` case "+
 			"is evaluated before `startCtx.Err() == context.DeadlineExceeded`.",
 			r.outcome, r.err, measured, startupTimeout)
 	}

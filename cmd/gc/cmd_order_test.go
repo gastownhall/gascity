@@ -599,6 +599,37 @@ func TestOrderCheckWithStoresResolverUsesLegacyCityStore(t *testing.T) {
 	}
 }
 
+func TestOrderCheckConditionUsesCityScope(t *testing.T) {
+	cityDir := t.TempDir()
+	orderDir := filepath.Join(cityDir, "packs", "workflows", "orders")
+	check := fmt.Sprintf(
+		`test "$GC_CITY_PATH" = '%s' && test "$GC_STORE_ROOT" = '%s' && test "$GC_STORE_SCOPE" = city && test "$ORDER_DIR" = '%s'`,
+		cityDir,
+		cityDir,
+		orderDir,
+	)
+	aa := []orders.Order{{
+		Name:    "pr-review-router",
+		Trigger: "condition",
+		Check:   check,
+		Formula: "mol-pr-review-router",
+		Pool:    "workflows.pr-review-router",
+		Source:  filepath.Join(orderDir, "pr-review-router.toml"),
+	}}
+	resolver := func(orders.Order) ([]beads.Store, error) {
+		return []beads.Store{beads.NewMemStore()}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderCheckWithStoresResolverScoped(cityDir, &config.City{}, aa, time.Now(), nil, resolver, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderCheckWithStoresResolverScoped = %d, want 0; stderr: %s; stdout: %s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "yes") {
+		t.Fatalf("stdout missing due row:\n%s", stdout.String())
+	}
+}
+
 func TestOrderCheckWithStoresResolverFailsWhenLegacyEventCursorReadFails(t *testing.T) {
 	rigStore := beads.NewMemStore()
 	legacyStore := labelFailListStore{
@@ -690,6 +721,312 @@ func TestOrderRun(t *testing.T) {
 	}
 }
 
+func TestOrderRunEventExecAdvancesCursor(t *testing.T) {
+	cityDir := t.TempDir()
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+`)
+	store := beads.NewMemStore()
+	eventLog := events.NewFake()
+	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+	headSeq, err := eventLog.LatestSeq()
+	if err != nil {
+		t.Fatalf("LatestSeq(): %v", err)
+	}
+	aa := []orders.Order{{
+		Name:    "release-exec",
+		Trigger: "event",
+		On:      events.BeadClosed,
+		Exec:    "printf ok",
+	}}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "release-exec", "", cityDir, store, eventLog, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	results, err := store.ListByLabel("order-run:release-exec", 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
+	}
+	for _, want := range []string{"order:release-exec", fmt.Sprintf("seq:%d", headSeq), "exec"} {
+		if !slicesContain(results[0].Labels, want) {
+			t.Fatalf("tracking bead labels = %v, want %s", results[0].Labels, want)
+		}
+	}
+}
+
+func TestCmdOrderRunEventExecAdvancesCursor(t *testing.T) {
+	cityDir := t.TempDir()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_EVENTS", "")
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_CITY_ROOT", cityDir)
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	t.Chdir(cityDir)
+
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+`)
+	if err := os.MkdirAll(filepath.Join(cityDir, "orders"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cityDir, "orders", "release-exec.toml"), `[order]
+exec = "printf ok"
+trigger = "event"
+on = "bead.closed"
+`)
+	var eventStderr bytes.Buffer
+	eventLog, err := events.NewFileRecorder(filepath.Join(cityDir, ".gc", "events.jsonl"), &eventStderr)
+	if err != nil {
+		t.Fatalf("NewFileRecorder(): %v", err)
+	}
+	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+	headSeq, err := eventLog.LatestSeq()
+	if err != nil {
+		t.Fatalf("LatestSeq(): %v", err)
+	}
+	if err := eventLog.Close(); err != nil {
+		t.Fatalf("Close(): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderRun("release-exec", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdOrderRun = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(): %v", err)
+	}
+	results, err := store.ListByLabel("order-run:release-exec", 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
+	}
+	for _, want := range []string{"order:release-exec", fmt.Sprintf("seq:%d", headSeq), "exec"} {
+		if !slicesContain(results[0].Labels, want) {
+			t.Fatalf("tracking bead labels = %v, want %s", results[0].Labels, want)
+		}
+	}
+}
+
+func TestOrderRunEventFormulaLatestSeqErrorDoesNotInstantiate(t *testing.T) {
+	aa := []orders.Order{{
+		Name:         "release-watch",
+		Trigger:      "event",
+		On:           events.BeadClosed,
+		Formula:      "test-formula",
+		FormulaLayer: sharedTestFormulaDir,
+	}}
+	store := beads.NewMemStore()
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "release-watch", "", "/city", store, events.NewFailFake(), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doOrderRun = %d, want 1 when event cursor cannot be read; stdout: %s", code, stdout.String())
+	}
+	results, err := store.ListByLabel("order-run:release-watch", 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("store.ListByLabel() len = %d, want 0 (%#v)", len(results), results)
+	}
+	if !strings.Contains(stderr.String(), "reading event cursor for release-watch") {
+		t.Fatalf("stderr = %q, want event cursor read failure", stderr.String())
+	}
+}
+
+func TestOrderRunResolvesPackBindingForPool(t *testing.T) {
+	aa := []orders.Order{
+		{Name: "digest", Formula: "mol-digest", Trigger: "cooldown", Interval: "24h", Pool: "dog", FormulaLayer: sharedTestFormulaDir},
+	}
+	cityDir := t.TempDir()
+	writeOrderRunImportFixture(t, cityDir, "maintenance")
+	store := beads.NewMemStore()
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "digest", "", cityDir, store, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	results, err := store.ListByLabel("order-run:digest", 0)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
+	}
+	if got := results[0].Metadata["gc.routed_to"]; got != "maintenance.dog" {
+		t.Fatalf("gc.routed_to = %q, want maintenance.dog", got)
+	}
+	if !strings.Contains(stdout.String(), "gc.routed_to=maintenance.dog") {
+		t.Fatalf("stdout = %q, want binding-qualified route", stdout.String())
+	}
+}
+
+func TestOrderRunResolvesImportedPackPoolAgainstCityShadow(t *testing.T) {
+	cityDir := t.TempDir()
+	writeImportedDogOrderFixture(t, cityDir, true)
+	_, aa := loadImportedDogOrders(t, cityDir)
+	store := beads.NewMemStore()
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "digest", "", cityDir, store, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	results, err := store.ListByLabel("order-run:digest", 0)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
+	}
+	if got := results[0].Metadata["gc.routed_to"]; got != "maintenance.dog" {
+		t.Fatalf("gc.routed_to = %q, want maintenance.dog", got)
+	}
+}
+
+func TestOrderRunResolvesImportedPackPoolAgainstSiblingImportCollision(t *testing.T) {
+	cityDir := t.TempDir()
+	writeImportedDogOrderFixture(t, cityDir, false, "gastown")
+	_, aa := loadImportedDogOrders(t, cityDir)
+	store := beads.NewMemStore()
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "digest", "", cityDir, store, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	results, err := store.ListByLabel("order-run:digest", 0)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
+	}
+	if got := results[0].Metadata["gc.routed_to"]; got != "maintenance.dog" {
+		t.Fatalf("gc.routed_to = %q, want maintenance.dog", got)
+	}
+}
+
+func TestOrderRunPrefersCityShadowForPool(t *testing.T) {
+	aa := []orders.Order{
+		{Name: "digest", Formula: "mol-digest", Trigger: "cooldown", Interval: "24h", Pool: "dog", FormulaLayer: sharedTestFormulaDir},
+	}
+	cityDir := t.TempDir()
+	writeOrderRunImportFixture(t, cityDir, "maintenance")
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "shadow-city"
+prefix = "shd"
+
+[[agent]]
+name = "dog"
+`)
+	store := beads.NewMemStore()
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "digest", "", cityDir, store, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	results, err := store.ListByLabel("order-run:digest", 0)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
+	}
+	if got := results[0].Metadata["gc.routed_to"]; got != "dog" {
+		t.Fatalf("gc.routed_to = %q, want dog", got)
+	}
+	if !strings.Contains(stdout.String(), "gc.routed_to=dog") {
+		t.Fatalf("stdout = %q, want city-local route", stdout.String())
+	}
+}
+
+func TestOrderRunRejectsAmbiguousPackPool(t *testing.T) {
+	aa := []orders.Order{
+		{Name: "digest", Formula: "mol-digest", Trigger: "cooldown", Interval: "24h", Pool: "dog", FormulaLayer: sharedTestFormulaDir},
+	}
+	cityDir := t.TempDir()
+	writeOrderRunImportFixture(t, cityDir, "gastown", "maintenance")
+	store := beads.NewMemStore()
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "digest", "", cityDir, store, nil, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doOrderRun = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `ambiguous pool "dog"`) {
+		t.Fatalf("stderr = %q, want ambiguity error", stderr.String())
+	}
+	results, err := store.ListByLabel("order-run:digest", 0)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("store.ListByLabel() len = %d, want 0 (%#v)", len(results), results)
+	}
+}
+
+func writeOrderRunImportFixture(t *testing.T, cityDir string, bindings ...string) {
+	t.Helper()
+
+	packRoot := filepath.Join(cityDir, "packs")
+	if err := os.MkdirAll(packRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `
+[workspace]
+name = "test-city"
+`)
+
+	var packToml strings.Builder
+	packToml.WriteString(`
+[pack]
+name = "test-city"
+schema = 1
+`)
+	for _, binding := range bindings {
+		packDir := filepath.Join(packRoot, binding)
+		if err := os.MkdirAll(packDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(packDir, "pack.toml"), `
+[pack]
+name = "`+binding+`"
+schema = 1
+
+[[agent]]
+name = "dog"
+scope = "city"
+`)
+		packToml.WriteString(`
+[imports.` + binding + `]
+source = "./packs/` + binding + `"
+`)
+	}
+	writeFile(t, filepath.Join(cityDir, "pack.toml"), packToml.String())
+}
+
 func TestOrderRunNoPool(t *testing.T) {
 	aa := []orders.Order{
 		{Name: "cleanup", Formula: "mol-cleanup", Trigger: "cron", Schedule: "0 3 * * *", FormulaLayer: sharedTestFormulaDir},
@@ -716,6 +1053,56 @@ func TestOrderRunNoPool(t *testing.T) {
 	// Verify wisp ID appears in stdout (MemStore generates gc-N IDs).
 	if !strings.Contains(stdout.String(), "gc-1") {
 		t.Errorf("stdout missing wisp ID: %s", stdout.String())
+	}
+}
+
+func TestOrderRunReportsAllMissingRequiredVarsAtOnce(t *testing.T) {
+	dir := t.TempDir()
+	formulaBody := `
+formula = "order-required-vars"
+version = 1
+
+[vars.target_id]
+description = "Bead being worked on"
+required = true
+
+[vars.workspace]
+description = "Workspace path"
+required = true
+
+[[steps]]
+id = "do-work"
+title = "Do work for {{target_id}}"
+description = "Target: {{target_id}}, workspace: {{workspace}}"
+`
+	if err := os.WriteFile(filepath.Join(dir, "order-required-vars.formula.toml"), []byte(formulaBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	aa := []orders.Order{{
+		Name:         "digest",
+		Formula:      "order-required-vars",
+		Trigger:      "cooldown",
+		Interval:     "24h",
+		FormulaLayer: dir,
+	}}
+
+	store := beads.NewMemStore()
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "digest", "", "/city", store, nil, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doOrderRun = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+
+	errText := stderr.String()
+	if !strings.Contains(errText, `variable "target_id" is required`) {
+		t.Fatalf("stderr = %q, want missing target_id reported", errText)
+	}
+	if !strings.Contains(errText, `variable "workspace" is required`) {
+		t.Fatalf("stderr = %q, want missing workspace reported", errText)
+	}
+	if strings.Contains(errText, "bead title contains unresolved variable(s)") {
+		t.Fatalf("stderr = %q, want consolidated required-var validation instead of title-only failure", errText)
 	}
 }
 
@@ -781,8 +1168,8 @@ title = "Do work"
 			if bead.Assignee != config.ControlDispatcherAgentName {
 				t.Fatalf("finalizer assignee = %q, want %q", bead.Assignee, config.ControlDispatcherAgentName)
 			}
-			if bead.Metadata["gc.routed_to"] != config.ControlDispatcherAgentName {
-				t.Fatalf("finalizer gc.routed_to = %q, want %q", bead.Metadata["gc.routed_to"], config.ControlDispatcherAgentName)
+			if bead.Metadata["gc.routed_to"] != "" {
+				t.Fatalf("finalizer gc.routed_to = %q, want empty for concrete control dispatcher assignee", bead.Metadata["gc.routed_to"])
 			}
 			if bead.Metadata[graphExecutionRouteMetaKey] != "quinn" {
 				t.Fatalf("finalizer execution route = %q, want quinn", bead.Metadata[graphExecutionRouteMetaKey])
@@ -883,6 +1270,9 @@ func TestOrderRunExecProjectsExternalDoltTarget(t *testing.T) {
 name = "test-city"
 prefix = "ct"
 `)
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	writeFile(t, filepath.Join(cityDir, ".beads", "config.yaml"), strings.Join([]string{
 		"issue_prefix: ct",
 		"gc.endpoint_origin: city_canonical",
@@ -941,6 +1331,9 @@ func TestOrderRunExecPreservesAuthOnlyOverridesForManagedLocal(t *testing.T) {
 name = "test-city"
 prefix = "ct"
 `)
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	writeFile(t, filepath.Join(cityDir, ".beads", "config.yaml"), strings.Join([]string{
 		"issue_prefix: ct",
 		"gc.endpoint_origin: managed_city",
@@ -1014,6 +1407,164 @@ prefix = "ct"
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("exec dolt env:\ngot:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+func TestOrderRunExecMarksExternalDoltTargetForManagedLocalOnlyOrders(t *testing.T) {
+	cityDir := t.TempDir()
+	t.Setenv("GC_PACK_STATE_DIR", filepath.Join(t.TempDir(), "poison-pack-state"))
+	t.Setenv("GC_DOLT_DATA_DIR", filepath.Join(t.TempDir(), "poison-dolt-data"))
+	t.Setenv("GC_DOLT_CONFIG_FILE", filepath.Join(t.TempDir(), "poison-dolt-config.yaml"))
+	t.Setenv("GC_DOLT_STATE_FILE", filepath.Join(t.TempDir(), "poison-state.json"))
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+`)
+	writeFile(t, filepath.Join(cityDir, ".beads", "config.yaml"), strings.Join([]string{
+		"issue_prefix: ct",
+		"gc.endpoint_origin: city_canonical",
+		"gc.endpoint_status: verified",
+		"dolt.auto-start: false",
+		"dolt.host: external.example.internal",
+		"dolt.port: 4406",
+		"",
+	}, "\n"))
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	outPath := filepath.Join(cityDir, "exec-managed-marker.txt")
+	a := orders.Order{
+		Name:     "dolt-gc-nudge",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     fmt.Sprintf(`printf 'managed=<%%s>\nhost=<%%s>\nport=<%%s>\npack_state=<%%s>\ndata=<%%s>\nconfig=<%%s>\nstate=<%%s>\n' "$GC_DOLT_MANAGED_LOCAL" "$GC_DOLT_HOST" "$GC_DOLT_PORT" "$GC_PACK_STATE_DIR" "$GC_DOLT_DATA_DIR" "$GC_DOLT_CONFIG_FILE" "$GC_DOLT_STATE_FILE" > %q`, outPath),
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRunExec(a, cityDir, cfg, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRunExec = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	got := strings.TrimSpace(readFileString(t, outPath))
+	externalRoot := filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt", "external-target")
+	want := strings.Join([]string{
+		"managed=<0>",
+		"host=<external.example.internal>",
+		"port=<4406>",
+		"pack_state=<>",
+		"data=<" + externalRoot + ">",
+		"config=<" + filepath.Join(externalRoot, "dolt-config.yaml") + ">",
+		"state=<" + filepath.Join(externalRoot, "dolt-state.json") + ">",
+	}, "\n")
+	if got != want {
+		t.Fatalf("order exec env:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestOrderRunExecPropagatesManagedDoltLayout(t *testing.T) {
+	cityDir := t.TempDir()
+	dataDir := filepath.Join(t.TempDir(), "managed-dolt")
+	configFile := filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+`)
+	writeFile(t, filepath.Join(cityDir, ".beads", "config.yaml"), strings.Join([]string{
+		"issue_prefix: ct",
+		"gc.endpoint_origin: managed_city",
+		"gc.endpoint_status: verified",
+		"dolt.auto-start: false",
+		"",
+	}, "\n"))
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer func() {
+		if err := listener.Close(); err != nil {
+			t.Fatalf("Close listener: %v", err)
+		}
+	}()
+	port := fmt.Sprint(listener.Addr().(*net.TCPAddr).Port)
+	stateDir := filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(stateDir, "dolt-state.json"), fmt.Sprintf(
+		`{"running":true,"pid":%d,"port":%s,"data_dir":%q}`,
+		os.Getpid(),
+		port,
+		dataDir,
+	))
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	t.Setenv("GC_DOLT_DATA_DIR", filepath.Join(t.TempDir(), "poison-dolt-data"))
+	t.Setenv("GC_DOLT_CONFIG_FILE", filepath.Join(t.TempDir(), "poison-dolt-config.yaml"))
+	t.Setenv("GC_PACK_STATE_DIR", filepath.Join(t.TempDir(), "poison-pack-state"))
+	t.Setenv("GC_DOLT_STATE_FILE", filepath.Join(t.TempDir(), "poison-state.json"))
+	outPath := filepath.Join(cityDir, "exec-managed-layout.txt")
+	a := orders.Order{
+		Name:     "dolt-gc-nudge",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     fmt.Sprintf(`printf 'managed=<%%s>\nport=<%%s>\ndata=<%%s>\nconfig=<%%s>\n' "$GC_DOLT_MANAGED_LOCAL" "$GC_DOLT_PORT" "$GC_DOLT_DATA_DIR" "$GC_DOLT_CONFIG_FILE" > %q`, outPath),
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRunExec(a, cityDir, cfg, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRunExec = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	got := strings.TrimSpace(readFileString(t, outPath))
+	want := strings.Join([]string{
+		"managed=<1>",
+		"port=<" + port + ">",
+		"data=<" + dataDir + ">",
+		"config=<" + configFile + ">",
+	}, "\n")
+	if got != want {
+		t.Fatalf("order exec env:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestOrderRunExecHonorsOrdersMaxTimeout(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{
+		Orders: config.OrdersConfig{MaxTimeout: "50ms"},
+	}
+	a := orders.Order{
+		Name:    "slow-exec",
+		Trigger: "manual",
+		Exec:    "while :; do :; done",
+		Timeout: "5s",
+	}
+
+	var stdout, stderr bytes.Buffer
+	start := time.Now()
+	code := doOrderRunExec(a, cityDir, cfg, &stdout, &stderr)
+	elapsed := time.Since(start)
+	if code == 0 {
+		t.Fatalf("doOrderRunExec = 0, want timeout failure; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if elapsed > time.Second {
+		t.Fatalf("doOrderRunExec elapsed = %s, want capped below 1s", elapsed)
+	}
+	if !strings.Contains(stderr.String(), "exec failed") {
+		t.Fatalf("stderr = %q, want exec failure", stderr.String())
 	}
 }
 

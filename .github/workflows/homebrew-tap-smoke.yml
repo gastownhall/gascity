@@ -34,7 +34,7 @@ jobs:
         run: brew uninstall --force gascity || true
 
       - name: Install gascity from the live tap
-        run: brew install --build-from-source gastownhall/gascity/gascity
+        run: brew install gastownhall/gascity/gascity
 
       - name: Run formula test block
         run: brew test gastownhall/gascity/gascity

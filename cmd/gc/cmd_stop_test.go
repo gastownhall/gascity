@@ -126,6 +126,7 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 }
 
 func TestStopCityManagedBeadsProviderIfRunningStopsDefaultBD(t *testing.T) {
+	skipSlowCmdGCTest(t, "exercises managed bd provider shutdown; run make test-cmd-gc-process for full coverage")
 	t.Setenv("GC_BEADS", "bd")
 
 	cityDir := t.TempDir()

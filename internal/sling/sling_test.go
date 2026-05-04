@@ -11,8 +11,10 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formulatest"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
@@ -30,6 +32,15 @@ type fakeRunner struct {
 	dirs  []string
 	envs  []map[string]string
 	rules []fakeRunnerRule
+}
+
+type getErrStore struct {
+	beads.Store
+	err error
+}
+
+func (s *getErrStore) Get(_ string) (beads.Bead, error) {
+	return beads.Bead{}, s.err
 }
 
 type closeAllFailMemStore struct {
@@ -77,7 +88,22 @@ func (r *fakeRunner) run(dir, command string, env map[string]string) (string, er
 	return "", nil
 }
 
-func intPtr(v int) *int { return &v }
+func intPtr(v int) *int          { return &v }
+func stringPtr(v string) *string { return &v }
+
+func seededStore(ids ...string) *beads.MemStore {
+	seed := make([]beads.Bead, 0, len(ids))
+	for _, id := range ids {
+		seed = append(seed, beads.Bead{
+			ID:       id,
+			Title:    id,
+			Type:     "task",
+			Status:   "open",
+			Metadata: map[string]string{},
+		})
+	}
+	return beads.NewMemStoreFrom(0, seed, nil)
+}
 
 // testResolver implements AgentResolver for tests using exact match.
 type testResolver struct{}
@@ -172,17 +198,16 @@ func TestBuildSlingCommandForAgentParseErrorRedactsTemplate(t *testing.T) {
 	a := config.Agent{Name: "worker"}
 	template := "custom {} --route={{.Rig"
 
-	var buf strings.Builder
-	got := BuildSlingCommandForAgent("sling_query", template, "BL-42", cityPath, "", a, nil, &buf)
+	got, warning := BuildSlingCommandForAgent("sling_query", template, "BL-42", cityPath, "", a, nil)
 
 	if got != "custom 'BL-42' --route={{.Rig" {
 		t.Fatalf("BuildSlingCommandForAgent() = %q, want %q", got, "custom 'BL-42' --route={{.Rig")
 	}
-	if !strings.Contains(buf.String(), "sling_query") {
-		t.Fatalf("stderr missing field name: %q", buf.String())
+	if !strings.Contains(warning, "sling_query") {
+		t.Fatalf("warning missing field name: %q", warning)
 	}
-	if strings.Contains(buf.String(), template) {
-		t.Fatalf("stderr should redact raw template, got %q", buf.String())
+	if strings.Contains(warning, template) {
+		t.Fatalf("warning should redact raw template, got %q", warning)
 	}
 }
 
@@ -192,7 +217,7 @@ func TestBuildSlingCommandForAgentExpandsPathContextPlaceholders(t *testing.T) {
 	a := config.Agent{Name: "worker", Dir: "frontend"}
 	rigs := []config.Rig{{Name: "frontend", Path: rigPath}}
 
-	got := BuildSlingCommandForAgent(
+	got, _ := BuildSlingCommandForAgent(
 		"sling_query",
 		"custom {} --route={{.CityName}}/{{.Rig}}/{{.AgentBase}}",
 		"BL-42",
@@ -200,7 +225,6 @@ func TestBuildSlingCommandForAgentExpandsPathContextPlaceholders(t *testing.T) {
 		"",
 		a,
 		rigs,
-		nil,
 	)
 
 	if want := "custom 'BL-42' --route=demo-city/frontend/worker"; got != want {
@@ -285,6 +309,272 @@ func TestBeadPrefixSling(t *testing.T) {
 	}
 }
 
+func TestBeadPrefixForCityLongestMatch(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "agent", Path: "/agent", Prefix: "agent"},
+			{Name: "agent-diagnostics", Path: "/ad", Prefix: "agent-diagnostics"},
+			{Name: "fe", Path: "/fe", Prefix: "fe"},
+		},
+	}
+	tests := []struct {
+		id   string
+		want string
+	}{
+		{"agent-diagnostics-hnn", "agent-diagnostics"},
+		{"agent-x1", "agent"},
+		{"fe-42", "fe"},
+		{"unknown-7", "unknown"}, // falls back to BeadPrefix.
+		{"", ""},
+	}
+	for _, tt := range tests {
+		got := BeadPrefixForCity(cfg, tt.id)
+		if got != tt.want {
+			t.Errorf("BeadPrefixForCity(%q) = %q, want %q", tt.id, got, tt.want)
+		}
+	}
+}
+
+func TestBeadPrefixForCityFallsBackToBeadPrefix(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "fe", Path: "/fe", Prefix: "fe"}},
+	}
+	// Unknown prefix → fall back to BeadPrefix's first-dash split.
+	if got := BeadPrefixForCity(cfg, "unknown-7"); got != "unknown" {
+		t.Errorf("BeadPrefixForCity(unknown-7) = %q, want unknown", got)
+	}
+	// Nil cfg → fall back to BeadPrefix.
+	if got := BeadPrefixForCity(nil, "fe-42"); got != "fe" {
+		t.Errorf("BeadPrefixForCity(nil, fe-42) = %q, want fe", got)
+	}
+}
+
+func TestLooksLikeConfiguredBeadIDAcceptsHyphenatedPrefix(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "agent-diagnostics", Path: "/ad", Prefix: "agent-diagnostics"},
+		},
+	}
+	tests := []struct {
+		id   string
+		want bool
+	}{
+		{"agent-diagnostics-hnn", true},
+		{"agent-diagnostics-h1", true},
+		{"agent-diagnostics-12345678", true},   // 8-char numeric suffix.
+		{"agent-diagnostics-123456789", false}, // 9-char suffix exceeds cap.
+		{"agent-diagnostics-", false},          // empty suffix.
+		{"agent-diagnostics-h.1", true},        // hierarchical .child.
+		{"agent-diagnostics-h.x", true},
+		{"agent-diagnostics-h.", true}, // trailing dot accepted (matches BeadIDParts).
+		{"agent-diagnostics", false},   // no suffix dash.
+	}
+	for _, tt := range tests {
+		got := LooksLikeConfiguredBeadID(cfg, tt.id)
+		if got != tt.want {
+			t.Errorf("LooksLikeConfiguredBeadID(%q) = %v, want %v", tt.id, got, tt.want)
+		}
+	}
+}
+
+func TestLooksLikeConfiguredBeadIDPrefersLongestPrefix(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "agent", Path: "/agent", Prefix: "agent"},
+			{Name: "agent-diagnostics", Path: "/ad", Prefix: "agent-diagnostics"},
+		},
+	}
+	// Both prefixes can match "agent-diagnostics-h1" via the prefix-then-validate
+	// rule, but matchConfiguredBeadPrefix must pick the longest.
+	if !LooksLikeConfiguredBeadID(cfg, "agent-diagnostics-h1") {
+		t.Fatal("LooksLikeConfiguredBeadID(agent-diagnostics-h1) = false, want true")
+	}
+	// "agent-x1" only matches the shorter "agent" prefix.
+	if !LooksLikeConfiguredBeadID(cfg, "agent-x1") {
+		t.Fatal("LooksLikeConfiguredBeadID(agent-x1) = false, want true")
+	}
+}
+
+func TestLooksLikeConfiguredBeadIDRejectsUnknownPrefix(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "fe", Path: "/fe", Prefix: "fe"}},
+	}
+	cases := []string{
+		"unknown-42",
+		"code-review-please", // no rig "code" or "code-review" configured.
+		"hello-world",
+		"",
+		"   ",
+		"fe foo",  // whitespace.
+		"fe-foo!", // non-alphanumeric suffix char.
+	}
+	for _, c := range cases {
+		if LooksLikeConfiguredBeadID(cfg, c) {
+			t.Errorf("LooksLikeConfiguredBeadID(%q) = true, want false", c)
+		}
+	}
+}
+
+func TestLooksLikeConfiguredBeadIDAcceptsHQPrefix(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test", Prefix: "HQ"},
+	}
+	if !LooksLikeConfiguredBeadID(cfg, "HQ-42") {
+		t.Fatal("HQ-42 should be a configured bead ID")
+	}
+	if !LooksLikeConfiguredBeadID(cfg, "hq-abc") {
+		t.Fatal("hq-abc should match HQ prefix case-insensitively")
+	}
+}
+
+// Underscored rig prefixes (e.g. "live_docs") are common in real cities
+// but were rejected by BeadIDParts' alpha-only prefix charset. The
+// config-aware path matches against cfg.Rigs literally, so the broken
+// charset gate is bypassed for any prefix the city has actually
+// declared. Coverage parallels the bug-report cases: live_docs,
+// migration_evals, scix_experiments, EnterpriseBench.
+func TestLooksLikeConfiguredBeadIDAcceptsUnderscoredPrefix(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "live_docs", Path: "/ld", Prefix: "live_docs"},
+			{Name: "migration_evals", Path: "/me", Prefix: "migration_evals"},
+			{Name: "scix_experiments", Path: "/sx", Prefix: "scix_experiments"},
+			{Name: "EnterpriseBench", Path: "/eb", Prefix: "EnterpriseBench"},
+		},
+	}
+	tests := []struct {
+		id   string
+		want bool
+	}{
+		{"live_docs-5du", true},
+		{"migration_evals-cns", true},
+		{"scix_experiments-wqr.9.3", true}, // hierarchical .child suffix.
+		{"EnterpriseBench-0rv.18", true},
+		{"EnterpriseBench-0rv", true},
+		{"live_docs-", false},    // empty suffix.
+		{"live_docs", false},     // no suffix dash.
+		{"unknown_rig-7", false}, // not in config.
+	}
+	for _, tt := range tests {
+		got := LooksLikeConfiguredBeadID(cfg, tt.id)
+		if got != tt.want {
+			t.Errorf("LooksLikeConfiguredBeadID(%q) = %v, want %v", tt.id, got, tt.want)
+		}
+	}
+}
+
+func TestBeadPrefixForCityHandlesUnderscoredPrefix(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "live_docs", Path: "/ld", Prefix: "live_docs"},
+			{Name: "migration_evals", Path: "/me", Prefix: "migration_evals"},
+		},
+	}
+	tests := []struct {
+		id   string
+		want string
+	}{
+		{"live_docs-5du", "live_docs"},
+		{"migration_evals-cns", "migration_evals"},
+		{"migration_evals-cns.1", "migration_evals"},
+	}
+	for _, tt := range tests {
+		got := BeadPrefixForCity(cfg, tt.id)
+		if got != tt.want {
+			t.Errorf("BeadPrefixForCity(%q) = %q, want %q", tt.id, got, tt.want)
+		}
+	}
+}
+
+func TestRigDirForBeadHonorsUnderscoredPrefix(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "live_docs", Path: "/live-docs-rig", Prefix: "live_docs"},
+		},
+	}
+	if got := RigDirForBead(cfg, "live_docs-5du"); got != "/live-docs-rig" {
+		t.Errorf("RigDirForBead(live_docs-5du) = %q, want /live-docs-rig", got)
+	}
+}
+
+// RigDirForBead returns "" in two distinct ways: the prefix doesn't
+// parse at all (BeadPrefixForCity returns "") and the prefix parses
+// but doesn't match any configured rig (BeadPrefix falls back to
+// first-dash split for unknown prefixes). Cover both so a regression
+// that conflates the branches is caught.
+func TestRigDirForBeadEmptyPrefixAndUnknownRig(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "fe", Path: "/fe", Prefix: "fe"}},
+	}
+	// Empty input → BeadPrefixForCity returns "", short-circuits.
+	if got := RigDirForBead(cfg, ""); got != "" {
+		t.Errorf("RigDirForBead(\"\") = %q, want \"\"", got)
+	}
+	// Unknown prefix that BeadPrefix's fallback parses ("unknown")
+	// but is not a configured rig: hits the FindRigByPrefix=false
+	// branch.
+	if got := RigDirForBead(cfg, "unknown-7"); got != "" {
+		t.Errorf("RigDirForBead(unknown-7) = %q, want \"\" (no matching rig)", got)
+	}
+}
+
+// configuredBeadPrefixes skips rigs whose effective prefix is empty.
+// Reaching that branch requires both an empty Name and Prefix —
+// validated configs reject this, but the guard exists so a malformed
+// or partially-applied config can't produce an "" entry that confuses
+// equal-length tiebreaks in matchConfiguredBeadPrefix.
+func TestConfiguredBeadPrefixesSkipsEmptyRigPrefix(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test", Prefix: "HQ"},
+		Rigs: []config.Rig{
+			{Name: "fe", Path: "/fe", Prefix: "fe"},
+			{Name: "", Path: "/empty", Prefix: ""},
+		},
+	}
+	got := configuredBeadPrefixes(cfg)
+	want := []string{"HQ", "fe"}
+	if len(got) != len(want) {
+		t.Fatalf("configuredBeadPrefixes = %v, want %v (empty-prefix rig must be skipped)", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("configuredBeadPrefixes[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestRigDirForBeadHonorsHyphenatedPrefix(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "agent", Path: "/agent", Prefix: "agent"},
+			{Name: "agent-diagnostics", Path: "/agent-diag", Prefix: "agent-diagnostics"},
+		},
+	}
+	if got := RigDirForBead(cfg, "agent-diagnostics-hnn"); got != "/agent-diag" {
+		t.Errorf("RigDirForBead = %q, want /agent-diag (longest configured prefix)", got)
+	}
+	if got := RigDirForBead(cfg, "agent-x1"); got != "/agent" {
+		t.Errorf("RigDirForBead = %q, want /agent", got)
+	}
+}
+
+func TestCheckCrossRigDetectsHyphenatedPrefixMismatch(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "agent", Path: "/agent", Prefix: "agent"},
+			{Name: "agent-diagnostics", Path: "/ad", Prefix: "agent-diagnostics"},
+		},
+	}
+	// First-dash BeadPrefix yields "agent" for "agent-diagnostics-hnn",
+	// which falsely matches a worker in rig "agent" and lets cross-rig
+	// routing through silently. The longest-prefix resolver returns
+	// "agent-diagnostics", so the guard fires correctly.
+	a := config.Agent{Name: "worker", Dir: "agent"}
+	if msg := CheckCrossRig("agent-diagnostics-hnn", a, cfg); msg == "" {
+		t.Error("expected cross-rig warning: bead in rig 'agent-diagnostics' routed to worker in rig 'agent' must not be silently permitted")
+	}
+}
+
 func TestCheckCrossRigSling(t *testing.T) {
 	cfg := &config.City{
 		Rigs: []config.Rig{
@@ -324,6 +614,7 @@ func TestDoSlingBeadToFixedAgent(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps := testDeps(cfg, sp, runner.run)
+	deps.Store = seededStore("BL-42")
 	result, err := DoSling(testOpts(a, "BL-42"), deps, nil)
 	if err != nil {
 		t.Fatalf("DoSling error: %v", err)
@@ -346,6 +637,7 @@ func TestDoSlingSuspendedAgentWarns(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), Suspended: true}
 
 	deps := testDeps(cfg, sp, runner.run)
+	deps.Store = seededStore("BL-42")
 	result, err := DoSling(testOpts(a, "BL-42"), deps, nil)
 	if err != nil {
 		t.Fatalf("DoSling error: %v", err)
@@ -363,6 +655,7 @@ func TestDoSlingRunnerError(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps := testDeps(cfg, sp, runner.run)
+	deps.Store = seededStore("BL-42")
 	_, err := DoSling(testOpts(a, "BL-42"), deps, nil)
 
 	if err == nil {
@@ -393,6 +686,65 @@ func TestDoSlingFormulaToAgent(t *testing.T) {
 	}
 }
 
+func TestBuildSlingFormulaVarsSeedsRoutingNamespace(t *testing.T) {
+	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), newFakeRunner().run)
+
+	vars := BuildSlingFormulaVars("mol-polecat-work", "HW-42", nil, config.Agent{
+		Name:        "polecat",
+		Dir:         "hw",
+		BindingName: "gastown",
+	}, deps)
+
+	if got := vars["rig_name"]; got != "hw" {
+		t.Fatalf("rig_name var = %q, want hw", got)
+	}
+	if got := vars["binding_name"]; got != "gastown" {
+		t.Fatalf("binding_name var = %q, want gastown", got)
+	}
+	if got := vars["binding_prefix"]; got != "gastown." {
+		t.Fatalf("binding_prefix var = %q, want gastown.", got)
+	}
+}
+
+func TestBuildSlingFormulaVarsPreservesExplicitRoutingNamespace(t *testing.T) {
+	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), newFakeRunner().run)
+
+	vars := BuildSlingFormulaVars("mol-polecat-work", "HW-42", []string{
+		"rig_name=override-rig",
+		"binding_name=override-binding",
+		"binding_prefix=override.",
+	}, config.Agent{
+		Name:        "polecat",
+		Dir:         "hw",
+		BindingName: "gastown",
+	}, deps)
+
+	if got := vars["rig_name"]; got != "override-rig" {
+		t.Fatalf("rig_name var = %q, want override-rig", got)
+	}
+	if got := vars["binding_name"]; got != "override-binding" {
+		t.Fatalf("binding_name var = %q, want override-binding", got)
+	}
+	if got := vars["binding_prefix"]; got != "override." {
+		t.Fatalf("binding_prefix var = %q, want override.", got)
+	}
+}
+
+func TestBuildSlingFormulaVarsSeedsEmptyRoutingNamespaceForUnboundAgent(t *testing.T) {
+	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), newFakeRunner().run)
+
+	vars := BuildSlingFormulaVars("mol-deacon-patrol", "CITY-42", nil, config.Agent{
+		Name: "deacon",
+	}, deps)
+
+	for _, key := range []string{"rig_name", "binding_name", "binding_prefix"} {
+		got, ok := vars[key]
+		if !ok || got != "" {
+			t.Fatalf("%s var = %q, %v; want empty string, true", key, got, ok)
+		}
+	}
+}
+
 func TestDoSlingCrossRigBlocks(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -406,6 +758,7 @@ func TestDoSlingCrossRigBlocks(t *testing.T) {
 	a := config.Agent{Name: "worker", Dir: "other", MaxActiveSessions: intPtr(1)}
 
 	deps := testDeps(cfg, sp, runner.run)
+	deps.Store = seededStore("BL-42")
 	_, err := DoSling(testOpts(a, "BL-42"), deps, nil)
 
 	if err == nil {
@@ -579,6 +932,7 @@ func TestDoSlingCustomSlingQueryExpandsTemplateContext(t *testing.T) {
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
 	deps.CityPath = cityPath
 	deps.CityName = ""
+	deps.Store = seededStore("FR-99")
 	opts := testOpts(a, "FR-99")
 	result, err := DoSling(opts, deps, nil)
 	if err != nil {
@@ -616,6 +970,7 @@ func TestNewSlingValid(t *testing.T) {
 func TestSlingRouteBead(t *testing.T) {
 	runner := newFakeRunner()
 	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
+	deps.Store = seededStore("BL-42")
 	s, err := New(deps)
 	if err != nil {
 		t.Fatal(err)
@@ -637,6 +992,337 @@ func TestSlingRouteBead(t *testing.T) {
 	}
 	if len(runner.calls) != 1 {
 		t.Fatalf("got %d runner calls, want 1", len(runner.calls))
+	}
+}
+
+func TestSlingRouteBeadRejectsMissingBead(t *testing.T) {
+	runner := newFakeRunner()
+	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
+	deps.Store = beads.NewMemStore()
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	_, err = s.RouteBead(context.Background(), "BL-404", a, RouteOpts{})
+	if err == nil {
+		t.Fatal("RouteBead error = nil, want missing bead error")
+	}
+	if !strings.Contains(err.Error(), "BL-404") || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("RouteBead error = %q, want missing bead diagnostic", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("runner calls = %#v, want none", runner.calls)
+	}
+}
+
+func TestProbeBeadInStoreTreatsBackendNotFoundAsMissing(t *testing.T) {
+	fileStore, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(t.TempDir(), "beads.json"))
+	if err != nil {
+		t.Fatalf("OpenFileStore: %v", err)
+	}
+	bdStore := beads.NewBdStore(t.TempDir(), func(_, _ string, _ ...string) ([]byte, error) {
+		return []byte(`[]`), nil
+	})
+	execScript := filepath.Join(t.TempDir(), "beads-provider")
+	if err := os.WriteFile(execScript, []byte("#!/bin/sh\ncase \"$1\" in\n  get) echo 'not found' >&2; exit 1 ;;\n  *) exit 2 ;;\nesac\n"), 0o755); err != nil {
+		t.Fatalf("write exec provider: %v", err)
+	}
+
+	tests := []struct {
+		name  string
+		store beads.Store
+	}{
+		{name: "mem", store: beads.NewMemStore()},
+		{name: "file", store: fileStore},
+		{name: "caching", store: beads.NewCachingStoreForTest(beads.NewMemStore(), nil)},
+		{name: "bd", store: bdStore},
+		{name: "exec", store: beadsexec.NewStore(execScript)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			exists, err := ProbeBeadInStore(tt.store, "NOPE-1")
+			if err != nil {
+				t.Fatalf("ProbeBeadInStore error = %v, want nil", err)
+			}
+			if exists {
+				t.Fatal("ProbeBeadInStore exists = true, want false")
+			}
+		})
+	}
+}
+
+func TestSlingRouteBeadDryRunRejectsMissingBead(t *testing.T) {
+	runner := newFakeRunner()
+	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
+	deps.Store = beads.NewMemStore()
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	_, err = s.RouteBead(context.Background(), "BL-404", a, RouteOpts{DryRun: true})
+	if err == nil {
+		t.Fatal("RouteBead dry-run error = nil, want missing bead error")
+	}
+	if !strings.Contains(err.Error(), "BL-404") || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("RouteBead dry-run error = %q, want missing bead diagnostic", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("runner calls = %#v, want none", runner.calls)
+	}
+}
+
+func TestDoSlingDryRunInlineTextSkipsMissingBeadValidation(t *testing.T) {
+	runner := newFakeRunner()
+	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
+	deps.Store = beads.NewMemStore()
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	result, err := DoSling(SlingOpts{
+		Target:        a,
+		BeadOrFormula: "write docs",
+		DryRun:        true,
+		InlineText:    true,
+	}, deps, nil)
+	if err != nil {
+		t.Fatalf("DoSling dry-run inline text: %v", err)
+	}
+	if !result.DryRun {
+		t.Fatalf("DryRun = false, want true")
+	}
+	if result.BeadID != "write docs" {
+		t.Fatalf("BeadID = %q, want inline text", result.BeadID)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("runner calls = %#v, want none", runner.calls)
+	}
+}
+
+func TestDoSlingBatchValidatesContainerInQuerierStore(t *testing.T) {
+	runner := newFakeRunner()
+	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
+	deps.Store = beads.NewMemStore()
+	querier := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "BL-1", Title: "convoy", Type: "convoy", Status: "open", Metadata: map[string]string{}},
+		{ID: "BL-2", Title: "child", Type: "task", Status: "open", ParentID: "BL-1", Metadata: map[string]string{}},
+	}, nil)
+
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	result, err := DoSlingBatch(SlingOpts{Target: a, BeadOrFormula: "BL-1"}, deps, querier)
+	if err != nil {
+		t.Fatalf("DoSlingBatch: %v", err)
+	}
+	if result.Method != "batch" {
+		t.Fatalf("Method = %q, want batch", result.Method)
+	}
+	if result.Routed != 1 {
+		t.Fatalf("Routed = %d, want 1", result.Routed)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("runner calls = %#v, want one", runner.calls)
+	}
+}
+
+func TestDoSlingBatchFallsBackToSelectedStoreForContainerExpansion(t *testing.T) {
+	runner := newFakeRunner()
+	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
+	convoy, err := deps.Store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("create convoy: %v", err)
+	}
+	if _, err := deps.Store.Create(beads.Bead{Title: "child", Type: "task", Status: "open", ParentID: convoy.ID}); err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	wrongQuerier := beads.NewMemStore()
+
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	result, err := DoSlingBatch(SlingOpts{Target: a, BeadOrFormula: convoy.ID}, deps, wrongQuerier)
+	if err != nil {
+		t.Fatalf("DoSlingBatch: %v", err)
+	}
+	if result.Method != "batch" {
+		t.Fatalf("Method = %q, want batch", result.Method)
+	}
+	if result.Routed != 1 {
+		t.Fatalf("Routed = %d, want 1", result.Routed)
+	}
+}
+
+func TestDoSlingBatchUsesCallerQuerierChildrenWhenContainerExistsThere(t *testing.T) {
+	runner := newFakeRunner()
+	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
+	deps.Store = beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "BL-1", Title: "convoy", Type: "convoy", Status: "open", Metadata: map[string]string{}},
+		{ID: "BL-store-only", Title: "store child", Type: "task", Status: "open", ParentID: "BL-1", Metadata: map[string]string{}},
+	}, nil)
+	querier := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "BL-1", Title: "convoy", Type: "convoy", Status: "open", Metadata: map[string]string{}},
+		{ID: "BL-query-only", Title: "query child", Type: "task", Status: "open", ParentID: "BL-1", Metadata: map[string]string{}},
+	}, nil)
+
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	result, err := DoSlingBatch(SlingOpts{Target: a, BeadOrFormula: "BL-1"}, deps, querier)
+	if err != nil {
+		t.Fatalf("DoSlingBatch: %v", err)
+	}
+	if result.Routed != 1 {
+		t.Fatalf("Routed = %d, want 1", result.Routed)
+	}
+	if len(result.Children) != 1 || result.Children[0].BeadID != "BL-query-only" {
+		t.Fatalf("children = %#v, want caller querier child", result.Children)
+	}
+}
+
+func TestDoSlingBatchRoutesNonContainerFoundInQuerierStore(t *testing.T) {
+	runner := newFakeRunner()
+	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
+	deps.Store = beads.NewMemStore()
+	querier := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "BL-1", Title: "task", Type: "task", Status: "open", Metadata: map[string]string{}},
+	}, nil)
+
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	result, err := DoSlingBatch(SlingOpts{Target: a, BeadOrFormula: "BL-1"}, deps, querier)
+	if err != nil {
+		t.Fatalf("DoSlingBatch: %v", err)
+	}
+	if result.Method != "bead" {
+		t.Fatalf("Method = %q, want bead", result.Method)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("runner calls = %#v, want one", runner.calls)
+	}
+	if result.ConvoyID != "" {
+		t.Fatalf("ConvoyID = %q, want no local auto-convoy", result.ConvoyID)
+	}
+	if len(result.MetadataErrors) != 1 || !strings.Contains(result.MetadataErrors[0], "skipping auto-convoy") {
+		t.Fatalf("MetadataErrors = %#v, want auto-convoy skip warning", result.MetadataErrors)
+	}
+}
+
+func TestDoSlingBatchDoesNotFallbackOnQuerierLookupError(t *testing.T) {
+	runner := newFakeRunner()
+	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
+	deps.StoreRef = "rig:selected"
+	convoy, err := deps.Store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("create convoy: %v", err)
+	}
+	if _, err := deps.Store.Create(beads.Bead{Title: "child", Type: "task", Status: "open", ParentID: convoy.ID}); err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	querier := &getErrStore{Store: beads.NewMemStore(), err: fmt.Errorf("backend unavailable")}
+
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	_, err = DoSlingBatch(SlingOpts{Target: a, BeadOrFormula: convoy.ID}, deps, querier)
+	if err == nil {
+		t.Fatal("DoSlingBatch error = nil, want lookup error")
+	}
+	var lookup *BeadLookupError
+	if !errors.As(err, &lookup) {
+		t.Fatalf("DoSlingBatch error = %T %[1]v, want BeadLookupError", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("runner calls = %#v, want none", runner.calls)
+	}
+}
+
+func TestSlingRouteBeadForceAllowsMissingBead(t *testing.T) {
+	runner := newFakeRunner()
+	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
+	deps.Store = beads.NewMemStore()
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	result, err := s.RouteBead(context.Background(), "BL-404", a, RouteOpts{Force: true})
+	if err != nil {
+		t.Fatalf("RouteBead force: %v", err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("runner calls = %#v, want one call", runner.calls)
+	}
+	if len(result.MetadataErrors) != 1 || !strings.Contains(result.MetadataErrors[0], "forced dispatch skipped missing-bead validation") {
+		t.Fatalf("MetadataErrors = %#v, want forced missing-bead warning", result.MetadataErrors)
+	}
+	all, err := deps.Store.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("list beads: %v", err)
+	}
+	if len(all) != 0 {
+		t.Fatalf("stored beads = %#v, want no orphan auto-convoy", all)
+	}
+}
+
+func TestSlingRouteDefaultFormulaForceStillRejectsMissingBead(t *testing.T) {
+	runner := newFakeRunner()
+	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
+	deps.Store = beads.NewMemStore()
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a := config.Agent{Name: "mayor", DefaultSlingFormula: stringPtr("code-review"), MaxActiveSessions: intPtr(1)}
+	_, err = s.RouteBead(context.Background(), "BL-404", a, RouteOpts{Force: true})
+	if err == nil {
+		t.Fatal("RouteBead force with default formula error = nil, want missing bead error")
+	}
+	var missing *MissingBeadError
+	if !errors.As(err, &missing) {
+		t.Fatalf("RouteBead force with default formula error = %T %[1]v, want MissingBeadError", err)
+	}
+	all, listErr := deps.Store.List(beads.ListQuery{AllowScan: true})
+	if listErr != nil {
+		t.Fatalf("list beads: %v", listErr)
+	}
+	if len(all) != 0 {
+		t.Fatalf("stored beads = %#v, want no orphan formula state", all)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("runner calls = %#v, want none", runner.calls)
+	}
+}
+
+func TestValidateExistingBeadInQuerierNilIsLookupError(t *testing.T) {
+	err := validateExistingBeadInQuerier("BL-42", "rig:missing", nil)
+	var lookup *BeadLookupError
+	if !errors.As(err, &lookup) {
+		t.Fatalf("error = %T %[1]v, want BeadLookupError", err)
+	}
+	var missing *MissingBeadError
+	if errors.As(err, &missing) {
+		t.Fatalf("error = %T %[1]v, should not report missing bead for nil store", err)
+	}
+}
+
+func TestSlingRouteBeadSurfacesStoreLookupError(t *testing.T) {
+	runner := newFakeRunner()
+	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
+	deps.Store = &getErrStore{Store: beads.NewMemStore(), err: fmt.Errorf("backend unavailable")}
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	_, err = s.RouteBead(context.Background(), "BL-42", a, RouteOpts{})
+	if err == nil {
+		t.Fatal("RouteBead error = nil, want store lookup failure")
+	}
+	if !strings.Contains(err.Error(), "backend unavailable") {
+		t.Fatalf("RouteBead error = %q, want backend failure", err)
+	}
+	if strings.Contains(err.Error(), "not found") {
+		t.Fatalf("RouteBead error = %q, want store failure, not not-found", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("runner calls = %#v, want none", runner.calls)
 	}
 }
 
@@ -681,6 +1367,7 @@ func TestSlingRouteBeadWithTypedRouter(t *testing.T) {
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	deps.Router = router
+	deps.Store = seededStore("BL-42")
 
 	s, err := New(deps)
 	if err != nil {
@@ -730,6 +1417,61 @@ func TestSlingAttachFormula(t *testing.T) {
 	}
 	if result.FormulaName != "code-review" {
 		t.Errorf("FormulaName = %q, want code-review", result.FormulaName)
+	}
+}
+
+func TestSlingAttachFormulaRejectsMissingBead(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = beads.NewMemStore()
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	_, err = s.AttachFormula(context.Background(), "code-review", "BL-404", a, FormulaOpts{})
+	if err == nil {
+		t.Fatal("AttachFormula error = nil, want missing bead error")
+	}
+	var missing *MissingBeadError
+	if !errors.As(err, &missing) {
+		t.Fatalf("AttachFormula error = %T %[1]v, want MissingBeadError", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("runner calls = %#v, want none", runner.calls)
+	}
+}
+
+func TestSlingAttachFormulaForceStillRejectsMissingBead(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = beads.NewMemStore()
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	_, err = s.AttachFormula(context.Background(), "code-review", "BL-404", a, FormulaOpts{Force: true})
+	if err == nil {
+		t.Fatal("AttachFormula force error = nil, want missing bead error")
+	}
+	var missing *MissingBeadError
+	if !errors.As(err, &missing) {
+		t.Fatalf("AttachFormula force error = %T %[1]v, want MissingBeadError", err)
+	}
+	all, listErr := deps.Store.List(beads.ListQuery{AllowScan: true})
+	if listErr != nil {
+		t.Fatalf("list beads: %v", listErr)
+	}
+	if len(all) != 0 {
+		t.Fatalf("stored beads = %#v, want no orphan formula state", all)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("runner calls = %#v, want none", runner.calls)
 	}
 }
 
@@ -1861,6 +2603,19 @@ func TestSourceWorkflowLockScopeUsesStorePath(t *testing.T) {
 	}); got != filepath.Join("/city", "rigs", "alpha") {
 		t.Fatalf("rig scope = %q, want %q", got, filepath.Join("/city", "rigs", "alpha"))
 	}
+	wantShared := sourceworkflow.LockScopeForStoreRef("/city", "", "rig:alpha", func(rigName string) (string, bool) {
+		if rigName != "alpha" {
+			return "", false
+		}
+		return "rigs/alpha", true
+	})
+	if got := sourceWorkflowLockScope(SlingDeps{
+		CityPath: "/city",
+		StoreRef: "rig:alpha",
+		Cfg:      cfg,
+	}); got != wantShared {
+		t.Fatalf("rig scope = %q, want shared helper scope %q", got, wantShared)
+	}
 }
 
 func TestSlingExpandConvoy(t *testing.T) {
@@ -1901,6 +2656,7 @@ func TestDoSlingPoolEmptyWarns(t *testing.T) {
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
 	a := config.Agent{Name: "pool", MaxActiveSessions: intPtr(0)}
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = seededStore("BL-1")
 	result, err := DoSling(testOpts(a, "BL-1"), deps, nil)
 	if err != nil {
 		t.Fatalf("DoSling: %v", err)
@@ -1937,6 +2693,7 @@ func TestFinalizeNoConvoyWhenSuppressed(t *testing.T) {
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = seededStore("BL-1")
 
 	result, err := DoSling(SlingOpts{
 		Target: a, BeadOrFormula: "BL-1", NoConvoy: true,
@@ -2026,6 +2783,7 @@ func TestDoSlingDryRun(t *testing.T) {
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = seededStore("BL-1")
 
 	result, err := DoSling(SlingOpts{
 		Target: a, BeadOrFormula: "BL-1", DryRun: true,
@@ -2046,6 +2804,7 @@ func TestDoSlingNudgeSignal(t *testing.T) {
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = seededStore("BL-1")
 
 	result, err := DoSling(SlingOpts{
 		Target: a, BeadOrFormula: "BL-1", Nudge: true,
@@ -2067,6 +2826,7 @@ func TestDoSlingSuspendedAgentWarnsEvenOnFailure(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), Suspended: true}
 
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = seededStore("BL-1")
 	result, err := DoSling(testOpts(a, "BL-1"), deps, nil)
 
 	if err == nil {
@@ -2089,6 +2849,7 @@ func TestDoSlingNonexistentTargetFails(_ *testing.T) {
 	}
 	nonexistent := config.Agent{Name: "nonexistent", MaxActiveSessions: intPtr(1)}
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = seededStore("BL-1")
 	// Cross-rig and routing should still work even if agent doesn't exist in config.
 	// The runner will fail, but the domain doesn't validate agent existence.
 	result, err := DoSling(testOpts(nonexistent, "BL-1"), deps, nil)
@@ -2107,6 +2868,7 @@ func TestDoSlingPoolEmptyWarnsOnFailure(t *testing.T) {
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
 	a := config.Agent{Name: "empty-pool", MaxActiveSessions: intPtr(0)}
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = seededStore("BL-1")
 
 	result, err := DoSling(testOpts(a, "BL-1"), deps, nil)
 	if err == nil {

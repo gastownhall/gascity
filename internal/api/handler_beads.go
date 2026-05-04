@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -109,7 +110,11 @@ func (s *Server) findStore(rig string) beads.Store {
 // prefix/routes mapping when possible. If there is no routed match, it falls
 // back to the legacy store scan order.
 func (s *Server) beadStoresForID(id string) []beads.Store {
-	if prefix := beadPrefix(strings.TrimSpace(id)); prefix != "" {
+	id = strings.TrimSpace(id)
+	if store := s.resolveStoreByConfiguredIDPrefix(id); store != nil {
+		return []beads.Store{store}
+	}
+	if prefix := beadPrefix(id); prefix != "" {
 		if store := s.resolveStoreByPrefix(prefix); store != nil {
 			return []beads.Store{store}
 		}
@@ -127,6 +132,45 @@ func (s *Server) beadStoresForID(id string) []beads.Store {
 	return candidates
 }
 
+func (s *Server) resolveStoreByConfiguredIDPrefix(id string) beads.Store {
+	if id == "" {
+		return nil
+	}
+	cfg := s.state.Config()
+	if cfg == nil {
+		return nil
+	}
+
+	var bestStore beads.Store
+	bestLen := -1
+	if prefix := strings.TrimSpace(config.EffectiveHQPrefix(cfg)); beadIDHasConfiguredPrefix(id, prefix) {
+		if cityStore := s.state.CityBeadStore(); cityStore != nil {
+			bestStore = cityStore
+			bestLen = len(prefix)
+		}
+	}
+	for _, rig := range cfg.Rigs {
+		prefix := strings.TrimSpace(rig.EffectivePrefix())
+		if !beadIDHasConfiguredPrefix(id, prefix) || len(prefix) <= bestLen {
+			continue
+		}
+		store := s.state.BeadStore(rig.Name)
+		if store == nil {
+			continue
+		}
+		bestStore = store
+		bestLen = len(prefix)
+	}
+	return bestStore
+}
+
+func beadIDHasConfiguredPrefix(id, prefix string) bool {
+	if prefix == "" {
+		return false
+	}
+	return id == prefix || strings.HasPrefix(id, prefix+"-")
+}
+
 // resolveStoreByPrefix finds the store that owns a bead prefix by checking
 // routes.jsonl files in the city and each rig's .beads/ directory, then
 // mapping the resolved store path back to the correct store.
@@ -137,6 +181,21 @@ func (s *Server) resolveStoreByPrefix(prefix string) beads.Store {
 	}
 	stores := s.state.BeadStores()
 	cityPath := strings.TrimSpace(s.state.CityPath())
+
+	if prefix == config.EffectiveHQPrefix(cfg) {
+		if cityStore := s.state.CityBeadStore(); cityStore != nil {
+			return cityStore
+		}
+	}
+	for _, rig := range cfg.Rigs {
+		if prefix != rig.EffectivePrefix() {
+			continue
+		}
+		if store, exists := stores[rig.Name]; exists {
+			return store
+		}
+		return nil
+	}
 
 	// Build rig path → name map for reverse lookup (used by both city
 	// and rig route resolution below).
@@ -232,13 +291,110 @@ type BeadGraphResponse struct {
 	Deps  []workflowDepResponse `json:"deps"`
 }
 
-// beadPrefix extracts the alphabetic prefix from a bead ID (e.g., "ga" from "ga-5b8i").
+func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workflowDepResponse, error) {
+	graphBeads := make([]beads.Bead, 0, 1)
+	beadIndex := make(map[string]beads.Bead)
+
+	upsert := func(b beads.Bead) {
+		if b.ID == "" {
+			return
+		}
+		if existing, ok := beadIndex[b.ID]; ok {
+			if existing.ParentID == "" && b.ParentID != "" {
+				existing.ParentID = b.ParentID
+				beadIndex[b.ID] = existing
+				for i := range graphBeads {
+					if graphBeads[i].ID == b.ID {
+						graphBeads[i].ParentID = b.ParentID
+						break
+					}
+				}
+			}
+			return
+		}
+		beadIndex[b.ID] = b
+		graphBeads = append(graphBeads, b)
+	}
+	upsert(root)
+
+	metadataChildren, err := store.List(beads.ListQuery{
+		Metadata:      map[string]string{"gc.root_bead_id": root.ID},
+		IncludeClosed: true,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("listing metadata children for bead %q: %w", root.ID, err)
+	}
+	for _, child := range metadataChildren {
+		upsert(child)
+	}
+
+	parentEdges := make([]workflowDepResponse, 0)
+	seenEdges := make(map[string]bool)
+	addParentEdge := func(parentID, childID string) {
+		if parentID == "" || childID == "" {
+			return
+		}
+		edge := workflowDepResponse{From: parentID, To: childID, Kind: "parent-child"}
+		key := edge.From + "|" + edge.To + "|" + edge.Kind
+		if seenEdges[key] {
+			return
+		}
+		seenEdges[key] = true
+		parentEdges = append(parentEdges, edge)
+	}
+
+	for i := 0; i < len(graphBeads); i++ {
+		parent := graphBeads[i]
+		children, err := store.List(beads.ListQuery{
+			ParentID:      parent.ID,
+			IncludeClosed: true,
+			Sort:          beads.SortCreatedAsc,
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("listing child beads for bead %q: %w", parent.ID, err)
+		}
+		for _, child := range children {
+			if child.ParentID == "" {
+				child.ParentID = parent.ID
+			}
+			addParentEdge(parent.ID, child.ID)
+			upsert(child)
+		}
+	}
+
+	return graphBeads, parentEdges, nil
+}
+
+func mergeWorkflowDeps(primary, extra []workflowDepResponse) []workflowDepResponse {
+	if len(extra) == 0 {
+		return primary
+	}
+	seen := make(map[string]bool, len(primary)+len(extra))
+	for _, edge := range primary {
+		seen[edge.From+"|"+edge.To+"|"+edge.Kind] = true
+	}
+	for _, edge := range extra {
+		key := edge.From + "|" + edge.To + "|" + edge.Kind
+		if seen[key] {
+			continue
+		}
+		primary = append(primary, edge)
+		seen[key] = true
+	}
+	return primary
+}
+
+// beadPrefix extracts the configured prefix from a bead ID (e.g., "ga" from
+// "ga-5b8i"). bd prefixes may contain digits after the first character.
 func beadPrefix(id string) string {
 	for i, c := range id {
 		if c == '-' {
 			return id[:i]
 		}
 		if c < 'a' || c > 'z' {
+			if i > 0 && c >= '0' && c <= '9' {
+				continue
+			}
 			return ""
 		}
 	}

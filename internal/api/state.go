@@ -121,7 +121,9 @@ type ProviderUpdate struct {
 	DisplayName        *string
 	Base               **string
 	Command            *string
+	ACPCommand         *string
 	Args               []string // nil = not set, non-nil = replace
+	ACPArgs            []string // nil = not set, non-nil = replace
 	ArgsAppend         []string // nil = not set, non-nil = replace
 	PromptMode         *string
 	PromptFlag         *string

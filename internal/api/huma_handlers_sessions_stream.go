@@ -119,6 +119,15 @@ func (s *Server) streamSession(hctx huma.Context, input *SessionStreamInput, sen
 		}
 		return
 	}
+	if format == "raw" {
+		_ = send(sse.Message{ID: 0, Data: SessionStreamRawMessageEvent{
+			ID:       info.ID,
+			Template: info.Template,
+			Provider: info.Provider,
+			Format:   "raw",
+			Messages: []SessionRawMessageFrame{},
+		}})
+	}
 	switch {
 	case hasHistory:
 		if format == "raw" {

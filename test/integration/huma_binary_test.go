@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -31,12 +32,19 @@ import (
 func TestHumaBinary_SupervisorBootsAndServesSpec(t *testing.T) {
 	bin := buildGCBinary(t)
 
-	gcHome := t.TempDir()
 	// macOS caps AF_UNIX paths at ~104 chars. t.TempDir() paths on
-	// macOS are long enough that <tempdir>/gc/supervisor.sock blows
-	// past the limit. Use a short /tmp-rooted dir for XDG_RUNTIME_DIR
-	// so the socket path stays under the limit.
-	runtimeDir := shortTempDir(t)
+	// macOS are long enough that <tempdir>/supervisor.sock blows past
+	// the limit. An isolated GC_HOME override keeps the supervisor
+	// socket under GC_HOME, so both GC_HOME and XDG_RUNTIME_DIR must
+	// live under the short /tmp-rooted test directory.
+	root := shortTempDir(t)
+	gcHome := filepath.Join(root, "home")
+	runtimeDir := filepath.Join(root, "run")
+	for _, dir := range []string{gcHome, runtimeDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
 	port := reserveFreePort(t)
 	writeSupervisorConfig(t, gcHome, port)
 	if err := seedDoltIdentityForRoot(gcHome); err != nil {
@@ -282,4 +290,735 @@ func waitHTTP(t *testing.T, url string, deadline time.Duration) {
 		case <-ticker.C:
 		}
 	}
+}
+
+// TestHumaBinary_CityCreateAsync exercises the async POST /v0/city
+// contract end-to-end against a live supervisor: subscribe to
+// /v0/events/stream, POST /v0/city, verify the handler returns 202
+// immediately with {request_id}, then assert a request.result.city.create event
+// for that city name arrives on the SSE stream. This is the test a real-world app's
+// live contract harness implicitly needs — without it, any
+// regression in Scaffold, the reconciler's city create completion emission, or
+// the supervisor event multiplexer would ship unnoticed.
+//
+// Build-tagged `integration`; run with:
+//
+//	go test -tags=integration ./test/integration/ -run TestHumaBinary_CityCreateAsync
+func TestHumaBinary_CityCreateAsync(t *testing.T) {
+	bin := buildGCBinary(t)
+
+	root := shortTempDir(t)
+	gcHome := filepath.Join(root, "home")
+	runtimeDir := filepath.Join(root, "run")
+	for _, dir := range []string{gcHome, runtimeDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	port := reserveFreePort(t)
+	writeSupervisorConfig(t, gcHome, port)
+	if err := seedDoltIdentityForRoot(gcHome); err != nil {
+		t.Fatalf("seed dolt identity: %v", err)
+	}
+
+	baseURL := "http://127.0.0.1:" + strconv.Itoa(port)
+	env := integrationEnvFor(gcHome, runtimeDir, true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	cmd := exec.CommandContext(ctx, bin, "supervisor", "run")
+	cmd.Env = env
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatalf("stderr pipe: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start supervisor: %v", err)
+	}
+	var supervisorLog strings.Builder
+	go func() { _, _ = io.Copy(&supervisorLog, stderr) }()
+	t.Cleanup(func() {
+		cancel()
+		_ = cmd.Wait()
+		if t.Failed() {
+			t.Logf("supervisor stderr:\n%s", supervisorLog.String())
+		}
+	})
+
+	waitHTTP(t, baseURL+"/health", 10*time.Second)
+
+	// 1. POST /v0/city. Expected: 202 Accepted, body contains name
+	// matching the directory basename. We POST first because the
+	// supervisor event stream rejects subscriptions when no event
+	// providers are registered (503 no_providers), which is the
+	// case before any city exists.
+	cityDir := filepath.Join(gcHome, "async-test-city")
+	body := `{"dir":"` + cityDir + `","provider":"claude"}`
+	postReq, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v0/city", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("build post request: %v", err)
+	}
+	postReq.Header.Set("Content-Type", "application/json")
+	postReq.Header.Set("X-GC-Request", "true")
+	postStart := time.Now()
+	postResp, err := http.DefaultClient.Do(postReq)
+	if err != nil {
+		t.Fatalf("POST /v0/city: %v", err)
+	}
+	postDur := time.Since(postStart)
+	postBody, _ := io.ReadAll(postResp.Body)
+	_ = postResp.Body.Close()
+	if postResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /v0/city status = %d, want 202; body: %s", postResp.StatusCode, string(postBody))
+	}
+	if postDur > 20*time.Second {
+		t.Errorf("POST /v0/city took %s, want fast scaffold response (<20s); async contract is broken", postDur)
+	}
+	var createResp struct {
+		RequestID   string `json:"request_id"`
+		EventCursor string `json:"event_cursor"`
+	}
+	if err := json.Unmarshal(postBody, &createResp); err != nil {
+		t.Fatalf("decode create response: %v; body: %s", err, string(postBody))
+	}
+	if createResp.RequestID == "" {
+		t.Fatalf("empty request_id in response; body: %s", string(postBody))
+	}
+	if createResp.EventCursor == "" {
+		t.Fatalf("empty event_cursor in response; body: %s", string(postBody))
+	}
+	// The city name is the basename of cityDir.
+	cityName := filepath.Base(cityDir)
+	t.Logf("POST /v0/city returned 202 in %s for city %q (request_id=%s)", postDur.Round(time.Millisecond), cityName, createResp.RequestID)
+
+	// 2. Subscribe to /v0/events/stream. No retry: Scaffold writes
+	// the city to cities.toml synchronously before POST returns, and
+	// TransientCityEventProviders reads cities.toml directly, so the
+	// mux contains this city's event provider by the time the client
+	// receives 202. event_cursor is the supervisor head captured before
+	// acceptance, so the client catches this request's result without
+	// replaying unrelated historical backlog.
+	streamCtx, streamCancel := context.WithTimeout(context.Background(), 90*time.Second)
+	t.Cleanup(streamCancel)
+	streamReq, err := http.NewRequestWithContext(streamCtx, http.MethodGet, baseURL+"/v0/events/stream?after_cursor="+url.QueryEscape(createResp.EventCursor), nil)
+	if err != nil {
+		t.Fatalf("build stream request: %v", err)
+	}
+	streamReq.Header.Set("Accept", "text/event-stream")
+	streamResp, err := http.DefaultClient.Do(streamReq)
+	if err != nil {
+		t.Fatalf("GET /v0/events/stream: %v", err)
+	}
+	defer streamResp.Body.Close() //nolint:errcheck
+	if streamResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(streamResp.Body)
+		t.Fatalf("GET /v0/events/stream status = %d, want 200; body: %s", streamResp.StatusCode, string(body))
+	}
+
+	// Collect events on a background goroutine; surface them via a
+	// channel so the test body can block until the expected one
+	// arrives (or a timeout fires).
+	eventLines := make(chan string, 128)
+	go readSSEFrames(streamResp.Body, eventLines)
+
+	// 3. Wait for request.result.city.create (or request.failed with
+	// operation=city.create) on the SSE stream whose envelope Subject
+	// == cityName. This is the async completion contract the real-world app live
+	// harness relies on.
+	deadline := time.After(120 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for request.result.city.create for %q; collected %d lines so far", cityName, len(eventLines))
+		case line, ok := <-eventLines:
+			if !ok {
+				t.Fatalf("SSE stream closed before request.result.city.create for %q arrived", cityName)
+			}
+			// SSE "data:" lines carry JSON envelopes. Ignore
+			// heartbeats, comments, framing lines.
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			payload := strings.TrimPrefix(line, "data: ")
+			var env struct {
+				Type    string          `json:"type"`
+				Subject string          `json:"subject"`
+				Payload json.RawMessage `json:"payload"`
+			}
+			if err := json.Unmarshal([]byte(payload), &env); err != nil {
+				continue
+			}
+			if env.Subject != cityName || !payloadRequestIDMatches(env.Payload, createResp.RequestID) {
+				continue
+			}
+			switch env.Type {
+			case "request.result.city.create":
+				t.Logf("received request.result.city.create for %q — async contract satisfied", cityName)
+				return
+			case "request.failed":
+				var result struct {
+					Payload struct {
+						RequestID string `json:"request_id"`
+						Operation string `json:"operation"`
+					} `json:"payload"`
+				}
+				if err := json.Unmarshal([]byte(payload), &result); err == nil && result.Payload.RequestID == createResp.RequestID && result.Payload.Operation == "city.create" {
+					t.Fatalf("received request.failed(city.create) for %q: %s", cityName, payload)
+				}
+			}
+		}
+	}
+}
+
+// TestHumaBinary_CityUnregisterAsync exercises the async
+// POST /v0/city/{cityName}/unregister contract end-to-end against a
+// live supervisor. Creates a city, waits for create completion, then POSTs
+// unregister and asserts unregister completion arrives on the same SSE
+// stream. Symmetric with TestHumaBinary_CityCreateAsync.
+//
+// Build-tagged `integration`; run with:
+//
+//	go test -tags=integration ./test/integration/ -run TestHumaBinary_CityUnregisterAsync
+func TestHumaBinary_CityUnregisterAsync(t *testing.T) {
+	bin := buildGCBinary(t)
+
+	root := shortTempDir(t)
+	gcHome := filepath.Join(root, "home")
+	runtimeDir := filepath.Join(root, "run")
+	for _, dir := range []string{gcHome, runtimeDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	port := reserveFreePort(t)
+	writeSupervisorConfig(t, gcHome, port)
+	if err := seedDoltIdentityForRoot(gcHome); err != nil {
+		t.Fatalf("seed dolt identity: %v", err)
+	}
+
+	baseURL := "http://127.0.0.1:" + strconv.Itoa(port)
+	env := integrationEnvFor(gcHome, runtimeDir, true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	cmd := exec.CommandContext(ctx, bin, "supervisor", "run")
+	cmd.Env = env
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatalf("stderr pipe: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start supervisor: %v", err)
+	}
+	var supervisorLog strings.Builder
+	go func() { _, _ = io.Copy(&supervisorLog, stderr) }()
+	t.Cleanup(func() {
+		cancel()
+		_ = cmd.Wait()
+		if t.Failed() {
+			t.Logf("supervisor stderr:\n%s", supervisorLog.String())
+		}
+	})
+
+	waitHTTP(t, baseURL+"/health", 10*time.Second)
+
+	// 1. Create a city.
+	cityDir := filepath.Join(gcHome, "unregister-test-city")
+	body := `{"dir":"` + cityDir + `","provider":"claude"}`
+	postReq, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v0/city", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("build post request: %v", err)
+	}
+	postReq.Header.Set("Content-Type", "application/json")
+	postReq.Header.Set("X-GC-Request", "true")
+	postResp, err := http.DefaultClient.Do(postReq)
+	if err != nil {
+		t.Fatalf("POST /v0/city: %v", err)
+	}
+	postBody, _ := io.ReadAll(postResp.Body)
+	_ = postResp.Body.Close()
+	if postResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /v0/city status = %d, want 202; body: %s", postResp.StatusCode, string(postBody))
+	}
+	var createResp struct {
+		RequestID   string `json:"request_id"`
+		EventCursor string `json:"event_cursor"`
+	}
+	if err := json.Unmarshal(postBody, &createResp); err != nil {
+		t.Fatalf("decode create response: %v; body: %s", err, string(postBody))
+	}
+	if createResp.EventCursor == "" {
+		t.Fatalf("empty city create event_cursor in response; body: %s", string(postBody))
+	}
+	// The city name is the basename of cityDir.
+	cityName := filepath.Base(cityDir)
+
+	// 2. Subscribe to /v0/events/stream and wait for city ready so
+	// we know the reconciler has fully adopted the city (the
+	// unregister reconcile path we're testing operates on the
+	// running set).
+	streamCtx, streamCancel := context.WithTimeout(context.Background(), 180*time.Second)
+	t.Cleanup(streamCancel)
+	streamReq, err := http.NewRequestWithContext(streamCtx, http.MethodGet, baseURL+"/v0/events/stream?after_cursor="+url.QueryEscape(createResp.EventCursor), nil)
+	if err != nil {
+		t.Fatalf("build stream request: %v", err)
+	}
+	streamReq.Header.Set("Accept", "text/event-stream")
+	streamResp, err := http.DefaultClient.Do(streamReq)
+	if err != nil {
+		t.Fatalf("GET /v0/events/stream: %v", err)
+	}
+	defer streamResp.Body.Close() //nolint:errcheck
+	if streamResp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(streamResp.Body)
+		t.Fatalf("GET /v0/events/stream status = %d, want 200; body: %s", streamResp.StatusCode, string(b))
+	}
+
+	eventLines := make(chan string, 256)
+	go readSSEFrames(streamResp.Body, eventLines)
+
+	readyDeadline := time.After(120 * time.Second)
+ready:
+	for {
+		select {
+		case <-readyDeadline:
+			t.Fatalf("timed out waiting for request.result.city.create for %q", cityName)
+		case line, ok := <-eventLines:
+			if !ok {
+				t.Fatalf("SSE stream closed before request.result.city.create for %q arrived", cityName)
+			}
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			var env struct {
+				Type    string          `json:"type"`
+				Subject string          `json:"subject"`
+				Payload json.RawMessage `json:"payload"`
+			}
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &env); err != nil {
+				continue
+			}
+			if env.Type == "request.result.city.create" && payloadRequestIDMatches(env.Payload, createResp.RequestID) {
+				break ready
+			}
+		}
+	}
+	t.Logf("city %q ready; issuing unregister", cityName)
+
+	// 3. POST /v0/city/{cityName}/unregister. Expect 202.
+	unregURL := baseURL + "/v0/city/" + cityName + "/unregister"
+	unregReq, err := http.NewRequestWithContext(ctx, http.MethodPost, unregURL, nil)
+	if err != nil {
+		t.Fatalf("build unregister request: %v", err)
+	}
+	unregReq.Header.Set("X-GC-Request", "true")
+	unregStart := time.Now()
+	unregResp, err := http.DefaultClient.Do(unregReq)
+	if err != nil {
+		t.Fatalf("POST unregister: %v", err)
+	}
+	unregDur := time.Since(unregStart)
+	unregBody, _ := io.ReadAll(unregResp.Body)
+	_ = unregResp.Body.Close()
+	if unregResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST unregister status = %d, want 202; body: %s", unregResp.StatusCode, string(unregBody))
+	}
+	if unregDur > 20*time.Second {
+		t.Errorf("POST unregister took %s, want fast response (<20s)", unregDur)
+	}
+	var unregBodyDecoded struct {
+		RequestID   string `json:"request_id"`
+		EventCursor string `json:"event_cursor"`
+	}
+	if err := json.Unmarshal(unregBody, &unregBodyDecoded); err != nil {
+		t.Fatalf("decode unregister response: %v; body: %s", err, string(unregBody))
+	}
+	if unregBodyDecoded.RequestID == "" {
+		t.Errorf("unregister response missing request_id; body: %s", string(unregBody))
+	}
+	if unregBodyDecoded.EventCursor == "" {
+		t.Fatalf("unregister response missing event_cursor; body: %s", string(unregBody))
+	}
+	t.Logf("POST unregister returned 202 in %s (request_id=%s)", unregDur.Round(time.Millisecond), unregBodyDecoded.RequestID)
+
+	// 4. Wait for request.result.city.unregister (or request.failed
+	// with operation=city.unregister) on a stream opened after the POST
+	// from the returned event cursor.
+	unregStreamCtx, unregStreamCancel := context.WithTimeout(context.Background(), 120*time.Second)
+	t.Cleanup(unregStreamCancel)
+	unregStreamReq, err := http.NewRequestWithContext(unregStreamCtx, http.MethodGet, baseURL+"/v0/events/stream?after_cursor="+url.QueryEscape(unregBodyDecoded.EventCursor), nil)
+	if err != nil {
+		t.Fatalf("build unregister stream request: %v", err)
+	}
+	unregStreamReq.Header.Set("Accept", "text/event-stream")
+	unregStreamResp, err := http.DefaultClient.Do(unregStreamReq)
+	if err != nil {
+		t.Fatalf("GET /v0/events/stream for unregister: %v", err)
+	}
+	defer unregStreamResp.Body.Close() //nolint:errcheck
+	if unregStreamResp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(unregStreamResp.Body)
+		t.Fatalf("GET /v0/events/stream for unregister status = %d, want 200; body: %s", unregStreamResp.StatusCode, string(b))
+	}
+	unregEventLines := make(chan string, 256)
+	go readSSEFrames(unregStreamResp.Body, unregEventLines)
+
+	unregDeadline := time.After(120 * time.Second)
+	for {
+		select {
+		case <-unregDeadline:
+			t.Fatalf("timed out waiting for request.result.city.unregister for %q", cityName)
+		case line, ok := <-unregEventLines:
+			if !ok {
+				t.Fatalf("SSE stream closed before request.result.city.unregister for %q arrived", cityName)
+			}
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			payload := strings.TrimPrefix(line, "data: ")
+			var env struct {
+				Type    string          `json:"type"`
+				Subject string          `json:"subject"`
+				Payload json.RawMessage `json:"payload"`
+			}
+			if err := json.Unmarshal([]byte(payload), &env); err != nil {
+				continue
+			}
+			if env.Subject != cityName || !payloadRequestIDMatches(env.Payload, unregBodyDecoded.RequestID) {
+				continue
+			}
+			switch env.Type {
+			case "request.result.city.unregister":
+				t.Logf("received request.result.city.unregister for %q — async contract satisfied", cityName)
+				return
+			case "request.failed":
+				var result struct {
+					Payload struct {
+						RequestID string `json:"request_id"`
+						Operation string `json:"operation"`
+					} `json:"payload"`
+				}
+				if err := json.Unmarshal([]byte(payload), &result); err == nil && result.Payload.RequestID == unregBodyDecoded.RequestID && result.Payload.Operation == "city.unregister" {
+					t.Fatalf("received request.failed(city.unregister) for %q: %s", cityName, payload)
+				}
+			}
+		}
+	}
+}
+
+// readSSEFrames scans a text/event-stream body line-by-line and ships
+// each line to out. Returns when the underlying reader closes (EOF or
+// connection drop). The channel is closed to signal "no more frames".
+func readSSEFrames(body io.ReadCloser, out chan<- string) {
+	defer close(out)
+	buf := make([]byte, 0, 4096)
+	chunk := make([]byte, 4096)
+	for {
+		n, err := body.Read(chunk)
+		if n > 0 {
+			buf = append(buf, chunk[:n]...)
+			for {
+				i := strings.IndexByte(string(buf), '\n')
+				if i < 0 {
+					break
+				}
+				line := strings.TrimRight(string(buf[:i]), "\r")
+				buf = buf[i+1:]
+				out <- line
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// TestHumaBinary_SessionMessageAsync exercises the async POST
+// /v0/city/{cityName}/session/{id}/messages contract end-to-end:
+// create a city, wait for it to be ready, create a provider session,
+// suspend it, send a message, assert 202 returns immediately, then
+// wait for a request.result.session.message event on the SSE stream.
+func TestHumaBinary_SessionMessageAsync(t *testing.T) {
+	bin := buildGCBinary(t)
+
+	root := shortTempDir(t)
+	gcHome := filepath.Join(root, "home")
+	runtimeDir := filepath.Join(root, "run")
+	for _, dir := range []string{gcHome, runtimeDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	port := reserveFreePort(t)
+	writeSupervisorConfig(t, gcHome, port)
+	if err := seedDoltIdentityForRoot(gcHome); err != nil {
+		t.Fatalf("seed dolt identity: %v", err)
+	}
+
+	baseURL := "http://127.0.0.1:" + strconv.Itoa(port)
+	env := integrationEnvFor(gcHome, runtimeDir, true)
+	env = append(env, "GC_SESSION=fake")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	cmd := exec.CommandContext(ctx, bin, "supervisor", "run")
+	cmd.Env = env
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatalf("stderr pipe: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start supervisor: %v", err)
+	}
+	var supervisorLog strings.Builder
+	go func() { _, _ = io.Copy(&supervisorLog, stderr) }()
+	t.Cleanup(func() {
+		cancel()
+		_ = cmd.Wait()
+		if t.Failed() {
+			t.Logf("supervisor stderr:\n%s", supervisorLog.String())
+		}
+	})
+
+	waitHTTP(t, baseURL+"/health", 10*time.Second)
+
+	// 1. Create a city with fake session provider so provider
+	// startup is instant (no real Claude CLI needed).
+	cityDir := filepath.Join(gcHome, "msg-test-city")
+	cityBody := `{"dir":"` + cityDir + `","provider":"claude"}`
+	postReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v0/city", strings.NewReader(cityBody))
+	postReq.Header.Set("Content-Type", "application/json")
+	postReq.Header.Set("X-GC-Request", "true")
+	postResp, err := http.DefaultClient.Do(postReq)
+	if err != nil {
+		t.Fatalf("POST /v0/city: %v", err)
+	}
+	postBody, _ := io.ReadAll(postResp.Body)
+	_ = postResp.Body.Close()
+	if postResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /v0/city status = %d, want 202; body: %s", postResp.StatusCode, string(postBody))
+	}
+	var createResp struct {
+		RequestID   string `json:"request_id"`
+		EventCursor string `json:"event_cursor"`
+	}
+	json.Unmarshal(postBody, &createResp) //nolint:errcheck
+	if createResp.RequestID == "" {
+		t.Fatalf("empty city create request_id in response; body: %s", string(postBody))
+	}
+	if createResp.EventCursor == "" {
+		t.Fatalf("empty city create event_cursor in response; body: %s", string(postBody))
+	}
+	cityName := filepath.Base(cityDir)
+	cityBase := baseURL + "/v0/city/" + cityName
+
+	// 2. Subscribe to events and wait for city ready.
+	streamCtx, streamCancel := context.WithTimeout(context.Background(), 120*time.Second)
+	t.Cleanup(streamCancel)
+	streamReq, _ := http.NewRequestWithContext(streamCtx, http.MethodGet, baseURL+"/v0/events/stream?after_cursor="+url.QueryEscape(createResp.EventCursor), nil)
+	streamReq.Header.Set("Accept", "text/event-stream")
+	streamResp, err := http.DefaultClient.Do(streamReq)
+	if err != nil {
+		t.Fatalf("GET /v0/events/stream: %v", err)
+	}
+	defer streamResp.Body.Close() //nolint:errcheck
+
+	eventLines := make(chan string, 256)
+	go readSSEFrames(streamResp.Body, eventLines)
+
+	waitForRequestResultOnStream(t, eventLines, createResp.RequestID, "request.result.city.create", 120*time.Second)
+	t.Logf("city %q ready", cityName)
+
+	// 3. Create a provider session.
+	sessBody := `{"kind":"provider","name":"claude","project_id":"alpha","title":"msg-async-test","alias":"msg-async-test"}`
+	sessReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, cityBase+"/sessions", strings.NewReader(sessBody))
+	sessReq.Header.Set("Content-Type", "application/json")
+	sessReq.Header.Set("X-GC-Request", "true")
+	sessResp, err := http.DefaultClient.Do(sessReq)
+	if err != nil {
+		t.Fatalf("POST /sessions: %v", err)
+	}
+	sessRespBody, _ := io.ReadAll(sessResp.Body)
+	_ = sessResp.Body.Close()
+	if sessResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /sessions status = %d, want 202; body: %s", sessResp.StatusCode, string(sessRespBody))
+	}
+	var sessAccepted struct {
+		RequestID   string `json:"request_id"`
+		EventCursor string `json:"event_cursor"`
+	}
+	json.Unmarshal(sessRespBody, &sessAccepted) //nolint:errcheck
+	if sessAccepted.RequestID == "" {
+		t.Fatalf("empty session create request_id in response; body: %s", string(sessRespBody))
+	}
+	if sessAccepted.EventCursor == "" {
+		t.Fatalf("empty session create event_cursor in response; body: %s", string(sessRespBody))
+	}
+	var sessResult struct {
+		RequestID string `json:"request_id"`
+		Session   struct {
+			ID string `json:"id"`
+		} `json:"session"`
+	}
+	if payload := waitForRequestResultFromStreamURL(t, cityBase+"/events/stream?after_seq="+url.QueryEscape(sessAccepted.EventCursor), sessAccepted.RequestID, "request.result.session.create", 120*time.Second); payload != nil {
+		if err := json.Unmarshal(payload, &sessResult); err != nil {
+			t.Fatalf("decode session create result payload: %v; payload=%s", err, string(payload))
+		}
+	}
+	sessionID := sessResult.Session.ID
+	if sessionID == "" {
+		t.Fatalf("empty session ID in result for request_id=%s", sessAccepted.RequestID)
+	}
+	t.Logf("created session %q", sessionID)
+
+	// 4. Suspend the session.
+	suspReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, cityBase+"/session/"+sessionID+"/suspend", nil)
+	suspReq.Header.Set("X-GC-Request", "true")
+	suspResp, err := http.DefaultClient.Do(suspReq)
+	if err != nil {
+		t.Fatalf("POST /suspend: %v", err)
+	}
+	_ = suspResp.Body.Close()
+	if suspResp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /suspend status = %d, want 200", suspResp.StatusCode)
+	}
+	t.Logf("suspended session %q", sessionID)
+
+	// 5. Send a message — must return 202 immediately (async).
+	msgBody := `{"message":"hello after suspend"}`
+	msgReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, cityBase+"/session/"+sessionID+"/messages", strings.NewReader(msgBody))
+	msgReq.Header.Set("Content-Type", "application/json")
+	msgReq.Header.Set("X-GC-Request", "true")
+	msgStart := time.Now()
+	msgResp, err := http.DefaultClient.Do(msgReq)
+	if err != nil {
+		t.Fatalf("POST /messages: %v", err)
+	}
+	msgDur := time.Since(msgStart)
+	msgRespBody, _ := io.ReadAll(msgResp.Body)
+	_ = msgResp.Body.Close()
+	if msgResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /messages status = %d, want 202; body: %s", msgResp.StatusCode, string(msgRespBody))
+	}
+	var msgAccepted struct {
+		RequestID   string `json:"request_id"`
+		EventCursor string `json:"event_cursor"`
+	}
+	json.Unmarshal(msgRespBody, &msgAccepted) //nolint:errcheck
+	if msgAccepted.RequestID == "" {
+		t.Fatalf("empty message request_id in response; body: %s", string(msgRespBody))
+	}
+	if msgAccepted.EventCursor == "" {
+		t.Fatalf("empty message event_cursor in response; body: %s", string(msgRespBody))
+	}
+	if msgDur > 5*time.Second {
+		t.Errorf("POST /messages took %s, want fast async response (<5s)", msgDur)
+	}
+	t.Logf("POST /messages returned 202 in %s", msgDur.Round(time.Millisecond))
+
+	// 6. Wait for request.result.session.message on the event stream.
+	waitForRequestResultFromStreamURL(t, cityBase+"/events/stream?after_seq="+url.QueryEscape(msgAccepted.EventCursor), msgAccepted.RequestID, "request.result.session.message", 120*time.Second)
+	t.Logf("request.result.session.message received for %q", sessionID)
+
+	// 7. Submit a follow-up message and wait for the async result.
+	submitBody := `{"message":"follow up after async message","intent":"follow_up"}`
+	submitReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, cityBase+"/session/"+sessionID+"/submit", strings.NewReader(submitBody))
+	submitReq.Header.Set("Content-Type", "application/json")
+	submitReq.Header.Set("X-GC-Request", "true")
+	submitResp, err := http.DefaultClient.Do(submitReq)
+	if err != nil {
+		t.Fatalf("POST /submit: %v", err)
+	}
+	submitRespBody, _ := io.ReadAll(submitResp.Body)
+	_ = submitResp.Body.Close()
+	if submitResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /submit status = %d, want 202; body: %s", submitResp.StatusCode, string(submitRespBody))
+	}
+	var submitAccepted struct {
+		RequestID   string `json:"request_id"`
+		EventCursor string `json:"event_cursor"`
+	}
+	json.Unmarshal(submitRespBody, &submitAccepted) //nolint:errcheck
+	if submitAccepted.RequestID == "" {
+		t.Fatalf("empty submit request_id in response; body: %s", string(submitRespBody))
+	}
+	if submitAccepted.EventCursor == "" {
+		t.Fatalf("empty submit event_cursor in response; body: %s", string(submitRespBody))
+	}
+	waitForRequestResultFromStreamURL(t, cityBase+"/events/stream?after_seq="+url.QueryEscape(submitAccepted.EventCursor), submitAccepted.RequestID, "request.result.session.submit", 120*time.Second)
+	t.Logf("request.result.session.submit received for %q", sessionID)
+}
+
+func waitForRequestResultFromStreamURL(t *testing.T, streamURL, requestID, successType string, timeout time.Duration) json.RawMessage {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, streamURL, nil)
+	if err != nil {
+		t.Fatalf("build event stream request: %v", err)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", streamURL, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		t.Fatalf("GET %s status = %d, want 200; body: %s", streamURL, resp.StatusCode, string(body))
+	}
+	lines := make(chan string, 256)
+	go readSSEFrames(resp.Body, lines)
+	return waitForRequestResultOnStream(t, lines, requestID, successType, timeout)
+}
+
+// waitForRequestResultOnStream waits for a typed success event
+// (successType, e.g. "request.result.city.create") or request.failed
+// with the same request_id. Event type discriminates the payload shape.
+func waitForRequestResultOnStream(t *testing.T, eventLines <-chan string, requestID, successType string, timeout time.Duration) json.RawMessage {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for %s for request_id=%q", successType, requestID)
+		case line, ok := <-eventLines:
+			if !ok {
+				t.Fatalf("SSE stream closed before %s for request_id=%q arrived", successType, requestID)
+			}
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			raw := strings.TrimPrefix(line, "data: ")
+			var env struct {
+				Type    string          `json:"type"`
+				Payload json.RawMessage `json:"payload"`
+			}
+			if err := json.Unmarshal([]byte(raw), &env); err != nil {
+				continue
+			}
+			if !payloadRequestIDMatches(env.Payload, requestID) {
+				continue
+			}
+			if env.Type == successType {
+				return env.Payload
+			}
+			if env.Type == "request.failed" {
+				var result struct {
+					ErrorCode    string `json:"error_code"`
+					ErrorMessage string `json:"error_message"`
+				}
+				if err := json.Unmarshal(env.Payload, &result); err == nil {
+					t.Fatalf("request.failed for request_id=%q: %s: %s", requestID, result.ErrorCode, result.ErrorMessage)
+				}
+			}
+		}
+	}
+}
+
+func payloadRequestIDMatches(payload json.RawMessage, requestID string) bool {
+	var correlation struct {
+		RequestID string `json:"request_id"`
+	}
+	return json.Unmarshal(payload, &correlation) == nil && correlation.RequestID == requestID
 }

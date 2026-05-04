@@ -1,5 +1,5 @@
 import type { BeadRecord, RigRecord, ServiceStatusRecord } from "../api";
-import { api, cityScope } from "../api";
+import { api, cityScope, mutationHeaders } from "../api";
 import { promptActionDialog, promptConfirmDialog } from "../modals";
 import { byId, clear, el } from "../util/dom";
 import { formatAgentAddress, formatTimestamp, statusBadgeClass, truncate } from "../util/legacy";
@@ -309,7 +309,7 @@ export async function openAssignModal(beadID = ""): Promise<void> {
   });
   if (!selection) return;
   const res = await api.POST("/v0/city/{cityName}/sling", {
-    params: { path: { cityName: city } },
+    params: { path: { cityName: city }, header: mutationHeaders },
     body: { bead: selection.beadID, target: selection.target, rig: selection.rig || undefined },
   });
   if (res.error) {
@@ -339,7 +339,7 @@ async function clearAllAssigned(): Promise<void> {
   if (!confirmed) return;
   await Promise.all(items.map((bead) =>
     api.POST("/v0/city/{cityName}/bead/{id}/assign", {
-      params: { path: { cityName: city, id: bead.id ?? "" } },
+      params: { path: { cityName: city, id: bead.id ?? "" }, header: mutationHeaders },
       body: { assignee: "" },
     }),
   ));
@@ -351,7 +351,7 @@ async function unassignBead(beadID: string): Promise<void> {
   const city = cityScope();
   if (!city) return;
   const res = await api.POST("/v0/city/{cityName}/bead/{id}/assign", {
-    params: { path: { cityName: city, id: beadID } },
+    params: { path: { cityName: city, id: beadID }, header: mutationHeaders },
     body: { assignee: "" },
   });
   if (res.error) {
@@ -366,7 +366,7 @@ async function restartService(service: string): Promise<void> {
   const city = cityScope();
   if (!city) return;
   const res = await api.POST("/v0/city/{cityName}/service/{name}/restart", {
-    params: { path: { cityName: city, name: service } },
+    params: { path: { cityName: city, name: service }, header: mutationHeaders },
   });
   if (res.error) {
     showToast("error", "Service failed", res.error.detail ?? "Could not restart service");
@@ -380,7 +380,7 @@ async function rigAction(rig: string, action: string): Promise<void> {
   const city = cityScope();
   if (!city) return;
   const res = await api.POST("/v0/city/{cityName}/rig/{name}/{action}", {
-    params: { path: { cityName: city, name: rig, action } },
+    params: { path: { cityName: city, name: rig, action }, header: mutationHeaders },
   });
   if (res.error) {
     showToast("error", "Rig action failed", res.error.detail ?? `Could not ${action} ${rig}`);
@@ -395,7 +395,7 @@ async function ackEscalation(issue: BeadRecord): Promise<void> {
   if (!city || !issue.id) return;
   const labels = Array.from(new Set([...(issue.labels ?? []), "acked"]));
   const res = await api.POST("/v0/city/{cityName}/bead/{id}/update", {
-    params: { path: { cityName: city, id: issue.id } },
+    params: { path: { cityName: city, id: issue.id }, header: mutationHeaders },
     body: { labels },
   });
   if (res.error) {
@@ -410,7 +410,7 @@ async function closeBead(issueID: string): Promise<void> {
   const city = cityScope();
   if (!city) return;
   const res = await api.POST("/v0/city/{cityName}/bead/{id}/close", {
-    params: { path: { cityName: city, id: issueID } },
+    params: { path: { cityName: city, id: issueID }, header: mutationHeaders },
   });
   if (res.error) {
     showToast("error", "Resolve failed", res.error.detail ?? "Could not resolve escalation");
@@ -431,7 +431,7 @@ async function reassignBead(issueID: string): Promise<void> {
   });
   if (!selection) return;
   const res = await api.POST("/v0/city/{cityName}/bead/{id}/assign", {
-    params: { path: { cityName: city, id: issueID } },
+    params: { path: { cityName: city, id: issueID }, header: mutationHeaders },
     body: { assignee: selection.target },
   });
   if (res.error) {

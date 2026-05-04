@@ -42,11 +42,24 @@ const (
 	ControllerStopped  = "controller.stopped"
 	CitySuspended      = "city.suspended"
 	CityResumed        = "city.resumed"
-	OrderFired         = "order.fired"
-	OrderCompleted     = "order.completed"
-	OrderFailed        = "order.failed"
-	ProviderSwapped    = "provider.swapped"
-	WorkerOperation    = "worker.operation"
+	// Typed async request result events. 5 success types (one per
+	// operation, fully typed payload) + 1 shared failure type.
+	RequestResultCityCreate     = "request.result.city.create"
+	RequestResultCityUnregister = "request.result.city.unregister"
+	RequestResultSessionCreate  = "request.result.session.create"
+	RequestResultSessionMessage = "request.result.session.message"
+	RequestResultSessionSubmit  = "request.result.session.submit"
+	RequestFailed               = "request.failed"
+
+	// Non-terminal city lifecycle events recorded in the per-city
+	// event log during init/unregister for diagnostics.
+	CityCreated             = "city.created"
+	CityUnregisterRequested = "city.unregister_requested"
+	OrderFired              = "order.fired"
+	OrderCompleted          = "order.completed"
+	OrderFailed             = "order.failed"
+	ProviderSwapped         = "provider.swapped"
+	WorkerOperation         = "worker.operation"
 
 	// External messaging events.
 	ExtMsgBound          = "extmsg.bound"
@@ -72,6 +85,10 @@ var KnownEventTypes = []string{
 	ConvoyCreated, ConvoyClosed,
 	ControllerStarted, ControllerStopped,
 	CitySuspended, CityResumed,
+	RequestResultCityCreate, RequestResultCityUnregister,
+	RequestResultSessionCreate, RequestResultSessionMessage,
+	RequestResultSessionSubmit, RequestFailed,
+	CityCreated, CityUnregisterRequested,
 	OrderFired, OrderCompleted, OrderFailed,
 	ProviderSwapped, WorkerOperation,
 	ExtMsgBound, ExtMsgUnbound, ExtMsgGroupCreated,
@@ -116,6 +133,12 @@ type Provider interface {
 
 	// Close releases any resources held by the provider.
 	Close() error
+}
+
+// TailProvider is an optional extension for providers that can return the
+// trailing matching events without scanning or materializing the whole history.
+type TailProvider interface {
+	ListTail(filter Filter, limit int) ([]Event, error)
 }
 
 // Watcher yields events one at a time. Created by [Provider.Watch].

@@ -711,7 +711,9 @@ type ProviderUpdate struct {
 	DisplayName        *string
 	Base               **string
 	Command            *string
+	ACPCommand         *string
 	Args               []string // nil = not set, non-nil = replace
+	ACPArgs            []string // nil = not set, non-nil = replace
 	ArgsAppend         []string // nil = not set, non-nil = replace
 	PromptMode         *string
 	PromptFlag         *string
@@ -760,9 +762,16 @@ func (e *Editor) UpdateProvider(name string, patch ProviderUpdate) error {
 		if patch.Command != nil {
 			spec.Command = *patch.Command
 		}
+		if patch.ACPCommand != nil {
+			spec.ACPCommand = *patch.ACPCommand
+		}
 		if patch.Args != nil {
 			spec.Args = make([]string, len(patch.Args))
 			copy(spec.Args, patch.Args)
+		}
+		if patch.ACPArgs != nil {
+			spec.ACPArgs = make([]string, len(patch.ACPArgs))
+			copy(spec.ACPArgs, patch.ACPArgs)
 		}
 		if patch.ArgsAppend != nil {
 			spec.ArgsAppend = make([]string, len(patch.ArgsAppend))

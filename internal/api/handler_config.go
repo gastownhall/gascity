@@ -45,7 +45,9 @@ type configRigResponse struct {
 type providerSpecJSON struct {
 	DisplayName  string            `json:"display_name,omitempty"`
 	Command      string            `json:"command,omitempty"`
+	ACPCommand   string            `json:"acp_command,omitempty"`
 	Args         []string          `json:"args,omitempty"`
+	ACPArgs      *[]string         `json:"acp_args,omitempty"`
 	PromptMode   string            `json:"prompt_mode,omitempty"`
 	PromptFlag   string            `json:"prompt_flag,omitempty"`
 	ReadyDelayMs int               `json:"ready_delay_ms,omitempty"`

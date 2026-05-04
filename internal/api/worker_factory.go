@@ -7,14 +7,10 @@ import (
 
 func (s *Server) workerFactory(store beads.Store) (*worker.Factory, error) {
 	cfg := s.state.Config()
-	var resolveTransport func(template string) string
+	var resolveTransport func(template, provider string) string
 	if cfg != nil {
-		resolveTransport = func(template string) string {
-			agentCfg, ok := resolveSessionTemplateAgent(cfg, template)
-			if !ok {
-				return ""
-			}
-			return agentCfg.Session
+		resolveTransport = func(template, provider string) string {
+			return configuredSessionTransport(cfg, template, provider)
 		}
 	}
 	return worker.NewFactory(worker.FactoryConfig{
@@ -24,7 +20,7 @@ func (s *Server) workerFactory(store beads.Store) (*worker.Factory, error) {
 		SearchPaths:           s.sessionLogPaths(),
 		Recorder:              s.state.EventProvider(),
 		ResolveTransport:      resolveTransport,
-		ResolveSessionRuntime: s.resolveWorkerSessionRuntime,
+		ResolveSessionRuntime: s.resolveWorkerSessionRuntimeWithMetadata,
 	})
 }
 

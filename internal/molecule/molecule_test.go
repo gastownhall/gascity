@@ -1241,6 +1241,43 @@ func TestInstantiateRootOnly(t *testing.T) {
 	}
 }
 
+func TestInstantiateRunnableWispRootPreservesTaskType(t *testing.T) {
+	store := beads.NewMemStore()
+	recipe := &formula.Recipe{
+		Name:     "patrol",
+		RootOnly: true,
+		Steps: []formula.RecipeStep{
+			{ID: "patrol", Title: "Patrol", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "wisp"}},
+			{ID: "patrol.scan", Title: "Scan", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "patrol.scan", DependsOnID: "patrol", Type: "parent-child"},
+		},
+	}
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	root, err := store.Get(result.RootID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", result.RootID, err)
+	}
+	if root.Type != "task" {
+		t.Fatalf("root Type = %q, want task", root.Type)
+	}
+	if got := root.Metadata["gc.kind"]; got != "wisp" {
+		t.Fatalf("root gc.kind = %q, want wisp", got)
+	}
+	ready, err := store.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	if len(ready) != 1 || ready[0].ID != result.RootID {
+		t.Fatalf("Ready() = %+v, want only root %s", ready, result.RootID)
+	}
+}
+
 func TestInstantiateVarDefaults(t *testing.T) {
 	store := beads.NewMemStore()
 	defaultVal := "default-branch"
@@ -1821,6 +1858,45 @@ func TestInstantiateRejectsResidualTitleVars(t *testing.T) {
 		}
 	})
 
+	t.Run("root title override substitutes provided vars", func(t *testing.T) {
+		result, err := Instantiate(context.Background(), store, &formula.Recipe{
+			Name: "root-override-vars",
+			Steps: []formula.RecipeStep{
+				{ID: "root-override-vars", Title: "fallback", Type: "molecule", IsRoot: true},
+			},
+			Vars: map[string]*formula.VarDef{
+				"env": {Description: "Deployment environment", Required: true},
+			},
+		}, Options{
+			Title: "Deploy {{env}}",
+			Vars:  map[string]string{"env": "prod"},
+		})
+		if err != nil {
+			t.Fatalf("should succeed with substituted title override: %v", err)
+		}
+		if result.Created != 1 {
+			t.Errorf("Created = %d, want 1", result.Created)
+		}
+	})
+
+	t.Run("root title override satisfies required title var", func(t *testing.T) {
+		result, err := Instantiate(context.Background(), store, &formula.Recipe{
+			Name: "root-required-title",
+			Steps: []formula.RecipeStep{
+				{ID: "root-required-title", Title: "{{title}}", Type: "molecule", IsRoot: true},
+			},
+			Vars: map[string]*formula.VarDef{
+				"title": {Description: "Root title", Required: true},
+			},
+		}, Options{Title: "Reviewed work"})
+		if err != nil {
+			t.Fatalf("should succeed with required title override: %v", err)
+		}
+		if result.Created != 1 {
+			t.Errorf("Created = %d, want 1", result.Created)
+		}
+	})
+
 	t.Run("graph-apply path rejects unresolved vars", func(t *testing.T) {
 		gaStore := &graphApplySpyStore{MemStore: beads.NewMemStore()}
 		prev := IsGraphApplyEnabled()
@@ -1841,6 +1917,44 @@ func TestInstantiateRejectsResidualTitleVars(t *testing.T) {
 			t.Errorf("error should mention 'feature': %v", err)
 		}
 	})
+}
+
+func TestAttachReportsAllMissingRequiredVarsAtOnce(t *testing.T) {
+	store := beads.NewMemStore()
+	parent, err := store.Create(beads.Bead{Title: "Parent", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("Create(parent): %v", err)
+	}
+
+	recipe := &formula.Recipe{
+		Name: "attach-required-vars",
+		Steps: []formula.RecipeStep{
+			{ID: "attach-required-vars", Title: "Attach required vars", Type: "task", IsRoot: true},
+			{ID: "attach-required-vars.step", Title: "Do work for {{target_id}}", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "attach-required-vars.step", DependsOnID: "attach-required-vars", Type: "parent-child"},
+		},
+		Vars: map[string]*formula.VarDef{
+			"target_id": {Description: "Bead being worked on", Required: true},
+			"workspace": {Description: "Workspace path", Required: true},
+		},
+	}
+
+	_, err = Attach(context.Background(), store, recipe, parent.ID, AttachOptions{})
+	if err == nil {
+		t.Fatal("Attach should reject missing required vars")
+	}
+	errText := err.Error()
+	if !strings.Contains(errText, `variable "target_id" is required`) {
+		t.Fatalf("Attach error = %q, want missing target_id reported", errText)
+	}
+	if !strings.Contains(errText, `variable "workspace" is required`) {
+		t.Fatalf("Attach error = %q, want missing workspace reported", errText)
+	}
+	if strings.Contains(errText, "bead title contains unresolved variable(s)") {
+		t.Fatalf("Attach error = %q, want consolidated required-var validation instead of title-only failure", errText)
+	}
 }
 
 func TestInstantiateRejectsResidualTimeoutVars(t *testing.T) {

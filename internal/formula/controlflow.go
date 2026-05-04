@@ -20,6 +20,12 @@ import (
 // Conditional loops expand once and add a "loop:until" label for runtime evaluation.
 // Returns a new steps slice with loops expanded.
 func ApplyLoops(steps []*Step) ([]*Step, error) {
+	return ApplyLoopsWithVars(steps, nil)
+}
+
+// ApplyLoopsWithVars expands loop bodies in a formula's steps using vars for
+// computed range expressions.
+func ApplyLoopsWithVars(steps []*Step, vars map[string]string) ([]*Step, error) {
 	result := make([]*Step, 0, len(steps))
 
 	for _, step := range steps {
@@ -27,7 +33,7 @@ func ApplyLoops(steps []*Step) ([]*Step, error) {
 			// No loop - recursively process children
 			clone := cloneStep(step)
 			if len(step.Children) > 0 {
-				children, err := ApplyLoops(step.Children)
+				children, err := ApplyLoopsWithVars(step.Children, vars)
 				if err != nil {
 					return nil, err
 				}
@@ -43,7 +49,7 @@ func ApplyLoops(steps []*Step) ([]*Step, error) {
 		}
 
 		// Expand the loop
-		expanded, err := expandLoop(step)
+		expanded, err := expandLoopWithVars(step, vars)
 		if err != nil {
 			return nil, err
 		}
@@ -107,11 +113,6 @@ func validateLoopSpec(loop *LoopSpec, stepID string) error {
 	return nil
 }
 
-// expandLoop expands a loop step into its constituent steps.
-func expandLoop(step *Step) ([]*Step, error) {
-	return expandLoopWithVars(step, nil)
-}
-
 // expandLoopWithVars expands a loop step using the given variable context.
 // The vars map is used to resolve range expressions with variables.
 func expandLoopWithVars(step *Step, vars map[string]string) ([]*Step, error) {
@@ -130,7 +131,7 @@ func expandLoopWithVars(step *Step, vars map[string]string) ([]*Step, error) {
 
 		// Recursively expand any nested loops FIRST
 		var err error
-		result, err = ApplyLoops(result)
+		result, err = ApplyLoopsWithVars(result, vars)
 		if err != nil {
 			return nil, err
 		}
@@ -171,7 +172,7 @@ func expandLoopWithVars(step *Step, vars map[string]string) ([]*Step, error) {
 		}
 
 		// Recursively expand any nested loops FIRST
-		result, err = ApplyLoops(result)
+		result, err = ApplyLoopsWithVars(result, vars)
 		if err != nil {
 			return nil, err
 		}
@@ -551,10 +552,16 @@ func applyGatesWithMap(stepMap map[string]*Step, compose *ComposeRules) error {
 //
 // Returns a new steps slice. The original steps slice is not modified.
 func ApplyControlFlow(steps []*Step, compose *ComposeRules) ([]*Step, error) {
+	return ApplyControlFlowWithVars(steps, compose, nil)
+}
+
+// ApplyControlFlowWithVars applies all control flow operators using vars for
+// compile-time computed loop ranges.
+func ApplyControlFlowWithVars(steps []*Step, compose *ComposeRules, vars map[string]string) ([]*Step, error) {
 	var err error
 
 	// Apply loops first (expands steps) - ApplyLoops already returns new slice
-	steps, err = ApplyLoops(steps)
+	steps, err = ApplyLoopsWithVars(steps, vars)
 	if err != nil {
 		return nil, fmt.Errorf("applying loops: %w", err)
 	}

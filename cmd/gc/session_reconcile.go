@@ -506,6 +506,13 @@ func checkStability(session *beads.Bead, cfg *config.City, alive bool, dt *drain
 	if lastWoke == "" {
 		return false
 	}
+	var startupTimeout time.Duration
+	if cfg != nil {
+		startupTimeout = cfg.Session.StartupTimeoutDuration()
+	}
+	if pendingCreateStartInFlight(*session, clk, startupTimeout) {
+		return false
+	}
 	t, err := time.Parse(time.RFC3339, lastWoke)
 	if err != nil {
 		return false
@@ -569,9 +576,15 @@ func recordWakeFailure(session *beads.Bead, store beads.Store, clk clock.Clock) 
 
 // clearWakeFailures resets crash counter and quarantine for a stable session.
 func clearWakeFailures(session *beads.Bead, store beads.Store) {
-	batch := map[string]string{
-		"wake_attempts":     "0",
-		"quarantined_until": "",
+	batch := make(map[string]string, 2)
+	if session.Metadata["wake_attempts"] != "" && session.Metadata["wake_attempts"] != "0" {
+		batch["wake_attempts"] = "0"
+	}
+	if session.Metadata["quarantined_until"] != "" {
+		batch["quarantined_until"] = ""
+	}
+	if len(batch) == 0 {
+		return
 	}
 	if err := store.SetMetadataBatch(session.ID, batch); err == nil {
 		if session.Metadata == nil {

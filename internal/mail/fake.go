@@ -166,6 +166,32 @@ func (f *Fake) Delete(id string) error {
 	return f.Archive(id)
 }
 
+// ArchiveMany archives a batch of messages by looping over [Fake.Archive],
+// preserving per-id error reporting including [ErrAlreadyArchived].
+func (f *Fake) ArchiveMany(ids []string) ([]ArchiveResult, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	results := make([]ArchiveResult, len(ids))
+	for i, id := range ids {
+		results[i] = ArchiveResult{ID: id, Err: f.Archive(id)}
+	}
+	return results, nil
+}
+
+// DeleteMany deletes a batch of messages by looping over [Fake.Delete],
+// preserving per-id error reporting including [ErrAlreadyArchived].
+func (f *Fake) DeleteMany(ids []string) ([]ArchiveResult, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	results := make([]ArchiveResult, len(ids))
+	for i, id := range ids {
+		results[i] = ArchiveResult{ID: id, Err: f.Delete(id)}
+	}
+	return results, nil
+}
+
 // All returns all open messages (read and unread) for the recipient.
 func (f *Fake) All(recipient string) ([]Message, error) {
 	f.mu.Lock()

@@ -557,6 +557,48 @@ func TestBindingServiceListBySessionReturnsOnlyBindings(t *testing.T) {
 	}
 }
 
+func TestEmptyMetadataRecordsEncodeAsObjects(t *testing.T) {
+	freezeTestClock(t)
+	store := beads.NewMemStore()
+	fabric := NewServices(store)
+	ref := testConversationRef()
+
+	binding, err := fabric.Bindings.Bind(context.Background(), testControllerCaller(), BindInput{
+		Conversation: ref,
+		SessionID:    "sess-a",
+		Now:          testNow(),
+	})
+	if err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	if binding.Metadata == nil {
+		t.Fatal("binding Metadata = nil, want empty object map")
+	}
+
+	group, err := fabric.Groups.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
+		RootConversation: ref,
+		Mode:             GroupModeLauncher,
+	})
+	if err != nil {
+		t.Fatalf("EnsureGroup: %v", err)
+	}
+	if group.Metadata == nil {
+		t.Fatal("group Metadata = nil, want empty object map")
+	}
+
+	participant, err := fabric.Groups.UpsertParticipant(context.Background(), testControllerCaller(), UpsertParticipantInput{
+		GroupID:   group.ID,
+		Handle:    "alpha",
+		SessionID: "sess-a",
+	})
+	if err != nil {
+		t.Fatalf("UpsertParticipant: %v", err)
+	}
+	if participant.Metadata == nil {
+		t.Fatal("participant Metadata = nil, want empty object map")
+	}
+}
+
 func TestBindingServiceTouchDebouncesMetadataWrites(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()

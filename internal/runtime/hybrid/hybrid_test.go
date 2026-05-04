@@ -3,6 +3,7 @@ package hybrid
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -176,4 +177,84 @@ func TestPendingUnsupportedWhenBackendLacksInteractionSupport(t *testing.T) {
 
 type runtimeNoInteractionProvider struct {
 	runtime.Provider
+}
+
+type deadRuntimeCheckProvider struct {
+	*runtime.Fake
+	dead   map[string]bool
+	errs   map[string]error
+	checks []string
+}
+
+func newDeadRuntimeCheckProvider() *deadRuntimeCheckProvider {
+	return &deadRuntimeCheckProvider{
+		Fake: runtime.NewFake(),
+		dead: make(map[string]bool),
+		errs: make(map[string]error),
+	}
+}
+
+func (p *deadRuntimeCheckProvider) IsDeadRuntimeSession(name string) (bool, error) {
+	p.checks = append(p.checks, name)
+	if err := p.errs[name]; err != nil {
+		return false, err
+	}
+	return p.dead[name], nil
+}
+
+func TestIsDeadRuntimeSessionDelegatesToRoutedChecker(t *testing.T) {
+	local := newDeadRuntimeCheckProvider()
+	remote := newDeadRuntimeCheckProvider()
+	remote.dead["polecat-1"] = true
+	h := New(local, remote, isRemote)
+
+	dead, err := h.IsDeadRuntimeSession("polecat-1")
+	if err != nil {
+		t.Fatalf("IsDeadRuntimeSession: %v", err)
+	}
+	if !dead {
+		t.Fatal("IsDeadRuntimeSession = false, want true from routed remote checker")
+	}
+	if len(local.checks) != 0 {
+		t.Fatalf("local checks = %v, want none", local.checks)
+	}
+	if got := remote.checks; len(got) != 1 || got[0] != "polecat-1" {
+		t.Fatalf("remote checks = %v, want [polecat-1]", got)
+	}
+}
+
+func TestIsDeadRuntimeSessionReturnsFalseWhenRoutedBackendLacksChecker(t *testing.T) {
+	local := runtime.NewFake()
+	remote := newDeadRuntimeCheckProvider()
+	remote.dead["refinery"] = true
+	h := New(local, remote, isRemote)
+
+	dead, err := h.IsDeadRuntimeSession("refinery")
+	if err != nil {
+		t.Fatalf("IsDeadRuntimeSession: %v", err)
+	}
+	if dead {
+		t.Fatal("IsDeadRuntimeSession = true, want false for non-checker routed backend")
+	}
+	if len(remote.checks) != 0 {
+		t.Fatalf("remote checks = %v, want none for local-routed session", remote.checks)
+	}
+}
+
+func TestIsDeadRuntimeSessionReturnsRoutedCheckerError(t *testing.T) {
+	local := newDeadRuntimeCheckProvider()
+	remote := newDeadRuntimeCheckProvider()
+	remote.errs["polecat-1"] = fmt.Errorf("runtime unavailable")
+	h := New(local, remote, isRemote)
+
+	dead, err := h.IsDeadRuntimeSession("polecat-1")
+	if err == nil {
+		t.Fatal("IsDeadRuntimeSession error = nil, want routed checker error")
+	}
+	if dead {
+		t.Fatal("IsDeadRuntimeSession = true, want false on checker error")
+	}
+	if !strings.Contains(err.Error(), "runtime unavailable") {
+		t.Fatalf("IsDeadRuntimeSession error = %v, want runtime unavailable", err)
+	}
 }

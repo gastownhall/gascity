@@ -1,13 +1,18 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
-// sessionBeadSnapshot caches open session-bead state for a single reconcile
-// cycle so build/sync/reconcile can reuse one store scan.
+// sessionBeadSnapshot caches active session-bead state for a single reconcile
+// cycle. Closed-session history is intentionally not loaded here: the
+// reconciler calls this several times per tick, and closed history grows
+// without bound. Callers that need a closed record must fetch that one ID
+// explicitly.
 type sessionBeadSnapshot struct {
 	open                      []beads.Bead
 	sessionNameByAgentName    map[string]string
@@ -15,19 +20,30 @@ type sessionBeadSnapshot struct {
 }
 
 func loadSessionBeadSnapshot(store beads.Store) (*sessionBeadSnapshot, error) {
-	open, err := loadSessionBeads(store)
-	if err != nil {
-		return nil, err
+	if store == nil {
+		return newSessionBeadSnapshot(nil), nil
 	}
-	return newSessionBeadSnapshot(open), nil
+	all, err := store.List(beads.ListQuery{
+		Label: sessionBeadLabel,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing session beads: %w", err)
+	}
+	sessions := make([]beads.Bead, 0, len(all))
+	for _, bead := range all {
+		if sessionpkg.IsSessionBeadOrRepairable(bead) {
+			sessions = append(sessions, bead)
+		}
+	}
+	return newSessionBeadSnapshot(sessions), nil
 }
 
-func newSessionBeadSnapshot(open []beads.Bead) *sessionBeadSnapshot {
-	filtered := make([]beads.Bead, 0, len(open))
+func newSessionBeadSnapshot(beadsIn []beads.Bead) *sessionBeadSnapshot {
+	filtered := make([]beads.Bead, 0, len(beadsIn))
 	sessionNameByAgentName := make(map[string]string)
 	sessionNameByTemplateHint := make(map[string]string)
 
-	for _, b := range open {
+	for _, b := range beadsIn {
 		if b.Status == "closed" {
 			continue
 		}
@@ -114,4 +130,31 @@ func (s *sessionBeadSnapshot) FindSessionNameByTemplate(template string) string 
 		return sn
 	}
 	return s.sessionNameByTemplateHint[template]
+}
+
+func (s *sessionBeadSnapshot) FindByID(id string) (beads.Bead, bool) {
+	if s == nil || strings.TrimSpace(id) == "" {
+		return beads.Bead{}, false
+	}
+	for _, bead := range s.open {
+		if bead.ID == id {
+			return bead, true
+		}
+	}
+	return beads.Bead{}, false
+}
+
+func (s *sessionBeadSnapshot) FindSessionNameByNamedIdentity(identity string) string {
+	if s == nil || strings.TrimSpace(identity) == "" {
+		return ""
+	}
+	for _, bead := range s.open {
+		if strings.TrimSpace(bead.Metadata["configured_named_identity"]) != identity {
+			continue
+		}
+		if sessionName := strings.TrimSpace(bead.Metadata["session_name"]); sessionName != "" {
+			return sessionName
+		}
+	}
+	return ""
 }

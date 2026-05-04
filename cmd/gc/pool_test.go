@@ -101,6 +101,7 @@ func TestEvaluatePoolNonInteger(t *testing.T) {
 }
 
 func TestEvaluatePoolDefaultScaleCheckCountsRoutedReadyWork(t *testing.T) {
+	skipSlowCmdGCTest(t, "uses real bd and jq for default scale_check coverage; run make test-cmd-gc-process for full coverage")
 	bdPath, err := findPreferredBinary("bd", "/home/ubuntu/.local/bin/bd")
 	if err != nil {
 		t.Skip("bd not installed")
@@ -143,7 +144,8 @@ func TestEvaluatePoolDefaultScaleCheckCountsRoutedReadyWork(t *testing.T) {
 	}
 }
 
-func TestEvaluatePoolDefaultScaleCheckCountsRoutedActiveUnassignedWork(t *testing.T) {
+func TestEvaluatePoolDefaultScaleCheckIgnoresRoutedActiveUnassignedWork(t *testing.T) {
+	skipSlowCmdGCTest(t, "uses real bd and jq for default scale_check coverage; run make test-cmd-gc-process for full coverage")
 	bdPath, err := findPreferredBinary("bd", "/home/ubuntu/.local/bin/bd")
 	if err != nil {
 		t.Skip("bd not installed")
@@ -185,8 +187,34 @@ func TestEvaluatePoolDefaultScaleCheckCountsRoutedActiveUnassignedWork(t *testin
 	if err != nil {
 		t.Fatalf("evaluatePool with routed in-progress work: %v", err)
 	}
-	if got != 1 {
-		t.Fatalf("evaluatePool with routed in-progress work = %d, want 1", got)
+	if got != 0 {
+		t.Fatalf("evaluatePool with routed in-progress work = %d, want 0", got)
+	}
+}
+
+func TestEvaluatePoolNewDemandDoesNotApplyMinOrMax(t *testing.T) {
+	sp := scaleParams{Min: 2, Max: 3, Check: "ignored"}
+	runner := func(_, _ string, _ map[string]string) (string, error) { return "5\n", nil }
+
+	got, err := evaluatePoolNewDemand("worker", sp, "", nil, runner)
+	if err != nil {
+		t.Fatalf("evaluatePoolNewDemand: %v", err)
+	}
+	if got != 5 {
+		t.Fatalf("evaluatePoolNewDemand = %d, want raw new demand 5", got)
+	}
+}
+
+func TestEvaluatePoolNewDemandErrorFallsBackToZero(t *testing.T) {
+	sp := scaleParams{Min: 2, Max: 3, Check: "ignored"}
+	runner := func(_, _ string, _ map[string]string) (string, error) { return "not-a-number\n", nil }
+
+	got, err := evaluatePoolNewDemand("worker", sp, "", nil, runner)
+	if err == nil {
+		t.Fatal("expected parse error")
+	}
+	if got != 0 {
+		t.Fatalf("evaluatePoolNewDemand error fallback = %d, want 0", got)
 	}
 }
 

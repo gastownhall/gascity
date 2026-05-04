@@ -236,6 +236,15 @@ type DialogProvider interface {
 	DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error
 }
 
+// TransportCapabilityProvider is an optional extension for providers that can
+// report whether they support starting sessions with a specific transport.
+//
+// Callers use this to fail fast when a requested transport cannot be routed by
+// the active session provider before session creation starts mutating state.
+type TransportCapabilityProvider interface {
+	SupportsTransport(transport string) bool
+}
+
 // ImmediateNudgeProvider is an optional extension for runtimes that can inject
 // input immediately without performing their own wait-idle heuristic first.
 type ImmediateNudgeProvider interface {
@@ -290,7 +299,8 @@ type CopyEntry struct {
 
 // HashPathContent returns a hex-encoded SHA-256 of the content at path.
 // For a regular file, hashes the file content. For a directory, hashes
-// a sorted manifest of relative paths and their contents. Returns empty
+// a sorted manifest of relative paths and their contents while ignoring
+// runtime-generated Python cache and editor backup artifacts. Returns empty
 // string on any error (caller should treat as "unknown").
 func HashPathContent(path string) string {
 	info, err := os.Stat(path)
@@ -316,10 +326,19 @@ func HashPathContent(path string) string {
 			walkErr = true
 			return nil
 		}
+		rel, _ := filepath.Rel(path, p)
+		if rel == "." {
+			return nil
+		}
+		if hashPathContentSkipEntry(d) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		if d.IsDir() {
 			return nil
 		}
-		rel, _ := filepath.Rel(path, p)
 		entries = append(entries, rel)
 		return nil
 	})
@@ -340,6 +359,25 @@ func HashPathContent(path string) string {
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
+func hashPathContentSkipEntry(d fs.DirEntry) bool {
+	base := d.Name()
+	if d.IsDir() {
+		switch base {
+		case "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache":
+			return true
+		default:
+			return false
+		}
+	}
+	switch filepath.Ext(base) {
+	case ".pyc", ".pyo":
+		return true
+	case ".swp", ".swx":
+		return strings.HasPrefix(base, ".")
+	}
+	return strings.HasSuffix(base, "~")
+}
+
 // Config holds the parameters for starting a new session.
 type Config struct {
 	// WorkDir is the working directory for the session process.
@@ -351,6 +389,10 @@ type Config struct {
 
 	// Env is additional environment variables set in the session.
 	Env map[string]string
+
+	// MCPServers is the effective ACP session/new MCP server list for this
+	// session. Non-ACP providers ignore it.
+	MCPServers []MCPServerConfig
 
 	// Startup reliability hints (all optional — zero values skip).
 

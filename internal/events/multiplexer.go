@@ -72,12 +72,16 @@ func (m *Multiplexer) snapshot() map[string]Provider {
 }
 
 // ListAll returns events from all cities matching the filter, sorted by
-// timestamp. Each event is tagged with its source city.
+// timestamp, city, and sequence. Each event is tagged with its source city.
+// A positive filter Limit returns the earliest matching events after that
+// global sort; callers needing the latest matching events should use ListTail.
 func (m *Multiplexer) ListAll(filter Filter) ([]TaggedEvent, error) {
 	providers := m.snapshot()
+	providerFilter := filter
+	providerFilter.Limit = 0
 	var all []TaggedEvent
 	for city, p := range providers {
-		evts, err := p.List(filter)
+		evts, err := p.List(providerFilter)
 		if err != nil {
 			continue // best-effort: skip cities with errors
 		}
@@ -86,9 +90,79 @@ func (m *Multiplexer) ListAll(filter Filter) ([]TaggedEvent, error) {
 		}
 	}
 	sort.Slice(all, func(i, j int) bool {
-		return all[i].Ts.Before(all[j].Ts)
+		return taggedEventLess(all[i], all[j])
 	})
+	if filter.Limit > 0 && len(all) > filter.Limit {
+		all = all[:filter.Limit]
+	}
 	return all, nil
+}
+
+// ListTail returns the trailing matching events across all cities. It asks
+// tail-capable providers for only their local tail, then trims the merged
+// result to the requested global limit.
+func (m *Multiplexer) ListTail(filter Filter, limit int) ([]TaggedEvent, error) {
+	if limit <= 0 {
+		return m.ListAll(filter)
+	}
+	providers := m.snapshot()
+	providerFilter := filter
+	providerFilter.Limit = 0
+	var all []TaggedEvent
+	for city, p := range providers {
+		var evts []Event
+		var err error
+		if tail, ok := p.(TailProvider); ok {
+			evts, err = tail.ListTail(providerFilter, limit)
+		} else {
+			evts, err = p.List(providerFilter)
+			if limit < len(evts) {
+				evts = evts[len(evts)-limit:]
+			}
+		}
+		if err != nil {
+			log.Printf("events: list tail failed for city %q: %v", city, err)
+			continue // best-effort: skip cities with errors
+		}
+		for _, e := range evts {
+			all = append(all, TaggedEvent{Event: e, City: city})
+		}
+	}
+	sort.Slice(all, func(i, j int) bool {
+		return taggedEventLess(all[i], all[j])
+	})
+	if limit < len(all) {
+		all = all[len(all)-limit:]
+	}
+	return all, nil
+}
+
+func taggedEventLess(left, right TaggedEvent) bool {
+	if !left.Ts.Equal(right.Ts) {
+		return left.Ts.Before(right.Ts)
+	}
+	if left.City != right.City {
+		return left.City < right.City
+	}
+	return left.Seq < right.Seq
+}
+
+// LatestCursor returns the current highest sequence number for each provider.
+// Providers that fail are skipped, matching ListAll's best-effort aggregation.
+func (m *Multiplexer) LatestCursor() (map[string]uint64, error) {
+	providers := m.snapshot()
+	cursors := make(map[string]uint64, len(providers))
+	var errs []error
+	for city, p := range providers {
+		seq, err := p.LatestSeq()
+		if err != nil {
+			log.Printf("events: latest cursor failed for city %q: %v", city, err)
+			errs = append(errs, fmt.Errorf("%s: %w", city, err))
+			continue
+		}
+		cursors[city] = seq
+	}
+	return cursors, errors.Join(errs...)
 }
 
 // Watch returns a Watcher that merges events from all currently registered

@@ -6,9 +6,8 @@ package sling
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -50,8 +49,11 @@ type SlingOpts struct {
 	Nudge         bool
 	Force         bool
 	DryRun        bool
-	ScopeKind     string
-	ScopeRef      string
+	// InlineText is set only by the CLI path for ad-hoc task text. API
+	// callers always provide explicit bead or formula references.
+	InlineText bool
+	ScopeKind  string
+	ScopeRef   string
 }
 
 // AgentResolver resolves an agent name to a config.Agent.
@@ -92,6 +94,7 @@ type RouteRequest struct {
 	Metadata map[string]string // gc.routed_to, pool label, etc.
 	WorkDir  string            // rig directory for command execution
 	Env      map[string]string // extra env vars (GC_SLING_TARGET, etc.)
+	Force    bool              // allow best-effort routing when the bead is absent
 }
 
 // SlingDeps bundles infrastructure dependencies for sling operations.
@@ -103,10 +106,13 @@ type SlingDeps struct {
 	Runner   SlingRunner
 	Store    beads.Store
 	StoreRef string
+	// ValidationQuerier overrides Store for existence checks when a caller has
+	// already resolved the bead through a narrower view.
+	ValidationQuerier BeadQuerier
 	// SourceWorkflowStores lists every bead store that may contain workflow
 	// roots for source-workflow singleton checks and recovery.
 	SourceWorkflowStores func() ([]SourceWorkflowStore, error)
-	Stderr               io.Writer
+	Tracer               func(format string, args ...any)
 
 	// Narrow interfaces (matches established internal package patterns).
 	Resolver AgentResolver  // agent name resolution
@@ -185,7 +191,10 @@ type RouteOpts struct {
 	Nudge    bool
 	Force    bool
 	DryRun   bool
-	SkipPoke bool
+	// InlineText is set only by the CLI path for ad-hoc task text. API
+	// callers always provide explicit bead or formula references.
+	InlineText bool
+	SkipPoke   bool
 }
 
 // FormulaOpts holds options for formula-based operations.
@@ -213,6 +222,7 @@ func (s *Sling) RouteBead(_ context.Context, beadID string, target config.Agent,
 		Force:         opts.Force,
 		SkipPoke:      opts.SkipPoke,
 		DryRun:        opts.DryRun,
+		InlineText:    opts.InlineText,
 	}, s.deps, s.deps.Store)
 }
 
@@ -264,6 +274,7 @@ func (s *Sling) ExpandConvoy(_ context.Context, convoyID string, target config.A
 		Force:         opts.Force,
 		SkipPoke:      opts.SkipPoke,
 		DryRun:        opts.DryRun,
+		InlineText:    opts.InlineText,
 	}, s.deps, querier)
 }
 
@@ -277,22 +288,28 @@ type ScaleInfo struct {
 // extra env vars and returns combined output.
 type SlingRunner func(dir, command string, env map[string]string) (string, error)
 
-// SlingTracef writes to the sling trace log if GC_SLING_TRACE is set.
+// SlingTracef calls the package-level trace function if set. Wire via
+// SetTracer at process startup; the domain package never opens files or
+// reads environment variables directly.
 func SlingTracef(format string, args ...any) {
-	path := strings.TrimSpace(os.Getenv("GC_SLING_TRACE"))
-	if path == "" {
-		return
+	if globalTracer != nil {
+		globalTracer(format, args...)
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return
-	}
-	defer f.Close()                                                                                    //nolint:errcheck // best-effort trace log
-	fmt.Fprintf(f, "%s %s\n", time.Now().UTC().Format(time.RFC3339Nano), fmt.Sprintf(format, args...)) //nolint:errcheck
+}
+
+var globalTracer func(format string, args ...any)
+
+// SetTracer installs the package-level trace function. Call once at
+// process startup from the CLI edge.
+func SetTracer(fn func(format string, args ...any)) {
+	globalTracer = fn
 }
 
 // FindRigByPrefix finds a rig whose effective prefix matches (case-insensitive).
 func FindRigByPrefix(cfg *config.City, prefix string) (config.Rig, bool) {
+	if cfg == nil {
+		return config.Rig{}, false
+	}
 	lp := strings.ToLower(prefix)
 	for _, r := range cfg.Rigs {
 		if strings.ToLower(r.EffectivePrefix()) == lp {
@@ -302,10 +319,17 @@ func FindRigByPrefix(cfg *config.City, prefix string) (config.Rig, bool) {
 	return config.Rig{}, false
 }
 
+// IsHQPrefix reports whether prefix matches the city's HQ bead prefix.
+func IsHQPrefix(cfg *config.City, prefix string) bool {
+	prefix = strings.TrimSpace(prefix)
+	return cfg != nil && prefix != "" && strings.EqualFold(prefix, config.EffectiveHQPrefix(cfg))
+}
+
 // RigDirForBead resolves the rig directory for a bead ID by extracting
-// the bead prefix and looking up the rig path.
+// the bead prefix and looking up the rig path. Honors hyphenated rig
+// prefixes via BeadPrefixForCity.
 func RigDirForBead(cfg *config.City, beadID string) string {
-	bp := BeadPrefix(beadID)
+	bp := BeadPrefixForCity(cfg, beadID)
 	if bp == "" {
 		return ""
 	}
@@ -345,22 +369,22 @@ func BuildSlingCommand(template, beadID string) string {
 
 // BuildSlingCommandForAgent expands any PathContext placeholders in a custom
 // sling_query, then replaces {} with the bead ID. Malformed templates fall back
-// to the raw sling_query so routing behavior remains non-fatal.
-func BuildSlingCommandForAgent(fieldName, template, beadID, cityPath, cityName string, a config.Agent, rigs []config.Rig, stderr io.Writer) string {
+// to the raw sling_query so routing behavior remains non-fatal. The returned
+// warning is non-empty when template expansion failed and the raw template was
+// used as fallback.
+func BuildSlingCommandForAgent(fieldName, template, beadID, cityPath, cityName string, a config.Agent, rigs []config.Rig) (command, warning string) {
 	if strings.Contains(template, "{{") {
 		expanded, err := workdirutil.ExpandCommandTemplate(template, cityPath, cityName, a, rigs)
 		if err != nil {
-			if stderr != nil {
-				if fieldName == "" {
-					fieldName = "sling_query"
-				}
-				fmt.Fprintf(stderr, "BuildSlingCommandForAgent: agent %q field %q: %v (using raw command)\n", a.QualifiedName(), fieldName, err) //nolint:errcheck
+			if fieldName == "" {
+				fieldName = "sling_query"
 			}
+			warning = fmt.Sprintf("BuildSlingCommandForAgent: agent %q field %q: %v (using raw command)", a.QualifiedName(), fieldName, err)
 		} else {
 			template = expanded
 		}
 	}
-	return BuildSlingCommand(template, beadID)
+	return BuildSlingCommand(template, beadID), warning
 }
 
 // FormatBeadLabel formats a bead ID with optional title for display.
@@ -374,12 +398,117 @@ func FormatBeadLabel(id, title string) string {
 // BeadPrefix extracts the rig prefix from a bead ID by taking the lowercase
 // letters before the first dash. "HW-7" → "hw", "FE-123" → "fe".
 // Returns "" if the ID has no dash (can't determine prefix).
+//
+// This is a config-free heuristic. For inputs whose rig prefix may itself
+// contain hyphens ("agent-diagnostics-hnn" routed to rig "agent-diagnostics"),
+// callers must use BeadPrefixForCity, which resolves the longest matching
+// configured prefix.
 func BeadPrefix(beadID string) string {
 	i := strings.Index(beadID, "-")
 	if i <= 0 {
 		return ""
 	}
 	return strings.ToLower(beadID[:i])
+}
+
+// BeadPrefixForCity returns the configured rig (or HQ) prefix that beadID
+// belongs to, preferring the longest match so hyphenated rig prefixes
+// resolve correctly. Falls back to BeadPrefix when no configured prefix
+// matches. Returns "" if the bead has no dash and no configured-prefix
+// match.
+func BeadPrefixForCity(cfg *config.City, beadID string) string {
+	if p := matchConfiguredBeadPrefix(cfg, beadID); p != "" {
+		return p
+	}
+	return BeadPrefix(beadID)
+}
+
+// LooksLikeConfiguredBeadID reports whether s parses as a bead ID whose
+// prefix matches the city's HQ prefix or any configured rig's effective
+// prefix. Unlike BeadIDParts, it accepts hyphenated rig prefixes
+// (e.g. "agent-diagnostics-hnn" with rig "agent-diagnostics"). The
+// trailing suffix must be alphanumeric (allowing an optional ".child"
+// hierarchical part) and at most 8 characters long.
+func LooksLikeConfiguredBeadID(cfg *config.City, s string) bool {
+	return matchConfiguredBeadPrefix(cfg, s) != ""
+}
+
+// matchConfiguredBeadPrefix returns the longest configured prefix
+// (HQ or rig) that beadID begins with, provided the trailing suffix
+// passes the bead-suffix shape gate. Match is case-insensitive on the
+// prefix; the returned value is the lower-cased configured prefix.
+// Returns "" if no configured prefix matches.
+func matchConfiguredBeadPrefix(cfg *config.City, beadID string) string {
+	beadID = strings.TrimSpace(beadID)
+	if cfg == nil || beadID == "" || strings.ContainsAny(beadID, " \t\n") {
+		return ""
+	}
+	candidates := configuredBeadPrefixes(cfg)
+	// Track the longest matching prefix; equal-length ties keep the first
+	// match, matching the order semantics of FindRigByPrefix.
+	best := ""
+	bestLen := 0
+	lower := strings.ToLower(beadID)
+	for _, p := range candidates {
+		lp := strings.ToLower(p)
+		if len(lp) <= bestLen {
+			continue
+		}
+		if !strings.HasPrefix(lower, lp+"-") {
+			continue
+		}
+		suffix := beadID[len(lp)+1:]
+		if !validBeadSuffix(suffix) {
+			continue
+		}
+		best = lp
+		bestLen = len(lp)
+	}
+	return best
+}
+
+// configuredBeadPrefixes returns every prefix the city accepts for bead
+// IDs: the city's HQ prefix plus each rig's effective prefix. Empty
+// entries are skipped. The caller picks the longest match; order only
+// matters when equal-length matches tie, in which case the first match
+// (HQ before rigs, then cfg.Rigs declaration order) is kept. Note that
+// config validation rejects duplicate prefixes, so ties should not
+// appear in valid configs.
+func configuredBeadPrefixes(cfg *config.City) []string {
+	if cfg == nil {
+		return nil
+	}
+	out := make([]string, 0, len(cfg.Rigs)+1)
+	if hq := config.EffectiveHQPrefix(cfg); hq != "" {
+		out = append(out, hq)
+	}
+	for i := range cfg.Rigs {
+		if p := cfg.Rigs[i].EffectivePrefix(); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// validBeadSuffix reports whether suffix is a plausible bead-ID suffix:
+// a non-empty alphanumeric base of at most 8 characters, optionally
+// followed by ".child" hierarchical parts. The hierarchical portion is
+// not validated, matching BeadIDParts which truncates at the first dot
+// before validating the base.
+func validBeadSuffix(suffix string) bool {
+	base := suffix
+	if dot := strings.IndexByte(suffix, '.'); dot > 0 {
+		base = suffix[:dot]
+	}
+	if base == "" || len(base) > 8 {
+		return false
+	}
+	for _, c := range base {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
+			return false
+		}
+	}
+	return true
 }
 
 // RigPrefixForAgent returns the rig prefix that an agent's rig uses for bead IDs.
@@ -398,50 +527,159 @@ func RigPrefixForAgent(a config.Agent, cfg *config.City) string {
 // CheckCrossRig returns a warning message if a rig-scoped agent receives
 // a bead from a different rig. Returns "" if routing is safe.
 func CheckCrossRig(beadID string, a config.Agent, cfg *config.City) string {
-	if cfg == nil || a.Dir == "" {
+	err := CrossRigRouteError(beadID, a, cfg)
+	if err == nil {
 		return ""
 	}
-	bp := BeadPrefix(beadID)
+	return err.Error()
+}
+
+// CrossRigError reports that a rig-scoped agent was asked to route a bead from
+// a different rig.
+type CrossRigError struct {
+	BeadID     string
+	BeadPrefix string
+	Target     string
+	RigPrefix  string
+}
+
+// Error returns the cross-rig routing diagnostic.
+func (e *CrossRigError) Error() string {
+	return fmt.Sprintf("cross-rig routing — bead %s (prefix %q) → agent %s (rig prefix %q)", e.BeadID, e.BeadPrefix, e.Target, e.RigPrefix)
+}
+
+// CrossRigRouteError returns a typed cross-rig error when routing is unsafe.
+func CrossRigRouteError(beadID string, a config.Agent, cfg *config.City) *CrossRigError {
+	if cfg == nil || a.Dir == "" {
+		return nil
+	}
+	bp := BeadPrefixForCity(cfg, beadID)
 	if bp == "" {
-		return ""
+		return nil
 	}
 	rp := RigPrefixForAgent(a, cfg)
 	if rp == "" {
-		return ""
+		return nil
 	}
 	if strings.EqualFold(bp, rp) {
-		return ""
+		return nil
 	}
-	return fmt.Sprintf("cross-rig routing — bead %s (prefix %q) → agent %s (rig prefix %q)", beadID, bp, a.QualifiedName(), rp)
+	return &CrossRigError{
+		BeadID:     beadID,
+		BeadPrefix: bp,
+		Target:     a.QualifiedName(),
+		RigPrefix:  rp,
+	}
 }
 
-// BeadExistsInStore checks if a bead exists in the given store.
-func BeadExistsInStore(store beads.Store, id string) bool {
-	if store == nil {
-		return false
-	}
-	_, err := store.Get(id)
-	return err == nil
+// ProbeBeadInStore checks if a bead exists in the given store and surfaces
+// non-not-found lookup errors.
+func ProbeBeadInStore(store beads.Store, id string) (bool, error) {
+	return probeBeadInQuerier(store, id)
 }
 
-// LooksLikeBeadID reports whether a string looks like a bead ID.
+func probeBeadInQuerier(querier BeadQuerier, id string) (bool, error) {
+	if querier == nil {
+		return false, fmt.Errorf("store unavailable")
+	}
+	_, err := querier.Get(id)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, beads.ErrNotFound) {
+		return false, nil
+	}
+	return false, err
+}
+
+// LooksLikeBeadID reports whether a string loosely resembles a bead ID.
+//
+// Deprecated: use BeadIDParts for the stricter routing heuristic.
 func LooksLikeBeadID(s string) bool {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return false
 	}
-	// Bead IDs are typically prefix-NNN or just NNN.
-	// They don't contain spaces, slashes, or common text punctuation.
 	if strings.ContainsAny(s, " \t\n/\\") {
 		return false
 	}
-	// If it contains a digit, it's likely a bead ID.
 	for _, c := range s {
 		if c >= '0' && c <= '9' {
 			return true
 		}
 	}
 	return false
+}
+
+// BeadIDParts trims surrounding whitespace and parses a bead-like string into
+// prefix and base suffix, ignoring any hierarchical ".child" suffix. It
+// validates the structured bead-ID shape used by the CLI's stricter routing
+// heuristic.
+func BeadIDParts(s string) (prefix, baseSuffix string, ok bool) {
+	s = strings.TrimSpace(s)
+	if s == "" || strings.ContainsAny(s, " \t\n") {
+		return "", "", false
+	}
+	i := strings.Index(s, "-")
+	if i <= 0 || i == len(s)-1 || strings.Count(s, "-") != 1 {
+		return "", "", false
+	}
+	prefix = s[:i]
+	for idx, c := range prefix {
+		if idx == 0 {
+			if ('A' > c || c > 'Z') && ('a' > c || c > 'z') {
+				return "", "", false
+			}
+			continue
+		}
+		if ('0' > c || c > '9') && ('a' > c || c > 'z') && ('A' > c || c > 'Z') {
+			return "", "", false
+		}
+	}
+	suffix := s[i+1:]
+	baseSuffix = suffix
+	if dot := strings.IndexByte(suffix, '.'); dot > 0 {
+		baseSuffix = suffix[:dot]
+	}
+	if baseSuffix == "" {
+		return "", "", false
+	}
+	for _, c := range baseSuffix {
+		if ('0' > c || c > '9') && ('a' > c || c > 'z') && ('A' > c || c > 'Z') {
+			return "", "", false
+		}
+	}
+	return prefix, baseSuffix, true
+}
+
+// MissingBeadError reports that a requested bead reference did not resolve in
+// the target store.
+type MissingBeadError struct {
+	BeadID   string
+	StoreRef string
+}
+
+// Error returns the missing-bead diagnostic.
+func (e *MissingBeadError) Error() string {
+	return fmt.Sprintf("bead %q not found in store %s", e.BeadID, e.StoreRef)
+}
+
+// BeadLookupError reports an operational failure while checking whether a bead
+// exists in the target store.
+type BeadLookupError struct {
+	BeadID   string
+	StoreRef string
+	Err      error
+}
+
+// Error returns the lookup-failure diagnostic.
+func (e *BeadLookupError) Error() string {
+	return fmt.Sprintf("getting bead %q from store %s: %v", e.BeadID, e.StoreRef, e.Err)
+}
+
+// Unwrap returns the underlying lookup failure.
+func (e *BeadLookupError) Unwrap() error {
+	return e.Err
 }
 
 func normalizeSlingQuery(query string) string {
@@ -559,7 +797,7 @@ func SlingFormulaTargetBranch(beadID string, deps SlingDeps, a config.Agent) str
 
 // BuildSlingFormulaVars builds the variable map for formula instantiation.
 func BuildSlingFormulaVars(formulaName, beadID string, userVars []string, a config.Agent, deps SlingDeps) map[string]string {
-	vars := make(map[string]string, len(userVars)+3)
+	vars := make(map[string]string, len(userVars)+6)
 	for _, v := range userVars {
 		key, value, ok := strings.Cut(v, "=")
 		if ok && key != "" {
@@ -575,10 +813,19 @@ func BuildSlingFormulaVars(formulaName, beadID string, userVars []string, a conf
 		}
 		vars[key] = value
 	}
+	addRoutingVar := func(key, value string) {
+		if _, explicit := vars[key]; explicit {
+			return
+		}
+		vars[key] = value
+	}
 
 	if beadID != "" {
 		addVar("issue", beadID)
 	}
+	addRoutingVar("rig_name", a.Dir)
+	addRoutingVar("binding_name", a.BindingName)
+	addRoutingVar("binding_prefix", a.BindingPrefix())
 
 	autoBranch := SlingFormulaTargetBranch(beadID, deps, a)
 	if SlingFormulaUsesBaseBranch(formulaName) {
@@ -661,9 +908,13 @@ func InstantiateSlingFormula(ctx context.Context, formulaName string, searchPath
 		opts.PriorityOverride = BeadPriorityOverride(deps.Store, sourceBeadID)
 	}
 	compileStart := time.Now()
-	recipe, err := formula.Compile(ctx, formulaName, searchPaths, opts.Vars)
+	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, formulaName, searchPaths, opts.Vars)
 	if err != nil {
 		SlingTracef("instantiate compile-error formula=%s dur=%s err=%v", formulaName, time.Since(compileStart), err)
+		return nil, err
+	}
+	if err := molecule.ValidateRecipeRuntimeVars(recipe, opts); err != nil {
+		SlingTracef("instantiate validate-error formula=%s err=%v", formulaName, err)
 		return nil, err
 	}
 	SlingTracef("instantiate compiled formula=%s dur=%s steps=%d", formulaName, time.Since(compileStart), len(recipe.Steps))
@@ -671,6 +922,7 @@ func InstantiateSlingFormula(ctx context.Context, formulaName string, searchPath
 		SlingTracef("instantiate decorate-error formula=%s err=%v", formulaName, err)
 		return nil, err
 	}
+	privatizeAttachedRootOnlyWisp(recipe, sourceBeadID)
 	instantiateStart := time.Now()
 	result, err := molecule.Instantiate(ctx, deps.Store, recipe, opts)
 	if err != nil {
@@ -679,6 +931,35 @@ func InstantiateSlingFormula(ctx context.Context, formulaName string, searchPath
 	}
 	SlingTracef("instantiate done formula=%s dur=%s root=%s created=%d graph=%t", formulaName, time.Since(instantiateStart), result.RootID, result.Created, result.GraphWorkflow)
 	return result, nil
+}
+
+func privatizeAttachedRootOnlyWisp(recipe *formula.Recipe, sourceBeadID string) {
+	if recipe == nil || !recipe.RootOnly || strings.TrimSpace(sourceBeadID) == "" || len(recipe.Steps) == 0 {
+		return
+	}
+	root := &recipe.Steps[0]
+	if root.Metadata["gc.kind"] != "wisp" {
+		return
+	}
+	root.Type = "molecule"
+	root.Metadata = mapsCloneWithout(root.Metadata, "gc.kind")
+}
+
+func mapsCloneWithout(in map[string]string, drop string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for key, value := range in {
+		if key == drop {
+			continue
+		}
+		out[key] = value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // ShouldPromoteWorkflowLaunchStatus reports whether a bead's status should

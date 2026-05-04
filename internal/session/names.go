@@ -13,6 +13,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
@@ -104,6 +105,24 @@ func GenerateAdhocExplicitName(base string) (string, error) {
 		base = base[:maxBaseLen]
 	}
 	return ValidateExplicitName(base + suffix)
+}
+
+// GenerateAdhocIdentity produces a stable, MCP-safe per-session identity for
+// aliasless sessions that still need a concrete unique name for templating.
+func GenerateAdhocIdentity(base string) (string, error) {
+	token, err := GenerateSessionKey()
+	if err != nil {
+		return "", fmt.Errorf("generate adhoc identity: %w", err)
+	}
+	compact := strings.ReplaceAll(token, "-", "")
+	if len(compact) > 10 {
+		compact = compact[:10]
+	}
+	base = agent.SanitizeQualifiedNameForSession(strings.TrimSpace(base))
+	if base == "" {
+		base = "session"
+	}
+	return base + "-adhoc-" + compact, nil
 }
 
 // ValidateAlias validates a human-chosen session alias. Empty means
@@ -306,10 +325,13 @@ func ensureSessionNameAvailableForSelfAndOwner(store beads.Store, name, selfID, 
 	if name == "" {
 		return nil
 	}
-	all, err := store.List(beads.ListQuery{
-		Label:         LabelSession,
-		IncludeClosed: true,
-	})
+	all, err := ExactMetadataSessionCandidates(store, true,
+		map[string]string{"session_name": name},
+		map[string]string{"alias": name},
+		map[string]string{"agent_name": name},
+		map[string]string{"template": name},
+		map[string]string{"common_name": name},
+	)
 	if err != nil {
 		return fmt.Errorf("listing sessions: %w", err)
 	}
@@ -496,10 +518,13 @@ func isConfiguredNamedSessionRuntimeName(cfg *config.City, name, owner string) b
 // ensureSessionNameAvailableForSelf so the legacy-bypass path cannot
 // suppress rejections from live alias or identifier collisions.
 func noLiveSessionNameCollisions(store beads.Store, name, selfID, selfOwner string) bool {
-	all, err := store.List(beads.ListQuery{
-		Label:         LabelSession,
-		IncludeClosed: true,
-	})
+	all, err := ExactMetadataSessionCandidates(store, true,
+		map[string]string{"session_name": name},
+		map[string]string{"alias": name},
+		map[string]string{"agent_name": name},
+		map[string]string{"template": name},
+		map[string]string{"common_name": name},
+	)
 	if err != nil {
 		return false
 	}
@@ -546,9 +571,11 @@ func ensureSessionAliasAvailable(store beads.Store, cfg *config.City, alias, sel
 			hasSelfBead = true
 		}
 	}
-	all, err := store.List(beads.ListQuery{
-		Label: LabelSession,
-	})
+	all, err := ExactMetadataSessionCandidates(store, false,
+		map[string]string{"session_name": alias},
+		map[string]string{"alias": alias},
+		map[string]string{"agent_name": alias},
+	)
 	if err != nil {
 		return fmt.Errorf("listing sessions: %w", err)
 	}

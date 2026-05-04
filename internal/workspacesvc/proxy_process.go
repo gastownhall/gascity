@@ -204,7 +204,7 @@ func (p *proxyProcessInstance) start(now time.Time) error {
 		"GC_SERVICE_STATE_ROOT="+p.absStateRoot,
 		"GC_SERVICE_RUN_ROOT="+filepath.Join(p.absStateRoot, "run"),
 		"GC_SERVICE_SOCKET="+p.socketPath,
-		"GC_SERVICE_URL_PREFIX="+p.svc.MountPathOrDefault(),
+		"GC_SERVICE_URL_PREFIX="+citylayout.PublicServiceMountPath(p.rt.CityName(), p.svc.Name),
 		"GC_SERVICE_PUBLIC_URL="+p.publication.URL,
 		"GC_SERVICE_VISIBILITY="+p.publication.Visibility,
 		"GC_PUBLISHED_SERVICES_DIR="+citylayout.PublishedServicesDir(p.rt.CityPath()),

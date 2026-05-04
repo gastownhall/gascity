@@ -116,10 +116,37 @@ func (r *e2eReport) has(key, value string) bool {
 	return false
 }
 
+func (r *e2eReport) hasPath(t *testing.T, key, value string) bool {
+	t.Helper()
+	for _, v := range r.Values[key] {
+		if sameE2EPath(t, v, value) {
+			return true
+		}
+	}
+	return false
+}
+
 // hasKey returns true if the key is present in the report.
 func (r *e2eReport) hasKey(key string) bool {
 	_, ok := r.Values[key]
 	return ok
+}
+
+func sameE2EPath(t *testing.T, got, want string) bool {
+	t.Helper()
+	return normalizeE2EPath(t, got) == normalizeE2EPath(t, want)
+}
+
+func normalizeE2EPath(t *testing.T, path string) string {
+	t.Helper()
+	if path == "" {
+		return path
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return path
+	}
+	return resolved
 }
 
 // renderE2EToml generates a full single-file template for gc init --file.

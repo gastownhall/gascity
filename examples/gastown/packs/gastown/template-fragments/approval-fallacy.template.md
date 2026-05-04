@@ -41,7 +41,7 @@ gc bd update <work-bead> \
   --set-metadata branch=$(git branch --show-current) \
   --set-metadata target={{ .DefaultBranch }} \
   --notes "Implemented: <brief summary>"
-gc bd update <work-bead> --status=open --assignee={{ .RigName }}/refinery --set-metadata gc.routed_to={{ .RigName }}/refinery
+gc bd update <work-bead> --status=open --assignee={{ .RigName }}/{{ .BindingPrefix }}refinery --set-metadata gc.routed_to={{ .RigName }}/{{ .BindingPrefix }}refinery
 gc runtime drain-ack
 exit
 ```

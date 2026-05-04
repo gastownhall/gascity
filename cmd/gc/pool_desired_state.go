@@ -54,7 +54,7 @@ func PoolDesiredCounts(states []PoolDesiredState) map[string]int {
 // from scale_check, while this function only preserves sessions that already
 // own actionable work.
 // Each bead's gc.routed_to determines which agent template it belongs to.
-// scaleCheckCounts maps agent template → desired count from scale_check.
+// scaleCheckCounts maps agent template → new session demand from scale_check.
 // Pass nil for either when unavailable.
 func ComputePoolDesiredStates(
 	cfg *config.City,
@@ -103,8 +103,7 @@ func computePoolDesiredStates(
 		}
 	}
 
-	// Collect uncapped requests per agent template.
-	var allRequests []SessionRequest
+	var resumeRequests []SessionRequest
 
 	for i := range cfg.Agents {
 		agent := &cfg.Agents[i]
@@ -138,7 +137,7 @@ func computePoolDesiredStates(
 				continue
 			}
 			if sessionBeadID != "" {
-				allRequests = append(allRequests, SessionRequest{
+				resumeRequests = append(resumeRequests, SessionRequest{
 					Template:      template,
 					BeadPriority:  beadPriority(wb),
 					Tier:          "resume",
@@ -151,17 +150,17 @@ func computePoolDesiredStates(
 		}
 	}
 
-	// Merge scale_check demand: for each agent, if scale_check wants more
-	// sessions than bead-driven requests already cover, add the difference
-	// as "new" tier requests. This ensures the scale_check command (which
-	// runs in the correct rig directory) is always the authoritative demand
-	// signal, while bead-driven resume requests preserve running sessions.
+	limits := newNestedCapLimits(cfg)
+	usage := acceptedNestedCapUsage(limits, resumeRequests)
+	allRequests := append([]SessionRequest(nil), resumeRequests...)
+
+	// Merge scale_check demand. In bead-backed reconciliation, scale_check is
+	// the authoritative signal for new unassigned demand only; resume requests
+	// are calculated independently from assigned work and must not be deducted
+	// from that count.
 	if len(scaleCheckCounts) > 0 {
-		beadDriven := make(map[string]int, len(allRequests))
-		for _, r := range allRequests {
-			beadDriven[r.Template]++
-		}
-		for _, agent := range cfg.Agents {
+		for i := range cfg.Agents {
+			agent := &cfg.Agents[i]
 			if agent.Suspended {
 				continue
 			}
@@ -170,12 +169,14 @@ func computePoolDesiredStates(
 			if !ok {
 				continue
 			}
-			deficit := scaleCount - beadDriven[template]
-			for j := 0; j < deficit; j++ {
-				allRequests = append(allRequests, SessionRequest{
+			newCount := capNewDemandCount(limits, usage, agent, scaleCount)
+			for j := 0; j < newCount; j++ {
+				req := SessionRequest{
 					Template: template,
 					Tier:     "new",
-				})
+				}
+				allRequests = append(allRequests, req)
+				usage.accept(req, limits)
 			}
 		}
 	}
@@ -198,92 +199,20 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, trace *session
 		return false
 	})
 
-	// Counters for nested caps.
-	agentCount := make(map[string]int) // template → count
-	rigCount := make(map[string]int)   // rig name → count
-	workspaceCount := 0
-
-	// Resolve caps.
-	workspaceMax := -1 // -1 = unlimited
-	if cfg.Workspace.MaxActiveSessions != nil {
-		workspaceMax = *cfg.Workspace.MaxActiveSessions
-	}
-	rigMaxMap := make(map[string]int) // rig name → max (-1 = unlimited)
-	for _, rig := range cfg.Rigs {
-		if rig.MaxActiveSessions != nil {
-			rigMaxMap[rig.Name] = *rig.MaxActiveSessions
-		} else {
-			rigMaxMap[rig.Name] = -1
-		}
-	}
-	agentMaxMap := make(map[string]int)    // template → max (-1 = unlimited)
-	agentRigMap := make(map[string]string) // template → rig name
-	for i := range cfg.Agents {
-		agent := &cfg.Agents[i]
-		template := agent.QualifiedName()
-		agentRigMap[template] = agent.Dir
-		resolved := agent.ResolvedMaxActiveSessions(cfg)
-		if resolved != nil {
-			agentMaxMap[template] = *resolved
-		} else {
-			agentMaxMap[template] = -1
-		}
-	}
+	limits := newNestedCapLimits(cfg)
+	usage := newNestedCapUsage()
 
 	// Walk sorted requests, accepting each if all caps have room.
 	accepted := make(map[string][]SessionRequest) // template → accepted requests
-	// Dedup: don't accept multiple requests for the same session bead.
-	seenSessionBeads := make(map[string]bool)
 
 	for _, req := range requests {
-		// Dedup resume requests for the same session bead.
-		if req.Tier == "resume" && req.SessionBeadID != "" {
-			if seenSessionBeads[req.SessionBeadID] {
-				continue
-			}
-		}
-
 		template := req.Template
-		rig := agentRigMap[template]
-
-		// Check agent cap.
-		agentMax := agentMaxMap[template]
-		if agentMax >= 0 && agentCount[template] >= agentMax {
-			if trace != nil {
-				trace.recordDecision("reconciler.pool.agent_cap", template, "", "agent_cap", "rejected", traceRecordPayload{
-					"agent_max": agentMax,
-					"current":   agentCount[template],
-					"tier":      req.Tier,
-				}, nil, "")
-			}
+		if usage.isDuplicateResume(req) {
 			continue
 		}
-		// Check rig cap.
-		if rig != "" {
-			rigMax, ok := rigMaxMap[rig]
-			if !ok {
-				rigMax = -1
-			}
-			if rigMax >= 0 && rigCount[rig] >= rigMax {
-				if trace != nil {
-					trace.recordDecision("reconciler.pool.rig_cap", template, "", "rig_cap", "rejected", traceRecordPayload{
-						"rig":     rig,
-						"rig_max": rigMax,
-						"current": rigCount[rig],
-						"tier":    req.Tier,
-					}, nil, "")
-				}
-				continue
-			}
-		}
-		// Check workspace cap.
-		if workspaceMax >= 0 && workspaceCount >= workspaceMax {
+		if site, reason, payload, rejected := usage.rejection(req, limits); rejected {
 			if trace != nil {
-				trace.recordDecision("reconciler.pool.workspace_cap", template, "", "workspace_cap", "rejected", traceRecordPayload{
-					"workspace_max": workspaceMax,
-					"current":       workspaceCount,
-					"tier":          req.Tier,
-				}, nil, "")
+				trace.recordDecision(site, template, "", reason, "rejected", payload, nil, "")
 			}
 			continue
 		}
@@ -295,14 +224,7 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, trace *session
 				"tier": req.Tier,
 			}, nil, "")
 		}
-		agentCount[template]++
-		if rig != "" {
-			rigCount[rig]++
-		}
-		workspaceCount++
-		if req.Tier == "resume" && req.SessionBeadID != "" {
-			seenSessionBeads[req.SessionBeadID] = true
-		}
+		usage.accept(req, limits)
 	}
 
 	// Fill agent mins (if caps allow).
@@ -313,41 +235,23 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, trace *session
 		}
 		template := agent.QualifiedName()
 		minSess := agent.EffectiveMinActiveSessions()
-		for agentCount[template] < minSess {
-			rig := agentRigMap[template]
-			// Check caps before adding idle session.
-			agentMax := agentMaxMap[template]
-			if agentMax >= 0 && agentCount[template] >= agentMax {
-				break
-			}
-			if rig != "" {
-				rigMax, ok := rigMaxMap[rig]
-				if !ok {
-					rigMax = -1
-				}
-				if rigMax >= 0 && rigCount[rig] >= rigMax {
-					break
-				}
-			}
-			if workspaceMax >= 0 && workspaceCount >= workspaceMax {
-				break
-			}
-			accepted[template] = append(accepted[template], SessionRequest{
+		for usage.agentCount[template] < minSess {
+			req := SessionRequest{
 				Template: template,
 				Tier:     "new",
-			})
+			}
+			if _, _, _, rejected := usage.rejection(req, limits); rejected {
+				break
+			}
+			accepted[template] = append(accepted[template], req)
 			if trace != nil {
 				trace.recordDecision("reconciler.pool.min_fill", template, "", "min_fill", "accepted", traceRecordPayload{
 					"min":     minSess,
-					"current": agentCount[template],
+					"current": usage.agentCount[template],
 					"tier":    "new",
 				}, nil, "")
 			}
-			agentCount[template]++
-			if rig != "" {
-				rigCount[rig]++
-			}
-			workspaceCount++
+			usage.accept(req, limits)
 		}
 	}
 
@@ -364,4 +268,168 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, trace *session
 		return result[i].Template < result[j].Template
 	})
 	return result
+}
+
+type nestedCapLimits struct {
+	workspaceMax int
+	rigMax       map[string]int
+	agentMax     map[string]int
+	agentRig     map[string]string
+}
+
+type nestedCapUsage struct {
+	agentCount      map[string]int
+	rigCount        map[string]int
+	workspaceCount  int
+	seenSessionBead map[string]bool
+}
+
+func newNestedCapLimits(cfg *config.City) nestedCapLimits {
+	limits := nestedCapLimits{
+		workspaceMax: -1,
+		rigMax:       make(map[string]int),
+		agentMax:     make(map[string]int),
+		agentRig:     make(map[string]string),
+	}
+	if cfg.Workspace.MaxActiveSessions != nil {
+		limits.workspaceMax = *cfg.Workspace.MaxActiveSessions
+	}
+	for _, rig := range cfg.Rigs {
+		if rig.MaxActiveSessions != nil {
+			limits.rigMax[rig.Name] = *rig.MaxActiveSessions
+		} else {
+			limits.rigMax[rig.Name] = -1
+		}
+	}
+	for i := range cfg.Agents {
+		agent := &cfg.Agents[i]
+		template := agent.QualifiedName()
+		limits.agentRig[template] = agent.Dir
+		resolved := agent.ResolvedMaxActiveSessions(cfg)
+		if resolved != nil {
+			limits.agentMax[template] = *resolved
+		} else {
+			limits.agentMax[template] = -1
+		}
+	}
+	return limits
+}
+
+func newNestedCapUsage() nestedCapUsage {
+	return nestedCapUsage{
+		agentCount:      make(map[string]int),
+		rigCount:        make(map[string]int),
+		seenSessionBead: make(map[string]bool),
+	}
+}
+
+func acceptedNestedCapUsage(limits nestedCapLimits, requests []SessionRequest) nestedCapUsage {
+	usage := newNestedCapUsage()
+	sorted := append([]SessionRequest(nil), requests...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if sorted[i].BeadPriority != sorted[j].BeadPriority {
+			return sorted[i].BeadPriority > sorted[j].BeadPriority
+		}
+		if sorted[i].Tier != sorted[j].Tier {
+			return sorted[i].Tier == "resume"
+		}
+		return false
+	})
+	for _, req := range sorted {
+		if usage.canAccept(req, limits) {
+			usage.accept(req, limits)
+		}
+	}
+	return usage
+}
+
+func capNewDemandCount(limits nestedCapLimits, usage nestedCapUsage, agent *config.Agent, demand int) int {
+	if demand <= 0 {
+		return 0
+	}
+	template := agent.QualifiedName()
+	remaining := demand
+	if agentMax := limits.agentMax[template]; agentMax >= 0 {
+		remaining = minInt(remaining, agentMax-usage.agentCount[template])
+	}
+	if rig := limits.agentRig[template]; rig != "" {
+		rigMax, ok := limits.rigMax[rig]
+		if !ok {
+			rigMax = -1
+		}
+		if rigMax >= 0 {
+			remaining = minInt(remaining, rigMax-usage.rigCount[rig])
+		}
+	}
+	if limits.workspaceMax >= 0 {
+		remaining = minInt(remaining, limits.workspaceMax-usage.workspaceCount)
+	}
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
+}
+
+func (u nestedCapUsage) canAccept(req SessionRequest, limits nestedCapLimits) bool {
+	if u.isDuplicateResume(req) {
+		return false
+	}
+	_, _, _, rejected := u.rejection(req, limits)
+	return !rejected
+}
+
+func (u nestedCapUsage) isDuplicateResume(req SessionRequest) bool {
+	return req.Tier == "resume" && req.SessionBeadID != "" && u.seenSessionBead[req.SessionBeadID]
+}
+
+func (u nestedCapUsage) rejection(req SessionRequest, limits nestedCapLimits) (string, string, traceRecordPayload, bool) {
+	template := req.Template
+	if agentMax := limits.agentMax[template]; agentMax >= 0 && u.agentCount[template] >= agentMax {
+		return "reconciler.pool.agent_cap", "agent_cap", traceRecordPayload{
+			"agent_max": agentMax,
+			"current":   u.agentCount[template],
+			"tier":      req.Tier,
+		}, true
+	}
+	rig := limits.agentRig[template]
+	if rig != "" {
+		rigMax, ok := limits.rigMax[rig]
+		if !ok {
+			rigMax = -1
+		}
+		if rigMax >= 0 && u.rigCount[rig] >= rigMax {
+			return "reconciler.pool.rig_cap", "rig_cap", traceRecordPayload{
+				"rig":     rig,
+				"rig_max": rigMax,
+				"current": u.rigCount[rig],
+				"tier":    req.Tier,
+			}, true
+		}
+	}
+	if limits.workspaceMax >= 0 && u.workspaceCount >= limits.workspaceMax {
+		return "reconciler.pool.workspace_cap", "workspace_cap", traceRecordPayload{
+			"workspace_max": limits.workspaceMax,
+			"current":       u.workspaceCount,
+			"tier":          req.Tier,
+		}, true
+	}
+	return "", "", nil, false
+}
+
+func (u *nestedCapUsage) accept(req SessionRequest, limits nestedCapLimits) {
+	u.agentCount[req.Template]++
+	if rig := limits.agentRig[req.Template]; rig != "" {
+		u.rigCount[rig]++
+	}
+	u.workspaceCount++
+	if req.Tier == "resume" && req.SessionBeadID != "" {
+		u.seenSessionBead[req.SessionBeadID] = true
+	}
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

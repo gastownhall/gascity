@@ -408,9 +408,23 @@ auto-append fragments via `[agent_defaults].append_fragments`:
 append_fragments = ["operational-awareness", "command-glossary"]
 ```
 
-Agent-local `append_fragments` remains a follow-up tracked in
-[#671](https://github.com/gastownhall/gascity/issues/671); it is not part
-of the supported migration contract as of release v0.15.0.
+Agent-local `append_fragments` is also supported on a per-agent basis,
+declared directly on an `[[agent]]` block or in an
+`agents/<name>/agent.toml`:
+
+```toml
+[[agent]]
+name = "mayor"
+prompt_template = "agents/mayor/prompt.template.md"
+append_fragments = ["mayor-footer"]
+```
+
+Among the `append_fragments` sources, the layering order is per-agent
+first, then imported-pack `[agent_defaults].append_fragments`, then
+city-level `[agent_defaults].append_fragments`. Duplicates across
+layers are de-duplicated. Legacy `global_fragments` (workspace) and
+`inject_fragments` (per-agent) still prepend to this list during
+migration.
 
 `append_fragments` only works on `.template.md` prompts. Plain `.md` prompts are inert — nothing is injected, no template engine runs.
 

@@ -15,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doltversion"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -467,8 +468,8 @@ var initRunVersion = func(binary string) (string, error) {
 
 // Minimum versions for beads-provider binaries.
 const (
-	doltMinVersion = "1.86.1" // sql-server features used by gc-beads-bd
-	bdMinVersion   = "1.0.0"  // BdStore shell-out interface
+	doltMinVersion = doltversion.ManagedMin // sql-server features used by gc-beads-bd
+	bdMinVersion   = "1.0.0"                // BdStore shell-out interface
 )
 
 // checkHardDependencies verifies that all required binaries are available
@@ -482,6 +483,7 @@ func checkHardDependencies(cityPath string) []missingDep {
 		installHint string
 		minVersion  string      // empty = no version check
 		condition   func() bool // if non-nil, only checked when true
+		available   func() bool // if non-nil, custom availability probe
 	}
 
 	needsBd := initNeedsBdTooling(cityPath)
@@ -517,6 +519,14 @@ func checkHardDependencies(cityPath string) []missingDep {
 			condition:   func() bool { return needsBd },
 		},
 		{
+			name:        "timeout/gtimeout/python3",
+			installHint: "install GNU coreutils timeout/gtimeout or python3",
+			condition:   func() bool { return needsBd },
+			available: func() bool {
+				return initAnyToolAvailable("timeout", "gtimeout", "python3")
+			},
+		},
+		{
 			name:        "pgrep",
 			installHint: "brew install proctools (macOS) or apt install procps (Linux)",
 		},
@@ -531,6 +541,15 @@ func checkHardDependencies(cityPath string) []missingDep {
 		if d.condition != nil && !d.condition() {
 			continue
 		}
+		if d.available != nil {
+			if !d.available() {
+				missing = append(missing, missingDep{
+					name:        d.name,
+					installHint: d.installHint,
+				})
+			}
+			continue
+		}
 		if _, err := initLookPath(d.name); err != nil {
 			missing = append(missing, missingDep{
 				name:        d.name,
@@ -539,17 +558,24 @@ func checkHardDependencies(cityPath string) []missingDep {
 			continue
 		}
 		if d.minVersion != "" {
-			if ver := parseDepVersion(d.name); ver != "" {
-				if compareVersions(ver, d.minVersion) < 0 {
-					missing = append(missing, missingDep{
-						name:        fmt.Sprintf("%s (found v%s, need v%s+)", d.name, ver, d.minVersion),
-						installHint: d.installHint,
-					})
-				}
+			if ver, ok := depMeetsMinVersion(d.name, d.minVersion); ver != "" && !ok {
+				missing = append(missing, missingDep{
+					name:        fmt.Sprintf("%s (found v%s, need v%s+)", d.name, ver, d.minVersion),
+					installHint: d.installHint,
+				})
 			}
 		}
 	}
 	return missing
+}
+
+func initAnyToolAvailable(names ...string) bool {
+	for _, name := range names {
+		if _, err := initLookPath(name); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func initNeedsBdTooling(cityPath string) bool {
@@ -572,13 +598,29 @@ func initNeedsBdTooling(cityPath string) bool {
 	return workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs)
 }
 
-// parseDepVersion runs "<binary> version" and extracts a semver-like version string.
-// Returns "" if the version cannot be determined (non-fatal).
-func parseDepVersion(binary string) string {
+func depMeetsMinVersion(binary, minVersion string) (string, bool) {
 	line, err := initRunVersion(binary)
 	if err != nil {
-		return ""
+		return "", true
 	}
+	if binary == "dolt" {
+		info, err := doltversion.CheckFinalMinimum(line, minVersion)
+		if errors.Is(err, doltversion.ErrPreRelease) || errors.Is(err, doltversion.ErrBelowMinimum) {
+			return info.Raw, false
+		}
+		if err != nil {
+			return "", true
+		}
+		return info.Raw, true
+	}
+	ver := parseDepVersionLine(line)
+	if ver == "" {
+		return "", true
+	}
+	return ver, compareVersions(ver, minVersion) >= 0
+}
+
+func parseDepVersionLine(line string) string {
 	// Patterns: "dolt version 1.86.1", "bd version 1.0.0 (3ac028bf: ...)"
 	for _, field := range strings.Fields(line) {
 		if len(field) > 0 && field[0] >= '0' && field[0] <= '9' && strings.Contains(field, ".") {
