@@ -659,6 +659,7 @@ func integrationEnvDolt() []string {
 
 func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	env := filterEnv(os.Environ(), "GC_BEADS")
+	env = filterEnv(env, "BEADS_DIR")
 	env = filterEnv(env, "GC_DOLT")
 	env = filterEnv(env, "PATH")
 	env = filterEnv(env, "GC_HOME")
@@ -1085,6 +1086,7 @@ func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
 	t.Setenv("GC_DOLT_PORT", "0")
 	t.Setenv("GC_DOLT_USER", "ambient-user")
 	t.Setenv("GC_DOLT_PASSWORD", "ambient-password")
+	t.Setenv("BEADS_DIR", "/host/beads")
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient-beads-host")
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "0")
 	t.Setenv("BEADS_DOLT_SERVER_USER", "ambient-beads-user")
@@ -1115,6 +1117,7 @@ func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
 		"GC_DOLT_PORT",
 		"GC_DOLT_USER",
 		"GC_DOLT_PASSWORD",
+		"BEADS_DIR",
 		"BEADS_DOLT_SERVER_HOST",
 		"BEADS_DOLT_SERVER_PORT",
 		"BEADS_DOLT_SERVER_USER",
