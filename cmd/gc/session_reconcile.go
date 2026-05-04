@@ -854,6 +854,9 @@ func staleCreatingState(session beads.Bead, clk clock.Clock) bool {
 	if clk == nil {
 		return false
 	}
+	if strings.TrimSpace(session.Metadata["state"]) != string(sessionpkg.StateCreating) {
+		return false
+	}
 	if session.CreatedAt.IsZero() {
 		return true
 	}

@@ -2940,6 +2940,58 @@ func TestReconcileSessionBeads_RollsBackPendingCreateWhenLeaseExpiredAndNoRuntim
 	}
 }
 
+func TestReconcileSessionBeads_DoesNotRollbackStoppedPendingCreateAsExpiredLease(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)}
+	cfg := &config.City{Agents: []config.Agent{{Name: "helper"}}}
+	desired := map[string]TemplateParams{
+		"helper": {
+			Command:      "test-cmd",
+			SessionName:  "helper",
+			TemplateName: "helper",
+		},
+	}
+
+	bead, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:helper"},
+		Metadata: map[string]string{
+			"session_name":         "helper",
+			"pending_create_claim": "true",
+			"template":             "helper",
+			"state":                "stopped",
+			"generation":           "1",
+			"continuation_epoch":   "1",
+			"instance_token":       "test-token",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(bead): %v", err)
+	}
+	bead.CreatedAt = clk.Now().Add(-24 * time.Hour)
+
+	var stdout, stderr bytes.Buffer
+	cfgNames := configuredSessionNames(cfg, "", store)
+	_ = reconcileSessionBeads(
+		context.Background(), []beads.Bead{bead}, desired, cfgNames,
+		cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{"helper": 1}, false, nil, "",
+		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
+	)
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(bead): %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("status = closed, want stopped pending-create bead preserved for start retry; metadata=%v", got.Metadata)
+	}
+	if got.Metadata["close_reason"] != "" {
+		t.Fatalf("close_reason = %q, want empty", got.Metadata["close_reason"])
+	}
+}
+
 func TestReconcileSessionBeads_PreservesPendingCreateWhenLeaseRecentNoRuntime(t *testing.T) {
 	// Defensive: a session bead with pending_create_claim=true and no live
 	// runtime but a *fresh* last_woke_at lease (or recently CreatedAt) must
