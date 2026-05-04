@@ -24,6 +24,22 @@ func sessionBead(id, status string) beads.Bead {
 	return beads.Bead{ID: id, Status: status, Type: "session"}
 }
 
+func pendingPoolSessionBead(id string) beads.Bead {
+	const template = "claude"
+	return beads.Bead{
+		ID:     id,
+		Status: "open",
+		Type:   "session",
+		Metadata: map[string]string{
+			"template":             template,
+			"session_name":         PoolSessionName(template, id),
+			"state":                "creating",
+			"pending_create_claim": boolMetadata(true),
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	}
+}
+
 func newPoolDesiredStateTestTrace(templates ...string) *sessionReconcilerTraceCycle {
 	detail := make(map[string]TraceSource, len(templates))
 	for _, template := range templates {
@@ -576,6 +592,75 @@ func TestComputePoolDesiredStates_ScaleCheckAndResumeAddUp(t *testing.T) {
 	}
 	if resumeCount != 1 || newCount != 2 {
 		t.Errorf("resume=%d new=%d, want resume=1 new=2", resumeCount, newCount)
+	}
+}
+
+// Regression: scale_check counts unassigned ready work, which remains
+// unassigned while just-created sessions are still starting. Those in-flight
+// sessions must consume new demand or every reconciler tick can create another
+// session for the same ready bead.
+func TestComputePoolDesiredStates_InFlightNewSessionsConsumeScaleDemand(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	sessions := []beads.Bead{
+		pendingPoolSessionBead("sess-1"),
+		pendingPoolSessionBead("sess-2"),
+		pendingPoolSessionBead("sess-3"),
+	}
+	scaleCheck := map[string]int{"claude": 3}
+
+	result := ComputePoolDesiredStates(cfg, nil, sessions, scaleCheck)
+
+	counts := PoolDesiredCounts(result)
+	if counts["claude"] != 0 {
+		t.Fatalf("poolDesired[claude] = %d, want 0 when in-flight sessions fully cover demand", counts["claude"])
+	}
+}
+
+func TestComputePoolDesiredStates_InFlightNewSessionsDoNotCreateZeroDemand(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	sessions := []beads.Bead{
+		pendingPoolSessionBead("sess-1"),
+	}
+	scaleCheck := map[string]int{"claude": 0}
+
+	result := ComputePoolDesiredStates(cfg, nil, sessions, scaleCheck)
+
+	counts := PoolDesiredCounts(result)
+	if counts["claude"] != 0 {
+		t.Fatalf("poolDesired[claude] = %d, want 0 when scale_check reports no new demand", counts["claude"])
+	}
+}
+
+func TestComputePoolDesiredStates_InFlightNewSessionsOnlySubtractCoveredDemand(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	sessions := []beads.Bead{
+		pendingPoolSessionBead("sess-1"),
+		pendingPoolSessionBead("sess-2"),
+	}
+	scaleCheck := map[string]int{"claude": 5}
+
+	result := ComputePoolDesiredStates(cfg, nil, sessions, scaleCheck)
+
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	reqs := result[0].Requests
+	if len(reqs) != 3 {
+		t.Fatalf("len(requests) = %d, want 3 anonymous new creates after subtracting 2 in-flight sessions", len(reqs))
+	}
+	for _, req := range reqs {
+		if req.Tier != "new" {
+			t.Fatalf("tier = %q, want new", req.Tier)
+		}
+		if req.SessionBeadID != "" {
+			t.Fatalf("scale demand should only create anonymous new requests after subtracting in-flight count, got %+v", req)
+		}
 	}
 }
 

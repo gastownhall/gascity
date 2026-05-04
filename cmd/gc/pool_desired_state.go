@@ -153,11 +153,20 @@ func computePoolDesiredStates(
 	limits := newNestedCapLimits(cfg)
 	usage := acceptedNestedCapUsage(limits, resumeRequests)
 	allRequests := append([]SessionRequest(nil), resumeRequests...)
+	resumeSessionBeadIDs := make(map[string]struct{}, len(resumeRequests))
+	for _, req := range resumeRequests {
+		if req.SessionBeadID != "" {
+			resumeSessionBeadIDs[req.SessionBeadID] = struct{}{}
+		}
+	}
+	inFlightNewCounts := poolInFlightNewCounts(cfg, sessionBeads, resumeSessionBeadIDs)
 
 	// Merge scale_check demand. In bead-backed reconciliation, scale_check is
 	// the authoritative signal for new unassigned demand only; resume requests
 	// are calculated independently from assigned work and must not be deducted
-	// from that count.
+	// from that count. Pool-created sessions that have not claimed work yet
+	// represent already-spent new demand; they only subtract from positive
+	// scale_check counts and never create desired demand by themselves.
 	if len(scaleCheckCounts) > 0 {
 		for i := range cfg.Agents {
 			agent := &cfg.Agents[i]
@@ -168,6 +177,13 @@ func computePoolDesiredStates(
 			scaleCount, ok := scaleCheckCounts[template]
 			if !ok {
 				continue
+			}
+			if scaleCount <= 0 {
+				continue
+			}
+			scaleCount -= inFlightNewCounts[template]
+			if scaleCount < 0 {
+				scaleCount = 0
 			}
 			newCount := capNewDemandCount(limits, usage, agent, scaleCount)
 			for j := 0; j < newCount; j++ {
@@ -182,6 +198,43 @@ func computePoolDesiredStates(
 	}
 
 	return applyNestedCaps(cfg, allRequests, trace)
+}
+
+func poolInFlightNewCounts(cfg *config.City, sessionBeads []beads.Bead, resumeSessionBeadIDs map[string]struct{}) map[string]int {
+	counts := make(map[string]int)
+	for i := range cfg.Agents {
+		agent := &cfg.Agents[i]
+		if agent.Suspended || !agent.SupportsGenericEphemeralSessions() {
+			continue
+		}
+		template := agent.QualifiedName()
+		for _, sb := range sessionBeads {
+			if sb.Status == "closed" {
+				continue
+			}
+			if _, ok := resumeSessionBeadIDs[sb.ID]; ok {
+				continue
+			}
+			if !isEphemeralSessionBeadForAgent(sb, agent) || !isPoolManagedSessionBead(sb) {
+				continue
+			}
+			if normalizedSessionTemplate(sb, cfg) != template {
+				continue
+			}
+			if !poolSessionConsumesNewDemand(sb) {
+				continue
+			}
+			counts[template]++
+		}
+	}
+	return counts
+}
+
+func poolSessionConsumesNewDemand(session beads.Bead) bool {
+	if strings.TrimSpace(session.Metadata["pending_create_claim"]) == boolMetadata(true) {
+		return true
+	}
+	return strings.TrimSpace(session.Metadata["state"]) == "creating"
 }
 
 // applyNestedCaps enforces workspace, rig, and agent max_active_sessions caps.
