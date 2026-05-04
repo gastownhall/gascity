@@ -318,6 +318,12 @@ func TestStaleCreatingStateUsesPendingCreateStartedAtWhenPresent(t *testing.T) {
 			startedAt: "not-rfc3339",
 			wantStale: false,
 		},
+		{
+			name:      "zero pending create timestamp falls back to row creation",
+			createdAt: now.Add(-30 * time.Second),
+			startedAt: (time.Time{}).UTC().Format(time.RFC3339),
+			wantStale: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -332,6 +338,16 @@ func TestStaleCreatingStateUsesPendingCreateStartedAtWhenPresent(t *testing.T) {
 				t.Fatalf("staleCreatingState = %v, want %v", got, tt.wantStale)
 			}
 		})
+	}
+}
+
+func TestPendingCreateStartedAtNowSubstitutesCurrentTimeForZeroInput(t *testing.T) {
+	got := pendingCreateStartedAtNow(time.Time{})
+	if got == (time.Time{}).UTC().Format(time.RFC3339) {
+		t.Fatal("pendingCreateStartedAtNow wrote the zero timestamp")
+	}
+	if _, err := time.Parse(time.RFC3339, got); err != nil {
+		t.Fatalf("pendingCreateStartedAtNow returned invalid RFC3339 timestamp %q: %v", got, err)
 	}
 }
 

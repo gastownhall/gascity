@@ -933,6 +933,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			}
 			if createState != "active" {
 				meta["pending_create_claim"] = "true"
+				meta["pending_create_started_at"] = pendingCreateStartedAtNow(now)
 			}
 			if tp.DependencyOnly {
 				meta["dependency_only"] = boolMetadata(true)

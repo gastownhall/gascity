@@ -1642,11 +1642,8 @@ func sweepUndesiredPoolSessionBeads(
 // still alive.
 func isStaleCreating(bead beads.Bead) bool {
 	now := time.Now()
-	if v := strings.TrimSpace(bead.Metadata["pending_create_started_at"]); v != "" {
-		started, err := time.Parse(time.RFC3339, v)
-		if err == nil {
-			return !now.Before(started.Add(staleCreatingStateTimeout))
-		}
+	if started, ok := parseRFC3339Metadata(bead.Metadata["pending_create_started_at"]); ok {
+		return !now.Before(started.Add(staleCreatingStateTimeout))
 	}
 	if bead.CreatedAt.IsZero() {
 		return true
@@ -1654,9 +1651,9 @@ func isStaleCreating(bead beads.Bead) bool {
 	return !now.Before(bead.CreatedAt.Add(staleCreatingStateTimeout))
 }
 
-// parseRFC3339Metadata parses an RFC3339 timestamp metadata value. A missing
-// or unparseable value returns ok=false; the caller treats that as "no per-
-// start marker present" so older beads (pre-creation_complete_at rollout)
+// parseRFC3339Metadata parses an RFC3339 timestamp metadata value. A missing,
+// zero, or unparseable value returns ok=false; the caller treats that as "no
+// per-start marker present" so older beads (pre-creation_complete_at rollout)
 // fall through to the default sweepable path rather than being protected
 // indefinitely.
 func parseRFC3339Metadata(v string) (time.Time, bool) {
@@ -1666,6 +1663,9 @@ func parseRFC3339Metadata(v string) (time.Time, bool) {
 	}
 	t, err := time.Parse(time.RFC3339, v)
 	if err != nil {
+		return time.Time{}, false
+	}
+	if t.IsZero() {
 		return time.Time{}, false
 	}
 	return t, true

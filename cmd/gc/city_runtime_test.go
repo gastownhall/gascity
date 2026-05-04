@@ -1200,6 +1200,21 @@ func TestSweepUndesiredPoolSessionBeads_UsesPendingCreateStartedAtForCreatingSta
 	}
 }
 
+func TestIsStaleCreatingTreatsZeroPendingCreateStartedAtAsMissing(t *testing.T) {
+	now := time.Now().UTC()
+	bead := beads.Bead{
+		Metadata: map[string]string{
+			"state":                     "creating",
+			"pending_create_started_at": (time.Time{}).UTC().Format(time.RFC3339),
+		},
+		CreatedAt: now,
+	}
+
+	if isStaleCreating(bead) {
+		t.Fatal("zero pending_create_started_at should fall back to fresh CreatedAt")
+	}
+}
+
 func TestSweepUndesiredPoolSessionBeads_ClosesStoppedSessions(t *testing.T) {
 	store := beads.NewMemStore()
 	bead, err := store.Create(beads.Bead{

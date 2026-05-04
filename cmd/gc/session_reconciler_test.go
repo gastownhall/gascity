@@ -3140,6 +3140,76 @@ func TestReconcileSessionBeads_RollbackBudgetDefersExcessMismatchesAndStillStart
 	}
 }
 
+func TestReconcileSessionBeads_RollbackBudgetDefersExcessStaleNoRuntimeCreatesAndStillStarts(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "helper"}}}
+
+	var sessions []beads.Bead
+	staleStartedAt := pendingCreateStartedAtNow(env.clk.Now().Add(-2 * time.Minute))
+	for i := 0; i < 6; i++ {
+		name := fmt.Sprintf("sky-%d", i)
+		env.addDesired(name, "helper", false)
+		session := env.createSessionBead(name, "helper")
+		env.markSessionCreating(&session)
+		session.CreatedAt = env.clk.Now().Add(-2 * time.Minute)
+		env.setSessionMetadata(&session, map[string]string{
+			"pending_create_claim":      "true",
+			"pending_create_started_at": staleStartedAt,
+			"session_name_explicit":     "true",
+			"instance_token":            fmt.Sprintf("token-%d", i),
+		})
+		sessions = append(sessions, session)
+	}
+
+	env.addDesired("starter", "helper", false)
+	starter := env.createSessionBead("starter", "helper")
+	env.markSessionCreating(&starter)
+	sessions = append(sessions, starter)
+
+	if woken := env.reconcile(sessions); woken != 1 {
+		t.Fatalf("woken = %d, want 1 planned start after rollback budget is exhausted", woken)
+	}
+	if got := strings.Count(env.stderr.String(), "deferring rollback of sky-"); got != 1 {
+		t.Fatalf("deferred rollback messages = %d, want 1; stderr:\n%s", got, env.stderr.String())
+	}
+	closedCreates := 0
+	deferredCreates := 0
+	for i := 0; i < 6; i++ {
+		name := fmt.Sprintf("sky-%d", i)
+		got, err := env.store.Get(sessions[i].ID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", sessions[i].ID, err)
+		}
+		if got.Status == "closed" {
+			if got.Metadata["close_reason"] != "failed-create" {
+				t.Fatalf("%s close_reason = %q, want failed-create", name, got.Metadata["close_reason"])
+			}
+			closedCreates++
+			continue
+		}
+		if got.Metadata["pending_create_claim"] != "true" {
+			t.Fatalf("%s pending_create_claim = %q, want true on deferred stale create", name, got.Metadata["pending_create_claim"])
+		}
+		deferredCreates++
+	}
+	if closedCreates != 5 {
+		t.Fatalf("closed stale creates = %d, want 5", closedCreates)
+	}
+	if deferredCreates != 1 {
+		t.Fatalf("deferred stale creates = %d, want 1", deferredCreates)
+	}
+	started, err := env.store.Get(starter.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", starter.ID, err)
+	}
+	if started.Metadata["state"] != "active" {
+		t.Fatalf("starter state = %q, want active", started.Metadata["state"])
+	}
+	if !env.sp.IsRunning("starter") {
+		t.Fatal("starter runtime was not started after rollback budget was exhausted")
+	}
+}
+
 func TestReconcileSessionBeads_ConvergesPendingCreateOnLateSuccessStartError(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := &lateSuccessStartProvider{

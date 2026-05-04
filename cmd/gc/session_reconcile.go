@@ -878,11 +878,8 @@ func staleCreatingState(session beads.Bead, clk clock.Clock) bool {
 		return false
 	}
 	now := clk.Now()
-	if v := strings.TrimSpace(session.Metadata["pending_create_started_at"]); v != "" {
-		started, err := time.Parse(time.RFC3339, v)
-		if err == nil {
-			return !now.Before(started.Add(staleCreatingStateTimeout))
-		}
+	if started, ok := parseRFC3339Metadata(session.Metadata["pending_create_started_at"]); ok {
+		return !now.Before(started.Add(staleCreatingStateTimeout))
 	}
 	if session.CreatedAt.IsZero() {
 		return true
@@ -895,6 +892,9 @@ func staleCreatingState(session beads.Bead, clk clock.Clock) bool {
 // state=creating with pending_create_claim=true. Must match the format
 // staleCreatingState parses (RFC3339).
 func pendingCreateStartedAtNow(now time.Time) string {
+	if now.IsZero() {
+		now = time.Now()
+	}
 	return now.UTC().Format(time.RFC3339)
 }
 

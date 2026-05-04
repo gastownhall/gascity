@@ -394,6 +394,24 @@ func reconcileSessionBeadsTraced(
 	// remaining stale beads roll back on subsequent ticks.
 	const maxRollbacksPerTick = 5
 	rollbacksThisTick := 0
+	attemptRollbackPendingCreate := func(session *beads.Bead, templateName, name, action, detail string) {
+		if rollbacksThisTick >= maxRollbacksPerTick {
+			fmt.Fprintf(stderr, "session reconciler: deferring rollback of %s (%s): rollback budget exhausted this tick\n", name, detail) //nolint:errcheck
+			if trace != nil {
+				trace.recordDecision("reconciler.session.pending_create", templateName, name, action, "rollback_deferred", traceRecordPayload{
+					"rollbacks_this_tick":    rollbacksThisTick,
+					"max_rollbacks_per_tick": maxRollbacksPerTick,
+				}, nil, "")
+			}
+			return
+		}
+		rollbacksThisTick++
+		fmt.Fprintf(stderr, "session reconciler: rolling back pending create %s: %s\n", name, detail) //nolint:errcheck
+		if trace != nil {
+			trace.recordDecision("reconciler.session.pending_create", templateName, name, action, "rollback", nil, nil, "")
+		}
+		rollbackPendingCreate(session, store, clk.Now().UTC(), stderr)
+	}
 	for i := range ordered {
 		session := &ordered[i]
 
@@ -589,22 +607,7 @@ func reconcileSessionBeadsTraced(
 			}
 		}
 		if alive && shouldRollbackPendingCreate(session) && !runningSessionMatchesPendingCreate(session, name, sp) {
-			if rollbacksThisTick >= maxRollbacksPerTick {
-				fmt.Fprintf(stderr, "session reconciler: deferring rollback of %s (live-runtime mismatch): rollback budget exhausted this tick\n", name) //nolint:errcheck
-				if trace != nil {
-					trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, name, "pending_create_rollback", "rollback_deferred", traceRecordPayload{
-						"rollbacks_this_tick":    rollbacksThisTick,
-						"max_rollbacks_per_tick": maxRollbacksPerTick,
-					}, nil, "")
-				}
-				continue
-			}
-			rollbacksThisTick++
-			fmt.Fprintf(stderr, "session reconciler: rolling back pending create %s: live runtime belongs to another session\n", name) //nolint:errcheck
-			if trace != nil {
-				trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, name, "pending_create_rollback", "rollback", nil, nil, "")
-			}
-			rollbackPendingCreate(session, store, clk.Now().UTC(), stderr)
+			attemptRollbackPendingCreate(session, tp.TemplateName, name, "pending_create_rollback", "live runtime belongs to another session")
 			continue
 		}
 		// Desired-branch counterpart to pendingCreateSessionStillLeased: a
@@ -620,11 +623,7 @@ func reconcileSessionBeadsTraced(
 				startupTimeout = cfg.Session.StartupTimeoutDuration()
 			}
 			if !pendingCreateStartInFlight(*session, clk, startupTimeout) && staleCreatingState(*session, clk) {
-				fmt.Fprintf(stderr, "session reconciler: rolling back pending create %s: lease expired and no live runtime\n", name) //nolint:errcheck
-				if trace != nil {
-					trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, name, "pending_create_lease_expired", "rollback", nil, nil, "")
-				}
-				rollbackPendingCreate(session, store, clk.Now().UTC(), stderr)
+				attemptRollbackPendingCreate(session, tp.TemplateName, name, "pending_create_lease_expired", "lease expired and no live runtime")
 				continue
 			}
 		}

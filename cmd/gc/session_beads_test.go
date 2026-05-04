@@ -215,6 +215,38 @@ func TestSyncSessionBeads_CreatesNewBeads(t *testing.T) {
 	}
 }
 
+func TestSyncSessionBeads_CreatesNonActiveBeadWithPendingCreateStartedAt(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+
+	ds := map[string]TemplateParams{
+		"helper": {TemplateName: "helper", Command: "true"},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+
+	all := allSessionBeads(t, store)
+	if len(all) != 1 {
+		t.Fatalf("expected 1 bead, got %d", len(all))
+	}
+	b := all[0]
+	if got := b.Metadata["state"]; got != "creating" {
+		t.Fatalf("state = %q, want creating", got)
+	}
+	if got := b.Metadata["pending_create_claim"]; got != "true" {
+		t.Fatalf("pending_create_claim = %q, want true", got)
+	}
+	if got, want := b.Metadata["pending_create_started_at"], pendingCreateStartedAtNow(clk.Now()); got != want {
+		t.Fatalf("pending_create_started_at = %q, want %q", got, want)
+	}
+}
+
 func TestSyncSessionBeads_ExistingDesiredUsesSnapshotStateWithoutWorkerLookup(t *testing.T) {
 	base := beads.NewMemStore()
 	store := &sessionGetSpyStore{Store: base}
