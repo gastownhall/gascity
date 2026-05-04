@@ -14,9 +14,9 @@ fix, but it also changed two additional runtime behaviors:
 - Supervisor-managed cities now keep per-city API routes unavailable until
   startup reconciliation has completed and `CityRuntime.OnStarted` marks the
   city running.
-- Session transcript streams now create the log watcher before emitting the
-  initial snapshot so writes around initial history loading are reloaded through
-  the watcher path.
+- Session transcript streams now rely on the log watcher loop's immediate first
+  read after the caller's initial history load, so writes in that gap are
+  reloaded before the stream blocks for later file notifications.
 
 Future review finalization should record comparable bundled changes in the
 public review comment or maintainer handoff notes before applying

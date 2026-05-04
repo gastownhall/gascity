@@ -107,6 +107,22 @@ func TestSupervisorCitiesList(t *testing.T) {
 	}
 }
 
+func TestSupervisorCityServiceProxy404sUntilCityRunning(t *testing.T) {
+	sm := newTestSupervisorMux(t, map[string]*fakeState{})
+	req := httptest.NewRequest(http.MethodGet, "/v0/city/starting/svc/review-intake/healthz", nil)
+	rec := httptest.NewRecorder()
+
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+	const want = `{"status":404,"title":"Not Found","detail":"not_found: city not found or not running"}`
+	if strings.TrimSpace(rec.Body.String()) != want {
+		t.Fatalf("body = %s, want %s", rec.Body.String(), want)
+	}
+}
+
 func TestSupervisorProviderReadinessRoute(t *testing.T) {
 	homeDir := t.TempDir()
 	binDir := filepath.Join(homeDir, "bin")
