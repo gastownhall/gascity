@@ -388,7 +388,18 @@ func deriveReplyTitle(subject, originalTitle, body string) string {
 }
 
 // Thread returns all messages sharing a thread ID, ordered by creation time.
-func (p *Provider) Thread(threadID string) ([]mail.Message, error) {
+// Callers may pass either an actual thread ID or any message bead ID in the
+// thread — the latter is what `gc mail thread <id>` from the CLI hands us.
+// If the input resolves to an existing message bead, its `thread:` label is
+// used; otherwise the input is treated as a thread ID directly so callers
+// that already know the thread ID still work.
+func (p *Provider) Thread(id string) ([]mail.Message, error) {
+	threadID := id
+	if msgBead, err := p.store.Get(id); err == nil {
+		if t := extractLabel(msgBead.Labels, "thread:"); t != "" {
+			threadID = t
+		}
+	}
 	bs, err := p.store.List(beads.ListQuery{
 		Label: "thread:" + threadID,
 		Type:  "message",

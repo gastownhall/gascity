@@ -1394,6 +1394,62 @@ func TestThreadEmpty(t *testing.T) {
 	}
 }
 
+// TestThreadAcceptsMessageIDOfOriginal locks in the fix for #1526. Callers
+// (notably `gc mail thread <id>` from cmd/gc/cmd_mail.go) pass a *message*
+// bead-ID, not the underlying thread-ID. Provider.Thread must resolve the
+// message-ID to its thread label and return the thread.
+func TestThreadAcceptsMessageIDOfOriginal(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("alice", "bob", "Hello", "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Reply(sent.ID, "bob", "Re: Hello", "second"); err != nil {
+		t.Fatal(err)
+	}
+
+	msgs, err := p.Thread(sent.ID)
+	if err != nil {
+		t.Fatalf("Thread(%q): %v", sent.ID, err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("Thread(messageID) = %d messages, want 2", len(msgs))
+	}
+	if msgs[0].Body != "first" || msgs[1].Body != "second" {
+		t.Errorf("Thread(messageID) bodies = [%q, %q], want [first, second]", msgs[0].Body, msgs[1].Body)
+	}
+}
+
+// TestThreadAcceptsMessageIDOfReply ensures the resolution works regardless
+// of which message in the thread the caller hands us — the parent OR any
+// reply should both surface the full thread.
+func TestThreadAcceptsMessageIDOfReply(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("alice", "bob", "Hello", "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply, err := p.Reply(sent.ID, "bob", "Re: Hello", "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	msgs, err := p.Thread(reply.ID)
+	if err != nil {
+		t.Fatalf("Thread(%q): %v", reply.ID, err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("Thread(replyID) = %d messages, want 2", len(msgs))
+	}
+	if msgs[0].Body != "first" || msgs[1].Body != "second" {
+		t.Errorf("Thread(replyID) bodies = [%q, %q], want [first, second]", msgs[0].Body, msgs[1].Body)
+	}
+}
+
 // --- Count ---
 
 func TestCount(t *testing.T) {
