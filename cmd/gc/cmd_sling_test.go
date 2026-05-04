@@ -1445,8 +1445,17 @@ func TestCmdSlingDryRunInlineTextHasNoFalsePositivePreCheck(t *testing.T) {
 	}
 }
 
+func mustResolveInlineBeadAction(t *testing.T, cfg *config.City, beadOrFormula string, dryRun bool, store beads.Store) (bool, bool) {
+	t.Helper()
+	create, inlineText, err := resolveInlineBeadAction(cfg, beadOrFormula, dryRun, store)
+	if err != nil {
+		t.Fatalf("resolveInlineBeadAction: %v", err)
+	}
+	return create, inlineText
+}
+
 func TestResolveInlineBeadActionDryRunInlineTextDoesNotProbeStore(t *testing.T) {
-	create, inlineText := resolveInlineBeadAction(&config.City{}, "write docs", true, nil)
+	create, inlineText := mustResolveInlineBeadAction(t, &config.City{}, "write docs", true, nil)
 	if create {
 		t.Fatal("create = true, want false during dry-run")
 	}
@@ -1456,7 +1465,7 @@ func TestResolveInlineBeadActionDryRunInlineTextDoesNotProbeStore(t *testing.T) 
 }
 
 func TestResolveInlineBeadActionWhitespaceInlineTextDoesNotProbeStore(t *testing.T) {
-	create, inlineText := resolveInlineBeadAction(&config.City{}, "write docs", false, nil)
+	create, inlineText := mustResolveInlineBeadAction(t, &config.City{}, "write docs", false, nil)
 	if !create {
 		t.Fatal("create = false, want true for whitespace inline text")
 	}
@@ -1466,7 +1475,7 @@ func TestResolveInlineBeadActionWhitespaceInlineTextDoesNotProbeStore(t *testing
 }
 
 func TestResolveInlineBeadActionSingleTokenInlineTextDoesNotProbeStore(t *testing.T) {
-	create, inlineText := resolveInlineBeadAction(&config.City{}, "docs", false, nil)
+	create, inlineText := mustResolveInlineBeadAction(t, &config.City{}, "docs", false, nil)
 	if !create {
 		t.Fatal("create = false, want true for single-token inline text")
 	}
@@ -1476,7 +1485,7 @@ func TestResolveInlineBeadActionSingleTokenInlineTextDoesNotProbeStore(t *testin
 }
 
 func TestResolveInlineBeadActionBeadIDDoesNotProbeStore(t *testing.T) {
-	create, inlineText := resolveInlineBeadAction(&config.City{}, "FE-123", false, nil)
+	create, inlineText := mustResolveInlineBeadAction(t, &config.City{}, "FE-123", false, nil)
 	if create {
 		t.Fatal("create = true, want false for bead ID")
 	}
@@ -1495,7 +1504,7 @@ func TestResolveInlineBeadActionHyphenatedRigPrefixIsBeadID(t *testing.T) {
 		},
 	}
 
-	create, inlineText := resolveInlineBeadAction(cfg, "agent-diagnostics-hnn", false, nil)
+	create, inlineText := mustResolveInlineBeadAction(t, cfg, "agent-diagnostics-hnn", false, nil)
 	if create {
 		t.Fatal("create = true, want false for configured hyphenated bead ID")
 	}
@@ -1503,7 +1512,7 @@ func TestResolveInlineBeadActionHyphenatedRigPrefixIsBeadID(t *testing.T) {
 		t.Fatal("inlineText = true, want false outside dry-run")
 	}
 
-	create, inlineText = resolveInlineBeadAction(cfg, "agent-diagnostics-hnn", true, nil)
+	create, inlineText = mustResolveInlineBeadAction(t, cfg, "agent-diagnostics-hnn", true, nil)
 	if create {
 		t.Fatal("create = true, want false during dry-run")
 	}
@@ -1519,7 +1528,7 @@ func TestResolveInlineBeadActionUnknownHyphenatedTextStillCreates(t *testing.T) 
 	cfg := &config.City{
 		Rigs: []config.Rig{{Name: "fe", Path: "/fe", Prefix: "fe"}},
 	}
-	create, inlineText := resolveInlineBeadAction(cfg, "code-review-please", false, nil)
+	create, inlineText := mustResolveInlineBeadAction(t, cfg, "code-review-please", false, nil)
 	if !create {
 		t.Fatal("create = false, want true for non-configured hyphenated text")
 	}
@@ -1534,7 +1543,7 @@ func TestResolveInlineBeadActionConfiguredAlphaSuffixIsBeadID(t *testing.T) {
 		Rigs:      []config.Rig{{Name: "frontend", Path: "/tmp/frontend", Prefix: "FE"}},
 	}
 
-	create, inlineText := resolveInlineBeadAction(cfg, "FE-hello", false, nil)
+	create, inlineText := mustResolveInlineBeadAction(t, cfg, "FE-hello", false, nil)
 	if create {
 		t.Fatal("create = true, want false for configured bead ID with all-alpha suffix")
 	}
@@ -1542,7 +1551,7 @@ func TestResolveInlineBeadActionConfiguredAlphaSuffixIsBeadID(t *testing.T) {
 		t.Fatal("inlineText = true, want false outside dry-run")
 	}
 
-	create, inlineText = resolveInlineBeadAction(cfg, "FE-a1pha", false, nil)
+	create, inlineText = mustResolveInlineBeadAction(t, cfg, "FE-a1pha", false, nil)
 	if create {
 		t.Fatal("create = true, want false for configured bead ID with digit")
 	}
@@ -1559,7 +1568,7 @@ func TestResolveInlineBeadActionMultiDashStoreHitIsBeadID(t *testing.T) {
 	}
 	store := seededStore("fo-spawn-storm")
 
-	create, inlineText := resolveInlineBeadAction(cfg, "fo-spawn-storm", false, store)
+	create, inlineText := mustResolveInlineBeadAction(t, cfg, "fo-spawn-storm", false, store)
 	if create {
 		t.Fatal("create = true, want false — bead exists in store")
 	}
@@ -1567,7 +1576,7 @@ func TestResolveInlineBeadActionMultiDashStoreHitIsBeadID(t *testing.T) {
 		t.Fatal("inlineText = true, want false outside dry-run")
 	}
 
-	create, inlineText = resolveInlineBeadAction(cfg, "fo-spawn-storm", true, store)
+	create, inlineText = mustResolveInlineBeadAction(t, cfg, "fo-spawn-storm", true, store)
 	if create {
 		t.Fatal("create = true, want false during dry-run")
 	}
@@ -1584,12 +1593,27 @@ func TestResolveInlineBeadActionMultiDashStoreMissStillCreates(t *testing.T) {
 	}
 	store := seededStore() // empty
 
-	create, inlineText := resolveInlineBeadAction(cfg, "fo-typo-not-real", false, store)
+	create, inlineText := mustResolveInlineBeadAction(t, cfg, "fo-typo-not-real", false, store)
 	if !create {
 		t.Fatal("create = false, want true for unknown multi-dash text")
 	}
 	if inlineText {
 		t.Fatal("inlineText = true, want false outside dry-run")
+	}
+}
+
+func TestResolveInlineBeadActionMultiDashStoreErrorSurfaces(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "fo", Path: "/tmp/fo", Prefix: "fo"}},
+	}
+	store := &getErrStore{Store: beads.NewMemStore(), err: fmt.Errorf("lookup failed")}
+
+	_, _, err := resolveInlineBeadAction(cfg, "fo-spawn-storm", false, store)
+	if err == nil {
+		t.Fatal("resolveInlineBeadAction error = nil, want lookup failure")
+	}
+	if !strings.Contains(err.Error(), "lookup failed") {
+		t.Fatalf("resolveInlineBeadAction error = %q, want lookup failure", err)
 	}
 }
 

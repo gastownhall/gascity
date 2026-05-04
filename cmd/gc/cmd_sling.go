@@ -274,7 +274,11 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 	// During dry-run, mark the text as preview-only instead of creating it.
 	inlineText := false
 	if !isFormula {
-		createInlineBead, previewInlineText := resolveInlineBeadAction(cfg, beadOrFormula, dryRun, store)
+		createInlineBead, previewInlineText, err := resolveInlineBeadAction(cfg, beadOrFormula, dryRun, store)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		inlineText = previewInlineText
 		if createInlineBead {
 			created, err := store.Create(beads.Bead{Title: beadOrFormula, Description: stdinDescription, Type: "task"})
@@ -1800,23 +1804,27 @@ func looksLikeBeadIDSuffix(baseSuffix string) bool {
 	return false
 }
 
-func resolveInlineBeadAction(cfg *config.City, beadOrFormula string, dryRun bool, store beads.Store) (createInlineBead, previewInlineText bool) {
+func resolveInlineBeadAction(cfg *config.City, beadOrFormula string, dryRun bool, store beads.Store) (createInlineBead, previewInlineText bool, err error) {
 	// Fast path: heuristics already classify this as a bead ID.
 	if !looksLikeInlineText(cfg, beadOrFormula) {
-		return false, false
+		return false, false, nil
 	}
 	// Store probe: covers IDs that pass the shape pre-check but fail the
 	// heuristic (e.g. descriptive multi-dash IDs like "fo-spawn-storm").
 	// A store hit means the bead exists and should be routed, not created.
 	if store != nil && isBeadIDCandidate(beadOrFormula) {
-		if _, err := store.Get(beadOrFormula); err == nil {
-			return false, false
+		exists, err := sling.ProbeBeadInStore(store, beadOrFormula)
+		if err != nil {
+			return false, false, fmt.Errorf("checking bead candidate %q: %w", beadOrFormula, err)
+		}
+		if exists {
+			return false, false, nil
 		}
 	}
 	if dryRun {
-		return false, true
+		return false, true, nil
 	}
-	return true, false
+	return true, false, nil
 }
 
 // isBeadIDCandidate reports whether s has the shape of a potential bead ID:
