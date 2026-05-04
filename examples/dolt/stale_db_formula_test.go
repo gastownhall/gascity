@@ -159,11 +159,22 @@ esac
 	}
 	for _, want := range []string{
 		"bd update bead-1 --append-notes",
-		"gc event emit mol-dog-stale-db.done",
+		"## apply (--force, refused)",
 		"gc event emit mol-dog-stale-db.escalate",
+		"gc runtime drain-ack",
 	} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("command log missing %q\nlog:\n%s\noutput:\n%s", want, log, out)
+		}
+	}
+	for _, forbidden := range []string{
+		"gc event emit mol-dog-stale-db.drop",
+		"gc event emit mol-dog-stale-db.purge",
+		"gc event emit mol-dog-stale-db.reap",
+		"gc event emit mol-dog-stale-db.done",
+	} {
+		if strings.Contains(log, forbidden) {
+			t.Fatalf("rendered script logged forbidden success path %q despite apply errors\nlog:\n%s\noutput:\n%s", forbidden, log, out)
 		}
 	}
 	if strings.Contains(log, "bd close bead-1") {
@@ -581,6 +592,43 @@ esac
 	}
 	if strings.Contains(log, "bd close bead-1") {
 		t.Fatalf("rendered script closed bead despite SQL-backed apply failure\nlog:\n%s\noutput:\n%s", log, out)
+	}
+}
+
+func TestStaleDBFormulaExitZeroMaxOrphanRefusalLeavesWorkOpenWithoutSuccessEvents(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash not found: %v", err)
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skipf("jq not found: %v", err)
+	}
+
+	log, out, err := runStaleDBFormulaFailureCase(t, staleDBFailureCase{
+		scanJSON:  `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":20,"failed":[]},"purge":{"bytes_reclaimed":4096},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":4096,"bytes_freed_rss":0,"errors_total":0}}`,
+		applyJSON: `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":21,"failed":[]},"purge":{"ok":false,"bytes_reclaimed":0},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":0,"bytes_freed_rss":0,"errors_total":1},"errors":[{"stage":"drop","error":"refusing to drop 21 orphan databases; exceeds --max-orphan-dbs=20"}]}`,
+	})
+	if err == nil {
+		t.Fatalf("rendered script exited successfully; want exit-zero max-orphan refusal to keep work open\nlog:\n%s\noutput:\n%s", log, out)
+	}
+	for _, forbidden := range []string{
+		"gc event emit mol-dog-stale-db.drop",
+		"gc event emit mol-dog-stale-db.purge",
+		"gc event emit mol-dog-stale-db.reap",
+		"bd close bead-1",
+	} {
+		if strings.Contains(log, forbidden) {
+			t.Fatalf("exit-zero max-orphan refusal logged forbidden success path %q\nlog:\n%s\noutput:\n%s", forbidden, log, out)
+		}
+	}
+	for _, want := range []string{
+		"bd update bead-1 --append-notes",
+		"## apply (--force, refused)",
+		"gc event emit mol-dog-stale-db.escalate",
+		"gc runtime drain-ack",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("exit-zero max-orphan refusal log missing %q\nlog:\n%s\noutput:\n%s", want, log, out)
+		}
 	}
 }
 

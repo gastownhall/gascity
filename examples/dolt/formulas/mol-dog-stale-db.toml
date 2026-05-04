@@ -192,6 +192,23 @@ else
     fail_open_after_drain "gc dolt-cleanup apply returned invalid JSON; leaving work bead open"
   fi
 
+  APPLY_ERRS=$(jq -r '.summary.errors_total // 0' "$APPLY_FILE")
+  APPLY_MAX_ORPHAN_REFUSALS=$(jq -r '[.errors[]? | (.error // "" | ascii_downcase) | select((contains("--max-orphan-dbs") or contains("max-orphan") or contains("orphan databases")) and (contains("refus") or contains("exceed")))] | length' "$APPLY_FILE")
+  if [ "$APPLY_ERRS" -gt 0 ] || [ "$APPLY_MAX_ORPHAN_REFUSALS" -gt 0 ]; then
+    ESCALATED=1
+    APPLY_REFUSAL_MESSAGE="apply reported ${APPLY_ERRS} error(s); leaving work bead open"
+    if [ "$APPLY_MAX_ORPHAN_REFUSALS" -gt 0 ]; then
+      APPLY_REFUSAL_MESSAGE="apply refused by max-orphan safety guard; leaving work bead open"
+    fi
+    append_report_note "apply (--force, refused)" "$APPLY_FILE"
+    run_or_warn "send apply refusal escalation mail" gc mail send mayor \
+      "ESCALATION: gc dolt-cleanup apply refused [HIGH]" \
+      "gc dolt-cleanup --probe --force refused or reported ${APPLY_ERRS} error(s). Do not retry from an agent. Operator must inspect the attached apply report before deciding whether any manual cleanup is appropriate."
+    run_or_warn "emit apply refusal escalation" gc event emit mol-dog-stale-db.escalate \
+      --message "$APPLY_REFUSAL_MESSAGE"
+    fail_open_after_drain "gc dolt-cleanup ${APPLY_REFUSAL_MESSAGE}"
+  fi
+
   DROP_OK=$(jq -r '.dropped.count // 0' "$APPLY_FILE")
   DROP_FAIL=$(jq -r '.dropped.failed | length' "$APPLY_FILE")
   PURGE_BYTES=$(jq -r '.purge.bytes_reclaimed // 0' "$APPLY_FILE")
