@@ -1842,10 +1842,10 @@ func publishManagedCity(cr *cityRegistry, path string, mc *managedCity) bool {
 			alreadyRunning = true
 			return
 		}
-		// The controller state and per-city API are fully wired at this point.
-		// Mark the city started before the first reconcile so slow bead scans
-		// don't keep supervisor startup and API availability blocked.
-		mc.started = true
+		// The controller state and per-city API are wired at this point, but
+		// initial reconciliation has not yet materialized startup session
+		// beads. Keep the city in startup status until CityRuntime.OnStarted
+		// runs after that reconciliation completes.
 		mc.status = "starting_agents"
 		cities[path] = mc
 		delete(initStatus, path)

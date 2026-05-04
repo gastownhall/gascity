@@ -1914,7 +1914,7 @@ func TestReconcileCitiesResetsAbsentCounterWhenDirectoryReappears(t *testing.T) 
 	}
 }
 
-func TestPublishManagedCityMarksRunningBeforeInitialReconcile(t *testing.T) {
+func TestPublishManagedCityWaitsForInitialReconcileBeforeRunning(t *testing.T) {
 	registry := newCityRegistry()
 	cityPath := "/tmp/bright-lights"
 	cs := &controllerState{}
@@ -1942,14 +1942,14 @@ func TestPublishManagedCityMarksRunningBeforeInitialReconcile(t *testing.T) {
 	if len(cities) != 1 {
 		t.Fatalf("ListCities() returned %d cities, want 1", len(cities))
 	}
-	if !cities[0].Running {
-		t.Fatalf("city Running = false, want true: %+v", cities[0])
+	if cities[0].Running {
+		t.Fatalf("city Running = true before startup reconcile: %+v", cities[0])
 	}
-	if cities[0].Status != "" {
-		t.Fatalf("city Status = %q, want empty once published", cities[0].Status)
+	if cities[0].Status != "starting_agents" {
+		t.Fatalf("city Status = %q, want starting_agents while startup reconcile runs", cities[0].Status)
 	}
-	if got := registry.CityState("bright-lights"); got != cs {
-		t.Fatalf("CityState() = %#v, want controller state", got)
+	if got := registry.CityState("bright-lights"); got != nil {
+		t.Fatalf("CityState() = %#v before startup reconcile, want nil", got)
 	}
 
 	registry.ReadCallback(func(
