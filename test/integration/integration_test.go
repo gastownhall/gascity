@@ -394,7 +394,11 @@ func gcDolt(dir string, args ...string) (string, error) {
 // bd runs the bd binary with the given args. If dir is non-empty, it sets
 // the working directory. Returns combined stdout+stderr and any error.
 func bd(dir string, args ...string) (string, error) {
-	out, err := runCommand(dir, commandEnvForDir(dir, false), integrationBDCommandTimeout, bdBinary, args...)
+	env := commandEnvForDir(dir, false)
+	if isStandaloneBDDir(dir) {
+		env = standaloneBDEnv()
+	}
+	out, err := runCommand(dir, env, integrationBDCommandTimeout, bdBinary, args...)
 	if err == nil || !shouldUseFileStoreBDFallback(dir, out, args) {
 		return out, err
 	}
@@ -653,6 +657,13 @@ func integrationEnv() []string {
 	return integrationEnvFor(testGCHome, testRuntimeDir, false)
 }
 
+func standaloneBDEnv() []string {
+	env := integrationEnv()
+	env = filterEnv(env, "GC_DOLT")
+	env = filterEnv(env, "BEADS_DOLT_AUTO_START")
+	return env
+}
+
 func integrationEnvDolt() []string {
 	return integrationEnvFor(testGCHome, testRuntimeDir, true)
 }
@@ -861,6 +872,44 @@ func commandEnvForDir(dir string, useDolt bool) []string {
 		return integrationEnvDolt()
 	}
 	return integrationEnv()
+}
+
+func isStandaloneBDDir(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".beads")); err != nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".gc", "beads.json")); err == nil {
+		return false
+	}
+	return true
+}
+
+func TestIsStandaloneBDDir(t *testing.T) {
+	dir := t.TempDir()
+	if isStandaloneBDDir(dir) {
+		t.Fatalf("directory without .beads classified as standalone")
+	}
+
+	if err := os.Mkdir(filepath.Join(dir, ".beads"), 0o755); err != nil {
+		t.Fatalf("creating .beads: %v", err)
+	}
+	if !isStandaloneBDDir(dir) {
+		t.Fatalf("directory with only .beads should be standalone")
+	}
+
+	gcDir := filepath.Join(dir, ".gc")
+	if err := os.Mkdir(gcDir, 0o755); err != nil {
+		t.Fatalf("creating .gc: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(gcDir, "beads.json"), []byte("[]"), 0o644); err != nil {
+		t.Fatalf("writing beads.json: %v", err)
+	}
+	if isStandaloneBDDir(dir) {
+		t.Fatalf("file-backed Gas City bead store classified as standalone")
+	}
 }
 
 func commandCityDirForArgs(dir string, args []string) string {
@@ -1113,6 +1162,12 @@ func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
 	}
 	if got["BEADS_DOLT_AUTO_START"] != "0" {
 		t.Fatalf("BEADS_DOLT_AUTO_START = %q, want %q; tests must match bdRuntimeEnv and suppress bd's rogue auto-start", got["BEADS_DOLT_AUTO_START"], "0")
+	}
+	standalone := parseEnvList(standaloneBDEnv())
+	for _, key := range []string{"GC_DOLT", "BEADS_DOLT_AUTO_START"} {
+		if _, ok := standalone[key]; ok {
+			t.Fatalf("%s leaked into standalone bd env: %v", key, standalone)
+		}
 	}
 	for _, key := range []string{
 		"GC_DOLT_HOST",
