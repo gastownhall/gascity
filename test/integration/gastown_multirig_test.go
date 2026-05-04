@@ -272,7 +272,6 @@ func TestGastown_MultiRig_BeadIsolation(t *testing.T) {
 	agents := []gasTownAgent{
 		{Name: "worker", StartCommand: "sleep 3600"},
 	}
-	writeMultiRigToml(t, cityDir, cityName, rigDirs, agents)
 
 	// Initialize beads in each rig directory with unique prefixes.
 	prefix0 := initBd(t, rigDirs[0])
@@ -294,6 +293,8 @@ func TestGastown_MultiRig_BeadIsolation(t *testing.T) {
 	require.NoError(t, err, "bd show from rig-0: %s", out)
 	assert.Contains(t, out, "multi-rig bead test alpha",
 		"bead should be visible from rig-0")
+
+	writeMultiRigToml(t, cityDir, cityName, rigDirs, agents)
 }
 
 // TestGastown_MultiRig_IndependentLifecycle starts a city with 2 rigs, stops

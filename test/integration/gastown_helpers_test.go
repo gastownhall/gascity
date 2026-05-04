@@ -238,27 +238,22 @@ func initBd(t *testing.T, dir string) string {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("bd init in %s failed: %v\noutput: %s", dir, err, out)
 	}
-	cmd = exec.Command(bdBinary, "config", "set", "dolt.auto-start", "true")
-	cmd.Dir = dir
-	cmd.Env = env
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("bd config set dolt.auto-start in %s failed: %v\noutput: %s", dir, err, out)
-	}
 	return prefix
 }
 
-func TestInitBdEnablesPersistentDoltAutoStart(t *testing.T) {
+func TestInitBdAllowsStandaloneCreate(t *testing.T) {
 	requireDoltIntegration(t)
 
 	dir := t.TempDir()
-	initBd(t, dir)
+	prefix := initBd(t, dir)
 
-	out, err := bd(dir, "config", "get", "dolt.auto-start")
+	out, err := bd(dir, "create", "standalone bead")
 	if err != nil {
-		t.Fatalf("bd config get dolt.auto-start failed: %v\noutput: %s", err, out)
+		t.Fatalf("bd create failed: %v\noutput: %s", err, out)
 	}
-	if strings.TrimSpace(out) != "true" {
-		t.Fatalf("dolt.auto-start = %q, want true", strings.TrimSpace(out))
+	beadID := extractBeadID(t, out)
+	if !strings.HasPrefix(beadID, prefix) {
+		t.Fatalf("bead ID %q should start with prefix %q", beadID, prefix)
 	}
 }
 

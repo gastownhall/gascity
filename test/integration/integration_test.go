@@ -395,7 +395,7 @@ func gcDolt(dir string, args ...string) (string, error) {
 // the working directory. Returns combined stdout+stderr and any error.
 func bd(dir string, args ...string) (string, error) {
 	env := commandEnvForDir(dir, false)
-	if hasStandaloneBDWorkspace(dir) {
+	if usesStandaloneBDWorkspace(dir, env) {
 		env = standaloneBDEnvForDir(dir)
 	}
 	out, err := runCommand(dir, env, integrationBDCommandTimeout, bdBinary, args...)
@@ -406,30 +406,37 @@ func bd(dir string, args ...string) (string, error) {
 }
 
 func standaloneBDEnvForDir(dir string) []string {
-	base := parseEnvList(commandEnvForDir(dir, false))
+	base := parseEnvList(integrationEnv())
 	keep := []string{
 		"HOME",
 		"PATH",
 		"TMPDIR",
-		"XDG_RUNTIME_DIR",
 		"USER",
 		"LOGNAME",
 		"LANG",
 		"LC_ALL",
 		"TZ",
-		"DOLT_ROOT_PATH",
 		integrationRealBDBinaryEnv,
 		integrationGCBinaryEnv,
 		integrationDoltBinaryEnv,
 	}
-	env := make([]string, 0, len(keep)+2)
+	env := make([]string, 0, len(keep)+3)
 	for _, key := range keep {
 		if value, ok := base[key]; ok {
 			env = append(env, key+"="+value)
 		}
 	}
+	env = append(env, "DOLT_ROOT_PATH="+filepath.Join(dir, ".beads", "dolt-root"))
+	env = append(env, "XDG_RUNTIME_DIR="+dir)
 	env = append(env, "BEADS_DIR="+filepath.Join(dir, ".beads"))
 	return append(env, "BEADS_DOLT_AUTO_START=1")
+}
+
+func usesStandaloneBDWorkspace(dir string, env []string) bool {
+	if parseEnvList(env)["GC_BEADS"] == "file" {
+		return false
+	}
+	return hasStandaloneBDWorkspace(dir)
 }
 
 func hasStandaloneBDWorkspace(dir string) bool {
@@ -1258,6 +1265,12 @@ func TestStandaloneBDEnvAllowsBDAutoStart(t *testing.T) {
 	if got["BEADS_DIR"] != filepath.Join(dir, ".beads") {
 		t.Fatalf("BEADS_DIR = %q, want %q", got["BEADS_DIR"], filepath.Join(dir, ".beads"))
 	}
+	if got["DOLT_ROOT_PATH"] != filepath.Join(dir, ".beads", "dolt-root") {
+		t.Fatalf("DOLT_ROOT_PATH = %q, want %q", got["DOLT_ROOT_PATH"], filepath.Join(dir, ".beads", "dolt-root"))
+	}
+	if got["XDG_RUNTIME_DIR"] != dir {
+		t.Fatalf("XDG_RUNTIME_DIR = %q, want %q", got["XDG_RUNTIME_DIR"], dir)
+	}
 	for _, key := range []string{
 		"GC_DOLT",
 		"GC_DOLT_HOST",
@@ -1282,6 +1295,20 @@ func TestStandaloneBDEnvAllowsBDAutoStart(t *testing.T) {
 		if _, ok := got[key]; ok {
 			t.Fatalf("%s leaked into standalone bd env: %v", key, got[key])
 		}
+	}
+}
+
+func TestUsesStandaloneBDWorkspaceKeepsFileProviderOnShim(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+
+	if usesStandaloneBDWorkspace(dir, []string{"GC_BEADS=file"}) {
+		t.Fatal("file provider city should keep using the file-store bd shim")
+	}
+	if !usesStandaloneBDWorkspace(dir, []string{"GC_BEADS=dolt"}) {
+		t.Fatal("standalone .beads workspace should use the standalone bd env")
 	}
 }
 
