@@ -749,7 +749,6 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 		return
 	}
 	defer mw.Close() //nolint:errcheck
-	flushSSEHeaders(hctx)
 
 	keepalive := time.NewTicker(sseKeepalive)
 	defer keepalive.Stop()

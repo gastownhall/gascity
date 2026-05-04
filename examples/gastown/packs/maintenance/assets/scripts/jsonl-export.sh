@@ -34,10 +34,10 @@ mkdir -p "$(dirname "$STATE_FILE")"
 
 # Discover databases. Exclude Dolt/MySQL system schemas, Gas City's internal
 # health-probe database, and test-fixture scratch databases (benchdb,
-# testdb_*, beads_t*, beads_pt*, beads_vr*, doctest_*, doctortest_* — patterns
-# from mol-dog-stale-db); the remaining databases are expected to be bead
-# stores.
-DATABASES=$(dolt_sql -r csv -q "SHOW DATABASES" 2>/dev/null | tail -n +2 | grep -vi '^information_schema$\|^mysql$\|^dolt_cluster$\|^performance_schema$\|^sys$\|^__gc_probe$\|^benchdb$\|^testdb_\|^beads_t\|^beads_pt\|^beads_vr\|^doctest_\|^doctortest_' || true)
+# testdb_*, beads_t[0-9a-f]{8,}, beads_pt*, beads_vr*, doctest_*,
+# doctortest_* — matching the Go cleanup planner contract); the remaining
+# databases are expected to be bead stores.
+DATABASES=$(dolt_sql -r csv -q "SHOW DATABASES" 2>/dev/null | tail -n +2 | grep -vi '^information_schema$\|^mysql$\|^dolt_cluster$\|^performance_schema$\|^sys$\|^__gc_probe$\|^benchdb$\|^testdb_\|^beads_t[0-9a-f]\{8,\}$\|^beads_pt\|^beads_vr\|^doctest_\|^doctortest_' || true)
 if [ -z "$DATABASES" ]; then
     exit 0
 fi

@@ -91,4 +91,23 @@ func TestE2E_Hook_Inject(t *testing.T) {
 	} else if !os.IsNotExist(err) {
 		t.Fatalf("checking work_query marker: %v", err)
 	}
+
+	hookEnv := filterEnvMany(commandEnvForDir(cityDir, false),
+		"GC_RIG",
+		"GC_RIG_ROOT",
+		"GC_CITY",
+		"GC_CITY_PATH",
+		"GC_CITY_ROOT",
+		"GC_CITY_RUNTIME_DIR",
+	)
+	out, err = runGCWithEnv(hookEnv, cityDir, "hook", "injectee")
+	if err != nil {
+		t.Fatalf("gc hook should run armed work_query: %v\noutput: %s", err, out)
+	}
+	if !strings.Contains(out, "inject hook work items") {
+		t.Fatalf("gc hook output missing armed work query result:\n%s", out)
+	}
+	if _, err := os.Stat(markerPath); err != nil {
+		t.Fatalf("normal gc hook did not create work_query marker: %v", err)
+	}
 }

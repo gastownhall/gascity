@@ -806,13 +806,21 @@ func TestMaintenanceDoltScriptsSkipTestPatternDatabases(t *testing.T) {
 	excludedDBs := []string{
 		"benchdb",
 		"testdb_foo",
-		"beads_tbar",
+		"beads_t1234abcd",
+		"beads_tABCDEF12",
 		"beads_ptbaz",
 		"beads_vrqux",
 		"doctest_xyz",
 		"doctortest_abc",
 	}
-	includedDBs := []string{"beads", "customdb"}
+	includedDBs := []string{
+		"beads",
+		"customdb",
+		"beads_team",
+		"beads_t123",
+		"beads_t1234abcg",
+		"beads_t1234abcdx",
+	}
 
 	allDBs := append([]string{}, includedDBs...)
 	allDBs = append(allDBs, excludedDBs...)
