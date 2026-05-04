@@ -407,7 +407,7 @@ func bd(dir string, args ...string) (string, error) {
 
 func standaloneBDEnvForDir(dir string) []string {
 	env := commandEnvForDir(dir, false)
-	return filterEnvMany(
+	env = filterEnvMany(
 		env,
 		"BEADS_DOLT_AUTO_START",
 		"GC_DOLT",
@@ -416,6 +416,7 @@ func standaloneBDEnvForDir(dir string) []string {
 		"BEADS_DOLT_SERVER_HOST",
 		"BEADS_DOLT_SERVER_PORT",
 	)
+	return append(env, "BEADS_DOLT_AUTO_START=1")
 }
 
 func hasStandaloneBDWorkspace(dir string) bool {
@@ -1196,6 +1197,7 @@ func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
 }
 
 func TestStandaloneBDEnvAllowsBDAutoStart(t *testing.T) {
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
 	t.Setenv("GC_DOLT_HOST", "ambient-host")
 	t.Setenv("GC_DOLT_PORT", "1234")
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient-beads-host")
@@ -1205,8 +1207,8 @@ func TestStandaloneBDEnvAllowsBDAutoStart(t *testing.T) {
 	env := standaloneBDEnvForDir(dir)
 	got := parseEnvList(env)
 
-	if _, ok := got["BEADS_DOLT_AUTO_START"]; ok {
-		t.Fatalf("BEADS_DOLT_AUTO_START leaked into standalone bd env: %q", got["BEADS_DOLT_AUTO_START"])
+	if got["BEADS_DOLT_AUTO_START"] != "1" {
+		t.Fatalf("BEADS_DOLT_AUTO_START = %q, want 1", got["BEADS_DOLT_AUTO_START"])
 	}
 	for _, key := range []string{
 		"GC_DOLT_HOST",

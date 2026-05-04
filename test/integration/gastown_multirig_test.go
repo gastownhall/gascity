@@ -87,10 +87,14 @@ func setupMultiRigCity(t *testing.T, rigCount int) (cityDir string, rigDirs []st
 	for i := 0; i < rigCount; i++ {
 		rigDirs[i] = filepath.Join(t.TempDir(), fmt.Sprintf("rig-%d", i))
 		require.NoError(t, os.MkdirAll(rigDirs[i], 0o755))
+		registerCityCommandEnv(rigDirs[i], env)
 	}
 
 	t.Cleanup(func() {
 		unregisterCityCommandEnv(cityDir)
+		for _, rigDir := range rigDirs {
+			unregisterCityCommandEnv(rigDir)
+		}
 		runGCWithEnv(env, "", "stop", cityDir)                //nolint:errcheck // best-effort cleanup
 		runGCWithEnv(env, "", "supervisor", "stop", "--wait") //nolint:errcheck // best-effort cleanup
 		deadline := time.Now().Add(10 * time.Second)
