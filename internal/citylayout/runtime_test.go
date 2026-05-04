@@ -53,3 +53,34 @@ func TestSessionNameLocksDir(t *testing.T) {
 		t.Fatalf("SessionNameLocksDir = %q, want %q", got, "/city/.gc/session-name-locks")
 	}
 }
+
+func TestPublicServiceMountPath(t *testing.T) {
+	tests := []struct {
+		name        string
+		cityName    string
+		serviceName string
+		want        string
+	}{
+		{
+			name:        "happy path",
+			cityName:    "test-city",
+			serviceName: "slack",
+			want:        "/v0/city/test-city/svc/slack",
+		},
+		{
+			name:        "city with hyphens",
+			cityName:    "demo-app",
+			serviceName: "bridge",
+			want:        "/v0/city/demo-app/svc/bridge",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := PublicServiceMountPath(tt.cityName, tt.serviceName); got != tt.want {
+				t.Errorf("PublicServiceMountPath(%q, %q) = %q, want %q",
+					tt.cityName, tt.serviceName, got, tt.want)
+			}
+		})
+	}
+}

@@ -153,6 +153,10 @@ type Store interface {
 	// does not exist. Closing an already-closed bead is a no-op.
 	Close(id string) error
 
+	// Reopen sets a closed bead's status back to "open". Returns ErrNotFound
+	// if the ID does not exist.
+	Reopen(id string) error
+
 	// CloseAll closes multiple beads in a single batch operation and sets
 	// the given metadata on each. Already-closed beads are skipped.
 	// Returns the number of beads actually closed.
@@ -172,8 +176,8 @@ type Store interface {
 	// Ready returns open, unblocked beads representing actionable work.
 	// Infrastructure types (molecule, message, gate, etc.) are excluded
 	// to match the bd CLI's GetReadyWork semantics. Same ordering note
-	// as List.
-	Ready() ([]Bead, error)
+	// as List. Pass ReadyQuery to constrain the ready lookup.
+	Ready(query ...ReadyQuery) ([]Bead, error)
 
 	// Legacy helper; prefer List with ListQuery in new code.
 	// Children returns all beads whose ParentID matches the given ID,

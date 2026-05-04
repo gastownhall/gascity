@@ -214,21 +214,202 @@ func BeadConflictsWithNamedSession(b beads.Bead, spec NamedSessionSpec) bool {
 	return false
 }
 
+// ConfiguredNamedSessionLookup is the bounded lookup result for a configured named session.
+type ConfiguredNamedSessionLookup struct {
+	Canonical    beads.Bead
+	HasCanonical bool
+	Conflict     beads.Bead
+	HasConflict  bool
+}
+
+// FindCanonicalConfiguredNamedSessionBead finds the live bead that owns a
+// configured named session using exact metadata-filtered store queries.
+func FindCanonicalConfiguredNamedSessionBead(store beads.Store, spec NamedSessionSpec) (beads.Bead, bool, error) {
+	lookup, err := lookupConfiguredNamedSession(store, spec, false)
+	if err != nil {
+		return beads.Bead{}, false, err
+	}
+	return lookup.Canonical, lookup.HasCanonical, nil
+}
+
+// LookupConfiguredNamedSession finds the canonical bead or first live conflict
+// for a configured named session using exact metadata-filtered store queries.
+// The result is stitched from several sequential store reads; downstream
+// uniqueness and claim serialization remain the authority under concurrent
+// bead mutation.
+func LookupConfiguredNamedSession(store beads.Store, spec NamedSessionSpec) (ConfiguredNamedSessionLookup, error) {
+	return lookupConfiguredNamedSession(store, spec, true)
+}
+
+func lookupConfiguredNamedSession(store beads.Store, spec NamedSessionSpec, includeConflict bool) (ConfiguredNamedSessionLookup, error) {
+	if store == nil {
+		return ConfiguredNamedSessionLookup{}, nil
+	}
+	spec.Identity = NormalizeNamedSessionTarget(spec.Identity)
+	spec.SessionName = strings.TrimSpace(spec.SessionName)
+	if spec.Identity == "" && spec.SessionName == "" {
+		return ConfiguredNamedSessionLookup{}, nil
+	}
+
+	candidates := make([]beads.Bead, 0, 4)
+	seen := make(map[string]bool)
+	var runtimeSessionNameMatches []beads.Bead
+
+	if spec.Identity != "" {
+		matches, err := listConfiguredNamedSessionBeadsByMetadata(store, NamedSessionIdentityMetadata, spec.Identity)
+		if err != nil {
+			return ConfiguredNamedSessionLookup{}, fmt.Errorf("listing canonical named session candidates: %w", err)
+		}
+		candidates = appendUniqueNamedSessionCandidates(candidates, seen, matches)
+		if bead, ok := FindCanonicalNamedSessionBead(candidates, spec); ok {
+			return ConfiguredNamedSessionLookup{Canonical: bead, HasCanonical: true}, nil
+		}
+	}
+
+	if spec.SessionName != "" {
+		matches, err := listConfiguredNamedSessionBeadsByMetadata(store, "session_name", spec.SessionName)
+		if err != nil {
+			return ConfiguredNamedSessionLookup{}, fmt.Errorf("listing canonical named session candidates by session_name: %w", err)
+		}
+		runtimeSessionNameMatches = matches
+		candidates = appendUniqueNamedSessionCandidates(candidates, seen, matches)
+		if bead, ok := FindCanonicalNamedSessionBead(candidates, spec); ok {
+			return ConfiguredNamedSessionLookup{Canonical: bead, HasCanonical: true}, nil
+		}
+	}
+
+	if spec.Identity != "" && spec.Identity != spec.SessionName {
+		matches, err := listConfiguredNamedSessionBeadsByMetadata(store, "session_name", spec.Identity)
+		if err != nil {
+			return ConfiguredNamedSessionLookup{}, fmt.Errorf("listing canonical named session candidates by bare identity: %w", err)
+		}
+		candidates = appendUniqueNamedSessionCandidates(candidates, seen, matches)
+		if bead, ok := FindCanonicalNamedSessionBead(candidates, spec); ok {
+			return ConfiguredNamedSessionLookup{Canonical: bead, HasCanonical: true}, nil
+		}
+	}
+
+	if !includeConflict {
+		return ConfiguredNamedSessionLookup{}, nil
+	}
+
+	conflictCandidates := append([]beads.Bead{}, runtimeSessionNameMatches...)
+	if spec.Identity != "" {
+		matches, err := listConfiguredNamedSessionBeadsByMetadata(store, "alias", spec.Identity)
+		if err != nil {
+			return ConfiguredNamedSessionLookup{}, fmt.Errorf("listing alias conflicts: %w", err)
+		}
+		conflictCandidates = appendUniqueNamedSessionCandidates(conflictCandidates, make(map[string]bool, len(conflictCandidates)+len(matches)), matches)
+	}
+	if bead, conflict := FindNamedSessionConflict(conflictCandidates, spec); conflict {
+		return ConfiguredNamedSessionLookup{Conflict: bead, HasConflict: true}, nil
+	}
+	return ConfiguredNamedSessionLookup{}, nil
+}
+
+func listConfiguredNamedSessionBeadsByMetadata(store beads.Store, key, value string) ([]beads.Bead, error) {
+	key = strings.TrimSpace(key)
+	value = strings.TrimSpace(value)
+	if key == "" || value == "" {
+		return nil, nil
+	}
+	items, err := store.List(beads.ListQuery{
+		Metadata: map[string]string{key: value},
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]beads.Bead, 0, len(items))
+	for _, b := range items {
+		if !IsSessionBeadOrRepairable(b) {
+			continue
+		}
+		RepairEmptyType(store, &b)
+		out = append(out, b)
+	}
+	return out, nil
+}
+
+func appendUniqueNamedSessionCandidates(dst []beads.Bead, seen map[string]bool, src []beads.Bead) []beads.Bead {
+	for _, b := range dst {
+		seen[b.ID] = true
+	}
+	for _, b := range src {
+		if seen[b.ID] {
+			continue
+		}
+		dst = append(dst, b)
+		seen[b.ID] = true
+	}
+	return dst
+}
+
 // NamedSessionResolutionCandidates returns the live session beads that can own
-// or conflict with the configured named-session spec, using only exact
-// metadata lookups derived from the spec.
+// or conflict with the configured named-session spec.
+//
+// The implementation issues a single label-scoped store.List for gc:session
+// beads and applies the four metadata predicates in process. Targeted
+// per-key metadata lookups would be marginally cheaper per call against an
+// indexed store, but every named-session resolution drives four sequential
+// bd subprocess invocations through the BdStore exec runner. Under
+// reconciler/wake load — N agents × 4 sequential bd subprocesses each —
+// that fan-out saturates the bd CLI and the underlying Dolt connection
+// pool, tipping individual list invocations past the 120s subprocess
+// timeout (gascity ga-pa57, ga-sed; mayor escalation 2026-04-26). Folding
+// the four metadata predicates into one label-scoped scan caps per-resolve
+// bd invocations at one and bounds the candidate set by the active
+// session count, which is small. Measured under 20-parallel load on a
+// representative city: 5.2s → 1.3s. Interactive session-targeting paths
+// that must avoid label-wide scans use LookupConfiguredNamedSession instead.
 func NamedSessionResolutionCandidates(store beads.Store, spec NamedSessionSpec) ([]beads.Bead, error) {
 	if store == nil {
 		return nil, nil
 	}
 	identity := NormalizeNamedSessionTarget(spec.Identity)
 	sessionName := strings.TrimSpace(spec.SessionName)
-	return ExactMetadataSessionCandidates(store, false,
-		map[string]string{NamedSessionIdentityMetadata: identity},
-		map[string]string{"session_name": sessionName},
-		map[string]string{"session_name": identity},
-		map[string]string{"alias": identity},
-	)
+	if identity == "" && sessionName == "" {
+		return nil, nil
+	}
+	items, err := store.List(beads.ListQuery{Label: LabelSession})
+	if err != nil {
+		return nil, err
+	}
+	candidates := make([]beads.Bead, 0, len(items))
+	for _, b := range items {
+		if !IsSessionBeadOrRepairable(b) {
+			continue
+		}
+		if !beadMatchesNamedSessionResolutionFilter(b, identity, sessionName) {
+			continue
+		}
+		RepairEmptyType(store, &b)
+		candidates = append(candidates, b)
+	}
+	return candidates, nil
+}
+
+// beadMatchesNamedSessionResolutionFilter reports whether a bead matches any
+// of the metadata predicates that NamedSessionResolutionCandidates folds
+// in process: configured-named-identity, session_name against the runtime
+// name, session_name against the bare identity, or alias against the bare
+// identity. Empty arguments disable their respective predicates so the
+// behavior matches ExactMetadataSessionCandidates' empty-filter handling.
+func beadMatchesNamedSessionResolutionFilter(b beads.Bead, identity, sessionName string) bool {
+	if identity != "" {
+		if strings.TrimSpace(b.Metadata[NamedSessionIdentityMetadata]) == identity {
+			return true
+		}
+		if strings.TrimSpace(b.Metadata["session_name"]) == identity {
+			return true
+		}
+		if strings.TrimSpace(b.Metadata["alias"]) == identity {
+			return true
+		}
+	}
+	if sessionName != "" && strings.TrimSpace(b.Metadata["session_name"]) == sessionName {
+		return true
+	}
+	return false
 }
 
 // FindNamedSessionConflict finds the first live session bead that blocks a configured named session.
@@ -272,6 +453,9 @@ func FindClosedNamedSessionBeadForSessionName(store beads.Store, identity, sessi
 		if b.Status != "closed" {
 			continue
 		}
+		if !closedNamedSessionReopenEligible(b) {
+			continue
+		}
 		if sessionName != "" {
 			if strings.TrimSpace(b.Metadata["session_name"]) == sessionName {
 				return b, true, nil
@@ -290,6 +474,21 @@ func FindClosedNamedSessionBeadForSessionName(store beads.Store, identity, sessi
 		return fallback, true, nil
 	}
 	return beads.Bead{}, false, nil
+}
+
+func closedNamedSessionReopenEligible(b beads.Bead) bool {
+	if strings.TrimSpace(b.Metadata["continuity_eligible"]) == "false" {
+		return false
+	}
+	switch strings.TrimSpace(b.Metadata["close_reason"]) {
+	case "duplicate", "duplicate-repair", "gc_swept", "orphaned", "reconfigured", "stale-session":
+		return false
+	}
+	switch strings.TrimSpace(b.Metadata["state"]) {
+	case "duplicate", "duplicate-repair", "gc_swept", "orphaned", "reconfigured", "stale-session":
+		return false
+	}
+	return true
 }
 
 // FindCanonicalNamedSessionBead finds the active bead that owns a configured named session.

@@ -273,9 +273,7 @@ func TestResolveDoltArchiveLevel(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.envVal != "" {
-				t.Setenv("GC_DOLT_ARCHIVE_LEVEL", tt.envVal)
-			}
+			t.Setenv("GC_DOLT_ARCHIVE_LEVEL", tt.envVal)
 			if got := resolveDoltArchiveLevel(tt.explicit); got != tt.want {
 				t.Errorf("resolveDoltArchiveLevel(%d) = %d, want %d", tt.explicit, got, tt.want)
 			}

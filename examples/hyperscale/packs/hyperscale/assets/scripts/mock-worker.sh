@@ -13,7 +13,7 @@ set -euo pipefail
 cd "$GC_DIR"
 
 AGENT_SHORT=$(basename "$GC_AGENT")
-POOL_LABEL="${GC_TEMPLATE:-worker}"
+POOL_LABEL="${GC_TEMPLATE:?GC_TEMPLATE must be set to canonical pool route target}"
 echo "[$AGENT_SHORT] Starting up"
 
 # Jitter to avoid 100 workers racing on the same bead.

@@ -481,7 +481,7 @@ func probeGitHubCLIAuthStatus(ctx context.Context, homeDir, ghPath string) provi
 	stdout, stderr, err := runProbeCommand(
 		ctx,
 		homeDir,
-		2*time.Second,
+		5*time.Second,
 		ghPath,
 		"auth",
 		"status",

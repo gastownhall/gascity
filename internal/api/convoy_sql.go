@@ -272,7 +272,7 @@ func (s *Server) tryFullWorkflowSQL(workflowID, fallbackScopeKind, fallbackScope
 
 	store := &prefetchedDepStore{deps: depMap}
 
-	// Collect physical deps only — logical nodes are computed by MC.
+	// Collect physical deps only — logical nodes are computed by real-world app.
 	workflowDeps, partial := collectWorkflowDeps(store, beadIndex)
 
 	scopeKind := fallbackScopeKind

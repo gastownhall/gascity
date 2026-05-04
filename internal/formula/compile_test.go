@@ -391,6 +391,42 @@ title = "Scan"
 	if !recipe.RootOnly {
 		t.Error("vapor formula should be RootOnly by default")
 	}
+	if recipe.RootStep().Type != "task" {
+		t.Errorf("root Type = %q, want %q", recipe.RootStep().Type, "task")
+	}
+	if got := recipe.RootStep().Metadata["gc.kind"]; got != "wisp" {
+		t.Errorf("root gc.kind = %q, want wisp", got)
+	}
+}
+
+func TestCompileStepLessFormulaUsesRunnableWispRoot(t *testing.T) {
+	dir := t.TempDir()
+	formulaContent := `
+formula = "router"
+description = "Route pending work"
+version = 1
+`
+	if err := os.WriteFile(filepath.Join(dir, "router.toml"), []byte(formulaContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	recipe, err := Compile(context.Background(), "router", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	if len(recipe.Steps) != 1 {
+		t.Fatalf("len(Steps) = %d, want root only", len(recipe.Steps))
+	}
+	if !recipe.RootOnly {
+		t.Fatal("step-less formula should be RootOnly")
+	}
+	if recipe.RootStep().Type != "task" {
+		t.Fatalf("root Type = %q, want task", recipe.RootStep().Type)
+	}
+	if got := recipe.RootStep().Metadata["gc.kind"]; got != "wisp" {
+		t.Fatalf("root gc.kind = %q, want wisp", got)
+	}
 }
 
 // TestCompileExtendsPhasePour regresses the merge bug where the 'extends'

@@ -115,6 +115,34 @@ func (p *Provider) Delete(id string) error {
 	return err
 }
 
+// ArchiveMany archives a batch by looping over [Provider.Archive].
+// The exec script protocol is single-id per invocation; a batch endpoint
+// would require a protocol extension that is out of scope here.
+func (p *Provider) ArchiveMany(ids []string) ([]mail.ArchiveResult, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	results := make([]mail.ArchiveResult, len(ids))
+	for i, id := range ids {
+		results[i] = mail.ArchiveResult{ID: id, Err: p.Archive(id)}
+	}
+	return results, nil
+}
+
+// DeleteMany deletes a batch by looping over [Provider.Delete].
+// The exec script protocol is single-id per invocation; a batch endpoint
+// would require a protocol extension that is out of scope here.
+func (p *Provider) DeleteMany(ids []string) ([]mail.ArchiveResult, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	results := make([]mail.ArchiveResult, len(ids))
+	for i, id := range ids {
+		results[i] = mail.ArchiveResult{ID: id, Err: p.Delete(id)}
+	}
+	return results, nil
+}
+
 // All delegates to: script all <recipient>
 func (p *Provider) All(recipient string) ([]mail.Message, error) {
 	p.ensureRunning()

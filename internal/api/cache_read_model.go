@@ -21,3 +21,14 @@ func listSessionBeadsForReadModel(store beads.Store) ([]beads.Bead, error) {
 	}
 	return store.List(query)
 }
+
+func sessionReadModelRows(store beads.Store) ([]beads.Bead, []string, error) {
+	rows, err := listSessionBeadsForReadModel(store)
+	if err == nil {
+		return rows, nil, nil
+	}
+	if beads.IsPartialResult(err) && len(rows) > 0 {
+		return rows, []string{err.Error()}, nil
+	}
+	return nil, nil, err
+}

@@ -83,7 +83,7 @@ Use judgment — there are no hardcoded thresholds. Consider:
 
 **Possibly stuck (stale wisp, no activity, but ambiguous):** Nudge:
 ```bash
-{{ cmd }} nudge deacon "Boot check: are you making progress?"
+{{ cmd }} session nudge deacon "Boot check: are you making progress?"
 ```
 Drain-ack and exit. Next Boot tick will re-evaluate.
 
@@ -123,7 +123,7 @@ up your session and spawns you again next tick.
 |------------|----------------|
 | View deacon output | `{{ cmd }} agent peek deacon 30` |
 | Check deacon work | `gc bd list --assignee=deacon --status=in_progress --json` |
-| Nudge deacon | `{{ cmd }} nudge deacon "message"` |
+| Nudge deacon | `{{ cmd }} session nudge deacon "message"` |
 | File stuck warrant | `gc bd create --type=warrant --label=pool:dog --metadata '{...}'` |
 | Check agents | `{{ cmd }} agent list` |
 

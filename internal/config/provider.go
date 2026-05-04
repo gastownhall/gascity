@@ -97,9 +97,13 @@ type ProviderSpec struct {
 	//   "subcommand" → command resume <key>
 	ResumeStyle string `toml:"resume_style,omitempty"`
 	// ResumeCommand is the full shell command to run when resuming a session.
-	// Supports {{.SessionKey}} template variable. When set, takes precedence
-	// over ResumeFlag/ResumeStyle. Example:
+	// Supports only the {{.SessionKey}} template variable. When set, takes precedence
+	// over ResumeFlag/ResumeStyle. When schema-managed defaults are inserted, the
+	// resolver tokenizes and re-emits the command; for subcommand-style resume it
+	// inserts after the ResumeFlag token that precedes {{.SessionKey}}. Example:
 	//   "claude --resume {{.SessionKey}} --dangerously-skip-permissions"
+	// Schema-managed defaults missing from a subcommand-style resume command
+	// are inserted before {{.SessionKey}} during provider resolution.
 	ResumeCommand string `toml:"resume_command,omitempty"`
 	// SessionIDFlag is the CLI flag for creating a session with a specific ID.
 	// Enables the Generate & Pass strategy for session key management.
@@ -108,7 +112,7 @@ type ProviderSpec struct {
 	// PermissionModes maps permission mode names to CLI flags.
 	// Example: {"unrestricted": "--dangerously-skip-permissions", "plan": "--permission-mode plan"}
 	// This is a config-only lookup table consumed by external clients
-	// (e.g., Mission Control) to populate permission mode dropdowns.
+	// (e.g., real-world app) to populate permission mode dropdowns.
 	// Launch-time flag substitution is planned for a follow-up PR —
 	// currently no runtime code reads this field.
 	PermissionModes map[string]string `toml:"permission_modes,omitempty"`
@@ -203,8 +207,26 @@ type ResolvedProvider struct {
 	// EffectiveDefaults is the fully-merged option default map.
 	// Computed from: schema Default -> provider OptionDefaults -> agent OptionDefaults.
 	// Used by ResolveDefaultArgs() to produce CLI flags and by the API to
-	// tell MC what pre-selections to show.
+	// tell real-world apps what pre-selections to show.
 	EffectiveDefaults map[string]string
+}
+
+const (
+	// SessionTransportACP creates sessions through the Agent Client Protocol.
+	SessionTransportACP = "acp"
+	// SessionTransportTmux creates sessions through the tmux-backed CLI path.
+	SessionTransportTmux = "tmux"
+)
+
+// IsValidSessionTransport reports whether transport is a recognized explicit
+// session transport. The empty string is valid and means provider default.
+func IsValidSessionTransport(transport string) bool {
+	switch strings.TrimSpace(transport) {
+	case "", SessionTransportACP, SessionTransportTmux:
+		return true
+	default:
+		return false
+	}
 }
 
 // CommandString returns the full command line: command followed by args.
@@ -247,7 +269,7 @@ func (rp *ResolvedProvider) DefaultSessionTransport() string {
 		family = strings.TrimSpace(rp.Name)
 	}
 	if family == "opencode" {
-		return "acp"
+		return SessionTransportACP
 	}
 	return ""
 }
@@ -262,7 +284,7 @@ func (rp *ResolvedProvider) ProviderSessionCreateTransport() string {
 		return transport
 	}
 	if strings.TrimSpace(rp.ACPCommand) != "" || rp.ACPArgs != nil {
-		return "acp"
+		return SessionTransportACP
 	}
 	return ""
 }
@@ -271,13 +293,19 @@ func (rp *ResolvedProvider) ProviderSessionCreateTransport() string {
 // fresh session from an agent/template configuration.
 func ResolveSessionCreateTransport(agentSession string, resolved *ResolvedProvider) string {
 	agentSession = strings.TrimSpace(agentSession)
-	if agentSession != "" {
+	switch agentSession {
+	case SessionTransportACP:
+		return SessionTransportACP
+	case SessionTransportTmux:
+		return SessionTransportTmux
+	case "":
+		if resolved == nil {
+			return ""
+		}
+		return strings.TrimSpace(resolved.ProviderSessionCreateTransport())
+	default:
 		return agentSession
 	}
-	if resolved == nil {
-		return ""
-	}
-	return strings.TrimSpace(resolved.ProviderSessionCreateTransport())
 }
 
 // TitleModelFlagArgs resolves the TitleModel key against the "model"

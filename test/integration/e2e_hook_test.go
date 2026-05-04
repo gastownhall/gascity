@@ -57,12 +57,13 @@ func TestE2E_Hook_WithWork(t *testing.T) {
 // compatibility and does not run the configured work query.
 func TestE2E_Hook_Inject(t *testing.T) {
 	const markerName = "inject-work-query-ran"
+	const armName = "inject-work-query-armed"
 	city := e2eCity{
 		Agents: []e2eAgent{
 			{
 				Name:         "injectee",
 				StartCommand: e2eSleepScript(),
-				WorkQuery:    "touch .gc/" + markerName + " && echo 'inject hook work items'",
+				WorkQuery:    "if [ -d .gc/" + armName + " ]; then touch .gc/" + markerName + " && echo 'inject hook work items'; fi",
 			},
 		},
 	}
@@ -72,6 +73,11 @@ func TestE2E_Hook_Inject(t *testing.T) {
 		t.Fatalf("work_query marker exists before gc hook --inject: %s", markerPath)
 	} else if !os.IsNotExist(err) {
 		t.Fatalf("checking pre-hook work_query marker: %v", err)
+	}
+	// setupE2ECityNoStart briefly starts the controller during init; arm the
+	// marker only after setup so controller probes cannot satisfy the assertion.
+	if err := os.Mkdir(filepath.Join(cityDir, ".gc", armName), 0o755); err != nil {
+		t.Fatalf("arming work_query marker: %v", err)
 	}
 
 	out, err := gc(cityDir, "hook", "--inject", "injectee")

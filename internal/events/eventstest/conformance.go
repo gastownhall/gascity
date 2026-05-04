@@ -282,13 +282,91 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		}
 	})
 
+	t.Run("ListFilterBySubject", func(t *testing.T) {
+		p, cleanup := newProvider(t)
+		defer cleanup()
+
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "actor-a", Subject: "gc-1"})
+		p.Record(events.Event{Type: events.BeadClosed, Actor: "actor-a", Subject: "gc-2"})
+		p.Record(events.Event{Type: events.BeadUpdated, Actor: "actor-b", Subject: "gc-1"})
+
+		got, err := p.List(events.Filter{Subject: "gc-1"})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("List(Subject) returned %d events, want 2", len(got))
+		}
+		for _, e := range got {
+			if e.Subject != "gc-1" {
+				t.Errorf("Subject = %q, want gc-1", e.Subject)
+			}
+		}
+	})
+
+	t.Run("ListFilterByUntil", func(t *testing.T) {
+		p, cleanup := newProvider(t)
+		defer cleanup()
+
+		cutoff := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
+		before := cutoff.Add(-time.Minute)
+		after := cutoff.Add(time.Minute)
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "actor-a", Subject: "before", Ts: before})
+		p.Record(events.Event{Type: events.BeadUpdated, Actor: "actor-a", Subject: "boundary", Ts: cutoff})
+		p.Record(events.Event{Type: events.BeadClosed, Actor: "actor-a", Subject: "after", Ts: after})
+
+		got, err := p.List(events.Filter{Until: cutoff})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("List(Until) returned %d events, want 2", len(got))
+		}
+		if got[0].Subject != "before" {
+			t.Errorf("got[0].Subject = %q, want before", got[0].Subject)
+		}
+		if got[1].Subject != "boundary" {
+			t.Errorf("got[1].Subject = %q, want boundary", got[1].Subject)
+		}
+	})
+
+	t.Run("ListFilterByLimit", func(t *testing.T) {
+		p, cleanup := newProvider(t)
+		defer cleanup()
+
+		for _, subject := range []string{"gc-1", "gc-2", "gc-3", "gc-4"} {
+			p.Record(events.Event{Type: events.BeadCreated, Actor: "actor-a", Subject: subject})
+		}
+
+		got, err := p.List(events.Filter{Limit: 2})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("List(Limit) returned %d events, want 2", len(got))
+		}
+		if got[0].Subject != "gc-1" {
+			t.Errorf("got[0].Subject = %q, want gc-1", got[0].Subject)
+		}
+		if got[1].Subject != "gc-2" {
+			t.Errorf("got[1].Subject = %q, want gc-2", got[1].Subject)
+		}
+	})
+
 	t.Run("ListFilterCombined", func(t *testing.T) {
 		p, cleanup := newProvider(t)
 		defer cleanup()
 
-		p.Record(events.Event{Type: events.BeadCreated, Actor: "human"}) // seq 1
-		p.Record(events.Event{Type: events.BeadClosed, Actor: "human"})  // seq 2
-		p.Record(events.Event{Type: events.BeadCreated, Actor: "human"}) // seq 3
+		base := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
+		p.Record(events.Event{Type: events.MailSent, Actor: "seed", Subject: "seed", Ts: base})                           // seq 1
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Subject: "gc-1", Ts: base.Add(2 * time.Hour)})    // after Until
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Subject: "gc-1", Ts: base.Add(-2 * time.Hour)})   // before Since
+		p.Record(events.Event{Type: events.BeadClosed, Actor: "human", Subject: "gc-1", Ts: base.Add(10 * time.Minute)})  // wrong Type
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "agent", Subject: "gc-1", Ts: base.Add(20 * time.Minute)}) // wrong Actor
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Subject: "gc-2", Ts: base.Add(30 * time.Minute)}) // wrong Subject
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Subject: "gc-1", Ts: base.Add(40 * time.Minute)}) // match 1
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Subject: "gc-1", Ts: base.Add(50 * time.Minute)}) // match 2
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Subject: "gc-1", Ts: base.Add(55 * time.Minute)}) // limited out
 
 		// Get all to find seq of first event.
 		all, err := p.List(events.Filter{})
@@ -299,16 +377,28 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 			t.Fatal("need at least 1 event")
 		}
 
-		// Type + AfterSeq combined: bead.created with seq > first event.
-		got, err := p.List(events.Filter{Type: events.BeadCreated, AfterSeq: all[0].Seq})
+		got, err := p.List(events.Filter{
+			Type:     events.BeadCreated,
+			Actor:    "human",
+			Subject:  "gc-1",
+			Since:    base.Add(-time.Hour),
+			Until:    base.Add(time.Hour),
+			AfterSeq: all[0].Seq,
+			Limit:    2,
+		})
 		if err != nil {
 			t.Fatalf("List(combined): %v", err)
 		}
-		if len(got) != 1 {
-			t.Fatalf("List(Type+AfterSeq) returned %d events, want 1", len(got))
+		if len(got) != 2 {
+			t.Fatalf("List(all predicates) returned %d events, want 2", len(got))
 		}
-		if got[0].Type != events.BeadCreated {
-			t.Errorf("Type = %q, want %q", got[0].Type, events.BeadCreated)
+		for _, e := range got {
+			if e.Type != events.BeadCreated || e.Actor != "human" || e.Subject != "gc-1" {
+				t.Fatalf("event = %+v, want bead.created by human for gc-1", e)
+			}
+			if e.Ts.Before(base.Add(-time.Hour)) || e.Ts.After(base.Add(time.Hour)) {
+				t.Fatalf("event Ts = %s, want within combined window", e.Ts)
+			}
 		}
 	})
 

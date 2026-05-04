@@ -26,6 +26,7 @@ func newRigStatusCmd(stdout, stderr io.Writer) *cobra.Command {
 			}
 			return nil
 		},
+		ValidArgsFunction: completeRigNames,
 	}
 }
 

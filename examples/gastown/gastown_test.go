@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 func exampleDir() string {
@@ -73,14 +74,38 @@ func TestCityTomlParses(t *testing.T) {
 		t.Errorf("Workspace.Name = %q, want %q", cfg.Workspace.Name, "gastown")
 	}
 	if len(cfg.Workspace.Includes) != 0 {
-		t.Errorf("Workspace.Includes = %v, want empty (migrated to [imports.gastown])", cfg.Workspace.Includes)
+		t.Errorf("Workspace.Includes = %v, want empty (migrated to pack.toml)", cfg.Workspace.Includes)
 	}
-	gastownImp, ok := cfg.Imports["gastown"]
+	// Imports live in pack.toml (portable definition), not city.toml (deployment).
+	if len(cfg.Imports) != 0 {
+		t.Errorf("cfg.Imports = %v, want empty (imports migrated to pack.toml)", cfg.Imports)
+	}
+}
+
+func TestCityPackTomlParses(t *testing.T) {
+	dir := exampleDir()
+	data, err := os.ReadFile(filepath.Join(dir, "pack.toml"))
+	if err != nil {
+		t.Fatalf("reading pack.toml: %v", err)
+	}
+
+	var tc packFileConfig
+	if _, err := toml.Decode(string(data), &tc); err != nil {
+		t.Fatalf("parsing pack.toml: %v", err)
+	}
+
+	if tc.Pack.Name != "gastown" {
+		t.Errorf("[pack] name = %q, want %q", tc.Pack.Name, "gastown")
+	}
+	if tc.Pack.Schema != 2 {
+		t.Errorf("[pack] schema = %d, want 2", tc.Pack.Schema)
+	}
+	gastownImp, ok := tc.Imports["gastown"]
 	if !ok {
-		t.Fatalf("cfg.Imports = %v, want entry for \"gastown\"", cfg.Imports)
+		t.Fatalf("pack.toml imports = %v, want entry for \"gastown\"", tc.Imports)
 	}
 	if gastownImp.Source != "packs/gastown" {
-		t.Errorf("cfg.Imports[\"gastown\"].Source = %q, want %q", gastownImp.Source, "packs/gastown")
+		t.Errorf("pack.toml imports[\"gastown\"].Source = %q, want %q", gastownImp.Source, "packs/gastown")
 	}
 }
 
@@ -633,12 +658,12 @@ func TestGastownRoutedToTargetsUseBindingPrefix(t *testing.T) {
 		want string
 	}{
 		{"packs/gastown/formulas/mol-deacon-patrol.toml", "gc.routed_to={{binding_prefix}}dog"},
-		{"packs/gastown/formulas/mol-polecat-work.toml", "{{rig_name}}/{{binding_prefix}}refinery"},
+		{"packs/gastown/formulas/mol-polecat-work.toml", `${GC_RIG:+$GC_RIG/}{{binding_prefix}}refinery`},
 		{"packs/gastown/formulas/mol-refinery-patrol.toml", "gc.routed_to={{rig_name}}/{{binding_prefix}}polecat"},
 		{"packs/gastown/formulas/mol-idea-to-plan.toml", "$GC_RIG/{{binding_prefix}}polecat"},
 		{"packs/gastown/agents/mayor/prompt.template.md", "gc.routed_to=<rig>/{{ .BindingPrefix }}polecat"},
-		{"packs/gastown/agents/polecat/prompt.template.md", "{{ .RigName }}/{{ .BindingPrefix }}refinery"},
-		{"packs/gastown/template-fragments/approval-fallacy.template.md", "{{ .RigName }}/{{ .BindingPrefix }}refinery"},
+		{"packs/gastown/agents/polecat/prompt.template.md", `${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery`},
+		{"packs/gastown/template-fragments/approval-fallacy.template.md", `${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery`},
 	}
 	for _, check := range checks {
 		data, err := os.ReadFile(filepath.Join(dir, check.rel))
@@ -654,6 +679,8 @@ func TestGastownRoutedToTargetsUseBindingPrefix(t *testing.T) {
 			"gc.routed_to=<rig>/polecat",
 			"gc.routed_to=<rig>/refinery",
 			"gc.routed_to={{ .RigName }}/refinery",
+			"gc.routed_to={{rig_name}}/{{binding_prefix}}refinery",
+			"gc.routed_to={{ .RigName }}/{{ .BindingPrefix }}refinery",
 		} {
 			if strings.Contains(body, bad) {
 				t.Errorf("%s still contains short-form route %q", check.rel, bad)
@@ -770,6 +797,177 @@ func TestReviewLegFormulaPersistsReportAndNotifiesCoordinator(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("review-leg formula missing %q", want)
 		}
+	}
+}
+
+type witnessSessionFixture struct {
+	ID          string
+	State       string
+	Closed      bool
+	SessionName string
+	Alias       string
+	AgentName   string
+}
+
+type witnessSessionBeadFixture struct {
+	Status                  string
+	State                   string
+	ConfiguredNamedIdentity string
+}
+
+func resolveWitnessAssigneeForTest(
+	assignee string,
+	sessions []witnessSessionFixture,
+	sessionBeads []witnessSessionBeadFixture,
+) (string, bool) {
+	index := make(map[string]string)
+	add := func(key, state string, closed bool) {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			return
+		}
+		if closed {
+			state = "closed"
+		}
+		index[key] = state
+	}
+	for _, s := range sessions {
+		add(s.ID, s.State, s.Closed)
+		add(s.SessionName, s.State, s.Closed)
+		add(s.Alias, s.State, s.Closed)
+		add(s.AgentName, s.State, s.Closed)
+	}
+	for _, b := range sessionBeads {
+		add(b.ConfiguredNamedIdentity, b.State, b.Status == "closed")
+	}
+	state, ok := index[assignee]
+	return state, ok
+}
+
+func witnessStateIsOrphanedForTest(state string) (bool, bool) {
+	switch state {
+	case string(session.StateActive),
+		string(session.StateAwake),
+		string(session.StateCreating),
+		string(session.StateAsleep),
+		string(session.StateDrained),
+		string(session.StateSuspended),
+		string(session.StateDraining),
+		string(session.StateQuarantined):
+		return false, true
+	case string(session.StateArchived), "closed", "absent":
+		return true, true
+	default:
+		return false, false
+	}
+}
+
+func TestWitnessPatrolLivenessProcedureUsesExactSessionIdentity(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-witness-patrol.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading witness patrol formula: %v", err)
+	}
+	body := string(data)
+
+	for _, forbidden := range []string{
+		`grep -oE '(hq|sc|gc|de)-[a-z0-9]+'`,
+		`(hq|sc|gc|de)-<id>`,
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("witness patrol still contains fixed-prefix extraction %q", forbidden)
+		}
+	}
+	for _, want := range []string{
+		`$s.ID`,
+		`$s.SessionName`,
+		`$s.Alias`,
+		`$s.AgentName`,
+		`configured_named_identity`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("witness patrol liveness procedure missing exact lookup key %q", want)
+		}
+	}
+
+	sessions := []witnessSessionFixture{
+		{
+			ID:          "ga-n7iy6",
+			State:       string(session.StateActive),
+			SessionName: "polecats__sonnet-ga-n7iy6",
+			Alias:       "gastown/polecat-slot-1",
+			AgentName:   "gastown/sonnet",
+		},
+		{ID: "mp-7k4g", State: string(session.StateCreating)},
+	}
+	sessionBeads := []witnessSessionBeadFixture{
+		{
+			Status:                  "open",
+			State:                   string(session.StateAsleep),
+			ConfiguredNamedIdentity: "gastown/witness",
+		},
+	}
+	for _, tc := range []struct {
+		assignee string
+		want     string
+	}{
+		{assignee: "ga-n7iy6", want: string(session.StateActive)},
+		{assignee: "polecats__sonnet-ga-n7iy6", want: string(session.StateActive)},
+		{assignee: "gastown/polecat-slot-1", want: string(session.StateActive)},
+		{assignee: "gastown/sonnet", want: string(session.StateActive)},
+		{assignee: "mp-7k4g", want: string(session.StateCreating)},
+		{assignee: "gastown/witness", want: string(session.StateAsleep)},
+	} {
+		got, ok := resolveWitnessAssigneeForTest(tc.assignee, sessions, sessionBeads)
+		if !ok || got != tc.want {
+			t.Errorf("resolveWitnessAssigneeForTest(%q) = %q, %v; want %q, true", tc.assignee, got, ok, tc.want)
+		}
+	}
+	if got, ok := resolveWitnessAssigneeForTest("polecat-hq-00ohd", sessions, sessionBeads); ok {
+		t.Fatalf("embedded fixed-prefix assignee resolved to %q; want exact lookup miss", got)
+	}
+}
+
+func TestWitnessPatrolStateClassificationCoversSessionStates(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-witness-patrol.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading witness patrol formula: %v", err)
+	}
+	body := string(data)
+
+	notOrphaned := []session.State{
+		session.StateActive,
+		session.StateAwake,
+		session.StateCreating,
+		session.StateAsleep,
+		session.StateDrained,
+		session.StateSuspended,
+		session.StateDraining,
+		session.StateQuarantined,
+	}
+	for _, state := range notOrphaned {
+		if !strings.Contains(body, "`"+string(state)+"`") {
+			t.Errorf("witness patrol formula missing state %q", state)
+		}
+		got, ok := witnessStateIsOrphanedForTest(string(state))
+		if !ok || got {
+			t.Errorf("witnessStateIsOrphanedForTest(%q) = %v, %v; want false, true", state, got, ok)
+		}
+	}
+	for _, state := range []string{string(session.StateArchived), "closed", "absent"} {
+		if !strings.Contains(body, "`"+state+"`") {
+			t.Errorf("witness patrol formula missing state %q", state)
+		}
+		got, ok := witnessStateIsOrphanedForTest(state)
+		if !ok || !got {
+			t.Errorf("witnessStateIsOrphanedForTest(%q) = %v, %v; want true, true", state, got, ok)
+		}
+	}
+	if got, ok := witnessStateIsOrphanedForTest("future-state"); ok || got {
+		t.Fatalf("witnessStateIsOrphanedForTest(future-state) = %v, %v; want false, false", got, ok)
 	}
 }
 

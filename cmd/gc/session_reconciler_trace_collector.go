@@ -122,7 +122,7 @@ func newSessionReconcilerTracer(cityPath, cityName string, stderr io.Writer) *Se
 		flushDone: make(chan struct{}),
 		closeCh:   make(chan struct{}),
 	}
-	go tracer.runFlushLoop()
+	go tracer.runFlushLoop(tracer.flushCh)
 	return tracer
 }
 
@@ -162,9 +162,9 @@ func (t *SessionReconcilerTracer) Close() error {
 	return t.store.Close()
 }
 
-func (t *SessionReconcilerTracer) runFlushLoop() {
+func (t *SessionReconcilerTracer) runFlushLoop(flushCh <-chan sessionReconcilerTraceFlushRequest) {
 	defer close(t.flushDone)
-	for req := range t.flushCh {
+	for req := range flushCh {
 		err := t.store.AppendBatch(req.records, req.durability)
 		select {
 		case req.result <- err:
@@ -874,6 +874,10 @@ func (c *SessionReconcilerTraceCycle) RecordTraceControl(action string, scopeTyp
 	c.addRecord(rec)
 }
 
+// End flushes the cycle and writes a cycle-result trace record. Caller fields
+// are intentionally open-ended: known rollup keys are merged through
+// coalesceTraceField, so caller values keep priority there; additional non-nil
+// caller fields are preserved for site-specific trace context.
 func (c *SessionReconcilerTraceCycle) End(completion TraceCompletionStatus, fields map[string]any) error {
 	if c == nil || c.tracer == nil || !c.tracer.Enabled() {
 		return nil
@@ -927,6 +931,11 @@ func (c *SessionReconcilerTraceCycle) End(completion TraceCompletionStatus, fiel
 		"dropped_record_count":    droppedRecords,
 		"dropped_batch_count":     droppedBatches,
 		"drop_reason_counts":      dropReasons,
+	}
+	for k, v := range fields {
+		if _, ok := rollup[k]; !ok {
+			rollup[k] = v
+		}
 	}
 	rec := newTraceRecord(TraceRecordCycleResult).withCycle(c, now)
 	rec.SiteCode = TraceSiteCycleFinish

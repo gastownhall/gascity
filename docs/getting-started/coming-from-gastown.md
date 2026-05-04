@@ -457,7 +457,7 @@ Two rules help a lot:
 | `gt` | Closest in Gas City | Notes |
 |---|---|---|
 | `gt mail` | `gc mail` | Near-direct mapping. |
-| `gt nudge` | `gc session nudge` or `gc nudge` | Use `gc session nudge` for a specific live session, `gc nudge` for deferred delivery controls. |
+| `gt nudge` | `gc session nudge` | Use `gc session nudge <target> "msg"` to send messages to a live session. The `gc nudge` subcommand only exposes deferred-delivery controls (`drain`, `status`, `poll`); it does not accept a positional `<target> "msg"` form. |
 | `gt peek` | `gc session peek` | Near-direct mapping. |
 | `gt broadcast` | no single direct equivalent | Usually modeled as `gc mail send` to a group or multiple explicit targets. |
 | `gt notify` | no direct equivalent | Notification policy is not a top-level SDK command family. |

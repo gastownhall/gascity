@@ -182,7 +182,9 @@ func isMissingQueuedNudgeBeadErr(err error, beadID string) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "no issue found matching "+strings.ToLower(strconv.Quote(beadID))) ||
-		strings.Contains(msg, "error resolving "+beadID+": no issue found")
+		strings.Contains(msg, "error resolving "+beadID+": no issue found") ||
+		strings.Contains(msg, "ambiguous id") ||
+		strings.Contains(msg, "use more characters to disambiguate")
 }
 
 func marshalNudgeReference(ref *nudgeReference) string {

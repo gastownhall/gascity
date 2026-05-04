@@ -79,6 +79,31 @@ func TestProviderProvenance_MapKeyAttribution(t *testing.T) {
 	}
 }
 
+func TestProviderProvenance_InferredOptionDefaultsFromArgs(t *testing.T) {
+	b := "builtin:codex"
+	city := map[string]ProviderSpec{
+		"codex-mini": {
+			Base: &b,
+			Args: []string{
+				"-m",
+				"gpt-5.3-codex-spark",
+			},
+		},
+	}
+	r, err := ResolveProviderChain("codex-mini", city["codex-mini"], city)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	optKeys := r.Provenance.MapKeyLayer["option_defaults"]
+	if optKeys == nil {
+		t.Fatal("option_defaults provenance missing")
+	}
+	if got := optKeys["model"]; got != "providers.codex-mini" {
+		t.Errorf("option_defaults[model] layer = %q, want providers.codex-mini", got)
+	}
+}
+
 func TestProviderProvenance_ChainPopulated(t *testing.T) {
 	b := "builtin:codex"
 	r, err := ResolveProviderChain("foo", ProviderSpec{

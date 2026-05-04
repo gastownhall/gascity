@@ -1,26 +1,39 @@
 ---
-title: "Agent Protocol"
+title: "Session"
 ---
 
 
-> Last verified against code: 2026-03-17
+> Last verified against code: 2026-04-25
 
 ## Summary
 
-Gas City's agent runtime boundary lives in `internal/runtime/`.
-`runtime.Provider` is the low-level contract for starting, stopping,
-attaching to, nudging, and observing agent sessions. The surrounding pieces
-that make that usable at the product level are:
+Session is Gas City's Layer 0-1 primitive for starting, stopping,
+prompting, and observing sessions regardless of provider. It covers
+identity, pools, sandboxes, resume, and crash adoption. The runtime
+boundary lives in `internal/runtime/`; `runtime.Provider` is the
+low-level contract that pluggable providers (tmux, subprocess, exec,
+k8s, acp/auto/hybrid routing) implement. The surrounding pieces that
+make the primitive usable at the product level are:
 
 - `internal/agent/` for session naming and startup hints
 - `cmd/gc/template_resolve.go` for building runtime start configs
-- `internal/session/` for session bead records, waits, and blocked-turn state
+- `internal/session/` for the bead-backed lifecycle projection
+  (`lifecycle_projection.go`), session bead records, waits, and
+  blocked-turn state
 
 The important current-state split is:
 
 - **runtime** manages live sessions and I/O
 - **agent helpers** define naming and startup-hint data
 - **session helpers** manage higher-level session bookkeeping
+
+> **History.** Until commit `dd90ac0a` (Mar 8 2026, "session-first
+> migration"), this primitive was named "Agent Protocol" and exposed a
+> dedicated `agent.Agent` / `agent.Handle` interface. That interface
+> was removed; responsibilities now live in `internal/session/`
+> (lifecycle) and `internal/runtime/` (providers). `internal/agent/`
+> remains as a small helper package for session-name utilities and
+> startup hints — not a primitive.
 
 ## Key Concepts
 
@@ -140,7 +153,7 @@ Optional provider extensions also live in `runtime/runtime.go`:
 | Depended on by | How |
 |---|---|
 | `cmd/gc/cmd_start.go` | Starts runtimes for configured agents |
-| `cmd/gc/reconcile.go` | Uses runtime liveness and drift signals |
+| `cmd/gc/session_reconciler.go` | Uses runtime liveness and drift signals for bead-driven session reconciliation |
 | `cmd/gc/cmd_session.go` | Attach, list, inspect, and session-level commands |
 | `cmd/gc/cmd_nudge.go` | Idle-aware and queued nudge delivery |
 | `internal/api/` | Session-aware API surfaces and status views |

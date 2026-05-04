@@ -1360,7 +1360,7 @@ func TestCmdSessionWait_AllowsRigDependencyBeads(t *testing.T) {
 	if err := rigStore.Close(dep.ID); err != nil {
 		t.Fatalf("close rig dep bead: %v", err)
 	}
-	if got := beadPrefix(dep.ID); got != "fe" {
+	if got := beadPrefix(nil, dep.ID); got != "fe" {
 		t.Fatalf("rig dep prefix = %q, want %q", got, "fe")
 	}
 
@@ -1436,7 +1436,7 @@ func TestPrepareWaitWakeState_ResolvesRigDependencyBeads(t *testing.T) {
 	if err := rigStore.Close(dep.ID); err != nil {
 		t.Fatalf("close rig dep bead: %v", err)
 	}
-	if got := beadPrefix(dep.ID); got != "fe" {
+	if got := beadPrefix(nil, dep.ID); got != "fe" {
 		t.Fatalf("rig dep prefix = %q, want %q", got, "fe")
 	}
 	cityStore, err = openCityStoreAt(cityPath)

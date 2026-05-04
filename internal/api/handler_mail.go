@@ -142,8 +142,14 @@ func (s *Server) resolveMailQueryRecipientsWithContext(ctx context.Context, reci
 }
 
 func (s *Server) mailRecipientsForNamedSession(store beads.Store, spec apiNamedSessionSpec) ([]string, error) {
+	identity := apiNormalizeSessionTarget(spec.Identity)
+	if identity == "" {
+		return nil, nil
+	}
 	candidates, err := store.List(beads.ListQuery{
-		Label:         session.LabelSession,
+		Metadata: map[string]string{
+			session.NamedSessionIdentityMetadata: identity,
+		},
 		IncludeClosed: true,
 	})
 	if err != nil {
@@ -165,6 +171,32 @@ func (s *Server) mailRecipientsForNamedSession(store beads.Store, spec apiNamedS
 	}
 	sort.Strings(recipients)
 	return recipients, nil
+}
+
+func (s *Server) configuredNamedMailIdentities(identifier string) []string {
+	identifier = apiNormalizeSessionTarget(identifier)
+	seen := make(map[string]bool)
+	identities := make([]string, 0, 2)
+	add := func(identity string) {
+		identity = apiNormalizeSessionTarget(identity)
+		if identity == "" || seen[identity] {
+			return
+		}
+		seen[identity] = true
+		identities = append(identities, identity)
+	}
+	add(identifier)
+	cfg := s.state.Config()
+	if cfg == nil {
+		return identities
+	}
+	for i := range cfg.NamedSessions {
+		identity := cfg.NamedSessions[i].QualifiedName()
+		if session.TargetBasename(identity) == identifier {
+			add(identity)
+		}
+	}
+	return identities
 }
 
 type apiResolvedMailTarget struct {
@@ -209,11 +241,25 @@ func (s *Server) resolveLiveConfiguredNamedMailTarget(store beads.Store, identif
 	if store == nil || identifier == "" || identifier == "human" || strings.Contains(identifier, "/") {
 		return apiResolvedMailTarget{}, false, nil
 	}
-	all, err := store.List(beads.ListQuery{
-		Label: session.LabelSession,
-	})
-	if err != nil {
-		return apiResolvedMailTarget{}, false, err
+	identities := s.configuredNamedMailIdentities(identifier)
+	all := make([]beads.Bead, 0, len(identities))
+	seenBeads := make(map[string]bool)
+	for _, identity := range identities {
+		items, err := store.List(beads.ListQuery{
+			Metadata: map[string]string{
+				session.NamedSessionIdentityMetadata: identity,
+			},
+		})
+		if err != nil {
+			return apiResolvedMailTarget{}, false, err
+		}
+		for _, b := range items {
+			if b.ID != "" && seenBeads[b.ID] {
+				continue
+			}
+			seenBeads[b.ID] = true
+			all = append(all, b)
+		}
 	}
 
 	matches := make(map[string]apiResolvedMailTarget)

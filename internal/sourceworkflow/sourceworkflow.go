@@ -76,6 +76,45 @@ func NormalizeSourceStoreRef(sourceStoreRef string) string {
 	return strings.TrimSpace(sourceStoreRef)
 }
 
+// LockScopeForStoreRef returns the filesystem scope used for source-workflow
+// locks for a source bead's resident store ref.
+func LockScopeForStoreRef(cityPath, defaultStorePath, storeRef string, rigPath func(string) (string, bool)) string {
+	cityPath = strings.TrimSpace(cityPath)
+	defaultStorePath = strings.TrimSpace(defaultStorePath)
+	storeRef = strings.TrimSpace(storeRef)
+	if storeRef == "" {
+		switch {
+		case defaultStorePath != "":
+			return filepath.Clean(defaultStorePath)
+		case cityPath != "":
+			return filepath.Clean(cityPath)
+		default:
+			return ""
+		}
+	}
+	if cityPath == "" {
+		return filepath.Clean(storeRef)
+	}
+	switch {
+	case strings.HasPrefix(storeRef, "city:"):
+		return filepath.Clean(cityPath)
+	case strings.HasPrefix(storeRef, "rig:"):
+		rigName := strings.TrimSpace(strings.TrimPrefix(storeRef, "rig:"))
+		if rigPath != nil {
+			if path, ok := rigPath(rigName); ok {
+				path = strings.TrimSpace(path)
+				if path != "" {
+					if !filepath.IsAbs(path) {
+						path = filepath.Join(cityPath, path)
+					}
+					return filepath.Clean(path)
+				}
+			}
+		}
+	}
+	return filepath.Clean(storeRef)
+}
+
 // WorkflowMatchesSource reports whether a workflow root belongs to the
 // given source bead and (optionally) a specific source store ref. Legacy
 // roots without SourceStoreRefMetadataKey are treated as belonging to the

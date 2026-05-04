@@ -248,8 +248,7 @@ func checkBatchNoMoleculeChildren(q BeadChildQuerier, open []beads.Bead, store b
 	// without this, users see a generic "cannot use --on" string and
 	// never learn about `gc workflow delete-source`. The first child's
 	// conflict becomes the typed payload; a combined non-typed error
-	// keeps the legacy message so existing "%d/%d" diagnostics stay
-	// readable.
+	// keeps the summary message so "%d/%d" diagnostics stay readable.
 	type workflowConflict struct {
 		childID    string
 		workflowID string
@@ -299,7 +298,7 @@ func checkBatchNoMoleculeChildren(q BeadChildQuerier, open []beads.Bead, store b
 	// workflow — users running the suggested `gc workflow delete-source
 	// <first-child>` command would see unrelated workflow IDs and only
 	// clean up part of the batch. Group blocking workflow IDs by child,
-	// then join them alongside the legacy summary; the CLI walks the
+	// then join them alongside the summary; the CLI walks the
 	// error chain to render one cleanup hint per affected child.
 	conflictsByChild := make(map[string][]string, len(workflowConflicts))
 	childOrder := make([]string, 0, len(workflowConflicts))

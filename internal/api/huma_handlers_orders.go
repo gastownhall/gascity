@@ -257,7 +257,7 @@ func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryIn
 			}
 		}
 
-		entry.HasOutput = entry.CaptureOutput
+		entry.HasOutput = entry.CaptureOutput || orderRunHasOutput(b)
 
 		entries = append(entries, entry)
 		if len(entries) >= limit {
@@ -268,6 +268,13 @@ func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryIn
 	out := &OrderHistoryListOutput{}
 	out.Body.Entries = entries
 	return out, nil
+}
+
+func orderRunHasOutput(b beads.Bead) bool {
+	if b.Metadata == nil {
+		return false
+	}
+	return b.Metadata["convergence.gate_stdout"] != "" || b.Metadata["convergence.gate_stderr"] != ""
 }
 
 // orderHistoryEntry is a single entry in the order history response.

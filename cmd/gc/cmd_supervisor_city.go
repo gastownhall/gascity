@@ -275,18 +275,23 @@ func registerCityForAPI(cityPath, nameOverride string) error {
 // socket without waiting for the reply. Used by registerCityForAPI
 // so the async POST /v0/city handler doesn't block on the
 // reconciler tick.
-func reloadSupervisorNoWait() {
+func reloadSupervisorNoWait() error {
 	sockPath, _ := runningSupervisorSocket()
 	if sockPath == "" {
-		return
+		return errors.New("supervisor is not running; start it with 'gc supervisor start'")
 	}
 	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
 	if err != nil {
-		return
+		return fmt.Errorf("connecting to supervisor reload socket: %w", err)
 	}
 	defer conn.Close() //nolint:errcheck // best-effort
-	_ = conn.SetWriteDeadline(time.Now().Add(1 * time.Second))
-	_, _ = conn.Write([]byte("reload\n"))
+	if err := conn.SetWriteDeadline(time.Now().Add(1 * time.Second)); err != nil {
+		return fmt.Errorf("setting supervisor reload deadline: %w", err)
+	}
+	if _, err := conn.Write([]byte("reload\n")); err != nil {
+		return fmt.Errorf("writing supervisor reload command: %w", err)
+	}
+	return nil
 }
 
 func retrySupervisorCityStartAfterControllerLock(cityPath string, stdout, stderr io.Writer, startErr error) (bool, error) {

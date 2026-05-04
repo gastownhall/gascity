@@ -13,22 +13,10 @@ gcmux() { tmux ${GC_TMUX_SOCKET:+-L "$GC_TMUX_SOCKET"} "$@"; }
 
 # ── Mail click binding (root table: left-click on status-right) ───────
 # Shows unread mail preview in a popup when clicking the status-right area.
-guard="tmux ${GC_TMUX_SOCKET:+-L $GC_TMUX_SOCKET} show-environment -t '#{session_name}' GC_AGENT >/dev/null 2>&1"
+# Per-city socket isolation makes every session on this socket a GC
+# session, so we install the popup directly without an if-shell guard.
+mail_popup="display-popup -E -w 60 -h 15 'gc mail peek || echo No unread mail'"
 existing=$(gcmux list-keys -T root MouseDown1StatusRight 2>/dev/null || true)
-if ! printf '%s' "$existing" | grep -q 'gc mail'; then
-    fallback=""
-    if [ -n "$existing" ]; then
-        fallback=$(printf '%s' "$existing" | head -1 | awk '
-        {
-            i = 1; if ($i == "bind-key") i++; if ($i == "-r") i++
-            if ($i == "-T") i += 3
-            cmd = ""; for (; i <= NF; i++) cmd = cmd (cmd ? " " : "") $i
-            print cmd
-        }')
-    fi
-    [ -z "$fallback" ] && fallback=":"
-    gcmux bind-key -T root MouseDown1StatusRight \
-        if-shell "$guard" \
-        "display-popup -E -w 60 -h 15 'gc mail peek || echo No unread mail'" \
-        "$fallback"
+if ! printf '%s' "$existing" | grep -qF "$mail_popup"; then
+    gcmux bind-key -T root MouseDown1StatusRight "$mail_popup"
 fi

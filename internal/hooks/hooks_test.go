@@ -121,8 +121,8 @@ func TestInstallClaude(t *testing.T) {
 			return entries[0].Matcher
 		}())
 	}
-	if !strings.Contains(claudeHookCommand(t, runtimeData, "PreCompact"), `gc handoff "context cycle"`) {
-		t.Error("claude PreCompact hook should use gc handoff (not gc prime) to avoid context accumulation on compaction")
+	if !strings.Contains(claudeHookCommand(t, runtimeData, "PreCompact"), `gc handoff --auto "context cycle"`) {
+		t.Error("claude PreCompact hook should use gc handoff --auto (not gc prime or restart handoff) on compaction")
 	}
 	if !strings.Contains(s, "gc nudge drain --inject") {
 		t.Error("claude settings should contain gc nudge drain --inject")
@@ -150,7 +150,7 @@ func TestInstallClaudeUpgradesStaleGeneratedFile(t *testing.T) {
 	// Build a realistic stale fixture: the embedded file stores the command
 	// as JSON, so the literal bytes contain escaped quotes. Matching that
 	// shape is what claudeFileNeedsUpgrade expects.
-	stale := strings.Replace(string(current), `gc handoff \"context cycle\"`, `gc prime --hook`, 1)
+	stale := strings.Replace(string(current), `gc handoff --auto \"context cycle\"`, `gc prime --hook`, 1)
 	if stale == string(current) {
 		t.Fatal("stale fixture did not diverge from current embedded config — check stale pattern")
 	}
@@ -163,11 +163,34 @@ func TestInstallClaudeUpgradesStaleGeneratedFile(t *testing.T) {
 
 	hookData := fs.Files["/city/hooks/claude.json"]
 	runtimeData := fs.Files["/city/.gc/settings.json"]
-	if !strings.Contains(claudeHookCommand(t, hookData, "PreCompact"), `gc handoff "context cycle"`) {
+	if !strings.Contains(claudeHookCommand(t, hookData, "PreCompact"), `gc handoff --auto "context cycle"`) {
 		t.Fatalf("upgraded claude hook missing gc handoff:\n%s", string(hookData))
 	}
 	if string(runtimeData) != string(hookData) {
 		t.Fatalf("runtime Claude settings should mirror upgraded hook settings:\n%s", string(runtimeData))
+	}
+}
+
+func TestInstallClaudeUpgradesRestartingPreCompactHandoff(t *testing.T) {
+	fs := fsys.NewFake()
+	current, err := readEmbedded("config/claude.json")
+	if err != nil {
+		t.Fatalf("readEmbedded: %v", err)
+	}
+	stale := strings.Replace(string(current), `gc handoff --auto \"context cycle\"`, `gc handoff \"context cycle\"`, 1)
+	if stale == string(current) {
+		t.Fatal("stale fixture did not diverge from current embedded config — check stale pattern")
+	}
+	fs.Files["/city/hooks/claude.json"] = []byte(stale)
+	fs.Files["/city/.gc/settings.json"] = []byte(stale)
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	hookData := fs.Files["/city/hooks/claude.json"]
+	if !strings.Contains(claudeHookCommand(t, hookData, "PreCompact"), `gc handoff --auto "context cycle"`) {
+		t.Fatalf("upgraded claude hook missing gc handoff --auto:\n%s", string(hookData))
 	}
 }
 
@@ -335,7 +358,7 @@ func TestInstallClaudeUpgradesGeneratedFileWithAllKnownDrift(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readEmbedded: %v", err)
 	}
-	stale := strings.Replace(string(current), `gc handoff \"context cycle\"`, `gc prime --hook`, 1)
+	stale := strings.Replace(string(current), `gc handoff --auto \"context cycle\"`, `gc prime --hook`, 1)
 	stale = strings.Replace(stale, `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook`, `gc prime --hook`, 1)
 	stale = strings.Replace(stale, `"matcher": "startup"`, `"matcher": ""`, 1)
 	if stale == string(current) {
@@ -365,7 +388,7 @@ func TestInstallClaudeUpgradesGeneratedFileWithAllKnownDrift(t *testing.T) {
 			return entries[0].Matcher
 		}())
 	}
-	if !strings.Contains(claudeHookCommand(t, hookData, "PreCompact"), `gc handoff "context cycle"`) {
+	if !strings.Contains(claudeHookCommand(t, hookData, "PreCompact"), `gc handoff --auto "context cycle"`) {
 		t.Fatalf("upgraded all-drift PreCompact hook missing gc handoff:\n%s", string(hookData))
 	}
 	if string(runtimeData) != string(hookData) {

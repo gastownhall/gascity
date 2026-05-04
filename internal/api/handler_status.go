@@ -56,6 +56,7 @@ func (s *Server) buildStatusBody() StatusBody {
 	cityName := s.state.CityName()
 	sessTmpl := cfg.Workspace.SessionTemplate
 	sessionSnapshot := s.statusSessionSnapshot()
+	partialErrors := append([]string(nil), sessionSnapshot.partialErrors...)
 
 	// Count agents by state.
 	var ac agentCounts
@@ -113,7 +114,10 @@ func (s *Server) buildStatusBody() StatusBody {
 		seenStores[key] = true
 		list, err := store.List(beads.ListQuery{AllowScan: true})
 		if err != nil {
-			continue
+			partialErrors = append(partialErrors, fmt.Sprintf("rig %s work: %v", rigName, err))
+			if !beads.IsPartialResult(err) || len(list) == 0 {
+				continue
+			}
 		}
 		for _, b := range list {
 			switch b.Type {
@@ -149,24 +153,27 @@ func (s *Server) buildStatusBody() StatusBody {
 	uptime := int(time.Since(s.state.StartedAt()).Seconds())
 
 	return StatusBody{
-		Name:       cityName,
-		Path:       s.state.CityPath(),
-		Version:    s.state.Version(),
-		UptimeSec:  uptime,
-		Suspended:  cfg.Workspace.Suspended,
-		AgentCount: ac.Total,
-		RigCount:   rc.Total,
-		Running:    rawRunning,
-		Agents:     ac,
-		Rigs:       rc,
-		Work:       wc,
-		Mail:       mc,
+		Name:          cityName,
+		Path:          s.state.CityPath(),
+		Version:       s.state.Version(),
+		UptimeSec:     uptime,
+		Suspended:     cfg.Workspace.Suspended,
+		AgentCount:    ac.Total,
+		RigCount:      rc.Total,
+		Running:       rawRunning,
+		Agents:        ac,
+		Rigs:          rc,
+		Work:          wc,
+		Mail:          mc,
+		Partial:       len(partialErrors) > 0,
+		PartialErrors: partialErrors,
 	}
 }
 
 type statusSessionSnapshot struct {
 	bySessionName map[string]statusSessionInfo
 	byTemplate    map[string][]statusSessionInfo
+	partialErrors []string
 }
 
 type statusSessionInfo struct {
@@ -190,9 +197,13 @@ func (s *Server) statusSessionSnapshot() statusSessionSnapshot {
 		return snapshot
 	}
 
-	rows, err := listSessionBeadsForReadModel(store)
+	rows, partialErrors, err := sessionReadModelRows(store)
 	if err != nil {
+		snapshot.partialErrors = []string{fmt.Sprintf("sessions: %v", err)}
 		return snapshot
+	}
+	for _, partialErr := range partialErrors {
+		snapshot.partialErrors = append(snapshot.partialErrors, fmt.Sprintf("sessions: %s", partialErr))
 	}
 
 	seenSessionName := make(map[string]bool, len(rows))

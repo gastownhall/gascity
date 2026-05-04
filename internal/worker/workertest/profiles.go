@@ -6,9 +6,10 @@ type ProfileID string
 // revive:disable:exported
 const ( //nolint:revive // exported profile IDs are documented by the enclosing type.
 	// Profile* identify the canonical worker profiles used by conformance tests.
-	ProfileClaudeTmuxCLI ProfileID = "claude/tmux-cli"
-	ProfileCodexTmuxCLI  ProfileID = "codex/tmux-cli"
-	ProfileGeminiTmuxCLI ProfileID = "gemini/tmux-cli"
+	ProfileClaudeTmuxCLI   ProfileID = "claude/tmux-cli"
+	ProfileCodexTmuxCLI    ProfileID = "codex/tmux-cli"
+	ProfileGeminiTmuxCLI   ProfileID = "gemini/tmux-cli"
+	ProfileOpenCodeTmuxCLI ProfileID = "opencode/tmux-cli"
 )
 
 // revive:enable:exported
@@ -86,6 +87,22 @@ func Phase1Profiles() []Profile {
 				RecallPromptContains:   "Repeat the exact fixture summary from earlier before answering.",
 				RecallResponseContains: "The fixture models normalized transcript history.",
 				ResetResponseContains:  "I cannot repeat the earlier fixture summary because this chat is fresh.",
+			},
+		},
+		{
+			ID:       ProfileOpenCodeTmuxCLI,
+			Provider: "opencode/tmux-cli",
+			WorkDir:  "/tmp/gascity/phase1/opencode",
+			Fixtures: ProfileFixtureSet{
+				FreshRoot:        "testdata/fixtures/opencode/fresh",
+				ContinuationRoot: "testdata/fixtures/opencode/continuation",
+				ResetRoot:        "testdata/fixtures/opencode/reset",
+			},
+			Continuation: ContinuationOracle{
+				AnchorText:             "OpenCode phase 1 validates the tmux CLI transcript contract.",
+				RecallPromptContains:   "Repeat the exact OpenCode phase-1 summary from earlier before answering.",
+				RecallResponseContains: "OpenCode phase 1 validates the tmux CLI transcript contract.",
+				ResetResponseContains:  "I cannot repeat the earlier OpenCode summary because this session started fresh.",
 			},
 		},
 	}

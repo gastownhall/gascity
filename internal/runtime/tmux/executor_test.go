@@ -271,6 +271,67 @@ func TestIsSessionRunningFallsBackToSessionExistsOnPaneQueryError(t *testing.T) 
 	}
 }
 
+func TestProviderIsDeadRuntimeSessionRequiresEveryPaneDead(t *testing.T) {
+	fe := &fakeExecutor{
+		out: "1\n0",
+	}
+	tm := &Tmux{cfg: Config{SocketName: "x"}, exec: fe}
+	p := &Provider{tm: tm}
+
+	dead, err := p.IsDeadRuntimeSession("runner")
+	if err != nil {
+		t.Fatalf("IsDeadRuntimeSession: %v", err)
+	}
+	if dead {
+		t.Fatal("IsDeadRuntimeSession = true, want false when any pane is live")
+	}
+
+	if len(fe.calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(fe.calls))
+	}
+	want := []string{"-u", "-L", "x", "list-panes", "-s", "-t", "=runner", "-F", "#{pane_dead}"}
+	if len(fe.calls[0]) != len(want) {
+		t.Fatalf("call = %v, want %v", fe.calls[0], want)
+	}
+	for i := range want {
+		if fe.calls[0][i] != want[i] {
+			t.Fatalf("call arg %d = %q, want %q; call=%v", i, fe.calls[0][i], want[i], fe.calls[0])
+		}
+	}
+}
+
+func TestProviderIsDeadRuntimeSessionTrueWhenAllPanesDead(t *testing.T) {
+	fe := &fakeExecutor{
+		out: "1\n1",
+	}
+	tm := &Tmux{cfg: Config{SocketName: "x"}, exec: fe}
+	p := &Provider{tm: tm}
+
+	dead, err := p.IsDeadRuntimeSession("runner")
+	if err != nil {
+		t.Fatalf("IsDeadRuntimeSession: %v", err)
+	}
+	if !dead {
+		t.Fatal("IsDeadRuntimeSession = false, want true when all panes are dead")
+	}
+}
+
+func TestProviderIsDeadRuntimeSessionTreatsAbsentSessionAsNotDead(t *testing.T) {
+	fe := &fakeExecutor{
+		err: ErrSessionNotFound,
+	}
+	tm := &Tmux{cfg: Config{SocketName: "x"}, exec: fe}
+	p := &Provider{tm: tm}
+
+	dead, err := p.IsDeadRuntimeSession("missing")
+	if err != nil {
+		t.Fatalf("IsDeadRuntimeSession: %v", err)
+	}
+	if dead {
+		t.Fatal("IsDeadRuntimeSession = true, want false for absent session")
+	}
+}
+
 func TestWaitForRuntimeReadyCapturesPromptAboveBlankFooter(t *testing.T) {
 	fe := &promptFooterExecutor{}
 	tm := &Tmux{cfg: DefaultConfig(), exec: fe}
