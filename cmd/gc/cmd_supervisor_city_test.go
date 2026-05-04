@@ -1440,6 +1440,7 @@ func TestCmdStopSupervisorManagedCityReliesOnSupervisorCleanup(t *testing.T) {
 	logFile := filepath.Join(t.TempDir(), "ops.log")
 	script := writeSpyScript(t, logFile)
 	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
 
 	withSupervisorTestHooks(
 		t,
@@ -1519,6 +1520,7 @@ func TestReconcileCitiesNameDriftStopsBeadsProvider(t *testing.T) {
 	logFile := filepath.Join(t.TempDir(), "ops.log")
 	script := writeSpyScript(t, logFile)
 	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
 	if err := reg.Register(cityPath, "new-name"); err != nil {
@@ -1576,6 +1578,7 @@ func TestSupervisorCreatesControllerSocketForManagedCity(t *testing.T) {
 	logFile := filepath.Join(t.TempDir(), "ops.log")
 	script := writeSpyScript(t, logFile)
 	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
 	if err := reg.Register(cityPath, "test-city"); err != nil {

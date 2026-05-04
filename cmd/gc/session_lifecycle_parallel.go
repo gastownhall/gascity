@@ -794,6 +794,7 @@ func runPreparedStartCandidate(
 	}
 	defer cancel()
 	_, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg)
+	startCtxErr := startCtx.Err()
 	if err != nil && errors.Is(err, sessionpkg.ErrStateSync) {
 		running, runningErr := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, item.candidate.name())
 		if runningErr == nil && running {
@@ -836,21 +837,21 @@ func runPreparedStartCandidate(
 	}
 	var outcome string
 	switch {
-	case startCtx.Err() == context.DeadlineExceeded:
-		outcome = "deadline_exceeded"
-		if err == nil {
-			err = fmt.Errorf("resuming session: %w", context.DeadlineExceeded)
-		}
-	case startCtx.Err() == context.Canceled:
-		outcome = "canceled"
-		if err == nil {
-			err = fmt.Errorf("resuming session: %w", context.Canceled)
-		}
-	case err == nil:
-		outcome = "success"
 	case errors.Is(err, runtime.ErrSessionInitializing):
 		outcome = "session_initializing"
 		err = nil
+	case startCtxErr == context.DeadlineExceeded:
+		outcome = "deadline_exceeded"
+		if err == nil {
+			err = fmt.Errorf("session %q startup: %w", item.candidate.name(), context.DeadlineExceeded)
+		}
+	case startCtxErr == context.Canceled:
+		outcome = "canceled"
+		if err == nil {
+			err = fmt.Errorf("session %q startup: %w", item.candidate.name(), context.Canceled)
+		}
+	case err == nil:
+		outcome = "success"
 	case errors.Is(err, runtime.ErrSessionExists):
 		running, runningErr := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, item.candidate.name())
 		switch {
