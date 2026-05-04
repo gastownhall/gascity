@@ -660,11 +660,24 @@ func integrationEnvDolt() []string {
 func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	env := filterEnv(os.Environ(), "GC_BEADS")
 	env = filterEnv(env, "GC_DOLT")
+	env = filterEnv(env, "GC_BEADS_SCOPE_ROOT")
 	env = filterEnv(env, "PATH")
 	env = filterEnv(env, "GC_HOME")
+	env = filterEnv(env, "GC_DIR")
+	env = filterEnv(env, "GC_CITY")
+	env = filterEnv(env, "GC_CITY_PATH")
+	env = filterEnv(env, "GC_CITY_ROOT")
+	env = filterEnv(env, "GC_CITY_RUNTIME_DIR")
+	env = filterEnv(env, "GC_AGENT")
+	env = filterEnv(env, "GC_RIG")
+	env = filterEnv(env, "GC_RIG_ROOT")
+	env = filterEnv(env, "GC_TEMPLATE")
+	env = filterEnv(env, "GC_SESSION_NAME")
 	env = filterEnv(env, "XDG_RUNTIME_DIR")
 	env = filterEnv(env, integrationRealBDBinaryEnv)
 	env = filterEnv(env, "DOLT_ROOT_PATH")
+	env = filterEnv(env, "BEADS_DIR")
+	env = filterEnv(env, "BEADS_ACTOR")
 	env = filterEnv(env, "GC_DOLT_HOST")
 	env = filterEnv(env, "GC_DOLT_PORT")
 	env = filterEnv(env, "GC_DOLT_USER")
@@ -1089,6 +1102,19 @@ func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "0")
 	t.Setenv("BEADS_DOLT_SERVER_USER", "ambient-beads-user")
 	t.Setenv("BEADS_DOLT_PASSWORD", "ambient-beads-password")
+	t.Setenv("BEADS_DIR", "/host/beads")
+	t.Setenv("BEADS_ACTOR", "host-agent")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "/host/scope")
+	t.Setenv("GC_DIR", "/host/gc-dir")
+	t.Setenv("GC_CITY", "/host/city")
+	t.Setenv("GC_CITY_PATH", "/host/city-path")
+	t.Setenv("GC_CITY_ROOT", "/host/city-root")
+	t.Setenv("GC_CITY_RUNTIME_DIR", "/host/runtime")
+	t.Setenv("GC_AGENT", "host-agent")
+	t.Setenv("GC_RIG", "host-rig")
+	t.Setenv("GC_RIG_ROOT", "/host/rig")
+	t.Setenv("GC_TEMPLATE", "host/template")
+	t.Setenv("GC_SESSION_NAME", "host-session")
 	env := integrationEnv()
 	got := parseEnvList(env)
 
@@ -1119,6 +1145,19 @@ func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
 		"BEADS_DOLT_SERVER_PORT",
 		"BEADS_DOLT_SERVER_USER",
 		"BEADS_DOLT_PASSWORD",
+		"BEADS_DIR",
+		"BEADS_ACTOR",
+		"GC_BEADS_SCOPE_ROOT",
+		"GC_DIR",
+		"GC_CITY",
+		"GC_CITY_PATH",
+		"GC_CITY_ROOT",
+		"GC_CITY_RUNTIME_DIR",
+		"GC_AGENT",
+		"GC_RIG",
+		"GC_RIG_ROOT",
+		"GC_TEMPLATE",
+		"GC_SESSION_NAME",
 	} {
 		if _, ok := got[key]; ok {
 			t.Fatalf("%s leaked into integration env: %v", key, got[key])
