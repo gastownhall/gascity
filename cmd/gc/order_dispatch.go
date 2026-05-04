@@ -31,6 +31,25 @@ const (
 	orderTrackingSweepMetadataReason       = "stale-order-tracking"
 	orderTrackingSweepMetadataInitiator    = "order-tracking-sweep"
 	orderTrackingWatchdogMetadataInitiator = "controller-watchdog"
+
+	// orphanedOrderTrackingCloseReason is the canonical close_reason
+	// stamped on orphan-sweep closes. It satisfies bd's
+	// validation.on-close=error validator (which rejects closes without
+	// an explicit --reason of >=20 characters) and provides a meaningful
+	// audit trail in the closed bead's metadata. Without this, the close
+	// is rejected, the bead stays open, and the next sweep tick re-stamps
+	// identical metadata — generating one bead.updated event per tick per
+	// bead.
+	orphanedOrderTrackingCloseReason = "order-tracking sweep: orphaned by prior controller"
+
+	// staleOrderTrackingCloseReason is the canonical close_reason stamped
+	// on stale-sweep closes (both the periodic order-tracking-sweep order
+	// and the controller's runtime watchdog). Same rationale as
+	// orphanedOrderTrackingCloseReason — without an explicit reason of
+	// >=20 chars, validation.on-close=error rejects every close, the
+	// watchdog retries every 30s, and the order-firing pipeline silently
+	// wedges (no bead.created/closed events, only metadata churn).
+	staleOrderTrackingCloseReason = "order-tracking sweep: stale tracking bead exceeded retention window"
 )
 
 // orderDispatcher evaluates order trigger conditions and dispatches due
@@ -779,7 +798,9 @@ func sweepOrphanedOrderTracking(store beads.Store) (int, error) {
 	for i, b := range all {
 		ids[i] = b.ID
 	}
-	n, err := store.CloseAll(ids, nil)
+	n, err := store.CloseAll(ids, map[string]string{
+		"close_reason": orphanedOrderTrackingCloseReason,
+	})
 	if err != nil {
 		return n, fmt.Errorf("closing orphaned order-tracking beads: %w", err)
 	}
@@ -820,6 +841,7 @@ func sweepStaleOrderTracking(store beads.Store, now time.Time, staleAfter time.D
 	}
 	metadata := map[string]string{
 		"order_tracking_sweep": orderTrackingSweepMetadataReason,
+		"close_reason":         staleOrderTrackingCloseReason,
 	}
 	if initiator != "" {
 		metadata["order_tracking_sweep_by"] = initiator

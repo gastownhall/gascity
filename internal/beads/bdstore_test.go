@@ -676,6 +676,165 @@ func TestBdStoreCloseAllFallbackSuccessReturnsNil(t *testing.T) {
 	}
 }
 
+// captureCloseAllRunner returns a CommandRunner that records the args
+// of any `close` invocation into the provided slice and returns canned
+// closed-status JSON for every bead in the batch. update calls (from
+// SetMetadataBatch) succeed with empty output. Used by the
+// CloseAll-close-reason-forwarding tests below to assert the exact
+// shape of the bd close argv.
+func captureCloseAllRunner(closeArgs *[]string, ids ...string) beads.CommandRunner {
+	closedJSON := []byte(`[`)
+	for i, id := range ids {
+		if i > 0 {
+			closedJSON = append(closedJSON, ',')
+		}
+		closedJSON = append(closedJSON, []byte(`{"id":"`+id+`","title":"t","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}`)...)
+	}
+	closedJSON = append(closedJSON, ']')
+	return func(_, _ string, args ...string) ([]byte, error) {
+		if len(args) == 0 {
+			return nil, fmt.Errorf("empty args")
+		}
+		switch args[0] {
+		case "update":
+			return []byte(`[]`), nil
+		case "close":
+			*closeArgs = append([]string{}, args...)
+			return closedJSON, nil
+		}
+		return nil, fmt.Errorf("unexpected command: %v", args)
+	}
+}
+
+// TestBdStoreCloseAllForwardsCloseReason verifies that when the metadata
+// map passed to CloseAll contains a close_reason value, BdStore forwards
+// it as the --reason argument to bd close. This is required for cities
+// running with validation.on-close=error, where bd rejects close calls
+// without an explicit reason of >=20 characters. Mirrors the per-bead
+// BdStore.Close pattern for the batch path: CloseAll uses the shared
+// metadata map's close_reason because callers stamp the same metadata
+// on every bead in the batch.
+func TestBdStoreCloseAllForwardsCloseReason(t *testing.T) {
+	const reason = "order-tracking sweep: stale beyond watchdog window"
+	var closeArgs []string
+	runner := captureCloseAllRunner(&closeArgs, "bd-1", "bd-2")
+
+	s := beads.NewBdStore("/city", runner)
+	n, err := s.CloseAll([]string{"bd-1", "bd-2"}, map[string]string{
+		"close_reason": reason,
+	})
+	if err != nil {
+		t.Fatalf("CloseAll: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("closed = %d, want 2", n)
+	}
+
+	// Expected argv: close --force --json --reason "<phrase>" bd-1 bd-2
+	want := []string{"close", "--force", "--json", "--reason", reason, "bd-1", "bd-2"}
+	if len(closeArgs) != len(want) {
+		t.Fatalf("close args length = %d, want %d\ngot:  %v\nwant: %v", len(closeArgs), len(want), closeArgs, want)
+	}
+	for i := range want {
+		if closeArgs[i] != want[i] {
+			t.Errorf("close args[%d] = %q, want %q\nfull args: %v", i, closeArgs[i], want[i], closeArgs)
+		}
+	}
+}
+
+// TestBdStoreCloseAllOmitsReasonWhenAbsent verifies that when no
+// close_reason is present in the metadata map, CloseAll does not pass
+// --reason and lets bd assign its default. Preserves backward
+// compatibility for callers that don't pre-stamp a reason.
+func TestBdStoreCloseAllOmitsReasonWhenAbsent(t *testing.T) {
+	var closeArgs []string
+	runner := captureCloseAllRunner(&closeArgs, "bd-1")
+
+	s := beads.NewBdStore("/city", runner)
+	if _, err := s.CloseAll([]string{"bd-1"}, map[string]string{
+		"source": "wave1",
+	}); err != nil {
+		t.Fatalf("CloseAll: %v", err)
+	}
+
+	for _, arg := range closeArgs {
+		if arg == "--reason" {
+			t.Errorf("close args contain --reason for metadata without close_reason: %v", closeArgs)
+			return
+		}
+	}
+}
+
+// TestBdStoreCloseAllOmitsReasonWhenNilMetadata verifies that when nil
+// metadata is passed, CloseAll does not pass --reason. Same shape as
+// the absent-key case but exercises the empty-map branch (nil maps
+// read as empty in Go).
+func TestBdStoreCloseAllOmitsReasonWhenNilMetadata(t *testing.T) {
+	var closeArgs []string
+	runner := captureCloseAllRunner(&closeArgs, "bd-1")
+
+	s := beads.NewBdStore("/city", runner)
+	if _, err := s.CloseAll([]string{"bd-1"}, nil); err != nil {
+		t.Fatalf("CloseAll: %v", err)
+	}
+
+	for _, arg := range closeArgs {
+		if arg == "--reason" {
+			t.Errorf("close args contain --reason for nil metadata: %v", closeArgs)
+			return
+		}
+	}
+}
+
+// TestBdStoreCloseAllTrimsCloseReason verifies that whitespace
+// surrounding metadata.close_reason is stripped before forwarding, so
+// leading/trailing newlines or spaces from metadata persistence don't
+// pass through to bd's validator.
+func TestBdStoreCloseAllTrimsCloseReason(t *testing.T) {
+	var closeArgs []string
+	runner := captureCloseAllRunner(&closeArgs, "bd-1")
+
+	s := beads.NewBdStore("/city", runner)
+	if _, err := s.CloseAll([]string{"bd-1"}, map[string]string{
+		"close_reason": "  order-tracking sweep: stale beyond watchdog window  \n",
+	}); err != nil {
+		t.Fatalf("CloseAll: %v", err)
+	}
+
+	const want = "order-tracking sweep: stale beyond watchdog window"
+	for i, arg := range closeArgs {
+		if arg == "--reason" && i+1 < len(closeArgs) {
+			if closeArgs[i+1] != want {
+				t.Errorf("forwarded reason = %q, want %q (trimmed)", closeArgs[i+1], want)
+			}
+			return
+		}
+	}
+	t.Errorf("close args missing --reason: %v", closeArgs)
+}
+
+// TestBdStoreCloseAllWhitespaceCloseReason verifies that a
+// whitespace-only close_reason is treated as absent — no --reason is
+// forwarded. Mirrors the trim-then-empty-check pattern.
+func TestBdStoreCloseAllWhitespaceCloseReason(t *testing.T) {
+	var closeArgs []string
+	runner := captureCloseAllRunner(&closeArgs, "bd-1")
+
+	s := beads.NewBdStore("/city", runner)
+	if _, err := s.CloseAll([]string{"bd-1"}, map[string]string{
+		"close_reason": "   \n",
+	}); err != nil {
+		t.Fatalf("CloseAll: %v", err)
+	}
+
+	for _, arg := range closeArgs {
+		if arg == "--reason" {
+			t.Errorf("close args contain --reason for whitespace-only close_reason: %v", closeArgs)
+			return
+		}
+	}
+}
+
 // --- List ---
 
 func TestBdStoreList(t *testing.T) {

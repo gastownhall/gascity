@@ -2623,6 +2623,103 @@ func TestStartupSweepThenBuildDispatcher(t *testing.T) {
 	}
 }
 
+
+// TestSweepOrphanedOrderTracking_StampsCloseReason verifies that the
+// startup-time orphan sweep also stamps close_reason. The original
+// callsite passed nil metadata; under validation.on-close=error this
+// silently failed and left orphaned tracking beads open.
+func TestSweepOrphanedOrderTracking_StampsCloseReason(t *testing.T) {
+	if got := len(orphanedOrderTrackingCloseReason); got < 20 {
+		t.Fatalf("orphanedOrderTrackingCloseReason = %q (%d chars), want >=20", orphanedOrderTrackingCloseReason, got)
+	}
+
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{
+		Title:  "order:dolt-health",
+		Labels: []string{"order-run:dolt-health", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	closed, err := sweepOrphanedOrderTracking(store)
+	if err != nil {
+		t.Fatalf("sweepOrphanedOrderTracking: %v", err)
+	}
+	if closed != 1 {
+		t.Fatalf("closed = %d, want 1", closed)
+	}
+
+	final, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if final.Status != "closed" {
+		t.Fatalf("status = %q, want closed", final.Status)
+	}
+	if got := final.Metadata["close_reason"]; got != orphanedOrderTrackingCloseReason {
+		t.Errorf("close_reason = %q, want %q", got, orphanedOrderTrackingCloseReason)
+	}
+}
+
+// TestSweepStaleOrderTracking_StampsCloseReason verifies that the
+// runtime stale sweep (called every tick by the order-tracking-sweep
+// order AND every 30s by the controller's runtime watchdog) stamps
+// close_reason. The pre-fix callsite stamped order_tracking_sweep
+// metadata but no close_reason; under validation.on-close=error every
+// close was rejected, the watchdog retried indefinitely, and order
+// firing silently wedged.
+func TestSweepStaleOrderTracking_StampsCloseReason(t *testing.T) {
+	if got := len(staleOrderTrackingCloseReason); got < 20 {
+		t.Fatalf("staleOrderTrackingCloseReason = %q (%d chars), want >=20", staleOrderTrackingCloseReason, got)
+	}
+
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{
+		Title:  "order:dolt-health",
+		Labels: []string{"order-run:dolt-health", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Push the bead's CreatedAt into the past so it's outside the
+	// staleAfter window. MemStore stamps CreatedAt at Create time, but
+	// callers expose UpdateMetadata; we round-trip via direct field
+	// access on the returned bead by re-creating with the desired
+	// timestamp via the underlying clock isn't available, so we set
+	// staleAfter to a negative duration relative to the bead and pass
+	// a future "now" that's well past CreatedAt.
+	now := b.CreatedAt.Add(time.Hour)
+
+	closed, err := sweepStaleOrderTracking(store, now, time.Minute, nil, orderTrackingWatchdogMetadataInitiator)
+	if err != nil {
+		t.Fatalf("sweepStaleOrderTracking: %v", err)
+	}
+	if closed != 1 {
+		t.Fatalf("closed = %d, want 1", closed)
+	}
+
+	final, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if final.Status != "closed" {
+		t.Fatalf("status = %q, want closed", final.Status)
+	}
+	if got := final.Metadata["close_reason"]; got != staleOrderTrackingCloseReason {
+		t.Errorf("close_reason = %q, want %q", got, staleOrderTrackingCloseReason)
+	}
+	// Pre-fix metadata (order_tracking_sweep + initiator) must still be
+	// stamped — the new close_reason is additive, not a replacement.
+	if got := final.Metadata["order_tracking_sweep"]; got != orderTrackingSweepMetadataReason {
+		t.Errorf("order_tracking_sweep = %q, want %q", got, orderTrackingSweepMetadataReason)
+	}
+	if got := final.Metadata["order_tracking_sweep_by"]; got != orderTrackingWatchdogMetadataInitiator {
+		t.Errorf("order_tracking_sweep_by = %q, want %q", got, orderTrackingWatchdogMetadataInitiator)
+	}
+}
+
 func TestSweepOrphanedOrderTracking_RetryOnTransientError(t *testing.T) {
 	inner := beads.NewMemStore()
 	_, err := inner.Create(beads.Bead{

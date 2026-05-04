@@ -821,6 +821,22 @@ func (s *BdStore) Ping() error {
 
 // CloseAll closes multiple beads in batch and sets metadata on each.
 // Idempotent: closing an already-closed bead returns nil.
+//
+// Forwards metadata["close_reason"] as the --reason argument to the
+// batch bd close, so callers can satisfy validators like
+// validation.on-close=error (which rejects close calls without an
+// explicit --reason of >=20 characters). Whitespace is trimmed; an
+// empty or whitespace-only value is treated as absent and no --reason
+// flag is added — preserving backward compatibility for callers that
+// don't pre-stamp a reason. The same map is also written via
+// SetMetadataBatch on each bead before close, so the reason is
+// persisted in the bead's metadata as well as forwarded to bd.
+//
+// CloseAll uses the shared metadata map's close_reason because callers
+// stamp the same metadata on every bead in the batch — a single batch
+// close with one --reason matches caller intent. Per-bead reasons can
+// still be written via SetMetadata before invoking the per-id Close
+// path; that path reads each bead's own metadata.
 func (s *BdStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
@@ -836,8 +852,12 @@ func (s *BdStore) CloseAll(ids []string, metadata map[string]string) (int, error
 		}
 	}
 
-	// Batch close: bd close id1 id2 id3 ...
-	args := append([]string{"close", "--force", "--json"}, ids...)
+	// Batch close: bd close [--reason "..."] id1 id2 id3 ...
+	args := []string{"close", "--force", "--json"}
+	if reason := strings.TrimSpace(metadata["close_reason"]); reason != "" {
+		args = append(args, "--reason", reason)
+	}
+	args = append(args, ids...)
 	_, err := s.runner(s.dir, "bd", args...)
 	if err != nil {
 		// Fall back to individual closes on batch failure.
