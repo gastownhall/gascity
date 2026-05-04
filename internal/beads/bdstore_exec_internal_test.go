@@ -1,3 +1,5 @@
+//go:build !windows
+
 package beads
 
 import (
@@ -48,7 +50,7 @@ wait
 		t.Fatal("child pid was empty")
 	}
 
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		if err := exec.Command("kill", "-0", pid).Run(); err != nil {
 			return
 		}

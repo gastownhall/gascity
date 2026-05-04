@@ -1158,6 +1158,37 @@ func TestRunDoltCleanup_DryRunReportsUnsafeRigDatabaseName(t *testing.T) {
 	}
 }
 
+func TestRunDoltCleanup_DryRunDoesNotCountMissingRigMetadataAsError(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/rigs/silent/.beads/metadata.json"] = []byte(`{"database":"sqlite"}`)
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		Rigs: []resolverRig{
+			{Name: "missing", Path: "/rigs/missing"},
+			{Name: "silent", Path: "/rigs/silent"},
+		},
+		FS:                fs,
+		JSON:              true,
+		DiscoverProcesses: func() ([]DoltProcInfo, error) { return nil, nil },
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	}
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v\nstdout: %s", err, stdout.String())
+	}
+
+	if r.Summary.ErrorsTotal != 0 {
+		t.Fatalf("Summary.ErrorsTotal = %d, want 0 for dry-run metadata gaps; errors=%+v", r.Summary.ErrorsTotal, r.Errors)
+	}
+	if len(r.Errors) != 0 {
+		t.Fatalf("Errors = %+v, want none for dry-run metadata gaps", r.Errors)
+	}
+}
+
 func TestRunDoltCleanup_ForceDisablesDropAndPurgeWhenRigMetadataMissing(t *testing.T) {
 	fs := fsys.NewFake()
 	putFakeDirTree(fs, "/rigs/foo/.beads/dolt/.dolt_dropped_databases", map[string]int64{
@@ -1264,14 +1295,14 @@ func TestRunDoltCleanup_ForceRefusesDropWhenApplyPlanExceedsMaxOrphanDBs(t *test
 	if len(client.dropped) != 0 {
 		t.Fatalf("dropped = %v, want no forced drops when apply plan exceeds max", client.dropped)
 	}
-	if r.Dropped.Count != 0 || len(r.Dropped.Names) != 0 {
-		t.Fatalf("Dropped = %+v, want no actual drops when max-orphan guard refuses", r.Dropped)
+	if r.Dropped.Count != 3 || !equalStringSlice(r.Dropped.Names, []string{"testdb_a", "testdb_b", "testdb_c"}) {
+		t.Fatalf("Dropped = %+v, want planned drops when max-orphan guard refuses", r.Dropped)
 	}
 	if r.Summary.ErrorsTotal != 1 {
 		t.Fatalf("Summary.ErrorsTotal = %d, want 1; errors=%+v", r.Summary.ErrorsTotal, r.Errors)
 	}
-	if len(r.Errors) != 1 || r.Errors[0].Stage != "drop" || !strings.Contains(r.Errors[0].Error, "max_orphans_for_sql") {
-		t.Fatalf("Errors = %+v, want max orphan DB refusal", r.Errors)
+	if len(r.Errors) != 1 || r.Errors[0].Stage != "drop" || !strings.Contains(r.Errors[0].Error, "--max-orphan-dbs") || strings.Contains(r.Errors[0].Error, "max_orphans_for_sql") {
+		t.Fatalf("Errors = %+v, want user-facing max orphan DB refusal", r.Errors)
 	}
 }
 

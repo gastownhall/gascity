@@ -41,8 +41,9 @@ func runPurgeStage(report *CleanupReport, opts cleanupOptions) {
 
 	var totalBytes int64
 	bytesByRigDB := map[string]int64{}
+	eligibleRigDBs := map[string]bool{}
 	for _, rig := range opts.Rigs {
-		if opts.Force && !rigSharesResolvedDoltServer(rig, opts) {
+		if !rigSharesResolvedDoltServer(rig, opts) {
 			continue
 		}
 		root := filepath.Join(rig.Path, droppedDatabasesDir)
@@ -52,7 +53,9 @@ func runPurgeStage(report *CleanupReport, opts cleanupOptions) {
 			continue
 		}
 		totalBytes += bytes
-		bytesByRigDB[rigDoltDatabaseName(rig, opts.FS)] += bytes
+		dbName := rigDoltDatabaseName(rig, opts.FS)
+		bytesByRigDB[dbName] += bytes
+		eligibleRigDBs[dbName] = true
 	}
 
 	if !opts.Force {
@@ -82,6 +85,9 @@ func runPurgeStage(report *CleanupReport, opts cleanupOptions) {
 	allOK := true
 	var reclaimedBytes int64
 	for _, rp := range report.RigsProtected {
+		if !eligibleRigDBs[rp.DB] {
+			continue
+		}
 		if !live[rp.DB] {
 			if bytesByRigDB[rp.DB] > 0 {
 				allOK = false
@@ -119,7 +125,7 @@ func rigSharesResolvedDoltServer(rig resolverRig, opts cleanupOptions) bool {
 	}
 	port, ok := rigPortFileValue(rig, opts.FS)
 	if !ok {
-		return true
+		return opts.PortResolution.Fallback
 	}
 	return port == opts.PortResolution.Port
 }

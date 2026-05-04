@@ -217,8 +217,10 @@ func runDoltCleanup(opts cleanupOptions, stdout, stderr io.Writer) int {
 		},
 		RigsProtected: protections,
 	}
-	for _, e := range protectionErrors {
-		recordCleanupError(&report, "rig", e.rig, e.err)
+	if opts.Force {
+		for _, e := range protectionErrors {
+			recordCleanupError(&report, "rig", e.rig, e.err)
+		}
 	}
 	recordUnsafeRigDatabaseNames(&report)
 
@@ -401,7 +403,7 @@ func protectedDoltPortsForReap(opts cleanupOptions) map[int]string {
 	if opts.PortResolution.Port <= 0 {
 		return ports
 	}
-	if opts.PortResolution.Fallback || opts.PortResolution.Source == "legacy default" {
+	if opts.PortResolution.Fallback {
 		return ports
 	}
 	source := opts.PortResolution.Source
