@@ -423,6 +423,12 @@ func bdDolt(dir string, args ...string) (string, error) {
 	if err == nil || dir == "" || !managedDoltTransportRetryable(out) {
 		return out, err
 	}
+	if _, readyErr := waitForManagedDoltCityReady(env, dir, 20*time.Second); readyErr == nil {
+		if port, ok := currentManagedDoltPortForTest(dir); ok {
+			env = appendManagedDoltEndpointEnv(env, port)
+		}
+		return runCommand(dir, env, integrationBDCommandTimeout, bdBinary, args...)
+	}
 	if port, ok := ensureManagedDoltPortForTest(dir); ok {
 		env = appendManagedDoltEndpointEnv(env, port)
 		return runCommand(dir, env, integrationBDCommandTimeout, bdBinary, args...)
@@ -947,12 +953,21 @@ func managedDoltTransportRetryable(out string) bool {
 		"broken pipe",
 		"unexpected eof",
 		"bad connection",
+		"dolt circuit breaker is open",
+		"server appears down",
 	} {
 		if strings.Contains(msg, marker) {
 			return true
 		}
 	}
 	return false
+}
+
+func TestManagedDoltTransportRetryableIncludesCircuitBreaker(t *testing.T) {
+	out := `{"error":"failed to open database: dolt circuit breaker is open: server appears down, failing fast (cooldown 5s)"}`
+	if !managedDoltTransportRetryable(out) {
+		t.Fatalf("managedDoltTransportRetryable(%q) = false, want true", out)
+	}
 }
 
 func testPortReachable(port string) bool {
