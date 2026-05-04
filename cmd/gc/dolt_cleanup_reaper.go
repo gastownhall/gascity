@@ -75,29 +75,38 @@ func extractConfigPath(argv []string) string {
 	return ""
 }
 
-// isTestConfigPath reports whether p matches the architect-specified test
-// allowlist (§4.3 step 3): /tmp/Test*, <tempDir>/Test*, or
-// <homeDir>/.gotmp/Test*. The leading `Test` prefix matches Go's
-// testing-package convention; `go test` writes tmp dirs under those roots when
-// fixtures spin up dolt sql-server.
+// isTestConfigPath reports whether p matches the cleanup allowlist for test
+// Dolt configs: Go test temp roots, plus known Gas City unit-test prefixes
+// that use short socket-safe directories under os.TempDir().
 func isTestConfigPath(p, homeDir, tempDir string) bool {
 	if p == "" {
 		return false
 	}
 	clean := filepath.Clean(p)
-	if hasTestChildPrefix(clean, "/tmp") {
+	if hasTestChildPrefix(clean, "/tmp", testConfigPathPrefixes()) {
 		return true
 	}
-	if hasTestChildPrefix(clean, tempDir) {
+	if hasTestChildPrefix(clean, tempDir, testConfigPathPrefixes()) {
 		return true
 	}
 	if homeDir == "" {
 		return false
 	}
-	return hasTestChildPrefix(clean, filepath.Join(homeDir, ".gotmp"))
+	return hasTestChildPrefix(clean, filepath.Join(homeDir, ".gotmp"), []string{"Test"})
 }
 
-func hasTestChildPrefix(cleanPath, root string) bool {
+func testConfigPathPrefixes() []string {
+	return []string{
+		"Test",
+		"gc-state-runtime-builtin-",
+		"gc-state-mutation-builtin-",
+		"gc-supervisor-city-",
+		"gc-reload-invalid-",
+		"gc-rename-",
+	}
+}
+
+func hasTestChildPrefix(cleanPath, root string, prefixes []string) bool {
 	if root == "" {
 		return false
 	}
@@ -109,7 +118,30 @@ func hasTestChildPrefix(cleanPath, root string) bool {
 	if !strings.HasPrefix(cleanPath, rootPrefix) {
 		return false
 	}
-	return strings.HasPrefix(strings.TrimPrefix(cleanPath, rootPrefix), "Test")
+	child := strings.TrimPrefix(cleanPath, rootPrefix)
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(child, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func configUnderActiveTestRoot(configPath string, activeTestRoots []string) bool {
+	if configPath == "" {
+		return false
+	}
+	cleanConfig := filepath.Clean(configPath)
+	for _, root := range activeTestRoots {
+		cleanRoot := filepath.Clean(root)
+		if cleanRoot == "." || cleanRoot == string(filepath.Separator) {
+			continue
+		}
+		if cleanConfig == cleanRoot || strings.HasPrefix(cleanConfig, cleanRoot+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
 }
 
 // classifyDoltProcess applies the architect's reaper decision rules (§4.3) to a
@@ -118,10 +150,11 @@ func hasTestChildPrefix(cleanPath, root string) bool {
 //  1. Any port match against rigPortByPort → protected (active rig server),
 //     even if the cmdline says it's a test path (defense in depth).
 //  2. Else extract --config path; matches /tmp/Test*, os.TempDir()/Test*,
-//     or ~/.gotmp/Test* → reap.
-//  3. Else protect with a reason that echoes the actual config path so
+//     known Gas City temp prefixes → reap.
+//  3. Else protect if the config sits under an active test root.
+//  4. Else protect with a reason that echoes the actual config path so
 //     operators can decide whether to kill it manually (architect Open Q 0).
-func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, tempDir string) reapClassification {
+func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, tempDir string, activeTestRoots []string) reapClassification {
 	for _, port := range p.Ports {
 		if name, ok := rigPortByPort[port]; ok {
 			return reapClassification{
@@ -136,6 +169,13 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 		return reapClassification{
 			Action: "protect",
 			Reason: "no --config path detected; refusing to kill an unidentified dolt server",
+		}
+	}
+	if configUnderActiveTestRoot(cfgPath, activeTestRoots) {
+		return reapClassification{
+			Action:     "protect",
+			Reason:     fmt.Sprintf("config %q is under an active test root", cfgPath),
+			ConfigPath: cfgPath,
 		}
 	}
 	if isTestConfigPath(cfgPath, homeDir, tempDir) {
@@ -153,10 +193,10 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 // planOrphanReap classifies each dolt sql-server process and partitions them
 // into reap targets vs protected processes. Order is preserved so the report
 // renders deterministically.
-func planOrphanReap(procs []DoltProcInfo, rigPortByPort map[int]string, homeDir, tempDir string) ReapPlan {
+func planOrphanReap(procs []DoltProcInfo, rigPortByPort map[int]string, homeDir, tempDir string, activeTestRoots []string) ReapPlan {
 	plan := ReapPlan{}
 	for _, p := range procs {
-		c := classifyDoltProcess(p, rigPortByPort, homeDir, tempDir)
+		c := classifyDoltProcess(p, rigPortByPort, homeDir, tempDir, activeTestRoots)
 		switch c.Action {
 		case "reap":
 			plan.Reap = append(plan.Reap, ReapTarget{
