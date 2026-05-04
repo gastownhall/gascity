@@ -1445,7 +1445,7 @@ type getErrorStore struct {
 	getErr error
 }
 
-func (s *getErrorStore) Get(id string) (beads.Bead, error) {
+func (s *getErrorStore) Get(_ string) (beads.Bead, error) {
 	return beads.Bead{}, s.getErr
 }
 
