@@ -746,14 +746,26 @@ func listForControllerDemand(store beads.Store, query beads.ListQuery) ([]beads.
 }
 
 func readyForControllerDemand(store beads.Store) ([]beads.Bead, error) {
+	if cache, ok := store.(interface {
+		Backing() beads.Store
+	}); ok {
+		if _, ok := cache.Backing().(*beads.FileStore); ok {
+			return beads.ReadyLive(store)
+		}
+	}
 	// Controller demand reads are intentionally cache-tolerant, not
 	// authoritative lifecycle gates; CachedReady falls back whenever the cache
-	// has dirty or unknown dependency coverage.
+	// has dirty or unknown dependency coverage. An empty cached ready set is
+	// also not authoritative for long-running controllers because work can be
+	// added by an external `gc sling`/`bd` process after the cache was primed.
 	if cached, ok := store.(interface {
 		CachedReady() ([]beads.Bead, bool)
 	}); ok {
 		if ready, ok := cached.CachedReady(); ok {
-			return ready, nil
+			if len(ready) > 0 {
+				return ready, nil
+			}
+			return beads.ReadyLive(store)
 		}
 	}
 	return beads.ReadyLive(store)

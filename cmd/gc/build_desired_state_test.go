@@ -180,6 +180,60 @@ func TestCollectAssignedWorkBeadsUsesCachedReadyReadModel(t *testing.T) {
 	}
 }
 
+func TestCollectAssignedWorkBeadsFallsBackLiveWhenCachedReadyEmpty(t *testing.T) {
+	backing := beads.NewMemStore()
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	handoff, err := backing.Create(beads.Bead{
+		Title:    "externally slung handoff",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "repo/refinery",
+	})
+	if err != nil {
+		t.Fatalf("Create(handoff): %v", err)
+	}
+
+	got, _ := collectAssignedWorkBeads(&config.City{}, cache)
+	if len(got) != 1 || got[0].ID != handoff.ID {
+		t.Fatalf("collectAssignedWorkBeads returned %#v, want externally-created handoff %s", got, handoff.ID)
+	}
+}
+
+func TestCollectAssignedWorkBeadsUsesLiveReadyForFileBackedCache(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "beads.json")
+	controllerStore, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatalf("OpenFileStore(controller): %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(controllerStore, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	writerStore, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatalf("OpenFileStore(writer): %v", err)
+	}
+	handoff, err := writerStore.Create(beads.Bead{
+		Title:    "externally slung handoff",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "repo/refinery",
+	})
+	if err != nil {
+		t.Fatalf("Create(handoff): %v", err)
+	}
+
+	got, _ := collectAssignedWorkBeads(&config.City{}, cache)
+	if len(got) != 1 || got[0].ID != handoff.ID {
+		t.Fatalf("collectAssignedWorkBeads returned %#v, want externally-created handoff %s", got, handoff.ID)
+	}
+}
+
 func TestCollectAssignedWorkBeadsUsesCachedInProgressReadModel(t *testing.T) {
 	backing := &demandListCountingStore{Store: beads.NewMemStore()}
 	work, err := backing.Create(beads.Bead{
