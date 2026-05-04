@@ -396,13 +396,13 @@ func (fs *FileStore) ListOpen(status ...string) ([]Bead, error) {
 }
 
 // Ready reloads the on-disk store before listing ready beads.
-func (fs *FileStore) Ready() ([]Bead, error) {
+func (fs *FileStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
 	if err := fs.refreshReadStateLocked(); err != nil {
 		return nil, err
 	}
-	return fs.MemStore.Ready()
+	return fs.MemStore.Ready(query...)
 }
 
 // Children reloads the on-disk store before listing child beads.

@@ -245,7 +245,8 @@ func (m *MemStore) ListOpen(status ...string) ([]Bead, error) {
 
 // Ready returns all open beads with no open blocking dependencies, in
 // creation order.
-func (m *MemStore) Ready() ([]Bead, error) {
+func (m *MemStore) Ready(query ...ReadyQuery) ([]Bead, error) {
+	q := readyQueryFromArgs(query)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -260,6 +261,9 @@ func (m *MemStore) Ready() ([]Bead, error) {
 			continue
 		}
 		if IsReadyExcludedType(b.Type) {
+			continue
+		}
+		if q.Assignee != "" && b.Assignee != q.Assignee {
 			continue
 		}
 		blocked := false
@@ -279,6 +283,9 @@ func (m *MemStore) Ready() ([]Bead, error) {
 		}
 		if !blocked {
 			result = append(result, cloneBead(b))
+			if q.Limit > 0 && len(result) >= q.Limit {
+				break
+			}
 		}
 	}
 	return result, nil

@@ -33,7 +33,7 @@ type readyFailStore struct {
 	readyCalls int
 }
 
-func (s *readyFailStore) Ready() ([]beads.Bead, error) {
+func (s *readyFailStore) Ready(...beads.ReadyQuery) ([]beads.Bead, error) {
 	s.readyCalls++
 	return nil, errors.New("backing ready should not be used")
 }
@@ -44,7 +44,7 @@ type readyStaticStore struct {
 	readyCalls int
 }
 
-func (s *readyStaticStore) Ready() ([]beads.Bead, error) {
+func (s *readyStaticStore) Ready(...beads.ReadyQuery) ([]beads.Bead, error) {
 	s.readyCalls++
 	out := make([]beads.Bead, len(s.ready))
 	copy(out, s.ready)
@@ -113,8 +113,8 @@ func (s *partialAssignedWorkStore) List(query beads.ListQuery) ([]beads.Bead, er
 	return rows, nil
 }
 
-func (s *partialAssignedWorkStore) Ready() ([]beads.Bead, error) {
-	rows, err := s.MemStore.Ready()
+func (s *partialAssignedWorkStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	rows, err := s.MemStore.Ready(query...)
 	if err != nil {
 		return nil, err
 	}
