@@ -443,6 +443,100 @@ func TestRunDoltCleanup_DryRunSkipsPurgeBytesForRigsOnDifferentPort(t *testing.T
 	}
 }
 
+func TestRunDoltCleanup_DryRunCountsCityConfigPortRigWithoutPortFile(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/.beads/metadata.json"] = []byte(`{"dolt_database":"hq"}`)
+	putFakeDirTree(fs, "/city/.beads/dolt/.dolt_dropped_databases", map[string]int64{
+		"db_a/data.bin": 100,
+	})
+	fs.Files["/rigs/unknown/.beads/metadata.json"] = []byte(`{"dolt_database":"unknown_db"}`)
+	putFakeDirTree(fs, "/rigs/unknown/.beads/dolt/.dolt_dropped_databases", map[string]int64{
+		"db_b/data.bin": 200,
+	})
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		Rigs: []resolverRig{
+			{Name: "city", Path: "/city", HQ: true},
+			{Name: "unknown", Path: "/rigs/unknown"},
+		},
+		CityPort:          28231,
+		PortResolution:    PortResolution{Port: 28231, Source: cityConfigDoltPortSource},
+		FS:                fs,
+		JSON:              true,
+		DiscoverProcesses: func() ([]DoltProcInfo, error) { return nil, nil },
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%q", code, stderr.String())
+	}
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v\nstdout: %s", err, stdout.String())
+	}
+	if r.Purge.BytesReclaimed != 100 {
+		t.Fatalf("Purge.BytesReclaimed = %d, want selected city-config rig bytes only", r.Purge.BytesReclaimed)
+	}
+	if r.Summary.ErrorsTotal != 0 {
+		t.Fatalf("Summary.ErrorsTotal = %d, want 0; errors=%+v", r.Summary.ErrorsTotal, r.Errors)
+	}
+}
+
+func TestRunDoltCleanup_ForcePurgesCityConfigPortRigWithoutPortFile(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/.beads/metadata.json"] = []byte(`{"dolt_database":"hq"}`)
+	putFakeDirTree(fs, "/city/.beads/dolt/.dolt_dropped_databases", map[string]int64{
+		"db_a/data.bin": 100,
+	})
+	fs.Files["/rigs/unknown/.beads/metadata.json"] = []byte(`{"dolt_database":"unknown_db"}`)
+	putFakeDirTree(fs, "/rigs/unknown/.beads/dolt/.dolt_dropped_databases", map[string]int64{
+		"db_b/data.bin": 200,
+	})
+
+	purgedNames := []string{}
+	client := &fakeCleanupDoltClientCustomPurge{
+		databases: []string{"hq", "unknown_db"},
+		onPurge:   func(name string) error { purgedNames = append(purgedNames, name); return nil },
+	}
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		Rigs: []resolverRig{
+			{Name: "city", Path: "/city", HQ: true},
+			{Name: "unknown", Path: "/rigs/unknown"},
+		},
+		CityPort:          28231,
+		PortResolution:    PortResolution{Port: 28231, Source: cityConfigDoltPortSource},
+		FS:                fs,
+		JSON:              true,
+		Force:             true,
+		DoltClient:        client,
+		DiscoverProcesses: func() ([]DoltProcInfo, error) { return nil, nil },
+		ReapGracePeriod:   1,
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%q", code, stderr.String())
+	}
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v\nstdout: %s", err, stdout.String())
+	}
+	if !r.Purge.OK {
+		t.Errorf("Purge.OK = false, want true")
+	}
+	if r.Purge.BytesReclaimed != 100 {
+		t.Fatalf("Purge.BytesReclaimed = %d, want selected city-config rig bytes only", r.Purge.BytesReclaimed)
+	}
+	wantPurged := []string{"hq"}
+	if !equalStringSlice(purgedNames, wantPurged) {
+		t.Fatalf("purged DBs = %v, want %v", purgedNames, wantPurged)
+	}
+	if r.Summary.ErrorsTotal != 0 {
+		t.Fatalf("Summary.ErrorsTotal = %d, want 0; errors=%+v", r.Summary.ErrorsTotal, r.Errors)
+	}
+}
+
 func TestRunDoltCleanup_ForceSkipsPurgeWhenRigPortIsUnknownWithResolvedPort(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/.beads/metadata.json"] = []byte(`{"dolt_database":"hq"}`)

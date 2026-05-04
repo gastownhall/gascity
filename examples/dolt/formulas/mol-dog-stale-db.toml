@@ -247,16 +247,14 @@ fi
 run_or_warn "emit done event" gc event emit mol-dog-stale-db.done \
   --message "$DONE_MESSAGE"
 
-if [ "$APPLIED" -eq 1 ] && [ "$DONE_ERRS" -gt 0 ]; then
-  ESCALATED=1
-  run_or_warn "emit apply error escalation" gc event emit mol-dog-stale-db.escalate \
-    --message "apply reported ${DONE_ERRS} error(s); leaving work bead open"
-fi
-
 if [ "$APPLIED" -eq 1 ] && [ "$MISSED_PURGE_BYTES" -gt 0 ]; then
   ESCALATED=1
   run_or_warn "emit missed purge escalation" gc event emit mol-dog-stale-db.escalate \
     --message "apply missed ${MISSED_PURGE_BYTES} reclaimable bytes; leaving work bead open"
+elif [ "$APPLIED" -eq 1 ] && [ "$DONE_ERRS" -gt 0 ]; then
+  ESCALATED=1
+  run_or_warn "emit apply error escalation" gc event emit mol-dog-stale-db.escalate \
+    --message "apply reported ${DONE_ERRS} error(s); leaving work bead open"
 fi
 
 if [ "$ORPHAN_TOTAL" -ge "{{warn_threshold}}" ]; then
@@ -264,6 +262,10 @@ if [ "$ORPHAN_TOTAL" -ge "{{warn_threshold}}" ]; then
 fi
 
 gc session nudge deacon "DOG_DONE: stale-db - orphans: ${ORPHAN_TOTAL}, applied: ${APPLIED}, escalated: ${ESCALATED}" || true
+
+if [ "$APPLIED" -eq 1 ] && [ "$MISSED_PURGE_BYTES" -gt 0 ]; then
+  fail_open_after_drain "gc dolt-cleanup apply missed ${MISSED_PURGE_BYTES} reclaimable bytes; leaving work bead open"
+fi
 
 if [ "$APPLIED" -eq 1 ] && [ "$DONE_ERRS" -gt 0 ]; then
   fail_open_after_drain "gc dolt-cleanup apply reported ${DONE_ERRS} error(s); leaving work bead open"

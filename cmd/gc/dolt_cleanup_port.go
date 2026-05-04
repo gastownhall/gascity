@@ -17,6 +17,8 @@ const LegacyDefaultDoltPort = 3307
 
 const maxTCPPort = 65535
 
+const cityConfigDoltPortSource = "city config dolt.port"
+
 // PortResolverInput bundles the inputs needed for the dolt port discovery
 // chain (per AD-04 §4.1).
 type PortResolverInput struct {
@@ -140,7 +142,7 @@ func tryFlagPort(flag string) (PortResolutionAttempt, int, bool) {
 }
 
 func tryCityConfigPort(port int) (PortResolutionAttempt, int, bool) {
-	src := "city config dolt.port"
+	src := cityConfigDoltPortSource
 	if port == 0 {
 		return PortResolutionAttempt{Source: src, Status: "not-set"}, 0, false
 	}

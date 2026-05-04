@@ -125,9 +125,15 @@ func rigSharesResolvedDoltServer(rig resolverRig, opts cleanupOptions) bool {
 	}
 	port, ok := rigPortFileValue(rig, opts.FS)
 	if !ok {
-		return opts.PortResolution.Fallback
+		return opts.PortResolution.Fallback || cityConfigPortSelectsRig(rig, opts)
 	}
 	return port == opts.PortResolution.Port
+}
+
+func cityConfigPortSelectsRig(rig resolverRig, opts cleanupOptions) bool {
+	return rig.HQ &&
+		opts.PortResolution.Source == cityConfigDoltPortSource &&
+		opts.CityPort == opts.PortResolution.Port
 }
 
 func rigPortFileValue(rig resolverRig, fs fsys.FS) (int, bool) {

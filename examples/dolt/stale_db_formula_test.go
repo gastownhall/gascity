@@ -641,6 +641,7 @@ type staleDBFailureCase struct {
 	wantNote     string
 	wantLog      string
 	forbidLog    string
+	forbidOutput string
 }
 
 func TestStaleDBFormulaFailurePathsDrainAck(t *testing.T) {
@@ -693,10 +694,12 @@ func TestStaleDBFormulaFailurePathsDrainAck(t *testing.T) {
 		{
 			name: "apply misses dry-run reclaimable bytes",
 			spec: staleDBFailureCase{
-				scanJSON:  `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":1,"failed":[]},"purge":{"bytes_reclaimed":4096},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":4096,"bytes_freed_rss":0,"errors_total":0}}`,
-				applyJSON: `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":1,"failed":[]},"purge":{"ok":true,"bytes_reclaimed":0},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":0,"bytes_freed_rss":0,"errors_total":0}}`,
-				wantNote:  "## apply (--force)",
-				wantLog:   "apply missed 4096 reclaimable bytes",
+				scanJSON:     `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":1,"failed":[]},"purge":{"bytes_reclaimed":4096},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":4096,"bytes_freed_rss":0,"errors_total":0}}`,
+				applyJSON:    `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":1,"failed":[]},"purge":{"ok":true,"bytes_reclaimed":0},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":0,"bytes_freed_rss":0,"errors_total":0}}`,
+				wantNote:     "## apply (--force)",
+				wantLog:      "apply missed 4096 reclaimable bytes",
+				forbidLog:    "apply reported",
+				forbidOutput: "apply reported",
 			},
 		},
 		{
@@ -724,6 +727,9 @@ func TestStaleDBFormulaFailurePathsDrainAck(t *testing.T) {
 			}
 			if tc.spec.forbidLog != "" && strings.Contains(log, tc.spec.forbidLog) {
 				t.Fatalf("failure path log still contains unsupported copy %q\nlog:\n%s\noutput:\n%s", tc.spec.forbidLog, log, out)
+			}
+			if tc.spec.forbidOutput != "" && strings.Contains(string(out), tc.spec.forbidOutput) {
+				t.Fatalf("failure path output still contains unsupported copy %q\nlog:\n%s\noutput:\n%s", tc.spec.forbidOutput, log, out)
 			}
 			if strings.Contains(log, "bd close bead-1") {
 				t.Fatalf("failure path closed bead despite non-zero outcome\nlog:\n%s\noutput:\n%s", log, out)
