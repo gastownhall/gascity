@@ -231,13 +231,35 @@ func tailText(s string, maxLines int) string {
 func initBd(t *testing.T, dir string) string {
 	t.Helper()
 	prefix := uniqueCityName()
+	env := standaloneBDEnvForDir(dir)
 	cmd := exec.Command(bdBinary, "init", "-p", prefix, "--skip-hooks", "-q")
 	cmd.Dir = dir
-	cmd.Env = standaloneBDEnvForDir(dir)
+	cmd.Env = env
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("bd init in %s failed: %v\noutput: %s", dir, err, out)
 	}
+	cmd = exec.Command(bdBinary, "config", "set", "dolt.auto-start", "true")
+	cmd.Dir = dir
+	cmd.Env = env
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("bd config set dolt.auto-start in %s failed: %v\noutput: %s", dir, err, out)
+	}
 	return prefix
+}
+
+func TestInitBdEnablesPersistentDoltAutoStart(t *testing.T) {
+	requireDoltIntegration(t)
+
+	dir := t.TempDir()
+	initBd(t, dir)
+
+	out, err := bd(dir, "config", "get", "dolt.auto-start")
+	if err != nil {
+		t.Fatalf("bd config get dolt.auto-start failed: %v\noutput: %s", err, out)
+	}
+	if strings.TrimSpace(out) != "true" {
+		t.Fatalf("dolt.auto-start = %q, want true", strings.TrimSpace(out))
+	}
 }
 
 // createBead creates a bead and returns its ID.
