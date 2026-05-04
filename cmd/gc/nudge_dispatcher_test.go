@@ -244,6 +244,61 @@ func TestDispatchAllQueuedNudgesSkipsACPSession(t *testing.T) {
 	}
 }
 
+func TestNudgeDispatcherIsSupervisor(t *testing.T) {
+	if nudgeDispatcherIsSupervisor(nil) {
+		t.Error("nil cfg must report legacy mode")
+	}
+	if nudgeDispatcherIsSupervisor(&config.City{}) {
+		t.Error("zero-value DaemonConfig must report legacy mode")
+	}
+	if !nudgeDispatcherIsSupervisor(supervisorCfg()) {
+		t.Error("supervisorCfg must report supervisor mode")
+	}
+}
+
+func TestDispatchAllQueuedNudgesNilCfg(t *testing.T) {
+	dir := t.TempDir()
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "msg", "session", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	delivered, err := dispatchAllQueuedNudges(dir, nil, nil, nil, newSessionBeadSnapshot(nil))
+	if err != nil {
+		t.Fatalf("dispatchAllQueuedNudges: %v", err)
+	}
+	if delivered != 0 {
+		t.Fatalf("delivered = %d, want 0 with nil cfg", delivered)
+	}
+}
+
+func TestMaybeStartNudgePollerSkipsInSupervisorMode(t *testing.T) {
+	prev := startNudgePoller
+	t.Cleanup(func() { startNudgePoller = prev })
+
+	called := false
+	startNudgePoller = func(_, _, _ string) error {
+		called = true
+		return nil
+	}
+
+	maybeStartNudgePoller(nudgeTarget{
+		cityPath:    t.TempDir(),
+		sessionName: "worker-session",
+		cfg:         supervisorCfg(),
+	})
+	if called {
+		t.Fatal("startNudgePoller invoked in supervisor mode; supervisor dispatcher would race with the per-session poller")
+	}
+
+	maybeStartNudgePoller(nudgeTarget{
+		cityPath:    t.TempDir(),
+		sessionName: "worker-session",
+		cfg:         &config.City{},
+	})
+	if !called {
+		t.Fatal("startNudgePoller not invoked in legacy mode")
+	}
+}
+
 func TestEnqueuePingsWakeSocket(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
