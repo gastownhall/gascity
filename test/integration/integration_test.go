@@ -1154,6 +1154,63 @@ func TestCommandEnvLookupDirUsesRegisteredPathArg(t *testing.T) {
 	}
 }
 
+func TestStandaloneBdEnvIsolatesAmbientDoltConfig(t *testing.T) {
+	t.Setenv("HOME", "/host/home")
+	t.Setenv("GC_CITY", "/host/city")
+	t.Setenv("GC_CITY_PATH", "/host/city")
+	t.Setenv("GC_RIG", "host-rig")
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "/host/repo")
+	t.Setenv("GC_DOLT", "server")
+	t.Setenv("GC_DOLT_HOST", "127.0.0.1")
+	t.Setenv("GC_DOLT_PORT", "0")
+	t.Setenv("GC_DOLT_USER", "ambient-user")
+	t.Setenv("GC_DOLT_PASSWORD", "ambient-password")
+	t.Setenv("BEADS_DIR", "/host/beads")
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "0")
+	t.Setenv("BEADS_DOLT_SERVER_USER", "ambient-user")
+	t.Setenv("BEADS_DOLT_PASSWORD", "ambient-password")
+
+	dir := filepath.Join(t.TempDir(), "standalone")
+	got := parseEnvList(standaloneBdEnv(t, dir))
+
+	if got["HOME"] == "/host/home" || got["HOME"] == "" {
+		t.Fatalf("HOME = %q, want isolated non-empty home", got["HOME"])
+	}
+	if got["HOME"] != got["GC_HOME"] {
+		t.Fatalf("HOME = %q, want GC_HOME %q", got["HOME"], got["GC_HOME"])
+	}
+	if got["BEADS_DIR"] != filepath.Join(dir, ".beads") {
+		t.Fatalf("BEADS_DIR = %q, want standalone beads dir", got["BEADS_DIR"])
+	}
+	if got["BD_NON_INTERACTIVE"] != "1" {
+		t.Fatalf("BD_NON_INTERACTIVE = %q, want 1", got["BD_NON_INTERACTIVE"])
+	}
+	for _, key := range []string{
+		"GC_CITY",
+		"GC_CITY_PATH",
+		"GC_RIG",
+		"GC_BEADS",
+		"GC_BEADS_SCOPE_ROOT",
+		"GC_DOLT",
+		"GC_DOLT_HOST",
+		"GC_DOLT_PORT",
+		"GC_DOLT_USER",
+		"GC_DOLT_PASSWORD",
+		"BEADS_DOLT_AUTO_START",
+		"BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_SERVER_USER",
+		"BEADS_DOLT_PASSWORD",
+	} {
+		if _, ok := got[key]; ok {
+			t.Fatalf("%s leaked into standalone bd env: %v", key, got)
+		}
+	}
+}
+
 func TestRenderE2ETomlPlainAgentUsesNamedSessionWithoutSingletonCap(t *testing.T) {
 	toml := renderE2EToml(e2eCity{
 		Agents: []e2eAgent{{Name: "worker", StartCommand: "sleep 3600"}},
