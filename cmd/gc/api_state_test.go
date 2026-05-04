@@ -256,6 +256,7 @@ func TestControllerStateRuntimeUpdateAcceptsBuiltinAwareRevision(t *testing.T) {
 	t.Setenv("GC_BEADS", "")
 
 	cityDir := shortSocketTempDir(t, "gc-state-runtime-builtin-")
+	cleanupManagedDoltTestCity(t, cityDir)
 	tomlPath := filepath.Join(cityDir, "city.toml")
 	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
 		t.Fatalf("write initial city.toml: %v", err)
@@ -292,6 +293,7 @@ func TestControllerStateMutationRefreshKeepsBuiltinOrdersAndClearsPending(t *tes
 	t.Setenv("GC_BEADS", "")
 
 	cityDir := shortSocketTempDir(t, "gc-state-mutation-builtin-")
+	cleanupManagedDoltTestCity(t, cityDir)
 	tomlPath := filepath.Join(cityDir, "city.toml")
 	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"io"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/testutil"
 )
@@ -42,4 +44,26 @@ func clearInheritedBeadsEnv(t *testing.T) {
 	} {
 		t.Setenv(key, "")
 	}
+}
+
+func cleanupManagedDoltTestCity(t *testing.T, cityPath string) {
+	t.Helper()
+	t.Cleanup(func() {
+		tryStopController(cityPath, io.Discard)
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if controllerAlive(cityPath) == 0 {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if port := currentManagedDoltPort(cityPath); port != "" {
+			if _, err := stopManagedDoltProcess(cityPath, port); err != nil {
+				t.Logf("stopManagedDoltProcess(%s, %s): %v", cityPath, port, err)
+			}
+		}
+		if err := shutdownBeadsProvider(cityPath); err != nil {
+			t.Logf("shutdownBeadsProvider(%s): %v", cityPath, err)
+		}
+	})
 }

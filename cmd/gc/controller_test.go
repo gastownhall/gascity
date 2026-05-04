@@ -1796,6 +1796,7 @@ func TestControllerReloadCityNameChange(t *testing.T) {
 	t.Cleanup(func() { debounceDelay = old })
 
 	dir := shortSocketTempDir(t, "gc-rename-")
+	cleanupManagedDoltTestCity(t, dir)
 	tomlPath := writeCityTOML(t, dir, "test", "mayor")
 
 	cfg, err := config.Load(osFS{}, tomlPath)

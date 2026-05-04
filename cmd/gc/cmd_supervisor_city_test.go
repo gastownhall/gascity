@@ -1564,6 +1564,7 @@ func TestSupervisorCreatesControllerSocketForManagedCity(t *testing.T) {
 	t.Setenv("GC_HOME", gcHome)
 
 	cityPath := shortSocketTempDir(t, "gc-supervisor-city-")
+	cleanupManagedDoltTestCity(t, cityPath)
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
