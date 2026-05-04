@@ -673,6 +673,10 @@ func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	env = filterEnv(env, "BEADS_DOLT_SERVER_PORT")
 	env = filterEnv(env, "BEADS_DOLT_SERVER_USER")
 	env = filterEnv(env, "BEADS_DOLT_PASSWORD")
+	env = filterEnv(env, "DOLT_HOST")
+	env = filterEnv(env, "DOLT_PORT")
+	env = filterEnv(env, "DOLT_USER")
+	env = filterEnv(env, "DOLT_PASSWORD")
 	env = filterEnv(env, integrationGCBinaryEnv)
 	env = filterEnv(env, integrationDoltBinaryEnv)
 	env = filterEnv(env, "BEADS_DOLT_AUTO_START")
@@ -1089,6 +1093,10 @@ func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "0")
 	t.Setenv("BEADS_DOLT_SERVER_USER", "ambient-beads-user")
 	t.Setenv("BEADS_DOLT_PASSWORD", "ambient-beads-password")
+	t.Setenv("DOLT_HOST", "ambient-raw-host")
+	t.Setenv("DOLT_PORT", "0")
+	t.Setenv("DOLT_USER", "ambient-raw-user")
+	t.Setenv("DOLT_PASSWORD", "ambient-raw-password")
 	env := integrationEnv()
 	got := parseEnvList(env)
 
@@ -1119,6 +1127,10 @@ func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
 		"BEADS_DOLT_SERVER_PORT",
 		"BEADS_DOLT_SERVER_USER",
 		"BEADS_DOLT_PASSWORD",
+		"DOLT_HOST",
+		"DOLT_PORT",
+		"DOLT_USER",
+		"DOLT_PASSWORD",
 	} {
 		if _, ok := got[key]; ok {
 			t.Fatalf("%s leaked into integration env: %v", key, got[key])
