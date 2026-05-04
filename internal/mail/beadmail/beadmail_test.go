@@ -1422,6 +1422,33 @@ func TestThreadAcceptsMessageIDOfOriginal(t *testing.T) {
 	}
 }
 
+// TestThreadSurfacesNonNotFoundStoreErrors verifies that a real store I/O
+// failure during message-id resolution propagates to the caller instead of
+// being silently swallowed as "treat input as thread-id".
+func TestThreadSurfacesNonNotFoundStoreErrors(t *testing.T) {
+	mem := beads.NewMemStore()
+	failing := &getErrorStore{MemStore: mem, getErr: errors.New("simulated I/O failure")}
+	p := New(failing)
+
+	_, err := p.Thread("anything")
+	if err == nil {
+		t.Fatal("Thread: expected error from underlying store, got nil")
+	}
+	if !strings.Contains(err.Error(), "simulated I/O failure") {
+		t.Errorf("Thread: error %q does not wrap underlying store error", err)
+	}
+}
+
+// getErrorStore returns a custom error from Get; List defers to MemStore.
+type getErrorStore struct {
+	*beads.MemStore
+	getErr error
+}
+
+func (s *getErrorStore) Get(id string) (beads.Bead, error) {
+	return beads.Bead{}, s.getErr
+}
+
 // TestThreadAcceptsMessageIDOfReply ensures the resolution works regardless
 // of which message in the thread the caller hands us — the parent OR any
 // reply should both surface the full thread.
