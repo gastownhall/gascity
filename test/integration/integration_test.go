@@ -659,6 +659,8 @@ func integrationEnvDolt() []string {
 
 func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	env := filterEnv(os.Environ(), "GC_BEADS")
+	env = filterEnv(env, "BEADS_DIR")
+	env = filterEnv(env, "GC_BEADS_SCOPE_ROOT")
 	env = filterEnv(env, "GC_DOLT")
 	env = filterEnv(env, "PATH")
 	env = filterEnv(env, "GC_HOME")
@@ -672,6 +674,11 @@ func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	env = filterEnv(env, "BEADS_DOLT_SERVER_HOST")
 	env = filterEnv(env, "BEADS_DOLT_SERVER_PORT")
 	env = filterEnv(env, "BEADS_DOLT_SERVER_USER")
+	env = filterEnv(env, "BEADS_DOLT_HOST")
+	env = filterEnv(env, "BEADS_DOLT_PORT")
+	env = filterEnv(env, "BEADS_DOLT_USER")
+	env = filterEnv(env, "BEADS_DOLT_DATABASE")
+	env = filterEnv(env, "BEADS_DOLT_DATA_DIR")
 	env = filterEnv(env, "BEADS_DOLT_PASSWORD")
 	env = filterEnv(env, integrationGCBinaryEnv)
 	env = filterEnv(env, integrationDoltBinaryEnv)
@@ -1081,6 +1088,8 @@ func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
 	integrationToolBinDir = filepath.Join(t.TempDir(), "bin")
 
 	t.Setenv("HOME", "/host/home")
+	t.Setenv("BEADS_DIR", "/host/beads")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "/host/scope")
 	t.Setenv("GC_DOLT_HOST", "ambient-host")
 	t.Setenv("GC_DOLT_PORT", "0")
 	t.Setenv("GC_DOLT_USER", "ambient-user")
@@ -1088,6 +1097,11 @@ func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient-beads-host")
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "0")
 	t.Setenv("BEADS_DOLT_SERVER_USER", "ambient-beads-user")
+	t.Setenv("BEADS_DOLT_HOST", "ambient-legacy-host")
+	t.Setenv("BEADS_DOLT_PORT", "0")
+	t.Setenv("BEADS_DOLT_USER", "ambient-legacy-user")
+	t.Setenv("BEADS_DOLT_DATABASE", "ambient-legacy-db")
+	t.Setenv("BEADS_DOLT_DATA_DIR", filepath.Join(t.TempDir(), "ambient-dolt-data"))
 	t.Setenv("BEADS_DOLT_PASSWORD", "ambient-beads-password")
 	env := integrationEnv()
 	got := parseEnvList(env)
@@ -1111,6 +1125,8 @@ func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
 		t.Fatalf("BEADS_DOLT_AUTO_START = %q, want %q; tests must match bdRuntimeEnv and suppress bd's rogue auto-start", got["BEADS_DOLT_AUTO_START"], "0")
 	}
 	for _, key := range []string{
+		"BEADS_DIR",
+		"GC_BEADS_SCOPE_ROOT",
 		"GC_DOLT_HOST",
 		"GC_DOLT_PORT",
 		"GC_DOLT_USER",
@@ -1118,10 +1134,88 @@ func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
 		"BEADS_DOLT_SERVER_HOST",
 		"BEADS_DOLT_SERVER_PORT",
 		"BEADS_DOLT_SERVER_USER",
+		"BEADS_DOLT_HOST",
+		"BEADS_DOLT_PORT",
+		"BEADS_DOLT_USER",
+		"BEADS_DOLT_DATABASE",
+		"BEADS_DOLT_DATA_DIR",
 		"BEADS_DOLT_PASSWORD",
 	} {
 		if _, ok := got[key]; ok {
 			t.Fatalf("%s leaked into integration env: %v", key, got[key])
+		}
+	}
+}
+
+func TestStandaloneBDEnvUsesIsolatedDoltHomeAndAllowsAutoStart(t *testing.T) {
+	oldGCHome, oldRuntimeDir := testGCHome, testRuntimeDir
+	oldGCBinary, oldBDBinary, oldRealBDBinary := gcBinary, bdBinary, realBDBinary
+	oldToolBinDir, oldDoltBinary := integrationToolBinDir, doltBinary
+	t.Cleanup(func() {
+		testGCHome = oldGCHome
+		testRuntimeDir = oldRuntimeDir
+		gcBinary = oldGCBinary
+		bdBinary = oldBDBinary
+		realBDBinary = oldRealBDBinary
+		integrationToolBinDir = oldToolBinDir
+		doltBinary = oldDoltBinary
+	})
+
+	testGCHome = filepath.Join(t.TempDir(), "gc-home")
+	testRuntimeDir = filepath.Join(t.TempDir(), "runtime")
+	gcBinary = filepath.Join(t.TempDir(), "gc")
+	bdBinary = filepath.Join(t.TempDir(), "bd")
+	realBDBinary = "/usr/bin/bd"
+	doltBinary = "/usr/bin/dolt"
+	integrationToolBinDir = filepath.Join(t.TempDir(), "bin")
+
+	t.Setenv("HOME", "/host/home")
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_DOLT_HOST", "ambient-host")
+	t.Setenv("GC_DOLT_PORT", "0")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient-beads-host")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "0")
+	t.Setenv("BEADS_DOLT_HOST", "ambient-legacy-host")
+	t.Setenv("BEADS_DOLT_PORT", "0")
+	t.Setenv("BEADS_DOLT_USER", "ambient-legacy-user")
+	t.Setenv("BEADS_DOLT_DATABASE", "ambient-legacy-db")
+	t.Setenv("BEADS_DOLT_DATA_DIR", filepath.Join(t.TempDir(), "ambient-dolt-data"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "ambient-config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(t.TempDir(), "ambient-cache"))
+
+	dir := t.TempDir()
+	got := parseEnvList(standaloneBDEnv(t, dir))
+	wantHome := filepath.Join(dir, ".bd-home")
+	if got["HOME"] != wantHome {
+		t.Fatalf("HOME = %q, want %q", got["HOME"], wantHome)
+	}
+	if got["DOLT_ROOT_PATH"] != wantHome {
+		t.Fatalf("DOLT_ROOT_PATH = %q, want %q", got["DOLT_ROOT_PATH"], wantHome)
+	}
+	if got["XDG_CONFIG_HOME"] != filepath.Join(wantHome, ".config") {
+		t.Fatalf("XDG_CONFIG_HOME = %q, want isolated config under %q", got["XDG_CONFIG_HOME"], wantHome)
+	}
+	if got["XDG_CACHE_HOME"] != filepath.Join(wantHome, ".cache") {
+		t.Fatalf("XDG_CACHE_HOME = %q, want isolated cache under %q", got["XDG_CACHE_HOME"], wantHome)
+	}
+	if got["BEADS_DOLT_AUTO_START"] != "1" {
+		t.Fatalf("BEADS_DOLT_AUTO_START = %q, want %q", got["BEADS_DOLT_AUTO_START"], "1")
+	}
+	for _, key := range []string{
+		"GC_DOLT",
+		"GC_DOLT_HOST",
+		"GC_DOLT_PORT",
+		"BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_HOST",
+		"BEADS_DOLT_PORT",
+		"BEADS_DOLT_USER",
+		"BEADS_DOLT_DATABASE",
+		"BEADS_DOLT_DATA_DIR",
+	} {
+		if _, ok := got[key]; ok {
+			t.Fatalf("%s leaked into standalone bd env: %v", key, got[key])
 		}
 	}
 }

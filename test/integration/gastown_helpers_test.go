@@ -231,13 +231,51 @@ func tailText(s string, maxLines int) string {
 func initBd(t *testing.T, dir string) string {
 	t.Helper()
 	prefix := uniqueCityName()
-	cmd := exec.Command(bdBinary, "init", "-p", prefix, "--skip-hooks", "-q")
-	cmd.Dir = dir
-	cmd.Env = os.Environ()
-	if out, err := cmd.CombinedOutput(); err != nil {
+	out, err := bdStandalone(t, dir, "init", "-p", prefix, "--skip-hooks", "--skip-agents", "-q")
+	if err != nil {
 		t.Fatalf("bd init in %s failed: %v\noutput: %s", dir, err, out)
 	}
 	return prefix
+}
+
+func bdStandalone(t testing.TB, dir string, args ...string) (string, error) {
+	t.Helper()
+	return runCommand(dir, standaloneBDEnv(t, dir), integrationBDCommandTimeout, bdBinary, args...)
+}
+
+func standaloneBDEnv(t testing.TB, dir string) []string {
+	t.Helper()
+	bdHome := filepath.Join(dir, ".bd-home")
+	xdgConfigHome := filepath.Join(bdHome, ".config")
+	xdgCacheHome := filepath.Join(bdHome, ".cache")
+	for _, path := range []string{bdHome, xdgConfigHome, xdgCacheHome} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("creating standalone bd env dir %s: %v", path, err)
+		}
+	}
+
+	env := []string{
+		"HOME=" + bdHome,
+		"XDG_CONFIG_HOME=" + xdgConfigHome,
+		"XDG_CACHE_HOME=" + xdgCacheHome,
+		"DOLT_ROOT_PATH=" + bdHome,
+		"BEADS_DOLT_AUTO_START=1",
+		"BD_NON_INTERACTIVE=1",
+	}
+	addIfSet := func(name, value string) {
+		if strings.TrimSpace(value) != "" {
+			env = append(env, name+"="+value)
+		}
+	}
+	addIfSet("PATH", prependPath(integrationToolBinDir, os.Getenv("PATH")))
+	addIfSet("TMPDIR", os.TempDir())
+	addIfSet("USER", os.Getenv("USER"))
+	addIfSet("LOGNAME", os.Getenv("LOGNAME"))
+	addIfSet("SHELL", os.Getenv("SHELL"))
+	addIfSet("LANG", os.Getenv("LANG"))
+	addIfSet(integrationRealBDBinaryEnv, realBDBinary)
+	addIfSet(integrationDoltBinaryEnv, doltBinary)
+	return env
 }
 
 // createBead creates a bead and returns its ID.
