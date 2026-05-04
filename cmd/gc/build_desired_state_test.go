@@ -1131,6 +1131,98 @@ func TestBuildDesiredState_MinZeroDefaultScaleCheckRoutedWorkCreatesPoolSession(
 	}
 }
 
+func TestBuildDesiredState_PoolInFlightSessionsPreservePartialScaleDemand(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	const template = "worker"
+
+	for i := 0; i < 5; i++ {
+		if _, err := store.Create(beads.Bead{
+			Title:  fmt.Sprintf("queued work %d", i+1),
+			Type:   "task",
+			Status: "open",
+			Metadata: map[string]string{
+				"gc.routed_to": template,
+			},
+		}); err != nil {
+			t.Fatalf("create queued work: %v", err)
+		}
+	}
+	var inFlightSessionIDs []string
+	for i := 0; i < 2; i++ {
+		session, err := store.Create(beads.Bead{
+			Title:  template,
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel, "agent:" + template},
+			Metadata: map[string]string{
+				"template":             template,
+				"agent_name":           template,
+				"state":                "asleep",
+				"pending_create_claim": boolMetadata(true),
+				poolManagedMetadataKey: boolMetadata(true),
+			},
+		})
+		if err != nil {
+			t.Fatalf("create pending pool session: %v", err)
+		}
+		if err := store.SetMetadata(session.ID, "session_name", PoolSessionName(template, session.ID)); err != nil {
+			t.Fatalf("set session_name: %v", err)
+		}
+		inFlightSessionIDs = append(inFlightSessionIDs, session.ID)
+	}
+	sessionSnapshot, err := loadSessionBeadSnapshot(store)
+	if err != nil {
+		t.Fatalf("load session snapshot: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              template,
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(10),
+		}},
+	}
+
+	var stderr strings.Builder
+	dsResult := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(),
+		store, nil, sessionSnapshot, nil, &stderr,
+	)
+
+	if got := dsResult.ScaleCheckCounts[template]; got != 5 {
+		t.Fatalf("ScaleCheckCounts[%s] = %d, want 5", template, got)
+	}
+	desired := 0
+	for _, tp := range dsResult.State {
+		if tp.TemplateName == template {
+			desired++
+		}
+	}
+	if desired != 5 {
+		t.Fatalf("%s desired sessions = %d, want 5 with two in-flight plus three new; stderr:\n%s", template, desired, stderr.String())
+	}
+	desiredSessionNames := make(map[string]bool)
+	for _, tp := range dsResult.State {
+		if tp.TemplateName == template {
+			desiredSessionNames[tp.SessionName] = true
+		}
+	}
+	for _, id := range inFlightSessionIDs {
+		name := PoolSessionName(template, id)
+		if !desiredSessionNames[name] {
+			t.Fatalf("desired state did not preserve in-flight session %s (%s); desired=%#v", id, name, desiredSessionNames)
+		}
+	}
+	sessions, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("list session beads: %v", err)
+	}
+	if len(sessions) != 5 {
+		t.Fatalf("stored session beads = %d, want 5 total", len(sessions))
+	}
+}
+
 func TestBuildDesiredState_OnDemandNamedSession_RoutedMetadataAloneDoesNotMaterialize(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()

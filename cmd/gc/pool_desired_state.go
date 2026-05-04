@@ -13,7 +13,7 @@ type SessionRequest struct {
 	Template      string // agent template qualified name (e.g., "gascity/claude")
 	BeadPriority  int    // priority of the driving work bead
 	Tier          string // "resume" (in-progress work with assigned session) or "new" (ready unassigned work)
-	SessionBeadID string // for resume tier: the session bead to restart
+	SessionBeadID string // concrete session to preserve for resume or in-flight new demand
 	WorkBeadID    string // the work bead driving this request
 }
 
@@ -159,14 +159,14 @@ func computePoolDesiredStates(
 			resumeSessionBeadIDs[req.SessionBeadID] = struct{}{}
 		}
 	}
-	inFlightNewCounts := poolInFlightNewCounts(cfg, sessionBeads, resumeSessionBeadIDs)
+	inFlightNewRequests := poolInFlightNewRequests(cfg, sessionBeads, resumeSessionBeadIDs)
 
 	// Merge scale_check demand. In bead-backed reconciliation, scale_check is
 	// the authoritative signal for new unassigned demand only; resume requests
 	// are calculated independently from assigned work and must not be deducted
 	// from that count. Pool-created sessions that have not claimed work yet
-	// represent already-spent new demand; they only subtract from positive
-	// scale_check counts and never create desired demand by themselves.
+	// represent already-spent new demand, so they occupy the first new-demand
+	// slots explicitly before anonymous creates are materialized.
 	if len(scaleCheckCounts) > 0 {
 		for i := range cfg.Agents {
 			agent := &cfg.Agents[i]
@@ -178,15 +178,23 @@ func computePoolDesiredStates(
 			if !ok {
 				continue
 			}
-			if scaleCount <= 0 {
-				continue
-			}
-			scaleCount -= inFlightNewCounts[template]
-			if scaleCount < 0 {
-				scaleCount = 0
-			}
 			newCount := capNewDemandCount(limits, usage, agent, scaleCount)
-			for j := 0; j < newCount; j++ {
+			inFlight := inFlightNewRequests[template]
+			inFlightCount := minInt(len(inFlight), newCount)
+			if scaleCount > 0 && len(inFlight) > 0 && trace != nil {
+				trace.recordDecision(string(TraceSitePoolInFlightReuse), template, "", string(TraceReasonInFlightReuse), "accepted", traceRecordPayload{
+					"scale_check":   scaleCount,
+					"in_flight":     len(inFlight),
+					"reused":        inFlightCount,
+					"anonymous_new": newCount - inFlightCount,
+				}, nil, "")
+			}
+			for j := 0; j < inFlightCount; j++ {
+				req := inFlight[j]
+				allRequests = append(allRequests, req)
+				usage.accept(req, limits)
+			}
+			for j := inFlightCount; j < newCount; j++ {
 				req := SessionRequest{
 					Template: template,
 					Tier:     "new",
@@ -200,16 +208,23 @@ func computePoolDesiredStates(
 	return applyNestedCaps(cfg, allRequests, trace)
 }
 
-func poolInFlightNewCounts(cfg *config.City, sessionBeads []beads.Bead, resumeSessionBeadIDs map[string]struct{}) map[string]int {
-	counts := make(map[string]int)
+func poolInFlightNewRequests(cfg *config.City, sessionBeads []beads.Bead, resumeSessionBeadIDs map[string]struct{}) map[string][]SessionRequest {
+	requests := make(map[string][]SessionRequest)
+	sortedSessionBeads := append([]beads.Bead(nil), sessionBeads...)
+	sort.SliceStable(sortedSessionBeads, func(i, j int) bool {
+		if !sortedSessionBeads[i].CreatedAt.Equal(sortedSessionBeads[j].CreatedAt) {
+			return sortedSessionBeads[i].CreatedAt.Before(sortedSessionBeads[j].CreatedAt)
+		}
+		return sortedSessionBeads[i].ID < sortedSessionBeads[j].ID
+	})
 	for i := range cfg.Agents {
 		agent := &cfg.Agents[i]
 		if agent.Suspended || !agent.SupportsGenericEphemeralSessions() {
 			continue
 		}
 		template := agent.QualifiedName()
-		for _, sb := range sessionBeads {
-			if sb.Status == "closed" {
+		for _, sb := range sortedSessionBeads {
+			if sb.ID == "" || sb.Status == "closed" {
 				continue
 			}
 			if _, ok := resumeSessionBeadIDs[sb.ID]; ok {
@@ -224,16 +239,23 @@ func poolInFlightNewCounts(cfg *config.City, sessionBeads []beads.Bead, resumeSe
 			if !poolSessionConsumesNewDemand(sb) {
 				continue
 			}
-			counts[template]++
+			requests[template] = append(requests[template], SessionRequest{
+				Template:      template,
+				Tier:          "new",
+				SessionBeadID: sb.ID,
+			})
 		}
 	}
-	return counts
+	return requests
 }
 
 func poolSessionConsumesNewDemand(session beads.Bead) bool {
 	if strings.TrimSpace(session.Metadata["pending_create_claim"]) == boolMetadata(true) {
 		return true
 	}
+	// This pure desired-state pass has no reconciler clock. Creating sessions
+	// still represent already-spent new demand; lifecycle code owns stale
+	// creating recovery with its clock-aware predicate.
 	return strings.TrimSpace(session.Metadata["state"]) == "creating"
 }
 
@@ -260,7 +282,7 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, trace *session
 
 	for _, req := range requests {
 		template := req.Template
-		if usage.isDuplicateResume(req) {
+		if usage.isDuplicateSessionRequest(req) {
 			continue
 		}
 		if site, reason, payload, rejected := usage.rejection(req, limits); rejected {
@@ -424,15 +446,15 @@ func capNewDemandCount(limits nestedCapLimits, usage nestedCapUsage, agent *conf
 }
 
 func (u nestedCapUsage) canAccept(req SessionRequest, limits nestedCapLimits) bool {
-	if u.isDuplicateResume(req) {
+	if u.isDuplicateSessionRequest(req) {
 		return false
 	}
 	_, _, _, rejected := u.rejection(req, limits)
 	return !rejected
 }
 
-func (u nestedCapUsage) isDuplicateResume(req SessionRequest) bool {
-	return req.Tier == "resume" && req.SessionBeadID != "" && u.seenSessionBead[req.SessionBeadID]
+func (u nestedCapUsage) isDuplicateSessionRequest(req SessionRequest) bool {
+	return req.SessionBeadID != "" && u.seenSessionBead[req.SessionBeadID]
 }
 
 func (u nestedCapUsage) rejection(req SessionRequest, limits nestedCapLimits) (string, string, traceRecordPayload, bool) {
@@ -475,7 +497,7 @@ func (u *nestedCapUsage) accept(req SessionRequest, limits nestedCapLimits) {
 		u.rigCount[rig]++
 	}
 	u.workspaceCount++
-	if req.Tier == "resume" && req.SessionBeadID != "" {
+	if req.SessionBeadID != "" {
 		u.seenSessionBead[req.SessionBeadID] = true
 	}
 }
