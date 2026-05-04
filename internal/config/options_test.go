@@ -1124,6 +1124,11 @@ func TestBuiltinProviders_CodexHasNilArgsAndOptionDefaults(t *testing.T) {
 	if !schemaHasChoice(codex.OptionsSchema, "model", "gpt-5.5") {
 		t.Error("codex OptionsSchema missing model choice gpt-5.5")
 	}
+	for _, model := range []string{"gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"} {
+		if !schemaHasChoice(codex.OptionsSchema, "model", model) {
+			t.Errorf("codex OptionsSchema missing model choice %s", model)
+		}
+	}
 }
 
 func TestBuiltinProviders_GeminiHasNilArgsAndOptionDefaults(t *testing.T) {

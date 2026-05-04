@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Built-in Codex provider model choices now include `gpt-5.4`,
+  `gpt-5.4-mini`, and `gpt-5.4-nano`.
+
 ### Fixed
 
 - `proxy_process` services now receive a `GC_SERVICE_URL_PREFIX` that the

@@ -683,14 +683,14 @@ func TestResolveProviderChainArgsAppendAffectsResolvedArgs(t *testing.T) {
 		},
 		"codex-max": {
 			Base:       basePtr("codex"),
-			ArgsAppend: []string{"-m", "gpt-5.4"},
+			ArgsAppend: []string{"--wrapper-flag", "enabled"},
 		},
 	}
 	resolved, err := ResolveProviderChain("codex-max", custom["codex-max"], custom)
 	if err != nil {
 		t.Fatalf("ResolveProviderChain: %v", err)
 	}
-	want := []string{"run", "codex", "--", "-m", "gpt-5.4"}
+	want := []string{"run", "codex", "--", "--wrapper-flag", "enabled"}
 	if !reflect.DeepEqual(resolved.Args, want) {
 		t.Fatalf("Args = %v, want %v", resolved.Args, want)
 	}
