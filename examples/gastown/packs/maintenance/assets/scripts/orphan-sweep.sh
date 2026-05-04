@@ -40,7 +40,7 @@ fi
 # and rig scope. Fall back to the older config-show parser for older binaries.
 AGENTS=$(gc config explain 2>/dev/null | awk '/^Agent: /{print $2}') || AGENTS=""
 if [ -z "$AGENTS" ]; then
-    AGENTS=$(gc config show 2>/dev/null | awk '/^\[\[agent\]\]/{a=1} a && /^\s*name\s*=/{print; a=0}' | sed 's/.*=\s*"\(.*\)"/\1/') || exit 0
+    AGENTS=$(gc config show 2>/dev/null | awk '/^\[\[agent\]\]/{a=1} a && /^[[:space:]]*name[[:space:]]*=/{print; a=0}' | sed 's/.*=[[:space:]]*"\(.*\)"/\1/') || exit 0
 fi
 if [ -z "$AGENTS" ]; then
     exit 0
@@ -62,6 +62,17 @@ is_known_agent() {
     # Pool instance: strip trailing -<digits> and check template name.
     local base="${name%-[0-9]*}"
     if [ "$base" != "$name" ] && [ -n "${KNOWN_AGENTS[$base]+x}" ]; then return 0; fi
+    # City-qualified assignee (gastown.deacon): strip everything through the
+    # last dot and re-check. This relies on flattened pack binding chains.
+    # Defense-in-depth for older binaries that fall through to `gc config show`
+    # and emit unqualified names. Also covers pool patterns like
+    # "gastown.dog-3" by re-stripping the -N suffix.
+    local short="${name##*.}"
+    if [ "$short" != "$name" ]; then
+        if [ -n "${KNOWN_AGENTS[$short]+x}" ]; then return 0; fi
+        local short_base="${short%-[0-9]*}"
+        if [ "$short_base" != "$short" ] && [ -n "${KNOWN_AGENTS[$short_base]+x}" ]; then return 0; fi
+    fi
     return 1
 }
 
