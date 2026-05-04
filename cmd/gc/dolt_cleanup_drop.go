@@ -36,16 +36,17 @@ const cleanupListTimeout = 30 * time.Second
 // runDropStage discovers all databases on the resolved Dolt server,
 // classifies them with planDoltDrops against the protection list, and (when
 // --force is set) drops each stale name. Errors are recorded into the
-// report but never abort the run.
-func runDropStage(report *CleanupReport, opts cleanupOptions) {
+// report. It returns false only when a force-mode safety guard refuses cleanup
+// and the caller must skip the remaining destructive stages.
+func runDropStage(report *CleanupReport, opts cleanupOptions) bool {
 	if opts.DoltClient == nil {
 		if opts.DoltClientOpenErr != nil {
 			recordCleanupError(report, "drop", "", opts.DoltClientOpenErr)
 		}
-		return
+		return true
 	}
 	if opts.Force && hasRigProtectionError(report) {
-		return
+		return true
 	}
 
 	listCtx, listCancel := context.WithTimeout(context.Background(), cleanupListTimeout)
@@ -55,7 +56,7 @@ func runDropStage(report *CleanupReport, opts cleanupOptions) {
 	if err != nil {
 		report.Errors = append(report.Errors, CleanupError{Stage: "drop", Error: err.Error()})
 		report.Summary.ErrorsTotal++
-		return
+		return true
 	}
 
 	stalePrefixes := opts.StalePrefixes
@@ -78,7 +79,7 @@ func runDropStage(report *CleanupReport, opts cleanupOptions) {
 	if !opts.Force {
 		report.Dropped.Count = len(plan.ToDrop)
 		report.Dropped.Names = append([]string{}, plan.ToDrop...)
-		return
+		return true
 	}
 	if opts.MaxOrphanDBs > 0 && len(plan.ToDrop) > opts.MaxOrphanDBs {
 		report.Dropped.Count = len(plan.ToDrop)
@@ -87,9 +88,9 @@ func runDropStage(report *CleanupReport, opts cleanupOptions) {
 			report,
 			"drop",
 			"",
-			fmt.Errorf("apply-time stale database count %d exceeds --max-orphan-dbs=%d; refusing forced drops", len(plan.ToDrop), opts.MaxOrphanDBs),
+			fmt.Errorf("apply-time stale database count %d exceeds --max-orphan-dbs=%d; refusing forced cleanup", len(plan.ToDrop), opts.MaxOrphanDBs),
 		)
-		return
+		return false
 	}
 
 	droppedNames := make([]string, 0, len(plan.ToDrop))
@@ -116,6 +117,7 @@ func runDropStage(report *CleanupReport, opts cleanupOptions) {
 	// matches the live world rather than the planned set.
 	report.Dropped.Names = droppedNames
 	report.Dropped.Count = len(droppedNames)
+	return true
 }
 
 // sqlCleanupDoltClient wraps a *sql.DB to satisfy CleanupDoltClient.

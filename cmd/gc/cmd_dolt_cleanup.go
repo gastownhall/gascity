@@ -255,9 +255,10 @@ func runDoltCleanup(opts cleanupOptions, stdout, stderr io.Writer) int {
 		}
 	}
 
-	runDropStage(&report, opts)
-	runPurgeStage(&report, opts)
-	runReapStage(&report, opts)
+	if runDropStage(&report, opts) {
+		runPurgeStage(&report, opts)
+		runReapStage(&report, opts)
+	}
 	report.Summary.BytesFreedDisk = report.Purge.BytesReclaimed
 
 	emitReport(report, resolution, opts, stdout, stderr)
@@ -749,8 +750,9 @@ default is a connection fallback only; it does not protect port 3307
 from orphan-process reaping.
 
 Dry-run by default. Pass --force to actually drop, purge, and kill.
-Pass --max-orphan-dbs with --force to refuse destructive drops if the
-live apply-time stale database count exceeds the scan-time threshold.
+Pass --max-orphan-dbs with --force to refuse all destructive cleanup
+stages if the live apply-time stale database count exceeds the
+scan-time threshold.
 Active rig dolt servers, registered rig databases, active test temp roots,
 and processes outside the test-config-path allowlist (/tmp/Test*,
 os.TempDir()/Test*, known Gas City test prefixes, ~/.gotmp/Test*) are always
@@ -825,7 +827,7 @@ return successfully after emitting the report.`,
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON envelope (gc.dolt.cleanup.v1)")
 	cmd.Flags().BoolVar(&probe, "probe", false, "TCP-probe the resolved port; fail if unreachable")
 	cmd.Flags().BoolVar(&force, "force", false, "actually drop, purge, and kill orphaned resources (default: dry-run)")
-	cmd.Flags().IntVar(&maxOrphanDBs, "max-orphan-dbs", 0, "with --force, refuse drops when live stale database count exceeds this limit")
+	cmd.Flags().IntVar(&maxOrphanDBs, "max-orphan-dbs", 0, "with --force, refuse cleanup when live stale database count exceeds this limit")
 	return cmd
 }
 

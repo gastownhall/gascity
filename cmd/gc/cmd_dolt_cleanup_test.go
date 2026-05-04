@@ -1306,6 +1306,76 @@ func TestRunDoltCleanup_ForceRefusesDropWhenApplyPlanExceedsMaxOrphanDBs(t *test
 	}
 }
 
+func TestRunDoltCleanup_MaxOrphanRefusalAbortsForcedPurgeAndReap(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/rigs/foo/.beads/metadata.json"] = []byte(`{"dolt_database":"foo"}`)
+	putFakeDirTree(fs, "/rigs/foo/.beads/dolt/.dolt_dropped_databases", map[string]int64{
+		"dropped/data.bin": 100,
+	})
+
+	client := &fakeCleanupDoltClient{
+		databases: []string{"foo", "testdb_a", "testdb_b", "testdb_c"},
+	}
+	procs := []DoltProcInfo{{
+		PID:            4444,
+		Argv:           []string{"dolt", "sql-server", "--config", "/tmp/TestX/config.yaml"},
+		StartTimeTicks: 10,
+	}}
+	var signals []syscall.Signal
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		Rigs:         []resolverRig{{Name: "foo", Path: "/rigs/foo"}},
+		FS:           fs,
+		JSON:         true,
+		Force:        true,
+		MaxOrphanDBs: 2,
+		DoltClient:   client,
+		HomeDir:      "/home/u",
+		DiscoverProcesses: func() ([]DoltProcInfo, error) {
+			return procs, nil
+		},
+		KillProcess: func(_ int, sig syscall.Signal) error {
+			signals = append(signals, sig)
+			return nil
+		},
+		ReapGracePeriod: 1,
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%q", code, stderr.String())
+	}
+
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v\nstdout: %s", err, stdout.String())
+	}
+	if len(client.dropped) != 0 {
+		t.Fatalf("dropped = %v, want no forced drops when apply plan exceeds max", client.dropped)
+	}
+	if client.purged != 0 {
+		t.Fatalf("purged = %d, want max-orphan refusal to skip forced purge", client.purged)
+	}
+	if len(signals) != 0 {
+		t.Fatalf("signals = %v, want max-orphan refusal to skip forced reap", signals)
+	}
+	if r.Purge.BytesReclaimed != 0 || r.Purge.OK {
+		t.Fatalf("Purge = %+v, want no forced purge result after max-orphan refusal", r.Purge)
+	}
+	if r.Reaped.Count != 0 || len(r.Reaped.Targets) != 0 {
+		t.Fatalf("Reaped = %+v, want no forced reap result after max-orphan refusal", r.Reaped)
+	}
+	if r.Summary.BytesFreedDisk != 0 || r.Summary.BytesFreedRSS != 0 {
+		t.Fatalf("Summary = %+v, want no freed resources after max-orphan refusal", r.Summary)
+	}
+	if r.Summary.ErrorsTotal != 1 {
+		t.Fatalf("Summary.ErrorsTotal = %d, want 1; errors=%+v", r.Summary.ErrorsTotal, r.Errors)
+	}
+	if len(r.Errors) != 1 || r.Errors[0].Stage != "drop" || !strings.Contains(r.Errors[0].Error, "--max-orphan-dbs") {
+		t.Fatalf("Errors = %+v, want max-orphan drop refusal only", r.Errors)
+	}
+}
+
 func equalStringSlice(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
