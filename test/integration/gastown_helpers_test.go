@@ -233,7 +233,7 @@ func initBd(t *testing.T, dir string) string {
 	prefix := uniqueCityName()
 	cmd := exec.Command(bdBinary, "init", "-p", prefix, "--skip-hooks", "-q")
 	cmd.Dir = dir
-	cmd.Env = os.Environ()
+	cmd.Env = commandEnvForDir(dir, false)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("bd init in %s failed: %v\noutput: %s", dir, err, out)
 	}
