@@ -2086,6 +2086,13 @@ func (a *Agent) AttachEnabled() bool {
 // Formula roots that are themselves executable must be represented as ready()
 // work (for example type=wisp); molecule containers are not routable demand.
 //
+// Parent epics are excluded from every tier (--exclude-type=epic). An epic
+// has no executable spec — its semantic is "all children done" — so a worker
+// claiming an epic does undefined work (gc-udx). Roles that legitimately
+// process epics (oversight, reviewers, closers) opt in by setting an explicit
+// work_query in their agent config; that custom query is returned unchanged
+// above.
+//
 // When the reconciler runs the query for demand detection (no session
 // context), all identity vars are empty → assignee tiers skip → only
 // the routed_to tier fires to detect new demand.
@@ -2103,13 +2110,13 @@ func (a *Agent) EffectiveWorkQuery() string {
 			// Tier 1: in_progress assigned to any of my identifiers (crash recovery)
 			`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 			`[ -z "$id" ] && continue; ` +
-			`r=$(bd list --status in_progress --assignee="$id" --json --limit=1 2>/dev/null); ` +
+			`r=$(bd list --status in_progress --assignee="$id" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
 			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 			`done; ` +
 			// Tier 2: ready assigned to any of my identifiers (pre-assigned)
 			`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 			`[ -z "$id" ] && continue; ` +
-			`r=$(bd ready --assignee="$id" --json --limit=1 2>/dev/null); ` +
+			`r=$(bd ready --assignee="$id" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
 			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 			`done; ` +
 			// Tier 3: ready unassigned routed to this config (shared routed queue).
@@ -2119,7 +2126,7 @@ func (a *Agent) EffectiveWorkQuery() string {
 			`*) exit 0 ;; ` +
 			`esac; ` +
 			`r=$(bd ready --metadata-field gc.routed_to=` + target +
-			` --unassigned --json --limit=1 2>/dev/null); ` +
+			` --unassigned --exclude-type=epic --json --limit=1 2>/dev/null); ` +
 			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 			`printf "[]"'`
 	}
@@ -2132,7 +2139,7 @@ func (a *Agent) EffectiveWorkQuery() string {
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
-		`r=$(bd list --status in_progress --assignee="$cand" --json --limit=1 2>/dev/null); ` +
+		`r=$(bd list --status in_progress --assignee="$cand" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`done; ` +
 		`done; ` +
@@ -2142,7 +2149,7 @@ func (a *Agent) EffectiveWorkQuery() string {
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
-		`r=$(bd ready --assignee="$cand" --json --limit=1 2>/dev/null); ` +
+		`r=$(bd ready --assignee="$cand" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`done; ` +
 		`done; ` +
@@ -2154,10 +2161,10 @@ func (a *Agent) EffectiveWorkQuery() string {
 		`*) exit 0 ;; ` +
 		`esac; ` +
 		`r=$(bd ready --metadata-field gc.routed_to=` + target +
-		` --unassigned --json --limit=1 2>/dev/null); ` +
+		` --unassigned --exclude-type=epic --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`bd ready --metadata-field gc.routed_to=` + legacyTarget +
-		` --unassigned --json --limit=1 2>/dev/null'`
+		` --unassigned --exclude-type=epic --json --limit=1 2>/dev/null'`
 }
 
 func legacyWorkflowControlQualifiedName(target string) string {
