@@ -444,6 +444,9 @@ func bdDolt(dir string, args ...string) (string, error) {
 	}
 	if port, ok := ensureManagedDoltPortForTest(dir); ok {
 		env = appendManagedDoltEndpointEnv(env, port)
+		if delay := managedDoltRetryDelay(out); delay > 0 {
+			time.Sleep(delay)
+		}
 		return runCommand(dir, env, integrationBDCommandTimeout, bdBinary, args...)
 	}
 	return out, err
@@ -957,6 +960,8 @@ func ensureManagedDoltPortForTest(cityDir string) (string, bool) {
 func managedDoltTransportRetryable(out string) bool {
 	msg := strings.ToLower(out)
 	for _, marker := range []string{
+		"dolt circuit breaker is open",
+		"server appears down, failing fast",
 		"dolt server unreachable",
 		"dial tcp",
 		"connection refused",
@@ -969,6 +974,14 @@ func managedDoltTransportRetryable(out string) bool {
 		}
 	}
 	return false
+}
+
+func managedDoltRetryDelay(out string) time.Duration {
+	msg := strings.ToLower(out)
+	if strings.Contains(msg, "dolt circuit breaker is open") || strings.Contains(msg, "server appears down, failing fast") {
+		return 5 * time.Second
+	}
+	return 0
 }
 
 func testPortReachable(port string) bool {
@@ -1145,6 +1158,19 @@ func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
 		if _, ok := got[key]; ok {
 			t.Fatalf("%s leaked into integration env: %v", key, got[key])
 		}
+	}
+}
+
+func TestManagedDoltTransportRetryableRecognizesCircuitBreaker(t *testing.T) {
+	output := `{"error":"failed to open database: dolt circuit breaker is open: server appears down, failing fast (cooldown 5s)"}`
+	if !managedDoltTransportRetryable(output) {
+		t.Fatalf("managedDoltTransportRetryable(%q) = false, want true", output)
+	}
+	if got := managedDoltRetryDelay(output); got < 5*time.Second {
+		t.Fatalf("managedDoltRetryDelay(%q) = %s, want at least 5s", output, got)
+	}
+	if got := managedDoltRetryDelay("dial tcp 127.0.0.1:3306: connect: connection refused"); got != 0 {
+		t.Fatalf("managedDoltRetryDelay for plain transport error = %s, want 0", got)
 	}
 }
 
