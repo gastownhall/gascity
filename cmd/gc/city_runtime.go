@@ -1572,7 +1572,7 @@ func sweepUndesiredPoolSessionBeads(
 		if strings.TrimSpace(bead.Metadata["pending_create_claim"]) == "true" {
 			continue
 		}
-		if strings.TrimSpace(bead.Metadata["state"]) == "creating" && !isStaleCreating(bead.CreatedAt) {
+		if strings.TrimSpace(bead.Metadata["state"]) == "creating" && !isStaleCreating(bead) {
 			continue
 		}
 		// Age grace period for the post-creating, pre-wake window. After
@@ -1636,20 +1636,24 @@ func sweepUndesiredPoolSessionBeads(
 }
 
 // isStaleCreating mirrors staleCreatingState in session_reconcile.go without
-// requiring a clock.Clock dependency: a zero CreatedAt is treated as stale,
-// and otherwise the bead is stale once staleCreatingStateTimeout has elapsed.
-// Keeping this shape identical to the reconciler's predicate means the sweep
-// and the reconciler agree about which in-flight create beads are still alive.
-func isStaleCreating(createdAt time.Time) bool {
-	if createdAt.IsZero() {
+// requiring a clock.Clock dependency. It prefers the per-attempt
+// pending_create_started_at marker and falls back to CreatedAt for older beads
+// so the sweep and reconciler agree about which in-flight create beads are
+// still alive.
+func isStaleCreating(bead beads.Bead) bool {
+	now := time.Now()
+	if started, ok := parseRFC3339Metadata(bead.Metadata["pending_create_started_at"]); ok {
+		return !now.Before(started.Add(staleCreatingStateTimeout))
+	}
+	if bead.CreatedAt.IsZero() {
 		return true
 	}
-	return time.Since(createdAt) >= staleCreatingStateTimeout
+	return !now.Before(bead.CreatedAt.Add(staleCreatingStateTimeout))
 }
 
-// parseRFC3339Metadata parses an RFC3339 timestamp metadata value. A missing
-// or unparseable value returns ok=false; the caller treats that as "no per-
-// start marker present" so older beads (pre-creation_complete_at rollout)
+// parseRFC3339Metadata parses an RFC3339 timestamp metadata value. A missing,
+// zero, or unparseable value returns ok=false; the caller treats that as "no
+// per-start marker present" so older beads (pre-creation_complete_at rollout)
 // fall through to the default sweepable path rather than being protected
 // indefinitely.
 func parseRFC3339Metadata(v string) (time.Time, bool) {
@@ -1659,6 +1663,9 @@ func parseRFC3339Metadata(v string) (time.Time, bool) {
 	}
 	t, err := time.Parse(time.RFC3339, v)
 	if err != nil {
+		return time.Time{}, false
+	}
+	if t.IsZero() {
 		return time.Time{}, false
 	}
 	return t, true

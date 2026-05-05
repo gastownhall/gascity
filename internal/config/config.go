@@ -1063,6 +1063,11 @@ type DoltConfig struct {
 	Port int `toml:"port,omitempty" jsonschema:"default=0"`
 	// Host is the dolt server hostname. Defaults to localhost.
 	Host string `toml:"host,omitempty" jsonschema:"default=localhost"`
+	// ArchiveLevel controls Dolt's auto_gc archive aggressiveness.
+	// 0 disables archive compaction (lower CPU on startup).
+	// 1 enables archive compaction (higher CPU on startup).
+	// nil (omitted) defaults to 0.
+	ArchiveLevel *int `toml:"archive_level,omitempty" jsonschema:"default=0"`
 }
 
 // FormulasConfig holds formula directory settings.

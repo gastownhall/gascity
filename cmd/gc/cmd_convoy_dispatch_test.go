@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -1517,9 +1519,51 @@ case "$*" in
     ;;
 esac
 `)
-	if got, want := strings.TrimSpace(out), `[{"id":"ga-ready"}]`; got != want {
-		t.Fatalf("control query output = %q, want %q", got, want)
-	}
+	assertJSONEqual(t, out, `[{"id":"ga-ready"},{"id":"ga-routed"}]`)
+}
+
+func TestWorkflowServeControlReadyQueryIncludesMetadataRoutedWorkAfterAssignedPending(t *testing.T) {
+	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
+	out := runWorkflowServeShellQueryForTest(t, query, map[string]string{
+		"GC_SESSION_NAME": "gascity--control-dispatcher",
+		"GC_ALIAS":        "gascity/control-dispatcher",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  "--readonly --sandbox ready --assignee=gascity--control-dispatcher --json --limit=20")
+    printf '[{"id":"ga-pending","metadata":{"gc.kind":"retry"}}]'
+    ;;
+  "--readonly --sandbox ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --json --limit=20")
+    printf '[{"id":"ga-ready","metadata":{"gc.kind":"scope-check"}}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	assertJSONEqual(t, out, `[{"id":"ga-pending","metadata":{"gc.kind":"retry"}},{"id":"ga-ready","metadata":{"gc.kind":"scope-check"}}]`)
+}
+
+func TestWorkflowServeControlReadyQueryPreservesQueryPriorityWhenMerging(t *testing.T) {
+	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
+	out := runWorkflowServeShellQueryForTest(t, query, map[string]string{
+		"GC_SESSION_NAME": "gascity--control-dispatcher",
+		"GC_ALIAS":        "gascity/control-dispatcher",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  "--readonly --sandbox ready --assignee=gascity--control-dispatcher --json --limit=20")
+    printf '[{"id":"ga-z-assigned"},{"id":"ga-dup","source":"assigned"}]'
+    ;;
+  "--readonly --sandbox ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --json --limit=20")
+    printf '[{"id":"ga-a-routed"},{"id":"ga-dup","source":"routed"}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	assertJSONEqual(t, out, `[{"id":"ga-z-assigned"},{"id":"ga-dup","source":"assigned"},{"id":"ga-a-routed"}]`)
 }
 
 func TestWorkflowServeControlReadyQueryUsesConfiguredRuntimeNameWhenEnvIsManualSession(t *testing.T) {
@@ -1544,9 +1588,7 @@ case "$*" in
     ;;
 esac
 `)
-	if got, want := strings.TrimSpace(out), `[{"id":"ga-control-ready"}]`; got != want {
-		t.Fatalf("control query output = %q, want %q", got, want)
-	}
+	assertJSONEqual(t, out, `[{"id":"ga-control-ready"}]`)
 }
 
 func TestWorkflowServeControlReadyQueryPrioritizesConfiguredRuntimeName(t *testing.T) {
@@ -1586,9 +1628,7 @@ esac
 	if err != nil {
 		t.Fatalf("run workflow serve query: %v", err)
 	}
-	if got, want := strings.TrimSpace(out), `[{"id":"ga-control-ready"}]`; got != want {
-		t.Fatalf("control query output = %q, want %q", got, want)
-	}
+	assertJSONEqual(t, out, `[{"id":"ga-control-ready"}]`)
 	logData, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("read bd log: %v", err)
@@ -1622,9 +1662,7 @@ if [ "$#" -eq 8 ] &&
 fi
 printf '[]'
 `)
-	if got, want := strings.TrimSpace(out), `[{"id":"ga-routed"}]`; got != want {
-		t.Fatalf("control query output = %q, want %q", got, want)
-	}
+	assertJSONEqual(t, out, `[{"id":"ga-routed"}]`)
 	argsData, err := os.ReadFile(argsPath)
 	if err != nil {
 		t.Fatalf("read matched args: %v", err)
@@ -1653,9 +1691,7 @@ case "$*" in
     ;;
 esac
 `)
-	if got, want := strings.TrimSpace(out), `[{"id":"ga-legacy-route"}]`; got != want {
-		t.Fatalf("control query output = %q, want %q", got, want)
-	}
+	assertJSONEqual(t, out, `[{"id":"ga-legacy-route"}]`)
 }
 
 func runWorkflowServeShellQueryForTest(t *testing.T, query string, env map[string]string, bdScript string) string {
@@ -1676,6 +1712,21 @@ func runWorkflowServeShellQueryForTest(t *testing.T, query string, env map[strin
 		t.Fatalf("run workflow serve query: %v", err)
 	}
 	return out
+}
+
+func assertJSONEqual(t *testing.T, got, want string) {
+	t.Helper()
+	var gotValue any
+	if err := json.Unmarshal([]byte(got), &gotValue); err != nil {
+		t.Fatalf("unmarshal got JSON %q: %v", got, err)
+	}
+	var wantValue any
+	if err := json.Unmarshal([]byte(want), &wantValue); err != nil {
+		t.Fatalf("unmarshal want JSON %q: %v", want, err)
+	}
+	if !reflect.DeepEqual(gotValue, wantValue) {
+		t.Fatalf("JSON output = %s, want %s", got, want)
+	}
 }
 
 // TestRunWorkflowServeOverridesInheritedCityBeadsDir is a regression test for

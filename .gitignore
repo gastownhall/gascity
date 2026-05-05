@@ -45,3 +45,4 @@ reports/
 # Developer scratch — diff dumps and ad-hoc patches created during review
 tmp_*.diff
 tmp_*.patch
+issues.jsonl

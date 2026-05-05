@@ -1,12 +1,14 @@
 package beads_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -416,6 +418,90 @@ func TestBdStoreUpdatePassesPriority(t *testing.T) {
 	args := strings.Join(gotArgs, " ")
 	if !strings.Contains(args, "--priority 0") {
 		t.Fatalf("args = %q, want priority flag", args)
+	}
+}
+
+func TestBdStoreWaitForParentProjection(t *testing.T) {
+	var mu sync.Mutex
+	parentListCalls := 0
+
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		cmd := strings.Join(args, " ")
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		switch cmd {
+		case "list --json --include-infra --include-gates --limit 0 --parent bd-parent":
+			parentListCalls++
+			if parentListCalls == 1 {
+				return []byte(`[]`), nil
+			}
+			return []byte(`[{"id":"bd-child","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","parent":"bd-parent"}]`), nil
+		default:
+			return nil, fmt.Errorf("unexpected command: bd %s", cmd)
+		}
+	}
+
+	s := beads.NewBdStore("/city", runner)
+	if err := s.WaitForParentProjection(context.Background(), "bd-child", "", "bd-parent"); err != nil {
+		t.Fatalf("WaitForParentProjection: %v", err)
+	}
+	if parentListCalls < 2 {
+		t.Fatalf("parentListCalls = %d, want at least 2", parentListCalls)
+	}
+}
+
+func TestBdStoreWaitForParentRemovalProjection(t *testing.T) {
+	var mu sync.Mutex
+	oldParentListCalls := 0
+
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		cmd := strings.Join(args, " ")
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		switch cmd {
+		case "list --json --include-infra --include-gates --limit 0 --parent bd-parent":
+			oldParentListCalls++
+			if oldParentListCalls == 1 {
+				return []byte(`[{"id":"bd-child","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","parent":"bd-parent"}]`), nil
+			}
+			return []byte(`[]`), nil
+		default:
+			return nil, fmt.Errorf("unexpected command: bd %s", cmd)
+		}
+	}
+
+	s := beads.NewBdStore("/city", runner)
+	if err := s.WaitForParentProjection(context.Background(), "bd-child", "bd-parent", ""); err != nil {
+		t.Fatalf("WaitForParentProjection: %v", err)
+	}
+	if oldParentListCalls < 2 {
+		t.Fatalf("oldParentListCalls = %d, want at least 2", oldParentListCalls)
+	}
+}
+
+func TestBdStoreWaitForParentProjectionDetectsSupersededParent(t *testing.T) {
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		cmd := strings.Join(args, " ")
+		switch cmd {
+		case "list --json --include-infra --include-gates --limit 0 --parent bd-new":
+			return []byte(`[]`), nil
+		case "list --json --include-infra --include-gates --limit 0 --parent bd-old":
+			return []byte(`[]`), nil
+		case "show --json bd-child":
+			return []byte(`[{"id":"bd-child","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","parent":"bd-other"}]`), nil
+		default:
+			return nil, fmt.Errorf("unexpected command: bd %s", cmd)
+		}
+	}
+
+	s := beads.NewBdStore("/city", runner)
+	err := s.WaitForParentProjection(context.Background(), "bd-child", "bd-old", "bd-new")
+	if !errors.Is(err, beads.ErrParentProjectionSuperseded) {
+		t.Fatalf("err = %v, want ErrParentProjectionSuperseded", err)
 	}
 }
 

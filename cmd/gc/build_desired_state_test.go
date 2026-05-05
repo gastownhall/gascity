@@ -15,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -3180,6 +3181,40 @@ func TestSelectOrCreatePoolSessionBead_SkipsDrained(t *testing.T) {
 	}
 	if result.ID == drained.ID {
 		t.Fatal("should not reuse drained session bead for new-tier request")
+	}
+}
+
+func TestSelectOrCreatePoolSessionBead_UsesFreshCreateTimeNotBeaconTime(t *testing.T) {
+	store := beads.NewMemStore()
+	snapshot := &sessionBeadSnapshot{}
+	cfgAgent := config.Agent{Name: "claude", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}
+	anchor := time.Now().UTC()
+	oldBeacon := anchor.Add(-2 * staleCreatingStateTimeout)
+	beforeCreate := anchor.Add(-time.Second)
+	bp := &agentBuildParams{
+		beadStore:    store,
+		sessionBeads: snapshot,
+		agents:       []config.Agent{cfgAgent},
+		beaconTime:   oldBeacon,
+	}
+
+	result, err := selectOrCreatePoolSessionBead(bp, "claude", nil, map[string]bool{})
+	if err != nil {
+		t.Fatalf("selectOrCreatePoolSessionBead: %v", err)
+	}
+	startedAt, err := time.Parse(time.RFC3339, result.Metadata["pending_create_started_at"])
+	if err != nil {
+		t.Fatalf("parse pending_create_started_at %q: %v", result.Metadata["pending_create_started_at"], err)
+	}
+	if startedAt.Before(beforeCreate) {
+		t.Fatalf("pending_create_started_at = %s, want current create time after %s", startedAt, beforeCreate)
+	}
+	if !startedAt.After(oldBeacon.Add(staleCreatingStateTimeout)) {
+		t.Fatalf("pending_create_started_at = %s, want independent from stale beacon %s", startedAt, oldBeacon)
+	}
+	result.CreatedAt = oldBeacon
+	if staleCreatingState(result, &clock.Fake{Time: startedAt.Add(30 * time.Second)}) {
+		t.Fatal("fresh pool session was stale when row CreatedAt matched old controller beacon")
 	}
 }
 

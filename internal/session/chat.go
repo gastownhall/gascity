@@ -406,6 +406,7 @@ func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead) error {
 	}
 	if strings.TrimSpace(b.Metadata["pending_create_claim"]) != "" {
 		batch["pending_create_claim"] = ""
+		batch["pending_create_started_at"] = ""
 	}
 	if len(batch) == 0 {
 		return nil

@@ -215,6 +215,38 @@ func TestSyncSessionBeads_CreatesNewBeads(t *testing.T) {
 	}
 }
 
+func TestSyncSessionBeads_CreatesNonActiveBeadWithPendingCreateStartedAt(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+
+	ds := map[string]TemplateParams{
+		"helper": {TemplateName: "helper", Command: "true"},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+
+	all := allSessionBeads(t, store)
+	if len(all) != 1 {
+		t.Fatalf("expected 1 bead, got %d", len(all))
+	}
+	b := all[0]
+	if got := b.Metadata["state"]; got != "creating" {
+		t.Fatalf("state = %q, want creating", got)
+	}
+	if got := b.Metadata["pending_create_claim"]; got != "true" {
+		t.Fatalf("pending_create_claim = %q, want true", got)
+	}
+	if got, want := b.Metadata["pending_create_started_at"], pendingCreateStartedAtNow(clk.Now()); got != want {
+		t.Fatalf("pending_create_started_at = %q, want %q", got, want)
+	}
+}
+
 func TestSyncSessionBeads_ExistingDesiredUsesSnapshotStateWithoutWorkerLookup(t *testing.T) {
 	base := beads.NewMemStore()
 	store := &sessionGetSpyStore{Store: base}
@@ -973,8 +1005,70 @@ func TestSyncSessionBeads_ReopensClosedConfiguredNamedSession(t *testing.T) {
 	if got := all[0].Metadata["pending_create_claim"]; got != "true" {
 		t.Fatalf("pending_create_claim = %q, want true", got)
 	}
+	if got, want := all[0].Metadata["pending_create_started_at"], pendingCreateStartedAtNow(clk.Now()); got != want {
+		t.Fatalf("pending_create_started_at = %q, want %q", got, want)
+	}
 	if got := all[0].Metadata["session_name"]; got != sessionName {
 		t.Fatalf("session_name = %q, want %q", got, sessionName)
+	}
+}
+
+func TestReopenClosedConfiguredNamedSessionBeadClearsPendingCreateStartedAtWhenActive(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	now := time.Date(2026, 5, 1, 9, 30, 0, 0, time.UTC)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "refinery", StartCommand: "true", MaxActiveSessions: intPtr(2)},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "refinery", Mode: "on_demand"},
+		},
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "refinery")
+	closed, err := store.Create(beads.Bead{
+		Title:  "refinery",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               sessionName,
+			"alias":                      "refinery",
+			"template":                   "refinery",
+			"state":                      "suspended",
+			"close_reason":               "suspended",
+			"pending_create_started_at":  pendingCreateStartedAtNow(now.Add(-2 * time.Minute)),
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "refinery",
+			namedSessionModeMetadata:     "on_demand",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create closed canonical bead: %v", err)
+	}
+	if err := store.Close(closed.ID); err != nil {
+		t.Fatalf("close canonical bead: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	reopened, ok := reopenClosedConfiguredNamedSessionBead(
+		cityPath, store, cfg, "test-city", "refinery", sessionName, "active", now, nil, &stderr,
+	)
+	if !ok {
+		t.Fatalf("reopenClosedConfiguredNamedSessionBead failed: %s", stderr.String())
+	}
+	if reopened.Metadata["pending_create_claim"] != "" {
+		t.Fatalf("pending_create_claim = %q, want empty", reopened.Metadata["pending_create_claim"])
+	}
+	if reopened.Metadata["pending_create_started_at"] != "" {
+		t.Fatalf("pending_create_started_at = %q, want empty", reopened.Metadata["pending_create_started_at"])
+	}
+	stored, err := store.Get(closed.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", closed.ID, err)
+	}
+	if stored.Metadata["pending_create_started_at"] != "" {
+		t.Fatalf("stored pending_create_started_at = %q, want empty", stored.Metadata["pending_create_started_at"])
 	}
 }
 
@@ -2709,7 +2803,7 @@ func TestSyncSessionBeads_StalePoolSnapshotReusesVisibleOwner(t *testing.T) {
 	sp := runtime.NewFake()
 	template := "pack/worker"
 
-	owner, err := createPoolSessionBead(store, template, nil)
+	owner, err := createPoolSessionBead(store, template, nil, clk.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2764,7 +2858,7 @@ func TestCreatePoolSessionBead_MetadataFailureLeavesReachablePlaceholder(t *test
 	store := &failingPoolSessionNameStore{MemStore: beads.NewMemStore()}
 	template := "pack/worker"
 
-	if _, err := createPoolSessionBead(store, template, nil); err == nil {
+	if _, err := createPoolSessionBead(store, template, nil, time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)); err == nil {
 		t.Fatal("createPoolSessionBead returned nil error, want session_name metadata failure")
 	}
 

@@ -27,6 +27,7 @@ func newDoltConfigCmd(_ io.Writer, stderr io.Writer) *cobra.Command {
 		port         string
 		dataDir      string
 		logLevel     string
+		archiveLevel int
 		cityPath     string
 		scopeDir     string
 		issuePrefix  string
@@ -39,7 +40,7 @@ func newDoltConfigCmd(_ io.Writer, stderr io.Writer) *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if err := writeManagedDoltConfigFile(configFile, host, port, dataDir, logLevel); err != nil {
+			if err := writeManagedDoltConfigFile(configFile, host, port, dataDir, logLevel, archiveLevel); err != nil {
 				fmt.Fprintf(stderr, "gc dolt-config write-managed: %v\n", err) //nolint:errcheck
 				return errExit
 			}
@@ -51,6 +52,7 @@ func newDoltConfigCmd(_ io.Writer, stderr io.Writer) *cobra.Command {
 	writeManaged.Flags().StringVar(&port, "port", "", "listener port")
 	writeManaged.Flags().StringVar(&dataDir, "data-dir", "", "Dolt data directory")
 	writeManaged.Flags().StringVar(&logLevel, "log-level", "warning", "Dolt log level")
+	writeManaged.Flags().IntVar(&archiveLevel, "archive-level", 0, "Dolt auto_gc archive_level (0=off, 1=on)")
 	_ = writeManaged.MarkFlagRequired("file")
 	_ = writeManaged.MarkFlagRequired("host")
 	_ = writeManaged.MarkFlagRequired("port")
@@ -97,7 +99,7 @@ func newDoltConfigCmd(_ io.Writer, stderr io.Writer) *cobra.Command {
 	return cmd
 }
 
-func writeManagedDoltConfigFile(path, host, port, dataDir, logLevel string) error {
+func writeManagedDoltConfigFile(path, host, port, dataDir, logLevel string, archiveLevel int) error {
 	if path == "" {
 		return fmt.Errorf("missing --file")
 	}
@@ -137,8 +139,8 @@ data_dir: %q
 behavior:
   auto_gc_behavior:
     enable: true
-    archive_level: 1
-`, logLevel, port, host, dataDir)
+    archive_level: %d
+`, logLevel, port, host, dataDir, archiveLevel)
 	if err := fsys.WriteFileAtomic(fsys.OSFS{}, path, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("write config file: %w", err)
 	}

@@ -319,6 +319,16 @@ func reopenClosedConfiguredNamedSessionBead(
 			"pending_create_claim": pendingCreateClaim,
 			"synced_at":            now.Format("2006-01-02T15:04:05Z07:00"),
 		}
+		// Reset the pending-create stale clock to NOW. The bead row's
+		// CreatedAt reflects when it was first minted (potentially
+		// long ago); this reopen is a fresh spawn attempt, so the
+		// staleCreatingState window must start counting from here,
+		// not from CreatedAt.
+		if pendingCreateClaim == "true" {
+			batch["pending_create_started_at"] = pendingCreateStartedAtNow(now)
+		} else {
+			batch["pending_create_started_at"] = ""
+		}
 		for k, v := range extraMeta {
 			batch[k] = v
 		}
@@ -923,6 +933,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			}
 			if createState != "active" {
 				meta["pending_create_claim"] = "true"
+				meta["pending_create_started_at"] = pendingCreateStartedAtNow(now)
 			}
 			if tp.DependencyOnly {
 				meta["dependency_only"] = boolMetadata(true)
@@ -1495,6 +1506,7 @@ func setMetaBatch(store beads.Store, id string, batch map[string]string, stderr 
 func closeFailedCreateBead(store beads.Store, id string, now time.Time, stderr io.Writer) bool {
 	patch := session.ClosePatch(now.UTC(), "failed-create")
 	patch["pending_create_claim"] = ""
+	patch["pending_create_started_at"] = ""
 	if setMetaBatch(store, id, patch, stderr) != nil {
 		return false
 	}

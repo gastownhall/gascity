@@ -38,6 +38,9 @@ func processRetryControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		return ControlResult{}, fmt.Errorf("%s: no attempt found", bead.ID)
 	}
 	if attempt.Status != "closed" {
+		if err := ensureBlockingDependency(store, bead.ID, attempt.ID); err != nil {
+			return ControlResult{}, fmt.Errorf("%s: blocking on pending attempt %s: %w", bead.ID, attempt.ID, err)
+		}
 		return ControlResult{}, ErrControlPending
 	}
 
@@ -139,6 +142,9 @@ func processRalphControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		return ControlResult{}, fmt.Errorf("%s: no iteration found", bead.ID)
 	}
 	if iteration.Status != "closed" {
+		if err := ensureBlockingDependency(store, bead.ID, iteration.ID); err != nil {
+			return ControlResult{}, fmt.Errorf("%s: blocking on pending iteration %s: %w", bead.ID, iteration.ID, err)
+		}
 		return ControlResult{}, ErrControlPending
 	}
 
@@ -220,6 +226,19 @@ func processRalphControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 	}
 
 	return ControlResult{Processed: true, Action: "retry", Created: 1}, nil
+}
+
+func ensureBlockingDependency(store beads.Store, issueID, dependsOnID string) error {
+	deps, err := store.DepList(issueID, "down")
+	if err != nil {
+		return err
+	}
+	for _, dep := range deps {
+		if dep.DependsOnID == dependsOnID && dep.Type == "blocks" {
+			return nil
+		}
+	}
+	return store.DepAdd(issueID, dependsOnID, "blocks")
 }
 
 func handleRetryExhaustion(store beads.Store, beadID string, attemptNum int, reason, onExhausted, attemptLog string) (ControlResult, error) {

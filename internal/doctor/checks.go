@@ -2393,7 +2393,7 @@ type DoltConfigExpectedValue struct {
 func DoltConfigExpectedValues() []DoltConfigExpectedValue {
 	return []DoltConfigExpectedValue{
 		{"behavior.auto_gc_behavior.enable", true},
-		{"behavior.auto_gc_behavior.archive_level", 1},
+		{"behavior.auto_gc_behavior.archive_level", 0},
 		{"listener.read_timeout_millis", 300000},
 		{"listener.write_timeout_millis", 300000},
 		{"listener.max_connections", 1000},

@@ -166,6 +166,42 @@ func TestProviderLifecycleProcessEnvProjectsResolvedGCBin(t *testing.T) {
 	}
 }
 
+func TestProviderLifecycleProcessEnvPropagatesArchiveLevel(t *testing.T) {
+	cityPath := t.TempDir()
+	normPath := normalizePathForCompare(cityPath)
+
+	level := 1
+	cityDoltConfigs.Store(normPath, config.DoltConfig{ArchiveLevel: &level})
+	t.Cleanup(func() { cityDoltConfigs.Delete(normPath) })
+
+	envEntries := providerLifecycleProcessEnv(cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
+	env := map[string]string{}
+	for _, entry := range envEntries {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			env[key] = value
+		}
+	}
+	if got := env["GC_DOLT_ARCHIVE_LEVEL"]; got != "1" {
+		t.Fatalf("GC_DOLT_ARCHIVE_LEVEL = %q, want %q", got, "1")
+	}
+}
+
+func TestProviderLifecycleProcessEnvOmitsArchiveLevelWhenNil(t *testing.T) {
+	cityPath := t.TempDir()
+	normPath := normalizePathForCompare(cityPath)
+
+	cityDoltConfigs.Store(normPath, config.DoltConfig{})
+	t.Cleanup(func() { cityDoltConfigs.Delete(normPath) })
+
+	envEntries := providerLifecycleProcessEnv(cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
+	for _, entry := range envEntries {
+		if strings.HasPrefix(entry, "GC_DOLT_ARCHIVE_LEVEL=") {
+			t.Fatalf("GC_DOLT_ARCHIVE_LEVEL should not be set when ArchiveLevel is nil, got %q", entry)
+		}
+	}
+}
+
 func TestGcBeadsBdReadOnlyFallbackDoesNotTargetLegacyProbeDatabase(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := MaterializeBuiltinPacks(cityPath); err != nil {
@@ -6101,7 +6137,7 @@ data_dir: "$data_dir"
 behavior:
   auto_gc_behavior:
     enable: true
-    archive_level: 1
+    archive_level: 0
 EOF
     ;;
   "dolt-state allocate-port")
@@ -6356,7 +6392,7 @@ data_dir: "$data_dir"
 behavior:
   auto_gc_behavior:
     enable: true
-    archive_level: 1
+    archive_level: 0
 EOF
     printf '12345\n' > "$pid_file"
     printf '{"running":true,"pid":12345,"port":%%s,"data_dir":"%%s","started_at":"2026-04-14T00:00:00Z"}\n' "$port" "$data_dir" > "$state_file"
@@ -7597,7 +7633,7 @@ func TestManagedDoltConfigGoWriterMatchesShellFallbackSemantics(t *testing.T) {
 		t.Fatal(err)
 	}
 	goConfigPath := filepath.Join(t.TempDir(), "go", "dolt-config.yaml")
-	if err := writeManagedDoltConfigFile(goConfigPath, "0.0.0.0", "3311", filepath.Join(cityPath, ".beads", "dolt"), "info"); err != nil {
+	if err := writeManagedDoltConfigFile(goConfigPath, "0.0.0.0", "3311", filepath.Join(cityPath, ".beads", "dolt"), "info", 0); err != nil {
 		t.Fatalf("writeManagedDoltConfigFile: %v", err)
 	}
 
@@ -9061,5 +9097,82 @@ func TestGcBeadsBdStartFallsBackToShellManagedConfigWriterWhenGCBinUnset(t *test
 	}
 	if state.Port == 0 {
 		t.Fatalf("provider state port = %d, want non-zero", state.Port)
+	}
+}
+
+func TestAcquireProviderSemaphore_SerializesConcurrentOps(t *testing.T) {
+	t.Parallel()
+	cityPath := t.TempDir()
+
+	// First acquire succeeds immediately.
+	release1 := acquireProviderSemaphore(cityPath)
+
+	// Second acquire should block.
+	acquired := make(chan struct{})
+	go func() {
+		release2 := acquireProviderSemaphore(cityPath)
+		close(acquired)
+		release2()
+	}()
+
+	select {
+	case <-acquired:
+		t.Fatal("second acquire succeeded while first still held")
+	case <-time.After(50 * time.Millisecond):
+		// Expected — still blocked.
+	}
+
+	// Release first — second should unblock.
+	release1()
+
+	select {
+	case <-acquired:
+		// Expected.
+	case <-time.After(2 * time.Second):
+		t.Fatal("second acquire did not unblock after release")
+	}
+}
+
+func TestAcquireProviderSemaphore_IndependentCities(t *testing.T) {
+	t.Parallel()
+	city1 := t.TempDir()
+	city2 := t.TempDir()
+
+	release1 := acquireProviderSemaphore(city1)
+	defer release1()
+
+	// Different city should not block.
+	acquired := make(chan struct{})
+	go func() {
+		release2 := acquireProviderSemaphore(city2)
+		close(acquired)
+		release2()
+	}()
+
+	select {
+	case <-acquired:
+		// Expected — different cities are independent.
+	case <-time.After(2 * time.Second):
+		t.Fatal("acquire for different city blocked unexpectedly")
+	}
+}
+
+func TestProviderRecoveryJitter_Range(t *testing.T) {
+	t.Parallel()
+	for range 100 {
+		d := providerRecoveryJitter()
+		if d < 0 || d >= 2*time.Second {
+			t.Fatalf("jitter = %v, want [0, 2s)", d)
+		}
+	}
+}
+
+func TestProviderRecoveryJitter_Overridable(t *testing.T) {
+	orig := providerRecoveryJitter
+	providerRecoveryJitter = func() time.Duration { return 0 }
+	defer func() { providerRecoveryJitter = orig }()
+
+	if d := providerRecoveryJitter(); d != 0 {
+		t.Fatalf("overridden jitter = %v, want 0", d)
 	}
 }
