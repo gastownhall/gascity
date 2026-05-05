@@ -2352,7 +2352,9 @@ Request a fresh restart for an existing session without closing its bead.
 
 The controller stops the current runtime and starts the same session again with
 fresh provider conversation state. Session identity, alias, mail, and queued
-work remain attached to the existing session bead.
+work remain attached to the existing session bead. For named sessions, reset
+also clears any tripped named-session respawn circuit breaker before requesting
+the fresh restart.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 

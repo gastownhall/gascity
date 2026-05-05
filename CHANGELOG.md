@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prefix is now the full `/v0/city/<cityName>/svc/<svcName>` path. The
   per-city router contract (`config.Service.MountPathOrDefault`) is
   unchanged.
+- `gc session reset` now documents its named-session circuit-breaker behavior:
+  when the target is a named session, reset clears a tripped respawn breaker
+  before requesting a fresh restart.
 
 ### Changed
 
