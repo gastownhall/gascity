@@ -32,7 +32,8 @@ type Provenance struct {
 	// Warnings collects non-fatal collision warnings from composition.
 	Warnings []string
 
-	sourceContents map[string][]byte
+	sourceContents   map[string][]byte
+	revisionSnapshot *revisionSnapshot
 }
 
 // LoadOptions controls optional config-loading behavior.
@@ -323,7 +324,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// Resolve named pack references to cache paths before any expansion.
 	resolveNamedPacks(root, cityRoot)
 
-	implicitImports, implicitPath, implicitErr := ReadImplicitImports()
+	implicitImports, implicitPath, implicitData, implicitErr := readImplicitImportsWithData()
 	if implicitErr != nil {
 		return nil, nil, implicitErr
 	}
@@ -375,6 +376,9 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		}
 		if addedImplicit && implicitPath != "" {
 			prov.Sources = append(prov.Sources, implicitPath)
+			if implicitData != nil {
+				prov.recordSource(implicitPath, implicitData)
+			}
 		}
 	}
 
@@ -500,6 +504,16 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		return nil, nil, fmt.Errorf("%s: provider cache build failed: %w", path, err)
 	}
 
+	// v0.15.1: enrich every agent with its convention-discovered
+	// agent-local asset paths (agents/<name>/skills/, agents/<name>/mcp/).
+	// DiscoverPackAgents only does this for agents it creates — it skips
+	// names already present in pack.toml [[agent]] or city.toml
+	// [[agent]] entries, so those agents leave the discovery pass with
+	// empty SkillsDir/MCPDir even when agents/<name>/skills/ exists on
+	// disk. The materializer and collision validator both key off
+	// SkillsDir, so that gap silently loses agent-local skills for every
+	// explicitly-declared agent. Populate the fields here so the
+	// convention works uniformly.
 	populateAgentLocalAssetDirs(fs, root, cityRoot)
 
 	// Load namepool files for pool agents.
@@ -518,16 +532,10 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		prov.Warnings = append(prov.Warnings, warning)
 	}
 
-	// v0.15.1: enrich every agent with its convention-discovered
-	// agent-local asset paths (agents/<name>/skills/, agents/<name>/mcp/).
-	// DiscoverPackAgents only does this for agents it creates — it skips
-	// names already present in pack.toml [[agent]] or city.toml
-	// [[agent]] entries, so those agents leave the discovery pass with
-	// empty SkillsDir/MCPDir even when agents/<name>/skills/ exists on
-	// disk. The materializer and collision validator both key off
-	// SkillsDir, so that gap silently loses agent-local skills for every
-	// explicitly-declared agent. Populate the fields here so the
-	// convention works uniformly.
+	// Capture revision inputs after all config and pack discovery so callers
+	// can compare the loaded snapshot to future reloads without re-reading
+	// mutable files from disk.
+	prov.captureRevisionSnapshot(fs, root, cityRoot)
 	return root, prov, nil
 }
 
