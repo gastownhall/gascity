@@ -374,7 +374,6 @@ description = "Read and complete {{issue}}."
 	if restoredChild.ParentID != rootBead.ID {
 		t.Fatalf("restored child parent = %q, want %q", restoredChild.ParentID, rootBead.ID)
 	}
-
 	deps := liveContractJSON[struct {
 		Children []beads.Bead `json:"children"`
 	}](t, baseURL, validator, http.MethodGet, cityBase+"/bead/"+url.PathEscape(rootBead.ID)+"/deps", nil, http.StatusOK)

@@ -1030,7 +1030,8 @@ write_config_yaml() {
             --host "$DOLT_HOST" \
             --port "$DOLT_PORT" \
             --data-dir "$DATA_DIR" \
-            --log-level "$DOLT_LOGLEVEL" || die "failed to write managed dolt config via gc helper $gc_bin"
+            --log-level "$DOLT_LOGLEVEL" \
+            --archive-level "${GC_DOLT_ARCHIVE_LEVEL:-0}" || die "failed to write managed dolt config via gc helper $gc_bin"
         return 0
     fi
     local tmp
@@ -1057,7 +1058,7 @@ data_dir: "$DATA_DIR"
 behavior:
   auto_gc_behavior:
     enable: true
-    archive_level: 1
+    archive_level: ${GC_DOLT_ARCHIVE_LEVEL:-0}
 YAML
     mv "$tmp" "$CONFIG_FILE"
 }

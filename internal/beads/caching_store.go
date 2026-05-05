@@ -146,6 +146,16 @@ func (c *CachingStore) ownsBeadID(id string) bool {
 	return strings.HasPrefix(id, c.idPrefix+"-")
 }
 
+// WaitForParentProjection forwards the optional parent-projection wait
+// capability to the backing store when available.
+func (c *CachingStore) WaitForParentProjection(ctx context.Context, id, oldParentID, newParentID string) error {
+	waiter, ok := c.backing.(ParentProjectionWaiter)
+	if !ok {
+		return nil
+	}
+	return waiter.WaitForParentProjection(ctx, id, oldParentID, newParentID)
+}
+
 func (c *CachingStore) noteMutationLocked(ids ...string) uint64 {
 	c.mutationSeq++
 	seq := c.mutationSeq

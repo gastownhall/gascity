@@ -2950,7 +2950,7 @@ func writeDoctorManagedDoltConfig(t *testing.T, cityPath string, overrides map[s
 		"behavior": map[string]any{
 			"auto_gc_behavior": map[string]any{
 				"enable":        true,
-				"archive_level": 1,
+				"archive_level": 0,
 			},
 		},
 	}
