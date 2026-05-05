@@ -94,8 +94,7 @@ func doRigStatus(
 	dops drainOps,
 	rig config.Rig,
 	agents []config.Agent,
-	cityPath, cityName, sessionTemplate string,
-	cfg *config.City,
+	cityPath string,
 	stdout, stderr io.Writer,
 ) int {
 	_ = stderr // reserved for future error reporting
@@ -105,7 +104,7 @@ func doRigStatus(
 			store = opened
 		}
 	}
-	return doRigStatusWithStoreAndSnapshot(sp, dops, rig, agents, cityPath, cityName, sessionTemplate, cfg, store, loadStatusSessionSnapshot(store), stdout, stderr)
+	return doRigStatusWithStoreAndSnapshot(sp, dops, rig, agents, cityPath, "city", "", nil, store, loadStatusSessionSnapshot(store), stdout, stderr)
 }
 
 func doRigStatusWithStoreAndSnapshot(

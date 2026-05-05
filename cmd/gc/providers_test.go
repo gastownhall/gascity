@@ -726,7 +726,7 @@ func TestStatusSessionProviderUsesProvidedSnapshotToWrapObservedACPSessions(t *t
 
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	buildSessionProviderByName = func(name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+	buildSessionProviderByName = func(name string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
 		if name == "acp" {
 			return acpSP, nil
 		}
