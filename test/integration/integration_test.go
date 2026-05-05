@@ -401,6 +401,17 @@ func bd(dir string, args ...string) (string, error) {
 	return runFileStoreBD(dir, args...)
 }
 
+// bdStandalone runs bd in a standalone bd-initialized workspace. It permits
+// bd's embedded Dolt engine while still scrubbing host repository scope.
+func bdStandalone(dir string, args ...string) (string, error) {
+	return runCommand(dir, standaloneBDEnv(), integrationBDCommandTimeout, bdBinary, args...)
+}
+
+func standaloneBDEnv() []string {
+	env := integrationEnvDolt()
+	return filterEnv(env, "BEADS_DOLT_AUTO_START")
+}
+
 // bdDolt runs bd against a Dolt-backed city using the same isolated runtime
 // env as integration gc commands plus the city's managed Dolt port.
 func bdDolt(dir string, args ...string) (string, error) {
@@ -662,6 +673,8 @@ func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	env = filterEnv(env, "GC_DOLT")
 	env = filterEnv(env, "PATH")
 	env = filterEnv(env, "GC_HOME")
+	env = filterEnv(env, "BEADS_ACTOR")
+	env = filterEnv(env, "BEADS_DIR")
 	env = filterEnv(env, "XDG_RUNTIME_DIR")
 	env = filterEnv(env, integrationRealBDBinaryEnv)
 	env = filterEnv(env, "DOLT_ROOT_PATH")
@@ -1085,6 +1098,8 @@ func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
 	t.Setenv("GC_DOLT_PORT", "0")
 	t.Setenv("GC_DOLT_USER", "ambient-user")
 	t.Setenv("GC_DOLT_PASSWORD", "ambient-password")
+	t.Setenv("BEADS_ACTOR", "ambient-actor")
+	t.Setenv("BEADS_DIR", "/host/repo/.beads")
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient-beads-host")
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "0")
 	t.Setenv("BEADS_DOLT_SERVER_USER", "ambient-beads-user")
@@ -1115,6 +1130,8 @@ func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
 		"GC_DOLT_PORT",
 		"GC_DOLT_USER",
 		"GC_DOLT_PASSWORD",
+		"BEADS_ACTOR",
+		"BEADS_DIR",
 		"BEADS_DOLT_SERVER_HOST",
 		"BEADS_DOLT_SERVER_PORT",
 		"BEADS_DOLT_SERVER_USER",
@@ -1123,6 +1140,22 @@ func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
 		if _, ok := got[key]; ok {
 			t.Fatalf("%s leaked into integration env: %v", key, got[key])
 		}
+	}
+}
+
+func TestStandaloneBDEnvAllowsEmbeddedDoltAutoStart(t *testing.T) {
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	env := standaloneBDEnv()
+	got := parseEnvList(env)
+
+	if _, ok := got["BEADS_DOLT_AUTO_START"]; ok {
+		t.Fatalf("BEADS_DOLT_AUTO_START leaked into standalone bd env: %v", got)
+	}
+	if got["GC_DOLT"] == "skip" {
+		t.Fatalf("GC_DOLT = %q; standalone bd workspaces need embedded Dolt", got["GC_DOLT"])
+	}
+	if got["DOLT_ROOT_PATH"] != testGCHome {
+		t.Fatalf("DOLT_ROOT_PATH = %q, want %q", got["DOLT_ROOT_PATH"], testGCHome)
 	}
 }
 
