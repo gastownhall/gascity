@@ -807,7 +807,6 @@ func TestMaintenanceDoltScriptsSkipTestPatternDatabases(t *testing.T) {
 		"benchdb",
 		"testdb_foo",
 		"beads_t1234abcd",
-		"beads_tABCDEF12",
 		"beads_ptbaz",
 		"beads_vrqux",
 		"doctest_xyz",
@@ -818,6 +817,7 @@ func TestMaintenanceDoltScriptsSkipTestPatternDatabases(t *testing.T) {
 		"customdb",
 		"beads_team",
 		"beads_t123",
+		"beads_tABCDEF12",
 		"beads_t1234abcg",
 		"beads_t1234abcdx",
 	}

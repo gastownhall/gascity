@@ -87,9 +87,9 @@ func (s *Server) streamSession(hctx huma.Context, input *SessionStreamInput, sen
 		if err != nil {
 			// Invariant violation: precheck passed, body resolve failed.
 			// Session vanished between precheck and streaming start, or a
-			// race we didn't anticipate. Headers are already committed so
-			// we can't return an HTTP error — log so the next debugger has
-			// a starting point instead of a mute disconnect.
+			// race we didn't anticipate. The SSE body callback cannot
+			// return a typed HTTP error at this point, so log before the
+			// response closes without events.
 			log.Printf("api: session-stream: resolve failed after precheck city=%s id=%s: %v",
 				input.CityName, input.ID, err)
 			return

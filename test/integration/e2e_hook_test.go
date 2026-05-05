@@ -100,6 +100,7 @@ func TestE2E_Hook_Inject(t *testing.T) {
 		"GC_CITY_ROOT",
 		"GC_CITY_RUNTIME_DIR",
 	)
+	hookEnv = append(hookEnv, armEnv+"="+armValue)
 	out, err = runGCWithEnv(hookEnv, cityDir, "hook", "injectee")
 	if err != nil {
 		t.Fatalf("gc hook should run armed work_query: %v\noutput: %s", err, out)
