@@ -825,7 +825,8 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 	}
 
 	all, err := m.store.List(beads.ListQuery{
-		Label: LabelSession,
+		Label:         LabelSession,
+		IncludeClosed: b.Status == "closed",
 	})
 	if err != nil {
 		return "", fmt.Errorf("listing sessions: %w", err)
@@ -835,12 +836,17 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 		if !IsSessionBeadOrRepairable(other) {
 			continue
 		}
-		// Only count active sessions — closed historical sessions should not
-		// make the lookup ambiguous for the one live session.
-		if other.Status == "closed" {
+		// For a live target, closed historical sessions should not make the
+		// lookup ambiguous. For a closed target, historical siblings sharing
+		// the same workdir are the ambiguity we need to preserve.
+		if b.Status != "closed" && other.Status == "closed" {
 			continue
 		}
-		if provider != "" && strings.TrimSpace(other.Metadata["provider"]) != provider {
+		otherProvider := strings.TrimSpace(other.Metadata["provider_kind"])
+		if otherProvider == "" {
+			otherProvider = strings.TrimSpace(other.Metadata["provider"])
+		}
+		if provider != "" && otherProvider != provider {
 			continue
 		}
 		if other.Metadata["work_dir"] == workDir {

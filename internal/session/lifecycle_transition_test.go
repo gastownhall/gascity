@@ -347,6 +347,16 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			},
 		},
 		{
+			name:  "clear expired rate limit",
+			patch: ClearExpiredQuarantinePatch("rate_limit"),
+			want: MetadataPatch{
+				"quarantined_until": "",
+				"wake_attempts":     "0",
+				"churn_count":       "0",
+				"sleep_reason":      "",
+			},
+		},
+		{
 			name:  "clear expired non-quarantine timer",
 			patch: ClearExpiredQuarantinePatch("idle"),
 			want: MetadataPatch{
@@ -517,6 +527,20 @@ func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
 				"sleep_intent":      "",
 				"wake_attempts":     "0",
 				"churn_count":       "0",
+			},
+		},
+		{
+			name:        "rate limit reason is cleared",
+			state:       StateAsleep,
+			sleepReason: "rate_limit",
+			want: MetadataPatch{
+				"held_until":        "",
+				"quarantined_until": "",
+				"wait_hold":         "",
+				"sleep_intent":      "",
+				"wake_attempts":     "0",
+				"churn_count":       "0",
+				"sleep_reason":      "",
 			},
 		},
 	}

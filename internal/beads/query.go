@@ -43,6 +43,21 @@ type ListQuery struct {
 	Sort SortOrder
 }
 
+// ReadyQuery describes optional filters for ready-work lookup. A zero-value
+// query preserves Ready's historical behavior: all open, unblocked actionable
+// work.
+type ReadyQuery struct {
+	Assignee string
+	Limit    int
+}
+
+func readyQueryFromArgs(queries []ReadyQuery) ReadyQuery {
+	if len(queries) == 0 {
+		return ReadyQuery{}
+	}
+	return queries[0]
+}
+
 // HasFilter reports whether the query includes at least one indexed selector.
 func (q ListQuery) HasFilter() bool {
 	return q.Status != "" ||

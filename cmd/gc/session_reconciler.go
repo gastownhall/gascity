@@ -413,18 +413,49 @@ func reconcileSessionBeadsTraced(
 			if err != nil {
 				providerAlive = false
 			}
+			preserveNamed := preserveConfiguredNamedSessionBead(*session, cfg, cityName)
+			var (
+				preservedTP  TemplateParams
+				preserveErr  error
+				rateLimitHit bool
+				rateLimitErr error
+			)
+			if preserveNamed {
+				preservedTP, preserveErr = resolvePreservedConfiguredNamedSessionTemplate(cityPath, cityName, cfg, sp, store, ordered, *session, clk, stderr)
+				if preserveErr == nil {
+					obs, obsErr := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, session.ID, preservedTP.Hints.ProcessNames)
+					rateLimitAlive := rateLimitAliveFromObservation(obs.Alive, obsErr)
+					peek := cachedSessionPeek(cityPath, store, sp, cfg, session.ID, preservedTP.Hints.ProcessNames)
+					rateLimitHit, rateLimitErr = checkRateLimitStability(session, cfg, rateLimitAlive, dt, store, clk, peek)
+				}
+			}
+			if rateLimitHit || rateLimitErr != nil {
+				if trace != nil {
+					template := normalizedSessionTemplate(*session, cfg)
+					if template == "" {
+						template = session.Metadata["template"]
+					}
+					result := "held"
+					if rateLimitErr != nil {
+						result = "hold_deferred"
+					}
+					trace.recordDecision("reconciler.session.preserve_configured_named", template, name, "rate_limit", result, traceRecordPayload{
+						"provider_alive": providerAlive,
+					}, nil, "")
+				}
+				continue
+			}
 			// Heal state using provider liveness, not agent membership.
 			healState(session, providerAlive, store, clk)
 			switch {
-			case preserveConfiguredNamedSessionBead(*session, cfg, cityName):
+			case preserveNamed:
 				template := normalizedSessionTemplate(*session, cfg)
 				if template == "" {
 					template = session.Metadata["template"]
 				}
-				preservedTP, err := resolvePreservedConfiguredNamedSessionTemplate(cityPath, cityName, cfg, sp, store, ordered, *session, clk, stderr)
 				switch {
-				case err != nil:
-					fmt.Fprintf(stderr, "session reconciler: resolve preserved named session %s: %v\n", name, err) //nolint:errcheck
+				case preserveErr != nil:
+					fmt.Fprintf(stderr, "session reconciler: resolve preserved named session %s: %v\n", name, preserveErr) //nolint:errcheck
 				default:
 					tp = preservedTP
 					desired = true
@@ -435,7 +466,7 @@ func reconcileSessionBeadsTraced(
 						false: "resolution_failed",
 					}[desired], traceRecordPayload{
 						"provider_alive": providerAlive,
-						"degraded":       err != nil,
+						"degraded":       preserveErr != nil,
 					}, nil, "")
 				}
 			case pendingCreateSessionStillLeased(*session, cfg, clk):
@@ -566,17 +597,20 @@ func reconcileSessionBeadsTraced(
 		}
 		running := obs.Running
 		alive := obs.Alive
+		peek := cachedSessionPeek(cityPath, store, sp, cfg, session.ID, tp.Hints.ProcessNames)
 
 		// Zombie capture: session exists but process dead — grab scrollback for forensics.
 		if running && !alive {
-			if output, err := workerSessionTargetPeekWithConfig(cityPath, store, sp, cfg, session.ID, 50, tp.Hints.ProcessNames); err == nil && output != "" {
-				rec.Record(events.Event{
-					Type:    events.SessionCrashed,
-					Actor:   "gc",
-					Subject: tp.DisplayName(),
-					Message: output,
-				})
-				telemetry.RecordAgentCrash(context.Background(), tp.DisplayName(), output)
+			if output, err := peek(rateLimitPeekLines); err == nil && output != "" {
+				if !runtime.ContainsProviderRateLimitScreen(output) {
+					rec.Record(events.Event{
+						Type:    events.SessionCrashed,
+						Actor:   "gc",
+						Subject: tp.DisplayName(),
+						Message: output,
+					})
+					telemetry.RecordAgentCrash(context.Background(), tp.DisplayName(), output)
+				}
 			}
 		}
 		if alive && shouldRollbackPendingCreate(session) && !runningSessionMatchesPendingCreate(session, name, sp) {
@@ -600,6 +634,10 @@ func reconcileSessionBeadsTraced(
 				startupTimeout = cfg.Session.StartupTimeoutDuration()
 			}
 			if !pendingCreateStartInFlight(*session, clk, startupTimeout) && staleCreatingState(*session, clk) {
+				rateLimitHit, rateLimitErr := checkRateLimitStability(session, cfg, alive, dt, store, clk, peek)
+				if rateLimitHit || rateLimitErr != nil {
+					continue
+				}
 				fmt.Fprintf(stderr, "session reconciler: rolling back pending create %s: lease expired and no live runtime\n", name) //nolint:errcheck
 				if trace != nil {
 					trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, name, "pending_create_lease_expired", "rollback", nil, nil, "")
@@ -730,6 +768,11 @@ func reconcileSessionBeadsTraced(
 
 		policy := resolveSessionSleepPolicy(*session, cfg, sp)
 
+		rateLimitHit, rateLimitErr := checkRateLimitStability(session, cfg, alive, dt, store, clk, peek)
+		if rateLimitHit || rateLimitErr != nil {
+			continue // rate-limit hold recorded before state healing resets continuity metadata
+		}
+
 		// Heal advisory state metadata.
 		stateBeforeHeal := sessionpkg.State(strings.TrimSpace(session.Metadata["state"]))
 		healState(session, alive, store, clk)
@@ -738,9 +781,10 @@ func reconcileSessionBeadsTraced(
 		}
 		reconcileDetachedAt(session, store, policy, alive, sp, clk)
 
-		// Stability check: detect rapid exit (crash).
-		if checkStability(session, cfg, alive, dt, store, clk) {
-			continue // crash recorded, skip further processing
+		// Stability check: detect rapid crash after state healing. Rate-limit
+		// detection intentionally ran above before healState.
+		if checkStability(session, cfg, alive, dt, store, clk, nil) {
+			continue // rapid exit recorded, skip further processing
 		}
 
 		// Churn check: detect context exhaustion death spiral.
@@ -1276,6 +1320,36 @@ func reconcileSessionBeadsTraced(
 	clearMissingIdleProbes(dt, beadByID)
 
 	return plannedWakes
+}
+
+func cachedSessionPeek(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string, processNames []string) func(lines int) (string, error) {
+	var (
+		cached      bool
+		cachedLines int
+		content     string
+	)
+	return func(lines int) (string, error) {
+		if cached && cachedLines >= lines {
+			return content, nil
+		}
+		nextContent, nextErr := workerSessionTargetPeekWithConfig(cityPath, store, sp, cfg, target, lines, processNames)
+		if nextErr != nil {
+			return nextContent, nextErr
+		}
+		// Cache only successful peeks; transient capture errors must not
+		// suppress a later rate-limit classifier in the same reconcile tick.
+		content = nextContent
+		cachedLines = lines
+		cached = true
+		return content, nil
+	}
+}
+
+func rateLimitAliveFromObservation(alive bool, err error) bool {
+	if err != nil {
+		return false
+	}
+	return alive
 }
 
 func resolvePreservedConfiguredNamedSessionTemplate(

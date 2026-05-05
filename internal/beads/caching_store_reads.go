@@ -322,16 +322,19 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 }
 
 // Ready returns open beads whose blocking deps are all closed.
-func (c *CachingStore) Ready() ([]Bead, error) {
+func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
+	if readyQueryFromArgs(query) != (ReadyQuery{}) {
+		return c.backing.Ready(query...)
+	}
 	c.mu.RLock()
 	if c.state == cacheLive && c.depsComplete {
 		if len(c.dirty) > 0 {
 			c.mu.RUnlock()
-			return c.backing.Ready()
+			return c.backing.Ready(query...)
 		}
 		if c.primePartialErr != nil {
 			c.mu.RUnlock()
-			return c.backing.Ready()
+			return c.backing.Ready(query...)
 		}
 		statusByID := make(map[string]string, len(c.beads))
 		depsByID := make(map[string][]Dep, len(c.deps))
@@ -369,7 +372,7 @@ func (c *CachingStore) Ready() ([]Bead, error) {
 		return result, nil
 	}
 	c.mu.RUnlock()
-	return c.backing.Ready()
+	return c.backing.Ready(query...)
 }
 
 // CachedReady returns ready beads from the in-memory active read model.
