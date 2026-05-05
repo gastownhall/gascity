@@ -159,6 +159,29 @@ func TestProjectLifecycleDesiredStateAndBlockers(t *testing.T) {
 	}
 }
 
+func TestProjectLifecycleCreatingStalenessUsesPendingCreateStartedAt(t *testing.T) {
+	now := time.Date(2026, 5, 3, 9, 0, 0, 0, time.UTC)
+	view := ProjectLifecycle(LifecycleInput{
+		Status: "open",
+		Metadata: map[string]string{
+			"state":                     string(StateCreating),
+			"session_name":              "s-worker",
+			"pending_create_started_at": now.Add(-30 * time.Second).UTC().Format(time.RFC3339),
+		},
+		Runtime:            RuntimeFacts{Observed: true, Alive: false},
+		CreatedAt:          now.Add(-2 * time.Minute),
+		StaleCreatingAfter: time.Minute,
+		Now:                now,
+	})
+
+	if view.RuntimeProjection != RuntimeProjectionFreshCreating {
+		t.Fatalf("RuntimeProjection = %q, want %q", view.RuntimeProjection, RuntimeProjectionFreshCreating)
+	}
+	if view.ReconciledState != StateCreating {
+		t.Fatalf("ReconciledState = %q, want %q", view.ReconciledState, StateCreating)
+	}
+}
+
 func TestProjectLifecycleNamedIdentityProjection(t *testing.T) {
 	now := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
 

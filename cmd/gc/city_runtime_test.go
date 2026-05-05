@@ -1161,6 +1161,60 @@ func TestSweepUndesiredPoolSessionBeads_SkipsStalePendingCreateClaim(t *testing.
 	}
 }
 
+func TestSweepUndesiredPoolSessionBeads_UsesPendingCreateStartedAtForCreatingState(t *testing.T) {
+	store := beads.NewMemStore()
+	now := time.Now().UTC()
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":              "worker-bd-fresh-create",
+			"template":                  "worker",
+			"agent_name":                "worker",
+			"pool_slot":                 "1",
+			poolManagedMetadataKey:      boolMetadata(true),
+			"state":                     "creating",
+			"pending_create_started_at": pendingCreateStartedAtNow(now.Add(-30 * time.Second)),
+			"continuation_epoch":        "1",
+			"generation":                "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	bead.CreatedAt = now.Add(-2 * time.Minute)
+	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
+
+	closed := sweepUndesiredPoolSessionBeads(
+		store,
+		nil,
+		sessionBeads,
+		nil,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		runtime.NewFake(),
+		false,
+	)
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0 — fresh pending_create_started_at must keep old creating bead alive", closed)
+	}
+}
+
+func TestIsStaleCreatingTreatsZeroPendingCreateStartedAtAsMissing(t *testing.T) {
+	now := time.Now().UTC()
+	bead := beads.Bead{
+		Metadata: map[string]string{
+			"state":                     "creating",
+			"pending_create_started_at": (time.Time{}).UTC().Format(time.RFC3339),
+		},
+		CreatedAt: now,
+	}
+
+	if isStaleCreating(bead) {
+		t.Fatal("zero pending_create_started_at should fall back to fresh CreatedAt")
+	}
+}
+
 func TestSweepUndesiredPoolSessionBeads_ClosesStoppedSessions(t *testing.T) {
 	store := beads.NewMemStore()
 	bead, err := store.Create(beads.Bead{
