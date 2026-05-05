@@ -56,8 +56,13 @@ while IFS= read -r bead; do
         esac
     done
 
-    # Calculate age.
-    BEAD_TS=$(date -d "$updated_at" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%S" "$updated_at" +%s 2>/dev/null) || continue
+    # Calculate age. bd emits RFC3339 timestamps with a trailing 'Z'; the
+    # second BSD `date -j -f` fallback handles that explicitly because the
+    # third (no-Z) layout rejects it. GNU `date -d` is lenient and accepts
+    # both forms via the first fallback.
+    BEAD_TS=$(date -d "$updated_at" +%s 2>/dev/null || \
+              date -j -f "%Y-%m-%dT%H:%M:%SZ" "$updated_at" +%s 2>/dev/null || \
+              date -j -f "%Y-%m-%dT%H:%M:%S" "$updated_at" +%s 2>/dev/null) || continue
     AGE=$((NOW - BEAD_TS))
 
     # Skip if within TTL (unless force-promote via keep label).
