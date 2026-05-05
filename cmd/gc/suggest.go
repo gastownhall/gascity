@@ -17,6 +17,13 @@ func suggestSimilar(input string, candidates []string) string {
 	best := ""
 	bestDist := len(input)/2 + 1 // threshold: must be within half the input length
 	for _, c := range candidates {
+		if c == input {
+			// Defense-in-depth: never echo the input back as a hint. If the
+			// caller's lookup said "not found" yet a candidate equals the
+			// input, the lookup itself is wrong — surfacing the same string
+			// as a suggestion just hides that bug.
+			continue
+		}
 		d := levenshtein(strings.ToLower(input), strings.ToLower(c))
 		if d < bestDist {
 			bestDist = d

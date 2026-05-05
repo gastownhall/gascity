@@ -544,7 +544,9 @@ func resolveSessionTemplate(cfg *config.City, input, currentRigDir string) (conf
 	if cfg == nil || input == "" {
 		return config.Agent{}, false
 	}
-	if strings.Contains(input, "/") {
+	// Inputs that include a rig separator ("/") or a binding prefix (".")
+	// must match a qualified name exactly — no bare-name fallback.
+	if strings.ContainsAny(input, "/.") {
 		for _, a := range cfg.Agents {
 			if a.QualifiedName() == input {
 				return a, true

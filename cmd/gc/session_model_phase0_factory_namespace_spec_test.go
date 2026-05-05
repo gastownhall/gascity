@@ -39,6 +39,48 @@ func TestPhase0FactoryResolution_NoCrossRigUniqueBareFallbackWithoutAmbientRig(t
 	}
 }
 
+func TestResolveSessionTemplate_BindingQualifiedExactMatch(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "interface-lead", BindingName: "ar"},
+			{Name: "principal", BindingName: "ar"},
+		},
+	}
+	a, ok := resolveSessionTemplate(cfg, "ar.interface-lead", "")
+	if !ok {
+		t.Fatal("resolveSessionTemplate(ar.interface-lead) failed; expected match on binding-qualified name")
+	}
+	if got := a.QualifiedName(); got != "ar.interface-lead" {
+		t.Errorf("matched agent QualifiedName = %q, want ar.interface-lead", got)
+	}
+}
+
+func TestResolveSessionTemplate_BindingQualifiedNoBareFallback(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "interface-lead", BindingName: "ar"},
+		},
+	}
+	if _, ok := resolveSessionTemplate(cfg, "wrong.interface-lead", ""); ok {
+		t.Fatal("resolveSessionTemplate(wrong.interface-lead) succeeded; binding-qualified miss must not fall through to bare-name")
+	}
+}
+
+func TestResolveSessionTemplate_BareNameFallbackForBoundAgent(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "interface-lead", BindingName: "ar"},
+		},
+	}
+	a, ok := resolveSessionTemplate(cfg, "interface-lead", "")
+	if !ok {
+		t.Fatal("resolveSessionTemplate(interface-lead) failed; bare local name must still resolve when unique")
+	}
+	if got := a.QualifiedName(); got != "ar.interface-lead" {
+		t.Errorf("matched agent QualifiedName = %q, want ar.interface-lead", got)
+	}
+}
+
 func TestPhase0SessionTargeting_RejectsTemplateToken(t *testing.T) {
 	t.Setenv("GC_SESSION", "phase0")
 
