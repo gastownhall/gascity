@@ -123,33 +123,47 @@ func rigSharesResolvedDoltServer(rig resolverRig, opts cleanupOptions) bool {
 	if opts.PortResolution.Port <= 0 || opts.FS == nil {
 		return true
 	}
-	port, ok := rigPortFileValue(rig, opts.FS)
-	if !ok {
+	port, state := rigPortFileValue(rig, opts.FS)
+	switch state {
+	case rigPortFileValid:
+		return port == opts.PortResolution.Port
+	case rigPortFileMissing:
 		return opts.PortResolution.Fallback || cityConfigPortSelectsRig(rig, opts)
+	default:
+		return false
 	}
-	return port == opts.PortResolution.Port
 }
 
-func cityConfigPortSelectsRig(rig resolverRig, opts cleanupOptions) bool {
-	return rig.HQ &&
-		opts.PortResolution.Source == cityConfigDoltPortSource &&
+func cityConfigPortSelectsRig(_ resolverRig, opts cleanupOptions) bool {
+	return opts.PortResolution.Source == cityConfigDoltPortSource &&
 		opts.CityPort == opts.PortResolution.Port
 }
 
-func rigPortFileValue(rig resolverRig, fs fsys.FS) (int, bool) {
+type rigPortFileState int
+
+const (
+	rigPortFileMissing rigPortFileState = iota
+	rigPortFileInvalid
+	rigPortFileValid
+)
+
+func rigPortFileValue(rig resolverRig, fs fsys.FS) (int, rigPortFileState) {
 	data, err := fs.ReadFile(filepath.Join(rig.Path, ".beads", "dolt-server.port"))
 	if err != nil {
-		return 0, false
+		if errors.Is(err, iofs.ErrNotExist) {
+			return 0, rigPortFileMissing
+		}
+		return 0, rigPortFileInvalid
 	}
 	text := strings.TrimSpace(string(data))
 	if text == "" {
-		return 0, false
+		return 0, rigPortFileInvalid
 	}
 	port, err := strconv.Atoi(text)
 	if err != nil || !validDoltPort(port) {
-		return 0, false
+		return 0, rigPortFileInvalid
 	}
-	return port, true
+	return port, rigPortFileValid
 }
 
 // sumBytesUnder walks the given root recursively and returns the total

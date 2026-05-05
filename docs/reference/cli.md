@@ -927,7 +927,8 @@ from orphan-process reaping.
 Dry-run by default. Pass --force to actually drop, purge, and kill.
 Pass --max-orphan-dbs with --force to refuse all destructive cleanup
 stages if the live apply-time stale database count exceeds the
-scan-time threshold.
+scan-time threshold. The default 0 disables this guard; negative values
+are rejected before any city lookup or cleanup stage runs.
 Active rig dolt servers, registered rig databases, active test temp roots,
 and processes outside the test-config-path allowlist (/tmp/Test*,
 os.TempDir()/Test*, known Gas City test prefixes, ~/.gotmp/Test*) are always
@@ -940,9 +941,11 @@ and non-leading hyphens. Missing or silent rig metadata disables forced
 drop/purge because the live database name cannot be proven safe.
 
 JSON envelope schema is stable: gc.dolt.cleanup.v1. Automation that
-uses --json must inspect summary.errors_total and errors; cleanup stage
-errors are reported in the envelope even when the command can still
-return successfully after emitting the report.
+uses --json must inspect summary.errors_total and errors; dry-run
+force_blockers reports conditions that would block forced cleanup without
+incrementing errors_total. Cleanup stage errors are reported in the
+envelope even when the command can still return successfully after
+emitting the report.
 
 ```
 gc dolt-cleanup [flags]

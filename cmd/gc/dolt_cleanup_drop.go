@@ -84,9 +84,10 @@ func runDropStage(report *CleanupReport, opts cleanupOptions) bool {
 	if opts.MaxOrphanDBs > 0 && len(plan.ToDrop) > opts.MaxOrphanDBs {
 		report.Dropped.Count = len(plan.ToDrop)
 		report.Dropped.Names = append([]string{}, plan.ToDrop...)
-		recordCleanupError(
+		recordCleanupErrorKind(
 			report,
 			"drop",
+			cleanupErrorKindMaxOrphanRefusal,
 			"",
 			fmt.Errorf("apply-time stale database count %d exceeds --max-orphan-dbs=%d; refusing forced cleanup", len(plan.ToDrop), opts.MaxOrphanDBs),
 		)

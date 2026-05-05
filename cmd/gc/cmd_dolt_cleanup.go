@@ -33,6 +33,7 @@ type CleanupReport struct {
 	Schema        string                 `json:"schema"`
 	Port          CleanupPortReport      `json:"port"`
 	RigsProtected []CleanupRigProtection `json:"rigs_protected"`
+	ForceBlockers []CleanupForceBlocker  `json:"force_blockers"`
 	Dropped       CleanupDroppedReport   `json:"dropped"`
 	Purge         CleanupPurgeReport     `json:"purge"`
 	Reaped        CleanupReapedReport    `json:"reaped"`
@@ -52,6 +53,14 @@ type CleanupPortReport struct {
 type CleanupRigProtection struct {
 	Rig string `json:"rig"`
 	DB  string `json:"db"`
+}
+
+// CleanupForceBlocker records a condition that would block a future forced
+// cleanup but does not make dry-run output an error.
+type CleanupForceBlocker struct {
+	Kind  string `json:"kind"`
+	Name  string `json:"name,omitempty"`
+	Error string `json:"error"`
 }
 
 // CleanupDroppedReport summarizes the drop step.
@@ -113,9 +122,16 @@ type CleanupSummary struct {
 // it. Stage values are e.g. "drop", "purge", "reap", "port".
 type CleanupError struct {
 	Stage string `json:"stage"`
+	Kind  string `json:"kind,omitempty"`
 	Name  string `json:"name,omitempty"`
 	Error string `json:"error"`
 }
+
+const (
+	cleanupErrorKindInvalidMaxOrphanDBs = "invalid-max-orphan-dbs"
+	cleanupErrorKindMaxOrphanRefusal    = "max-orphan-refusal"
+	cleanupErrorKindRigProtection       = "rig-protection"
+)
 
 // MarshalJSON ensures slices serialize as `[]` rather than `null` for empty
 // values. The JSON contract documents these as always-present arrays.
@@ -123,6 +139,9 @@ func (r CleanupReport) MarshalJSON() ([]byte, error) {
 	type alias CleanupReport
 	if r.RigsProtected == nil {
 		r.RigsProtected = []CleanupRigProtection{}
+	}
+	if r.ForceBlockers == nil {
+		r.ForceBlockers = []CleanupForceBlocker{}
 	}
 	if r.Dropped.Failed == nil {
 		r.Dropped.Failed = []CleanupDropFailure{}
@@ -217,9 +236,12 @@ func runDoltCleanup(opts cleanupOptions, stdout, stderr io.Writer) int {
 		},
 		RigsProtected: protections,
 	}
+	for _, e := range protectionErrors {
+		recordCleanupForceBlocker(&report, cleanupErrorKindRigProtection, e.rig, e.err)
+	}
 	if opts.Force {
 		for _, e := range protectionErrors {
-			recordCleanupError(&report, "rig", e.rig, e.err)
+			recordCleanupErrorKind(&report, "rig", cleanupErrorKindRigProtection, e.rig, e.err)
 		}
 	}
 	recordUnsafeRigDatabaseNames(&report)
@@ -281,12 +303,24 @@ func cleanupPortResolution(opts cleanupOptions) PortResolution {
 }
 
 func recordCleanupError(report *CleanupReport, stage, name string, err error) {
-	entry := CleanupError{Stage: stage, Error: err.Error()}
+	recordCleanupErrorKind(report, stage, "", name, err)
+}
+
+func recordCleanupErrorKind(report *CleanupReport, stage, kind, name string, err error) {
+	entry := CleanupError{Stage: stage, Kind: kind, Error: err.Error()}
 	if name != "" {
 		entry.Name = name
 	}
 	report.Errors = append(report.Errors, entry)
 	report.Summary.ErrorsTotal++
+}
+
+func recordCleanupForceBlocker(report *CleanupReport, kind, name string, err error) {
+	entry := CleanupForceBlocker{Kind: kind, Error: err.Error()}
+	if name != "" {
+		entry.Name = name
+	}
+	report.ForceBlockers = append(report.ForceBlockers, entry)
 }
 
 // runReapStage discovers live `dolt sql-server` processes, classifies them
@@ -752,7 +786,8 @@ from orphan-process reaping.
 Dry-run by default. Pass --force to actually drop, purge, and kill.
 Pass --max-orphan-dbs with --force to refuse all destructive cleanup
 stages if the live apply-time stale database count exceeds the
-scan-time threshold.
+scan-time threshold. The default 0 disables this guard; negative values
+are rejected before any city lookup or cleanup stage runs.
 Active rig dolt servers, registered rig databases, active test temp roots,
 and processes outside the test-config-path allowlist (/tmp/Test*,
 os.TempDir()/Test*, known Gas City test prefixes, ~/.gotmp/Test*) are always
@@ -765,11 +800,24 @@ and non-leading hyphens. Missing or silent rig metadata disables forced
 drop/purge because the live database name cannot be proven safe.
 
 JSON envelope schema is stable: gc.dolt.cleanup.v1. Automation that
-uses --json must inspect summary.errors_total and errors; cleanup stage
-errors are reported in the envelope even when the command can still
-return successfully after emitting the report.`,
+uses --json must inspect summary.errors_total and errors; dry-run
+force_blockers reports conditions that would block forced cleanup without
+incrementing errors_total. Cleanup stage errors are reported in the
+envelope even when the command can still return successfully after
+emitting the report.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if maxOrphanDBs < 0 {
+				err := fmt.Errorf("--max-orphan-dbs must be >= 0")
+				if jsonOut {
+					report := CleanupReport{Schema: CleanupSchemaVersion}
+					recordCleanupErrorKind(&report, "options", cleanupErrorKindInvalidMaxOrphanDBs, "", err)
+					emitReport(report, PortResolution{}, cleanupOptions{JSON: true}, stdout, stderr)
+				} else {
+					fmt.Fprintf(stderr, "gc dolt-cleanup: %v\n", err) //nolint:errcheck
+				}
+				return errExit
+			}
 			cityPath, err := resolveCity()
 			if err != nil {
 				fmt.Fprintf(stderr, "gc dolt-cleanup: %v\n", err) //nolint:errcheck
@@ -860,13 +908,15 @@ func recordUnsafeRigDatabaseNames(report *CleanupReport) {
 		if validDoltDatabaseIdentifier(rp.DB) {
 			continue
 		}
-		recordCleanupError(report, "rig", rp.Rig, fmt.Errorf("rig %q dolt_database %q is not cleanup-safe", rp.Rig, rp.DB))
+		err := fmt.Errorf("rig %q dolt_database %q is not cleanup-safe", rp.Rig, rp.DB)
+		recordCleanupForceBlocker(report, cleanupErrorKindRigProtection, rp.Rig, err)
+		recordCleanupErrorKind(report, "rig", cleanupErrorKindRigProtection, rp.Rig, err)
 	}
 }
 
 func hasRigProtectionError(report *CleanupReport) bool {
 	for _, e := range report.Errors {
-		if e.Stage == "rig" {
+		if e.Kind == cleanupErrorKindRigProtection || e.Stage == "rig" {
 			return true
 		}
 	}

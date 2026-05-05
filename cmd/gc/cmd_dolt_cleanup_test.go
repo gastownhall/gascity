@@ -37,6 +37,7 @@ func TestCleanupReportJSONShape(t *testing.T) {
 		`"schema":"gc.dolt.cleanup.v1"`,
 		`"port":{`,
 		`"rigs_protected":[]`,
+		`"force_blockers":[]`,
 		`"dropped":{`,
 		`"purge":{`,
 		`"reaped":{`,
@@ -53,6 +54,26 @@ func TestCleanupReportJSONShape(t *testing.T) {
 		if strings.Contains(got, key) {
 			t.Errorf("JSON leaked Go field name %q\nfull JSON:\n%s", key, got)
 		}
+	}
+}
+
+func TestDoltCleanupCmdRejectsNegativeMaxOrphanDBsBeforeCityResolution(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	cmd := newDoltCleanupCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{"--json", "--max-orphan-dbs", "-1"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatalf("Execute succeeded; want negative --max-orphan-dbs rejected")
+	}
+	out := stdout.String()
+	if !strings.Contains(out, `"kind":"invalid-max-orphan-dbs"`) {
+		t.Fatalf("stdout missing structured max-orphan validation kind:\nstdout=%s\nstderr=%s", out, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "not in a Gas City workspace") {
+		t.Fatalf("negative max-orphan validation happened after city resolution:\nstdout=%s\nstderr=%s", out, stderr.String())
 	}
 }
 
@@ -1187,6 +1208,17 @@ func TestRunDoltCleanup_DryRunDoesNotCountMissingRigMetadataAsError(t *testing.T
 	if len(r.Errors) != 0 {
 		t.Fatalf("Errors = %+v, want none for dry-run metadata gaps", r.Errors)
 	}
+	out := stdout.String()
+	for _, want := range []string{
+		`"force_blockers":[`,
+		`"kind":"rig-protection"`,
+		`"name":"missing"`,
+		`"name":"silent"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing dry-run force blocker %q:\n%s", want, out)
+		}
+	}
 }
 
 func TestRunDoltCleanup_ForceDisablesDropAndPurgeWhenRigMetadataMissing(t *testing.T) {
@@ -1304,6 +1336,9 @@ func TestRunDoltCleanup_ForceRefusesDropWhenApplyPlanExceedsMaxOrphanDBs(t *test
 	if len(r.Errors) != 1 || r.Errors[0].Stage != "drop" || !strings.Contains(r.Errors[0].Error, "--max-orphan-dbs") || strings.Contains(r.Errors[0].Error, "max_orphans_for_sql") {
 		t.Fatalf("Errors = %+v, want user-facing max orphan DB refusal", r.Errors)
 	}
+	if !strings.Contains(stdout.String(), `"kind":"max-orphan-refusal"`) {
+		t.Fatalf("stdout missing structured max-orphan refusal kind:\n%s", stdout.String())
+	}
 }
 
 func TestRunDoltCleanup_MaxOrphanRefusalAbortsForcedPurgeAndReap(t *testing.T) {
@@ -1373,6 +1408,9 @@ func TestRunDoltCleanup_MaxOrphanRefusalAbortsForcedPurgeAndReap(t *testing.T) {
 	}
 	if len(r.Errors) != 1 || r.Errors[0].Stage != "drop" || !strings.Contains(r.Errors[0].Error, "--max-orphan-dbs") {
 		t.Fatalf("Errors = %+v, want max-orphan drop refusal only", r.Errors)
+	}
+	if !strings.Contains(stdout.String(), `"kind":"max-orphan-refusal"`) {
+		t.Fatalf("stdout missing structured max-orphan refusal kind:\n%s", stdout.String())
 	}
 }
 

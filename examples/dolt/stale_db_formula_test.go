@@ -605,7 +605,7 @@ func TestStaleDBFormulaExitZeroMaxOrphanRefusalLeavesWorkOpenWithoutSuccessEvent
 
 	log, out, err := runStaleDBFormulaFailureCase(t, staleDBFailureCase{
 		scanJSON:  `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":20,"failed":[]},"purge":{"bytes_reclaimed":4096},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":4096,"bytes_freed_rss":0,"errors_total":0}}`,
-		applyJSON: `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":21,"failed":[]},"purge":{"ok":false,"bytes_reclaimed":0},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":0,"bytes_freed_rss":0,"errors_total":1},"errors":[{"stage":"drop","error":"refusing to drop 21 orphan databases; exceeds --max-orphan-dbs=20"}]}`,
+		applyJSON: `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":21,"failed":[]},"purge":{"ok":false,"bytes_reclaimed":0},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":0,"bytes_freed_rss":0,"errors_total":1},"errors":[{"stage":"drop","kind":"max-orphan-refusal","error":"stale database threshold tripped"}]}`,
 	})
 	if err == nil {
 		t.Fatalf("rendered script exited successfully; want exit-zero max-orphan refusal to keep work open\nlog:\n%s\noutput:\n%s", log, out)
@@ -623,6 +623,7 @@ func TestStaleDBFormulaExitZeroMaxOrphanRefusalLeavesWorkOpenWithoutSuccessEvent
 	for _, want := range []string{
 		"bd update bead-1 --append-notes",
 		"## apply (--force, refused)",
+		"apply refused by max-orphan safety guard",
 		"gc event emit mol-dog-stale-db.escalate",
 		"gc runtime drain-ack",
 	} {

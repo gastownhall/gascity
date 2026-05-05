@@ -193,7 +193,7 @@ else
   fi
 
   APPLY_ERRS=$(jq -r '.summary.errors_total // 0' "$APPLY_FILE")
-  APPLY_MAX_ORPHAN_REFUSALS=$(jq -r '[.errors[]? | (.error // "" | ascii_downcase) | select((contains("--max-orphan-dbs") or contains("max-orphan") or contains("orphan databases")) and (contains("refus") or contains("exceed")))] | length' "$APPLY_FILE")
+  APPLY_MAX_ORPHAN_REFUSALS=$(jq -r '[.errors[]? | select((.kind // "") == "max-orphan-refusal" or (((.error // "" | ascii_downcase) | (contains("--max-orphan-dbs") or contains("max-orphan") or contains("orphan databases")) and (contains("refus") or contains("exceed")))))] | length' "$APPLY_FILE")
   if [ "$APPLY_ERRS" -gt 0 ] || [ "$APPLY_MAX_ORPHAN_REFUSALS" -gt 0 ]; then
     ESCALATED=1
     APPLY_REFUSAL_MESSAGE="apply reported ${APPLY_ERRS} error(s); leaving work bead open"
