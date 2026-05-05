@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net/http"
 	"strings"
 	"time"
 
@@ -261,7 +262,7 @@ func (s *Server) humaHandleAgentCreate(ctx context.Context, input *AgentCreateIn
 	// target resolution reads the agent projection immediately after create.
 	qualifiedName := a.QualifiedName()
 	if waiter, ok := s.state.(AgentVisibilityWaiter); ok {
-		waitCtx, cancel := context.WithTimeout(ctx, agentVisibilityWaitTimeout)
+		waitCtx, cancel := context.WithTimeout(ctx, s.agentCreateVisibilityWaitTimeout())
 		err := waiter.WaitForAgentVisibility(waitCtx, qualifiedName)
 		cancel()
 		if err != nil {
@@ -278,12 +279,16 @@ func (s *Server) humaHandleAgentCreate(ctx context.Context, input *AgentCreateIn
 func agentVisibilityWaitHTTPError(err error) error {
 	switch {
 	case errors.Is(err, context.Canceled):
-		return huma.Error503ServiceUnavailable("agent was created, but visibility confirmation was canceled")
+		return agentVisibilityRetryableError(huma.Error503ServiceUnavailable("agent was created, but visibility confirmation was canceled"))
 	case errors.Is(err, context.DeadlineExceeded):
-		return huma.Error504GatewayTimeout("agent was created, but visibility was not confirmed before timeout")
+		return agentVisibilityRetryableError(huma.Error504GatewayTimeout("agent was created, but visibility was not confirmed before timeout"))
 	default:
 		return huma.Error500InternalServerError("agent was created, but visibility confirmation failed")
 	}
+}
+
+func agentVisibilityRetryableError(err error) error {
+	return huma.ErrorWithHeaders(err, http.Header{"Retry-After": []string{"1"}})
 }
 
 // humaHandleAgentUpdate is the Huma-typed handler for

@@ -23,10 +23,17 @@ const lookPathCacheTTL = 30 * time.Second
 // from blocking the caller for a perceptible time on the happy path.
 const agentVisibilityPollInterval = 50 * time.Millisecond
 
-// agentVisibilityWaitTimeout bounds the POST /agents read-after-write wait.
+// defaultAgentVisibilityWaitTimeout bounds the POST /agents read-after-write wait.
 // The controller should converge much faster; this timeout prevents a broken
 // projection from tying up the handler after the config mutation succeeded.
-var agentVisibilityWaitTimeout = 3 * time.Second
+const defaultAgentVisibilityWaitTimeout = 3 * time.Second
+
+func (s *Server) agentCreateVisibilityWaitTimeout() time.Duration {
+	if s.agentVisibilityWaitTimeout > 0 {
+		return s.agentVisibilityWaitTimeout
+	}
+	return defaultAgentVisibilityWaitTimeout
+}
 
 type agentResponse struct {
 	Name        string       `json:"name"`

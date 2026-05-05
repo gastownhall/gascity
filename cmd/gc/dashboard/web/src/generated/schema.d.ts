@@ -229,7 +229,10 @@ export interface paths {
         /** Get v0 city by city name agents */
         get: operations["get-v0-city-by-city-name-agents"];
         put?: never;
-        /** Create an agent */
+        /**
+         * Create an agent
+         * @description Creates an agent and waits until it is visible to immediate follow-up operations. If the agent is durably created but visibility confirmation is canceled or times out, the retryable 503/504 response includes a Retry-After header.
+         */
         post: operations["create-agent"];
         delete?: never;
         options?: never;

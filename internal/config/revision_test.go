@@ -50,6 +50,37 @@ name = "changed"
 	}
 }
 
+func TestRevision_UsesLoadedSourceSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city.toml")
+	writeFile(t, dir, "city.toml", `[workspace]
+name = "test"
+`)
+
+	cfg, prov, err := LoadWithIncludes(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	loadedRevision := Revision(fsys.OSFS{}, prov, cfg, dir)
+
+	writeFile(t, dir, "city.toml", `[workspace]
+name = "changed"
+`)
+	afterWriteRevision := Revision(fsys.OSFS{}, prov, cfg, dir)
+	if afterWriteRevision != loadedRevision {
+		t.Fatalf("revision changed after source file write; got %q, want loaded snapshot %q", afterWriteRevision, loadedRevision)
+	}
+
+	reloadedCfg, reloadedProv, err := LoadWithIncludes(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatalf("reloading config: %v", err)
+	}
+	reloadedRevision := Revision(fsys.OSFS{}, reloadedProv, reloadedCfg, dir)
+	if reloadedRevision == loadedRevision {
+		t.Fatal("revision did not change after reloading changed source file")
+	}
+}
+
 func TestRevision_IncludesFragments(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "city.toml", `[workspace]

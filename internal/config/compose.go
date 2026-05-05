@@ -31,6 +31,8 @@ type Provenance struct {
 	Workspace map[string]string
 	// Warnings collects non-fatal collision warnings from composition.
 	Warnings []string
+
+	sourceContents map[string][]byte
 }
 
 // LoadOptions controls optional config-loading behavior.
@@ -62,6 +64,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	}
 	cityRoot := filepath.Dir(path)
 	prov := newProvenance(path)
+	prov.recordSource(path, data)
 	prov.Warnings = append(prov.Warnings, rootWarnings...)
 	cityAgentsForProvenance := root.Agents
 
@@ -176,6 +179,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		// Track pack.toml agents in provenance.
 		trackAgents(prov, pc.Agents, packPath)
 		prov.Sources = append(prov.Sources, packPath)
+		prov.recordSource(packPath, packData)
 
 		packCommands, err := DiscoverPackCommands(fs, cityRoot, pc.Pack.Name)
 		if err != nil {
@@ -294,6 +298,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		// Merge fragment into root.
 		mergeFragment(root, frag, fragMeta, fragPath, prov)
 		prov.Sources = append(prov.Sources, fragPath)
+		prov.recordSource(fragPath, fragData)
 	}
 
 	// Inject system pack includes into Workspace.Includes. These are
@@ -1201,6 +1206,15 @@ func newProvenance(rootPath string) *Provenance {
 		Rigs:      make(map[string]string),
 		Workspace: make(map[string]string),
 	}
+}
+
+func (p *Provenance) recordSource(path string, data []byte) {
+	if p.sourceContents == nil {
+		p.sourceContents = make(map[string][]byte)
+	}
+	cp := make([]byte, len(data))
+	copy(cp, data)
+	p.sourceContents[path] = cp
 }
 
 func trackAgents(prov *Provenance, agents []Agent, source string) {

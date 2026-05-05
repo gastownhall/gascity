@@ -27,9 +27,13 @@ func Revision(fs fsys.FS, prov *Provenance, cfg *City, cityRoot string) string {
 	copy(sources, prov.Sources)
 	sort.Strings(sources)
 	for _, path := range sources {
-		data, err := fs.ReadFile(path)
-		if err != nil {
-			continue
+		data, ok := prov.sourceContents[path]
+		if !ok {
+			var err error
+			data, err = fs.ReadFile(path)
+			if err != nil {
+				continue
+			}
 		}
 		h.Write([]byte(path)) //nolint:errcheck // hash.Write never errors
 		h.Write([]byte{0})    //nolint:errcheck // hash.Write never errors

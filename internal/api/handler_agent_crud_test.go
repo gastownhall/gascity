@@ -142,15 +142,13 @@ func TestHandleAgentCreate_MakesImmediateSlingTargetVisible(t *testing.T) {
 }
 
 func TestHandleAgentCreate_VisibilityWaiterTimeoutIsBounded(t *testing.T) {
-	oldTimeout := agentVisibilityWaitTimeout
-	agentVisibilityWaitTimeout = 10 * time.Millisecond
-	t.Cleanup(func() { agentVisibilityWaitTimeout = oldTimeout })
-
 	fs := &agentVisibilityFakeState{
 		fakeMutatorState:     newFakeMutatorState(t),
 		waitUntilContextDone: true,
 	}
-	h := newTestCityHandler(t, fs)
+	srv := New(fs)
+	srv.agentVisibilityWaitTimeout = 10 * time.Millisecond
+	h := newTestCityHandlerWith(t, fs, srv)
 
 	req := newPostRequest(cityURL(fs, "/agents"), strings.NewReader(
 		`{"name":"coder","dir":"myrig","provider":"test-agent"}`,
@@ -164,6 +162,9 @@ func TestHandleAgentCreate_VisibilityWaiterTimeoutIsBounded(t *testing.T) {
 	}
 	if rec.Code != http.StatusGatewayTimeout {
 		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusGatewayTimeout, rec.Body.String())
+	}
+	if got := rec.Header().Get("Retry-After"); got != "1" {
+		t.Fatalf("Retry-After = %q, want 1", got)
 	}
 	if strings.Contains(rec.Body.String(), context.DeadlineExceeded.Error()) {
 		t.Fatalf("response leaked raw context error: %s", rec.Body.String())
@@ -185,6 +186,9 @@ func TestHandleAgentCreate_VisibilityWaiterCancelIsServiceUnavailable(t *testing
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	}
+	if got := rec.Header().Get("Retry-After"); got != "1" {
+		t.Fatalf("Retry-After = %q, want 1", got)
 	}
 	if strings.Contains(rec.Body.String(), context.Canceled.Error()) {
 		t.Fatalf("response leaked raw context error: %s", rec.Body.String())

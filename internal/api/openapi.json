@@ -13076,6 +13076,7 @@
         "summary": "Get v0 city by city name agents"
       },
       "post": {
+        "description": "Creates an agent and waits until it is visible to immediate follow-up operations. If the agent is durably created but visibility confirmation is canceled or times out, the retryable 503/504 response includes a Retry-After header.",
         "operationId": "create-agent",
         "parameters": [
           {

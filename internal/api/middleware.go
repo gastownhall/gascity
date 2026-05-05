@@ -105,7 +105,7 @@ func withCORS(next http.Handler) http.Handler {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Last-Event-ID, X-GC-Request")
-			w.Header().Set("Access-Control-Expose-Headers", "X-GC-Index, X-GC-Request-Id")
+			w.Header().Set("Access-Control-Expose-Headers", "X-GC-Index, X-GC-Request-Id, Retry-After")
 		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
