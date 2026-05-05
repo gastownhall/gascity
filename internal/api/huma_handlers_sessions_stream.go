@@ -51,7 +51,7 @@ func (s *Server) resolveSessionStream(ctx context.Context, input *SessionStreamI
 		return nil, humaSessionManagerError(stateErr)
 	}
 	running := workerPhaseHasLiveOutput(state.Phase)
-	if !hasHistory && !running {
+	if !hasHistory && !running && input.Format != "raw" {
 		return nil, huma.Error404NotFound("session " + id + " has no live output")
 	}
 

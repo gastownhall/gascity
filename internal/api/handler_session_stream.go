@@ -87,13 +87,14 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 		writeSessionManagerError(w, err)
 		return
 	}
+	format := r.URL.Query().Get("format")
 	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
 	}
 	historyReq := worker.HistoryRequest{}
-	if r.URL.Query().Get("format") == "raw" && !info.Closed {
+	if format == "raw" && !info.Closed {
 		historyReq.TailCompactions = 1
 	}
 	history, historyErr := handle.History(worker.WithoutOperationEvents(r.Context()), historyReq)
@@ -109,7 +110,7 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	running := workerPhaseHasLiveOutput(state.Phase)
-	if !hasHistory && !running {
+	if !hasHistory && !running && format != "raw" {
 		writeError(w, http.StatusNotFound, "not_found", "session "+id+" has no live output")
 		return
 	}
@@ -129,7 +130,6 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	format := r.URL.Query().Get("format")
 	if format == "raw" && !info.Closed {
 		data, _ := json.Marshal(SessionStreamRawMessageEvent{
 			ID:       info.ID,
