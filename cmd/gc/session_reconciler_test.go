@@ -1846,6 +1846,111 @@ func TestReconcileSessionBeads_OnDemandNamedSessionDoesNotWakeFromDesiredStatePr
 	}
 }
 
+func TestReconcileSessionBeads_OnDemandNamedSessionWakesFromRoutedIdentityDemand(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "mayor",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{Template: "mayor", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, "mayor")
+
+	woken, running := reconcileExistingAsleepNamedSessionWithRoutedWork(t, cfg, sessionName, "mayor", "mayor")
+	if woken != 1 {
+		t.Fatalf("woken = %d, want 1", woken)
+	}
+	if !running {
+		t.Fatalf("on-demand named session %q was not started from routed identity demand", sessionName)
+	}
+}
+
+func TestReconcileSessionBeads_OnDemandNamedSessionWakesFromRoutedSingletonTemplateDemand(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{Name: "primary", Template: "worker", Mode: "on_demand"}},
+	}
+
+	woken, running := reconcileExistingAsleepNamedSessionWithRoutedWork(t, cfg, "primary", "primary", "worker")
+	if woken != 1 {
+		t.Fatalf("woken = %d, want 1", woken)
+	}
+	if !running {
+		t.Fatal("on-demand named session primary was not started from routed singleton-template demand")
+	}
+}
+
+func reconcileExistingAsleepNamedSessionWithRoutedWork(t *testing.T, cfg *config.City, sessionName, identity, routedTo string) (int, bool) {
+	t.Helper()
+
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	if _, err := store.Create(beads.Bead{
+		Title:  "queued named work",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": routedTo,
+		},
+	}); err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:  sessionName,
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               sessionName,
+			"alias":                      identity,
+			"template":                   cfg.NamedSessions[0].Template,
+			"state":                      "asleep",
+			"generation":                 "1",
+			"instance_token":             "canonical-token",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: identity,
+			namedSessionModeMetadata:     "on_demand",
+		},
+	}); err != nil {
+		t.Fatalf("Create(session): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	dsResult := buildDesiredState(cfg.EffectiveCityName(), cityPath, clk.Now().UTC(), cfg, sp, store, &stderr)
+	if !dsResult.NamedSessionDemand[identity] {
+		t.Fatalf("NamedSessionDemand[%s] = false for routed_to=%s; stderr:\n%s", identity, routedTo, stderr.String())
+	}
+	cfgNames := configuredSessionNames(cfg, cfg.EffectiveCityName(), store)
+	syncSessionBeads(cityPath, store, dsResult.State, sp, cfgNames, cfg, clk, &stderr, true)
+	sessions, err := loadSessionBeads(store)
+	if err != nil {
+		t.Fatalf("loadSessionBeads: %v", err)
+	}
+	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, sessions, dsResult.ScaleCheckCounts))
+	if poolDesired == nil {
+		poolDesired = make(map[string]int)
+	}
+	mergeNamedSessionDemand(poolDesired, dsResult.NamedSessionDemand, cfg)
+
+	woken := reconcileSessionBeadsAtPathWithNamedDemand(
+		context.Background(), cityPath, sessions, dsResult.State, cfgNames, cfg, sp,
+		store, nil, dsResult.AssignedWorkBeads, nil, nil, newDrainTracker(), poolDesired,
+		dsResult.NamedSessionDemand, dsResult.StoreQueryPartial, nil, cfg.EffectiveCityName(),
+		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
+	)
+	return woken, sp.IsRunning(sessionName)
+}
+
 func TestReconcileSessionBeads_SyncsGCDirWithWorkDirOverride(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}

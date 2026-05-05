@@ -583,6 +583,41 @@ func TestCachingStoreApplyEventRecordsProblemOnMalformedPayload(t *testing.T) {
 	}
 }
 
+func TestCachingStoreSparseUpdatedEventFallsBackWhenCompleteCoverageIsMissingDeps(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	bead, err := backing.Create(Bead{Title: "target"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	cache.mu.Lock()
+	delete(cache.deps, bead.ID)
+	cache.depsComplete = true
+	cache.mu.Unlock()
+
+	cache.ApplyEvent("bead.updated", json.RawMessage(`{"id":"`+bead.ID+`","title":"target"}`))
+
+	cache.mu.RLock()
+	depsComplete := cache.depsComplete
+	lastProblem := cache.stats.LastProblem
+	cache.mu.RUnlock()
+	if depsComplete {
+		t.Fatal("depsComplete = true, want incomplete coverage after missing deps invariant break")
+	}
+	if !strings.Contains(lastProblem, "missing deps for "+bead.ID) {
+		t.Fatalf("LastProblem = %q, want missing deps diagnostic for %s", lastProblem, bead.ID)
+	}
+	if _, ok := cache.CachedReady(); ok {
+		t.Fatal("CachedReady answered from cache after dependency coverage became incomplete")
+	}
+}
+
 func TestCachingStoreApplyEventRechecksLocalMutationBeforeCommit(t *testing.T) {
 	backing := NewMemStore()
 	bead, err := backing.Create(Bead{

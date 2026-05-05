@@ -465,6 +465,49 @@ func TestDefaultScaleCheckCountsReadyErrorNamesAffectedTemplates(t *testing.T) {
 	}
 }
 
+func TestDefaultNamedSessionDemandUsesPartialReadyRows(t *testing.T) {
+	store := &partialAssignedWorkStore{MemStore: beads.NewMemStore(), partialReady: true}
+	if _, err := store.Create(beads.Bead{
+		Title:  "queued worker work",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": "worker",
+		},
+	}); err != nil {
+		t.Fatalf("create routed bead: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name: "worker",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Name:     "primary",
+			Template: "worker",
+			Mode:     "on_demand",
+		}},
+	}
+
+	demand, errs := defaultNamedSessionDemand([]defaultScaleCheckTarget{{
+		template: "worker",
+		storeKey: "rig:gascity",
+		store:    store,
+	}}, cfg, "test-city")
+	if !demand["primary"] {
+		t.Fatalf("defaultNamedSessionDemand[primary] = false, want survivor row counted")
+	}
+	if len(errs) != 1 || !beads.IsPartialResult(errs[0]) {
+		t.Fatalf("defaultNamedSessionDemand errs = %v, want partial-result diagnostic", errs)
+	}
+	msg := errs[0].Error()
+	for _, want := range []string{"rig:gascity", "worker"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("defaultNamedSessionDemand err = %q, want affected template %q", msg, want)
+		}
+	}
+}
+
 func TestDefaultScaleCheckCountsReportsMissingRigStore(t *testing.T) {
 	cityPath := t.TempDir()
 	cfg := &config.City{

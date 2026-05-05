@@ -181,6 +181,30 @@ func TestNamedOnDemand_ExactNamedIdentityAssigneeWakes(t *testing.T) {
 	assertReason(t, result, "hello-world--refinery", "assigned-work")
 }
 
+func TestNamedOnDemand_NamedSessionDemandWakesExistingIdentity(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:             []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
+		NamedSessions:      []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
+		SessionBeads:       []AwakeSessionBead{{ID: "mc-1", SessionName: "hello-world--refinery", Template: "hello-world/refinery", State: "asleep", NamedIdentity: "hello-world/refinery"}},
+		NamedSessionDemand: map[string]bool{"hello-world/refinery": true},
+		Now:                now,
+	})
+	assertAwake(t, result, "hello-world--refinery")
+	assertReason(t, result, "hello-world--refinery", "named-demand")
+}
+
+func TestNamedOnDemand_NamedSessionDemandWakesSingletonTemplateResolvedIdentity(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:             []AwakeAgent{{QualifiedName: "worker"}},
+		NamedSessions:      []AwakeNamedSession{{Identity: "primary", Template: "worker", Mode: "on_demand"}},
+		SessionBeads:       []AwakeSessionBead{{ID: "mc-1", SessionName: "primary", Template: "worker", State: "asleep", NamedIdentity: "primary"}},
+		NamedSessionDemand: map[string]bool{"primary": true},
+		Now:                now,
+	})
+	assertAwake(t, result, "primary")
+	assertReason(t, result, "primary", "named-demand")
+}
+
 func TestNamedOnDemand_PendingCreateWakesWithoutDemand(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents:        []AwakeAgent{{QualifiedName: "hello-world/refinery"}},

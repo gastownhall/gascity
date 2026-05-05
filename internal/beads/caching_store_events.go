@@ -204,13 +204,16 @@ func (c *CachingStore) updateEventDepsLocked(eventType string, b Bead, fields ma
 		return
 	}
 	if eventType == "bead.updated" && c.depsComplete {
+		c.depsComplete = false
+		c.recordProblemLocked("apply bead.updated event", fmt.Errorf("dependency cache marked complete but missing deps for %s", b.ID))
 		return
 	}
 	c.depsComplete = false
 }
 
-// ApplyDepEvent updates the dep cache for a bead. Call after dep
-// mutations are detected via events or write-through.
+// ApplyDepEvent updates the dep cache for callers that have an authoritative
+// dependency snapshot. bd hook payloads that omit dependency fields still flow
+// through ApplyEvent and fall back to reconciliation.
 func (c *CachingStore) ApplyDepEvent(beadID string, deps []Dep) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

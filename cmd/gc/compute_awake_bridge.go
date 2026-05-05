@@ -18,6 +18,7 @@ func buildAwakeInputFromReconciler(
 	cfg *config.City,
 	sessionBeads []beads.Bead,
 	poolDesired map[string]int,
+	namedSessionDemand map[string]bool,
 	workSet map[string]bool,
 	readyWaitSet map[string]bool,
 	assignedWorkBeads []beads.Bead,
@@ -26,14 +27,15 @@ func buildAwakeInputFromReconciler(
 	clk time.Time,
 ) AwakeInput {
 	input := AwakeInput{
-		ScaleCheckCounts: poolDesired,
-		WorkSet:          workSet,
-		ReadyWaitSet:     readyWaitSet,
-		RunningSessions:  make(map[string]bool),
-		AttachedSessions: make(map[string]bool),
-		PendingSessions:  make(map[string]bool),
-		ChatIdleTimeout:  cfg.ChatSessions.IdleTimeoutDuration(),
-		Now:              clk,
+		ScaleCheckCounts:   poolDesired,
+		NamedSessionDemand: cloneBoolMap(namedSessionDemand),
+		WorkSet:            workSet,
+		ReadyWaitSet:       readyWaitSet,
+		RunningSessions:    make(map[string]bool),
+		AttachedSessions:   make(map[string]bool),
+		PendingSessions:    make(map[string]bool),
+		ChatIdleTimeout:    cfg.ChatSessions.IdleTimeoutDuration(),
+		Now:                clk,
 	}
 
 	// Agents
@@ -149,7 +151,7 @@ func awakeSetToWakeEvals(decisions map[string]AwakeDecision, sessionBeads []Awak
 				reasons = []WakeReason{WakePin}
 			case "wait-ready":
 				reasons = []WakeReason{WakeWait}
-			case "assigned-work", "work-query":
+			case "assigned-work", "named-demand", "work-query":
 				reasons = []WakeReason{WakeWork}
 			default:
 				reasons = []WakeReason{WakeConfig}
@@ -161,6 +163,17 @@ func awakeSetToWakeEvals(decisions map[string]AwakeDecision, sessionBeads []Awak
 		}
 	}
 	return evals
+}
+
+func cloneBoolMap(source map[string]bool) map[string]bool {
+	if source == nil {
+		return nil
+	}
+	out := make(map[string]bool, len(source))
+	for key, value := range source {
+		out[key] = value
+	}
+	return out
 }
 
 func parseSleepDuration(s string) time.Duration {

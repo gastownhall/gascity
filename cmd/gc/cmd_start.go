@@ -623,9 +623,10 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	}
 	mergeNamedSessionDemand(poolDesired, dsResult.NamedSessionDemand, cfg)
 	awakeAssignedWorkBeads := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, open, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
-	reconcileSessionBeadsAtPath(
+	reconcileSessionBeadsAtPathWithNamedDemand(
 		sigCtx, cityPath, open, ds, cfgNames, cfg, sp, oneShotStore,
 		nil, awakeAssignedWorkBeads, rigStores, nil, dt, poolDesired,
+		dsResult.NamedSessionDemand,
 		dsResult.snapshotQueryPartial(),
 		nil, cityName,
 		nil, clock.Real{}, recorder, cfg.Session.StartupTimeoutDuration(), 0,

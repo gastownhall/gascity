@@ -29,6 +29,7 @@ func TestBuildAwakeInputFromReconcilerUsesLifecycleProjectionForCompatibilitySta
 		nil,
 		nil,
 		nil,
+		nil,
 		now,
 	)
 
@@ -66,6 +67,7 @@ func TestBuildAwakeInputFromReconcilerPopulatesPendingInteractions(t *testing.T)
 		nil,
 		nil,
 		nil,
+		nil,
 		[]wakeTarget{{session: &session, alive: true}},
 		sp,
 		now,
@@ -78,6 +80,50 @@ func TestBuildAwakeInputFromReconcilerPopulatesPendingInteractions(t *testing.T)
 	got := decisions["s-worker"]
 	if !got.ShouldWake || got.Reason != "pending" {
 		t.Fatalf("decision = %+v, want pending wake", got)
+	}
+}
+
+func TestBuildAwakeInputFromReconcilerCarriesNamedSessionDemand(t *testing.T) {
+	now := time.Now().UTC()
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "worker"}},
+		NamedSessions: []config.NamedSession{
+			{Name: "primary", Template: "worker", Mode: "on_demand"},
+		},
+	}
+	sessionBead := beads.Bead{
+		ID:     "mc-session-1",
+		Status: "open",
+		Type:   "session",
+		Metadata: map[string]string{
+			"state":                     "asleep",
+			"session_name":              "primary",
+			"template":                  "worker",
+			"configured_named_identity": "primary",
+			"configured_named_mode":     "on_demand",
+		},
+	}
+
+	input := buildAwakeInputFromReconciler(
+		cfg,
+		[]beads.Bead{sessionBead},
+		map[string]int{"worker": 1},
+		map[string]bool{"primary": true},
+		nil,
+		nil,
+		nil,
+		nil,
+		runtime.NewFake(),
+		now,
+	)
+
+	if !input.NamedSessionDemand["primary"] {
+		t.Fatalf("NamedSessionDemand[primary] = false, want true")
+	}
+	decisions := ComputeAwakeSet(input)
+	got := decisions["primary"]
+	if !got.ShouldWake || got.Reason != "named-demand" {
+		t.Fatalf("decision = %+v, want named-demand wake", got)
 	}
 }
 
@@ -117,7 +163,7 @@ func TestBuildAwakeInputFromReconcilerNamedAlwaysPostChurnRewakes(t *testing.T) 
 	input := buildAwakeInputFromReconciler(
 		cfg,
 		[]beads.Bead{postChurnBead},
-		nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, nil, nil,
 		runtime.NewFake(),
 		now,
 	)
