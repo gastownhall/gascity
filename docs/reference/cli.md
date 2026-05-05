@@ -941,11 +941,14 @@ and non-leading hyphens. Missing or silent rig metadata disables forced
 drop/purge because the live database name cannot be proven safe.
 
 JSON envelope schema is stable: gc.dolt.cleanup.v1. Automation that
-uses --json must inspect summary.errors_total and errors; dry-run
+uses --json must inspect summary.errors_total and errors, and must also
+refuse to invoke --force when dry-run force_blockers is non-empty.
 force_blockers reports conditions that would block forced cleanup without
-incrementing errors_total. Cleanup stage errors are reported in the
-envelope even when the command can still return successfully after
-emitting the report.
+incrementing errors_total. The rig-protection blocker is intentionally
+global: missing or silent rig metadata prevents forced drop/purge because
+the command cannot prove all registered rig databases are protected.
+Cleanup stage errors are reported in the envelope even when the command
+can still return successfully after emitting the report.
 
 ```
 gc dolt-cleanup [flags]

@@ -223,6 +223,19 @@ type cleanupOptions struct {
 // otherwise the report still renders with errors describing the unreachable
 // data plane.
 func runDoltCleanup(opts cleanupOptions, stdout, stderr io.Writer) int {
+	if opts.MaxOrphanDBs < 0 {
+		report := CleanupReport{Schema: CleanupSchemaVersion}
+		recordCleanupErrorKind(
+			&report,
+			"config",
+			cleanupErrorKindInvalidMaxOrphanDBs,
+			"--max-orphan-dbs",
+			fmt.Errorf("--max-orphan-dbs must be non-negative, got %d", opts.MaxOrphanDBs),
+		)
+		emitReport(report, PortResolution{}, opts, stdout, stderr)
+		return 1
+	}
+
 	resolution := cleanupPortResolution(opts)
 	opts.PortResolution = resolution
 	protections, protectionErrors := rigProtections(opts.Rigs, opts.FS)
@@ -517,7 +530,7 @@ func fatalPortResolutionAttempt(resolution PortResolution) (PortResolutionAttemp
 		if attempt.Status != "error" {
 			continue
 		}
-		if attempt.Source != "--port flag" && attempt.Source != "city config dolt.port" && !isRigPortFileSource(attempt.Source) {
+		if attempt.Source != flagDoltPortSource && attempt.Source != cityConfigDoltPortSource && !isRigPortFileSource(attempt.Source) {
 			continue
 		}
 		if attempt.Detail != "" {
@@ -614,6 +627,7 @@ func emitHumanReport(report CleanupReport, resolution PortResolution, opts clean
 	emitDroppedSection(report, stdout)
 	emitOrphansSection(report, stdout)
 	emitProtectedSection(report, stdout)
+	emitForceBlockersSection(report, stdout)
 	emitErrorsOrSummary(report, opts, stdout)
 	if !opts.Force {
 		fmt.Fprintln(stdout, "")                              //nolint:errcheck
@@ -667,6 +681,21 @@ func emitProtectedSection(report CleanupReport, stdout io.Writer) {
 	}
 	for _, pid := range report.Reaped.ProtectedPIDs {
 		fmt.Fprintf(stdout, "  PID %d (active server or non-test path)\n", pid) //nolint:errcheck
+	}
+}
+
+func emitForceBlockersSection(report CleanupReport, stdout io.Writer) {
+	if len(report.ForceBlockers) == 0 {
+		return
+	}
+	fmt.Fprintln(stdout, "")                                                //nolint:errcheck
+	fmt.Fprintf(stdout, "FORCE BLOCKERS (%d)\n", len(report.ForceBlockers)) //nolint:errcheck
+	for _, blocker := range report.ForceBlockers {
+		if blocker.Name != "" {
+			fmt.Fprintf(stdout, "  [%s] %s - %s\n", blocker.Kind, blocker.Name, blocker.Error) //nolint:errcheck
+		} else {
+			fmt.Fprintf(stdout, "  [%s] %s\n", blocker.Kind, blocker.Error) //nolint:errcheck
+		}
 	}
 }
 
@@ -800,11 +829,14 @@ and non-leading hyphens. Missing or silent rig metadata disables forced
 drop/purge because the live database name cannot be proven safe.
 
 JSON envelope schema is stable: gc.dolt.cleanup.v1. Automation that
-uses --json must inspect summary.errors_total and errors; dry-run
+uses --json must inspect summary.errors_total and errors, and must also
+refuse to invoke --force when dry-run force_blockers is non-empty.
 force_blockers reports conditions that would block forced cleanup without
-incrementing errors_total. Cleanup stage errors are reported in the
-envelope even when the command can still return successfully after
-emitting the report.`,
+incrementing errors_total. The rig-protection blocker is intentionally
+global: missing or silent rig metadata prevents forced drop/purge because
+the command cannot prove all registered rig databases are protected.
+Cleanup stage errors are reported in the envelope even when the command
+can still return successfully after emitting the report.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if maxOrphanDBs < 0 {

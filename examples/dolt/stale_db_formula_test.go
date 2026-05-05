@@ -36,6 +36,7 @@ func TestStaleDBFormulaRuntimeContract(t *testing.T) {
 		`gc dolt-cleanup --json --probe --force --max-orphan-dbs "{{max_orphans_for_sql}}" > "$APPLY_FILE"`,
 		`jq -r '.dropped.count // 0'`,
 		`jq -r '[.dropped.skipped[]? | select(.reason == "invalid-identifier")] | length'`,
+		`jq -r '[.force_blockers[]?] | length'`,
 		`jq -r '.reaped.targets | length'`,
 		`gc event emit mol-dog-stale-db.scan`,
 		`gc event emit mol-dog-stale-db.drop`,
@@ -43,7 +44,7 @@ func TestStaleDBFormulaRuntimeContract(t *testing.T) {
 		`gc event emit mol-dog-stale-db.reap`,
 		`gc event emit mol-dog-stale-db.done`,
 		`gc event emit mol-dog-stale-db.escalate`,
-		`if [ "$APPLIED" -eq 1 ] && [ "$DONE_ERRS" -gt 0 ]; then`,
+		`if [ "$APPLIED" -eq 1 ] && [ "$MISSED_PURGE_BYTES" -gt 0 ]; then`,
 		`leaving work bead open`,
 		`gc session nudge deacon "WARN: $ORPHAN_TOTAL Dolt orphan(s) seen this scan`,
 		`gc session nudge deacon "DOG_DONE: stale-db - orphans: ${ORPHAN_TOTAL}, applied: ${APPLIED}, escalated: ${ESCALATED}" || true`,
@@ -633,6 +634,45 @@ func TestStaleDBFormulaExitZeroMaxOrphanRefusalLeavesWorkOpenWithoutSuccessEvent
 	}
 }
 
+func TestStaleDBFormulaDryRunForceBlockersLeaveWorkOpenBeforeApply(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash not found: %v", err)
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skipf("jq not found: %v", err)
+	}
+
+	log, out, err := runStaleDBFormulaFailureCase(t, staleDBFailureCase{
+		scanJSON: `{"schema":"gc.dolt.cleanup.v1","force_blockers":[{"kind":"rig-protection","name":"missing","error":"missing metadata"}],"dropped":{"count":1,"failed":[]},"purge":{"bytes_reclaimed":4096},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":4096,"bytes_freed_rss":0,"errors_total":0}}`,
+		wantNote: "## scan (dry-run)",
+		wantLog:  "force blocker",
+	})
+	if err == nil {
+		t.Fatalf("rendered script exited successfully; want dry-run force blockers to keep work open\nlog:\n%s\noutput:\n%s", log, out)
+	}
+	for _, want := range []string{
+		"gc event emit mol-dog-stale-db.escalate",
+		"gc mail send mayor",
+		"gc runtime drain-ack",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("force-blocker path missing %q\nlog:\n%s\noutput:\n%s", want, log, out)
+		}
+	}
+	for _, forbidden := range []string{
+		"gc dolt-cleanup --json --probe --force",
+		"gc event emit mol-dog-stale-db.drop",
+		"gc event emit mol-dog-stale-db.purge",
+		"gc event emit mol-dog-stale-db.reap",
+		"gc event emit mol-dog-stale-db.done",
+		"bd close bead-1",
+	} {
+		if strings.Contains(log, forbidden) {
+			t.Fatalf("force-blocker path logged forbidden command %q\nlog:\n%s\noutput:\n%s", forbidden, log, out)
+		}
+	}
+}
+
 type staleDBFailureCase struct {
 	scanJSON     string
 	scanExit     string
@@ -818,6 +858,7 @@ maybe_fail() {
 }
 case "${1:-} ${2:-}" in
   "dolt-cleanup "*)
+    echo "gc $*" >> "$GC_TEST_LOG"
     case " $* " in
       *" --force "*)
         cat "$GC_TEST_APPLY_JSON"

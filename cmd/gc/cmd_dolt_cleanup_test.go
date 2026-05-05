@@ -77,6 +77,29 @@ func TestDoltCleanupCmdRejectsNegativeMaxOrphanDBsBeforeCityResolution(t *testin
 	}
 }
 
+func TestRunDoltCleanupRejectsNegativeMaxOrphanDBs(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		JSON:         true,
+		MaxOrphanDBs: -1,
+	}
+
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("runDoltCleanup exit=0; want negative MaxOrphanDBs rejected")
+	}
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+	if r.Summary.ErrorsTotal != 1 {
+		t.Fatalf("Summary.ErrorsTotal = %d, want 1; errors=%+v", r.Summary.ErrorsTotal, r.Errors)
+	}
+	if len(r.Errors) != 1 || r.Errors[0].Kind != cleanupErrorKindInvalidMaxOrphanDBs || !strings.Contains(r.Errors[0].Error, "non-negative") {
+		t.Fatalf("Errors = %+v, want invalid max orphan validation error", r.Errors)
+	}
+}
+
 func TestRunDoltCleanup_JSONOutputsResolvedPort(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/.beads/dolt-server.port"] = []byte("28231\n")
