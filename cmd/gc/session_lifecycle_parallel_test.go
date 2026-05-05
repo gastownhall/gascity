@@ -1619,6 +1619,122 @@ func TestAsyncStartLimiterNilReceiverMethodsAreNoops(t *testing.T) {
 	release()
 }
 
+func TestExecutePlannedStartsTracedCanceledContextDoesNotStart(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC)}
+	session, err := store.Create(beads.Bead{
+		ID:     "gc-worker",
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       "worker",
+			"template":           "worker",
+			"state":              "asleep",
+			"sleep_reason":       "idle",
+			"wake_mode":          "fresh",
+			"generation":         "1",
+			"continuation_epoch": "1",
+			"instance_token":     "tok-worker",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tp := TemplateParams{Command: "worker", SessionName: "worker", TemplateName: "worker"}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	sp := runtime.NewFake()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	woken := executePlannedStartsTraced(
+		ctx,
+		[]startCandidate{{session: &session, tp: tp}},
+		cfg,
+		map[string]TemplateParams{"worker": tp},
+		sp,
+		store,
+		"test-city",
+		"",
+		clk,
+		events.Discard,
+		5*time.Second,
+		ioDiscard{},
+		ioDiscard{},
+		nil,
+		withAsyncStartExecution(),
+		withAsyncStartTracker(&asyncStartTracker{}),
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0 after cancellation", woken)
+	}
+	for _, call := range sp.Calls {
+		if call.Method == "Start" {
+			t.Fatalf("unexpected Start after cancellation: calls=%+v", sp.Calls)
+		}
+	}
+}
+
+func TestReconcileSessionBeadsTracedCanceledContextDoesNotTouchProvider(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 5, 12, 1, 0, 0, time.UTC)}
+	session, err := store.Create(beads.Bead{
+		ID:     "gc-worker",
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":        "worker",
+			"template":            "worker",
+			"state":               "active",
+			"started_config_hash": "hash",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tp := TemplateParams{Command: "worker", SessionName: "worker", TemplateName: "worker"}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	sp := runtime.NewFake()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	woken := reconcileSessionBeadsTraced(
+		ctx,
+		"",
+		[]beads.Bead{session},
+		map[string]TemplateParams{"worker": tp},
+		map[string]bool{"worker": true},
+		cfg,
+		sp,
+		store,
+		nil,
+		nil,
+		nil,
+		nil,
+		newDrainTracker(),
+		map[string]int{"worker": 1},
+		false,
+		nil,
+		"test-city",
+		nil,
+		clk,
+		events.Discard,
+		5*time.Second,
+		time.Second,
+		ioDiscard{},
+		ioDiscard{},
+		nil,
+		withAsyncStartExecution(),
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0 after cancellation", woken)
+	}
+	if len(sp.Calls) != 0 {
+		t.Fatalf("provider calls after cancellation: %+v", sp.Calls)
+	}
+}
+
 func TestCityRuntimeShutdownWaitsForTrackedAsyncStartsBeforeStopSnapshot(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 25, 0, time.UTC)}

@@ -296,6 +296,9 @@ func reconcileSessionBeadsTraced(
 	trace *sessionReconcilerTraceCycle,
 	startOptions ...startExecutionOption,
 ) int {
+	if ctx != nil && ctx.Err() != nil {
+		return 0
+	}
 	deps := buildDepsMap(cfg)
 	if cityName == "" {
 		cityName = config.EffectiveCityName(cfg, "")
@@ -386,6 +389,9 @@ func reconcileSessionBeadsTraced(
 	var startCandidates []startCandidate
 	var wakeTargets []wakeTarget
 	for i := range ordered {
+		if ctx != nil && ctx.Err() != nil {
+			return 0
+		}
 		session := &ordered[i]
 
 		// Skip beads with unrecognized states. This enables forward-compatible
@@ -1114,6 +1120,10 @@ func reconcileSessionBeadsTraced(
 		wakeTargets = append(wakeTargets, wakeTarget{session: session, tp: tp, alive: alive})
 	}
 
+	if ctx != nil && ctx.Err() != nil {
+		return 0
+	}
+
 	// Use ComputeAwakeSet for the wake/sleep decision.
 	awakeInput := buildAwakeInputFromReconciler(
 		cfg, ordered, poolDesired, workSet, readyWaitSet,
@@ -1157,6 +1167,9 @@ func reconcileSessionBeadsTraced(
 	launchIdleProbes(ctx, idleProbeTargets, wakeTargets, dt, sp, clk)
 
 	for _, target := range wakeTargets {
+		if ctx != nil && ctx.Err() != nil {
+			return 0
+		}
 		name := target.session.Metadata["session_name"]
 		decision, hasDec := awakeDecisions[name]
 		shouldWake := hasDec && decision.ShouldWake
@@ -1305,12 +1318,20 @@ func reconcileSessionBeadsTraced(
 		}
 	}
 
+	if ctx != nil && ctx.Err() != nil {
+		return 0
+	}
+
 	plannedWakes := executePlannedStartsTraced(
 		ctx, startCandidates, cfg, desiredState, sp, store, cityName,
 		cityPath,
 		clk, rec, startupTimeout, stdout, stderr, trace,
 		startOptions...,
 	)
+
+	if ctx != nil && ctx.Err() != nil {
+		return plannedWakes
+	}
 
 	// Phase 2: Advance all in-flight drains.
 	sessionLookup := func(id string) *beads.Bead {

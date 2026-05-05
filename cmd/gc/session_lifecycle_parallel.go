@@ -1541,6 +1541,9 @@ func executePlannedStartsTraced(
 	if len(candidates) == 0 {
 		return 0
 	}
+	if ctx != nil && ctx.Err() != nil {
+		return 0
+	}
 	startOpts := startExecutionOptions{}
 	for _, apply := range options {
 		if apply != nil {
@@ -1570,6 +1573,9 @@ func executePlannedStartsTraced(
 	}
 	wakeCount := 0
 	for wave := 0; wave <= maxWave; wave++ {
+		if ctx != nil && ctx.Err() != nil {
+			return wakeCount
+		}
 		waveStarted := time.Now()
 		asyncFollowUpRequired := false
 		var waveCandidates []startCandidate
@@ -1589,6 +1595,9 @@ func executePlannedStartsTraced(
 		}
 		var ready []startCandidate
 		for _, candidate := range waveCandidates {
+			if ctx != nil && ctx.Err() != nil {
+				return wakeCount
+			}
 			if !allDependenciesAliveForTemplateWithClock(candidate.logicalTemplate(cfg), cfg, desiredState, sp, cityName, store, clk) {
 				logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "blocked_on_dependencies", time.Time{}, time.Time{}, nil)
 				continue
@@ -1608,6 +1617,9 @@ func executePlannedStartsTraced(
 			var prepared []preparedStart
 			var asyncPrepared []asyncPreparedStart
 			for _, candidate := range batchCandidates {
+				if ctx != nil && ctx.Err() != nil {
+					return wakeCount
+				}
 				if !allDependenciesAliveForTemplateWithClock(candidate.logicalTemplate(cfg), cfg, desiredState, sp, cityName, store, clk) {
 					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "blocked_on_dependencies", time.Time{}, time.Time{}, nil)
 					continue
@@ -1705,6 +1717,9 @@ func executePlannedStartsTraced(
 			}
 			offset = end
 			var results []startResult
+			if ctx != nil && ctx.Err() != nil {
+				return wakeCount
+			}
 			if startOpts.async {
 				results = enqueuePreparedStartWaveForCity(ctx, asyncPrepared, cityPath, sp, store, cfg, clk, rec, startupTimeout, wave, stdout, stderr, trace, startOpts.asyncFollowUp)
 				if len(results) > 0 && asyncStartBatchNeedsFollowUp(batchCandidates, cfg) {
