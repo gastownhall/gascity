@@ -232,6 +232,9 @@ func classifyRetryAttempt(subject beads.Bead) retryEvalResult {
 		if strings.TrimSpace(subject.Metadata["gc.failure_class"]) != "" || strings.TrimSpace(subject.Metadata["gc.failure_reason"]) != "" {
 			return retryEvalResult{Outcome: "hard", Reason: "invalid_worker_result_contract"}
 		}
+		if strings.TrimSpace(subject.Metadata["gc.output_json_required"]) == "true" && strings.TrimSpace(subject.Metadata["gc.output_json"]) == "" {
+			return retryEvalResult{Outcome: "transient", Reason: "missing_required_output_json"}
+		}
 		return retryEvalResult{Outcome: "pass"}
 	case "fail":
 		switch strings.TrimSpace(subject.Metadata["gc.failure_class"]) {
