@@ -305,5 +305,13 @@ func copyFile(src, dst string) error {
 		_ = closeErr
 		return fmt.Errorf("copying %q → %q: %w", src, dst, err)
 	}
-	return dstFile.Close()
+	if err := dstFile.Close(); err != nil {
+		return err
+	}
+	// OpenFile honors the process umask when creating files, so restore the
+	// source mode explicitly after the write to preserve executable scripts.
+	if err := os.Chmod(dst, info.Mode().Perm()); err != nil {
+		return fmt.Errorf("chmod %q: %w", dst, err)
+	}
+	return nil
 }

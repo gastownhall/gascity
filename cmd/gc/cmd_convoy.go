@@ -1125,13 +1125,27 @@ func convoyAutocloseStoreRoot(cwd string) string {
 		}
 		return filepath.Clean(root)
 	}
+	if cityPath, err := findCity(cwd); err == nil && pathIsWithin(cityPath, cwd) {
+		if beadsRoot := convoyAutocloseBeadsDirRoot(cwd); beadsRoot != "" &&
+			(samePath(beadsRoot, cityPath) || pathIsWithin(cityPath, beadsRoot)) {
+			return beadsRoot
+		}
+		return filepath.Clean(cwd)
+	}
+	if beadsRoot := convoyAutocloseBeadsDirRoot(cwd); beadsRoot != "" {
+		return beadsRoot
+	}
+	return cwd
+}
+
+func convoyAutocloseBeadsDirRoot(cwd string) string {
 	if beadsDir := strings.TrimSpace(os.Getenv("BEADS_DIR")); beadsDir != "" {
 		if !filepath.IsAbs(beadsDir) {
 			beadsDir = filepath.Join(cwd, beadsDir)
 		}
 		return filepath.Clean(filepath.Dir(beadsDir))
 	}
-	return cwd
+	return ""
 }
 
 // doConvoyAutocloseWith checks whether the closed bead's parent is a

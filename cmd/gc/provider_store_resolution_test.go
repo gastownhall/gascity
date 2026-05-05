@@ -191,6 +191,11 @@ func TestConvoyStoreCandidatesUseRigStoresForScopedFileProvider(t *testing.T) {
 func TestDoConvoyAutocloseUsesProviderAwareStore(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_STORE_ROOT", "")
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
 
 	cityDir := t.TempDir()
 	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
@@ -235,6 +240,54 @@ name = "demo"
 	}
 	if !strings.Contains(stdout.String(), "Auto-closed convoy") {
 		t.Fatalf("stdout = %q, want autoclose message", stdout.String())
+	}
+}
+
+func TestDoConvoyAutocloseIgnoresExternalBeadsDirWhenInCity(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	writeProviderAwareTestCity(t, cityDir, `[workspace]
+name = "demo"
+`)
+	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openScopeLocalFileStore(cityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	convoy, err := store.Create(beads.Bead{Title: "deploy", Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := store.Create(beads.Bead{Title: "task", Type: "task", ParentID: convoy.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(child.ID); err != nil {
+		t.Fatal(err)
+	}
+	chdirProviderAwareTest(t, cityDir)
+	t.Setenv("BEADS_DIR", filepath.Join(t.TempDir(), ".beads"))
+
+	var stdout, stderr bytes.Buffer
+	doConvoyAutoclose(child.ID, &stdout, &stderr)
+
+	reloaded, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := reloaded.Get(convoy.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != "closed" {
+		t.Fatalf("convoy status = %q, want closed", updated.Status)
 	}
 }
 

@@ -3328,6 +3328,9 @@ func TestDoInitFromDirPreservesPermissionsForLegacyTopLevelScripts(t *testing.T)
 	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\necho hello"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(scriptPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	cityPath := filepath.Join(dir, "dst")
 	if err := os.MkdirAll(cityPath, 0o755); err != nil {
@@ -3370,6 +3373,9 @@ func TestDoInitFromDirPreservesRealTopLevelScriptsForPackV2Template(t *testing.T
 	}
 	scriptPath := filepath.Join(srcDir, "scripts", "run.sh")
 	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\necho hello"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(scriptPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
