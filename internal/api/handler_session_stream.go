@@ -110,7 +110,7 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	running := workerPhaseHasLiveOutput(state.Phase)
-	if !hasHistory && !running && format != "raw" {
+	if !hasHistory && !running {
 		writeError(w, http.StatusNotFound, "not_found", "session "+id+" has no live output")
 		return
 	}
@@ -159,18 +159,7 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 		// No log file yet. If the session is running, poll tmux pane content
 		// and wrap it as a fake raw JSONL assistant message so a real-world app's existing
 		// rendering pipeline shows terminal output (e.g. OAuth prompts).
-		if running {
-			s.streamSessionPeekRaw(ctx, w, info, handle)
-		} else {
-			data, _ := json.Marshal(SessionStreamRawMessageEvent{
-				ID:       info.ID,
-				Template: info.Template,
-				Provider: info.Provider,
-				Format:   "raw",
-				Messages: []SessionRawMessageFrame{},
-			})
-			writeSSE(w, "message", 1, data)
-		}
+		s.streamSessionPeekRaw(ctx, w, info, handle)
 		return
 	default:
 		s.streamSessionPeek(ctx, w, info, handle)

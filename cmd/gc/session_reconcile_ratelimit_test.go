@@ -88,6 +88,36 @@ func TestCheckStability_RateLimitScreen_DoesNotCountAsCrash(t *testing.T) {
 	}
 }
 
+func TestCheckStability_RateLimitPendingCreateClearsStartedAt(t *testing.T) {
+	now := time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := newTestStore()
+	dt := newDrainTracker()
+
+	session := makeBead("b1", map[string]string{
+		"last_woke_at":              now.Add(-2 * time.Minute).Format(time.RFC3339),
+		"session_key":               "keep-session",
+		"started_config_hash":       "keep-hash",
+		"wake_attempts":             "3",
+		"pending_create_claim":      "true",
+		"pending_create_started_at": now.Add(-20 * time.Second).Format(time.RFC3339),
+	})
+
+	peek := func(_ int) (string, error) {
+		return "You've hit your limit, Pro plan\n\n/rate-limit-options", nil
+	}
+
+	if !checkStability(&session, nil, false, dt, store, clk, peek) {
+		t.Fatal("checkStability should return true when it records a rate-limit hold")
+	}
+	if session.Metadata["pending_create_claim"] != "" {
+		t.Error("pending_create_claim should be cleared after rate-limit detection")
+	}
+	if session.Metadata["pending_create_started_at"] != "" {
+		t.Error("pending_create_started_at should be cleared with pending_create_claim")
+	}
+}
+
 func TestCheckRateLimitStability_BeforeHealPreservesResumeMetadata(t *testing.T) {
 	now := time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}

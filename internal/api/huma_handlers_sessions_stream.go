@@ -51,7 +51,7 @@ func (s *Server) resolveSessionStream(ctx context.Context, input *SessionStreamI
 		return nil, humaSessionManagerError(stateErr)
 	}
 	running := workerPhaseHasLiveOutput(state.Phase)
-	if !hasHistory && !running && input.Format != "raw" {
+	if !hasHistory && !running {
 		return nil, huma.Error404NotFound("session " + id + " has no live output")
 	}
 
@@ -136,17 +136,7 @@ func (s *Server) streamSession(hctx huma.Context, input *SessionStreamInput, sen
 			s.streamSessionTranscriptLogHuma(reqCtx, send, info, handle, history)
 		}
 	case format == "raw":
-		if running {
-			s.streamSessionPeekRawHuma(reqCtx, send, info)
-		} else {
-			_ = send(sse.Message{ID: 1, Data: SessionStreamRawMessageEvent{
-				ID:       info.ID,
-				Template: info.Template,
-				Provider: info.Provider,
-				Format:   "raw",
-				Messages: []SessionRawMessageFrame{},
-			}})
-		}
+		s.streamSessionPeekRawHuma(reqCtx, send, info)
 	default:
 		s.streamSessionPeekHuma(reqCtx, send, info)
 	}

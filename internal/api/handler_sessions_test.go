@@ -4695,7 +4695,7 @@ func TestHandleSessionStreamStoppedWithoutOutputReturnsNotFound(t *testing.T) {
 	}
 }
 
-func TestHandleSessionStreamRawStoppedWithoutOutputReturnsEmptyStream(t *testing.T) {
+func TestHandleSessionStreamRawStoppedWithoutOutputReturnsNotFound(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
@@ -4714,14 +4714,31 @@ func TestHandleSessionStreamRawStoppedWithoutOutputReturnsEmptyStream(t *testing
 	req := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/stream?format=raw", nil)
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("got status %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("got status %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
 	}
-	if ct := rec.Header().Get("Content-Type"); ct != "text/event-stream" {
-		t.Fatalf("Content-Type = %q, want text/event-stream", ct)
+}
+
+func TestLegacySessionStreamRawStoppedWithoutOutputReturnsNotFound(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{t.TempDir()}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	info, err := mgr.Create(context.Background(), "default", "No Output", "echo test", t.TempDir(), "test", nil, session.ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
 	}
-	if !strings.Contains(rec.Body.String(), `"format":"raw"`) || !strings.Contains(rec.Body.String(), `"messages":[]`) {
-		t.Fatalf("raw stream body missing empty raw frame: %s", rec.Body.String())
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream?format=raw", nil)
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("got status %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
 	}
 }
 

@@ -570,6 +570,32 @@ func TestCreateBeadOnlyNamed_UsesExplicitSessionName(t *testing.T) {
 	}
 }
 
+func TestCreateAliasedBeadOnlyNamed_SetsPendingCreateMetadata(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.CreateAliasedBeadOnlyNamed("worker", "test-city--worker", "worker", "queued", "claude", "/tmp", "claude", "", nil, ProviderResume{})
+	if err != nil {
+		t.Fatalf("CreateAliasedBeadOnlyNamed: %v", err)
+	}
+
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := b.Metadata["pending_create_claim"]; got != "true" {
+		t.Fatalf("pending_create_claim = %q, want true", got)
+	}
+	startedAt := b.Metadata["pending_create_started_at"]
+	if startedAt == "" {
+		t.Fatal("pending_create_started_at is empty")
+	}
+	if _, err := time.Parse(time.RFC3339, startedAt); err != nil {
+		t.Fatalf("pending_create_started_at = %q, want RFC3339: %v", startedAt, err)
+	}
+}
+
 func TestCreateBeadOnly_SetsPendingCreateClaimForWakeSignal(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
