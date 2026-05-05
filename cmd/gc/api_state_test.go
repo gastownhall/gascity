@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -214,6 +215,64 @@ func TestControllerStateRuntimeUpdateDoesNotDropPendingMutationAgents(t *testing
 	if cs.configMutationPending.Load() {
 		t.Fatal("pending mutation marker not cleared after matching runtime update")
 	}
+}
+
+func TestControllerStateCreatedAgentVisibleAfterStaleRuntimeInterleaving(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "alpha")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("mkdir rig: %v", err)
+	}
+	current := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Rigs:      []config.Rig{{Name: "alpha", Path: rigDir}},
+		Agents:    []config.Agent{{Name: "worker", Dir: "alpha", Provider: "bash"}},
+	}
+	content, err := current.Marshal()
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), content, 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	cs := newControllerState(context.Background(), current, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	if err := cs.CreateAgent(config.Agent{Name: "helper", Dir: "alpha", Provider: "bash"}); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	stale := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Rigs:      []config.Rig{{Name: "alpha", Path: rigDir}},
+		Agents:    []config.Agent{{Name: "worker", Dir: "alpha", Provider: "bash"}},
+	}
+	cs.updateFromRuntime(stale, runtime.NewFake(), "stale-rev")
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := cs.WaitForAgentVisibility(ctx, "alpha/helper"); err != nil {
+		t.Fatalf("WaitForAgentVisibility after stale runtime update: %v", err)
+	}
+	got := cs.Config()
+	if !configHasAgent(got, "alpha/helper") {
+		t.Fatalf("agents after stale runtime update = %+v, want alpha/helper still visible", got.Agents)
+	}
+}
+
+func configHasAgent(cfg *config.City, qualifiedName string) bool {
+	if cfg == nil {
+		return false
+	}
+	for _, agent := range cfg.Agents {
+		if agent.QualifiedName() == qualifiedName {
+			return true
+		}
+	}
+	return false
 }
 
 func TestControllerStateRuntimeUpdateIgnoresEmptyRevisionDuringPendingMutation(t *testing.T) {

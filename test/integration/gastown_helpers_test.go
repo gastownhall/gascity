@@ -231,14 +231,16 @@ func tailText(s string, maxLines int) string {
 func initBd(t *testing.T, dir string) string {
 	t.Helper()
 	prefix := uniqueCityName()
-	env := standaloneBDEnvForDir(dir)
-	cmd := exec.Command(bdBinary, "init", "-p", prefix, "--skip-hooks", "--skip-agents", "-q")
-	cmd.Dir = dir
-	cmd.Env = env
-	if out, err := cmd.CombinedOutput(); err != nil {
+	out, err := bdStandalone(t, dir, "init", "-p", prefix, "--skip-hooks", "--skip-agents", "-q")
+	if err != nil {
 		t.Fatalf("bd init in %s failed: %v\noutput: %s", dir, err, out)
 	}
 	return prefix
+}
+
+func bdStandalone(t testing.TB, dir string, args ...string) (string, error) {
+	t.Helper()
+	return runCommand(dir, standaloneBDEnvForDir(dir), integrationBDCommandTimeout, bdBinary, args...)
 }
 
 func TestInitBdAllowsStandaloneCreate(t *testing.T) {

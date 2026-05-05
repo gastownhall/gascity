@@ -4907,6 +4907,68 @@ func TestStreamSessionTranscriptHistoryDoesNotSkipTurnsAcrossCompactionBoundarie
 	}
 }
 
+func TestStreamSessionTranscriptHistoryReloadsChangesWrittenAfterInitialHistory(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	searchBase := t.TempDir()
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"uuid":"a","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"before initial history\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+	)
+
+	handle, err := srv.workerHandleForSession(fs.cityBeadStore, info.ID)
+	if err != nil {
+		t.Fatalf("workerHandleForSession: %v", err)
+	}
+	initial, err := handle.History(context.Background(), worker.HistoryRequest{})
+	if err != nil {
+		t.Fatalf("History(initial): %v", err)
+	}
+
+	logPath := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir), info.SessionKey+".jsonl")
+	appendFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	if _, err := appendFile.WriteString(
+		`{"uuid":"b","parentUuid":"a","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"after initial history\"}","timestamp":"2025-01-01T00:00:01Z"}` + "\n",
+	); err != nil {
+		_ = appendFile.Close()
+		t.Fatalf("append transcript: %v", err)
+	}
+	if err := appendFile.Close(); err != nil {
+		t.Fatalf("close transcript: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	rec := newSyncResponseRecorder()
+	done := make(chan struct{})
+	go func() {
+		srv.streamSessionTranscriptHistory(ctx, rec, info, handle, initial)
+		close(done)
+	}()
+
+	if body := waitForRecorderSubstring(t, rec, "after initial history", time.Second); !strings.Contains(body, "after initial history") {
+		t.Fatalf("stream body missing post-initial-history turn: %s", body)
+	}
+	cancel()
+	<-done
+}
+
 func TestCityScopedSessionStreamReloadsRotatedGeminiTranscriptAcrossRestart(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)

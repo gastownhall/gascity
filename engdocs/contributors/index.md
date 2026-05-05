@@ -8,6 +8,7 @@ description: The shortest path for new contributors to get productive in Gas Cit
 - [Codebase Map](codebase-map.md)
 - [Architecture Overview](../architecture/index.md)
 - [Primitive Test](primitive-test.md)
+- [PR Review Handoff Notes](pr-review-handoff.md)
 - [Reconciler Debugging](reconciler-debugging.md)
 - [Huma Usage Notes](huma-usage.md) when touching `internal/api/`,
   OpenAPI generation, or SSE registration
