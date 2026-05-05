@@ -144,7 +144,6 @@ func rigLocalDoltPIDFromSQLServerInfo(rigPath string) (pid int, infoExists bool,
 	if err != nil {
 		return 0, false, false
 	}
-	infoExists = true
 	parts := strings.SplitN(strings.TrimSpace(string(data)), ":", 3)
 	if len(parts) < 1 || strings.TrimSpace(parts[0]) == "" {
 		return 0, true, false
@@ -155,4 +154,3 @@ func rigLocalDoltPIDFromSQLServerInfo(rigPath string) (pid int, infoExists bool,
 	}
 	return parsed, true, pidAlive(parsed)
 }
-

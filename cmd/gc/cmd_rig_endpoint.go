@@ -154,7 +154,7 @@ func doRigSetEndpoint(fs fsys.FS, cityPath, rigName string, opts rigEndpointOpti
 
 	if (opts.External || opts.Self) && !opts.AdoptUnverified {
 		if err := verifyRigExternalEndpoint(targetState, rig.Path, rig.Path); err != nil {
-			fmt.Fprintf(stderr, "gc rig set-endpoint: validate endpoint: %v\n", err)                                                  //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "gc rig set-endpoint: validate endpoint: %v\n", err)                                               //nolint:errcheck // best-effort stderr
 			fmt.Fprintf(stderr, "gc rig set-endpoint: rerun with --adopt-unverified to record this endpoint without validation\n") //nolint:errcheck // best-effort stderr
 			return 1
 		}
