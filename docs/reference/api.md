@@ -241,6 +241,17 @@ behavior, heartbeat suppression, and the `--seq` plain-text cursor format, see
 
 ### City Scope
 
+Per-city routes are available only after the supervisor marks the city
+`running=true` in `GET /v0/cities`. During startup reconciliation, a city can
+appear in the city list with `running=false` and `status=starting_agents`; in
+that window typed `/v0/city/{cityName}/...` routes return `404` with
+`not_found: city not found or not running: <cityName>`. The raw
+`/v0/city/{cityName}/svc/*` workspace-service proxy is outside the Huma-typed
+API surface and returns the static readiness detail
+`not_found: city not found or not running`. Clients should use the supervisor
+city list or lifecycle events as the readiness boundary before issuing per-city
+requests.
+
 - `GET /v0/city/{cityName}/events`
   returns `ListBodyWireEvent` and includes `X-GC-Index`.
 - `GET /v0/city/{cityName}/events/stream`

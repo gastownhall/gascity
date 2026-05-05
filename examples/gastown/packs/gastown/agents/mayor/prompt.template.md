@@ -21,7 +21,9 @@ When you file a bead, default to immediately dispatching it to a polecat:
 
 ```bash
 gc bd create "Fix the auth timeout bug" -t task --json   # file it
-gc bd update <bead-id> --set-metadata gc.routed_to=<rig>/{{ .BindingPrefix }}polecat  # dispatch to polecat pool (pool reconciler picks up routed metadata)
+TARGET_RIG="${GC_RIG:-}"  # set to the target rig, or leave empty in an HQ-only city
+POLECAT_TARGET="${TARGET_RIG:+$TARGET_RIG/}{{ .BindingPrefix }}polecat"
+gc bd update <bead-id> --set-metadata gc.routed_to="$POLECAT_TARGET"  # dispatch to polecat pool (pool reconciler picks up routed metadata)
 ```
 
 **Why this is the default:**
