@@ -2331,6 +2331,85 @@ dir = "orders"
 	}
 }
 
+func TestCmdSlingUnderscoredPrefixMultiDashExistingBeadUsesPrefixStore(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	rigDir := filepath.Join(cityDir, "live-docs")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rig): %v", err)
+	}
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatalf("ensureScopedFileStoreLayout: %v", err)
+	}
+	for _, dir := range []string{cityDir, rigDir} {
+		if err := ensurePersistedScopeLocalFileStore(dir); err != nil {
+			t.Fatalf("ensurePersistedScopeLocalFileStore(%s): %v", dir, err)
+		}
+	}
+	const beadID = "live_docs-spawn-storm"
+	writeTestFileStoreBeads(t, rigDir, []beads.Bead{{
+		ID:       beadID,
+		Title:    "spawn storm bead",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{},
+	}})
+	cityToml := `[workspace]
+name = "demo"
+
+[[rigs]]
+name = "live_docs"
+path = "live-docs"
+prefix = "live_docs"
+
+[[agent]]
+name = "worker"
+dir = "live_docs"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Chdir(cityDir)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSling(
+		[]string{"live_docs/worker", beadID},
+		false, false, false,
+		"", nil, "",
+		true, false, "",
+		false, false, false,
+		"", "",
+		&stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("cmdSling returned %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Created ") {
+		t.Fatalf("stdout = %q, want existing bead route without inline creation", stdout.String())
+	}
+
+	rigStore, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig): %v", err)
+	}
+	routed, err := rigStore.Get(beadID)
+	if err != nil {
+		t.Fatalf("rigStore.Get(%s): %v", beadID, err)
+	}
+	if routed.Metadata["gc.routed_to"] != "live_docs/worker" {
+		t.Fatalf("rig bead gc.routed_to = %q, want live_docs/worker", routed.Metadata["gc.routed_to"])
+	}
+
+	assertStoreHasNoBeadTitle(t, cityDir, cityDir, beadID)
+}
+
 func setupCmdSlingMultiDashBeadFixture(t *testing.T, defaultTarget bool) (cityDir, rigDir string) {
 	t.Helper()
 	configureIsolatedRuntimeEnv(t)

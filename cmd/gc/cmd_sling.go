@@ -1906,9 +1906,9 @@ func resolveInlineBeadAction(cfg *config.City, beadOrFormula string, dryRun bool
 }
 
 // isBeadIDCandidate reports whether s has the shape of a potential bead ID:
-// no whitespace, starts with a letter, contains only letters, digits, and
-// hyphens, and has at least one hyphen. Used to gate the store probe before
-// falling back to inline-text creation.
+// no whitespace, starts with a letter, contains only letters, digits, hyphens,
+// underscores, and dots, and has at least one hyphen. Used to gate the store
+// probe before falling back to inline-text creation.
 func isBeadIDCandidate(s string) bool {
 	if s == "" || strings.ContainsAny(s, " \t\n") {
 		return false
@@ -1922,6 +1922,7 @@ func isBeadIDCandidate(s string) bool {
 		switch {
 		case c == '-':
 			hasDash = true
+		case c == '_' || c == '.':
 		case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9':
 		default:
 			return false
