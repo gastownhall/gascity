@@ -104,7 +104,7 @@ var postgresBackendKeys = []string{
 
 // crossBackendKeysToScrub returns the on-disk metadata keys that should be
 // removed when canonicalising for the given backend. An empty backend
-// preserves all backend-specific keys (today's behaviour for unknown-shape
+// preserves all backend-specific keys (today's behavior for unknown-shape
 // metadata).
 func crossBackendKeysToScrub(backend string) []string {
 	switch backend {
