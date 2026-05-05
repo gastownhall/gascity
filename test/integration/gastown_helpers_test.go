@@ -289,6 +289,22 @@ func standaloneBdEnv(t *testing.T, dir string) []string {
 	return env
 }
 
+func TestInitBdAllowsStandaloneCreate(t *testing.T) {
+	requireDoltIntegration(t)
+
+	dir := t.TempDir()
+	prefix := initBd(t, dir)
+
+	out, err := bd(dir, "create", "standalone bead")
+	if err != nil {
+		t.Fatalf("bd create failed: %v\noutput: %s", err, out)
+	}
+	beadID := extractBeadID(t, out)
+	if !strings.HasPrefix(beadID, prefix) {
+		t.Fatalf("bead ID %q should start with prefix %q", beadID, prefix)
+	}
+}
+
 // createBead creates a bead and returns its ID.
 func createBead(t *testing.T, cityDir, title string) string {
 	t.Helper()

@@ -2560,6 +2560,27 @@ func TestAsyncStartSessionStillCurrent_PendingCreateClearedAfterAttachIsNotStale
 	}
 }
 
+func TestAsyncStartSessionStillCurrent_PendingCreateClearedAfterAwakeIsNotStale(t *testing.T) {
+	prepared := beads.Bead{Metadata: map[string]string{
+		"instance_token":       "tok-awake",
+		"generation":           "2",
+		"state":                "creating",
+		"pending_create_claim": "true",
+	}}
+	current := beads.Bead{Metadata: map[string]string{
+		"instance_token":       "tok-awake",
+		"generation":           "8",
+		"state":                "awake",
+		"pending_create_claim": "",
+	}}
+	if !asyncStartSessionStillCurrent(prepared, current) {
+		t.Fatal("session that advanced to awake mid-flight must not be considered stale even when pcc was cleared")
+	}
+	if asyncStartStaleRuntimeCleanupAllowed(prepared, current) {
+		t.Fatal("session that advanced to awake must not allow runtime cleanup")
+	}
+}
+
 func TestAsyncStartSessionStillCurrent_RollbackPendingCreateStillWorksWhenNotActive(t *testing.T) {
 	// Defensive: if pcc was cleared but state has NOT advanced to active/awake
 	// (still creating/asleep), the original rollback drift check still fires.
