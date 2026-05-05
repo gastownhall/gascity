@@ -173,17 +173,25 @@ To check on the status of your city, use `gc status`:
 ~/my-city
 $ gc status
 my-city  /Users/csells/my-city
-  Controller: standalone-managed (PID 83621)
-  Authority: standalone controller PID 83621
-  Next: gc stop /Users/csells/my-city && gc start /Users/csells/my-city to hand ownership to the supervisor
+  Controller: supervisor-managed (PID 83621)
+  Authority: supervisor process PID 83621
   Suspended:  no
 
 Agents:
-  mayor                   pool (min=0, max=unlimited)
-  claude                  pool (min=0, max=unlimited)
+  dog                     scaled (min=0, max=3)
+    dog-1                 stopped
+    dog-2                 stopped
+    dog-3                 stopped
 
-Sessions: 1 active, 0 suspended
+0/3 agents running
+
+Named sessions:
+  mayor                   reserved-unmaterialized (always)
 ```
+
+The `dog` pool is a background utility agent from the built-in maintenance
+pack. It handles internal housekeeping like shutdown coordination. You don't
+need to interact with it — ignore it for now.
 
 ## Adding a rig
 
