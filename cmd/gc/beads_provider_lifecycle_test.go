@@ -3116,6 +3116,98 @@ func TestRunProviderOpSanitizesInheritedRuntimeEnv(t *testing.T) {
 	}
 }
 
+func TestRunProviderOpKillsProcessGroupOnTimeout(t *testing.T) {
+	oldProviderOpTimeout := providerOpTimeout
+	providerOpTimeout = func(string) time.Duration {
+		return 300 * time.Millisecond
+	}
+	t.Cleanup(func() {
+		providerOpTimeout = oldProviderOpTimeout
+	})
+
+	dir := t.TempDir()
+	childPIDFile := filepath.Join(dir, "child.pid")
+	script := filepath.Join(dir, "provider-op.sh")
+	content := `#!/bin/sh
+sh -c 'echo $$ > "$GC_TEST_CHILD_PID"; while :; do sleep 1; done' &
+wait
+`
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	err := runProviderOpWithEnv(script, append(os.Environ(), "GC_TEST_CHILD_PID="+childPIDFile), "health")
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+
+	pidBytes, readErr := os.ReadFile(childPIDFile)
+	if readErr != nil {
+		t.Fatalf("read child pid: %v", readErr)
+	}
+	pid, convErr := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	if convErr != nil {
+		t.Fatalf("parse child pid: %v", convErr)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("provider child pid %d survived provider op timeout", pid)
+}
+
+func TestRunProviderProbeKillsProcessGroupOnTimeout(t *testing.T) {
+	oldProviderProbeTimeout := providerProbeTimeout
+	providerProbeTimeout = 300 * time.Millisecond
+	t.Cleanup(func() {
+		providerProbeTimeout = oldProviderProbeTimeout
+	})
+
+	dir := t.TempDir()
+	childPIDFile := filepath.Join(dir, "child.pid")
+	script := filepath.Join(dir, "provider-probe.sh")
+	content := `#!/bin/sh
+sh -c 'echo $$ > "$GC_TEST_CHILD_PID"; while :; do sleep 1; done' &
+wait
+`
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_TEST_CHILD_PID", childPIDFile)
+
+	if ok := runProviderProbe(script, "", ""); ok {
+		t.Fatal("expected timeout probe to return false")
+	}
+
+	pidBytes, readErr := os.ReadFile(childPIDFile)
+	if readErr != nil {
+		t.Fatalf("read child pid: %v", readErr)
+	}
+	pid, convErr := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	if convErr != nil {
+		t.Fatalf("parse child pid: %v", convErr)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("provider child pid %d survived provider probe timeout", pid)
+}
+
 func TestStartBeadsLifecycleDoesNotMutateProcessDoltEnv(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
