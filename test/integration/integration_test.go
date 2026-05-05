@@ -474,6 +474,12 @@ func bdDolt(dir string, args ...string) (string, error) {
 	if err == nil || dir == "" || !managedDoltTransportRetryable(out) {
 		return out, err
 	}
+	if _, readyErr := waitForManagedDoltCityReady(env, dir, 20*time.Second); readyErr == nil {
+		if port, ok := currentManagedDoltPortForTest(dir); ok {
+			env = appendManagedDoltEndpointEnv(env, port)
+		}
+		return runCommand(dir, env, integrationBDCommandTimeout, bdBinary, args...)
+	}
 	if port, ok := ensureManagedDoltPortForTest(dir); ok {
 		env = appendManagedDoltEndpointEnv(env, port)
 		if delay := managedDoltRetryDelay(out); delay > 0 {
@@ -745,6 +751,10 @@ func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	env = filterEnv(env, "BEADS_DOLT_DATABASE")
 	env = filterEnv(env, "BEADS_DOLT_DATA_DIR")
 	env = filterEnv(env, "BEADS_DOLT_PASSWORD")
+	env = filterEnv(env, "DOLT_HOST")
+	env = filterEnv(env, "DOLT_PORT")
+	env = filterEnv(env, "DOLT_USER")
+	env = filterEnv(env, "DOLT_PASSWORD")
 	env = filterEnv(env, integrationGCBinaryEnv)
 	env = filterEnv(env, integrationDoltBinaryEnv)
 	env = filterEnv(env, "BEADS_DOLT_AUTO_START")
@@ -1017,6 +1027,8 @@ func managedDoltTransportRetryable(out string) bool {
 		"broken pipe",
 		"unexpected eof",
 		"bad connection",
+		"dolt circuit breaker is open",
+		"server appears down",
 	} {
 		if strings.Contains(msg, marker) {
 			return true
@@ -1031,6 +1043,13 @@ func managedDoltRetryDelay(out string) time.Duration {
 		return 5 * time.Second
 	}
 	return 0
+}
+
+func TestManagedDoltTransportRetryableIncludesCircuitBreaker(t *testing.T) {
+	out := `{"error":"failed to open database: dolt circuit breaker is open: server appears down, failing fast (cooldown 5s)"}`
+	if !managedDoltTransportRetryable(out) {
+		t.Fatalf("managedDoltTransportRetryable(%q) = false, want true", out)
+	}
 }
 
 func testPortReachable(port string) bool {
@@ -1180,6 +1199,10 @@ func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
 	t.Setenv("BEADS_DOLT_DATABASE", "ambient-legacy-db")
 	t.Setenv("BEADS_DOLT_DATA_DIR", filepath.Join(t.TempDir(), "ambient-dolt-data"))
 	t.Setenv("BEADS_DOLT_PASSWORD", "ambient-beads-password")
+	t.Setenv("DOLT_HOST", "ambient-raw-host")
+	t.Setenv("DOLT_PORT", "0")
+	t.Setenv("DOLT_USER", "ambient-raw-user")
+	t.Setenv("DOLT_PASSWORD", "ambient-raw-password")
 	t.Setenv("BEADS_DIR", "/host/beads")
 	t.Setenv("BEADS_ACTOR", "host-agent")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "/host/scope")
@@ -1232,6 +1255,10 @@ func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
 		"BEADS_DOLT_DATABASE",
 		"BEADS_DOLT_DATA_DIR",
 		"BEADS_DOLT_PASSWORD",
+		"DOLT_HOST",
+		"DOLT_PORT",
+		"DOLT_USER",
+		"DOLT_PASSWORD",
 		"BEADS_DIR",
 		"BEADS_ACTOR",
 		"GC_BEADS_SCOPE_ROOT",
