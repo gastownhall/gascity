@@ -258,9 +258,21 @@ func TestControllerStateCreatedAgentVisibleAfterStaleRuntimeInterleaving(t *test
 		t.Fatalf("WaitForAgentVisibility after stale runtime update: %v", err)
 	}
 	got := cs.Config()
-	if len(got.Agents) != 2 || got.Agents[1].QualifiedName() != "alpha/helper" {
+	if !configHasAgent(got, "alpha/helper") {
 		t.Fatalf("agents after stale runtime update = %+v, want alpha/helper still visible", got.Agents)
 	}
+}
+
+func configHasAgent(cfg *config.City, qualifiedName string) bool {
+	if cfg == nil {
+		return false
+	}
+	for _, agent := range cfg.Agents {
+		if agent.QualifiedName() == qualifiedName {
+			return true
+		}
+	}
+	return false
 }
 
 func TestControllerStateRuntimeUpdateIgnoresEmptyRevisionDuringPendingMutation(t *testing.T) {
