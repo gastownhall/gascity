@@ -385,6 +385,33 @@ func reconcileSessionBeadsTraced(
 	// Phase 1: Forward pass (topo order) — wake sessions, handle alive state.
 	var startCandidates []startCandidate
 	var wakeTargets []wakeTarget
+	// Rate-limit rollbacks per tick. Each rollbackPendingCreate fires three
+	// bd subprocess calls (~2s each at the bd dolt-commit cost), so an
+	// unbounded rollback storm easily blows the tick past
+	// staleCreatingStateTimeout (60s) and starves executePlannedStartsTraced
+	// — fresh pending-create beads age out before op=start fires. Capping
+	// rollbacks per tick lets the rest of the tick make forward progress;
+	// remaining stale beads roll back on subsequent ticks.
+	const maxRollbacksPerTick = 5
+	rollbacksThisTick := 0
+	attemptRollbackPendingCreate := func(session *beads.Bead, templateName, name, action, detail string) {
+		if rollbacksThisTick >= maxRollbacksPerTick {
+			fmt.Fprintf(stderr, "session reconciler: deferring rollback of %s (%s): rollback budget exhausted this tick\n", name, detail) //nolint:errcheck
+			if trace != nil {
+				trace.recordDecision("reconciler.session.pending_create", templateName, name, action, "rollback_deferred", traceRecordPayload{
+					"rollbacks_this_tick":    rollbacksThisTick,
+					"max_rollbacks_per_tick": maxRollbacksPerTick,
+				}, nil, "")
+			}
+			return
+		}
+		rollbacksThisTick++
+		fmt.Fprintf(stderr, "session reconciler: rolling back pending create %s: %s\n", name, detail) //nolint:errcheck
+		if trace != nil {
+			trace.recordDecision("reconciler.session.pending_create", templateName, name, action, "rollback", nil, nil, "")
+		}
+		rollbackPendingCreate(session, store, clk.Now().UTC(), stderr)
+	}
 	for i := range ordered {
 		session := &ordered[i]
 
@@ -614,11 +641,7 @@ func reconcileSessionBeadsTraced(
 			}
 		}
 		if alive && shouldRollbackPendingCreate(session) && !runningSessionMatchesPendingCreate(session, name, sp) {
-			fmt.Fprintf(stderr, "session reconciler: rolling back pending create %s: live runtime belongs to another session\n", name) //nolint:errcheck
-			if trace != nil {
-				trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, name, "pending_create_rollback", "rollback", nil, nil, "")
-			}
-			rollbackPendingCreate(session, store, clk.Now().UTC(), stderr)
+			attemptRollbackPendingCreate(session, tp.TemplateName, name, "pending_create_rollback", "live runtime belongs to another session")
 			continue
 		}
 		// Desired-branch counterpart to pendingCreateSessionStillLeased: a
@@ -638,11 +661,7 @@ func reconcileSessionBeadsTraced(
 				if rateLimitHit || rateLimitErr != nil {
 					continue
 				}
-				fmt.Fprintf(stderr, "session reconciler: rolling back pending create %s: lease expired and no live runtime\n", name) //nolint:errcheck
-				if trace != nil {
-					trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, name, "pending_create_lease_expired", "rollback", nil, nil, "")
-				}
-				rollbackPendingCreate(session, store, clk.Now().UTC(), stderr)
+				attemptRollbackPendingCreate(session, tp.TemplateName, name, "pending_create_lease_expired", "lease expired and no live runtime")
 				continue
 			}
 		}
@@ -953,7 +972,7 @@ func reconcileSessionBeadsTraced(
 								}
 								continue
 							}
-							resetConfiguredNamedSessionForConfigDrift(session, store, sp, name, alive, "creating", stderr)
+							resetConfiguredNamedSessionForConfigDrift(session, store, sp, name, alive, "creating", clk.Now().UTC(), stderr)
 							if trace != nil {
 								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "restart_in_place", configDriftTracePayload(storedHash, currentHash, driftedFields, nil), nil, "")
 							}
@@ -1057,7 +1076,7 @@ func reconcileSessionBeadsTraced(
 							_ = json.Unmarshal([]byte(raw), &storedBreakdown)
 						}
 						driftedFields := runtime.CoreFingerprintDriftFields(storedBreakdown, agentCfg)
-						resetConfiguredNamedSessionForConfigDrift(session, store, sp, name, false, "asleep", stderr)
+						resetConfiguredNamedSessionForConfigDrift(session, store, sp, name, false, "asleep", clk.Now().UTC(), stderr)
 						if trace != nil {
 							trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "repair_in_place", configDriftTracePayload(storedHash, currentHash, driftedFields, nil), nil, "")
 						}
@@ -1760,6 +1779,7 @@ func resetConfiguredNamedSessionForConfigDrift(
 	sessionName string,
 	alive bool,
 	nextState string,
+	now time.Time,
 	stderr io.Writer,
 ) {
 	if session == nil || store == nil {
@@ -1777,7 +1797,7 @@ func resetConfiguredNamedSessionForConfigDrift(
 	if newKey, err := sessionpkg.GenerateSessionKey(); err == nil {
 		newSessionKey = newKey
 	}
-	batch := sessionpkg.ConfigDriftResetPatch(sessionpkg.State(nextState), newSessionKey)
+	batch := sessionpkg.ConfigDriftResetPatch(sessionpkg.State(nextState), newSessionKey, now)
 	batch[namedSessionConfigDriftDeferredAtMetadata] = ""
 	batch[namedSessionConfigDriftDeferredKeyMetadata] = ""
 	batch[sessionAttachedConfigDriftDeferredAtMetadata] = ""

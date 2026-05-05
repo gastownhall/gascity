@@ -644,6 +644,7 @@ func (m *Manager) createAliasedBeadOnlyNamed(alias, explicitName, template, titl
 			meta["session_key"] = sessionKey
 		}
 		meta["pending_create_claim"] = "true"
+		meta["pending_create_started_at"] = pendingCreateStartedAt(time.Now().UTC())
 		if explicitName != "" {
 			meta["session_name"] = explicitName
 			meta["session_name_explicit"] = "true"
@@ -860,6 +861,7 @@ func (m *Manager) retireConfiguredNamedSessionIdentifiers(id string, b beads.Bea
 	update.Metadata["session_name"] = ""
 	update.Metadata["session_name_explicit"] = ""
 	update.Metadata["pending_create_claim"] = ""
+	update.Metadata["pending_create_started_at"] = ""
 	if err := m.store.Update(id, update); err != nil {
 		return fmt.Errorf("retiring configured named session identifiers: %w", err)
 	}
