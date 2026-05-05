@@ -1393,9 +1393,9 @@ type readyCountingPartialListStore struct {
 	readyCalls int
 }
 
-func (s *readyCountingPartialListStore) Ready() ([]Bead, error) {
+func (s *readyCountingPartialListStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	s.readyCalls++
-	return s.partialListErrorStore.Ready()
+	return s.partialListErrorStore.Ready(query...)
 }
 
 func hasBead(items []Bead, id string) bool {

@@ -24,6 +24,7 @@ type testStore struct {
 	metadata             map[string]map[string]string // id -> key -> value
 	metadataBatchCalls   int
 	metadataBatchPatches []map[string]string
+	metadataBatchErr     error
 }
 
 func newTestStore() *testStore {
@@ -45,6 +46,9 @@ func (s *testStore) SetMetadataBatch(id string, kvs map[string]string) error {
 		patch[k] = v
 	}
 	s.metadataBatchPatches = append(s.metadataBatchPatches, patch)
+	if s.metadataBatchErr != nil {
+		return s.metadataBatchErr
+	}
 	for k, v := range kvs {
 		if err := s.SetMetadata(id, k, v); err != nil {
 			return err
@@ -894,7 +898,7 @@ func TestCheckStability_AliveReturnsFalse(t *testing.T) {
 		"last_woke_at": clk.Now().Add(-10 * time.Second).Format(time.RFC3339),
 	})
 
-	if checkStability(&session, nil, true, dt, store, clk) {
+	if checkStability(&session, nil, true, dt, store, clk, nil) {
 		t.Error("alive session should not report stability failure")
 	}
 }
@@ -910,7 +914,7 @@ func TestCheckStability_RapidExit(t *testing.T) {
 		"wake_attempts": "0",
 	})
 
-	if !checkStability(&session, nil, false, dt, store, clk) {
+	if !checkStability(&session, nil, false, dt, store, clk, nil) {
 		t.Error("rapid exit should report stability failure")
 	}
 
@@ -936,7 +940,7 @@ func TestCheckStability_PendingCreateInFlightNotCounted(t *testing.T) {
 		"wake_attempts":        "0",
 	})
 
-	if checkStability(&session, nil, false, dt, store, clk) {
+	if checkStability(&session, nil, false, dt, store, clk, nil) {
 		t.Fatal("in-flight pending create should not be counted as a rapid exit")
 	}
 	if got := session.Metadata["wake_attempts"]; got != "0" {
@@ -958,7 +962,7 @@ func TestCheckStability_DrainingNotCounted(t *testing.T) {
 		"last_woke_at": now.Add(-10 * time.Second).Format(time.RFC3339),
 	})
 
-	if checkStability(&session, nil, false, dt, store, clk) {
+	if checkStability(&session, nil, false, dt, store, clk, nil) {
 		t.Error("draining session death should not count as stability failure")
 	}
 }
@@ -974,7 +978,7 @@ func TestCheckStability_StableSession(t *testing.T) {
 		"last_woke_at": now.Add(-2 * time.Minute).Format(time.RFC3339),
 	})
 
-	if checkStability(&session, nil, false, dt, store, clk) {
+	if checkStability(&session, nil, false, dt, store, clk, nil) {
 		t.Error("session that lived past threshold should not be stability failure")
 	}
 }
@@ -993,7 +997,7 @@ func TestCheckStability_SubprocessProviderSkipsCrashCounting(t *testing.T) {
 		"wake_attempts": "0",
 	})
 
-	if checkStability(&session, cfg, false, dt, store, clk) {
+	if checkStability(&session, cfg, false, dt, store, clk, nil) {
 		t.Fatal("subprocess rapid exit should not be counted as a crash")
 	}
 	if got := session.Metadata["wake_attempts"]; got != "0" {
@@ -1709,7 +1713,7 @@ func TestCheckStability_RapidExitAfterHealStateKeepsStartedConfigHashCleared(t *
 	if session.Metadata["started_config_hash"] != "" {
 		t.Fatalf("healState started_config_hash = %q, want empty", session.Metadata["started_config_hash"])
 	}
-	if !checkStability(&session, nil, false, nil, store, clk) {
+	if !checkStability(&session, nil, false, nil, store, clk, nil) {
 		t.Fatal("checkStability should record the rapid exit")
 	}
 	if session.Metadata["started_config_hash"] != "" {

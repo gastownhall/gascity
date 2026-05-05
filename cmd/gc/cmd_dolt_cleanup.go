@@ -157,10 +157,10 @@ func (r CleanupReport) MarshalJSON() ([]byte, error) {
 //
 // DiscoverProcesses and KillProcess are injection points for tests; in
 // production they default to the /proc walker and syscall.Kill respectively.
-// HomeDir defaults to the live $HOME and seeds the test-config-path allowlist
-// (~/.gotmp/Test* recognition). TempDir defaults to the live os.TempDir() and
-// lets the reaper recognize Go test temp roots on hosts where TMPDIR is not
-// /tmp.
+// HomeDir defaults to the live $HOME and seeds ~/.gotmp/Test* recognition.
+// TempDir defaults to the live os.TempDir() and lets the reaper recognize
+// Go test temp roots and known Gas City test prefixes on hosts where TMPDIR
+// is not /tmp.
 type cleanupOptions struct {
 	Flag           string
 	CityPort       int
@@ -188,6 +188,7 @@ type cleanupOptions struct {
 	DoltClientOpenErr error
 
 	DiscoverProcesses func() ([]DoltProcInfo, error)
+	ActiveTestRoots   []string
 	KillProcess       func(pid int, sig syscall.Signal) error
 	ReapGracePeriod   time.Duration
 }
@@ -307,7 +308,11 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 	if tempDir == "" {
 		tempDir = os.TempDir()
 	}
-	plan := planOrphanReap(procs, rigPorts, opts.HomeDir, tempDir)
+	activeTestRoots := opts.ActiveTestRoots
+	if activeTestRoots == nil {
+		activeTestRoots = discoverActiveTestRoots(opts.HomeDir, tempDir)
+	}
+	plan := planOrphanReap(procs, rigPorts, opts.HomeDir, tempDir, activeTestRoots)
 
 	report.Reaped.ProtectedPIDs = nil
 	for _, p := range plan.Protected {
@@ -337,7 +342,7 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 	gone := make(map[int]bool, len(plan.Reap))
 	sigtermSent := make(map[int]bool, len(plan.Reap))
 	for _, target := range plan.Reap {
-		switch revalidateReapTarget(report, discover, target, rigPorts, opts.HomeDir, tempDir, "SIGTERM") {
+		switch revalidateReapTarget(report, discover, target, rigPorts, opts.HomeDir, tempDir, activeTestRoots, "SIGTERM") {
 		case reapRevalidationEligible:
 		case reapRevalidationVanished:
 			appendVanishedPID(report, target.PID)
@@ -363,7 +368,7 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 		if gone[target.PID] || !sigtermSent[target.PID] {
 			continue
 		}
-		switch revalidateReapTarget(report, discover, target, rigPorts, opts.HomeDir, tempDir, "SIGKILL") {
+		switch revalidateReapTarget(report, discover, target, rigPorts, opts.HomeDir, tempDir, activeTestRoots, "SIGKILL") {
 		case reapRevalidationEligible:
 		case reapRevalidationVanished:
 			gone[target.PID] = true
@@ -414,7 +419,7 @@ const (
 	reapRevalidationError
 )
 
-func revalidateReapTarget(report *CleanupReport, discover func() ([]DoltProcInfo, error), target ReapTarget, rigPorts map[int]string, homeDir, tempDir, signalName string) reapRevalidationStatus {
+func revalidateReapTarget(report *CleanupReport, discover func() ([]DoltProcInfo, error), target ReapTarget, rigPorts map[int]string, homeDir, tempDir string, activeTestRoots []string, signalName string) reapRevalidationStatus {
 	refreshed, err := discover()
 	if err != nil {
 		recordReapRevalidationError(report, signalName, err)
@@ -424,7 +429,7 @@ func revalidateReapTarget(report *CleanupReport, discover func() ([]DoltProcInfo
 		if proc.PID != target.PID {
 			continue
 		}
-		recheck := classifyDoltProcess(proc, rigPorts, homeDir, tempDir)
+		recheck := classifyDoltProcess(proc, rigPorts, homeDir, tempDir, activeTestRoots)
 		if recheck.Action != "reap" || recheck.ConfigPath != target.ConfigPath || !sameReapProcessIdentity(target, proc) {
 			appendProtectedPID(report, target.PID)
 			return reapRevalidationProtected
@@ -735,9 +740,10 @@ or invalid rig port files fail closed before cleanup stages run; only
 absent rig port files can reach the legacy default.
 
 Dry-run by default. Pass --force to actually drop, purge, and kill.
-Active rig dolt servers, registered rig databases, and processes
-outside the test-config-path allowlist (/tmp/Test*, os.TempDir()/Test*,
-~/.gotmp/Test*) are always protected — see the PROTECTED section of the
+Active rig dolt servers, registered rig databases, active test temp roots,
+and processes outside the test-config-path allowlist (/tmp/Test*,
+os.TempDir()/Test*, known Gas City test prefixes, ~/.gotmp/Test*) are always
+protected — see the PROTECTED section of the
 report. Destructive drops are limited to known stale test database name
 shapes and conservative SQL identifier characters; skipped stale matches
 are reported in dropped.skipped. Rig dolt_database names used for purge

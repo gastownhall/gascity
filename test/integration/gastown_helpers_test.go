@@ -240,42 +240,23 @@ func initBd(t *testing.T, dir string) string {
 
 func bdStandalone(t testing.TB, dir string, args ...string) (string, error) {
 	t.Helper()
-	return runCommand(dir, standaloneBDEnv(t, dir), integrationBDCommandTimeout, bdBinary, args...)
+	return runCommand(dir, standaloneBDEnvForDir(dir), integrationBDCommandTimeout, bdBinary, args...)
 }
 
-func standaloneBDEnv(t testing.TB, dir string) []string {
-	t.Helper()
-	bdHome := filepath.Join(dir, ".bd-home")
-	xdgConfigHome := filepath.Join(bdHome, ".config")
-	xdgCacheHome := filepath.Join(bdHome, ".cache")
-	for _, path := range []string{bdHome, xdgConfigHome, xdgCacheHome} {
-		if err := os.MkdirAll(path, 0o755); err != nil {
-			t.Fatalf("creating standalone bd env dir %s: %v", path, err)
-		}
-	}
+func TestInitBdAllowsStandaloneCreate(t *testing.T) {
+	requireDoltIntegration(t)
 
-	env := []string{
-		"HOME=" + bdHome,
-		"XDG_CONFIG_HOME=" + xdgConfigHome,
-		"XDG_CACHE_HOME=" + xdgCacheHome,
-		"DOLT_ROOT_PATH=" + bdHome,
-		"BEADS_DOLT_AUTO_START=1",
-		"BD_NON_INTERACTIVE=1",
+	dir := t.TempDir()
+	prefix := initBd(t, dir)
+
+	out, err := bd(dir, "create", "standalone bead")
+	if err != nil {
+		t.Fatalf("bd create failed: %v\noutput: %s", err, out)
 	}
-	addIfSet := func(name, value string) {
-		if strings.TrimSpace(value) != "" {
-			env = append(env, name+"="+value)
-		}
+	beadID := extractBeadID(t, out)
+	if !strings.HasPrefix(beadID, prefix) {
+		t.Fatalf("bead ID %q should start with prefix %q", beadID, prefix)
 	}
-	addIfSet("PATH", prependPath(integrationToolBinDir, os.Getenv("PATH")))
-	addIfSet("TMPDIR", os.TempDir())
-	addIfSet("USER", os.Getenv("USER"))
-	addIfSet("LOGNAME", os.Getenv("LOGNAME"))
-	addIfSet("SHELL", os.Getenv("SHELL"))
-	addIfSet("LANG", os.Getenv("LANG"))
-	addIfSet(integrationRealBDBinaryEnv, realBDBinary)
-	addIfSet(integrationDoltBinaryEnv, doltBinary)
-	return env
 }
 
 // createBead creates a bead and returns its ID.

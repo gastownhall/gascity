@@ -274,7 +274,11 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 	// During dry-run, mark the text as preview-only instead of creating it.
 	inlineText := false
 	if !isFormula {
-		createInlineBead, previewInlineText := resolveInlineBeadAction(cfg, beadOrFormula, dryRun)
+		createInlineBead, previewInlineText, err := resolveInlineBeadAction(cfg, beadOrFormula, dryRun, store)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		inlineText = previewInlineText
 		if createInlineBead {
 			created, err := store.Create(beads.Bead{Title: beadOrFormula, Description: stdinDescription, Type: "task"})
@@ -1800,15 +1804,52 @@ func looksLikeBeadIDSuffix(baseSuffix string) bool {
 	return false
 }
 
-func shouldCreateInlineBead(cfg *config.City, beadOrFormula string) bool {
-	return looksLikeInlineText(cfg, beadOrFormula)
+func resolveInlineBeadAction(cfg *config.City, beadOrFormula string, dryRun bool, store beads.Store) (createInlineBead, previewInlineText bool, err error) {
+	// Fast path: heuristics already classify this as a bead ID.
+	if !looksLikeInlineText(cfg, beadOrFormula) {
+		return false, false, nil
+	}
+	// Store probe: covers IDs that pass the shape pre-check but fail the
+	// heuristic (e.g. descriptive multi-dash IDs like "fo-spawn-storm").
+	// A store hit means the bead exists and should be routed, not created.
+	if store != nil && isBeadIDCandidate(beadOrFormula) {
+		exists, err := sling.ProbeBeadInStore(store, beadOrFormula)
+		if err != nil {
+			return false, false, fmt.Errorf("checking bead candidate %q: %w", beadOrFormula, err)
+		}
+		if exists {
+			return false, false, nil
+		}
+	}
+	if dryRun {
+		return false, true, nil
+	}
+	return true, false, nil
 }
 
-func resolveInlineBeadAction(cfg *config.City, beadOrFormula string, dryRun bool) (createInlineBead, previewInlineText bool) {
-	if dryRun && looksLikeInlineText(cfg, beadOrFormula) {
-		return false, true
+// isBeadIDCandidate reports whether s has the shape of a potential bead ID:
+// no whitespace, starts with a letter, contains only letters, digits, and
+// hyphens, and has at least one hyphen. Used to gate the store probe before
+// falling back to inline-text creation.
+func isBeadIDCandidate(s string) bool {
+	if s == "" || strings.ContainsAny(s, " \t\n") {
+		return false
 	}
-	return shouldCreateInlineBead(cfg, beadOrFormula), false
+	first := s[0]
+	if (first < 'a' || first > 'z') && (first < 'A' || first > 'Z') {
+		return false
+	}
+	hasDash := false
+	for _, c := range s {
+		switch {
+		case c == '-':
+			hasDash = true
+		case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9':
+		default:
+			return false
+		}
+	}
+	return hasDash
 }
 
 func looksLikeInlineText(cfg *config.City, beadOrFormula string) bool {
