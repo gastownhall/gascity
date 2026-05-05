@@ -3203,7 +3203,11 @@ case "$cmd" in
     exit 0
     ;;
   --host)
-    exit 0
+    count=0
+    if [ -f "$attempts_file" ]; then
+      count=$(cat "$attempts_file")
+    fi
+    [ "$count" -ge 2 ]
     ;;
   sql-server)
     config_file=""
@@ -3242,9 +3246,12 @@ esac
 	}
 	fakeNC := filepath.Join(binDir, "nc")
 	fakeNCScript := fmt.Sprintf(`#!/bin/sh
-set -eu
 attempts_file=%q
-if [ -f "$attempts_file" ] && [ "$(cat "$attempts_file")" -ge 2 ]; then
+count=0
+if [ -f "$attempts_file" ]; then
+  count=$(cat "$attempts_file")
+fi
+if [ "$count" -ge 2 ]; then
   exit 0
 fi
 exit 1
