@@ -232,7 +232,7 @@ func initBd(t *testing.T, dir string) string {
 	t.Helper()
 	prefix := uniqueCityName()
 	env := standaloneBDEnvForDir(dir)
-	cmd := exec.Command(bdBinary, "init", "-p", prefix, "--skip-hooks", "-q")
+	cmd := exec.Command(bdBinary, "init", "-p", prefix, "--skip-hooks", "--skip-agents", "-q")
 	cmd.Dir = dir
 	cmd.Env = env
 	if out, err := cmd.CombinedOutput(); err != nil {

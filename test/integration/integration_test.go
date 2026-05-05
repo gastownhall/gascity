@@ -416,6 +416,7 @@ func standaloneBDEnvForDir(dir string) []string {
 		"LANG",
 		"LC_ALL",
 		"TZ",
+		"DOLT_ROOT_PATH",
 		integrationRealBDBinaryEnv,
 		integrationGCBinaryEnv,
 		integrationDoltBinaryEnv,
@@ -426,7 +427,11 @@ func standaloneBDEnvForDir(dir string) []string {
 			env = append(env, key+"="+value)
 		}
 	}
-	env = append(env, "DOLT_ROOT_PATH="+filepath.Join(dir, ".beads", "dolt-root"))
+	// Keep DOLT_ROOT_PATH from integrationEnv so standalone bd commands use
+	// the suite's seeded Dolt identity instead of an unseeded per-workspace root.
+	// BEADS_DIR and XDG_RUNTIME_DIR are temp-scoped by caller-owned test dirs;
+	// bd's embedded-mode default needs no server shutdown, and server-mode tests
+	// should use their own explicit lifecycle instead of hiding it in this env.
 	env = append(env, "XDG_RUNTIME_DIR="+dir)
 	env = append(env, "BEADS_DIR="+filepath.Join(dir, ".beads"))
 	return append(env, "BEADS_DOLT_AUTO_START=1")
@@ -444,9 +449,6 @@ func hasStandaloneBDWorkspace(dir string) bool {
 		return false
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".beads", "config.yaml")); err == nil {
-		return true
-	}
-	if _, err := os.Stat(filepath.Join(dir, ".beads")); err == nil {
 		return true
 	}
 	return false
@@ -1293,8 +1295,8 @@ func TestStandaloneBDEnvAllowsBDAutoStart(t *testing.T) {
 	if got["BEADS_DIR"] != filepath.Join(dir, ".beads") {
 		t.Fatalf("BEADS_DIR = %q, want %q", got["BEADS_DIR"], filepath.Join(dir, ".beads"))
 	}
-	if got["DOLT_ROOT_PATH"] != filepath.Join(dir, ".beads", "dolt-root") {
-		t.Fatalf("DOLT_ROOT_PATH = %q, want %q", got["DOLT_ROOT_PATH"], filepath.Join(dir, ".beads", "dolt-root"))
+	if got["DOLT_ROOT_PATH"] != testGCHome {
+		t.Fatalf("DOLT_ROOT_PATH = %q, want seeded integration root %q", got["DOLT_ROOT_PATH"], testGCHome)
 	}
 	if got["XDG_RUNTIME_DIR"] != dir {
 		t.Fatalf("XDG_RUNTIME_DIR = %q, want %q", got["XDG_RUNTIME_DIR"], dir)
@@ -1335,8 +1337,14 @@ func TestUsesStandaloneBDWorkspaceKeepsFileProviderOnShim(t *testing.T) {
 	if usesStandaloneBDWorkspace(dir, []string{"GC_BEADS=file"}) {
 		t.Fatal("file provider city should keep using the file-store bd shim")
 	}
+	if usesStandaloneBDWorkspace(dir, []string{"GC_BEADS=dolt"}) {
+		t.Fatal("bare .beads directory should not select the standalone bd env")
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte("issue_prefix: test\n"), 0o644); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
 	if !usesStandaloneBDWorkspace(dir, []string{"GC_BEADS=dolt"}) {
-		t.Fatal("standalone .beads workspace should use the standalone bd env")
+		t.Fatal("standalone .beads workspace with config.yaml should use the standalone bd env")
 	}
 }
 

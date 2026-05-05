@@ -161,6 +161,57 @@ func writeMultiRigToml(t *testing.T, cityDir, cityName string, rigDirs []string,
 	require.NoError(t, os.WriteFile(tomlPath, []byte(b.String()), 0o644))
 }
 
+func installFakeBDForCity(t *testing.T, cityDir string) {
+	t.Helper()
+
+	shimDir := t.TempDir()
+	script := filepath.Join(shimDir, "bd")
+	content := `#!/bin/sh
+set -eu
+store="${BEADS_DIR:?}/fake-beads"
+mkdir -p "$store"
+case "${1:-}" in
+  create)
+    title="${2:?missing title}"
+    id="${GC_BEADS_PREFIX:-bd}-fake"
+    printf '%s' "$title" > "$store/$id"
+    printf 'Created issue: %s\n' "$id"
+    ;;
+  show)
+    id="${2:?missing id}"
+    if [ ! -f "$store/$id" ]; then
+      printf 'Error: issue not found: %s\n' "$id" >&2
+      exit 1
+    fi
+    printf 'ID: %s\n' "$id"
+    printf 'Title: %s\n' "$(cat "$store/$id")"
+    ;;
+  *)
+    printf 'unsupported fake bd command: %s\n' "$*" >&2
+    exit 2
+    ;;
+esac
+`
+	require.NoError(t, os.WriteFile(script, []byte(content), 0o755))
+
+	loaded, ok := cityCommandEnv.Load(cityDir)
+	require.True(t, ok, "city command env should be registered for %s", cityDir)
+	env := append([]string(nil), loaded.([]string)...)
+	envMap := parseEnvList(env)
+	env = replaceEnv(env, "PATH", prependPath(shimDir, envMap["PATH"]))
+	registerCityCommandEnv(cityDir, env)
+}
+
+func seedConfiguredFakeBDWorkspace(t *testing.T, dir, prefix string) {
+	t.Helper()
+
+	beadsDir := filepath.Join(dir, ".beads")
+	require.NoError(t, os.MkdirAll(beadsDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue_prefix: "+prefix+"\n"), 0o644))
+	metadata := fmt.Sprintf(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":%q}`+"\n", prefix)
+	require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0o644))
+}
+
 // TestGastown_MultiRig_ConfigLoads creates a city with 2 rigs and verifies
 // that gc config show reports both rigs.
 func TestGastown_MultiRig_ConfigLoads(t *testing.T) {
@@ -272,14 +323,19 @@ func TestGastown_MultiRig_BeadIsolation(t *testing.T) {
 	agents := []gasTownAgent{
 		{Name: "worker", StartCommand: "sleep 3600"},
 	}
+	writeMultiRigToml(t, cityDir, cityName, rigDirs, agents)
+	installFakeBDForCity(t, cityDir)
 
-	// Initialize beads in each rig directory with unique prefixes.
-	prefix0 := initBd(t, rigDirs[0])
-	prefix1 := initBd(t, rigDirs[1])
+	// Seed bd store markers after city.toml exists, then exercise only
+	// Gas City's configured rig route rather than direct cwd-based bd calls.
+	prefix0 := "r0"
+	prefix1 := "r1"
+	seedConfiguredFakeBDWorkspace(t, rigDirs[0], prefix0)
+	seedConfiguredFakeBDWorkspace(t, rigDirs[1], prefix1)
 	assert.NotEqual(t, prefix0, prefix1, "rig bead prefixes should differ")
 
-	// Create a bead from rig-0's directory.
-	out, err := bd(rigDirs[0], "create", "multi-rig bead test alpha")
+	// Create a bead through Gas City's configured rig route.
+	out, err := gc(cityDir, "bd", "--rig", "rig-0", "create", "multi-rig bead test alpha")
 	require.NoError(t, err, "bd create in rig-0: %s", out)
 	beadID := extractBeadID(t, out)
 
@@ -288,13 +344,17 @@ func TestGastown_MultiRig_BeadIsolation(t *testing.T) {
 	assert.True(t, strings.HasPrefix(beadID, prefix0),
 		"bead ID %q should start with rig-0 prefix %q", beadID, prefix0)
 
-	// Verify the bead is visible from rig-0.
-	out, err = bd(rigDirs[0], "show", beadID)
+	// Verify the bead is visible through rig-0's configured route.
+	out, err = gc(cityDir, "bd", "--rig", "rig-0", "show", beadID)
 	require.NoError(t, err, "bd show from rig-0: %s", out)
 	assert.Contains(t, out, "multi-rig bead test alpha",
 		"bead should be visible from rig-0")
 
-	writeMultiRigToml(t, cityDir, cityName, rigDirs, agents)
+	// Verify the same bead is not visible through rig-1's configured route.
+	out, err = gc(cityDir, "bd", "--rig", "rig-1", "show", beadID)
+	require.Error(t, err, "bd show from rig-1 should fail for bead %s; output: %s", beadID, out)
+	assert.NotContains(t, out, "multi-rig bead test alpha",
+		"bead should not be visible from rig-1")
 }
 
 // TestGastown_MultiRig_IndependentLifecycle starts a city with 2 rigs, stops
