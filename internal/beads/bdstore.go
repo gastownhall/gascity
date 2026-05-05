@@ -947,9 +947,19 @@ func (s *BdStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error) {
 	})
 }
 
-// Ready returns all open beads via bd ready.
-func (s *BdStore) Ready() ([]Bead, error) {
-	out, err := s.runner(s.dir, "bd", "ready", "--json", "--limit", "0")
+// Ready returns open ready beads via bd ready.
+func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
+	q := readyQueryFromArgs(query)
+	args := []string{"ready", "--json"}
+	if q.Assignee != "" {
+		args = append(args, "--assignee", q.Assignee)
+	}
+	if q.Limit > 0 {
+		args = append(args, "--limit", strconv.Itoa(q.Limit))
+	} else {
+		args = append(args, "--limit", "0")
+	}
+	out, err := s.runner(s.dir, "bd", args...)
 	if err != nil {
 		return nil, fmt.Errorf("bd ready: %w", err)
 	}
@@ -958,6 +968,9 @@ func (s *BdStore) Ready() ([]Bead, error) {
 	for i := range issues {
 		bead := issues[i].toBead()
 		if IsReadyExcludedType(bead.Type) {
+			continue
+		}
+		if q.Assignee != "" && bead.Assignee != q.Assignee {
 			continue
 		}
 		result = append(result, bead)

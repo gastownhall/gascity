@@ -113,7 +113,7 @@ func ClearWakeBlockersPatch(state State, sleepReason string) MetadataPatch {
 		patch["state"] = string(StateAsleep)
 	}
 	switch sleepReason {
-	case "user-hold", "wait-hold", "quarantine", "context-churn", string(StateDrained):
+	case "user-hold", "wait-hold", "quarantine", "context-churn", "rate_limit", string(StateDrained):
 		patch["sleep_reason"] = ""
 	}
 	return patch
@@ -131,8 +131,8 @@ func ClearExpiredHoldPatch(sleepReason string) MetadataPatch {
 	return patch
 }
 
-// ClearExpiredQuarantinePatch clears an expired quarantine or context churn
-// timer and resets retry counters associated with that blocker.
+// ClearExpiredQuarantinePatch clears an expired quarantine-like timer and
+// resets retry counters associated with that blocker.
 func ClearExpiredQuarantinePatch(sleepReason string) MetadataPatch {
 	patch := MetadataPatch{
 		"quarantined_until": "",
@@ -140,7 +140,7 @@ func ClearExpiredQuarantinePatch(sleepReason string) MetadataPatch {
 		"churn_count":       "0",
 	}
 	switch sleepReason {
-	case "quarantine", "context-churn":
+	case "quarantine", "context-churn", "rate_limit":
 		patch["sleep_reason"] = ""
 	}
 	return patch

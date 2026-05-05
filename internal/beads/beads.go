@@ -171,8 +171,8 @@ type Store interface {
 	// Ready returns open, unblocked beads representing actionable work.
 	// Infrastructure types (molecule, message, gate, etc.) are excluded
 	// to match the bd CLI's GetReadyWork semantics. Same ordering note
-	// as List.
-	Ready() ([]Bead, error)
+	// as List. Pass ReadyQuery to constrain the ready lookup.
+	Ready(query ...ReadyQuery) ([]Bead, error)
 
 	// Legacy helper; prefer List with ListQuery in new code.
 	// Children returns all beads whose ParentID matches the given ID,
