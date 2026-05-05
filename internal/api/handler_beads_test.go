@@ -194,8 +194,8 @@ func (s *prefixedAliasStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	return out, nil
 }
 
-func (s *prefixedAliasStore) Ready() ([]beads.Bead, error) {
-	items, err := s.base.Ready()
+func (s *prefixedAliasStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	items, err := s.base.Ready(query...)
 	if err != nil {
 		return nil, err
 	}

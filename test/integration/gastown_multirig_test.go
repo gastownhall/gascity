@@ -87,10 +87,14 @@ func setupMultiRigCity(t *testing.T, rigCount int) (cityDir string, rigDirs []st
 	for i := 0; i < rigCount; i++ {
 		rigDirs[i] = filepath.Join(t.TempDir(), fmt.Sprintf("rig-%d", i))
 		require.NoError(t, os.MkdirAll(rigDirs[i], 0o755))
+		registerCityCommandEnv(rigDirs[i], env)
 	}
 
 	t.Cleanup(func() {
 		unregisterCityCommandEnv(cityDir)
+		for _, rigDir := range rigDirs {
+			unregisterCityCommandEnv(rigDir)
+		}
 		runGCWithEnv(env, "", "stop", cityDir)                //nolint:errcheck // best-effort cleanup
 		runGCWithEnv(env, "", "supervisor", "stop", "--wait") //nolint:errcheck // best-effort cleanup
 		deadline := time.Now().Add(10 * time.Second)
@@ -268,7 +272,6 @@ func TestGastown_MultiRig_BeadIsolation(t *testing.T) {
 	agents := []gasTownAgent{
 		{Name: "worker", StartCommand: "sleep 3600"},
 	}
-	writeMultiRigToml(t, cityDir, cityName, rigDirs, agents)
 
 	// Initialize beads in each rig directory with unique prefixes.
 	prefix0 := initBd(t, rigDirs[0])
@@ -290,6 +293,8 @@ func TestGastown_MultiRig_BeadIsolation(t *testing.T) {
 	require.NoError(t, err, "bd show from rig-0: %s", out)
 	assert.Contains(t, out, "multi-rig bead test alpha",
 		"bead should be visible from rig-0")
+
+	writeMultiRigToml(t, cityDir, cityName, rigDirs, agents)
 }
 
 // TestGastown_MultiRig_IndependentLifecycle starts a city with 2 rigs, stops

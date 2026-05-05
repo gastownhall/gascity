@@ -231,13 +231,30 @@ func tailText(s string, maxLines int) string {
 func initBd(t *testing.T, dir string) string {
 	t.Helper()
 	prefix := uniqueCityName()
+	env := standaloneBDEnvForDir(dir)
 	cmd := exec.Command(bdBinary, "init", "-p", prefix, "--skip-hooks", "-q")
 	cmd.Dir = dir
-	cmd.Env = commandEnvForDir(dir, false)
+	cmd.Env = env
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("bd init in %s failed: %v\noutput: %s", dir, err, out)
 	}
 	return prefix
+}
+
+func TestInitBdAllowsStandaloneCreate(t *testing.T) {
+	requireDoltIntegration(t)
+
+	dir := t.TempDir()
+	prefix := initBd(t, dir)
+
+	out, err := bd(dir, "create", "standalone bead")
+	if err != nil {
+		t.Fatalf("bd create failed: %v\noutput: %s", err, out)
+	}
+	beadID := extractBeadID(t, out)
+	if !strings.HasPrefix(beadID, prefix) {
+		t.Fatalf("bead ID %q should start with prefix %q", beadID, prefix)
+	}
 }
 
 // createBead creates a bead and returns its ID.
