@@ -52,6 +52,12 @@ expanded to their open children before routing.
   are always overwritten to stay in sync with the binary version. Stale
   files are cleaned up. Implemented in `cmd/gc/system_formulas.go`.
 
+- **Review Quorum Formula**: `mol-review-quorum` is a core pack
+  `graph.v2` formula that dispatches exactly two read-only reviewer
+  lanes, Kimi and DeepSeek, and then routes a synthesis step. Dispatch
+  treats it like any other formula-backed wisp; it does not give
+  `dx-review` lifecycle ownership.
+
 ## Architecture
 
 Dispatch is not a separate Go package. It is a composition of primitives
@@ -246,6 +252,20 @@ System formulas are embedded in the `gc` binary and materialized to
 `.gc/system-formulas/` at startup. They form the lowest-priority formula
 layer (Layer 0) in the formula resolution stack. Pack and city-level
 formulas override system formulas by name.
+
+`mol-review-quorum` is provided by the core pack formula layer. Its reviewer
+targets default to `opencode-go/kimi-k2.6` and
+`opencode-go/deepseek-v4-pro`, configurable through formula vars. Its dispatch
+targets are separate vars that should resolve to local OpenCode agents. Each
+reviewer lane is expected to produce durable structured output with verdict, findings,
+evidence, usage, failure classification, and read-only mutation-baseline delta.
+The synthesis step writes the combined `review-quorum.summary.v1` state for
+future consumers such as `dx-review summarize`.
+
+Read-only mutation checks are baseline-relative. Dispatch and review consumers
+must compare reviewer after-state to the reviewer-recorded before baseline, not
+to an absolute clean-worktree expectation; pre-existing untracked files are not
+reviewer-created mutations.
 
 ## Testing
 

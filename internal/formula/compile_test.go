@@ -1140,6 +1140,117 @@ func TestCompileScopedWorkCarriesScopeAndCleanupMetadata(t *testing.T) {
 	}
 }
 
+func TestCompileReviewQuorumCoreFormula(t *testing.T) {
+	enableV2ForTest(t)
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	repoRoot := filepath.Clean(filepath.Join(cwd, "..", ".."))
+	searchDir := filepath.Join(repoRoot, "internal", "bootstrap", "packs", "core", "formulas")
+
+	parser := NewParser(searchDir)
+	parsed, err := parser.ParseFile(filepath.Join(searchDir, "mol-review-quorum.toml"))
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+
+	var reviewerLanes []string
+	for _, step := range parsed.Steps {
+		if lane := step.Metadata["gc.review_quorum_lane"]; lane != "" {
+			reviewerLanes = append(reviewerLanes, lane)
+			if step.Retry == nil {
+				t.Fatalf("%s missing retry spec", step.ID)
+			}
+			if step.Retry.MaxAttempts != 3 {
+				t.Fatalf("%s retry max_attempts = %d, want 3", step.ID, step.Retry.MaxAttempts)
+			}
+			if step.Retry.OnExhausted != "soft_fail" {
+				t.Fatalf("%s retry on_exhausted = %q, want soft_fail", step.ID, step.Retry.OnExhausted)
+			}
+			for _, required := range []string{
+				"verdict",
+				"findings_count",
+				"evidence",
+				"usage",
+				"read_only_enforcement",
+				"mutations_delta",
+				"failure_class",
+				"failure_reason",
+			} {
+				if !strings.Contains(step.Description, required) {
+					t.Fatalf("%s description missing structured output key %q", step.ID, required)
+				}
+			}
+		}
+	}
+	if got, want := strings.Join(reviewerLanes, ","), "kimi,deepseek"; got != want {
+		t.Fatalf("reviewer lanes = %q, want %q", got, want)
+	}
+	if def := parsed.Vars["kimi_model"].Default; def == nil || *def != "opencode-go/kimi-k2.6" {
+		t.Fatalf("kimi_model default = %v, want opencode-go/kimi-k2.6", def)
+	}
+	if def := parsed.Vars["deepseek_model"].Default; def == nil || *def != "opencode-go/deepseek-v4-pro" {
+		t.Fatalf("deepseek_model default = %v, want opencode-go/deepseek-v4-pro", def)
+	}
+	if def := parsed.Vars["kimi_target"].Default; def == nil || *def != "opencode-kimi" {
+		t.Fatalf("kimi_target default = %v, want opencode-kimi", def)
+	}
+	if def := parsed.Vars["deepseek_target"].Default; def == nil || *def != "opencode-deepseek" {
+		t.Fatalf("deepseek_target default = %v, want opencode-deepseek", def)
+	}
+
+	recipe, err := Compile(context.Background(), "mol-review-quorum", []string{searchDir}, map[string]string{
+		"subject": "PR-123",
+	})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	for _, stepID := range []string{"mol-review-quorum.review-kimi", "mol-review-quorum.review-deepseek"} {
+		control := recipe.StepByID(stepID)
+		if control == nil {
+			t.Fatalf("%s control step missing", stepID)
+		}
+		if got := control.Metadata["gc.kind"]; got != "retry" {
+			t.Fatalf("%s gc.kind = %q, want retry", stepID, got)
+		}
+		if got := control.Metadata["gc.on_exhausted"]; got != "soft_fail" {
+			t.Fatalf("%s gc.on_exhausted = %q, want soft_fail", stepID, got)
+		}
+		if got := control.Metadata["gc.max_attempts"]; got != "3" {
+			t.Fatalf("%s gc.max_attempts = %q, want 3", stepID, got)
+		}
+		attempt := recipe.StepByID(stepID + ".attempt.1")
+		if attempt == nil {
+			t.Fatalf("%s attempt.1 missing", stepID)
+		}
+		if got := attempt.Metadata["gc.output_json"]; got != "review-quorum.lane.v1" {
+			t.Fatalf("%s attempt gc.output_json = %q, want review-quorum.lane.v1", stepID, got)
+		}
+		if got := attempt.Metadata["gc.provider"]; got != "opencode" {
+			t.Fatalf("%s attempt gc.provider = %q, want opencode", stepID, got)
+		}
+		if got := attempt.Metadata["gc.model"]; got == "" {
+			t.Fatalf("%s attempt gc.model is empty", stepID)
+		}
+	}
+
+	synthesis := recipe.StepByID("mol-review-quorum.synthesize-review-quorum")
+	if synthesis == nil {
+		t.Fatal("synthesis step missing")
+	}
+	if got := synthesis.Metadata["gc.output_json"]; got != "review-quorum.summary.v1" {
+		t.Fatalf("synthesis gc.output_json = %q, want review-quorum.summary.v1", got)
+	}
+	for _, dep := range []string{"mol-review-quorum.review-kimi", "mol-review-quorum.review-deepseek"} {
+		if !hasRecipeDep(recipe.Deps, synthesis.ID, dep, "blocks") {
+			t.Fatalf("synthesis missing blocks dep on %s", dep)
+		}
+	}
+}
+
 // TestCompileBugReportFlowV2 is an integration-style check that loads
 // the real tooling formula used by the bugflow workflow and asserts
 // the teardown retry control carries a blocks dep on its attempt.

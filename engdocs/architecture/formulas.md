@@ -64,6 +64,35 @@ Store.MolCook / Store.MolCookOn
         \--> Mem/File    -> simplified molecule root for tests/tutorials
 ```
 
+### Review Quorum Primitive
+
+`internal/bootstrap/packs/core/formulas/mol-review-quorum.toml` is the first
+Gas City-owned review quorum primitive. It is a core `graph.v2` formula, not a
+separate lifecycle controller. The graph has exactly two reviewer lanes, Kimi
+and DeepSeek, followed by a synthesis step.
+
+The reviewer model targets are intentionally configured in one obvious place:
+formula vars. Defaults are `opencode-go/kimi-k2.6` for Kimi and
+`opencode-go/deepseek-v4-pro` for DeepSeek. Dispatch targets are separate
+`kimi_target` and `deepseek_target` vars so cities can bind the lanes to local
+OpenCode agents without changing the model contract. Each reviewer lane has
+`[steps.retry] max_attempts = 3` and `on_exhausted = "soft_fail"` so transient
+provider exhaustion degrades quorum coverage instead of failing the whole
+primitive. The synthesis step is hard-fail because it is responsible for
+persisting the final durable state.
+
+Reviewer output is structured for future automation. Lanes must write
+`verdict`, `summary`, `findings_count`, `findings`, `evidence`, `usage`,
+`read_only_enforcement`, `mutations_delta`, `failure_class`, and
+`failure_reason`; synthesis preserves lane provenance and writes a
+`review-quorum.summary.v1` output. Future `dx-review summarize` compatibility
+can consume that state, but `dx-review` is not the lifecycle owner.
+
+Read-only enforcement is defined as a mutation baseline delta. A reviewer must
+record the workspace state before review and compare after review against that
+baseline; pre-existing tracked changes and untracked files do not count as
+reviewer-created mutations.
+
 ### Resolution
 
 `ComputeFormulaLayers()` in `internal/config/pack.go` computes the ordered
@@ -154,6 +183,7 @@ Closed wisps are purged by the controller's wisp GC in
 | `internal/beads/memstore.go` | Simplified in-memory molecule creation |
 | `internal/beads/filestore.go` | Persistent wrapper over `MemStore` |
 | `internal/convergence/formula.go` | Convergence-specific formula validation |
+| `internal/bootstrap/packs/core/formulas/mol-review-quorum.toml` | Core two-lane review quorum primitive |
 
 ## Configuration
 
