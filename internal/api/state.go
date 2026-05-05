@@ -6,6 +6,7 @@
 package api
 
 import (
+	"context"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -138,6 +139,21 @@ type ProviderUpdate struct {
 // /v0/config/explain endpoint to distinguish inline vs pack-derived agents.
 type RawConfigProvider interface {
 	RawConfig() *config.City
+}
+
+// AgentVisibilityWaiter is an optional capability for states whose Config()
+// snapshot may briefly lag a successful agent mutation. Callers that need
+// strict read-after-write semantics for agent target resolution can type-assert
+// this interface after CreateAgent to ensure the new agent is visible through
+// findAgent before returning a success response. The interface is deliberately
+// agent-scoped because POST /sling resolves targets through the agent
+// projection immediately after create; rig and provider create endpoints do not
+// currently expose the same follow-up target-resolution contract.
+type AgentVisibilityWaiter interface {
+	// WaitForAgentVisibility blocks until findAgent in the current Config()
+	// resolves the given qualified agent name, or returns an error if the
+	// projection does not converge before ctx is done.
+	WaitForAgentVisibility(ctx context.Context, qualifiedName string) error
 }
 
 // StateMutator extends State with write operations for mutation endpoints.
