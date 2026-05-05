@@ -923,9 +923,10 @@ or invalid rig port files fail closed before cleanup stages run; only
 absent rig port files can reach the legacy default.
 
 Dry-run by default. Pass --force to actually drop, purge, and kill.
-Active rig dolt servers, registered rig databases, and processes
-outside the test-config-path allowlist (/tmp/Test*, os.TempDir()/Test*,
-~/.gotmp/Test*) are always protected — see the PROTECTED section of the
+Active rig dolt servers, registered rig databases, active test temp roots,
+and processes outside the test-config-path allowlist (/tmp/Test*,
+os.TempDir()/Test*, known Gas City test prefixes, ~/.gotmp/Test*) are always
+protected — see the PROTECTED section of the
 report. Destructive drops are limited to known stale test database name
 shapes and conservative SQL identifier characters; skipped stale matches
 are reported in dropped.skipped. Rig dolt_database names used for purge

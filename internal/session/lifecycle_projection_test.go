@@ -346,6 +346,23 @@ func TestProjectLifecycleRuntimeLivenessProjection(t *testing.T) {
 			wantReset:           true,
 		},
 		{
+			name: "dead active runtime with rate-limit reason preserves resume identity",
+			input: LifecycleInput{
+				Status: "open",
+				Metadata: map[string]string{
+					"state":               "active",
+					"session_name":        "s-worker",
+					"session_key":         "provider-conversation",
+					"started_config_hash": "config",
+					"sleep_reason":        "rate_limit",
+				},
+				Runtime: RuntimeFacts{Observed: true, Alive: false},
+				Now:     now,
+			},
+			wantRuntime:         RuntimeProjectionMissing,
+			wantReconciledState: StateAsleep,
+		},
+		{
 			name: "fresh creating state stays creating after restart",
 			input: LifecycleInput{
 				Status: "open",
@@ -508,6 +525,14 @@ func TestLifecycleDisplayReasonUsesOnlyActiveLifecycleReasons(t *testing.T) {
 			name: "expired production context churn reason is not visible",
 			meta: map[string]string{
 				"sleep_reason":      "context-churn",
+				"quarantined_until": past,
+			},
+			want: "",
+		},
+		{
+			name: "expired rate-limit reason is not visible",
+			meta: map[string]string{
+				"sleep_reason":      "rate_limit",
 				"quarantined_until": past,
 			},
 			want: "",
