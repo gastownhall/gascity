@@ -221,6 +221,36 @@ func TestGcBeadsBdReadOnlyFallbackDoesNotTargetLegacyProbeDatabase(t *testing.T)
 	}
 }
 
+func TestGcBeadsBdShellFallbackSanitizesArchiveLevel(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
+	}
+	scriptData, err := os.ReadFile(gcBeadsBdScriptPath(cityPath))
+	if err != nil {
+		t.Fatalf("ReadFile(gc-beads-bd): %v", err)
+	}
+	script := string(scriptData)
+	for _, forbidden := range []string{
+		`--archive-level "${GC_DOLT_ARCHIVE_LEVEL:-0}"`,
+		"archive_level: ${GC_DOLT_ARCHIVE_LEVEL:-0}",
+	} {
+		if strings.Contains(script, forbidden) {
+			t.Fatalf("gc-beads-bd shell fallback uses unsanitized archive level pattern %q", forbidden)
+		}
+	}
+	for _, want := range []string{
+		"archive_level=${GC_DOLT_ARCHIVE_LEVEL:-0}",
+		"*[!0-9]*",
+		"--archive-level \"$archive_level\"",
+		"archive_level: $archive_level",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("gc-beads-bd shell fallback missing sanitized archive level pattern %q", want)
+		}
+	}
+}
+
 func TestGcBeadsBdInitRejectsManagedProbeDatabaseName(t *testing.T) {
 	for _, dbName := range []string{
 		managedDoltProbeDatabase,
@@ -8557,6 +8587,40 @@ func TestStartBeadsLifecycleRegistersDoltConfig(t *testing.T) {
 	}
 }
 
+func TestStartBeadsLifecycleRegistersArchiveLevelOnlyDoltConfig(t *testing.T) {
+	realCity := t.TempDir()
+	aliasRoot := t.TempDir()
+	aliasCity := filepath.Join(aliasRoot, "city-link")
+	if err := os.Symlink(realCity, aliasCity); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", aliasCity)
+	t.Setenv("GC_DOLT", "skip")
+
+	archiveLevel := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Dolt:      config.DoltConfig{ArchiveLevel: &archiveLevel},
+	}
+	if err := startBeadsLifecycle(aliasCity, "test-city", cfg, io.Discard); err != nil {
+		t.Fatalf("startBeadsLifecycle: %v", err)
+	}
+	t.Cleanup(func() { cityDoltConfigs.Delete(normalizePathForCompare(realCity)) })
+
+	envEntries := providerLifecycleProcessEnv(realCity, "exec:"+gcBeadsBdScriptPath(realCity))
+	env := map[string]string{}
+	for _, entry := range envEntries {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			env[key] = value
+		}
+	}
+	if got := env["GC_DOLT_ARCHIVE_LEVEL"]; got != "1" {
+		t.Fatalf("GC_DOLT_ARCHIVE_LEVEL = %q, want 1", got)
+	}
+}
+
 func TestStartBeadsLifecycleManagedDeferredDoesNotRequireRuntimeState(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "rig")
@@ -9105,12 +9169,18 @@ func TestAcquireProviderSemaphore_SerializesConcurrentOps(t *testing.T) {
 	cityPath := t.TempDir()
 
 	// First acquire succeeds immediately.
-	release1 := acquireProviderSemaphore(cityPath)
+	release1, err := acquireProviderSemaphore(context.Background(), cityPath)
+	if err != nil {
+		t.Fatalf("acquireProviderSemaphore first: %v", err)
+	}
 
 	// Second acquire should block.
 	acquired := make(chan struct{})
 	go func() {
-		release2 := acquireProviderSemaphore(cityPath)
+		release2, err := acquireProviderSemaphore(context.Background(), cityPath)
+		if err != nil {
+			return
+		}
 		close(acquired)
 		release2()
 	}()
@@ -9138,13 +9208,19 @@ func TestAcquireProviderSemaphore_IndependentCities(t *testing.T) {
 	city1 := t.TempDir()
 	city2 := t.TempDir()
 
-	release1 := acquireProviderSemaphore(city1)
+	release1, err := acquireProviderSemaphore(context.Background(), city1)
+	if err != nil {
+		t.Fatalf("acquireProviderSemaphore city1: %v", err)
+	}
 	defer release1()
 
 	// Different city should not block.
 	acquired := make(chan struct{})
 	go func() {
-		release2 := acquireProviderSemaphore(city2)
+		release2, err := acquireProviderSemaphore(context.Background(), city2)
+		if err != nil {
+			return
+		}
 		close(acquired)
 		release2()
 	}()
@@ -9157,22 +9233,116 @@ func TestAcquireProviderSemaphore_IndependentCities(t *testing.T) {
 	}
 }
 
-func TestProviderRecoveryJitter_Range(t *testing.T) {
+func TestAcquireProviderSemaphoreHonorsContextDeadline(t *testing.T) {
 	t.Parallel()
-	for range 100 {
-		d := providerRecoveryJitter()
-		if d < 0 || d >= 2*time.Second {
-			t.Fatalf("jitter = %v, want [0, 2s)", d)
-		}
+	cityPath := t.TempDir()
+
+	release1, err := acquireProviderSemaphore(context.Background(), cityPath)
+	if err != nil {
+		t.Fatalf("acquireProviderSemaphore first: %v", err)
+	}
+	defer release1()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	release2, err := acquireProviderSemaphore(ctx, cityPath)
+	if err == nil {
+		release2()
+		t.Fatal("second acquire succeeded while first still held")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("acquireProviderSemaphore error = %v, want context deadline", err)
 	}
 }
 
-func TestProviderRecoveryJitter_Overridable(t *testing.T) {
-	orig := providerRecoveryJitter
-	providerRecoveryJitter = func() time.Duration { return 0 }
-	defer func() { providerRecoveryJitter = orig }()
+func TestEnsureBeadsProviderSerializesConcurrentExecStarts(t *testing.T) {
+	cityPath := t.TempDir()
+	script := filepath.Join(cityPath, "provider.sh")
+	lockDir := filepath.Join(cityPath, "provider.lock")
+	callLog := filepath.Join(cityPath, "provider.log")
+	scriptBody := fmt.Sprintf(`#!/bin/sh
+set -eu
+if [ "$1" = "start" ]; then
+  if ! mkdir %q 2>/dev/null; then
+    echo "overlap" >&2
+    exit 1
+  fi
+  echo "start" >> %q
+  sleep 0.1
+  rmdir %q
+  exit 0
+fi
+exit 2
+`, lockDir, callLog, lockDir)
+	if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
 
-	if d := providerRecoveryJitter(); d != 0 {
-		t.Fatalf("overridden jitter = %v, want 0", d)
+	errs := make(chan error, 2)
+	for range 2 {
+		go func() {
+			errs <- ensureBeadsProvider(cityPath)
+		}()
+	}
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatalf("ensureBeadsProvider: %v", err)
+		}
+	}
+
+	data, err := os.ReadFile(callLog)
+	if err != nil {
+		t.Fatalf("read call log: %v", err)
+	}
+	if got := strings.Count(string(data), "start"); got != 2 {
+		t.Fatalf("start call count = %d, want 2; log:\n%s", got, data)
+	}
+}
+
+func TestHealthBeadsProviderSerializesConcurrentExecHealthChecks(t *testing.T) {
+	cityPath := t.TempDir()
+	script := filepath.Join(cityPath, "provider.sh")
+	lockDir := filepath.Join(cityPath, "provider.lock")
+	callLog := filepath.Join(cityPath, "provider.log")
+	scriptBody := fmt.Sprintf(`#!/bin/sh
+set -eu
+if [ "$1" = "health" ]; then
+  if ! mkdir %q 2>/dev/null; then
+    echo "overlap" >&2
+    exit 1
+  fi
+  echo "health" >> %q
+  sleep 0.1
+  rmdir %q
+  exit 0
+fi
+exit 2
+`, lockDir, callLog, lockDir)
+	if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
+
+	errs := make(chan error, 2)
+	for range 2 {
+		go func() {
+			errs <- healthBeadsProvider(cityPath)
+		}()
+	}
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatalf("healthBeadsProvider: %v", err)
+		}
+	}
+
+	data, err := os.ReadFile(callLog)
+	if err != nil {
+		t.Fatalf("read call log: %v", err)
+	}
+	if got := strings.Count(string(data), "health"); got != 2 {
+		t.Fatalf("health call count = %d, want 2; log:\n%s", got, data)
 	}
 }

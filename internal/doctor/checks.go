@@ -2523,7 +2523,7 @@ func (c *DoltConfigCheck) Run(_ *CheckContext) *CheckResult {
 				drifted = append(drifted, fmt.Sprintf("%s (got %v, want %v)", exp.Path, got, want))
 			}
 		case int:
-			if !yamlIntEqual(got, want) {
+			if !doltConfigExpectedIntEqual(exp.Path, got, want) {
 				drifted = append(drifted, fmt.Sprintf("%s (got %v, want %d)", exp.Path, got, want))
 			}
 		default:
@@ -2552,6 +2552,20 @@ func (c *DoltConfigCheck) Run(_ *CheckContext) *CheckResult {
 	r.Status = StatusOK
 	r.Message = "dolt config OK"
 	return r
+}
+
+func doltConfigExpectedIntEqual(path string, got any, want int) bool {
+	if yamlIntEqual(got, want) {
+		return true
+	}
+	// Managed configs written before archive_level defaulted to 0 can contain
+	// archive_level: 1. Accept that one-release compatibility value so first
+	// post-upgrade doctor runs do not report drift before gc start rewrites the
+	// managed config.
+	if path == "behavior.auto_gc_behavior.archive_level" && want == 0 {
+		return yamlIntEqual(got, 1)
+	}
+	return false
 }
 
 // CanFix returns false. TODO: wire Fix() into the same code path as

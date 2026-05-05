@@ -3075,6 +3075,18 @@ func TestDoltConfigCheck_OK(t *testing.T) {
 	}
 }
 
+func TestDoltConfigCheck_AcceptsLegacyArchiveLevelOne(t *testing.T) {
+	dir := setupManagedDoltCity(t)
+	writeDoctorManagedDoltConfig(t, dir, map[string]any{
+		"behavior.auto_gc_behavior.archive_level": 1,
+	})
+	c := NewDoltConfigCheck(dir, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK for one-release archive_level=1 compatibility; msg = %s", r.Status, r.Message)
+	}
+}
+
 func TestDoltConfigCheck_UsesTrustedCityRuntimeDir(t *testing.T) {
 	dir := setupManagedDoltCity(t)
 	customRuntimeDir := filepath.Join(t.TempDir(), "runtime-root")

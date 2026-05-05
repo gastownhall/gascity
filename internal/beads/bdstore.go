@@ -691,14 +691,23 @@ func (s *BdStore) waitForParentProjection(ctx context.Context, id, oldParentID, 
 
 	var lastErr error
 	for {
-		matches, err := s.parentProjectionMatches(id, oldParentID, newParentID)
-		if err == nil && matches {
-			return nil
+		current, err := s.Get(id)
+		if err == nil {
+			switch current.ParentID {
+			case newParentID:
+				matches, matchErr := s.parentProjectionMatches(id, oldParentID, newParentID)
+				if matchErr == nil && matches {
+					return nil
+				}
+				lastErr = matchErr
+			case oldParentID:
+				lastErr = nil
+			default:
+				return fmt.Errorf("updating bead %q: %w", id, ErrParentProjectionSuperseded)
+			}
+		} else {
+			lastErr = err
 		}
-		if superseded, supersededErr := s.parentProjectionSuperseded(id, oldParentID, newParentID); supersededErr == nil && superseded {
-			return fmt.Errorf("updating bead %q: %w", id, ErrParentProjectionSuperseded)
-		}
-		lastErr = err
 		select {
 		case <-ctx.Done():
 			if lastErr != nil {
@@ -708,17 +717,6 @@ func (s *BdStore) waitForParentProjection(ctx context.Context, id, oldParentID, 
 		case <-ticker.C:
 		}
 	}
-}
-
-func (s *BdStore) parentProjectionSuperseded(id, oldParentID, newParentID string) (bool, error) {
-	current, err := s.Get(id)
-	if err != nil {
-		return false, err
-	}
-	if current.ParentID == newParentID || current.ParentID == oldParentID {
-		return false, nil
-	}
-	return true, nil
 }
 
 func (s *BdStore) parentProjectionMatches(id, oldParentID, newParentID string) (bool, error) {

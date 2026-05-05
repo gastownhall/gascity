@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand/v2"
 	"net"
 	"os"
 	"os/exec"
@@ -38,6 +37,18 @@ var cityDoltConfigs sync.Map // cityPath → config.DoltConfig
 // hammers the server back down. Each semaphore allows at most 1
 // concurrent provider operation per city (serialize lifecycle ops).
 var providerOpSemaphores sync.Map // cityPath → chan struct{}
+
+func cityDoltConfigHasLifecycleFields(cfg config.DoltConfig) bool {
+	return cfg.Host != "" || cfg.Port != 0 || cfg.ArchiveLevel != nil
+}
+
+func registerCityDoltConfig(cityPath string, cfg config.DoltConfig) {
+	cityDoltConfigs.Store(normalizePathForCompare(cityPath), cfg)
+}
+
+func clearCityDoltConfig(cityPath string) {
+	cityDoltConfigs.Delete(normalizePathForCompare(cityPath))
+}
 
 var resolveProviderLifecycleGCBinary = func() string {
 	if isTestBinary() {
@@ -103,10 +114,10 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, _ io.Writer) erro
 	// registration point — supervisor, standalone, and reload all flow
 	// through here. Always write (or clear) to handle config reload:
 	// removing [dolt] after a reload must not leave stale entries.
-	if cfg.Dolt.Host != "" || cfg.Dolt.Port != 0 {
-		cityDoltConfigs.Store(cityPath, cfg.Dolt)
+	if cityDoltConfigHasLifecycleFields(cfg.Dolt) {
+		registerCityDoltConfig(cityPath, cfg.Dolt)
 	} else {
-		cityDoltConfigs.Delete(cityPath)
+		clearCityDoltConfig(cityPath)
 	}
 	// Skip local Dolt startup only when canonical or compatibility topology
 	// says the city endpoint is external. Managed-local cities may not have a
@@ -230,6 +241,7 @@ func desiredScopeDoltConfigStateForInit(cityPath, dir, prefix string) (contract.
 	if strings.TrimSpace(dir) == "" || strings.TrimSpace(prefix) == "" {
 		return contract.ConfigState{}, false, nil
 	}
+	cityPath = normalizePathForCompare(cityPath)
 	cityDolt := config.DoltConfig{}
 	if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil {
 		resolveRigPaths(cityPath, cfg.Rigs)
@@ -431,7 +443,10 @@ func ensureBeadsProvider(cityPath string) error {
 	}
 	provider := beadsProvider(cityPath)
 	if strings.HasPrefix(provider, "exec:") {
-		release := acquireProviderSemaphore(cityPath)
+		release, err := acquireProviderSemaphoreForOp(cityPath, "start")
+		if err != nil {
+			return err
+		}
 		defer release()
 
 		script := strings.TrimPrefix(provider, "exec:")
@@ -629,6 +644,7 @@ func forcedScopeDoltConfigStateForInit(cityPath, dir, prefix string) (contract.C
 	if strings.TrimSpace(dir) == "" || strings.TrimSpace(prefix) == "" {
 		return contract.ConfigState{}, false, nil
 	}
+	cityPath = normalizePathForCompare(cityPath)
 	cityDolt := config.DoltConfig{}
 	if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil {
 		resolveRigPaths(cityPath, cfg.Rigs)
@@ -671,15 +687,17 @@ func initFileStoreForDir(cityPath, dir string) error {
 // provider, always healthy (no-op).
 //
 // Acquires a per-city semaphore to prevent concurrent health/recovery
-// operations from causing a thundering herd when dolt bounces. A random
-// jitter (0-2s) before recovery staggers reconnect attempts across callers.
+// operations from causing a thundering herd when dolt bounces.
 func healthBeadsProvider(cityPath string) error {
 	if cityUsesBdStoreContract(cityPath) && strings.TrimSpace(os.Getenv("GC_DOLT")) == "skip" {
 		return nil
 	}
 	provider := beadsProvider(cityPath)
 	if strings.HasPrefix(provider, "exec:") {
-		release := acquireProviderSemaphore(cityPath)
+		release, err := acquireProviderSemaphoreForOp(cityPath, "health")
+		if err != nil {
+			return err
+		}
 		defer release()
 
 		script := strings.TrimPrefix(provider, "exec:")
@@ -687,13 +705,6 @@ func healthBeadsProvider(cityPath string) error {
 		if err := runProviderOpWithEnv(script, providerEnv, "health"); err != nil {
 			if providerUsesBdStoreContract(provider) && isExternalDolt(cityPath) {
 				return err
-			}
-			// Jitter before recovery to stagger reconnect attempts when
-			// multiple callers detect dolt failure simultaneously.
-			// Skip jitter when the provider script doesn't exist —
-			// there's no dolt process to stagger against.
-			if _, statErr := os.Stat(script); statErr == nil {
-				time.Sleep(providerRecoveryJitter())
 			}
 			if recErr := runProviderOpWithEnv(script, providerEnv, "recover"); recErr != nil {
 				return fmt.Errorf("unhealthy (%w) and recovery failed: %w", err, recErr)
@@ -810,6 +821,7 @@ func configuredCityDoltTarget(cityPath string) (string, string, bool) {
 }
 
 func resolveConfiguredCityDoltTarget(cityPath string) (string, string, bool, bool) {
+	cityPath = normalizePathForCompare(cityPath)
 	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, cityPath, "")
 	if err != nil {
 		var invalid *contract.InvalidCanonicalConfigError
@@ -1418,25 +1430,39 @@ func providerLifecycleProcessEnv(cityPath, provider string) []string {
 	return env
 }
 
-// acquireProviderSemaphore returns a per-city semaphore channel and
-// blocks until a slot is available. Call the returned function to release.
+// acquireProviderSemaphore returns a per-city semaphore channel and waits
+// until a slot is available or ctx is canceled. Call the returned function to
+// release. Semaphore entries intentionally live for the process lifetime:
+// deleting an entry while a lifecycle operation is still running would allow a
+// second channel for the same city and break serialization. The map is bounded
+// by city roots seen by this controller process.
 // This serializes lifecycle operations per city to prevent thundering herd
 // when dolt bounces: without this, concurrent health checks all trigger
 // recovery simultaneously, spawning a storm of processes that overwhelm
 // dolt on restart.
-func acquireProviderSemaphore(cityPath string) func() {
+func acquireProviderSemaphore(ctx context.Context, cityPath string) (func(), error) {
 	cityPath = normalizePathForCompare(cityPath)
 	v, _ := providerOpSemaphores.LoadOrStore(cityPath, make(chan struct{}, 1))
 	sem := v.(chan struct{})
-	sem <- struct{}{}
-	return func() { <-sem }
+	select {
+	case sem <- struct{}{}:
+		return func() { <-sem }, nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("waiting for provider lifecycle slot for %q: %w", cityPath, ctx.Err())
+	}
 }
 
-// providerRecoveryJitter returns a random duration between 0 and 2 seconds.
-// Applied before recovery attempts to stagger reconnects when multiple
-// callers detect dolt failure simultaneously.
-var providerRecoveryJitter = func() time.Duration {
-	return time.Duration(rand.Int64N(int64(2 * time.Second)))
+func acquireProviderSemaphoreForOp(cityPath, op string) (func(), error) {
+	ctx, cancel := context.WithTimeout(context.Background(), providerOpTimeout(op))
+	release, err := acquireProviderSemaphore(ctx, cityPath)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	return func() {
+		release()
+		cancel()
+	}, nil
 }
 
 // providerOpTimeout returns the context timeout for a given lifecycle

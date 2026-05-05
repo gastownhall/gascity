@@ -1022,7 +1022,13 @@ cleanup_stale_locks() {
 # Overwritten on each server start. Without read/write timeouts, CLOSE_WAIT connections
 # accumulate and the server enters unrecoverable read-only mode.
 write_config_yaml() {
-    local gc_bin
+    local archive_level gc_bin
+    archive_level=${GC_DOLT_ARCHIVE_LEVEL:-0}
+    case "$archive_level" in
+        ''|*[!0-9]*)
+            archive_level=0
+            ;;
+    esac
     gc_bin=$(resolve_gc_helper_bin)
     if [ -n "$gc_bin" ]; then
         "$gc_bin" dolt-config write-managed \
@@ -1031,7 +1037,7 @@ write_config_yaml() {
             --port "$DOLT_PORT" \
             --data-dir "$DATA_DIR" \
             --log-level "$DOLT_LOGLEVEL" \
-            --archive-level "${GC_DOLT_ARCHIVE_LEVEL:-0}" || die "failed to write managed dolt config via gc helper $gc_bin"
+            --archive-level "$archive_level" || die "failed to write managed dolt config via gc helper $gc_bin"
         return 0
     fi
     local tmp
@@ -1058,7 +1064,7 @@ data_dir: "$DATA_DIR"
 behavior:
   auto_gc_behavior:
     enable: true
-    archive_level: ${GC_DOLT_ARCHIVE_LEVEL:-0}
+    archive_level: $archive_level
 YAML
     mv "$tmp" "$CONFIG_FILE"
 }
