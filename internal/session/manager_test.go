@@ -3071,6 +3071,47 @@ func TestTranscriptPathSkipsAmbiguousWorkDirFallback(t *testing.T) {
 	}
 }
 
+func TestTranscriptPathClosedSessionSkipsAmbiguousHistoricalWorkDirFallback(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	workDir := t.TempDir()
+	info1, err := mgr.Create(context.Background(), "helper", "one", "codex", workDir, "codex", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create one: %v", err)
+	}
+	info2, err := mgr.Create(context.Background(), "helper", "two", "codex", workDir, "codex", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create two: %v", err)
+	}
+	if err := mgr.Close(info1.ID); err != nil {
+		t.Fatalf("Close one: %v", err)
+	}
+	if err := mgr.Close(info2.ID); err != nil {
+		t.Fatalf("Close two: %v", err)
+	}
+
+	searchBase := t.TempDir()
+	dayDir := filepath.Join(searchBase, "2026", "05", "04")
+	if err := os.MkdirAll(dayDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	codexPath := filepath.Join(dayDir, "rollout-current.jsonl")
+	meta := `{"type":"session_meta","payload":{"cwd":"` + workDir + `"}}`
+	if err := os.WriteFile(codexPath, []byte(meta+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	path, err := mgr.TranscriptPath(info1.ID, []string{searchBase})
+	if err != nil {
+		t.Fatalf("TranscriptPath: %v", err)
+	}
+	if path != "" {
+		t.Errorf("TranscriptPath = %q, want empty for ambiguous historical codex workdir", path)
+	}
+}
+
 func TestTranscriptPathSameWorkDirDifferentProvidersUsesProviderSpecificFallback(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

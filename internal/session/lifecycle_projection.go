@@ -225,7 +225,7 @@ func LifecycleDisplayReason(status string, metadata map[string]string, now time.
 		return ""
 	}
 	if reason := strings.TrimSpace(metadata["sleep_reason"]); reason != "" {
-		staleTimedQuarantine := (reason == "quarantine" || reason == "context-churn") &&
+		staleTimedQuarantine := (reason == "quarantine" || reason == "context-churn" || reason == "rate_limit") &&
 			strings.TrimSpace(metadata["quarantined_until"]) != "" &&
 			!view.HasBlocker(BlockerQuarantined)
 		staleTimedHold := reason == "user-hold" &&
@@ -521,7 +521,7 @@ func shouldResetContinuation(base BaseState, meta map[string]string, sleepReason
 		return false
 	}
 	switch strings.TrimSpace(sleepReason) {
-	case "idle", "idle-timeout", "no-wake-reason", "config-drift", "drained", "city-stop", "user-hold", "wait-hold":
+	case "idle", "idle-timeout", "no-wake-reason", "config-drift", "drained", "city-stop", "user-hold", "wait-hold", "rate_limit":
 		return false
 	}
 	return base == BaseStateActive || base == BaseStateCreating

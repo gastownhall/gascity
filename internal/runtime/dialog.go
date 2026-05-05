@@ -209,7 +209,7 @@ func acceptCodexUpdateDialog(
 			containsWorkspaceTrustDialog(content) ||
 			strings.Contains(content, "Bypass Permissions mode") ||
 			containsCustomAPIKeyDialog(content) ||
-			containsRateLimitDialog(content) {
+			ContainsRateLimitDialog(content) {
 			return nil
 		}
 
@@ -243,7 +243,7 @@ func containsPostUpdateStartupDialog(content string) bool {
 	return containsWorkspaceTrustDialog(content) ||
 		strings.Contains(content, "Bypass Permissions mode") ||
 		containsCustomAPIKeyDialog(content) ||
-		containsRateLimitDialog(content)
+		ContainsRateLimitDialog(content)
 }
 
 // acceptWorkspaceTrustDialog dismisses workspace trust dialogs for supported
@@ -314,7 +314,7 @@ func containsWorkspaceTrustDialog(content string) bool {
 func containsPostTrustStartupDialog(content string) bool {
 	return strings.Contains(content, "Bypass Permissions mode") ||
 		containsCustomAPIKeyDialog(content) ||
-		containsRateLimitDialog(content)
+		ContainsRateLimitDialog(content)
 }
 
 // acceptBypassPermissionsWarning dismisses the Claude Code bypass permissions
@@ -370,7 +370,7 @@ func acceptBypassPermissionsWarningFromStream(
 }
 
 func containsPostBypassStartupDialog(content string) bool {
-	return containsCustomAPIKeyDialog(content) || containsRateLimitDialog(content)
+	return containsCustomAPIKeyDialog(content) || ContainsRateLimitDialog(content)
 }
 
 // acceptCustomAPIKeyDialog dismisses Claude's API-key confirmation prompt.
@@ -402,7 +402,7 @@ func acceptCustomAPIKeyDialog(
 			return sendKeys("Enter")
 		}
 
-		if containsPromptIndicator(content) || containsRateLimitDialog(content) {
+		if containsPromptIndicator(content) || ContainsRateLimitDialog(content) {
 			return nil
 		}
 
@@ -422,7 +422,7 @@ func acceptCustomAPIKeyDialogFromStream(
 		matchKeys:   []string{"Up", "Enter"},
 		matchDelay:  bypassDialogConfirmDelay,
 		ready:       containsPromptIndicator,
-		readyOrNext: containsRateLimitDialog,
+		readyOrNext: ContainsRateLimitDialog,
 	})
 }
 
@@ -433,8 +433,9 @@ func containsCustomAPIKeyDialog(content string) bool {
 
 // dismissRateLimitDialog detects rate limit / usage limit dialogs (e.g.,
 // Gemini's "Usage limit reached") and selects "Stop" to let the session
-// exit cleanly. The reconciler treats the exit as a startup failure and
-// retries later when the rate limit resets.
+// exit cleanly. The reconciler then peeks the pane and quarantines provider
+// rate-limit exits with sleep_reason=rate_limit instead of counting them as
+// wake failures.
 func dismissRateLimitDialog(
 	ctx context.Context,
 	timeout time.Duration,
@@ -452,7 +453,7 @@ func dismissRateLimitDialog(
 			return err
 		}
 
-		if containsRateLimitDialog(content) {
+		if ContainsRateLimitDialog(content) {
 			// Select "Stop" (option 2). The menu has "Keep trying" selected
 			// by default, so press Down then Enter.
 			if err := sendKeys("Down"); err != nil {
@@ -478,7 +479,7 @@ func dismissRateLimitDialogFromStream(
 	sendKeys func(keys ...string) error,
 ) (bool, error) {
 	return acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
-		match:      containsRateLimitDialog,
+		match:      ContainsRateLimitDialog,
 		matchKeys:  []string{"Down", "Enter"},
 		matchDelay: bypassDialogConfirmDelay,
 		ready:      containsPromptIndicator,
@@ -718,10 +719,29 @@ func sendDialogKeys(
 	return nil
 }
 
-func containsRateLimitDialog(content string) bool {
+// ContainsRateLimitDialog reports whether pane content shows a provider
+// rate-limit or usage-limit startup dialog. It is intentionally permissive for
+// startup compatibility; use ContainsProviderRateLimitScreen when classifying
+// arbitrary post-crash scrollback.
+func ContainsRateLimitDialog(content string) bool {
 	return strings.Contains(content, "Usage limit reached") ||
+		strings.Contains(content, "You've hit your limit") ||
+		strings.Contains(content, "/rate-limit-options") ||
 		strings.Contains(content, "rate limit") ||
 		strings.Contains(content, "Rate limit")
+}
+
+// ContainsProviderRateLimitScreen reports whether pane content has
+// high-confidence provider rate-limit screen evidence.
+func ContainsProviderRateLimitScreen(content string) bool {
+	if strings.Contains(content, "Usage limit reached") ||
+		strings.Contains(content, "You've hit your limit") ||
+		strings.Contains(content, "/rate-limit-options") {
+		return true
+	}
+	return strings.Contains(strings.ToLower(content), "rate limit") &&
+		strings.Contains(content, "Keep trying") &&
+		strings.Contains(content, "Stop")
 }
 
 // containsPromptIndicator checks whether any line in the content looks like a

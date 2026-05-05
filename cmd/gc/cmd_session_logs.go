@@ -84,7 +84,12 @@ func cmdSessionLogs(args []string, follow bool, tail int, stdout, stderr io.Writ
 		ok       bool
 	)
 	if err == nil && store != nil {
-		path, provider, ok = resolveStoredSessionLogSource(cityPath, cfg, store, identifier, searchPaths)
+		var diagnostic string
+		path, provider, ok, diagnostic = resolveStoredSessionLogSource(cityPath, cfg, store, identifier, searchPaths)
+		if ok && path == "" && diagnostic != "" {
+			fmt.Fprintf(stderr, "gc session logs: %s\n", diagnostic) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 	if !ok {
 		workDir, found := resolveConfiguredSessionLogContext(cityPath, cfg, identifier)
@@ -110,16 +115,16 @@ func resolveSessionLogPath(searchPaths []string, logCtx sessionLogContext) strin
 	return factory.DiscoverTranscript(logCtx.provider, logCtx.workDir, logCtx.sessionKey)
 }
 
-func resolveStoredSessionLogSource(cityPath string, cfg *config.City, store beads.Store, identifier string, searchPaths []string) (string, string, bool) {
+func resolveStoredSessionLogSource(cityPath string, cfg *config.City, store beads.Store, identifier string, searchPaths []string) (string, string, bool, string) {
 	logCtx, ok := resolveSessionLogContext(cityPath, cfg, store, identifier)
 	if !ok {
-		return "", "", false
+		return "", "", false, ""
 	}
 	if logCtx.sessionID != "" {
 		handle, err := workerHandleForSessionWithConfig(cityPath, store, newSessionProvider(), cfg, logCtx.sessionID)
 		if err == nil {
 			if path, pathErr := handle.TranscriptPath(context.Background()); pathErr == nil && strings.TrimSpace(path) != "" {
-				return path, logCtx.provider, true
+				return path, logCtx.provider, true, ""
 			}
 		}
 	}
@@ -145,7 +150,10 @@ func resolveStoredSessionLogSource(cityPath string, cfg *config.City, store bead
 	if !sessionLogPathFreshEnough(path, logCtx.createdAt) {
 		path = ""
 	}
-	return path, logCtx.provider, true
+	if path == "" && !fallbackAllowed {
+		return "", logCtx.provider, true, ambiguousSessionLogDiagnostic(logCtx)
+	}
+	return path, logCtx.provider, true, ""
 }
 
 func resolveSessionKeyedLogPath(searchPaths []string, logCtx sessionLogContext) string {
@@ -285,6 +293,21 @@ func sessionLogFallbackCandidateLive(b beads.Bead) bool {
 	default:
 		return false
 	}
+}
+
+func ambiguousSessionLogDiagnostic(logCtx sessionLogContext) string {
+	sessionID := strings.TrimSpace(logCtx.sessionID)
+	if sessionID == "" {
+		sessionID = "requested session"
+	}
+	provider := strings.TrimSpace(logCtx.provider)
+	if provider == "" {
+		provider = "provider"
+	}
+	if strings.TrimSpace(logCtx.sessionKey) == "" {
+		return fmt.Sprintf("session %q has no session_key and workdir fallback is ambiguous for %s work_dir %q", sessionID, provider, logCtx.workDir)
+	}
+	return fmt.Sprintf("no exact transcript found for session %q and workdir fallback is ambiguous for %s work_dir %q", sessionID, provider, logCtx.workDir)
 }
 
 func resolveConfiguredSessionLogContext(cityPath string, cfg *config.City, identifier string) (string, bool) {

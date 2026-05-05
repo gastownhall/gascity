@@ -153,6 +153,7 @@ type startResult struct {
 	started         time.Time
 	finished        time.Time
 	rollbackPending bool
+	rateLimitScreen bool
 }
 
 type startExecutionOptions struct {
@@ -824,7 +825,8 @@ func runPreparedStartCandidate(
 	}
 	finished := time.Now()
 	rollbackPending := err != nil && shouldRollbackPendingCreate(item.candidate.session)
-	if err != nil && rollbackPending && runningSessionMatchesPendingCreate(item.candidate.session, item.candidate.name(), sp) {
+	rateLimitScreen := err != nil && startupRateLimitScreenDetected(item, cityPath, sp, store, cfg)
+	if err != nil && rollbackPending && !rateLimitScreen && runningSessionMatchesPendingCreate(item.candidate.session, item.candidate.name(), sp) {
 		return startResult{
 			prepared:        item,
 			err:             nil,
@@ -856,7 +858,7 @@ func runPreparedStartCandidate(
 		switch {
 		case runningErr != nil || !running:
 			outcome = "provider_error"
-		case rollbackPending && runningSessionMatchesPendingCreate(item.candidate.session, item.candidate.name(), sp):
+		case rollbackPending && !rateLimitScreen && runningSessionMatchesPendingCreate(item.candidate.session, item.candidate.name(), sp):
 			outcome = "session_exists_converged"
 			err = nil
 			rollbackPending = false
@@ -866,6 +868,9 @@ func runPreparedStartCandidate(
 	default:
 		outcome = "provider_error"
 	}
+	if err == nil {
+		rateLimitScreen = false
+	}
 	return startResult{
 		prepared:        item,
 		err:             err,
@@ -873,7 +878,40 @@ func runPreparedStartCandidate(
 		started:         started,
 		finished:        finished,
 		rollbackPending: rollbackPending,
+		rateLimitScreen: rateLimitScreen,
 	}
+}
+
+func startupRateLimitScreenDetected(
+	item preparedStart,
+	cityPath string,
+	sp runtime.Provider,
+	store beads.Store,
+	cfg *config.City,
+) bool {
+	if item.candidate.session == nil {
+		return false
+	}
+	if cfg != nil && cfg.Session.Provider == "subprocess" {
+		return false
+	}
+	lastWoke := item.candidate.session.Metadata["last_woke_at"]
+	if lastWoke == "" {
+		return false
+	}
+	if _, err := time.Parse(time.RFC3339, lastWoke); err != nil {
+		return false
+	}
+	content, err := workerSessionTargetPeekWithConfig(
+		cityPath,
+		store,
+		sp,
+		cfg,
+		item.candidate.name(),
+		rateLimitPeekLines,
+		item.cfg.ProcessNames,
+	)
+	return err == nil && runtime.ContainsProviderRateLimitScreen(content)
 }
 
 func enqueuePreparedStartWaveForCity(
@@ -1211,8 +1249,28 @@ func commitStartResultTraced(
 		return false
 	}
 	if result.err != nil {
+		fmt.Fprintf(stderr, "session reconciler: starting %s: %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
+		if result.rateLimitScreen {
+			if err := recordRateLimitQuarantine(session, store, clk); err != nil {
+				fmt.Fprintf(stderr, "session reconciler: recording startup rate-limit hold for %s: %v\n", name, err) //nolint:errcheck
+				if trace != nil {
+					trace.recordOperation("reconciler.start.rate_limit_hold", tp.TemplateName, name, "", "start", "hold_deferred", traceRecordPayload{
+						"error": formatLifecycleError(result.err),
+						"cause": err.Error(),
+					}, "")
+				}
+				logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err)
+				return false
+			}
+			if trace != nil {
+				trace.recordOperation("reconciler.start.rate_limit_hold", tp.TemplateName, name, "", "start", "held", traceRecordPayload{
+					"error": formatLifecycleError(result.err),
+				}, "")
+			}
+			logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err)
+			return false
+		}
 		if result.rollbackPending {
-			fmt.Fprintf(stderr, "session reconciler: starting %s: %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
 			if trace != nil {
 				trace.recordOperation("reconciler.start.rollback_pending", tp.TemplateName, name, "", "start", result.outcome, traceRecordPayload{
 					"error": formatLifecycleError(result.err),
@@ -1222,7 +1280,6 @@ func commitStartResultTraced(
 			logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err)
 			return false
 		}
-		fmt.Fprintf(stderr, "session reconciler: starting %s: %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
 		if err := store.SetMetadata(session.ID, "last_woke_at", ""); err != nil {
 			fmt.Fprintf(stderr, "session reconciler: clearing last_woke_at for %s: %v\n", name, err) //nolint:errcheck
 		} else {

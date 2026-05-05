@@ -210,9 +210,22 @@ const (
 	// after exceeding max wake failures.
 	defaultQuarantineDuration = 5 * time.Minute
 
+	// defaultRateLimitQuarantineDuration is how long to hold a session when
+	// the pane shows a provider rate-limit screen. This is intentionally
+	// longer than crash-loop quarantine because immediate retries cannot help;
+	// 30m limits noisy respawn cycles for common minute-scale provider limits
+	// while still re-detecting and re-quarantining during longer windows.
+	defaultRateLimitQuarantineDuration = 30 * time.Minute
+
 	// defaultMaxWakeAttempts is how many consecutive wake failures before
 	// quarantine.
 	defaultMaxWakeAttempts = 5
+
+	// rateLimitPeekLines is the amount of pane scrollback inspected before a
+	// rapid dead process is classified as a crash. Known provider rate-limit
+	// screens are short, so 120 lines favors robust detection over shaving a
+	// cheap pane read.
+	rateLimitPeekLines = 120
 
 	// churnProductivityThreshold is how long a session must run to be
 	// considered productive. Sessions that survive past stabilityThreshold

@@ -4647,6 +4647,193 @@ func TestExecutePreparedStartWave_StaleSessionKeyDetectedWhenPaneSurvives(t *tes
 	}
 }
 
+func TestExecutePreparedStartWave_RateLimitStartupDeathQuarantinesWithoutWakeFailure(t *testing.T) {
+	sp := &zombieAfterStartProvider{Fake: runtime.NewFake()}
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)}
+	session, err := store.Create(beads.Bead{
+		ID:     "gc-99",
+		Title:  "test-agent",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "test-agent",
+			"session_key":          "stale-key-abc",
+			"template":             "worker",
+			"state":                "active",
+			"last_woke_at":         clk.Now().Add(-10 * time.Second).UTC().Format(time.RFC3339),
+			"wake_attempts":        "2",
+			"started_config_hash":  "keep-hash",
+			"continuation_command": "resume",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	sp.SetPeekOutput("test-agent", "You've hit your limit, Pro plan\n\n/rate-limit-options")
+	item := preparedStart{
+		candidate: startCandidate{
+			session: &session,
+			tp: TemplateParams{
+				Command:      "claude --resume stale-key-abc",
+				SessionName:  "test-agent",
+				TemplateName: "worker",
+			},
+		},
+		cfg: runtime.Config{
+			Command:      "claude --resume stale-key-abc",
+			ProcessNames: []string{"claude"},
+		},
+	}
+
+	results := executePreparedStartWaveForCity(
+		context.Background(),
+		[]preparedStart{item},
+		"",
+		sp,
+		nil,
+		&config.City{},
+		10*time.Second,
+		1,
+	)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].err == nil {
+		t.Fatal("expected startup-death error")
+	}
+
+	if commitStartResult(results[0], store, clk, events.Discard, 0, ioDiscard{}, ioDiscard{}) {
+		t.Fatal("startup rate-limit hold should not count as a committed wake")
+	}
+	got, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["wake_attempts"] != "2" {
+		t.Fatalf("wake_attempts = %q, want 2", got.Metadata["wake_attempts"])
+	}
+	if got.Metadata["sleep_reason"] != "rate_limit" {
+		t.Fatalf("sleep_reason = %q, want rate_limit", got.Metadata["sleep_reason"])
+	}
+	if got.Metadata["state"] != "asleep" {
+		t.Fatalf("state = %q, want asleep", got.Metadata["state"])
+	}
+	if got.Metadata["session_key"] != "stale-key-abc" {
+		t.Fatalf("session_key = %q, want preserved", got.Metadata["session_key"])
+	}
+	if got.Metadata["started_config_hash"] != "keep-hash" {
+		t.Fatalf("started_config_hash = %q, want preserved", got.Metadata["started_config_hash"])
+	}
+	if got.Metadata["continuation_reset_pending"] != "" {
+		t.Fatalf("continuation_reset_pending = %q, want empty", got.Metadata["continuation_reset_pending"])
+	}
+	if got.Metadata["last_woke_at"] != "" {
+		t.Fatalf("last_woke_at = %q, want cleared after rate-limit hold", got.Metadata["last_woke_at"])
+	}
+	qUntil, err := time.Parse(time.RFC3339, got.Metadata["quarantined_until"])
+	if err != nil {
+		t.Fatalf("quarantined_until parse: %v", err)
+	}
+	if want := clk.Now().Add(defaultRateLimitQuarantineDuration); !qUntil.Equal(want) {
+		t.Fatalf("quarantined_until = %s, want %s", qUntil.Format(time.RFC3339), want.Format(time.RFC3339))
+	}
+}
+
+func TestExecutePreparedStartWave_RateLimitPendingCreateDeathClearsClaim(t *testing.T) {
+	sp := &zombieAfterStartProvider{Fake: runtime.NewFake()}
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 28, 12, 30, 0, 0, time.UTC)}
+	session, err := store.Create(beads.Bead{
+		ID:     "gc-creating",
+		Title:  "creating-agent",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: creatingMeta(map[string]string{
+			"session_name":         "creating-agent",
+			"session_key":          "resume-key",
+			"template":             "worker",
+			"last_woke_at":         clk.Now().Add(-10 * time.Second).UTC().Format(time.RFC3339),
+			"wake_attempts":        "2",
+			"started_config_hash":  "keep-hash",
+			"pending_create_claim": "true",
+		}),
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	sp.SetPeekOutput("creating-agent", "You've hit your limit, Pro plan\n\n/rate-limit-options")
+	item := preparedStart{
+		candidate: startCandidate{
+			session: &session,
+			tp: TemplateParams{
+				Command:      "claude --resume resume-key",
+				SessionName:  "creating-agent",
+				TemplateName: "worker",
+			},
+		},
+		cfg: runtime.Config{
+			Command:      "claude --resume resume-key",
+			ProcessNames: []string{"claude"},
+		},
+	}
+
+	results := executePreparedStartWaveForCity(
+		context.Background(),
+		[]preparedStart{item},
+		"",
+		sp,
+		nil,
+		&config.City{},
+		10*time.Second,
+		1,
+	)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].err == nil {
+		t.Fatal("expected startup-death error")
+	}
+	if !results[0].rateLimitScreen {
+		t.Fatal("pending-create startup death should still classify provider rate-limit screen")
+	}
+
+	if commitStartResult(results[0], store, clk, events.Discard, 0, ioDiscard{}, ioDiscard{}) {
+		t.Fatal("startup rate-limit hold should not count as a committed wake")
+	}
+	got, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("status = %q, want open", got.Status)
+	}
+	if got.Metadata["close_reason"] != "" {
+		t.Fatalf("close_reason = %q, want empty", got.Metadata["close_reason"])
+	}
+	if got.Metadata["state"] != "asleep" {
+		t.Fatalf("state = %q, want asleep", got.Metadata["state"])
+	}
+	if got.Metadata["sleep_reason"] != "rate_limit" {
+		t.Fatalf("sleep_reason = %q, want rate_limit", got.Metadata["sleep_reason"])
+	}
+	if got.Metadata["wake_attempts"] != "2" {
+		t.Fatalf("wake_attempts = %q, want 2", got.Metadata["wake_attempts"])
+	}
+	if got.Metadata["pending_create_claim"] != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared by rate-limit hold", got.Metadata["pending_create_claim"])
+	}
+	if got.Metadata["session_key"] != "resume-key" {
+		t.Fatalf("session_key = %q, want preserved", got.Metadata["session_key"])
+	}
+	if got.Metadata["started_config_hash"] != "keep-hash" {
+		t.Fatalf("started_config_hash = %q, want preserved", got.Metadata["started_config_hash"])
+	}
+	if got.Metadata["last_woke_at"] != "" {
+		t.Fatalf("last_woke_at = %q, want cleared after rate-limit hold", got.Metadata["last_woke_at"])
+	}
+}
+
 func TestExecutePreparedStartWave_NoStaleCheckWithoutSessionKey(t *testing.T) {
 	// Session without a session_key should not trigger stale detection,
 	// even if the session dies after start.
