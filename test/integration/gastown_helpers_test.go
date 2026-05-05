@@ -245,7 +245,7 @@ func initBd(t *testing.T, dir string) string {
 	}
 
 	prefix := uniqueCityName()
-	cmd := exec.Command(bdBinary, "init", "-p", prefix, "--skip-hooks", "-q")
+	cmd := exec.Command(bdBinary, "init", "-p", prefix, "--skip-hooks", "--skip-agents", "-q")
 	cmd.Dir = dir
 	cmd.Env = env
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -287,6 +287,11 @@ func standaloneBdEnv(t *testing.T, dir string) []string {
 	env = replaceEnv(env, "BD_NON_INTERACTIVE", "1")
 	env = append(env, "BEADS_DIR="+filepath.Join(dir, ".beads"))
 	return env
+}
+
+func bdStandalone(t testing.TB, dir string, args ...string) (string, error) {
+	t.Helper()
+	return runCommand(dir, standaloneBDEnvForDir(dir), integrationBDCommandTimeout, bdBinary, args...)
 }
 
 func TestInitBdAllowsStandaloneCreate(t *testing.T) {

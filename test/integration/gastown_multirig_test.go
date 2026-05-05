@@ -279,7 +279,7 @@ func TestGastown_MultiRig_BeadIsolation(t *testing.T) {
 	assert.NotEqual(t, prefix0, prefix1, "rig bead prefixes should differ")
 
 	// Create a bead from rig-0's directory.
-	out, err := bd(rigDirs[0], "create", "multi-rig bead test alpha")
+	out, err := bdStandalone(t, rigDirs[0], "create", "multi-rig bead test alpha")
 	require.NoError(t, err, "bd create in rig-0: %s", out)
 	beadID := extractBeadID(t, out)
 
@@ -289,7 +289,7 @@ func TestGastown_MultiRig_BeadIsolation(t *testing.T) {
 		"bead ID %q should start with rig-0 prefix %q", beadID, prefix0)
 
 	// Verify the bead is visible from rig-0.
-	out, err = bd(rigDirs[0], "show", beadID)
+	out, err = bdStandalone(t, rigDirs[0], "show", beadID)
 	require.NoError(t, err, "bd show from rig-0: %s", out)
 	assert.Contains(t, out, "multi-rig bead test alpha",
 		"bead should be visible from rig-0")

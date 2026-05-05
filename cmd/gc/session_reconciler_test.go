@@ -2417,6 +2417,79 @@ func TestReconcileSessionBeads_FreshPendingCreateSurvivesStaleConfigSnapshot(t *
 	}
 }
 
+func TestReconcileSessionBeads_PendingCreateWithoutDesiredStateUsesNeverStartedLease(t *testing.T) {
+	env := newReconcilerTestEnv()
+	session := env.createSessionBead("s-gc-late", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"state":                "creating",
+		"pending_create_claim": "true",
+		// last_woke_at deliberately empty: preWakeCommit never fired before
+		// this pending create left desired state.
+	})
+	session.CreatedAt = env.clk.Now().Add(-(pendingCreateNeverStartedTimeout - time.Minute))
+
+	woken := env.reconcile([]beads.Bead{session})
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0 without desired-state membership", woken)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get session: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("pending-create session was closed before never-started lease expired: %+v", got)
+	}
+	if got.Metadata["state"] == "orphaned" || got.Metadata["close_reason"] == "orphaned" {
+		t.Fatalf("pending-create session was marked orphaned before never-started lease expired: %+v", got.Metadata)
+	}
+}
+
+func TestReconcileSessionBeads_ConfiguredPendingCreateWithoutDemandUsesNeverStartedLease(t *testing.T) {
+	tests := []struct {
+		name       string
+		createdAt  time.Time
+		wantClosed bool
+	}{
+		{
+			name:       "before lease expires",
+			createdAt:  time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC).Add(-(pendingCreateNeverStartedTimeout - time.Minute)),
+			wantClosed: false,
+		},
+		{
+			name:       "after lease expires",
+			createdAt:  time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC).Add(-(pendingCreateNeverStartedTimeout + time.Second)),
+			wantClosed: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := newReconcilerTestEnv()
+			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+			session := env.createSessionBead("s-gc-late", "worker")
+			env.setSessionMetadata(&session, map[string]string{
+				"state":                "creating",
+				"pending_create_claim": "true",
+				// last_woke_at deliberately empty: preWakeCommit never fired before
+				// this configured template lost pool demand.
+			})
+			session.CreatedAt = tt.createdAt
+
+			woken := env.reconcile([]beads.Bead{session})
+			if woken != 0 {
+				t.Fatalf("woken = %d, want 0 without desired-state membership", woken)
+			}
+			got, err := env.store.Get(session.ID)
+			if err != nil {
+				t.Fatalf("Get session: %v", err)
+			}
+			if got.Status == "closed" != tt.wantClosed {
+				t.Fatalf("status = %q, want closed=%v; metadata=%v", got.Status, tt.wantClosed, got.Metadata)
+			}
+		})
+	}
+}
+
 func TestReconcileSessionBeads_DependencyOrdering_DepDeadBlocksWake(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
@@ -3290,13 +3363,67 @@ func TestReconcileSessionBeads_ConvergesPendingCreateWhenRuntimeMatchesBead(t *t
 	}
 }
 
+func TestReconcileSessionBeads_PreservesNeverStartedPendingCreateBeforeLeaseExpires(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)}
+	cfg := &config.City{Agents: []config.Agent{{Name: "helper"}}}
+	desired := map[string]TemplateParams{
+		"helper": {
+			Command:      "test-cmd",
+			SessionName:  "helper",
+			TemplateName: "helper",
+		},
+	}
+
+	bead, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:helper"},
+		Metadata: map[string]string{
+			"session_name":          "helper",
+			"session_name_explicit": "true",
+			"pending_create_claim":  "true",
+			"template":              "helper",
+			"state":                 "creating",
+			"generation":            "1",
+			"continuation_epoch":    "1",
+			"instance_token":        "test-token",
+			// last_woke_at deliberately empty — preWakeCommit never fired.
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(bead): %v", err)
+	}
+	bead.CreatedAt = clk.Now().Add(-(pendingCreateNeverStartedTimeout - time.Minute))
+
+	var stdout, stderr bytes.Buffer
+	cfgNames := configuredSessionNames(cfg, "", store)
+	_ = reconcileSessionBeads(
+		context.Background(), []beads.Bead{bead}, desired, cfgNames,
+		cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{"helper": 1}, false, nil, "",
+		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
+	)
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(bead): %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("status = closed, want never-started pending create preserved until never-started lease expires; metadata=%v", got.Metadata)
+	}
+	if got.Metadata["close_reason"] != "" {
+		t.Fatalf("close_reason = %q, want empty", got.Metadata["close_reason"])
+	}
+}
+
 func TestReconcileSessionBeads_RollsBackPendingCreateWhenLeaseExpiredAndNoRuntime(t *testing.T) {
 	// Regression test: a session bead in the desired set with
 	// pending_create_claim=true but no live runtime AND no active lease
-	// (last_woke_at empty AND CreatedAt past staleCreatingState window) is
-	// stuck. Without this rollback, the bead lives forever holding its alias,
-	// blocking new spawn attempts ("alias already belongs to gm-XXXX") for
-	// any session whose template still has demand.
+	// (last_woke_at empty AND CreatedAt past the never-started pending-create
+	// window) is stuck. Without this rollback, the bead lives forever holding
+	// its alias, blocking new spawn attempts ("alias already belongs to
+	// gm-XXXX") for any session whose template still has demand.
 	store := beads.NewMemStore()
 	sp := runtime.NewFake() // no runtime started
 	clk := &clock.Fake{Time: time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)}
@@ -3328,10 +3455,10 @@ func TestReconcileSessionBeads_RollsBackPendingCreateWhenLeaseExpiredAndNoRuntim
 	if err != nil {
 		t.Fatalf("Create(bead): %v", err)
 	}
-	// Force CreatedAt past the staleCreatingState window so the lease check
-	// flips from "fresh" to "expired". The reconciler reads CreatedAt from
-	// the passed bead slice, so modifying the local copy is sufficient.
-	bead.CreatedAt = clk.Now().Add(-5 * time.Minute)
+	// Force CreatedAt past the never-started pending-create window. The
+	// reconciler reads CreatedAt from the passed bead slice, so modifying the
+	// local copy is sufficient.
+	bead.CreatedAt = clk.Now().Add(-(pendingCreateNeverStartedTimeout + time.Second))
 
 	var stdout, stderr bytes.Buffer
 	cfgNames := configuredSessionNames(cfg, "", store)
@@ -3350,6 +3477,58 @@ func TestReconcileSessionBeads_RollsBackPendingCreateWhenLeaseExpiredAndNoRuntim
 	}
 	if got.Metadata["close_reason"] != "failed-create" {
 		t.Fatalf("close_reason = %q, want failed-create", got.Metadata["close_reason"])
+	}
+}
+
+func TestReconcileSessionBeads_DoesNotRollbackStoppedPendingCreateAsExpiredLease(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)}
+	cfg := &config.City{Agents: []config.Agent{{Name: "helper"}}}
+	desired := map[string]TemplateParams{
+		"helper": {
+			Command:      "test-cmd",
+			SessionName:  "helper",
+			TemplateName: "helper",
+		},
+	}
+
+	bead, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:helper"},
+		Metadata: map[string]string{
+			"session_name":         "helper",
+			"pending_create_claim": "true",
+			"template":             "helper",
+			"state":                "stopped",
+			"generation":           "1",
+			"continuation_epoch":   "1",
+			"instance_token":       "test-token",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(bead): %v", err)
+	}
+	bead.CreatedAt = clk.Now().Add(-24 * time.Hour)
+
+	var stdout, stderr bytes.Buffer
+	cfgNames := configuredSessionNames(cfg, "", store)
+	_ = reconcileSessionBeads(
+		context.Background(), []beads.Bead{bead}, desired, cfgNames,
+		cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{"helper": 1}, false, nil, "",
+		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
+	)
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(bead): %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("status = closed, want stopped pending-create bead preserved for start retry; metadata=%v", got.Metadata)
+	}
+	if got.Metadata["close_reason"] != "" {
+		t.Fatalf("close_reason = %q, want empty", got.Metadata["close_reason"])
 	}
 }
 
@@ -3489,6 +3668,76 @@ func TestReconcileSessionBeads_PreservesPendingCreateWhenLeaseRecentNoRuntime(t 
 	}
 	if strings.TrimSpace(got.Metadata["pending_create_claim"]) != "true" {
 		t.Fatalf("pending_create_claim = %q, want still 'true'", got.Metadata["pending_create_claim"])
+	}
+}
+
+func TestPendingCreateNeverStartedExpiredEdges(t *testing.T) {
+	clk := &clock.Fake{Time: time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)}
+	base := beads.Bead{
+		Metadata: map[string]string{
+			"pending_create_claim": "true",
+			"state":                "creating",
+		},
+	}
+
+	tests := []struct {
+		name      string
+		createdAt time.Time
+		want      bool
+	}{
+		{
+			name:      "before boundary",
+			createdAt: clk.Now().Add(-(pendingCreateNeverStartedTimeout - time.Second)),
+			want:      false,
+		},
+		{
+			name:      "exact boundary",
+			createdAt: clk.Now().Add(-pendingCreateNeverStartedTimeout),
+			want:      false,
+		},
+		{
+			name:      "after boundary",
+			createdAt: clk.Now().Add(-(pendingCreateNeverStartedTimeout + time.Second)),
+			want:      true,
+		},
+		{
+			name:      "zero created at",
+			createdAt: time.Time{},
+			want:      true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bead := base
+			bead.CreatedAt = tt.createdAt
+			if got := pendingCreateNeverStartedExpired(bead, clk); got != tt.want {
+				t.Fatalf("pendingCreateNeverStartedExpired() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPendingCreateLeaseExpiredForRollbackFallsBackToStaleWindowForInvalidLastWokeAt(t *testing.T) {
+	clk := &clock.Fake{Time: time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)}
+	base := beads.Bead{
+		Metadata: map[string]string{
+			"pending_create_claim": "true",
+			"state":                "creating",
+			"last_woke_at":         "not-a-timestamp",
+		},
+	}
+
+	recent := base
+	recent.CreatedAt = clk.Now().Add(-(staleCreatingStateTimeout - time.Second))
+	if pendingCreateLeaseExpiredForRollback(recent, clk, time.Minute) {
+		t.Fatal("invalid last_woke_at used never-started lease; want legacy stale window before rollback")
+	}
+
+	stale := base
+	stale.CreatedAt = clk.Now().Add(-(staleCreatingStateTimeout + time.Second))
+	if !pendingCreateLeaseExpiredForRollback(stale, clk, time.Minute) {
+		t.Fatal("invalid last_woke_at preserved after stale window; want rollback")
 	}
 }
 
