@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -22,6 +23,53 @@ func workBead(id, routedTo, assignee, status string, priority int) beads.Bead {
 
 func sessionBead(id, status string) beads.Bead {
 	return beads.Bead{ID: id, Status: status, Type: "session"}
+}
+
+func pendingPoolSessionBead(id string) beads.Bead {
+	return poolSessionBeadWithState(id, "creating", boolMetadata(true))
+}
+
+func pendingPoolSessionBeadAt(id string, createdAt time.Time) beads.Bead {
+	session := pendingPoolSessionBead(id)
+	session.CreatedAt = createdAt
+	return session
+}
+
+func poolSessionBeadWithState(id, state, pendingCreateClaim string) beads.Bead {
+	const template = "claude"
+	return beads.Bead{
+		ID:     id,
+		Status: "open",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:" + template},
+		Metadata: map[string]string{
+			"template":             template,
+			"session_name":         PoolSessionName(template, id),
+			"state":                state,
+			"pending_create_claim": pendingCreateClaim,
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	}
+}
+
+func poolTraceDecision(t *testing.T, trace *sessionReconcilerTraceCycle, site TraceSiteCode) SessionReconcilerTraceRecord {
+	t.Helper()
+	for _, rec := range trace.records {
+		if rec.RecordType == TraceRecordDecision && rec.SiteCode == site {
+			return rec
+		}
+	}
+	t.Fatalf("missing trace decision for %s; records=%#v", site, trace.records)
+	return SessionReconcilerTraceRecord{}
+}
+
+func poolTraceFieldInt(t *testing.T, fields map[string]any, key string) int {
+	t.Helper()
+	got, ok := fields[key].(int)
+	if !ok {
+		t.Fatalf("trace field %s = %#v, want int", key, fields[key])
+	}
+	return got
 }
 
 func newPoolDesiredStateTestTrace(templates ...string) *sessionReconcilerTraceCycle {
@@ -576,6 +624,318 @@ func TestComputePoolDesiredStates_ScaleCheckAndResumeAddUp(t *testing.T) {
 	}
 	if resumeCount != 1 || newCount != 2 {
 		t.Errorf("resume=%d new=%d, want resume=1 new=2", resumeCount, newCount)
+	}
+}
+
+// Regression: scale_check counts unassigned ready work, which remains
+// unassigned while just-created sessions are still starting. Those in-flight
+// sessions must consume new demand or every reconciler tick can create another
+// session for the same ready bead.
+func TestComputePoolDesiredStates_InFlightNewSessionsConsumeScaleDemand(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	sessions := []beads.Bead{
+		pendingPoolSessionBead("sess-1"),
+		pendingPoolSessionBead("sess-2"),
+		pendingPoolSessionBead("sess-3"),
+	}
+	scaleCheck := map[string]int{"claude": 3}
+
+	result := ComputePoolDesiredStates(cfg, nil, sessions, scaleCheck)
+
+	counts := PoolDesiredCounts(result)
+	if counts["claude"] != 3 {
+		t.Fatalf("poolDesired[claude] = %d, want 3 in-flight sessions preserving total demand", counts["claude"])
+	}
+	seen := make(map[string]bool)
+	for _, req := range result[0].Requests {
+		if req.Tier != "new" {
+			t.Fatalf("tier = %q, want new", req.Tier)
+		}
+		if req.SessionBeadID == "" {
+			t.Fatalf("in-flight session should be represented as an explicit desired request: %+v", req)
+		}
+		seen[req.SessionBeadID] = true
+	}
+	for _, id := range []string{"sess-1", "sess-2", "sess-3"} {
+		if !seen[id] {
+			t.Fatalf("missing in-flight request for %s; saw %#v", id, seen)
+		}
+	}
+}
+
+func TestComputePoolDesiredStates_InFlightNewSessionsDoNotCreateZeroDemand(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	sessions := []beads.Bead{
+		pendingPoolSessionBead("sess-1"),
+	}
+	scaleCheck := map[string]int{"claude": 0}
+
+	result := ComputePoolDesiredStates(cfg, nil, sessions, scaleCheck)
+
+	counts := PoolDesiredCounts(result)
+	if counts["claude"] != 0 {
+		t.Fatalf("poolDesired[claude] = %d, want 0 when scale_check reports no new demand", counts["claude"])
+	}
+}
+
+func TestComputePoolDesiredStates_InFlightNewSessionsOnlySubtractCoveredDemand(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	sessions := []beads.Bead{
+		pendingPoolSessionBead("sess-1"),
+		pendingPoolSessionBead("sess-2"),
+	}
+	scaleCheck := map[string]int{"claude": 5}
+
+	result := ComputePoolDesiredStates(cfg, nil, sessions, scaleCheck)
+
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	reqs := result[0].Requests
+	if len(reqs) != 5 {
+		t.Fatalf("len(requests) = %d, want 5 total desired sessions", len(reqs))
+	}
+	explicit := make(map[string]bool)
+	anonymous := 0
+	for _, req := range reqs {
+		if req.Tier != "new" {
+			t.Fatalf("tier = %q, want new", req.Tier)
+		}
+		if req.SessionBeadID == "" {
+			anonymous++
+			continue
+		}
+		explicit[req.SessionBeadID] = true
+	}
+	if anonymous != 3 {
+		t.Fatalf("anonymous new requests = %d, want 3 after two in-flight sessions consume demand", anonymous)
+	}
+	for _, id := range []string{"sess-1", "sess-2"} {
+		if !explicit[id] {
+			t.Fatalf("missing explicit in-flight request for %s; saw %#v", id, explicit)
+		}
+	}
+}
+
+func TestComputePoolDesiredStates_InFlightResumeBeadsDoNotConsumeNewDemand(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	work := []beads.Bead{
+		workBead("w1", "claude", "sess-1", "in_progress", 5),
+	}
+	sessions := []beads.Bead{
+		pendingPoolSessionBead("sess-1"),
+		pendingPoolSessionBead("sess-2"),
+	}
+	scaleCheck := map[string]int{"claude": 3}
+
+	result := ComputePoolDesiredStates(cfg, work, sessions, scaleCheck)
+
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	reqs := result[0].Requests
+	if len(reqs) != 4 {
+		t.Fatalf("len(requests) = %d, want 4 (one resume plus three new-demand slots)", len(reqs))
+	}
+	resume := 0
+	explicitNew := 0
+	anonymousNew := 0
+	for _, req := range reqs {
+		switch {
+		case req.Tier == "resume":
+			resume++
+			if req.SessionBeadID != "sess-1" {
+				t.Fatalf("resume SessionBeadID = %q, want sess-1", req.SessionBeadID)
+			}
+		case req.Tier == "new" && req.SessionBeadID == "sess-2":
+			explicitNew++
+		case req.Tier == "new" && req.SessionBeadID == "":
+			anonymousNew++
+		default:
+			t.Fatalf("unexpected request: %+v", req)
+		}
+	}
+	if resume != 1 || explicitNew != 1 || anonymousNew != 2 {
+		t.Fatalf("resume=%d explicitNew=%d anonymousNew=%d, want 1/1/2", resume, explicitNew, anonymousNew)
+	}
+}
+
+func TestComputePoolDesiredStates_InFlightPredicateBranches(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	tests := []struct {
+		name    string
+		session beads.Bead
+	}{
+		{
+			name:    "pending create claim",
+			session: poolSessionBeadWithState("sess-pending", "active", boolMetadata(true)),
+		},
+		{
+			name:    "creating state",
+			session: poolSessionBeadWithState("sess-creating", "creating", ""),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ComputePoolDesiredStates(cfg, nil, []beads.Bead{tt.session}, map[string]int{"claude": 1})
+
+			if len(result) != 1 || len(result[0].Requests) != 1 {
+				t.Fatalf("result = %#v, want one in-flight request", result)
+			}
+			if got := result[0].Requests[0].SessionBeadID; got != tt.session.ID {
+				t.Fatalf("SessionBeadID = %q, want %q", got, tt.session.ID)
+			}
+		})
+	}
+}
+
+func TestComputePoolDesiredStates_StaleCreatingBeadStillConsumesNewDemand(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	stale := poolSessionBeadWithState("sess-stale", "creating", "")
+	stale.CreatedAt = time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC).Add(-2 * staleCreatingStateTimeout)
+
+	result := ComputePoolDesiredStates(cfg, nil, []beads.Bead{stale}, map[string]int{"claude": 1})
+
+	if len(result) != 1 || len(result[0].Requests) != 1 {
+		t.Fatalf("result = %#v, want one stale creating request preserving already-spent demand", result)
+	}
+	if got := result[0].Requests[0].SessionBeadID; got != stale.ID {
+		t.Fatalf("SessionBeadID = %q, want %q", got, stale.ID)
+	}
+}
+
+func TestComputePoolDesiredStates_InFlightSelectionRespectsCapsInStableOrder(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(2), 0)},
+	}
+	base := time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC)
+	sessions := []beads.Bead{
+		pendingPoolSessionBeadAt("sess-newest", base.Add(4*time.Minute)),
+		pendingPoolSessionBeadAt("sess-oldest", base.Add(time.Minute)),
+		pendingPoolSessionBeadAt("sess-tie-b", base.Add(2*time.Minute)),
+		pendingPoolSessionBeadAt("sess-tie-a", base.Add(2*time.Minute)),
+	}
+
+	result := ComputePoolDesiredStates(cfg, nil, sessions, map[string]int{"claude": 10})
+
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	reqs := result[0].Requests
+	if len(reqs) != 2 {
+		t.Fatalf("len(requests) = %d, want 2 after agent cap", len(reqs))
+	}
+	wantIDs := []string{"sess-oldest", "sess-tie-a"}
+	for i, want := range wantIDs {
+		if got := reqs[i].SessionBeadID; got != want {
+			t.Fatalf("request[%d].SessionBeadID = %q, want %q; requests=%#v", i, got, want, reqs)
+		}
+	}
+}
+
+func TestComputePoolDesiredStates_InFlightDemandRecordsTrace(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	sessions := []beads.Bead{
+		pendingPoolSessionBead("sess-1"),
+		pendingPoolSessionBead("sess-2"),
+	}
+	trace := newPoolDesiredStateTestTrace("claude")
+
+	result := computePoolDesiredStates(cfg, nil, sessions, map[string]int{"claude": 5}, trace)
+
+	if len(result) != 1 || len(result[0].Requests) != 5 {
+		t.Fatalf("result = %#v, want five desired requests", result)
+	}
+	if got := trace.decisionCounts[string(TraceSitePoolInFlightReuse)]; got != 1 {
+		t.Fatalf("in-flight trace decisions = %d, want 1", got)
+	}
+	rec := poolTraceDecision(t, trace, TraceSitePoolInFlightReuse)
+	for key, want := range map[string]int{
+		"scale_check":   5,
+		"in_flight":     2,
+		"reused":        2,
+		"anonymous_new": 3,
+	} {
+		if got := poolTraceFieldInt(t, rec.Fields, key); got != want {
+			t.Fatalf("%s = %d, want %d", key, got, want)
+		}
+	}
+}
+
+func TestComputePoolDesiredStates_InFlightDemandRecordsTraceWhenCapsSuppressReuse(t *testing.T) {
+	workspaceMax := 0
+	cfg := &config.City{
+		Workspace: config.Workspace{MaxActiveSessions: &workspaceMax},
+		Agents:    []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	sessions := []beads.Bead{
+		pendingPoolSessionBead("sess-1"),
+		pendingPoolSessionBead("sess-2"),
+	}
+	trace := newPoolDesiredStateTestTrace("claude")
+
+	result := computePoolDesiredStates(cfg, nil, sessions, map[string]int{"claude": 5}, trace)
+
+	if len(result) != 0 {
+		t.Fatalf("result = %#v, want no desired requests when workspace cap is exhausted", result)
+	}
+	if got := trace.decisionCounts[string(TraceSitePoolInFlightReuse)]; got != 1 {
+		t.Fatalf("in-flight trace decisions = %d, want 1", got)
+	}
+	rec := poolTraceDecision(t, trace, TraceSitePoolInFlightReuse)
+	for key, want := range map[string]int{
+		"scale_check":   5,
+		"in_flight":     2,
+		"reused":        0,
+		"anonymous_new": 0,
+	} {
+		if got := poolTraceFieldInt(t, rec.Fields, key); got != want {
+			t.Fatalf("%s = %d, want %d", key, got, want)
+		}
+	}
+}
+
+func TestApplyNestedCaps_DedupsConcreteSessionRequestsAcrossTiers(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	requests := []SessionRequest{
+		{Template: "claude", Tier: "resume", SessionBeadID: "sess-1", BeadPriority: 10},
+		{Template: "claude", Tier: "new", SessionBeadID: "sess-1"},
+		{Template: "claude", Tier: "new", SessionBeadID: "sess-2"},
+	}
+
+	result := applyNestedCaps(cfg, requests, nil)
+
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	reqs := result[0].Requests
+	if len(reqs) != 2 {
+		t.Fatalf("len(requests) = %d, want duplicate concrete session suppressed; requests=%#v", len(reqs), reqs)
+	}
+	seenSess1 := 0
+	for _, req := range reqs {
+		if req.SessionBeadID == "sess-1" {
+			seenSess1++
+		}
+	}
+	if seenSess1 != 1 {
+		t.Fatalf("sess-1 accepted %d times, want once; requests=%#v", seenSess1, reqs)
 	}
 }
 
