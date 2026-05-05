@@ -2390,6 +2390,11 @@ func TestCmdSlingRefusesMissingConfiguredFallbackBeadID(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 
 	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
 	rigDir := filepath.Join(cityDir, "orders")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(rig): %v", err)
