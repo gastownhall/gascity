@@ -394,7 +394,7 @@ func gcDolt(dir string, args ...string) (string, error) {
 // bd runs the bd binary with the given args. If dir is non-empty, it sets
 // the working directory. Returns combined stdout+stderr and any error.
 func bd(dir string, args ...string) (string, error) {
-	out, err := runCommand(dir, commandEnvForDir(dir, false), integrationBDCommandTimeout, bdBinary, args...)
+	out, err := runCommand(dir, bdEnvForDir(dir), integrationBDCommandTimeout, bdBinary, args...)
 	if err == nil || !shouldUseFileStoreBDFallback(dir, out, args) {
 		return out, err
 	}
@@ -862,6 +862,39 @@ func commandEnvForDir(dir string, useDolt bool) []string {
 	return integrationEnv()
 }
 
+func bdEnvForDir(dir string) []string {
+	if dir != "" {
+		if _, ok := cityCommandEnv.Load(dir); ok {
+			return commandEnvForDir(dir, false)
+		}
+		if info, err := os.Stat(filepath.Join(dir, ".beads")); err == nil && info.IsDir() {
+			return standaloneBDEnvForDir(dir)
+		}
+	}
+	return commandEnvForDir(dir, false)
+}
+
+func standaloneBDEnvForDir(dir string) []string {
+	return filterEnvMany(commandEnvForDir(dir, false),
+		"GC_BEADS",
+		"BEADS_DIR",
+		"GC_CITY",
+		"GC_CITY_PATH",
+		"GC_CITY_ROOT",
+		"GC_CITY_RUNTIME_DIR",
+		"GC_DOLT",
+		"GC_DOLT_HOST",
+		"GC_DOLT_PORT",
+		"GC_DOLT_USER",
+		"GC_DOLT_PASSWORD",
+		"BEADS_DOLT_AUTO_START",
+		"BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_SERVER_USER",
+		"BEADS_DOLT_PASSWORD",
+	)
+}
+
 func commandCityDirForArgs(dir string, args []string) string {
 	if dir != "" || len(args) < 2 {
 		return dir
@@ -1126,6 +1159,145 @@ func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
 		if _, ok := got[key]; ok {
 			t.Fatalf("%s leaked into integration env: %v", key, got[key])
 		}
+	}
+}
+
+func TestStandaloneBDEnvForDirIsIsolatedWithoutDisablingEmbeddedDolt(t *testing.T) {
+	oldGCHome, oldRuntimeDir := testGCHome, testRuntimeDir
+	oldGCBinary, oldBDBinary, oldRealBDBinary := gcBinary, bdBinary, realBDBinary
+	oldToolBinDir, oldDoltBinary := integrationToolBinDir, doltBinary
+	t.Cleanup(func() {
+		testGCHome = oldGCHome
+		testRuntimeDir = oldRuntimeDir
+		gcBinary = oldGCBinary
+		bdBinary = oldBDBinary
+		realBDBinary = oldRealBDBinary
+		integrationToolBinDir = oldToolBinDir
+		doltBinary = oldDoltBinary
+	})
+
+	testGCHome = filepath.Join(t.TempDir(), "gc-home")
+	testRuntimeDir = filepath.Join(t.TempDir(), "runtime")
+	gcBinary = filepath.Join(t.TempDir(), "gc")
+	bdBinary = filepath.Join(t.TempDir(), "bd")
+	realBDBinary = "/usr/bin/bd"
+	doltBinary = "/usr/bin/dolt"
+	integrationToolBinDir = filepath.Join(t.TempDir(), "bin")
+
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("BEADS_DIR", "/host/beads")
+	t.Setenv("GC_CITY", "/host/city")
+	t.Setenv("GC_CITY_PATH", "/host/city")
+	t.Setenv("GC_CITY_ROOT", "/host")
+	t.Setenv("GC_CITY_RUNTIME_DIR", "/host/city/.gc/runtime")
+	t.Setenv("GC_DOLT_HOST", "ambient-host")
+	t.Setenv("GC_DOLT_PORT", "0")
+	t.Setenv("GC_DOLT_USER", "ambient-user")
+	t.Setenv("GC_DOLT_PASSWORD", "ambient-password")
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient-beads-host")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "0")
+	t.Setenv("BEADS_DOLT_SERVER_USER", "ambient-beads-user")
+	t.Setenv("BEADS_DOLT_PASSWORD", "ambient-beads-password")
+
+	got := parseEnvList(standaloneBDEnvForDir(filepath.Join(t.TempDir(), "rig")))
+
+	if got["GC_HOME"] != testGCHome {
+		t.Fatalf("GC_HOME = %q, want %q", got["GC_HOME"], testGCHome)
+	}
+	if got["XDG_RUNTIME_DIR"] != testRuntimeDir {
+		t.Fatalf("XDG_RUNTIME_DIR = %q, want %q", got["XDG_RUNTIME_DIR"], testRuntimeDir)
+	}
+	if got[integrationRealBDBinaryEnv] != realBDBinary {
+		t.Fatalf("%s = %q, want %q", integrationRealBDBinaryEnv, got[integrationRealBDBinaryEnv], realBDBinary)
+	}
+	if got["DOLT_ROOT_PATH"] != testGCHome {
+		t.Fatalf("DOLT_ROOT_PATH = %q, want %q", got["DOLT_ROOT_PATH"], testGCHome)
+	}
+	for _, key := range []string{
+		"GC_BEADS",
+		"BEADS_DIR",
+		"GC_CITY",
+		"GC_CITY_PATH",
+		"GC_CITY_ROOT",
+		"GC_CITY_RUNTIME_DIR",
+		"GC_DOLT",
+		"GC_DOLT_HOST",
+		"GC_DOLT_PORT",
+		"GC_DOLT_USER",
+		"GC_DOLT_PASSWORD",
+		"BEADS_DOLT_AUTO_START",
+		"BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_SERVER_USER",
+		"BEADS_DOLT_PASSWORD",
+	} {
+		if _, ok := got[key]; ok {
+			t.Fatalf("%s leaked into standalone bd env: %v", key, got[key])
+		}
+	}
+}
+
+func TestBDEnvForDirUsesStandaloneEnvWhenBeadsWorkspaceExists(t *testing.T) {
+	oldGCHome, oldRuntimeDir := testGCHome, testRuntimeDir
+	oldGCBinary, oldBDBinary, oldRealBDBinary := gcBinary, bdBinary, realBDBinary
+	oldToolBinDir, oldDoltBinary := integrationToolBinDir, doltBinary
+	t.Cleanup(func() {
+		testGCHome = oldGCHome
+		testRuntimeDir = oldRuntimeDir
+		gcBinary = oldGCBinary
+		bdBinary = oldBDBinary
+		realBDBinary = oldRealBDBinary
+		integrationToolBinDir = oldToolBinDir
+		doltBinary = oldDoltBinary
+	})
+
+	testGCHome = filepath.Join(t.TempDir(), "gc-home")
+	testRuntimeDir = filepath.Join(t.TempDir(), "runtime")
+	gcBinary = filepath.Join(t.TempDir(), "gc")
+	bdBinary = filepath.Join(t.TempDir(), "bd")
+	realBDBinary = "/usr/bin/bd"
+	doltBinary = "/usr/bin/dolt"
+	integrationToolBinDir = filepath.Join(t.TempDir(), "bin")
+
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".beads"), 0o755); err != nil {
+		t.Fatalf("creating .beads: %v", err)
+	}
+
+	t.Setenv("GC_DOLT_HOST", "ambient-host")
+	t.Setenv("GC_DOLT_PORT", "0")
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+
+	got := parseEnvList(bdEnvForDir(dir))
+
+	if got["GC_HOME"] != testGCHome {
+		t.Fatalf("GC_HOME = %q, want %q", got["GC_HOME"], testGCHome)
+	}
+	for _, key := range []string{
+		"GC_DOLT",
+		"GC_DOLT_HOST",
+		"GC_DOLT_PORT",
+		"BEADS_DOLT_AUTO_START",
+	} {
+		if _, ok := got[key]; ok {
+			t.Fatalf("%s leaked into standalone bd env: %v", key, got[key])
+		}
+	}
+}
+
+func TestBDEnvForDirPrefersRegisteredCityEnv(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatalf("creating .beads: %v", err)
+	}
+	want := []string{"HOME=/tmp/isolated", "GC_HOME=/tmp/isolated", "GC_BEADS=file", "PATH=/tmp/bin"}
+	registerCityCommandEnv(cityDir, want)
+	t.Cleanup(func() { unregisterCityCommandEnv(cityDir) })
+
+	got := bdEnvForDir(cityDir)
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("bdEnvForDir(%q) = %v, want %v", cityDir, got, want)
 	}
 }
 
