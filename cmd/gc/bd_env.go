@@ -193,9 +193,7 @@ func applyCanonicalDoltAuthEnv(env map[string]string, cityPath, scopeRoot string
 }
 
 // applyCanonicalScopeBackendEnv dispatches to the appropriate backend
-// helper based on the scope's MetadataState.Backend. Renamed from
-// applyCanonicalScopeDoltEnv; the Dolt body lives in the case "", "dolt"
-// arm.
+// helper based on the scope's MetadataState.Backend.
 //
 // Returns (true, nil) when the scope is authoritative and the backend
 // projection succeeded. Returns (false, nil) when the scope is
