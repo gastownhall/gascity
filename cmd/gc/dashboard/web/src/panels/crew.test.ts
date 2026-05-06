@@ -140,10 +140,17 @@ describe("crew empty states", () => {
   });
 });
 
+// Slow Blacksmith CI runs have shown the openLogDrawer + loadTranscript
+// chain take ~1.3s while passing runs finish in ~100ms — same VM class,
+// same code. The 1s budget here was missing those slow runs by a few
+// hundred ms even though the chain ultimately completed (the
+// `[crew] Transcript loaded` debug log fires *after* the assertion times
+// out). Five seconds keeps the local cost negligible and absorbs the
+// observed CI variance.
 async function waitFor(assertion: () => void): Promise<void> {
   const started = Date.now();
   let lastError: unknown;
-  while (Date.now() - started < 1000) {
+  while (Date.now() - started < 5000) {
     try {
       assertion();
       return;
