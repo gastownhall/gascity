@@ -427,14 +427,32 @@ mkdir -p "$(dirname "$STATE_FILE")"
 
 retry_pending_spike_alert
 
+is_user_database() {
+    case "$1" in
+        information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe|benchdb|testdb_*|beads_pt*|beads_vr*|doctest_*|doctortest_*)
+            return 1
+            ;;
+        beads_t[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+            return 1
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+
 # Discover databases. Exclude Dolt/MySQL system schemas, Gas City's internal
 # health-probe database, and test-fixture scratch databases (benchdb,
 # testdb_*, lowercase beads_t[0-9a-f]{8,}, beads_pt*, beads_vr*,
 # doctest_*, doctortest_* — matching the Go cleanup planner contract); the
 # remaining databases are expected to be bead stores.
-DATABASES=$(dolt_sql -r csv -q "SHOW DATABASES" 2>/dev/null | tail -n +2 \
-    | grep -vi '^information_schema$\|^mysql$\|^dolt_cluster$\|^performance_schema$\|^sys$\|^__gc_probe$\|^benchdb$\|^testdb_\|^beads_pt\|^beads_vr\|^doctest_\|^doctortest_' \
-    | grep -v '^beads_t[0-9a-f]\{8,\}$' || true)
+DATABASES=$(
+    while IFS= read -r db; do
+        if is_user_database "$db"; then
+            printf '%s\n' "$db"
+        fi
+    done < <(dolt_sql -r csv -q "SHOW DATABASES" 2>/dev/null | tail -n +2)
+)
 if [ -z "$DATABASES" ]; then
     if [ -d "$ARCHIVE_REPO/.git" ]; then
         cd "$ARCHIVE_REPO"

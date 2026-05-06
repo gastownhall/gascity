@@ -32,14 +32,32 @@ PURGE_AGE_H=$(duration_to_hours "$PURGE_AGE")
 STALE_AGE_H=$(duration_to_hours "$STALE_ISSUE_AGE")
 MAIL_AGE_H=$(duration_to_hours "$MAIL_DELETE_AGE")
 
+is_user_database() {
+    case "$1" in
+        information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe|benchdb|testdb_*|beads_pt*|beads_vr*|doctest_*|doctortest_*)
+            return 1
+            ;;
+        beads_t[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+            return 1
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+
 # Discover databases from Dolt server. Exclude Dolt/MySQL system schemas,
 # Gas City's internal health-probe database, and test-fixture scratch
 # databases (benchdb, testdb_*, lowercase beads_t[0-9a-f]{8,}, beads_pt*,
 # beads_vr*, doctest_*, doctortest_* — matching the Go cleanup planner
 # contract); the remainder are bead stores.
-DATABASES=$(dolt_sql -r csv -q "SHOW DATABASES" 2>/dev/null | tail -n +2 \
-    | grep -vi '^information_schema$\|^mysql$\|^dolt_cluster$\|^performance_schema$\|^sys$\|^__gc_probe$\|^benchdb$\|^testdb_\|^beads_pt\|^beads_vr\|^doctest_\|^doctortest_' \
-    | grep -v '^beads_t[0-9a-f]\{8,\}$' || true)
+DATABASES=$(
+    while IFS= read -r db; do
+        if is_user_database "$db"; then
+            printf '%s\n' "$db"
+        fi
+    done < <(dolt_sql -r csv -q "SHOW DATABASES" 2>/dev/null | tail -n +2)
+)
 if [ -z "$DATABASES" ]; then
     # No databases accessible — nothing to do.
     exit 0

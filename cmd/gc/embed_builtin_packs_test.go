@@ -112,7 +112,7 @@ func TestBuiltinDatabaseEnumeratorsSkipManagedProbeDatabase(t *testing.T) {
 	}
 
 	doltSystemNeedle := "information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe"
-	maintenanceSystemNeedle := "^information_schema$\\|^mysql$\\|^dolt_cluster$\\|^performance_schema$\\|^sys$\\|^__gc_probe$"
+	maintenanceSystemNeedle := "information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe|benchdb|testdb_*|beads_pt*|beads_vr*|doctest_*|doctortest_*"
 	for _, tt := range []struct {
 		pack     string
 		rel      string
