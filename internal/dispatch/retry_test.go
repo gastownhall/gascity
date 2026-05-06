@@ -86,6 +86,101 @@ func TestProcessRetryEvalPassClosesLogical(t *testing.T) {
 	}
 }
 
+func TestProcessRetryEvalRetriesPassMissingRequiredOutputJSON(t *testing.T) {
+	t.Parallel()
+
+	store := newStrictCloseStore()
+	root := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	logical := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "prepare review items",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":                 "retry",
+			"gc.root_bead_id":         root.ID,
+			"gc.step_ref":             "demo.prepare-review-items",
+			"gc.max_attempts":         "3",
+			"gc.on_exhausted":         "hard_fail",
+			"gc.output_json_required": "true",
+		},
+	})
+	run1 := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "prepare review items attempt 1",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.kind":                 "retry-run",
+			"gc.root_bead_id":         root.ID,
+			"gc.step_ref":             "demo.prepare-review-items.run.1",
+			"gc.logical_bead_id":      logical.ID,
+			"gc.attempt":              "1",
+			"gc.max_attempts":         "3",
+			"gc.on_exhausted":         "hard_fail",
+			"gc.outcome":              "pass",
+			"gc.output_json_required": "true",
+		},
+	})
+	eval1 := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "prepare review items eval 1",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":            "retry-eval",
+			"gc.root_bead_id":    root.ID,
+			"gc.step_ref":        "demo.prepare-review-items.eval.1",
+			"gc.logical_bead_id": logical.ID,
+			"gc.attempt":         "1",
+			"gc.max_attempts":    "3",
+			"gc.on_exhausted":    "hard_fail",
+		},
+	})
+	mustDepAdd(t, store, logical.ID, eval1.ID, "blocks")
+	mustDepAdd(t, store, eval1.ID, run1.ID, "blocks")
+
+	result, err := ProcessControl(store, eval1, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(retry-eval missing output_json): %v", err)
+	}
+	if !result.Processed || result.Action != "retry" {
+		t.Fatalf("result = %+v, want processed retry", result)
+	}
+
+	evalAfter := mustGetBead(t, store, eval1.ID)
+	if evalAfter.Status != "closed" || evalAfter.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("eval = status %q outcome %q, want closed/fail", evalAfter.Status, evalAfter.Metadata["gc.outcome"])
+	}
+	if evalAfter.Metadata["gc.failure_class"] != "transient" {
+		t.Fatalf("eval gc.failure_class = %q, want transient", evalAfter.Metadata["gc.failure_class"])
+	}
+	if evalAfter.Metadata["gc.failure_reason"] != "missing_required_output_json" {
+		t.Fatalf("eval gc.failure_reason = %q, want missing_required_output_json", evalAfter.Metadata["gc.failure_reason"])
+	}
+
+	logicalAfter := mustGetBead(t, store, logical.ID)
+	if logicalAfter.Status != "open" {
+		t.Fatalf("logical status = %q, want open", logicalAfter.Status)
+	}
+
+	var run2 beads.Bead
+	all, err := store.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen(): %v", err)
+	}
+	for _, bead := range all {
+		if bead.Metadata["gc.step_ref"] == "demo.prepare-review-items.run.2" {
+			run2 = bead
+		}
+	}
+	if run2.ID == "" {
+		t.Fatal("missing retry run 2")
+	}
+}
+
 func TestProcessRetryEvalPassPropagatesNonGCMetadataToLogical(t *testing.T) {
 	t.Parallel()
 

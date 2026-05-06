@@ -1471,6 +1471,699 @@ func TestRunWorkflowServeDrainsReadyBatchBeforeRequery(t *testing.T) {
 	}
 }
 
+func TestRunWorkflowServeRoutesTraceOpenWarningsToCommandStderr(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	tracePath := filepath.Join(t.TempDir(), "missing", "workflow-trace.log")
+	t.Setenv("GC_WORKFLOW_TRACE", tracePath)
+
+	prevCityFlag := cityFlag
+	prevList := workflowServeList
+	prevInterval := workflowServeIdlePollInterval
+	prevAttempts := workflowServeIdlePollAttempts
+	cityFlag = ""
+	workflowServeIdlePollInterval = 0
+	workflowServeIdlePollAttempts = 0
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+		workflowServeList = prevList
+		workflowServeIdlePollInterval = prevInterval
+		workflowServeIdlePollAttempts = prevAttempts
+	})
+
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		return nil, nil
+	}
+
+	var stderr bytes.Buffer
+	if err := runWorkflowServe("", false, io.Discard, &stderr); err != nil {
+		t.Fatalf("runWorkflowServe: %v", err)
+	}
+
+	got := stderr.String()
+	if count := strings.Count(got, "opening workflow trace"); count != 1 {
+		t.Fatalf("warning count = %d, want 1; stderr=%q", count, got)
+	}
+	wantPrefix := fmt.Sprintf("gc convoy control --serve: warning: opening workflow trace %q:", tracePath)
+	if !strings.Contains(got, wantPrefix) {
+		t.Fatalf("stderr = %q, want warning prefix %q", got, wantPrefix)
+	}
+}
+
+func TestRunWorkflowServeWarnsOnLegacyTracePath(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_WORKFLOW_TRACE", filepath.Join(cityDir, "control-dispatcher-trace.log"))
+
+	prevCityFlag := cityFlag
+	prevList := workflowServeList
+	prevInterval := workflowServeIdlePollInterval
+	prevAttempts := workflowServeIdlePollAttempts
+	cityFlag = ""
+	workflowServeIdlePollInterval = 0
+	workflowServeIdlePollAttempts = 0
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+		workflowServeList = prevList
+		workflowServeIdlePollInterval = prevInterval
+		workflowServeIdlePollAttempts = prevAttempts
+	})
+
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		return nil, nil
+	}
+
+	var stderr bytes.Buffer
+	if err := runWorkflowServe("", false, io.Discard, &stderr); err != nil {
+		t.Fatalf("runWorkflowServe: %v", err)
+	}
+
+	got := stderr.String()
+	if !strings.Contains(got, "legacy control-dispatcher trace path") {
+		t.Fatalf("stderr = %q, want legacy-trace warning", got)
+	}
+	if !strings.Contains(got, "change or unset GC_WORKFLOW_TRACE") {
+		t.Fatalf("stderr = %q, want explicit override guidance", got)
+	}
+	if !strings.Contains(got, filepath.Join(cityDir, ".gc", "runtime", "control-dispatcher-trace.log")) {
+		t.Fatalf("stderr = %q, want canonical runtime trace path guidance", got)
+	}
+}
+
+func TestRunWorkflowServeWarnsWhenLegacyTraceFileStillExists(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	legacyTracePath := filepath.Join(cityDir, "control-dispatcher-trace.log")
+	if err := os.WriteFile(legacyTracePath, []byte("stale\n"), 0o644); err != nil {
+		t.Fatalf("write legacy trace: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+
+	prevCityFlag := cityFlag
+	prevList := workflowServeList
+	prevInterval := workflowServeIdlePollInterval
+	prevAttempts := workflowServeIdlePollAttempts
+	cityFlag = ""
+	workflowServeIdlePollInterval = 0
+	workflowServeIdlePollAttempts = 0
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+		workflowServeList = prevList
+		workflowServeIdlePollInterval = prevInterval
+		workflowServeIdlePollAttempts = prevAttempts
+	})
+
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		return nil, nil
+	}
+
+	var stderr bytes.Buffer
+	if err := runWorkflowServe("", false, io.Discard, &stderr); err != nil {
+		t.Fatalf("runWorkflowServe: %v", err)
+	}
+
+	got := stderr.String()
+	if !strings.Contains(got, "legacy control-dispatcher trace file") {
+		t.Fatalf("stderr = %q, want legacy-trace artifact warning", got)
+	}
+	if !strings.Contains(got, legacyTracePath) {
+		t.Fatalf("stderr = %q, want legacy trace path %q", got, legacyTracePath)
+	}
+	if !strings.Contains(got, filepath.Join(cityDir, ".gc", "runtime", "control-dispatcher-trace.log")) {
+		t.Fatalf("stderr = %q, want canonical runtime trace path guidance", got)
+	}
+	if !strings.Contains(got, "restart or recycle the control-dispatcher session") {
+		t.Fatalf("stderr = %q, want restart guidance for still-growing legacy trace", got)
+	}
+}
+
+func TestRunWorkflowServeWarnsWhenLegacyRigTraceFileStillExists(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n\n[[rigs]]\nname = \"alpha\"\npath = \"rigs/alpha\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	rigRoot := filepath.Join(cityDir, "rigs", "alpha")
+	if err := os.MkdirAll(rigRoot, 0o755); err != nil {
+		t.Fatalf("mkdir rig root: %v", err)
+	}
+	legacyTracePath := filepath.Join(rigRoot, "control-dispatcher-trace.log")
+	if err := os.WriteFile(legacyTracePath, []byte("stale\n"), 0o644); err != nil {
+		t.Fatalf("write legacy rig trace: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_RIG_ROOT", "")
+
+	prevCityFlag := cityFlag
+	prevList := workflowServeList
+	prevInterval := workflowServeIdlePollInterval
+	prevAttempts := workflowServeIdlePollAttempts
+	cityFlag = ""
+	workflowServeIdlePollInterval = 0
+	workflowServeIdlePollAttempts = 0
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+		workflowServeList = prevList
+		workflowServeIdlePollInterval = prevInterval
+		workflowServeIdlePollAttempts = prevAttempts
+	})
+
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		return nil, nil
+	}
+
+	var stderr bytes.Buffer
+	if err := runWorkflowServe("", false, io.Discard, &stderr); err != nil {
+		t.Fatalf("runWorkflowServe: %v", err)
+	}
+
+	got := stderr.String()
+	if !strings.Contains(got, legacyTracePath) {
+		t.Fatalf("stderr = %q, want legacy rig trace path %q", got, legacyTracePath)
+	}
+	if !strings.Contains(got, "legacy control-dispatcher trace file") {
+		t.Fatalf("stderr = %q, want legacy rig trace warning", got)
+	}
+}
+
+func TestRunWorkflowServeWarnsWhenLegacyEnvRigTraceFileStillExistsOutsideConfiguredRigs(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n\n[[rigs]]\nname = \"alpha\"\npath = \"rigs/alpha\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	rigRoot := filepath.Join(cityDir, "rigs", "beta")
+	if err := os.MkdirAll(rigRoot, 0o755); err != nil {
+		t.Fatalf("mkdir rig root: %v", err)
+	}
+	legacyTracePath := filepath.Join(rigRoot, "control-dispatcher-trace.log")
+	if err := os.WriteFile(legacyTracePath, []byte("stale\n"), 0o644); err != nil {
+		t.Fatalf("write legacy env rig trace: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_RIG_ROOT", rigRoot)
+
+	prevCityFlag := cityFlag
+	prevList := workflowServeList
+	prevInterval := workflowServeIdlePollInterval
+	prevAttempts := workflowServeIdlePollAttempts
+	cityFlag = ""
+	workflowServeIdlePollInterval = 0
+	workflowServeIdlePollAttempts = 0
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+		workflowServeList = prevList
+		workflowServeIdlePollInterval = prevInterval
+		workflowServeIdlePollAttempts = prevAttempts
+	})
+
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		return nil, nil
+	}
+
+	var stderr bytes.Buffer
+	if err := runWorkflowServe("", false, io.Discard, &stderr); err != nil {
+		t.Fatalf("runWorkflowServe: %v", err)
+	}
+
+	got := stderr.String()
+	if !strings.Contains(got, legacyTracePath) {
+		t.Fatalf("stderr = %q, want undeclared rig trace path %q", got, legacyTracePath)
+	}
+	if !strings.Contains(got, "legacy control-dispatcher trace file") {
+		t.Fatalf("stderr = %q, want undeclared rig trace warning", got)
+	}
+}
+
+func TestRunControlDispatcherWithStoreRoutesRalphTraceWarningToStderr(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	checkPath := filepath.Join(cityDir, "pass-check.sh")
+	if err := os.WriteFile(checkPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write pass-check.sh: %v", err)
+	}
+	t.Setenv("GC_WORKFLOW_TRACE", filepath.Join(t.TempDir(), "missing", "workflow-trace.log"))
+
+	store := beads.NewMemStore()
+	workflow, err := store.Create(beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create workflow bead: %v", err)
+	}
+	logical, err := store.Create(beads.Bead{
+		Title: "logical",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "ralph",
+			"gc.step_id":      "implement",
+			"gc.max_attempts": "1",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create logical bead: %v", err)
+	}
+	run1, err := store.Create(beads.Bead{
+		Title: "run 1",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":            "run",
+			"gc.step_id":         "implement",
+			"gc.ralph_step_id":   "implement",
+			"gc.attempt":         "1",
+			"gc.step_ref":        "implement.run.1",
+			"gc.root_bead_id":    workflow.ID,
+			"gc.logical_bead_id": logical.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create run bead: %v", err)
+	}
+	check1, err := store.Create(beads.Bead{
+		Title: "check 1",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":            "check",
+			"gc.step_id":         "implement",
+			"gc.ralph_step_id":   "implement",
+			"gc.attempt":         "1",
+			"gc.step_ref":        "implement.check.1",
+			"gc.check_mode":      "exec",
+			"gc.check_path":      checkPath,
+			"gc.check_timeout":   "30s",
+			"gc.max_attempts":    "1",
+			"gc.root_bead_id":    workflow.ID,
+			"gc.logical_bead_id": logical.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create check bead: %v", err)
+	}
+	if err := store.DepAdd(check1.ID, run1.ID, "blocks"); err != nil {
+		t.Fatalf("add check->run dep: %v", err)
+	}
+	if err := store.DepAdd(logical.ID, check1.ID, "blocks"); err != nil {
+		t.Fatalf("add logical->check dep: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := runControlDispatcherWithStore(cityDir, cityDir, store, check1, check1.ID, &stdout, &stderr); err != nil {
+		t.Fatalf("runControlDispatcherWithStore: %v", err)
+	}
+
+	gotStderr := stderr.String()
+	if count := strings.Count(gotStderr, "opening workflow trace"); count != 1 {
+		t.Fatalf("warning count = %d, want 1; stderr=%q", count, gotStderr)
+	}
+	if !strings.Contains(gotStderr, "gc convoy control --serve: warning: opening workflow trace") {
+		t.Fatalf("stderr = %q, want workflow trace warning prefix", gotStderr)
+	}
+	if gotStdout := stdout.String(); !strings.Contains(gotStdout, "action=pass") {
+		t.Fatalf("stdout = %q, want processed pass action", gotStdout)
+	}
+	checkAfter, err := store.Get(check1.ID)
+	if err != nil {
+		t.Fatalf("reload check bead: %v", err)
+	}
+	if checkAfter.Status != "closed" || checkAfter.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("check bead = status %q outcome %q, want closed/pass", checkAfter.Status, checkAfter.Metadata["gc.outcome"])
+	}
+}
+
+func TestRunControlDispatcherWithStoreWarnsOnLegacyTracePath(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	checkPath := filepath.Join(cityDir, "pass-check.sh")
+	if err := os.WriteFile(checkPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write pass-check.sh: %v", err)
+	}
+	legacyTracePath := filepath.Join(cityDir, "control-dispatcher-trace.log")
+	t.Setenv("GC_WORKFLOW_TRACE", legacyTracePath)
+
+	store := beads.NewMemStore()
+	workflow, err := store.Create(beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create workflow bead: %v", err)
+	}
+	logical, err := store.Create(beads.Bead{
+		Title: "logical",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "ralph",
+			"gc.step_id":      "implement",
+			"gc.max_attempts": "1",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create logical bead: %v", err)
+	}
+	run1, err := store.Create(beads.Bead{
+		Title: "run 1",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":            "run",
+			"gc.step_id":         "implement",
+			"gc.ralph_step_id":   "implement",
+			"gc.attempt":         "1",
+			"gc.step_ref":        "implement.run.1",
+			"gc.root_bead_id":    workflow.ID,
+			"gc.logical_bead_id": logical.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create run bead: %v", err)
+	}
+	check1, err := store.Create(beads.Bead{
+		Title: "check 1",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":            "check",
+			"gc.step_id":         "implement",
+			"gc.ralph_step_id":   "implement",
+			"gc.attempt":         "1",
+			"gc.step_ref":        "implement.check.1",
+			"gc.check_mode":      "exec",
+			"gc.check_path":      checkPath,
+			"gc.check_timeout":   "30s",
+			"gc.max_attempts":    "1",
+			"gc.root_bead_id":    workflow.ID,
+			"gc.logical_bead_id": logical.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create check bead: %v", err)
+	}
+	if err := store.DepAdd(check1.ID, run1.ID, "blocks"); err != nil {
+		t.Fatalf("add check->run dep: %v", err)
+	}
+	if err := store.DepAdd(logical.ID, check1.ID, "blocks"); err != nil {
+		t.Fatalf("add logical->check dep: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := runControlDispatcherWithStore(cityDir, cityDir, store, check1, check1.ID, &stdout, &stderr); err != nil {
+		t.Fatalf("runControlDispatcherWithStore: %v", err)
+	}
+
+	got := stderr.String()
+	if !strings.Contains(got, legacyTracePath) {
+		t.Fatalf("stderr = %q, want legacy trace path %q", got, legacyTracePath)
+	}
+	if !strings.Contains(got, "change or unset GC_WORKFLOW_TRACE") {
+		t.Fatalf("stderr = %q, want explicit override guidance", got)
+	}
+}
+
+func TestRunWorkflowServeDedupsTraceWarningsAcrossNestedControlDispatch(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	checkPath := filepath.Join(cityDir, "pass-check.sh")
+	if err := os.WriteFile(checkPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write pass-check.sh: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_WORKFLOW_TRACE", filepath.Join(t.TempDir(), "missing", "workflow-trace.log"))
+
+	prevCityFlag := cityFlag
+	prevList := workflowServeList
+	prevControl := controlDispatcherServe
+	prevInterval := workflowServeIdlePollInterval
+	prevAttempts := workflowServeIdlePollAttempts
+	cityFlag = ""
+	workflowServeIdlePollInterval = 0
+	workflowServeIdlePollAttempts = 0
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+		workflowServeList = prevList
+		controlDispatcherServe = prevControl
+		workflowServeIdlePollInterval = prevInterval
+		workflowServeIdlePollAttempts = prevAttempts
+	})
+
+	store := beads.NewMemStore()
+	newCheckBead := func(stepID string) string {
+		t.Helper()
+		workflow, err := store.Create(beads.Bead{
+			Title: "workflow " + stepID,
+			Type:  "task",
+			Metadata: map[string]string{
+				"gc.kind":             "workflow",
+				"gc.formula_contract": "graph.v2",
+			},
+		})
+		if err != nil {
+			t.Fatalf("create workflow bead for %s: %v", stepID, err)
+		}
+		logical, err := store.Create(beads.Bead{
+			Title: "logical " + stepID,
+			Type:  "task",
+			Metadata: map[string]string{
+				"gc.kind":         "ralph",
+				"gc.step_id":      stepID,
+				"gc.max_attempts": "1",
+				"gc.root_bead_id": workflow.ID,
+			},
+		})
+		if err != nil {
+			t.Fatalf("create logical bead for %s: %v", stepID, err)
+		}
+		run, err := store.Create(beads.Bead{
+			Title: "run " + stepID,
+			Type:  "task",
+			Metadata: map[string]string{
+				"gc.kind":            "run",
+				"gc.step_id":         stepID,
+				"gc.ralph_step_id":   stepID,
+				"gc.attempt":         "1",
+				"gc.step_ref":        stepID + ".run.1",
+				"gc.root_bead_id":    workflow.ID,
+				"gc.logical_bead_id": logical.ID,
+			},
+		})
+		if err != nil {
+			t.Fatalf("create run bead for %s: %v", stepID, err)
+		}
+		check, err := store.Create(beads.Bead{
+			Title: "check " + stepID,
+			Type:  "task",
+			Metadata: map[string]string{
+				"gc.kind":            "check",
+				"gc.step_id":         stepID,
+				"gc.ralph_step_id":   stepID,
+				"gc.attempt":         "1",
+				"gc.step_ref":        stepID + ".check.1",
+				"gc.check_mode":      "exec",
+				"gc.check_path":      checkPath,
+				"gc.check_timeout":   "30s",
+				"gc.max_attempts":    "1",
+				"gc.root_bead_id":    workflow.ID,
+				"gc.logical_bead_id": logical.ID,
+			},
+		})
+		if err != nil {
+			t.Fatalf("create check bead for %s: %v", stepID, err)
+		}
+		if err := store.DepAdd(check.ID, run.ID, "blocks"); err != nil {
+			t.Fatalf("add check->run dep for %s: %v", stepID, err)
+		}
+		if err := store.DepAdd(logical.ID, check.ID, "blocks"); err != nil {
+			t.Fatalf("add logical->check dep for %s: %v", stepID, err)
+		}
+		return check.ID
+	}
+
+	checkOneID := newCheckBead("implement-a")
+	checkTwoID := newCheckBead("implement-b")
+	sequence := [][]hookBead{
+		{{ID: checkOneID, Metadata: map[string]string{"gc.kind": "check"}}},
+		{{ID: checkTwoID, Metadata: map[string]string{"gc.kind": "check"}}},
+	}
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		if len(sequence) == 0 {
+			return nil, nil
+		}
+		next := sequence[0]
+		sequence = sequence[1:]
+		return next, nil
+	}
+	controlDispatcherServe = func(cityPath, storePath, beadID string, stdout, stderr io.Writer) error {
+		bead, err := store.Get(beadID)
+		if err != nil {
+			return err
+		}
+		return runControlDispatcherWithStore(cityPath, storePath, store, bead, beadID, stdout, stderr)
+	}
+
+	var stderr bytes.Buffer
+	if err := runWorkflowServe("", false, io.Discard, &stderr); err != nil {
+		t.Fatalf("runWorkflowServe: %v", err)
+	}
+
+	got := stderr.String()
+	if count := strings.Count(got, "opening workflow trace"); count != 1 {
+		t.Fatalf("warning count = %d, want 1 across nested control dispatch; stderr=%q", count, got)
+	}
+}
+
+func TestRunWorkflowServeDedupsLegacyTraceWarningsAcrossNestedControlDispatch(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	checkPath := filepath.Join(cityDir, "pass-check.sh")
+	if err := os.WriteFile(checkPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write pass-check.sh: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_WORKFLOW_TRACE", filepath.Join(cityDir, "control-dispatcher-trace.log"))
+
+	prevCityFlag := cityFlag
+	prevList := workflowServeList
+	prevControl := controlDispatcherServe
+	prevInterval := workflowServeIdlePollInterval
+	prevAttempts := workflowServeIdlePollAttempts
+	cityFlag = ""
+	workflowServeIdlePollInterval = 0
+	workflowServeIdlePollAttempts = 0
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+		workflowServeList = prevList
+		controlDispatcherServe = prevControl
+		workflowServeIdlePollInterval = prevInterval
+		workflowServeIdlePollAttempts = prevAttempts
+	})
+
+	store := beads.NewMemStore()
+	newCheckBead := func(stepID string) string {
+		t.Helper()
+		workflow, err := store.Create(beads.Bead{
+			Title: "workflow " + stepID,
+			Type:  "task",
+			Metadata: map[string]string{
+				"gc.kind":             "workflow",
+				"gc.formula_contract": "graph.v2",
+			},
+		})
+		if err != nil {
+			t.Fatalf("create workflow bead for %s: %v", stepID, err)
+		}
+		logical, err := store.Create(beads.Bead{
+			Title: "logical " + stepID,
+			Type:  "task",
+			Metadata: map[string]string{
+				"gc.kind":         "ralph",
+				"gc.step_id":      stepID,
+				"gc.max_attempts": "1",
+				"gc.root_bead_id": workflow.ID,
+			},
+		})
+		if err != nil {
+			t.Fatalf("create logical bead for %s: %v", stepID, err)
+		}
+		run, err := store.Create(beads.Bead{
+			Title: "run " + stepID,
+			Type:  "task",
+			Metadata: map[string]string{
+				"gc.kind":            "run",
+				"gc.step_id":         stepID,
+				"gc.ralph_step_id":   stepID,
+				"gc.attempt":         "1",
+				"gc.step_ref":        stepID + ".run.1",
+				"gc.root_bead_id":    workflow.ID,
+				"gc.logical_bead_id": logical.ID,
+			},
+		})
+		if err != nil {
+			t.Fatalf("create run bead for %s: %v", stepID, err)
+		}
+		check, err := store.Create(beads.Bead{
+			Title: "check " + stepID,
+			Type:  "task",
+			Metadata: map[string]string{
+				"gc.kind":            "check",
+				"gc.step_id":         stepID,
+				"gc.ralph_step_id":   stepID,
+				"gc.attempt":         "1",
+				"gc.step_ref":        stepID + ".check.1",
+				"gc.check_mode":      "exec",
+				"gc.check_path":      checkPath,
+				"gc.check_timeout":   "30s",
+				"gc.max_attempts":    "1",
+				"gc.root_bead_id":    workflow.ID,
+				"gc.logical_bead_id": logical.ID,
+			},
+		})
+		if err != nil {
+			t.Fatalf("create check bead for %s: %v", stepID, err)
+		}
+		if err := store.DepAdd(check.ID, run.ID, "blocks"); err != nil {
+			t.Fatalf("add check->run dep for %s: %v", stepID, err)
+		}
+		if err := store.DepAdd(logical.ID, check.ID, "blocks"); err != nil {
+			t.Fatalf("add logical->check dep for %s: %v", stepID, err)
+		}
+		return check.ID
+	}
+
+	checkOneID := newCheckBead("implement-a")
+	checkTwoID := newCheckBead("implement-b")
+	sequence := [][]hookBead{
+		{{ID: checkOneID, Metadata: map[string]string{"gc.kind": "check"}}},
+		{{ID: checkTwoID, Metadata: map[string]string{"gc.kind": "check"}}},
+	}
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		if len(sequence) == 0 {
+			return nil, nil
+		}
+		next := sequence[0]
+		sequence = sequence[1:]
+		return next, nil
+	}
+	controlDispatcherServe = func(cityPath, storePath, beadID string, stdout, stderr io.Writer) error {
+		bead, err := store.Get(beadID)
+		if err != nil {
+			return err
+		}
+		return runControlDispatcherWithStore(cityPath, storePath, store, bead, beadID, stdout, stderr)
+	}
+
+	var stderr bytes.Buffer
+	if err := runWorkflowServe("", false, io.Discard, &stderr); err != nil {
+		t.Fatalf("runWorkflowServe: %v", err)
+	}
+
+	got := stderr.String()
+	if count := strings.Count(got, "legacy control-dispatcher trace path"); count != 1 {
+		t.Fatalf("warning count = %d, want 1 across nested control dispatch; stderr=%q", count, got)
+	}
+}
+
 func TestWorkflowServeControlReadyQueryUsesControlTiers(t *testing.T) {
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName})
 	if strings.Contains(query, "GC_SESSION_ORIGIN") {
@@ -3617,6 +4310,131 @@ func TestWaitForRelevantWorkflowWakeTraceIncludesBackoffState(t *testing.T) {
 	trace := string(traceBytes)
 	if !strings.Contains(trace, "serve wake-sweep idle_sweeps=3 sleep=5ms") {
 		t.Fatalf("trace = %q, want wake-sweep line with idle_sweeps and sleep", trace)
+	}
+}
+
+func TestWorkflowTracefWarnsOnceWhenTracePathCannotBeOpened(t *testing.T) {
+	tracePath := filepath.Join(t.TempDir(), "missing", "workflow-trace.log")
+	t.Setenv("GC_WORKFLOW_TRACE", tracePath)
+
+	var stderr bytes.Buffer
+	restoreWarnings := useWorkflowTraceWarnings(&stderr)
+	defer restoreWarnings()
+
+	workflowTracef("first write")
+	workflowTracef("second write")
+
+	got := stderr.String()
+	if count := strings.Count(got, "opening workflow trace"); count != 1 {
+		t.Fatalf("warning count = %d, want 1; stderr=%q", count, got)
+	}
+	if !strings.Contains(got, tracePath) {
+		t.Fatalf("stderr = %q, want missing trace path %q", got, tracePath)
+	}
+}
+
+func TestWorkflowTracefFallsBackToSlingTrace(t *testing.T) {
+	tracePath := filepath.Join(t.TempDir(), "workflow-trace.log")
+	t.Setenv("GC_SLING_TRACE", tracePath)
+
+	workflowTracef("fallback trace")
+
+	traceBytes, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+	if !strings.Contains(string(traceBytes), "fallback trace") {
+		t.Fatalf("trace = %q, want fallback trace payload", traceBytes)
+	}
+}
+
+func TestWorkflowTracefUsesRFC3339NanoTimestamp(t *testing.T) {
+	tracePath := filepath.Join(t.TempDir(), "workflow-trace.log")
+	t.Setenv("GC_WORKFLOW_TRACE", tracePath)
+
+	fixedNow := time.Date(2026, 5, 5, 22, 12, 34, 345678901, time.UTC)
+	prevNow := workflowTraceNow
+	workflowTraceNow = func() time.Time { return fixedNow }
+	defer func() {
+		workflowTraceNow = prevNow
+	}()
+
+	workflowTracef("precise trace")
+
+	traceBytes, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+
+	line := strings.TrimSpace(string(traceBytes))
+	wantPrefix := fixedNow.Format(time.RFC3339Nano) + " "
+	if !strings.HasPrefix(line, wantPrefix) {
+		t.Fatalf("trace = %q, want prefix %q", line, wantPrefix)
+	}
+}
+
+func TestWorkflowTraceWarningScopeResetsAcrossTopLevelInstalls(t *testing.T) {
+	badPath := filepath.Join(t.TempDir(), "missing", "workflow-trace.log")
+	var stderr bytes.Buffer
+
+	restoreOne := useWorkflowTraceWarnings(&stderr)
+	workflowTraceWarnOpenFailure(badPath, os.ErrNotExist)
+	restoreOne()
+
+	restoreTwo := useWorkflowTraceWarnings(&stderr)
+	workflowTraceWarnOpenFailure(badPath, os.ErrNotExist)
+	restoreTwo()
+
+	if count := strings.Count(stderr.String(), "opening workflow trace"); count != 2 {
+		t.Fatalf("warning count = %d, want 2 across separate top-level installs; stderr=%q", count, stderr.String())
+	}
+}
+
+func TestWorkflowTraceWarningRestoreSupportsOutOfOrderRelease(t *testing.T) {
+	badPath := filepath.Join(t.TempDir(), "missing", "workflow-trace.log")
+	var outer bytes.Buffer
+	var inner bytes.Buffer
+	var fresh bytes.Buffer
+
+	restoreOuter := useWorkflowTraceWarnings(&outer)
+	restoreInner := useWorkflowTraceWarnings(&inner)
+
+	restoreOuter()
+	workflowTraceWarnOpenFailure(badPath, os.ErrNotExist)
+	restoreInner()
+
+	if outer.Len() != 0 {
+		t.Fatalf("outer stderr = %q, want no warning after out-of-order outer restore", outer.String())
+	}
+	if count := strings.Count(inner.String(), "opening workflow trace"); count != 1 {
+		t.Fatalf("inner warning count = %d, want 1 after out-of-order outer restore; stderr=%q", count, inner.String())
+	}
+
+	restoreFresh := useWorkflowTraceWarnings(&fresh)
+	workflowTraceWarnOpenFailure(badPath, os.ErrNotExist)
+	restoreFresh()
+	if count := strings.Count(fresh.String(), "opening workflow trace"); count != 1 {
+		t.Fatalf("fresh warning count = %d, want 1 after scopes reset; stderr=%q", count, fresh.String())
+	}
+}
+
+func TestWorkflowTraceWarnfDedupsMatchingInactiveScopeWriter(t *testing.T) {
+	var outer bytes.Buffer
+	var inner bytes.Buffer
+
+	restoreOuter := useWorkflowTraceWarnings(&outer)
+	defer restoreOuter()
+	restoreInner := useWorkflowTraceWarnings(&inner)
+	defer restoreInner()
+
+	workflowTraceWarnf(&outer, "duplicate", "outer warning\n")
+	workflowTraceWarnf(&outer, "duplicate", "outer warning\n")
+
+	if count := strings.Count(outer.String(), "outer warning"); count != 1 {
+		t.Fatalf("outer warning count = %d, want 1; stderr=%q", count, outer.String())
+	}
+	if inner.Len() != 0 {
+		t.Fatalf("inner stderr = %q, want no warning for outer-scope writer", inner.String())
 	}
 }
 

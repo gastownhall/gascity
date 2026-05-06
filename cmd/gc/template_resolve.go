@@ -252,7 +252,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		// Rig-scoped agents override the rig-specific keys below.
 		"GT_ROOT": p.cityPath,
 	}
-	for key, value := range citylayout.CityRuntimeEnvMap(p.cityPath) {
+	for key, value := range cityRuntimeEnvMapForCity(p.cityPath) {
 		agentEnv[key] = value
 	}
 	agentEnv["GC_BEADS"] = rawBeadsProviderForScope(rigRoot, p.cityPath)

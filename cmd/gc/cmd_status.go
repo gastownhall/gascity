@@ -88,26 +88,6 @@ func cmdRigStatus(args []string, stdout, stderr io.Writer) int {
 	return doRigStatusWithStoreAndSnapshot(sp, dops, rig, rigAgents, cityPath, cityName, cfg.Workspace.SessionTemplate, cfg, store, statusSnapshot, stdout, stderr)
 }
 
-// doRigStatus prints rig info and per-agent running state.
-func doRigStatus(
-	sp runtime.Provider,
-	dops drainOps,
-	rig config.Rig,
-	agents []config.Agent,
-	cityPath, cityName, sessionTemplate string,
-	cfg *config.City,
-	stdout, stderr io.Writer,
-) int {
-	_ = stderr // reserved for future error reporting
-	var store beads.Store
-	if cityPath != "" {
-		if opened, err := openCityStoreAt(cityPath); err == nil {
-			store = opened
-		}
-	}
-	return doRigStatusWithStoreAndSnapshot(sp, dops, rig, agents, cityPath, cityName, sessionTemplate, cfg, store, loadStatusSessionSnapshot(store), stdout, stderr)
-}
-
 func doRigStatusWithStoreAndSnapshot(
 	sp runtime.Provider,
 	dops drainOps,

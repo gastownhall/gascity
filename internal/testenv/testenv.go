@@ -28,12 +28,13 @@
 //
 // Passthrough: a parent that intentionally launches a helper subprocess
 // with seeded leak-vector vars (e.g. workspacesvc's proxy_process tests,
-// where proxy_process.go seeds GC_CITY/GC_CITY_PATH/GC_CITY_RUNTIME_DIR
-// into the child env) can set GC_TESTENV_PASSTHROUGH in the child env to
-// a comma-separated list of leak-vector var names. init() preserves only
-// those named vars and scrubs the rest. The passthrough var itself is
-// always unset so the child cannot propagate the list further. Unlike a
-// blanket bypass, every surviving GC_* must be explicitly declared.
+// where proxy_process.go seeds GC_CITY/GC_CITY_PATH/GC_CITY_RUNTIME_DIR/
+// GC_CONTROL_DISPATCHER_TRACE_DEFAULT into the child env) can set
+// GC_TESTENV_PASSTHROUGH in the child env to a comma-separated list of
+// leak-vector var names. init() preserves only those named vars and scrubs
+// the rest. The passthrough var itself is always unset so the child cannot
+// propagate the list further. Unlike a blanket bypass, every surviving GC_*
+// must be explicitly declared.
 //
 // Testscript subcommand bypass: when the test binary is re-invoked via
 // rogpeppe/go-internal/testscript's Main as a registered subcommand (e.g.
@@ -81,6 +82,7 @@ var LeakVectorVars = []string{
 	"GC_CITY_PATH",
 	"GC_CITY_ROOT",
 	"GC_CITY_RUNTIME_DIR",
+	"GC_CONTROL_DISPATCHER_TRACE_DEFAULT",
 	"GC_DIR",
 	"GC_HOME",
 	"GC_SESSION_ID",

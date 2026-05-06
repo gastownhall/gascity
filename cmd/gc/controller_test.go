@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -833,6 +834,70 @@ func TestWatchConfigDirs_CityRootDoesNotWatchUnrelatedNestedSubdir(t *testing.T)
 	}
 	if dirty.Load() {
 		t.Fatalf("dirty flag set after unrelated nested city-root file changed; stderr=%q", stderr.String())
+	}
+}
+
+func TestWatchConfigDirs_CityRootIgnoresRuntimeTraceWrites(t *testing.T) {
+	old := debounceDelay
+	debounceDelay = 5 * time.Millisecond
+	t.Cleanup(func() { debounceDelay = old })
+
+	dir := t.TempDir()
+	traceDir := citylayout.RuntimeDataDir(dir)
+	if err := os.MkdirAll(traceDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll runtime dir: %v", err)
+	}
+	traceFile := filepath.Join(traceDir, "control-dispatcher-trace.log")
+	if err := os.WriteFile(traceFile, []byte("first\n"), 0o644); err != nil {
+		t.Fatalf("seed runtime trace: %v", err)
+	}
+	legacyTraceFile := filepath.Join(dir, "control-dispatcher-trace.log")
+
+	if !shouldIgnoreConfigWatchEvent(traceFile) {
+		t.Fatalf("shouldIgnoreConfigWatchEvent(%q) = false, want true", traceFile)
+	}
+	if shouldIgnoreConfigWatchEvent(legacyTraceFile) {
+		t.Fatalf("shouldIgnoreConfigWatchEvent(%q) = true, want false", legacyTraceFile)
+	}
+
+	var dirty atomic.Bool
+	pokeCh := make(chan struct{}, 1)
+	var stderr bytes.Buffer
+	cleanup := watchConfigTargets([]config.WatchTarget{{Path: dir, DiscoverConventions: true}}, &dirty, pokeCh, &stderr)
+	defer cleanup()
+
+	select {
+	case <-pokeCh:
+	default:
+	}
+	dirty.Store(false)
+
+	for i, body := range []string{"second\n", "third\n", "fourth\n"} {
+		if err := os.WriteFile(traceFile, []byte(body), 0o644); err != nil {
+			t.Fatalf("rewrite runtime trace #%d: %v", i+1, err)
+		}
+		select {
+		case <-pokeCh:
+			t.Fatalf("unexpected watcher poke after runtime trace write #%d; stderr=%q", i+1, stderr.String())
+		case <-time.After(250 * time.Millisecond):
+		}
+		if dirty.Load() {
+			t.Fatalf("dirty flag set after runtime trace write #%d; stderr=%q", i+1, stderr.String())
+		}
+	}
+
+	dirty.Store(false)
+	if err := os.WriteFile(legacyTraceFile, []byte("legacy\n"), 0o644); err != nil {
+		t.Fatalf("write legacy city-root trace: %v", err)
+	}
+
+	select {
+	case <-pokeCh:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for watcher poke after legacy city-root trace write; stderr=%q", stderr.String())
+	}
+	if !dirty.Load() {
+		t.Fatalf("dirty flag not set after legacy city-root trace write; stderr=%q", stderr.String())
 	}
 }
 
