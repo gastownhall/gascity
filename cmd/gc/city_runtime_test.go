@@ -255,6 +255,78 @@ func TestCityRuntimeDemandSnapshotReusesStablePatrolDemand(t *testing.T) {
 	}
 }
 
+func TestCityRuntimeDemandSnapshotRetainsOnlyPoolScaleCheckPartials(t *testing.T) {
+	sessionBeads := newSessionBeadSnapshot([]beads.Bead{{
+		ID:     "session-worker",
+		Status: "open",
+		Metadata: map[string]string{
+			"session_name":         "worker-bd-123",
+			"template":             "worker",
+			"agent_name":           "worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "awake",
+		},
+	}})
+
+	tests := []struct {
+		name   string
+		result DesiredStateResult
+		want   int
+	}{
+		{
+			name: "pool partial retains awake pool session",
+			result: DesiredStateResult{
+				State:                          map[string]TemplateParams{},
+				ScaleCheckCounts:               map[string]int{"worker": 0},
+				ScaleCheckPartialTemplates:     map[string]bool{"worker": true},
+				PoolScaleCheckPartialTemplates: map[string]bool{"worker": true},
+			},
+			want: 1,
+		},
+		{
+			name: "named partial does not retain generic pool session",
+			result: DesiredStateResult{
+				State:                           map[string]TemplateParams{},
+				ScaleCheckCounts:                map[string]int{"worker": 0},
+				ScaleCheckPartialTemplates:      map[string]bool{"worker": true},
+				NamedScaleCheckPartialTemplates: map[string]bool{"worker": true},
+			},
+			want: 0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cr := &CityRuntime{
+				cityName: "test-city",
+				cityPath: t.TempDir(),
+				cfg: &config.City{
+					Workspace: config.Workspace{Name: "test-city"},
+					Agents: []config.Agent{{
+						Name:              "worker",
+						MinActiveSessions: intPtr(0),
+						MaxActiveSessions: intPtr(5),
+					}},
+				},
+				cs: &controllerState{
+					eventProv: events.NewFake(),
+				},
+				stderr: io.Discard,
+			}
+			cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+				return tc.result
+			}
+
+			snapshot := cr.loadDemandSnapshot(sessionBeads, nil, "poke", false)
+
+			if got := snapshot.result.PoolDesiredCounts["worker"]; got != tc.want {
+				t.Fatalf("PoolDesiredCounts[worker] = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCityRuntimeAsyncStartLimiterUsesMaxWakesPerTick(t *testing.T) {
 	maxWakes := 7
 	cfg := &config.City{Daemon: config.DaemonConfig{MaxWakesPerTick: &maxWakes}}
@@ -1462,6 +1534,178 @@ func TestCityRuntimeBeadReconcileTick_TransientStoreQueryPartialKeepsRunningPool
 	}
 	if !sp.IsRunning("worker-bd-123") {
 		t.Fatal("recovered tick should keep the worker running")
+	}
+}
+
+func TestCityRuntimeBeadReconcileTick_ScaleCheckPartialKeepsOnlyAffectedPoolSession(t *testing.T) {
+	store := beads.NewMemStore()
+	worker, err := store.Create(beads.Bead{
+		ID:     "session-worker",
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":         "worker-bd-123",
+			"template":             "worker",
+			"agent_name":           "worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "awake",
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create worker session: %v", err)
+	}
+	helper, err := store.Create(beads.Bead{
+		ID:     "session-helper",
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel, "agent:helper"},
+		Metadata: map[string]string{
+			"session_name":         "helper-bd-123",
+			"template":             "helper",
+			"agent_name":           "helper",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "awake",
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create helper session: %v", err)
+	}
+
+	sp := runtime.NewFake()
+	for _, name := range []string{"worker-bd-123", "helper-bd-123"} {
+		if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+			t.Fatalf("Start(%s): %v", name, err)
+		}
+	}
+
+	cityPath := t.TempDir()
+	cfg := &config.City{Agents: []config.Agent{
+		{
+			Name:              "worker",
+			StartCommand:      "echo",
+			ScaleCheck:        "exit 42",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(5),
+		},
+		{
+			Name:              "helper",
+			StartCommand:      "echo",
+			ScaleCheck:        "printf 0",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(5),
+		},
+	}}
+	cr := &CityRuntime{
+		cityPath:            cityPath,
+		cityName:            "maintainer-city",
+		cfg:                 cfg,
+		sp:                  sp,
+		standaloneCityStore: store,
+		sessionDrains:       newDrainTracker(),
+		rec:                 events.Discard,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+	}
+
+	snapshot := newSessionBeadSnapshot([]beads.Bead{worker, helper})
+	var stderr strings.Builder
+	result := buildDesiredStateWithSessionBeads("maintainer-city", cityPath, time.Now().UTC(), cfg, sp, store, nil, snapshot, nil, &stderr)
+	if result.StoreQueryPartial {
+		t.Fatalf("StoreQueryPartial = true, want false for scoped scale_check failure; stderr=%s", stderr.String())
+	}
+	if !result.ScaleCheckPartialTemplates["worker"] || result.ScaleCheckPartialTemplates["helper"] {
+		t.Fatalf("ScaleCheckPartialTemplates = %v, want only worker", result.ScaleCheckPartialTemplates)
+	}
+	cr.beadReconcileTick(context.Background(), result, snapshot, nil)
+
+	if drain := cr.sessionDrains.get(worker.ID); drain != nil {
+		t.Fatalf("affected worker session was scheduled for drain: reason=%s", drain.reason)
+	}
+	if cr.sessionDrains.get(helper.ID) == nil {
+		t.Fatal("unaffected helper session was not scheduled for drain")
+	}
+	if !sp.IsRunning("worker-bd-123") {
+		t.Fatal("affected worker session should remain running")
+	}
+	if !sp.IsRunning("helper-bd-123") {
+		t.Fatal("helper drain should be asynchronous and not stop immediately")
+	}
+}
+
+func TestCityRuntimeBeadReconcileTick_ScaleCheckPartialPreservesDormantAffectedPoolSessionWithoutDrain(t *testing.T) {
+	store := beads.NewMemStore()
+	worker, err := store.Create(beads.Bead{
+		ID:     "session-worker",
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":         "worker-bd-123",
+			"template":             "worker",
+			"agent_name":           "worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "asleep",
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create worker session: %v", err)
+	}
+
+	sp := runtime.NewFake()
+	cityPath := t.TempDir()
+	cfg := &config.City{Agents: []config.Agent{{
+		Name:              "worker",
+		StartCommand:      "echo",
+		ScaleCheck:        "exit 42",
+		MinActiveSessions: intPtr(0),
+		MaxActiveSessions: intPtr(5),
+	}}}
+	cr := &CityRuntime{
+		cityPath:            cityPath,
+		cityName:            "maintainer-city",
+		cfg:                 cfg,
+		sp:                  sp,
+		standaloneCityStore: store,
+		sessionDrains:       newDrainTracker(),
+		rec:                 events.Discard,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+	}
+
+	snapshot := newSessionBeadSnapshot([]beads.Bead{worker})
+	var stderr strings.Builder
+	result := buildDesiredStateWithSessionBeads("maintainer-city", cityPath, time.Now().UTC(), cfg, sp, store, nil, snapshot, nil, &stderr)
+	if _, ok := result.State["worker-bd-123"]; !ok {
+		t.Fatalf("affected dormant worker session not preserved in desired state: keys=%v stderr=%s", mapKeys(result.State), stderr.String())
+	}
+
+	cr.beadReconcileTick(context.Background(), result, snapshot, nil)
+
+	if drain := cr.sessionDrains.get(worker.ID); drain != nil {
+		t.Fatalf("affected dormant worker session was scheduled for drain: reason=%s", drain.reason)
+	}
+	got, err := store.Get(worker.ID)
+	if err != nil {
+		t.Fatalf("Get worker session: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("affected dormant worker session was closed: %+v", got)
+	}
+	if state := got.Metadata["state"]; state != "asleep" {
+		t.Fatalf("affected dormant worker state = %q, want asleep", state)
+	}
+	if sp.IsRunning("worker-bd-123") {
+		t.Fatal("affected dormant worker should not be woken by scale_check retention")
 	}
 }
 

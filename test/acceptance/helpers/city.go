@@ -107,6 +107,14 @@ func (c *City) RigAdd(rigPath string, include string) {
 	if err := EnsureClaudeProjectState(c.Env, rigPath); err != nil {
 		c.t.Fatalf("acceptance: seeding Claude state for rig %s: %v", rigPath, err)
 	}
+	// Rig temp dirs are often created with t.TempDir() after Init/InitFrom has
+	// already registered its cleanup. Registering another best-effort stop +
+	// unregister cleanup here ensures those temp dirs are removed only after rig
+	// runtime state under .gc has been torn down.
+	c.t.Cleanup(func() {
+		RunGC(c.Env, c.Dir, "stop", c.Dir)       //nolint:errcheck
+		RunGC(c.Env, c.Dir, "unregister", c.Dir) //nolint:errcheck
+	})
 }
 
 // AppendToConfig appends raw TOML content to city.toml.

@@ -1265,8 +1265,12 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	poolDesired := result.PoolDesiredCounts
 	if poolDesired == nil {
 		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cr.cfg, cr.cityPath, sessionBeads.Open(), assignedWorkBeads, assignedWorkStoreRefs)
-		poolDesired = PoolDesiredCounts(ComputePoolDesiredStatesTraced(
-			cr.cfg, poolWorkBeads, sessionBeads.Open(), result.ScaleCheckCounts, trace))
+		poolDesired = retainScaleCheckPartialPoolDesired(
+			PoolDesiredCounts(ComputePoolDesiredStatesTraced(
+				cr.cfg, poolWorkBeads, sessionBeads.Open(), result.ScaleCheckCounts, trace)),
+			sessionBeads,
+			result.PoolScaleCheckPartialTemplates,
+		)
 	}
 	// Merge named-session assignee demand so on-demand named sessions with
 	// direct work (Assignee match, no gc.routed_to) stay config-eligible.
@@ -1358,15 +1362,19 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 			})
 		}
 		trace.RecordCycleInputSnapshot(map[string]any{
-			"desired_session_count":  len(desiredState),
-			"open_session_count":     len(open),
-			"scale_check_counts":     result.ScaleCheckCounts,
-			"pool_desired":           poolDesired,
-			"ready_wait_count":       len(readyWaitSet),
-			"work_set_count":         len(workSet),
-			"store_query_partial":    result.StoreQueryPartial,
-			"session_query_partial":  result.SessionQueryPartial,
-			"snapshot_query_partial": result.snapshotQueryPartial(),
+			"desired_session_count":               len(desiredState),
+			"open_session_count":                  len(open),
+			"scale_check_counts":                  result.ScaleCheckCounts,
+			"pool_desired":                        poolDesired,
+			"ready_wait_count":                    len(readyWaitSet),
+			"work_set_count":                      len(workSet),
+			"store_query_partial":                 result.StoreQueryPartial,
+			"scale_check_query_partial":           len(result.ScaleCheckPartialTemplates) > 0,
+			"scale_check_partial_templates":       sortedBoolMapKeys(result.ScaleCheckPartialTemplates),
+			"pool_scale_check_partial_templates":  sortedBoolMapKeys(result.PoolScaleCheckPartialTemplates),
+			"named_scale_check_partial_templates": sortedBoolMapKeys(result.NamedScaleCheckPartialTemplates),
+			"session_query_partial":               result.SessionQueryPartial,
+			"snapshot_query_partial":              result.snapshotQueryPartial(),
 		})
 		for _, agent := range cr.cfg.Agents {
 			template := agent.QualifiedName()
@@ -1719,8 +1727,12 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	)
 	open := filterSessionBeadsByName(updated, cfgNames)
 	poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(filteredCfg, cr.cityPath, open, wfcResult.AssignedWorkBeads, wfcResult.AssignedWorkStoreRefs)
-	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(
-		filteredCfg, poolWorkBeads, open, wfcResult.ScaleCheckCounts))
+	poolDesired := retainScaleCheckPartialPoolDesired(
+		PoolDesiredCounts(ComputePoolDesiredStates(
+			filteredCfg, poolWorkBeads, open, wfcResult.ScaleCheckCounts)),
+		newSessionBeadSnapshot(open),
+		wfcResult.PoolScaleCheckPartialTemplates,
+	)
 	if poolDesired == nil {
 		poolDesired = make(map[string]int)
 	}
@@ -1837,8 +1849,12 @@ func (cr *CityRuntime) loadDemandSnapshot(
 			openSessionBeads = sessionBeads.Open()
 		}
 		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cr.cfg, cr.cityPath, openSessionBeads, result.AssignedWorkBeads, result.AssignedWorkStoreRefs)
-		result.PoolDesiredCounts = PoolDesiredCounts(ComputePoolDesiredStatesTraced(
-			cr.cfg, poolWorkBeads, openSessionBeads, result.ScaleCheckCounts, trace))
+		result.PoolDesiredCounts = retainScaleCheckPartialPoolDesired(
+			PoolDesiredCounts(ComputePoolDesiredStatesTraced(
+				cr.cfg, poolWorkBeads, openSessionBeads, result.ScaleCheckCounts, trace)),
+			sessionBeads,
+			result.PoolScaleCheckPartialTemplates,
+		)
 		if result.PoolDesiredCounts == nil {
 			result.PoolDesiredCounts = make(map[string]int)
 		}

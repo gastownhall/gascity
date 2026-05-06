@@ -2352,7 +2352,7 @@ func TestProcessRalphCheckResumesExistingRetryAttemptWithoutDuplicates(t *testin
 	if err := store.Close(run1.ID); err != nil {
 		t.Fatalf("close run1: %v", err)
 	}
-	if _, err := appendRalphRetry(store, logical.ID, run1, check1, 2, cityPath); err != nil {
+	if _, err := appendRalphRetry(store, logical.ID, run1, check1, 2, ProcessOptions{CityPath: cityPath}); err != nil {
 		t.Fatalf("appendRalphRetry: %v", err)
 	}
 
@@ -2403,7 +2403,7 @@ func TestAppendRalphRetryDefersAssigneesUntilDepsAreWired(t *testing.T) {
 	run1 = mustGetBead(t, inspect, run1.ID)
 	check1 = mustGetBead(t, inspect, check1.ID)
 
-	mapping, err := appendRalphRetry(inspect, logical.ID, run1, check1, 2, "")
+	mapping, err := appendRalphRetry(inspect, logical.ID, run1, check1, 2, ProcessOptions{})
 	if err != nil {
 		t.Fatalf("appendRalphRetry: %v", err)
 	}
@@ -2478,7 +2478,7 @@ max = -1
 	run1 = mustGetBead(t, store, run1.ID)
 	check1 = mustGetBead(t, store, check1.ID)
 
-	mapping, err := appendRalphRetry(store, logical.ID, run1, check1, 2, cityPath)
+	mapping, err := appendRalphRetry(store, logical.ID, run1, check1, 2, ProcessOptions{CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("appendRalphRetry: %v", err)
 	}
@@ -2585,7 +2585,7 @@ func TestAppendRalphRetryRemapsNestedRetryLogicalRefs(t *testing.T) {
 	mustDepAdd(t, store, check1.ID, run1.ID, "blocks")
 	mustDepAdd(t, store, logical.ID, check1.ID, "blocks")
 
-	mapping, err := appendRalphRetry(store, logical.ID, run1, check1, 2, "")
+	mapping, err := appendRalphRetry(store, logical.ID, run1, check1, 2, ProcessOptions{})
 	if err != nil {
 		t.Fatalf("appendRalphRetry: %v", err)
 	}

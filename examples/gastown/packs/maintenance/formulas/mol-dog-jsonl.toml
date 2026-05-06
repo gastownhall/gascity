@@ -105,14 +105,15 @@ Remove records matching test patterns from exported JSONL:
 Compare current export record counts against previous commit.
 
 **3. Evaluate results:**
-- If delta > {{spike_threshold}} (default 20%) for ANY database -> HALT
+- If delta > {{spike_threshold}} (default 20%) for ANY database -> HALT after
+  committing the refreshed export locally so the baseline advances
 - Log anomalies: sudden jumps = pollution, sudden drops = data loss
 - Escalate to Mayor:
   ```bash
   gc mail send mayor/ -s "ESCALATION: JSONL spike detected [HIGH]" \\
     -m "Database: <db>, delta: <pct>%, threshold: {{spike_threshold}}"
   ```
-- Do NOT proceed to commit/push
+- Skip push so the spike snapshot stays local until a later successful run
 
 **4. First export:**
 Skip verification when no baseline exists (previous commit has no file).
@@ -125,6 +126,9 @@ title = "Commit and push to git archive"
 needs = ["verify"]
 description = """
 Stage, commit, and push JSONL files to the archive repository.
+
+If the verify step halts on a spike, this push step is skipped because the
+HALT path already wrote a local baseline-advance commit.
 
 **1. Stage changes:**
 ```bash

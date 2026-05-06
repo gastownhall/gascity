@@ -1705,9 +1705,81 @@ provider = "bd"
 	if got["GC_CITY_RUNTIME_DIR"] != customRuntimeDir {
 		t.Fatalf("GC_CITY_RUNTIME_DIR = %q, want %q; env=%v", got["GC_CITY_RUNTIME_DIR"], customRuntimeDir, got)
 	}
+	wantControlTrace := filepath.Join(customRuntimeDir, "control-dispatcher-trace.log")
+	if got["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"] != wantControlTrace {
+		t.Fatalf("GC_CONTROL_DISPATCHER_TRACE_DEFAULT = %q, want %q; env=%v", got["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"], wantControlTrace, got)
+	}
 	wantStateFile := filepath.Join(packStateDir, "dolt-state.json")
 	if got["GC_DOLT_STATE_FILE"] != wantStateFile {
 		t.Fatalf("GC_DOLT_STATE_FILE = %q, want %q; env=%v", got["GC_DOLT_STATE_FILE"], wantStateFile, got)
+	}
+}
+
+func TestOrderDispatchExecManagedDoltCoercesInCityRuntimeDirForControlTraceDefault(t *testing.T) {
+	store := beads.NewMemStore()
+	cityDir := t.TempDir()
+	dataDir := filepath.Join(cityDir, ".beads", "dolt")
+	unsafeRuntimeDir := filepath.Join(cityDir, "runtime-outside-gc")
+	packStateDir := filepath.Join(unsafeRuntimeDir, "packs", "dolt")
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_CITY_RUNTIME_DIR", unsafeRuntimeDir)
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(packStateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+
+[beads]
+provider = "bd"
+`)
+	writeFile(t, filepath.Join(cityDir, ".beads", "config.yaml"), strings.Join([]string{
+		"issue_prefix: ct",
+		"gc.endpoint_origin: managed_city",
+		"gc.endpoint_status: verified",
+		"dolt.auto-start: false",
+		"",
+	}, "\n"))
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer func() {
+		if err := listener.Close(); err != nil {
+			t.Fatalf("Close listener: %v", err)
+		}
+	}()
+	writeFile(t, filepath.Join(packStateDir, "dolt-state.json"), fmt.Sprintf(
+		`{"running":true,"pid":%d,"port":%d,"data_dir":%q}`,
+		os.Getpid(),
+		listener.Addr().(*net.TCPAddr).Port,
+		dataDir,
+	))
+
+	envCh := make(chan []string, 1)
+	fakeExec := func(_ context.Context, _, _ string, env []string) ([]byte, error) {
+		envCh <- env
+		return nil, nil
+	}
+	aa := []orders.Order{{
+		Name:     "dolt-gc-nudge",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     "gc dolt gc-nudge",
+	}}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
+	ad.dispatch(context.Background(), cityDir, time.Now())
+
+	got := orderDispatchTestEnv(t, envCh)
+	if got["GC_CITY_RUNTIME_DIR"] != unsafeRuntimeDir {
+		t.Fatalf("GC_CITY_RUNTIME_DIR = %q, want %q; env=%v", got["GC_CITY_RUNTIME_DIR"], unsafeRuntimeDir, got)
+	}
+	wantControlTrace := filepath.Join(cityDir, ".gc", "runtime", "control-dispatcher-trace.log")
+	if got["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"] != wantControlTrace {
+		t.Fatalf("GC_CONTROL_DISPATCHER_TRACE_DEFAULT = %q, want %q; env=%v", got["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"], wantControlTrace, got)
 	}
 }
 
