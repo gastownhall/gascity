@@ -33,7 +33,7 @@ if ! dolt_sql -q "SELECT active_branch()" >/dev/null 2>&1; then
         -s "ESCALATION: Dolt server unreachable on port $PORT [CRITICAL]" \
         -m "Doctor probe failed: server did not respond to active_branch() query." \
         2>/dev/null || true
-    gc nudge deacon/ "DOG_DONE: doctor — server: UNREACHABLE (escalated)" 2>/dev/null || true
+    gc session nudge deacon/ "DOG_DONE: doctor — server: UNREACHABLE (escalated)" 2>/dev/null || true
     echo "doctor: server unreachable on port $PORT (escalated)"
     exit 0
 fi
@@ -98,5 +98,5 @@ Orphan DBs: ${ORPHAN_COUNT}${ORPHAN_WARN}${BACKUP_STALE}" \
 fi
 
 SUMMARY="doctor — server: ok, latency: ${LATENCY_S}s, conns: ${CONN_COUNT}/${CONN_MAX}, disk: ${DISK_USAGE}, orphans: ${ORPHAN_COUNT}"
-gc nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
+gc session nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
 echo "doctor: $SUMMARY"

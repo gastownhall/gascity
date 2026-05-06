@@ -42,7 +42,7 @@ done
 
 if [ "$PHANTOM_COUNT" -eq 0 ]; then
     SUMMARY="phantom-db — scanned: $SCANNED, phantoms: 0, valid: $VALID"
-    gc nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
+    gc session nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
     echo "phantom-db: $SUMMARY"
     exit 0
 fi
@@ -72,5 +72,5 @@ $([ "$ERRORS" -gt 0 ] && echo "Removal errors: $ERRORS" || true)" \
 # --- Step 3: Report ---
 
 SUMMARY="phantom-db — scanned: $SCANNED, phantoms: $PHANTOM_COUNT, quarantined: $QUARANTINED"
-gc nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
+gc session nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
 echo "phantom-db: $SUMMARY"

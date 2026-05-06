@@ -89,5 +89,5 @@ if [ "$FAILED_COUNT" -gt 0 ]; then
 fi
 
 SUMMARY="backup — synced: $SYNCED/$TOTAL, offsite: $OFFSITE_STATUS"
-gc nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
+gc session nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
 echo "backup: $SUMMARY"
