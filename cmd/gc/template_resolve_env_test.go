@@ -134,3 +134,72 @@ func TestResolveTemplateUsesTrustedRuntimeRootForControlTraceDefault(t *testing.
 		t.Fatalf("GC_CONTROL_DISPATCHER_TRACE_DEFAULT = %q, want %q", got, wantTraceDefault)
 	}
 }
+
+// TestResolveTemplateInjectsPerDispatcherTraceDefault asserts that
+// resolveTemplate produces a per-dispatcher GC_CONTROL_DISPATCHER_TRACE_DEFAULT
+// in agentEnv for control-dispatcher agents (closes #1650). The override
+// goes in agentEnv (last in mergeEnv) so it deterministically wins over
+// the uniform city-level default seeded by cityRuntimeEnvMapForCity.
+func TestResolveTemplateInjectsPerDispatcherTraceDefault(t *testing.T) {
+	cases := []struct {
+		name          string
+		dir           string
+		qualifiedName string
+		wantFilename  string
+	}{
+		{
+			name:          "city dispatcher",
+			dir:           "",
+			qualifiedName: config.ControlDispatcherAgentName,
+			wantFilename:  "control-dispatcher-trace.log",
+		},
+		{
+			name:          "rig dispatcher uses double-dash filename",
+			dir:           "app",
+			qualifiedName: "app/control-dispatcher",
+			wantFilename:  "app--control-dispatcher-trace.log",
+		},
+		{
+			name:          "non-dispatcher agent untouched",
+			dir:           "",
+			qualifiedName: "polecat",
+			wantFilename:  "control-dispatcher-trace.log", // city-uniform default preserved
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			writeTemplateResolveCityConfig(t, cityPath, "file")
+			t.Setenv("GC_CITY_PATH", cityPath)
+			t.Setenv("GC_CITY_RUNTIME_DIR", "")
+
+			params := &agentBuildParams{
+				cityName:   "city",
+				cityPath:   cityPath,
+				workspace:  &config.Workspace{Provider: "test"},
+				providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+				lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+				fs:         fsys.OSFS{},
+				beaconTime: time.Unix(0, 0),
+				beadNames:  make(map[string]string),
+				stderr:     io.Discard,
+			}
+
+			agentName := config.ControlDispatcherAgentName
+			if tc.qualifiedName == "polecat" {
+				agentName = "polecat"
+			}
+			agent := &config.Agent{Name: agentName, Dir: tc.dir}
+			tp, err := resolveTemplate(params, agent, tc.qualifiedName, nil)
+			if err != nil {
+				t.Fatalf("resolveTemplate: %v", err)
+			}
+
+			wantPath := filepath.Join(cityPath, ".gc", "runtime", tc.wantFilename)
+			if got := tp.Env["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"]; got != wantPath {
+				t.Fatalf("GC_CONTROL_DISPATCHER_TRACE_DEFAULT = %q, want %q", got, wantPath)
+			}
+		})
+	}
+}

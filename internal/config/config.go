@@ -37,6 +37,13 @@ const (
 	// subtree recursively, so defaults must stay under it to avoid self-triggered
 	// config-watch churn. The trace intentionally stays a flat, well-known file
 	// under .gc/runtime because operators and tests tail a single canonical path.
+	//
+	// Per-dispatcher distinction (closes #1650) is layered on top in
+	// cmd/gc/template_resolve.go at session-spawn time: agentEnv there
+	// overrides GC_CONTROL_DISPATCHER_TRACE_DEFAULT with a per-name absolute
+	// path, which the ${GC_CONTROL_DISPATCHER_TRACE_DEFAULT:-...} expression
+	// below consumes. The shell template stays uniform so the trust decision
+	// lives in Go.
 	controlDispatcherDefaultTracePathExpr = `${GC_CONTROL_DISPATCHER_TRACE_DEFAULT:-${GC_CITY}/` + citylayout.RuntimeDataRoot + `/control-dispatcher-trace.log}`
 	// controlDispatcherTraceInit exports the resolved trace path. Explicit
 	// GC_WORKFLOW_TRACE overrides win first; otherwise the runtime injects a
@@ -63,10 +70,10 @@ const (
 )
 
 // ControlDispatcherStartCommandFor returns the start command for a
-// control-dispatcher agent with the given qualified name. The trace log
-// default lives under .gc/runtime/ to stay inside the controller's
-// fsnotify exclusion; see ControlDispatcherStartCommand for the full
-// rationale.
+// control-dispatcher agent with the given qualified name. The shell-level
+// trace default is uniform across dispatchers; per-dispatcher distinction
+// (closes #1650) is injected via agentEnv in cmd/gc/template_resolve.go at
+// session-spawn time so the trust decision happens in Go.
 func ControlDispatcherStartCommandFor(qualifiedName string) string {
 	return `sh -c '` + controlDispatcherTraceInit + `; ` + controlDispatcherTraceDirInit + `; exec "${GC_BIN:-gc}" convoy control --serve --follow ` + qualifiedName + `'`
 }
@@ -2490,6 +2497,13 @@ func injectControlDispatcherAgents(cfg *City, existing map[agentKey]bool) {
 }
 
 // newControlDispatcherAgent creates a control-dispatcher agent for the given scope.
+//
+// Per-dispatcher GC_CONTROL_DISPATCHER_TRACE_DEFAULT injection (closes #1650)
+// happens in cmd/gc/template_resolve.go at session-spawn time, where
+// agentEnv has the right priority in mergeEnv to override the uniform
+// city-level default seeded by cityRuntimeEnvMapForCity. See
+// citylayout.ControlDispatcherTraceDefaultPathFor for the path computation.
+// Operators retain GC_WORKFLOW_TRACE as the topmost override.
 func newControlDispatcherAgent(dir string) Agent {
 	qualifiedName := ControlDispatcherAgentName
 	if dir != "" {
