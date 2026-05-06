@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -10,7 +11,9 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/pgauth"
 )
 
 // ── Dolt config wiring tests (issue 011) ──────────────────────────────
@@ -3062,5 +3065,393 @@ func TestControlBdCommandRunnerDefaultsBeadsActorToControllerWhenUnset(t *testin
 	}
 	if got := captured["BD_EXPORT_AUTO"]; got != "false" {
 		t.Fatalf("BD_EXPORT_AUTO = %q, want false", got)
+	}
+}
+
+// ── PG-backend wiring (slice 3 of PG-auth) ─────────────────────────────
+
+func writePGScopeFixture(t *testing.T, scopeRoot, password string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(scopeRoot, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	meta := `{"backend":"postgres","postgres_host":"db.example.test","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads"}`
+	if err := os.WriteFile(filepath.Join(scopeRoot, ".beads", "metadata.json"), []byte(meta), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if password != "" {
+		envFile := filepath.Join(scopeRoot, ".beads", ".env")
+		if err := os.WriteFile(envFile, []byte("BEADS_POSTGRES_PASSWORD="+password+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func clearAmbientPostgresEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range projectedPostgresEnvKeys {
+		t.Setenv(key, "")
+		_ = os.Unsetenv(key)
+	}
+	t.Setenv("BEADS_CREDENTIALS_FILE", "")
+	_ = os.Unsetenv("BEADS_CREDENTIALS_FILE")
+	t.Setenv("HOME", t.TempDir())
+}
+
+func TestApplyResolvedScopePostgresEnv_HappyPath(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	scopeRoot := t.TempDir()
+	writePGScopeFixture(t, scopeRoot, "devpw")
+
+	env := map[string]string{}
+	meta := contract.MetadataState{
+		Backend:          "postgres",
+		PostgresHost:     "db.example.test",
+		PostgresPort:     "5432",
+		PostgresUser:     "bd",
+		PostgresDatabase: "beads",
+	}
+	if err := applyResolvedScopePostgresEnv(env, scopeRoot, meta); err != nil {
+		t.Fatalf("applyResolvedScopePostgresEnv: %v", err)
+	}
+	want := map[string]string{
+		"GC_POSTGRES_PASSWORD":    "devpw",
+		"BEADS_POSTGRES_PASSWORD": "devpw",
+		"BEADS_POSTGRES_HOST":     "db.example.test",
+		"BEADS_POSTGRES_PORT":     "5432",
+		"BEADS_POSTGRES_USER":     "bd",
+		"BEADS_POSTGRES_DATABASE": "beads",
+	}
+	for key, value := range want {
+		if got := env[key]; got != value {
+			t.Errorf("env[%q] = %q, want %q", key, got, value)
+		}
+	}
+}
+
+func TestBdRuntimeEnvForRig_PostgresBackend(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	for _, key := range []string{"GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD"} {
+		t.Setenv(key, "")
+		_ = os.Unsetenv(key)
+	}
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigDir := filepath.Join(cityPath, "rigs", "pg")
+	writePGScopeFixture(t, rigDir, "devpw")
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: pg
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "pg", Path: "rigs/pg", Prefix: "pg"}}}
+
+	env := bdRuntimeEnvForRig(cityPath, cfg, rigDir)
+
+	wantPG := map[string]string{
+		"GC_POSTGRES_PASSWORD":    "devpw",
+		"BEADS_POSTGRES_PASSWORD": "devpw",
+		"BEADS_POSTGRES_HOST":     "db.example.test",
+		"BEADS_POSTGRES_PORT":     "5432",
+		"BEADS_POSTGRES_USER":     "bd",
+		"BEADS_POSTGRES_DATABASE": "beads",
+	}
+	for key, value := range wantPG {
+		if got := env[key]; got != value {
+			t.Errorf("env[%q] = %q, want %q", key, got, value)
+		}
+	}
+	for _, key := range []string{"GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD", "BEADS_DOLT_PASSWORD", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_USER"} {
+		if value, ok := env[key]; ok && value != "" {
+			t.Errorf("env[%q] = %q, want empty/absent for PG-backed rig", key, value)
+		}
+	}
+}
+
+func TestMergeRuntimeEnvScrubsPostgresKeys(t *testing.T) {
+	for _, key := range projectedPostgresEnvKeys {
+		t.Setenv(key, "PARENT")
+	}
+
+	parentEnv := []string{}
+	for _, key := range projectedPostgresEnvKeys {
+		parentEnv = append(parentEnv, key+"=PARENT")
+	}
+	overrides := map[string]string{"BEADS_POSTGRES_PASSWORD": "CHILD"}
+
+	merged := mergeRuntimeEnv(parentEnv, overrides)
+
+	got := map[string]string{}
+	for _, entry := range merged {
+		idx := strings.IndexByte(entry, '=')
+		if idx < 0 {
+			continue
+		}
+		got[entry[:idx]] = entry[idx+1:]
+	}
+	if got["BEADS_POSTGRES_PASSWORD"] != "CHILD" {
+		t.Errorf("BEADS_POSTGRES_PASSWORD = %q, want CHILD", got["BEADS_POSTGRES_PASSWORD"])
+	}
+	for _, key := range projectedPostgresEnvKeys {
+		if key == "BEADS_POSTGRES_PASSWORD" {
+			continue
+		}
+		if value, ok := got[key]; ok {
+			t.Errorf("env[%q] = %q, want absent (parent value not stripped)", key, value)
+		}
+	}
+}
+
+func TestApplyResolvedScopePostgresEnv_NoPasswordResolvable(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	scopeRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(scopeRoot, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	env := map[string]string{}
+	meta := contract.MetadataState{
+		Backend:          "postgres",
+		PostgresHost:     "db.example.test",
+		PostgresPort:     "5432",
+		PostgresUser:     "bd",
+		PostgresDatabase: "beads",
+	}
+	err := applyResolvedScopePostgresEnv(env, scopeRoot, meta)
+	if err == nil {
+		t.Fatal("applyResolvedScopePostgresEnv = nil error, want resolver exhaustion")
+	}
+	if !errors.Is(err, pgauth.ErrNoPasswordResolvable) {
+		t.Errorf("errors.Is(err, ErrNoPasswordResolvable) = false, want true; err = %v", err)
+	}
+	if !strings.Contains(err.Error(), "resolving postgres credentials for ") {
+		t.Errorf("err.Error() = %q, want prefix %q", err.Error(), "resolving postgres credentials for ")
+	}
+	if !strings.Contains(err.Error(), scopeRoot) {
+		t.Errorf("err.Error() = %q, want scope path %q embedded", err.Error(), scopeRoot)
+	}
+}
+
+func TestPGTransportError_NoManagedRecovery(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+
+	origRunner := beadsExecCommandRunnerWithEnv
+	origRecover := recoverManagedBDCommand
+	t.Cleanup(func() {
+		beadsExecCommandRunnerWithEnv = origRunner
+		recoverManagedBDCommand = origRecover
+	})
+
+	cityPath := t.TempDir()
+	writePGScopeFixture(t, cityPath, "devpw")
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: pg
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	originalErr := errors.New("dial tcp 127.0.0.1:5432: connect: connection refused")
+	attempts := 0
+	recoverCalls := 0
+	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
+		return func(_ string, _ string, _ ...string) ([]byte, error) {
+			attempts++
+			return nil, originalErr
+		}
+	}
+	recoverManagedBDCommand = func(_ string) error {
+		recoverCalls++
+		return nil
+	}
+
+	runner := bdCommandRunnerWithManagedRetry(cityPath, func(_ string) map[string]string {
+		return map[string]string{}
+	})
+	_, err := runner(cityPath, "bd", "list", "--json")
+
+	if err == nil {
+		t.Fatal("runner err = nil, want wrapped transport error")
+	}
+	if !strings.Contains(err.Error(), "postgres at ") {
+		t.Errorf("err = %q, want substring %q", err.Error(), "postgres at ")
+	}
+	if !strings.Contains(err.Error(), "is unreachable; gc does not manage external PG endpoints") {
+		t.Errorf("err = %q, want unreachable hint substring", err.Error())
+	}
+	if !errors.Is(err, originalErr) {
+		t.Errorf("errors.Is(err, originalErr) = false, want true (wrap chain broken)")
+	}
+	if attempts != 1 {
+		t.Errorf("attempts = %d, want 1 (no retry for PG)", attempts)
+	}
+	if recoverCalls != 0 {
+		t.Errorf("recoverCalls = %d, want 0 (managed recovery must not run for PG)", recoverCalls)
+	}
+}
+
+func TestMixedBackendCity_PerScopeDispatch(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	for _, key := range []string{"GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD"} {
+		t.Setenv(key, "")
+		_ = os.Unsetenv(key)
+	}
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	pgRig := filepath.Join(cityPath, "rigs", "pg")
+	writePGScopeFixture(t, pgRig, "pgpw")
+	if err := os.WriteFile(filepath.Join(pgRig, ".beads", "config.yaml"), []byte(`issue_prefix: pg
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	defaultRig := filepath.Join(cityPath, "rigs", "default")
+	if err := os.MkdirAll(filepath.Join(defaultRig, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(defaultRig, ".beads", "config.yaml"), []byte(`issue_prefix: default
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{Rigs: []config.Rig{
+		{Name: "pg", Path: "rigs/pg", Prefix: "pg"},
+		{Name: "default", Path: "rigs/default", Prefix: "default"},
+	}}
+
+	pgEnv := bdRuntimeEnvForRig(cityPath, cfg, pgRig)
+	if got := pgEnv["BEADS_POSTGRES_PASSWORD"]; got != "pgpw" {
+		t.Errorf("pg rig BEADS_POSTGRES_PASSWORD = %q, want pgpw", got)
+	}
+	if got := pgEnv["BEADS_POSTGRES_HOST"]; got != "db.example.test" {
+		t.Errorf("pg rig BEADS_POSTGRES_HOST = %q, want db.example.test", got)
+	}
+
+	defaultEnv := bdRuntimeEnvForRig(cityPath, cfg, defaultRig)
+	if value, ok := defaultEnv["BEADS_POSTGRES_PASSWORD"]; ok && value != "" {
+		t.Errorf("default rig BEADS_POSTGRES_PASSWORD = %q, want absent (no PG leak across scopes)", value)
+	}
+	if value, ok := defaultEnv["BEADS_POSTGRES_HOST"]; ok && value != "" {
+		t.Errorf("default rig BEADS_POSTGRES_HOST = %q, want absent", value)
+	}
+}
+
+func TestProjectedKeysCoverage(t *testing.T) {
+	parentKeys := make([]string, 0, len(projectedPostgresEnvKeys)+len(projectedDoltEnvKeys))
+	for _, key := range projectedPostgresEnvKeys {
+		parentKeys = append(parentKeys, key+"=PARENT")
+	}
+	for _, key := range projectedDoltEnvKeys {
+		parentKeys = append(parentKeys, key+"=PARENT")
+	}
+	stripped := mergeRuntimeEnv(parentKeys, nil)
+	if len(stripped) != 0 {
+		t.Errorf("mergeRuntimeEnv stripped projected keys = %d entries left, want 0; entries=%v", len(stripped), stripped)
+	}
+
+	for _, key := range projectedPostgresEnvKeys {
+		if !pgKeyStripped(key) {
+			t.Errorf("projectedPostgresEnvKeys[%q] is not in mergeRuntimeEnv strip list - symmetry broken", key)
+		}
+	}
+}
+
+func pgKeyStripped(key string) bool {
+	out := mergeRuntimeEnv([]string{key + "=PARENT"}, nil)
+	for _, entry := range out {
+		if strings.HasPrefix(entry, key+"=") {
+			return false
+		}
+	}
+	return true
+}
+
+func TestApplyCanonicalScopeBackendEnv_UnsupportedBackend(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"backend":"sqlite"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	env := map[string]string{}
+	used, err := applyCanonicalScopeBackendEnv(env, cityPath, cityPath)
+	if err == nil {
+		t.Fatal("applyCanonicalScopeBackendEnv = nil error, want unsupported-backend rejection")
+	}
+	if !used {
+		t.Errorf("used = false, want true (scope is authoritative; failure is semantic)")
+	}
+	var parseErr *contract.MetadataParseError
+	if !errors.As(err, &parseErr) {
+		t.Errorf("errors.As(*MetadataParseError) = false, want true; err=%v", err)
+	}
+}
+
+func TestPGTransportError_MarkerCoverage(t *testing.T) {
+	for _, marker := range []string{
+		"connection refused",
+		"dial tcp",
+		"no such host",
+		"i/o timeout",
+		"password authentication failed",
+		"pq:",
+		"pgx:",
+	} {
+		t.Run(marker, func(t *testing.T) {
+			if !pgTransportError(fmt.Errorf("%s sample", marker)) {
+				t.Errorf("pgTransportError(%q) = false, want true", marker)
+			}
+		})
+	}
+	if pgTransportError(nil) {
+		t.Errorf("pgTransportError(nil) = true, want false")
+	}
+	if pgTransportError(errors.New("unrelated database error")) {
+		t.Errorf("pgTransportError(unrelated) = true, want false")
 	}
 }
