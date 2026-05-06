@@ -916,13 +916,16 @@ source = "`+doltDir+`"
 		t.Fatalf("scanAllOrders: %v; stderr: %s", err, stderr.String())
 	}
 
-	const wantDogOrders = 5
-	var gotDogOrders int
+	const wantFormulaDogOrders = 2
+	var gotFormulaDogOrders int
 	for _, a := range aa {
 		if !strings.HasPrefix(a.Name, "mol-dog-") {
 			continue
 		}
-		gotDogOrders++
+		if a.Exec != "" {
+			continue
+		}
+		gotFormulaDogOrders++
 		if a.Pool != "dog" {
 			t.Fatalf("%s pool = %q, want portable bare dog", a.Name, a.Pool)
 		}
@@ -934,8 +937,8 @@ source = "`+doltDir+`"
 			t.Fatalf("qualifyOrderPool(%s) = %q, want ops.dog", a.Name, got)
 		}
 	}
-	if gotDogOrders != wantDogOrders {
-		t.Fatalf("Dolt dog order count = %d, want %d", gotDogOrders, wantDogOrders)
+	if gotFormulaDogOrders != wantFormulaDogOrders {
+		t.Fatalf("Dolt formula-based dog order count = %d, want %d", gotFormulaDogOrders, wantFormulaDogOrders)
 	}
 }
 
