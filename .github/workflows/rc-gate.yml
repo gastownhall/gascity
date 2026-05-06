@@ -83,10 +83,12 @@ jobs:
 
   ubuntu_acceptance_a:
     name: ubuntu / acceptance A / ${{ matrix.label }}
+    needs: ci_parity
     runs-on: blacksmith-32vcpu-ubuntu-2404
     timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
         include:
           - label: root-1-of-8
@@ -162,10 +164,12 @@ jobs:
 
   ubuntu_acceptance_c:
     name: ubuntu / acceptance C / ${{ matrix.shard_index }} of 5
+    needs: ubuntu_acceptance_a
     runs-on: blacksmith-32vcpu-ubuntu-2404
     timeout-minutes: 60
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         shard_index: [1, 2, 3, 4, 5]
     env:
@@ -195,10 +199,12 @@ jobs:
 
   ubuntu_integration_shards:
     name: ubuntu / integration / ${{ matrix.shard_name }}
+    needs: ubuntu_acceptance_c
     runs-on: blacksmith-32vcpu-ubuntu-2404
     timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       fail-fast: false
+      max-parallel: 4
       matrix:
         include:
           - shard_name: packages-core-1-of-4
@@ -316,10 +322,12 @@ jobs:
 
   ubuntu_tutorial:
     name: ubuntu / tutorial goldens / ${{ matrix.shard_index }} of 6
+    needs: ubuntu_integration_shards
     runs-on: blacksmith-32vcpu-ubuntu-2404
     timeout-minutes: 110
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         shard_index: [1, 2, 3, 4, 5, 6]
     env:
