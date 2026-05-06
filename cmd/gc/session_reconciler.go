@@ -1820,6 +1820,21 @@ func recordSessionAttachedConfigDriftDeferral(session beads.Bead, store beads.St
 	if clk != nil {
 		now = clk.Now().UTC()
 	}
+	// Skip the write when the same drift key is already deferred and the
+	// existing stamp is comfortably within the false-negative TTL window.
+	// Without this guard the reconciler emits a bead.updated event on every
+	// tick (~1.4s) for every attached session with persistent drift.
+	// Refreshing at TTL/2 leaves enough headroom that a paused reconcile
+	// loop cannot accidentally let the deferral expire.
+	if driftKey != "" && session.Metadata[sessionAttachedConfigDriftDeferredKeyMetadata] == driftKey {
+		if raw := session.Metadata[sessionAttachedConfigDriftDeferredAtMetadata]; raw != "" {
+			if existing, err := time.Parse(time.RFC3339, raw); err == nil &&
+				!existing.After(now) &&
+				now.Sub(existing) < sessionAttachedConfigDriftFalseNegativeLimit/2 {
+				return nil
+			}
+		}
+	}
 	return store.SetMetadataBatch(session.ID, map[string]string{
 		sessionAttachedConfigDriftDeferredAtMetadata:  now.Format(time.RFC3339),
 		sessionAttachedConfigDriftDeferredKeyMetadata: driftKey,
