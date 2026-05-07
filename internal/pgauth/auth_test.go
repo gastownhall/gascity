@@ -81,23 +81,22 @@ func writeCredentialsFileWithMode(t *testing.T, host, port, password string, mod
 }
 
 // pinHome sets HOME to a tmp dir and (optionally) seeds
-// ~/.config/beads/credentials with the given content. Returns the
-// credentials file path. When content is empty no file is written.
-func pinHome(t *testing.T, content string) (homeDir, credPath string) {
+// ~/.config/beads/credentials with the given content. When content is
+// empty no file is written.
+func pinHome(t *testing.T, content string) {
 	t.Helper()
-	homeDir = t.TempDir()
+	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
-	credPath = filepath.Join(homeDir, ".config", "beads", "credentials")
 	if content == "" {
-		return homeDir, credPath
+		return
 	}
+	credPath := filepath.Join(homeDir, ".config", "beads", "credentials")
 	if err := os.MkdirAll(filepath.Dir(credPath), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.config/beads): %v", err)
 	}
 	if err := os.WriteFile(credPath, []byte(content), 0o600); err != nil {
 		t.Fatalf("WriteFile(credentials): %v", err)
 	}
-	return homeDir, credPath
 }
 
 func endpoint() Endpoint {

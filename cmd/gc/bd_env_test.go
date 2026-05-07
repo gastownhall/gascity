@@ -3271,7 +3271,7 @@ dolt.auto-start: false
 	originalErr := errors.New("dial tcp 127.0.0.1:5432: connect: connection refused")
 	attempts := 0
 	recoverCalls := 0
-	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
+	beadsExecCommandRunnerWithEnv = func(_ map[string]string) beads.CommandRunner {
 		return func(_ string, _ string, _ ...string) ([]byte, error) {
 			attempts++
 			return nil, originalErr

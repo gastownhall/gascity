@@ -34,15 +34,16 @@ type Resolved struct {
 // reading order (see ResolveFromEnv).
 type Source int
 
+// Source values, in resolution-chain reading order; see ResolveFromEnv.
 const (
-	SourceNone               Source = iota // no tier supplied a value
-	SourceProjectedGC                      // envMap["GC_POSTGRES_PASSWORD"]
-	SourceProjectedBeads                   // envMap["BEADS_POSTGRES_PASSWORD"]
-	SourceProcessEnvGC                     // os.Getenv("GC_POSTGRES_PASSWORD")
-	SourceScopeFile                        // <scope>/.beads/.env BEADS_POSTGRES_PASSWORD
-	SourceProcessEnvBeads                  // os.Getenv("BEADS_POSTGRES_PASSWORD")
-	SourceCredentialsFileEnv               // $BEADS_CREDENTIALS_FILE [host:port] section
-	SourceCredentialsFileHome              // ~/.config/beads/credentials [host:port] section
+	SourceNone                Source = iota // no tier supplied a value
+	SourceProjectedGC                       // envMap["GC_POSTGRES_PASSWORD"]
+	SourceProjectedBeads                    // envMap["BEADS_POSTGRES_PASSWORD"]
+	SourceProcessEnvGC                      // os.Getenv("GC_POSTGRES_PASSWORD")
+	SourceScopeFile                         // <scope>/.beads/.env BEADS_POSTGRES_PASSWORD
+	SourceProcessEnvBeads                   // os.Getenv("BEADS_POSTGRES_PASSWORD")
+	SourceCredentialsFileEnv                // $BEADS_CREDENTIALS_FILE [host:port] section
+	SourceCredentialsFileHome               // ~/.config/beads/credentials [host:port] section
 )
 
 // String returns the stable snake_case identifier for s. The eight values

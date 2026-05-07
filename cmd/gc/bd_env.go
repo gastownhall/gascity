@@ -233,7 +233,7 @@ func applyCanonicalScopeBackendEnv(env map[string]string, cityPath, scopeRoot st
 }
 
 // scopeMetadataJSONPath returns the absolute path to a scope's
-// .beads/metadata.json. Centralised so the dispatcher and the recovery
+// .beads/metadata.json. Centralized so the dispatcher and the recovery
 // hook helpers agree on the file location.
 func scopeMetadataJSONPath(scopeRoot string) string {
 	return filepath.Join(scopeRoot, ".beads", "metadata.json")
