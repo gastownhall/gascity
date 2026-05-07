@@ -39,6 +39,10 @@ type Provider struct {
 	memLimit           string
 	serviceAccount     string        // pod service account name (GC_K8S_SERVICE_ACCOUNT)
 	prebaked           bool          // skip staging + init container for prebaked images
+	nodeSelector       map[string]string   // GC_K8S_NODE_SELECTOR (JSON)
+	tolerations        []corev1.Toleration // GC_K8S_TOLERATIONS (JSON)
+	affinity           *corev1.Affinity    // GC_K8S_AFFINITY (JSON)
+	priorityClassName  string              // GC_K8S_PRIORITY_CLASS_NAME
 	postStartSettle    time.Duration // settle time before post-start liveness check
 	stderr             io.Writer     // warning output (default os.Stderr)
 }
@@ -79,6 +83,26 @@ func NewProvider() (*Provider, error) {
 		return nil, err
 	}
 
+	var nodeSelector map[string]string
+	if v := os.Getenv("GC_K8S_NODE_SELECTOR"); v != "" {
+		if err := json.Unmarshal([]byte(v), &nodeSelector); err != nil {
+			return nil, fmt.Errorf("parsing GC_K8S_NODE_SELECTOR: %w", err)
+		}
+	}
+	var tolerations []corev1.Toleration
+	if v := os.Getenv("GC_K8S_TOLERATIONS"); v != "" {
+		if err := json.Unmarshal([]byte(v), &tolerations); err != nil {
+			return nil, fmt.Errorf("parsing GC_K8S_TOLERATIONS: %w", err)
+		}
+	}
+	var affinity *corev1.Affinity
+	if v := os.Getenv("GC_K8S_AFFINITY"); v != "" {
+		affinity = &corev1.Affinity{}
+		if err := json.Unmarshal([]byte(v), affinity); err != nil {
+			return nil, fmt.Errorf("parsing GC_K8S_AFFINITY: %w", err)
+		}
+	}
+	priorityClassName := os.Getenv("GC_K8S_PRIORITY_CLASS_NAME")
 	return &Provider{
 		ops: &realK8sOps{
 			clientset:  clientset,
@@ -98,6 +122,10 @@ func NewProvider() (*Provider, error) {
 		prebaked:           os.Getenv("GC_K8S_PREBAKED") == "true",
 		postStartSettle:    3 * time.Second,
 		stderr:             os.Stderr,
+		nodeSelector:       nodeSelector,
+		tolerations:        tolerations,
+		affinity:           affinity,
+		priorityClassName:  priorityClassName,
 	}, nil
 }
 

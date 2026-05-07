@@ -322,6 +322,12 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 		},
 	}
 
+	// Apply optional scheduling fields.
+	pod.Spec.NodeSelector = p.nodeSelector
+	pod.Spec.Tolerations = p.tolerations
+	pod.Spec.Affinity = p.affinity
+	pod.Spec.PriorityClassName = p.priorityClassName
+
 	// Add init container when staging is needed (skip when prebaked).
 	if !p.prebaked && needsStaging(cfg, ctrlCity) {
 		initVolMounts := []corev1.VolumeMount{
