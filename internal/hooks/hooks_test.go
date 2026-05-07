@@ -376,6 +376,66 @@ func TestInstallCodexPreservesFullyCustomHooks(t *testing.T) {
 	}
 }
 
+func TestUpgradeCodexHooksSkipsWhenDesiredPreCompactUnavailable(t *testing.T) {
+	existing := []byte(`{
+  "hooks": {
+    "SessionStart": [{
+      "hooks": [{
+        "type": "command",
+        "command": "gc prime --hook --hook-format codex"
+      }]
+    }]
+  }
+}`)
+	for name, desired := range map[string][]byte{
+		"malformed": []byte(`{not-json`),
+		"missing":   []byte(`{"hooks":{}}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, changed, err := upgradeCodexHooks(existing, desired); err != nil || changed {
+				t.Fatalf("changed = %v, err = %v, want unchanged without error", changed, err)
+			}
+		})
+	}
+}
+
+func TestAddCodexPreCompactHookRejectsInvalidRoots(t *testing.T) {
+	desired := []byte(`{"hooks":{"PreCompact":[{"hooks":[{"type":"command","command":"gc handoff --auto"}]}]}}`)
+	for name, root := range map[string]any{
+		"non-map-root": []any{},
+		"custom-only": map[string]any{
+			"hooks": map[string]any{
+				"UserPromptSubmit": []any{map[string]any{
+					"hooks": []any{map[string]any{"command": "printf custom"}},
+				}},
+			},
+		},
+		"missing-hooks-map": map[string]any{
+			"other": []any{map[string]any{"command": "gc prime --hook"}},
+		},
+		"already-has-precompact": map[string]any{
+			"hooks": map[string]any{
+				"SessionStart": []any{map[string]any{
+					"hooks": []any{map[string]any{"command": "gc prime --hook"}},
+				}},
+				"PreCompact": []any{},
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if addCodexPreCompactHook(root, desired) {
+				t.Fatalf("addCodexPreCompactHook(%s) = true, want false", name)
+			}
+		})
+	}
+}
+
+func TestDesiredCodexPreCompactHookFallsBackToEmbeddedOverlay(t *testing.T) {
+	if got := desiredCodexPreCompactHook(nil); got == nil {
+		t.Fatal("desiredCodexPreCompactHook(nil) = nil, want embedded PreCompact hook")
+	}
+}
+
 func TestInstallCodexPreservesUnreadableExistingHooks(t *testing.T) {
 	workDir := t.TempDir()
 	hookDir := filepath.Join(workDir, ".codex")

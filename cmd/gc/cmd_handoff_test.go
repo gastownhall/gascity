@@ -160,6 +160,27 @@ func TestCmdHandoffAutoHookFormatCodex(t *testing.T) {
 	}
 }
 
+func TestDoHandoffAutoReportsHookOutputWriteError(t *testing.T) {
+	store := beads.NewMemStore()
+	rec := events.NewFake()
+	var stderr bytes.Buffer
+
+	code := doHandoffAuto(store, rec, "mayor", []string{"context cycle"}, "codex", errWriter{}, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "writing hook output") {
+		t.Fatalf("stderr = %q, want hook output write error", stderr.String())
+	}
+	all, err := store.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("open beads = %d, want handoff mail still created", len(all))
+	}
+}
+
 func TestCmdHandoffAutoUsesDefaultSubject(t *testing.T) {
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
@@ -195,6 +216,12 @@ func TestCmdHandoffAutoUsesDefaultSubject(t *testing.T) {
 	if got := all[0].Title; got != "context cycle" {
 		t.Fatalf("mail title = %q, want context cycle", got)
 	}
+}
+
+type errWriter struct{}
+
+func (errWriter) Write([]byte) (int, error) {
+	return 0, errors.New("write failed")
 }
 
 func TestCmdHandoffAutoRejectsTarget(t *testing.T) {
