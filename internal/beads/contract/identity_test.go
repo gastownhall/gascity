@@ -1,8 +1,11 @@
 package contract
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -466,4 +469,120 @@ func TestProjectIdentity(t *testing.T) {
 			t.Fatalf("body mismatch after concurrent writes\n got: %q\nwant: %q", string(got), want)
 		}
 	})
+}
+
+// identityRepoRoot resolves the repository root from this test file's
+// location. identity_test.go lives at <root>/internal/beads/contract/, so we
+// walk up three directories. The result is sanity-checked to fail loudly if
+// the file is ever moved without updating the offset.
+func identityRepoRoot(t *testing.T) string {
+	t.Helper()
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatalf("runtime.Caller(0) failed; cannot locate test source file")
+	}
+	root := filepath.Join(filepath.Dir(filename), "..", "..", "..")
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		t.Fatalf("filepath.Abs(%s): %v", root, err)
+	}
+	for _, marker := range []string{
+		"go.mod",
+		filepath.Join("internal", "beads", "contract", "identity.go"),
+	} {
+		if _, err := os.Stat(filepath.Join(abs, marker)); err != nil {
+			t.Fatalf("resolved repo root %q is missing expected marker %q: %v", abs, marker, err)
+		}
+	}
+	return abs
+}
+
+// TestNoExternalIdentityWriters enforces that .beads/identity.toml is only
+// referenced by Go source in internal/beads/contract/. Any other production
+// (.go, non-test) file mentioning the literal "identity.toml" is a candidate
+// writer that must be moved into the contract package so all writers share the
+// same atomic, validated, byte-equal template (designer §5 D1, ga-ich5z).
+//
+// V1 implementation is a coarse byte-level grep. False positives (an error
+// message that mentions the file outside the contract package) should be rare;
+// if any appear, add the offending path to identityWriterAllowlist with a
+// comment explaining why it is benign. AST-level filtering is deferred to a
+// future hardening bead per ga-ich5z out-of-scope notes.
+func TestNoExternalIdentityWriters(t *testing.T) {
+	root := identityRepoRoot(t)
+
+	// contractRel is the package directory whose entire content (including
+	// _test.go files) is exempt — the contract package owns identity.toml.
+	contractRel := filepath.Join("internal", "beads", "contract") + string(filepath.Separator)
+
+	// skipDirs are directory base names whose subtrees are not walked at all.
+	// vendor/.git/node_modules are required by the bead spec; .gc/.claude and
+	// nested git worktrees under worktrees/ are repo-local untracked trees
+	// outside the production source surface.
+	skipDirs := map[string]struct{}{
+		".git":         {},
+		"vendor":       {},
+		"node_modules": {},
+		".gc":          {},
+		".claude":      {},
+		"worktrees":    {},
+	}
+
+	// identityWriterAllowlist enumerates relative paths that may legitimately
+	// contain the literal "identity.toml" outside internal/beads/contract/.
+	// Empty by design — no benign external references exist today. Add an
+	// entry only with a comment explaining why a move into the contract
+	// package is not feasible.
+	identityWriterAllowlist := map[string]string{}
+
+	needle := []byte("identity.toml")
+	var violations []string
+
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			if _, skip := skipDirs[d.Name()]; skip {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		if strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if strings.HasPrefix(rel, contractRel) {
+			return nil
+		}
+		if _, ok := identityWriterAllowlist[rel]; ok {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if bytes.Contains(data, needle) {
+			violations = append(violations, rel)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking repo from %s: %v", root, err)
+	}
+
+	if len(violations) > 0 {
+		sort.Strings(violations)
+		t.Errorf("found %d Go file(s) outside internal/beads/contract/ that mention %q:", len(violations), "identity.toml")
+		for _, v := range violations {
+			t.Errorf("  %s", v)
+		}
+		t.Error("Move these references into internal/beads/contract/ so all writers share ProjectIdentityPath / WriteProjectIdentity.")
+	}
 }
