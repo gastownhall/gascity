@@ -196,6 +196,73 @@ archive_has_local_only_commits() {
     return 1
 }
 
+# Detect the archive's push mode from the live state of its remotes rather
+# than from a cached state field. Operators opt into off-box backup by adding
+# an `origin` remote; removing it reverts to local-only on the next run with
+# no extra command.
+get_archive_mode() {
+    if [ -d "$ARCHIVE_REPO/.git" ] \
+        && git -C "$ARCHIVE_REPO" remote get-url origin >/dev/null 2>&1; then
+        echo "push"
+    else
+        echo "local-only"
+    fi
+}
+
+should_attempt_push() {
+    [ "$(get_archive_mode)" = "push" ]
+}
+
+# Log the archive mode on transitions and re-log weekly so operators who
+# missed the first line still see the current configuration. State fields
+# last_logged_mode and last_logged_at drive the re-log interval.
+log_archive_mode_if_needed() {
+    local current_mode
+    local state_json
+    local last_logged_mode
+    local last_logged_at
+    local now
+    local now_ts
+    local last_ts
+    local should_log=0
+    local message
+
+    current_mode=$(get_archive_mode)
+    state_json=$(read_state_json)
+    last_logged_mode=$(printf '%s\n' "$state_json" | jq -r '.last_logged_mode // empty')
+    last_logged_at=$(printf '%s\n' "$state_json" | jq -r '.last_logged_at // empty')
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    now_ts=$(date -u +%s)
+
+    if [ "$current_mode" != "$last_logged_mode" ]; then
+        should_log=1
+    elif [ -z "$last_logged_at" ]; then
+        should_log=1
+    else
+        last_ts=$(jq -n -r --arg ts "$last_logged_at" '$ts | try fromdateiso8601 catch 0')
+        if [ "$last_ts" = "0" ] || [ "$((now_ts - last_ts))" -gt 604800 ]; then
+            should_log=1
+        fi
+    fi
+
+    if [ "$should_log" -eq 0 ]; then
+        return 0
+    fi
+
+    if [ "$current_mode" = "push" ]; then
+        message="jsonl-export: archive running in push mode (origin configured; will push commits to remote)"
+    else
+        message="jsonl-export: archive running in local-only mode (no origin remote; commits stay on this host — off-box backup disabled)"
+    fi
+    echo "$message" >&2
+
+    write_state_json "$(
+        printf '%s\n' "$state_json" \
+            | jq -c --arg mode "$current_mode" --arg at "$now" \
+                '.last_logged_mode = $mode | .last_logged_at = $at'
+    )"
+}
+
 set_pending_spike_alert() {
     local db="$1"
     local prev_count="$2"
@@ -425,6 +492,7 @@ fi
 STATE_FILE_BACKUP="${STATE_FILE}.bak"
 mkdir -p "$(dirname "$STATE_FILE")"
 
+log_archive_mode_if_needed
 retry_pending_spike_alert
 
 is_user_database() {
