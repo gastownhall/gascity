@@ -428,6 +428,7 @@ func emitPostgresCredentialResolved(cityPath, scopeRoot string, meta contract.Me
 	if err != nil {
 		return
 	}
+	defer rec.Close() //nolint:errcheck // best-effort: emission must not surface I/O errors
 	rec.Record(events.Event{
 		Type:    events.PostgresCredentialResolved,
 		Actor:   eventActor(),

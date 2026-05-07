@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/pgauth"
 )
 
 // scrubAmbientPostgresEnv ensures resolver tier 3/5 (process env) cannot
@@ -322,79 +323,29 @@ func TestPostgresAuthCheck_RenderExtras_NoCredsPrintsAllNoTokens(t *testing.T) {
 	}
 }
 
-// TestHumanSourceLabel locks design §3.4 mappings.
+// TestHumanSourceLabel locks design §3.4 mappings by driving the
+// production humanSourceLabel directly.
 func TestHumanSourceLabel(t *testing.T) {
-	cases := map[string]struct {
-		input string
-		want  string
+	cases := []struct {
+		name string
+		in   pgauth.Source
+		want string
 	}{
-		"projected_gc":          {"projected_gc", "projected env (GC_POSTGRES_PASSWORD)"},
-		"projected_beads":       {"projected_beads", "projected env (BEADS_POSTGRES_PASSWORD)"},
-		"process_env_gc":        {"process_env_gc", "parent shell env (GC_POSTGRES_PASSWORD)"},
-		"scope_file":            {"scope_file", "scope file"},
-		"process_env_beads":     {"process_env_beads", "parent shell env (BEADS_POSTGRES_PASSWORD)"},
-		"credentials_file_env":  {"credentials_file_env", "$BEADS_CREDENTIALS_FILE"},
-		"credentials_file_home": {"credentials_file_home", "~/.config/beads/credentials"},
+		{"projected_gc", pgauth.SourceProjectedGC, "projected env (GC_POSTGRES_PASSWORD)"},
+		{"projected_beads", pgauth.SourceProjectedBeads, "projected env (BEADS_POSTGRES_PASSWORD)"},
+		{"process_env_gc", pgauth.SourceProcessEnvGC, "parent shell env (GC_POSTGRES_PASSWORD)"},
+		{"scope_file", pgauth.SourceScopeFile, "scope file"},
+		{"process_env_beads", pgauth.SourceProcessEnvBeads, "parent shell env (BEADS_POSTGRES_PASSWORD)"},
+		{"credentials_file_env", pgauth.SourceCredentialsFileEnv, "$BEADS_CREDENTIALS_FILE"},
+		{"credentials_file_home", pgauth.SourceCredentialsFileHome, "~/.config/beads/credentials"},
+		{"none_returns_empty", pgauth.SourceNone, ""},
 	}
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			// Build a Source by index — the enum order in pgauth/auth.go.
-			var s int
-			switch tc.input {
-			case "projected_gc":
-				s = 1
-			case "projected_beads":
-				s = 2
-			case "process_env_gc":
-				s = 3
-			case "scope_file":
-				s = 4
-			case "process_env_beads":
-				s = 5
-			case "credentials_file_env":
-				s = 6
-			case "credentials_file_home":
-				s = 7
-			}
-			got := humanSourceLabelByIndex(s)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := humanSourceLabel(tc.in)
 			if got != tc.want {
-				t.Fatalf("humanSourceLabel(%s) = %q; want %q", tc.input, got, tc.want)
+				t.Fatalf("humanSourceLabel(%v) = %q; want %q", tc.in, got, tc.want)
 			}
 		})
 	}
-}
-
-// humanSourceLabelByIndex is a shim used by TestHumanSourceLabel —
-// avoids importing pgauth's Source type into the test scope while
-// still exercising the per-source mapping.
-func humanSourceLabelByIndex(i int) string {
-	// Local enum: same order as pgauth/auth.go (SourceNone=0..7).
-	const (
-		none = iota
-		projGC
-		projBeads
-		procGC
-		scopeFile
-		procBeads
-		credEnv
-		credHome
-	)
-	switch i {
-	case projGC:
-		return "projected env (GC_POSTGRES_PASSWORD)"
-	case projBeads:
-		return "projected env (BEADS_POSTGRES_PASSWORD)"
-	case procGC:
-		return "parent shell env (GC_POSTGRES_PASSWORD)"
-	case scopeFile:
-		return "scope file"
-	case procBeads:
-		return "parent shell env (BEADS_POSTGRES_PASSWORD)"
-	case credEnv:
-		return "$BEADS_CREDENTIALS_FILE"
-	case credHome:
-		return "~/.config/beads/credentials"
-	}
-	_ = none
-	return ""
 }

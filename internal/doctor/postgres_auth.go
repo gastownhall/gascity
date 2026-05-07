@@ -133,7 +133,7 @@ func (c *PostgresAuthCheck) RenderExtras(ctx *CheckContext, w io.Writer) {
 // case (the check is not registered when no scope has Backend==postgres).
 func collectPostgresAuthScopes(cityPath string, cfg *config.City) []postgresAuthScope {
 	var out []postgresAuthScope
-	if scope, ok := loadPostgresAuthScope(cityPath, cityPath, "city", "city", ".beads/.env"); ok {
+	if scope, ok := loadPostgresAuthScope(cityPath, "city", "city", ".beads/.env"); ok {
 		out = append(out, scope)
 	}
 	if cfg == nil {
@@ -155,7 +155,7 @@ func collectPostgresAuthScopes(cityPath string, cfg *config.City) []postgresAuth
 			rel = filepath.Base(rigPath)
 		}
 		display := "rigs/" + rig.Name
-		scope, ok := loadPostgresAuthScope(cityPath, rigPath, "rig", display, filepath.Join(rel, ".beads", ".env"))
+		scope, ok := loadPostgresAuthScope(rigPath, "rig", display, filepath.Join(rel, ".beads", ".env"))
 		if !ok {
 			continue
 		}
@@ -165,7 +165,7 @@ func collectPostgresAuthScopes(cityPath string, cfg *config.City) []postgresAuth
 	return out
 }
 
-func loadPostgresAuthScope(_ string, scopeRoot, kind, displayBase, relEnv string) (postgresAuthScope, bool) {
+func loadPostgresAuthScope(scopeRoot, kind, displayBase, relEnv string) (postgresAuthScope, bool) {
 	metaPath := filepath.Join(scopeRoot, ".beads", "metadata.json")
 	meta, _, err := contract.LoadMetadataState(fsys.OSFS{}, metaPath)
 	if err != nil || meta.Backend != "postgres" {
