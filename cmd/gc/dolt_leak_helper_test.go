@@ -58,7 +58,7 @@ func (r *recordingTB) runCleanups() {
 // scriptedDoltEnumerator returns a stub func() ([]DoltProcInfo, error)
 // that yields successive snapshots from the given slice on each call.
 // After all snapshots are exhausted further calls fail the outer test
-// — a wrong call count is a test bug, not a behaviour we want to assert.
+// — a wrong call count is a test bug, not a behavior we want to assert.
 func scriptedDoltEnumerator(t *testing.T, snapshots ...[]DoltProcInfo) func() ([]DoltProcInfo, error) {
 	t.Helper()
 	var idx int
@@ -88,7 +88,7 @@ func TestRequireNoLeakedDoltAfter_NoChangeNoError(t *testing.T) {
 }
 
 // TestRequireNoLeakedDoltAfter_NewPIDReportedWithArgv pins the core
-// behaviour: a PID present at cleanup but absent at registration is
+// behavior: a PID present at cleanup but absent at registration is
 // reported via Errorf, and the message embeds both the PID and the
 // argv string so operators can trace the spawn site from the test
 // log. This is the regression that originally motivated the helper
