@@ -4592,6 +4592,673 @@ func TestJsonlExportHaltMailFailurePreservesExistingPendingAlerts(t *testing.T) 
 	}
 }
 
+// gateSweepEnv constructs the env for a gate-sweep.sh invocation with a
+// PATH-shimmed bd stub that logs every call to BD_LOG.
+func gateSweepEnv(t *testing.T) (binDir, bdLog string, env map[string]string) {
+	t.Helper()
+	binDir = t.TempDir()
+	bdLog = filepath.Join(t.TempDir(), "bd.log")
+	env = map[string]string{
+		"BD_LOG":       bdLog,
+		"GC_CITY":      t.TempDir(),
+		"GC_CITY_PATH": t.TempDir(),
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+	return binDir, bdLog, env
+}
+
+func TestGateSweepInvokesTimerAndGhGateChecks(t *testing.T) {
+	binDir, bdLog, env := gateSweepEnv(t)
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+printf '%s\n' "$*" >> "$BD_LOG"
+exit 0
+`)
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "gate-sweep.sh"), env)
+
+	log, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	s := string(log)
+	for _, want := range []string{
+		"gate check --type=timer --escalate",
+		"gate check --type=gh --escalate",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("missing %q in bd log:\n%s", want, s)
+		}
+	}
+}
+
+func TestGateSweepSkipsBeadAndUnsupportedGateTypes(t *testing.T) {
+	binDir, bdLog, env := gateSweepEnv(t)
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+printf '%s\n' "$*" >> "$BD_LOG"
+exit 0
+`)
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "gate-sweep.sh"), env)
+
+	log, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	s := string(log)
+	// Sanity: the script must actually invoke at least one gate check, so
+	// this test can't pass vacuously if the script regressed to a no-op.
+	if !strings.Contains(s, "gate check") {
+		t.Fatalf("gate-sweep should call `bd gate check` at least once; bd log:\n%s", s)
+	}
+	// bead-type is no-op upstream (beads v1.0.2 multi-rig removal); the
+	// script intentionally skips it. condition-type doesn't exist at all.
+	for _, banned := range []string{"type=bead", "type=condition"} {
+		if strings.Contains(s, banned) {
+			t.Fatalf("gate-sweep should not invoke %q; bd log:\n%s", banned, s)
+		}
+	}
+	// gate list is the broken pre-fix call shape (gc-mrg). Must not regress.
+	if strings.Contains(s, "gate list") {
+		t.Fatalf("gate-sweep should call `gate check`, not `gate list`; bd log:\n%s", s)
+	}
+}
+
+func TestGateSweepToleratesBdFailures(t *testing.T) {
+	binDir, _, env := gateSweepEnv(t)
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+echo "bd: simulated failure" >&2
+exit 1
+`)
+
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "gate-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("gate-sweep should exit 0 even when bd fails (|| true is load-bearing for fresh cities without gh auth); got %v\n%s", err, out)
+	}
+}
+
+// hermeticGitEnv builds a git invocation env that strips any pre-existing
+// GIT_* control variables from the parent environment before applying the
+// overrides — same approach as mergeTestEnv. This avoids duplicate keys
+// where libc's getenv may return the first (parent) occurrence and silently
+// defeat the intended hermeticity.
+func hermeticGitEnv(t *testing.T, overrides map[string]string) []string {
+	t.Helper()
+	return mergeTestEnv(overrides)
+}
+
+// runGit runs a git subcommand in the given directory and fails the test on
+// non-zero exit. The git binary used is whatever the developer has on PATH.
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = hermeticGitEnv(t, map[string]string{
+		"GIT_AUTHOR_NAME":     "Test",
+		"GIT_AUTHOR_EMAIL":    "test@example.com",
+		"GIT_COMMITTER_NAME":  "Test",
+		"GIT_COMMITTER_EMAIL": "test@example.com",
+		"GIT_CONFIG_NOSYSTEM": "1",
+		"GIT_CONFIG_GLOBAL":   filepath.Join(t.TempDir(), "gitconfig"),
+	})
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s in %s: %v\n%s", strings.Join(args, " "), dir, err, out)
+	}
+}
+
+// runGitOut is runGit but returns trimmed stdout. On failure the test fatal
+// includes combined stderr+stdout so CI-only git failures are diagnosable.
+func runGitOut(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = hermeticGitEnv(t, map[string]string{
+		"GIT_CONFIG_NOSYSTEM": "1",
+		"GIT_CONFIG_GLOBAL":   filepath.Join(t.TempDir(), "gitconfig"),
+	})
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git %s in %s: %v\nstderr: %s", strings.Join(args, " "), dir, err, stderr.String())
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// pruneBranchesRig sets up a temp git repo with an `origin` remote that
+// has a single commit on `main`, then invokes setup(rigPath, originPath)
+// to populate gc/* branches and exercise specific scenarios. Returns
+// (rigPath, gcStubBin) where gcStubBin is a PATH dir containing a `gc` stub
+// that reports the rig path via `gc rig list --json`.
+func pruneBranchesRig(t *testing.T, setup func(rigPath, originPath string)) (string, string) {
+	t.Helper()
+	rigPath := t.TempDir()
+	originPath := filepath.Join(t.TempDir(), "origin.git")
+
+	runGit(t, t.TempDir(), "init", "-q", "--bare", "-b", "main", originPath)
+
+	runGit(t, rigPath, "init", "-q", "-b", "main", ".")
+	runGit(t, rigPath, "remote", "add", "origin", originPath)
+	if err := os.WriteFile(filepath.Join(rigPath, "README"), []byte("seed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, rigPath, "add", "README")
+	runGit(t, rigPath, "commit", "-q", "-m", "seed")
+	runGit(t, rigPath, "push", "-q", "-u", "origin", "main")
+
+	setup(rigPath, originPath)
+
+	binDir := t.TempDir()
+	// Stub mirrors the real `gc rig list --json` schema (RigListJSON in
+	// cmd/gc/cmd_rig.go: {"city_path":..., "city_name":..., "rigs":[...]}).
+	// Older versions of prune-branches.sh used `.[].path` against this
+	// output and silently no-op'd via `|| exit 0`; pinning the real schema
+	// here means the test actually catches that regression now.
+	writeExecutable(t, filepath.Join(binDir, "gc"), fmt.Sprintf(`#!/bin/sh
+case "$1 $2 $3" in
+  "rig list --json")
+    printf '{"city_path":"/tmp","city_name":"test","rigs":[{"name":"r","path":"%s","prefix":"r","hq":true,"suspended":false,"beads":""}]}\n'
+    exit 0
+    ;;
+esac
+exit 1
+`, rigPath))
+	return rigPath, binDir
+}
+
+func TestPruneBranchesPrunesMergedGcBranches(t *testing.T) {
+	rigPath, binDir := pruneBranchesRig(t, func(rigPath, _ string) {
+		// gc/merged tip == main tip → merge-base --is-ancestor succeeds.
+		runGit(t, rigPath, "branch", "gc/merged")
+	})
+
+	env := map[string]string{
+		"GC_CITY":      t.TempDir(),
+		"GC_CITY_PATH": t.TempDir(),
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "prune-branches.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("prune-branches: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "deleted 1 stale branches") {
+		t.Fatalf("expected deletion summary; got:\n%s", out)
+	}
+
+	branches := runGitOut(t, rigPath, "branch", "--list", "gc/*")
+	if branches != "" {
+		t.Fatalf("gc/merged not pruned, branches:\n%s", branches)
+	}
+}
+
+func TestPruneBranchesSkipsCurrentBranch(t *testing.T) {
+	rigPath, binDir := pruneBranchesRig(t, func(rigPath, _ string) {
+		runGit(t, rigPath, "checkout", "-q", "-b", "gc/active")
+	})
+
+	env := map[string]string{
+		"GC_CITY":      t.TempDir(),
+		"GC_CITY_PATH": t.TempDir(),
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "prune-branches.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("prune-branches: %v\n%s", err, out)
+	}
+	// No deletion summary means PRUNED stayed 0.
+	if strings.Contains(string(out), "deleted") {
+		t.Fatalf("current branch must not be pruned; got:\n%s", out)
+	}
+
+	if got := runGitOut(t, rigPath, "branch", "--show-current"); got != "gc/active" {
+		t.Fatalf("current branch changed; got %q", got)
+	}
+}
+
+func TestPruneBranchesPreservesBranchWithUnmergedWork(t *testing.T) {
+	// gc/* branch with a commit not in origin/main and no remote tracking
+	// ref should NOT be deleted: prune-branches uses safe `branch -d` which
+	// refuses unmerged work. This test pins that safety behavior.
+	rigPath, binDir := pruneBranchesRig(t, func(rigPath, _ string) {
+		runGit(t, rigPath, "checkout", "-q", "-b", "gc/unmerged")
+		if err := os.WriteFile(filepath.Join(rigPath, "WIP"), []byte("wip"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		runGit(t, rigPath, "add", "WIP")
+		runGit(t, rigPath, "commit", "-q", "-m", "wip work")
+		runGit(t, rigPath, "checkout", "-q", "main")
+		// Never push gc/unmerged → no refs/remotes/origin/gc/unmerged exists.
+	})
+
+	env := map[string]string{
+		"GC_CITY":      t.TempDir(),
+		"GC_CITY_PATH": t.TempDir(),
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "prune-branches.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("prune-branches: %v\n%s", err, out)
+	}
+	if strings.Contains(string(out), "deleted") {
+		t.Fatalf("unmerged branch must not be force-deleted; got:\n%s", out)
+	}
+
+	branches := runGitOut(t, rigPath, "branch", "--list", "gc/*")
+	if !strings.Contains(branches, "gc/unmerged") {
+		t.Fatalf("gc/unmerged was pruned despite unmerged commits:\n%s", branches)
+	}
+}
+
+func TestPruneBranchesNoOpWhenNoGcBranches(t *testing.T) {
+	_, binDir := pruneBranchesRig(t, func(_, _ string) {
+		// No gc/* branches created; only main exists.
+	})
+
+	env := map[string]string{
+		"GC_CITY":      t.TempDir(),
+		"GC_CITY_PATH": t.TempDir(),
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "prune-branches.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("prune-branches: %v\n%s", err, out)
+	}
+	if strings.TrimSpace(string(out)) != "" {
+		t.Fatalf("expected silent no-op when no gc/* branches exist; got:\n%s", out)
+	}
+}
+
+// wispTimestampLayout produces no-Z timestamps that both GNU `date -d` and
+// BSD `date -j -f "%Y-%m-%dT%H:%M:%S"` accept; wisp-compact.sh also accepts
+// RFC3339 timestamps with trailing Z.
+const wispTimestampLayout = "2006-01-02T15:04:05"
+
+// wispCompactEnv installs a `bd` stub that returns the supplied beadsJSON on
+// `bd list --json --all -n 0` and logs all other bd subcommands to BD_LOG.
+// BD_LOG is pre-created empty so skip-path tests can still assert on its
+// (empty) contents. TZ=UTC is pinned for cross-platform date parsing — see
+// wispTimestampLayout. jq is whatever is on PATH.
+func wispCompactEnv(t *testing.T, beadsJSON string) (bdLog string, env map[string]string) {
+	t.Helper()
+	binDir := t.TempDir()
+	bdLog = filepath.Join(t.TempDir(), "bd.log")
+	if err := os.WriteFile(bdLog, nil, 0o644); err != nil {
+		t.Fatalf("WriteFile(bd log): %v", err)
+	}
+
+	stubPath := filepath.Join(binDir, "bd")
+	// Stub fails fast on any subcommand or flag shape the script doesn't
+	// currently use. This pins the script's bd contract — a regression that
+	// dropped `--json` or `--all` from `bd list` would otherwise silently
+	// pass because cat would still emit valid JSON.
+	writeExecutable(t, stubPath, fmt.Sprintf(`#!/bin/sh
+case "$1" in
+  list)
+    case "$*" in
+      *"--json"*"--all"*"-n 0"*)
+        cat <<'EOF'
+%s
+EOF
+        exit 0
+        ;;
+      *)
+        echo "bd list called with unexpected args: $*" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  update|comment|delete)
+    printf '%%s\n' "$*" >> "$BD_LOG"
+    exit 0
+    ;;
+  *)
+    echo "bd called with unexpected subcommand: $*" >&2
+    exit 2
+    ;;
+esac
+`, beadsJSON))
+
+	env = map[string]string{
+		"BD_LOG":       bdLog,
+		"GC_CITY":      t.TempDir(),
+		"GC_CITY_PATH": t.TempDir(),
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"TZ":           "UTC",
+	}
+	return bdLog, env
+}
+
+func TestWispCompactDeletesClosedPastTTL(t *testing.T) {
+	pastTTL := time.Now().Add(-48 * time.Hour).UTC().Format(wispTimestampLayout)
+	beads := fmt.Sprintf(`[
+  {"id":"ga-old","status":"closed","ephemeral":true,"updated_at":%q,"comment_count":0,"labels":[]}
+]`, pastTTL)
+
+	bdLog, env := wispCompactEnv(t, beads)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+
+	log, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	s := string(log)
+	if !strings.Contains(s, "delete ga-old --force") {
+		t.Fatalf("expected `bd delete ga-old --force`; bd log:\n%s", s)
+	}
+	for _, banned := range []string{"update ga-old --persistent", "comment ga-old"} {
+		if strings.Contains(s, banned) {
+			t.Fatalf("closed+past-TTL+no-comments should be deleted, not %q; bd log:\n%s", banned, s)
+		}
+	}
+}
+
+func TestWispCompactReportsSummaryForActions(t *testing.T) {
+	pastTTL := time.Now().Add(-48 * time.Hour).UTC().Format(wispTimestampLayout)
+	withinTTL := time.Now().Add(-1 * time.Hour).UTC().Format(wispTimestampLayout)
+	beads := fmt.Sprintf(`[
+  {"id":"ga-old","status":"closed","ephemeral":true,"updated_at":%q,"comment_count":0,"labels":[]},
+  {"id":"ga-fresh","status":"closed","ephemeral":true,"updated_at":%q,"comment_count":0,"labels":[]}
+]`, pastTTL, withinTTL)
+
+	_, env := wispCompactEnv(t, beads)
+	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+	if err != nil {
+		t.Fatalf("wisp-compact.sh failed: %v\n%s", err, out)
+	}
+	if got, want := strings.TrimSpace(string(out)), "wisp-compact: promoted=0 deleted=1 skipped=1"; got != want {
+		t.Fatalf("summary = %q, want %q", got, want)
+	}
+}
+
+func TestWispCompactPromotesNonClosedPastTTL(t *testing.T) {
+	pastTTL := time.Now().Add(-48 * time.Hour).UTC().Format(wispTimestampLayout)
+	beads := fmt.Sprintf(`[
+  {"id":"ga-stuck","status":"open","ephemeral":true,"updated_at":%q,"comment_count":0,"labels":[]}
+]`, pastTTL)
+
+	bdLog, env := wispCompactEnv(t, beads)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+
+	log, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	s := string(log)
+	if !strings.Contains(s, "update ga-stuck --persistent") {
+		t.Fatalf("expected `bd update ga-stuck --persistent`; bd log:\n%s", s)
+	}
+	if !strings.Contains(s, "stuck detection") {
+		t.Fatalf("expected promotion comment to mention stuck detection; bd log:\n%s", s)
+	}
+	if strings.Contains(s, "delete ga-stuck") {
+		t.Fatalf("non-closed wisp must be promoted, not deleted; bd log:\n%s", s)
+	}
+}
+
+func TestWispCompactPromotesClosedWispsWithComments(t *testing.T) {
+	pastTTL := time.Now().Add(-48 * time.Hour).UTC().Format(wispTimestampLayout)
+	beads := fmt.Sprintf(`[
+  {"id":"ga-discussed","status":"closed","ephemeral":true,"updated_at":%q,"comment_count":3,"labels":[]}
+]`, pastTTL)
+
+	bdLog, env := wispCompactEnv(t, beads)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+
+	log, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	s := string(log)
+	if !strings.Contains(s, "update ga-discussed --persistent") {
+		t.Fatalf("expected `bd update ga-discussed --persistent`; bd log:\n%s", s)
+	}
+	if !strings.Contains(s, "proven value") {
+		t.Fatalf("expected promotion comment to mention proven value; bd log:\n%s", s)
+	}
+	if strings.Contains(s, "delete ga-discussed") {
+		t.Fatalf("wisp with comments must be preserved, not deleted; bd log:\n%s", s)
+	}
+}
+
+func TestWispCompactSkipsBeadsWithinTTL(t *testing.T) {
+	withinTTL := time.Now().Add(-1 * time.Hour).UTC().Format(wispTimestampLayout)
+	beads := fmt.Sprintf(`[
+  {"id":"ga-fresh","status":"closed","ephemeral":true,"updated_at":%q,"comment_count":0,"labels":[]}
+]`, withinTTL)
+
+	bdLog, env := wispCompactEnv(t, beads)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+
+	log, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	s := string(log)
+	for _, banned := range []string{"delete ga-fresh", "update ga-fresh", "comment ga-fresh"} {
+		if strings.Contains(s, banned) {
+			t.Fatalf("within-TTL bead must not be touched; saw %q in bd log:\n%s", banned, s)
+		}
+	}
+}
+
+func TestWispCompactRespectsHeartbeatTTL(t *testing.T) {
+	// wisp_type:heartbeat has a 6h TTL. A bead aged 7h should be acted on
+	// (delete, since closed + no comments + no keep label) even though the
+	// default 24h TTL would skip it.
+	aged7h := time.Now().Add(-7 * time.Hour).UTC().Format(wispTimestampLayout)
+	beads := fmt.Sprintf(`[
+  {"id":"ga-hb","status":"closed","ephemeral":true,"updated_at":%q,"comment_count":0,"labels":["wisp_type:heartbeat"]}
+]`, aged7h)
+
+	bdLog, env := wispCompactEnv(t, beads)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+
+	log, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	s := string(log)
+	if !strings.Contains(s, "delete ga-hb --force") {
+		t.Fatalf("heartbeat aged 7h should be deleted past 6h TTL; bd log:\n%s", s)
+	}
+}
+
+func TestWispCompactSkipsNonEphemeralBeads(t *testing.T) {
+	pastTTL := time.Now().Add(-48 * time.Hour).UTC().Format(wispTimestampLayout)
+	beads := fmt.Sprintf(`[
+  {"id":"ga-perm","status":"closed","ephemeral":false,"updated_at":%q,"comment_count":0,"labels":[]}
+]`, pastTTL)
+
+	bdLog, env := wispCompactEnv(t, beads)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+
+	log, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	s := string(log)
+	for _, banned := range []string{"delete ga-perm", "update ga-perm", "comment ga-perm"} {
+		if strings.Contains(s, banned) {
+			t.Fatalf("non-ephemeral bead must be ignored; saw %q in bd log:\n%s", banned, s)
+		}
+	}
+}
+
+// crossRigDepsEnv installs a `bd` stub that handles three subcommand shapes:
+//   - `bd list --status=closed --closed-after=... --json` → returns closedJSON
+//   - `bd dep list <id> --direction=up --type=blocks --json` → returns depsJSON
+//   - `bd dep remove ...` and `bd dep add ...` → appended to BD_LOG
+//
+// BD_LOG is pre-created empty so skip-path tests can still read it.
+func crossRigDepsEnv(t *testing.T, closedJSON, depsJSON string) (bdLog string, env map[string]string) {
+	t.Helper()
+	binDir := t.TempDir()
+	bdLog = filepath.Join(t.TempDir(), "bd.log")
+	if err := os.WriteFile(bdLog, nil, 0o644); err != nil {
+		t.Fatalf("WriteFile(bd log): %v", err)
+	}
+
+	stubPath := filepath.Join(binDir, "bd")
+	// Stub fails fast on unexpected subcommands or flag shapes so the test
+	// pins the script's bd contract; a regression dropping --json from
+	// `bd list` or --type=blocks from `bd dep list` would otherwise still
+	// pass.
+	writeExecutable(t, stubPath, fmt.Sprintf(`#!/bin/sh
+case "$1" in
+  list)
+    case "$*" in
+      *"--status=closed"*"--closed-after"*"--json"*)
+        cat <<'EOF'
+%s
+EOF
+        exit 0
+        ;;
+      *)
+        echo "bd list called with unexpected args: $*" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  dep)
+    case "$2" in
+      list)
+        case "$*" in
+          *"--direction=up"*"--type=blocks"*"--json"*)
+            cat <<'EOF'
+%s
+EOF
+            exit 0
+            ;;
+          *)
+            echo "bd dep list called with unexpected args: $*" >&2
+            exit 2
+            ;;
+        esac
+        ;;
+      remove|add)
+        printf '%%s\n' "$*" >> "$BD_LOG"
+        exit 0
+        ;;
+      *)
+        echo "bd dep called with unexpected subcommand: $*" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  *)
+    echo "bd called with unexpected subcommand: $*" >&2
+    exit 2
+    ;;
+esac
+`, closedJSON, depsJSON))
+
+	env = map[string]string{
+		"BD_LOG":       bdLog,
+		"GC_CITY":      t.TempDir(),
+		"GC_CITY_PATH": t.TempDir(),
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+	return bdLog, env
+}
+
+func TestCrossRigDepsConvertsExternalBlocksToRelated(t *testing.T) {
+	closed := `[{"id":"ga-blocker"}]`
+	deps := `[{"id":"external:other-rig:rig-dep-1"}]`
+
+	bdLog, env := crossRigDepsEnv(t, closed, deps)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "cross-rig-deps.sh"), env)
+
+	log, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	s := string(log)
+	if !strings.Contains(s, "dep remove external:other-rig:rig-dep-1 external:ga-blocker") {
+		t.Fatalf("missing `bd dep remove` for external dep; bd log:\n%s", s)
+	}
+	if !strings.Contains(s, "dep add external:other-rig:rig-dep-1 external:ga-blocker --type=related") {
+		t.Fatalf("missing `bd dep add ... --type=related` for external dep; bd log:\n%s", s)
+	}
+}
+
+func TestCrossRigDepsReportsResolvedSummary(t *testing.T) {
+	closed := `[{"id":"ga-blocker"}]`
+	deps := `[{"id":"external:other-rig:rig-dep-1"}]`
+
+	_, env := crossRigDepsEnv(t, closed, deps)
+	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "cross-rig-deps.sh"), env)
+	if err != nil {
+		t.Fatalf("cross-rig-deps.sh failed: %v\n%s", err, out)
+	}
+	if got, want := strings.TrimSpace(string(out)), "cross-rig-deps: resolved 1 cross-rig dependencies"; got != want {
+		t.Fatalf("summary = %q, want %q", got, want)
+	}
+}
+
+func TestCrossRigDepsSkipsInternalDeps(t *testing.T) {
+	closed := `[{"id":"ga-blocker"}]`
+	// Internal deps lack the "external:" prefix and must be left untouched
+	// — internal blocking semantics are bd's normal computeBlockedIDs path.
+	deps := `[{"id":"local-rig-dep"},{"id":"another-internal"}]`
+
+	bdLog, env := crossRigDepsEnv(t, closed, deps)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "cross-rig-deps.sh"), env)
+
+	log, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	s := string(log)
+	if strings.Contains(s, "dep remove") || strings.Contains(s, "dep add") {
+		t.Fatalf("internal-only deps must not trigger bd dep remove/add; bd log:\n%s", s)
+	}
+}
+
+func TestCrossRigDepsNoOpWhenNothingClosed(t *testing.T) {
+	bdLog, env := crossRigDepsEnv(t, `[]`, `[]`)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "cross-rig-deps.sh"), env)
+
+	log, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	if len(log) != 0 {
+		t.Fatalf("expected no bd dep calls when nothing recently closed; bd log:\n%s", log)
+	}
+}
+
+func TestCrossRigDepsHandlesEmptyDepsForClosedBead(t *testing.T) {
+	closed := `[{"id":"ga-blocker"}]`
+	bdLog, env := crossRigDepsEnv(t, closed, `[]`)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "cross-rig-deps.sh"), env)
+
+	log, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	if len(log) != 0 {
+		t.Fatalf("closed bead with no upward deps should not call bd dep remove/add; bd log:\n%s", log)
+	}
+}
+
 func TestWispCompactReportsNonZeroCounters(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
@@ -4644,6 +5311,88 @@ exit 0
 	want := "wisp-compact: promoted=1 deleted=2 skipped=1"
 	if !strings.Contains(string(out), want) {
 		t.Fatalf("wisp-compact summary missing or wrong (subshell counter regression?)\nwant substring: %q\ngot output:\n%s", want, out)
+	}
+}
+
+func TestWispCompactBSDDateZFallbackUsesUTC(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	dateLog := filepath.Join(t.TempDir(), "date.log")
+
+	nearBoundary := "2033-05-17T20:33:20Z"
+	beadsJSON := fmt.Sprintf(`[
+  {"id":"ga-heartbeat","status":"open","ephemeral":true,"updated_at":"%s","comment_count":0,"labels":["wisp_type:heartbeat"]}
+]`, nearBoundary)
+
+	writeExecutable(t, filepath.Join(binDir, "bd"), fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> "$BD_LOG"
+case "$1 $2" in
+  "list --json")
+    cat <<'JSON'
+%s
+JSON
+    ;;
+esac
+exit 0
+`, beadsJSON))
+
+	writeExecutable(t, filepath.Join(binDir, "date"), fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> "$DATE_LOG"
+if [ "$1" = "+%%s" ]; then
+  echo 2000000000
+  exit 0
+fi
+if [ "$1" = "-d" ]; then
+  exit 1
+fi
+if [ "$1" = "-ju" ] && [ "$2" = "-f" ] && [ "$4" = "%s" ]; then
+  echo 1999974800
+  exit 0
+fi
+if [ "$1" = "-j" ] && [ "$2" = "-f" ] && [ "$4" = "%s" ]; then
+  echo 2000000000
+  exit 0
+fi
+exit 1
+`, nearBoundary, nearBoundary))
+
+	env := map[string]string{
+		"BD_LOG":       bdLog,
+		"DATE_LOG":     dateLog,
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"TZ":           "America/Los_Angeles",
+	}
+
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+
+	want := "wisp-compact: promoted=1 deleted=0 skipped=0"
+	if !strings.Contains(string(out), want) {
+		t.Fatalf("wisp-compact should parse BSD Z timestamps as UTC at the heartbeat TTL boundary\nwant substring: %q\ngot output:\n%s", want, out)
+	}
+
+	dateData, err := os.ReadFile(dateLog)
+	if err != nil {
+		t.Fatalf("ReadFile(date log): %v", err)
+	}
+	if !strings.Contains(string(dateData), "-ju -f %Y-%m-%dT%H:%M:%SZ "+nearBoundary+" +%s") {
+		t.Fatalf("BSD Z fallback did not force UTC:\n%s", dateData)
+	}
+
+	bdData, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	if !strings.Contains(string(bdData), "update ga-heartbeat --persistent") {
+		t.Fatalf("expected expired heartbeat to be promoted, got bd calls:\n%s", bdData)
 	}
 }
 
