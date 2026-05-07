@@ -46,3 +46,4 @@ reports/
 tmp_*.diff
 tmp_*.patch
 issues.jsonl
+contrib/k8s/leidos-cas.pem

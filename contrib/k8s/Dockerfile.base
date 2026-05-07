@@ -27,6 +27,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tmux \
     && rm -rf /var/lib/apt/lists/*
 
+# Trust a site-local CA bundle (e.g. Leidos perimeter MITM cert).
+# contrib/k8s/leidos-cas.pem is gitignored; the Makefile copies ~/.leidos-cas.pem
+# there before building if it exists. An empty file is a no-op.
+COPY contrib/k8s/leidos-cas.pem /tmp/leidos-cas.pem
+RUN if [ -s /tmp/leidos-cas.pem ]; then \
+        cp /tmp/leidos-cas.pem /usr/local/share/ca-certificates/leidos-cas.crt \
+        && update-ca-certificates; \
+    fi \
+    && rm /tmp/leidos-cas.pem
+
 COPY .github/scripts/install-claude-native.sh /tmp/install-claude-native.sh
 RUN /tmp/install-claude-native.sh "${CLAUDE_CODE_VERSION}" \
     && rm -f /tmp/install-claude-native.sh

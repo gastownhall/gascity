@@ -1112,6 +1112,51 @@ func TestRecordWakeFailure_BelowThreshold(t *testing.T) {
 	}
 }
 
+func TestRecordWakeFailure_ClearsPendingCreateClaim(t *testing.T) {
+	// Regression: pending_create_claim bypasses staleCreatingState check in
+	// sessionStartRequested, causing a tight poke-driven retry loop that hammers
+	// Dolt. recordWakeFailure must clear it so subsequent retries are gated by
+	// the 1-minute stale timeout instead of retrying on every patrol tick.
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := newTestStore()
+
+	session := makeBead("b1", map[string]string{
+		"wake_attempts":        "1",
+		"pending_create_claim": "true",
+		"state":                "creating",
+	})
+
+	recordWakeFailure(&session, store, clk)
+
+	if session.Metadata["pending_create_claim"] != "" {
+		t.Errorf("pending_create_claim = %q after failure, want empty (to gate retries via stale timeout)", session.Metadata["pending_create_claim"])
+	}
+	if session.Metadata["wake_attempts"] != "2" {
+		t.Errorf("wake_attempts = %q, want 2", session.Metadata["wake_attempts"])
+	}
+}
+
+func TestRecordWakeFailure_ClearsPendingCreateClaimAtQuarantine(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := newTestStore()
+
+	session := makeBead("b1", map[string]string{
+		"wake_attempts":        "4",
+		"pending_create_claim": "true",
+	})
+
+	recordWakeFailure(&session, store, clk)
+
+	if session.Metadata["pending_create_claim"] != "" {
+		t.Errorf("pending_create_claim = %q at quarantine, want empty", session.Metadata["pending_create_claim"])
+	}
+	if session.Metadata["quarantined_until"] == "" {
+		t.Error("expected quarantine to be set at max attempts")
+	}
+}
+
 func TestRecordWakeFailure_ClearsStartedConfigHash(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}

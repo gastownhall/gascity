@@ -521,6 +521,8 @@ spec-ci: install-oapi-codegen
 
 ## docker-base: build base image with system dependencies (~2.5 min, rebuild rarely)
 docker-base: check-docker
+	@if [ -f ~/.leidos-cas.pem ]; then cp ~/.leidos-cas.pem contrib/k8s/leidos-cas.pem; \
+	else touch contrib/k8s/leidos-cas.pem; fi
 	. ./deps.env && docker build -f contrib/k8s/Dockerfile.base \
 		--build-arg DOLT_VERSION=$$DOLT_VERSION \
 		-t gc-agent-base:latest .

@@ -657,9 +657,10 @@ func recordWakeFailure(session *beads.Bead, store beads.Store, clk clock.Clock) 
 	if attempts >= defaultMaxWakeAttempts {
 		qUntil := clk.Now().Add(defaultQuarantineDuration).UTC().Format(time.RFC3339)
 		batch := map[string]string{
-			"wake_attempts":     strconv.Itoa(attempts),
-			"quarantined_until": qUntil,
-			"sleep_reason":      "quarantine",
+			"wake_attempts":       strconv.Itoa(attempts),
+			"quarantined_until":   qUntil,
+			"sleep_reason":        "quarantine",
+			"pending_create_claim": "",
 		}
 		if err := store.SetMetadataBatch(session.ID, batch); err == nil {
 			for k, v := range batch {
@@ -667,8 +668,18 @@ func recordWakeFailure(session *beads.Bead, store beads.Store, clk clock.Clock) 
 			}
 		}
 	} else {
-		_ = store.SetMetadata(session.ID, "wake_attempts", strconv.Itoa(attempts))
-		session.Metadata["wake_attempts"] = strconv.Itoa(attempts)
+		// Clear pending_create_claim so sessionStartRequested falls through to
+		// the staleCreatingState check (1-minute gate) instead of bypassing it.
+		// Without this, each failure pokes the patrol and retries immediately,
+		// creating a tight loop that hammers Dolt with ~50 connections/second.
+		batch := map[string]string{
+			"wake_attempts":       strconv.Itoa(attempts),
+			"pending_create_claim": "",
+		}
+		if err := store.SetMetadataBatch(session.ID, batch); err == nil {
+			session.Metadata["wake_attempts"] = strconv.Itoa(attempts)
+			session.Metadata["pending_create_claim"] = ""
+		}
 	}
 }
 
