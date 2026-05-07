@@ -434,7 +434,11 @@ func statusDisplayText(status string) string {
 	}
 }
 
-func unregisterCityFromSupervisor(cityPath string, stdout, stderr io.Writer, commandName string) (bool, int) {
+func unregisterCityFromSupervisor(cityPath string, stdout, stderr io.Writer) (bool, int) {
+	return unregisterCityFromSupervisorWithForce(cityPath, stdout, stderr, "gc unregister", false)
+}
+
+func unregisterCityFromSupervisorWithForce(cityPath string, stdout, stderr io.Writer, commandName string, force bool) (bool, int) {
 	cityPath = normalizePathForCompare(cityPath)
 	entry, registered, err := registeredCityEntry(cityPath)
 	if err != nil {
@@ -452,6 +456,10 @@ func unregisterCityFromSupervisor(cityPath string, stdout, stderr io.Writer, com
 	}
 
 	fmt.Fprintf(stdout, "Unregistered city '%s' (%s)\n", entry.EffectiveName(), entry.Path) //nolint:errcheck // best-effort stdout
+
+	if force && supervisorAliveHook() != 0 {
+		tryStopControllerWithForce(cityPath, io.Discard, true)
+	}
 
 	// If the city directory is gone, there's nothing to wait on or restore.
 	// Skip the supervisor-side probes that would otherwise spew

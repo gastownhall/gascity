@@ -122,6 +122,7 @@ func acquireControllerLock(cityPath string) (*os.File, error) {
 func startControllerSocket(
 	cityPath string,
 	cancelFn context.CancelFunc,
+	forceShutdown *atomic.Bool,
 	dirty *atomic.Bool,
 	reloadReqCh chan reloadRequest,
 	convergenceReqCh chan convergenceRequest,
@@ -144,19 +145,21 @@ func startControllerSocket(
 			if err != nil {
 				return // listener closed
 			}
-			go handleControllerConn(conn, cityPath, cancelFn, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+			go handleControllerConn(conn, cityPath, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
 		}
 	}()
 	return lis, nil
 }
 
 // handleControllerConn reads from a connection and dispatches commands.
-// Supported commands: "stop" (shutdown), "ping" (liveness check, returns PID),
-// "converge:{json}" (convergence commands routed to event loop).
+// Supported commands: "stop" (shutdown), "stop-force" (shutdown without
+// interrupt grace), "ping" (liveness check, returns PID), "converge:{json}"
+// (convergence commands routed to event loop).
 func handleControllerConn(
 	conn net.Conn,
 	cityPath string,
 	cancelFn context.CancelFunc,
+	forceShutdown *atomic.Bool,
 	dirty *atomic.Bool,
 	reloadReqCh chan reloadRequest,
 	convergenceReqCh chan convergenceRequest,
@@ -172,6 +175,12 @@ func handleControllerConn(
 		line := scanner.Text()
 		switch {
 		case line == "stop":
+			cancelFn()
+			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
+		case line == "stop-force":
+			if forceShutdown != nil {
+				forceShutdown.Store(true)
+			}
 			cancelFn()
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
 		case line == "ping":
@@ -1198,7 +1207,8 @@ func runController(
 	configDirty := &atomic.Bool{}
 
 	sockPath := controllerSocketPath(cityPath)
-	lis, err := startControllerSocket(cityPath, cancel, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+	forceShutdown := &atomic.Bool{}
+	lis, err := startControllerSocket(cityPath, cancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1245,6 +1255,7 @@ func runController(
 		Rec:                     rec,
 		PoolSessions:            poolSessions,
 		PoolDeathHandlers:       poolDeathHandlers,
+		ForceStopShutdown:       forceShutdown,
 		ReloadReqCh:             reloadReqCh,
 		ConvergenceReqCh:        convergenceReqCh,
 		PokeCh:                  pokeCh,

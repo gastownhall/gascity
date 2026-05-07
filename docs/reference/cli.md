@@ -2650,9 +2650,20 @@ shutdown timeout, then force-kills any remaining sessions. Also stops
 the Dolt server and cleans up orphan sessions. If a controller is
 running, delegates shutdown to it.
 
+Use --timeout=DURATION to cap the wall-clock time gc stop will spend
+before giving up; the default budgets configured session interrupt and
+stop waves, the configured shutdown grace wait, and a second orphan
+cleanup pass. Use --force to skip the interrupt grace period and go
+straight to kill.
+
 ```
-gc stop [path]
+gc stop [path] [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--force` | bool |  | skip the interrupt grace period and force-kill all sessions immediately |
+| `--timeout` | duration | `0s` | wall-clock cap for the stop sequence (0 = derive from city config) |
 
 ## gc supervisor
 

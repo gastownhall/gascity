@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -16,6 +17,30 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
+
+type recordingStopProvider struct {
+	*runtime.Fake
+	stops      chan string
+	interrupts chan string
+}
+
+func newRecordingStopProvider() *recordingStopProvider {
+	return &recordingStopProvider{
+		Fake:       runtime.NewFake(),
+		stops:      make(chan string, 8),
+		interrupts: make(chan string, 8),
+	}
+}
+
+func (p *recordingStopProvider) Stop(name string) error {
+	p.stops <- name
+	return p.Fake.Stop(name)
+}
+
+func (p *recordingStopProvider) Interrupt(name string) error {
+	p.interrupts <- name
+	return p.Fake.Interrupt(name)
+}
 
 func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
@@ -122,6 +147,154 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("unexpected stderr: %q", stderr.String())
+	}
+}
+
+func TestCmdStopWallClockTimeoutBoundsDirectStop(t *testing.T) {
+	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
+
+	cityDir := shortSocketTempDir(t, "gc-stop-timeout-")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "timeout-city"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
+		Agents: []config.Agent{
+			{Name: "worker", StartCommand: "sleep 1"},
+		},
+	}
+	data, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sp := newHangingProvider()
+	t.Cleanup(sp.release)
+	sessionName := lookupSessionNameOrLegacy(nil, loadedCityName(cfg, cityDir), cfg.Agents[0].QualifiedName(), cfg.Workspace.SessionTemplate)
+	if err := sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+
+	oldFactory := sessionProviderForStopCity
+	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+	sessionProviderForStopCity = func(*config.City, string) runtime.Provider {
+		return sp
+	}
+
+	var stdout, stderr lockedBuffer
+	started := time.Now()
+	code := cmdStop([]string{cityDir}, &stdout, &stderr, 100*time.Millisecond, false)
+	if code != 1 {
+		t.Fatalf("cmdStop() = %d, want timeout code 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("cmdStop returned after %s, want wall-clock cap near 100ms", elapsed)
+	}
+	if !strings.Contains(stderr.String(), "timed out after 100ms") {
+		t.Fatalf("stderr = %q, want wall-clock timeout message", stderr.String())
+	}
+}
+
+func TestCmdStopForceDelegatesImmediateControllerStop(t *testing.T) {
+	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
+
+	dir := shortSocketTempDir(t, "gc-force-stop-")
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "force-stop-city"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "250ms"},
+	}
+	data, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tomlPath := filepath.Join(dir, "city.toml")
+	if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sp := newRecordingStopProvider()
+	buildFn := func(_ *config.City, _ runtime.Provider, _ beads.Store) DesiredStateResult {
+		return DesiredStateResult{State: map[string]TemplateParams{}}
+	}
+
+	var controllerStdout, controllerStderr bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		runController(dir, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &controllerStdout, &controllerStderr)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		tryStopController(dir, &bytes.Buffer{})
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
+	})
+
+	waitForControllerAvailable(t, dir, 15*time.Second)
+	const sess = "force-stop-session"
+	if err := sp.Start(context.Background(), sess, runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	stopDone := make(chan int, 1)
+	go func() {
+		stopDone <- cmdStop([]string{dir}, &stdout, &stderr, 2*time.Second, true)
+	}()
+
+	select {
+	case interrupted := <-sp.interrupts:
+		t.Fatalf("gc stop --force delegated interrupt for %q; want immediate stop", interrupted)
+	case stopped := <-sp.stops:
+		if stopped != sess {
+			t.Fatalf("stopped = %q, want %q", stopped, sess)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for delegated force stop")
+	}
+
+	select {
+	case code := <-stopDone:
+		if code != 0 {
+			t.Fatalf("cmdStop = %d, want 0; stdout=%q stderr=%q controller stderr=%q", code, stdout.String(), stderr.String(), controllerStderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cmdStop did not finish after delegated force stop")
+	}
+}
+
+func TestDefaultStopWallClockTimeoutScalesWithConfiguredStopTargets(t *testing.T) {
+	origStop := stopPerTargetTimeoutDefault
+	origMargin := interruptPerTargetTimeoutMargin
+	stopPerTargetTimeoutDefault = 10 * time.Second
+	interruptPerTargetTimeoutMargin = time.Second
+	t.Cleanup(func() {
+		stopPerTargetTimeoutDefault = origStop
+		interruptPerTargetTimeoutMargin = origMargin
+	})
+
+	cfg := &config.City{
+		Daemon: config.DaemonConfig{ShutdownTimeout: "2s"},
+	}
+	for i := 0; i < 7; i++ {
+		cfg.Agents = append(cfg.Agents, config.Agent{Name: fmt.Sprintf("worker-%d", i+1)})
+	}
+
+	got := defaultStopWallClockTimeout(cfg)
+	want := 80 * time.Second
+	if got != want {
+		t.Fatalf("defaultStopWallClockTimeout() = %s, want %s", got, want)
 	}
 }
 

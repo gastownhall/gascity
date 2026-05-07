@@ -2111,22 +2111,35 @@ func interruptTargetsBounded(targets []stopTarget, cfg *config.City, store beads
 	// interactive "What should Claude do instead?" prompt would hang
 	// them forever. Stop them immediately instead of interrupting —
 	// no metadata to go stale if shutdown is aborted.
+	poolManaged := make([]stopTarget, 0, len(targets))
 	interruptable := make([]stopTarget, 0, len(targets))
 	for _, t := range targets {
 		if t.poolManaged {
-			started := time.Now()
-			err := stopTargetThroughWorkerBoundary(t, store, sp, cfg)
-			outcome := "stopped_pool_managed"
-			if err != nil {
-				outcome = "stop_failed"
-			}
-			logLifecycleOutcome(stderr, "interrupt", 0, t.name, t.template, outcome, started, time.Now(), err)
+			poolManaged = append(poolManaged, t)
 			continue
 		}
 		interruptable = append(interruptable, t)
 	}
 
+	if len(poolManaged) > 0 {
+		waveStarted := time.Now()
+		results := executeTargetWave(poolManaged, defaultMaxParallelStopsPerWave, stopPerTargetTimeoutDefault, func(target stopTarget) error {
+			return stopTargetThroughWorkerBoundary(target, store, sp, cfg)
+		})
+		for _, result := range results {
+			outcome := result.outcome
+			if result.err == nil && outcome == "success" {
+				outcome = "stopped_pool_managed"
+			}
+			logLifecycleOutcome(stderr, "interrupt", 0, result.target.name, result.target.template, outcome, result.started, result.finished, result.err)
+		}
+		logLifecycleWave(stderr, "interrupt", 0, waveStarted, len(poolManaged))
+	}
+
 	sent := 0
+	if len(interruptable) == 0 {
+		return sent
+	}
 	waveStarted := time.Now()
 	results := executeTargetWave(interruptable, min(len(interruptable), defaultMaxParallelInterrupts), interruptPerTargetTimeout(cfg), func(target stopTarget) error {
 		targetID := strings.TrimSpace(target.sessionID)

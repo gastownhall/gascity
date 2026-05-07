@@ -30,9 +30,10 @@ the Dolt server and cleans up orphan sessions. If a controller is
 running, delegates shutdown to it.
 
 Use --timeout=DURATION to cap the wall-clock time gc stop will spend
-before giving up; the default derives from the configured shutdown
-grace times a fudge factor. Use --force to skip the interrupt grace
-period and go straight to kill.`,
+before giving up; the default budgets configured session interrupt and
+stop waves, the configured shutdown grace wait, and a second orphan
+cleanup pass. Use --force to skip the interrupt grace period and go
+straight to kill.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdStop(args, stdout, stderr, wallClockTimeout, force) != 0 {
@@ -84,15 +85,16 @@ func cmdStop(args []string, stdout, stderr io.Writer, wallClockTimeout time.Dura
 	case out := <-doneCh:
 		return out.code
 	case <-time.After(wallClockCap):
-		fmt.Fprintf(stderr, "gc stop: timed out after %s; some sessions may not have stopped — try gc stop --force\n", wallClockCap) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc stop: timed out after %s; some sessions may not have stopped — try gc stop --force --timeout=<longer-duration>\n", wallClockCap) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 }
 
 // defaultStopWallClockTimeout returns the wall-clock cap used by cmdStop
-// when --timeout is not set: a multiple of the configured shutdown grace,
-// padded enough to absorb the interrupt wave + per-target stop timeout
-// for every session in serial worst-case.
+// when --timeout is not set. It budgets a full configured-session stop and a
+// second full orphan cleanup pass using the same bounded wave sizes as the
+// stop implementation. Unknown extra live pool sessions or orphans can still
+// require an explicit --timeout from the operator.
 func defaultStopWallClockTimeout(cfg *config.City) time.Duration {
 	base := 5 * time.Second
 	if cfg != nil {
@@ -100,7 +102,55 @@ func defaultStopWallClockTimeout(cfg *config.City) time.Duration {
 			base = d
 		}
 	}
-	return base*4 + stopPerTargetTimeoutDefault
+	targets := estimatedConfiguredStopTargets(cfg)
+	interruptWaves := ceilDiv(targets, defaultMaxParallelInterrupts)
+	stopWaves := ceilDiv(targets, defaultMaxParallelStopsPerWave)
+	onePass := time.Duration(interruptWaves)*interruptPerTargetTimeout(cfg) +
+		base +
+		time.Duration(stopWaves)*stopPerTargetTimeoutDefault
+	return 2*onePass + stopPerTargetTimeoutDefault
+}
+
+func estimatedConfiguredStopTargets(cfg *config.City) int {
+	if cfg == nil || len(cfg.Agents) == 0 {
+		return 1
+	}
+	total := 0
+	for i := range cfg.Agents {
+		agent := &cfg.Agents[i]
+		if len(agent.NamepoolNames) > 0 {
+			total += len(agent.NamepoolNames)
+			continue
+		}
+		if maxSessions := agent.EffectiveMaxActiveSessions(); maxSessions != nil {
+			switch {
+			case *maxSessions == 0:
+				continue
+			case *maxSessions > 0:
+				total += *maxSessions
+				continue
+			}
+		}
+		if minSessions := agent.EffectiveMinActiveSessions(); minSessions > 1 {
+			total += minSessions
+			continue
+		}
+		total++
+	}
+	if total < 1 {
+		return 1
+	}
+	return total
+}
+
+func ceilDiv(n, d int) int {
+	if n <= 0 {
+		return 0
+	}
+	if d <= 0 {
+		return n
+	}
+	return (n + d - 1) / d
 }
 
 // cmdStopBody contains the original cmdStop flow, factored out so cmdStop
@@ -108,7 +158,7 @@ func defaultStopWallClockTimeout(cfg *config.City) time.Duration {
 func cmdStopBody(cityPath string, cfg *config.City, force bool, stdout, stderr io.Writer) int {
 	cityName := loadedCityName(cfg, cityPath)
 
-	if handled, code := unregisterCityFromSupervisor(cityPath, stdout, stderr, "gc stop"); handled {
+	if handled, code := unregisterCityFromSupervisorWithForce(cityPath, stdout, stderr, "gc stop", force); handled {
 		if code != 0 {
 			return code
 		}
@@ -123,7 +173,7 @@ func cmdStopBody(cityPath string, cfg *config.City, force bool, stdout, stderr i
 	markCityStopSessionSleepReason(store, stderr)
 
 	// If a controller is running, ask it to shut down (it stops agents).
-	if tryStopController(cityPath, stdout) {
+	if tryStopControllerWithForce(cityPath, stdout, force) {
 		if err := waitForStandaloneControllerStop(cityPath, cfg.Daemon.ShutdownTimeoutDuration()+15*time.Second); err != nil {
 			fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -247,13 +297,21 @@ func stopOrphans(sp runtime.Provider, desired map[string]bool, cfg *config.City,
 // Returns true if a controller acknowledged the shutdown. If no controller
 // is running (socket doesn't exist or connection refused), returns false.
 func tryStopController(cityPath string, stdout io.Writer) bool {
+	return tryStopControllerWithForce(cityPath, stdout, false)
+}
+
+func tryStopControllerWithForce(cityPath string, stdout io.Writer, force bool) bool {
 	sockPath := controllerSocketPath(cityPath)
 	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
 	if err != nil {
 		return false
 	}
-	defer conn.Close()                                     //nolint:errcheck // best-effort cleanup
-	conn.Write([]byte("stop\n"))                           //nolint:errcheck // best-effort
+	defer conn.Close() //nolint:errcheck // best-effort cleanup
+	command := "stop\n"
+	if force {
+		command = "stop-force\n"
+	}
+	conn.Write([]byte(command))                            //nolint:errcheck // best-effort
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck // best-effort
 	buf := make([]byte, 64)
 	n, readErr := conn.Read(buf)

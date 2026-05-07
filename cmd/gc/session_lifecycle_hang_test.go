@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -139,5 +141,55 @@ func TestGracefulStopAll_HangingProviderDoesNotWedge(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("gracefulStopAll did not return within 5s — unbounded wait regression")
+	}
+}
+
+// TestInterruptTargetsBounded_PoolManagedStopDoesNotWedge verifies that
+// pool-managed sessions are stopped through the same bounded worker boundary as
+// normal stop targets. Pool-managed sessions bypass the interrupt prompt, so an
+// inline stop here would wedge the whole interrupt pass.
+func TestInterruptTargetsBounded_PoolManagedStopDoesNotWedge(t *testing.T) {
+	origStop := stopPerTargetTimeoutDefault
+	stopPerTargetTimeoutDefault = 100 * time.Millisecond
+	t.Cleanup(func() { stopPerTargetTimeoutDefault = origStop })
+
+	sp := newHangingProvider()
+	t.Cleanup(sp.release)
+	if err := sp.Start(context.Background(), "pool-worker", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "pool-worker session",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "pool-worker",
+			"template":             "pool",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "active",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	targets := []stopTarget{{name: "pool-worker", template: "pool", resolved: true, poolManaged: true}}
+	var stderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- interruptTargetsBounded(targets, nil, store, sp, &stderr)
+	}()
+
+	select {
+	case sent := <-done:
+		if sent != 0 {
+			t.Fatalf("sent = %d, want 0 for pool-managed stop-only target", sent)
+		}
+		if !strings.Contains(stderr.String(), "outcome=timed_out") {
+			t.Fatalf("stderr = %q, want timed_out lifecycle outcome", stderr.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("pool-managed stop wedged interruptTargetsBounded")
 	}
 }

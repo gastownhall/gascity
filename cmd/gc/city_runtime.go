@@ -98,6 +98,7 @@ type CityRuntime struct {
 
 	shutdownOnce             sync.Once
 	preserveSessionsShutdown atomic.Bool
+	forceStopShutdown        *atomic.Bool
 	logPrefix                string // "gc start" or "gc supervisor"
 	stdout, stderr           io.Writer
 }
@@ -132,6 +133,7 @@ type CityRuntimeParams struct {
 
 	PoolSessions      map[string]time.Duration
 	PoolDeathHandlers map[string]poolDeathInfo
+	ForceStopShutdown *atomic.Bool
 
 	ConvergenceReqCh    chan convergenceRequest // may be nil
 	ReloadReqCh         chan reloadRequest      // may be nil; receives structured reload commands
@@ -219,6 +221,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		rec:                     p.Rec,
 		poolSessions:            p.PoolSessions,
 		poolDeathHandlers:       p.PoolDeathHandlers,
+		forceStopShutdown:       p.ForceStopShutdown,
 		suspendedNames:          suspendedNames,
 		asyncStartLimiter:       newAsyncStartLimiter(maxParallelStartsPerTick(p.Cfg)),
 		convergenceReqCh:        p.ConvergenceReqCh,
@@ -2124,6 +2127,9 @@ func (cr *CityRuntime) shutdown() {
 		// sweepOrphanedOrderTrackingRetry on next start.
 		total := cr.cfg.Daemon.ShutdownTimeoutDuration()
 		gracefulTimeout := total
+		if cr.forceStopShutdown != nil && cr.forceStopShutdown.Load() {
+			gracefulTimeout = 0
+		}
 		if cr.od != nil || len(cr.retiredOrderDispatchers) > 0 {
 			drainTimeout := orderShutdownDrainTimeout(total)
 			drainCtx, drainCancel := context.WithTimeout(context.Background(), drainTimeout)
