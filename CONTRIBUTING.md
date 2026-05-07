@@ -100,7 +100,7 @@ For the capability boundary, use the
 The docs tree is now Mintlify-based.
 
 - Config lives in `docs/docs.json`
-- Preview locally with `cd docs && ./mint.sh dev`
+- Preview locally with `./mint.sh dev`
 - Run docs checks with `make check-docs`
 
 When updating docs:
