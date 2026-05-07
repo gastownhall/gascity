@@ -29,7 +29,8 @@ export interface ActivityEntry {
   type: string;
 }
 
-type DashboardEventRecord = CityEventRecord | SupervisorEventRecord | CityEventStreamEnvelope | SupervisorEventStreamEnvelope;
+type DashboardHistoryRecord = CityEventRecord | SupervisorEventRecord;
+type DashboardEventRecord = DashboardHistoryRecord | CityEventStreamEnvelope | SupervisorEventStreamEnvelope;
 
 const MAX_ENTRIES = 150;
 const entries: ActivityEntry[] = [];
@@ -46,17 +47,24 @@ export async function seedActivity(entriesFromAPI: ActivityEntry[]): Promise<voi
 
 export async function loadActivityHistory(): Promise<void> {
   const city = cityScope();
-  const res = city
-    ? await api.GET("/v0/city/{cityName}/events", {
-        params: { path: { cityName: city }, query: { since: "1h", limit: 100 } },
-      })
-    : await api.GET("/v0/events", {
-        params: { query: { since: "1h" } },
-      });
-  const normalized = (res.data?.items ?? [])
+  let records: DashboardHistoryRecord[] = [];
+  let supervisorEventCursor = "";
+  if (city) {
+    const res = await api.GET("/v0/city/{cityName}/events", {
+      params: { path: { cityName: city }, query: { since: "1h", limit: 100 } },
+    });
+    records = res.data?.items ?? [];
+  } else {
+    const res = await api.GET("/v0/events", {
+      params: { query: { since: "1h" } },
+    });
+    records = res.data?.items ?? [];
+    supervisorEventCursor = res.data?.event_cursor ?? "";
+  }
+  const normalized = records
     .map((item) => toEntryFromRecord(item))
     .filter((item): item is ActivityEntry => item !== null);
-  streamCursor = cursorFromRecords(res.data?.items ?? [], city);
+  streamCursor = cursorFromRecords(records, city, supervisorEventCursor);
   await seedActivity(normalized);
 }
 
@@ -99,8 +107,9 @@ export function activityStreamCursorForTest(): { afterCursor?: string; afterSeq?
 export function activityStreamCursorFromRecordsForTest(
   records: DashboardEventRecord[],
   city: string,
+  supervisorEventCursor = "",
 ): { afterCursor?: string; afterSeq?: string } {
-  return cursorFromRecords(records, city);
+  return cursorFromRecords(records, city, supervisorEventCursor);
 }
 
 export function stopActivityStream(): void {
@@ -234,7 +243,7 @@ function toEntryFromMessage(msg: DashboardEventMessage): ActivityEntry | null {
   return toActivityEntry(msg.data, msg.id);
 }
 
-function toEntryFromRecord(record: CityEventRecord | SupervisorEventRecord): ActivityEntry | null {
+function toEntryFromRecord(record: DashboardHistoryRecord): ActivityEntry | null {
   return toActivityEntry(record);
 }
 
@@ -295,13 +304,18 @@ function recordCity(record: DashboardEventRecord): string | undefined {
   return undefined;
 }
 
-function cursorFromRecords(records: DashboardEventRecord[], city: string): { afterCursor?: string; afterSeq?: string } {
+function cursorFromRecords(
+  records: DashboardEventRecord[],
+  city: string,
+  supervisorEventCursor = "",
+): { afterCursor?: string; afterSeq?: string } {
   if (city) {
     const maxSeq = records.reduce((max, record) => Math.max(max, record.seq ?? 0), 0);
     return maxSeq > 0 ? { afterSeq: String(maxSeq) } : {};
   }
 
-  return {};
+  const cursor = supervisorEventCursor.trim();
+  return cursor ? { afterCursor: cursor } : {};
 }
 
 function stableEventID(record: DashboardEventRecord, eventID?: string): string {

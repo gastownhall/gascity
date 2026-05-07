@@ -13,9 +13,12 @@ import { installCommandPalette } from "./palette";
 import { installDashboardLogging, logInfo } from "./logger";
 import {
   consumeInvalidated,
+  canFetchCityScopedResources,
   currentCityStatus,
   invalidateAll,
   invalidateForEventType,
+  isKnownUnavailableCity,
+  markCachedCitiesUnknown,
   syncCityScopeFromLocation,
   type DashboardResource,
 } from "./state";
@@ -64,7 +67,7 @@ function wireSSE(): void {
   // the supervisor with every backoff tick. Supervisor-scope streams
   // (kind === "supervisor") always open.
   const status = currentCityStatus();
-  if (status.kind === "not-running" || status.kind === "unknown") {
+  if (isKnownUnavailableCity(status)) {
     stopActivityStream();
     setConnectionBadge("connecting"); // visible "not wired" state; re-wires on next city switch
     return;
@@ -231,28 +234,30 @@ async function refreshVisibleResources(force = false): Promise<void> {
   }
 
   if (dirty.has("cities")) {
-    await renderCityTabs().catch((error) => reportUIError("City tabs failed", error));
+    await renderCityTabs().catch((error) => {
+      markCachedCitiesUnknown();
+      reportUIError("City tabs failed", error);
+    });
   }
 
   const tasks: Array<Promise<void>> = [];
   const status = currentCityStatus();
-  const hasRunningCity = status.kind === "running";
-  syncCityScopedControls(hasRunningCity);
-  if (status.kind === "not-running" || status.kind === "unknown") {
+  const canFetchCity = canFetchCityScopedResources(status);
+  syncCityScopedControls(canFetchCity);
+  if (isKnownUnavailableCity(status)) {
     resetCityScopedResourceViews();
   }
 
   queueRefresh(tasks, dirty, "status", () => renderStatus());
-  if (status.kind === "supervisor" || hasRunningCity) {
+  if (status.kind === "supervisor" || canFetchCity) {
     queueRefresh(tasks, dirty, "activity", () => loadActivityHistory());
   } else {
     resetActivity();
   }
-  // Only fan out per-city fetches when the selected city is actually
-  // running. Stopped/unknown cities return 404 for every endpoint,
-  // which cascades into a console full of errors for the user. Let
-  // renderStatus surface the "city not running" banner instead.
-  if (hasRunningCity) {
+  // Fan out city-scoped fetches for running cities and for selected
+  // cities whose availability is not known yet. Reset/hide only once
+  // the city list is known-good and proves the city is stopped or absent.
+  if (canFetchCity) {
     queueRefresh(tasks, dirty, "crew", () => renderCrew());
     queueRefresh(tasks, dirty, "issues", () => renderIssues());
     queueRefresh(tasks, dirty, "mail", () => renderMail());

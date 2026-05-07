@@ -1,6 +1,6 @@
 import { api, cityScope, type DashboardSchema } from "../api";
 import { logWarn } from "../logger";
-import { currentCityStatus, getCachedCities } from "../state";
+import { currentCityStatus, isKnownUnavailableCity } from "../state";
 import { byId, clear, el } from "../util/dom";
 import { ACTIVE_WINDOW_MS, beadPriority, formatTimestamp } from "../util/legacy";
 
@@ -26,7 +26,7 @@ export async function renderStatus(): Promise<void> {
   }
 
   const status = currentCityStatus();
-  if (status.kind === "not-running" || (status.kind === "unknown" && getCachedCities().length > 0)) {
+  if (isKnownUnavailableCity(status)) {
     const reason = status.kind === "not-running"
       ? (status.city.error ?? status.city.status ?? "City not running")
       : "City unavailable";

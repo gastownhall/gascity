@@ -618,14 +618,18 @@ func TestSupervisorGlobalEventList(t *testing.T) {
 	}
 
 	var resp struct {
-		Items []events.TaggedEvent `json:"items"`
-		Total int                  `json:"total"`
+		EventCursor string               `json:"event_cursor"`
+		Items       []events.TaggedEvent `json:"items"`
+		Total       int                  `json:"total"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if resp.Total != 2 {
 		t.Errorf("total = %d, want 2", resp.Total)
+	}
+	if resp.EventCursor != "alpha:1,beta:1" {
+		t.Fatalf("event_cursor = %q, want alpha:1,beta:1", resp.EventCursor)
 	}
 
 	// Verify events are tagged with city names.

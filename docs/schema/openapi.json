@@ -6491,6 +6491,10 @@
       "SupervisorEventListOutputBody": {
         "additionalProperties": false,
         "properties": {
+          "event_cursor": {
+            "description": "Supervisor event-stream cursor captured before the history snapshot was listed. Pass this value as after_cursor to /v0/events/stream to receive events emitted after the snapshot boundary without replaying unrelated historical backlog.",
+            "type": "string"
+          },
           "items": {
             "items": {
               "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelope"
@@ -6506,6 +6510,7 @@
           }
         },
         "required": [
+          "event_cursor",
           "items",
           "total"
         ],

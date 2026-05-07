@@ -146,4 +146,91 @@ describe("dashboard city scope navigation", () => {
       expect(document.getElementById("beads-panel")?.textContent).not.toContain("mlc1-627");
     });
   });
+
+  it("keeps city-scoped panels enabled before the city list is known-good", async () => {
+    const renderIssues = vi.fn(async () => {
+      document.getElementById("beads-panel")!.textContent = "loaded selected city";
+    });
+    const resetIssuesNoCity = vi.fn(() => {
+      document.getElementById("beads-panel")!.textContent = "cleared beads";
+    });
+
+    vi.doMock("./logger", () => ({
+      installDashboardLogging: vi.fn(),
+      logInfo: vi.fn(),
+    }));
+    vi.doMock("./ui", () => ({
+      installPanelAffordances: vi.fn(),
+      popPause: vi.fn(),
+      refreshPaused: vi.fn(() => false),
+      reportUIError: vi.fn(),
+      setPopPauseListener: vi.fn(),
+    }));
+    vi.doMock("./refresh_scheduler", () => ({
+      createRefreshScheduler: vi.fn(() => ({ schedule: vi.fn() })),
+    }));
+    vi.doMock("./modals", () => ({
+      installSharedModals: vi.fn(),
+    }));
+    vi.doMock("./palette", () => ({
+      installCommandPalette: vi.fn(),
+    }));
+    vi.doMock("./panels/cities", () => ({
+      renderCityTabs: vi.fn(async () => {
+        throw new Error("temporary city list failure");
+      }),
+    }));
+    vi.doMock("./panels/status", () => ({
+      renderStatus: vi.fn(async () => {}),
+    }));
+    vi.doMock("./panels/crew", () => ({
+      closeLogDrawerExternal: vi.fn(),
+      installCrewInteractions: vi.fn(),
+      renderCrew: vi.fn(async () => {}),
+      resetCrewNoCity: vi.fn(),
+    }));
+    vi.doMock("./panels/issues", () => ({
+      installIssueInteractions: vi.fn(),
+      renderIssues,
+      resetIssuesNoCity,
+    }));
+    vi.doMock("./panels/mail", () => ({
+      installMailInteractions: vi.fn(),
+      renderMail: vi.fn(async () => {}),
+      resetMailNoCity: vi.fn(),
+    }));
+    vi.doMock("./panels/convoys", () => ({
+      installConvoyInteractions: vi.fn(),
+      renderConvoys: vi.fn(async () => {}),
+      resetConvoysNoCity: vi.fn(),
+    }));
+    vi.doMock("./panels/activity", () => ({
+      eventTypeFromMessage: vi.fn(() => ""),
+      installActivityInteractions: vi.fn(),
+      loadActivityHistory: vi.fn(async () => {}),
+      resetActivity: vi.fn(),
+      startActivityStream: vi.fn(),
+      stopActivityStream: vi.fn(),
+    }));
+    vi.doMock("./panels/admin", () => ({
+      installAdminInteractions: vi.fn(),
+      renderAdminEmptyStates: vi.fn(),
+      renderAdminPanels: vi.fn(async () => {}),
+    }));
+    vi.doMock("./panels/options", () => ({
+      invalidateOptions: vi.fn(),
+    }));
+    vi.doMock("./panels/supervisor", () => ({
+      renderSupervisorOverview: vi.fn(),
+    }));
+
+    await import("./main");
+
+    await waitFor(() => {
+      expect(renderIssues).toHaveBeenCalled();
+      expect(document.getElementById("beads-panel")?.hidden).toBe(false);
+      expect(document.getElementById("beads-panel")?.textContent).toBe("loaded selected city");
+    });
+    expect(resetIssuesNoCity).not.toHaveBeenCalled();
+  });
 });

@@ -1,5 +1,4 @@
 export interface RefreshScheduler {
-  flushNow(): Promise<void>;
   schedule(): void;
 }
 
@@ -51,13 +50,5 @@ export function createRefreshScheduler(options: RefreshSchedulerOptions): Refres
     }, Math.max(options.delayMs, intervalDelayMs));
   }
 
-  async function flushNow(): Promise<void> {
-    if (timer !== null) {
-      clearTimeout(timer);
-      timer = null;
-    }
-    await flush();
-  }
-
-  return { flushNow, schedule };
+  return { schedule };
 }
