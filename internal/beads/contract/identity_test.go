@@ -530,10 +530,13 @@ func TestNoExternalIdentityWriters(t *testing.T) {
 
 	// identityWriterAllowlist enumerates relative paths that may legitimately
 	// contain the literal "identity.toml" outside internal/beads/contract/.
-	// Empty by design — no benign external references exist today. Add an
-	// entry only with a comment explaining why a move into the contract
-	// package is not feasible.
-	identityWriterAllowlist := map[string]string{}
+	// Add an entry only when the reference is not an identity file writer and
+	// moving it through WriteProjectIdentity would misrepresent what it does.
+	identityWriterAllowlist := map[string]string{
+		// gitignore.go writes .gitignore negation patterns so identity.toml is
+		// tracked; it never reads or writes the identity file itself.
+		filepath.Join("cmd", "gc", "gitignore.go"): "gitignore pattern",
+	}
 
 	needle := []byte("identity.toml")
 	var violations []string
