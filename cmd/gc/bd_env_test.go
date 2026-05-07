@@ -3513,6 +3513,7 @@ func clearAmbientPostgresEnv(t *testing.T) {
 
 func TestApplyResolvedScopePostgresEnv_HappyPath(t *testing.T) {
 	clearAmbientPostgresEnv(t)
+	cityPath := t.TempDir()
 	scopeRoot := t.TempDir()
 	writePGScopeFixture(t, scopeRoot, "devpw")
 
@@ -3524,7 +3525,7 @@ func TestApplyResolvedScopePostgresEnv_HappyPath(t *testing.T) {
 		PostgresUser:     "bd",
 		PostgresDatabase: "beads",
 	}
-	if err := applyResolvedScopePostgresEnv(env, scopeRoot, meta); err != nil {
+	if err := applyResolvedScopePostgresEnv(env, cityPath, scopeRoot, meta); err != nil {
 		t.Fatalf("applyResolvedScopePostgresEnv: %v", err)
 	}
 	want := map[string]string{
@@ -4019,6 +4020,7 @@ func TestMergeRuntimeEnvScrubsPostgresKeys(t *testing.T) {
 
 func TestApplyResolvedScopePostgresEnv_NoPasswordResolvable(t *testing.T) {
 	clearAmbientPostgresEnv(t)
+	cityPath := t.TempDir()
 	scopeRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(scopeRoot, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
@@ -4032,7 +4034,7 @@ func TestApplyResolvedScopePostgresEnv_NoPasswordResolvable(t *testing.T) {
 		PostgresUser:     "bd",
 		PostgresDatabase: "beads",
 	}
-	err := applyResolvedScopePostgresEnv(env, scopeRoot, meta)
+	err := applyResolvedScopePostgresEnv(env, cityPath, scopeRoot, meta)
 	if err == nil {
 		t.Fatal("applyResolvedScopePostgresEnv = nil error, want resolver exhaustion")
 	}

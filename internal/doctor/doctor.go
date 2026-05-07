@@ -83,6 +83,9 @@ func (d *Doctor) run(ctx *CheckContext, w io.Writer, fix, stream bool) *Report {
 
 		if stream {
 			printResult(w, result, ctx.Verbose)
+			if r, ok := c.(Renderer); ok {
+				r.RenderExtras(ctx, w)
+			}
 		}
 		r.Results = append(r.Results, result)
 
