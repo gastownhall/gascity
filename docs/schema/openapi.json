@@ -17245,12 +17245,12 @@
             }
           },
           {
-            "description": "Thread ID.",
+            "description": "Thread ID, or any message ID in the thread.",
             "in": "path",
             "name": "id",
             "required": true,
             "schema": {
-              "description": "Thread ID.",
+              "description": "Thread ID, or any message ID in the thread.",
               "type": "string"
             }
           },

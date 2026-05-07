@@ -1439,6 +1439,27 @@ func TestThreadSurfacesNonNotFoundStoreErrors(t *testing.T) {
 	}
 }
 
+func TestThreadRejectsNonMessageBeadID(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+	task, err := store.Create(beads.Bead{
+		Title:  "not mail",
+		Type:   "task",
+		Labels: []string{"thread:looks-mail-like"},
+	})
+	if err != nil {
+		t.Fatalf("Create task: %v", err)
+	}
+
+	_, err = p.Thread(task.ID)
+	if err == nil {
+		t.Fatal("Thread(non-message bead ID): expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), `bead "`) || !strings.Contains(err.Error(), "want message") {
+		t.Fatalf("Thread(non-message bead ID) error = %q, want clear non-message diagnostic", err)
+	}
+}
+
 // getErrorStore returns a custom error from Get; List defers to MemStore.
 type getErrorStore struct {
 	*beads.MemStore

@@ -31,8 +31,14 @@ PROMOTED=0
 DELETED=0
 SKIPPED=0
 
-# Process each ephemeral bead.
-echo "$EPHEMERALS" | jq -c '.[]' 2>/dev/null | while IFS= read -r bead; do
+# Process each ephemeral bead. Capturing jq output into BEADS first
+# (instead of piping into the loop) preserves the original pipefail
+# fail-loud on jq error AND keeps PROMOTED/DELETED/SKIPPED in the parent
+# shell so they survive to the summary echo below. EPHEMERALS is
+# pre-validated as a non-empty array on lines 22-27, so BEADS is
+# guaranteed non-empty here.
+BEADS=$(echo "$EPHEMERALS" | jq -c '.[]' 2>/dev/null)
+while IFS= read -r bead; do
     id=$(echo "$bead" | jq -r '.id')
     status=$(echo "$bead" | jq -r '.status')
     updated_at=$(echo "$bead" | jq -r '.updated_at // .created_at')
@@ -73,7 +79,7 @@ echo "$EPHEMERALS" | jq -c '.[]' 2>/dev/null | while IFS= read -r bead; do
     # Closed + past TTL + no special attributes → delete.
     bd delete "$id" --force 2>/dev/null || true
     DELETED=$((DELETED + 1))
-done
+done <<< "$BEADS"
 
 TOTAL=$((PROMOTED + DELETED))
 if [ "$TOTAL" -gt 0 ]; then

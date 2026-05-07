@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -4588,5 +4589,146 @@ func TestJsonlExportHaltMailFailurePreservesExistingPendingAlerts(t *testing.T) 
 	}
 	if _, ok := pendingAlerts["beads"]; !ok {
 		t.Fatalf("expected new pending alert to be added, got:\n%s", stateData)
+	}
+}
+
+func TestWispCompactReportsNonZeroCounters(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+
+	pastTTL := "2020-01-01T00:00:00Z"
+	withinTTL := time.Now().UTC().Format(time.RFC3339)
+	beadsJSON := fmt.Sprintf(`[
+  {"id":"ga-old-1","status":"closed","ephemeral":true,"updated_at":"%s","comment_count":0,"labels":[]},
+  {"id":"ga-old-2","status":"closed","ephemeral":true,"updated_at":"%s","comment_count":0,"labels":[]},
+  {"id":"ga-stuck","status":"open","ephemeral":true,"updated_at":"%s","comment_count":0,"labels":[]},
+  {"id":"ga-fresh","status":"closed","ephemeral":true,"updated_at":"%s","comment_count":0,"labels":[]}
+]`, pastTTL, pastTTL, pastTTL, withinTTL)
+
+	writeExecutable(t, filepath.Join(binDir, "bd"), fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> "$BD_LOG"
+case "$1 $2" in
+  "list --json")
+    cat <<'JSON'
+%s
+JSON
+    ;;
+esac
+exit 0
+`, beadsJSON))
+
+	env := map[string]string{
+		"BD_LOG":       bdLog,
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+
+	logData, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	if !strings.Contains(string(logData), "list --json --all -n 0") {
+		t.Fatalf("bd list call not observed:\n%s", logData)
+	}
+
+	want := "wisp-compact: promoted=1 deleted=2 skipped=1"
+	if !strings.Contains(string(out), want) {
+		t.Fatalf("wisp-compact summary missing or wrong (subshell counter regression?)\nwant substring: %q\ngot output:\n%s", want, out)
+	}
+}
+
+func TestCrossRigDepsReportsNonZeroCounter(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+
+	closedJSON := `[{"id":"ga-closed-1"},{"id":"ga-closed-2"},{"id":"ga-closed-internal"}]`
+	depsForClosed1 := `[{"id":"external:rig-a/ga-dep-1"},{"id":"external:rig-b/ga-dep-2"}]`
+	depsForClosed2 := `[{"id":"external:rig-a/ga-dep-3"},{"id":"external:rig-c/ga-dep-4"}]`
+	depsForClosedInternal := `[{"id":"ga-internal-1"},{"id":"ga-internal-2"}]`
+
+	writeExecutable(t, filepath.Join(binDir, "bd"), fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> "$BD_LOG"
+case "$1" in
+  list)
+    cat <<'JSON'
+%s
+JSON
+    exit 0
+    ;;
+  dep)
+    case "$2 $3" in
+      "list ga-closed-1")
+        cat <<'JSON'
+%s
+JSON
+        exit 0
+        ;;
+      "list ga-closed-2")
+        cat <<'JSON'
+%s
+JSON
+        exit 0
+        ;;
+      "list ga-closed-internal")
+        cat <<'JSON'
+%s
+JSON
+        exit 0
+        ;;
+      "remove "*|"add "*)
+        exit 0
+        ;;
+    esac
+    ;;
+esac
+exit 0
+`, closedJSON, depsForClosed1, depsForClosed2, depsForClosedInternal))
+
+	env := map[string]string{
+		"BD_LOG":       bdLog,
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "cross-rig-deps.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+
+	logData, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	for _, want := range []string{
+		"dep list ga-closed-1",
+		"dep list ga-closed-2",
+		"dep list ga-closed-internal",
+	} {
+		if !strings.Contains(string(logData), want) {
+			t.Fatalf("bd dep list call %q not observed:\n%s", want, logData)
+		}
+	}
+	if strings.Contains(string(logData), `dep remove "" `) || strings.Contains(string(logData), "dep remove  ") {
+		t.Fatalf("bogus empty-dep_id call observed (empty-filter guard regression?):\n%s", logData)
+	}
+
+	want := "cross-rig-deps: resolved 4 cross-rig dependencies"
+	if !strings.Contains(string(out), want) {
+		t.Fatalf("cross-rig-deps summary missing or wrong (subshell counter regression?)\nwant substring: %q\ngot output:\n%s\nbd log:\n%s", want, out, logData)
 	}
 }

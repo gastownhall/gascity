@@ -397,6 +397,9 @@ func (p *Provider) Thread(id string) ([]mail.Message, error) {
 	msgBead, err := p.store.Get(id)
 	switch {
 	case err == nil:
+		if msgBead.Type != "message" {
+			return nil, fmt.Errorf("beadmail thread: bead %q is type %q, want message", id, msgBead.Type)
+		}
 		if t := extractLabel(msgBead.Labels, "thread:"); t != "" {
 			threadID = t
 		}

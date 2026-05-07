@@ -7278,7 +7278,7 @@ export type GetV0CityByCityNameMailThreadByIdData = {
          */
         cityName: string;
         /**
-         * Thread ID.
+         * Thread ID, or any message ID in the thread.
          */
         id: string;
     };

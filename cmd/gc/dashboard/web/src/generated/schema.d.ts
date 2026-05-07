@@ -8662,7 +8662,7 @@ export interface operations {
             path: {
                 /** @description City name. */
                 cityName: string;
-                /** @description Thread ID. */
+                /** @description Thread ID, or any message ID in the thread. */
                 id: string;
             };
             cookie?: never;
