@@ -62,7 +62,8 @@ gc version
 <Warning>
 If you use Oh My Zsh with the `git` plugin, `gc` may already be an alias for
 `git commit --verbose`. Run `command gc version` once to bypass the alias. For
-a persistent fix, add `unalias gc 2>/dev/null` after Oh My Zsh loads in
+a persistent fix, add `unalias gc 2>/dev/null` or
+`zstyle ':omz:plugins:git' aliases no 'gc'` after Oh My Zsh loads in
 `~/.zshrc`, or put that line in a file such as
 `~/.oh-my-zsh/custom/gascity.zsh`.
 </Warning>
