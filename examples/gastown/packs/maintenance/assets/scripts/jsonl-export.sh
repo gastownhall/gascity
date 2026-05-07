@@ -383,9 +383,24 @@ retry_pending_spike_alert() {
 
 push_archive_main() {
     local consecutive
+    local fetch_err
+    local rebase_err
+    local push_err
+
+    # Retain only the last ~20 lines of stderr so an extremely chatty failure
+    # doesn't drown the escalation body.
+    truncate_stderr_context() {
+        local raw="$1"
+
+        [ -z "$raw" ] && return 0
+        printf '%s\n' "$raw" | tail -n 20
+    }
 
     record_archive_push_failure() {
         local message="$1"
+        local stderr_context="$2"
+        local body
+        local stderr_display
 
         echo "$message" >&2
         consecutive=$(read_state_json | jq -r '.consecutive_push_failures // 0' || echo "0")
@@ -394,17 +409,39 @@ push_archive_main() {
         set_pending_archive_push
 
         if [ "$consecutive" -ge "$MAX_PUSH_FAILURES" ]; then
+            stderr_display=$(truncate_stderr_context "$stderr_context")
+            if [ -z "$stderr_display" ]; then
+                stderr_display="(no stderr captured)"
+            fi
+            body=$(cat <<ESCALATION
+Order: mol-dog-jsonl
+Archive: $ARCHIVE_REPO
+Consecutive failures: $consecutive (threshold: $MAX_PUSH_FAILURES)
+
+Last git push stderr:
+$stderr_display
+
+Remediation:
+- Check remote: git -C $ARCHIVE_REPO remote -v
+- Verify remote is reachable and credentials are valid
+- Temporarily suppress: export GC_JSONL_MAX_PUSH_FAILURES=99
+- See docs/getting-started/troubleshooting.md#jsonl-archive-push-failures
+ESCALATION
+)
             gc mail send mayor/ -s "ESCALATION: JSONL push failed [HIGH]" \
-                -m "Consecutive failures: $consecutive (threshold: $MAX_PUSH_FAILURES)" \
+                -m "$body" \
                 2>/dev/null || true
         fi
 
         return 1
     }
 
-    if ! refresh_archive_remote_main; then
+    fetch_err=$(git fetch origin main -q 2>&1 >/dev/null) || true
+    if [ -n "$fetch_err" ] || ! git rev-parse --verify refs/remotes/origin/main >/dev/null 2>&1; then
         if git rev-parse --verify refs/remotes/origin/main >/dev/null 2>&1; then
-            record_archive_push_failure "jsonl-export: fetching origin/main failed"
+            record_archive_push_failure \
+                "jsonl-export: fetching origin/main failed" \
+                "$fetch_err"
             return 1
         fi
         echo "jsonl-export: origin/main missing; attempting initial push bootstrap" >&2
@@ -412,11 +449,13 @@ push_archive_main() {
 
     if git rev-parse --verify refs/remotes/origin/main >/dev/null 2>&1; then
         if ! git merge-base --is-ancestor refs/remotes/origin/main HEAD >/dev/null 2>&1; then
-            if ! git rebase refs/remotes/origin/main >/dev/null 2>&1; then
+            rebase_err=$(git rebase refs/remotes/origin/main 2>&1 >/dev/null) || {
                 git rebase --abort >/dev/null 2>&1 || true
-                record_archive_push_failure "jsonl-export: rebase onto origin/main failed during archive push recovery"
+                record_archive_push_failure \
+                    "jsonl-export: rebase onto origin/main failed during archive push recovery" \
+                    "$rebase_err"
                 return 1
-            fi
+            }
         fi
         if ! archive_has_local_only_commits_from_tracking; then
             set_consecutive_push_failures "0"
@@ -425,13 +464,16 @@ push_archive_main() {
         fi
     fi
 
-    if git push origin main -q 2>/dev/null; then
-        set_consecutive_push_failures "0"
-        clear_pending_archive_push
-        return 0
-    fi
+    push_err=$(git push origin main -q 2>&1 >/dev/null) || {
+        record_archive_push_failure \
+            "jsonl-export: pushing archive main failed" \
+            "$push_err"
+        return 1
+    }
 
-    record_archive_push_failure "jsonl-export: pushing archive main failed"
+    set_consecutive_push_failures "0"
+    clear_pending_archive_push
+    return 0
 }
 
 commit_archive_snapshot() {
