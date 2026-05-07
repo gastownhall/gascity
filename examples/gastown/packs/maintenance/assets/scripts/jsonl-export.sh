@@ -529,9 +529,13 @@ if [ -z "$DATABASES" ]; then
     if [ -d "$ARCHIVE_REPO/.git" ]; then
         cd "$ARCHIVE_REPO"
         if has_pending_archive_push || archive_has_local_only_commits; then
-            PUSH_STATUS="ok"
-            if ! push_archive_main; then
-                PUSH_STATUS="failed"
+            if should_attempt_push; then
+                PUSH_STATUS="ok"
+                if ! push_archive_main; then
+                    PUSH_STATUS="failed"
+                fi
+            else
+                PUSH_STATUS="skipped (local-only)"
             fi
             SUMMARY="jsonl — no user databases, push: $PUSH_STATUS"
             gc session nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
@@ -746,9 +750,13 @@ fi
 
 if git diff --cached --quiet 2>/dev/null; then
     if has_pending_archive_push || archive_has_local_only_commits; then
-        PUSH_STATUS="ok"
-        if ! push_archive_main; then
-            PUSH_STATUS="failed"
+        if should_attempt_push; then
+            PUSH_STATUS="ok"
+            if ! push_archive_main; then
+                PUSH_STATUS="failed"
+            fi
+        else
+            PUSH_STATUS="skipped (local-only)"
         fi
         if [ -n "$FAILED_DBS" ]; then
             EXPORTED_DBS=$((TOTAL_DBS - FAILED_DB_COUNT))
@@ -781,9 +789,13 @@ commit_archive_snapshot \
 }
 set_pending_archive_push
 
-PUSH_STATUS="ok"
-if ! push_archive_main; then
-    PUSH_STATUS="failed"
+if should_attempt_push; then
+    PUSH_STATUS="ok"
+    if ! push_archive_main; then
+        PUSH_STATUS="failed"
+    fi
+else
+    PUSH_STATUS="skipped (local-only)"
 fi
 
 SUMMARY="jsonl — exported $EXPORTED_DBS/$TOTAL_DBS, records: $TOTAL_EXPORTED, push: $PUSH_STATUS"

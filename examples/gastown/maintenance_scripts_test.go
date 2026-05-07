@@ -3452,6 +3452,21 @@ func initEmptyArchiveRemote(t *testing.T, archiveRepo string, prevCount int) str
 	return remoteRepo
 }
 
+// initSeedArchiveWithUnreachableRemote seeds the archive and adds an `origin`
+// that points at a nonexistent path, so any `git fetch`/`git push` fails.
+// Used by tests that specifically exercise the push-failure recovery paths:
+// push mode is active (so `should_attempt_push` returns true) but the remote
+// cannot be reached.
+func initSeedArchiveWithUnreachableRemote(t *testing.T, archiveRepo string, prevCount int) string {
+	t.Helper()
+	head := initSeedArchive(t, archiveRepo, prevCount)
+	unreachable := filepath.Join(t.TempDir(), "nonexistent-remote.git")
+	if out, err := exec.Command("git", "-C", archiveRepo, "remote", "add", "origin", unreachable).CombinedOutput(); err != nil {
+		t.Fatalf("git remote add origin: %v\n%s", err, out)
+	}
+	return head
+}
+
 func advanceArchiveRemoteMain(t *testing.T, remoteRepo string) string {
 	t.Helper()
 	worktree := t.TempDir()
@@ -4522,7 +4537,7 @@ func TestJsonlExportPushFailureRecoversFromMalformedState(t *testing.T) {
 	archiveRepo := filepath.Join(cityDir, "archive")
 	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
 
-	initSeedArchive(t, archiveRepo, 3)
+	initSeedArchiveWithUnreachableRemote(t, archiveRepo, 3)
 	writeMultiRecordDoltStub(t, binDir, 5)
 	writeJsonlExportGCStub(t, binDir)
 
@@ -4556,7 +4571,7 @@ func TestJsonlExportPushFailureRecoversFromWrongShapeState(t *testing.T) {
 	archiveRepo := filepath.Join(cityDir, "archive")
 	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
 
-	initSeedArchive(t, archiveRepo, 3)
+	initSeedArchiveWithUnreachableRemote(t, archiveRepo, 3)
 	writeMultiRecordDoltStub(t, binDir, 5)
 	writeJsonlExportGCStub(t, binDir)
 
