@@ -126,9 +126,15 @@ func buildOrderDispatcher(cityPath string, cfg *config.City, rec events.Recorder
 	}
 
 	// Filter out manual-trigger orders — they are never auto-dispatched.
+	// Also filter out disabled orders — ApplyOverrides above may have flipped
+	// Enabled=false on a scanned order whose formula default is enabled, and
+	// the dispatcher must honor that override (DECISION.md 2026-05-05:
+	// "[[orders.overrides]] enabled = false did not suppress the orders from
+	// firing"). The scanner pre-filter at scanner.go:85 only sees the formula
+	// default, so post-override re-filtering is required here.
 	var auto []orders.Order
 	for _, a := range allAA {
-		if a.Trigger != "manual" {
+		if a.Trigger != "manual" && a.IsEnabled() {
 			auto = append(auto, a)
 		}
 	}

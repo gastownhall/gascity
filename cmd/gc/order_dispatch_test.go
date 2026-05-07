@@ -168,6 +168,59 @@ func TestOrderDispatchManualFiltered(t *testing.T) {
 	}
 }
 
+// TestOrderDispatchDisabledFiltered guards against the orders.overrides
+// regression: ApplyOverrides correctly sets Enabled=false on the in-memory
+// Order, but if the dispatcher's auto-trigger filter only rejects
+// Trigger=="manual" and ignores IsEnabled(), every disabled order still
+// runs every reconciler tick. This is the bug DECISION.md (2026-05-05)
+// reported as "[[orders.overrides]] enabled = false did not suppress the
+// orders from firing". Disabled orders must not produce a dispatcher.
+func TestOrderDispatchDisabledFiltered(t *testing.T) {
+	disabled := false
+	ad := buildOrderDispatcherFromList(
+		[]orders.Order{{
+			Name:     "disabled-cooldown",
+			Trigger:  "cooldown",
+			Interval: "1m",
+			Formula:  "noop",
+			Pool:     "worker",
+			Enabled:  &disabled,
+		}},
+		beads.NewMemStore(), nil,
+	)
+	if ad != nil {
+		t.Error("expected nil dispatcher — disabled orders must be filtered out (orders.overrides enabled=false)")
+	}
+}
+
+// TestOrderDispatchEnabledFalseOverrideTakesEffect is the end-to-end
+// regression for the ApplyOverrides → buildOrderDispatcher pipeline that
+// DECISION.md flagged. A scanned order arrives Enabled=nil (meaning "use
+// formula default = enabled"); a city.toml [[orders.overrides]] with
+// enabled=false should flip it; the dispatcher's filter must respect that.
+func TestOrderDispatchEnabledFalseOverrideTakesEffect(t *testing.T) {
+	scanned := []orders.Order{{
+		Name:     "noisy-cooldown",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Formula:  "noop",
+		Pool:     "worker",
+		// Enabled deliberately nil — defaults to "enabled" per IsEnabled().
+	}}
+	disabled := false
+	overrides := []orders.Override{{Name: "noisy-cooldown", Enabled: &disabled}}
+	if err := orders.ApplyOverrides(scanned, overrides); err != nil {
+		t.Fatalf("ApplyOverrides: %v", err)
+	}
+	if scanned[0].IsEnabled() {
+		t.Fatal("ApplyOverrides did not flip Enabled to false; helper changed shape?")
+	}
+	ad := buildOrderDispatcherFromList(scanned, beads.NewMemStore(), nil)
+	if ad != nil {
+		t.Error("expected nil dispatcher after enabled=false override — buildOrderDispatcher filter ignores IsEnabled()")
+	}
+}
+
 func TestOrderDispatchCooldownDue(t *testing.T) {
 	store := beads.NewMemStore()
 
@@ -2762,7 +2815,7 @@ func buildOrderDispatcherFromListExec(aa []orders.Order, store beads.Store, ep e
 	cfg := &config.City{}
 	seenRigs := make(map[string]bool)
 	for _, a := range aa {
-		if a.Trigger != "manual" {
+		if a.Trigger != "manual" && a.IsEnabled() {
 			auto = append(auto, a)
 		}
 		if a.Rig != "" && !seenRigs[a.Rig] {
