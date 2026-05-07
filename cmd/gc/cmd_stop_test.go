@@ -447,6 +447,52 @@ func TestStopCityManagedBeadsProviderIfRunningStopsDefaultBD(t *testing.T) {
 	}
 }
 
+func TestMarkCityStopSessionSleepReasonSkipsCreatingSessions(t *testing.T) {
+	store := beads.NewMemStore()
+	active, err := store.Create(beads.Bead{
+		Title:  "active",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"state":        "active",
+			"session_name": "active",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	creating, err := store.Create(beads.Bead{
+		Title:  "creating",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"state":                "creating",
+			"session_name":         "creating",
+			"pending_create_claim": "true",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	markCityStopSessionSleepReason(store, ioDiscard{})
+
+	activeUpdated, err := store.Get(active.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := activeUpdated.Metadata["sleep_reason"]; got != sleepReasonCityStop {
+		t.Fatalf("active sleep_reason = %q, want %q", got, sleepReasonCityStop)
+	}
+	creatingUpdated, err := store.Get(creating.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := creatingUpdated.Metadata["sleep_reason"]; got != "" {
+		t.Fatalf("creating sleep_reason = %q, want empty because create rollback owns this state", got)
+	}
+}
+
 func TestCmdStopUsesTargetCitySessionProviderOutsideCityDir(t *testing.T) {
 	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
 

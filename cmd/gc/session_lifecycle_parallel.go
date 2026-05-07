@@ -1059,7 +1059,7 @@ func commitAsyncStartResultWithContext(
 		}
 		if refreshed.err == nil && shouldRollbackPendingCreate(refreshed.prepared.candidate.session) {
 			stopStaleAsyncStartRuntime(refreshed, sp, stderr)
-			clearPendingStartInFlightLease(refreshed.prepared.candidate.session, store, stderr)
+			rollbackPendingCreate(refreshed.prepared.candidate.session, store, clk.Now().UTC(), stderr)
 		}
 		logLifecycleOutcome(stderr, "start", wave, name, template, "context_canceled", refreshed.started, time.Now(), ctx.Err())
 		return false

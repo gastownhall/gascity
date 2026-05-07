@@ -245,7 +245,7 @@ func markCityStopSessionSleepReason(store beads.Store, stderr io.Writer) {
 	}
 	for _, session := range sessions {
 		state := sessionMetadataState(session)
-		if state != "active" && state != "creating" {
+		if state != "active" {
 			continue
 		}
 		if strings.TrimSpace(session.Metadata["sleep_reason"]) != "" {

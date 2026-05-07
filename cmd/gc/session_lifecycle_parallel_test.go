@@ -3170,11 +3170,8 @@ func TestCommitAsyncStartResultWithContext_SkipsCanceledCommit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := updated.Metadata["state"]; got != "creating" {
-		t.Fatalf("state = %q, want creating", got)
-	}
-	if got := updated.Metadata["pending_create_claim"]; got != "true" {
-		t.Fatalf("pending_create_claim = %q, want true", got)
+	if updated.Status != "closed" {
+		t.Fatalf("status = %q, want closed so canceled create cannot strand a creating bead", updated.Status)
 	}
 }
 
@@ -3240,6 +3237,9 @@ func TestCommitAsyncStartResultWithContext_StopsCanceledSuccessfulPendingCreateR
 	if err != nil {
 		t.Fatal(err)
 	}
+	if updated.Status != "closed" {
+		t.Fatalf("status = %q, want closed so canceled create cannot strand a creating bead", updated.Status)
+	}
 	if got := updated.Metadata["last_woke_at"]; got != "" {
 		t.Fatalf("last_woke_at = %q, want cleared so the next controller can retry", got)
 	}
@@ -3297,6 +3297,64 @@ func TestCommitAsyncStartResultWithContext_RollsBackCanceledPendingCreateError(t
 	}
 	if updated.Status != "closed" {
 		t.Fatalf("status = %q, want closed so pending-create can be retried by replacement bead", updated.Status)
+	}
+}
+
+func TestCommitAsyncStartResultWithContext_RollsBackCanceledPendingCreateSuccess(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 7, 4, 17, 11, 0, time.UTC)}
+	session, err := store.Create(beads.Bead{
+		ID:     "gc-control",
+		Title:  "control",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: creatingMeta(map[string]string{
+			"session_name":         "control",
+			"template":             "control",
+			"generation":           "2",
+			"continuation_epoch":   "1",
+			"instance_token":       "tok-control",
+			"pending_create_claim": "true",
+			"last_woke_at":         clk.Now().Format(time.RFC3339),
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := startResult{
+		prepared: preparedStart{
+			candidate: startCandidate{
+				session: &session,
+				tp: TemplateParams{
+					Command:      "control",
+					SessionName:  "control",
+					TemplateName: "control",
+				},
+			},
+		},
+		outcome:         "success",
+		started:         clk.Now(),
+		finished:        clk.Now(),
+		rollbackPending: true,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if commitAsyncStartResultWithContext(ctx, result, nil, store, clk, events.Discard, 0, ioDiscard{}, ioDiscard{}, nil) {
+		t.Fatal("canceled async success commit should report not committed")
+	}
+	updated, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != "closed" {
+		t.Fatalf("status = %q, want closed so canceled create cannot strand a creating bead", updated.Status)
+	}
+	if got := updated.Metadata["pending_create_claim"]; got != "true" {
+		t.Fatalf("pending_create_claim = %q, want preserved on closed failed-create bead for audit", got)
+	}
+	if pendingCreateStartInFlight(updated, clk, 0) {
+		t.Fatal("canceled async success left the pending-create bead leased")
 	}
 }
 
