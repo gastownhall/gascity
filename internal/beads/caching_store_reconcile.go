@@ -7,7 +7,15 @@ import (
 	"time"
 )
 
-func (c *CachingStore) reconcileLoop(ctx context.Context) {
+func (c *CachingStore) reconcileLoop(ctx context.Context, stagger time.Duration) {
+	if stagger > 0 {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(stagger):
+		}
+	}
+
 	timer := time.NewTimer(cacheReconcilePollInterval)
 	defer timer.Stop()
 
