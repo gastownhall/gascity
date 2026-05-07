@@ -252,6 +252,34 @@ describe("status panel scope rendering", () => {
     });
   });
 
+  it("renders all five scope stats when no overseer session exists", async () => {
+    window.history.pushState({}, "", "/dashboard?city=alpha");
+    apiGet.mockImplementation((path: string) => {
+      if (path.includes("/status")) {
+        return Promise.resolve(ok({
+          agents: { running: 0 },
+          mail: { unread: 0 },
+          work: { in_progress: 0, open: 0 },
+        }));
+      }
+      if (path.includes("/sessions")) return Promise.resolve(ok({ items: [] }));
+      if (path.includes("/beads")) return Promise.resolve(ok({ items: [] }));
+      if (path.includes("/convoys")) return Promise.resolve(ok({ items: [] }));
+      return Promise.resolve(ok({}));
+    });
+
+    const { renderStatus } = await import("./status");
+    await renderStatus();
+
+    const stats = scopeStats();
+    expect(Object.keys(stats)).toHaveLength(5);
+    expect(stats["City"]).toBe("alpha");
+    expect(stats["Session"]).toBe("—");
+    expect(stats["Activity"]).toBe("—");
+    expect(stats["Terminal"]).toBe("—");
+    expect(stats["State"]).toBe("—");
+  });
+
   it("keeps terminal attachment separate from the city scope badge", async () => {
     window.history.pushState({}, "", "/dashboard?city=alpha");
     const now = new Date().toISOString();
