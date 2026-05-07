@@ -32,17 +32,43 @@ const (
 	// ControlDispatcherAgentName is the built-in deterministic control lane for
 	// graph.v2 workflow control beads.
 	ControlDispatcherAgentName = "control-dispatcher"
+	// controlDispatcherDefaultTracePathExpr is the watcher-safe default trace
+	// target for the control-dispatcher. The controller ignores the hidden .gc
+	// subtree recursively, so defaults must stay under it to avoid self-triggered
+	// config-watch churn. The trace intentionally stays a flat, well-known file
+	// under .gc/runtime because operators and tests tail a single canonical path.
+	controlDispatcherDefaultTracePathExpr = `${GC_CONTROL_DISPATCHER_TRACE_DEFAULT:-${GC_CITY}/` + citylayout.RuntimeDataRoot + `/control-dispatcher-trace.log}`
+	// controlDispatcherTraceInit exports the resolved trace path. Explicit
+	// GC_WORKFLOW_TRACE overrides win first; otherwise the runtime injects a
+	// precomputed watcher-safe default trace path for the current city/session.
+	controlDispatcherTraceInit = `export GC_WORKFLOW_TRACE="${GC_WORKFLOW_TRACE:-` + controlDispatcherDefaultTracePathExpr + `}"`
+	// controlDispatcherTraceDirInit creates the parent directory for the
+	// resolved trace path. This preserves explicit GC_WORKFLOW_TRACE overrides
+	// instead of unconditionally depending on the default runtime root.
+	controlDispatcherTraceDirInit = `trace_dir="${GC_WORKFLOW_TRACE%/*}"; if [ "$trace_dir" = "$GC_WORKFLOW_TRACE" ]; then trace_dir="."; elif [ -z "$trace_dir" ]; then trace_dir="/"; fi; mkdir -p "$trace_dir"`
 	// ControlDispatcherStartCommand runs the built-in control-dispatcher worker.
 	// Wrapped in `sh -c` so any appended prompt suffix is ignored as $0.
 	// The control lane is kept resident and blocks on workflow-relevant city
 	// events instead of exiting after each one-shot drain.
-	ControlDispatcherStartCommand = `sh -c 'export GC_WORKFLOW_TRACE="${GC_WORKFLOW_TRACE:-${GC_CITY}/control-dispatcher-trace.log}"; exec "${GC_BIN:-gc}" convoy control --serve --follow ` + ControlDispatcherAgentName + `'`
+	//
+	// The trace log default is under .gc/runtime/ so it sits inside the
+	// controller's fsnotify exclusion (cmd/gc/controller.go shouldIgnoreConfigWatchEvent
+	// excludes the .gc and .beads path segments). Placing it at city root
+	// caused every append to fire markDirty() through the watcher debouncer,
+	// which kept the patrol loop in continuous reconciliation and blew patrol
+	// cycle duration well past the configured patrol_interval. See
+	// engdocs/design/session-reconciler-tracing.md for the canonical
+	// .gc/runtime/ convention for trace data.
+	ControlDispatcherStartCommand = `sh -c '` + controlDispatcherTraceInit + `; ` + controlDispatcherTraceDirInit + `; exec "${GC_BIN:-gc}" convoy control --serve --follow ` + ControlDispatcherAgentName + `'`
 )
 
 // ControlDispatcherStartCommandFor returns the start command for a
-// control-dispatcher agent with the given qualified name.
+// control-dispatcher agent with the given qualified name. The trace log
+// default lives under .gc/runtime/ to stay inside the controller's
+// fsnotify exclusion; see ControlDispatcherStartCommand for the full
+// rationale.
 func ControlDispatcherStartCommandFor(qualifiedName string) string {
-	return `sh -c 'export GC_WORKFLOW_TRACE="${GC_WORKFLOW_TRACE:-${GC_CITY}/control-dispatcher-trace.log}"; exec "${GC_BIN:-gc}" convoy control --serve --follow ` + qualifiedName + `'`
+	return `sh -c '` + controlDispatcherTraceInit + `; ` + controlDispatcherTraceDirInit + `; exec "${GC_BIN:-gc}" convoy control --serve --follow ` + qualifiedName + `'`
 }
 
 // BindingQualifiedName returns the binding-qualified agent identity without a
@@ -1063,6 +1089,11 @@ type DoltConfig struct {
 	Port int `toml:"port,omitempty" jsonschema:"default=0"`
 	// Host is the dolt server hostname. Defaults to localhost.
 	Host string `toml:"host,omitempty" jsonschema:"default=localhost"`
+	// ArchiveLevel controls Dolt's auto_gc archive aggressiveness.
+	// 0 disables archive compaction (lower CPU on startup).
+	// 1 enables archive compaction (higher CPU on startup).
+	// nil (omitted) defaults to 0.
+	ArchiveLevel *int `toml:"archive_level,omitempty" jsonschema:"default=0"`
 }
 
 // FormulasConfig holds formula directory settings.
@@ -2080,9 +2111,8 @@ func (a *Agent) EffectiveScaleCheck() string {
 		return a.ScaleCheck
 	}
 	template := a.QualifiedName()
-	return `ready=$(bd ready --metadata-field gc.routed_to=` + template +
-		` --unassigned --json 2>/dev/null | jq 'length' 2>/dev/null); ` +
-		`echo "${ready:-0}" || echo 0`
+	return `ready_json=$(bd ready --metadata-field gc.routed_to=` + template +
+		` --unassigned --limit 0 --json) && printf '%s\n' "$ready_json" | jq 'length'`
 }
 
 // EffectiveMaxActiveSessions returns the agent's max active sessions.

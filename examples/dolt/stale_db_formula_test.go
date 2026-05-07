@@ -33,9 +33,10 @@ func TestStaleDBFormulaRuntimeContract(t *testing.T) {
 		`trap cleanup EXIT`,
 		`drain_ack_once()`,
 		`gc dolt-cleanup --json --probe > "$SCAN_FILE"`,
-		`gc dolt-cleanup --json --probe --force > "$APPLY_FILE"`,
+		`gc dolt-cleanup --json --probe --force --max-orphan-dbs "{{max_orphans_for_sql}}" > "$APPLY_FILE"`,
 		`jq -r '.dropped.count // 0'`,
 		`jq -r '[.dropped.skipped[]? | select(.reason == "invalid-identifier")] | length'`,
+		`jq -r '[.force_blockers[]?] | length'`,
 		`jq -r '.reaped.targets | length'`,
 		`gc event emit mol-dog-stale-db.scan`,
 		`gc event emit mol-dog-stale-db.drop`,
@@ -43,7 +44,7 @@ func TestStaleDBFormulaRuntimeContract(t *testing.T) {
 		`gc event emit mol-dog-stale-db.reap`,
 		`gc event emit mol-dog-stale-db.done`,
 		`gc event emit mol-dog-stale-db.escalate`,
-		`if [ "$APPLIED" -eq 1 ] && [ "$DONE_ERRS" -gt 0 ]; then`,
+		`if [ "$APPLIED" -eq 1 ] && [ "$MISSED_PURGE_BYTES" -gt 0 ]; then`,
 		`leaving work bead open`,
 		`gc session nudge deacon "WARN: $ORPHAN_TOTAL Dolt orphan(s) seen this scan`,
 		`gc session nudge deacon "DOG_DONE: stale-db - orphans: ${ORPHAN_TOTAL}, applied: ${APPLIED}, escalated: ${ESCALATED}" || true`,
@@ -159,11 +160,22 @@ esac
 	}
 	for _, want := range []string{
 		"bd update bead-1 --append-notes",
-		"gc event emit mol-dog-stale-db.done",
+		"## apply (--force, refused)",
 		"gc event emit mol-dog-stale-db.escalate",
+		"gc runtime drain-ack",
 	} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("command log missing %q\nlog:\n%s\noutput:\n%s", want, log, out)
+		}
+	}
+	for _, forbidden := range []string{
+		"gc event emit mol-dog-stale-db.drop",
+		"gc event emit mol-dog-stale-db.purge",
+		"gc event emit mol-dog-stale-db.reap",
+		"gc event emit mol-dog-stale-db.done",
+	} {
+		if strings.Contains(log, forbidden) {
+			t.Fatalf("rendered script logged forbidden success path %q despite apply errors\nlog:\n%s\noutput:\n%s", forbidden, log, out)
 		}
 	}
 	if strings.Contains(log, "bd close bead-1") {
@@ -397,7 +409,7 @@ esac
 		t.Fatalf("rendered script failed: %v\nlog:\n%s\noutput:\n%s", err, log, out)
 	}
 	for _, want := range []string{
-		"gc dolt-cleanup --json --probe --force",
+		"gc dolt-cleanup --json --probe --force --max-orphan-dbs 20",
 		"gc event emit mol-dog-stale-db.done --message 1200 bytes freed; 0 errors",
 		"bd close bead-1",
 	} {
@@ -482,7 +494,7 @@ esac
 		t.Fatalf("rendered script failed: %v\nlog:\n%s\noutput:\n%s", err, log, out)
 	}
 	for _, want := range []string{
-		"gc dolt-cleanup --json --probe --force",
+		"gc dolt-cleanup --json --probe --force --max-orphan-dbs 20",
 		"gc event emit mol-dog-stale-db.done --message 4096 bytes freed; 0 errors",
 		"bd close bead-1",
 	} {
@@ -570,7 +582,7 @@ esac
 		t.Fatalf("rendered script exited successfully; want SQL-backed apply failure to keep work open\nlog:\n%s\noutput:\n%s", log, out)
 	}
 	for _, want := range []string{
-		"gc dolt-cleanup --json --probe --force",
+		"gc dolt-cleanup --json --probe --force --max-orphan-dbs 20",
 		"bd update bead-1 --append-notes",
 		"## apply (--force, failed)",
 		`"stage":"purge"`,
@@ -584,6 +596,83 @@ esac
 	}
 }
 
+func TestStaleDBFormulaExitZeroMaxOrphanRefusalLeavesWorkOpenWithoutSuccessEvents(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash not found: %v", err)
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skipf("jq not found: %v", err)
+	}
+
+	log, out, err := runStaleDBFormulaFailureCase(t, staleDBFailureCase{
+		scanJSON:  `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":20,"failed":[]},"purge":{"bytes_reclaimed":4096},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":4096,"bytes_freed_rss":0,"errors_total":0}}`,
+		applyJSON: `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":21,"failed":[]},"purge":{"ok":false,"bytes_reclaimed":0},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":0,"bytes_freed_rss":0,"errors_total":1},"errors":[{"stage":"drop","kind":"max-orphan-refusal","error":"stale database threshold tripped"}]}`,
+	})
+	if err == nil {
+		t.Fatalf("rendered script exited successfully; want exit-zero max-orphan refusal to keep work open\nlog:\n%s\noutput:\n%s", log, out)
+	}
+	for _, forbidden := range []string{
+		"gc event emit mol-dog-stale-db.drop",
+		"gc event emit mol-dog-stale-db.purge",
+		"gc event emit mol-dog-stale-db.reap",
+		"bd close bead-1",
+	} {
+		if strings.Contains(log, forbidden) {
+			t.Fatalf("exit-zero max-orphan refusal logged forbidden success path %q\nlog:\n%s\noutput:\n%s", forbidden, log, out)
+		}
+	}
+	for _, want := range []string{
+		"bd update bead-1 --append-notes",
+		"## apply (--force, refused)",
+		"apply refused by max-orphan safety guard",
+		"gc event emit mol-dog-stale-db.escalate",
+		"gc runtime drain-ack",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("exit-zero max-orphan refusal log missing %q\nlog:\n%s\noutput:\n%s", want, log, out)
+		}
+	}
+}
+
+func TestStaleDBFormulaDryRunForceBlockersLeaveWorkOpenBeforeApply(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash not found: %v", err)
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skipf("jq not found: %v", err)
+	}
+
+	log, out, err := runStaleDBFormulaFailureCase(t, staleDBFailureCase{
+		scanJSON: `{"schema":"gc.dolt.cleanup.v1","force_blockers":[{"kind":"rig-protection","name":"missing","error":"missing metadata"}],"dropped":{"count":1,"failed":[]},"purge":{"bytes_reclaimed":4096},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":4096,"bytes_freed_rss":0,"errors_total":0}}`,
+		wantNote: "## scan (dry-run)",
+		wantLog:  "force blocker",
+	})
+	if err == nil {
+		t.Fatalf("rendered script exited successfully; want dry-run force blockers to keep work open\nlog:\n%s\noutput:\n%s", log, out)
+	}
+	for _, want := range []string{
+		"gc event emit mol-dog-stale-db.escalate",
+		"gc mail send mayor",
+		"gc runtime drain-ack",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("force-blocker path missing %q\nlog:\n%s\noutput:\n%s", want, log, out)
+		}
+	}
+	for _, forbidden := range []string{
+		"gc dolt-cleanup --json --probe --force",
+		"gc event emit mol-dog-stale-db.drop",
+		"gc event emit mol-dog-stale-db.purge",
+		"gc event emit mol-dog-stale-db.reap",
+		"gc event emit mol-dog-stale-db.done",
+		"bd close bead-1",
+	} {
+		if strings.Contains(log, forbidden) {
+			t.Fatalf("force-blocker path logged forbidden command %q\nlog:\n%s\noutput:\n%s", forbidden, log, out)
+		}
+	}
+}
+
 type staleDBFailureCase struct {
 	scanJSON     string
 	scanExit     string
@@ -593,6 +682,7 @@ type staleDBFailureCase struct {
 	wantNote     string
 	wantLog      string
 	forbidLog    string
+	forbidOutput string
 }
 
 func TestStaleDBFormulaFailurePathsDrainAck(t *testing.T) {
@@ -645,10 +735,12 @@ func TestStaleDBFormulaFailurePathsDrainAck(t *testing.T) {
 		{
 			name: "apply misses dry-run reclaimable bytes",
 			spec: staleDBFailureCase{
-				scanJSON:  `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":1,"failed":[]},"purge":{"bytes_reclaimed":4096},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":4096,"bytes_freed_rss":0,"errors_total":0}}`,
-				applyJSON: `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":1,"failed":[]},"purge":{"ok":true,"bytes_reclaimed":0},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":0,"bytes_freed_rss":0,"errors_total":0}}`,
-				wantNote:  "## apply (--force)",
-				wantLog:   "apply missed 4096 reclaimable bytes",
+				scanJSON:     `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":1,"failed":[]},"purge":{"bytes_reclaimed":4096},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":4096,"bytes_freed_rss":0,"errors_total":0}}`,
+				applyJSON:    `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":1,"failed":[]},"purge":{"ok":true,"bytes_reclaimed":0},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":0,"bytes_freed_rss":0,"errors_total":0}}`,
+				wantNote:     "## apply (--force)",
+				wantLog:      "apply missed 4096 reclaimable bytes",
+				forbidLog:    "apply reported",
+				forbidOutput: "apply reported",
 			},
 		},
 		{
@@ -676,6 +768,9 @@ func TestStaleDBFormulaFailurePathsDrainAck(t *testing.T) {
 			}
 			if tc.spec.forbidLog != "" && strings.Contains(log, tc.spec.forbidLog) {
 				t.Fatalf("failure path log still contains unsupported copy %q\nlog:\n%s\noutput:\n%s", tc.spec.forbidLog, log, out)
+			}
+			if tc.spec.forbidOutput != "" && strings.Contains(string(out), tc.spec.forbidOutput) {
+				t.Fatalf("failure path output still contains unsupported copy %q\nlog:\n%s\noutput:\n%s", tc.spec.forbidOutput, log, out)
 			}
 			if strings.Contains(log, "bd close bead-1") {
 				t.Fatalf("failure path closed bead despite non-zero outcome\nlog:\n%s\noutput:\n%s", log, out)
@@ -763,6 +858,7 @@ maybe_fail() {
 }
 case "${1:-} ${2:-}" in
   "dolt-cleanup "*)
+    echo "gc $*" >> "$GC_TEST_LOG"
     case " $* " in
       *" --force "*)
         cat "$GC_TEST_APPLY_JSON"

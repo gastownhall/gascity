@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
@@ -181,6 +182,30 @@ func TestNamedOnDemand_ExactNamedIdentityAssigneeWakes(t *testing.T) {
 	assertReason(t, result, "hello-world--refinery", "assigned-work")
 }
 
+func TestNamedOnDemand_NamedSessionDemandWakesExistingIdentity(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:             []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
+		NamedSessions:      []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
+		SessionBeads:       []AwakeSessionBead{{ID: "mc-1", SessionName: "hello-world--refinery", Template: "hello-world/refinery", State: "asleep", NamedIdentity: "hello-world/refinery"}},
+		NamedSessionDemand: map[string]bool{"hello-world/refinery": true},
+		Now:                now,
+	})
+	assertAwake(t, result, "hello-world--refinery")
+	assertReason(t, result, "hello-world--refinery", "named-demand")
+}
+
+func TestNamedOnDemand_NamedSessionDemandWakesSingletonTemplateResolvedIdentity(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:             []AwakeAgent{{QualifiedName: "worker"}},
+		NamedSessions:      []AwakeNamedSession{{Identity: "primary", Template: "worker", Mode: "on_demand"}},
+		SessionBeads:       []AwakeSessionBead{{ID: "mc-1", SessionName: "primary", Template: "worker", State: "asleep", NamedIdentity: "primary"}},
+		NamedSessionDemand: map[string]bool{"primary": true},
+		Now:                now,
+	})
+	assertAwake(t, result, "primary")
+	assertReason(t, result, "primary", "named-demand")
+}
+
 func TestNamedOnDemand_PendingCreateWakesWithoutDemand(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents:        []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
@@ -317,6 +342,48 @@ func TestScaled_Demand2_OneActive(t *testing.T) {
 	})
 	assertAwake(t, result, "polecat-mc-1")
 	assertAsleep(t, result, "polecat-mc-2") // asleep ephemerals not reused
+}
+
+func TestScaled_NewDemandDoesNotUseActiveAssignedSessions(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-assigned-1", SessionName: "polecat-assigned-1", Template: "hello-world/polecat", State: "active"},
+			{ID: "mc-assigned-2", SessionName: "polecat-assigned-2", Template: "hello-world/polecat", State: "active"},
+			{ID: "mc-assigned-3", SessionName: "polecat-assigned-3", Template: "hello-world/polecat", State: "active"},
+			{ID: "mc-assigned-4", SessionName: "polecat-assigned-4", Template: "hello-world/polecat", State: "active"},
+			{ID: "mc-assigned-5", SessionName: "polecat-assigned-5", Template: "hello-world/polecat", State: "active"},
+			{ID: "mc-new-1", SessionName: "polecat-new-1", Template: "hello-world/polecat", State: "creating"},
+			{ID: "mc-new-2", SessionName: "polecat-new-2", Template: "hello-world/polecat", State: "creating"},
+			{ID: "mc-new-3", SessionName: "polecat-new-3", Template: "hello-world/polecat", State: "creating"},
+			{ID: "mc-new-4", SessionName: "polecat-new-4", Template: "hello-world/polecat", State: "creating"},
+			{ID: "mc-new-5", SessionName: "polecat-new-5", Template: "hello-world/polecat", State: "creating"},
+		},
+		WorkBeads: []AwakeWorkBead{
+			{ID: "w-assigned-1", Assignee: "mc-assigned-1", Status: "in_progress"},
+			{ID: "w-assigned-2", Assignee: "mc-assigned-2", Status: "in_progress"},
+			{ID: "w-assigned-3", Assignee: "mc-assigned-3", Status: "in_progress"},
+			{ID: "w-assigned-4", Assignee: "mc-assigned-4", Status: "in_progress"},
+			{ID: "w-assigned-5", Assignee: "mc-assigned-5", Status: "in_progress"},
+		},
+		ScaleCheckCounts: map[string]int{"hello-world/polecat": 5},
+		RunningSessions: map[string]bool{
+			"polecat-assigned-1": true,
+			"polecat-assigned-2": true,
+			"polecat-assigned-3": true,
+			"polecat-assigned-4": true,
+			"polecat-assigned-5": true,
+		},
+		Now: now,
+	})
+
+	for i := 1; i <= 5; i++ {
+		suffix := strconv.Itoa(i)
+		assertAwake(t, result, "polecat-assigned-"+suffix)
+		assertReason(t, result, "polecat-assigned-"+suffix, "assigned-work")
+		assertAwake(t, result, "polecat-new-"+suffix)
+		assertReason(t, result, "polecat-new-"+suffix, "scaled:creating")
+	}
 }
 
 func TestScaled_Demand1_TwoActive(t *testing.T) {
@@ -958,6 +1025,24 @@ func TestRegression_AsleepEphemeralWithAssignedWork_WakesViaAssignedWork(t *test
 	if result["polecat-mc-sctve"].Reason != "assigned-work" {
 		t.Errorf("reason = %q, want assigned-work", result["polecat-mc-sctve"].Reason)
 	}
+}
+
+func TestRegression_ConcreteAssignedWorkSuppressesIdleSleep(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat", SleepAfterIdle: 2 * time.Hour}},
+		SessionBeads: []AwakeSessionBead{
+			{
+				ID: "mc-sctve", SessionName: "polecat-mc-sctve", Template: "hello-world/polecat", State: "active",
+				IdleSince: now.Add(-3 * time.Hour),
+			},
+		},
+		WorkBeads:        []AwakeWorkBead{{ID: "hw-8lb", Assignee: "polecat-mc-sctve", Status: "in_progress"}},
+		ScaleCheckCounts: map[string]int{"hello-world/polecat": 1},
+		RunningSessions:  map[string]bool{"polecat-mc-sctve": true},
+		Now:              now,
+	})
+	assertAwake(t, result, "polecat-mc-sctve")
+	assertReason(t, result, "polecat-mc-sctve", "assigned-work")
 }
 
 // ---------------------------------------------------------------------------

@@ -583,6 +583,41 @@ func TestCachingStoreApplyEventRecordsProblemOnMalformedPayload(t *testing.T) {
 	}
 }
 
+func TestCachingStoreSparseUpdatedEventFallsBackWhenCompleteCoverageIsMissingDeps(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	bead, err := backing.Create(Bead{Title: "target"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	cache.mu.Lock()
+	delete(cache.deps, bead.ID)
+	cache.depsComplete = true
+	cache.mu.Unlock()
+
+	cache.ApplyEvent("bead.updated", json.RawMessage(`{"id":"`+bead.ID+`","title":"target"}`))
+
+	cache.mu.RLock()
+	depsComplete := cache.depsComplete
+	lastProblem := cache.stats.LastProblem
+	cache.mu.RUnlock()
+	if depsComplete {
+		t.Fatal("depsComplete = true, want incomplete coverage after missing deps invariant break")
+	}
+	if !strings.Contains(lastProblem, "missing deps for "+bead.ID) {
+		t.Fatalf("LastProblem = %q, want missing deps diagnostic for %s", lastProblem, bead.ID)
+	}
+	if _, ok := cache.CachedReady(); ok {
+		t.Fatal("CachedReady answered from cache after dependency coverage became incomplete")
+	}
+}
+
 func TestCachingStoreApplyEventRechecksLocalMutationBeforeCommit(t *testing.T) {
 	backing := NewMemStore()
 	bead, err := backing.Create(Bead{
@@ -1664,6 +1699,32 @@ func TestCachingStoreBdReconcileRefreshesListDependenciesForCachedReady(t *testi
 
 	if runner.depScanCalls != 0 {
 		t.Fatalf("dep scan calls = %d, want 0", runner.depScanCalls)
+	}
+}
+
+func TestCachingStoreBdReconcileClearsCachedDepsWhenListOmitsDependencies(t *testing.T) {
+	t.Parallel()
+
+	runner := newCachingStoreBdDepRunner(t)
+	runner.deps["bd-1"] = []Dep{{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks"}}
+	cache := NewCachingStore(NewBdStore("/city", runner.run), nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	runner.deps["bd-1"] = nil
+	cache.runReconciliation()
+
+	ready, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable")
+	}
+	readyByID := make(map[string]bool, len(ready))
+	for _, bead := range ready {
+		readyByID[bead.ID] = true
+	}
+	if !readyByID["bd-1"] {
+		t.Fatalf("CachedReady excludes bd-1 after omitted deps, ready=%v", readyByID)
 	}
 }
 

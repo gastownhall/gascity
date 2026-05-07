@@ -150,6 +150,10 @@ in the arguments.
 
 All arguments after "gc bd" are forwarded to bd unchanged.
 
+gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
+from wedging the wrapper after printing command output. If you need
+auto-export behavior, invoke bd directly.
+
 ```
 gc bd [bd-args...]
 ```
@@ -919,10 +923,16 @@ cleanup tool. It resolves the Dolt server port via the AD-04 chain
 drops stale test/agent databases, calls DOLT_PURGE_DROPPED_DATABASES
 to reclaim disk, and reaps orphaned dolt sql-server processes left
 over from leaked test harnesses. Invalid explicit ports and unreadable
-or invalid rig port files fail closed before cleanup stages run; only
-absent rig port files can reach the legacy default.
+or invalid city/rig port settings fail closed before cleanup stages run;
+only absent rig port files can reach the legacy default. The legacy
+default is a connection fallback only; it does not protect port 3307
+from orphan-process reaping.
 
 Dry-run by default. Pass --force to actually drop, purge, and kill.
+Pass --max-orphan-dbs with --force to refuse all destructive cleanup
+stages if the live apply-time stale database count exceeds the
+scan-time threshold. The default 0 disables this guard; negative values
+are rejected before any city lookup or cleanup stage runs.
 Active rig dolt servers, registered rig databases, active test temp roots,
 and processes outside the test-config-path allowlist (/tmp/Test*,
 os.TempDir()/Test*, known Gas City test prefixes, ~/.gotmp/Test*) are always
@@ -931,9 +941,18 @@ report. Destructive drops are limited to known stale test database name
 shapes and conservative SQL identifier characters; skipped stale matches
 are reported in dropped.skipped. Rig dolt_database names used for purge
 must use the same identifier shape: ASCII letters, digits, underscores,
-and non-leading hyphens.
+and non-leading hyphens. Missing or silent rig metadata disables forced
+drop/purge because the live database name cannot be proven safe.
 
-JSON envelope schema is stable: gc.dolt.cleanup.v1.
+JSON envelope schema is stable: gc.dolt.cleanup.v1. Automation that
+uses --json must inspect summary.errors_total and errors, and must also
+refuse to invoke --force when dry-run force_blockers is non-empty.
+force_blockers reports conditions that would block forced cleanup without
+incrementing errors_total. The rig-protection blocker is intentionally
+global: missing or silent rig metadata prevents forced drop/purge because
+the command cannot prove all registered rig databases are protected.
+Cleanup stage errors are reported in the envelope even when the command
+can still return successfully after emitting the report.
 
 ```
 gc dolt-cleanup [flags]
@@ -943,6 +962,7 @@ gc dolt-cleanup [flags]
 |------|------|---------|-------------|
 | `--force` | bool |  | actually drop, purge, and kill orphaned resources (default: dry-run) |
 | `--json` | bool |  | emit JSON envelope (gc.dolt.cleanup.v1) |
+| `--max-orphan-dbs` | int |  | with --force, refuse cleanup when live stale database count exceeds this limit |
 | `--port` | string |  | override the resolved Dolt port |
 | `--probe` | bool |  | TCP-probe the resolved port; fail if unreachable |
 
@@ -1505,10 +1525,10 @@ gc mail send mayor "Build is green"
 
 ## gc mail thread
 
-Show all messages sharing a thread ID, ordered by time.
+Show all messages sharing a thread ID or message ID, ordered by time.
 
 ```
-gc mail thread <thread-id>
+gc mail thread <id>
 ```
 
 ## gc mcp
@@ -2352,7 +2372,9 @@ Request a fresh restart for an existing session without closing its bead.
 
 The controller stops the current runtime and starts the same session again with
 fresh provider conversation state. Session identity, alias, mail, and queued
-work remain attached to the existing session bead.
+work remain attached to the existing session bead. For named sessions, reset
+also clears any tripped named-session respawn circuit breaker before requesting
+the fresh restart.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 

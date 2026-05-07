@@ -468,6 +468,69 @@ set -eu
 	}
 }
 
+func TestGcBdSuppressesBdAutoExportForJsonShowAndUpdate(t *testing.T) {
+	origCityFlag := cityFlag
+	origRigFlag := rigFlag
+	defer func() {
+		cityFlag = origCityFlag
+		rigFlag = origRigFlag
+	}()
+	cityFlag = ""
+	rigFlag = ""
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	script := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(script, []byte(`#!/bin/sh
+set -eu
+if [ "${BD_EXPORT_AUTO:-}" != "false" ]; then
+  echo "BD_EXPORT_AUTO=${BD_EXPORT_AUTO:-}" >&2
+  exit 73
+fi
+case "${1:-}" in
+  show)
+    printf '[{"id":"gc-1","title":"ok"}]\n'
+    ;;
+  update)
+    printf '{"id":"gc-1","status":"in_progress"}\n'
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("BD_EXPORT_AUTO", "true")
+
+	for _, args := range [][]string{
+		{"show", "gc-1", "--json"},
+		{"update", "gc-1", "--claim", "--json"},
+	} {
+		var stdout, stderr bytes.Buffer
+		if got := doBd(args, &stdout, &stderr); got != 0 {
+			t.Fatalf("doBd(%v) = %d, want 0; stdout=%q stderr=%q", args, got, stdout.String(), stderr.String())
+		}
+		if strings.TrimSpace(stdout.String()) == "" {
+			t.Fatalf("doBd(%v) produced empty stdout", args)
+		}
+		if stderr.String() != "" {
+			t.Fatalf("doBd(%v) stderr = %q, want empty", args, stderr.String())
+		}
+	}
+}
+
 func TestGcBdDoesNotAutoRouteHyphenatedFlagValue(t *testing.T) {
 	origCityFlag := cityFlag
 	origRigFlag := rigFlag

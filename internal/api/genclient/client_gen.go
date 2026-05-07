@@ -2573,8 +2573,10 @@ type SupervisorCitiesOutputBody struct {
 
 // SupervisorEventListOutputBody defines model for SupervisorEventListOutputBody.
 type SupervisorEventListOutputBody struct {
-	Items *[]TypedTaggedEventStreamEnvelope `json:"items"`
-	Total int64                             `json:"total"`
+	// EventCursor Supervisor event-stream cursor captured before the history snapshot was listed. Pass this value as after_cursor to /v0/events/stream to receive events emitted after the snapshot boundary without replaying unrelated historical backlog.
+	EventCursor string                            `json:"event_cursor"`
+	Items       *[]TypedTaggedEventStreamEnvelope `json:"items"`
+	Total       int64                             `json:"total"`
 }
 
 // SupervisorHealthOutputBody defines model for SupervisorHealthOutputBody.

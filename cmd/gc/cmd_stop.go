@@ -98,7 +98,7 @@ func cmdStop(args []string, stdout, stderr io.Writer) int {
 			desired[sn] = true
 		} else {
 			// Pool agent: resolve runtime session names from beads first, then legacy discovery.
-			for _, ref := range resolvePoolSessionRefs(store, a.Name, a.Dir, sp0, &a, cityName, st, sp, stderr) {
+			for _, ref := range resolvePoolSessionRefs(store, cfg, a.Name, a.Dir, sp0, &a, cityName, st, sp, stderr) {
 				sessionNames = append(sessionNames, ref.sessionName)
 				desired[ref.sessionName] = true
 			}

@@ -61,7 +61,9 @@ func TestFreshInit_ClaudeUnrestricted(t *testing.T) {
 	}
 
 	result := runFreshInitSlingClaudeWork(t, "Write the current time to permission-check.txt", "permission-check.txt")
-	command := metaString(result.SpawnedSessionBead.Metadata, "command")
+	spawnedSessionBead, err := showBeadJSON(result.CityDir, result.SpawnedSessionBead.ID)
+	require.NoError(t, err, "refresh spawned session bead %s", result.SpawnedSessionBead.ID)
+	command := metaString(spawnedSessionBead.Metadata, "command")
 	require.NotEmpty(t, command, "spawned worker should persist the resolved launch command")
 	require.Contains(t, command, "--dangerously-skip-permissions", "fresh claude worker should launch unrestricted")
 	require.NotContains(t, command, "--permission-mode auto-edit", "fresh claude worker should not launch in auto-edit mode")

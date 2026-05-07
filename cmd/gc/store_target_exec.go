@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -45,7 +44,7 @@ func copyExecProjectedDoltEnv(dst, src map[string]string) {
 }
 
 func gcExecStoreEnv(cityPath string, target execStoreTarget, provider string) map[string]string {
-	env := citylayout.CityRuntimeEnvMap(cityPath)
+	env := cityRuntimeEnvMapForCity(cityPath)
 	env["GC_PROVIDER"] = provider
 	env["GC_STORE_ROOT"] = target.ScopeRoot
 	env["GC_STORE_SCOPE"] = target.ScopeKind

@@ -229,9 +229,9 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		fmt.Fprintf(stderr, "gc rig add: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if cityUsesBdStoreContract(cityPath) && (cfg.Dolt.Host != "" || cfg.Dolt.Port != 0) {
-		cityDoltConfigs.Store(cityPath, cfg.Dolt)
-		defer cityDoltConfigs.Delete(cityPath)
+	if cityUsesBdStoreContract(cityPath) && cityDoltConfigHasLifecycleFields(cfg.Dolt) {
+		registerCityDoltConfig(cityPath, cfg.Dolt)
+		defer clearCityDoltConfig(cityPath)
 	}
 	rootDefaultRigImports, err := config.LoadRootPackDefaultRigImports(fs, cityPath)
 	if err != nil {

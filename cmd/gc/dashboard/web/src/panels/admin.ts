@@ -33,7 +33,7 @@ export async function renderAdminPanels(): Promise<void> {
   renderQueues(queuesR.data?.items ?? null);
 }
 
-function renderAdminEmptyStates(): void {
+export function renderAdminEmptyStates(): void {
   renderEmptyBody("services-body", "services-count", "Select a city to view services");
   renderEmptyBody("rigs-body", "rigs-count", "Select a city to view rigs");
   renderEmptyBody("escalations-body", "escalations-count", "Select a city to view escalations");

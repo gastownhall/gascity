@@ -6491,6 +6491,10 @@
       "SupervisorEventListOutputBody": {
         "additionalProperties": false,
         "properties": {
+          "event_cursor": {
+            "description": "Supervisor event-stream cursor captured before the history snapshot was listed. Pass this value as after_cursor to /v0/events/stream to receive events emitted after the snapshot boundary without replaying unrelated historical backlog.",
+            "type": "string"
+          },
           "items": {
             "items": {
               "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelope"
@@ -6506,6 +6510,7 @@
           }
         },
         "required": [
+          "event_cursor",
           "items",
           "total"
         ],
@@ -13076,6 +13081,7 @@
         "summary": "Get v0 city by city name agents"
       },
       "post": {
+        "description": "Creates an agent and waits until it is visible to immediate follow-up operations. If the agent is durably created but visibility confirmation is canceled or times out, the retryable 503/504 response includes a Retry-After header.",
         "operationId": "create-agent",
         "parameters": [
           {
@@ -17244,12 +17250,12 @@
             }
           },
           {
-            "description": "Thread ID.",
+            "description": "Thread ID, or any message ID in the thread.",
             "in": "path",
             "name": "id",
             "required": true,
             "schema": {
-              "description": "Thread ID.",
+              "description": "Thread ID, or any message ID in the thread.",
               "type": "string"
             }
           },

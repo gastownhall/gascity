@@ -24,6 +24,7 @@ type testStore struct {
 	metadata             map[string]map[string]string // id -> key -> value
 	metadataBatchCalls   int
 	metadataBatchPatches []map[string]string
+	metadataBatchErr     error
 }
 
 func newTestStore() *testStore {
@@ -45,6 +46,9 @@ func (s *testStore) SetMetadataBatch(id string, kvs map[string]string) error {
 		patch[k] = v
 	}
 	s.metadataBatchPatches = append(s.metadataBatchPatches, patch)
+	if s.metadataBatchErr != nil {
+		return s.metadataBatchErr
+	}
 	for k, v := range kvs {
 		if err := s.SetMetadata(id, k, v); err != nil {
 			return err
@@ -245,6 +249,7 @@ func TestWakeReasons_StaleCreatingWithoutPendingClaimDoesNotWakeCreate(t *testin
 		"session_name": "worker-b1",
 		"state":        "creating",
 	})
+	// Past staleCreatingStateTimeout (60s).
 	session.CreatedAt = now.Add(-2 * time.Minute)
 
 	reasons := wakeReasons(session, &config.City{}, nil, nil, nil, nil, clk)
@@ -280,11 +285,73 @@ func TestWakeReasons_PendingCreateClaimKeepsWakeCreateAfterCreatingGoesStale(t *
 		"state":                "creating",
 		"pending_create_claim": "true",
 	})
+	// Past staleCreatingStateTimeout (60s).
 	session.CreatedAt = now.Add(-2 * time.Minute)
 
 	reasons := wakeReasons(session, &config.City{}, nil, nil, nil, nil, clk)
 	if !containsWakeReason(reasons, WakeCreate) {
 		t.Fatalf("session with pending_create_claim should wake for create even when stale, got %v", reasons)
+	}
+}
+
+func TestStaleCreatingStateUsesPendingCreateStartedAtWhenPresent(t *testing.T) {
+	now := time.Date(2026, 5, 1, 9, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+
+	tests := []struct {
+		name      string
+		createdAt time.Time
+		startedAt string
+		wantStale bool
+	}{
+		{
+			name:      "fresh pending create timestamp keeps old bead fresh",
+			createdAt: now.Add(-2 * time.Minute),
+			startedAt: pendingCreateStartedAtNow(now.Add(-30 * time.Second)),
+			wantStale: false,
+		},
+		{
+			name:      "stale pending create timestamp wins over fresh row creation",
+			createdAt: now.Add(-30 * time.Second),
+			startedAt: pendingCreateStartedAtNow(now.Add(-2 * time.Minute)),
+			wantStale: true,
+		},
+		{
+			name:      "invalid pending create timestamp falls back to row creation",
+			createdAt: now.Add(-30 * time.Second),
+			startedAt: "not-rfc3339",
+			wantStale: false,
+		},
+		{
+			name:      "zero pending create timestamp falls back to row creation",
+			createdAt: now.Add(-30 * time.Second),
+			startedAt: (time.Time{}).UTC().Format(time.RFC3339),
+			wantStale: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			session := makeBead("b1", map[string]string{
+				"state":                     "creating",
+				"pending_create_started_at": tt.startedAt,
+			})
+			session.CreatedAt = tt.createdAt
+
+			if got := staleCreatingState(session, clk); got != tt.wantStale {
+				t.Fatalf("staleCreatingState = %v, want %v", got, tt.wantStale)
+			}
+		})
+	}
+}
+
+func TestPendingCreateStartedAtNowSubstitutesCurrentTimeForZeroInput(t *testing.T) {
+	got := pendingCreateStartedAtNow(time.Time{})
+	if got == (time.Time{}).UTC().Format(time.RFC3339) {
+		t.Fatal("pendingCreateStartedAtNow wrote the zero timestamp")
+	}
+	if _, err := time.Parse(time.RFC3339, got); err != nil {
+		t.Fatalf("pendingCreateStartedAtNow returned invalid RFC3339 timestamp %q: %v", got, err)
 	}
 }
 
@@ -894,7 +961,7 @@ func TestCheckStability_AliveReturnsFalse(t *testing.T) {
 		"last_woke_at": clk.Now().Add(-10 * time.Second).Format(time.RFC3339),
 	})
 
-	if checkStability(&session, nil, true, dt, store, clk) {
+	if checkStability(&session, nil, true, dt, store, clk, nil) {
 		t.Error("alive session should not report stability failure")
 	}
 }
@@ -910,7 +977,7 @@ func TestCheckStability_RapidExit(t *testing.T) {
 		"wake_attempts": "0",
 	})
 
-	if !checkStability(&session, nil, false, dt, store, clk) {
+	if !checkStability(&session, nil, false, dt, store, clk, nil) {
 		t.Error("rapid exit should report stability failure")
 	}
 
@@ -936,7 +1003,7 @@ func TestCheckStability_PendingCreateInFlightNotCounted(t *testing.T) {
 		"wake_attempts":        "0",
 	})
 
-	if checkStability(&session, nil, false, dt, store, clk) {
+	if checkStability(&session, nil, false, dt, store, clk, nil) {
 		t.Fatal("in-flight pending create should not be counted as a rapid exit")
 	}
 	if got := session.Metadata["wake_attempts"]; got != "0" {
@@ -958,7 +1025,7 @@ func TestCheckStability_DrainingNotCounted(t *testing.T) {
 		"last_woke_at": now.Add(-10 * time.Second).Format(time.RFC3339),
 	})
 
-	if checkStability(&session, nil, false, dt, store, clk) {
+	if checkStability(&session, nil, false, dt, store, clk, nil) {
 		t.Error("draining session death should not count as stability failure")
 	}
 }
@@ -974,7 +1041,7 @@ func TestCheckStability_StableSession(t *testing.T) {
 		"last_woke_at": now.Add(-2 * time.Minute).Format(time.RFC3339),
 	})
 
-	if checkStability(&session, nil, false, dt, store, clk) {
+	if checkStability(&session, nil, false, dt, store, clk, nil) {
 		t.Error("session that lived past threshold should not be stability failure")
 	}
 }
@@ -993,7 +1060,7 @@ func TestCheckStability_SubprocessProviderSkipsCrashCounting(t *testing.T) {
 		"wake_attempts": "0",
 	})
 
-	if checkStability(&session, cfg, false, dt, store, clk) {
+	if checkStability(&session, cfg, false, dt, store, clk, nil) {
 		t.Fatal("subprocess rapid exit should not be counted as a crash")
 	}
 	if got := session.Metadata["wake_attempts"]; got != "0" {
@@ -1379,10 +1446,33 @@ func TestHealState_PreservesCreatingWhileStartRequested(t *testing.T) {
 		"state":                "creating",
 		"pending_create_claim": "true",
 	})
+	// #1460: pending_create_claim only short-circuits while the create
+	// lease is fresh. Pin CreatedAt to "now" so the bead is within the
+	// lease window — without this the zero CreatedAt is treated as stale
+	// and the bead correctly heals to asleep (covered by the test below).
+	session.CreatedAt = clk.Now().Add(-30 * time.Second)
 
 	healState(&session, false, store, clk)
 	if session.Metadata["state"] != "creating" {
 		t.Fatalf("state = %q, want creating", session.Metadata["state"])
+	}
+}
+
+// #1460: stale-creating + pending_create_claim must heal to asleep so a
+// crashed creator does not strand the pool slot indefinitely.
+func TestHealState_StaleCreatingWithPendingClaimHealsToAsleep(t *testing.T) {
+	store := newTestStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 29, 4, 0, 0, 0, time.UTC)}
+
+	session := makeBead("b1", map[string]string{
+		"state":                "creating",
+		"pending_create_claim": "true",
+	})
+	session.CreatedAt = clk.Now().Add(-2 * time.Minute)
+
+	healState(&session, false, store, clk)
+	if session.Metadata["state"] != "asleep" {
+		t.Fatalf("state = %q, want asleep", session.Metadata["state"])
 	}
 }
 
@@ -1408,6 +1498,7 @@ func TestHealState_StaleCreatingWithoutPendingClaimHealsToAsleep(t *testing.T) {
 	session := makeBead("b1", map[string]string{
 		"state": "creating",
 	})
+	// Past staleCreatingStateTimeout (60s).
 	session.CreatedAt = clk.Now().Add(-2 * time.Minute)
 
 	healState(&session, false, store, clk)
@@ -1481,6 +1572,7 @@ func TestHealStatePatchProjectsRuntimeLiveness(t *testing.T) {
 					"session_key":         "old-key",
 					"started_config_hash": "old-hash",
 				})
+				// Past staleCreatingStateTimeout (60s).
 				b.CreatedAt = now.Add(-2 * time.Minute)
 				return b
 			}(),
@@ -1709,7 +1801,7 @@ func TestCheckStability_RapidExitAfterHealStateKeepsStartedConfigHashCleared(t *
 	if session.Metadata["started_config_hash"] != "" {
 		t.Fatalf("healState started_config_hash = %q, want empty", session.Metadata["started_config_hash"])
 	}
-	if !checkStability(&session, nil, false, nil, store, clk) {
+	if !checkStability(&session, nil, false, nil, store, clk, nil) {
 		t.Fatal("checkStability should record the rapid exit")
 	}
 	if session.Metadata["started_config_hash"] != "" {

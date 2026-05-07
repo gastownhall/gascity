@@ -131,6 +131,14 @@ type ExternalOriginEnvelope struct {
 }
 
 // AdapterCapabilities describes what a transport adapter supports.
+//
+// Intentionally untagged: this struct does not cross the gc↔adapter HTTP
+// callback wire. It is passed by value at adapter construction (see
+// NewHTTPAdapter) and exposed via the Huma API at POST /extmsg/adapters,
+// which serializes it with PascalCase keys today. Adding json tags here
+// would silently change that public API contract; if a snake_case
+// migration is wanted, do it as a coordinated API change with
+// regenerated clients, not as a side-effect of this fix.
 type AdapterCapabilities struct {
 	SupportsChildConversations bool
 	SupportsAttachments        bool
@@ -138,12 +146,19 @@ type AdapterCapabilities struct {
 }
 
 // PublishRequest is a request to publish a message to an external conversation.
+//
+// JSON tags are required: this struct is serialized over the HTTP wire to
+// out-of-process adapters (gc → adapter `/publish`), and the adapter side
+// parses snake_case keys. Without tags, Go marshals fields as PascalCase,
+// and case-insensitive matching on the receiver does not bridge the
+// underscore difference (so `ReplyToMessageID` would not match the
+// adapter's `reply_to_message_id` tag and the field would silently zero).
 type PublishRequest struct {
-	Conversation     ConversationRef
-	Text             string
-	ReplyToMessageID string
-	IdempotencyKey   string
-	Metadata         map[string]string
+	Conversation     ConversationRef   `json:"conversation"`
+	Text             string            `json:"text"`
+	ReplyToMessageID string            `json:"reply_to_message_id,omitempty"`
+	IdempotencyKey   string            `json:"idempotency_key,omitempty"`
+	Metadata         map[string]string `json:"metadata,omitempty"`
 }
 
 // PublishFailureKind classifies the reason a publish attempt failed.
@@ -165,6 +180,13 @@ const (
 )
 
 // PublishReceipt is the result of a publish attempt.
+//
+// Intentionally untagged: this struct is exposed via the Huma API as
+// OutboundResult.Receipt at POST /extmsg/outbound, where the public
+// contract is PascalCase. The gc↔adapter HTTP callback wire (which
+// uses snake_case) is bridged in HTTPAdapter.Publish via an explicit
+// wire-shaped intermediate type, so domain-type tagging is not needed
+// to fix the silent-drop bug.
 type PublishReceipt struct {
 	MessageID    string
 	Conversation ConversationRef

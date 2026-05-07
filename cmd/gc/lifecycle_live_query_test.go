@@ -63,7 +63,7 @@ func TestCollectAssignedWorkBeads_UsesCachedReadyEventStateForAssignedOpenHandof
 	}
 }
 
-func TestCollectAssignedWorkBeads_FallsBackLiveWhenSparseDepHookInvalidatesCachedReady(t *testing.T) {
+func TestCollectAssignedWorkBeads_UsesExplicitDepEventsForCachedReady(t *testing.T) {
 	t.Parallel()
 
 	t.Run("dep add", func(t *testing.T) {
@@ -95,11 +95,11 @@ func TestCollectAssignedWorkBeads_FallsBackLiveWhenSparseDepHookInvalidatesCache
 		if err := backing.DepAdd(handoff.ID, blocker.ID, "blocks"); err != nil {
 			t.Fatalf("backing DepAdd(%s <- %s): %v", handoff.ID, blocker.ID, err)
 		}
-		cache.ApplyEvent("bead.updated", []byte(`{"id":"`+handoff.ID+`","title":"handoff","status":"open","issue_type":"task","assignee":"worker","created_at":"2026-01-01T00:00:00Z"}`))
+		cache.ApplyDepEvent(handoff.ID, []beads.Dep{{IssueID: handoff.ID, DependsOnID: blocker.ID, Type: "blocks"}})
 
 		got, _ := collectAssignedWorkBeads(&config.City{}, cache)
 		if len(got) != 0 {
-			t.Fatalf("collectAssignedWorkBeads() = %#v, want sparse dep-add event to force live blocked result", got)
+			t.Fatalf("collectAssignedWorkBeads() = %#v, want explicit dep-add event to block handoff", got)
 		}
 	})
 
@@ -135,11 +135,11 @@ func TestCollectAssignedWorkBeads_FallsBackLiveWhenSparseDepHookInvalidatesCache
 		if err := backing.DepRemove(handoff.ID, blocker.ID); err != nil {
 			t.Fatalf("backing DepRemove(%s <- %s): %v", handoff.ID, blocker.ID, err)
 		}
-		cache.ApplyEvent("bead.updated", []byte(`{"id":"`+handoff.ID+`","title":"handoff","status":"open","issue_type":"task","assignee":"worker","created_at":"2026-01-01T00:00:00Z"}`))
+		cache.ApplyDepEvent(handoff.ID, nil)
 
 		got, _ := collectAssignedWorkBeads(&config.City{}, cache)
 		if len(got) != 1 || got[0].ID != handoff.ID {
-			t.Fatalf("collectAssignedWorkBeads() = %#v, want [%s] after sparse dep-remove event forced live ready result", got, handoff.ID)
+			t.Fatalf("collectAssignedWorkBeads() = %#v, want [%s] after explicit dep-remove event", got, handoff.ID)
 		}
 	})
 }

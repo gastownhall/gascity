@@ -249,6 +249,7 @@ func TestCollectAssignedWorkBeadsIncludesUnassignedInProgressPoolWorkForRecovery
 		store,
 		nil,
 		nil,
+		nil,
 	)
 	if partial {
 		t.Fatal("collectAssignedWorkBeadsWithStores reported partial results")

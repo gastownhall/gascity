@@ -37,6 +37,7 @@ func TestCleanupReportJSONShape(t *testing.T) {
 		`"schema":"gc.dolt.cleanup.v1"`,
 		`"port":{`,
 		`"rigs_protected":[]`,
+		`"force_blockers":[]`,
 		`"dropped":{`,
 		`"purge":{`,
 		`"reaped":{`,
@@ -53,6 +54,49 @@ func TestCleanupReportJSONShape(t *testing.T) {
 		if strings.Contains(got, key) {
 			t.Errorf("JSON leaked Go field name %q\nfull JSON:\n%s", key, got)
 		}
+	}
+}
+
+func TestDoltCleanupCmdRejectsNegativeMaxOrphanDBsBeforeCityResolution(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	cmd := newDoltCleanupCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{"--json", "--max-orphan-dbs", "-1"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatalf("Execute succeeded; want negative --max-orphan-dbs rejected")
+	}
+	out := stdout.String()
+	if !strings.Contains(out, `"kind":"invalid-max-orphan-dbs"`) {
+		t.Fatalf("stdout missing structured max-orphan validation kind:\nstdout=%s\nstderr=%s", out, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "not in a Gas City workspace") {
+		t.Fatalf("negative max-orphan validation happened after city resolution:\nstdout=%s\nstderr=%s", out, stderr.String())
+	}
+}
+
+func TestRunDoltCleanupRejectsNegativeMaxOrphanDBs(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		JSON:         true,
+		MaxOrphanDBs: -1,
+	}
+
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("runDoltCleanup exit=0; want negative MaxOrphanDBs rejected")
+	}
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+	if r.Summary.ErrorsTotal != 1 {
+		t.Fatalf("Summary.ErrorsTotal = %d, want 1; errors=%+v", r.Summary.ErrorsTotal, r.Errors)
+	}
+	if len(r.Errors) != 1 || r.Errors[0].Kind != cleanupErrorKindInvalidMaxOrphanDBs || !strings.Contains(r.Errors[0].Error, "non-negative") {
+		t.Fatalf("Errors = %+v, want invalid max orphan validation error", r.Errors)
 	}
 }
 
@@ -205,7 +249,7 @@ func TestRunDoltCleanup_ForceProtectsSelectedPortWithoutRigPortFile(t *testing.T
 }
 
 func TestRunDoltCleanup_InvalidPortFlagIsFatal(t *testing.T) {
-	for _, flag := range []string{"not-a-number", "0", "-1"} {
+	for _, flag := range []string{"not-a-number", "0", "-1", "65536", "70000"} {
 		t.Run(flag, func(t *testing.T) {
 			client := &fakeCleanupDoltClient{
 				databases: []string{"testdb_abc"},
@@ -257,6 +301,51 @@ func TestRunDoltCleanup_InvalidPortFlagIsFatal(t *testing.T) {
 	}
 }
 
+func TestRunDoltCleanup_InvalidCityConfigPortIsFatal(t *testing.T) {
+	client := &fakeCleanupDoltClient{
+		databases: []string{"testdb_abc"},
+	}
+	var killed []syscall.Signal
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		CityPort:   70000,
+		FS:         fsys.NewFake(),
+		JSON:       true,
+		Force:      true,
+		DoltClient: client,
+		DiscoverProcesses: func() ([]DoltProcInfo, error) {
+			return []DoltProcInfo{{PID: 4444, Argv: []string{"dolt", "sql-server", "--config", "/tmp/TestX/config.yaml"}}}, nil
+		},
+		KillProcess: func(_ int, sig syscall.Signal) error {
+			killed = append(killed, sig)
+			return nil
+		},
+		ReapGracePeriod: 1,
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("exit=0, want invalid city config port to fail\nstdout=%s\nstderr=%s", stdout.String(), stderr.String())
+	}
+
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v\nstdout: %s", err, stdout.String())
+	}
+	if len(client.dropped) != 0 {
+		t.Fatalf("DropDatabase called for invalid city config port: %v", client.dropped)
+	}
+	if len(killed) != 0 {
+		t.Fatalf("KillProcess called for invalid city config port: %v", killed)
+	}
+	if r.Port.Resolved != 0 {
+		t.Fatalf("Port.Resolved = %d, want 0 for unresolved fatal city config port", r.Port.Resolved)
+	}
+	if len(r.Errors) != 1 || r.Errors[0].Stage != "port" || r.Errors[0].Name != "city config dolt.port" || !strings.Contains(r.Errors[0].Error, "65535") {
+		t.Fatalf("Errors = %+v, want fatal city config port validation error", r.Errors)
+	}
+}
+
 func TestRunDoltCleanup_BadRigPortFileIsFatal(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -272,6 +361,11 @@ func TestRunDoltCleanup_BadRigPortFileIsFatal(t *testing.T) {
 			name:      "malformed",
 			setup:     func(fs *fsys.Fake) { fs.Files["/city/.beads/dolt-server.port"] = []byte("not-a-port\n") },
 			wantError: "invalid port",
+		},
+		{
+			name:      "out of range",
+			setup:     func(fs *fsys.Fake) { fs.Files["/city/.beads/dolt-server.port"] = []byte("70000\n") },
+			wantError: "65535",
 		},
 		{
 			name:      "unreadable",
@@ -331,6 +425,48 @@ func TestRunDoltCleanup_BadRigPortFileIsFatal(t *testing.T) {
 				t.Fatalf("Errors missing fatal rig port-file entry containing %q: %+v", tc.wantError, r.Errors)
 			}
 		})
+	}
+}
+
+func TestRunDoltCleanup_ForceDoesNotProtectLegacyFallbackPort(t *testing.T) {
+	var signals []syscall.Signal
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		FS:      fsys.NewFake(),
+		JSON:    true,
+		Force:   true,
+		HomeDir: "/home/u",
+		DiscoverProcesses: func() ([]DoltProcInfo, error) {
+			return []DoltProcInfo{{
+				PID:            4444,
+				Ports:          []int{LegacyDefaultDoltPort},
+				Argv:           []string{"dolt", "sql-server", "--config", "/tmp/TestLegacyFallback/config.yaml"},
+				StartTimeTicks: 10,
+			}}, nil
+		},
+		KillProcess: func(_ int, sig syscall.Signal) error {
+			signals = append(signals, sig)
+			return syscall.ESRCH
+		},
+		ReapGracePeriod: 1,
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	}
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v\nstdout: %s", err, stdout.String())
+	}
+	if r.Port.Resolved != LegacyDefaultDoltPort || !r.Port.Fallback {
+		t.Fatalf("Port = %+v, want legacy fallback", r.Port)
+	}
+	if !equalIntSlice(r.Reaped.ProtectedPIDs, nil) {
+		t.Fatalf("ProtectedPIDs = %v, want none for legacy fallback test process", r.Reaped.ProtectedPIDs)
+	}
+	if len(signals) != 1 || signals[0] != syscall.SIGTERM {
+		t.Fatalf("signals = %v, want legacy fallback process to stay eligible for SIGTERM", signals)
 	}
 }
 
@@ -888,6 +1024,60 @@ func TestRunDoltCleanup_ForceSkipsSIGKILLWhenRevalidationDiscoverErrors(t *testi
 	}
 }
 
+func TestRunDoltCleanup_ForceSkipsSIGKILLWhenProcessBecomesProtected(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/.beads/dolt-server.port"] = []byte("28231\n")
+
+	discoverCalls := 0
+	var signals []syscall.Signal
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		Rigs:    []resolverRig{{Name: "hq", Path: "/city", HQ: true}},
+		FS:      fs,
+		JSON:    true,
+		Force:   true,
+		HomeDir: "/home/u",
+		DiscoverProcesses: func() ([]DoltProcInfo, error) {
+			discoverCalls++
+			proc := DoltProcInfo{
+				PID:            4444,
+				Argv:           []string{"dolt", "sql-server", "--config", "/tmp/TestX/config.yaml"},
+				StartTimeTicks: 10,
+			}
+			if discoverCalls >= 3 {
+				proc.Ports = []int{28231}
+			}
+			return []DoltProcInfo{proc}, nil
+		},
+		KillProcess: func(_ int, sig syscall.Signal) error {
+			signals = append(signals, sig)
+			return nil
+		},
+		ReapGracePeriod: 1,
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	}
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v\nstdout: %s", err, stdout.String())
+	}
+	if discoverCalls != 3 {
+		t.Fatalf("DiscoverProcesses calls = %d, want initial, pre-SIGTERM, pre-SIGKILL", discoverCalls)
+	}
+	if len(signals) != 1 || signals[0] != syscall.SIGTERM {
+		t.Fatalf("signals = %v, want only SIGTERM before protected SIGKILL revalidation", signals)
+	}
+	if r.Reaped.Count != 0 {
+		t.Errorf("Reaped.Count = %d, want 0 because SIGKILL was skipped", r.Reaped.Count)
+	}
+	if !equalIntSlice(r.Reaped.ProtectedPIDs, []int{4444}) {
+		t.Errorf("ProtectedPIDs = %v, want [4444]", r.Reaped.ProtectedPIDs)
+	}
+}
+
 func TestRunDoltCleanup_ForceRecordsKillError(t *testing.T) {
 	procs := []DoltProcInfo{
 		{PID: 4444, Argv: []string{"dolt", "sql-server", "--config", "/tmp/TestX/config.yaml"}, StartTimeTicks: 10},
@@ -1009,6 +1199,241 @@ func TestRunDoltCleanup_DryRunReportsUnsafeRigDatabaseName(t *testing.T) {
 	}
 	if len(r.Errors) != 1 || r.Errors[0].Stage != "rig" || r.Errors[0].Name != "foo" || !strings.Contains(r.Errors[0].Error, "foo db") {
 		t.Fatalf("Errors = %+v, want typed rig error naming unsafe dolt_database", r.Errors)
+	}
+}
+
+func TestRunDoltCleanup_DryRunDoesNotCountMissingRigMetadataAsError(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/rigs/silent/.beads/metadata.json"] = []byte(`{"database":"sqlite"}`)
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		Rigs: []resolverRig{
+			{Name: "missing", Path: "/rigs/missing"},
+			{Name: "silent", Path: "/rigs/silent"},
+		},
+		FS:                fs,
+		JSON:              true,
+		DiscoverProcesses: func() ([]DoltProcInfo, error) { return nil, nil },
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	}
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v\nstdout: %s", err, stdout.String())
+	}
+
+	if r.Summary.ErrorsTotal != 0 {
+		t.Fatalf("Summary.ErrorsTotal = %d, want 0 for dry-run metadata gaps; errors=%+v", r.Summary.ErrorsTotal, r.Errors)
+	}
+	if len(r.Errors) != 0 {
+		t.Fatalf("Errors = %+v, want none for dry-run metadata gaps", r.Errors)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		`"force_blockers":[`,
+		`"kind":"rig-protection"`,
+		`"name":"missing"`,
+		`"name":"silent"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing dry-run force blocker %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRunDoltCleanup_ForceDisablesDropAndPurgeWhenRigMetadataMissing(t *testing.T) {
+	fs := fsys.NewFake()
+	putFakeDirTree(fs, "/rigs/foo/.beads/dolt/.dolt_dropped_databases", map[string]int64{
+		"db_a/data.bin": 100,
+	})
+	client := &fakeCleanupDoltClient{
+		databases: []string{"foo", "testdb_foo_live"},
+	}
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		Rigs:              []resolverRig{{Name: "foo", Path: "/rigs/foo"}},
+		FS:                fs,
+		JSON:              true,
+		Force:             true,
+		DoltClient:        client,
+		DiscoverProcesses: func() ([]DoltProcInfo, error) { return nil, nil },
+		ReapGracePeriod:   1,
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%q", code, stderr.String())
+	}
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v\nstdout: %s", err, stdout.String())
+	}
+	if len(client.dropped) != 0 {
+		t.Fatalf("dropped = %v, want no forced drops when rig metadata is missing", client.dropped)
+	}
+	if client.purged != 0 {
+		t.Fatalf("purged = %d, want no forced purge when rig metadata is missing", client.purged)
+	}
+	if r.Summary.ErrorsTotal != 1 {
+		t.Fatalf("Summary.ErrorsTotal = %d, want 1; errors=%+v", r.Summary.ErrorsTotal, r.Errors)
+	}
+	if len(r.Errors) != 1 || r.Errors[0].Stage != "rig" || r.Errors[0].Name != "foo" || !strings.Contains(r.Errors[0].Error, "missing") {
+		t.Fatalf("Errors = %+v, want missing metadata rig protection error", r.Errors)
+	}
+}
+
+func TestRunDoltCleanup_ForceDisablesDropAndPurgeWhenRigMetadataLacksDoltDatabase(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/rigs/foo/.beads/metadata.json"] = []byte(`{"database":"sqlite"}`)
+	client := &fakeCleanupDoltClient{
+		databases: []string{"foo", "testdb_foo_live"},
+	}
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		Rigs:              []resolverRig{{Name: "foo", Path: "/rigs/foo"}},
+		FS:                fs,
+		JSON:              true,
+		Force:             true,
+		DoltClient:        client,
+		DiscoverProcesses: func() ([]DoltProcInfo, error) { return nil, nil },
+		ReapGracePeriod:   1,
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%q", code, stderr.String())
+	}
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v\nstdout: %s", err, stdout.String())
+	}
+	if len(client.dropped) != 0 {
+		t.Fatalf("dropped = %v, want no forced drops when rig metadata lacks dolt_database", client.dropped)
+	}
+	if client.purged != 0 {
+		t.Fatalf("purged = %d, want no forced purge when rig metadata lacks dolt_database", client.purged)
+	}
+	if r.Summary.ErrorsTotal != 1 {
+		t.Fatalf("Summary.ErrorsTotal = %d, want 1; errors=%+v", r.Summary.ErrorsTotal, r.Errors)
+	}
+	if len(r.Errors) != 1 || r.Errors[0].Stage != "rig" || r.Errors[0].Name != "foo" || !strings.Contains(r.Errors[0].Error, "dolt_database") {
+		t.Fatalf("Errors = %+v, want missing dolt_database rig protection error", r.Errors)
+	}
+}
+
+func TestRunDoltCleanup_ForceRefusesDropWhenApplyPlanExceedsMaxOrphanDBs(t *testing.T) {
+	client := &fakeCleanupDoltClient{
+		databases: []string{"testdb_a", "testdb_b", "testdb_c"},
+	}
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		FS:                fsys.NewFake(),
+		JSON:              true,
+		Force:             true,
+		MaxOrphanDBs:      2,
+		DoltClient:        client,
+		DiscoverProcesses: func() ([]DoltProcInfo, error) { return nil, nil },
+		ReapGracePeriod:   1,
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%q", code, stderr.String())
+	}
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v\nstdout: %s", err, stdout.String())
+	}
+	if len(client.dropped) != 0 {
+		t.Fatalf("dropped = %v, want no forced drops when apply plan exceeds max", client.dropped)
+	}
+	if r.Dropped.Count != 3 || !equalStringSlice(r.Dropped.Names, []string{"testdb_a", "testdb_b", "testdb_c"}) {
+		t.Fatalf("Dropped = %+v, want planned drops when max-orphan guard refuses", r.Dropped)
+	}
+	if r.Summary.ErrorsTotal != 1 {
+		t.Fatalf("Summary.ErrorsTotal = %d, want 1; errors=%+v", r.Summary.ErrorsTotal, r.Errors)
+	}
+	if len(r.Errors) != 1 || r.Errors[0].Stage != "drop" || !strings.Contains(r.Errors[0].Error, "--max-orphan-dbs") || strings.Contains(r.Errors[0].Error, "max_orphans_for_sql") {
+		t.Fatalf("Errors = %+v, want user-facing max orphan DB refusal", r.Errors)
+	}
+	if !strings.Contains(stdout.String(), `"kind":"max-orphan-refusal"`) {
+		t.Fatalf("stdout missing structured max-orphan refusal kind:\n%s", stdout.String())
+	}
+}
+
+func TestRunDoltCleanup_MaxOrphanRefusalAbortsForcedPurgeAndReap(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/rigs/foo/.beads/metadata.json"] = []byte(`{"dolt_database":"foo"}`)
+	putFakeDirTree(fs, "/rigs/foo/.beads/dolt/.dolt_dropped_databases", map[string]int64{
+		"dropped/data.bin": 100,
+	})
+
+	client := &fakeCleanupDoltClient{
+		databases: []string{"foo", "testdb_a", "testdb_b", "testdb_c"},
+	}
+	procs := []DoltProcInfo{{
+		PID:            4444,
+		Argv:           []string{"dolt", "sql-server", "--config", "/tmp/TestX/config.yaml"},
+		StartTimeTicks: 10,
+	}}
+	var signals []syscall.Signal
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		Rigs:         []resolverRig{{Name: "foo", Path: "/rigs/foo"}},
+		FS:           fs,
+		JSON:         true,
+		Force:        true,
+		MaxOrphanDBs: 2,
+		DoltClient:   client,
+		HomeDir:      "/home/u",
+		DiscoverProcesses: func() ([]DoltProcInfo, error) {
+			return procs, nil
+		},
+		KillProcess: func(_ int, sig syscall.Signal) error {
+			signals = append(signals, sig)
+			return nil
+		},
+		ReapGracePeriod: 1,
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%q", code, stderr.String())
+	}
+
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v\nstdout: %s", err, stdout.String())
+	}
+	if len(client.dropped) != 0 {
+		t.Fatalf("dropped = %v, want no forced drops when apply plan exceeds max", client.dropped)
+	}
+	if client.purged != 0 {
+		t.Fatalf("purged = %d, want max-orphan refusal to skip forced purge", client.purged)
+	}
+	if len(signals) != 0 {
+		t.Fatalf("signals = %v, want max-orphan refusal to skip forced reap", signals)
+	}
+	if r.Purge.BytesReclaimed != 0 || r.Purge.OK {
+		t.Fatalf("Purge = %+v, want no forced purge result after max-orphan refusal", r.Purge)
+	}
+	if r.Reaped.Count != 0 || len(r.Reaped.Targets) != 0 {
+		t.Fatalf("Reaped = %+v, want no forced reap result after max-orphan refusal", r.Reaped)
+	}
+	if r.Summary.BytesFreedDisk != 0 || r.Summary.BytesFreedRSS != 0 {
+		t.Fatalf("Summary = %+v, want no freed resources after max-orphan refusal", r.Summary)
+	}
+	if r.Summary.ErrorsTotal != 1 {
+		t.Fatalf("Summary.ErrorsTotal = %d, want 1; errors=%+v", r.Summary.ErrorsTotal, r.Errors)
+	}
+	if len(r.Errors) != 1 || r.Errors[0].Stage != "drop" || !strings.Contains(r.Errors[0].Error, "--max-orphan-dbs") {
+		t.Fatalf("Errors = %+v, want max-orphan drop refusal only", r.Errors)
+	}
+	if !strings.Contains(stdout.String(), `"kind":"max-orphan-refusal"`) {
+		t.Fatalf("stdout missing structured max-orphan refusal kind:\n%s", stdout.String())
 	}
 }
 

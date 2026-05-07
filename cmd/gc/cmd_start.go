@@ -616,16 +616,21 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	dt := newDrainTracker()
 	poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, open, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
-	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(
-		cfg, poolWorkBeads, open, dsResult.ScaleCheckCounts))
+	poolDesired := retainScaleCheckPartialPoolDesired(
+		PoolDesiredCounts(ComputePoolDesiredStates(
+			cfg, poolWorkBeads, open, dsResult.ScaleCheckCounts)),
+		sessionBeads,
+		dsResult.PoolScaleCheckPartialTemplates,
+	)
 	if poolDesired == nil {
 		poolDesired = make(map[string]int)
 	}
 	mergeNamedSessionDemand(poolDesired, dsResult.NamedSessionDemand, cfg)
 	awakeAssignedWorkBeads := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, open, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
-	reconcileSessionBeadsAtPath(
+	reconcileSessionBeadsAtPathWithNamedDemand(
 		sigCtx, cityPath, open, ds, cfgNames, cfg, sp, oneShotStore,
 		nil, awakeAssignedWorkBeads, rigStores, nil, dt, poolDesired,
+		dsResult.NamedSessionDemand,
 		dsResult.snapshotQueryPartial(),
 		nil, cityName,
 		nil, clock.Real{}, recorder, cfg.Session.StartupTimeoutDuration(), 0,

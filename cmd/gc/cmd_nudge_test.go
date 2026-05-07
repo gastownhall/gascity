@@ -15,11 +15,8 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
-
-type noActivityCapabilityProvider struct {
-	*runtime.Fake
-}
 
 func intPtrNudge(n int) *int { return &n }
 
@@ -71,10 +68,6 @@ func (s *unrelatedNotFoundNudgeBeadStore) SetMetadataBatch(id string, kvs map[st
 		return fmt.Errorf("setting metadata on %q: backend path not found", id)
 	}
 	return s.MemStore.SetMetadataBatch(id, kvs)
-}
-
-func (p *noActivityCapabilityProvider) Capabilities() runtime.ProviderCapabilities {
-	return runtime.ProviderCapabilities{}
 }
 
 func TestMarkQueuedNudgeTerminalFallsBackWhenStoredBeadIDEmpty(t *testing.T) {
@@ -573,16 +566,19 @@ func TestDeliverSessionNudgeWithProviderWaitIdleStartsClaudePollerWhenQueued(t *
 	}
 }
 
-func TestPollerSessionIdleEnoughUsesLastActivityWithoutCapabilityFlag(t *testing.T) {
-	fake := runtime.NewFake()
-	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	fake.SetActivity("sess-worker", time.Now().Add(-5*time.Second))
+func TestPollerSessionIdleEnoughUsesSuppliedLastActivity(t *testing.T) {
 	target := nudgeTarget{sessionName: "sess-worker"}
+	last := time.Now().Add(-5 * time.Second)
+	obs := worker.LiveObservation{LastActivity: &last}
 
-	if !pollerSessionIdleEnough(target, nil, &noActivityCapabilityProvider{Fake: fake}, 3*time.Second) {
-		t.Fatal("pollerSessionIdleEnough = false, want true when last activity is old enough")
+	if !pollerSessionIdleEnough(target, nil, 3*time.Second, obs) {
+		t.Fatal("pollerSessionIdleEnough = false, want true when supplied last activity is old enough")
+	}
+
+	recent := time.Now().Add(-1 * time.Second)
+	obs.LastActivity = &recent
+	if pollerSessionIdleEnough(target, nil, 3*time.Second, obs) {
+		t.Fatal("pollerSessionIdleEnough = true, want false when supplied last activity is too recent")
 	}
 }
 
@@ -593,8 +589,9 @@ func TestPollerSessionIdleEnoughFallsBackToIdleWaitWhenActivityUnavailable(t *te
 	}
 	fake.WaitForIdleErrors["sess-worker"] = nil
 	target := nudgeTarget{sessionName: "sess-worker"}
+	obs := worker.LiveObservation{}
 
-	if !pollerSessionIdleEnough(target, nil, fake, 3*time.Second) {
+	if !pollerSessionIdleEnough(target, fake, 3*time.Second, obs) {
 		t.Fatal("pollerSessionIdleEnough = false, want idle wait fallback to allow delivery")
 	}
 
@@ -610,7 +607,7 @@ func TestPollerSessionIdleEnoughFallsBackToIdleWaitWhenActivityUnavailable(t *te
 	}
 
 	fake.WaitForIdleErrors["sess-worker"] = errors.New("timed out waiting for idle")
-	if pollerSessionIdleEnough(target, nil, fake, 3*time.Second) {
+	if pollerSessionIdleEnough(target, fake, 3*time.Second, obs) {
 		t.Fatal("pollerSessionIdleEnough = true, want idle wait error to suppress delivery")
 	}
 }
@@ -1153,7 +1150,8 @@ func TestTryDeliverQueuedNudgesByPollerDeliversAndAcks(t *testing.T) {
 	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	fake.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-10 * time.Second)}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
 
 	target := nudgeTarget{
 		cityPath:    dir,
@@ -1162,8 +1160,9 @@ func TestTryDeliverQueuedNudgesByPollerDeliversAndAcks(t *testing.T) {
 		resolved:    &config.ResolvedProvider{Name: "codex"},
 		sessionName: info.SessionName,
 	}
+	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
 
-	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, fake, 3*time.Second)
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, fake, 3*time.Second, obs)
 	if err != nil {
 		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
 	}
@@ -1214,7 +1213,8 @@ func TestTryDeliverQueuedNudgesByPollerLeavesACPDeliveryUnwrapped(t *testing.T) 
 	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	fake.Activity = map[string]time.Time{"sess-worker": time.Now().Add(-10 * time.Second)}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{"sess-worker": idleSince}
 
 	target := nudgeTarget{
 		cityPath:    dir,
@@ -1223,8 +1223,9 @@ func TestTryDeliverQueuedNudgesByPollerLeavesACPDeliveryUnwrapped(t *testing.T) 
 		resolved:    &config.ResolvedProvider{Name: "codex"},
 		sessionName: "sess-worker",
 	}
+	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
 
-	delivered, err := tryDeliverQueuedNudgesByPoller(target, openNudgeBeadStore(dir), fake, 3*time.Second)
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, openNudgeBeadStore(dir), fake, 3*time.Second, obs)
 	if err != nil {
 		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
 	}

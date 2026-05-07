@@ -4695,6 +4695,53 @@ func TestHandleSessionStreamStoppedWithoutOutputReturnsNotFound(t *testing.T) {
 	}
 }
 
+func TestHandleSessionStreamRawStoppedWithoutOutputReturnsNotFound(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	srv.sessionLogSearchPaths = []string{t.TempDir()}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	info, err := mgr.Create(context.Background(), "default", "No Output", "echo test", t.TempDir(), "test", nil, session.ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/stream?format=raw", nil)
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("got status %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+}
+
+func TestLegacySessionStreamRawStoppedWithoutOutputReturnsNotFound(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{t.TempDir()}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	info, err := mgr.Create(context.Background(), "default", "No Output", "echo test", t.TempDir(), "test", nil, session.ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream?format=raw", nil)
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("got status %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+}
+
 func TestHandleSessionStreamClosedSessionReturnsSnapshot(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
@@ -4745,6 +4792,58 @@ func TestHandleSessionStreamClosedSessionReturnsSnapshot(t *testing.T) {
 		if event.Type == events.WorkerOperation {
 			t.Fatalf("closed session stream emitted worker operation event: %#v", event)
 		}
+	}
+}
+
+func TestHandleSessionStreamStoppedSessionCommitsStatusHeaders(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{searchBase}
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+	)
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+cityURL(fs, "/session/")+info.ID+"/stream", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	cancel()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if got := resp.Header.Get("GC-Session-State"); got != "suspended" {
+		t.Fatalf("committed GC-Session-State = %q, want %q", got, "suspended")
+	}
+	if got := resp.Header.Get("GC-Session-Status"); got != "stopped" {
+		t.Fatalf("committed GC-Session-Status = %q, want %q", got, "stopped")
 	}
 }
 
@@ -4875,6 +4974,68 @@ func TestStreamSessionTranscriptHistoryDoesNotSkipTurnsAcrossCompactionBoundarie
 	if !strings.Contains(body, "after second boundary") {
 		t.Fatalf("stream body missing turn written after new compact boundary: %s", body)
 	}
+}
+
+func TestStreamSessionTranscriptHistoryReloadsChangesWrittenAfterInitialHistory(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	searchBase := t.TempDir()
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"uuid":"a","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"before initial history\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+	)
+
+	handle, err := srv.workerHandleForSession(fs.cityBeadStore, info.ID)
+	if err != nil {
+		t.Fatalf("workerHandleForSession: %v", err)
+	}
+	initial, err := handle.History(context.Background(), worker.HistoryRequest{})
+	if err != nil {
+		t.Fatalf("History(initial): %v", err)
+	}
+
+	logPath := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir), info.SessionKey+".jsonl")
+	appendFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	if _, err := appendFile.WriteString(
+		`{"uuid":"b","parentUuid":"a","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"after initial history\"}","timestamp":"2025-01-01T00:00:01Z"}` + "\n",
+	); err != nil {
+		_ = appendFile.Close()
+		t.Fatalf("append transcript: %v", err)
+	}
+	if err := appendFile.Close(); err != nil {
+		t.Fatalf("close transcript: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	rec := newSyncResponseRecorder()
+	done := make(chan struct{})
+	go func() {
+		srv.streamSessionTranscriptHistory(ctx, rec, info, handle, initial)
+		close(done)
+	}()
+
+	if body := waitForRecorderSubstring(t, rec, "after initial history", time.Second); !strings.Contains(body, "after initial history") {
+		t.Fatalf("stream body missing post-initial-history turn: %s", body)
+	}
+	cancel()
+	<-done
 }
 
 func TestCityScopedSessionStreamReloadsRotatedGeminiTranscriptAcrossRestart(t *testing.T) {
@@ -5575,6 +5736,171 @@ func TestHandleSessionTranscriptRawIncludesAllTypes(t *testing.T) {
 	// Raw format should include ALL entry types (user, assistant, tool_use, tool_result).
 	if len(resp.Messages) != 4 {
 		t.Fatalf("got %d raw messages, want 4 (all types included)", len(resp.Messages))
+	}
+}
+
+func TestHandleSessionTranscriptRawIncludesCodexCustomToolCalls(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "codex", workDir, "codex", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	codexDir := filepath.Join(searchBase, "2026", "05", "02")
+	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll codex session dir: %v", err)
+	}
+	codexPayload := strings.Join([]string{
+		fmt.Sprintf(`{"timestamp":"2025-01-01T00:00:00Z","type":"session_meta","payload":{"cwd":%q}}`, workDir),
+		`{"timestamp":"2025-01-01T00:00:04Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-edit","name":"apply_patch","input":"*** Begin Patch\n*** Update File: city.toml\n@@\n+# Created by Chris Sells\n [workspace]\n*** End Patch\n"}}`,
+		`{"timestamp":"2025-01-01T00:00:05Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-edit","output":"{\"output\":\"Success. Updated the following files:\\nM city.toml\\n\"}"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(codexDir, "rollout-2026-05-02T00-00-00-test.jsonl"), []byte(codexPayload), 0o644); err != nil {
+		t.Fatalf("WriteFile codex session: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/transcript?format=raw&tail=0", nil)
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp SessionStreamRawMessageEvent
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Messages) != 2 {
+		t.Fatalf("got %d raw messages, want 2 Codex custom tool frames", len(resp.Messages))
+	}
+	rawJSON, err := json.Marshal(resp.Messages)
+	if err != nil {
+		t.Fatalf("marshal raw transcript messages: %v", err)
+	}
+	rawJoined := string(rawJSON)
+	if !strings.Contains(rawJoined, `"custom_tool_call"`) ||
+		!strings.Contains(rawJoined, `"custom_tool_call_output"`) {
+		t.Fatalf("raw transcript missing Codex custom tool frames: %s", rawJoined)
+	}
+	if !strings.Contains(rawJoined, "apply_patch") ||
+		!strings.Contains(rawJoined, "Created by Chris Sells") ||
+		!strings.Contains(rawJoined, "Success. Updated the following files") {
+		t.Fatalf("raw transcript missing Codex custom tool payloads: %s", rawJoined)
+	}
+}
+
+func TestHandleSessionTranscriptConversationIncludesCodexErrorFrame(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "codex", workDir, "codex", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	codexDir := filepath.Join(searchBase, "2026", "05", "02")
+	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll codex session dir: %v", err)
+	}
+	codexPayload := strings.Join([]string{
+		fmt.Sprintf(`{"timestamp":"2025-01-01T00:00:00Z","type":"session_meta","payload":{"cwd":%q}}`, workDir),
+		`{"timestamp":"2025-01-01T00:00:04Z","type":"event_msg","payload":{"type":"error","message":"You've hit your usage limit.","codex_error_info":"usage_limit_exceeded"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(codexDir, "rollout-2026-05-02T00-00-00-test.jsonl"), []byte(codexPayload), 0o644); err != nil {
+		t.Fatalf("WriteFile codex session: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/transcript?tail=0", nil)
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp sessionTranscriptResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Format != "conversation" {
+		t.Fatalf("Format = %q, want conversation", resp.Format)
+	}
+	if got := len(resp.Turns); got != 1 {
+		t.Fatalf("turns = %d, want Codex error turn; body: %s", got, w.Body.String())
+	}
+	if resp.Turns[0].Role != "system" {
+		t.Fatalf("turn role = %q, want system", resp.Turns[0].Role)
+	}
+	if !strings.Contains(resp.Turns[0].Text, "usage_limit_exceeded") || !strings.Contains(resp.Turns[0].Text, "You've hit your usage limit.") {
+		t.Fatalf("turn text = %q, want Codex error code and message", resp.Turns[0].Text)
+	}
+}
+
+func TestHandleSessionStreamConversationIncludesCodexErrorFrame(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "codex", workDir, "codex", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	codexDir := filepath.Join(searchBase, "2026", "05", "02")
+	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll codex session dir: %v", err)
+	}
+	codexPayload := strings.Join([]string{
+		fmt.Sprintf(`{"timestamp":"2025-01-01T00:00:00Z","type":"session_meta","payload":{"cwd":%q}}`, workDir),
+		`{"timestamp":"2025-01-01T00:00:04Z","type":"event_msg","payload":{"type":"error","message":"You've hit your usage limit.","codex_error_info":"usage_limit_exceeded"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(codexDir, "rollout-2026-05-02T00-00-00-test.jsonl"), []byte(codexPayload), 0o644); err != nil {
+		t.Fatalf("WriteFile codex session: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "usage_limit_exceeded") || !strings.Contains(body, "You've hit your usage limit.") {
+		t.Fatalf("conversation stream body missing Codex error frame: %s", body)
 	}
 }
 

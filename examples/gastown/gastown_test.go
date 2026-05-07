@@ -659,9 +659,10 @@ func TestGastownRoutedToTargetsUseBindingPrefix(t *testing.T) {
 	}{
 		{"packs/gastown/formulas/mol-deacon-patrol.toml", "gc.routed_to={{binding_prefix}}dog"},
 		{"packs/gastown/formulas/mol-polecat-work.toml", `${GC_RIG:+$GC_RIG/}{{binding_prefix}}refinery`},
-		{"packs/gastown/formulas/mol-refinery-patrol.toml", "gc.routed_to={{rig_name}}/{{binding_prefix}}polecat"},
+		{"packs/gastown/formulas/mol-refinery-patrol.toml", `${GC_RIG:+$GC_RIG/}{{binding_prefix}}polecat`},
 		{"packs/gastown/formulas/mol-idea-to-plan.toml", "$GC_RIG/{{binding_prefix}}polecat"},
-		{"packs/gastown/agents/mayor/prompt.template.md", "gc.routed_to=<rig>/{{ .BindingPrefix }}polecat"},
+		{"packs/gastown/agents/mayor/prompt.template.md", `${TARGET_RIG:+$TARGET_RIG/}{{ .BindingPrefix }}polecat`},
+		{"packs/gastown/agents/polecat/prompt.template.md", `${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}polecat`},
 		{"packs/gastown/agents/polecat/prompt.template.md", `${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery`},
 		{"packs/gastown/template-fragments/approval-fallacy.template.md", `${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery`},
 	}
@@ -680,12 +681,135 @@ func TestGastownRoutedToTargetsUseBindingPrefix(t *testing.T) {
 			"gc.routed_to=<rig>/refinery",
 			"gc.routed_to={{ .RigName }}/refinery",
 			"gc.routed_to={{rig_name}}/{{binding_prefix}}refinery",
+			"gc.routed_to={{rig_name}}/{{binding_prefix}}polecat",
 			"gc.routed_to={{ .RigName }}/{{ .BindingPrefix }}refinery",
+			"{{ .RigName }}/{{ .BindingPrefix }}polecat",
 		} {
 			if strings.Contains(body, bad) {
 				t.Errorf("%s still contains short-form route %q", check.rel, bad)
 			}
 		}
+	}
+}
+
+func TestGastownRigTargetShellExpressionsRenderForRigAndHQ(t *testing.T) {
+	tests := []struct {
+		name      string
+		expr      string
+		gcRig     string
+		targetRig string
+		want      string
+	}{
+		{
+			name: "refinery hq no binding",
+			expr: `${GC_RIG:+$GC_RIG/}refinery`,
+			want: "refinery",
+		},
+		{
+			name:  "refinery rig with binding",
+			expr:  `${GC_RIG:+$GC_RIG/}review.refinery`,
+			gcRig: "gascity",
+			want:  "gascity/review.refinery",
+		},
+		{
+			name: "polecat hq with binding",
+			expr: `${GC_RIG:+$GC_RIG/}review.polecat`,
+			want: "review.polecat",
+		},
+		{
+			name:  "polecat rig with binding",
+			expr:  `${GC_RIG:+$GC_RIG/}review.polecat`,
+			gcRig: "gascity",
+			want:  "gascity/review.polecat",
+		},
+		{
+			name: "mayor polecat hq with binding",
+			expr: `${TARGET_RIG:+$TARGET_RIG/}review.polecat`,
+			want: "review.polecat",
+		},
+		{
+			name:      "mayor polecat rig with binding",
+			expr:      `${TARGET_RIG:+$TARGET_RIG/}review.polecat`,
+			targetRig: "gascity",
+			want:      "gascity/review.polecat",
+		},
+		{
+			name:      "gc rig expression ignores target rig",
+			expr:      `${GC_RIG:+$GC_RIG/}review.refinery`,
+			gcRig:     "gascity",
+			targetRig: "othercity",
+			want:      "gascity/review.refinery",
+		},
+		{
+			name:      "target rig expression ignores gc rig",
+			expr:      `${TARGET_RIG:+$TARGET_RIG/}review.polecat`,
+			gcRig:     "gascity",
+			targetRig: "othercity",
+			want:      "othercity/review.polecat",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := exec.Command("sh", "-c", `printf '%s' "`+tt.expr+`"`)
+			cmd.Env = append(os.Environ(), "GC_RIG="+tt.gcRig, "TARGET_RIG="+tt.targetRig)
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("render target: %v", err)
+			}
+			if got := string(out); got != tt.want {
+				t.Fatalf("target = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGastownRefineryPatrolRejectionCommandsReturnWorkToPolecatPool(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(exampleDir(), "packs/gastown/formulas/mol-refinery-patrol.toml"))
+	if err != nil {
+		t.Fatalf("reading mol-refinery-patrol.toml: %v", err)
+	}
+	body := string(data)
+
+	checks := []struct {
+		name      string
+		startText string
+		endText   string
+	}{
+		{
+			name:      "rebase conflict rejection",
+			startText: "If rebase FAILED (conflicts):",
+			endText:   "A new polecat will pick up the bead",
+		},
+		{
+			name:      "test failure rejection",
+			startText: "If branch caused it:",
+			endText:   "If pre-existing on target:",
+		},
+	}
+	for _, check := range checks {
+		t.Run(check.name, func(t *testing.T) {
+			start := strings.Index(body, check.startText)
+			if start < 0 {
+				t.Fatalf("missing section start %q", check.startText)
+			}
+			end := strings.Index(body[start:], check.endText)
+			if end < 0 {
+				t.Fatalf("missing section end %q after %q", check.endText, check.startText)
+			}
+			section := body[start : start+end]
+			for _, want := range []string{
+				"gc workflow delete-source $WORK --apply && gc workflow reopen-source $WORK",
+				"gc bd update $WORK",
+				"--status=open",
+				`--assignee=""`,
+				"--set-metadata rejection_reason=",
+				`--set-metadata gc.routed_to="${GC_RIG:+$GC_RIG/}{{binding_prefix}}polecat"`,
+			} {
+				if !strings.Contains(section, want) {
+					t.Errorf("%s missing %q:\n%s", check.name, want, section)
+				}
+			}
+		})
 	}
 }
 

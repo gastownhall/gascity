@@ -33,4 +33,66 @@ describe("dashboard logger", () => {
     expect(parsed.city).toBe("mc-city");
     expect(parsed.details.reason).toBe("missing recipient");
   });
+
+  it("does not emit debug logs by default", async () => {
+    const { installDashboardLogging, logDebug } = await import("./logger");
+
+    installDashboardLogging();
+    logDebug("api", "Request start", { url: "http://127.0.0.1:8372/v0/cities" });
+
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("does not emit info logs by default", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const { installDashboardLogging, logInfo } = await import("./logger");
+
+    installDashboardLogging();
+    logInfo("dashboard", "Boot complete", { city: "mc-city" });
+
+    expect(info).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("emits debug logs when explicitly enabled", async () => {
+    window.history.pushState({}, "", "/dashboard?city=mc-city&debug=1");
+    const { installDashboardLogging, logDebug } = await import("./logger");
+
+    installDashboardLogging();
+    logDebug("api", "Request start", { url: "http://127.0.0.1:8372/v0/cities" });
+
+    expect(fetch).toHaveBeenCalledWith("/__client-log", expect.objectContaining({
+      keepalive: true,
+      method: "POST",
+    }));
+  });
+
+  it("emits info logs when explicitly enabled", async () => {
+    window.history.pushState({}, "", "/dashboard?city=mc-city&debug=1");
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const { installDashboardLogging, logInfo } = await import("./logger");
+
+    installDashboardLogging();
+    logInfo("dashboard", "Boot complete", { city: "mc-city" });
+
+    expect(info).toHaveBeenCalledWith("[dashboard][dashboard] Boot complete", { city: "mc-city" });
+    expect(fetch).toHaveBeenCalledWith("/__client-log", expect.objectContaining({
+      keepalive: true,
+      method: "POST",
+    }));
+  });
+
+  it("still emits warnings by default", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const { installDashboardLogging, logWarn } = await import("./logger");
+
+    installDashboardLogging();
+    logWarn("status", "City status dependency timed out", { city: "mc-city" });
+
+    expect(warn).toHaveBeenCalledWith("[dashboard][status] City status dependency timed out", { city: "mc-city" });
+    expect(fetch).toHaveBeenCalledWith("/__client-log", expect.objectContaining({
+      keepalive: true,
+      method: "POST",
+    }));
+  });
 });

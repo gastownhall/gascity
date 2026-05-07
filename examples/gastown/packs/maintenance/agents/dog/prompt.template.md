@@ -76,7 +76,7 @@ and the pool can't recycle your slot.
 
 ```bash
 gc session nudge <target> "message"                # Nudge an agent
-gc session peek <target> 50                        # View agent output
+gc session peek <target> --lines 50                # View agent output
 gc session list                                    # Check agent status
 ```
 

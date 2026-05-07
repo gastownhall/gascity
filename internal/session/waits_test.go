@@ -73,6 +73,7 @@ func TestCancelWaits_CancelsLegacyWaitBeadsWithoutLegacyTypeQuery(t *testing.T) 
 
 func TestWakeSessionRequestsStartForSuspendedBead(t *testing.T) {
 	store := beads.NewMemStore()
+	now := time.Date(2026, 5, 3, 8, 30, 0, 0, time.UTC)
 	sessionBead, err := store.Create(beads.Bead{
 		Type:   BeadType,
 		Labels: []string{LabelSession},
@@ -88,7 +89,7 @@ func TestWakeSessionRequestsStartForSuspendedBead(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 
-	if _, err := WakeSession(store, sessionBead, time.Now().UTC()); err != nil {
+	if _, err := WakeSession(store, sessionBead, now); err != nil {
 		t.Fatalf("WakeSession: %v", err)
 	}
 
@@ -104,6 +105,9 @@ func TestWakeSessionRequestsStartForSuspendedBead(t *testing.T) {
 	}
 	if got := updated.Metadata["pending_create_claim"]; got != "true" {
 		t.Fatalf("pending_create_claim = %q, want true", got)
+	}
+	if got, want := updated.Metadata["pending_create_started_at"], now.UTC().Format(time.RFC3339); got != want {
+		t.Fatalf("pending_create_started_at = %q, want %q", got, want)
 	}
 	for _, key := range []string{"held_until", "wait_hold", "sleep_reason"} {
 		if got := updated.Metadata[key]; got != "" {
@@ -160,6 +164,7 @@ func TestWakeSessionRejectsArchivedHistoricalBead(t *testing.T) {
 
 func TestWakeSessionRequestsStartForContinuityEligibleArchivedBead(t *testing.T) {
 	store := beads.NewMemStore()
+	now := time.Date(2026, 5, 3, 8, 45, 0, 0, time.UTC)
 	sessionBead, err := store.Create(beads.Bead{
 		Type:   BeadType,
 		Labels: []string{LabelSession},
@@ -191,7 +196,7 @@ func TestWakeSessionRequestsStartForContinuityEligibleArchivedBead(t *testing.T)
 		t.Fatalf("create wait: %v", err)
 	}
 
-	if _, err := WakeSession(store, sessionBead, time.Now().UTC()); err != nil {
+	if _, err := WakeSession(store, sessionBead, now); err != nil {
 		t.Fatalf("WakeSession: %v", err)
 	}
 
@@ -207,6 +212,9 @@ func TestWakeSessionRequestsStartForContinuityEligibleArchivedBead(t *testing.T)
 	}
 	if got := updated.Metadata["pending_create_claim"]; got != "true" {
 		t.Fatalf("pending_create_claim = %q, want true", got)
+	}
+	if got, want := updated.Metadata["pending_create_started_at"], now.UTC().Format(time.RFC3339); got != want {
+		t.Fatalf("pending_create_started_at = %q, want %q", got, want)
 	}
 	for _, key := range []string{"held_until", "quarantined_until", "wait_hold", "sleep_intent", "sleep_reason", "archived_at"} {
 		if got := updated.Metadata[key]; got != "" {

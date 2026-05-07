@@ -55,6 +55,22 @@ func (s *noLabelScanSessionLogStore) ListByLabel(label string, _ int, _ ...beads
 	return nil, fmt.Errorf("unexpected label scan for %q", label)
 }
 
+func writeCodexTestSession(t *testing.T, searchBase, workDir, fileName string, lines ...string) string {
+	t.Helper()
+	dayDir := filepath.Join(searchBase, "2026", "05", "04")
+	if err := os.MkdirAll(dayDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dayDir, fileName)
+	allLines := append([]string{
+		fmt.Sprintf(`{"timestamp":"2026-05-04T00:00:00Z","type":"session_meta","payload":{"cwd":%q}}`, workDir),
+	}, lines...)
+	if err := os.WriteFile(path, []byte(strings.Join(allLines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestDoSessionLogsBasic(t *testing.T) {
 	searchBase := t.TempDir()
 	workDir := t.TempDir()
@@ -335,9 +351,12 @@ func TestResolveStoredSessionLogSource_UniqueWorkDirFallsBackBeyondLatestAlias(t
 		},
 	})
 
-	got, provider, ok := resolveStoredSessionLogSource("", nil, store, "mayor", []string{searchBase})
+	got, provider, ok, diagnostic := resolveStoredSessionLogSource("", nil, store, "mayor", []string{searchBase})
 	if !ok {
 		t.Fatal("resolveStoredSessionLogSource() = not found, want found")
+	}
+	if diagnostic != "" {
+		t.Fatalf("resolveStoredSessionLogSource() diagnostic = %q, want empty", diagnostic)
 	}
 	if provider != "claude" {
 		t.Fatalf("resolveStoredSessionLogSource() provider = %q, want %q", provider, "claude")
@@ -379,7 +398,7 @@ func TestResolveStoredSessionLogSource_DoesNotCrossAmbiguousWorkDir(t *testing.T
 		},
 	})
 
-	got, provider, ok := resolveStoredSessionLogSource("", nil, store, "mayor", []string{searchBase})
+	got, provider, ok, diagnostic := resolveStoredSessionLogSource("", nil, store, "mayor", []string{searchBase})
 	if !ok {
 		t.Fatal("resolveStoredSessionLogSource() = not found, want found")
 	}
@@ -388,6 +407,49 @@ func TestResolveStoredSessionLogSource_DoesNotCrossAmbiguousWorkDir(t *testing.T
 	}
 	if got != "" {
 		t.Fatalf("resolveStoredSessionLogSource() path = %q, want empty for ambiguous same-workdir transcript", got)
+	}
+	if !strings.Contains(diagnostic, "ambiguous") {
+		t.Fatalf("resolveStoredSessionLogSource() diagnostic = %q, want ambiguous", diagnostic)
+	}
+}
+
+func TestResolveStoredSessionLogSource_CodexDoesNotUseAmbiguousWorkDirFallback(t *testing.T) {
+	store := beads.NewMemStore()
+	workDir := t.TempDir()
+	searchBase := t.TempDir()
+	writeCodexTestSession(t, searchBase, workDir, "rollout-current.jsonl",
+		`{"timestamp":"2026-05-04T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"wrong session"}]}}`,
+	)
+
+	for _, name := range []string{"workflows__codex-max-mc-one", "workflows__codex-max-mc-two"} {
+		b, _ := store.Create(beads.Bead{
+			Type:   session.BeadType,
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"alias":         name,
+				"provider":      "codex",
+				"provider_kind": "codex",
+				"session_key":   "019df2fd-078f-7cb2-93c8-5c649a15eabe",
+				"session_name":  name,
+				"state":         "gc_swept",
+				"work_dir":      workDir,
+			},
+		})
+		_ = store.Close(b.ID)
+	}
+
+	got, provider, ok, diagnostic := resolveStoredSessionLogSource("", nil, store, "workflows__codex-max-mc-one", []string{searchBase})
+	if !ok {
+		t.Fatal("resolveStoredSessionLogSource() = not found, want found")
+	}
+	if provider != "codex" {
+		t.Fatalf("resolveStoredSessionLogSource() provider = %q, want codex", provider)
+	}
+	if got != "" {
+		t.Fatalf("resolveStoredSessionLogSource() path = %q, want empty for ambiguous codex workdir", got)
+	}
+	if !strings.Contains(diagnostic, "ambiguous") {
+		t.Fatalf("resolveStoredSessionLogSource() diagnostic = %q, want ambiguous", diagnostic)
 	}
 }
 

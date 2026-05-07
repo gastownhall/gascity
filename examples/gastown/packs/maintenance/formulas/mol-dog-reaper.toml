@@ -1,25 +1,42 @@
 description = """
-Reap stale wisps and close stale issues across all Dolt databases.
+Reap stale wisps across Dolt databases and close stale issues in the city DB.
 
-The Reaper Dog closes wisps past their retention age, purges closed wisps
-and mail older than the purge threshold, and auto-closes stale issues.
-This keeps the wisp and mail tables from growing unbounded.
+The Reaper Dog closes stale non-closed wisps only when parent-child
+dependency data proves the parent is closed, purges closed wisps
+older than the purge threshold, and auto-closes stale issues only in the city
+database where `bd close` is correctly scoped. This keeps the wisps table from
+growing unbounded without closing active wisps by age alone.
 
 Current behavior:
-- Closes open/hooked/in_progress wisps older than max_age (default 24h)
-  whose parent molecule is closed or missing
-- Purges (deletes) closed wisps past purge_age (default 3 days)
-- Purges closed mail past mail_delete_age (default 3 days)
-- Auto-closes stale issues open >7 days with no status change
+- Observes open/hooked/in_progress wisps older than max_age (default 24h)
+- Closes only the subset whose parent-child dependency points to a closed
+  parent
+- Purges (deletes) closed wisps past purge_age (default 7 days)
+- Auto-closes stale city issues open >30 days with no status change
+- Reports stale issue candidates in non-city databases without closing them
 - Alerts if open wisp count exceeds threshold (500)
+
+Mail is NOT a SQL table — mail messages are beads (Type=message). Any
+mail cleanup must go through `bd`, never Dolt. BD-backed mail retention is
+tracked separately as `ga-w9jfl5`; until that lands, Reaper intentionally does
+not delete mail. Wisp parentage is no longer carried on the wisps row; it
+lives in `dependencies` rows with `type='parent-child'`. For the Dolt-backed
+bead store, `ParentID` is a projection from those parent-child dependencies,
+not a separate `parent_id` column for Reaper to query. Non-closed wisps without
+that parentage signal are reported only; they are not closed by age alone.
+Legacy `mail_delete_age` overrides do not apply to Reaper and should be
+removed or moved to the BD-backed mail cleanup tool. Legacy `databases`
+overrides from earlier formula drafts are also no longer accepted; the script
+auto-discovers production bead databases from Dolt and filters known scratch
+database patterns.
 
 ## Dog Contract
 
 This is infrastructure work. You:
 1. Scan all production databases for candidates
-2. Reap (close) wisps past max_age whose parent is closed/missing
-3. Purge (delete) closed wisps past purge_age + old closed mail
-4. Auto-close stale issues (with exclusions)
+2. Report non-closed wisps past max_age and close only wisps whose parent is closed
+3. Purge (delete) closed wisps past purge_age
+4. Auto-close stale city issues (with exclusions)
 5. Report findings and flag anomalies
 6. Return to kennel
 
@@ -27,28 +44,39 @@ This is infrastructure work. You:
 
 | Variable | Source | Description |
 |----------|--------|-------------|
-| max_age | config | Max wisp age before reaping (default 24h) |
-| purge_age | config | Max closed wisp age before purging (default 3d) |
-| stale_issue_age | config | Max issue staleness before auto-close (default 7d) |
-| mail_delete_age | config | Max closed mail age before purging (default 3d) |
+| max_age | config | Max non-closed wisp age before reporting/parent-safe close (default 24h) |
+| purge_age | config | Max closed wisp age before purging (default 7d) |
+| stale_issue_age | config | Max issue staleness before auto-close (default 30d) |
 | alert_threshold | config | Open wisp count that triggers escalation (default 500) |
 | dry_run | config | If "true", report without acting |
-| databases | config | Comma-separated DB list (empty = auto-discover) |
 | dolt_port | config | Dolt server port (default 3307) |
+
+The duration variables are Go duration strings in configuration. The exec
+script normalizes them to integer hour values before building Dolt SQL, so SQL
+examples below use `<max_age_hours>`, `<purge_age_hours>`, and
+`<stale_issue_age_hours>` placeholders.
 
 ## Safety
 
-Reaping closes wisps — reversible (can reopen). Purging deletes rows —
-irreversible but only targets already-closed wisps past retention.
-Auto-close excludes P0/P1, epics, and issues with active dependencies.
+Non-closed wisps are closed only when a parent-child dependency points to a
+closed parent. Wisps without a parent-child edge, or with an unresolved parent
+record, are observed, not closed by age alone. Purging deletes rows —
+irreversible but only targets already-closed wisps past retention. Auto-close
+excludes P0/P1, epics, and issues with active dependencies. Non-city database
+issue candidates are report-only until the maintenance pack has an explicit
+DB-to-`BEADS_DIR` routing map for scoped `bd close`. If the canonical city
+database cannot be resolved from bead metadata, a `GC_REAPER_CITY_DATABASE`
+override does not match that metadata, or the resolved database is not present
+in the discovered database list, stale issue auto-close is disabled for that
+run and reported as an anomaly.
 
 ## Anomaly Detection
 
 The Dog should watch for and flag:
-- Dangling parent references (wisps referencing purged parents)
-- Sudden spikes in reap candidates (suggests a wisp lifecycle problem)
+- Sudden spikes in stale non-closed wisps (suggests a wisp lifecycle problem)
 - Open wisp counts exceeding alert_threshold
-- Dolt commit failures (data may not be persisted)
+- Dolt commit failures except benign no-op races where another process already
+  committed the counted change
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-dog-reaper"
@@ -57,20 +85,16 @@ contract = "graph.v2"
 
 [vars]
 [vars.max_age]
-description = "Max wisp age before reaping (e.g., '24h')"
+description = "Max non-closed wisp age before reporting (e.g., '24h')"
 default = "24h"
 
 [vars.purge_age]
-description = "Max closed wisp age before purging (e.g., '72h' = 3 days)"
-default = "72h"
-
-[vars.stale_issue_age]
-description = "Max issue staleness before auto-close (e.g., '168h' = 7 days)"
+description = "Max closed wisp age before purging (e.g., '168h' = 7 days)"
 default = "168h"
 
-[vars.mail_delete_age]
-description = "Max closed mail age before purging (e.g., '72h' = 3 days)"
-default = "72h"
+[vars.stale_issue_age]
+description = "Max issue staleness before auto-close (e.g., '720h' = 30 days)"
+default = "720h"
 
 [vars.alert_threshold]
 description = "Open wisp count that triggers escalation warning"
@@ -78,10 +102,6 @@ default = "500"
 
 [vars.dry_run]
 description = "If 'true', report without modifying data"
-default = ""
-
-[vars.databases]
-description = "Comma-separated database names (empty = auto-discover)"
 default = ""
 
 [vars.dolt_port]
@@ -95,36 +115,53 @@ description = """
 Discover databases and count candidates for each operation.
 
 **1. Determine databases to scan:**
-Use configured database list from {{databases}}, or auto-discover from Dolt server
-on port {{dolt_port}}.
+Auto-discover production databases from the Dolt server on port {{dolt_port}}.
 
 **2. For each database, count candidates:**
 ```sql
--- Open wisps past max_age with closed/missing parent (reap candidates)
-SELECT COUNT(*) FROM wisps w
-LEFT JOIN wisps parent ON w.parent_id = parent.id
+-- Non-closed wisps past max_age (reported)
+SELECT COUNT(*) FROM wisps
+WHERE status IN ('open', 'hooked', 'in_progress')
+AND created_at < DATE_SUB(NOW(), INTERVAL <max_age_hours> HOUR);
+
+-- Schema-safe close candidates: stale child wisps with closed parent
+SELECT COUNT(DISTINCT w.id) FROM wisps w
+INNER JOIN dependencies d
+  ON d.issue_id = w.id
+  AND d.type = 'parent-child'
+LEFT JOIN wisps parent_wisp ON d.depends_on_id = parent_wisp.id
+LEFT JOIN issues parent_issue ON d.depends_on_id = parent_issue.id
 WHERE w.status IN ('open', 'hooked', 'in_progress')
-AND w.created_at < NOW() - INTERVAL {{max_age}}
-AND (parent.id IS NULL OR parent.status = 'closed');
+AND w.created_at < DATE_SUB(NOW(), INTERVAL <max_age_hours> HOUR)
+AND (
+  parent_wisp.status = 'closed'
+  OR parent_issue.status = 'closed'
+);
+-- Repeat the count/update pair until this returns zero so multi-level stale
+-- child chains converge in one reaper run.
 
 -- Closed wisps past purge_age (purge candidates)
 SELECT COUNT(*) FROM wisps
 WHERE status = 'closed'
-AND closed_at < NOW() - INTERVAL {{purge_age}};
-
--- Closed mail past mail_delete_age (mail purge candidates)
-SELECT COUNT(*) FROM mail
-WHERE status = 'closed'
-AND closed_at < NOW() - INTERVAL {{mail_delete_age}};
+AND closed_at < DATE_SUB(NOW(), INTERVAL <purge_age_hours> HOUR)
+AND id NOT IN (
+  SELECT DISTINCT d.depends_on_id FROM dependencies d
+  INNER JOIN wisps child_wisp ON d.issue_id = child_wisp.id
+  WHERE d.type = 'parent-child'
+  AND d.depends_on_id IS NOT NULL
+  AND child_wisp.status IN ('open', 'hooked', 'in_progress')
+);
 
 -- Total open wisps (for alert threshold)
 SELECT COUNT(*) FROM wisps
 WHERE status IN ('open', 'hooked', 'in_progress');
 ```
 
+Mail is not a SQL table — do not query it via Dolt. Mail messages are
+beads with Type=message; any mail cleanup goes through `bd`.
+
 **3. Check for anomalies:**
-- Dangling parent references: wisps whose parent_id points to a missing row
-- Sudden spikes in reap candidates vs previous cycle
+- Sudden spikes in stale non-closed wisps vs previous cycle
 - Open wisp count exceeding {{alert_threshold}}
 
 **4. Decide whether to proceed:**
@@ -135,77 +172,114 @@ WHERE status IN ('open', 'hooked', 'in_progress');
 
 [[steps]]
 id = "reap"
-title = "Reap stale wisps"
+title = "Close stale wisps with closed parents"
 needs = ["scan"]
 description = """
-Close wisps past max_age whose parent molecule is closed or missing.
+Report wisps past max_age and close only the schema-safe subset whose
+parent-child dependency points to a closed parent.
 
-**1. For each database with reap candidates:**
+Wisp parentage no longer lives on the wisps row (the schema has no
+`parent_id` column); parentage is in `dependencies` rows with
+`type='parent-child'`. The SDK `ParentID` field is projected from those rows
+for Dolt-backed beads. Do not close non-closed wisps by age alone.
+`wisp-compact.sh` promotes non-closed wisps past TTL for stuck detection.
+The close step repeats until no schema-safe candidates remain, so a stale
+multi-level child chain whose root is closed converges in one reaper run.
+
+**1. For each database with stale non-closed wisps:**
+```sql
+SELECT COUNT(*) FROM wisps
+WHERE status IN ('open', 'hooked', 'in_progress')
+AND created_at < DATE_SUB(NOW(), INTERVAL <max_age_hours> HOUR);
+```
+
+**2. Close only stale wisps with closed parents, repeating to a fixpoint:**
 ```sql
 UPDATE wisps SET status='closed', closed_at=NOW()
 WHERE status IN ('open', 'hooked', 'in_progress')
-AND created_at < NOW() - INTERVAL {{max_age}}
+AND created_at < DATE_SUB(NOW(), INTERVAL <max_age_hours> HOUR)
 AND id IN (
-  SELECT w.id FROM wisps w
-  LEFT JOIN wisps parent ON w.parent_id = parent.id
-  WHERE parent.id IS NULL OR parent.status = 'closed'
+  SELECT id FROM (
+    SELECT w.id FROM wisps w
+    INNER JOIN dependencies d
+      ON d.issue_id = w.id
+      AND d.type = 'parent-child'
+    LEFT JOIN wisps parent_wisp ON d.depends_on_id = parent_wisp.id
+    LEFT JOIN issues parent_issue ON d.depends_on_id = parent_issue.id
+    WHERE w.status IN ('open', 'hooked', 'in_progress')
+    AND w.created_at < DATE_SUB(NOW(), INTERVAL <max_age_hours> HOUR)
+    AND (
+      parent_wisp.status = 'closed'
+      OR parent_issue.status = 'closed'
+    )
+  ) reaper_wisp_candidates
 );
 ```
 
-**2. Record results:**
-- Count reaped per database
+**3. Record results:**
+- Count stale non-closed wisps per database
+- Count closed-parent stale wisps closed per database
 - Any errors encountered
 
-**3. Alert check:**
+**4. Alert check:**
 If total open wisps across all databases exceed {{alert_threshold}},
 log a warning and consider escalating.
 
-**Exit criteria:** All stale wisps closed."""
+**Exit criteria:** Stale non-closed wisps counted; only stale wisps with closed parents closed."""
 
 [[steps]]
 id = "purge"
-title = "Purge old closed wisps and mail"
+title = "Purge old closed wisps"
 needs = ["reap"]
 description = """
-Delete closed wisps past purge_age and closed mail past mail_delete_age.
+Delete closed wisps past purge_age.
 
 **1. Purge closed wisps for each database:**
 ```sql
 DELETE FROM wisps
 WHERE status = 'closed'
-AND closed_at < NOW() - INTERVAL {{purge_age}};
+AND closed_at < DATE_SUB(NOW(), INTERVAL <purge_age_hours> HOUR)
+AND id NOT IN (
+  SELECT DISTINCT d.depends_on_id FROM dependencies d
+  INNER JOIN wisps child_wisp ON d.issue_id = child_wisp.id
+  WHERE d.type = 'parent-child'
+  AND d.depends_on_id IS NOT NULL
+  AND child_wisp.status IN ('open', 'hooked', 'in_progress')
+);
 ```
 
-**2. Purge closed mail for each database:**
-```sql
-DELETE FROM mail
-WHERE status = 'closed'
-AND closed_at < NOW() - INTERVAL {{mail_delete_age}};
-```
-
-**3. Check for anomalies:**
+**2. Check for anomalies:**
 - Verify Dolt commit succeeded (data may not be persisted if commit fails)
 - Check purge counts are reasonable (not suspiciously high or low)
 
-**Safety:** Only deletes wisps/mail that are already closed AND past the
-retention window. Active wisps are never touched. Reverse dependency
-references are cleaned up to prevent dangling parent refs.
+**Safety:** Only deletes wisps that are already closed AND past the
+retention window, and never deletes a closed parent wisp while any
+non-closed child wisp still depends on it. Active wisps are never touched.
+Mail messages live as beads (Type=message), not in a SQL table — use `bd`
+for any mail cleanup, never DELETE FROM mail.
 
-**Exit criteria:** Old closed wisps and mail purged."""
+**Exit criteria:** Old closed wisps purged."""
 
 [[steps]]
 id = "auto-close"
-title = "Auto-close stale issues"
+title = "Auto-close stale city issues"
 needs = ["purge"]
 description = """
-Close issues that have been open with no status change past stale_issue_age.
+Close city-scoped issues that have been open with no status change past
+stale_issue_age. Rig/non-city database candidates are report-only because a
+bare `bd close` is scoped to the city store and must not be used for other
+databases. If the city database identity is unavailable, a
+`GC_REAPER_CITY_DATABASE` override does not match bead metadata, or the
+resolved database is not present in the discovered database list, skip all
+stale issue auto-close mutations and escalate the missing/invalid identity as
+an anomaly.
 
 **1. For each production database, find stale issues:**
 ```sql
 -- Candidates: open past stale_issue_age, not updated, not P0/P1, not epic
 SELECT id, title, updated_at FROM issues
 WHERE status IN ('open', 'in_progress')
-AND updated_at < NOW() - INTERVAL {{stale_issue_age}}
+AND updated_at < DATE_SUB(NOW(), INTERVAL <stale_issue_age_hours> HOUR)
 AND priority > 1
 AND issue_type != 'epic'
 AND id NOT IN (
@@ -220,14 +294,17 @@ AND id NOT IN (
 )
 ```
 
-**2. Close each candidate** with reason 'stale:auto-closed by reaper'.
+**2. Close each city database candidate** with reason
+'stale:auto-closed by reaper'. For non-city databases, report the candidate
+count only and do not call `bd close`.
 
 **3. Verify exclusions are working** — P0/P1, epics, and dependency-linked
 issues should never be auto-closed.
 
-**4. Record total closed for report.**
+**4. Record total closed and non-city skipped candidates for report.**
 
-**Exit criteria:** All eligible stale issues auto-closed."""
+**Exit criteria:** All eligible city stale issues auto-closed; non-city stale
+issue candidates reported without mutation."""
 
 [[steps]]
 id = "report"
@@ -238,10 +315,11 @@ Generate summary and signal completion.
 
 **1. Generate report summary:**
 - Databases scanned
-- Wisps reaped (closed stale open wisps)
+- Stale non-closed wisps observed
+- Closed-parent stale wisps closed
 - Wisps purged (deleted old closed wisps)
-- Mail purged (deleted old closed mail)
-- Issues auto-closed (stale past {{stale_issue_age}}, excl. epics/P0-P1/deps)
+- City issues auto-closed (stale past {{stale_issue_age}}, excl. epics/P0-P1/deps)
+- Non-city stale issue candidates skipped as report-only
 - Open wisps remaining
 - Anomalies detected (if any)
 - Per-database breakdown
@@ -254,7 +332,7 @@ gc mail send mayor/ -s "ESCALATION: Reaper anomalies detected [MEDIUM]" \
 
 **3. Signal completion:**
 ```bash
-gc session nudge deacon/ "DOG_DONE: reaper — reaped:<count>, purged:<count>, mail:<count>, closed:<count>"
+gc session nudge deacon/ "DOG_DONE: reaper — stale_wisps:<count>, closed_wisps:<count>, purged:<count>, closed:<count>, skipped_non_city_issues:<count>"
 ```
 
 **4. Close work and exit:**

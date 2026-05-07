@@ -874,6 +874,59 @@ func TestPrepareStartCandidate_GeneratesMissingSessionKeyBeforeWake(t *testing.T
 	}
 }
 
+func TestPrepareStartCandidate_ResumeCapableWithoutSessionKeyKeepsStartupPrompt(t *testing.T) {
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "codex-worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:codex-worker"},
+		Metadata: map[string]string{
+			"template":            "codex-worker",
+			"session_name":        "codex-worker",
+			"started_config_hash": "previous-start",
+			"session_key":         "",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prepared, err := prepareStartCandidate(startCandidate{
+		session: &session,
+		tp: TemplateParams{
+			TemplateName: "codex-worker",
+			SessionName:  "codex-worker",
+			Command:      "aimux run codex -- --dangerously-bypass-approvals-and-sandbox",
+			Prompt:       "You are a routed workflow lane. Run gc hook first.",
+			ResolvedProvider: &config.ResolvedProvider{
+				Name:          "codex",
+				PromptMode:    "arg",
+				ResumeFlag:    "resume",
+				ResumeStyle:   "subcommand",
+				ResumeCommand: "aimux run codex -- resume {{.SessionKey}}",
+			},
+		},
+		order: 0,
+	}, &config.City{}, store, &clock.Fake{Time: time.Date(2026, 5, 5, 4, 20, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatalf("prepareStartCandidate: %v", err)
+	}
+
+	if prepared.cfg.PromptSuffix == "" {
+		t.Fatal("PromptSuffix should be retained when there is no session_key to resume")
+	}
+	parts := shellquote.Split(prepared.cfg.PromptSuffix)
+	if len(parts) != 1 {
+		t.Fatalf("PromptSuffix parsed parts = %#v, want single prompt payload", parts)
+	}
+	if !strings.Contains(parts[0], "Run gc hook first") {
+		t.Fatalf("prompt payload = %q, want startup workflow prompt", parts[0])
+	}
+	if strings.Contains(prepared.cfg.Command, "resume") {
+		t.Fatalf("prepared.cfg.Command = %q, should not use resume without a session_key", prepared.cfg.Command)
+	}
+}
+
 func TestPrepareStartCandidate_DoesNotAppendCLIResumeFlagForACP(t *testing.T) {
 	store := beads.NewMemStore()
 	session, err := store.Create(beads.Bead{
@@ -1617,6 +1670,122 @@ func TestAsyncStartLimiterNilReceiverMethodsAreNoops(t *testing.T) {
 		t.Fatalf("nil limiter reserve = reserved %v outcome %q, want success", reserved, outcome)
 	}
 	release()
+}
+
+func TestExecutePlannedStartsTracedCanceledContextDoesNotStart(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC)}
+	session, err := store.Create(beads.Bead{
+		ID:     "gc-worker",
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       "worker",
+			"template":           "worker",
+			"state":              "asleep",
+			"sleep_reason":       "idle",
+			"wake_mode":          "fresh",
+			"generation":         "1",
+			"continuation_epoch": "1",
+			"instance_token":     "tok-worker",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tp := TemplateParams{Command: "worker", SessionName: "worker", TemplateName: "worker"}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	sp := runtime.NewFake()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	woken := executePlannedStartsTraced(
+		ctx,
+		[]startCandidate{{session: &session, tp: tp}},
+		cfg,
+		map[string]TemplateParams{"worker": tp},
+		sp,
+		store,
+		"test-city",
+		"",
+		clk,
+		events.Discard,
+		5*time.Second,
+		ioDiscard{},
+		ioDiscard{},
+		nil,
+		withAsyncStartExecution(),
+		withAsyncStartTracker(&asyncStartTracker{}),
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0 after cancellation", woken)
+	}
+	for _, call := range sp.Calls {
+		if call.Method == "Start" {
+			t.Fatalf("unexpected Start after cancellation: calls=%+v", sp.Calls)
+		}
+	}
+}
+
+func TestReconcileSessionBeadsTracedCanceledContextDoesNotTouchProvider(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 5, 12, 1, 0, 0, time.UTC)}
+	session, err := store.Create(beads.Bead{
+		ID:     "gc-worker",
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":        "worker",
+			"template":            "worker",
+			"state":               "active",
+			"started_config_hash": "hash",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tp := TemplateParams{Command: "worker", SessionName: "worker", TemplateName: "worker"}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	sp := runtime.NewFake()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	woken := reconcileSessionBeadsTraced(
+		ctx,
+		"",
+		[]beads.Bead{session},
+		map[string]TemplateParams{"worker": tp},
+		map[string]bool{"worker": true},
+		cfg,
+		sp,
+		store,
+		nil,
+		nil,
+		nil,
+		nil,
+		newDrainTracker(),
+		map[string]int{"worker": 1},
+		false,
+		nil,
+		"test-city",
+		nil,
+		clk,
+		events.Discard,
+		5*time.Second,
+		time.Second,
+		ioDiscard{},
+		ioDiscard{},
+		nil,
+		withAsyncStartExecution(),
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0 after cancellation", woken)
+	}
+	if len(sp.Calls) != 0 {
+		t.Fatalf("provider calls after cancellation: %+v", sp.Calls)
+	}
 }
 
 func TestCityRuntimeShutdownWaitsForTrackedAsyncStartsBeforeStopSnapshot(t *testing.T) {
@@ -2557,6 +2726,27 @@ func TestAsyncStartSessionStillCurrent_PendingCreateClearedAfterAttachIsNotStale
 	}
 	if asyncStartStaleRuntimeCleanupAllowed(prepared, current) {
 		t.Fatal("session that advanced to active must not allow runtime cleanup")
+	}
+}
+
+func TestAsyncStartSessionStillCurrent_PendingCreateClearedAfterAwakeIsNotStale(t *testing.T) {
+	prepared := beads.Bead{Metadata: map[string]string{
+		"instance_token":       "tok-awake",
+		"generation":           "2",
+		"state":                "creating",
+		"pending_create_claim": "true",
+	}}
+	current := beads.Bead{Metadata: map[string]string{
+		"instance_token":       "tok-awake",
+		"generation":           "8",
+		"state":                "awake",
+		"pending_create_claim": "",
+	}}
+	if !asyncStartSessionStillCurrent(prepared, current) {
+		t.Fatal("session that advanced to awake mid-flight must not be considered stale even when pcc was cleared")
+	}
+	if asyncStartStaleRuntimeCleanupAllowed(prepared, current) {
+		t.Fatal("session that advanced to awake must not allow runtime cleanup")
 	}
 }
 
@@ -4623,6 +4813,193 @@ func TestExecutePreparedStartWave_StaleSessionKeyDetectedWhenPaneSurvives(t *tes
 	}
 	if !strings.Contains(r.err.Error(), "died during startup") {
 		t.Fatalf("unexpected error: %v", r.err)
+	}
+}
+
+func TestExecutePreparedStartWave_RateLimitStartupDeathQuarantinesWithoutWakeFailure(t *testing.T) {
+	sp := &zombieAfterStartProvider{Fake: runtime.NewFake()}
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)}
+	session, err := store.Create(beads.Bead{
+		ID:     "gc-99",
+		Title:  "test-agent",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "test-agent",
+			"session_key":          "stale-key-abc",
+			"template":             "worker",
+			"state":                "active",
+			"last_woke_at":         clk.Now().Add(-10 * time.Second).UTC().Format(time.RFC3339),
+			"wake_attempts":        "2",
+			"started_config_hash":  "keep-hash",
+			"continuation_command": "resume",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	sp.SetPeekOutput("test-agent", "You've hit your limit, Pro plan\n\n/rate-limit-options")
+	item := preparedStart{
+		candidate: startCandidate{
+			session: &session,
+			tp: TemplateParams{
+				Command:      "claude --resume stale-key-abc",
+				SessionName:  "test-agent",
+				TemplateName: "worker",
+			},
+		},
+		cfg: runtime.Config{
+			Command:      "claude --resume stale-key-abc",
+			ProcessNames: []string{"claude"},
+		},
+	}
+
+	results := executePreparedStartWaveForCity(
+		context.Background(),
+		[]preparedStart{item},
+		"",
+		sp,
+		nil,
+		&config.City{},
+		10*time.Second,
+		1,
+	)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].err == nil {
+		t.Fatal("expected startup-death error")
+	}
+
+	if commitStartResult(results[0], store, clk, events.Discard, 0, ioDiscard{}, ioDiscard{}) {
+		t.Fatal("startup rate-limit hold should not count as a committed wake")
+	}
+	got, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["wake_attempts"] != "2" {
+		t.Fatalf("wake_attempts = %q, want 2", got.Metadata["wake_attempts"])
+	}
+	if got.Metadata["sleep_reason"] != "rate_limit" {
+		t.Fatalf("sleep_reason = %q, want rate_limit", got.Metadata["sleep_reason"])
+	}
+	if got.Metadata["state"] != "asleep" {
+		t.Fatalf("state = %q, want asleep", got.Metadata["state"])
+	}
+	if got.Metadata["session_key"] != "stale-key-abc" {
+		t.Fatalf("session_key = %q, want preserved", got.Metadata["session_key"])
+	}
+	if got.Metadata["started_config_hash"] != "keep-hash" {
+		t.Fatalf("started_config_hash = %q, want preserved", got.Metadata["started_config_hash"])
+	}
+	if got.Metadata["continuation_reset_pending"] != "" {
+		t.Fatalf("continuation_reset_pending = %q, want empty", got.Metadata["continuation_reset_pending"])
+	}
+	if got.Metadata["last_woke_at"] != "" {
+		t.Fatalf("last_woke_at = %q, want cleared after rate-limit hold", got.Metadata["last_woke_at"])
+	}
+	qUntil, err := time.Parse(time.RFC3339, got.Metadata["quarantined_until"])
+	if err != nil {
+		t.Fatalf("quarantined_until parse: %v", err)
+	}
+	if want := clk.Now().Add(defaultRateLimitQuarantineDuration); !qUntil.Equal(want) {
+		t.Fatalf("quarantined_until = %s, want %s", qUntil.Format(time.RFC3339), want.Format(time.RFC3339))
+	}
+}
+
+func TestExecutePreparedStartWave_RateLimitPendingCreateDeathClearsClaim(t *testing.T) {
+	sp := &zombieAfterStartProvider{Fake: runtime.NewFake()}
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 28, 12, 30, 0, 0, time.UTC)}
+	session, err := store.Create(beads.Bead{
+		ID:     "gc-creating",
+		Title:  "creating-agent",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: creatingMeta(map[string]string{
+			"session_name":         "creating-agent",
+			"session_key":          "resume-key",
+			"template":             "worker",
+			"last_woke_at":         clk.Now().Add(-10 * time.Second).UTC().Format(time.RFC3339),
+			"wake_attempts":        "2",
+			"started_config_hash":  "keep-hash",
+			"pending_create_claim": "true",
+		}),
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	sp.SetPeekOutput("creating-agent", "You've hit your limit, Pro plan\n\n/rate-limit-options")
+	item := preparedStart{
+		candidate: startCandidate{
+			session: &session,
+			tp: TemplateParams{
+				Command:      "claude --resume resume-key",
+				SessionName:  "creating-agent",
+				TemplateName: "worker",
+			},
+		},
+		cfg: runtime.Config{
+			Command:      "claude --resume resume-key",
+			ProcessNames: []string{"claude"},
+		},
+	}
+
+	results := executePreparedStartWaveForCity(
+		context.Background(),
+		[]preparedStart{item},
+		"",
+		sp,
+		nil,
+		&config.City{},
+		10*time.Second,
+		1,
+	)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].err == nil {
+		t.Fatal("expected startup-death error")
+	}
+	if !results[0].rateLimitScreen {
+		t.Fatal("pending-create startup death should still classify provider rate-limit screen")
+	}
+
+	if commitStartResult(results[0], store, clk, events.Discard, 0, ioDiscard{}, ioDiscard{}) {
+		t.Fatal("startup rate-limit hold should not count as a committed wake")
+	}
+	got, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("status = %q, want open", got.Status)
+	}
+	if got.Metadata["close_reason"] != "" {
+		t.Fatalf("close_reason = %q, want empty", got.Metadata["close_reason"])
+	}
+	if got.Metadata["state"] != "asleep" {
+		t.Fatalf("state = %q, want asleep", got.Metadata["state"])
+	}
+	if got.Metadata["sleep_reason"] != "rate_limit" {
+		t.Fatalf("sleep_reason = %q, want rate_limit", got.Metadata["sleep_reason"])
+	}
+	if got.Metadata["wake_attempts"] != "2" {
+		t.Fatalf("wake_attempts = %q, want 2", got.Metadata["wake_attempts"])
+	}
+	if got.Metadata["pending_create_claim"] != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared by rate-limit hold", got.Metadata["pending_create_claim"])
+	}
+	if got.Metadata["session_key"] != "resume-key" {
+		t.Fatalf("session_key = %q, want preserved", got.Metadata["session_key"])
+	}
+	if got.Metadata["started_config_hash"] != "keep-hash" {
+		t.Fatalf("started_config_hash = %q, want preserved", got.Metadata["started_config_hash"])
+	}
+	if got.Metadata["last_woke_at"] != "" {
+		t.Fatalf("last_woke_at = %q, want cleared after rate-limit hold", got.Metadata["last_woke_at"])
 	}
 }
 

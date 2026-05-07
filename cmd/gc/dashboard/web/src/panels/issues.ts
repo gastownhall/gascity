@@ -51,7 +51,7 @@ export async function renderIssues(): Promise<void> {
   renderIssueTable();
 }
 
-function resetIssuesNoCity(): void {
+export function resetIssuesNoCity(): void {
   const issuesList = byId("issues-list");
   const rigTabs = byId("rig-filter-tabs");
   const detail = byId("issue-detail");
@@ -61,6 +61,7 @@ function resetIssuesNoCity(): void {
   const detailOpen = detail.style.display === "block";
   detail.style.display = "none";
   issuesList.style.display = "block";
+  clearIssueDetailContent();
   clear(issuesList);
   issuesList.append(el("div", { class: "empty-state" }, [el("p", {}, ["Select a city to view beads"])]));
   clear(rigTabs);
@@ -70,6 +71,32 @@ function resetIssuesNoCity(): void {
   rigTabs.append(rigButton("all", true));
   byId("issues-count")!.textContent = "0";
   if (detailOpen) popPause();
+}
+
+function clearIssueDetailContent(): void {
+  [
+    "issue-detail-id",
+    "issue-detail-title-text",
+    "issue-detail-description",
+    "issue-detail-status",
+    "issue-detail-type",
+    "issue-detail-owner",
+    "issue-detail-created",
+  ].forEach((id) => {
+    const node = byId(id);
+    if (node) node.textContent = "";
+  });
+  const priority = byId("issue-detail-priority");
+  if (priority) {
+    priority.className = "badge";
+    priority.textContent = "";
+  }
+  ["issue-detail-actions", "issue-detail-depends-on", "issue-detail-blocks"].forEach((id) => {
+    const node = byId(id);
+    if (node) clear(node);
+  });
+  byId("issue-detail-deps")?.style.setProperty("display", "none");
+  byId("issue-detail-blocks-section")?.style.setProperty("display", "none");
 }
 
 function renderIssueTable(): void {

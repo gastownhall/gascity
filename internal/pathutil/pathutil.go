@@ -70,3 +70,21 @@ func canonicalizePlatformPathAlias(path string) string {
 func SamePath(a, b string) bool {
 	return NormalizePathForCompare(a) == NormalizePathForCompare(b)
 }
+
+// PathWithin reports whether candidate is the same path as root or a path
+// lexically contained beneath root after normalization and symlink resolution.
+func PathWithin(root, candidate string) bool {
+	root = NormalizePathForCompare(root)
+	candidate = NormalizePathForCompare(candidate)
+	if root == "" || candidate == "" {
+		return false
+	}
+	if root == candidate {
+		return true
+	}
+	rel, err := filepath.Rel(root, candidate)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}

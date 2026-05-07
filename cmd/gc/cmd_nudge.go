@@ -457,7 +457,7 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 			return 0
 		}
 		missingSince = time.Time{}
-		delivered, pollErr := tryDeliverQueuedNudgesByPoller(target, store, sp, quiescence)
+		delivered, pollErr := tryDeliverQueuedNudgesByPoller(target, store, sp, quiescence, obs)
 		if pollErr != nil {
 			fmt.Fprintf(stderr, "gc nudge poll: %v\n", pollErr) //nolint:errcheck
 		}
@@ -726,8 +726,8 @@ func parseNudgeDeliveryMode(raw string) (nudgeDeliveryMode, error) {
 	}
 }
 
-func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store beads.Store, sp runtime.Provider, quiescence time.Duration) (bool, error) {
-	if !pollerSessionIdleEnough(target, store, sp, quiescence) {
+func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store beads.Store, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) (bool, error) {
+	if !pollerSessionIdleEnough(target, sp, quiescence, obs) {
 		return false, nil
 	}
 	items, err := claimDueQueuedNudgesForTarget(target.cityPath, target, time.Now())
@@ -786,11 +786,7 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store beads.Store, sp ru
 	return true, ackQueuedNudges(target.cityPath, queuedNudgeIDs(items))
 }
 
-func pollerSessionIdleEnough(target nudgeTarget, store beads.Store, sp runtime.Provider, quiescence time.Duration) bool {
-	obs, err := workerObserveNudgeTarget(target, store, sp)
-	if err != nil {
-		return false
-	}
+func pollerSessionIdleEnough(target nudgeTarget, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) bool {
 	if quiescence <= 0 {
 		return true
 	}

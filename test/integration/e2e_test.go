@@ -168,6 +168,26 @@ func TestE2E_Overlay(t *testing.T) {
 	}
 }
 
+func TestE2E_NoStartClearsReportsFromInit(t *testing.T) {
+	city := e2eCity{
+		Agents: []e2eAgent{
+			{Name: "nostart-report", StartCommand: e2eReportScript()},
+		},
+	}
+	cityDir := setupE2ECityNoStart(t, city)
+	reportDir := filepath.Join(cityDir, ".gc-reports")
+	entries, err := os.ReadDir(reportDir)
+	if os.IsNotExist(err) {
+		return
+	}
+	if err != nil {
+		t.Fatalf("reading report dir: %v", err)
+	}
+	if len(entries) > 0 {
+		t.Fatalf("setupE2ECityNoStart left stale report files: %v", entries)
+	}
+}
+
 // TestE2E_Hooks_Gemini verifies that install_agent_hooks=["gemini"] creates
 // .gemini/settings.json in the workdir.
 func TestE2E_Hooks_Gemini(t *testing.T) {

@@ -143,6 +143,37 @@ func TestRunDoltCleanup_HumanOutputShowsErrorsSection(t *testing.T) {
 	}
 }
 
+func TestRunDoltCleanup_HumanOutputShowsForceBlockersSection(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/rigs/silent/.beads/metadata.json"] = []byte(`{"database":"sqlite"}`)
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		Rigs: []resolverRig{
+			{Name: "missing", Path: "/rigs/missing"},
+			{Name: "silent", Path: "/rigs/silent"},
+		},
+		FS:                fs,
+		JSON:              false,
+		DiscoverProcesses: func() ([]DoltProcInfo, error) { return nil, nil },
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%q", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"FORCE BLOCKERS (2)",
+		"rig-protection",
+		"missing",
+		"silent",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("human output missing force-blocker detail %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestRunDoltCleanup_HumanOutputCountsPostSIGTERMGoneAsReaped(t *testing.T) {
 	discoverCalls := 0
 

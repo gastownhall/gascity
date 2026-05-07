@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/molecule"
 )
 
@@ -47,12 +48,10 @@ func TestNewSyncsFormulaV2FeatureFlags(t *testing.T) {
 	state := newFakeMutatorState(t)
 	state.cfg.Daemon.FormulaV2 = true
 
-	prevFormulaV2 := formula.IsFormulaV2Enabled()
+	formulatest.SetV2ForTest(t, false)
 	prevGraphApply := molecule.IsGraphApplyEnabled()
-	formula.SetFormulaV2Enabled(false)
 	molecule.SetGraphApplyEnabled(false)
 	t.Cleanup(func() {
-		formula.SetFormulaV2Enabled(prevFormulaV2)
 		molecule.SetGraphApplyEnabled(prevGraphApply)
 	})
 
@@ -574,19 +573,19 @@ func TestSlingConflictReturns409ForExistingLiveWorkflow(t *testing.T) {
 	//      which is default-false out of newFakeMutatorState.
 	//   2. We then set state.cfg.Daemon.FormulaV2 = true for reads that go
 	//      through config (handler-level checks).
-	//   3. The global flag is what formula compile calls, so we call
-	//      formula.SetFormulaV2Enabled(true) AFTER newSlingTestServer so
-	//      New()'s syncFeatureFlags doesn't stomp it back to false.
-	prevFormulaV2 := formula.IsFormulaV2Enabled()
+	//   3. The compile-time flag is process-global, so this test holds the
+	//      shared formulatest guard and flips it to true AFTER
+	//      newSlingTestServer so New()'s syncFeatureFlags doesn't stomp it
+	//      back to false.
+	setFormulaV2 := formulatest.LockV2ForTest(t)
 	prevGraphApply := molecule.IsGraphApplyEnabled()
 	t.Cleanup(func() {
-		formula.SetFormulaV2Enabled(prevFormulaV2)
 		molecule.SetGraphApplyEnabled(prevGraphApply)
 	})
 
 	srv, state := newSlingTestServer(t)
 	state.cfg.Daemon.FormulaV2 = true
-	formula.SetFormulaV2Enabled(true)
+	setFormulaV2(true)
 	molecule.SetGraphApplyEnabled(true)
 	formulaDir := t.TempDir()
 	state.cfg.FormulaLayers.City = []string{formulaDir}

@@ -2,6 +2,12 @@ name: CI
 
 on:
   workflow_call:
+    inputs:
+      force_blacksmith:
+        description: Force all jobs in the reusable CI graph onto Blacksmith runners.
+        required: false
+        type: boolean
+        default: false
   push:
     branches: [main]
   pull_request:
@@ -21,7 +27,7 @@ concurrency:
 jobs:
   runner-policy:
     name: Runner policy
-    runs-on: ${{ github.event_name == 'pull_request' && contains(fromJSON('["julianknutsen","csells","sjarmak","quad341"]'), github.event.pull_request.user.login) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.force_blacksmith && 'blacksmith-2vcpu-ubuntu-2404' || (github.event_name == 'pull_request' && contains(fromJSON('["julianknutsen","csells","sjarmak","quad341"]'), github.event.pull_request.user.login) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest') }}
     outputs:
       use_blacksmith: ${{ steps.policy.outputs.use_blacksmith }}
       reason: ${{ steps.policy.outputs.reason }}
@@ -36,6 +42,7 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          FORCE_BLACKSMITH: ${{ inputs.force_blacksmith }}
         run: |
           python3 .github/workflows/scripts/runner_policy.py
 

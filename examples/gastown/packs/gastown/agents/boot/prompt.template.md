@@ -36,7 +36,7 @@ Narrow scope makes restarts cheap. The controller manages your lifecycle.
 ### Step 1: Check if deacon session exists
 
 ```bash
-{{ cmd }} agent peek deacon 1
+{{ cmd }} session peek deacon --lines 1
 ```
 
 If the deacon session doesn't exist: do nothing and exit. The controller
@@ -46,13 +46,13 @@ detects dead agents and restarts them — that's its job, not yours.
 
 ```bash
 # Recent pane output — is the deacon actively working?
-{{ cmd }} agent peek deacon 30
+{{ cmd }} session peek deacon --lines 30
 
 # Deacon's current patrol wisp — how fresh is it?
 gc bd list --assignee=deacon --status=in_progress --json --limit=5
 
 # Does the deacon have unread mail? (may explain idle state)
-gc mail inbox --address=deacon --json 2>/dev/null | jq length
+gc mail count deacon 2>/dev/null
 ```
 
 Read the wisp timestamps and pane output. Build a picture:
@@ -121,11 +121,11 @@ up your session and spawns you again next tick.
 
 | Want to... | Correct command |
 |------------|----------------|
-| View deacon output | `{{ cmd }} agent peek deacon 30` |
+| View deacon output | `{{ cmd }} session peek deacon --lines 30` |
 | Check deacon work | `gc bd list --assignee=deacon --status=in_progress --json` |
 | Nudge deacon | `{{ cmd }} session nudge deacon "message"` |
 | File stuck warrant | `gc bd create --type=warrant --label=pool:dog --metadata '{...}'` |
-| Check agents | `{{ cmd }} agent list` |
+| Check active sessions | `{{ cmd }} session list` |
 
 Working directory: {{ .WorkDir }}
 Formula: none (ephemeral triage, no patrol loop)

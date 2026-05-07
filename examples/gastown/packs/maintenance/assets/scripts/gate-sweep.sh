@@ -1,50 +1,17 @@
 #!/usr/bin/env bash
 # gate-sweep — evaluate and close pending gates.
 #
-# Replaces the deacon patrol check-gates step. All gate evaluation is
-# deterministic: timer gates are timestamp comparison, condition gates
-# are exit code checks, GitHub gates are API status queries.
+# Runs as an exec order (no LLM, no agent, no wisp). bd dispatches per
+# type. `|| true` is load-bearing: bd shells out to `gh` for gh:run /
+# gh:pr gates, and fresh cities without `gh auth` would otherwise fail
+# this order on every 30s cooldown. bd's combined output reaches the
+# controller log only on non-zero exit (cmd/gc/order_dispatch.go:466-475),
+# so the suppression also hides real bd errors — diagnose by hand.
 #
-# Runs as an exec order (no LLM, no agent, no wisp).
+# Bead-type gates are skipped: in beads v1.0.2, checkBeadGate is
+# hard-coded to fail because cross-rig routing was removed upstream.
+# Restore `bd gate check --type=bead --escalate` when beads adds it back.
 set -euo pipefail
 
-CITY="${GC_CITY:-.}"
-
-# Step 1: Close elapsed timer gates.
-# bd gate check evaluates all open gate beads, closes those past their
-# timeout, and prints a summary. --escalate sends mail for expired gates.
-bd gate check --type=timer --escalate 2>/dev/null || true
-
-# Step 2: Evaluate condition gates.
-# For each open condition gate, run its check command. Close if exit 0.
-CONDITION_GATES=$(bd gate list --type=condition --status=open --json 2>/dev/null) || true
-if [ -n "$CONDITION_GATES" ] && [ "$CONDITION_GATES" != "[]" ]; then
-    echo "$CONDITION_GATES" | jq -r '.[] | "\(.id)\t\(.metadata.check)"' 2>/dev/null | while IFS=$'\t' read -r gate_id check_cmd; do
-        if [ -n "$check_cmd" ] && eval "$check_cmd" >/dev/null 2>&1; then
-            bd gate close "$gate_id" --reason "condition satisfied" 2>/dev/null || true
-        fi
-    done
-fi
-
-# Step 3: Evaluate GitHub gates (gh:run, gh:pr).
-# For each open GitHub gate, check the workflow/PR status and close if done.
-GH_GATES=$(bd gate list --type=gh --status=open --json 2>/dev/null) || true
-if [ -n "$GH_GATES" ] && [ "$GH_GATES" != "[]" ]; then
-    echo "$GH_GATES" | jq -r '.[] | "\(.id)\t\(.metadata.await_type)\t\(.metadata.ref)"' 2>/dev/null | while IFS=$'\t' read -r gate_id await_type ref; do
-        case "$await_type" in
-            gh:run)
-                STATUS=$(gh run view "$ref" --json status -q .status 2>/dev/null) || continue
-                if [ "$STATUS" = "completed" ]; then
-                    CONCLUSION=$(gh run view "$ref" --json conclusion -q .conclusion 2>/dev/null)
-                    bd gate close "$gate_id" --reason "workflow $CONCLUSION" 2>/dev/null || true
-                fi
-                ;;
-            gh:pr)
-                STATE=$(gh pr view "$ref" --json state -q .state 2>/dev/null) || continue
-                if [ "$STATE" = "MERGED" ] || [ "$STATE" = "CLOSED" ]; then
-                    bd gate close "$gate_id" --reason "PR $STATE" 2>/dev/null || true
-                fi
-                ;;
-        esac
-    done
-fi
+bd gate check --type=timer --escalate || true
+bd gate check --type=gh --escalate || true

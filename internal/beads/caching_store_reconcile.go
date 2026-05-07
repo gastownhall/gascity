@@ -108,10 +108,7 @@ func (c *CachingStore) runReconciliation() {
 			if _, keep := c.recentLocalBeadConflictLocked(id, freshBead, now); keep {
 				continue
 			}
-			freshDeps := depsFromBeadFields(freshBead)
-			if useFreshDeps {
-				freshDeps = depMap[id]
-			}
+			freshDeps := c.depsForReconcileLocked(id, freshBead, depMap, useFreshDeps)
 
 			old, exists := c.beads[id]
 			switch {
@@ -209,10 +206,7 @@ func (c *CachingStore) runReconciliation() {
 			beadForCache = current
 			preservedRecentLocal = true
 		}
-		freshDeps := depsFromBeadFields(freshBead)
-		if useFreshDeps {
-			freshDeps = depMap[id]
-		}
+		freshDeps := c.depsForReconcileLocked(id, freshBead, depMap, useFreshDeps)
 		nextBeads[id] = cloneBead(beadForCache)
 		nextDeps[id] = cloneDeps(freshDeps)
 
@@ -285,6 +279,22 @@ func (c *CachingStore) runReconciliation() {
 	c.updateStatsLocked()
 	c.mu.Unlock()
 	c.notifyChanges(notifications)
+}
+
+func (c *CachingStore) depsForReconcileLocked(id string, freshBead Bead, depMap map[string][]Dep, useFreshDeps bool) []Dep {
+	if useFreshDeps {
+		return cloneDeps(depMap[id])
+	}
+	freshDeps := depsFromBeadFields(freshBead)
+	if _, ok := c.backing.(*BdStore); ok {
+		return freshDeps
+	}
+	if len(freshDeps) == 0 {
+		if cachedDeps, ok := c.deps[id]; ok && len(cachedDeps) > 0 {
+			return cloneDeps(cachedDeps)
+		}
+	}
+	return freshDeps
 }
 
 // recoverMissingFromList re-fetches any cached active bead that didn't appear

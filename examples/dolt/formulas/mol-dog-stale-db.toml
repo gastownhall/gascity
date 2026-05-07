@@ -138,10 +138,11 @@ DISK_BYTES=$(jq -r '.summary.bytes_freed_disk // .purge.bytes_reclaimed // 0' "$
 RSS_BYTES=$(jq -r '.summary.bytes_freed_rss // 0' "$SCAN_FILE")
 SCAN_ERRS=$(jq -r '.summary.errors_total // 0' "$SCAN_FILE")
 INVALID_DROP_SKIPS=$(jq -r '[.dropped.skipped[]? | select(.reason == "invalid-identifier")] | length' "$SCAN_FILE")
+SCAN_FORCE_BLOCKERS=$(jq -r '[.force_blockers[]?] | length' "$SCAN_FILE")
 
 run_or_warn "emit scan event" gc event emit mol-dog-stale-db.scan \
   --message "$ORPHAN_DBS orphans (${DISK_BYTES} bytes), $ORPHAN_PROCS procs (${RSS_BYTES} bytes)" \
-  --payload "$(jq -c '{dropped: .dropped.count, purge_bytes: .purge.bytes_reclaimed, procs: (.reaped.targets | length), rss_bytes: .summary.bytes_freed_rss, errors: .summary.errors_total, invalid_identifier_skips: ([.dropped.skipped[]? | select(.reason == "invalid-identifier")] | length)}' "$SCAN_FILE")"
+  --payload "$(jq -c '{dropped: .dropped.count, purge_bytes: .purge.bytes_reclaimed, procs: (.reaped.targets | length), rss_bytes: .summary.bytes_freed_rss, errors: .summary.errors_total, invalid_identifier_skips: ([.dropped.skipped[]? | select(.reason == "invalid-identifier")] | length), force_blockers: ([.force_blockers[]?] | length)}' "$SCAN_FILE")"
 
 append_report_note "scan (dry-run)" "$SCAN_FILE"
 
@@ -156,14 +157,14 @@ MISSED_PURGE_BYTES=0
 REAP_KILLED=0
 REAP_TOTAL="$ORPHAN_PROCS"
 
-if [ "$SCAN_ERRS" -gt 0 ] || [ "$INVALID_DROP_SKIPS" -gt 0 ]; then
+if [ "$SCAN_ERRS" -gt 0 ] || [ "$INVALID_DROP_SKIPS" -gt 0 ] || [ "$SCAN_FORCE_BLOCKERS" -gt 0 ]; then
   ESCALATED=1
   run_or_warn "send dry-run error escalation mail" gc mail send mayor \
-    "ESCALATION: Dolt cleanup dry-run reported ${SCAN_ERRS} error(s), ${INVALID_DROP_SKIPS} invalid stale database identifier(s)" \
+    "ESCALATION: Dolt cleanup dry-run reported ${SCAN_ERRS} error(s), ${INVALID_DROP_SKIPS} invalid stale database identifier(s), ${SCAN_FORCE_BLOCKERS} force blocker(s)" \
     "Dry-run report attached to work bead. Operator review required before forcing cleanup."
   run_or_warn "emit dry-run error escalation" gc event emit mol-dog-stale-db.escalate \
-    --message "dry-run reported ${SCAN_ERRS} error(s), ${INVALID_DROP_SKIPS} invalid stale database identifier(s); leaving work bead open"
-  fail_open_after_drain "gc dolt-cleanup dry-run reported ${SCAN_ERRS} error(s), ${INVALID_DROP_SKIPS} invalid stale database identifier(s); leaving work bead open"
+    --message "dry-run reported ${SCAN_ERRS} error(s), ${INVALID_DROP_SKIPS} invalid stale database identifier(s), ${SCAN_FORCE_BLOCKERS} force blocker(s); leaving work bead open"
+  fail_open_after_drain "gc dolt-cleanup dry-run reported ${SCAN_ERRS} error(s), ${INVALID_DROP_SKIPS} invalid stale database identifier(s), ${SCAN_FORCE_BLOCKERS} force blocker(s); leaving work bead open"
 elif [ "$ORPHAN_TOTAL" -eq 0 ] && [ "$DISK_BYTES" -le 0 ]; then
   :
 elif [ "$ORPHAN_DBS" -gt "{{max_orphans_for_sql}}" ]; then
@@ -175,7 +176,7 @@ elif [ "$ORPHAN_DBS" -gt "{{max_orphans_for_sql}}" ]; then
   run_or_warn "emit max-orphan escalation" gc event emit mol-dog-stale-db.escalate \
     --message "$ORPHAN_DBS stale databases > max_orphans_for_sql={{max_orphans_for_sql}} -> mail sent to mayor"
 else
-  if ! gc dolt-cleanup --json --probe --force > "$APPLY_FILE"; then
+  if ! gc dolt-cleanup --json --probe --force --max-orphan-dbs "{{max_orphans_for_sql}}" > "$APPLY_FILE"; then
     ESCALATED=1
     append_report_note "apply (--force, failed)" "$APPLY_FILE"
     run_or_warn "send apply refusal escalation mail" gc mail send mayor \
@@ -190,6 +191,23 @@ else
     run_or_warn "emit invalid apply JSON escalation" gc event emit mol-dog-stale-db.escalate \
       --message "apply returned invalid JSON; leaving work bead open"
     fail_open_after_drain "gc dolt-cleanup apply returned invalid JSON; leaving work bead open"
+  fi
+
+  APPLY_ERRS=$(jq -r '.summary.errors_total // 0' "$APPLY_FILE")
+  APPLY_MAX_ORPHAN_REFUSALS=$(jq -r '[.errors[]? | select((.kind // "") == "max-orphan-refusal" or (((.error // "" | ascii_downcase) | (contains("--max-orphan-dbs") or contains("max-orphan") or contains("orphan databases")) and (contains("refus") or contains("exceed")))))] | length' "$APPLY_FILE")
+  if [ "$APPLY_ERRS" -gt 0 ] || [ "$APPLY_MAX_ORPHAN_REFUSALS" -gt 0 ]; then
+    ESCALATED=1
+    APPLY_REFUSAL_MESSAGE="apply reported ${APPLY_ERRS} error(s); leaving work bead open"
+    if [ "$APPLY_MAX_ORPHAN_REFUSALS" -gt 0 ]; then
+      APPLY_REFUSAL_MESSAGE="apply refused by max-orphan safety guard; leaving work bead open"
+    fi
+    append_report_note "apply (--force, refused)" "$APPLY_FILE"
+    run_or_warn "send apply refusal escalation mail" gc mail send mayor \
+      "ESCALATION: gc dolt-cleanup apply refused [HIGH]" \
+      "gc dolt-cleanup --probe --force refused or reported ${APPLY_ERRS} error(s). Do not retry from an agent. Operator must inspect the attached apply report before deciding whether any manual cleanup is appropriate."
+    run_or_warn "emit apply refusal escalation" gc event emit mol-dog-stale-db.escalate \
+      --message "$APPLY_REFUSAL_MESSAGE"
+    fail_open_after_drain "gc dolt-cleanup ${APPLY_REFUSAL_MESSAGE}"
   fi
 
   DROP_OK=$(jq -r '.dropped.count // 0' "$APPLY_FILE")
@@ -230,12 +248,6 @@ fi
 run_or_warn "emit done event" gc event emit mol-dog-stale-db.done \
   --message "$DONE_MESSAGE"
 
-if [ "$APPLIED" -eq 1 ] && [ "$DONE_ERRS" -gt 0 ]; then
-  ESCALATED=1
-  run_or_warn "emit apply error escalation" gc event emit mol-dog-stale-db.escalate \
-    --message "apply reported ${DONE_ERRS} error(s); leaving work bead open"
-fi
-
 if [ "$APPLIED" -eq 1 ] && [ "$MISSED_PURGE_BYTES" -gt 0 ]; then
   ESCALATED=1
   run_or_warn "emit missed purge escalation" gc event emit mol-dog-stale-db.escalate \
@@ -248,8 +260,8 @@ fi
 
 gc session nudge deacon "DOG_DONE: stale-db - orphans: ${ORPHAN_TOTAL}, applied: ${APPLIED}, escalated: ${ESCALATED}" || true
 
-if [ "$APPLIED" -eq 1 ] && [ "$DONE_ERRS" -gt 0 ]; then
-  fail_open_after_drain "gc dolt-cleanup apply reported ${DONE_ERRS} error(s); leaving work bead open"
+if [ "$APPLIED" -eq 1 ] && [ "$MISSED_PURGE_BYTES" -gt 0 ]; then
+  fail_open_after_drain "gc dolt-cleanup apply missed ${MISSED_PURGE_BYTES} reclaimable bytes; leaving work bead open"
 fi
 
 bd close "$WORK_BEAD" --reason "Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED}, escalated=${ESCALATED})"

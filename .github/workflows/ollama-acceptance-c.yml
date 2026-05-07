@@ -1,0 +1,74 @@
+name: Ollama Acceptance C
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DOLT_VERSION: "1.86.1"
+  BD_VERSION: "v1.0.0"
+  ANTHROPIC_BASE_URL: https://ollama.com
+  ANTHROPIC_API_KEY: ""
+  ANTHROPIC_AUTH_TOKEN: ${{ secrets.OLLAMA_API_KEY }}
+  OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+  ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_HAIKU_MODEL }}
+  ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SONNET_MODEL }}
+  ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_OPUS_MODEL }}
+  CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SUBAGENT_MODEL }}
+  CLAUDE_CODE_EFFORT_LEVEL: auto
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+
+jobs:
+  acceptance-c:
+    name: Acceptance C via Ollama Cloud
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "true"
+      - name: Validate Ollama Claude configuration
+        run: |
+          test -n "$OLLAMA_API_KEY" || { echo "Missing OLLAMA_API_KEY GitHub secret" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_HAIKU_MODEL" || { echo "ANTHROPIC_DEFAULT_HAIKU_MODEL resolved empty" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_SONNET_MODEL" || { echo "ANTHROPIC_DEFAULT_SONNET_MODEL resolved empty" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_OPUS_MODEL" || { echo "ANTHROPIC_DEFAULT_OPUS_MODEL resolved empty" >&2; exit 1; }
+          test -n "$CLAUDE_CODE_SUBAGENT_MODEL" || { echo "CLAUDE_CODE_SUBAGENT_MODEL resolved empty" >&2; exit 1; }
+      - name: Verify 6 concurrent Claude harness requests
+        run: |
+          set -euo pipefail
+          pids=()
+          for i in 1 2 3 4 5 6; do
+            claude --model "$CLAUDE_CODE_SUBAGENT_MODEL" --print "Reply exactly ok-$i" >"$RUNNER_TEMP/ollama-concurrency-$i.out" 2>"$RUNNER_TEMP/ollama-concurrency-$i.err" &
+            pids+=("$!")
+          done
+          failed=0
+          for pid in "${pids[@]}"; do
+            if ! wait "$pid"; then
+              failed=1
+            fi
+          done
+          if [ "$failed" -ne 0 ]; then
+            for i in 1 2 3 4 5 6; do
+              echo "=== request $i stderr ===" >&2
+              cat "$RUNNER_TEMP/ollama-concurrency-$i.err" >&2 || true
+            done
+            exit 1
+          fi
+          for i in 1 2 3 4 5 6; do
+            if ! grep -Fxq "ok-$i" "$RUNNER_TEMP/ollama-concurrency-$i.out"; then
+              echo "request $i did not return ok-$i" >&2
+              echo "=== request $i stdout ===" >&2
+              cat "$RUNNER_TEMP/ollama-concurrency-$i.out" >&2 || true
+              echo "=== request $i stderr ===" >&2
+              cat "$RUNNER_TEMP/ollama-concurrency-$i.err" >&2 || true
+              exit 1
+            fi
+          done
+      - name: Run make test-acceptance-c
+        run: make test-acceptance-c

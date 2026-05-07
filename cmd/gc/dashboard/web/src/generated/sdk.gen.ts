@@ -142,6 +142,8 @@ export const getV0CityByCityNameAgents = <ThrowOnError extends boolean = false>(
 
 /**
  * Create an agent
+ *
+ * Creates an agent and waits until it is visible to immediate follow-up operations. If the agent is durably created but visibility confirmation is canceled or times out, the retryable 503/504 response includes a Retry-After header.
  */
 export const createAgent = <ThrowOnError extends boolean = false>(options: Options<CreateAgentData, ThrowOnError>) => (options.client ?? client).post<CreateAgentResponses, CreateAgentErrors, ThrowOnError>({
     url: '/v0/city/{cityName}/agents',

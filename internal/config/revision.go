@@ -3,6 +3,7 @@ package config
 import (
 	"crypto/sha256"
 	"fmt"
+	"hash"
 	"os"
 	"path/filepath"
 	"sort"
@@ -11,6 +12,13 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
+
+type revisionSnapshot struct {
+	dirHashes      map[string]string
+	fileContents   map[string][]byte
+	fileKnown      map[string]bool
+	conventionDirs []string
+}
 
 // Revision computes a deterministic bundle hash from all resolved config
 // source files. This serves as a revision identifier — if the revision
@@ -27,9 +35,13 @@ func Revision(fs fsys.FS, prov *Provenance, cfg *City, cityRoot string) string {
 	copy(sources, prov.Sources)
 	sort.Strings(sources)
 	for _, path := range sources {
-		data, err := fs.ReadFile(path)
-		if err != nil {
-			continue
+		data, ok := prov.sourceContents[path]
+		if !ok {
+			var err error
+			data, err = fs.ReadFile(path)
+			if err != nil {
+				continue
+			}
 		}
 		h.Write([]byte(path)) //nolint:errcheck // hash.Write never errors
 		h.Write([]byte{0})    //nolint:errcheck // hash.Write never errors
@@ -42,22 +54,14 @@ func Revision(fs fsys.FS, prov *Provenance, cfg *City, cityRoot string) string {
 	for _, r := range rigs {
 		for _, ref := range r.Includes {
 			topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
-			topoHash := PackContentHashRecursive(fs, topoDir)
-			h.Write([]byte("pack:" + r.Name + ":" + ref)) //nolint:errcheck // hash.Write never errors
-			h.Write([]byte{0})                            //nolint:errcheck // hash.Write never errors
-			h.Write([]byte(topoHash))                     //nolint:errcheck // hash.Write never errors
-			h.Write([]byte{0})                            //nolint:errcheck // hash.Write never errors
+			writeRevisionDirHash(h, prov, "pack:"+r.Name+":"+ref, fs, topoDir)
 		}
 	}
 
 	// Hash city-level pack directory contents.
 	for _, ref := range cfg.Workspace.Includes {
 		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
-		topoHash := PackContentHashRecursive(fs, topoDir)
-		h.Write([]byte("city-pack:" + ref)) //nolint:errcheck // hash.Write never errors
-		h.Write([]byte{0})                  //nolint:errcheck // hash.Write never errors
-		h.Write([]byte(topoHash))           //nolint:errcheck // hash.Write never errors
-		h.Write([]byte{0})                  //nolint:errcheck // hash.Write never errors
+		writeRevisionDirHash(h, prov, "city-pack:"+ref, fs, topoDir)
 	}
 
 	// Remote PackV2 imports resolve through packs.lock, so lockfile changes
@@ -65,7 +69,11 @@ func Revision(fs fsys.FS, prov *Provenance, cfg *City, cityRoot string) string {
 	// untouched.
 	if tracksPackV2Imports(cfg) {
 		lockPath := filepath.Join(cityRoot, "packs.lock")
-		if data, err := fs.ReadFile(lockPath); err == nil {
+		if data, known, exists := revisionSnapshotFile(prov, lockPath); known {
+			if exists {
+				writeRevisionBytes(h, lockPath, data)
+			}
+		} else if data, err := fs.ReadFile(lockPath); err == nil {
 			h.Write([]byte(lockPath)) //nolint:errcheck // hash.Write never errors
 			h.Write([]byte{0})        //nolint:errcheck // hash.Write never errors
 			h.Write(data)             //nolint:errcheck // hash.Write never errors
@@ -81,11 +89,7 @@ func Revision(fs fsys.FS, prov *Provenance, cfg *City, cityRoot string) string {
 		if strings.TrimSpace(dir) == "" {
 			continue
 		}
-		topoHash := PackContentHashRecursive(fs, dir)
-		h.Write([]byte("city-packdir:" + dir)) //nolint:errcheck // hash.Write never errors
-		h.Write([]byte{0})                     //nolint:errcheck // hash.Write never errors
-		h.Write([]byte(topoHash))              //nolint:errcheck // hash.Write never errors
-		h.Write([]byte{0})                     //nolint:errcheck // hash.Write never errors
+		writeRevisionDirHash(h, prov, "city-packdir:"+dir, fs, dir)
 	}
 	rigPackDirNames := make([]string, 0, len(cfg.RigPackDirs))
 	for name := range cfg.RigPackDirs {
@@ -97,24 +101,133 @@ func Revision(fs fsys.FS, prov *Provenance, cfg *City, cityRoot string) string {
 			if strings.TrimSpace(dir) == "" {
 				continue
 			}
-			topoHash := PackContentHashRecursive(fs, dir)
-			h.Write([]byte("rig-packdir:" + rigName + ":" + dir)) //nolint:errcheck // hash.Write never errors
-			h.Write([]byte{0})                                    //nolint:errcheck // hash.Write never errors
-			h.Write([]byte(topoHash))                             //nolint:errcheck // hash.Write never errors
-			h.Write([]byte{0})                                    //nolint:errcheck // hash.Write never errors
+			writeRevisionDirHash(h, prov, "rig-packdir:"+rigName+":"+dir, fs, dir)
 		}
 	}
 	// Hash convention-discovered city-pack trees so adding or editing
 	// agents/commands/doctor content changes the effective revision too.
-	for _, dir := range existingConventionDiscoveryDirsFS(fs, cityRoot) {
-		topoHash := PackContentHashRecursive(fs, dir)
-		h.Write([]byte("city-discovery:" + dir)) //nolint:errcheck // hash.Write never errors
-		h.Write([]byte{0})                       //nolint:errcheck // hash.Write never errors
-		h.Write([]byte(topoHash))                //nolint:errcheck // hash.Write never errors
-		h.Write([]byte{0})                       //nolint:errcheck // hash.Write never errors
+	for _, dir := range revisionConventionDirs(prov, fs, cityRoot) {
+		writeRevisionDirHash(h, prov, "city-discovery:"+dir, fs, dir)
 	}
 
 	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+func (p *Provenance) captureRevisionSnapshot(fs fsys.FS, cfg *City, cityRoot string) {
+	if p == nil || cfg == nil {
+		return
+	}
+	p.recordMissingSourceContents(fs)
+	snap := &revisionSnapshot{
+		dirHashes:    make(map[string]string),
+		fileContents: make(map[string][]byte),
+		fileKnown:    make(map[string]bool),
+	}
+	recordDir := func(label, dir string) {
+		snap.dirHashes[label] = PackContentHashRecursive(fs, dir)
+	}
+
+	for _, r := range cfg.Rigs {
+		for _, ref := range r.Includes {
+			topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
+			recordDir("pack:"+r.Name+":"+ref, topoDir)
+		}
+	}
+	for _, ref := range cfg.Workspace.Includes {
+		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
+		recordDir("city-pack:"+ref, topoDir)
+	}
+	if tracksPackV2Imports(cfg) {
+		lockPath := filepath.Join(cityRoot, "packs.lock")
+		snap.fileKnown[lockPath] = true
+		if data, err := fs.ReadFile(lockPath); err == nil {
+			snap.fileContents[lockPath] = cloneBytes(data)
+		}
+	}
+	for _, dir := range cfg.PackDirs {
+		if strings.TrimSpace(dir) == "" {
+			continue
+		}
+		recordDir("city-packdir:"+dir, dir)
+	}
+	rigPackDirNames := make([]string, 0, len(cfg.RigPackDirs))
+	for name := range cfg.RigPackDirs {
+		rigPackDirNames = append(rigPackDirNames, name)
+	}
+	sort.Strings(rigPackDirNames)
+	for _, rigName := range rigPackDirNames {
+		for _, dir := range cfg.RigPackDirs[rigName] {
+			if strings.TrimSpace(dir) == "" {
+				continue
+			}
+			recordDir("rig-packdir:"+rigName+":"+dir, dir)
+		}
+	}
+	snap.conventionDirs = existingConventionDiscoveryDirsFS(fs, cityRoot)
+	for _, dir := range snap.conventionDirs {
+		recordDir("city-discovery:"+dir, dir)
+	}
+	p.revisionSnapshot = snap
+}
+
+func (p *Provenance) recordMissingSourceContents(fs fsys.FS) {
+	if p == nil {
+		return
+	}
+	for _, path := range p.Sources {
+		if _, ok := p.sourceContents[path]; ok {
+			continue
+		}
+		data, err := fs.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		p.recordSource(path, data)
+	}
+}
+
+func writeRevisionDirHash(h hash.Hash, prov *Provenance, label string, fs fsys.FS, dir string) {
+	topoHash, ok := revisionSnapshotDirHash(prov, label)
+	if !ok {
+		topoHash = PackContentHashRecursive(fs, dir)
+	}
+	writeRevisionBytes(h, label, []byte(topoHash))
+}
+
+func writeRevisionBytes(h hash.Hash, label string, data []byte) {
+	h.Write([]byte(label)) //nolint:errcheck // hash.Write never errors
+	h.Write([]byte{0})     //nolint:errcheck // hash.Write never errors
+	h.Write(data)          //nolint:errcheck // hash.Write never errors
+	h.Write([]byte{0})     //nolint:errcheck // hash.Write never errors
+}
+
+func revisionSnapshotDirHash(prov *Provenance, label string) (string, bool) {
+	if prov == nil || prov.revisionSnapshot == nil {
+		return "", false
+	}
+	v, ok := prov.revisionSnapshot.dirHashes[label]
+	return v, ok
+}
+
+func revisionSnapshotFile(prov *Provenance, path string) ([]byte, bool, bool) {
+	if prov == nil || prov.revisionSnapshot == nil || !prov.revisionSnapshot.fileKnown[path] {
+		return nil, false, false
+	}
+	data, exists := prov.revisionSnapshot.fileContents[path]
+	return data, true, exists
+}
+
+func revisionConventionDirs(prov *Provenance, fs fsys.FS, cityRoot string) []string {
+	if prov == nil || prov.revisionSnapshot == nil {
+		return existingConventionDiscoveryDirsFS(fs, cityRoot)
+	}
+	return append([]string(nil), prov.revisionSnapshot.conventionDirs...)
+}
+
+func cloneBytes(data []byte) []byte {
+	cp := make([]byte, len(data))
+	copy(cp, data)
+	return cp
 }
 
 // WatchTarget describes a filesystem path that should be watched for config

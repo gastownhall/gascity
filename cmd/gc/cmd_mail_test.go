@@ -2732,3 +2732,127 @@ func TestMailCheckInjectFiltersCorrectly(t *testing.T) {
 		t.Errorf("stdout missing correct count:\n%s", out)
 	}
 }
+
+// --- ga-q6ct: identity-resolution session-list cache ---
+
+// countingMailIdentityListStore counts broad gc:session List calls (the same
+// query the cmd_mail identity-resolution path issues) so tests can assert the
+// per-command cache budget.
+type countingMailIdentityListStore struct {
+	beads.Store
+	sessionListCalls int
+}
+
+func (s *countingMailIdentityListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == session.LabelSession && len(query.Metadata) == 0 {
+		s.sessionListCalls++
+	}
+	return s.Store.List(query)
+}
+
+func TestResolveLiveConfiguredNamedMailTargetCached_SharesCacheAcrossCalls(t *testing.T) {
+	// Pin: when a single command invocation resolves multiple identity
+	// candidates (or recipient + sender both), the broad gc:session
+	// enumeration runs at most once via the shared cache.
+	base := beads.NewMemStore()
+	store := &countingMailIdentityListStore{Store: base}
+
+	if _, err := base.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			namedSessionIdentityMetadata: "gascity/builder",
+			"alias":                      "builder-1",
+		},
+	}); err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+
+	cache := &mailIdentitySessionCache{}
+	for _, id := range []string{"unmatched-a", "unmatched-b", "unmatched-c"} {
+		if _, _, err := resolveLiveConfiguredNamedMailTargetCached(store, id, cache); err != nil {
+			t.Fatalf("resolve(%q): %v", id, err)
+		}
+	}
+
+	if store.sessionListCalls != 1 {
+		t.Errorf("broad gc:session List calls = %d, want 1 (cache must dedupe across resolutions)", store.sessionListCalls)
+	}
+}
+
+func TestResolveLiveConfiguredNamedMailTargetCached_NilCacheStillFetches(t *testing.T) {
+	// Backward-compat: passing nil cache should still resolve correctly,
+	// issuing a broad scan per call (the legacy behavior).
+	base := beads.NewMemStore()
+	store := &countingMailIdentityListStore{Store: base}
+
+	for _, id := range []string{"a", "b"} {
+		if _, _, err := resolveLiveConfiguredNamedMailTargetCached(store, id, nil); err != nil {
+			t.Fatalf("resolve(%q): %v", id, err)
+		}
+	}
+
+	if store.sessionListCalls != 2 {
+		t.Errorf("broad gc:session List calls = %d, want 2 (no cache → per-call scan)", store.sessionListCalls)
+	}
+}
+
+func TestListLiveSessionMailboxesCached_UsesCache(t *testing.T) {
+	// Pin: listLiveSessionMailboxesCached + a sibling resolve call sharing
+	// the same cache hit the store at most once for the broad enumeration.
+	base := beads.NewMemStore()
+	store := &countingMailIdentityListStore{Store: base}
+
+	if _, err := base.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			namedSessionIdentityMetadata: "gascity/mayor",
+			"alias":                      "mayor",
+		},
+	}); err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+
+	cache := &mailIdentitySessionCache{}
+	if _, err := listLiveSessionMailboxesCached(store, cache); err != nil {
+		t.Fatalf("listLiveSessionMailboxesCached: %v", err)
+	}
+	if _, _, err := resolveLiveConfiguredNamedMailTargetCached(store, "no-match", cache); err != nil {
+		t.Fatalf("resolveLiveConfiguredNamedMailTargetCached: %v", err)
+	}
+
+	if store.sessionListCalls != 1 {
+		t.Errorf("broad gc:session List calls = %d, want 1 across listLiveSessionMailboxes + resolve sharing one cache", store.sessionListCalls)
+	}
+}
+
+func TestResolveMailIdentityWithConfigCached_SharedCacheSurvivesFallbackMiss(t *testing.T) {
+	// Pin: the shared cache must stay in effect even when identity resolution
+	// misses every shortcut and falls back to the generic resolution path.
+	base := beads.NewMemStore()
+	store := &countingMailIdentityListStore{Store: base}
+
+	if _, err := base.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			namedSessionIdentityMetadata: "gascity/worker",
+			"alias":                      "worker",
+		},
+	}); err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+
+	cache := &mailIdentitySessionCache{}
+	if _, err := listLiveSessionMailboxesCached(store, cache); err != nil {
+		t.Fatalf("listLiveSessionMailboxesCached: %v", err)
+	}
+	if _, err := resolveMailIdentityWithConfigCached("", nil, store, "no-match", cache); !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("resolveMailIdentityWithConfigCached(no-match) error = %v, want ErrSessionNotFound", err)
+	}
+
+	if store.sessionListCalls != 1 {
+		t.Errorf("broad gc:session List calls = %d, want 1 across listLiveSessionMailboxes + fallback miss resolution", store.sessionListCalls)
+	}
+}

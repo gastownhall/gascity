@@ -48,19 +48,27 @@ func applyFreshWakeConversationReset(patch MetadataPatch) {
 	patch[startupDialogVerifiedKey] = ""
 }
 
+func pendingCreateStartedAt(now time.Time) string {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	return now.UTC().Format(time.RFC3339)
+}
+
 // RequestWakePatch records a controller-owned one-shot create claim.
-func RequestWakePatch(reason string) MetadataPatch {
+func RequestWakePatch(reason string, now time.Time) MetadataPatch {
 	return MetadataPatch{
-		"state":                string(StateCreating),
-		"state_reason":         reason,
-		"pending_create_claim": "true",
-		"held_until":           "",
-		"quarantined_until":    "",
-		"sleep_reason":         "",
-		"wait_hold":            "",
-		"sleep_intent":         "",
-		"wake_attempts":        "0",
-		"churn_count":          "0",
+		"state":                     string(StateCreating),
+		"state_reason":              reason,
+		"pending_create_claim":      "true",
+		"pending_create_started_at": pendingCreateStartedAt(now),
+		"held_until":                "",
+		"quarantined_until":         "",
+		"sleep_reason":              "",
+		"wait_hold":                 "",
+		"sleep_intent":              "",
+		"wake_attempts":             "0",
+		"churn_count":               "0",
 	}
 }
 
@@ -113,7 +121,7 @@ func ClearWakeBlockersPatch(state State, sleepReason string) MetadataPatch {
 		patch["state"] = string(StateAsleep)
 	}
 	switch sleepReason {
-	case "user-hold", "wait-hold", "quarantine", "context-churn", string(StateDrained):
+	case "user-hold", "wait-hold", "quarantine", "context-churn", "rate_limit", string(StateDrained):
 		patch["sleep_reason"] = ""
 	}
 	return patch
@@ -131,8 +139,8 @@ func ClearExpiredHoldPatch(sleepReason string) MetadataPatch {
 	return patch
 }
 
-// ClearExpiredQuarantinePatch clears an expired quarantine or context churn
-// timer and resets retry counters associated with that blocker.
+// ClearExpiredQuarantinePatch clears an expired quarantine-like timer and
+// resets retry counters associated with that blocker.
 func ClearExpiredQuarantinePatch(sleepReason string) MetadataPatch {
 	patch := MetadataPatch{
 		"quarantined_until": "",
@@ -140,7 +148,7 @@ func ClearExpiredQuarantinePatch(sleepReason string) MetadataPatch {
 		"churn_count":       "0",
 	}
 	switch sleepReason {
-	case "quarantine", "context-churn":
+	case "quarantine", "context-churn", "rate_limit":
 		patch["sleep_reason"] = ""
 	}
 	return patch
@@ -152,11 +160,12 @@ func ClearExpiredQuarantinePatch(sleepReason string) MetadataPatch {
 // bead whose last_woke_at was later cleared by crash/churn recovery.
 func ConfirmStartedPatch(now time.Time) MetadataPatch {
 	return MetadataPatch{
-		"state":                string(StateActive),
-		"state_reason":         "creation_complete",
-		"creation_complete_at": now.UTC().Format(time.RFC3339),
-		"pending_create_claim": "",
-		"sleep_reason":         "",
+		"state":                     string(StateActive),
+		"state_reason":              "creation_complete",
+		"creation_complete_at":      now.UTC().Format(time.RFC3339),
+		"pending_create_claim":      "",
+		"pending_create_started_at": "",
+		"sleep_reason":              "",
 	}
 }
 
@@ -209,6 +218,7 @@ func CommitStartedPatch(input CommitStartedPatchInput) MetadataPatch {
 	}
 	if input.ClearPendingCreateClaim {
 		patch["pending_create_claim"] = ""
+		patch["pending_create_started_at"] = ""
 	}
 	return patch
 }
@@ -225,12 +235,13 @@ func BeginDrainPatch(now time.Time, reason string) MetadataPatch {
 // SleepPatch records a non-terminal sleep/drain result.
 func SleepPatch(now time.Time, reason string) MetadataPatch {
 	return MetadataPatch{
-		"state":                string(StateAsleep),
-		"sleep_reason":         reason,
-		"last_woke_at":         "",
-		"pending_create_claim": "",
-		"sleep_intent":         "",
-		"slept_at":             now.UTC().Format(time.RFC3339),
+		"state":                     string(StateAsleep),
+		"sleep_reason":              reason,
+		"last_woke_at":              "",
+		"pending_create_claim":      "",
+		"pending_create_started_at": "",
+		"sleep_intent":              "",
+		"slept_at":                  now.UTC().Format(time.RFC3339),
 	}
 }
 
@@ -239,9 +250,10 @@ func SleepPatch(now time.Time, reason string) MetadataPatch {
 // reselect it, but explicit attach or work can.
 func AcknowledgeDrainPatch(freshWake bool) MetadataPatch {
 	patch := MetadataPatch{
-		"state":                string(StateDrained),
-		"last_woke_at":         "",
-		"pending_create_claim": "",
+		"state":                     string(StateDrained),
+		"last_woke_at":              "",
+		"pending_create_claim":      "",
+		"pending_create_started_at": "",
 	}
 	if freshWake {
 		patch["session_key"] = ""
@@ -275,6 +287,7 @@ func RestartRequestPatch(sessionKey string) MetadataPatch {
 		"continuation_reset_pending": "true",
 		"last_woke_at":               "",
 		"pending_create_claim":       "",
+		"pending_create_started_at":  "",
 	}
 	if sessionKey != "" {
 		patch["session_key"] = sessionKey
@@ -285,17 +298,19 @@ func RestartRequestPatch(sessionKey string) MetadataPatch {
 // ConfigDriftResetPatch records an in-place named-session repair after core
 // config drift. Creating claims a new runtime start; asleep stays dormant
 // until the next normal wake reason.
-func ConfigDriftResetPatch(nextState State, sessionKey string) MetadataPatch {
+func ConfigDriftResetPatch(nextState State, sessionKey string, now time.Time) MetadataPatch {
 	patch := MetadataPatch{
 		"state":                      string(nextState),
 		"last_woke_at":               "",
 		"restart_requested":          "",
 		"continuation_reset_pending": "true",
 		"pending_create_claim":       "",
+		"pending_create_started_at":  "",
 	}
 	applyFreshWakeConversationReset(patch)
 	if nextState == StateCreating {
 		patch["pending_create_claim"] = "true"
+		patch["pending_create_started_at"] = pendingCreateStartedAt(now)
 	}
 	if sessionKey != "" {
 		patch["session_key"] = sessionKey
@@ -310,11 +325,12 @@ func ArchivePatch(now time.Time, reason string, continuityEligible bool) Metadat
 		continuity = "true"
 	}
 	return MetadataPatch{
-		"state":                string(StateArchived),
-		"state_reason":         reason,
-		"archived_at":          now.UTC().Format(time.RFC3339),
-		"continuity_eligible":  continuity,
-		"pending_create_claim": "",
+		"state":                     string(StateArchived),
+		"state_reason":              reason,
+		"archived_at":               now.UTC().Format(time.RFC3339),
+		"continuity_eligible":       continuity,
+		"pending_create_claim":      "",
+		"pending_create_started_at": "",
 	}
 }
 
@@ -368,12 +384,13 @@ func ReactivatePatch(continuityEligible bool) MetadataPatch {
 		continuity = "true"
 	}
 	return MetadataPatch{
-		"state":                string(StateAsleep),
-		"state_reason":         "reactivated",
-		"pending_create_claim": "",
-		"continuity_eligible":  continuity,
-		"quarantined_until":    "",
-		"crash_count":          "0",
-		"archived_at":          "",
+		"state":                     string(StateAsleep),
+		"state_reason":              "reactivated",
+		"pending_create_claim":      "",
+		"pending_create_started_at": "",
+		"continuity_eligible":       continuity,
+		"quarantined_until":         "",
+		"crash_count":               "0",
+		"archived_at":               "",
 	}
 }
