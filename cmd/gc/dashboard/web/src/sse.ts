@@ -184,6 +184,7 @@ export function connectEvents(
             reportUIError(`Unexpected supervisor SSE event: ${eventName}`, frame);
           },
         });
+        opts?.onStatus?.("live");
         // Drain the underlying async generator so the reader keeps
         // pumping frames into onSseEvent. The values it yields are not
         // used — per-frame dispatch happens in the callback above.
@@ -264,6 +265,7 @@ export function connectCityEvents(
             reportUIError(`Unexpected city SSE event: ${eventName}`, frame);
           },
         });
+        opts?.onStatus?.("live");
         for await (const _ of stream) {
           void _;
         }

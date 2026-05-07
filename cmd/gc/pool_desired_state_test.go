@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
@@ -624,6 +625,42 @@ func TestComputePoolDesiredStates_ScaleCheckAndResumeAddUp(t *testing.T) {
 	}
 	if resumeCount != 1 || newCount != 2 {
 		t.Errorf("resume=%d new=%d, want resume=1 new=2", resumeCount, newCount)
+	}
+}
+
+func TestComputePoolDesiredStates_AssignedSessionsDoNotConsumeNewDemand(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(20), 0)},
+	}
+	var work []beads.Bead
+	var sessions []beads.Bead
+	for i := 1; i <= 5; i++ {
+		suffix := strconv.Itoa(i)
+		sessionID := "sess-" + suffix
+		work = append(work, workBead("w"+suffix, "claude", sessionID, "in_progress", 0))
+		sessions = append(sessions, sessionBead(sessionID, "open"))
+	}
+
+	result := ComputePoolDesiredStates(cfg, work, sessions, map[string]int{"claude": 5})
+
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	if got := len(result[0].Requests); got != 10 {
+		t.Fatalf("len(requests) = %d, want 10 (5 assigned resume + 5 new ready)", got)
+	}
+	resumeCount := 0
+	newCount := 0
+	for _, request := range result[0].Requests {
+		switch request.Tier {
+		case "resume":
+			resumeCount++
+		case "new":
+			newCount++
+		}
+	}
+	if resumeCount != 5 || newCount != 5 {
+		t.Fatalf("request tiers = resume:%d new:%d, want resume:5 new:5", resumeCount, newCount)
 	}
 }
 

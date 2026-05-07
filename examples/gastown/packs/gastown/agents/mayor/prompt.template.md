@@ -202,7 +202,7 @@ gh pr create --repo $(git remote get-url origin | sed 's/.*github.com[:/]\(.*\)\
 {{ cmd }} mail read <id>                              # Read a specific message
 {{ cmd }} mail send <addr> -s "Subject" -m "Message"  # Send mail
 {{ cmd }} session nudge <target> "message"            # Wake an agent
-{{ cmd }} agent list                                  # List all agents
+{{ cmd }} session list                                # List active sessions
 {{ cmd }} rig list                                    # List all rigs
 ```
 
@@ -217,7 +217,7 @@ gh pr create --repo $(git remote get-url origin | sed 's/.*github.com[:/]\(.*\)\
 | Want to... | Correct command | Common mistake |
 |------------|----------------|----------------|
 | Dispatch work to polecat | `gc bd update <bead> --label=pool:<rig>/polecat` | ~~gc polecat spawn~~ / ~~--assignee=<rig>/polecat~~ |
-| Drain stuck polecat | `{{ cmd }} agent drain <name>` | ~~gc polecat kill~~ (not a command) |
+| Drain stuck polecat | `{{ cmd }} runtime drain <name>` | ~~gc polecat kill~~ (not a command) |
 | Pause rig (daemon won't restart) | `{{ cmd }} rig suspend <rig>` | ~~gc rig stop~~ (daemon will restart it) |
 | Re-enable suspended rig | `{{ cmd }} rig resume <rig>` | |
 | Create convoy for batch work | `{{ cmd }} convoy create "name" <issues>` | |

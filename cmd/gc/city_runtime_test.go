@@ -71,12 +71,33 @@ func TestSweepUndesiredPoolSessionBeads_KeepsRunningSessionsOpen(t *testing.T) {
 	}
 }
 
+// newTestCityRuntime builds a CityRuntime and registers a cleanup that
+// cancels in-flight dispatched orders before invoking shutdown. Do NOT
+// add a duplicate t.Cleanup(cr.shutdown) in callers — t.Cleanup is LIFO,
+// and a duplicate would consume cr.shutdownOnce before this wrapper's
+// cancel runs, reintroducing the .gc/ RemoveAll race.
 func newTestCityRuntime(t *testing.T, params CityRuntimeParams) *CityRuntime {
 	t.Helper()
 
 	cr := newCityRuntime(params)
-	t.Cleanup(cr.shutdown)
+	t.Cleanup(func() {
+		// Tests pass context.Background to cr.tick, so dispatched orders
+		// cannot be canceled via tick ctx propagation. Type-assert to the
+		// concrete dispatcher (only it spawns subprocess goroutines that
+		// need cancellation; test fakes have nothing to interrupt).
+		cancelInflight(cr.od)
+		for _, od := range cr.retiredOrderDispatchers {
+			cancelInflight(od)
+		}
+		cr.shutdown()
+	})
 	return cr
+}
+
+func cancelInflight(od orderDispatcher) {
+	if m, ok := od.(*memoryOrderDispatcher); ok {
+		m.cancel()
+	}
 }
 
 func TestFilterReleasedAssignedWorkBeads_PreservesSameIDUnreleasedWork(t *testing.T) {
@@ -3214,7 +3235,6 @@ func TestCityRuntimeManualReloadReplyWaitsForTickCompletion(t *testing.T) {
 		Stdout: &stdout,
 		Stderr: io.Discard,
 	})
-	t.Cleanup(cr.shutdown)
 	cr.activeReload = &reloadRequest{doneCh: doneCh}
 	lastProviderName := "fake"
 	var prevPoolRunning map[string]bool

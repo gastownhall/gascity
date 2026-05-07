@@ -4,7 +4,7 @@
 // every panel re-fetches against the new scope.
 
 import { api, cityScope } from "../api";
-import { getCachedCities, setCachedCities } from "../state";
+import { getCachedCities, markCachedCitiesUnknown, setCachedCities } from "../state";
 import { byId, clear, el } from "../util/dom";
 
 export async function renderCityTabs(): Promise<void> {
@@ -21,6 +21,8 @@ export async function renderCityTabs(): Promise<void> {
       running: city.running === true,
       status: city.status ?? undefined,
     })));
+  } else {
+    markCachedCitiesUnknown();
   }
   const cachedCityItems = getCachedCities();
   if (error || cachedCityItems.length === 0) {

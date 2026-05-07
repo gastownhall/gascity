@@ -72,13 +72,13 @@ describe("activity feed ordering", () => {
     expect(cursor).toEqual({ afterSeq: "19" });
   });
 
-  it("computes a supervisor stream cursor from loaded history", () => {
+  it("resumes the supervisor stream from the history response cursor", () => {
     const cursor = activityStreamCursorFromRecordsForTest([
       { city: "beta", seq: 3, type: "bead.created", actor: "human", ts: "2026-04-01T10:00:00Z" },
       { city: "alpha", seq: 9, type: "bead.updated", actor: "human", ts: "2026-04-01T10:01:00Z" },
       { city: "beta", seq: 7, type: "bead.closed", actor: "human", ts: "2026-04-01T10:02:00Z" },
-    ] as any, "");
+    ] as any, "", "alpha:12,beta:8");
 
-    expect(cursor).toEqual({ afterCursor: "alpha:9,beta:7" });
+    expect(cursor).toEqual({ afterCursor: "alpha:12,beta:8" });
   });
 });

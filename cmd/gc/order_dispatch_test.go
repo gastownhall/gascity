@@ -2779,16 +2779,19 @@ func buildOrderDispatcherFromListExec(aa []orders.Order, store beads.Store, ep e
 	if execRun == nil {
 		execRun = shellExecRunner
 	}
+	dispatchCtx, dispatchCancel := context.WithCancel(context.Background())
 	return &memoryOrderDispatcher{
 		aa: auto,
 		storeFn: func(_ execStoreTarget) (beads.Store, error) {
 			return store, nil
 		},
-		ep:      ep,
-		execRun: execRun,
-		rec:     rec,
-		stderr:  &bytes.Buffer{},
-		cfg:     cfg,
+		ep:             ep,
+		execRun:        execRun,
+		rec:            rec,
+		stderr:         &bytes.Buffer{},
+		cfg:            cfg,
+		dispatchCtx:    dispatchCtx,
+		dispatchCancel: dispatchCancel,
 	}
 }
 
@@ -4171,5 +4174,57 @@ func TestOrderDispatcherDrainIdleReturnsImmediately(t *testing.T) {
 	case <-done:
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("drain on idle dispatcher did not return promptly")
+	}
+}
+
+// TestOrderDispatcherCancelTerminatesInFlight verifies cancel() propagates
+// to in-flight dispatchOne goroutines via context, so a follow-up drain
+// returns promptly without waiting out the per-order timeout. Without
+// this, shutdown can race t.TempDir cleanup against subprocesses still
+// holding files inside .gc/ open.
+func TestOrderDispatcherCancelTerminatesInFlight(t *testing.T) {
+	store := beads.NewMemStore()
+	execStarted := make(chan struct{})
+
+	// Exec respects ctx — returns when canceled. This mirrors what
+	// exec.CommandContext does in production: SIGKILL on ctx.Done.
+	fakeExec := func(ctx context.Context, _, _ string, _ []string) ([]byte, error) {
+		close(execStarted)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	aa := []orders.Order{{
+		Name:     "cancel-test",
+		Trigger:  "cooldown",
+		Interval: "2m",
+		Exec:     "scripts/cancel.sh",
+	}}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+	m, ok := ad.(*memoryOrderDispatcher)
+	if !ok {
+		t.Fatalf("expected *memoryOrderDispatcher, got %T", ad)
+	}
+
+	// Use Background so the only ctx that can cancel the dispatchOne is
+	// the one cancel() controls — proves the hookup works.
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	<-execStarted
+
+	m.cancel()
+
+	drainDone := make(chan struct{})
+	go func() {
+		ad.drain(context.Background())
+		close(drainDone)
+	}()
+
+	select {
+	case <-drainDone:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("drain did not return promptly after cancel()")
 	}
 }

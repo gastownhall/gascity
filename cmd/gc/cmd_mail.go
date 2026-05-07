@@ -1076,9 +1076,9 @@ deleted in a single batch round-trip.`,
 
 func newMailThreadCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
-		Use:   "thread <thread-id>",
+		Use:   "thread <id>",
 		Short: "List all messages in a thread",
-		Long:  `Show all messages sharing a thread ID, ordered by time.`,
+		Long:  `Show all messages sharing a thread ID or message ID, ordered by time.`,
 		Args:  cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdMailThread(args, stdout, stderr) != 0 {
@@ -1666,19 +1666,19 @@ func cmdMailThread(args []string, stdout, stderr io.Writer) int {
 // doMailThread shows all messages in a thread.
 func doMailThread(mp mail.Provider, args []string, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
-		fmt.Fprintln(stderr, "gc mail thread: missing thread ID") //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "gc mail thread: missing thread or message ID") //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	threadID := args[0]
+	id := args[0]
 
-	msgs, err := mp.Thread(threadID)
+	msgs, err := mp.Thread(id)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc mail thread: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	if len(msgs) == 0 {
-		fmt.Fprintf(stdout, "No messages in thread %s\n", threadID) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(stdout, "No messages in thread %s\n", id) //nolint:errcheck // best-effort stdout
 		return 0
 	}
 

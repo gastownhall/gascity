@@ -1394,6 +1394,110 @@ func TestThreadEmpty(t *testing.T) {
 	}
 }
 
+// TestThreadAcceptsMessageIDOfOriginal locks in the fix for #1526. Callers
+// (notably `gc mail thread <id>` from cmd/gc/cmd_mail.go) pass a *message*
+// bead-ID, not the underlying thread-ID. Provider.Thread must resolve the
+// message-ID to its thread label and return the thread.
+func TestThreadAcceptsMessageIDOfOriginal(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("alice", "bob", "Hello", "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Reply(sent.ID, "bob", "Re: Hello", "second"); err != nil {
+		t.Fatal(err)
+	}
+
+	msgs, err := p.Thread(sent.ID)
+	if err != nil {
+		t.Fatalf("Thread(%q): %v", sent.ID, err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("Thread(messageID) = %d messages, want 2", len(msgs))
+	}
+	if msgs[0].Body != "first" || msgs[1].Body != "second" {
+		t.Errorf("Thread(messageID) bodies = [%q, %q], want [first, second]", msgs[0].Body, msgs[1].Body)
+	}
+}
+
+// TestThreadSurfacesNonNotFoundStoreErrors verifies that a real store I/O
+// failure during message-id resolution propagates to the caller instead of
+// being silently swallowed as "treat input as thread-id".
+func TestThreadSurfacesNonNotFoundStoreErrors(t *testing.T) {
+	mem := beads.NewMemStore()
+	failing := &getErrorStore{MemStore: mem, getErr: errors.New("simulated I/O failure")}
+	p := New(failing)
+
+	_, err := p.Thread("anything")
+	if err == nil {
+		t.Fatal("Thread: expected error from underlying store, got nil")
+	}
+	if !strings.Contains(err.Error(), "simulated I/O failure") {
+		t.Errorf("Thread: error %q does not wrap underlying store error", err)
+	}
+}
+
+func TestThreadRejectsNonMessageBeadID(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+	task, err := store.Create(beads.Bead{
+		Title:  "not mail",
+		Type:   "task",
+		Labels: []string{"thread:looks-mail-like"},
+	})
+	if err != nil {
+		t.Fatalf("Create task: %v", err)
+	}
+
+	_, err = p.Thread(task.ID)
+	if err == nil {
+		t.Fatal("Thread(non-message bead ID): expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), `bead "`) || !strings.Contains(err.Error(), "want message") {
+		t.Fatalf("Thread(non-message bead ID) error = %q, want clear non-message diagnostic", err)
+	}
+}
+
+// getErrorStore returns a custom error from Get; List defers to MemStore.
+type getErrorStore struct {
+	*beads.MemStore
+	getErr error
+}
+
+func (s *getErrorStore) Get(_ string) (beads.Bead, error) {
+	return beads.Bead{}, s.getErr
+}
+
+// TestThreadAcceptsMessageIDOfReply ensures the resolution works regardless
+// of which message in the thread the caller hands us — the parent OR any
+// reply should both surface the full thread.
+func TestThreadAcceptsMessageIDOfReply(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("alice", "bob", "Hello", "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply, err := p.Reply(sent.ID, "bob", "Re: Hello", "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	msgs, err := p.Thread(reply.ID)
+	if err != nil {
+		t.Fatalf("Thread(%q): %v", reply.ID, err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("Thread(replyID) = %d messages, want 2", len(msgs))
+	}
+	if msgs[0].Body != "first" || msgs[1].Body != "second" {
+		t.Errorf("Thread(replyID) bodies = [%q, %q], want [first, second]", msgs[0].Body, msgs[1].Body)
+	}
+}
+
 // --- Count ---
 
 func TestCount(t *testing.T) {

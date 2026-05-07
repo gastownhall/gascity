@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -388,7 +387,27 @@ func deriveReplyTitle(subject, originalTitle, body string) string {
 }
 
 // Thread returns all messages sharing a thread ID, ordered by creation time.
-func (p *Provider) Thread(threadID string) ([]mail.Message, error) {
+// Callers may pass either an actual thread ID or any message bead ID in the
+// thread — the latter is what `gc mail thread <id>` from the CLI hands us.
+// If the input resolves to an existing message bead with a `thread:` label,
+// that label is used; otherwise the input is treated as a thread ID directly
+// so callers that already know the thread ID still work.
+func (p *Provider) Thread(id string) ([]mail.Message, error) {
+	threadID := id
+	msgBead, err := p.store.Get(id)
+	switch {
+	case err == nil:
+		if msgBead.Type != "message" {
+			return nil, fmt.Errorf("beadmail thread: bead %q is type %q, want message", id, msgBead.Type)
+		}
+		if t := extractLabel(msgBead.Labels, "thread:"); t != "" {
+			threadID = t
+		}
+	case errors.Is(err, beads.ErrNotFound):
+		// Caller passed a non-bead-id (e.g., a real thread-id); fall through.
+	default:
+		return nil, fmt.Errorf("beadmail thread: resolving %q: %w", id, err)
+	}
 	bs, err := p.store.List(beads.ListQuery{
 		Label: "thread:" + threadID,
 		Type:  "message",
@@ -401,10 +420,8 @@ func (p *Provider) Thread(threadID string) ([]mail.Message, error) {
 	for i, b := range bs {
 		msgs[i] = beadToMessage(b)
 	}
-	// Sort by creation time ascending.
-	sort.Slice(msgs, func(i, j int) bool {
-		return msgs[i].CreatedAt.Before(msgs[j].CreatedAt)
-	})
+	// Note: store.List already sorts by SortCreatedAsc with an ID tie-break
+	// (see sortBeadsForQuery in internal/beads/query.go), so no post-sort here.
 	return msgs, nil
 }
 

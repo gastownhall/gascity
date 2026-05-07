@@ -4572,6 +4572,46 @@ func TestSelectOrCreatePoolSessionBead_ReusesAvailableForNewTier(t *testing.T) {
 	}
 }
 
+func TestSelectOrCreatePoolSessionBead_SkipsAssignedForNewTier(t *testing.T) {
+	store := beads.NewMemStore()
+	assigned, err := store.Create(beads.Bead{
+		Title:  "claude",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":     "claude",
+			"agent_name":   "claude",
+			"session_name": "claude-assigned",
+			"state":        "active",
+			"pool_managed": "true",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := &sessionBeadSnapshot{}
+	snapshot.add(assigned)
+	cfgAgent := config.Agent{Name: "claude", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}
+	bp := &agentBuildParams{
+		beadStore:    store,
+		sessionBeads: snapshot,
+		agents:       []config.Agent{cfgAgent},
+		assignedWorkBeads: []beads.Bead{{
+			ID:       "w-assigned",
+			Status:   "in_progress",
+			Assignee: assigned.ID,
+		}},
+	}
+
+	result, err := selectOrCreatePoolSessionBead(bp, "claude", nil, map[string]bool{})
+	if err != nil {
+		t.Fatalf("selectOrCreatePoolSessionBead: %v", err)
+	}
+	if result.ID == assigned.ID {
+		t.Fatal("new-tier should not reuse a session bead that has assigned work")
+	}
+}
+
 func TestSelectOrCreatePoolSessionBead_SkipsAsleepBeads(t *testing.T) {
 	// An asleep pool session should NOT be reused for new demand.
 	// The reconciler should create a fresh session instead.

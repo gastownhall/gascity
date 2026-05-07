@@ -1525,10 +1525,10 @@ gc mail send mayor "Build is green"
 
 ## gc mail thread
 
-Show all messages sharing a thread ID, ordered by time.
+Show all messages sharing a thread ID or message ID, ordered by time.
 
 ```
-gc mail thread <thread-id>
+gc mail thread <id>
 ```
 
 ## gc mcp

@@ -157,17 +157,24 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			continue
 		}
 		active := collectActiveBeads(input.SessionBeads, template)
-		for i, bead := range active {
-			if i >= count {
+		filled := 0
+		for _, bead := range active {
+			if filled >= count {
 				break
 			}
+			if sessionHasConcreteAssignedWork(input.WorkBeads, bead) {
+				continue
+			}
 			desired[bead.SessionName] = "scaled:demand"
+			filled++
 		}
 		creating := collectCreatingBeads(input.SessionBeads, template)
-		filled := len(active)
 		for _, bead := range creating {
 			if filled >= count {
 				break
+			}
+			if sessionHasConcreteAssignedWork(input.WorkBeads, bead) {
+				continue
 			}
 			desired[bead.SessionName] = "scaled:creating"
 			filled++
@@ -381,6 +388,19 @@ func collectActiveBeads(beads []AwakeSessionBead, template string) []AwakeSessio
 		}
 	}
 	return result
+}
+
+func sessionHasConcreteAssignedWork(workBeads []AwakeWorkBead, bead AwakeSessionBead) bool {
+	for _, wb := range workBeads {
+		assignee := strings.TrimSpace(wb.Assignee)
+		if assignee == "" || (wb.Status != "open" && wb.Status != "in_progress") {
+			continue
+		}
+		if assignee == bead.ID || assignee == bead.SessionName {
+			return true
+		}
+	}
+	return false
 }
 
 func isOnDemandSession(named []AwakeNamedSession, bead AwakeSessionBead) bool {

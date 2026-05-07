@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
@@ -341,6 +342,48 @@ func TestScaled_Demand2_OneActive(t *testing.T) {
 	})
 	assertAwake(t, result, "polecat-mc-1")
 	assertAsleep(t, result, "polecat-mc-2") // asleep ephemerals not reused
+}
+
+func TestScaled_NewDemandDoesNotUseActiveAssignedSessions(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-assigned-1", SessionName: "polecat-assigned-1", Template: "hello-world/polecat", State: "active"},
+			{ID: "mc-assigned-2", SessionName: "polecat-assigned-2", Template: "hello-world/polecat", State: "active"},
+			{ID: "mc-assigned-3", SessionName: "polecat-assigned-3", Template: "hello-world/polecat", State: "active"},
+			{ID: "mc-assigned-4", SessionName: "polecat-assigned-4", Template: "hello-world/polecat", State: "active"},
+			{ID: "mc-assigned-5", SessionName: "polecat-assigned-5", Template: "hello-world/polecat", State: "active"},
+			{ID: "mc-new-1", SessionName: "polecat-new-1", Template: "hello-world/polecat", State: "creating"},
+			{ID: "mc-new-2", SessionName: "polecat-new-2", Template: "hello-world/polecat", State: "creating"},
+			{ID: "mc-new-3", SessionName: "polecat-new-3", Template: "hello-world/polecat", State: "creating"},
+			{ID: "mc-new-4", SessionName: "polecat-new-4", Template: "hello-world/polecat", State: "creating"},
+			{ID: "mc-new-5", SessionName: "polecat-new-5", Template: "hello-world/polecat", State: "creating"},
+		},
+		WorkBeads: []AwakeWorkBead{
+			{ID: "w-assigned-1", Assignee: "mc-assigned-1", Status: "in_progress"},
+			{ID: "w-assigned-2", Assignee: "mc-assigned-2", Status: "in_progress"},
+			{ID: "w-assigned-3", Assignee: "mc-assigned-3", Status: "in_progress"},
+			{ID: "w-assigned-4", Assignee: "mc-assigned-4", Status: "in_progress"},
+			{ID: "w-assigned-5", Assignee: "mc-assigned-5", Status: "in_progress"},
+		},
+		ScaleCheckCounts: map[string]int{"hello-world/polecat": 5},
+		RunningSessions: map[string]bool{
+			"polecat-assigned-1": true,
+			"polecat-assigned-2": true,
+			"polecat-assigned-3": true,
+			"polecat-assigned-4": true,
+			"polecat-assigned-5": true,
+		},
+		Now: now,
+	})
+
+	for i := 1; i <= 5; i++ {
+		suffix := strconv.Itoa(i)
+		assertAwake(t, result, "polecat-assigned-"+suffix)
+		assertReason(t, result, "polecat-assigned-"+suffix, "assigned-work")
+		assertAwake(t, result, "polecat-new-"+suffix)
+		assertReason(t, result, "polecat-new-"+suffix, "scaled:creating")
+	}
 }
 
 func TestScaled_Demand1_TwoActive(t *testing.T) {
