@@ -278,6 +278,44 @@ func TestInstallCodexUpgradesGeneratedFileMissingHookFormat(t *testing.T) {
 	if !strings.Contains(got, "--hook-format codex") {
 		t.Errorf("upgraded codex hooks missing Codex hook output format:\n%s", got)
 	}
+	if !strings.Contains(got, `"PreCompact"`) {
+		t.Errorf("upgraded codex hooks missing PreCompact:\n%s", got)
+	}
+	if !strings.Contains(got, `gc handoff --auto --hook-format codex \"context cycle\"`) {
+		t.Errorf("upgraded codex PreCompact missing auto handoff command:\n%s", got)
+	}
+}
+
+func TestInstallCodexUpgradesManagedFileMissingPreCompact(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/work/.codex/hooks.json"] = []byte(`{
+  "hooks": {
+    "SessionStart": [{
+      "hooks": [{
+        "type": "command",
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc prime --hook --hook-format codex"
+      }]
+    }],
+    "UserPromptSubmit": [{
+      "hooks": [{
+        "type": "command",
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc mail check --inject --hook-format codex"
+      }]
+    }]
+  }
+}`)
+
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	got := string(fs.Files["/work/.codex/hooks.json"])
+	if !strings.Contains(got, `"PreCompact"`) {
+		t.Errorf("upgraded codex hooks missing PreCompact:\n%s", got)
+	}
+	if !strings.Contains(got, `gc handoff --auto --hook-format codex \"context cycle\"`) {
+		t.Errorf("upgraded codex PreCompact missing auto handoff command:\n%s", got)
+	}
 }
 
 func TestInstallCodexUpgradePreservesCustomHooks(t *testing.T) {
@@ -309,6 +347,66 @@ func TestInstallCodexUpgradePreservesCustomHooks(t *testing.T) {
 	}
 	if !strings.Contains(got, "printf custom-codex-hook") {
 		t.Errorf("custom codex hook was not preserved:\n%s", got)
+	}
+	if !strings.Contains(got, `"PreCompact"`) {
+		t.Errorf("managed codex upgrade should add PreCompact while preserving custom hooks:\n%s", got)
+	}
+}
+
+func TestInstallCodexPreservesFullyCustomHooks(t *testing.T) {
+	fs := fsys.NewFake()
+	custom := []byte(`{
+  "hooks": {
+    "UserPromptSubmit": [{
+      "hooks": [{
+        "type": "command",
+        "command": "printf custom-codex-hook"
+      }]
+    }]
+  }
+}`)
+	fs.Files["/work/.codex/hooks.json"] = custom
+
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	if got := string(fs.Files["/work/.codex/hooks.json"]); got != string(custom) {
+		t.Fatalf("fully custom codex hooks were overwritten:\n%s", got)
+	}
+}
+
+func TestInstallCodexPreservesUnreadableExistingHooks(t *testing.T) {
+	workDir := t.TempDir()
+	hookDir := filepath.Join(workDir, ".codex")
+	if err := os.MkdirAll(hookDir, 0o755); err != nil {
+		t.Fatalf("mkdir hooks dir: %v", err)
+	}
+	hookPath := filepath.Join(hookDir, "hooks.json")
+	custom := []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"printf custom"}]}]}}`)
+	if err := os.WriteFile(hookPath, custom, 0o644); err != nil {
+		t.Fatalf("write hooks: %v", err)
+	}
+	if err := os.Chmod(hookPath, 0); err != nil {
+		t.Fatalf("chmod hooks unreadable: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(hookPath, 0o644)
+	})
+
+	if err := Install(fsys.OSFS{}, "/city", workDir, []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	if err := os.Chmod(hookPath, 0o644); err != nil {
+		t.Fatalf("restore hooks mode: %v", err)
+	}
+	got, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatalf("read hooks: %v", err)
+	}
+	if string(got) != string(custom) {
+		t.Fatalf("unreadable codex hooks were overwritten:\n%s", string(got))
 	}
 }
 
@@ -768,6 +866,12 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	codexHooks := string(fs.Files["/work/.codex/hooks.json"])
 	if !strings.Contains(codexHooks, "--hook-format codex") {
 		t.Error("codex hooks should request Codex hook output format")
+	}
+	if !strings.Contains(codexHooks, `"PreCompact"`) {
+		t.Error("codex hooks should include PreCompact")
+	}
+	if !strings.Contains(codexHooks, `gc handoff --auto --hook-format codex \"context cycle\"`) {
+		t.Error("codex PreCompact should use auto handoff with Codex hook output format")
 	}
 	for _, rel := range []string{
 		"/work/.codex/hooks.json",
