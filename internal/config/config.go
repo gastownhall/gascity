@@ -1077,6 +1077,56 @@ type K8sConfig struct {
 	// Prebaked skips init container staging and EmptyDir volumes when true.
 	// Use with images built by `gc build-image` that have city content baked in.
 	Prebaked bool `toml:"prebaked,omitempty"`
+	// NodeSelector constrains agent pod scheduling to nodes with matching labels.
+	// Set via GC_K8S_NODE_SELECTOR env (JSON) or TOML node_selector.
+	NodeSelector map[string]string `toml:"node_selector,omitempty"`
+	// Tolerations allows agent pods to be scheduled on tainted nodes.
+	// Set via GC_K8S_TOLERATIONS env (JSON array) or TOML toleration array.
+	Tolerations []K8sToleration `toml:"toleration,omitempty"`
+	// Affinity specifies advanced node/pod affinity rules for agent pods.
+	// Set via GC_K8S_AFFINITY env (JSON) or TOML affinity block.
+	Affinity *K8sAffinity `toml:"affinity,omitempty"`
+	// PriorityClassName sets the priority class for agent pods.
+	// Set via GC_K8S_PRIORITY_CLASS_NAME env or TOML priority_class_name.
+	PriorityClassName string `toml:"priority_class_name,omitempty"`
+}
+
+// K8sToleration mirrors corev1.Toleration for TOML serialization.
+type K8sToleration struct {
+	Key               string `toml:"key,omitempty"`
+	Operator          string `toml:"operator,omitempty"` // "Equal" or "Exists"
+	Value             string `toml:"value,omitempty"`
+	Effect            string `toml:"effect,omitempty"` // "NoSchedule", "PreferNoSchedule", "NoExecute"
+	TolerationSeconds *int64 `toml:"toleration_seconds,omitempty"`
+}
+
+// K8sAffinity mirrors the subset of corev1.Affinity used for pod placement.
+type K8sAffinity struct {
+	NodeAffinity *K8sNodeAffinity `toml:"node_affinity,omitempty"`
+}
+
+// K8sNodeAffinity mirrors corev1.NodeAffinity for TOML.
+type K8sNodeAffinity struct {
+	// Required is the hard node affinity requirement
+	// (RequiredDuringSchedulingIgnoredDuringExecution).
+	Required *K8sNodeSelector `toml:"required,omitempty"`
+}
+
+// K8sNodeSelector mirrors corev1.NodeSelector for TOML.
+type K8sNodeSelector struct {
+	NodeSelectorTerms []K8sNodeSelectorTerm `toml:"node_selector_term,omitempty"`
+}
+
+// K8sNodeSelectorTerm mirrors corev1.NodeSelectorTerm for TOML.
+type K8sNodeSelectorTerm struct {
+	MatchExpressions []K8sNodeSelectorRequirement `toml:"match_expression,omitempty"`
+}
+
+// K8sNodeSelectorRequirement mirrors corev1.NodeSelectorRequirement for TOML.
+type K8sNodeSelectorRequirement struct {
+	Key      string   `toml:"key"`
+	Operator string   `toml:"operator"` // "In", "NotIn", "Exists", "DoesNotExist", "Gt", "Lt"
+	Values   []string `toml:"values,omitempty"`
 }
 
 // MailConfig holds mail provider settings.
