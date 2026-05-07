@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -281,5 +282,80 @@ func TestResolveProviderChain_SharedAncestorDAG(t *testing.T) {
 	}
 	if rA.BuiltinAncestor != "codex" || rB.BuiltinAncestor != "codex" {
 		t.Errorf("both should have BuiltinAncestor=codex; got A=%q B=%q", rA.BuiltinAncestor, rB.BuiltinAncestor)
+	}
+}
+
+func TestResolveProviderChain_OpenCodeDeepSeekV4Override(t *testing.T) {
+	leaf := ProviderSpec{
+		Base:               basePtr("builtin:opencode"),
+		DisplayName:        "OpenCode DeepSeek V4",
+		OptionsSchemaMerge: "by_key",
+		TitleModel:         "deepseek/deepseek-v4-flash",
+		OptionDefaults: map[string]string{
+			"model": "deepseek/deepseek-v4-pro",
+		},
+		OptionsSchema: []ProviderOption{
+			{
+				Key:     "model",
+				Label:   "Model",
+				Type:    "select",
+				Default: "deepseek/deepseek-v4-pro",
+				Choices: []OptionChoice{
+					{
+						Value:    "deepseek/deepseek-v4-pro",
+						Label:    "DeepSeek V4 Pro",
+						FlagArgs: []string{"--model", "deepseek/deepseek-v4-pro"},
+					},
+					{
+						Value:    "deepseek/deepseek-v4-flash",
+						Label:    "DeepSeek V4 Flash",
+						FlagArgs: []string{"--model", "deepseek/deepseek-v4-flash"},
+					},
+				},
+			},
+		},
+	}
+
+	resolved, err := ResolveProviderChain("opencode-deepseek-v4", leaf, customs(map[string]ProviderSpec{}))
+	if err != nil {
+		t.Fatalf("ResolveProviderChain: %v", err)
+	}
+
+	if resolved.BuiltinAncestor != "opencode" {
+		t.Fatalf("BuiltinAncestor = %q, want opencode", resolved.BuiltinAncestor)
+	}
+	if resolved.Command != "opencode" {
+		t.Fatalf("Command = %q, want opencode", resolved.Command)
+	}
+	if got := resolved.DefaultSessionTransport(); got != "acp" {
+		t.Fatalf("DefaultSessionTransport() = %q, want acp", got)
+	}
+
+	wantDefaultArgs := []string{"--model", "deepseek/deepseek-v4-pro"}
+	if got := resolved.ResolveDefaultArgs(); !reflect.DeepEqual(got, wantDefaultArgs) {
+		t.Fatalf("ResolveDefaultArgs() = %v, want %v", got, wantDefaultArgs)
+	}
+
+	wantTitleArgs := []string{"--model", "deepseek/deepseek-v4-flash"}
+	if got := resolved.TitleModelFlagArgs(); !reflect.DeepEqual(got, wantTitleArgs) {
+		t.Fatalf("TitleModelFlagArgs() = %v, want %v", got, wantTitleArgs)
+	}
+
+	defaultLaunch, err := BuildProviderLaunchCommand("", &resolved, nil, "acp")
+	if err != nil {
+		t.Fatalf("BuildProviderLaunchCommand default: %v", err)
+	}
+	if want := "opencode acp --model deepseek/deepseek-v4-pro"; defaultLaunch.Command != want {
+		t.Fatalf("default launch command = %q, want %q", defaultLaunch.Command, want)
+	}
+
+	flashLaunch, err := BuildProviderLaunchCommand("", &resolved, map[string]string{
+		"model": "deepseek/deepseek-v4-flash",
+	}, "acp")
+	if err != nil {
+		t.Fatalf("BuildProviderLaunchCommand override: %v", err)
+	}
+	if want := "opencode acp --model deepseek/deepseek-v4-flash"; flashLaunch.Command != want {
+		t.Fatalf("override launch command = %q, want %q", flashLaunch.Command, want)
 	}
 }
