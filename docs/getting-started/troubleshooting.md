@@ -160,6 +160,108 @@ of a clean version string, upgrade to Gas City v0.13.4 or later. This was a
 bug where remote pack fetches wrote git sideband output to the terminal,
 fixed in [PR #141](https://github.com/gastownhall/gascity/pull/141).
 
+## JSONL Archive Push Failures
+
+The maintenance pack runs `jsonl-export` every 15 minutes to dump each bead
+database to a text-diffable JSONL snapshot inside a local git repository
+(the "JSONL archive"). The archive serves as a disaster-recovery backup:
+if the live Dolt server loses data, the last-known-good bead graph can be
+reconstructed from the archive's commit history.
+
+### Local-only vs push mode
+
+The archive operates in one of two modes, detected from the state of its
+git remotes on every run:
+
+- **Local-only (default).** No `origin` remote is configured. Commits are
+  created and retained on the host but never leave the machine. This mode
+  is safe to run indefinitely; its only limitation is that the archive is
+  not backed up off-box, so a disk failure on this host loses the archive
+  alongside the live Dolt data.
+- **Push.** An `origin` remote is configured. Each run rebases onto
+  `origin/main` and pushes new commits so the archive survives a host
+  loss.
+
+On each run `jsonl-export` logs the active mode to stderr on transitions
+(e.g. after you add or remove `origin`) and re-logs it at least weekly so
+that an operator reading the log file can always find the current mode.
+
+### Enabling off-box backup
+
+Pick a repository that only this host will push to (the archive contains
+bead content and should not be shared across cities). Then:
+
+```bash
+# Create a private repo on your git host (example: GitHub via gh)
+gh repo create my-city-jsonl-archive --private
+
+# Point the archive at it
+ARCHIVE=$(gc config get state_dir)/packs/maintenance/jsonl-archive
+git -C "$ARCHIVE" remote add origin git@github.com:<you>/my-city-jsonl-archive.git
+
+# Seed the remote with the existing local history
+git -C "$ARCHIVE" push -u origin main
+```
+
+On the next 15-minute tick, `jsonl-export` detects the new `origin`,
+logs `archive running in push mode`, and resumes pushing every run.
+
+### Switching back to local-only
+
+Remove the remote:
+
+```bash
+git -C "$ARCHIVE" remote remove origin
+```
+
+Re-detection is automatic on the next run — no state-file edits are
+required. The next log line will read `archive running in local-only
+mode`.
+
+### Reading a `JSONL push failed [HIGH]` escalation
+
+When push mode is active and `git push` fails `GC_JSONL_MAX_PUSH_FAILURES`
+times in a row (default: 3), the mayor's inbox receives an
+`ESCALATION: JSONL push failed [HIGH]` message with a body shaped like:
+
+```
+Order: mol-dog-jsonl
+Archive: /path/to/archive
+Consecutive failures: 3 (threshold: 3)
+
+Last git push stderr:
+<last ~20 lines of captured stderr from fetch / rebase / push>
+
+Remediation:
+- Check remote: git -C <archive> remote -v
+- Verify remote is reachable and credentials are valid
+- Temporarily suppress: export GC_JSONL_MAX_PUSH_FAILURES=99
+- See docs/getting-started/troubleshooting.md#jsonl-archive-push-failures
+```
+
+Common root causes, in rough order of frequency:
+
+- **Credentials rotated or expired.** SSH key removed from the remote
+  host, HTTPS token expired. The captured stderr usually reads
+  `Permission denied (publickey)` or `remote: Invalid username or
+  password`.
+- **Remote URL typo or deleted repo.** stderr reads `does not appear to
+  be a git repository` or `repository not found`.
+- **Network partition.** stderr reads `Could not resolve host` or a
+  connection-timeout message. If the host is also firewalled from the
+  rest of the internet, this will recover once connectivity returns.
+- **Diverged history.** Very unusual — the archive rebases onto
+  `origin/main` automatically — but if the remote was force-pushed from
+  another host, rebase may fail with a conflict. Inspecting the archive
+  and resolving manually is the only option.
+
+If the underlying problem cannot be fixed immediately (e.g., the remote
+host is down for scheduled maintenance), set
+`GC_JSONL_MAX_PUSH_FAILURES=99` in the maintenance pack's environment and
+restart the city with `gc restart`. That bumps the escalation threshold
+from 3 to 99, which at the current 15-minute tick rate is ~24 hours of
+silence.
+
 ## WSL (Windows Subsystem for Linux)
 
 Gas City works under WSL 2 with a standard Ubuntu or Debian distribution.
