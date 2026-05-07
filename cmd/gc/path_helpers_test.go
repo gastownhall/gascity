@@ -1,7 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"io"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,6 +47,62 @@ func clearInheritedBeadsEnv(t *testing.T) {
 	} {
 		t.Setenv(key, "")
 	}
+}
+
+// requireNoLeakedDoltAfter snapshots the live dolt sql-server PIDs at
+// registration time and re-scans in t.Cleanup. Any PID present at cleanup
+// that wasn't there at registration is reported via t.Errorf with PID and
+// argv so operators can trace the spawn site.
+//
+// Pair with clearInheritedBeadsEnv: that helper prevents the leak by
+// stripping inherited GC_BEADS=bd before the test writes its city.toml;
+// this helper catches any leak that slips through (forgotten env scrub,
+// child path that spawns dolt despite [beads] provider = "file", etc.).
+//
+// The scan walks /proc and is a no-op on hosts where /proc is unavailable
+// (discoverDoltProcesses returns nil there). The helper is safe in
+// city_runtime_test.go because that file does not call t.Parallel(),
+// so other parallel tests are paused while these tests run and cannot
+// add benign dolt PIDs that would false-positive the diff.
+func requireNoLeakedDoltAfter(t *testing.T) {
+	t.Helper()
+	initial := snapshotDoltProcessPIDs(t)
+	t.Cleanup(func() {
+		leaked := snapshotDoltProcessPIDs(t)
+		for pid := range initial {
+			delete(leaked, pid)
+		}
+		if len(leaked) == 0 {
+			return
+		}
+		pids := make([]int, 0, len(leaked))
+		for pid := range leaked {
+			pids = append(pids, pid)
+		}
+		sort.Ints(pids)
+		var rep []string
+		for _, pid := range pids {
+			rep = append(rep, fmt.Sprintf("  pid=%d argv=%q", pid, leaked[pid]))
+		}
+		t.Errorf("test leaked %d dolt sql-server process(es); ensure cleanup paths reach shutdownBeadsProvider, or call clearInheritedBeadsEnv to prevent inherited GC_BEADS=bd from triggering gc-beads-bd.sh:\n%s",
+			len(leaked), strings.Join(rep, "\n"))
+	})
+}
+
+// snapshotDoltProcessPIDs returns a map from PID to space-joined argv for
+// every live dolt sql-server visible via /proc. Empty on hosts without
+// /proc (the helper degrades to no-op).
+func snapshotDoltProcessPIDs(t *testing.T) map[int]string {
+	t.Helper()
+	procs, err := discoverDoltProcesses()
+	if err != nil {
+		t.Fatalf("discoverDoltProcesses: %v", err)
+	}
+	out := make(map[int]string, len(procs))
+	for _, p := range procs {
+		out[p.PID] = strings.Join(p.Argv, " ")
+	}
+	return out
 }
 
 func cleanupManagedDoltTestCity(t *testing.T, cityPath string) {

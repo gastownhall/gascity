@@ -4219,6 +4219,7 @@ func loadCityRuntimeControllerConfig(t *testing.T, cityPath string) (*config.Cit
 func writeCityRuntimeConfigNamed(t *testing.T, tomlPath, name, provider string) {
 	t.Helper()
 	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfter(t)
 	data := []byte("[workspace]\nname = \"" + name + "\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"" + provider + "\"\n")
 	if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -4227,6 +4228,8 @@ func writeCityRuntimeConfigNamed(t *testing.T, tomlPath, name, provider string) 
 
 func writeCityRuntimeConfigWithShutdownTimeout(t *testing.T, tomlPath, provider, timeout string) {
 	t.Helper()
+	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfter(t)
 	data := []byte("[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"" + provider + "\"\n\n[daemon]\nshutdown_timeout = \"" + timeout + "\"\n")
 	if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -4245,6 +4248,7 @@ func warningsContain(warnings []string, substr string) bool {
 func writeCityRuntimeConfigWithIncludes(t *testing.T, tomlPath string, includes []string) {
 	t.Helper()
 	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfter(t)
 	var quoted []string
 	for _, include := range includes {
 		quoted = append(quoted, fmt.Sprintf("%q", include))
