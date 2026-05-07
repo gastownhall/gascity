@@ -3235,6 +3235,9 @@ func TestCityRuntimeManualReloadReplyWaitsForTickCompletion(t *testing.T) {
 		Stdout: &stdout,
 		Stderr: io.Discard,
 	})
+	// This test asserts reload reply timing only; order subprocesses add
+	// unrelated tempdir cleanup races after the tick has completed.
+	cr.od = nil
 	cr.activeReload = &reloadRequest{doneCh: doneCh}
 	lastProviderName := "fake"
 	var prevPoolRunning map[string]bool
