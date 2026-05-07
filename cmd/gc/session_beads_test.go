@@ -5508,3 +5508,123 @@ func TestPreserveConfiguredNamedSessionBead_StateGate(t *testing.T) {
 		})
 	}
 }
+
+// TestConfiguredNamedSessionInFailedCreateCooldown_HoldsRecentFailure verifies
+// that a configured-named session whose most recent closed bead was retired
+// with close_reason="failed-create" inside failedCreateReopenCooldown is held
+// off — this prevents the reopen/rollback/close storm seen in the 2026-05-05
+// maxwell disk-fill incident (see incident notes for ma-uu1, ma-qi1ky6,
+// ma-64k9h8, ma-r6a4h: 4 zombies × ~1 cycle per 50s × 3-5 writes per cycle
+// produced ~28k Dolt commits in one day and bloated the backup remote to
+// 207 GB before manual cleanup).
+func TestConfiguredNamedSessionInFailedCreateCooldown_HoldsRecentFailure(t *testing.T) {
+	store := beads.NewMemStore()
+	now := time.Date(2026, 5, 5, 21, 0, 0, 0, time.UTC)
+	closedAt := now.Add(-30 * time.Second)
+
+	b, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               "test-city--boot",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "boot",
+			"close_reason":               "failed-create",
+			"state":                      "failed-create",
+			"closed_at":                  closedAt.Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Close(b.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if !configuredNamedSessionInFailedCreateCooldown(store, "boot", "test-city--boot", now) {
+		t.Fatal("expected cooldown hold for failed-create closed 30s ago, got release")
+	}
+}
+
+// TestConfiguredNamedSessionInFailedCreateCooldown_ReleasesAfterCooldown
+// verifies that once the cooldown window elapses, the helper returns false
+// so the reconciler can attempt another reopen — transient provider failures
+// (rate-limit clearance, supervisor restart, operator reconfig) must still
+// recover on their own without manual intervention.
+func TestConfiguredNamedSessionInFailedCreateCooldown_ReleasesAfterCooldown(t *testing.T) {
+	store := beads.NewMemStore()
+	now := time.Date(2026, 5, 5, 21, 0, 0, 0, time.UTC)
+	closedAt := now.Add(-2*failedCreateReopenCooldown - time.Second)
+
+	b, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               "test-city--boot",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "boot",
+			"close_reason":               "failed-create",
+			"state":                      "failed-create",
+			"closed_at":                  closedAt.Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Close(b.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if configuredNamedSessionInFailedCreateCooldown(store, "boot", "test-city--boot", now) {
+		t.Fatal("expected cooldown release after window elapsed, got hold")
+	}
+}
+
+// TestConfiguredNamedSessionInFailedCreateCooldown_IgnoresOtherCloseReasons
+// verifies that the cooldown applies ONLY to failed-create. Deliberate
+// retirements (close, orphaned, duplicate, reconfigured, etc.) are legitimate
+// terminal states the reconciler must be free to reopen immediately when a
+// live runtime reclaims the identity.
+func TestConfiguredNamedSessionInFailedCreateCooldown_IgnoresOtherCloseReasons(t *testing.T) {
+	store := beads.NewMemStore()
+	now := time.Date(2026, 5, 5, 21, 0, 0, 0, time.UTC)
+	closedAt := now.Add(-1 * time.Second)
+
+	for _, reason := range []string{"", "orphaned", "duplicate", "reconfigured", "drained"} {
+		t.Run("reason="+reason, func(t *testing.T) {
+			b, err := store.Create(beads.Bead{
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name":               "test-city--boot",
+					namedSessionMetadataKey:      "true",
+					namedSessionIdentityMetadata: "boot",
+					"close_reason":               reason,
+					"closed_at":                  closedAt.Format(time.RFC3339),
+				},
+			})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if err := store.Close(b.ID); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			if configuredNamedSessionInFailedCreateCooldown(store, "boot", "test-city--boot", now) {
+				t.Fatalf("unexpected cooldown hold for close_reason=%q", reason)
+			}
+		})
+	}
+}
+
+// TestConfiguredNamedSessionInFailedCreateCooldown_NoClosedBead verifies the
+// helper returns false when no closed bead exists for the identity at all —
+// the fresh-start case must NOT be held; the reconciler must be free to mint
+// the very first bead for a newly-configured named session.
+func TestConfiguredNamedSessionInFailedCreateCooldown_NoClosedBead(t *testing.T) {
+	store := beads.NewMemStore()
+	now := time.Date(2026, 5, 5, 21, 0, 0, 0, time.UTC)
+
+	if configuredNamedSessionInFailedCreateCooldown(store, "boot", "test-city--boot", now) {
+		t.Fatal("expected fresh-identity release, got hold")
+	}
+}

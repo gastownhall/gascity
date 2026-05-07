@@ -259,6 +259,68 @@ func preserveConfiguredNamedSessionBead(b beads.Bead, cfg *config.City, cityName
 	return true
 }
 
+// failedCreateReopenCooldown is the minimum interval the reconciler waits
+// before re-attempting to reopen a configured-named session bead that was
+// retired with close_reason="failed-create".
+//
+// Without this gate, a configured-named session whose startup consistently
+// fails (misconfigured provider, missing binary, stale prompt template,
+// wrong startup_timeout for a non-claude provider, etc.) produces a tight
+// reopen → rollbackPendingCreate → closeBead loop: every reconciler tick
+// finds no open bead for the identity, reopens the closed failed-create
+// bead (2 commits: Update to Status=open plus setMetaBatch writing
+// state=creating), the start attempt fails, rollbackPendingCreate closes
+// it again (2 more commits), and the next tick repeats. Four such zombies
+// produced ~28,000 Dolt commits and bloated the backup remote to 207 GB
+// in a single day on 2026-05-05 before the disk filled.
+//
+// 2 minutes is short enough that a legitimate transient failure
+// (rate-limit clearance, supervisor restart, operator reconfig) recovers
+// within a few minutes of downtime, and long enough that a persistent
+// misconfiguration emits ~30 commits/hour per affected identity instead of
+// ~300/hour — three orders of magnitude of damage containment while still
+// letting the reconciler retry without manual intervention.
+const failedCreateReopenCooldown = 2 * time.Minute
+
+// configuredNamedSessionInFailedCreateCooldown reports whether the most
+// recent closed bead for a configured-named session identity should be held
+// for a cooldown window before the reconciler reopens (or mints a fresh bead
+// for) that identity.
+//
+// Callers that observe !exists for a configured-named session MUST consult
+// this helper BEFORE invoking reopenClosedConfiguredNamedSessionBead or
+// falling through to create a fresh bead. Skipping both paths on hold is
+// the correct action: creating a new bead just moves the retry loop to a
+// new ID and keeps the storm burning.
+//
+// Returns true when the most recent closed bead for the identity was
+// closed with close_reason="failed-create" and its closed_at timestamp is
+// within failedCreateReopenCooldown of now. Returns false in every other
+// case — fresh identity, legitimate retirement, malformed/missing
+// closed_at, cooldown elapsed — so the reconciler's normal reopen/create
+// path runs unchanged.
+func configuredNamedSessionInFailedCreateCooldown(store beads.Store, identity, sessionName string, now time.Time) bool {
+	if store == nil || identity == "" {
+		return false
+	}
+	bead, ok, err := session.FindClosedNamedSessionBeadForSessionName(store, identity, sessionName)
+	if err != nil || !ok {
+		return false
+	}
+	if strings.TrimSpace(bead.Metadata["close_reason"]) != "failed-create" {
+		return false
+	}
+	closedAtRaw := strings.TrimSpace(bead.Metadata["closed_at"])
+	if closedAtRaw == "" {
+		return false
+	}
+	closedAt, err := time.Parse(time.RFC3339, closedAtRaw)
+	if err != nil {
+		return false
+	}
+	return now.Sub(closedAt) < failedCreateReopenCooldown
+}
+
 func reopenClosedConfiguredNamedSessionBead(
 	cityPath string,
 	store beads.Store,
@@ -908,6 +970,19 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		}
 		state := syncSessionCachedState(sn, b, exists, sp)
 		if !exists && isConfiguredNamed {
+			// Defend against tight reopen/rollback storms when the identity
+			// was just retired with close_reason="failed-create" (typically a
+			// persistent misconfig: wrong provider command, stale prompt
+			// template, too-short startup_timeout for a non-claude provider).
+			// Without this gate, reopen → rollbackPendingCreate → closeBead
+			// cycles every reconciler tick; four such zombies burned 207 GB
+			// of backup disk on 2026-05-05 before the loop was contained.
+			// Skipping this iteration entirely is correct: falling through to
+			// the create-new path below would just relocate the same retry
+			// loop onto a fresh bead ID and keep the storm burning.
+			if configuredNamedSessionInFailedCreateCooldown(store, tp.ConfiguredNamedIdentity, sn, now) {
+				continue
+			}
 			if reopened, ok := reopenClosedConfiguredNamedSessionBead(cityPath, store, cfg, cityName, tp.ConfiguredNamedIdentity, sn, state, now, nil, stderr); ok {
 				b = reopened
 				exists = true

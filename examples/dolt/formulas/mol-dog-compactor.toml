@@ -15,21 +15,27 @@ diff is just the txn.
 the most recent N as individual picks. NOT safe with concurrent writes — Dolt
 detects graph changes and returns an error. Retries once on collision.
 
-## ZFC Exemption
+## Executor
 
-This formula is used for **observability tracking only** — the compactor daemon
-code is the executor. The compactor is exempt from agent-driven formula
-execution (ZFC) because:
+The Compactor Dog (agent in the `dog` pool) executes this formula via
+`gc dolt sql -q "..."`. Agents have full Dolt SQL access; the prior
+"ZFC-exempt / daemon-only" framing was factually wrong and has been removed.
+A future compactor daemon may take over surgical mode (see follow-up bead),
+but flatten mode is dog-authoritative.
 
-1. Operations require SQL connections via database/sql (agents lack SQL access)
-2. Transactional state spans multiple queries (pre-flight counts, HEAD hashes)
-3. Branch creation/deletion requires cleanup-on-failure error paths
-4. Concurrent write retry needs error classification
-5. Integrity verification compares row counts before/after compaction
+**Care required during execution** (these are quality expectations, not
+capability gates):
 
-The daemon pours this molecule, executes the compaction, and closes/fails each
-step for observability. This IS the hybrid approach: formula defines observable
-structure, imperative code is the executor.
+1. Transactional state spans multiple queries (pre-flight counts, HEAD hashes)
+   — record before destructive operations, verify after.
+2. Branch creation/deletion (surgical mode only) needs cleanup-on-failure paths.
+3. Concurrent-write retry must classify errors — only retry on graph-change
+   errors, never on integrity failures.
+4. Integrity verification: compare row counts pre/post and abort on mismatch.
+
+Flatten mode (default) is concurrent-write safe and the standard path.
+Surgical mode is more fragile and should be enabled only after operator
+review of recent dog reliability.
 
 ## Dog Contract
 
