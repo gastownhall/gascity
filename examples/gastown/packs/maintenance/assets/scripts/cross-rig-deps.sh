@@ -30,7 +30,7 @@ fi
 
 # Step 2: For each closed issue, check for cross-rig dependents.
 RESOLVED=0
-echo "$CLOSED" | jq -r '.[].id' 2>/dev/null | while IFS= read -r closed_id; do
+while IFS= read -r closed_id; do
     # Find beads that have a blocks dep on this closed issue.
     DEPS=$(bd dep list "$closed_id" --direction=up --type=blocks --json 2>/dev/null) || continue
     if [ -z "$DEPS" ] || [ "$DEPS" = "[]" ]; then
@@ -38,13 +38,13 @@ echo "$CLOSED" | jq -r '.[].id' 2>/dev/null | while IFS= read -r closed_id; do
     fi
 
     # Filter for external (cross-rig) deps.
-    echo "$DEPS" | jq -r '.[] | select(.id | startswith("external:")) | .id' 2>/dev/null | while IFS= read -r dep_id; do
+    while IFS= read -r dep_id; do
         # Convert blocks → related: remove blocking semantics, keep audit trail.
         bd dep remove "$dep_id" "external:$closed_id" 2>/dev/null || true
         bd dep add "$dep_id" "external:$closed_id" --type=related 2>/dev/null || true
         RESOLVED=$((RESOLVED + 1))
-    done
-done
+    done < <(echo "$DEPS" | jq -r '.[] | select(.id | startswith("external:")) | .id' 2>/dev/null)
+done < <(echo "$CLOSED" | jq -r '.[].id' 2>/dev/null)
 
 if [ "$RESOLVED" -gt 0 ]; then
     echo "cross-rig-deps: resolved $RESOLVED cross-rig dependencies"

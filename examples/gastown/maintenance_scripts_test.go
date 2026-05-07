@@ -4972,6 +4972,24 @@ func TestWispCompactDeletesClosedPastTTL(t *testing.T) {
 	}
 }
 
+func TestWispCompactReportsSummaryForActions(t *testing.T) {
+	pastTTL := time.Now().Add(-48 * time.Hour).UTC().Format(wispTimestampLayout)
+	withinTTL := time.Now().Add(-1 * time.Hour).UTC().Format(wispTimestampLayout)
+	beads := fmt.Sprintf(`[
+  {"id":"ga-old","status":"closed","ephemeral":true,"updated_at":%q,"comment_count":0,"labels":[]},
+  {"id":"ga-fresh","status":"closed","ephemeral":true,"updated_at":%q,"comment_count":0,"labels":[]}
+]`, pastTTL, withinTTL)
+
+	_, env := wispCompactEnv(t, beads)
+	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+	if err != nil {
+		t.Fatalf("wisp-compact.sh failed: %v\n%s", err, out)
+	}
+	if got, want := strings.TrimSpace(string(out)), "wisp-compact: promoted=0 deleted=1 skipped=1"; got != want {
+		t.Fatalf("summary = %q, want %q", got, want)
+	}
+}
+
 func TestWispCompactPromotesNonClosedPastTTL(t *testing.T) {
 	pastTTL := time.Now().Add(-48 * time.Hour).UTC().Format(wispTimestampLayout)
 	beads := fmt.Sprintf(`[
@@ -5180,6 +5198,20 @@ func TestCrossRigDepsConvertsExternalBlocksToRelated(t *testing.T) {
 	}
 	if !strings.Contains(s, "dep add external:other-rig:rig-dep-1 external:ga-blocker --type=related") {
 		t.Fatalf("missing `bd dep add ... --type=related` for external dep; bd log:\n%s", s)
+	}
+}
+
+func TestCrossRigDepsReportsResolvedSummary(t *testing.T) {
+	closed := `[{"id":"ga-blocker"}]`
+	deps := `[{"id":"external:other-rig:rig-dep-1"}]`
+
+	_, env := crossRigDepsEnv(t, closed, deps)
+	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "cross-rig-deps.sh"), env)
+	if err != nil {
+		t.Fatalf("cross-rig-deps.sh failed: %v\n%s", err, out)
+	}
+	if got, want := strings.TrimSpace(string(out)), "cross-rig-deps: resolved 1 cross-rig dependencies"; got != want {
+		t.Fatalf("summary = %q, want %q", got, want)
 	}
 }
 

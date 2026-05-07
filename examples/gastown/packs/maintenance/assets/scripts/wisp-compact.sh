@@ -32,7 +32,7 @@ DELETED=0
 SKIPPED=0
 
 # Process each ephemeral bead.
-echo "$EPHEMERALS" | jq -c '.[]' 2>/dev/null | while IFS= read -r bead; do
+while IFS= read -r bead; do
     id=$(echo "$bead" | jq -r '.id')
     status=$(echo "$bead" | jq -r '.status')
     updated_at=$(echo "$bead" | jq -r '.updated_at // .created_at')
@@ -73,7 +73,7 @@ echo "$EPHEMERALS" | jq -c '.[]' 2>/dev/null | while IFS= read -r bead; do
     # Closed + past TTL + no special attributes → delete.
     bd delete "$id" --force 2>/dev/null || true
     DELETED=$((DELETED + 1))
-done
+done < <(echo "$EPHEMERALS" | jq -c '.[]' 2>/dev/null)
 
 TOTAL=$((PROMOTED + DELETED))
 if [ "$TOTAL" -gt 0 ]; then
