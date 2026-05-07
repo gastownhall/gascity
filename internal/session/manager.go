@@ -644,6 +644,7 @@ func (m *Manager) createAliasedBeadOnlyNamed(alias, explicitName, template, titl
 			meta["session_key"] = sessionKey
 		}
 		meta["pending_create_claim"] = "true"
+		meta["pending_create_started_at"] = pendingCreateStartedAt(time.Now().UTC())
 		if explicitName != "" {
 			meta["session_name"] = explicitName
 			meta["session_name_explicit"] = "true"
@@ -860,6 +861,7 @@ func (m *Manager) retireConfiguredNamedSessionIdentifiers(id string, b beads.Bea
 	update.Metadata["session_name"] = ""
 	update.Metadata["session_name_explicit"] = ""
 	update.Metadata["pending_create_claim"] = ""
+	update.Metadata["pending_create_started_at"] = ""
 	if err := m.store.Update(id, update); err != nil {
 		return fmt.Errorf("retiring configured named session identifiers: %w", err)
 	}
@@ -1137,33 +1139,45 @@ func (m *Manager) PruneDetailed(before time.Time) (PruneResult, error) {
 
 // Get returns info about a single session.
 func (m *Manager) Get(id string) (Info, error) {
-	b, _, err := m.loadSessionBead(id, true)
-	if err != nil {
-		return Info{}, err
-	}
-	return m.infoFromBead(b), nil
+	info, _, err := m.GetWithBead(id)
+	return info, err
 }
 
-// ObserveRuntime reports live provider state for the current session runtime.
-func (m *Manager) ObserveRuntime(id string, processNames []string) (RuntimeObservation, error) {
-	info, err := m.Get(id)
+// GetWithBead returns session info and the underlying bead in a single
+// store fetch, for callers that need both views (e.g. spec build plus
+// metadata lookup) without a redundant store.Get.
+func (m *Manager) GetWithBead(id string) (Info, beads.Bead, error) {
+	b, _, err := m.loadSessionBead(id, true)
 	if err != nil {
-		return RuntimeObservation{}, err
+		return Info{}, beads.Bead{}, err
 	}
+	return m.infoFromBead(b), b, nil
+}
+
+// SessionInfoFromBead converts an already-loaded session bead to Info,
+// applying the same enrichment as Get. Callers that have just resolved
+// the bead can use this to avoid a second store.Get.
+func (m *Manager) SessionInfoFromBead(b beads.Bead) Info {
+	return m.infoFromBead(b)
+}
+
+// ObserveRuntimeForInfo reports live provider state for a session whose Info
+// has already been loaded by the caller, avoiding a redundant store fetch.
+func (m *Manager) ObserveRuntimeForInfo(info Info, processNames []string) RuntimeObservation {
 	obs := RuntimeObservation{SessionName: info.SessionName}
 	if strings.TrimSpace(info.SessionName) == "" || m.sp == nil {
-		return obs, nil
+		return obs
 	}
 	obs.Running = m.sp.IsRunning(info.SessionName)
 	if !obs.Running {
-		return obs, nil
+		return obs
 	}
 	obs.Alive = m.sp.ProcessAlive(info.SessionName, processNames)
 	obs.Attached = m.sp.IsAttached(info.SessionName)
 	if lastActive, err := m.sp.GetLastActivity(info.SessionName); err == nil {
 		obs.LastActive = lastActive
 	}
-	return obs, nil
+	return obs
 }
 
 // ListResult holds the results of a ListFull call, including the raw beads

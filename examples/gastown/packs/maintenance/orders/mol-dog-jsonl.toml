@@ -1,5 +1,5 @@
 # Converted from formula+pool to exec. All JSONL export operations are
-# deterministic: dolt sql exports, wc -l spike comparisons, git push.
+# deterministic: dolt sql exports, jq record-count comparisons, git push.
 # No LLM judgment needed — runs inline in the controller.
 [order]
 description = "Export Dolt databases to JSONL git archive"

@@ -1023,3 +1023,68 @@ func TestProviderPathCheck_FallsBackToRawWhenNoCache(t *testing.T) {
 		t.Errorf("providerPathCheck = %q, want custom-cli", got)
 	}
 }
+
+// TestWaitForAgentVisibilityIn_ReturnsImmediatelyOnHit covers the happy
+// path: the freshly created agent is already visible in the snapshot
+// and the wait returns without sleeping.
+func TestWaitForAgentVisibilityIn_ReturnsImmediatelyOnHit(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "worker", Dir: "alpha"}},
+	}
+	calls := 0
+	snapshot := func() *config.City {
+		calls++
+		return cfg
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := WaitForAgentVisibilityIn(ctx, snapshot, "alpha/worker"); err != nil {
+		t.Fatalf("WaitForAgentVisibilityIn: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("snapshot calls = %d, want 1 (no polling on hit)", calls)
+	}
+}
+
+// TestWaitForAgentVisibilityIn_PollsUntilVisible covers the race recovery
+// path: a stale runtime tick clobbers the snapshot after CreateAgent, the
+// next runtime tick restores it, and the wait succeeds once the agent
+// reappears.
+func TestWaitForAgentVisibilityIn_PollsUntilVisible(t *testing.T) {
+	stale := &config.City{}
+	fresh := &config.City{
+		Agents: []config.Agent{{Name: "worker", Dir: "alpha"}},
+	}
+	calls := 0
+	snapshot := func() *config.City {
+		calls++
+		if calls < 3 {
+			return stale
+		}
+		return fresh
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := waitForAgentVisibilityIn(ctx, snapshot, "alpha/worker", time.Millisecond); err != nil {
+		t.Fatalf("waitForAgentVisibilityIn: %v", err)
+	}
+	if calls < 3 {
+		t.Errorf("snapshot calls = %d, want >= 3 (polled past stale snapshots)", calls)
+	}
+}
+
+// TestWaitForAgentVisibilityIn_RespectsContext covers the bounded-failure
+// case: the agent never appears and the wait surfaces ctx.Err() instead of
+// blocking indefinitely.
+func TestWaitForAgentVisibilityIn_RespectsContext(t *testing.T) {
+	snapshot := func() *config.City { return &config.City{} }
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err := waitForAgentVisibilityIn(ctx, snapshot, "alpha/worker", time.Millisecond)
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("error = %v, want wrapped DeadlineExceeded", err)
+	}
+}

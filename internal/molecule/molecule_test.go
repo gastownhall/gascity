@@ -21,9 +21,7 @@ import (
 // graph will be missing the dep — which is exactly what we saw in
 // production.
 func TestBuildRecipeApplyPlanBugReportFlowV2(t *testing.T) {
-	prev := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
+	formulatest.EnableV2ForTest(t)
 
 	const toolingPath = "/home/ubuntu/tooling/formulas"
 	if _, err := os.Stat(filepath.Join(toolingPath, "mol-bug-report-flow-v2.formula.toml")); err != nil {
@@ -85,9 +83,7 @@ func TestBuildRecipeApplyPlanBugReportFlowV2(t *testing.T) {
 // soon as its non-attempt blockers (body scope) close, trips the
 // "latest attempt ... is open, not closed" invariant, and crash-loops.
 func TestCookTeardownRetryBlocksOnAttempt(t *testing.T) {
-	prevFormulaV2 := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prevFormulaV2) })
+	formulatest.EnableV2ForTest(t)
 	prevGraphApply := IsGraphApplyEnabled()
 	SetGraphApplyEnabled(true)
 	t.Cleanup(func() { SetGraphApplyEnabled(prevGraphApply) })

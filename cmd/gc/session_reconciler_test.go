@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -34,11 +35,58 @@ func (f *fakeIdleTracker) checkIdle(sessionName string, _ runtime.Provider, _ ti
 
 func (f *fakeIdleTracker) setTimeout(_ string, _ time.Duration) {}
 
+type lineLimitedPeekProvider struct {
+	*runtime.Fake
+	peekLines []int
+}
+
+func (p *lineLimitedPeekProvider) Peek(name string, lines int) (string, error) {
+	p.peekLines = append(p.peekLines, lines)
+	output, err := p.Fake.Peek(name, lines)
+	if err != nil || lines <= 0 {
+		return output, err
+	}
+	parts := strings.Split(output, "\n")
+	if len(parts) <= lines {
+		return output, nil
+	}
+	return strings.Join(parts[len(parts)-lines:], "\n"), nil
+}
+
+type transientPeekErrorProvider struct {
+	*runtime.Fake
+	calls int
+}
+
+func (p *transientPeekErrorProvider) Peek(name string, lines int) (string, error) {
+	p.calls++
+	if p.calls == 1 {
+		return "", errors.New("peek failed")
+	}
+	return p.Fake.Peek(name, lines)
+}
+
 type delayedSessionExistsProvider struct {
 	*runtime.Fake
 	pendingConflict map[string]bool
 	hiddenRunning   map[string]bool
 	hiddenMeta      map[string]map[string]string
+}
+
+type failRateLimitHoldStore struct {
+	*beads.MemStore
+	failRateLimitHold  bool
+	rateLimitHoldCalls int
+}
+
+func (s *failRateLimitHoldStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if kvs["sleep_reason"] == "rate_limit" {
+		s.rateLimitHoldCalls++
+		if s.failRateLimitHold {
+			return errors.New("rate-limit hold batch failed")
+		}
+	}
+	return s.MemStore.SetMetadataBatch(id, kvs)
 }
 
 func newDelayedSessionExistsProvider() *delayedSessionExistsProvider {
@@ -1798,6 +1846,111 @@ func TestReconcileSessionBeads_OnDemandNamedSessionDoesNotWakeFromDesiredStatePr
 	}
 }
 
+func TestReconcileSessionBeads_OnDemandNamedSessionWakesFromRoutedIdentityDemand(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "mayor",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{Template: "mayor", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, "mayor")
+
+	woken, running := reconcileExistingAsleepNamedSessionWithRoutedWork(t, cfg, sessionName, "mayor", "mayor")
+	if woken != 1 {
+		t.Fatalf("woken = %d, want 1", woken)
+	}
+	if !running {
+		t.Fatalf("on-demand named session %q was not started from routed identity demand", sessionName)
+	}
+}
+
+func TestReconcileSessionBeads_OnDemandNamedSessionWakesFromRoutedSingletonTemplateDemand(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{Name: "primary", Template: "worker", Mode: "on_demand"}},
+	}
+
+	woken, running := reconcileExistingAsleepNamedSessionWithRoutedWork(t, cfg, "primary", "primary", "worker")
+	if woken != 1 {
+		t.Fatalf("woken = %d, want 1", woken)
+	}
+	if !running {
+		t.Fatal("on-demand named session primary was not started from routed singleton-template demand")
+	}
+}
+
+func reconcileExistingAsleepNamedSessionWithRoutedWork(t *testing.T, cfg *config.City, sessionName, identity, routedTo string) (int, bool) {
+	t.Helper()
+
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	if _, err := store.Create(beads.Bead{
+		Title:  "queued named work",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": routedTo,
+		},
+	}); err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:  sessionName,
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               sessionName,
+			"alias":                      identity,
+			"template":                   cfg.NamedSessions[0].Template,
+			"state":                      "asleep",
+			"generation":                 "1",
+			"instance_token":             "canonical-token",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: identity,
+			namedSessionModeMetadata:     "on_demand",
+		},
+	}); err != nil {
+		t.Fatalf("Create(session): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	dsResult := buildDesiredState(cfg.EffectiveCityName(), cityPath, clk.Now().UTC(), cfg, sp, store, &stderr)
+	if !dsResult.NamedSessionDemand[identity] {
+		t.Fatalf("NamedSessionDemand[%s] = false for routed_to=%s; stderr:\n%s", identity, routedTo, stderr.String())
+	}
+	cfgNames := configuredSessionNames(cfg, cfg.EffectiveCityName(), store)
+	syncSessionBeads(cityPath, store, dsResult.State, sp, cfgNames, cfg, clk, &stderr, true)
+	sessions, err := loadSessionBeads(store)
+	if err != nil {
+		t.Fatalf("loadSessionBeads: %v", err)
+	}
+	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, sessions, dsResult.ScaleCheckCounts))
+	if poolDesired == nil {
+		poolDesired = make(map[string]int)
+	}
+	mergeNamedSessionDemand(poolDesired, dsResult.NamedSessionDemand, cfg)
+
+	woken := reconcileSessionBeadsAtPathWithNamedDemand(
+		context.Background(), cityPath, sessions, dsResult.State, cfgNames, cfg, sp,
+		store, nil, dsResult.AssignedWorkBeads, nil, nil, newDrainTracker(), poolDesired,
+		dsResult.NamedSessionDemand, dsResult.StoreQueryPartial, nil, cfg.EffectiveCityName(),
+		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
+	)
+	return woken, sp.IsRunning(sessionName)
+}
+
 func TestReconcileSessionBeads_SyncsGCDirWithWorkDirOverride(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
@@ -1850,6 +2003,322 @@ func TestReconcileSessionBeads_SkipsAliveSession(t *testing.T) {
 
 	if woken != 0 {
 		t.Errorf("expected 0 woken, got %d", woken)
+	}
+}
+
+func TestReconcileSessionBeads_RateLimitScreenQuarantinesBeforeHeal(t *testing.T) {
+	env := newReconcilerTestEnv()
+	rec := events.NewFake()
+	env.rec = rec
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.desiredState["worker"] = TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  "worker",
+		TemplateName: "worker",
+		Hints:        agent.StartupHints{ProcessNames: []string{"agent-cli"}},
+	}
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd", ProcessNames: []string{"agent-cli"}}); err != nil {
+		t.Fatalf("Start(worker): %v", err)
+	}
+	env.sp.Zombies["worker"] = true
+	env.sp.SetPeekOutput("worker", "You've hit your limit, Pro plan\n\n/rate-limit-options")
+	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"state":               "active",
+		"last_woke_at":        env.clk.Now().Add(-10 * time.Second).UTC().Format(time.RFC3339),
+		"session_key":         "keep-session",
+		"started_config_hash": "keep-hash",
+		"wake_attempts":       "2",
+	})
+
+	woken := env.reconcile([]beads.Bead{session})
+
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["wake_attempts"] != "2" {
+		t.Fatalf("wake_attempts = %q, want 2", got.Metadata["wake_attempts"])
+	}
+	if got.Metadata["sleep_reason"] != "rate_limit" {
+		t.Fatalf("sleep_reason = %q, want rate_limit", got.Metadata["sleep_reason"])
+	}
+	if got.Metadata["state"] != "asleep" {
+		t.Fatalf("state = %q, want asleep", got.Metadata["state"])
+	}
+	qUntil, err := time.Parse(time.RFC3339, got.Metadata["quarantined_until"])
+	if err != nil {
+		t.Fatalf("quarantined_until parse: %v", err)
+	}
+	if want := env.clk.Now().Add(defaultRateLimitQuarantineDuration); !qUntil.Equal(want) {
+		t.Fatalf("quarantined_until = %s, want %s", qUntil.Format(time.RFC3339), want.Format(time.RFC3339))
+	}
+	if got.Metadata["session_key"] != "keep-session" {
+		t.Fatalf("session_key = %q, want preserved", got.Metadata["session_key"])
+	}
+	if got.Metadata["started_config_hash"] != "keep-hash" {
+		t.Fatalf("started_config_hash = %q, want preserved", got.Metadata["started_config_hash"])
+	}
+	if got.Metadata["continuation_reset_pending"] != "" {
+		t.Fatalf("continuation_reset_pending = %q, want empty", got.Metadata["continuation_reset_pending"])
+	}
+	if got.Metadata["last_woke_at"] != "" {
+		t.Fatalf("last_woke_at = %q, want cleared", got.Metadata["last_woke_at"])
+	}
+	for _, e := range rec.Events {
+		if e.Type == events.SessionCrashed {
+			t.Fatalf("recorded %s for rate-limit screen; want crash telemetry suppressed", e.Type)
+		}
+	}
+}
+
+func TestReconcileSessionBeads_RateLimitScreenBeyondCrashCaptureSuppressesTelemetry(t *testing.T) {
+	env := newReconcilerTestEnv()
+	sp := &lineLimitedPeekProvider{Fake: runtime.NewFake()}
+	rec := events.NewFake()
+	env.rec = rec
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.desiredState["worker"] = TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  "worker",
+		TemplateName: "worker",
+		Hints:        agent.StartupHints{ProcessNames: []string{"agent-cli"}},
+	}
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd", ProcessNames: []string{"agent-cli"}}); err != nil {
+		t.Fatalf("Start(worker): %v", err)
+	}
+	sp.Zombies["worker"] = true
+	var paneLines []string
+	paneLines = append(paneLines, "You've hit your limit, Pro plan", "", "/rate-limit-options")
+	for i := 0; i < 60; i++ {
+		paneLines = append(paneLines, fmt.Sprintf("trailing line %02d", i))
+	}
+	sp.SetPeekOutput("worker", strings.Join(paneLines, "\n"))
+	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"state":               "active",
+		"last_woke_at":        env.clk.Now().Add(-10 * time.Second).UTC().Format(time.RFC3339),
+		"session_key":         "keep-session",
+		"started_config_hash": "keep-hash",
+		"wake_attempts":       "2",
+	})
+
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+	woken := reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames,
+		env.cfg, sp, env.store, nil, nil, nil, env.dt, map[string]int{"worker": 1}, false, nil, "",
+		nil, env.clk, rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+	if len(sp.peekLines) != 1 || sp.peekLines[0] != rateLimitPeekLines {
+		t.Fatalf("peek lines = %v, want single %d-line read", sp.peekLines, rateLimitPeekLines)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["sleep_reason"] != "rate_limit" {
+		t.Fatalf("sleep_reason = %q, want rate_limit", got.Metadata["sleep_reason"])
+	}
+	if got.Metadata["wake_attempts"] != "2" {
+		t.Fatalf("wake_attempts = %q, want 2", got.Metadata["wake_attempts"])
+	}
+	for _, e := range rec.Events {
+		if e.Type == events.SessionCrashed {
+			t.Fatalf("recorded %s for rate-limit marker outside old 50-line capture", e.Type)
+		}
+	}
+}
+
+func TestCachedSessionPeekRetriesAfterError(t *testing.T) {
+	sp := &transientPeekErrorProvider{Fake: runtime.NewFake()}
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start(worker): %v", err)
+	}
+	sp.SetPeekOutput("worker", "You've hit your limit, Pro plan\n\n/rate-limit-options")
+	peek := cachedSessionPeek("", nil, sp, &config.City{}, "worker", nil)
+
+	if output, err := peek(rateLimitPeekLines); err == nil {
+		t.Fatalf("first peek err = nil, output = %q; want transient error", output)
+	}
+	output, err := peek(rateLimitPeekLines)
+	if err != nil {
+		t.Fatalf("second peek should retry after transient error: %v", err)
+	}
+	if !runtime.ContainsProviderRateLimitScreen(output) {
+		t.Fatalf("second peek output = %q, want provider rate-limit screen", output)
+	}
+	if sp.calls != 2 {
+		t.Fatalf("peek calls = %d, want 2", sp.calls)
+	}
+}
+
+func TestRateLimitAliveFromObservationDoesNotTreatObservationErrorAsAlive(t *testing.T) {
+	if rateLimitAliveFromObservation(true, errors.New("observe failed")) {
+		t.Fatal("observation errors must not reuse runtime-running state as process-alive")
+	}
+	if !rateLimitAliveFromObservation(true, nil) {
+		t.Fatal("successful live observation should report alive")
+	}
+	if rateLimitAliveFromObservation(false, nil) {
+		t.Fatal("successful dead observation should report dead")
+	}
+}
+
+func TestReconcileSessionBeads_RateLimitScreenReholdsAfterQuarantineExpiry(t *testing.T) {
+	env := newReconcilerTestEnv()
+	rec := events.NewFake()
+	env.rec = rec
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Providers:     map[string]config.ProviderSpec{"test-provider": {Command: "test-cmd", ProcessNames: []string{"agent-cli"}}},
+		Agents:        []config.Agent{{Name: "worker", Provider: "test-provider", StartCommand: "test-cmd"}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:                 "test-cmd",
+		SessionName:             sessionName,
+		TemplateName:            "worker",
+		ConfiguredNamedIdentity: "worker",
+		ConfiguredNamedMode:     "always",
+		Hints:                   agent.StartupHints{ProcessNames: []string{"agent-cli"}},
+	}
+	env.sp.SetPeekOutput(sessionName, "You've hit your limit, Pro plan\n\n/rate-limit-options")
+	session := env.createSessionBead(sessionName, "worker")
+	startedHash := runtime.CoreFingerprint(runtime.Config{Command: "test-cmd", ProcessNames: []string{"agent-cli"}})
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "always",
+		"state":                      "active",
+		"last_woke_at":               env.clk.Now().Add(-10 * time.Second).UTC().Format(time.RFC3339),
+		"session_key":                "keep-session",
+		"started_config_hash":        startedHash,
+		"wake_attempts":              "2",
+	})
+
+	env.reconcile([]beads.Bead{session})
+	held, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get held session: %v", err)
+	}
+	if held.Metadata["sleep_reason"] != "rate_limit" {
+		t.Fatalf("initial sleep_reason = %q, want rate_limit", held.Metadata["sleep_reason"])
+	}
+	qUntil, err := time.Parse(time.RFC3339, held.Metadata["quarantined_until"])
+	if err != nil {
+		t.Fatalf("quarantined_until parse: %v", err)
+	}
+
+	env.clk.Time = qUntil.Add(time.Second)
+	woken := env.reconcile([]beads.Bead{held})
+	if woken != 1 {
+		t.Fatalf("woken after quarantine expiry = %d, want 1", woken)
+	}
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatal("worker should be restarted after rate-limit quarantine expiry")
+	}
+	afterWake, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get after wake: %v", err)
+	}
+	if got := afterWake.Metadata["session_key"]; got != "keep-session" {
+		t.Fatalf("session_key after wake = %q, want preserved", got)
+	}
+	afterWakeHash := afterWake.Metadata["started_config_hash"]
+	if afterWakeHash == "" {
+		t.Fatal("started_config_hash should be set after wake")
+	}
+
+	if err := env.sp.Stop(sessionName); err != nil {
+		t.Fatalf("Stop(%s) after wake: %v", sessionName, err)
+	}
+	env.reconcile([]beads.Bead{afterWake})
+	reheld, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get reheld session: %v", err)
+	}
+	if got := reheld.Metadata["sleep_reason"]; got != "rate_limit" {
+		t.Fatalf("sleep_reason after re-detection = %q, want rate_limit", got)
+	}
+	if got := reheld.Metadata["session_key"]; got != "keep-session" {
+		t.Fatalf("session_key after re-detection = %q, want preserved", got)
+	}
+	if got := reheld.Metadata["started_config_hash"]; got != afterWakeHash {
+		t.Fatalf("started_config_hash after re-detection = %q, want %q", got, afterWakeHash)
+	}
+	if got := reheld.Metadata["continuation_reset_pending"]; got != "" {
+		t.Fatalf("continuation_reset_pending after re-detection = %q, want empty", got)
+	}
+	for _, e := range rec.Events {
+		if e.Type == events.SessionCrashed {
+			t.Fatalf("recorded %s during rate-limit expiry/re-hold cycle", e.Type)
+		}
+	}
+}
+
+func TestReconcileSessionBeads_GenericRateLimitCrashRecordsTelemetry(t *testing.T) {
+	env := newReconcilerTestEnv()
+	rec := events.NewFake()
+	env.rec = rec
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.desiredState["worker"] = TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  "worker",
+		TemplateName: "worker",
+		Hints:        agent.StartupHints{ProcessNames: []string{"agent-cli"}},
+	}
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd", ProcessNames: []string{"agent-cli"}}); err != nil {
+		t.Fatalf("Start(worker): %v", err)
+	}
+	env.sp.Zombies["worker"] = true
+	env.sp.SetPeekOutput("worker", "worker failed while parsing rate limit config")
+	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"state":               "active",
+		"last_woke_at":        env.clk.Now().Add(-10 * time.Second).UTC().Format(time.RFC3339),
+		"session_key":         "reset-session",
+		"started_config_hash": "reset-hash",
+		"wake_attempts":       "2",
+	})
+
+	woken := env.reconcile([]beads.Bead{session})
+
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["sleep_reason"] == "rate_limit" {
+		t.Fatalf("sleep_reason = %q, want normal crash path", got.Metadata["sleep_reason"])
+	}
+	if got.Metadata["wake_attempts"] != "3" {
+		t.Fatalf("wake_attempts = %q, want 3", got.Metadata["wake_attempts"])
+	}
+	if got.Metadata["session_key"] != "" {
+		t.Fatalf("session_key = %q, want cleared after normal crash", got.Metadata["session_key"])
+	}
+	if got.Metadata["started_config_hash"] != "" {
+		t.Fatalf("started_config_hash = %q, want cleared after normal crash", got.Metadata["started_config_hash"])
+	}
+	crashRecorded := false
+	for _, e := range rec.Events {
+		if e.Type == events.SessionCrashed && e.Message == "worker failed while parsing rate limit config" {
+			crashRecorded = true
+			break
+		}
+	}
+	if !crashRecorded {
+		t.Fatal("expected SessionCrashed event for generic crash output that mentions rate limit")
 	}
 }
 
@@ -2012,6 +2481,7 @@ func TestReconcileSessionBeads_PendingCreateLeasePreventsOrphanClose(t *testing.
 		"manual_session":       "true",
 		"pending_create_claim": "true",
 	})
+	session.CreatedAt = env.clk.Now().Add(-30 * time.Second)
 
 	woken := env.reconcile([]beads.Bead{session})
 	if woken != 0 {
@@ -2050,6 +2520,82 @@ func TestReconcileSessionBeads_FreshPendingCreateSurvivesStaleConfigSnapshot(t *
 	}
 	if got.Metadata["state"] == "orphaned" || got.Metadata["close_reason"] == "orphaned" {
 		t.Fatalf("fresh pending-create session was marked orphaned: %+v", got.Metadata)
+	}
+}
+
+func TestReconcileSessionBeads_PendingCreateWithoutDesiredStateUsesNeverStartedLease(t *testing.T) {
+	env := newReconcilerTestEnv()
+	session := env.createSessionBead("s-gc-late", "worker")
+	startedAt := env.clk.Now().Add(-(pendingCreateNeverStartedTimeout - time.Minute))
+	env.setSessionMetadata(&session, map[string]string{
+		"state":                     "creating",
+		"pending_create_claim":      "true",
+		"pending_create_started_at": pendingCreateStartedAtNow(startedAt),
+		// last_woke_at deliberately empty: preWakeCommit never fired before
+		// this pending create left desired state.
+	})
+	session.CreatedAt = env.clk.Now().Add(-24 * time.Hour)
+
+	woken := env.reconcile([]beads.Bead{session})
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0 without desired-state membership", woken)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get session: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("pending-create session was closed before never-started lease expired: %+v", got)
+	}
+	if got.Metadata["state"] == "orphaned" || got.Metadata["close_reason"] == "orphaned" {
+		t.Fatalf("pending-create session was marked orphaned before never-started lease expired: %+v", got.Metadata)
+	}
+}
+
+func TestReconcileSessionBeads_ConfiguredPendingCreateWithoutDemandUsesNeverStartedLease(t *testing.T) {
+	tests := []struct {
+		name       string
+		startedAt  time.Time
+		wantClosed bool
+	}{
+		{
+			name:       "before lease expires",
+			startedAt:  time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC).Add(-(pendingCreateNeverStartedTimeout - time.Minute)),
+			wantClosed: false,
+		},
+		{
+			name:       "after lease expires",
+			startedAt:  time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC).Add(-(pendingCreateNeverStartedTimeout + time.Second)),
+			wantClosed: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := newReconcilerTestEnv()
+			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+			session := env.createSessionBead("s-gc-late", "worker")
+			env.setSessionMetadata(&session, map[string]string{
+				"state":                     "creating",
+				"pending_create_claim":      "true",
+				"pending_create_started_at": pendingCreateStartedAtNow(tt.startedAt),
+				// last_woke_at deliberately empty: preWakeCommit never fired before
+				// this configured template lost pool demand.
+			})
+			session.CreatedAt = env.clk.Now().Add(-24 * time.Hour)
+
+			woken := env.reconcile([]beads.Bead{session})
+			if woken != 0 {
+				t.Fatalf("woken = %d, want 0 without desired-state membership", woken)
+			}
+			got, err := env.store.Get(session.ID)
+			if err != nil {
+				t.Fatalf("Get session: %v", err)
+			}
+			if got.Status == "closed" != tt.wantClosed {
+				t.Fatalf("status = %q, want closed=%v; metadata=%v", got.Status, tt.wantClosed, got.Metadata)
+			}
+		})
 	}
 }
 
@@ -2193,6 +2739,210 @@ func TestReconcileSessionBeads_OrphanDrainLogThrottled(t *testing.T) {
 	}
 }
 
+func TestReconcileSessionBeads_DrainAckedOrphanCanceledForAssignedWork(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{}
+	if err := env.sp.Start(context.Background(), "orphan", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := env.sp.SetMeta("orphan", "GC_DRAIN_ACK", "1"); err != nil {
+		t.Fatalf("SetMeta(GC_DRAIN_ACK): %v", err)
+	}
+	session := env.createSessionBead("orphan", "worker")
+	env.markSessionActive(&session)
+	work, err := env.store.Create(beads.Bead{
+		Title:    "assigned work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: session.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("orphan"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+	env.dt.set(session.ID, &drainState{
+		startedAt:  env.clk.Now().Add(-defaultDrainTimeout),
+		deadline:   env.clk.Now().Add(-time.Second),
+		reason:     "orphaned",
+		generation: 1,
+		ackSet:     true,
+	})
+
+	reconcileSessionBeadsAtPath(
+		context.Background(),
+		"",
+		[]beads.Bead{session},
+		nil,
+		nil,
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		[]beads.Bead{work},
+		nil,
+		nil,
+		env.dt,
+		map[string]int{},
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+
+	if !env.sp.IsRunning("orphan") {
+		t.Fatal("assigned-work orphan drain should be canceled before stopping the running session")
+	}
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("drain = %+v, want canceled", ds)
+	}
+	if ack, _ := env.sp.GetMeta("orphan", "GC_DRAIN_ACK"); ack != "" {
+		t.Fatalf("GC_DRAIN_ACK = %q, want cleared", ack)
+	}
+}
+
+func TestReconcileSessionBeads_RecoveredDrainAckedOrphanCanceledForAssignedWork(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{}
+	if err := env.sp.Start(context.Background(), "orphan", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	session := env.createSessionBead("orphan", "worker")
+	env.markSessionActive(&session)
+	work, err := env.store.Create(beads.Bead{
+		Title:    "assigned work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: session.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := setReconcilerDrainAckMetadata(env.sp, "orphan", &drainState{
+		reason:     "orphaned",
+		generation: 1,
+		ackSet:     true,
+	}); err != nil {
+		t.Fatalf("setReconcilerDrainAckMetadata: %v", err)
+	}
+
+	reconcileSessionBeadsAtPath(
+		context.Background(),
+		"",
+		[]beads.Bead{session},
+		nil,
+		nil,
+		env.cfg,
+		env.sp,
+		env.store,
+		newDrainOps(env.sp),
+		[]beads.Bead{work},
+		nil,
+		nil,
+		env.dt,
+		map[string]int{},
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+
+	if !env.sp.IsRunning("orphan") {
+		t.Fatal("recovered assigned-work orphan drain should be canceled before stopping the running session")
+	}
+	if ack, _ := env.sp.GetMeta("orphan", "GC_DRAIN_ACK"); ack != "" {
+		t.Fatalf("GC_DRAIN_ACK = %q, want cleared", ack)
+	}
+	if source, _ := env.sp.GetMeta("orphan", reconcilerDrainAckSourceKey); source != "" {
+		t.Fatalf("%s = %q, want cleared", reconcilerDrainAckSourceKey, source)
+	}
+}
+
+func TestReconcileSessionBeads_DeadDrainAckedOrphanWithAssignedWorkCompletesDrain(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{}
+	session := env.createSessionBead("orphan", "worker")
+	env.markSessionActive(&session)
+	work, err := env.store.Create(beads.Bead{
+		Title:    "assigned work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: session.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("orphan"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+	env.dt.set(session.ID, &drainState{
+		startedAt:  env.clk.Now().Add(-defaultDrainTimeout),
+		deadline:   env.clk.Now().Add(-time.Second),
+		reason:     "orphaned",
+		generation: 1,
+		ackSet:     true,
+	})
+
+	reconcileSessionBeadsAtPath(
+		context.Background(),
+		"",
+		[]beads.Bead{session},
+		nil,
+		nil,
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		[]beads.Bead{work},
+		nil,
+		nil,
+		env.dt,
+		map[string]int{},
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+
+	if env.sp.IsRunning("orphan") {
+		t.Fatal("dead provider should not be treated as recovered")
+	}
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("drain = %+v, want completed", ds)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["state"] != "asleep" {
+		t.Fatalf("state = %q, want asleep", got.Metadata["state"])
+	}
+	if got.Metadata["sleep_reason"] != "idle" {
+		t.Fatalf("sleep_reason = %q, want idle", got.Metadata["sleep_reason"])
+	}
+}
+
 func TestReconcileSessionBeads_OrphanNotRunningClosed(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "other"}}}
@@ -2275,6 +3025,55 @@ func TestReconcileSessionBeads_PreservesConfiguredNamedSessionOutsideDesiredStat
 	}
 	if ds := env.dt.get(session.ID); ds != nil {
 		t.Fatalf("unexpected drain for configured named session: %+v", ds)
+	}
+}
+
+func TestReconcileSessionBeads_PreservedConfiguredNamedRateLimitRunsBeforeHeal(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	session := env.createSessionBead(sessionName, "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "on_demand",
+		"state":                      "active",
+		"last_woke_at":               env.clk.Now().Add(-10 * time.Second).UTC().Format(time.RFC3339),
+		"session_key":                "keep-session",
+		"started_config_hash":        "keep-hash",
+	})
+	env.sp.SetPeekOutput(sessionName, "You've hit your limit, Pro plan\n\n/rate-limit-options")
+
+	woken := env.reconcile([]beads.Bead{session})
+
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["sleep_reason"] != "rate_limit" {
+		t.Fatalf("sleep_reason = %q, want rate_limit", got.Metadata["sleep_reason"])
+	}
+	if got.Metadata["state"] != "asleep" {
+		t.Fatalf("state = %q, want asleep", got.Metadata["state"])
+	}
+	if got.Metadata["session_key"] != "keep-session" {
+		t.Fatalf("session_key = %q, want preserved", got.Metadata["session_key"])
+	}
+	if got.Metadata["started_config_hash"] != "keep-hash" {
+		t.Fatalf("started_config_hash = %q, want preserved", got.Metadata["started_config_hash"])
+	}
+	if got.Metadata["continuation_reset_pending"] != "" {
+		t.Fatalf("continuation_reset_pending = %q, want empty", got.Metadata["continuation_reset_pending"])
+	}
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("unexpected drain for rate-limited configured named session: %+v", ds)
 	}
 }
 
@@ -2877,13 +3676,68 @@ func TestReconcileSessionBeads_ConvergesPendingCreateWhenRuntimeMatchesBead(t *t
 	}
 }
 
+func TestReconcileSessionBeads_PreservesNeverStartedPendingCreateBeforeLeaseExpires(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)}
+	cfg := &config.City{Agents: []config.Agent{{Name: "helper"}}}
+	desired := map[string]TemplateParams{
+		"helper": {
+			Command:      "test-cmd",
+			SessionName:  "helper",
+			TemplateName: "helper",
+		},
+	}
+
+	bead, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:helper"},
+		Metadata: map[string]string{
+			"session_name":              "helper",
+			"session_name_explicit":     "true",
+			"pending_create_claim":      "true",
+			"pending_create_started_at": pendingCreateStartedAtNow(clk.Now().Add(-(pendingCreateNeverStartedTimeout - time.Minute))),
+			"template":                  "helper",
+			"state":                     "creating",
+			"generation":                "1",
+			"continuation_epoch":        "1",
+			"instance_token":            "test-token",
+			// last_woke_at deliberately empty — preWakeCommit never fired.
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(bead): %v", err)
+	}
+	bead.CreatedAt = clk.Now().Add(-24 * time.Hour)
+
+	var stdout, stderr bytes.Buffer
+	cfgNames := configuredSessionNames(cfg, "", store)
+	_ = reconcileSessionBeads(
+		context.Background(), []beads.Bead{bead}, desired, cfgNames,
+		cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{"helper": 1}, false, nil, "",
+		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
+	)
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(bead): %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("status = closed, want never-started pending create preserved until never-started lease expires; metadata=%v", got.Metadata)
+	}
+	if got.Metadata["close_reason"] != "" {
+		t.Fatalf("close_reason = %q, want empty", got.Metadata["close_reason"])
+	}
+}
+
 func TestReconcileSessionBeads_RollsBackPendingCreateWhenLeaseExpiredAndNoRuntime(t *testing.T) {
 	// Regression test: a session bead in the desired set with
 	// pending_create_claim=true but no live runtime AND no active lease
-	// (last_woke_at empty AND CreatedAt past staleCreatingState window) is
-	// stuck. Without this rollback, the bead lives forever holding its alias,
-	// blocking new spawn attempts ("alias already belongs to gm-XXXX") for
-	// any session whose template still has demand.
+	// (last_woke_at empty AND CreatedAt past the never-started pending-create
+	// window) is stuck. Without this rollback, the bead lives forever holding
+	// its alias, blocking new spawn attempts ("alias already belongs to
+	// gm-XXXX") for any session whose template still has demand.
 	store := beads.NewMemStore()
 	sp := runtime.NewFake() // no runtime started
 	clk := &clock.Fake{Time: time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)}
@@ -2901,24 +3755,24 @@ func TestReconcileSessionBeads_RollsBackPendingCreateWhenLeaseExpiredAndNoRuntim
 		Type:   sessionBeadType,
 		Labels: []string{sessionBeadLabel, "template:helper"},
 		Metadata: map[string]string{
-			"session_name":          "helper",
-			"session_name_explicit": "true",
-			"pending_create_claim":  "true",
-			"template":              "helper",
-			"state":                 "creating",
-			"generation":            "1",
-			"continuation_epoch":    "1",
-			"instance_token":        "test-token",
+			"session_name":              "helper",
+			"session_name_explicit":     "true",
+			"pending_create_claim":      "true",
+			"pending_create_started_at": pendingCreateStartedAtNow(clk.Now().Add(-(pendingCreateNeverStartedTimeout + time.Second))),
+			"template":                  "helper",
+			"state":                     "creating",
+			"generation":                "1",
+			"continuation_epoch":        "1",
+			"instance_token":            "test-token",
 			// last_woke_at deliberately empty — preWakeCommit never fired.
 		},
 	})
 	if err != nil {
 		t.Fatalf("Create(bead): %v", err)
 	}
-	// Force CreatedAt past the staleCreatingState window so the lease check
-	// flips from "fresh" to "expired". The reconciler reads CreatedAt from
-	// the passed bead slice, so modifying the local copy is sufficient.
-	bead.CreatedAt = clk.Now().Add(-5 * time.Minute)
+	// Keep CreatedAt fresh to prove production pending_create_started_at anchors
+	// the never-started pending-create lease for desired sessions.
+	bead.CreatedAt = clk.Now().Add(-time.Minute)
 
 	var stdout, stderr bytes.Buffer
 	cfgNames := configuredSessionNames(cfg, "", store)
@@ -2937,6 +3791,140 @@ func TestReconcileSessionBeads_RollsBackPendingCreateWhenLeaseExpiredAndNoRuntim
 	}
 	if got.Metadata["close_reason"] != "failed-create" {
 		t.Fatalf("close_reason = %q, want failed-create", got.Metadata["close_reason"])
+	}
+}
+
+func TestReconcileSessionBeads_DoesNotRollbackStoppedPendingCreateAsExpiredLease(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)}
+	cfg := &config.City{Agents: []config.Agent{{Name: "helper"}}}
+	desired := map[string]TemplateParams{
+		"helper": {
+			Command:      "test-cmd",
+			SessionName:  "helper",
+			TemplateName: "helper",
+		},
+	}
+
+	bead, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:helper"},
+		Metadata: map[string]string{
+			"session_name":         "helper",
+			"pending_create_claim": "true",
+			"template":             "helper",
+			"state":                "stopped",
+			"generation":           "1",
+			"continuation_epoch":   "1",
+			"instance_token":       "test-token",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(bead): %v", err)
+	}
+	bead.CreatedAt = clk.Now().Add(-24 * time.Hour)
+
+	var stdout, stderr bytes.Buffer
+	cfgNames := configuredSessionNames(cfg, "", store)
+	_ = reconcileSessionBeads(
+		context.Background(), []beads.Bead{bead}, desired, cfgNames,
+		cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{"helper": 1}, false, nil, "",
+		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
+	)
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(bead): %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("status = closed, want stopped pending-create bead preserved for start retry; metadata=%v", got.Metadata)
+	}
+	if got.Metadata["close_reason"] != "" {
+		t.Fatalf("close_reason = %q, want empty", got.Metadata["close_reason"])
+	}
+}
+
+func TestReconcileSessionBeads_RateLimitPendingCreateBatchFailureRetriesBeforeRollback(t *testing.T) {
+	env := newReconcilerTestEnv()
+	store := &failRateLimitHoldStore{
+		MemStore:          beads.NewMemStore(),
+		failRateLimitHold: true,
+	}
+	env.store = store
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.desiredState["worker"] = TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  "worker",
+		TemplateName: "worker",
+		Hints:        agent.StartupHints{ProcessNames: []string{"agent-cli"}},
+	}
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd", ProcessNames: []string{"agent-cli"}}); err != nil {
+		t.Fatalf("Start(worker): %v", err)
+	}
+	env.sp.Zombies["worker"] = true
+	env.sp.SetPeekOutput("worker", "You've hit your limit, Pro plan\n\n/rate-limit-options")
+	lastWoke := env.clk.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339)
+	session := env.createSessionBead("worker", "worker")
+	session.CreatedAt = env.clk.Now().Add(-5 * time.Minute)
+	env.setSessionMetadata(&session, map[string]string{
+		"state":                 "creating",
+		"pending_create_claim":  "true",
+		"last_woke_at":          lastWoke,
+		"session_key":           "keep-session",
+		"started_config_hash":   "keep-hash",
+		"wake_attempts":         "2",
+		"continuation_epoch":    "1",
+		"session_name_explicit": "true",
+	})
+
+	if woken := env.reconcile([]beads.Bead{session}); woken != 0 {
+		t.Fatalf("woken after failed hold write = %d, want 0", woken)
+	}
+	if store.rateLimitHoldCalls != 1 {
+		t.Fatalf("rate-limit hold attempts = %d, want 1", store.rateLimitHoldCalls)
+	}
+	got, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get after failed hold write: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("status = closed with close_reason=%q, want retryable pending-create hold", got.Metadata["close_reason"])
+	}
+	if got.Metadata["pending_create_claim"] != "true" {
+		t.Fatalf("pending_create_claim = %q, want preserved after failed hold write", got.Metadata["pending_create_claim"])
+	}
+	if got.Metadata["last_woke_at"] != lastWoke {
+		t.Fatalf("last_woke_at = %q, want preserved after failed hold write", got.Metadata["last_woke_at"])
+	}
+	if got.Metadata["state"] != "creating" {
+		t.Fatalf("state = %q, want unchanged creating after failed hold write", got.Metadata["state"])
+	}
+
+	store.failRateLimitHold = false
+	got.CreatedAt = session.CreatedAt
+	if woken := env.reconcile([]beads.Bead{got}); woken != 0 {
+		t.Fatalf("woken after retry = %d, want 0", woken)
+	}
+	retried, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get after retry: %v", err)
+	}
+	if retried.Status == "closed" {
+		t.Fatalf("status = closed after successful retry, want rate-limit hold")
+	}
+	if retried.Metadata["sleep_reason"] != "rate_limit" {
+		t.Fatalf("sleep_reason = %q, want rate_limit after retry", retried.Metadata["sleep_reason"])
+	}
+	if retried.Metadata["state"] != "asleep" {
+		t.Fatalf("state = %q, want asleep after retry", retried.Metadata["state"])
+	}
+	if retried.Metadata["pending_create_claim"] != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared after durable hold", retried.Metadata["pending_create_claim"])
+	}
+	if retried.Metadata["last_woke_at"] != "" {
+		t.Fatalf("last_woke_at = %q, want cleared after durable hold", retried.Metadata["last_woke_at"])
 	}
 }
 
@@ -2994,6 +3982,96 @@ func TestReconcileSessionBeads_PreservesPendingCreateWhenLeaseRecentNoRuntime(t 
 	}
 	if strings.TrimSpace(got.Metadata["pending_create_claim"]) != "true" {
 		t.Fatalf("pending_create_claim = %q, want still 'true'", got.Metadata["pending_create_claim"])
+	}
+}
+
+func TestPendingCreateNeverStartedExpiredEdges(t *testing.T) {
+	clk := &clock.Fake{Time: time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)}
+	base := beads.Bead{
+		Metadata: map[string]string{
+			"pending_create_claim": "true",
+			"state":                "creating",
+		},
+	}
+
+	tests := []struct {
+		name      string
+		createdAt time.Time
+		startedAt string
+		want      bool
+	}{
+		{
+			name:      "before boundary",
+			createdAt: clk.Now().Add(-(pendingCreateNeverStartedTimeout - time.Second)),
+			want:      false,
+		},
+		{
+			name:      "exact boundary",
+			createdAt: clk.Now().Add(-pendingCreateNeverStartedTimeout),
+			want:      false,
+		},
+		{
+			name:      "after boundary",
+			createdAt: clk.Now().Add(-(pendingCreateNeverStartedTimeout + time.Second)),
+			want:      true,
+		},
+		{
+			name:      "zero created at",
+			createdAt: time.Time{},
+			want:      true,
+		},
+		{
+			name:      "started at overrides older created at before boundary",
+			createdAt: clk.Now().Add(-24 * time.Hour),
+			startedAt: pendingCreateStartedAtNow(clk.Now().Add(-(pendingCreateNeverStartedTimeout - time.Second))),
+			want:      false,
+		},
+		{
+			name:      "started at overrides fresh created at after boundary",
+			createdAt: clk.Now().Add(-time.Minute),
+			startedAt: pendingCreateStartedAtNow(clk.Now().Add(-(pendingCreateNeverStartedTimeout + time.Second))),
+			want:      true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bead := base
+			if tt.startedAt != "" {
+				bead.Metadata = map[string]string{
+					"pending_create_claim":      "true",
+					"pending_create_started_at": tt.startedAt,
+					"state":                     "creating",
+				}
+			}
+			bead.CreatedAt = tt.createdAt
+			if got := pendingCreateNeverStartedExpired(bead, clk); got != tt.want {
+				t.Fatalf("pendingCreateNeverStartedExpired() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPendingCreateLeaseExpiredForRollbackFallsBackToStaleWindowForInvalidLastWokeAt(t *testing.T) {
+	clk := &clock.Fake{Time: time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)}
+	base := beads.Bead{
+		Metadata: map[string]string{
+			"pending_create_claim": "true",
+			"state":                "creating",
+			"last_woke_at":         "not-a-timestamp",
+		},
+	}
+
+	recent := base
+	recent.CreatedAt = clk.Now().Add(-(staleCreatingStateTimeout - time.Second))
+	if pendingCreateLeaseExpiredForRollback(recent, clk, time.Minute) {
+		t.Fatal("invalid last_woke_at used never-started lease; want legacy stale window before rollback")
+	}
+
+	stale := base
+	stale.CreatedAt = clk.Now().Add(-(staleCreatingStateTimeout + time.Second))
+	if !pendingCreateLeaseExpiredForRollback(stale, clk, time.Minute) {
+		t.Fatal("invalid last_woke_at preserved after stale window; want rollback")
 	}
 }
 
@@ -3061,6 +4139,152 @@ func TestReconcileSessionBeads_RollsBackPendingCreateWhenConflictingRuntimeAlrea
 	}
 	if got.Metadata["close_reason"] != "failed-create" {
 		t.Fatalf("close_reason = %q, want failed-create", got.Metadata["close_reason"])
+	}
+}
+
+func TestReconcileSessionBeads_RollbackBudgetDefersExcessMismatchesAndStillStarts(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "helper"}}}
+
+	var sessions []beads.Bead
+	for i := 0; i < 6; i++ {
+		name := fmt.Sprintf("sky-%d", i)
+		env.addDesired(name, "helper", false)
+		session := env.createSessionBead(name, "helper")
+		env.markSessionCreating(&session)
+		env.setSessionMetadata(&session, map[string]string{
+			"pending_create_claim":  "true",
+			"session_name_explicit": "true",
+			"instance_token":        fmt.Sprintf("token-%d", i),
+		})
+		if err := env.sp.Start(context.Background(), name, runtime.Config{Command: "test-cmd"}); err != nil {
+			t.Fatalf("Start(%s): %v", name, err)
+		}
+		if err := env.sp.SetMeta(name, "GC_SESSION_ID", "different-"+session.ID); err != nil {
+			t.Fatalf("SetMeta(%s, GC_SESSION_ID): %v", name, err)
+		}
+		if err := env.sp.SetMeta(name, "GC_INSTANCE_TOKEN", "different-token"); err != nil {
+			t.Fatalf("SetMeta(%s, GC_INSTANCE_TOKEN): %v", name, err)
+		}
+		sessions = append(sessions, session)
+	}
+
+	env.addDesired("starter", "helper", false)
+	starter := env.createSessionBead("starter", "helper")
+	env.markSessionCreating(&starter)
+	sessions = append(sessions, starter)
+
+	if woken := env.reconcile(sessions); woken != 1 {
+		t.Fatalf("woken = %d, want 1 planned start after rollback budget is exhausted", woken)
+	}
+	if got := strings.Count(env.stderr.String(), "deferring rollback of sky-"); got != 1 {
+		t.Fatalf("deferred rollback messages = %d, want 1; stderr:\n%s", got, env.stderr.String())
+	}
+	closedMismatches := 0
+	deferredMismatches := 0
+	for i := 0; i < 6; i++ {
+		name := fmt.Sprintf("sky-%d", i)
+		got, err := env.store.Get(sessions[i].ID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", sessions[i].ID, err)
+		}
+		if got.Status == "closed" {
+			if got.Metadata["close_reason"] != "failed-create" {
+				t.Fatalf("%s close_reason = %q, want failed-create", name, got.Metadata["close_reason"])
+			}
+			closedMismatches++
+			continue
+		}
+		if got.Metadata["pending_create_claim"] != "true" {
+			t.Fatalf("%s pending_create_claim = %q, want true on deferred mismatch", name, got.Metadata["pending_create_claim"])
+		}
+		deferredMismatches++
+	}
+	if closedMismatches != 5 {
+		t.Fatalf("closed mismatches = %d, want 5", closedMismatches)
+	}
+	if deferredMismatches != 1 {
+		t.Fatalf("deferred mismatches = %d, want 1", deferredMismatches)
+	}
+	started, err := env.store.Get(starter.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", starter.ID, err)
+	}
+	if started.Metadata["state"] != "active" {
+		t.Fatalf("starter state = %q, want active", started.Metadata["state"])
+	}
+	if !env.sp.IsRunning("starter") {
+		t.Fatal("starter runtime was not started after rollback budget was exhausted")
+	}
+}
+
+func TestReconcileSessionBeads_RollbackBudgetDefersExcessStaleNoRuntimeCreatesAndStillStarts(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "helper"}}}
+
+	var sessions []beads.Bead
+	staleStartedAt := pendingCreateStartedAtNow(env.clk.Now().Add(-(pendingCreateNeverStartedTimeout + time.Second)))
+	for i := 0; i < 6; i++ {
+		name := fmt.Sprintf("sky-%d", i)
+		env.addDesired(name, "helper", false)
+		session := env.createSessionBead(name, "helper")
+		env.markSessionCreating(&session)
+		session.CreatedAt = env.clk.Now().Add(-24 * time.Hour)
+		env.setSessionMetadata(&session, map[string]string{
+			"pending_create_claim":      "true",
+			"pending_create_started_at": staleStartedAt,
+			"session_name_explicit":     "true",
+			"instance_token":            fmt.Sprintf("token-%d", i),
+		})
+		sessions = append(sessions, session)
+	}
+
+	env.addDesired("starter", "helper", false)
+	starter := env.createSessionBead("starter", "helper")
+	env.markSessionCreating(&starter)
+	sessions = append(sessions, starter)
+
+	if woken := env.reconcile(sessions); woken != 1 {
+		t.Fatalf("woken = %d, want 1 planned start after rollback budget is exhausted", woken)
+	}
+	if got := strings.Count(env.stderr.String(), "deferring rollback of sky-"); got != 1 {
+		t.Fatalf("deferred rollback messages = %d, want 1; stderr:\n%s", got, env.stderr.String())
+	}
+	closedCreates := 0
+	deferredCreates := 0
+	for i := 0; i < 6; i++ {
+		name := fmt.Sprintf("sky-%d", i)
+		got, err := env.store.Get(sessions[i].ID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", sessions[i].ID, err)
+		}
+		if got.Status == "closed" {
+			if got.Metadata["close_reason"] != "failed-create" {
+				t.Fatalf("%s close_reason = %q, want failed-create", name, got.Metadata["close_reason"])
+			}
+			closedCreates++
+			continue
+		}
+		if got.Metadata["pending_create_claim"] != "true" {
+			t.Fatalf("%s pending_create_claim = %q, want true on deferred stale create", name, got.Metadata["pending_create_claim"])
+		}
+		deferredCreates++
+	}
+	if closedCreates != 5 {
+		t.Fatalf("closed stale creates = %d, want 5", closedCreates)
+	}
+	if deferredCreates != 1 {
+		t.Fatalf("deferred stale creates = %d, want 1", deferredCreates)
+	}
+	started, err := env.store.Get(starter.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", starter.ID, err)
+	}
+	if started.Metadata["state"] != "active" {
+		t.Fatalf("starter state = %q, want active", started.Metadata["state"])
+	}
+	if !env.sp.IsRunning("starter") {
+		t.Fatal("starter runtime was not started after rollback budget was exhausted")
 	}
 }
 

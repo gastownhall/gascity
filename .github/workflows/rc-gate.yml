@@ -17,11 +17,13 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/ci.yml
+    with:
+      force_blacksmith: true
     secrets: inherit
 
   ubuntu_fast_tests:
     name: ubuntu / fast tests / ${{ matrix.label }}
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       fail-fast: false
@@ -67,7 +69,7 @@ jobs:
 
   ubuntu_make_check_docs:
     name: ubuntu / make check-docs
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -81,10 +83,12 @@ jobs:
 
   ubuntu_acceptance_a:
     name: ubuntu / acceptance A / ${{ matrix.label }}
-    runs-on: ubuntu-latest
+    needs: ci_parity
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
         include:
           - label: root-1-of-8
@@ -115,12 +119,13 @@ jobs:
             timeout_minutes: 10
             command: go test -tags acceptance_a -timeout 8m ./test/acceptance/helpers
     env:
-      ANTHROPIC_BASE_URL: https://api.synthetic.new/anthropic
-      ANTHROPIC_AUTH_TOKEN: ${{ secrets.SYNTHETIC_API_KEY }}
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_HAIKU_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
-      ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
-      ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
-      CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      ANTHROPIC_BASE_URL: https://ollama.com
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.OLLAMA_API_KEY }}
+      OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_HAIKU_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL }}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL }}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_OPUS_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL }}
+      CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SUBAGENT_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL }}
       CLAUDE_CODE_EFFORT_LEVEL: auto
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
     steps:
@@ -130,19 +135,19 @@ jobs:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-version: ${{ env.BD_VERSION }}
           install-claude-cli: "true"
-      - name: Validate synthetic Claude configuration
+      - name: Validate Ollama Claude configuration
         run: |
-          test -n "$ANTHROPIC_AUTH_TOKEN" || { echo "Missing SYNTHETIC_API_KEY GitHub secret" >&2; exit 1; }
-          test -n "$ANTHROPIC_DEFAULT_HAIKU_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_HAIKU_MODEL GitHub variable" >&2; exit 1; }
-          test -n "$ANTHROPIC_DEFAULT_SONNET_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL GitHub variable" >&2; exit 1; }
-          test -n "$ANTHROPIC_DEFAULT_OPUS_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL GitHub variable" >&2; exit 1; }
-          test -n "$CLAUDE_CODE_SUBAGENT_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$OLLAMA_API_KEY" || { echo "Missing OLLAMA_API_KEY GitHub secret" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_HAIKU_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL or GC_WORKER_INFERENCE_CLAUDE_OLLAMA_HAIKU_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_SONNET_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL or GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SONNET_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_OPUS_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL or GC_WORKER_INFERENCE_CLAUDE_OLLAMA_OPUS_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$CLAUDE_CODE_SUBAGENT_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL or GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SUBAGENT_MODEL GitHub variable" >&2; exit 1; }
       - name: Run acceptance A shard
         run: ${{ matrix.command }}
 
   ubuntu_acceptance_b:
     name: ubuntu / acceptance B / ${{ matrix.shard_index }} of 3
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -160,19 +165,22 @@ jobs:
 
   ubuntu_acceptance_c:
     name: ubuntu / acceptance C / ${{ matrix.shard_index }} of 5
-    runs-on: ubuntu-latest
+    needs: ubuntu_acceptance_a
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     timeout-minutes: 60
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         shard_index: [1, 2, 3, 4, 5]
     env:
-      ANTHROPIC_BASE_URL: https://api.synthetic.new/anthropic
-      ANTHROPIC_AUTH_TOKEN: ${{ secrets.SYNTHETIC_API_KEY }}
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_HAIKU_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
-      ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
-      ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
-      CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      ANTHROPIC_BASE_URL: https://ollama.com
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.OLLAMA_API_KEY }}
+      OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_HAIKU_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL }}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL }}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_OPUS_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL }}
+      CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SUBAGENT_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL }}
       CLAUDE_CODE_EFFORT_LEVEL: auto
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
     steps:
@@ -181,22 +189,24 @@ jobs:
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-version: ${{ env.BD_VERSION }}
-      - name: Validate synthetic Claude configuration
+      - name: Validate Ollama Claude configuration
         run: |
-          test -n "$ANTHROPIC_AUTH_TOKEN" || { echo "Missing SYNTHETIC_API_KEY GitHub secret" >&2; exit 1; }
-          test -n "$ANTHROPIC_DEFAULT_HAIKU_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_HAIKU_MODEL GitHub variable" >&2; exit 1; }
-          test -n "$ANTHROPIC_DEFAULT_SONNET_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL GitHub variable" >&2; exit 1; }
-          test -n "$ANTHROPIC_DEFAULT_OPUS_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL GitHub variable" >&2; exit 1; }
-          test -n "$CLAUDE_CODE_SUBAGENT_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$OLLAMA_API_KEY" || { echo "Missing OLLAMA_API_KEY GitHub secret" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_HAIKU_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL or GC_WORKER_INFERENCE_CLAUDE_OLLAMA_HAIKU_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_SONNET_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL or GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SONNET_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_OPUS_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL or GC_WORKER_INFERENCE_CLAUDE_OLLAMA_OPUS_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$CLAUDE_CODE_SUBAGENT_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL or GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SUBAGENT_MODEL GitHub variable" >&2; exit 1; }
       - name: Run acceptance C shard
         run: GO_TEST_TAGS=acceptance_c GO_TEST_TIMEOUT=45m GO_TEST_COUNT=1 ./scripts/test-go-test-shard ./test/acceptance/tier_c ${{ matrix.shard_index }} 5
 
   ubuntu_integration_shards:
     name: ubuntu / integration / ${{ matrix.shard_name }}
-    runs-on: ubuntu-latest
+    needs: ubuntu_acceptance_c
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       fail-fast: false
+      max-parallel: 4
       matrix:
         include:
           - shard_name: packages-core-1-of-4
@@ -287,12 +297,13 @@ jobs:
             timeout_minutes: 20
             command: ./scripts/test-integration-shard rest-full-8-of-8
     env:
-      ANTHROPIC_BASE_URL: https://api.synthetic.new/anthropic
-      ANTHROPIC_AUTH_TOKEN: ${{ secrets.SYNTHETIC_API_KEY }}
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_HAIKU_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
-      ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
-      ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
-      CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      ANTHROPIC_BASE_URL: https://ollama.com
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.OLLAMA_API_KEY }}
+      OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_HAIKU_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL }}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL }}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_OPUS_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL }}
+      CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SUBAGENT_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL }}
       CLAUDE_CODE_EFFORT_LEVEL: auto
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
     steps:
@@ -302,31 +313,34 @@ jobs:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-version: ${{ env.BD_VERSION }}
           install-claude-cli: "true"
-      - name: Validate synthetic Claude configuration
+      - name: Validate Ollama Claude configuration
         run: |
-          test -n "$ANTHROPIC_AUTH_TOKEN" || { echo "Missing SYNTHETIC_API_KEY GitHub secret" >&2; exit 1; }
-          test -n "$ANTHROPIC_DEFAULT_HAIKU_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_HAIKU_MODEL GitHub variable" >&2; exit 1; }
-          test -n "$ANTHROPIC_DEFAULT_SONNET_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL GitHub variable" >&2; exit 1; }
-          test -n "$ANTHROPIC_DEFAULT_OPUS_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL GitHub variable" >&2; exit 1; }
-          test -n "$CLAUDE_CODE_SUBAGENT_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$OLLAMA_API_KEY" || { echo "Missing OLLAMA_API_KEY GitHub secret" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_HAIKU_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL or GC_WORKER_INFERENCE_CLAUDE_OLLAMA_HAIKU_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_SONNET_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL or GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SONNET_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_OPUS_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL or GC_WORKER_INFERENCE_CLAUDE_OLLAMA_OPUS_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$CLAUDE_CODE_SUBAGENT_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL or GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SUBAGENT_MODEL GitHub variable" >&2; exit 1; }
       - name: Run integration shard
         run: ${{ matrix.command }}
 
   ubuntu_tutorial:
     name: ubuntu / tutorial goldens / ${{ matrix.shard_index }} of 6
-    runs-on: ubuntu-latest
+    needs: ubuntu_integration_shards
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     timeout-minutes: 110
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         shard_index: [1, 2, 3, 4, 5, 6]
     env:
-      ANTHROPIC_BASE_URL: https://api.synthetic.new/anthropic
-      ANTHROPIC_AUTH_TOKEN: ${{ secrets.SYNTHETIC_API_KEY }}
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_HAIKU_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
-      ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
-      ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
-      CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      ANTHROPIC_BASE_URL: https://ollama.com
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.OLLAMA_API_KEY }}
+      OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_HAIKU_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL }}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL }}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_OPUS_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL }}
+      CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SUBAGENT_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL }}
       CLAUDE_CODE_EFFORT_LEVEL: auto
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
       GC_TUTORIAL_GOLDENS_USE_CLAUDE_FOR_CODEX: "1"
@@ -336,19 +350,19 @@ jobs:
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-version: ${{ env.BD_VERSION }}
-      - name: Validate synthetic Claude configuration
+      - name: Validate Ollama Claude configuration
         run: |
-          test -n "$ANTHROPIC_AUTH_TOKEN" || { echo "Missing SYNTHETIC_API_KEY GitHub secret" >&2; exit 1; }
-          test -n "$ANTHROPIC_DEFAULT_HAIKU_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_HAIKU_MODEL GitHub variable" >&2; exit 1; }
-          test -n "$ANTHROPIC_DEFAULT_SONNET_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL GitHub variable" >&2; exit 1; }
-          test -n "$ANTHROPIC_DEFAULT_OPUS_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL GitHub variable" >&2; exit 1; }
-          test -n "$CLAUDE_CODE_SUBAGENT_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$OLLAMA_API_KEY" || { echo "Missing OLLAMA_API_KEY GitHub secret" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_HAIKU_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL or GC_WORKER_INFERENCE_CLAUDE_OLLAMA_HAIKU_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_SONNET_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL or GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SONNET_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_OPUS_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL or GC_WORKER_INFERENCE_CLAUDE_OLLAMA_OPUS_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$CLAUDE_CODE_SUBAGENT_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL or GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SUBAGENT_MODEL GitHub variable" >&2; exit 1; }
       - name: Run tutorial golden shard
         run: GO_TEST_TAGS=acceptance_c GO_TEST_TIMEOUT=90m GO_TEST_COUNT=1 ./scripts/test-go-test-shard ./test/acceptance/tutorial_goldens ${{ matrix.shard_index }} 6
 
   ubuntu_goreleaser_snapshot:
     name: ubuntu / goreleaser snapshot
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -373,7 +387,7 @@ jobs:
 
   macos_fast_tests:
     name: macOS / fast tests / ${{ matrix.label }}
-    runs-on: macos-15
+    runs-on: blacksmith-12vcpu-macos-15
     timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       fail-fast: false
@@ -409,19 +423,18 @@ jobs:
             command: GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=20m ./scripts/test-go-test-shard ./cmd/gc 6 6
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+      - uses: ./.github/actions/setup-gascity-macos
         with:
-          cache: false
-          go-version: "1.25.9"
-      - name: Install released bd
-        run: .github/scripts/install-bd-archive.sh "${{ env.BD_VERSION }}" --cache
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "false"
       - name: Run macOS fast test shard
         run: ${{ matrix.command }}
 
   rc_summary:
     name: RC summary
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     needs:
       - ci_parity
       - ubuntu_fast_tests

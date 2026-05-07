@@ -229,7 +229,10 @@ export interface paths {
         /** Get v0 city by city name agents */
         get: operations["get-v0-city-by-city-name-agents"];
         put?: never;
-        /** Create an agent */
+        /**
+         * Create an agent
+         * @description Creates an agent and waits until it is visible to immediate follow-up operations. If the agent is durably created but visibility confirmation is canceled or times out, the retryable 503/504 response includes a Retry-After header.
+         */
         post: operations["create-agent"];
         delete?: never;
         options?: never;
@@ -3969,6 +3972,8 @@ export interface components {
             total: number;
         };
         SupervisorEventListOutputBody: {
+            /** @description Supervisor event-stream cursor captured before the history snapshot was listed. Pass this value as after_cursor to /v0/events/stream to receive events emitted after the snapshot boundary without replaying unrelated historical backlog. */
+            event_cursor: string;
             items: components["schemas"]["TypedTaggedEventStreamEnvelope"][] | null;
             /** Format: int64 */
             total: number;
@@ -8659,7 +8664,7 @@ export interface operations {
             path: {
                 /** @description City name. */
                 cityName: string;
-                /** @description Thread ID. */
+                /** @description Thread ID, or any message ID in the thread. */
                 id: string;
             };
             cookie?: never;

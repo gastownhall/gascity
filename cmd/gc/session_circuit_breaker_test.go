@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"reflect"
 	"strings"
 	"testing"
@@ -934,7 +935,7 @@ func TestReconciler_CircuitOpenStatePersistsAcrossControllerRestart(t *testing.T
 	if env.sp.IsRunning("session-a") {
 		t.Fatal("session-a should not be running after persisted CIRCUIT_OPEN restore")
 	}
-	if snap := SessionCircuitBreakerSnapshot(env.clk.Now().UTC()); len(snap) != 1 || snap[0].Identity != identity || snap[0].State != circuitOpen.String() {
+	if snap := sessionCircuitBreakerSnapshot(env.clk.Now().UTC()); len(snap) != 1 || snap[0].Identity != identity || snap[0].State != circuitOpen.String() {
 		t.Fatalf("restored snapshot = %+v, want one OPEN entry for %s", snap, identity)
 	}
 }
@@ -1143,5 +1144,61 @@ func TestReconciler_CircuitTripsThroughRepeatedWakeAttempts(t *testing.T) {
 	snap := cb.Snapshot(env.clk.Now().UTC())
 	if len(snap) != 1 || snap[0].Identity != identity || snap[0].State != "CIRCUIT_OPEN" || snap[0].RestartCount != 6 {
 		t.Fatalf("snapshot after trip = %+v, want one OPEN entry with 6 restarts", snap)
+	}
+}
+
+func TestReconciler_CircuitStaysClosedWhenAssignedWorkStatusProgresses(t *testing.T) {
+	env := newReconcilerTestEnv()
+	configureAlwaysNamedSession(env)
+	env.addDesired("session-a", "template-a", false)
+
+	cb := breakerAt(30*time.Minute, 5)
+	restore := setSessionCircuitBreakerForTest(cb)
+	defer restore()
+
+	const identity = "rig-a/session-a"
+	b := createCircuitTestNamedSession(t, env, "asleep")
+	statuses := []string{"open", "in_progress", "blocked", "open", "in_progress", "closed"}
+
+	for i, status := range statuses {
+		current, err := env.store.Get(b.ID)
+		if err != nil {
+			t.Fatalf("get bead attempt %d: %v", i+1, err)
+		}
+		poolDesired := map[string]int{"template-a": 1}
+		woken := reconcileSessionBeads(
+			context.Background(), []beads.Bead{current}, env.desiredState,
+			configuredSessionNames(env.cfg, "", env.store), env.cfg, env.sp,
+			env.store, nil,
+			[]beads.Bead{{ID: "work-1", Assignee: identity, Status: status}},
+			nil, env.dt, poolDesired, false, nil, "", nil, env.clk, env.rec,
+			0, 0, &env.stdout, &env.stderr,
+		)
+		if woken != 1 {
+			t.Fatalf("attempt %d (%s): woken = %d, want 1; stderr=%s", i+1, status, woken, env.stderr.String())
+		}
+		if cb.IsOpen(identity, env.clk.Now().UTC()) {
+			t.Fatalf("attempt %d (%s): breaker should stay CLOSED after assigned work progress", i+1, status)
+		}
+		if !env.sp.IsRunning("session-a") {
+			t.Fatalf("attempt %d (%s): session-a should be running after CLOSED breaker wake", i+1, status)
+		}
+		if err := env.sp.Stop("session-a"); err != nil {
+			t.Fatalf("attempt %d (%s): stop session-a: %v", i+1, status, err)
+		}
+		if err := env.store.SetMetadata(b.ID, "state", "asleep"); err != nil {
+			t.Fatalf("attempt %d (%s): set state asleep: %v", i+1, status, err)
+		}
+		if i < len(statuses)-1 {
+			env.clk.Advance(6 * time.Minute)
+		}
+	}
+
+	snap := cb.Snapshot(env.clk.Now().UTC())
+	if len(snap) != 1 || snap[0].Identity != identity || snap[0].State != circuitClosed.String() || snap[0].RestartCount != len(statuses) {
+		t.Fatalf("snapshot after progressing work = %+v, want one CLOSED entry with %d restarts", snap, len(statuses))
+	}
+	if strings.Contains(env.stderr.String(), "CIRCUIT_OPEN") {
+		t.Fatalf("did not expect CIRCUIT_OPEN log, got: %q", env.stderr.String())
 	}
 }

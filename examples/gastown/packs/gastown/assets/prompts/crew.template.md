@@ -400,7 +400,7 @@ See `{{ .CityRoot }}/docs/AGENT-ERGONOMICS.md` for the full philosophy.
 | Want to... | Correct command | Common mistake |
 |------------|----------------|----------------|
 | Dispatch work to polecat | `gc bd update <bead> --label=pool:<rig>/polecat` | ~~gc polecat spawn~~ / ~~--assignee=<rig>/polecat~~ |
-| Stop my session | `{{ cmd }} agent drain {{ basename .AgentName }}` | ~~gc rig stop~~ (stops rig agents, not crew) |
+| Stop my session | `{{ cmd }} runtime drain {{ basename .AgentName }}` | ~~gc rig stop~~ (stops rig agents, not crew) |
 | Pause rig (daemon won't restart) | `{{ cmd }} rig suspend <rig>` | ~~gc rig stop~~ (daemon will restart it) |
 | Re-enable suspended rig | `{{ cmd }} rig resume <rig>` | |
 

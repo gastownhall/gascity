@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -694,16 +695,7 @@ func (r *configWatchRegistrar) isConventionRootCreate(path string) bool {
 }
 
 func pathIsWithin(root, path string) bool {
-	root = normalizePathForCompare(root)
-	path = normalizePathForCompare(path)
-	if samePath(root, path) {
-		return true
-	}
-	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
-	if err != nil {
-		return false
-	}
-	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	return pathutil.PathWithin(root, path)
 }
 
 func isConventionDiscoveryDirName(base string) bool {

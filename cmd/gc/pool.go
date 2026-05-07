@@ -428,7 +428,9 @@ func discoverPoolInstances(agentName, agentDir string, sp0 scaleParams, a *confi
 		for i := 1; i <= sp0.Max; i++ {
 			instanceName := poolInstanceName(agentName, i, a)
 			qn := instanceName
-			if agentDir != "" {
+			if a != nil {
+				qn = a.QualifiedInstanceName(instanceName)
+			} else if agentDir != "" {
 				qn = agentDir + "/" + instanceName
 			}
 			names = append(names, qn)
@@ -441,7 +443,9 @@ func discoverPoolInstances(agentName, agentDir string, sp0 scaleParams, a *confi
 	// When bead-derived session names ("s-{beadID}") are active, this prefix
 	// match will fail. Migrate to bead store query by template metadata.
 	qnPrefix := agentName + "-"
-	if agentDir != "" {
+	if a != nil {
+		qnPrefix = a.QualifiedName() + "-"
+	} else if agentDir != "" {
 		qnPrefix = agentDir + "/" + agentName + "-"
 	}
 	// Build the session name prefix to match against running sessions.
@@ -472,6 +476,7 @@ func discoverPoolInstances(agentName, agentDir string, sp0 scaleParams, a *confi
 
 func resolvePoolSessionRefs(
 	store beads.Store,
+	cfg *config.City,
 	agentName, agentDir string,
 	sp0 scaleParams, a *config.Agent,
 	cityName, sessionTemplate string,
@@ -479,12 +484,14 @@ func resolvePoolSessionRefs(
 	stderr io.Writer,
 ) []poolSessionRef {
 	template := agentName
-	if agentDir != "" {
+	if a != nil {
+		template = a.QualifiedName()
+	} else if agentDir != "" {
 		template = agentDir + "/" + agentName
 	}
 	seenSessions := make(map[string]bool)
 	var refs []poolSessionRef
-	poolSessions, err := lookupPoolSessionNames(store, template)
+	poolSessions, err := lookupPoolSessionNameCandidates(store, template, cfg, a)
 	if err != nil && stderr != nil {
 		fmt.Fprintf(stderr, "gc lifecycle: pool bead lookup for %s returned error (legacy discovery also runs): %v\n", template, err) //nolint:errcheck
 	}
@@ -494,15 +501,17 @@ func resolvePoolSessionRefs(
 	}
 	sort.Strings(poolInstances)
 	for _, qualifiedInstance := range poolInstances {
-		sessionName := poolSessions[qualifiedInstance]
-		if sessionName == "" || seenSessions[sessionName] {
-			continue
+		for _, candidate := range poolSessions[qualifiedInstance] {
+			sessionName := candidate.sessionName
+			if sessionName == "" || seenSessions[sessionName] {
+				continue
+			}
+			seenSessions[sessionName] = true
+			refs = append(refs, poolSessionRef{
+				qualifiedInstance: qualifiedInstance,
+				sessionName:       sessionName,
+			})
 		}
-		seenSessions[sessionName] = true
-		refs = append(refs, poolSessionRef{
-			qualifiedInstance: qualifiedInstance,
-			sessionName:       sessionName,
-		})
 	}
 	for _, qualifiedInstance := range discoverPoolInstances(agentName, agentDir, sp0, a, cityName, sessionTemplate, sp) {
 		sessionName := lookupSessionNameOrLegacy(store, cityName, qualifiedInstance, sessionTemplate)
@@ -516,4 +525,29 @@ func resolvePoolSessionRefs(
 		})
 	}
 	return refs
+}
+
+func selectRunningPoolSessionRefs(store beads.Store, sp runtime.Provider, cfg *config.City, refs []poolSessionRef) ([]poolSessionRef, error) {
+	grouped := make(map[string][]poolSessionRef)
+	order := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		if _, ok := grouped[ref.qualifiedInstance]; !ok {
+			order = append(order, ref.qualifiedInstance)
+		}
+		grouped[ref.qualifiedInstance] = append(grouped[ref.qualifiedInstance], ref)
+	}
+
+	live := make([]poolSessionRef, 0, len(order))
+	for _, qualifiedInstance := range order {
+		for _, ref := range grouped[qualifiedInstance] {
+			running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, ref.sessionName)
+			if err != nil {
+				return nil, fmt.Errorf("observing %s: %w", ref.sessionName, err)
+			}
+			if running {
+				live = append(live, ref)
+			}
+		}
+	}
+	return live, nil
 }

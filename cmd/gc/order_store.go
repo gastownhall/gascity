@@ -256,7 +256,7 @@ func resolveManagedDoltOrderRuntimeLayout(cityPath string, env map[string]string
 }
 
 func managedDoltOrderPackStateDir(cityPath string, env map[string]string) string {
-	if runtimeDir := trustedAmbientCityRuntimeDir(cityPath); runtimeDir != "" {
+	if runtimeDir := citylayout.TrustedAmbientCityRuntimeDir(cityPath); runtimeDir != "" {
 		return normalizePathForCompare(filepath.Join(runtimeDir, "packs", "dolt"))
 	}
 	if env != nil {

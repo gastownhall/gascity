@@ -29,7 +29,7 @@ closes the bead once the PR is verified.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-refinery-patrol"
-version = 2
+version = 3
 contract = "graph.v2"
 
 [vars]
@@ -166,8 +166,10 @@ gc workflow delete-source $WORK --apply && gc workflow reopen-source $WORK
 3. Put the work bead back in the pool with rejection metadata:
 ```bash
 gc bd update $WORK \
+  --status=open \
+  --assignee="" \
   --set-metadata rejection_reason="Conflicts with $TARGET at $(git rev-parse origin/$TARGET)" \
-  --set-metadata gc.routed_to={{rig_name}}/{{binding_prefix}}polecat
+  --set-metadata gc.routed_to="${GC_RIG:+$GC_RIG/}{{binding_prefix}}polecat"
 ```
 4. Do NOT delete the branch (new polecat needs it for conflict resolution).
 5. Clean up temp branch: `git checkout {{target_branch}} && git branch -D temp`
@@ -236,7 +238,10 @@ TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{target_bran
    - Put the work bead back in the pool with rejection metadata:
      ```bash
      gc bd update $WORK \
-       --set-metadata rejection_reason="<failure summary>"
+       --status=open \
+       --assignee="" \
+       --set-metadata rejection_reason="<failure summary>" \
+       --set-metadata gc.routed_to="${GC_RIG:+$GC_RIG/}{{binding_prefix}}polecat"
      ```
    - Delete branch: `git push origin --delete $BRANCH`
    - Clean up: `git checkout "$TARGET" && git branch -D temp`

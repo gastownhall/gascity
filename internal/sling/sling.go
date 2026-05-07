@@ -412,12 +412,14 @@ func BeadPrefix(beadID string) string {
 }
 
 // BeadPrefixForCity returns the configured rig (or HQ) prefix that beadID
-// belongs to, preferring the longest match so hyphenated rig prefixes
-// resolve correctly. Falls back to BeadPrefix when no configured prefix
-// matches. Returns "" if the bead has no dash and no configured-prefix
+// belongs to, preferring the longest match so hyphenated rig prefixes resolve
+// correctly. It does not require the suffix to pass the short bead-ID shape
+// gate; callers that need to decide bead ID vs inline text should use
+// LooksLikeConfiguredBeadID. Falls back to BeadPrefix when no configured
+// prefix matches. Returns "" if the bead has no dash and no configured-prefix
 // match.
 func BeadPrefixForCity(cfg *config.City, beadID string) string {
-	if p := matchConfiguredBeadPrefix(cfg, beadID); p != "" {
+	if p := matchConfiguredBeadPrefixCandidate(cfg, beadID); p != "" {
 		return p
 	}
 	return BeadPrefix(beadID)
@@ -439,6 +441,14 @@ func LooksLikeConfiguredBeadID(cfg *config.City, s string) bool {
 // prefix; the returned value is the lower-cased configured prefix.
 // Returns "" if no configured prefix matches.
 func matchConfiguredBeadPrefix(cfg *config.City, beadID string) string {
+	return matchConfiguredBeadPrefixBySuffix(cfg, beadID, true)
+}
+
+func matchConfiguredBeadPrefixCandidate(cfg *config.City, beadID string) string {
+	return matchConfiguredBeadPrefixBySuffix(cfg, beadID, false)
+}
+
+func matchConfiguredBeadPrefixBySuffix(cfg *config.City, beadID string, requireValidSuffix bool) string {
 	beadID = strings.TrimSpace(beadID)
 	if cfg == nil || beadID == "" || strings.ContainsAny(beadID, " \t\n") {
 		return ""
@@ -457,9 +467,11 @@ func matchConfiguredBeadPrefix(cfg *config.City, beadID string) string {
 		if !strings.HasPrefix(lower, lp+"-") {
 			continue
 		}
-		suffix := beadID[len(lp)+1:]
-		if !validBeadSuffix(suffix) {
-			continue
+		if requireValidSuffix {
+			suffix := beadID[len(lp)+1:]
+			if !validBeadSuffix(suffix) {
+				continue
+			}
 		}
 		best = lp
 		bestLen = len(lp)

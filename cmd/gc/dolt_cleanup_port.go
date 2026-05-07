@@ -15,6 +15,12 @@ import (
 // shell-side cleanup script when no other source can be resolved.
 const LegacyDefaultDoltPort = 3307
 
+const maxTCPPort = 65535
+
+const flagDoltPortSource = "--port flag"
+
+const cityConfigDoltPortSource = "city config dolt.port"
+
 // PortResolverInput bundles the inputs needed for the dolt port discovery
 // chain (per AD-04 §4.1).
 type PortResolverInput struct {
@@ -114,7 +120,7 @@ func ResolveDoltPort(in PortResolverInput) PortResolution {
 }
 
 func tryFlagPort(flag string) (PortResolutionAttempt, int, bool) {
-	src := "--port flag"
+	src := flagDoltPortSource
 	flag = strings.TrimSpace(flag)
 	if flag == "" {
 		return PortResolutionAttempt{Source: src, Status: "not-provided"}, 0, false
@@ -127,20 +133,27 @@ func tryFlagPort(flag string) (PortResolutionAttempt, int, bool) {
 			Detail: fmt.Sprintf("invalid port %q: %v", flag, err),
 		}, 0, false
 	}
-	if port <= 0 {
+	if !validDoltPort(port) {
 		return PortResolutionAttempt{
 			Source: src,
 			Status: "error",
-			Detail: fmt.Sprintf("invalid port %d (must be > 0)", port),
+			Detail: invalidDoltPortMessage(port),
 		}, 0, false
 	}
 	return PortResolutionAttempt{Source: src, Status: "found", Detail: strconv.Itoa(port)}, port, true
 }
 
 func tryCityConfigPort(port int) (PortResolutionAttempt, int, bool) {
-	src := "city config dolt.port"
-	if port <= 0 {
+	src := cityConfigDoltPortSource
+	if port == 0 {
 		return PortResolutionAttempt{Source: src, Status: "not-set"}, 0, false
+	}
+	if !validDoltPort(port) {
+		return PortResolutionAttempt{
+			Source: src,
+			Status: "error",
+			Detail: invalidDoltPortMessage(port),
+		}, 0, false
 	}
 	return PortResolutionAttempt{Source: src, Status: "found", Detail: strconv.Itoa(port)}, port, true
 }
@@ -173,14 +186,22 @@ func tryRigPortFile(fs fsys.FS, path string) (PortResolutionAttempt, int, bool) 
 			Detail: fmt.Sprintf("invalid port %q: %v", text, err),
 		}, 0, false
 	}
-	if port <= 0 {
+	if !validDoltPort(port) {
 		return PortResolutionAttempt{
 			Source: path,
 			Status: "error",
-			Detail: fmt.Sprintf("invalid port %d (must be > 0)", port),
+			Detail: invalidDoltPortMessage(port),
 		}, 0, false
 	}
 	return PortResolutionAttempt{Source: path, Status: "found", Detail: strconv.Itoa(port)}, port, true
+}
+
+func validDoltPort(port int) bool {
+	return port >= 1 && port <= maxTCPPort
+}
+
+func invalidDoltPortMessage(port int) string {
+	return fmt.Sprintf("invalid port %d (must be between 1 and %d)", port, maxTCPPort)
 }
 
 // orderRigsHQFirst returns the rigs reordered so the HQ rig (if any) is

@@ -698,6 +698,62 @@ func TestLoadProviderSessionSnapshotLoadsStoreWithoutACPAgents(t *testing.T) {
 	}
 }
 
+func TestStatusSessionProviderSkipsSessionSnapshot(t *testing.T) {
+	oldOpen := openSessionProviderStore
+	t.Cleanup(func() { openSessionProviderStore = oldOpen })
+
+	calls := 0
+	openSessionProviderStore = func(string) (beads.Store, error) {
+		calls++
+		return nil, errors.New("session snapshot should not load for status")
+	}
+
+	sp := newStatusSessionProviderForCity(&config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Session:   config.SessionConfig{Provider: "subprocess"},
+	}, "/tmp/city")
+	if sp == nil {
+		t.Fatal("newStatusSessionProviderForCity() = nil")
+	}
+	if calls != 0 {
+		t.Fatalf("openSessionProviderStore called %d times, want 0", calls)
+	}
+}
+
+func TestStatusSessionProviderUsesProvidedSnapshotToWrapObservedACPSessions(t *testing.T) {
+	oldBuild := buildSessionProviderByName
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	buildSessionProviderByName = func(name string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
+		if name == "acp" {
+			return acpSP, nil
+		}
+		return defaultSP, nil
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Session:   config.SessionConfig{Provider: "fake"},
+		Agents:    []config.Agent{{Name: "mayor"}},
+	}
+	snapshot := newSessionBeadSnapshot([]beads.Bead{{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":     "orphan-acp",
+			"transport":    "acp",
+			"session_name": "provider-session",
+		},
+	}})
+
+	sp := newStatusSessionProviderForCityWithSnapshot(cfg, t.TempDir(), snapshot)
+	if err := sp.Attach("provider-session"); err == nil || !strings.Contains(err.Error(), "ACP transport") {
+		t.Fatalf("Attach(provider-session) error = %v, want ACP transport error from snapshot-backed wrapper", err)
+	}
+}
+
 func TestLoadProviderSessionSnapshotLoadsOpenACPAgents(t *testing.T) {
 	oldOpen := openSessionProviderStore
 	t.Cleanup(func() { openSessionProviderStore = oldOpen })

@@ -100,7 +100,7 @@ gc mail inbox
 When nudged after dispatch, run `gc hook` or `{{ .WorkQuery }}`. That lookup
 checks assigned work first (session bead ID, runtime session name, then
 alias) and only falls through to unassigned pool work routed to
-`{{ .RigName }}/{{ .BindingPrefix }}polecat`.
+`${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}polecat`.
 
 **Hook/work query -> Read formula steps -> Follow in order -> done sequence.**
 
@@ -153,7 +153,8 @@ When blocked, you MUST escalate. Do NOT wait for human input.
 **How:**
 ```bash
 # Blocking issues
-gc mail send {{ .RigName }}/witness -s "ESCALATION: Brief description [HIGH]" -m "Details"
+WITNESS_TARGET="${GC_RIG:+$GC_RIG/}witness"
+gc mail send "$WITNESS_TARGET" -s "ESCALATION: Brief description [HIGH]" -m "Details"
 
 # Cross-rig or strategic
 gc mail send mayor/ -s "BLOCKED: <topic>" -m "Context"
@@ -166,8 +167,9 @@ After escalating: continue if possible, otherwise `gc bd update <bead> --status=
 ## Communication
 
 ```bash
-gc session nudge {{ .RigName }}/witness "Quick question about bead status"   # Default: nudge
-gc mail send {{ .RigName }}/witness -s "HELP: Blocked on X" -m "..."  # Escalation: mail
+WITNESS_TARGET="${GC_RIG:+$GC_RIG/}witness"
+gc session nudge "$WITNESS_TARGET" "Quick question about bead status" # Default: nudge
+gc mail send "$WITNESS_TARGET" -s "HELP: Blocked on X" -m "..."       # Escalation: mail
 gc mail send mayor/ -s "BLOCKED: Need coordination" -m "..."          # Cross-rig: mail
 ```
 
@@ -220,7 +222,7 @@ is the "Idle Polecat heresy."
 |------------|----------------|
 | Signal work complete | Done sequence (push, set metadata, reassign, `gc runtime drain-ack`, exit) |
 | Read formula steps | `gc bd show <wisp-id>` (shows formula ref) |
-| Escalate blocker | `gc mail send {{ .RigName }}/witness -s "ESCALATION: desc [HIGH]" -m "..."` |
+| Escalate blocker | `WITNESS_TARGET="${GC_RIG:+$GC_RIG/}witness"; gc mail send "$WITNESS_TARGET" -s "ESCALATION: desc [HIGH]" -m "..."` |
 | Context exhaustion | `gc runtime request-restart` |
 | Handoff to next session | `gc mail send -s "HANDOFF: ..." -m "..."` then `gc runtime drain-ack && exit` |
 

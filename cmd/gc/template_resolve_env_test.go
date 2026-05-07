@@ -100,3 +100,37 @@ func TestResolveTemplatePrependsGCBinDirToConfiguredAgentPATH(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveTemplateUsesTrustedRuntimeRootForControlTraceDefault(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	customRuntimeDir := filepath.Join(t.TempDir(), "runtime-root")
+	t.Setenv("GC_CITY_PATH", cityPath)
+	t.Setenv("GC_CITY_RUNTIME_DIR", customRuntimeDir)
+
+	params := &agentBuildParams{
+		cityName:   "city",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Provider: "test"},
+		providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+
+	agent := &config.Agent{Name: "runner"}
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+
+	if got := tp.Env["GC_CITY_RUNTIME_DIR"]; got != customRuntimeDir {
+		t.Fatalf("GC_CITY_RUNTIME_DIR = %q, want %q", got, customRuntimeDir)
+	}
+	wantTraceDefault := filepath.Join(customRuntimeDir, "control-dispatcher-trace.log")
+	if got := tp.Env["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"]; got != wantTraceDefault {
+		t.Fatalf("GC_CONTROL_DISPATCHER_TRACE_DEFAULT = %q, want %q", got, wantTraceDefault)
+	}
+}

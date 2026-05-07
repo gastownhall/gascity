@@ -1141,6 +1141,11 @@
           "type": "string",
           "description": "Host is the dolt server hostname. Defaults to localhost.",
           "default": "localhost"
+        },
+        "archive_level": {
+          "type": "integer",
+          "description": "ArchiveLevel controls Dolt's auto_gc archive aggressiveness.\n0 disables archive compaction (lower CPU on startup).\n1 enables archive compaction (higher CPU on startup).\nnil (omitted) defaults to 0.",
+          "default": 0
         }
       },
       "additionalProperties": false,

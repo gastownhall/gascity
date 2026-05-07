@@ -87,13 +87,14 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 		writeSessionManagerError(w, err)
 		return
 	}
+	format := r.URL.Query().Get("format")
 	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
 	}
 	historyReq := worker.HistoryRequest{}
-	if r.URL.Query().Get("format") == "raw" && !info.Closed {
+	if format == "raw" && !info.Closed {
 		historyReq.TailCompactions = 1
 	}
 	history, historyErr := handle.History(worker.WithoutOperationEvents(r.Context()), historyReq)
@@ -129,7 +130,6 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	format := r.URL.Query().Get("format")
 	if format == "raw" && !info.Closed {
 		data, _ := json.Marshal(SessionStreamRawMessageEvent{
 			ID:       info.ID,
@@ -159,18 +159,7 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 		// No log file yet. If the session is running, poll tmux pane content
 		// and wrap it as a fake raw JSONL assistant message so a real-world app's existing
 		// rendering pipeline shows terminal output (e.g. OAuth prompts).
-		if running {
-			s.streamSessionPeekRaw(ctx, w, info, handle)
-		} else {
-			data, _ := json.Marshal(SessionStreamRawMessageEvent{
-				ID:       info.ID,
-				Template: info.Template,
-				Provider: info.Provider,
-				Format:   "raw",
-				Messages: []SessionRawMessageFrame{},
-			})
-			writeSSE(w, "message", 1, data)
-		}
+		s.streamSessionPeekRaw(ctx, w, info, handle)
 		return
 	default:
 		s.streamSessionPeek(ctx, w, info, handle)

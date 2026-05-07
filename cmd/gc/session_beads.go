@@ -24,6 +24,12 @@ const sessionBeadLabel = "gc:session"
 // sessionBeadType is the bead type for session beads.
 const sessionBeadType = "session"
 
+const (
+	poolAliasConflictMetadataKey      = "pool_alias_conflict"
+	poolAliasConflictCountMetadataKey = "pool_alias_conflict_count"
+	poolAliasConflictAtMetadataKey    = "pool_alias_conflict_at"
+)
+
 // loadSessionBeads returns all open session beads from the store.
 func loadSessionBeads(store beads.Store) ([]beads.Bead, error) {
 	if store == nil {
@@ -318,6 +324,16 @@ func reopenClosedConfiguredNamedSessionBead(
 			"closed_at":            "",
 			"pending_create_claim": pendingCreateClaim,
 			"synced_at":            now.Format("2006-01-02T15:04:05Z07:00"),
+		}
+		// Reset the pending-create stale clock to NOW. The bead row's
+		// CreatedAt reflects when it was first minted (potentially
+		// long ago); this reopen is a fresh spawn attempt, so the
+		// staleCreatingState window must start counting from here,
+		// not from CreatedAt.
+		if pendingCreateClaim == "true" {
+			batch["pending_create_started_at"] = pendingCreateStartedAtNow(now)
+		} else {
+			batch["pending_create_started_at"] = ""
 		}
 		for k, v := range extraMeta {
 			batch[k] = v
@@ -923,6 +939,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			}
 			if createState != "active" {
 				meta["pending_create_claim"] = "true"
+				meta["pending_create_started_at"] = pendingCreateStartedAtNow(now)
 			}
 			if tp.DependencyOnly {
 				meta["dependency_only"] = boolMetadata(true)
@@ -1073,8 +1090,17 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		// per-key writes are expensive enough to stall unrelated reconciler
 		// work during city startup.
 		batch := map[string]string{}
+		aliasGuardedBatch := map[string]string{}
 		queueMeta := func(key, value string) {
 			batch[key] = value
+		}
+		queueAliasGuardedMeta := func(key, value string) {
+			aliasGuardedBatch[key] = value
+		}
+		mergeAliasGuardedBatch := func() {
+			for key, value := range aliasGuardedBatch {
+				queueMeta(key, value)
+			}
 		}
 
 		// Backfill template and pool_slot metadata for beads created
@@ -1101,11 +1127,16 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				queueMeta("pool_slot", "")
 			}
 		}
+		needsAliasSync := b.Metadata["alias"] != managedAlias
 		if b.Metadata["pool_slot"] == "" {
+			queuePoolSlotMeta := queueMeta
+			if needsAliasSync && isManagedPool && isPoolInstance {
+				queuePoolSlotMeta = queueAliasGuardedMeta
+			}
 			if tp.PoolSlot > 0 {
-				queueMeta("pool_slot", strconv.Itoa(tp.PoolSlot))
+				queuePoolSlotMeta("pool_slot", strconv.Itoa(tp.PoolSlot))
 			} else if slot := resolvePoolSlot(tp.InstanceName, tp.TemplateName); slot > 0 {
-				queueMeta("pool_slot", strconv.Itoa(slot))
+				queuePoolSlotMeta("pool_slot", strconv.Itoa(slot))
 			}
 		}
 		existingAgentName := strings.TrimSpace(b.Metadata["agent_name"])
@@ -1119,14 +1150,18 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				// Legacy active sessions are still running in their original
 				// work_dir. Don't repoint metadata until the session stops.
 				if !legacyNeedsConcreteIdentity || state != "active" {
-					queueMeta("work_dir", tp.WorkDir)
+					if legacyNeedsConcreteIdentity {
+						queueAliasGuardedMeta("work_dir", tp.WorkDir)
+					} else {
+						queueMeta("work_dir", tp.WorkDir)
+					}
 				}
 			case legacyNeedsConcreteIdentity && b.Metadata["work_dir"] != tp.WorkDir && state != "active":
-				queueMeta("work_dir", tp.WorkDir)
+				queueAliasGuardedMeta("work_dir", tp.WorkDir)
 			}
 		}
 		if legacyNeedsConcreteIdentity && agentName != "" {
-			queueMeta("agent_name", agentName)
+			queueAliasGuardedMeta("agent_name", agentName)
 		}
 		if b.Metadata["dependency_only"] != boolMetadata(tp.DependencyOnly) {
 			queueMeta("dependency_only", boolMetadata(tp.DependencyOnly))
@@ -1152,7 +1187,6 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				queueMeta(namedSessionModeMetadata, "")
 			}
 		}
-		needsAliasSync := b.Metadata["alias"] != managedAlias
 		if b.Metadata["wake_mode"] != tp.WakeMode {
 			queueMeta("wake_mode", tp.WakeMode)
 		}
@@ -1234,6 +1268,26 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				setMeta(store, b.ID, "synced_at", now.Format("2006-01-02T15:04:05Z07:00"), stderr) //nolint:errcheck
 			}
 		}
+		clearAliasConflict := func() {
+			if b.Metadata[poolAliasConflictMetadataKey] != "" {
+				queueMeta(poolAliasConflictMetadataKey, "")
+			}
+			if b.Metadata[poolAliasConflictCountMetadataKey] != "" {
+				queueMeta(poolAliasConflictCountMetadataKey, "")
+			}
+			if b.Metadata[poolAliasConflictAtMetadataKey] != "" {
+				queueMeta(poolAliasConflictAtMetadataKey, "")
+			}
+		}
+		recordAliasConflict := func() {
+			count := 0
+			if existing, err := strconv.Atoi(strings.TrimSpace(b.Metadata[poolAliasConflictCountMetadataKey])); err == nil && existing > 0 {
+				count = existing
+			}
+			queueMeta(poolAliasConflictMetadataKey, managedAlias)
+			queueMeta(poolAliasConflictCountMetadataKey, strconv.Itoa(count+1))
+			queueMeta(poolAliasConflictAtMetadataKey, now.Format(time.RFC3339))
+		}
 		if needsAliasSync {
 			lockAlias := managedAlias
 			if lockAlias == "" {
@@ -1248,11 +1302,14 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 					err = session.EnsureAliasAvailableWithConfig(store, cfg, managedAlias, b.ID)
 				}
 				if err != nil {
+					recordAliasConflict()
 					fmt.Fprintf(stderr, "session beads: alias %q for %s unavailable: %v\n", managedAlias, agentName, err) //nolint:errcheck
 				} else {
+					clearAliasConflict()
 					for key, value := range session.UpdatedAliasMetadata(b.Metadata, managedAlias) {
 						queueMeta(key, value)
 					}
+					mergeAliasGuardedBatch()
 				}
 				applyBatch()
 				appliedWithLock = true
@@ -1264,6 +1321,10 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			if appliedWithLock {
 				continue
 			}
+		}
+		if !needsAliasSync {
+			clearAliasConflict()
+			mergeAliasGuardedBatch()
 		}
 		applyBatch()
 	}
@@ -1364,6 +1425,7 @@ func syncDesiredPoolSlots(
 	}
 
 	for template, names := range desiredByTemplate {
+		agentCfg := findAgentByTemplate(cfg, template)
 		sort.Strings(names)
 		usedSlots := make(map[int]string)
 		slotByName := make(map[string]int, len(names))
@@ -1372,8 +1434,13 @@ func syncDesiredPoolSlots(
 			if !ok {
 				continue
 			}
-			slot, _ := strconv.Atoi(openBeads[idx].Metadata["pool_slot"])
-			if slot <= 0 || slot > len(names) || usedSlots[slot] != "" {
+			bead := openBeads[idx]
+			tp := desiredState[sn]
+			if tp.Alias != "" && bead.Metadata["alias"] != tp.Alias {
+				continue
+			}
+			slot := existingPoolSlotWithConfig(cfg, agentCfg, openBeads[idx])
+			if slot <= 0 || usedSlots[slot] != "" {
 				continue
 			}
 			usedSlots[slot] = sn
@@ -1398,6 +1465,10 @@ func syncDesiredPoolSlots(
 				continue
 			}
 			bead := openBeads[idx]
+			tp := desiredState[sn]
+			if tp.Alias != "" && bead.Metadata["alias"] != tp.Alias {
+				continue
+			}
 			wantSlot := strconv.Itoa(slotByName[sn])
 			batch := map[string]string{}
 			if bead.Metadata[poolManagedMetadataKey] != boolMetadata(true) {
@@ -1495,6 +1566,7 @@ func setMetaBatch(store beads.Store, id string, batch map[string]string, stderr 
 func closeFailedCreateBead(store beads.Store, id string, now time.Time, stderr io.Writer) bool {
 	patch := session.ClosePatch(now.UTC(), "failed-create")
 	patch["pending_create_claim"] = ""
+	patch["pending_create_started_at"] = ""
 	if setMetaBatch(store, id, patch, stderr) != nil {
 		return false
 	}

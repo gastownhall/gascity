@@ -225,7 +225,7 @@ func LifecycleDisplayReason(status string, metadata map[string]string, now time.
 		return ""
 	}
 	if reason := strings.TrimSpace(metadata["sleep_reason"]); reason != "" {
-		staleTimedQuarantine := (reason == "quarantine" || reason == "context-churn") &&
+		staleTimedQuarantine := (reason == "quarantine" || reason == "context-churn" || reason == "rate_limit") &&
 			strings.TrimSpace(metadata["quarantined_until"]) != "" &&
 			!view.HasBlocker(BlockerQuarantined)
 		staleTimedHold := reason == "user-hold" &&
@@ -487,14 +487,22 @@ func projectRuntimeProjection(input LifecycleInput, base BaseState, compat State
 	if base == BaseStateNone || base == BaseStateClosed || base == BaseStateClosing {
 		return RuntimeProjectionMissing, compat, false
 	}
-	if hasWakeCause(wakeCauses, WakeCausePendingCreate) {
-		return RuntimeProjectionStartRequested, StateCreating, false
-	}
+	// #1460: When base is BaseStateCreating, evaluate staleness first.
+	// pending_create_claim represents an in-flight create attempt and is
+	// honored only while the lease (StaleCreatingAfter) is fresh. Once the
+	// lease expires with no live runtime, the claim no longer protects the
+	// bead — otherwise a crashed creator strands the slot indefinitely.
 	if base == BaseStateCreating {
 		if !creatingStateIsStale(input) {
+			if hasWakeCause(wakeCauses, WakeCausePendingCreate) {
+				return RuntimeProjectionStartRequested, StateCreating, false
+			}
 			return RuntimeProjectionFreshCreating, StateCreating, false
 		}
 		return RuntimeProjectionStaleCreating, StateAsleep, shouldResetContinuation(base, input.Metadata, sleepReason)
+	}
+	if hasWakeCause(wakeCauses, WakeCausePendingCreate) {
+		return RuntimeProjectionStartRequested, StateCreating, false
 	}
 	return RuntimeProjectionMissing, StateAsleep, shouldResetContinuation(base, input.Metadata, sleepReason)
 }
@@ -503,14 +511,22 @@ func creatingStateIsStale(input LifecycleInput) bool {
 	if input.StaleCreatingAfter <= 0 {
 		return false
 	}
-	if input.CreatedAt.IsZero() {
-		return true
-	}
 	now := input.Now
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	return !now.Before(input.CreatedAt.Add(input.StaleCreatingAfter))
+	startedAt := input.CreatedAt
+	if input.Metadata != nil {
+		if v := strings.TrimSpace(input.Metadata["pending_create_started_at"]); v != "" {
+			if t, err := time.Parse(time.RFC3339, v); err == nil && !t.IsZero() {
+				startedAt = t
+			}
+		}
+	}
+	if startedAt.IsZero() {
+		return true
+	}
+	return !now.Before(startedAt.Add(input.StaleCreatingAfter))
 }
 
 func shouldResetContinuation(base BaseState, meta map[string]string, sleepReason string) bool {
@@ -521,7 +537,7 @@ func shouldResetContinuation(base BaseState, meta map[string]string, sleepReason
 		return false
 	}
 	switch strings.TrimSpace(sleepReason) {
-	case "idle", "idle-timeout", "no-wake-reason", "config-drift", "drained", "city-stop", "user-hold", "wait-hold":
+	case "idle", "idle-timeout", "no-wake-reason", "config-drift", "drained", "city-stop", "user-hold", "wait-hold", "rate_limit":
 		return false
 	}
 	return base == BaseStateActive || base == BaseStateCreating

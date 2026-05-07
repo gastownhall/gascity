@@ -1705,9 +1705,81 @@ provider = "bd"
 	if got["GC_CITY_RUNTIME_DIR"] != customRuntimeDir {
 		t.Fatalf("GC_CITY_RUNTIME_DIR = %q, want %q; env=%v", got["GC_CITY_RUNTIME_DIR"], customRuntimeDir, got)
 	}
+	wantControlTrace := filepath.Join(customRuntimeDir, "control-dispatcher-trace.log")
+	if got["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"] != wantControlTrace {
+		t.Fatalf("GC_CONTROL_DISPATCHER_TRACE_DEFAULT = %q, want %q; env=%v", got["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"], wantControlTrace, got)
+	}
 	wantStateFile := filepath.Join(packStateDir, "dolt-state.json")
 	if got["GC_DOLT_STATE_FILE"] != wantStateFile {
 		t.Fatalf("GC_DOLT_STATE_FILE = %q, want %q; env=%v", got["GC_DOLT_STATE_FILE"], wantStateFile, got)
+	}
+}
+
+func TestOrderDispatchExecManagedDoltCoercesInCityRuntimeDirForControlTraceDefault(t *testing.T) {
+	store := beads.NewMemStore()
+	cityDir := t.TempDir()
+	dataDir := filepath.Join(cityDir, ".beads", "dolt")
+	unsafeRuntimeDir := filepath.Join(cityDir, "runtime-outside-gc")
+	packStateDir := filepath.Join(unsafeRuntimeDir, "packs", "dolt")
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_CITY_RUNTIME_DIR", unsafeRuntimeDir)
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(packStateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+
+[beads]
+provider = "bd"
+`)
+	writeFile(t, filepath.Join(cityDir, ".beads", "config.yaml"), strings.Join([]string{
+		"issue_prefix: ct",
+		"gc.endpoint_origin: managed_city",
+		"gc.endpoint_status: verified",
+		"dolt.auto-start: false",
+		"",
+	}, "\n"))
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer func() {
+		if err := listener.Close(); err != nil {
+			t.Fatalf("Close listener: %v", err)
+		}
+	}()
+	writeFile(t, filepath.Join(packStateDir, "dolt-state.json"), fmt.Sprintf(
+		`{"running":true,"pid":%d,"port":%d,"data_dir":%q}`,
+		os.Getpid(),
+		listener.Addr().(*net.TCPAddr).Port,
+		dataDir,
+	))
+
+	envCh := make(chan []string, 1)
+	fakeExec := func(_ context.Context, _, _ string, env []string) ([]byte, error) {
+		envCh <- env
+		return nil, nil
+	}
+	aa := []orders.Order{{
+		Name:     "dolt-gc-nudge",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     "gc dolt gc-nudge",
+	}}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
+	ad.dispatch(context.Background(), cityDir, time.Now())
+
+	got := orderDispatchTestEnv(t, envCh)
+	if got["GC_CITY_RUNTIME_DIR"] != unsafeRuntimeDir {
+		t.Fatalf("GC_CITY_RUNTIME_DIR = %q, want %q; env=%v", got["GC_CITY_RUNTIME_DIR"], unsafeRuntimeDir, got)
+	}
+	wantControlTrace := filepath.Join(cityDir, ".gc", "runtime", "control-dispatcher-trace.log")
+	if got["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"] != wantControlTrace {
+		t.Fatalf("GC_CONTROL_DISPATCHER_TRACE_DEFAULT = %q, want %q; env=%v", got["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"], wantControlTrace, got)
 	}
 }
 
@@ -2707,16 +2779,19 @@ func buildOrderDispatcherFromListExec(aa []orders.Order, store beads.Store, ep e
 	if execRun == nil {
 		execRun = shellExecRunner
 	}
+	dispatchCtx, dispatchCancel := context.WithCancel(context.Background())
 	return &memoryOrderDispatcher{
 		aa: auto,
 		storeFn: func(_ execStoreTarget) (beads.Store, error) {
 			return store, nil
 		},
-		ep:      ep,
-		execRun: execRun,
-		rec:     rec,
-		stderr:  &bytes.Buffer{},
-		cfg:     cfg,
+		ep:             ep,
+		execRun:        execRun,
+		rec:            rec,
+		stderr:         &bytes.Buffer{},
+		cfg:            cfg,
+		dispatchCtx:    dispatchCtx,
+		dispatchCancel: dispatchCancel,
 	}
 }
 
@@ -4099,5 +4174,57 @@ func TestOrderDispatcherDrainIdleReturnsImmediately(t *testing.T) {
 	case <-done:
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("drain on idle dispatcher did not return promptly")
+	}
+}
+
+// TestOrderDispatcherCancelTerminatesInFlight verifies cancel() propagates
+// to in-flight dispatchOne goroutines via context, so a follow-up drain
+// returns promptly without waiting out the per-order timeout. Without
+// this, shutdown can race t.TempDir cleanup against subprocesses still
+// holding files inside .gc/ open.
+func TestOrderDispatcherCancelTerminatesInFlight(t *testing.T) {
+	store := beads.NewMemStore()
+	execStarted := make(chan struct{})
+
+	// Exec respects ctx — returns when canceled. This mirrors what
+	// exec.CommandContext does in production: SIGKILL on ctx.Done.
+	fakeExec := func(ctx context.Context, _, _ string, _ []string) ([]byte, error) {
+		close(execStarted)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	aa := []orders.Order{{
+		Name:     "cancel-test",
+		Trigger:  "cooldown",
+		Interval: "2m",
+		Exec:     "scripts/cancel.sh",
+	}}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+	m, ok := ad.(*memoryOrderDispatcher)
+	if !ok {
+		t.Fatalf("expected *memoryOrderDispatcher, got %T", ad)
+	}
+
+	// Use Background so the only ctx that can cancel the dispatchOne is
+	// the one cancel() controls — proves the hookup works.
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	<-execStarted
+
+	m.cancel()
+
+	drainDone := make(chan struct{})
+	go func() {
+		ad.drain(context.Background())
+		close(drainDone)
+	}()
+
+	select {
+	case <-drainDone:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("drain did not return promptly after cancel()")
 	}
 }

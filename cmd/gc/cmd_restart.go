@@ -164,15 +164,12 @@ func doRigRestart(
 			}
 		} else {
 			// Pool agent: resolve live instances from beads first, then legacy discovery.
-			for _, ref := range resolvePoolSessionRefs(store, a.Name, a.Dir, sp0, &a, cityName, sessionTemplate, sp, stderr) {
-				running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, ref.sessionName)
-				if err != nil {
-					fmt.Fprintf(stderr, "gc rig restart: observing %s: %v\n", ref.sessionName, err) //nolint:errcheck
-					return 1
-				}
-				if !running {
-					continue
-				}
+			refs, err := selectRunningPoolSessionRefs(store, sp, cfg, resolvePoolSessionRefs(store, cfg, a.Name, a.Dir, sp0, &a, cityName, sessionTemplate, sp, stderr))
+			if err != nil {
+				fmt.Fprintf(stderr, "gc rig restart: observing %s: %v\n", a.QualifiedName(), err) //nolint:errcheck
+				return 1
+			}
+			for _, ref := range refs {
 				targets = append(targets, stopTarget{
 					name:     ref.sessionName,
 					template: a.QualifiedName(),

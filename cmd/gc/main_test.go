@@ -1349,6 +1349,12 @@ func TestFindSessionNameByTemplate_UsesLegacyAgentLabelForPoolInstance(t *testin
 
 func TestLookupPoolSessionNames_RejectsSharedPrefixSiblingTemplates(t *testing.T) {
 	store := beads.NewMemStore()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(5)},
+		},
+	}
+	cfgAgent := &cfg.Agents[0]
 	for _, bead := range []beads.Bead{
 		{
 			Title:  "worker",
@@ -1376,7 +1382,7 @@ func TestLookupPoolSessionNames_RejectsSharedPrefixSiblingTemplates(t *testing.T
 		}
 	}
 
-	got, err := lookupPoolSessionNames(store, "frontend/worker")
+	got, err := lookupPoolSessionNames(store, cfg, cfgAgent)
 	if err != nil {
 		t.Fatalf("lookupPoolSessionNames: %v", err)
 	}
@@ -1385,6 +1391,734 @@ func TestLookupPoolSessionNames_RejectsSharedPrefixSiblingTemplates(t *testing.T
 	}
 	if _, ok := got["frontend/worker-supervisor-1"]; ok {
 		t.Fatalf("lookupPoolSessionNames(frontend/worker) wrongly matched sibling template: %#v", got)
+	}
+}
+
+func TestLookupPoolSessionNames_PreservesUniqueLegacyLocalSessionNameIdentity(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(5)},
+			{Name: "worker", Dir: "backend", MaxActiveSessions: intPtr(1)},
+		},
+	}
+	cfgAgent := &cfg.Agents[0]
+	if _, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "worker-5",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := lookupPoolSessionNames(store, cfg, cfgAgent)
+	if err != nil {
+		t.Fatalf("lookupPoolSessionNames: %v", err)
+	}
+	if got["frontend/worker-5"] != "worker-5" {
+		t.Fatalf("lookupPoolSessionNames(frontend/worker) = %#v, want unique local session_name to recover worker-5", got)
+	}
+}
+
+func TestLookupPoolSessionNames_DoesNotClaimAmbiguousLegacyLocalSessionNameIdentity(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(5)},
+			{Name: "worker", Dir: "backend", MaxActiveSessions: intPtr(5)},
+		},
+	}
+	cfgAgent := &cfg.Agents[0]
+	if _, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "worker-5",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := lookupPoolSessionNames(store, cfg, cfgAgent)
+	if err != nil {
+		t.Fatalf("lookupPoolSessionNames: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("lookupPoolSessionNames(frontend/worker) = %#v, want ambiguous local session_name to stay unresolved", got)
+	}
+}
+
+func TestLookupPoolSessionNames_PreservesLegacyCommonNameSessionNameIdentity(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(5)},
+			{Name: "worker", Dir: "backend", MaxActiveSessions: intPtr(1)},
+		},
+	}
+	cfgAgent := &cfg.Agents[0]
+	if _, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"common_name":  "worker",
+			"session_name": "worker-5",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := lookupPoolSessionNames(store, cfg, cfgAgent)
+	if err != nil {
+		t.Fatalf("lookupPoolSessionNames: %v", err)
+	}
+	if got["frontend/worker-5"] != "worker-5" {
+		t.Fatalf("lookupPoolSessionNames(frontend/worker) = %#v, want common_name-only legacy session_name to recover worker-5", got)
+	}
+}
+
+func TestLookupPoolSessionNames_DoesNotRecoverSessionNameSlotWhenAliasPresent(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(5)},
+			{Name: "worker", Dir: "backend", MaxActiveSessions: intPtr(1)},
+		},
+	}
+	cfgAgent := &cfg.Agents[0]
+	if _, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":     "frontend/worker",
+			"alias":        "stale-worker-alias",
+			"session_name": "worker-5",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := lookupPoolSessionNames(store, cfg, cfgAgent)
+	if err != nil {
+		t.Fatalf("lookupPoolSessionNames: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("lookupPoolSessionNames(frontend/worker) = %#v, want alias-bearing bead to stay unresolved", got)
+	}
+}
+
+type lookupPoolSessionNameCandidatesStore struct {
+	beads.Store
+	beads []beads.Bead
+}
+
+func (s lookupPoolSessionNameCandidatesStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	var result []beads.Bead
+	for _, bead := range s.beads {
+		if query.Label != "" {
+			matched := false
+			for _, label := range bead.Labels {
+				if label == query.Label {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+		result = append(result, bead)
+	}
+	return result, nil
+}
+
+func TestLookupPoolSessionNames_DoesNotRecoverOwnedPoolSessionNameSlot(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(5)},
+			{Name: "worker", Dir: "backend", MaxActiveSessions: intPtr(1)},
+		},
+	}
+	cfgAgent := &cfg.Agents[0]
+	store := lookupPoolSessionNameCandidatesStore{
+		beads: []beads.Bead{
+			{
+				ID:     "5",
+				Title:  "worker",
+				Type:   sessionBeadType,
+				Status: "open",
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"template":     "frontend/worker",
+					"session_name": PoolSessionName("frontend/worker", "5"),
+				},
+			},
+		},
+	}
+
+	got, err := lookupPoolSessionNames(store, cfg, cfgAgent)
+	if err != nil {
+		t.Fatalf("lookupPoolSessionNames: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("lookupPoolSessionNames(frontend/worker) = %#v, want bead-owned pool session_name to stay unresolved", got)
+	}
+}
+
+func TestLookupPoolSessionNames_PrefersStampedBeadOverLegacyCollision(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(5)},
+			{Name: "worker", Dir: "backend", MaxActiveSessions: intPtr(1)},
+		},
+	}
+	cfgAgent := &cfg.Agents[0]
+	for _, bead := range []beads.Bead{
+		{
+			Title:  "legacy worker",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"common_name":  "worker",
+				"session_name": "worker-7",
+			},
+		},
+		{
+			Title:  "live worker",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"template":     "frontend/worker",
+				"session_name": "s-live-worker-7",
+				"agent_name":   "frontend/worker-7",
+				"pool_slot":    "7",
+			},
+		},
+	} {
+		if _, err := store.Create(bead); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := lookupPoolSessionNames(store, cfg, cfgAgent)
+	if err != nil {
+		t.Fatalf("lookupPoolSessionNames: %v", err)
+	}
+	if got["frontend/worker-7"] != "s-live-worker-7" {
+		t.Fatalf("lookupPoolSessionNames(frontend/worker) = %#v, want stamped bead to win the collision", got)
+	}
+}
+
+func TestLookupPoolSessionNames_DropsAmbiguousLegacyCollision(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(5)},
+			{Name: "worker", Dir: "backend", MaxActiveSessions: intPtr(1)},
+		},
+	}
+	cfgAgent := &cfg.Agents[0]
+	for _, bead := range []beads.Bead{
+		{
+			Title:  "legacy worker a",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"common_name":  "worker",
+				"session_name": "legacy-worker-a",
+				"alias":        "frontend/worker-7",
+			},
+		},
+		{
+			Title:  "legacy worker b",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"common_name":  "worker",
+				"session_name": "legacy-worker-b",
+				"alias":        "frontend/worker-7",
+			},
+		},
+	} {
+		if _, err := store.Create(bead); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := lookupPoolSessionNames(store, cfg, cfgAgent)
+	if err != nil {
+		t.Fatalf("lookupPoolSessionNames: %v", err)
+	}
+	if _, ok := got["frontend/worker-7"]; ok {
+		t.Fatalf("lookupPoolSessionNames(frontend/worker) = %#v, want ambiguous legacy collision dropped", got)
+	}
+}
+
+func TestLookupPoolSessionNames_StampedBeadOverridesEarlierAmbiguousLegacyCollision(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(5)},
+			{Name: "worker", Dir: "backend", MaxActiveSessions: intPtr(1)},
+		},
+	}
+	cfgAgent := &cfg.Agents[0]
+	for _, bead := range []beads.Bead{
+		{
+			Title:  "legacy worker a",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"common_name":  "worker",
+				"session_name": "worker-7",
+			},
+		},
+		{
+			Title:  "legacy worker b",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"common_name":  "worker",
+				"session_name": "legacy-worker-b",
+				"alias":        "frontend/worker-7",
+			},
+		},
+		{
+			Title:  "live worker",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"template":     "frontend/worker",
+				"session_name": "s-live-worker-7",
+				"agent_name":   "frontend/worker-7",
+				"pool_slot":    "7",
+			},
+		},
+	} {
+		if _, err := store.Create(bead); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := lookupPoolSessionNames(store, cfg, cfgAgent)
+	if err != nil {
+		t.Fatalf("lookupPoolSessionNames: %v", err)
+	}
+	if got["frontend/worker-7"] != "s-live-worker-7" {
+		t.Fatalf("lookupPoolSessionNames(frontend/worker) = %#v, want stamped bead to override earlier ambiguous legacy collision", got)
+	}
+}
+
+func TestLookupPoolSessionNames_PrefersConcreteStampedBeadOverPoolSlotOnlyDuplicate(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(5)},
+		},
+	}
+	cfgAgent := &cfg.Agents[0]
+	for _, bead := range []beads.Bead{
+		{
+			Title:  "stale duplicate",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"template":     "frontend/worker",
+				"session_name": "s-stale-duplicate",
+				"pool_slot":    "7",
+			},
+		},
+		{
+			Title:  "live worker",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"template":     "frontend/worker",
+				"session_name": "s-live-worker-7",
+				"agent_name":   "frontend/worker-7",
+				"pool_slot":    "7",
+			},
+		},
+	} {
+		if _, err := store.Create(bead); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := lookupPoolSessionNames(store, cfg, cfgAgent)
+	if err != nil {
+		t.Fatalf("lookupPoolSessionNames: %v", err)
+	}
+	if got["frontend/worker-7"] != "s-live-worker-7" {
+		t.Fatalf("lookupPoolSessionNames(frontend/worker) = %#v, want concrete stamped bead to beat pool_slot-only duplicate", got)
+	}
+}
+
+func TestLookupPoolSessionNames_PrefersActiveStampedBeadOverCreatingScoreTie(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(5)},
+		},
+	}
+	cfgAgent := &cfg.Agents[0]
+	for _, bead := range []beads.Bead{
+		{
+			Title:  "creating duplicate",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"template":     "frontend/worker",
+				"session_name": "a-creating-worker-5",
+				"pool_slot":    "5",
+				"state":        "creating",
+			},
+		},
+		{
+			Title:  "active worker",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"template":     "frontend/worker",
+				"session_name": "z-active-worker-5",
+				"pool_slot":    "5",
+				"state":        "awake",
+			},
+		},
+	} {
+		if _, err := store.Create(bead); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := lookupPoolSessionNames(store, cfg, cfgAgent)
+	if err != nil {
+		t.Fatalf("lookupPoolSessionNames: %v", err)
+	}
+	if got["frontend/worker-5"] != "z-active-worker-5" {
+		t.Fatalf("lookupPoolSessionNames(frontend/worker) = %#v, want active stamped bead to beat creating duplicate", got)
+	}
+}
+
+func TestResolvePoolSessionRefs_KeepsLowerScoredFallbackCandidate(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(10)},
+		},
+	}
+	agentCfg := cfg.Agents[0]
+	for _, bead := range []beads.Bead{
+		{
+			Title:  "stale duplicate",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"template":     "frontend/worker",
+				"session_name": "s-stale-worker-7",
+				"pool_slot":    "7",
+			},
+		},
+		{
+			Title:  "live legacy",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"common_name":  "worker",
+				"session_name": "worker-7",
+				"alias":        "frontend/worker-7",
+			},
+		},
+	} {
+		if _, err := store.Create(bead); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	refs := resolvePoolSessionRefs(store, cfg, agentCfg.Name, agentCfg.Dir, scaleParamsFor(&agentCfg), &agentCfg, "test-city", "", runtime.NewFake(), io.Discard)
+	var got []string
+	for _, ref := range refs {
+		if ref.qualifiedInstance == "frontend/worker-7" {
+			got = append(got, ref.sessionName)
+		}
+	}
+	wantPrefix := []string{"s-stale-worker-7", "worker-7"}
+	if len(got) < len(wantPrefix) || !reflect.DeepEqual(got[:len(wantPrefix)], wantPrefix) {
+		t.Fatalf("resolvePoolSessionRefs(frontend/worker-7) = %v, want prefix %v", got, wantPrefix)
+	}
+}
+
+func TestSelectRunningPoolSessionRefs_PrefersLiveFallbackCandidate(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(10)},
+		},
+	}
+	agentCfg := cfg.Agents[0]
+	for _, bead := range []beads.Bead{
+		{
+			Title:  "stale duplicate",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"template":     "frontend/worker",
+				"session_name": "s-stale-worker-7",
+				"pool_slot":    "7",
+			},
+		},
+		{
+			Title:  "live legacy",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"common_name":  "worker",
+				"session_name": "worker-7",
+				"alias":        "frontend/worker-7",
+			},
+		},
+	} {
+		if _, err := store.Create(bead); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker-7", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatal(err)
+	}
+
+	refs, err := selectRunningPoolSessionRefs(store, sp, cfg, resolvePoolSessionRefs(store, cfg, agentCfg.Name, agentCfg.Dir, scaleParamsFor(&agentCfg), &agentCfg, "test-city", "", sp, io.Discard))
+	if err != nil {
+		t.Fatalf("selectRunningPoolSessionRefs: %v", err)
+	}
+	if len(refs) != 1 {
+		t.Fatalf("selectRunningPoolSessionRefs() returned %d refs, want 1: %#v", len(refs), refs)
+	}
+	if refs[0].qualifiedInstance != "frontend/worker-7" || refs[0].sessionName != "worker-7" {
+		t.Fatalf("selectRunningPoolSessionRefs() = %#v, want frontend/worker-7 -> worker-7", refs)
+	}
+}
+
+func TestSelectRunningPoolSessionRefs_ReturnsAllLiveCandidatesForLogicalInstance(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(10)},
+		},
+	}
+	agentCfg := cfg.Agents[0]
+	for _, bead := range []beads.Bead{
+		{
+			Title:  "stale duplicate",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"template":     "frontend/worker",
+				"session_name": "s-stale-worker-7",
+				"pool_slot":    "7",
+			},
+		},
+		{
+			Title:  "live legacy",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"common_name":  "worker",
+				"session_name": "worker-7",
+				"alias":        "frontend/worker-7",
+			},
+		},
+	} {
+		if _, err := store.Create(bead); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sp := runtime.NewFake()
+	for _, sessionName := range []string{"s-stale-worker-7", "worker-7"} {
+		if err := sp.Start(context.Background(), sessionName, runtime.Config{Command: "echo"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	refs, err := selectRunningPoolSessionRefs(store, sp, cfg, resolvePoolSessionRefs(store, cfg, agentCfg.Name, agentCfg.Dir, scaleParamsFor(&agentCfg), &agentCfg, "test-city", "", sp, io.Discard))
+	if err != nil {
+		t.Fatalf("selectRunningPoolSessionRefs: %v", err)
+	}
+	got := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		if ref.qualifiedInstance == "frontend/worker-7" {
+			got = append(got, ref.sessionName)
+		}
+	}
+	want := []string{"s-stale-worker-7", "worker-7"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("selectRunningPoolSessionRefs(frontend/worker-7) = %v, want %v", got, want)
+	}
+}
+
+func TestSelectRunningPoolSessionRefs_ReportsConcreteSessionOnProbeFailure(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(10)},
+		},
+	}
+	refs := []poolSessionRef{{
+		qualifiedInstance: "frontend/worker-7",
+		sessionName:       "custom-worker-7",
+	}}
+
+	_, err := selectRunningPoolSessionRefs(nil, nil, cfg, refs)
+	if err == nil {
+		t.Fatal("selectRunningPoolSessionRefs() unexpectedly succeeded")
+	}
+	if !strings.Contains(err.Error(), "custom-worker-7") {
+		t.Fatalf("selectRunningPoolSessionRefs() error = %q, want concrete session name", err)
+	}
+}
+
+func TestResolvePoolSessionRefs_ResolvesBindingQualifiedNamepoolAlias(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{
+				Name:          "worker",
+				Dir:           "frontend",
+				BindingName:   "ops",
+				NamepoolNames: []string{"furiosa", "nux"},
+			},
+		},
+	}
+	agentCfg := cfg.Agents[0]
+	if _, err := store.Create(beads.Bead{
+		Title:  "bound themed pool instance",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":     "frontend/ops.worker",
+			"session_name": "ops-furiosa-session",
+			"alias":        "frontend/ops.furiosa",
+			"state":        "awake",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	refs := resolvePoolSessionRefs(store, cfg, agentCfg.Name, agentCfg.Dir, scaleParamsFor(&agentCfg), &agentCfg, "test-city", "", runtime.NewFake(), io.Discard)
+	if len(refs) != 1 {
+		t.Fatalf("resolvePoolSessionRefs() returned %d refs, want 1: %#v", len(refs), refs)
+	}
+	if refs[0].qualifiedInstance != "frontend/ops.furiosa" || refs[0].sessionName != "ops-furiosa-session" {
+		t.Fatalf("resolvePoolSessionRefs() = %#v, want frontend/ops.furiosa -> ops-furiosa-session", refs)
+	}
+}
+
+func TestResolvePoolSessionRefs_UsesBoundTemplatePoolSlotForCustomSessionName(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{
+				Name:          "worker",
+				Dir:           "frontend",
+				BindingName:   "ops",
+				NamepoolNames: []string{"furiosa", "nux"},
+			},
+		},
+	}
+	agentCfg := cfg.Agents[0]
+	if _, err := store.Create(beads.Bead{
+		Title:  "bound themed pool instance",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":     "frontend/ops.worker",
+			"session_name": "custom-ops-furiosa",
+			"pool_slot":    "1",
+			"state":        "awake",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	refs := resolvePoolSessionRefs(store, cfg, agentCfg.Name, agentCfg.Dir, scaleParamsFor(&agentCfg), &agentCfg, "test-city", "", runtime.NewFake(), io.Discard)
+	if len(refs) != 1 {
+		t.Fatalf("resolvePoolSessionRefs() returned %d refs, want 1: %#v", len(refs), refs)
+	}
+	if refs[0].qualifiedInstance != "frontend/ops.furiosa" || refs[0].sessionName != "custom-ops-furiosa" {
+		t.Fatalf("resolvePoolSessionRefs() = %#v, want frontend/ops.furiosa -> custom-ops-furiosa", refs)
+	}
+}
+
+func TestResolvePoolSessionRefs_RewritesTemplateIdentityAgentNameFromPoolSlot(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(10)},
+		},
+	}
+	agentCfg := cfg.Agents[0]
+	if _, err := store.Create(beads.Bead{
+		Title:  "legacy pool instance",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":     "frontend/worker",
+			"agent_name":   "frontend/worker",
+			"session_name": "custom-worker-7",
+			"pool_slot":    "7",
+			"state":        "awake",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	refs := resolvePoolSessionRefs(store, cfg, agentCfg.Name, agentCfg.Dir, scaleParamsFor(&agentCfg), &agentCfg, "test-city", "", runtime.NewFake(), io.Discard)
+	for _, ref := range refs {
+		if ref.sessionName == "custom-worker-7" {
+			if ref.qualifiedInstance != "frontend/worker-7" {
+				t.Fatalf("resolvePoolSessionRefs() custom ref = %#v, want frontend/worker-7 -> custom-worker-7", ref)
+			}
+			return
+		}
+	}
+	t.Fatalf("resolvePoolSessionRefs() = %#v, want custom-worker-7 candidate keyed by frontend/worker-7", refs)
+}
+
+func TestResolvePoolSessionRefs_DoesNotRecoverOutOfBoundsAliasOnlyBoundedPoolIdentity(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(5)},
+		},
+	}
+	agentCfg := cfg.Agents[0]
+	if _, err := store.Create(beads.Bead{
+		Title:  "stale out-of-bounds pool instance",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":     "frontend/worker",
+			"alias":        "frontend/worker-7",
+			"session_name": "custom-worker-7",
+			"state":        "awake",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	refs := resolvePoolSessionRefs(store, cfg, agentCfg.Name, agentCfg.Dir, scaleParamsFor(&agentCfg), &agentCfg, "test-city", "", runtime.NewFake(), io.Discard)
+	for _, ref := range refs {
+		if ref.sessionName == "custom-worker-7" {
+			t.Fatalf("resolvePoolSessionRefs() unexpectedly kept out-of-bounds ref %#v", ref)
+		}
 	}
 }
 

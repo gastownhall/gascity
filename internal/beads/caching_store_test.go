@@ -1254,6 +1254,107 @@ func TestCachingStoreCachedReadyUsesWriteThroughDependencies(t *testing.T) {
 	}
 }
 
+func TestCachingStoreReadyFallsBackAfterDependencyOmittingUpdateEvent(t *testing.T) {
+	t.Parallel()
+
+	t.Run("external dep add", func(t *testing.T) {
+		mem := beads.NewMemStore()
+		blocker, err := mem.Create(beads.Bead{Title: "Blocker"})
+		if err != nil {
+			t.Fatalf("Create(blocker): %v", err)
+		}
+		target, err := mem.Create(beads.Bead{Title: "Target"})
+		if err != nil {
+			t.Fatalf("Create(target): %v", err)
+		}
+		cache := beads.NewCachingStoreForTest(mem, nil)
+		if err := cache.Prime(context.Background()); err != nil {
+			t.Fatalf("Prime: %v", err)
+		}
+
+		if err := mem.DepAdd(target.ID, blocker.ID, "blocks"); err != nil {
+			t.Fatalf("backing DepAdd: %v", err)
+		}
+		cache.ApplyEvent("bead.updated", dependencyOmittingUpdatePayload(t, target))
+
+		if ready, ok := cache.CachedReady(); ok {
+			t.Fatalf("CachedReady remained authoritative after dependency-omitting dep-add event: %v", ready)
+		}
+		ready, err := cache.Ready()
+		if err != nil {
+			t.Fatalf("Ready: %v", err)
+		}
+		if containsBeadID(ready, target.ID) {
+			t.Fatalf("Ready = %v, want backing dependency add to block %s", ready, target.ID)
+		}
+	})
+
+	t.Run("external dep remove", func(t *testing.T) {
+		mem := beads.NewMemStore()
+		blocker, err := mem.Create(beads.Bead{Title: "Blocker"})
+		if err != nil {
+			t.Fatalf("Create(blocker): %v", err)
+		}
+		target, err := mem.Create(beads.Bead{Title: "Target"})
+		if err != nil {
+			t.Fatalf("Create(target): %v", err)
+		}
+		if err := mem.DepAdd(target.ID, blocker.ID, "blocks"); err != nil {
+			t.Fatalf("DepAdd: %v", err)
+		}
+		cache := beads.NewCachingStoreForTest(mem, nil)
+		if err := cache.Prime(context.Background()); err != nil {
+			t.Fatalf("Prime: %v", err)
+		}
+		cache.ApplyEvent("bead.updated", dependencySnapshotUpdatePayload(t, target, []beads.Dep{{
+			IssueID:     target.ID,
+			DependsOnID: blocker.ID,
+			Type:        "blocks",
+		}}))
+
+		if err := mem.DepRemove(target.ID, blocker.ID); err != nil {
+			t.Fatalf("backing DepRemove: %v", err)
+		}
+		cache.ApplyEvent("bead.updated", dependencyOmittingUpdatePayload(t, target))
+
+		if ready, ok := cache.CachedReady(); ok {
+			t.Fatalf("CachedReady remained authoritative after dependency-omitting dep-remove event: %v", ready)
+		}
+		ready, err := cache.Ready()
+		if err != nil {
+			t.Fatalf("Ready: %v", err)
+		}
+		if !containsBeadID(ready, target.ID) {
+			t.Fatalf("Ready = %v, want backing dependency removal to unblock %s", ready, target.ID)
+		}
+	})
+}
+
+func TestCachingStoreUpdatedEventForNewBeadDoesNotTreatUnknownDepsAsEmpty(t *testing.T) {
+	t.Parallel()
+
+	mem := beads.NewMemStore()
+	blocker, err := mem.Create(beads.Bead{Title: "Blocker"})
+	if err != nil {
+		t.Fatalf("Create(blocker): %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(mem, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	target, err := mem.Create(beads.Bead{Title: "Target", Needs: []string{blocker.ID}})
+	if err != nil {
+		t.Fatalf("Create(target): %v", err)
+	}
+	cache.ApplyEvent("bead.updated", dependencyOmittingUpdatePayload(t, target))
+
+	ready, ok := cache.CachedReady()
+	if ok && containsBeadID(ready, target.ID) {
+		t.Fatalf("CachedReady = %v, want new bead dependency coverage not treated as empty", ready)
+	}
+}
+
 func TestCachingStoreCachedReadyIgnoresStaleDependencyEventsAfterLocalMutation(t *testing.T) {
 	t.Parallel()
 
@@ -1383,6 +1484,41 @@ func TestCachingStoreCachedReadyUsesCompleteCreatedEventDependencies(t *testing.
 	}
 }
 
+func TestCachingStoreCachedReadyUsesCompleteUpdatedEventDependencies(t *testing.T) {
+	t.Parallel()
+	mem := beads.NewMemStore()
+	blocker, err := mem.Create(beads.Bead{Title: "Blocker"})
+	if err != nil {
+		t.Fatalf("Create(blocker): %v", err)
+	}
+	target, err := mem.Create(beads.Bead{Title: "Event target"})
+	if err != nil {
+		t.Fatalf("Create(target): %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(mem, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	cache.ApplyEvent("bead.updated", []byte(`{"id":"`+target.ID+`","title":"Event target","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z","dependencies":[{"issue_id":"`+target.ID+`","depends_on_id":"`+blocker.ID+`","type":"blocks"}]}`))
+	ready, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable after dependency update")
+	}
+	ids := map[string]bool{}
+	for _, b := range ready {
+		ids[b.ID] = true
+	}
+	if ids[target.ID] {
+		t.Fatalf("CachedReady ids = %v, want target blocked by updated dependencies", ids)
+	}
+
+	cache.ApplyEvent("bead.updated", []byte(`{"id":"`+target.ID+`","title":"Event target","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z"}`))
+	if ready, ok = cache.CachedReady(); ok {
+		t.Fatalf("CachedReady remained authoritative after dependency-omitting update: %v", ready)
+	}
+}
+
 func TestCachingStoreCachedReadyUnavailableForPartialEventDependencies(t *testing.T) {
 	t.Parallel()
 	cache := beads.NewCachingStoreForTest(beads.NewMemStore(), nil)
@@ -1428,15 +1564,32 @@ func TestCachingStoreCachedReadyRefreshesEventNeedsDependencies(t *testing.T) {
 
 	cache.ApplyEvent("bead.updated", []byte(`{"id":"`+target.ID+`","title":"Event target","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z"}`))
 	if ready, ok = cache.CachedReady(); ok {
-		t.Fatalf("CachedReady available after dependency-omitting update, ready=%v", ready)
+		t.Fatalf("CachedReady remained authoritative after dependency-omitting update: %v", ready)
+	}
+}
+
+func TestCachingStoreCachedReadyClearsExplicitEventNeeds(t *testing.T) {
+	t.Parallel()
+	mem := beads.NewMemStore()
+	blocker, err := mem.Create(beads.Bead{Title: "Blocker"})
+	if err != nil {
+		t.Fatalf("Create(blocker): %v", err)
+	}
+	target, err := mem.Create(beads.Bead{Title: "Event target", Needs: []string{blocker.ID}})
+	if err != nil {
+		t.Fatalf("Create(target): %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(mem, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
 	}
 
-	cache.ApplyEvent("bead.updated", []byte(`{"id":"`+target.ID+`","title":"Event target","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z","needs":[]}`))
-	ready, ok = cache.CachedReady()
+	cache.ApplyEvent("bead.updated", []byte(`{"id":"`+target.ID+`","title":"Event target","status":"open","issue_type":"task","needs":[]}`))
+	ready, ok := cache.CachedReady()
 	if !ok {
 		t.Fatal("CachedReady reported cache unavailable after explicit needs clear")
 	}
-	ids = map[string]bool{}
+	ids := map[string]bool{}
 	for _, b := range ready {
 		ids[b.ID] = true
 	}
@@ -2136,7 +2289,7 @@ func TestCachingStoreReconcilerStopsOnCancel(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cs.StartReconciler(ctx)
+	cs.StartReconciler(ctx, beads.WithStaggerOff(), "")
 	time.Sleep(100 * time.Millisecond)
 	cancel()
 	time.Sleep(100 * time.Millisecond)
@@ -2300,6 +2453,154 @@ func containsBeadID(items []beads.Bead, id string) bool {
 		}
 	}
 	return false
+}
+
+func dependencyOmittingUpdatePayload(t *testing.T, b beads.Bead) json.RawMessage {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"id":         b.ID,
+		"title":      b.Title,
+		"status":     b.Status,
+		"issue_type": b.Type,
+		"created_at": b.CreatedAt,
+	})
+	if err != nil {
+		t.Fatalf("Marshal event payload: %v", err)
+	}
+	return payload
+}
+
+func dependencySnapshotUpdatePayload(t *testing.T, b beads.Bead, deps []beads.Dep) json.RawMessage {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"id":           b.ID,
+		"title":        b.Title,
+		"status":       b.Status,
+		"issue_type":   b.Type,
+		"created_at":   b.CreatedAt,
+		"dependencies": deps,
+	})
+	if err != nil {
+		t.Fatalf("Marshal event payload: %v", err)
+	}
+	return payload
+}
+
+func TestStartReconcilerStaggerOff(t *testing.T) {
+	t.Parallel()
+	mem := beads.NewMemStore()
+	cs := beads.NewCachingStoreForTest(mem, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs.StartReconciler(ctx, beads.WithStaggerOff(), "any-agent-name")
+
+	if got := cs.Stats().StaggerOffsetMs; got != 0 {
+		t.Fatalf("StaggerOffsetMs = %d, want 0 with WithStaggerOff()", got)
+	}
+}
+
+func TestStartReconcilerStaggerFixed(t *testing.T) {
+	t.Parallel()
+	mem := beads.NewMemStore()
+	cs := beads.NewCachingStoreForTest(mem, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs.StartReconciler(ctx, beads.WithStaggerFixed(5*time.Second), "any-agent-name")
+
+	if got := cs.Stats().StaggerOffsetMs; got != 5000 {
+		t.Fatalf("StaggerOffsetMs = %d, want 5000 with WithStaggerFixed(5s)", got)
+	}
+}
+
+func TestStartReconcilerStaggerFixedNegativeClampsToZero(t *testing.T) {
+	t.Parallel()
+	mem := beads.NewMemStore()
+	cs := beads.NewCachingStoreForTest(mem, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs.StartReconciler(ctx, beads.WithStaggerFixed(-1*time.Second), "")
+
+	if got := cs.Stats().StaggerOffsetMs; got != 0 {
+		t.Fatalf("StaggerOffsetMs = %d, want 0 for negative WithStaggerFixed", got)
+	}
+}
+
+func TestStartReconcilerStaggerAutoIsDeterministic(t *testing.T) {
+	t.Parallel()
+
+	// Acceptance criterion 2: pinned FNV-32a-derived offset for a known agent_id.
+	cases := []struct {
+		agentID      string
+		wantOffsetMs int64
+	}{
+		{"beads/builder-1", 20616},
+		{"beads/builder-2", 13473},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.agentID, func(t *testing.T) {
+			t.Parallel()
+			mem := beads.NewMemStore()
+			cs := beads.NewCachingStoreForTest(mem, nil)
+			if err := cs.Prime(context.Background()); err != nil {
+				t.Fatalf("Prime: %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			cs.StartReconciler(ctx, beads.WithStaggerAuto(), tc.agentID)
+
+			got := cs.Stats().StaggerOffsetMs
+			if got != tc.wantOffsetMs {
+				t.Fatalf("StaggerOffsetMs for %q = %d, want %d (FNV-32a pin)", tc.agentID, got, tc.wantOffsetMs)
+			}
+			if got < 0 || got >= 30000 {
+				t.Fatalf("StaggerOffsetMs for %q = %d outside [0, 30000) bound", tc.agentID, got)
+			}
+		})
+	}
+}
+
+func TestStartReconcilerStaggerAutoDifferentAgentsDiffer(t *testing.T) {
+	t.Parallel()
+
+	// Acceptance criterion 1: two agents started with WithStaggerAuto produce
+	// measurably different stagger offsets.
+	mem1 := beads.NewMemStore()
+	cs1 := beads.NewCachingStoreForTest(mem1, nil)
+	if err := cs1.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime cs1: %v", err)
+	}
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	defer cancel1()
+	cs1.StartReconciler(ctx1, beads.WithStaggerAuto(), "beads/builder-1")
+
+	mem2 := beads.NewMemStore()
+	cs2 := beads.NewCachingStoreForTest(mem2, nil)
+	if err := cs2.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime cs2: %v", err)
+	}
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	cs2.StartReconciler(ctx2, beads.WithStaggerAuto(), "beads/builder-2")
+
+	off1 := cs1.Stats().StaggerOffsetMs
+	off2 := cs2.Stats().StaggerOffsetMs
+	if off1 == off2 {
+		t.Fatalf("expected different stagger offsets for distinct agents; both got %d", off1)
+	}
 }
 
 func findTestBead(items []beads.Bead, id string) (beads.Bead, bool) {

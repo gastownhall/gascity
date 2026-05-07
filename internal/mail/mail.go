@@ -104,7 +104,8 @@ type Provider interface {
 	Reply(id, from, subject, body string) (Message, error)
 
 	// Thread returns all messages sharing a thread ID, ordered by time.
-	Thread(threadID string) ([]Message, error)
+	// The id may be either the thread ID or any message ID in that thread.
+	Thread(id string) ([]Message, error)
 
 	// All returns all open messages (read and unread) for the recipient.
 	All(recipient string) ([]Message, error)

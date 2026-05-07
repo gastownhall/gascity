@@ -154,7 +154,7 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 		if ctx.Err() != nil {
 			return
 		}
-		cs.StartReconciler(ctx)
+		cs.StartReconciler(ctx, beads.WithStaggerAuto(), os.Getenv("GC_AGENT"))
 	}()
 	return cs
 }
@@ -778,6 +778,15 @@ func (cs *controllerState) CreateAgent(a config.Agent) error {
 	return cs.mutateAndPoke(func() error {
 		return cs.editor.CreateAgent(a)
 	})
+}
+
+// WaitForAgentVisibility blocks until findAgent in the controller's hot-reloaded
+// config snapshot resolves the given qualified agent name. CreateAgent already
+// refreshes cs.cfg from disk, so the first check normally succeeds; the wait
+// preserves the HTTP contract that a successful POST /agents response can be
+// followed immediately by POST /sling against the same target.
+func (cs *controllerState) WaitForAgentVisibility(ctx context.Context, qualifiedName string) error {
+	return api.WaitForAgentVisibilityIn(ctx, cs.Config, qualifiedName)
 }
 
 // UpdateAgent partially updates an existing agent definition in city.toml.

@@ -77,6 +77,7 @@ func TestPlanDoltDrops_BeadsTRequiresHexSuffix(t *testing.T) {
 		"beads_tenant",
 		"beads_tmp_prod",
 		"beads_t123",
+		"beads_tABCDEF12",
 		"beads_t1234abcg",
 	}
 

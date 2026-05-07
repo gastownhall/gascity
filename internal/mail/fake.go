@@ -255,11 +255,19 @@ func (f *Fake) Reply(id, from, subject, body string) (Message, error) {
 }
 
 // Thread returns all messages sharing a thread ID, ordered by time.
-func (f *Fake) Thread(threadID string) ([]Message, error) {
+// id may be either the thread ID or any message ID in that thread.
+func (f *Fake) Thread(id string) ([]Message, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.broken {
 		return nil, fmt.Errorf("mail provider unavailable")
+	}
+	threadID := id
+	for _, fm := range f.messages {
+		if fm.msg.ID == id {
+			threadID = fm.msg.ThreadID
+			break
+		}
 	}
 	var result []Message
 	for _, fm := range f.messages {

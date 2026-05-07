@@ -2950,7 +2950,7 @@ func writeDoctorManagedDoltConfig(t *testing.T, cityPath string, overrides map[s
 		"behavior": map[string]any{
 			"auto_gc_behavior": map[string]any{
 				"enable":        true,
-				"archive_level": 1,
+				"archive_level": 0,
 			},
 		},
 	}
@@ -3072,6 +3072,18 @@ func TestDoltConfigCheck_OK(t *testing.T) {
 	}
 	if !strings.Contains(r.Message, "OK") {
 		t.Errorf("message = %q, want OK text", r.Message)
+	}
+}
+
+func TestDoltConfigCheck_AcceptsLegacyArchiveLevelOne(t *testing.T) {
+	dir := setupManagedDoltCity(t)
+	writeDoctorManagedDoltConfig(t, dir, map[string]any{
+		"behavior.auto_gc_behavior.archive_level": 1,
+	})
+	c := NewDoltConfigCheck(dir, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK for one-release archive_level=1 compatibility; msg = %s", r.Status, r.Message)
 	}
 }
 

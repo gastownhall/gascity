@@ -153,6 +153,7 @@ type startResult struct {
 	started         time.Time
 	finished        time.Time
 	rollbackPending bool
+	rateLimitScreen bool
 }
 
 type startExecutionOptions struct {
@@ -621,7 +622,8 @@ func buildPreparedStart(
 	}
 	firstStart := session.Metadata["started_config_hash"] == ""
 	forceFresh := session.Metadata["wake_mode"] == "fresh"
-	if !firstStart && !forceFresh {
+	hasResumeKey := strings.TrimSpace(session.Metadata["session_key"]) != ""
+	if !firstStart && !forceFresh && hasResumeKey {
 		agentCfg.PromptSuffix = ""
 		agentCfg.PromptFlag = ""
 		agentCfg.Nudge = tp.Hints.Nudge
@@ -794,6 +796,7 @@ func runPreparedStartCandidate(
 	}
 	defer cancel()
 	_, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg)
+	startCtxErr := startCtx.Err()
 	if err != nil && errors.Is(err, sessionpkg.ErrStateSync) {
 		running, runningErr := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, item.candidate.name())
 		if runningErr == nil && running {
@@ -824,7 +827,8 @@ func runPreparedStartCandidate(
 	}
 	finished := time.Now()
 	rollbackPending := err != nil && shouldRollbackPendingCreate(item.candidate.session)
-	if err != nil && rollbackPending && runningSessionMatchesPendingCreate(item.candidate.session, item.candidate.name(), sp) {
+	rateLimitScreen := err != nil && startupRateLimitScreenDetected(item, cityPath, sp, store, cfg)
+	if err != nil && rollbackPending && !rateLimitScreen && runningSessionMatchesPendingCreate(item.candidate.session, item.candidate.name(), sp) {
 		return startResult{
 			prepared:        item,
 			err:             nil,
@@ -836,27 +840,27 @@ func runPreparedStartCandidate(
 	}
 	var outcome string
 	switch {
-	case startCtx.Err() == context.DeadlineExceeded:
-		outcome = "deadline_exceeded"
-		if err == nil {
-			err = fmt.Errorf("resuming session: %w", context.DeadlineExceeded)
-		}
-	case startCtx.Err() == context.Canceled:
-		outcome = "canceled"
-		if err == nil {
-			err = fmt.Errorf("resuming session: %w", context.Canceled)
-		}
-	case err == nil:
-		outcome = "success"
 	case errors.Is(err, runtime.ErrSessionInitializing):
 		outcome = "session_initializing"
 		err = nil
+	case startCtxErr == context.DeadlineExceeded:
+		outcome = "deadline_exceeded"
+		if err == nil {
+			err = fmt.Errorf("session %q startup: %w", item.candidate.name(), context.DeadlineExceeded)
+		}
+	case startCtxErr == context.Canceled:
+		outcome = "canceled"
+		if err == nil {
+			err = fmt.Errorf("session %q startup: %w", item.candidate.name(), context.Canceled)
+		}
+	case err == nil:
+		outcome = "success"
 	case errors.Is(err, runtime.ErrSessionExists):
 		running, runningErr := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, item.candidate.name())
 		switch {
 		case runningErr != nil || !running:
 			outcome = "provider_error"
-		case rollbackPending && runningSessionMatchesPendingCreate(item.candidate.session, item.candidate.name(), sp):
+		case rollbackPending && !rateLimitScreen && runningSessionMatchesPendingCreate(item.candidate.session, item.candidate.name(), sp):
 			outcome = "session_exists_converged"
 			err = nil
 			rollbackPending = false
@@ -866,6 +870,9 @@ func runPreparedStartCandidate(
 	default:
 		outcome = "provider_error"
 	}
+	if err == nil {
+		rateLimitScreen = false
+	}
 	return startResult{
 		prepared:        item,
 		err:             err,
@@ -873,7 +880,40 @@ func runPreparedStartCandidate(
 		started:         started,
 		finished:        finished,
 		rollbackPending: rollbackPending,
+		rateLimitScreen: rateLimitScreen,
 	}
+}
+
+func startupRateLimitScreenDetected(
+	item preparedStart,
+	cityPath string,
+	sp runtime.Provider,
+	store beads.Store,
+	cfg *config.City,
+) bool {
+	if item.candidate.session == nil {
+		return false
+	}
+	if cfg != nil && cfg.Session.Provider == "subprocess" {
+		return false
+	}
+	lastWoke := item.candidate.session.Metadata["last_woke_at"]
+	if lastWoke == "" {
+		return false
+	}
+	if _, err := time.Parse(time.RFC3339, lastWoke); err != nil {
+		return false
+	}
+	content, err := workerSessionTargetPeekWithConfig(
+		cityPath,
+		store,
+		sp,
+		cfg,
+		item.candidate.name(),
+		rateLimitPeekLines,
+		item.cfg.ProcessNames,
+	)
+	return err == nil && runtime.ContainsProviderRateLimitScreen(content)
 }
 
 func enqueuePreparedStartWaveForCity(
@@ -1211,8 +1251,28 @@ func commitStartResultTraced(
 		return false
 	}
 	if result.err != nil {
+		fmt.Fprintf(stderr, "session reconciler: starting %s: %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
+		if result.rateLimitScreen {
+			if err := recordRateLimitQuarantine(session, store, clk); err != nil {
+				fmt.Fprintf(stderr, "session reconciler: recording startup rate-limit hold for %s: %v\n", name, err) //nolint:errcheck
+				if trace != nil {
+					trace.recordOperation("reconciler.start.rate_limit_hold", tp.TemplateName, name, "", "start", "hold_deferred", traceRecordPayload{
+						"error": formatLifecycleError(result.err),
+						"cause": err.Error(),
+					}, "")
+				}
+				logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err)
+				return false
+			}
+			if trace != nil {
+				trace.recordOperation("reconciler.start.rate_limit_hold", tp.TemplateName, name, "", "start", "held", traceRecordPayload{
+					"error": formatLifecycleError(result.err),
+				}, "")
+			}
+			logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err)
+			return false
+		}
 		if result.rollbackPending {
-			fmt.Fprintf(stderr, "session reconciler: starting %s: %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
 			if trace != nil {
 				trace.recordOperation("reconciler.start.rollback_pending", tp.TemplateName, name, "", "start", result.outcome, traceRecordPayload{
 					"error": formatLifecycleError(result.err),
@@ -1222,7 +1282,6 @@ func commitStartResultTraced(
 			logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err)
 			return false
 		}
-		fmt.Fprintf(stderr, "session reconciler: starting %s: %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
 		if err := store.SetMetadata(session.ID, "last_woke_at", ""); err != nil {
 			fmt.Fprintf(stderr, "session reconciler: clearing last_woke_at for %s: %v\n", name, err) //nolint:errcheck
 		} else {
@@ -1483,6 +1542,9 @@ func executePlannedStartsTraced(
 	if len(candidates) == 0 {
 		return 0
 	}
+	if ctx != nil && ctx.Err() != nil {
+		return 0
+	}
 	startOpts := startExecutionOptions{}
 	for _, apply := range options {
 		if apply != nil {
@@ -1512,6 +1574,9 @@ func executePlannedStartsTraced(
 	}
 	wakeCount := 0
 	for wave := 0; wave <= maxWave; wave++ {
+		if ctx != nil && ctx.Err() != nil {
+			return wakeCount
+		}
 		waveStarted := time.Now()
 		asyncFollowUpRequired := false
 		var waveCandidates []startCandidate
@@ -1531,6 +1596,9 @@ func executePlannedStartsTraced(
 		}
 		var ready []startCandidate
 		for _, candidate := range waveCandidates {
+			if ctx != nil && ctx.Err() != nil {
+				return wakeCount
+			}
 			if !allDependenciesAliveForTemplateWithClock(candidate.logicalTemplate(cfg), cfg, desiredState, sp, cityName, store, clk) {
 				logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "blocked_on_dependencies", time.Time{}, time.Time{}, nil)
 				continue
@@ -1550,6 +1618,9 @@ func executePlannedStartsTraced(
 			var prepared []preparedStart
 			var asyncPrepared []asyncPreparedStart
 			for _, candidate := range batchCandidates {
+				if ctx != nil && ctx.Err() != nil {
+					return wakeCount
+				}
 				if !allDependenciesAliveForTemplateWithClock(candidate.logicalTemplate(cfg), cfg, desiredState, sp, cityName, store, clk) {
 					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "blocked_on_dependencies", time.Time{}, time.Time{}, nil)
 					continue
@@ -1647,6 +1718,9 @@ func executePlannedStartsTraced(
 			}
 			offset = end
 			var results []startResult
+			if ctx != nil && ctx.Err() != nil {
+				return wakeCount
+			}
 			if startOpts.async {
 				results = enqueuePreparedStartWaveForCity(ctx, asyncPrepared, cityPath, sp, store, cfg, clk, rec, startupTimeout, wave, stdout, stderr, trace, startOpts.asyncFollowUp)
 				if len(results) > 0 && asyncStartBatchNeedsFollowUp(batchCandidates, cfg) {

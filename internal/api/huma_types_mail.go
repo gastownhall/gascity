@@ -107,7 +107,7 @@ type MailDeleteInput struct {
 // MailThreadInput is the Huma input for GET /v0/city/{cityName}/mail/thread/{id}.
 type MailThreadInput struct {
 	CityScope
-	ID  string `path:"id" doc:"Thread ID."`
+	ID  string `path:"id" doc:"Thread ID, or any message ID in the thread."`
 	Rig string `query:"rig" required:"false" doc:"Filter by rig."`
 }
 

@@ -131,6 +131,9 @@ func TestRunDoltCleanup_ForceDropsStaleDatabases(t *testing.T) {
 	client := &fakeCleanupDoltClient{
 		databases: []string{"hq", "beads", "testdb_abc", "doctest_x"},
 	}
+	fs := fsys.NewFake()
+	fs.Files["/city/.beads/metadata.json"] = []byte(`{"dolt_database":"hq"}`)
+	fs.Files["/beads/.beads/metadata.json"] = []byte(`{"dolt_database":"beads"}`)
 	rigs := []resolverRig{
 		{Name: "hq", Path: "/city", HQ: true},
 		{Name: "beads", Path: "/beads"},
@@ -139,7 +142,7 @@ func TestRunDoltCleanup_ForceDropsStaleDatabases(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	opts := cleanupOptions{
 		Rigs:              rigs,
-		FS:                fsys.NewFake(),
+		FS:                fs,
 		JSON:              true,
 		Force:             true,
 		DoltClient:        client,

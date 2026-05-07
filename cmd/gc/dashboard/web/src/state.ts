@@ -45,6 +45,7 @@ const CITY_SCOPED_RESOURCES: DashboardResource[] = [
 
 let currentCity = readCityScope(window.location.search);
 let cachedCities: CityInfoSummary[] = [];
+let cachedCitiesKnown = false;
 const invalidated = new Set<DashboardResource>(ALL_RESOURCES);
 
 export function cityScope(): string {
@@ -85,6 +86,7 @@ export function consumeInvalidated(force = false): Set<DashboardResource> {
 }
 
 export function setCachedCities(cities: CityInfoSummary[]): void {
+  cachedCitiesKnown = true;
   cachedCities = cities.map((city) => ({
     error: city.error,
     name: city.name,
@@ -93,6 +95,10 @@ export function setCachedCities(cities: CityInfoSummary[]): void {
     running: city.running,
     status: city.status,
   }));
+}
+
+export function markCachedCitiesUnknown(): void {
+  cachedCitiesKnown = false;
 }
 
 export function getCachedCities(): CityInfoSummary[] {
@@ -120,9 +126,20 @@ export type CurrentCityStatus =
 export function currentCityStatus(): CurrentCityStatus {
   const name = currentCity;
   if (name === "") return { kind: "supervisor" };
+  if (!cachedCitiesKnown) return { kind: "unknown", name };
   const city = cachedCities.find((c) => c.name === name);
   if (!city) return { kind: "unknown", name };
   return city.running ? { kind: "running", city } : { kind: "not-running", city };
+}
+
+export function canFetchCityScopedResources(status: CurrentCityStatus = currentCityStatus()): boolean {
+  if (status.kind === "running") return true;
+  if (status.kind === "unknown") return !cachedCitiesKnown;
+  return false;
+}
+
+export function isKnownUnavailableCity(status: CurrentCityStatus = currentCityStatus()): boolean {
+  return status.kind === "not-running" || (status.kind === "unknown" && cachedCitiesKnown);
 }
 
 export function invalidateForEventType(type: string): boolean {

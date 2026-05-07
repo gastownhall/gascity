@@ -185,7 +185,7 @@ re-reads formula steps and resumes from context.
 gc mail send mayor/ -s "Subject" -m "Message"              # Escalate to mayor
 gc mail send {{ .RigName }}/refinery -s "Subject" -m "..."  # Refinery questions
 gc session nudge {{ .RigName }}/<polecat-name> "Run gc hook; it checks assigned work before routed pool work"
-gc session peek {{ .RigName }}/<polecat-name> 50             # View polecat output
+gc session peek {{ .RigName }}/<polecat-name> --lines 50     # View polecat output
 ```
 
 Use the concrete polecat name from `gc status` or `gc session list`;

@@ -91,6 +91,11 @@ type orderStoreFunc func(execStoreTarget) (beads.Store, error)
 // orphaned waiter goroutine. dispatch is only ever called from the tick
 // goroutine, so addInflight's check-and-create happens-before any
 // concurrent drain call on the same instance.
+//
+// dispatchCtx is the parent context for every dispatchOne goroutine. The
+// per-goroutine ctx is derived to cancel when EITHER the caller's tick
+// ctx OR dispatchCtx is done (see launchDispatchOne). cancel() cancels
+// dispatchCtx.
 type memoryOrderDispatcher struct {
 	aa           []orders.Order
 	storeFn      orderStoreFunc
@@ -103,6 +108,9 @@ type memoryOrderDispatcher struct {
 	cityName     string
 	cacheMu      sync.Mutex
 	lastRunCache map[string]time.Time
+
+	dispatchCtx    context.Context
+	dispatchCancel context.CancelFunc
 
 	inflightMu   sync.Mutex
 	inflightN    int
@@ -143,18 +151,21 @@ func buildOrderDispatcher(cityPath string, cfg *config.City, rec events.Recorder
 		ep = p
 	}
 
+	dispatchCtx, dispatchCancel := context.WithCancel(context.Background())
 	return &memoryOrderDispatcher{
 		aa: auto,
 		storeFn: func(target execStoreTarget) (beads.Store, error) {
 			return openStoreAtForCity(target.ScopeRoot, cityPath)
 		},
-		ep:         ep,
-		execRun:    shellExecRunner,
-		rec:        rec,
-		stderr:     stderr,
-		maxTimeout: cfg.Orders.MaxTimeoutDuration(),
-		cfg:        cfg,
-		cityName:   loadedCityName(cfg, cityPath),
+		ep:             ep,
+		execRun:        shellExecRunner,
+		rec:            rec,
+		stderr:         stderr,
+		maxTimeout:     cfg.Orders.MaxTimeoutDuration(),
+		cfg:            cfg,
+		cityName:       loadedCityName(cfg, cityPath),
+		dispatchCtx:    dispatchCtx,
+		dispatchCancel: dispatchCancel,
 	}
 }
 
@@ -280,7 +291,37 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		// controller exit or config reload.
 		a := a // capture loop variable
 		m.addInflight()
-		go m.dispatchOne(ctx, store, target, a, cityPath, trackingBead.ID)
+		m.launchDispatchOne(ctx, store, target, a, cityPath, trackingBead.ID)
+	}
+}
+
+// launchDispatchOne spawns dispatchOne with a context that cancels when
+// EITHER the caller's tick ctx OR m.dispatchCtx is done — required so
+// cancel() reaches goroutines whose tick ctx was context.Background().
+// Falls back to the bare caller ctx when m.dispatchCtx is nil (test
+// sites that don't initialize the cancel fields).
+func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string) {
+	if m.dispatchCtx == nil {
+		go m.dispatchOne(ctx, store, target, a, cityPath, trackingID)
+		return
+	}
+	mergedCtx, cancelMerged := context.WithCancel(ctx)
+	stopAfter := context.AfterFunc(m.dispatchCtx, cancelMerged)
+	go func() {
+		defer stopAfter()
+		defer cancelMerged()
+		m.dispatchOne(mergedCtx, store, target, a, cityPath, trackingID)
+	}()
+}
+
+// cancel signals all in-flight dispatchOne goroutines to terminate. Safe
+// to call multiple times. Caller should follow with drain to wait for
+// goroutine completion (exec.CommandContext propagates the cancel as
+// SIGKILL; dispatchOne's deferred cleanup writes the tracking-bead
+// outcome before doneInflight signals drain).
+func (m *memoryOrderDispatcher) cancel() {
+	if m.dispatchCancel != nil {
+		m.dispatchCancel()
 	}
 }
 

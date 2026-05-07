@@ -1,3 +1,5 @@
+//go:build !windows
+
 package beads
 
 import (
@@ -16,7 +18,8 @@ func TestExecCommandRunnerTimeoutKillsChildProcess(t *testing.T) {
 	}
 
 	oldTimeout := bdCommandTimeout
-	bdCommandTimeout = 50 * time.Millisecond
+	const commandTimeout = 3 * time.Second
+	bdCommandTimeout = commandTimeout
 	t.Cleanup(func() { bdCommandTimeout = oldTimeout })
 
 	dir := t.TempDir()
@@ -31,7 +34,14 @@ wait
 	}
 
 	runner := ExecCommandRunner()
-	_, err := runner(dir, script, pidFile)
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := runner(dir, script, pidFile)
+		errCh <- err
+	}()
+
+	pid := waitForNonEmptyFile(t, pidFile, commandTimeout)
+	err := <-errCh
 	if err == nil {
 		t.Fatal("runner unexpectedly succeeded")
 	}
@@ -39,16 +49,7 @@ wait
 		t.Fatalf("error = %v, want timeout", err)
 	}
 
-	pidBytes, readErr := os.ReadFile(pidFile)
-	if readErr != nil {
-		t.Fatalf("read child pid: %v", readErr)
-	}
-	pid := strings.TrimSpace(string(pidBytes))
-	if pid == "" {
-		t.Fatal("child pid was empty")
-	}
-
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		if err := exec.Command("kill", "-0", pid).Run(); err != nil {
 			return
 		}
@@ -63,4 +64,23 @@ func TestKillCommandTreeHandlesNilCommand(t *testing.T) {
 	if err := killCommandTree(nil); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		t.Fatalf("killCommandTree(nil): %v", err)
 	}
+}
+
+func waitForNonEmptyFile(t *testing.T, path string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		pidBytes, err := os.ReadFile(path)
+		if err == nil {
+			pid := strings.TrimSpace(string(pidBytes))
+			if pid != "" {
+				return pid
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("read child pid: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("child pid was not written within %s", timeout)
+	return ""
 }

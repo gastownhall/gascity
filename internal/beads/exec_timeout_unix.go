@@ -19,7 +19,7 @@ func killCommandTree(cmd *exec.Cmd) error {
 	}
 	pgid, err := syscall.Getpgid(cmd.Process.Pid)
 	if err == nil {
-		if killErr := syscall.Kill(-pgid, syscall.SIGKILL); killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
+		if killErr := syscall.Kill(-pgid, syscall.SIGKILL); killErr != nil && !errors.Is(killErr, os.ErrProcessDone) && !errors.Is(killErr, syscall.ESRCH) {
 			return killErr
 		}
 		return nil
