@@ -350,7 +350,7 @@ func readClaudeSettingsCandidate(fs fsys.FS, path string) (claudeCandidateState,
 
 func writeCodexHooksManaged(fs fsys.FS, dst string, data []byte) error {
 	if existing, err := fs.ReadFile(dst); err == nil {
-		upgraded, changed, upgradeErr := upgradeCodexHookCommands(existing)
+		upgraded, changed, upgradeErr := upgradeCodexHooks(existing, data)
 		if upgradeErr != nil || !changed {
 			return nil
 		}
@@ -372,12 +372,16 @@ func writeManagedData(fs fsys.FS, dst string, data []byte) error {
 	return nil
 }
 
-func upgradeCodexHookCommands(existing []byte) ([]byte, bool, error) {
+func upgradeCodexHooks(existing, desired []byte) ([]byte, bool, error) {
 	var root any
 	if err := json.Unmarshal(existing, &root); err != nil {
 		return nil, false, err
 	}
-	if !upgradeCodexHookValue(root) {
+	changed := upgradeCodexHookValue(root)
+	if addCodexPreCompactHook(root, desired) {
+		changed = true
+	}
+	if !changed {
 		return nil, false, nil
 	}
 	data, err := json.MarshalIndent(root, "", "  ")
@@ -434,6 +438,84 @@ func upgradeCodexHookCommand(command string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func addCodexPreCompactHook(root any, desired []byte) bool {
+	doc, ok := root.(map[string]any)
+	if !ok || !codexHookDocLooksManaged(doc) {
+		return false
+	}
+	hooksMap, ok := doc["hooks"].(map[string]any)
+	if !ok {
+		return false
+	}
+	if _, exists := hooksMap["PreCompact"]; exists {
+		return false
+	}
+	preCompact := desiredCodexPreCompactHook(desired)
+	if preCompact == nil {
+		return false
+	}
+	hooksMap["PreCompact"] = preCompact
+	return true
+}
+
+func codexHookDocLooksManaged(doc map[string]any) bool {
+	var found bool
+	var walk func(any)
+	walk = func(v any) {
+		if found {
+			return
+		}
+		switch node := v.(type) {
+		case map[string]any:
+			if command, ok := node["command"].(string); ok && isManagedCodexHookCommand(command) {
+				found = true
+				return
+			}
+			for _, val := range node {
+				walk(val)
+			}
+		case []any:
+			for _, val := range node {
+				walk(val)
+			}
+		}
+	}
+	walk(doc)
+	return found
+}
+
+func isManagedCodexHookCommand(command string) bool {
+	for _, needle := range []string{
+		`gc prime --hook`,
+		`gc nudge drain --inject`,
+		`gc mail check --inject`,
+		`gc hook --inject`,
+		`gc handoff --auto`,
+	} {
+		if strings.Contains(command, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func desiredCodexPreCompactHook(desired []byte) any {
+	if len(desired) == 0 {
+		var err error
+		desired, err = iofs.ReadFile(core.PackFS, path.Join("overlay", "per-provider", "codex", ".codex", "hooks.json"))
+		if err != nil {
+			return nil
+		}
+	}
+	var doc struct {
+		Hooks map[string]any `json:"hooks"`
+	}
+	if err := json.Unmarshal(desired, &doc); err != nil {
+		return nil
+	}
+	return doc.Hooks["PreCompact"]
 }
 
 func writeManagedFile(fs fsys.FS, dst string, data []byte, policy writeManagedFilePolicy) error {

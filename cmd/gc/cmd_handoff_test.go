@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -121,6 +122,44 @@ func TestCmdHandoffAutoSendsMailWithoutBlocking(t *testing.T) {
 	}
 }
 
+func TestCmdHandoffAutoHookFormatCodex(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_ALIAS", "mayor")
+	t.Setenv("GC_SESSION_NAME", "mayor")
+
+	var stdout, stderr bytes.Buffer
+	cmd := newHandoffCmd(&stdout, &stderr)
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetArgs([]string{"--auto", "--hook-format", "codex", "context cycle"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("gc handoff --auto --hook-format codex failed: %v; stderr=%s", err, stderr.String())
+	}
+
+	var payload struct {
+		HookSpecificOutput struct {
+			HookEventName     string `json:"hookEventName"`
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not Codex hook JSON: %v\n%s", err, stdout.String())
+	}
+	if got, want := payload.HookSpecificOutput.HookEventName, "PreCompact"; got != want {
+		t.Fatalf("hookEventName = %q, want %q", got, want)
+	}
+	if !strings.Contains(payload.HookSpecificOutput.AdditionalContext, "Handoff: sent auto mail") {
+		t.Fatalf("additionalContext = %q, want handoff confirmation", payload.HookSpecificOutput.AdditionalContext)
+	}
+}
+
 func TestCmdHandoffAutoUsesDefaultSubject(t *testing.T) {
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
@@ -160,7 +199,7 @@ func TestCmdHandoffAutoUsesDefaultSubject(t *testing.T) {
 
 func TestCmdHandoffAutoRejectsTarget(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if code := cmdHandoff([]string{"context cycle"}, "mayor", true, &stdout, &stderr); code == 0 {
+	if code := cmdHandoff([]string{"context cycle"}, "mayor", true, "", &stdout, &stderr); code == 0 {
 		t.Fatal("cmdHandoff returned 0 for --auto with --target")
 	}
 	if !strings.Contains(stderr.String(), "--auto cannot be used with --target") {
@@ -402,7 +441,7 @@ func TestCmdHandoff_Regression744_NamedSessionReturnsWithoutBlocking(t *testing.
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- cmdHandoff([]string{"HANDOFF: context full"}, "", false, &stdout, &stderr)
+		done <- cmdHandoff([]string{"HANDOFF: context full"}, "", false, "", &stdout, &stderr)
 	}()
 
 	select {
