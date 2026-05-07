@@ -7,6 +7,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
+
 	// Blank import: pgauth's init() registers PostgresCredentialResolvedPayload
 	// in the events registry. The api package never references pgauth's types
 	// directly (the payload bytes flow through events.Event.Payload as JSON),

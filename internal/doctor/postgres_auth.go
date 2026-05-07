@@ -165,7 +165,7 @@ func collectPostgresAuthScopes(cityPath string, cfg *config.City) []postgresAuth
 	return out
 }
 
-func loadPostgresAuthScope(cityPath, scopeRoot, kind, displayBase, relEnv string) (postgresAuthScope, bool) {
+func loadPostgresAuthScope(_ string, scopeRoot, kind, displayBase, relEnv string) (postgresAuthScope, bool) {
 	metaPath := filepath.Join(scopeRoot, ".beads", "metadata.json")
 	meta, _, err := contract.LoadMetadataState(fsys.OSFS{}, metaPath)
 	if err != nil || meta.Backend != "postgres" {
@@ -201,7 +201,7 @@ type perScopeReport struct {
 	// fields; the explain table renders [ERR] at the failing tier.
 	errParse *pgauth.CredentialsParseError
 	errPerm  *pgauth.PermissivePermissionError
-	// rawErr is the unrecognised-error text for §3.3.6.
+	// rawErr is the unrecognized-error text for §3.3.6.
 	rawErr string
 }
 
@@ -257,8 +257,8 @@ func classifyPostgresAuthResult(res postgresAuthScopeResult) perScopeReport {
 	}
 	// Defensive fallthrough — design §3.3.6.
 	out.status = StatusError
-	out.message = fmt.Sprintf("%s: pgauth returned unrecognised error: %s", res.scope.display, res.err.Error())
-	out.fixHint = "please file a bug — postgres-auth check did not recognise this error shape"
+	out.message = fmt.Sprintf("%s: pgauth returned unrecognized error: %s", res.scope.display, res.err.Error())
+	out.fixHint = "please file a bug — postgres-auth check did not recognize this error shape"
 	out.rawErr = res.err.Error()
 	return out
 }

@@ -32,10 +32,10 @@ func writePGMetadata(t *testing.T, scopeRoot string) {
 	}
 }
 
-func writePGScopeEnv(t *testing.T, scopeRoot, password string) {
+func writePGScopeEnv(t *testing.T, scopeRoot string) {
 	t.Helper()
 	envFile := filepath.Join(scopeRoot, ".beads", ".env")
-	if err := os.WriteFile(envFile, []byte("BEADS_POSTGRES_PASSWORD="+password+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(envFile, []byte("BEADS_POSTGRES_PASSWORD=devpw\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -47,7 +47,7 @@ func TestPostgresAuthCheck_StatusOK_ScopeFile(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "rigs", "pwu")
 	writePGMetadata(t, rigPath)
-	writePGScopeEnv(t, rigPath, "devpw")
+	writePGScopeEnv(t, rigPath)
 
 	cfg := &config.City{Rigs: []config.Rig{{Name: "pwu", Path: "rigs/pwu"}}}
 	check := NewPostgresAuthCheck(cityPath, cfg)
@@ -174,7 +174,7 @@ func TestPostgresAuthCheck_MultipleScopes(t *testing.T) {
 	// Rig A — OK (scope file).
 	rigAPath := filepath.Join(cityPath, "rigs", "alpha")
 	writePGMetadata(t, rigAPath)
-	writePGScopeEnv(t, rigAPath, "devpw")
+	writePGScopeEnv(t, rigAPath)
 
 	// Rig B — Error (no creds).
 	rigBPath := filepath.Join(cityPath, "rigs", "beta")
@@ -223,7 +223,7 @@ func TestPostgresAuthCheck_RenderExtras_FlagOff(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "rigs", "pwu")
 	writePGMetadata(t, rigPath)
-	writePGScopeEnv(t, rigPath, "devpw")
+	writePGScopeEnv(t, rigPath)
 
 	cfg := &config.City{Rigs: []config.Rig{{Name: "pwu", Path: "rigs/pwu"}}}
 	check := NewPostgresAuthCheck(cityPath, cfg)
@@ -244,7 +244,7 @@ func TestPostgresAuthCheck_RenderExtras_ExplainTable_OK_TierFour(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "rigs", "pwu")
 	writePGMetadata(t, rigPath)
-	writePGScopeEnv(t, rigPath, "devpw")
+	writePGScopeEnv(t, rigPath)
 
 	cfg := &config.City{Rigs: []config.Rig{{Name: "pwu", Path: "rigs/pwu"}}}
 	check := NewPostgresAuthCheck(cityPath, cfg)
@@ -379,8 +379,7 @@ func humanSourceLabelByIndex(i int) string {
 		credEnv
 		credHome
 	)
-	type srcEnum = int
-	switch srcEnum(i) {
+	switch i {
 	case projGC:
 		return "projected env (GC_POSTGRES_PASSWORD)"
 	case projBeads:

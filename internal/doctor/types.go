@@ -49,7 +49,7 @@ type CheckContext struct {
 	Output io.Writer
 	// ExplainPostgresAuth, when true, opts checks that implement
 	// Renderer into emitting their per-scope resolution table after
-	// the standard summary line. Today only PostgresAuthCheck honours
+	// the standard summary line. Today only PostgresAuthCheck honors
 	// this flag.
 	ExplainPostgresAuth bool
 }

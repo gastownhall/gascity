@@ -21,7 +21,7 @@ import (
 // execenv.RedactText all keep the resolved Postgres password out of any
 // observation surface an operator or auditor can read.
 //
-// Each sub-test runs as its own t.Run so a regression localises to the
+// Each sub-test runs as its own t.Run so a regression localizes to the
 // surface that broke. The canary password literal is unique per run so
 // grep assertions cannot be confused with unrelated test data.
 func TestPostgresEventOmitsPassword(t *testing.T) {
