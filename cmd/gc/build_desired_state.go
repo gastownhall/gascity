@@ -349,6 +349,7 @@ func buildDesiredStateWithSessionBeads(
 			fmt.Fprintf(stderr, "scaleCheck: PARTIAL — scale_check failed for %s, retaining affected sessions\n", strings.Join(sortedBoolMapKeys(scaleCheckPartialTemplates), ",")) //nolint:errcheck
 		}
 		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, sessionBeads.Open(), assignedWorkBeads, assignedWorkStoreRefs)
+		bp.assignedWorkBeads = poolWorkBeads
 		poolDesiredStates := ComputePoolDesiredStatesTraced(cfg, poolWorkBeads, sessionBeads.Open(), scaleCheckCounts, trace)
 		for _, poolState := range poolDesiredStates {
 			cfgAgent := findAgentByTemplate(cfg, poolState.Template)
@@ -1898,6 +1899,9 @@ func selectOrCreatePoolSessionBead(
 		if isNamedSessionBead(bead) {
 			continue
 		}
+		if sessionBeadHasAssignedWork(bp.assignedWorkBeads, bead) {
+			continue
+		}
 		if used[bead.ID] {
 			continue
 		}
@@ -1909,6 +1913,22 @@ func selectOrCreatePoolSessionBead(
 		}
 	}
 	return createPoolSessionBead(bp.beadStore, template, bp.sessionBeads, poolSessionCreateStartedAt(bp))
+}
+
+func sessionBeadHasAssignedWork(workBeads []beads.Bead, sessionBead beads.Bead) bool {
+	for _, wb := range workBeads {
+		assignee := strings.TrimSpace(wb.Assignee)
+		if assignee == "" || (wb.Status != "open" && wb.Status != "in_progress") {
+			continue
+		}
+		if assignee == sessionBead.ID || assignee == strings.TrimSpace(sessionBead.Metadata["session_name"]) {
+			return true
+		}
+		if namedIdentity := strings.TrimSpace(sessionBead.Metadata["configured_named_identity"]); namedIdentity != "" && assignee == namedIdentity {
+			return true
+		}
+	}
+	return false
 }
 
 func selectOrCreateDependencyPoolSessionBead(
