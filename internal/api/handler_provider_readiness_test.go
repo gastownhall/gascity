@@ -930,7 +930,15 @@ func TestHandleReadinessReturnsNotInstalledForGitHubCLIWithoutBinary(t *testing.
 		providerProbePathEnv = originalPathEnv
 		providerProbeGOOS = originalGOOS
 	}()
-	providerProbeGOOS = "linux"
+	// Use a sentinel GOOS so searchpath.Expand skips the unconditional
+	// platform path injection (linux: /snap/bin, /home/linuxbrew/.linuxbrew/bin;
+	// darwin: /opt/homebrew/bin, /opt/local/bin). On dev machines with brew
+	// installed, those leak into the search and let findProbeBinary find a
+	// real gh outside the sandboxed homeDir, reporting needs_auth instead of
+	// not_installed. "test" matches no case in searchpath.Expand and preserves
+	// the test's intent: when no binary is on the configured search path, the
+	// probe must report not_installed.
+	providerProbeGOOS = "test"
 
 	state := newFakeState(t)
 	h := newTestCityHandler(t, state)
