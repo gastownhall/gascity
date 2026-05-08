@@ -88,7 +88,7 @@ var (
 	}
 )
 
-const providerProbeCacheTTL = 2 * time.Second
+var providerProbeCacheTTL = 2 * time.Second
 
 type providerReadinessResponse struct {
 	Providers map[string]providerReadiness `json:"providers"`
