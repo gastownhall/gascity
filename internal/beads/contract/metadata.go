@@ -11,9 +11,9 @@ import "strings"
 // cmd/gc/session_reconciler.go silently bridged the two semantics. The
 // new keys split the meaning:
 //
-//   WorkerDirKey ("worker_dir")     — agent process cwd. Session beads.
-//   ArtifactDirKey ("artifact_dir") — work artifact directory.
-//                                     Task / molecule beads.
+//	WorkerDirKey ("worker_dir")     — agent process cwd. Session beads.
+//	ArtifactDirKey ("artifact_dir") — work artifact directory.
+//	                                  Task / molecule beads.
 //
 // LegacyWorkDirKey is the old name. It MUST be kept readable on session
 // beads via WorkerDirFromMetadata so existing data does not regress
@@ -75,7 +75,7 @@ func ArtifactDirFromMetadata(meta map[string]string) string {
 // creating the map if nil. Returns the (possibly newly allocated) map
 // so call sites can use a fluent style:
 //
-//   meta = contract.SetWorkerDir(meta, "/home/ds/gascity")
+//	meta = contract.SetWorkerDir(meta, "/home/ds/gascity")
 //
 // Empty values are passed through (allowing callers to clear the key
 // by passing ""). Does not touch LegacyWorkDirKey — coexistence with
