@@ -1,6 +1,11 @@
+# Converted from formula+pool to exec. The mol-dog-compactor formula
+# is preserved as the observability spec; the actual work is
+# deterministic (count commits, soft-reset to root, commit-all,
+# verify, dolt_gc) and runs inline in the controller — no LLM
+# judgment, no agent dispatch. Mirrors the reaper.sh / jsonl-export.sh
+# patterns in the maintenance pack.
 [order]
 description = "Flatten Dolt commit history to reduce storage"
-formula = "mol-dog-compactor"
+exec = "$PACK_DIR/assets/scripts/compactor.sh"
 trigger = "cooldown"
 interval = "24h"
-pool = "dog"

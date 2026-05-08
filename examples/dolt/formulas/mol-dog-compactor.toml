@@ -15,21 +15,15 @@ diff is just the txn.
 the most recent N as individual picks. NOT safe with concurrent writes — Dolt
 detects graph changes and returns an error. Retries once on collision.
 
-## ZFC Exemption
+## Implementation
 
-This formula is used for **observability tracking only** — the compactor daemon
-code is the executor. The compactor is exempt from agent-driven formula
-execution (ZFC) because:
-
-1. Operations require SQL connections via database/sql (agents lack SQL access)
-2. Transactional state spans multiple queries (pre-flight counts, HEAD hashes)
-3. Branch creation/deletion requires cleanup-on-failure error paths
-4. Concurrent write retry needs error classification
-5. Integrity verification compares row counts before/after compaction
-
-The daemon pours this molecule, executes the compaction, and closes/fails each
-step for observability. This IS the hybrid approach: formula defines observable
-structure, imperative code is the executor.
+This formula is preserved as the observability spec; the order
+(`orders/mol-dog-compactor.toml`) routes the work to an exec script
+(`assets/scripts/compactor.sh`) rather than dispatching to an agent.
+The script pattern mirrors `reaper.sh` / `jsonl-export.sh` in the
+maintenance pack. All operations are deterministic — count commits,
+soft-reset to root, commit-all, integrity verify, dolt_gc reclaim —
+so no LLM judgment is required.
 
 ## Dog Contract
 
