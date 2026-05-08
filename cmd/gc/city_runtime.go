@@ -509,6 +509,9 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// Track pool instance liveness for death detection.
 	var prevPoolRunning map[string]bool
 	runTick := func(trigger string) {
+		if ctx.Err() != nil {
+			return
+		}
 		cr.safeTick(func() {
 			cr.tick(ctx, dirty, &lastProviderName, cityRoot, &prevPoolRunning, trigger)
 		}, trigger)
@@ -615,6 +618,9 @@ func (cr *CityRuntime) tick(
 	prevPoolRunning *map[string]bool,
 	trigger string,
 ) {
+	if ctx.Err() != nil {
+		return
+	}
 	sessionBeads := cr.loadSessionBeadSnapshot()
 	traceTrigger := trigger
 	traceDetail := "controller_tick"
@@ -699,10 +705,16 @@ func (cr *CityRuntime) tick(
 			manualReloadCompleted = true
 		}
 	}
+	if ctx.Err() != nil {
+		return
+	}
 
 	// Order dispatch is intentionally before the expensive session reconcile
 	// phases so due formulas are not starved by slow startup/config drift work.
 	cr.dispatchOrders(ctx, cityRoot)
+	if ctx.Err() != nil {
+		return
+	}
 
 	// Session bead sync BEFORE reconciliation (one-tick state lag; see run()).
 	// Post-reconcile sync was intentionally removed: the daemon's next tick
@@ -713,6 +725,9 @@ func (cr *CityRuntime) tick(
 	cleanupDeadRuntimeSessionCorpses(sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
 	if reapStaleSessionBeads(cr.cityBeadStore(), cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr) > 0 {
 		sessionBeads = cr.loadSessionBeadSnapshot()
+	}
+	if ctx.Err() != nil {
+		return
 	}
 	demand := cr.loadDemandSnapshot(sessionBeads, trace, trigger, configChanged)
 	result := demand.result
