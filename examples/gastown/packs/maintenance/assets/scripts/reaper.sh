@@ -306,7 +306,13 @@ has_wisps_table() {
     local db="$1"
     local output
     if ! output=$(dolt_sql -r csv -q "SHOW TABLES FROM \`$db\` LIKE 'wisps'" 2>/dev/null); then
-        return 1
+        # Probe failed (dolt unreachable, connection dropped, etc.).
+        # Fall through to normal processing rather than silently
+        # skipping a real bead store on a transient error — the
+        # subsequent get_sql_count calls will fail in the same way
+        # and record proper anomalies, which is the right behavior
+        # for "dolt is broken" vs "this DB has no schema."
+        return 0
     fi
     [ "$(printf '%s\n' "$output" | tail -n +2 | head -1 | tr -d '\r')" = "wisps" ]
 }
