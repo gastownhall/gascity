@@ -1121,6 +1121,10 @@ func TestBuiltinProviders_CodexHasNilArgsAndOptionDefaults(t *testing.T) {
 		t.Errorf("codex OptionDefaults[model] = %q, want gpt-5.5",
 			codex.OptionDefaults["model"])
 	}
+	if codex.OptionDefaults["effort"] != "xhigh" {
+		t.Errorf("codex OptionDefaults[effort] = %q, want xhigh",
+			codex.OptionDefaults["effort"])
+	}
 	if !schemaHasChoice(codex.OptionsSchema, "model", "gpt-5.5") {
 		t.Error("codex OptionsSchema missing model choice gpt-5.5")
 	}

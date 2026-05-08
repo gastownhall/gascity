@@ -10,8 +10,8 @@ var modelFamilyWindows = map[string]int{
 	"sonnet": 200_000,
 	"haiku":  200_000,
 	"gemini": 1_000_000,
-	"gpt-5":  258_000,
-	"codex":  258_000,
+	"gpt-5":  400_000,
+	"codex":  400_000,
 	"gpt-4":  128_000,
 	"gpt-4o": 128_000,
 }
