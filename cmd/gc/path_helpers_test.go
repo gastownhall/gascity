@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strings"
 	"testing"
@@ -49,10 +50,10 @@ func clearInheritedBeadsEnv(t *testing.T) {
 	}
 }
 
-// requireNoLeakedDoltAfter snapshots the live dolt sql-server PIDs at
-// registration time and re-scans in t.Cleanup. Any PID present at cleanup
-// that wasn't there at registration is reported via t.Errorf with PID and
-// argv so operators can trace the spawn site.
+// requireNoLeakedDoltAfter snapshots the live test-owned dolt sql-server PIDs
+// at registration time and re-scans in t.Cleanup. Any matching PID present at
+// cleanup that wasn't there at registration is reported via t.Errorf with PID
+// and argv so operators can trace the spawn site.
 //
 // Pair with clearInheritedBeadsEnv: that helper prevents the leak by
 // stripping inherited GC_BEADS=bd before the test writes its city.toml;
@@ -60,10 +61,9 @@ func clearInheritedBeadsEnv(t *testing.T) {
 // child path that spawns dolt despite [beads] provider = "file", etc.).
 //
 // The scan walks /proc and is a no-op on hosts where /proc is unavailable
-// (discoverDoltProcesses returns nil there). The helper is safe in
-// city_runtime_test.go because that file does not call t.Parallel(),
-// so other parallel tests are paused while these tests run and cannot
-// add benign dolt PIDs that would false-positive the diff.
+// (discoverDoltProcesses returns nil there). The test-config allowlist keeps
+// unrelated city/runtime dolt servers out of the diff so background activity
+// does not false-positive the cleanup check.
 func requireNoLeakedDoltAfter(t *testing.T) {
 	t.Helper()
 	requireNoLeakedDoltAfterWith(t, discoverDoltProcesses)
@@ -99,21 +99,25 @@ func requireNoLeakedDoltAfterWith(t testReporter, enumerate func() ([]DoltProcIn
 	})
 }
 
-// snapshotDoltProcessPIDsWith returns a map from PID to space-joined
-// argv for every live dolt sql-server returned by enumerate. The
-// production caller passes discoverDoltProcesses (which walks /proc and
-// degrades to no-op on hosts where /proc is unavailable); unit tests for
-// the leak-detector itself pass a scripted enumerator. Enumeration
-// errors are surfaced via Fatalf so a swallowed discovery failure can
-// never silently mask a real leak.
+// snapshotDoltProcessPIDsWith returns a map from PID to space-joined argv for
+// every live test-owned dolt sql-server returned by enumerate. The production
+// caller passes discoverDoltProcesses (which walks /proc and degrades to no-op
+// on hosts where /proc is unavailable); unit tests for the leak-detector itself
+// pass a scripted enumerator. Enumeration errors are surfaced via Fatalf so a
+// swallowed discovery failure can never silently mask a real leak.
 func snapshotDoltProcessPIDsWith(t testReporter, enumerate func() ([]DoltProcInfo, error)) map[int]string {
 	t.Helper()
 	procs, err := enumerate()
 	if err != nil {
 		t.Fatalf("discoverDoltProcesses: %v", err)
 	}
+	homeDir, _ := os.UserHomeDir()
+	tempDir := os.TempDir()
 	out := make(map[int]string, len(procs))
 	for _, p := range procs {
+		if !isTestConfigPath(extractConfigPath(p.Argv), homeDir, tempDir) {
+			continue
+		}
 		out[p.PID] = strings.Join(p.Argv, " ")
 	}
 	return out

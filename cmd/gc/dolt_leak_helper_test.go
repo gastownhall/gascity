@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -53,6 +54,19 @@ func (r *recordingTB) runCleanups() {
 	for i := len(r.cleanups) - 1; i >= 0; i-- {
 		r.cleanups[i]()
 	}
+}
+
+func doltTestProc(pid int, args ...string) DoltProcInfo {
+	configPath := filepath.Join(
+		"/tmp",
+		"TestDoltLeakHelper",
+		fmt.Sprintf("%d", pid),
+		".gc",
+		"runtime",
+		"dolt.yaml",
+	)
+	argv := append([]string{"dolt", "sql-server", "--config=" + configPath}, args...)
+	return DoltProcInfo{PID: pid, Argv: argv}
 }
 
 // scriptedDoltEnumerator returns a stub func() ([]DoltProcInfo, error)
@@ -129,7 +143,7 @@ func TestRequireNoLeakedDoltAfter_NewPIDReportedWithArgv(t *testing.T) {
 // this subtraction the helper would false-positive on every host
 // running an unrelated dolt server.
 func TestRequireNoLeakedDoltAfter_PreExistingPIDsNotReported(t *testing.T) {
-	preexisting := DoltProcInfo{PID: 1000, Argv: []string{"dolt", "sql-server"}}
+	preexisting := doltTestProc(1000)
 	enumerate := scriptedDoltEnumerator(t,
 		[]DoltProcInfo{preexisting}, // initial
 		[]DoltProcInfo{preexisting}, // cleanup: same set, no leak
@@ -148,8 +162,8 @@ func TestRequireNoLeakedDoltAfter_PreExistingPIDsNotReported(t *testing.T) {
 // only the new one appears in the error message. This proves the diff
 // is computed (cleanup minus initial), not re-reported in full.
 func TestRequireNoLeakedDoltAfter_OnlyNewPIDsInDiff(t *testing.T) {
-	preexisting := DoltProcInfo{PID: 1000, Argv: []string{"dolt", "sql-server"}}
-	leaked := DoltProcInfo{PID: 9999, Argv: []string{"dolt", "sql-server", "--leaked"}}
+	preexisting := doltTestProc(1000)
+	leaked := doltTestProc(9999, "--leaked")
 	enumerate := scriptedDoltEnumerator(t,
 		[]DoltProcInfo{preexisting},
 		[]DoltProcInfo{preexisting, leaked},
@@ -177,8 +191,8 @@ func TestRequireNoLeakedDoltAfter_OnlyNewPIDsInDiff(t *testing.T) {
 //  2. PIDs are listed in ascending numerical order regardless of how
 //     the enumerator returns them.
 func TestRequireNoLeakedDoltAfter_MultipleLeaksReportedSorted(t *testing.T) {
-	leakedHi := DoltProcInfo{PID: 50002, Argv: []string{"dolt", "sql-server", "--port=3308"}}
-	leakedLo := DoltProcInfo{PID: 50001, Argv: []string{"dolt", "sql-server", "--port=3307"}}
+	leakedHi := doltTestProc(50002, "--port=3308")
+	leakedLo := doltTestProc(50001, "--port=3307")
 	enumerate := scriptedDoltEnumerator(t,
 		nil,
 		// Order in slice deliberately unsorted to verify the helper sorts.
@@ -205,6 +219,34 @@ func TestRequireNoLeakedDoltAfter_MultipleLeaksReportedSorted(t *testing.T) {
 	}
 	if iLo != -1 && iHi != -1 && iLo > iHi {
 		t.Errorf("PIDs not in ascending order; got %q", msg)
+	}
+}
+
+// TestRequireNoLeakedDoltAfter_NewNonTestPIDIgnored pins that the leak helper
+// ignores unrelated dolt servers whose config path is outside the test-temp
+// allowlist. City or pack runtimes can start their own managed dolt process
+// while this test package is running; those are not leaks from the test under
+// inspection.
+func TestRequireNoLeakedDoltAfter_NewNonTestPIDIgnored(t *testing.T) {
+	unrelated := DoltProcInfo{
+		PID: 2041535,
+		Argv: []string{
+			"dolt",
+			"sql-server",
+			"--config",
+			"/data/projects/maintainer-city/.gc/runtime/packs/dolt/dolt-config.yaml",
+		},
+	}
+	enumerate := scriptedDoltEnumerator(t,
+		nil,
+		[]DoltProcInfo{unrelated},
+	)
+	inner := &recordingTB{}
+	requireNoLeakedDoltAfterWith(inner, enumerate)
+	inner.runCleanups()
+	if inner.failed() {
+		t.Fatalf("unrelated dolt server reported as leaked: errors=%v fatals=%v",
+			inner.errors, inner.fatals)
 	}
 }
 
