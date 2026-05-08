@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://github.com/gastownhall/gascity/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://img.shields.io/github/actions/workflow/status/gastownhall/gascity/ci.yml?branch=main&label=Build&style=for-the-badge" alt="Build status"></a>
   <a href="https://github.com/gastownhall/gascity/releases"><img src="https://img.shields.io/github/v/release/gastownhall/gascity?include_prereleases&style=for-the-badge" alt="GitHub release"></a>
-  <a href="https://gastownhall.ai"><img src="https://img.shields.io/badge/Discord-Gas%20Town%20Hall-5865F2?logo=discord&logoColor=white&style=for-the-badge" alt="Discord"></a>
+  <a href="https://gastownhall.ai"><img src="https://img.shields.io/discord/1462817445562814505?label=Discord&logo=discord&logoColor=white&color=5865F2&style=for-the-badge" alt="Discord"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="MIT License"></a>
 </p>
 
@@ -20,7 +20,7 @@ declarative city configuration.
 
 <table>
   <tr>
-    <td align="center" width="100%" bgcolor="#111111">
+    <td align="center" width="100%">
       <a href="https://blacksmith.sh/">
         <picture>
           <img src="docs/images/blacksmith.svg" alt="Blacksmith" height="28">
