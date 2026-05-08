@@ -949,10 +949,15 @@ func enforceCanonicalScopeMetadataForInit(fs fsys.FS, scopeRoot, doltDatabase st
 // normalizeCanonicalBdScopeFiles reconciles canonical bd metadata/config/port
 // mirrors under the city and each rig. warn receives operator-visible WARN
 // lines when port-file rewrites change on-disk contents (pass io.Discard to
-// suppress, or a stderr writer from the caller to show them).
-func normalizeCanonicalBdScopeFiles(cityPath string, cfg *config.City, warn io.Writer) error {
+// suppress, or a stderr writer from the caller to show them). When omitted,
+// warning output is suppressed.
+func normalizeCanonicalBdScopeFiles(cityPath string, cfg *config.City, warns ...io.Writer) error {
 	if cfg == nil {
 		return nil
+	}
+	var warn io.Writer
+	if len(warns) > 0 {
+		warn = warns[0]
 	}
 	if warn == nil {
 		warn = io.Discard
