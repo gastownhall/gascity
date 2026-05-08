@@ -517,6 +517,14 @@ while IFS= read -r DB; do
 "
         continue
     fi
+    if ! has_wisps_table "$DB"; then
+        # Not a bd-managed bead store. Decrement the count we just
+        # bumped — schemaless DBs aren't part of the export universe
+        # and shouldn't appear in TOTAL_DBS or FAILED_DBS summaries.
+        # See dolt-target.sh:has_wisps_table and gastownhall/gascity#1816.
+        TOTAL_DBS=$((TOTAL_DBS - 1))
+        continue
+    fi
 
     DB_DIR="$ARCHIVE_REPO/$DB"
     mkdir -p "$DB_DIR"

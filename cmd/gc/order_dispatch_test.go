@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -69,6 +70,10 @@ type createdAtOverrideStore struct {
 	beads.Store
 
 	createdAt map[string]time.Time
+}
+
+type strictCloseReasonStore struct {
+	beads.Store
 }
 
 func (s selectiveUpdateFailStore) Update(id string, opts beads.UpdateOpts) error {
@@ -139,6 +144,18 @@ func (s *createdAtOverrideStore) List(query beads.ListQuery) ([]beads.Bead, erro
 		}
 	}
 	return results, nil
+}
+
+func (s strictCloseReasonStore) Close(id string) error {
+	return fmt.Errorf("strict close validation rejected reasonless close for %s", id)
+}
+
+func (s strictCloseReasonStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	reason := strings.TrimSpace(metadata["close_reason"])
+	if len(reason) < 20 {
+		return 0, fmt.Errorf("strict close validation rejected close_reason %q", reason)
+	}
+	return s.Store.CloseAll(ids, metadata)
 }
 
 func TestOrderDispatcherNil(t *testing.T) {
@@ -2623,6 +2640,102 @@ func TestStartupSweepThenBuildDispatcher(t *testing.T) {
 	}
 }
 
+// TestSweepOrphanedOrderTracking_StampsCloseReason verifies that the
+// startup-time orphan sweep also stamps close_reason. The original
+// callsite passed nil metadata; under validation.on-close=error this
+// silently failed and left orphaned tracking beads open.
+func TestSweepOrphanedOrderTracking_StampsCloseReason(t *testing.T) {
+	if got := len(orphanedOrderTrackingCloseReason); got < 20 {
+		t.Fatalf("orphanedOrderTrackingCloseReason = %q (%d chars), want >=20", orphanedOrderTrackingCloseReason, got)
+	}
+
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{
+		Title:  "order:dolt-health",
+		Labels: []string{"order-run:dolt-health", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	closed, err := sweepOrphanedOrderTracking(store)
+	if err != nil {
+		t.Fatalf("sweepOrphanedOrderTracking: %v", err)
+	}
+	if closed != 1 {
+		t.Fatalf("closed = %d, want 1", closed)
+	}
+
+	final, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if final.Status != "closed" {
+		t.Fatalf("status = %q, want closed", final.Status)
+	}
+	if got := final.Metadata["close_reason"]; got != orphanedOrderTrackingCloseReason {
+		t.Errorf("close_reason = %q, want %q", got, orphanedOrderTrackingCloseReason)
+	}
+}
+
+// TestSweepStaleOrderTracking_StampsCloseReason verifies that the
+// runtime stale sweep (called every tick by the order-tracking-sweep
+// order AND every 30s by the controller's runtime watchdog) stamps
+// close_reason. The pre-fix callsite stamped order_tracking_sweep
+// metadata but no close_reason; under validation.on-close=error every
+// close was rejected, the watchdog retried indefinitely, and order
+// firing silently wedged.
+func TestSweepStaleOrderTracking_StampsCloseReason(t *testing.T) {
+	if got := len(staleOrderTrackingCloseReason); got < 20 {
+		t.Fatalf("staleOrderTrackingCloseReason = %q (%d chars), want >=20", staleOrderTrackingCloseReason, got)
+	}
+
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{
+		Title:  "order:dolt-health",
+		Labels: []string{"order-run:dolt-health", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Push the bead's CreatedAt into the past so it's outside the
+	// staleAfter window. MemStore stamps CreatedAt at Create time, but
+	// callers expose UpdateMetadata; we round-trip via direct field
+	// access on the returned bead by re-creating with the desired
+	// timestamp via the underlying clock isn't available, so we set
+	// staleAfter to a negative duration relative to the bead and pass
+	// a future "now" that's well past CreatedAt.
+	now := b.CreatedAt.Add(time.Hour)
+
+	closed, err := sweepStaleOrderTracking(store, now, time.Minute, nil, orderTrackingWatchdogMetadataInitiator)
+	if err != nil {
+		t.Fatalf("sweepStaleOrderTracking: %v", err)
+	}
+	if closed != 1 {
+		t.Fatalf("closed = %d, want 1", closed)
+	}
+
+	final, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if final.Status != "closed" {
+		t.Fatalf("status = %q, want closed", final.Status)
+	}
+	if got := final.Metadata["close_reason"]; got != staleOrderTrackingCloseReason {
+		t.Errorf("close_reason = %q, want %q", got, staleOrderTrackingCloseReason)
+	}
+	// Pre-fix metadata (order_tracking_sweep + initiator) must still be
+	// stamped — the new close_reason is additive, not a replacement.
+	if got := final.Metadata["order_tracking_sweep"]; got != orderTrackingSweepMetadataReason {
+		t.Errorf("order_tracking_sweep = %q, want %q", got, orderTrackingSweepMetadataReason)
+	}
+	if got := final.Metadata["order_tracking_sweep_by"]; got != orderTrackingWatchdogMetadataInitiator {
+		t.Errorf("order_tracking_sweep_by = %q, want %q", got, orderTrackingWatchdogMetadataInitiator)
+	}
+}
+
 func TestSweepOrphanedOrderTracking_RetryOnTransientError(t *testing.T) {
 	inner := beads.NewMemStore()
 	_, err := inner.Create(beads.Bead{
@@ -2788,7 +2901,7 @@ func buildOrderDispatcherFromListExec(aa []orders.Order, store beads.Store, ep e
 		ep:             ep,
 		execRun:        execRun,
 		rec:            rec,
-		stderr:         &bytes.Buffer{},
+		stderr:         lockedStderr(&bytes.Buffer{}),
 		cfg:            cfg,
 		dispatchCtx:    dispatchCtx,
 		dispatchCancel: dispatchCancel,
@@ -3856,7 +3969,7 @@ func (r *memRecorder) hasSubject(subject string) bool {
 // --- dedup / tracking bead lifecycle tests ---
 
 func TestOrderDispatchClosesTrackingBead(t *testing.T) {
-	store := beads.NewMemStore()
+	store := strictCloseReasonStore{Store: beads.NewMemStore()}
 	var rec memRecorder
 
 	fakeExec := func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
@@ -3881,6 +3994,9 @@ func TestOrderDispatchClosesTrackingBead(t *testing.T) {
 			if l == "order-run:health-check" {
 				if b.Status != "closed" {
 					t.Errorf("tracking bead status = %q, want %q", b.Status, "closed")
+				}
+				if got := b.Metadata["close_reason"]; got != completedOrderTrackingCloseReason {
+					t.Errorf("close_reason = %q, want %q", got, completedOrderTrackingCloseReason)
 				}
 				return
 			}
@@ -4226,5 +4342,55 @@ func TestOrderDispatcherCancelTerminatesInFlight(t *testing.T) {
 	case <-drainDone:
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("drain did not return promptly after cancel()")
+	}
+}
+
+// lockedWriter must serialize concurrent Write calls so log lines emitted
+// from parallel dispatchOne goroutines do not interleave. Run under -race
+// to also catch the underlying data race on the shared writer.
+func TestLockedWriterSerializesConcurrentWrites(t *testing.T) {
+	var buf bytes.Buffer
+	lw := &lockedWriter{w: &buf}
+	const goroutines = 16
+	const writesPerG = 100
+	line := []byte("dispatch err line\n")
+
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < writesPerG; j++ {
+				if _, err := lw.Write(line); err != nil {
+					t.Errorf("Write: %v", err)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	wantBytes := goroutines * writesPerG * len(line)
+	if got := buf.Len(); got != wantBytes {
+		t.Fatalf("buffer length: got %d, want %d (suggests torn or lost writes)", got, wantBytes)
+	}
+	wantLine := bytes.TrimRight(line, "\n")
+	for i, l := range bytes.Split(bytes.TrimRight(buf.Bytes(), "\n"), []byte{'\n'}) {
+		if !bytes.Equal(l, wantLine) {
+			t.Fatalf("line %d: got %q, want %q (interleaved bytes)", i, l, wantLine)
+		}
+	}
+}
+
+func TestLockedStderrPreservesNil(t *testing.T) {
+	if got := lockedStderr(nil); got != nil {
+		t.Fatalf("lockedStderr(nil): got %v, want nil", got)
+	}
+}
+
+func TestLockedStderrWrapsNonNil(t *testing.T) {
+	var buf bytes.Buffer
+	w := lockedStderr(&buf)
+	if _, ok := w.(*lockedWriter); !ok {
+		t.Fatalf("lockedStderr(non-nil): got %T, want *lockedWriter", w)
 	}
 }

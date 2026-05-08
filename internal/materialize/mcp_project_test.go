@@ -74,6 +74,14 @@ func TestBuildMCPProjectionTargetsAndStableHash(t *testing.T) {
 	if got, want := gemini.Target, filepath.Join("/work", ".gemini", "settings.json"); got != want {
 		t.Fatalf("gemini target = %q, want %q", got, want)
 	}
+
+	opencode, err := BuildMCPProjection(MCPProviderOpenCode, "/work", nil)
+	if err != nil {
+		t.Fatalf("BuildMCPProjection(opencode): %v", err)
+	}
+	if got, want := opencode.Target, filepath.Join("/work", "opencode.json"); got != want {
+		t.Fatalf("opencode target = %q, want %q", got, want)
+	}
 }
 
 func TestBuildMCPProjectionRejectsUnsupportedProvider(t *testing.T) {
@@ -333,6 +341,104 @@ func TestApplyMCPProjectionCodexRemovesManagedFileWhenItOnlyContainsMCP(t *testi
 	}
 	if _, err := os.Stat(target); !os.IsNotExist(err) {
 		t.Fatalf("codex config should be removed, stat err = %v", err)
+	}
+}
+
+func TestApplyMCPProjectionOpenCodePreservesNonMCPConfig(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "opencode.json")
+	if err := os.WriteFile(target, []byte(`{"theme":"system","mcp":{"old":{"type":"local","command":["old"]}}}`), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	proj, err := BuildMCPProjection(MCPProviderOpenCode, dir, []MCPServer{
+		{
+			Name:      "alpha",
+			Transport: MCPTransportStdio,
+			Command:   "uvx",
+			Args:      []string{"pkg"},
+			Env:       map[string]string{"TOKEN": "secret"},
+		},
+		{
+			Name:      "remote",
+			Transport: MCPTransportHTTP,
+			URL:       "https://mcp.example.com",
+			Headers:   map[string]string{"Authorization": "Bearer token"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildMCPProjection: %v", err)
+	}
+	if err := proj.Apply(fsys.OSFS{}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var doc struct {
+		Theme string `json:"theme"`
+		MCP   map[string]struct {
+			Type    string            `json:"type"`
+			Command []string          `json:"command"`
+			URL     string            `json:"url"`
+			Env     map[string]string `json:"environment"`
+			Headers map[string]string `json:"headers"`
+			Enabled bool              `json:"enabled"`
+		} `json:"mcp"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if doc.Theme != "system" {
+		t.Fatalf("theme = %q, want system", doc.Theme)
+	}
+	if _, ok := doc.MCP["old"]; ok {
+		t.Fatalf("old MCP entry was preserved: %+v", doc.MCP)
+	}
+	if got, want := doc.MCP["alpha"].Type, "local"; got != want {
+		t.Fatalf("alpha.type = %q, want %q", got, want)
+	}
+	if !reflect.DeepEqual(doc.MCP["alpha"].Command, []string{"uvx", "pkg"}) {
+		t.Fatalf("alpha.command = %#v, want uvx/pkg", doc.MCP["alpha"].Command)
+	}
+	if got := doc.MCP["alpha"].Env["TOKEN"]; got != "secret" {
+		t.Fatalf("alpha.environment TOKEN = %q, want secret", got)
+	}
+	if got, want := doc.MCP["remote"].Type, "remote"; got != want {
+		t.Fatalf("remote.type = %q, want %q", got, want)
+	}
+	if got, want := doc.MCP["remote"].URL, "https://mcp.example.com"; got != want {
+		t.Fatalf("remote.url = %q, want %q", got, want)
+	}
+	if got := doc.MCP["remote"].Headers["Authorization"]; got != "Bearer token" {
+		t.Fatalf("remote.headers Authorization = %q, want Bearer token", got)
+	}
+	if !doc.MCP["alpha"].Enabled || !doc.MCP["remote"].Enabled {
+		t.Fatalf("projected OpenCode MCP entries should be enabled: %+v", doc.MCP)
+	}
+
+	empty, err := BuildMCPProjection(MCPProviderOpenCode, dir, nil)
+	if err != nil {
+		t.Fatalf("BuildMCPProjection(empty): %v", err)
+	}
+	if err := empty.Apply(fsys.OSFS{}); err != nil {
+		t.Fatalf("Apply(empty): %v", err)
+	}
+	data, err = os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile after empty apply: %v", err)
+	}
+	var after map[string]any
+	if err := json.Unmarshal(data, &after); err != nil {
+		t.Fatalf("Unmarshal after empty apply: %v", err)
+	}
+	if _, ok := after["mcp"]; ok {
+		t.Fatalf("mcp key remained after empty projection: %s", data)
+	}
+	if got := after["theme"]; got != "system" {
+		t.Fatalf("theme after empty apply = %v, want system", got)
 	}
 }
 

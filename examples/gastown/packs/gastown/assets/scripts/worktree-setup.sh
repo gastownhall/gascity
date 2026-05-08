@@ -107,6 +107,21 @@ rmdir "$WT" 2>/dev/null || true
 git -C "$RIG_ROOT" worktree prune >/dev/null 2>&1 || true
 
 BRANCH=$(branch_name)
+
+# Determine the upstream default branch ref and refresh it so the agent's
+# persistent worktree branch is always created from the remote tip, not
+# from whatever happened to be checked out locally. Without this fetch +
+# explicit start-point, the worktree branch inherits a stale local default
+# branch — across many beads, this causes the agent's local default branch
+# to drift behind origin's, and feature branches cut from it carry
+# already-merged commits that the refinery rebase rejects as spurious
+# duplicates with mismatched hashes.
+DEFAULT_REF=$(git -C "$RIG_ROOT" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null || true)
+if [ -n "$DEFAULT_REF" ]; then
+    DEFAULT_BRANCH=${DEFAULT_REF#refs/remotes/origin/}
+    git -C "$RIG_ROOT" fetch origin "$DEFAULT_BRANCH" >/dev/null 2>&1 || true
+fi
+
 if git -C "$RIG_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
     if ! GIT_LFS_SKIP_SMUDGE=1 git -C "$RIG_ROOT" worktree add "$WT" "$BRANCH"; then
         echo "worktree-setup: failed to create worktree at $WT from $RIG_ROOT (branch $BRANCH)" >&2
@@ -114,7 +129,14 @@ if git -C "$RIG_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
         exit 1
     fi
 else
-    if ! GIT_LFS_SKIP_SMUDGE=1 git -C "$RIG_ROOT" worktree add "$WT" -b "$BRANCH"; then
+    if [ -n "$DEFAULT_REF" ]; then
+        WORKTREE_ADD="git -C $RIG_ROOT worktree add $WT -b $BRANCH $DEFAULT_REF"
+    else
+        # Fallback: no origin/HEAD configured (detached, or no remote default
+        # set). Create from current HEAD as before.
+        WORKTREE_ADD="git -C $RIG_ROOT worktree add $WT -b $BRANCH"
+    fi
+    if ! GIT_LFS_SKIP_SMUDGE=1 $WORKTREE_ADD; then
         echo "worktree-setup: failed to create worktree at $WT from $RIG_ROOT (branch $BRANCH)" >&2
         restore_stage
         exit 1

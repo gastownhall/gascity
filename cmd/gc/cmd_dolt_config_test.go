@@ -37,8 +37,14 @@ func TestDoltConfigWriteManagedCmd(t *testing.T) {
 		"host: 127.0.0.1",
 		`data_dir: "/tmp/city/.beads/dolt"`,
 		"archive_level: 0",
+		"enable: false",
 		"back_log: 50",
 		"max_connections_timeout_millis: 5000",
+		`dolt_auto_gc_enabled: "OFF"`,
+		`dolt_stats_enabled: "OFF"`,
+		`dolt_stats_gc_enabled: "OFF"`,
+		`dolt_stats_memory_only: "ON"`,
+		`dolt_stats_paused: "ON"`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("config missing %q:\n%s", want, text)
