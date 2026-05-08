@@ -821,6 +821,17 @@ func (s *BdStore) Ping() error {
 
 // CloseAll closes multiple beads in batch and sets metadata on each.
 // Idempotent: closing an already-closed bead returns nil.
+//
+// Forwards metadata["close_reason"] as the --reason argument to bd close,
+// so callers can satisfy validators like validation.on-close=error (which
+// rejects close calls without an explicit --reason of >=20 characters).
+// Whitespace is trimmed; an empty or whitespace-only value is treated as
+// absent and no --reason flag is added, preserving backward compatibility
+// for callers that don't pre-stamp a reason. The same map is also written
+// via SetMetadataBatch on each bead before close, so the reason is persisted
+// in the bead's metadata as well as forwarded to bd. If batch close falls
+// back to per-id closes, the same shared reason is forwarded to every
+// fallback close.
 func (s *BdStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
@@ -836,15 +847,16 @@ func (s *BdStore) CloseAll(ids []string, metadata map[string]string) (int, error
 		}
 	}
 
-	// Batch close: bd close id1 id2 id3 ...
-	args := append([]string{"close", "--force", "--json"}, ids...)
+	// Batch close: bd close [--reason "..."] id1 id2 id3 ...
+	reason := strings.TrimSpace(metadata["close_reason"])
+	args := bdCloseArgs(reason, ids...)
 	_, err := s.runner(s.dir, "bd", args...)
 	if err != nil {
 		// Fall back to individual closes on batch failure.
 		closed := 0
 		var fallbackErr error
 		for _, id := range ids {
-			if closeErr := s.Close(id); closeErr == nil {
+			if closeErr := s.close(id, reason); closeErr == nil {
 				closed++
 			} else {
 				fallbackErr = errors.Join(fallbackErr, closeErr)
@@ -858,10 +870,27 @@ func (s *BdStore) CloseAll(ids []string, metadata map[string]string) (int, error
 	return len(ids), nil
 }
 
-// Close sets a bead's status to closed via bd close.
+// Close sets a bead's status to closed via bd close. If the bead already has
+// metadata.close_reason, the trimmed value is forwarded as bd close --reason.
 // Idempotent: closing an already-closed bead returns nil.
 func (s *BdStore) Close(id string) error {
-	_, err := s.runner(s.dir, "bd", "close", "--force", "--json", id)
+	reason := ""
+	if b, err := s.Get(id); err == nil {
+		reason = strings.TrimSpace(b.Metadata["close_reason"])
+	}
+	return s.close(id, reason)
+}
+
+func bdCloseArgs(reason string, ids ...string) []string {
+	args := []string{"close", "--force", "--json"}
+	if reason != "" {
+		args = append(args, "--reason", reason)
+	}
+	return append(args, ids...)
+}
+
+func (s *BdStore) close(id, reason string) error {
+	_, err := s.runner(s.dir, "bd", bdCloseArgs(reason, id)...)
 	if err != nil {
 		// Some bd error paths collapse to a bare exit status without a helpful
 		// not-found string. Re-read the bead to distinguish "already closed" from

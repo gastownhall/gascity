@@ -31,7 +31,7 @@ func TestDoInitRestoresLegacyIdentityWhenSiteBindingWriteFails(t *testing.T) {
 	fs := &failSiteBindingRenameFS{target: filepath.Join(cityPath, ".gc", "site.toml")}
 
 	var stdout, stderr bytes.Buffer
-	code := doInit(fs, cityPath, defaultWizardConfig(), "machine-alias", &stdout, &stderr)
+	code := doInit(fs, cityPath, defaultWizardConfig(), "machine-alias", &stdout, &stderr, false)
 	if code == 0 {
 		t.Fatalf("doInit = %d, want failure", code)
 	}
@@ -71,7 +71,7 @@ func TestDoInitFromFileRestoresLegacyIdentityWhenSiteBindingWriteFails(t *testin
 	fs := &failSiteBindingRenameFS{target: filepath.Join(cityPath, ".gc", "site.toml")}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdInitFromTOMLFileWithOptions(fs, srcToml, cityPath, "machine-alias", &stdout, &stderr, true)
+	code := cmdInitFromTOMLFileWithOptions(fs, srcToml, cityPath, "machine-alias", &stdout, &stderr, true, false)
 	if code == 0 {
 		t.Fatalf("cmdInitFromTOMLFileWithOptions = %d, want failure", code)
 	}

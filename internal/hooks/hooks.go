@@ -358,6 +358,10 @@ func writeCodexHooksManaged(fs fsys.FS, dst string, data []byte) error {
 	} else if _, statErr := fs.Stat(dst); statErr == nil {
 		return nil
 	}
+	normalized, _, err := normalizeCodexHookCommands(data)
+	if err == nil {
+		data = normalized
+	}
 	return writeManagedData(fs, dst, data)
 }
 
@@ -377,18 +381,63 @@ func upgradeCodexHooks(existing, desired []byte) ([]byte, bool, error) {
 	if err := json.Unmarshal(existing, &root); err != nil {
 		return nil, false, err
 	}
+	hasManagedCommand := codexHookValueHasManagedCommand(root)
+	needsPreCompact := codexHookDocCanAddPreCompact(root)
 	changed := upgradeCodexHookValue(root)
 	if addCodexPreCompactHook(root, desired) {
 		changed = true
-	}
-	if !changed {
-		return nil, false, nil
 	}
 	data, err := json.MarshalIndent(root, "", "  ")
 	if err != nil {
 		return nil, false, err
 	}
-	return append(data, '\n'), true, nil
+	data = append(data, '\n')
+	if hasManagedCommand && !needsPreCompact && !bytes.Equal(data, existing) {
+		changed = true
+	}
+	return data, changed, nil
+}
+
+func normalizeCodexHookCommands(existing []byte) ([]byte, bool, error) {
+	var root any
+	if err := json.Unmarshal(existing, &root); err != nil {
+		return nil, false, err
+	}
+	hasManagedCommand := codexHookValueHasManagedCommand(root)
+	changed := upgradeCodexHookValue(root)
+	data, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return nil, false, err
+	}
+	data = append(data, '\n')
+	if hasManagedCommand && !bytes.Equal(data, existing) {
+		changed = true
+	}
+	return data, changed, nil
+}
+
+func codexHookValueHasManagedCommand(v any) bool {
+	switch node := v.(type) {
+	case map[string]any:
+		for key, val := range node {
+			if key == "command" {
+				if command, ok := val.(string); ok && isCodexManagedHookCommand(command) {
+					return true
+				}
+				continue
+			}
+			if codexHookValueHasManagedCommand(val) {
+				return true
+			}
+		}
+	case []any:
+		for _, elem := range node {
+			if codexHookValueHasManagedCommand(elem) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func upgradeCodexHookValue(v any) bool {
@@ -423,16 +472,28 @@ func upgradeCodexHookValue(v any) bool {
 	}
 }
 
+var codexManagedHookCommandNeedles = []string{
+	`gc prime --hook`,
+	`gc nudge drain --inject`,
+	`gc mail check --inject`,
+	`gc hook --inject`,
+	`gc handoff --auto`,
+}
+
+func isCodexManagedHookCommand(command string) bool {
+	for _, needle := range codexManagedHookCommandNeedles {
+		if strings.Contains(command, needle) {
+			return true
+		}
+	}
+	return false
+}
+
 func upgradeCodexHookCommand(command string) (string, bool) {
 	if strings.Contains(command, `--hook-format codex`) {
 		return "", false
 	}
-	for _, needle := range []string{
-		`gc prime --hook`,
-		`gc nudge drain --inject`,
-		`gc mail check --inject`,
-		`gc hook --inject`,
-	} {
+	for _, needle := range codexManagedHookCommandNeedles {
 		if strings.Contains(command, needle) {
 			return strings.Replace(command, needle, needle+` --hook-format codex`, 1), true
 		}
@@ -441,6 +502,20 @@ func upgradeCodexHookCommand(command string) (string, bool) {
 }
 
 func addCodexPreCompactHook(root any, desired []byte) bool {
+	if !codexHookDocCanAddPreCompact(root) {
+		return false
+	}
+	doc := root.(map[string]any)
+	hooksMap := doc["hooks"].(map[string]any)
+	preCompact := desiredCodexPreCompactHook(desired)
+	if preCompact == nil {
+		return false
+	}
+	hooksMap["PreCompact"] = preCompact
+	return true
+}
+
+func codexHookDocCanAddPreCompact(root any) bool {
 	doc, ok := root.(map[string]any)
 	if !ok || !codexHookDocLooksManaged(doc) {
 		return false
@@ -452,11 +527,6 @@ func addCodexPreCompactHook(root any, desired []byte) bool {
 	if _, exists := hooksMap["PreCompact"]; exists {
 		return false
 	}
-	preCompact := desiredCodexPreCompactHook(desired)
-	if preCompact == nil {
-		return false
-	}
-	hooksMap["PreCompact"] = preCompact
 	return true
 }
 
@@ -469,7 +539,7 @@ func codexHookDocLooksManaged(doc map[string]any) bool {
 		}
 		switch node := v.(type) {
 		case map[string]any:
-			if command, ok := node["command"].(string); ok && isManagedCodexHookCommand(command) {
+			if command, ok := node["command"].(string); ok && isCodexManagedHookCommand(command) {
 				found = true
 				return
 			}
@@ -484,21 +554,6 @@ func codexHookDocLooksManaged(doc map[string]any) bool {
 	}
 	walk(doc)
 	return found
-}
-
-func isManagedCodexHookCommand(command string) bool {
-	for _, needle := range []string{
-		`gc prime --hook`,
-		`gc nudge drain --inject`,
-		`gc mail check --inject`,
-		`gc hook --inject`,
-		`gc handoff --auto`,
-	} {
-		if strings.Contains(command, needle) {
-			return true
-		}
-	}
-	return false
 }
 
 func desiredCodexPreCompactHook(desired []byte) any {

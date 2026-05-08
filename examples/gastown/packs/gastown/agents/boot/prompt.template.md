@@ -89,10 +89,10 @@ Drain-ack and exit. Next Boot tick will re-evaluate.
 
 **Clearly stuck (very stale wisp, no output, errors visible):** File a warrant:
 ```bash
-gc bd create --type=warrant \
+gc bd create --type=task \
   --title="Stuck: deacon" \
   --metadata '{"target":"deacon","reason":"Stale patrol wisp, no activity","requester":"boot"}' \
-  --label=pool:dog
+  --label=warrant,pool:dog
 ```
 The dog pool picks up the warrant and runs the shutdown dance.
 
@@ -124,7 +124,7 @@ up your session and spawns you again next tick.
 | View deacon output | `{{ cmd }} session peek deacon --lines 30` |
 | Check deacon work | `gc bd list --assignee=deacon --status=in_progress --json` |
 | Nudge deacon | `{{ cmd }} session nudge deacon "message"` |
-| File stuck warrant | `gc bd create --type=warrant --label=pool:dog --metadata '{...}'` |
+| File stuck warrant | `gc bd create --type=task --label=warrant,pool:dog --metadata '{...}'` |
 | Check active sessions | `{{ cmd }} session list` |
 
 Working directory: {{ .WorkDir }}

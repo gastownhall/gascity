@@ -51,6 +51,28 @@ func TestReadinessRegistrySync(t *testing.T) {
 	}
 }
 
+func TestProbeCommandEnvForwardsClaudeCodeOAuthToken(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-test")
+
+	env := probeCommandEnv(homeDir)
+	if !slices.Contains(env, "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-test") {
+		t.Fatalf("probeCommandEnv missing CLAUDE_CODE_OAUTH_TOKEN forwarding: %v", env)
+	}
+}
+
+func TestProbeCommandEnvOmitsUnsetClaudeCodeOAuthToken(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
+
+	env := probeCommandEnv(homeDir)
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "CLAUDE_CODE_OAUTH_TOKEN=") {
+			t.Fatalf("probeCommandEnv forwarded unset CLAUDE_CODE_OAUTH_TOKEN: %q", entry)
+		}
+	}
+}
+
 func TestProbeCommandEnvPreservesXDGOverridesWhenGHConfigDirIsSet(t *testing.T) {
 	homeDir := t.TempDir()
 	xdgConfigHome := filepath.Join(homeDir, "xdg-config")
@@ -529,6 +551,83 @@ func TestHandleProviderReadinessReturnsNeedsAuthForCodexWithEmptyTokensObject(t 
 	state := newFakeState(t)
 	h := newTestCityHandler(t, state)
 	assertProviderStatus(t, h, state, "/provider-readiness?providers=codex&fresh=1", "codex", probeStatusNeedsAuth)
+}
+
+func TestHandleProviderReadinessReturnsConfiguredForClaudeOAuthToken(t *testing.T) {
+	homeDir := t.TempDir()
+	binDir := filepath.Join(homeDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	// `claude setup-token` produces a long-lived first-party OAuth token;
+	// `claude auth status --json` reports authMethod "oauth_token" for it.
+	writeExecutable(t, binDir, "claude", `#!/bin/sh
+printf '%s\n' '{"loggedIn":true,"authMethod":"oauth_token","apiProvider":"firstParty"}'
+`)
+
+	t.Setenv("HOME", homeDir)
+	originalPathEnv := providerProbePathEnv
+	originalCommandContext := providerProbeCommandContext
+	providerProbePathEnv = binDir
+	providerProbeCommandContext = exec.CommandContext
+	defer func() {
+		providerProbePathEnv = originalPathEnv
+		providerProbeCommandContext = originalCommandContext
+	}()
+
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+	assertProviderStatus(t, h, state, "/provider-readiness?providers=claude&fresh=1", "claude", probeStatusConfigured)
+}
+
+func TestHandleProviderReadinessReturnsInvalidConfigurationForClaudeNonFirstPartyProvider(t *testing.T) {
+	homeDir := t.TempDir()
+	binDir := filepath.Join(homeDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	writeExecutable(t, binDir, "claude", `#!/bin/sh
+printf '%s\n' '{"loggedIn":true,"authMethod":"oauth_token","apiProvider":"bedrock"}'
+`)
+
+	t.Setenv("HOME", homeDir)
+	originalPathEnv := providerProbePathEnv
+	originalCommandContext := providerProbeCommandContext
+	providerProbePathEnv = binDir
+	providerProbeCommandContext = exec.CommandContext
+	defer func() {
+		providerProbePathEnv = originalPathEnv
+		providerProbeCommandContext = originalCommandContext
+	}()
+
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+	assertProviderStatus(t, h, state, "/provider-readiness?providers=claude&fresh=1", "claude", probeStatusInvalidConfiguration)
+}
+
+func TestHandleProviderReadinessReturnsInvalidConfigurationForClaudeUnknownAuthMethod(t *testing.T) {
+	homeDir := t.TempDir()
+	binDir := filepath.Join(homeDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	writeExecutable(t, binDir, "claude", `#!/bin/sh
+printf '%s\n' '{"loggedIn":true,"authMethod":"apiKey","apiProvider":"firstParty"}'
+`)
+
+	t.Setenv("HOME", homeDir)
+	originalPathEnv := providerProbePathEnv
+	originalCommandContext := providerProbeCommandContext
+	providerProbePathEnv = binDir
+	providerProbeCommandContext = exec.CommandContext
+	defer func() {
+		providerProbePathEnv = originalPathEnv
+		providerProbeCommandContext = originalCommandContext
+	}()
+
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+	assertProviderStatus(t, h, state, "/provider-readiness?providers=claude&fresh=1", "claude", probeStatusInvalidConfiguration)
 }
 
 func TestHandleProviderReadinessReturnsNeedsAuthForLoggedOutClaude(t *testing.T) {

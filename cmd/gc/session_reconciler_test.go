@@ -2709,6 +2709,32 @@ func TestReconcileSessionBeads_OrphanSessionDrained(t *testing.T) {
 	}
 }
 
+func TestReconcileSessionBeads_OrphanDrainLiveAssignedWorkStaysOpen(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "other"}}}
+	_ = env.sp.Start(context.Background(), "orphan", runtime.Config{})
+	session := env.createSessionBead("orphan", "orphan")
+	env.markSessionActive(&session)
+
+	if _, err := env.store.Create(beads.Bead{
+		Title:    "claimed work",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.Metadata["session_name"],
+	}); err != nil {
+		t.Fatalf("Create assigned work bead: %v", err)
+	}
+
+	env.reconcile([]beads.Bead{session})
+
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("expected live assigned work to block orphan drain, got drain state %+v", ds)
+	}
+	if strings.Contains(env.stdout.String(), "Draining session 'orphan': orphaned") {
+		t.Fatalf("expected no orphan drain log, got stdout:\n%s", env.stdout.String())
+	}
+}
+
 // TestReconcileSessionBeads_OrphanDrainLogThrottled covers issue #855:
 // once a session is draining, the reconciler must not re-emit
 // "Draining session '...': orphaned" on every subsequent tick. The

@@ -32,6 +32,131 @@ func TestValidateRigEndpointOptionsRejectsWildcardExternalHost(t *testing.T) {
 	}
 }
 
+func TestValidateRigEndpointOptionsSelfRequiresPort(t *testing.T) {
+	err := validateRigEndpointOptions(rigEndpointOptions{Self: true})
+	if err == nil || !strings.Contains(err.Error(), "--self requires --port") {
+		t.Fatalf("validateRigEndpointOptions(Self without port) error = %v", err)
+	}
+}
+
+func TestValidateRigEndpointOptionsSelfRejectsHost(t *testing.T) {
+	err := validateRigEndpointOptions(rigEndpointOptions{Self: true, Port: "28232", Host: "db.example.com"})
+	if err == nil || !strings.Contains(err.Error(), "--self") || !strings.Contains(err.Error(), "--host") {
+		t.Fatalf("validateRigEndpointOptions(Self+Host) error = %v", err)
+	}
+}
+
+func TestValidateRigEndpointOptionsSelfRejectsUser(t *testing.T) {
+	err := validateRigEndpointOptions(rigEndpointOptions{Self: true, Port: "28232", User: "someone"})
+	if err == nil || !strings.Contains(err.Error(), "--self") || !strings.Contains(err.Error(), "--user") {
+		t.Fatalf("validateRigEndpointOptions(Self+User) error = %v", err)
+	}
+}
+
+func TestValidateRigEndpointOptionsForceRequiresSelf(t *testing.T) {
+	err := validateRigEndpointOptions(rigEndpointOptions{External: true, Host: "db.example.com", Port: "3307", Force: true})
+	if err == nil || !strings.Contains(err.Error(), "--force") {
+		t.Fatalf("validateRigEndpointOptions(External+Force) error = %v", err)
+	}
+}
+
+func TestValidateRigEndpointOptionsRejectsMultipleModes(t *testing.T) {
+	err := validateRigEndpointOptions(rigEndpointOptions{Inherit: true, Self: true, Port: "28232"})
+	if err == nil || !strings.Contains(err.Error(), "exactly one") {
+		t.Fatalf("validateRigEndpointOptions(Inherit+Self) error = %v", err)
+	}
+}
+
+func TestDoRigSetEndpointSelfManagedCityRequiresForce(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeRigEndpointCityConfig(t, cityDir, rigDir)
+	writeRigEndpointMetadata(t, cityDir, "hq")
+	writeRigEndpointMetadata(t, rigDir, "fe")
+	writeRigEndpointRuntimeState(t, cityDir, 3311)
+	writeRigEndpointCanonicalConfig(t, rigDir, contract.ConfigState{
+		IssuePrefix:    "fe",
+		EndpointOrigin: contract.EndpointOriginInheritedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := doRigSetEndpoint(fsys.OSFS{}, cityDir, "frontend", rigEndpointOptions{
+		Self: true,
+		Port: "28232",
+	}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("doRigSetEndpoint(Self, managed_city, no --force) exit = 0, want non-zero")
+	}
+	if !strings.Contains(stderr.String(), "--force") {
+		t.Errorf("want stderr to mention --force, got:\n%s", stderr.String())
+	}
+	// Canonical config must not have been mutated.
+	state := readRigEndpointConfigState(t, rigDir)
+	if state.EndpointOrigin != contract.EndpointOriginInheritedCity {
+		t.Fatalf("EndpointOrigin = %q, want unchanged %q", state.EndpointOrigin, contract.EndpointOriginInheritedCity)
+	}
+}
+
+func TestDoRigSetEndpointSelfWithForceSucceeds(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeRigEndpointCityConfig(t, cityDir, rigDir)
+	writeRigEndpointMetadata(t, cityDir, "hq")
+	writeRigEndpointMetadata(t, rigDir, "fe")
+	writeRigEndpointRuntimeState(t, cityDir, 3311)
+	writeRigEndpointCanonicalConfig(t, rigDir, contract.ConfigState{
+		IssuePrefix:    "fe",
+		EndpointOrigin: contract.EndpointOriginInheritedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	})
+	rigPortFile := filepath.Join(rigDir, ".beads", "dolt-server.port")
+	if err := os.WriteFile(rigPortFile, []byte("3311\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	origVerify := verifyRigExternalEndpoint
+	defer func() { verifyRigExternalEndpoint = origVerify }()
+	verifyRigExternalEndpoint = func(contract.ConfigState, string, string) error { return nil }
+
+	var stdout, stderr bytes.Buffer
+	code := doRigSetEndpoint(fsys.OSFS{}, cityDir, "frontend", rigEndpointOptions{
+		Self:  true,
+		Port:  "28232",
+		Force: true,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigSetEndpoint(Self+Force, managed_city) = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "WARN") {
+		t.Errorf("want WARN in stderr, got:\n%s", stderr.String())
+	}
+
+	state := readRigEndpointConfigState(t, rigDir)
+	if state.EndpointOrigin != contract.EndpointOriginExplicit {
+		t.Fatalf("EndpointOrigin = %q, want %q", state.EndpointOrigin, contract.EndpointOriginExplicit)
+	}
+	if state.DoltHost != "127.0.0.1" {
+		t.Fatalf("DoltHost = %q, want 127.0.0.1", state.DoltHost)
+	}
+	if state.DoltPort != "28232" {
+		t.Fatalf("DoltPort = %q, want 28232", state.DoltPort)
+	}
+	if _, err := os.Stat(rigPortFile); !os.IsNotExist(err) {
+		t.Fatalf("rig port file after --self --force: err = %v, want not exist", err)
+	}
+}
+
 func TestDoRigSetEndpointInheritWritesManagedInheritedRigConfig(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 

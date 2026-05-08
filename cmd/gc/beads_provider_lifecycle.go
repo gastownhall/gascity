@@ -105,7 +105,7 @@ func isRetryableManagedDoltLifecycleError(err error) bool {
 // start → init+hooks(city) → init+hooks(each rig) → regenerate routes.
 // Called by gc start and controller config reload. Rigs must have absolute
 // paths before calling (resolve relative paths first).
-func startBeadsLifecycle(cityPath, _ string, cfg *config.City, _ io.Writer) error {
+func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer) error {
 	if err := validateCanonicalCompatDoltDrift(cityPath, cfg); err != nil {
 		return err
 	}
@@ -153,7 +153,7 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, _ io.Writer) erro
 			return fmt.Errorf("init rig %q beads: %w", cfg.Rigs[i].Name, err)
 		}
 	}
-	if err := normalizeCanonicalBdScopeFiles(cityPath, cfg); err != nil {
+	if err := normalizeCanonicalBdScopeFiles(cityPath, cfg, stderr); err != nil {
 		return err
 	}
 	// Regenerate routes for cross-rig routing.
@@ -866,7 +866,7 @@ type doltRuntimeState struct {
 // control-plane input.
 func currentDoltPort(cityPath string) string {
 	if port := currentManagedDoltPort(cityPath); port != "" {
-		writeDoltPortFile(cityPath, port)
+		writeDoltPortFile(cityPath, port, "", io.Discard)
 		return port
 	}
 	removeDoltPortFile(cityPath)
@@ -940,7 +940,13 @@ func doltPortReachable(port string) bool {
 	return true
 }
 
-func writeDoltPortFile(dir, port string) {
+// writeDoltPortFile writes the managed Dolt port into dir/.beads/dolt-server.port.
+// When the existing file contains a non-empty port different from the one being
+// written, a WARN line naming scopeLabel and both ports is emitted on warn so
+// operators can see that their on-disk port file is being reconciled to the
+// canonical managed port. scopeLabel may be empty for silent callers; warn may
+// be nil or io.Discard to suppress warnings entirely.
+func writeDoltPortFile(dir, port, scopeLabel string, warn io.Writer) {
 	if dir == "" || port == "" {
 		return
 	}
@@ -949,8 +955,19 @@ func writeDoltPortFile(dir, port string) {
 		return
 	}
 	portFile := filepath.Join(dir, ".beads", "dolt-server.port")
-	if data, err := os.ReadFile(portFile); err == nil && strings.TrimSpace(string(data)) == trimmedPort {
-		return
+	existing := ""
+	if data, err := os.ReadFile(portFile); err == nil {
+		existing = strings.TrimSpace(string(data))
+		if existing == trimmedPort {
+			return
+		}
+	}
+	if warn != nil && existing != "" && existing != trimmedPort {
+		label := strings.TrimSpace(scopeLabel)
+		if label == "" {
+			label = dir
+		}
+		fmt.Fprintf(warn, "WARN: %s .beads/dolt-server.port rewrite %s → %s (managed city port)\n", label, existing, trimmedPort) //nolint:errcheck // best-effort stderr
 	}
 	if err := ensureBeadsDir(fsys.OSFS{}, filepath.Dir(portFile)); err != nil {
 		return
@@ -1042,9 +1059,21 @@ func enforceCanonicalScopeMetadataForInit(fs fsys.FS, scopeRoot, doltDatabase st
 	return ensureCanonicalScopeMetadata(fs, scopeRoot, doltDatabase, false)
 }
 
-func normalizeCanonicalBdScopeFiles(cityPath string, cfg *config.City) error {
+// normalizeCanonicalBdScopeFiles reconciles canonical bd metadata/config/port
+// mirrors under the city and each rig. warn receives operator-visible WARN
+// lines when port-file rewrites change on-disk contents (pass io.Discard to
+// suppress, or a stderr writer from the caller to show them). When omitted,
+// warning output is suppressed.
+func normalizeCanonicalBdScopeFiles(cityPath string, cfg *config.City, warns ...io.Writer) error {
 	if cfg == nil {
 		return nil
+	}
+	var warn io.Writer
+	if len(warns) > 0 {
+		warn = warns[0]
+	}
+	if warn == nil {
+		warn = io.Discard
 	}
 	resolveRigPaths(cityPath, cfg.Rigs)
 	if scopeUsesManagedBdStoreContract(cityPath, cityPath) {
@@ -1060,13 +1089,21 @@ func normalizeCanonicalBdScopeFiles(cityPath string, cfg *config.City) error {
 			return fmt.Errorf("canonicalizing rig %q metadata: %w", cfg.Rigs[i].Name, err)
 		}
 	}
-	if err := syncConfiguredDoltPortFiles(cityPath, cfg.Dolt, config.EffectiveHQPrefix(cfg), cfg.Rigs); err != nil {
+	if err := syncConfiguredDoltPortFiles(cityPath, cfg.Dolt, config.EffectiveHQPrefix(cfg), cfg.Rigs, warn); err != nil {
 		return fmt.Errorf("syncing canonical dolt config: %w", err)
 	}
 	return nil
 }
 
-func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, cityPrefix string, rigs []config.Rig) error {
+// syncConfiguredDoltPortFiles reconciles each scope's .beads/dolt-server.port
+// compatibility mirror with the canonical managed-city Dolt port. When warn is
+// non-nil, a WARN line is emitted for every port file whose prior non-empty
+// contents disagreed with the canonical port (operator-visible signal that gc
+// is overriding a rig-local or stale port). Pass io.Discard to suppress.
+func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, cityPrefix string, rigs []config.Rig, warn io.Writer) error {
+	if warn == nil {
+		warn = io.Discard
+	}
 	resolveRigPaths(cityPath, rigs)
 	cityUsesBd := scopeUsesManagedBdStoreContract(cityPath, cityPath)
 	anyRigUsesBd := false
@@ -1098,7 +1135,7 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 			return err
 		}
 		if managedPort != "" {
-			writeDoltPortFile(cityPath, managedPort)
+			writeDoltPortFile(cityPath, managedPort, "city", warn)
 		} else {
 			removeDoltPortFile(cityPath)
 		}
@@ -1127,7 +1164,7 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 			return err
 		}
 		if rigManagedPort != "" {
-			writeDoltPortFile(rig.Path, rigManagedPort)
+			writeDoltPortFile(rig.Path, rigManagedPort, "rig "+rig.Name, warn)
 		} else {
 			removeDoltPortFile(rig.Path)
 		}

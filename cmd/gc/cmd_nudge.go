@@ -1259,7 +1259,16 @@ func enqueueQueuedNudgeWithStore(cityPath string, store beads.Store, item queued
 		return nil
 	})
 	if err != nil && created && store != nil && beadID != "" {
-		_ = store.Close(beadID)
+		// Stamp metadata.close_reason before Close so BdStore.Close can forward
+		// it as `bd close --reason` and satisfy validation.on-close=error.
+		// Preserve the original enqueue error, but return rollback failures too
+		// so leaked open nudge beads are diagnosable.
+		if setErr := store.SetMetadata(beadID, "close_reason", nudgeEnqueueRollbackCloseReason); setErr != nil {
+			err = errors.Join(err, fmt.Errorf("stamping rollback nudge bead %q close reason: %w", beadID, setErr))
+		}
+		if closeErr := store.Close(beadID); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("closing rollback nudge bead %q: %w", beadID, closeErr))
+		}
 	}
 	return err
 }

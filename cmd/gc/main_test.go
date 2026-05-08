@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -2237,7 +2238,7 @@ func TestDoInitSuccess(t *testing.T) {
 	// No pre-existing files — doInit creates everything from scratch.
 
 	var stdout, stderr bytes.Buffer
-	code := doInit(f, "/bright-lights", defaultWizardConfig(), "", &stdout, &stderr)
+	code := doInit(f, "/bright-lights", defaultWizardConfig(), "", &stdout, &stderr, false)
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2328,7 +2329,7 @@ func TestDoInitWritesExpectedTOML(t *testing.T) {
 	f := fsys.NewFake()
 
 	var stdout, stderr bytes.Buffer
-	code := doInit(f, "/bright-lights", defaultWizardConfig(), "", &stdout, &stderr)
+	code := doInit(f, "/bright-lights", defaultWizardConfig(), "", &stdout, &stderr, false)
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2366,7 +2367,7 @@ func TestDoInitGastownWritesCanonicalPackV2Shape(t *testing.T) {
 	f := fsys.NewFake()
 
 	var stdout, stderr bytes.Buffer
-	code := doInit(f, "/bright-lights", wizardConfig{configName: "gastown", provider: "claude"}, "", &stdout, &stderr)
+	code := doInit(f, "/bright-lights", wizardConfig{configName: "gastown", provider: "claude"}, "", &stdout, &stderr, false)
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2404,7 +2405,7 @@ func TestDoInitAlreadyInitialized(t *testing.T) {
 	markFakeCityScaffold(f, "/city")
 
 	var stderr bytes.Buffer
-	code := doInit(f, "/city", defaultWizardConfig(), "", &bytes.Buffer{}, &stderr)
+	code := doInit(f, "/city", defaultWizardConfig(), "", &bytes.Buffer{}, &stderr, false)
 	if code != initExitAlreadyInitialized {
 		t.Errorf("doInit = %d, want %d", code, initExitAlreadyInitialized)
 	}
@@ -2430,7 +2431,7 @@ func TestDoInitBootstrapsExistingCityToml(t *testing.T) {
 	f.Files[filepath.Join("/city", "city.toml")] = original
 
 	var stdout, stderr bytes.Buffer
-	code := doInit(f, "/city", defaultWizardConfig(), "", &stdout, &stderr)
+	code := doInit(f, "/city", defaultWizardConfig(), "", &stdout, &stderr, false)
 	if code != 0 {
 		t.Errorf("doInit = %d, want 0; stderr=%q", code, stderr.String())
 	}
@@ -2456,7 +2457,7 @@ func TestDoInitBootstrapWithNameOverride(t *testing.T) {
 	f.Files[filepath.Join("/city", "city.toml")] = []byte("[workspace]\nname = \"old-name\"\n")
 
 	var stdout, stderr bytes.Buffer
-	code := doInit(f, "/city", defaultWizardConfig(), "new-name", &stdout, &stderr)
+	code := doInit(f, "/city", defaultWizardConfig(), "new-name", &stdout, &stderr, false)
 	if code != 0 {
 		t.Errorf("doInit = %d, want 0; stderr=%q", code, stderr.String())
 	}
@@ -2478,7 +2479,7 @@ func TestDoInitMkdirGCFails(t *testing.T) {
 	f.Errors[filepath.Join("/city", ".gc")] = fmt.Errorf("permission denied")
 
 	var stderr bytes.Buffer
-	code := doInit(f, "/city", defaultWizardConfig(), "", &bytes.Buffer{}, &stderr)
+	code := doInit(f, "/city", defaultWizardConfig(), "", &bytes.Buffer{}, &stderr, false)
 	if code != 1 {
 		t.Errorf("doInit = %d, want 1", code)
 	}
@@ -2492,7 +2493,7 @@ func TestDoInitWriteFails(t *testing.T) {
 	f.Errors[filepath.Join("/city", "city.toml")] = fmt.Errorf("read-only fs")
 
 	var stderr bytes.Buffer
-	code := doInit(f, "/city", defaultWizardConfig(), "", &bytes.Buffer{}, &stderr)
+	code := doInit(f, "/city", defaultWizardConfig(), "", &bytes.Buffer{}, &stderr, false)
 	if code != 1 {
 		t.Errorf("doInit = %d, want 1", code)
 	}
@@ -2506,7 +2507,7 @@ func TestDoInitWriteFails(t *testing.T) {
 func TestDoInitCreatesSettings(t *testing.T) {
 	f := fsys.NewFake()
 	var stdout, stderr bytes.Buffer
-	code := doInit(f, "/bright-lights", defaultWizardConfig(), "", &stdout, &stderr)
+	code := doInit(f, "/bright-lights", defaultWizardConfig(), "", &stdout, &stderr, false)
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2526,7 +2527,7 @@ func TestDoInitCreatesSettings(t *testing.T) {
 func TestDoInitSettingsIsValidJSON(t *testing.T) {
 	f := fsys.NewFake()
 	var stdout, stderr bytes.Buffer
-	code := doInit(f, "/bright-lights", defaultWizardConfig(), "", &stdout, &stderr)
+	code := doInit(f, "/bright-lights", defaultWizardConfig(), "", &stdout, &stderr, false)
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2868,7 +2869,7 @@ func TestDoInitWithWizardConfig(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doInit(f, "/bright-lights", wiz, "", &stdout, &stderr)
+	code := doInit(f, "/bright-lights", wiz, "", &stdout, &stderr, false)
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2922,7 +2923,7 @@ func TestDoInitWithCustomCommand(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doInit(f, "/bright-lights", wiz, "", &stdout, &stderr)
+	code := doInit(f, "/bright-lights", wiz, "", &stdout, &stderr, false)
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2958,7 +2959,7 @@ func TestDoInitWithGastownTemplate(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doInit(f, "/bright-lights", wiz, "", &stdout, &stderr)
+	code := doInit(f, "/bright-lights", wiz, "", &stdout, &stderr, false)
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -3006,7 +3007,7 @@ func TestDoInitWithCustomTemplate(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doInit(f, "/my-city", wiz, "", &stdout, &stderr)
+	code := doInit(f, "/my-city", wiz, "", &stdout, &stderr, false)
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -3043,7 +3044,7 @@ func TestDoInitWithProviderFlagAndBootstrapProfile(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doInit(f, "/hosted-city", wiz, "", &stdout, &stderr)
+	code := doInit(f, "/hosted-city", wiz, "", &stdout, &stderr, false)
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -3087,7 +3088,7 @@ func TestDoInitWithOpenCodeProviderInstallsWorkspaceHooks(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doInit(f, "/open-city", wiz, "", &stdout, &stderr)
+	code := doInit(f, "/open-city", wiz, "", &stdout, &stderr, false)
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -3116,7 +3117,7 @@ func TestDoInitWithClaudeProviderLeavesWorkspaceHooksEmpty(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doInit(f, "/claude-city", wiz, "", &stdout, &stderr)
+	code := doInit(f, "/claude-city", wiz, "", &stdout, &stderr, false)
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -3322,6 +3323,193 @@ func TestCmdInitFromTOMLFileAlreadyInitializedByCityToml(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "already initialized") {
 		t.Errorf("stderr = %q, want 'already initialized'", stderr.String())
+	}
+}
+
+func TestCmdInitFromTOMLFilePreservesExistingFiles(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city")
+	if err := os.MkdirAll(filepath.Join(cityPath, "agents", "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	preExistingPack := []byte("[pack]\nname = \"user-authored\"\nschema = 2\nversion = \"9.9.9\"\n")
+	preExistingCity := []byte("[workspace]\nname = \"user-authored\"\nprovider = \"claude\"\n")
+	preExistingPrompt := []byte("user-authored mayor prompt\n")
+	for _, f := range []struct {
+		path string
+		data []byte
+	}{
+		{filepath.Join(cityPath, "pack.toml"), preExistingPack},
+		{filepath.Join(cityPath, "city.toml"), preExistingCity},
+		{filepath.Join(cityPath, "agents", "mayor", "prompt.template.md"), preExistingPrompt},
+	} {
+		if err := os.WriteFile(f.path, f.data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	src := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(src,
+		[]byte("[workspace]\nname = \"from-template\"\nprovider = \"claude\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"prompts/mayor.md\"\n"),
+		0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdInitFromTOMLFileWithOptions(fsys.OSFS{}, src, cityPath, "", &stdout, &stderr, true, true)
+	if code != 0 {
+		t.Fatalf("cmdInitFromTOMLFileWithOptions = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	for _, f := range []struct {
+		path string
+		want []byte
+	}{
+		{filepath.Join(cityPath, "pack.toml"), preExistingPack},
+		{filepath.Join(cityPath, "city.toml"), preExistingCity},
+		{filepath.Join(cityPath, "agents", "mayor", "prompt.template.md"), preExistingPrompt},
+	} {
+		got, err := os.ReadFile(f.path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", f.path, err)
+		}
+		if !bytes.Equal(got, f.want) {
+			t.Errorf("%s was rewritten under --preserve-existing\n got: %s\nwant: %s", f.path, got, f.want)
+		}
+	}
+
+	out := stdout.String()
+	for _, want := range []string{"Preserved existing pack.toml.", "Preserved existing city.toml."} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout missing %q; got:\n%s", want, out)
+		}
+	}
+}
+
+func TestCmdInitFromTOMLFilePreserveExistingBlockedByScaffold(t *testing.T) {
+	f := fsys.NewFake()
+	cityPath := "/city"
+
+	// A fully-initialized runtime scaffold should still cause init to refuse,
+	// even with --preserve-existing. Only committed config files are meant to
+	// be tolerated; an active runtime indicates the city is already live.
+	f.Files[filepath.Join(cityPath, ".gc", "events.jsonl")] = []byte("")
+	for _, sub := range []string{"cache", "runtime", "system"} {
+		f.Dirs[filepath.Join(cityPath, ".gc", sub)] = true
+	}
+	f.Dirs[filepath.Join(cityPath, ".gc")] = true
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(src, []byte("[workspace]\nname = \"x\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdInitFromTOMLFileWithOptions(f, src, cityPath, "", &stdout, &stderr, true, true)
+	if code != initExitAlreadyInitialized {
+		t.Errorf("code = %d, want %d", code, initExitAlreadyInitialized)
+	}
+	if !strings.Contains(stderr.String(), "already initialized") {
+		t.Errorf("stderr = %q, want 'already initialized'", stderr.String())
+	}
+}
+
+func TestWriteInitFile_PreserveExistingStatError(t *testing.T) {
+	// When preserve=true, a Stat error that isn't os.IsNotExist must surface
+	// to the caller instead of being silently treated as "does not exist".
+	f := fsys.NewFake()
+	target := "/city/pack.toml"
+	f.Errors[target] = errors.New("permission denied")
+
+	wrote, err := writeInitFile(f, target, []byte("new"), true)
+	if err == nil {
+		t.Fatal("expected error propagation, got nil")
+	}
+	if wrote {
+		t.Errorf("wrote = true on stat error; want false")
+	}
+	// Must not have attempted to write over the file.
+	for _, c := range f.Calls {
+		if c.Method == "WriteFile" && c.Path == target {
+			t.Errorf("WriteFile called despite stat error; calls=%v", f.Calls)
+		}
+	}
+}
+
+func TestWriteInitFile_PreserveFalseOverwrites(t *testing.T) {
+	// When preserve=false, the helper writes unconditionally — even over
+	// an existing file — mirroring the pre-flag default behavior.
+	f := fsys.NewFake()
+	target := "/city/pack.toml"
+	f.Files[target] = []byte("existing")
+
+	wrote, err := writeInitFile(f, target, []byte("replacement"), false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !wrote {
+		t.Errorf("wrote = false; want true when preserve=false")
+	}
+	if got := string(f.Files[target]); got != "replacement" {
+		t.Errorf("file contents = %q, want %q", got, "replacement")
+	}
+}
+
+// TestDoInitPreservesExistingPackToml exercises the wizard-init path
+// (`doInit`, not `cmdInitFromTOMLFileWithOptions`) with `preserveExisting=true`
+// and a pre-seeded pack.toml. Covers the "Preserved existing pack.toml."
+// stdout branch unique to the wizard path.
+func TestDoInitPreservesExistingPackToml(t *testing.T) {
+	f := fsys.NewFake()
+	// Pre-seed pack.toml. No pre-seeded city.toml — that would route
+	// doInit into the separate "bootstrap existing" path above the
+	// preserve branches and never reach the pack.toml write.
+	preExistingPack := []byte("[pack]\nname = \"user-authored\"\nschema = 2\nversion = \"9.9.9\"\n")
+	f.Files["/city/pack.toml"] = preExistingPack
+
+	var stdout, stderr bytes.Buffer
+	code := doInit(f, "/city", defaultWizardConfig(), "", &stdout, &stderr, true)
+	if code != 0 {
+		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if got := f.Files["/city/pack.toml"]; !bytes.Equal(got, preExistingPack) {
+		t.Errorf("pack.toml was rewritten under preserveExisting=true\n got: %s\nwant: %s", got, preExistingPack)
+	}
+	if !strings.Contains(stdout.String(), "Preserved existing pack.toml.") {
+		t.Errorf("stdout missing preservation log; got:\n%s", stdout.String())
+	}
+}
+
+// TestCmdInitFromFileWithOptionsUsesCWDWhenArgsEmpty covers the wrapper
+// branch that defaults cityPath to the current working directory when no
+// positional arg is supplied. The inner `cmdInitFromTOMLFileWithOptions`
+// call is exercised by the broader preserve-existing test; this case
+// pins the wrapper's default-path behavior itself.
+func TestCmdInitFromFileWithOptionsUsesCWDWhenArgsEmpty(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	src := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(src,
+		[]byte("[workspace]\nname = \"from-template\"\nprovider = \"claude\"\n"),
+		0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdInitFromFileWithOptions(src, nil, "", &stdout, &stderr, true, false)
+	if code != 0 {
+		t.Fatalf("cmdInitFromFileWithOptions = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	// Init should have written city.toml into the CWD.
+	if _, err := os.Stat(filepath.Join(dir, "city.toml")); err != nil {
+		t.Errorf("city.toml not written to CWD: %v", err)
 	}
 }
 
@@ -3551,7 +3739,7 @@ func TestInitNameFlagWithFile(t *testing.T) {
 	cityPath := filepath.Join(dir, "target-dir")
 
 	var stdout, stderr bytes.Buffer
-	code := cmdInitFromFileWithOptions(tomlFile, []string{cityPath}, "my-file-name", &stdout, &stderr, true)
+	code := cmdInitFromFileWithOptions(tomlFile, []string{cityPath}, "my-file-name", &stdout, &stderr, true, false)
 	if code != 0 {
 		t.Fatalf("cmdInitFromFileWithOptions = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -3579,7 +3767,7 @@ func TestInitNameFlagWithBareInit(t *testing.T) {
 	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
 		configName: "minimal",
 		provider:   "claude",
-	}, "my-bare-name", &stdout, &stderr)
+	}, "my-bare-name", &stdout, &stderr, false)
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
 	}

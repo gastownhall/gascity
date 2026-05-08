@@ -345,12 +345,24 @@ func probeClaude(ctx context.Context, homeDir string) providerProbeResult {
 	if !status.LoggedIn {
 		return providerProbeResult{status: probeStatusNeedsAuth, detail: "claude is installed but not logged in"}
 	}
-	// Onboarding only supports the first-party claude.ai OAuth flow. API-key
-	// or alternate providers are intentionally treated as unsupported.
-	if status.AuthMethod == "claude.ai" && status.APIProvider == "firstParty" {
+	// Onboarding supports the first-party claude.ai OAuth flow. Both the
+	// interactive `claude /login` flow ("claude.ai") and the long-lived
+	// token from `claude setup-token` ("oauth_token") are accepted — the
+	// latter is needed in headless / containerised environments where the
+	// interactive browser flow is not available. API-key or alternate
+	// providers are intentionally treated as unsupported.
+	if claudeFirstPartyAuthMethod(status.AuthMethod) && status.APIProvider == "firstParty" {
 		return providerProbeResult{status: probeStatusConfigured}
 	}
-	return providerProbeResult{status: probeStatusInvalidConfiguration, detail: "claude must use claude.ai first-party auth"}
+	return providerProbeResult{status: probeStatusInvalidConfiguration, detail: "claude must use claude.ai or oauth_token first-party auth"}
+}
+
+func claudeFirstPartyAuthMethod(method string) bool {
+	switch method {
+	case "claude.ai", "oauth_token":
+		return true
+	}
+	return false
 }
 
 func probeCodex(homeDir string) providerProbeResult {
@@ -589,6 +601,14 @@ func probeCommandEnv(homeDir string) []string {
 		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 			env = append(env, key+"="+value)
 		}
+	}
+	// CLAUDE_CODE_OAUTH_TOKEN holds the long-lived first-party token from
+	// `claude setup-token`. In headless / containerised deployments it is
+	// the only authentication signal available, so it must be forwarded
+	// into the probe subprocess — otherwise `claude auth status --json`
+	// reports loggedIn: false and readiness falls through to needs_auth.
+	if value := strings.TrimSpace(os.Getenv("CLAUDE_CODE_OAUTH_TOKEN")); value != "" {
+		env = append(env, "CLAUDE_CODE_OAUTH_TOKEN="+value)
 	}
 	return env
 }

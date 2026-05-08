@@ -2392,8 +2392,13 @@ type DoltConfigExpectedValue struct {
 // inspected city path.
 func DoltConfigExpectedValues() []DoltConfigExpectedValue {
 	return []DoltConfigExpectedValue{
-		{"behavior.auto_gc_behavior.enable", true},
+		{"behavior.auto_gc_behavior.enable", false},
 		{"behavior.auto_gc_behavior.archive_level", 0},
+		{"system_variables.dolt_auto_gc_enabled", "OFF"},
+		{"system_variables.dolt_stats_enabled", "OFF"},
+		{"system_variables.dolt_stats_gc_enabled", "OFF"},
+		{"system_variables.dolt_stats_memory_only", "ON"},
+		{"system_variables.dolt_stats_paused", "ON"},
 		{"listener.read_timeout_millis", 300000},
 		{"listener.write_timeout_millis", 300000},
 		{"listener.max_connections", 1000},

@@ -219,8 +219,12 @@ func TestBuiltinDoltDoctorBoundsVersionProbe(t *testing.T) {
 		name string
 		body string
 	}{
+		// Named gtimeout so the script's gtimeout-first preference picks
+		// up the fake even on macOS dev hosts where Homebrew coreutils
+		// exposes a real gtimeout from /opt/homebrew/bin. binDir is
+		// prepended to PATH below, so the fake wins.
 		{
-			name: "timeout",
+			name: "gtimeout",
 			body: "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$TIMEOUT_CAPTURE\"\nif [ \"$1\" = \"--kill-after=2\" ]; then\n  shift\nfi\nshift\nexec \"$@\"\n",
 		},
 		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 1.86.10\\n'\n"},
@@ -264,7 +268,9 @@ func TestBuiltinDoltDoctorReportsTimedOutVersionProbe(t *testing.T) {
 		name string
 		body string
 	}{
-		{name: "timeout", body: "#!/bin/sh\nexit 124\n"},
+		// Named gtimeout for the same reason as
+		// TestBuiltinDoltDoctorBoundsVersionProbe.
+		{name: "gtimeout", body: "#!/bin/sh\nexit 124\n"},
 		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 1.86.1\\n'\n"},
 		{name: "flock", body: "#!/bin/sh\nexit 0\n"},
 		{name: "lsof", body: "#!/bin/sh\nexit 0\n"},
