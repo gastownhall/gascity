@@ -302,7 +302,7 @@ func TestFinalizeInitBlocksBootstrapCollisionBeforeRegistration(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cityPath := filepath.Join(t.TempDir(), "bright-lights")
 			var initStdout, initStderr bytes.Buffer
-			code := doInit(fsys.OSFS{}, cityPath, defaultWizardConfig(), "", &initStdout, &initStderr)
+			code := doInit(fsys.OSFS{}, cityPath, defaultWizardConfig(), "", &initStdout, &initStderr, false)
 			if code != 0 {
 				t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
 			}
