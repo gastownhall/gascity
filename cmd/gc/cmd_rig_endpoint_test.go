@@ -120,6 +120,10 @@ func TestDoRigSetEndpointSelfWithForceSucceeds(t *testing.T) {
 		EndpointOrigin: contract.EndpointOriginInheritedCity,
 		EndpointStatus: contract.EndpointStatusVerified,
 	})
+	rigPortFile := filepath.Join(rigDir, ".beads", "dolt-server.port")
+	if err := os.WriteFile(rigPortFile, []byte("3311\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	origVerify := verifyRigExternalEndpoint
 	defer func() { verifyRigExternalEndpoint = origVerify }()
@@ -147,6 +151,9 @@ func TestDoRigSetEndpointSelfWithForceSucceeds(t *testing.T) {
 	}
 	if state.DoltPort != "28232" {
 		t.Fatalf("DoltPort = %q, want 28232", state.DoltPort)
+	}
+	if _, err := os.Stat(rigPortFile); !os.IsNotExist(err) {
+		t.Fatalf("rig port file after --self --force: err = %v, want not exist", err)
 	}
 }
 

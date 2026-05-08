@@ -105,19 +105,51 @@ func TestDoltDriftCheckCleanManagedCityIsOK(t *testing.T) {
 
 func TestDoltDriftCheckDetectsLiveRigLocalDolt(t *testing.T) {
 	cityDir, rigDir, _, cfg := managedCityDriftFixture(t, "runner")
-	// Write sql-server.info with our own PID (definitely alive).
-	writeSQLServerInfo(t, rigDir, os.Getpid(), 28232)
+	ln := listenOnRandomPort(t)
+	t.Cleanup(func() { _ = ln.Close() })
+	rigLocalPort := ln.Addr().(*net.TCPAddr).Port
+	// Write sql-server.info with our own PID and a port held by this process.
+	writeSQLServerInfo(t, rigDir, os.Getpid(), rigLocalPort)
 
 	r := newDoltDriftCheck(cityDir, cfg).Run(&doctor.CheckContext{CityPath: cityDir})
 	if r.Status != doctor.StatusError {
 		t.Fatalf("Run() status = %v, want StatusError; message=%q details=%v", r.Status, r.Message, r.Details)
 	}
-	joined := r.Message + " " + strings.Join(r.Details, " ")
+	joined := r.Message + " " + strings.Join(r.Details, " ") + " " + r.FixHint
 	if !strings.Contains(joined, "runner") {
 		t.Errorf("want rig name in message/details, got:\n%s", joined)
 	}
 	if !strings.Contains(joined, "rig-local Dolt") && !strings.Contains(joined, "sql-server.info") {
 		t.Errorf("want rig-local Dolt mention in details, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "--self --port") || !strings.Contains(joined, "--force") {
+		t.Errorf("want explicit --self --port --force remediation, got:\n%s", joined)
+	}
+	if strings.Contains(joined, "--inherit") {
+		t.Errorf("want no --inherit no-op remediation for inherited rig, got:\n%s", joined)
+	}
+}
+
+func TestDoltDriftCheckTreatsLivePIDWithoutMatchingPortAsStale(t *testing.T) {
+	cityDir, rigDir, _, cfg := managedCityDriftFixture(t, "reused")
+	unusedPort := reserveRandomTCPPort(t)
+	// The PID is live, but it is not the process listening on the recorded
+	// sql-server.info port. Treat it as stale instead of a live rig-local Dolt.
+	writeSQLServerInfo(t, rigDir, os.Getpid(), unusedPort)
+
+	r := newDoltDriftCheck(cityDir, cfg).Run(&doctor.CheckContext{CityPath: cityDir})
+	if r.Status != doctor.StatusWarning {
+		t.Fatalf("Run() status = %v, want StatusWarning; message=%q details=%v", r.Status, r.Message, r.Details)
+	}
+	joined := r.Message + " " + strings.Join(r.Details, " ") + " " + r.FixHint
+	if !strings.Contains(joined, "stale") {
+		t.Errorf("want stale classification, got:\n%s", joined)
+	}
+	if strings.Contains(joined, "endpoint_origin=inherited_city") {
+		t.Errorf("want no live rig-local error for reused PID, got:\n%s", joined)
+	}
+	if strings.Contains(joined, "PID is not alive") {
+		t.Errorf("want stale hint to account for live PID with mismatched port, got:\n%s", joined)
 	}
 }
 
@@ -134,8 +166,8 @@ func TestDoltDriftCheckDetectsStaleRigLocalInfo(t *testing.T) {
 	if !strings.Contains(joined, "stale") {
 		t.Errorf("want 'stale' in result, got:\n%s", joined)
 	}
-	if !strings.Contains(joined, "stale") {
-		t.Errorf("want stale file mention, got:\n%s", joined)
+	if !strings.Contains(joined, "pid 2147483640") {
+		t.Errorf("want stale PID detail, got:\n%s", joined)
 	}
 }
 
@@ -173,26 +205,34 @@ func TestDoltDriftCheckNoRigsIsOK(t *testing.T) {
 
 func TestRigLocalDoltPIDFromSQLServerInfoParsesColonFormat(t *testing.T) {
 	dir := t.TempDir()
-	writeSQLServerInfo(t, dir, 12345, 28232)
-	pid, exists, alive := rigLocalDoltPIDFromSQLServerInfo(dir)
+	const parsedPID = 2147483639
+	writeSQLServerInfo(t, dir, parsedPID, 28232)
+	pid, port, exists, alive := rigLocalDoltPIDFromSQLServerInfo(dir)
 	if !exists {
 		t.Fatalf("infoExists = false, want true")
 	}
-	if pid != 12345 {
-		t.Errorf("pid = %d, want 12345", pid)
+	if pid != parsedPID {
+		t.Errorf("pid = %d, want %d", pid, parsedPID)
 	}
-	// alive depends on whether pid 12345 happens to be live; don't assert.
-	_ = alive
+	if port != 28232 {
+		t.Errorf("port = %d, want 28232", port)
+	}
+	if alive {
+		t.Errorf("pidAliveNow = true, want false when recorded PID is not tied to the port")
+	}
 }
 
 func TestRigLocalDoltPIDFromSQLServerInfoMissingFile(t *testing.T) {
 	dir := t.TempDir()
-	pid, exists, alive := rigLocalDoltPIDFromSQLServerInfo(dir)
+	pid, port, exists, alive := rigLocalDoltPIDFromSQLServerInfo(dir)
 	if exists {
 		t.Errorf("infoExists = true, want false when file is absent")
 	}
 	if pid != 0 {
 		t.Errorf("pid = %d, want 0", pid)
+	}
+	if port != 0 {
+		t.Errorf("port = %d, want 0", port)
 	}
 	if alive {
 		t.Errorf("pidAliveNow = true, want false when file absent")

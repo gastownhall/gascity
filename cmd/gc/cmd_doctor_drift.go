@@ -71,18 +71,19 @@ func (c *doltDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 			continue
 		}
 
-		livePID, infoExists, pidOK := rigLocalDoltPIDFromSQLServerInfo(rig.Path)
+		livePID, livePort, infoExists, liveRigLocal := rigLocalDoltPIDFromSQLServerInfo(rig.Path)
 
 		// Case A: rig is inherited_city but has a live rig-local Dolt.
-		if pidOK {
+		if liveRigLocal {
 			errors = append(errors, fmt.Sprintf(
-				"rig %q endpoint_origin=inherited_city but rig-local Dolt pid %d is live (.dolt/sql-server.info); run `gc rig set-endpoint %s --inherit` to rejoin the city or stop the rig-local server",
-				rig.Name, livePID, rig.Name,
+				"rig %q endpoint_origin=inherited_city but rig-local Dolt pid %d is listening on port %d (.dolt/sql-server.info); stop the rig-local server or acknowledge it with `gc rig set-endpoint %s --self --port %d --force`",
+				rig.Name, livePID, livePort, rig.Name, livePort,
 			))
 		} else if infoExists {
-			// Case C: stale rig-local sql-server.info (file present, PID not alive).
+			// Case C: stale rig-local sql-server.info (file present, but the
+			// recorded PID is not serving the recorded port).
 			warnings = append(warnings, fmt.Sprintf(
-				"rig %q has stale .dolt/sql-server.info (pid %d not alive); safe to delete",
+				"rig %q has stale .dolt/sql-server.info (pid %d is not a live Dolt listener for the recorded port); safe to delete after confirming no rig-local server is running",
 				rig.Name, livePID,
 			))
 		}
@@ -115,7 +116,7 @@ func (c *doltDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 		}
 		r.Message = fmt.Sprintf("%d drift issue%s between rig-local Dolt state and managed city topology", len(errors), plural)
 		r.Details = append(append([]string{}, errors...), warnings...)
-		r.FixHint = "use `gc rig set-endpoint <rig> --inherit` (rejoin city) or --external (pin explicit endpoint); remove stale .dolt/sql-server.info files"
+		r.FixHint = "stop the rig-local Dolt server, or acknowledge explicit rig-local ownership with `gc rig set-endpoint <rig> --self --port <port> --force`; use --external for non-local servers; remove stale .dolt/sql-server.info files"
 		return r
 	}
 	plural := ""
@@ -125,7 +126,7 @@ func (c *doltDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 	r.Status = doctor.StatusWarning
 	r.Message = fmt.Sprintf("%d stale rig-local Dolt state file%s", len(warnings), plural)
 	r.Details = warnings
-	r.FixHint = "remove stale .dolt/sql-server.info files whose PID is not alive"
+	r.FixHint = "remove stale .dolt/sql-server.info files whose PID is not serving the recorded port"
 	return r
 }
 
@@ -135,22 +136,33 @@ func (c *doltDriftCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
 // rigLocalDoltPIDFromSQLServerInfo reads the colon-separated PID:PORT:UUID
 // content of rigPath/.dolt/sql-server.info (written by dolt sql-server). It
-// returns the PID parsed from the file, whether the file exists at all, and
-// whether that PID is currently alive. When the file is missing the PID is
-// zero and both bools are false.
-func rigLocalDoltPIDFromSQLServerInfo(rigPath string) (pid int, infoExists bool, pidAliveNow bool) {
+// returns the PID and port parsed from the file, whether the file exists at
+// all, and whether that PID is currently alive and listening on the recorded
+// port. When the file is missing the PID and port are zero and both bools are
+// false.
+func rigLocalDoltPIDFromSQLServerInfo(rigPath string) (pid int, port int, infoExists bool, pidAliveNow bool) {
 	path := filepath.Join(rigPath, ".dolt", "sql-server.info")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return 0, false, false
+		return 0, 0, false, false
 	}
 	parts := strings.SplitN(strings.TrimSpace(string(data)), ":", 3)
 	if len(parts) < 1 || strings.TrimSpace(parts[0]) == "" {
-		return 0, true, false
+		return 0, 0, true, false
 	}
 	parsed, convErr := strconv.Atoi(strings.TrimSpace(parts[0]))
 	if convErr != nil || parsed <= 0 {
-		return 0, true, false
+		return 0, 0, true, false
 	}
-	return parsed, true, pidAlive(parsed)
+	if len(parts) < 2 || strings.TrimSpace(parts[1]) == "" {
+		return parsed, 0, true, false
+	}
+	parsedPort, convErr := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if convErr != nil || parsedPort <= 0 {
+		return parsed, 0, true, false
+	}
+	if !pidAlive(parsed) {
+		return parsed, parsedPort, true, false
+	}
+	return parsed, parsedPort, true, findPortHolderPID(strconv.Itoa(parsedPort)) == parsed
 }
