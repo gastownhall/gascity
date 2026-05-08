@@ -926,6 +926,9 @@ func TestMaintenanceDoltScriptsSkipUnsafeDatabaseIdentifiers(t *testing.T) {
 			writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
 printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
 case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\nfoo db\n'
     ;;
@@ -1159,6 +1162,9 @@ func TestReaperClosesStaleWispChainsToFixpoint(t *testing.T) {
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
 printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
 case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\n'
     ;;
@@ -1246,6 +1252,9 @@ func TestReaperCountQueriesIgnoreSuccessfulStderrWarnings(t *testing.T) {
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
 printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
 case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\n'
     ;;
@@ -1317,6 +1326,9 @@ func TestReaperRowQueriesIgnoreSuccessfulStderrWarnings(t *testing.T) {
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
 printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
 case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\n'
     ;;
@@ -1388,6 +1400,9 @@ func TestReaperDoesNotCloseNonClosedWispsByAgeOnly(t *testing.T) {
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
 printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
 case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\n'
     ;;
@@ -1456,6 +1471,9 @@ func TestReaperClosesStaleWispsOnlyWithClosedParent(t *testing.T) {
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
 printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
 case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\n'
     ;;
@@ -1548,6 +1566,9 @@ func TestReaperEscalatesDoltCommitFailure(t *testing.T) {
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
 printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
 case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\n'
     ;;
@@ -1619,6 +1640,9 @@ func TestReaperDoesNotCountFailedPurgeAsSuccess(t *testing.T) {
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
 printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
 case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\n'
     ;;
@@ -1680,6 +1704,9 @@ func TestReaperCommitReportsOnlySuccessfulPurgeRows(t *testing.T) {
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
 printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
 case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\n'
     ;;
@@ -1771,6 +1798,9 @@ func TestReaperDoesNotCountFailedIssueCloseAsSuccess(t *testing.T) {
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
 printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
 case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\n'
     ;;
@@ -1837,6 +1867,9 @@ func TestReaperAutoClosesIssuesOnlyInCityDatabase(t *testing.T) {
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
 printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
 case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
   *"SHOW DATABASES"*)
     printf 'Database\ncitydb\nrigdb\n'
     ;;
@@ -1912,6 +1945,9 @@ func TestReaperCityDatabaseUsesGCCityPathFallback(t *testing.T) {
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
 printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
 case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
   *"SHOW DATABASES"*)
     printf 'Database\ncitydb\n'
     ;;
@@ -1985,6 +2021,9 @@ func TestReaperScopesIssueAutoCloseToCityBeadsDir(t *testing.T) {
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
 printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
 case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
   *"SHOW DATABASES"*)
     printf 'Database\ncitydb\n'
     ;;
@@ -2052,6 +2091,9 @@ func TestReaperSkipsIssueAutoCloseWhenConfiguredCityDatabaseDoesNotMatchMetadata
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
 printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
 case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
   *"SHOW DATABASES"*)
     printf 'Database\ncitydb\nwrongdb\n'
     ;;
@@ -2133,6 +2175,9 @@ func TestReaperSkipsIssueAutoCloseWhenCityMetadataIsNotJSON(t *testing.T) {
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
 printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
 case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\n'
     ;;
@@ -2204,6 +2249,9 @@ func TestReaperCityDatabaseUsesShellFallbackWhenJSONParsersUnavailable(t *testin
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
 printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
 case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
   *"SHOW DATABASES"*)
     printf 'Database\ncitydb\n'
     ;;
@@ -2278,6 +2326,9 @@ func TestReaperSkipsIssueAutoCloseWhenCityMetadataIsMalformed(t *testing.T) {
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
 printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
 case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\n'
     ;;
@@ -2345,6 +2396,9 @@ func TestReaperSkipsIssueAutoCloseWhenCityDatabaseUnknown(t *testing.T) {
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
 printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
 case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\nrigdb\n'
     ;;
@@ -2411,6 +2465,9 @@ func TestReaperIgnoresNothingToCommitAfterMutationRace(t *testing.T) {
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
 printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
 case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\n'
     ;;
@@ -2545,6 +2602,82 @@ func writeManagedRuntimeStateWithPID(t *testing.T, cityDir string, port int, pid
 	}
 	if err := os.WriteFile(filepath.Join(stateDir, "dolt-state.json"), payload, 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestReaperSkipsDatabasesWithoutWispsTable pins the schemaless-DB
+// precheck (gastownhall/gascity#1816). Reaper iterates the user
+// databases discovered by SHOW DATABASES, but a database that exists on
+// the server without bd schema (orphan CREATE DATABASE, partial migration,
+// system schemas not on the is_user_database blocklist) has nothing for
+// the reaper to do — querying its wisps table just produces spurious
+// "table not found" anomalies. Reaper now probes SHOW TABLES FROM <db>
+// LIKE 'wisps' and skips silently when the wisps table is absent.
+func TestReaperSkipsDatabasesWithoutWispsTable(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":          doltLog,
+		"DOLT_DBS":               "real_beads empty_db",
+		"DOLT_DBS_WITHOUT_WISPS": "empty_db",
+		"GC_CALL_LOG":            gcLog,
+		"GC_CITY":                cityDir,
+		"GC_CITY_PATH":           cityDir,
+		"GC_PACK_STATE_DIR":      stateDir,
+		"GC_DOLT_HOST":           "127.0.0.1",
+		"GC_DOLT_PORT":           "3307",
+		"GC_DOLT_USER":           "root",
+		"GC_DOLT_PASSWORD":       "",
+		"GC_REAPER_DRY_RUN":      "1",
+		"GIT_CONFIG_GLOBAL":      filepath.Join(t.TempDir(), "gitconfig"),
+		"GIT_CONFIG_NOSYSTEM":    "1",
+		"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	logData, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt log): %v", err)
+	}
+	log := string(logData)
+
+	// real_beads has wisps → reaper should query its wisps table.
+	if !strings.Contains(log, "`real_beads`.wisps") {
+		t.Errorf("reaper did not query real_beads.wisps; expected normal processing:\n%s", log)
+	}
+
+	// empty_db has no wisps → reaper must skip without querying its
+	// wisps/issues/dependencies tables.
+	for _, forbidden := range []string{
+		"`empty_db`.wisps",
+		"`empty_db`.issues",
+		"`empty_db`.dependencies",
+	} {
+		if strings.Contains(log, forbidden) {
+			t.Errorf("reaper queried schemaless DB (%s); precheck did not skip:\n%s", forbidden, log)
+		}
+	}
+
+	// No anomaly mail should be sent for empty_db. The reaper sends a
+	// single ESCALATION mail at end-of-run if any anomaly was recorded;
+	// with empty_db skipped silently, the gc log must not contain it.
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if strings.Contains(string(gcData), "empty_db") {
+		t.Errorf("reaper escalated empty_db to mayor; precheck should have suppressed:\n%s", gcData)
 	}
 }
 
@@ -2918,6 +3051,19 @@ case "$*" in
     printf 'beads\n'
   fi
   ;;
+*"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+  # Schemaless-DB precheck (gastownhall/gascity#1816). By default, every
+  # test DB is treated as having wisps so existing tests are unaffected.
+  # Tests that exercise the precheck set DOLT_DBS_WITHOUT_WISPS to a
+  # space-separated list of DB names that should report no wisps row.
+  printf 'Tables_in_db\n'
+  for skip in ${DOLT_DBS_WITHOUT_WISPS:-}; do
+    case "$*" in
+    *"FROM"*"$skip"*"LIKE 'wisps'"*) exit 0 ;;
+    esac
+  done
+  printf 'wisps\n'
+  ;;
 *"SELECT *"*)
   printf '{"id":"ga-1","title":"sample"}\n'
   ;;
@@ -3095,6 +3241,9 @@ func writeNoUserDatabasesDoltStub(t *testing.T, binDir string) {
 	t.Helper()
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
 case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
   *"SHOW DATABASES"*)
     printf 'Database\n'
     ;;
