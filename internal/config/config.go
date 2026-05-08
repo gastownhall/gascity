@@ -1116,6 +1116,13 @@ type BeadsConfig struct {
 	// Provider selects the bead store backend: "bd" (default), "file",
 	// or "exec:<script>" for a user-supplied script.
 	Provider string `toml:"provider,omitempty" jsonschema:"default=bd"`
+	// Database selects the bd metadata database family written to
+	// .beads/metadata.json. Defaults to "dolt".
+	Database string `toml:"database,omitempty" jsonschema:"default=dolt"`
+	// Backend selects the bd storage backend written to .beads/metadata.json.
+	// Defaults to "dolt". Non-Dolt values disable GC's managed Dolt lifecycle
+	// while still allowing the bd CLI provider to manage beads.
+	Backend string `toml:"backend,omitempty" jsonschema:"default=dolt"`
 }
 
 // SessionConfig holds session provider settings.

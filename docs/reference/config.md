@@ -240,6 +240,8 @@ BeadsConfig holds bead store settings.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `provider` | string |  | `bd` | Provider selects the bead store backend: "bd" (default), "file", or "exec:&lt;script&gt;" for a user-supplied script. |
+| `database` | string |  | `dolt` | Database selects the bd metadata database family written to .beads/metadata.json. Defaults to "dolt". |
+| `backend` | string |  | `dolt` | Backend selects the bd storage backend written to .beads/metadata.json. Defaults to "dolt". Non-Dolt values disable GC's managed Dolt lifecycle while still allowing the bd CLI provider to manage beads. |
 
 ## ChatSessionsConfig
 

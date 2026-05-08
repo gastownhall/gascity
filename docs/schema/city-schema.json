@@ -883,6 +883,16 @@
           "type": "string",
           "description": "Provider selects the bead store backend: \"bd\" (default), \"file\",\nor \"exec:\u003cscript\u003e\" for a user-supplied script.",
           "default": "bd"
+        },
+        "database": {
+          "type": "string",
+          "description": "Database selects the bd metadata database family written to\n.beads/metadata.json. Defaults to \"dolt\".",
+          "default": "dolt"
+        },
+        "backend": {
+          "type": "string",
+          "description": "Backend selects the bd storage backend written to .beads/metadata.json.\nDefaults to \"dolt\". Non-Dolt values disable GC's managed Dolt lifecycle\nwhile still allowing the bd CLI provider to manage beads.",
+          "default": "dolt"
         }
       },
       "additionalProperties": false,

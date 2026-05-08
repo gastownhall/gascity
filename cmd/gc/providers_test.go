@@ -162,6 +162,32 @@ provider = "file"
 	}
 }
 
+func TestBeadsProviderLeavesBdDirectForNonDoltMetadataBackend(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "bd"
+backend = "postgres"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := rawBeadsProvider(cityDir); got != "bd" {
+		t.Fatalf("rawBeadsProvider() = %q, want bd", got)
+	}
+	if got := rawBeadsMetadataBackend(cityDir); got != "postgres" {
+		t.Fatalf("rawBeadsMetadataBackend() = %q, want postgres", got)
+	}
+	if got := beadsProvider(cityDir); got != "bd" {
+		t.Fatalf("beadsProvider() = %q, want direct bd for non-Dolt metadata backend", got)
+	}
+	if cityUsesManagedDoltBackend(cityDir) {
+		t.Fatal("cityUsesManagedDoltBackend() = true, want false for backend=postgres")
+	}
+}
+
 func TestRawBeadsProviderForScopeIgnoresConfigYamlWithoutMetadata(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "frontend")

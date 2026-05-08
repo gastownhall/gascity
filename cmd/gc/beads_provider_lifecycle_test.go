@@ -492,6 +492,61 @@ func TestNormalizeCanonicalBdScopeFilesRejectsExistingManagedSystemDatabase(t *t
 	}
 }
 
+func TestNormalizeCanonicalBdScopeFilesUsesConfiguredNonDoltBackend(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "frontend")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"fr"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "dolt-server.port"), []byte("3306\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "dogfood-city"},
+		Beads:     config.BeadsConfig{Provider: "bd", Backend: "postgres"},
+		Rigs:      []config.Rig{{Name: "frontend", Path: rigPath, Prefix: "fr"}},
+	}
+	if err := normalizeCanonicalBdScopeFiles(cityPath, cfg, io.Discard); err != nil {
+		t.Fatalf("normalizeCanonicalBdScopeFiles: %v", err)
+	}
+
+	for _, path := range []string{
+		filepath.Join(cityPath, ".beads", "metadata.json"),
+		filepath.Join(rigPath, ".beads", "metadata.json"),
+	} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var meta map[string]any
+		if err := json.Unmarshal(data, &meta); err != nil {
+			t.Fatalf("metadata %s: %v", path, err)
+		}
+		if got := strings.TrimSpace(fmt.Sprint(meta["backend"])); got != "postgres" {
+			t.Fatalf("%s backend = %q, want postgres; metadata=%s", path, got, data)
+		}
+		if got := strings.TrimSpace(fmt.Sprint(meta["database"])); got != "dolt" {
+			t.Fatalf("%s database = %q, want dolt; metadata=%s", path, got, data)
+		}
+	}
+
+	if data, err := os.ReadFile(filepath.Join(cityPath, ".beads", "dolt-server.port")); err != nil {
+		t.Fatal(err)
+	} else if got := strings.TrimSpace(string(data)); got != "3306" {
+		t.Fatalf("dolt-server.port = %q, want untouched 3306", got)
+	}
+}
+
 func TestNormalizeCanonicalBdScopeFilesForInitPreservesExistingManagedProbeDatabase(t *testing.T) {
 	cityPath := t.TempDir()
 	metadataPath := filepath.Join(cityPath, ".beads", "metadata.json")

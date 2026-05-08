@@ -446,6 +446,8 @@ name = "test-city"
 
 [beads]
 provider = "file"
+backend = "postgres"
+database = "postgres"
 
 [[agent]]
 name = "mayor"
@@ -456,6 +458,12 @@ name = "mayor"
 	}
 	if cfg.Beads.Provider != "file" {
 		t.Errorf("Beads.Provider = %q, want %q", cfg.Beads.Provider, "file")
+	}
+	if cfg.Beads.Backend != "postgres" {
+		t.Errorf("Beads.Backend = %q, want %q", cfg.Beads.Backend, "postgres")
+	}
+	if cfg.Beads.Database != "postgres" {
+		t.Errorf("Beads.Database = %q, want %q", cfg.Beads.Database, "postgres")
 	}
 }
 

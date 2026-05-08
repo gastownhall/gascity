@@ -149,7 +149,7 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 		clearCityDoltConfig(cityPath)
 	}
 	skipLocalDolt := false
-	if cityUsesBdStoreContract(cityPath) {
+	if cityUsesManagedDoltBackend(cityPath) {
 		owned, err := managedDoltLifecycleOwned(cityPath)
 		if err != nil {
 			return err
@@ -199,7 +199,7 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 // skipped init — the caller should tell the user it's deferred to gc start.
 func initDirIfReady(cityPath, dir, prefix string) (deferred bool, err error) {
 	provider := beadsProvider(cityPath)
-	if cityUsesBdStoreContract(cityPath) {
+	if cityUsesManagedDoltBackend(cityPath) {
 		if gcDoltSkip() {
 			// Defer to controller/startup without forcing a new dolt_database:
 			// preserve existing metadata identity when present.
@@ -235,7 +235,7 @@ func initDirIfReady(cityPath, dir, prefix string) (deferred bool, err error) {
 	if strings.HasPrefix(provider, "exec:") {
 		script := strings.TrimPrefix(provider, "exec:")
 		if !runProviderProbe(script, cityPath, provider) {
-			if cityUsesBdStoreContract(cityPath) {
+			if cityUsesManagedDoltBackend(cityPath) {
 				if err := seedDeferredManagedBeadsErr(cityPath, dir, prefix, ""); err != nil {
 					return false, err
 				}
@@ -445,7 +445,7 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 	if err := normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase); err != nil {
 		return err
 	}
-	if cityUsesBdStoreContract(cityPath) && currentResolvableManagedDoltPort(cityPath) != "" {
+	if cityUsesManagedDoltBackend(cityPath) && currentResolvableManagedDoltPort(cityPath) != "" {
 		if err := syncManagedDoltPortMirrors(cityPath); err != nil {
 			return fmt.Errorf("sync managed dolt port mirrors after init: %w", err)
 		}
@@ -623,7 +623,7 @@ func resolveRigPaths(cityPath string, rigs []config.Rig) {
 // Acquires a per-city semaphore to prevent concurrent start operations
 // from causing spawn storms.
 func ensureBeadsProvider(cityPath string) error {
-	if cityUsesBdStoreContract(cityPath) && gcDoltSkip() {
+	if cityUsesManagedDoltBackend(cityPath) && gcDoltSkip() {
 		return nil
 	}
 	provider := beadsProvider(cityPath)
@@ -665,7 +665,7 @@ func ensureBeadsProvider(cityPath string) error {
 // Called by gc stop after agents have been terminated.
 // For exec providers, fires "stop". For file providers, always available.
 func shutdownBeadsProvider(cityPath string) error {
-	if cityUsesBdStoreContract(cityPath) && gcDoltSkip() {
+	if cityUsesManagedDoltBackend(cityPath) && gcDoltSkip() {
 		return clearManagedDoltRuntimeStateUnlessPostgres(cityPath)
 	}
 	provider := beadsProvider(cityPath)
@@ -705,7 +705,7 @@ func shutdownBeadsProvider(cityPath string) error {
 // providers that run bd init elsewhere (for example gc-beads-k8s inside the
 // pod) must set it in their own wrapper before invoking bd init.
 func initBeadsForDir(cityPath, dir, prefix, doltDatabase string) error {
-	if cityUsesBdStoreContract(cityPath) && gcDoltSkip() {
+	if cityUsesManagedDoltBackend(cityPath) && gcDoltSkip() {
 		if err := seedDeferredManagedBeadsErr(cityPath, dir, prefix, doltDatabase); err != nil {
 			return err
 		}
@@ -894,7 +894,7 @@ func initFileStoreForDir(cityPath, dir string) error {
 // Acquires a per-city semaphore to prevent concurrent health/recovery
 // operations from causing a thundering herd when dolt bounces.
 func healthBeadsProvider(cityPath string) error {
-	if cityUsesBdStoreContract(cityPath) && gcDoltSkip() {
+	if cityUsesManagedDoltBackend(cityPath) && gcDoltSkip() {
 		return nil
 	}
 	provider := beadsProvider(cityPath)
@@ -1245,9 +1245,11 @@ func isLegacyManagedDoltProbeDatabase(name string) bool {
 	return strings.EqualFold(strings.TrimSpace(name), managedDoltProbeDatabase)
 }
 
-func ensureCanonicalScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase string, preserveExisting bool) error {
+func ensureCanonicalScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase string, state contract.MetadataState, preserveExisting bool) error {
 	path := filepath.Join(scopeRoot, ".beads", "metadata.json")
 	preserveReservedExisting := false
+	metadataBackend := normalizedBeadsMetadataBackend(state.Backend)
+	managedDoltMetadata := strings.EqualFold(metadataBackend, "dolt")
 	if preserveExisting {
 		if existing, ok, err := contract.LoadMetadataState(fs, path); err != nil {
 			if !allowLegacyDoltMetadataRepair(fs, path, err) {
@@ -1258,7 +1260,7 @@ func ensureCanonicalScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase string, pr
 		}
 		if existing, ok, err := contract.ReadDoltDatabase(fs, path); err != nil {
 			return err
-		} else if ok && strings.TrimSpace(existing) != "" {
+		} else if managedDoltMetadata && ok && strings.TrimSpace(existing) != "" {
 			doltDatabase = strings.TrimSpace(existing)
 			if isReservedManagedDoltDatabase(doltDatabase) {
 				// New init paths reject this reserved name, but existing metadata
@@ -1270,7 +1272,7 @@ func ensureCanonicalScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase string, pr
 		}
 	}
 	var err error
-	if !preserveReservedExisting {
+	if managedDoltMetadata && !preserveReservedExisting {
 		if doltDatabase, err = validateManagedDoltDatabaseName(path, doltDatabase); err != nil {
 			return err
 		}
@@ -1278,23 +1280,42 @@ func ensureCanonicalScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase string, pr
 	if err := ensureBeadsDir(fs, filepath.Dir(path)); err != nil {
 		return err
 	}
-	_, err = contract.EnsureCanonicalMetadata(fs, path, contract.MetadataState{
-		Database:     "dolt",
-		Backend:      "dolt",
-		DoltMode:     "server",
-		DoltDatabase: doltDatabase,
-	})
+	state.Backend = metadataBackend
+	if strings.TrimSpace(state.Database) == "" {
+		state.Database = metadataBackend
+	}
+	if managedDoltMetadata {
+		state.DoltMode = "server"
+		state.DoltDatabase = doltDatabase
+	}
+	_, err = contract.EnsureCanonicalMetadata(fs, path, state)
 	return err
 }
 
 //nolint:unparam // keep fs seam for future testable FS injection
 func ensureCanonicalScopeMetadataForInit(fs fsys.FS, scopeRoot, doltDatabase string) error {
-	return ensureCanonicalScopeMetadata(fs, scopeRoot, doltDatabase, true)
+	return ensureCanonicalScopeMetadata(fs, scopeRoot, doltDatabase, contract.MetadataState{Database: "dolt", Backend: "dolt"}, true)
 }
 
 //nolint:unparam // keep fs seam for future testable FS injection
 func enforceCanonicalScopeMetadataForInit(fs fsys.FS, scopeRoot, doltDatabase string) error {
-	return ensureCanonicalScopeMetadata(fs, scopeRoot, doltDatabase, false)
+	return ensureCanonicalScopeMetadata(fs, scopeRoot, doltDatabase, contract.MetadataState{Database: "dolt", Backend: "dolt"}, false)
+}
+
+func configuredBeadsMetadataState(cfg *config.City) contract.MetadataState {
+	state := contract.MetadataState{Database: "dolt", Backend: "dolt"}
+	if cfg == nil {
+		return state
+	}
+	backend := strings.TrimSpace(cfg.Beads.Backend)
+	database := strings.TrimSpace(cfg.Beads.Database)
+	if backend != "" {
+		state.Backend = backend
+	}
+	if database != "" {
+		state.Database = database
+	}
+	return state
 }
 
 // normalizeCanonicalBdScopeFiles reconciles canonical bd metadata/config/port
@@ -1314,11 +1335,15 @@ func normalizeCanonicalBdScopeFiles(cityPath string, cfg *config.City, warns ...
 		warn = io.Discard
 	}
 	resolveRigPaths(cityPath, cfg.Rigs)
+	metadataState := configuredBeadsMetadataState(cfg)
+	metadataBackend := normalizedBeadsMetadataBackend(metadataState.Backend)
 	if scopeUsesManagedBdStoreContract(cityPath, cityPath) {
-		if usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, cityPath); err != nil {
+		usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, cityPath)
+		if err != nil {
 			return fmt.Errorf("classifying city backend: %w", err)
-		} else if !usesPostgres {
-			if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, cityPath, defaultScopeDoltDatabase(cityPath, cityPath, config.EffectiveHQPrefix(cfg))); err != nil {
+		}
+		if !usesPostgres || !strings.EqualFold(metadataBackend, "dolt") {
+			if err := ensureCanonicalScopeMetadata(fsys.OSFS{}, cityPath, defaultScopeDoltDatabase(cityPath, cityPath, config.EffectiveHQPrefix(cfg)), metadataState, true); err != nil {
 				return fmt.Errorf("canonicalizing city metadata: %w", err)
 			}
 		}
@@ -1327,13 +1352,19 @@ func normalizeCanonicalBdScopeFiles(cityPath string, cfg *config.City, warns ...
 		if !rigUsesManagedBdStoreContract(cityPath, cfg.Rigs[i]) {
 			continue
 		}
-		if usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, cfg.Rigs[i].Path); err != nil {
+		usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, cfg.Rigs[i].Path)
+		if err != nil {
 			return fmt.Errorf("classifying rig %q backend: %w", cfg.Rigs[i].Name, err)
-		} else if !usesPostgres {
-			if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, cfg.Rigs[i].Path, defaultScopeDoltDatabase(cityPath, cfg.Rigs[i].Path, cfg.Rigs[i].EffectivePrefix())); err != nil {
-				return fmt.Errorf("canonicalizing rig %q metadata: %w", cfg.Rigs[i].Name, err)
-			}
 		}
+		if usesPostgres && strings.EqualFold(metadataBackend, "dolt") {
+			continue
+		}
+		if err := ensureCanonicalScopeMetadata(fsys.OSFS{}, cfg.Rigs[i].Path, defaultScopeDoltDatabase(cityPath, cfg.Rigs[i].Path, cfg.Rigs[i].EffectivePrefix()), metadataState, true); err != nil {
+			return fmt.Errorf("canonicalizing rig %q metadata: %w", cfg.Rigs[i].Name, err)
+		}
+	}
+	if !strings.EqualFold(metadataBackend, "dolt") {
+		return nil
 	}
 	if err := syncConfiguredDoltPortFiles(cityPath, cfg.Dolt, config.EffectiveHQPrefix(cfg), cfg.Rigs, warn); err != nil {
 		return fmt.Errorf("syncing canonical dolt config: %w", err)

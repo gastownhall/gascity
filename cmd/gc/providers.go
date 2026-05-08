@@ -454,6 +454,13 @@ func configuredBeadsProviderValue(cityPath string) string {
 	return strings.TrimSpace(peekBeadsProvider(filepath.Join(cityPath, "city.toml")))
 }
 
+func configuredBeadsMetadataBackendValue(cityPath string) string {
+	if v := strings.TrimSpace(os.Getenv("GC_BEADS_BACKEND")); v != "" {
+		return v
+	}
+	return strings.TrimSpace(peekBeadsMetadataBackend(filepath.Join(cityPath, "city.toml")))
+}
+
 func scopedBeadsProviderOverride(cityPath, scopeRoot string) (string, bool) {
 	provider := strings.TrimSpace(os.Getenv("GC_BEADS"))
 	if provider == "" {
@@ -517,6 +524,26 @@ func providerUsesBdStoreContract(provider string) bool {
 
 func cityUsesBdStoreContract(cityPath string) bool {
 	return providerUsesBdStoreContract(rawBeadsProvider(cityPath))
+}
+
+func normalizedBeadsMetadataBackend(backend string) string {
+	backend = strings.TrimSpace(backend)
+	if backend == "" {
+		return "dolt"
+	}
+	return backend
+}
+
+func rawBeadsMetadataBackend(cityPath string) string {
+	return normalizedBeadsMetadataBackend(configuredBeadsMetadataBackendValue(cityPath))
+}
+
+func providerUsesManagedDoltBackend(provider, backend string) bool {
+	return providerUsesBdStoreContract(provider) && strings.EqualFold(normalizedBeadsMetadataBackend(backend), "dolt")
+}
+
+func cityUsesManagedDoltBackend(cityPath string) bool {
+	return providerUsesManagedDoltBackend(rawBeadsProvider(cityPath), rawBeadsMetadataBackend(cityPath))
 }
 
 func rawBeadsProviderForScope(scopeRoot, cityPath string) string {
@@ -619,7 +646,7 @@ func bdProviderMismatchHint(scopeRoot, resolvedProvider string) string {
 //     operations. Used by testscript and integration tests.
 func beadsProvider(cityPath string) string {
 	raw := rawBeadsProvider(cityPath)
-	if raw == "bd" {
+	if raw == "bd" && cityUsesManagedDoltBackend(cityPath) {
 		return "exec:" + gcBeadsBdScriptPath(cityPath)
 	}
 	return raw

@@ -281,6 +281,24 @@ func peekBeadsProvider(tomlPath string) string {
 	return peek.Beads.Provider
 }
 
+// peekBeadsMetadataBackend reads just the beads.backend field from a city.toml
+// without doing full config parsing. Returns "" if not set or on error.
+func peekBeadsMetadataBackend(tomlPath string) string {
+	data, err := os.ReadFile(tomlPath)
+	if err != nil {
+		return ""
+	}
+	var peek struct {
+		Beads struct {
+			Backend string `toml:"backend"`
+		} `toml:"beads"`
+	}
+	if _, err := toml.Decode(string(data), &peek); err != nil {
+		return ""
+	}
+	return peek.Beads.Backend
+}
+
 // peekEventsProvider reads just the events.provider field from a city.toml
 // without doing full config parsing. Returns "" if not set or on error.
 //
