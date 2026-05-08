@@ -164,7 +164,11 @@ func applyCanonicalDoltAuthEnv(env map[string]string, cityPath, scopeRoot string
 	if env == nil {
 		return
 	}
-	applyResolvedDoltAuthEnv(env, doltauth.AuthScopeRoot(cityPath, scopeRoot, target), strings.TrimSpace(target.User))
+	authScopeRoot := doltauth.AuthScopeRoot(cityPath, scopeRoot, target)
+	if !samePath(authScopeRoot, cityPath) {
+		clearProjectedDoltPasswordEnv(env)
+	}
+	applyResolvedDoltAuthEnv(env, authScopeRoot, strings.TrimSpace(target.User))
 }
 
 func applyCanonicalScopeDoltEnv(env map[string]string, cityPath, scopeRoot string) (bool, error) {
@@ -265,6 +269,11 @@ func clearProjectedDoltEnv(env map[string]string) {
 	for _, key := range projectedDoltEnvKeys {
 		delete(env, key)
 	}
+}
+
+func clearProjectedDoltPasswordEnv(env map[string]string) {
+	delete(env, "GC_DOLT_PASSWORD")
+	delete(env, "BEADS_DOLT_PASSWORD")
 }
 
 func managedLocalDoltHost(host string) bool {
@@ -445,6 +454,7 @@ func applyResolvedRigDoltEnv(env map[string]string, cityPath, rigPath string, ex
 	}
 	if explicitRig != nil && (explicitRig.DoltHost != "" || explicitRig.DoltPort != "") {
 		applyLegacyRigExternalTarget(env, *explicitRig)
+		clearProjectedDoltPasswordEnv(env)
 		applyResolvedDoltAuthEnv(env, rigPath, "")
 		mirrorBeadsDoltEnv(env)
 		return nil

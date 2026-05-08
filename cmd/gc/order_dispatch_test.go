@@ -2175,6 +2175,65 @@ func TestOrderExecManagedDoltFallbackSkipsInheritedExternalCity(t *testing.T) {
 	}
 }
 
+func TestApplyOrderExecCanonicalDoltEnvClearsProjectedPasswordForExplicitRig(t *testing.T) {
+	t.Setenv("GC_DOLT_HOST", "")
+	t.Setenv("GC_DOLT_PORT", "")
+	t.Setenv("GC_DOLT_USER", "")
+	t.Setenv("GC_DOLT_PASSWORD", "")
+	t.Setenv("BEADS_DOLT_PASSWORD", "")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cityDir, ".beads", "config.yaml"), strings.Join([]string{
+		"issue_prefix: ct",
+		"gc.endpoint_origin: city_canonical",
+		"gc.endpoint_status: verified",
+		"dolt.host: city-db.example.com",
+		"dolt.port: 4406",
+		"dolt.user: city-user",
+		"",
+	}, "\n"))
+	writeFile(t, filepath.Join(cityDir, ".beads", ".env"), "BEADS_DOLT_PASSWORD=city-secret\n")
+	writeFile(t, filepath.Join(rigDir, ".beads", "config.yaml"), strings.Join([]string{
+		"issue_prefix: fe",
+		"gc.endpoint_origin: explicit",
+		"gc.endpoint_status: verified",
+		"dolt.host: rig-db.example.com",
+		"dolt.port: 5506",
+		"dolt.user: rig-user",
+		"",
+	}, "\n"))
+	credentialsPath := filepath.Join(t.TempDir(), "credentials")
+	if err := os.WriteFile(credentialsPath, []byte("[rig-db.example.com:5506]\npassword=rig-credentials-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_CREDENTIALS_FILE", credentialsPath)
+
+	env := map[string]string{
+		"GC_DOLT_HOST":           "city-db.example.com",
+		"GC_DOLT_PORT":           "4406",
+		"GC_DOLT_PASSWORD":       "city-secret",
+		"BEADS_DOLT_PASSWORD":    "city-secret",
+		"BEADS_CREDENTIALS_FILE": credentialsPath,
+	}
+	applyOrderExecCanonicalDoltEnv(cityDir, rigDir, env)
+	if got := env["GC_DOLT_HOST"]; got != "rig-db.example.com" {
+		t.Fatalf("GC_DOLT_HOST = %q, want %q", got, "rig-db.example.com")
+	}
+	if got := env["GC_DOLT_PASSWORD"]; got != "rig-credentials-secret" {
+		t.Fatalf("GC_DOLT_PASSWORD = %q, want %q", got, "rig-credentials-secret")
+	}
+	if got := env["BEADS_DOLT_PASSWORD"]; got != "rig-credentials-secret" {
+		t.Fatalf("BEADS_DOLT_PASSWORD = %q, want %q", got, "rig-credentials-secret")
+	}
+}
+
 func TestOrderDispatchExecTimeout(t *testing.T) {
 	store := beads.NewMemStore()
 	var rec memRecorder

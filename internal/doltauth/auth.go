@@ -31,6 +31,8 @@ func AuthScopeRoot(cityRoot, scopeRoot string, target contract.DoltConnectionTar
 }
 
 // Resolve returns the effective Dolt auth for a scope and target.
+// Ambient BEADS_DOLT_PASSWORD is an intentional fallback for operators and
+// non-bd callers, after scope-local .beads/.env and before credentials files.
 func Resolve(scopeRoot, fallbackUser, host string, port int) Resolved {
 	overridePath := strings.TrimSpace(os.Getenv("BEADS_CREDENTIALS_FILE"))
 	return Resolved{
@@ -41,6 +43,8 @@ func Resolve(scopeRoot, fallbackUser, host string, port int) Resolved {
 }
 
 // ResolveFromEnv returns effective Dolt auth using projected environment values.
+// Projected BEADS_DOLT_PASSWORD is treated like an already-resolved fallback;
+// callers that switch auth scopes must clear stale projected passwords first.
 func ResolveFromEnv(scopeRoot, fallbackUser string, env map[string]string) Resolved {
 	host := strings.TrimSpace(env["GC_DOLT_HOST"])
 	port, ok := projectedPort(env)
