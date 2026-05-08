@@ -169,9 +169,11 @@ if [ -d "$data_dir" ] && [ "$server_reachable" = true ]; then
       db=$(metadata_db "$meta")
       if [ "$db" = "$name" ]; then
         beads_dir="$(dirname "$meta")"
-        if [ -f "$beads_dir/beads.jsonl" ]; then
-          open_beads=$(grep -c '"status":"open"' "$beads_dir/beads.jsonl" 2>/dev/null || echo 0)
-        fi
+        for issues_file in "$beads_dir/issues.jsonl" "$beads_dir/beads.jsonl"; do
+          [ -f "$issues_file" ] || continue
+          open_beads=$(grep -Ec '"status"[[:space:]]*:[[:space:]]*"open"' "$issues_file" 2>/dev/null) || open_beads=0
+          break
+        done
         break
       fi
     done < "$_meta_cache"

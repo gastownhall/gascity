@@ -485,6 +485,232 @@ exec %q "$@"
 	}
 }
 
+func TestHealthScriptCountsOpenIssuesJSONL(t *testing.T) {
+	cityPath := t.TempDir()
+	fakeBin := t.TempDir()
+	port := "19911"
+
+	beadsDir := filepath.Join(cityPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"),
+		[]byte(`{"dolt_database":"city"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// issues.jsonl is preferred when both stores are present, and the status
+	// matcher accepts whitespace around JSON colons.
+	if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), []byte(strings.Join([]string{
+		`{"id":"city-1", "status" : "open"}`,
+		`{"id":"city-2","status":"closed"}`,
+		`{"id":"city-3","status" : "open"}`,
+	}, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "beads.jsonl"), []byte(strings.Join([]string{
+		`{"id":"legacy-1","status":"open"}`,
+		`{"id":"legacy-2","status":"open"}`,
+		`{"id":"legacy-3","status":"open"}`,
+	}, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeManagedRuntimeStateForScriptWithPID(t, cityPath, mustAtoi(t, port), os.Getpid())
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads", "dolt", "city", ".dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"), `#!/bin/sh
+exit 0
+`)
+	writeExecutable(t, filepath.Join(fakeBin, "nc"), `#!/bin/sh
+exit 0
+`)
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), `#!/bin/sh
+case "$*" in
+  *"SELECT 1"*) exit 0 ;;
+  *"SELECT COUNT(*) FROM dolt_log"*) printf 'COUNT(*)\n7\n'; exit 0 ;;
+esac
+exit 0
+`)
+
+	root := repoRoot(t)
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT="+port,
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh --json failed: %v\n%s", err, out)
+	}
+
+	var report struct {
+		Databases []struct {
+			Name      string `json:"name"`
+			OpenBeads int    `json:"open_beads"`
+		} `json:"databases"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("health.sh --json returned invalid JSON: %v\n%s", err, out)
+	}
+	for _, db := range report.Databases {
+		if db.Name == "city" {
+			if db.OpenBeads != 2 {
+				t.Fatalf("city open_beads = %d, want 2\n%s", db.OpenBeads, out)
+			}
+			return
+		}
+	}
+	t.Fatalf("city database missing from health output:\n%s", out)
+}
+
+func mustAtoi(t *testing.T, s string) int {
+	t.Helper()
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		t.Fatalf("Atoi(%q): %v", s, err)
+	}
+	return n
+}
+
+func TestHealthScriptFallsBackToLegacyBeadsJSONL(t *testing.T) {
+	cityPath := t.TempDir()
+	fakeBin := t.TempDir()
+	port := "19913"
+
+	beadsDir := filepath.Join(cityPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"),
+		[]byte(`{"dolt_database":"city"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "beads.jsonl"), []byte(strings.Join([]string{
+		`{"id":"legacy-1","status":"open"}`,
+		`{"id":"legacy-2","status":"closed"}`,
+		`{"id":"legacy-3","status":"open"}`,
+	}, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeManagedRuntimeStateForScriptWithPID(t, cityPath, mustAtoi(t, port), os.Getpid())
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads", "dolt", "city", ".dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"), "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), `#!/bin/sh
+case "$*" in
+  *"SELECT 1"*) exit 0 ;;
+  *"SELECT COUNT(*) FROM dolt_log"*) printf 'COUNT(*)\n7\n'; exit 0 ;;
+esac
+exit 0
+`)
+
+	root := repoRoot(t)
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT="+port,
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh --json failed: %v\n%s", err, out)
+	}
+
+	var report struct {
+		Databases []struct {
+			Name      string `json:"name"`
+			OpenBeads int    `json:"open_beads"`
+		} `json:"databases"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("health.sh --json returned invalid JSON: %v\n%s", err, out)
+	}
+	if len(report.Databases) != 1 || report.Databases[0].Name != "city" || report.Databases[0].OpenBeads != 2 {
+		t.Fatalf("database entries = %+v, want city with 2 open beads\n%s", report.Databases, out)
+	}
+}
+
+func TestHealthScriptDoesNotEmitBogusDatabaseWhenNoIssuesAreOpen(t *testing.T) {
+	cityPath := t.TempDir()
+	fakeBin := t.TempDir()
+	port := "19912"
+
+	beadsDir := filepath.Join(cityPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"),
+		[]byte(`{"dolt_database":"city"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"),
+		[]byte(`{"id":"city-1","status":"closed"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeManagedRuntimeStateForScriptWithPID(t, cityPath, mustAtoi(t, port), os.Getpid())
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads", "dolt", "city", ".dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"), "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), `#!/bin/sh
+case "$*" in
+  *"SELECT 1"*) exit 0 ;;
+  *"SELECT COUNT(*) FROM dolt_log"*) printf 'COUNT(*)\n7\n'; exit 0 ;;
+esac
+exit 0
+`)
+
+	root := repoRoot(t)
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT="+port,
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh --json failed: %v\n%s", err, out)
+	}
+
+	var report struct {
+		Databases []struct {
+			Name      string `json:"name"`
+			OpenBeads int    `json:"open_beads"`
+		} `json:"databases"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("health.sh --json returned invalid JSON: %v\n%s", err, out)
+	}
+	if len(report.Databases) != 1 {
+		t.Fatalf("got %d database entries, want 1; output:\n%s", len(report.Databases), out)
+	}
+	if report.Databases[0].Name != "city" || report.Databases[0].OpenBeads != 0 {
+		t.Fatalf("database entry = %+v, want city with 0 open beads\n%s", report.Databases[0], out)
+	}
+}
+
 func TestHealthScriptReportsRunningWhenLsofIsInconclusive(t *testing.T) {
 	cityPath := t.TempDir()
 	fakeBin := t.TempDir()
