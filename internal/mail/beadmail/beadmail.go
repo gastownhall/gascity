@@ -219,6 +219,13 @@ func (p *Provider) MarkUnread(id string) error {
 	})
 }
 
+// MailArchivedCloseReason is the canonical close_reason stamped on
+// message beads when they are archived (or deleted, which has the same
+// storage semantics — see DeleteMany). Without an explicit reason of
+// >=20 chars, bd's validation.on-close=error rejects the close, the
+// message stays open, and the archive operation silently fails.
+const MailArchivedCloseReason = "beadmail: message archived without read"
+
 // Archive closes a message bead without reading it.
 func (p *Provider) Archive(id string) error {
 	b, err := p.store.Get(id)
@@ -231,6 +238,11 @@ func (p *Provider) Archive(id string) error {
 	if b.Status == "closed" {
 		return mail.ErrAlreadyArchived
 	}
+	// Stamp close_reason before Close so validation.on-close=error sees
+	// it on the close that follows. Best-effort: an error here is not
+	// fatal — Close still proceeds and any pre-existing close_reason is
+	// preserved.
+	_ = p.store.SetMetadata(id, "close_reason", MailArchivedCloseReason)
 	if err := p.store.Close(id); err != nil {
 		return fmt.Errorf("beadmail archive: %w", err)
 	}
@@ -277,8 +289,13 @@ func (p *Provider) ArchiveMany(ids []string) ([]mail.ArchiveResult, error) {
 	if len(openIDs) == 0 {
 		return results, nil
 	}
-	if _, err := p.store.CloseAll(openIDs, nil); err != nil {
+	if _, err := p.store.CloseAll(openIDs, map[string]string{
+		"close_reason": MailArchivedCloseReason,
+	}); err != nil {
 		for k, id := range openIDs {
+			// Per-id fallback also stamps the canonical reason so the
+			// retry path is validation-safe under on-close=error.
+			_ = p.store.SetMetadata(id, "close_reason", MailArchivedCloseReason)
 			if closeErr := p.store.Close(id); closeErr != nil {
 				results[openIdx[k]].Err = fmt.Errorf("beadmail archive: %w", closeErr)
 			}
