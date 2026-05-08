@@ -1,6 +1,7 @@
 package hooks
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -277,6 +278,22 @@ func TestInstallCodexUpgradesGeneratedFileMissingHookFormat(t *testing.T) {
 	got := string(fs.Files["/work/.codex/hooks.json"])
 	if !strings.Contains(got, "--hook-format codex") {
 		t.Errorf("upgraded codex hooks missing Codex hook output format:\n%s", got)
+	}
+}
+
+func TestInstallCodexWritesCanonicalHookBytes(t *testing.T) {
+	fs := fsys.NewFake()
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	got := fs.Files["/work/.codex/hooks.json"]
+	normalized, changed, err := normalizeCodexHookCommands(got)
+	if err != nil {
+		t.Fatalf("normalizeCodexHookCommands: %v", err)
+	}
+	if changed || !bytes.Equal(normalized, got) {
+		t.Fatalf("codex hook install should write canonical bytes")
 	}
 }
 

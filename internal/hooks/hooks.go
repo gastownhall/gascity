@@ -350,13 +350,17 @@ func readClaudeSettingsCandidate(fs fsys.FS, path string) (claudeCandidateState,
 
 func writeCodexHooksManaged(fs fsys.FS, dst string, data []byte) error {
 	if existing, err := fs.ReadFile(dst); err == nil {
-		upgraded, changed, upgradeErr := upgradeCodexHookCommands(existing)
+		upgraded, changed, upgradeErr := normalizeCodexHookCommands(existing)
 		if upgradeErr != nil || !changed {
 			return nil
 		}
 		return writeManagedData(fs, dst, upgraded)
 	} else if _, statErr := fs.Stat(dst); statErr == nil {
 		return nil
+	}
+	normalized, _, err := normalizeCodexHookCommands(data)
+	if err == nil {
+		data = normalized
 	}
 	return writeManagedData(fs, dst, data)
 }
@@ -372,19 +376,21 @@ func writeManagedData(fs fsys.FS, dst string, data []byte) error {
 	return nil
 }
 
-func upgradeCodexHookCommands(existing []byte) ([]byte, bool, error) {
+func normalizeCodexHookCommands(existing []byte) ([]byte, bool, error) {
 	var root any
 	if err := json.Unmarshal(existing, &root); err != nil {
 		return nil, false, err
 	}
-	if !upgradeCodexHookValue(root) {
-		return nil, false, nil
-	}
+	changed := upgradeCodexHookValue(root)
 	data, err := json.MarshalIndent(root, "", "  ")
 	if err != nil {
 		return nil, false, err
 	}
-	return append(data, '\n'), true, nil
+	data = append(data, '\n')
+	if !bytes.Equal(data, existing) {
+		changed = true
+	}
+	return data, changed, nil
 }
 
 func upgradeCodexHookValue(v any) bool {
