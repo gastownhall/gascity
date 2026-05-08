@@ -64,6 +64,14 @@ func (a *HTTPAdapter) Publish(ctx context.Context, req PublishRequest) (*Publish
 		return nil, fmt.Errorf("creating HTTP request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	// Adapters often register a callback URL pointing at gc's own
+	// /svc/<service>/publish proxy (proxy_process mode). gc's CSRF gate
+	// for private-service-proxy mutations requires X-GC-Request != ""
+	// (see internal/api/handler_services.go:serviceRequestAllowed). The
+	// header is harmless when the callback is an external HTTP listener,
+	// so set it unconditionally — same convention as gc's CLI client
+	// (internal/api/client.go).
+	httpReq.Header.Set("X-GC-Request", "true")
 
 	resp, err := a.client.Do(httpReq)
 	if err != nil {
@@ -166,6 +174,8 @@ func (a *HTTPAdapter) EnsureChildConversation(ctx context.Context, ref Conversat
 		return nil, fmt.Errorf("creating HTTP request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	// Same /svc-proxy CSRF reasoning as Publish above.
+	httpReq.Header.Set("X-GC-Request", "true")
 
 	resp, err := a.client.Do(httpReq)
 	if err != nil {
