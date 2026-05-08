@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestHTTPAdapterPublishSetsCSRFHeader pins that HTTPAdapter.Publish sets
@@ -22,19 +23,19 @@ import (
 func TestHTTPAdapterPublishSetsCSRFHeader(t *testing.T) {
 	t.Parallel()
 
-	var (
-		handlerCalled bool
-		gotHeader     string
-	)
+	// Pass observations from the handler goroutine to the test
+	// goroutine via a buffered channel — receiving on the channel
+	// happens-before the test's assertions, satisfying the Go memory
+	// model. A bare shared variable would race.
+	gotHeader := make(chan string, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		handlerCalled = true
 		if r.Method != http.MethodPost {
 			t.Errorf("expected POST, got %s", r.Method)
 		}
 		if !strings.HasSuffix(r.URL.Path, "/publish") {
 			t.Errorf("expected /publish suffix, got %s", r.URL.Path)
 		}
-		gotHeader = r.Header.Get(csrfHeaderName)
+		gotHeader <- r.Header.Get(csrfHeaderName)
 		_, _ = io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(wirePublishReceipt{
@@ -61,17 +62,19 @@ func TestHTTPAdapterPublishSetsCSRFHeader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
-	if !handlerCalled {
-		t.Fatalf("server handler was never invoked; request did not reach the callback URL")
-	}
 	if !receipt.Delivered {
 		t.Fatalf("expected Delivered=true, got receipt=%+v", receipt)
 	}
-	if gotHeader != "true" {
-		t.Fatalf("expected %s=%q on outbound request, got %q. "+
-			"This header is required by gc's /svc-proxy CSRF gate when the "+
-			"adapter callback URL points at a gc-internal proxy.",
-			csrfHeaderName, "true", gotHeader)
+	select {
+	case h := <-gotHeader:
+		if h != "true" {
+			t.Fatalf("expected %s=%q on outbound request, got %q. "+
+				"This header is required by gc's /svc-proxy CSRF gate when the "+
+				"adapter callback URL points at a gc-internal proxy.",
+				csrfHeaderName, "true", h)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("server handler was never invoked; request did not reach the callback URL")
 	}
 }
 
@@ -82,19 +85,15 @@ func TestHTTPAdapterPublishSetsCSRFHeader(t *testing.T) {
 func TestHTTPAdapterEnsureChildConversationSetsCSRFHeader(t *testing.T) {
 	t.Parallel()
 
-	var (
-		handlerCalled bool
-		gotHeader     string
-	)
+	gotHeader := make(chan string, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		handlerCalled = true
 		if r.Method != http.MethodPost {
 			t.Errorf("expected POST, got %s", r.Method)
 		}
 		if !strings.HasSuffix(r.URL.Path, "/child-conversation") {
 			t.Errorf("expected /child-conversation suffix, got %s", r.URL.Path)
 		}
-		gotHeader = r.Header.Get(csrfHeaderName)
+		gotHeader <- r.Header.Get(csrfHeaderName)
 		_, _ = io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(ConversationRef{
@@ -115,11 +114,13 @@ func TestHTTPAdapterEnsureChildConversationSetsCSRFHeader(t *testing.T) {
 	if _, err := adapter.EnsureChildConversation(context.Background(), parent, "test-label"); err != nil {
 		t.Fatalf("EnsureChildConversation: %v", err)
 	}
-	if !handlerCalled {
+	select {
+	case h := <-gotHeader:
+		if h != "true" {
+			t.Fatalf("expected %s=%q on outbound child-conversation request, got %q.",
+				csrfHeaderName, "true", h)
+		}
+	case <-time.After(2 * time.Second):
 		t.Fatalf("server handler was never invoked; request did not reach the callback URL")
-	}
-	if gotHeader != "true" {
-		t.Fatalf("expected %s=%q on outbound child-conversation request, got %q.",
-			csrfHeaderName, "true", gotHeader)
 	}
 }
