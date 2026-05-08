@@ -30,13 +30,14 @@ gc [flags]
 | [gc convoy](#gc-convoy) | Manage convoys — graphs of related work |
 | [gc dashboard](#gc-dashboard) | Web dashboard for monitoring the supervisor and managed cities |
 | [gc doctor](#gc-doctor) | Check workspace health |
+| [gc dolt-cleanup](#gc-dolt-cleanup) | Find and remove orphaned Dolt databases (Go-side core) |
 | [gc event](#gc-event) | Event operations |
 | [gc events](#gc-events) | Show events from the GC API |
 | [gc formula](#gc-formula) | Manage and inspect formulas |
 | [gc graph](#gc-graph) | Show dependency graph for beads |
 | [gc handoff](#gc-handoff) | Send handoff mail and restart controller-managed sessions |
 | [gc help](#gc-help) | Help about any command |
-| [gc hook](#gc-hook) | Check for available work (use --inject for Stop hook output) |
+| [gc hook](#gc-hook) | Check for available work |
 | [gc import](#gc-import) | Manage pack imports |
 | [gc init](#gc-init) | Initialize a new city |
 | [gc mail](#gc-mail) | Send and receive messages between agents and humans |
@@ -148,6 +149,10 @@ the rig automatically from the --rig flag or by detecting the bead prefix
 in the arguments.
 
 All arguments after "gc bd" are forwarded to bd unchanged.
+
+gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
+from wedging the wrapper after printing command output. If you need
+auto-export behavior, invoke bd directly.
 
 ```
 gc bd [bd-args...]
@@ -643,7 +648,7 @@ gc convoy
 | [gc convoy close](#gc-convoy-close) | Close a convoy |
 | [gc convoy control](#gc-convoy-control) | Execute control beads or run the control-dispatcher loop |
 | [gc convoy create](#gc-convoy-create) | Create a convoy and optionally track issues |
-| [gc convoy delete](#gc-convoy-delete) | Close and optionally delete a convoy and all its beads |
+| [gc convoy delete](#gc-convoy-delete) | Close or delete a convoy and all its beads |
 | [gc convoy delete-source](#gc-convoy-delete-source) | Close workflows sourced from a bead |
 | [gc convoy land](#gc-convoy-land) | Land an owned convoy (terminate + cleanup) |
 | [gc convoy list](#gc-convoy-list) | List open convoys with progress |
@@ -730,13 +735,13 @@ gc convoy create sprint-42
 
 ## gc convoy delete
 
-Close all open beads in a convoy, then optionally delete them.
+Close all open beads in a convoy, or delete them.
 
 Searches all stores (city + rigs) for the convoy root and all beads
 with matching gc.root_bead_id. Without --force, shows a preview.
 
 By default, beads are closed with gc.outcome=skipped. Use --delete to
-also remove them from the store after closing.
+remove them from the store via bd delete --cascade --force.
 
 ```
 gc convoy delete <convoy-id> [flags]
@@ -744,7 +749,7 @@ gc convoy delete <convoy-id> [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--delete` | bool |  | Also delete beads from the store after closing |
+| `--delete` | bool |  | Delete beads from the store instead of closing |
 | `-f`, `--force` | bool |  | Actually close/delete (without this, shows preview) |
 
 ## gc convoy delete-source
@@ -909,6 +914,57 @@ gc doctor
 |------|------|---------|-------------|
 | `--fix` | bool |  | attempt to fix issues automatically |
 | `-v`, `--verbose` | bool |  | show extra diagnostic details |
+
+## gc dolt-cleanup
+
+gc dolt-cleanup is the Go-side implementation of the operational Dolt
+cleanup tool. It resolves the Dolt server port via the AD-04 chain
+(--port &gt; city dolt.port &gt; &lt;rigRoot&gt;/.beads/dolt-server.port &gt; 3307),
+drops stale test/agent databases, calls DOLT_PURGE_DROPPED_DATABASES
+to reclaim disk, and reaps orphaned dolt sql-server processes left
+over from leaked test harnesses. Invalid explicit ports and unreadable
+or invalid city/rig port settings fail closed before cleanup stages run;
+only absent rig port files can reach the legacy default. The legacy
+default is a connection fallback only; it does not protect port 3307
+from orphan-process reaping.
+
+Dry-run by default. Pass --force to actually drop, purge, and kill.
+Pass --max-orphan-dbs with --force to refuse all destructive cleanup
+stages if the live apply-time stale database count exceeds the
+scan-time threshold. The default 0 disables this guard; negative values
+are rejected before any city lookup or cleanup stage runs.
+Active rig dolt servers, registered rig databases, active test temp roots,
+and processes outside the test-config-path allowlist (/tmp/Test*,
+os.TempDir()/Test*, known Gas City test prefixes, ~/.gotmp/Test*) are always
+protected — see the PROTECTED section of the
+report. Destructive drops are limited to known stale test database name
+shapes and conservative SQL identifier characters; skipped stale matches
+are reported in dropped.skipped. Rig dolt_database names used for purge
+must use the same identifier shape: ASCII letters, digits, underscores,
+and non-leading hyphens. Missing or silent rig metadata disables forced
+drop/purge because the live database name cannot be proven safe.
+
+JSON envelope schema is stable: gc.dolt.cleanup.v1. Automation that
+uses --json must inspect summary.errors_total and errors, and must also
+refuse to invoke --force when dry-run force_blockers is non-empty.
+force_blockers reports conditions that would block forced cleanup without
+incrementing errors_total. The rig-protection blocker is intentionally
+global: missing or silent rig metadata prevents forced drop/purge because
+the command cannot prove all registered rig databases are protected.
+Cleanup stage errors are reported in the envelope even when the command
+can still return successfully after emitting the report.
+
+```
+gc dolt-cleanup [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--force` | bool |  | actually drop, purge, and kill orphaned resources (default: dry-run) |
+| `--json` | bool |  | emit JSON envelope (gc.dolt.cleanup.v1) |
+| `--max-orphan-dbs` | int |  | with --force, refuse cleanup when live stale database count exceeds this limit |
+| `--port` | string |  | override the resolved Dolt port |
+| `--probe` | bool |  | TCP-probe the resolved port; fail if unreachable |
 
 ## gc event
 
@@ -1092,6 +1148,10 @@ For controller-restartable sessions, equivalent to:
   gc mail send $GC_ALIAS &lt;subject&gt; [message]
   gc runtime request-restart
 
+Auto handoff (--auto): sends mail to self and returns without requesting a
+restart. This is for PreCompact hooks, where the provider is already managing
+the context compaction lifecycle.
+
 Remote handoff (--target): sends mail to a target session. If the target is
 controller-restartable, kills it so the reconciler restarts it with the handoff
 mail waiting. For on-demand configured named targets, sends mail and returns
@@ -1103,14 +1163,16 @@ For controller-restartable targets, equivalent to:
   gc session kill &lt;target&gt;
 
 Self-handoff requires session context (GC_ALIAS or GC_SESSION_ID, plus
-GC_SESSION_NAME and city context env). Remote handoff accepts a session alias or ID.
+GC_SESSION_NAME and city context env). Remote handoff accepts a session alias
+or ID. Subject is required unless --auto is set.
 
 ```
-gc handoff <subject> [message] [flags]
+gc handoff [subject] [message] [flags]
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--auto` | bool |  | Send handoff mail without requesting restart (for PreCompact hooks) |
 | `--target` | string |  | Remote session alias or ID to handoff (kills only controller-restartable sessions) |
 
 ## gc help
@@ -1127,7 +1189,7 @@ gc help [command]
 Checks for available work using the agent's work_query config.
 
 Without --inject: prints raw output, exits 0 if work exists, 1 if empty.
-With --inject: wraps output in &lt;system-reminder&gt; for hook injection, always exits 0.
+With --inject: silent legacy Stop-hook compatibility; skips the work query and always exits 0.
 
 		The agent is determined from $GC_AGENT or a positional argument.
 
@@ -1137,8 +1199,7 @@ gc hook [agent] [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--hook-format` | string |  | format hook output for a provider |
-| `--inject` | bool |  | output &lt;system-reminder&gt; block for hook injection |
+| `--inject` | bool |  | silent legacy Stop-hook compatibility; skip work query and exit 0 |
 
 ## gc import
 
@@ -1250,6 +1311,10 @@ the standard top-level directories, and .template.md prompt templates, then
 materializes builtin packs under .gc/system/packs. Use --provider to create the default minimal city
 non-interactively, or --file to initialize from an existing TOML config file.
 
+Pass --preserve-existing to keep any pre-authored pack.toml, city.toml, or
+agent prompt files in the target directory (useful when bootstrapping a
+committed workspace — e.g. from a bootstrap.sh shipped in the repo).
+
 ```
 gc init [path] [flags]
 ```
@@ -1264,6 +1329,7 @@ gc init
   gc init --name my-city
   gc init --from ~/elan --name elan /city
   gc init --file examples/gastown.toml ~/bright-lights
+  gc init --file city.toml --preserve-existing .
 ```
 
 | Flag | Type | Default | Description |
@@ -1272,6 +1338,7 @@ gc init
 | `--file` | string |  | path to a TOML file to use as city.toml |
 | `--from` | string |  | path to an example city directory to copy |
 | `--name` | string |  | workspace name (default: target directory basename) |
+| `--preserve-existing` | bool |  | keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them |
 | `--provider` | string |  | built-in workspace provider to use for the default mayor config |
 | `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
 
@@ -1289,10 +1356,10 @@ gc mail
 
 | Subcommand | Description |
 |------------|-------------|
-| [gc mail archive](#gc-mail-archive) | Archive a message without reading it |
+| [gc mail archive](#gc-mail-archive) | Archive one or more messages without reading them |
 | [gc mail check](#gc-mail-check) | Check for unread mail (use --inject for hook output) |
 | [gc mail count](#gc-mail-count) | Show total/unread message count |
-| [gc mail delete](#gc-mail-delete) | Delete a message (closes the bead) |
+| [gc mail delete](#gc-mail-delete) | Delete one or more messages (closes the beads) |
 | [gc mail inbox](#gc-mail-inbox) | List unread messages (defaults to your inbox) |
 | [gc mail mark-read](#gc-mail-mark-read) | Mark a message as read |
 | [gc mail mark-unread](#gc-mail-mark-unread) | Mark a message as unread |
@@ -1304,13 +1371,14 @@ gc mail
 
 ## gc mail archive
 
-Close a message bead without displaying its contents.
+Close one or more message beads without displaying their contents.
 
-Use this to dismiss a message without reading it. The message is marked
-as closed and will no longer appear in mail check or inbox results.
+Use this to dismiss messages without reading them. Each message is marked
+as closed and will no longer appear in mail check or inbox results. When
+multiple IDs are passed, they are archived in a single batch round-trip.
 
 ```
-gc mail archive <id>
+gc mail archive <id>...
 ```
 
 ## gc mail check
@@ -1350,10 +1418,12 @@ gc mail count [session]
 
 ## gc mail delete
 
-Delete a message by closing the bead. Same effect as archive but with different user intent.
+Delete one or more messages by closing the beads. Same effect as archive
+but with different user intent. When multiple IDs are passed, they are
+deleted in a single batch round-trip.
 
 ```
-gc mail delete <id>
+gc mail delete <id>...
 ```
 
 ## gc mail inbox
@@ -1410,6 +1480,7 @@ gc mail read <id>
 Reply to a message. The reply is addressed to the original sender.
 
 Inherits the thread ID from the original message for conversation tracking.
+Use --notify to nudge the recipient after replying.
 Use -s/--subject for the reply subject and -m/--message for the reply body.
 
 ```
@@ -1460,10 +1531,10 @@ gc mail send mayor "Build is green"
 
 ## gc mail thread
 
-Show all messages sharing a thread ID, ordered by time.
+Show all messages sharing a thread ID or message ID, ordered by time.
 
 ```
-gc mail thread <thread-id>
+gc mail thread <id>
 ```
 
 ## gc mcp
@@ -1540,6 +1611,7 @@ gc order
 | [gc order list](#gc-order-list) | List available orders |
 | [gc order run](#gc-order-run) | Execute an order manually |
 | [gc order show](#gc-order-show) | Show details of an order |
+| [gc order sweep-tracking](#gc-order-sweep-tracking) | Close stale order-tracking beads |
 
 ## gc order check
 
@@ -1610,6 +1682,22 @@ gc order show <name> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--rig` | string |  | rig name to disambiguate same-name orders |
+
+## gc order sweep-tracking
+
+Close stale open order-tracking beads.
+
+This is intended for maintenance exec orders. It only closes tracking beads
+older than --stale-after so a fresh in-flight order is not interrupted.
+
+```
+gc order sweep-tracking [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--quiet` | bool |  | suppress success output |
+| `--stale-after` | duration | `10m0s` | minimum age for an open tracking bead to be closed |
 
 ## gc pack
 
@@ -1940,7 +2028,7 @@ gc runtime
 | [gc runtime drain](#gc-runtime-drain) | Signal a session to drain (wind down gracefully) |
 | [gc runtime drain-ack](#gc-runtime-drain-ack) | Acknowledge drain — signal the controller to stop this session |
 | [gc runtime drain-check](#gc-runtime-drain-check) | Check if a session is draining (exit 0 = draining) |
-| [gc runtime request-restart](#gc-runtime-request-restart) | Request controller restart this session (blocks until killed) |
+| [gc runtime request-restart](#gc-runtime-request-restart) | Request controller restart this session (waits to be killed) |
 | [gc runtime undrain](#gc-runtime-undrain) | Cancel drain on a session |
 
 ## gc runtime drain
@@ -1984,18 +2072,25 @@ gc runtime drain-check [name]
 
 Signal the controller to stop and restart this session.
 
-Sets GC_RESTART_REQUESTED metadata on the session, then blocks forever.
-The controller will stop the session on its next reconcile tick and
-restart it fresh. The blocking prevents the agent from consuming more
-context while waiting.
+Sets GC_RESTART_REQUESTED metadata on the session, then waits while the
+controller stops the session on its next reconcile tick and restarts it
+fresh. The wait keeps the agent idle so it does not consume more context
+in the interim.
 
-For on-demand configured named sessions, the controller cannot restart the
-user-attended process. In that case this command reports that restart was
-skipped and returns without blocking. No session.draining event is emitted
-when restart is skipped.
+Under normal operation the controller SIGKILLs the process tree before
+this command returns. If the controller accepts the stop handoff, the
+runtime is already gone, or a SIGINT/SIGTERM is received, the command
+exits 0 cleanly. If the controller has not acted within a bounded
+timeout (max(5*PatrolInterval, 5min), capped at 30min) the command exits
+1 with a diagnostic pointing at controller health.
+
+For on-demand configured named sessions, the controller cannot restart
+the user-attended process. In that case this command reports that
+restart was skipped and returns immediately. No session.draining event
+is emitted when restart is skipped.
 
 This command is designed to be called from within a session context.
-It emits a session.draining event before blocking.
+It emits a session.draining event before waiting.
 
 ```
 gc runtime request-restart
@@ -2283,7 +2378,9 @@ Request a fresh restart for an existing session without closing its bead.
 
 The controller stops the current runtime and starts the same session again with
 fresh provider conversation state. Session identity, alias, mail, and queued
-work remain attached to the existing session bead.
+work remain attached to the existing session bead. For named sessions, reset
+also clears any tripped named-session respawn circuit breaker before requesting
+the fresh restart.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 
@@ -2660,6 +2757,10 @@ gc supervisor stop [flags]
 ## gc supervisor uninstall
 
 Remove the platform service and stop the machine-wide supervisor.
+
+On systemd, uninstall refuses to remove an active unit when the supervisor
+control socket is unavailable. Start the supervisor first so it can re-adopt
+preserved sessions, then retry uninstall.
 
 ```
 gc supervisor uninstall

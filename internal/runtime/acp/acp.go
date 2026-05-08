@@ -67,8 +67,9 @@ type Provider struct {
 
 // Compile-time check.
 var (
-	_ runtime.Provider            = (*Provider)(nil)
-	_ runtime.InteractionProvider = (*Provider)(nil)
+	_ runtime.Provider                    = (*Provider)(nil)
+	_ runtime.InteractionProvider         = (*Provider)(nil)
+	_ runtime.TransportCapabilityProvider = (*Provider)(nil)
 )
 
 // NewProvider returns an ACP [Provider] that stores socket files in
@@ -94,6 +95,12 @@ func NewProviderWithDir(dir string, cfg Config) *Provider {
 		workDirs: make(map[string]string),
 		cfg:      cfg,
 	}
+}
+
+// SupportsTransport reports whether this provider can host the requested
+// session transport.
+func (p *Provider) SupportsTransport(transport string) bool {
+	return transport == "acp"
 }
 
 // Start spawns an ACP agent process, performs the JSON-RPC handshake, and
@@ -263,7 +270,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	hsTimeoutCtx, hsTimeoutCancel := context.WithTimeout(hsCtx, p.cfg.handshakeTimeout())
 	defer hsTimeoutCancel()
 
-	if err := p.handshake(hsTimeoutCtx, sc); err != nil {
+	if err := p.handshake(hsTimeoutCtx, sc, cfg.WorkDir, cfg.MCPServers); err != nil {
 		// Handshake failed — kill the process. The monitor goroutine
 		// handles listener/socket cleanup when the process exits.
 		_ = stdinPipe.Close()
@@ -301,7 +308,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 }
 
 // handshake performs the ACP initialize → initialized → session/new sequence.
-func (p *Provider) handshake(ctx context.Context, sc *sessionConn) error {
+func (p *Provider) handshake(ctx context.Context, sc *sessionConn, workDir string, mcpServers []runtime.MCPServerConfig) error {
 	// Step 1: Send "initialize" request.
 	initReq, _ := newInitializeRequest()
 	ch, err := sc.sendRequest(initReq)
@@ -328,7 +335,7 @@ func (p *Provider) handshake(ctx context.Context, sc *sessionConn) error {
 	}
 
 	// Step 3: Send "session/new" request.
-	newReq, _ := newSessionNewRequest()
+	newReq, _ := newSessionNewRequest(workDir, mcpServers)
 	ch, err = sc.sendRequest(newReq)
 	if err != nil {
 		return fmt.Errorf("sending session/new: %w", err)

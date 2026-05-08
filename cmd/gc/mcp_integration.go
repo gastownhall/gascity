@@ -38,24 +38,6 @@ type resolvedMCPProjection struct {
 	Projection   materialize.MCPProjection
 }
 
-func buildMCPTemplateData(cityPath, qualifiedName, workDir string, agent *config.Agent, rigs []config.Rig) map[string]string {
-	rigName := configuredRigName(cityPath, agent, rigs)
-	rigRoot := rigRootForName(rigName, rigs)
-	return buildTemplateData(PromptContext{
-		CityRoot:      cityPath,
-		AgentName:     qualifiedName,
-		TemplateName:  templateNameFor(agent, qualifiedName),
-		RigName:       rigName,
-		RigRoot:       rigRoot,
-		WorkDir:       workDir,
-		IssuePrefix:   findRigPrefix(rigName, rigs),
-		DefaultBranch: defaultBranchFor(workDir),
-		WorkQuery:     agent.EffectiveWorkQuery(),
-		SlingQuery:    agent.EffectiveSlingQuery(),
-		Env:           agent.Env,
-	})
-}
-
 func supportsMCPProviderKind(kind string) bool {
 	switch strings.TrimSpace(kind) {
 	case materialize.MCPProviderClaude, materialize.MCPProviderCodex, materialize.MCPProviderGemini:
@@ -71,8 +53,7 @@ func loadEffectiveMCPForAgent(
 	agent *config.Agent,
 	qualifiedName, workDir string,
 ) (materialize.MCPCatalog, error) {
-	templateData := buildMCPTemplateData(cityPath, qualifiedName, workDir, agent, cfg.Rigs)
-	catalog, err := materialize.EffectiveMCPForAgent(cfg, agent, templateData)
+	catalog, err := materialize.EffectiveMCPForSession(cfg, cityPath, agent, qualifiedName, workDir)
 	if err != nil {
 		return materialize.MCPCatalog{}, fmt.Errorf("loading effective MCP: %w", err)
 	}

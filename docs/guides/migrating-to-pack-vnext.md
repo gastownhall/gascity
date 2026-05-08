@@ -481,13 +481,19 @@ each prompt file:
 append_fragments = ["operational-awareness", "command-glossary"]
 ```
 
+Per-agent `append_fragments` is also supported, declared on an
+`[[agent]]` block or in `agents/<name>/agent.toml`, and layers in front
+of the `[agent_defaults]` list:
+
+```toml
+[[agent]]
+name = "mayor"
+prompt_template = "agents/mayor/prompt.template.md"
+append_fragments = ["mayor-footer"]
+```
+
 Plain `.md` prompts are inert — no fragments attach, no template engine
 runs.
-
-> **As of release v0.15.0:** `[agent_defaults].append_fragments` is the
-> proven migration bridge in the current release. Agent-local
-> `append_fragments` is still tracked as a spec/runtime parity gap in
-> [#671](https://github.com/gastownhall/gascity/issues/671).
 
 ## Assets and paths
 

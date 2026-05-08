@@ -14,6 +14,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
@@ -89,10 +90,13 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 			return s.sourceWorkflowStores(), nil
 		},
 		Runner:   s.slingRunner(),
+		Router:   apiBeadRouter{server: s, store: store},
 		Resolver: apiAgentResolver{},
 		Branches: apiBranchResolver{cityPath: s.state.CityPath()},
 		Notify:   &apiNotifier{state: s.state},
-		Stderr:   apiSlingStderr(),
+		Tracer: func(format string, args ...any) {
+			fmt.Fprintf(apiSlingStderr(), format+"\n", args...) //nolint:errcheck
+		},
 	}
 	sl, err := sling.New(deps)
 	if err != nil {
@@ -190,7 +194,7 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 	if resp.WorkflowID == "" && resp.RootBeadID == "" {
 		return nil, http.StatusInternalServerError, "internal", "sling did not produce a workflow or bead id", nil
 	}
-	return resp, http.StatusCreated, "", "", nil
+	return resp, http.StatusOK, "", "", nil
 }
 
 func allowsForceStoreFallback(body slingBody, agentCfg config.Agent) bool {
@@ -266,14 +270,15 @@ func (s *Server) slingStoreScopeForBead(beadID string) (rigName string, cityScop
 	if beadID == "" {
 		return "", false
 	}
-	prefix := sling.BeadPrefix(beadID)
+	cfg := s.state.Config()
+	prefix := sling.BeadPrefixForCity(cfg, beadID)
 	if prefix == "" {
 		return "", false
 	}
-	if sling.IsHQPrefix(s.state.Config(), prefix) {
+	if sling.IsHQPrefix(cfg, prefix) {
 		return "", true
 	}
-	rig, ok := sling.FindRigByPrefix(s.state.Config(), prefix)
+	rig, ok := sling.FindRigByPrefix(cfg, prefix)
 	if !ok {
 		return "", false
 	}
@@ -313,9 +318,7 @@ func (s *Server) slingRunner() sling.SlingRunner {
 		if dir != "" {
 			cmd.Dir = dir
 		}
-		if len(env) > 0 {
-			cmd.Env = mergeEnvForSling(env)
-		}
+		cmd.Env = mergeEnvForSling(env)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			return string(out), fmt.Errorf("running %q: %w", command, err)
@@ -326,13 +329,7 @@ func (s *Server) slingRunner() sling.SlingRunner {
 
 // mergeEnvForSling merges extra env vars into the current process env.
 func mergeEnvForSling(extra map[string]string) []string {
-	base := os.Environ()
-	merged := make([]string, 0, len(base)+len(extra))
-	merged = append(merged, base...)
-	for k, v := range extra {
-		merged = append(merged, k+"="+v)
-	}
-	return merged
+	return execenv.MergeMap(os.Environ(), extra)
 }
 
 // apiAgentResolver implements sling.AgentResolver for the API context.
@@ -406,4 +403,40 @@ func (n *apiNotifier) PokeController(_ string) {
 
 func (n *apiNotifier) PokeControlDispatch(_ string) {
 	n.state.Poke()
+}
+
+type apiBeadRouter struct {
+	server *Server
+	store  beads.Store
+}
+
+func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
+	if r.server == nil {
+		return fmt.Errorf("sling router: missing server")
+	}
+	cfg := r.server.state.Config()
+	if cfg != nil {
+		if agentCfg, ok := findAgentByQualifiedTemplate(cfg, req.Target); ok && sling.IsCustomSlingQuery(agentCfg) {
+			runner := r.server.slingRunner()
+			if runner == nil {
+				return fmt.Errorf("custom sling_query requires a runner")
+			}
+			slingCmd, slingWarn := sling.BuildSlingCommandForAgent("sling_query", agentCfg.EffectiveSlingQuery(), req.BeadID, r.server.state.CityPath(), r.server.state.CityName(), agentCfg, cfg.Rigs)
+			if slingWarn != "" {
+				fmt.Fprintf(apiSlingStderr(), "gc api sling: %s\n", slingWarn) //nolint:errcheck
+			}
+			_, err := runner(req.WorkDir, slingCmd, req.Env)
+			return err
+		}
+	}
+	if r.store == nil {
+		return fmt.Errorf("built-in sling routing requires a store")
+	}
+	if err := r.store.SetMetadata(req.BeadID, "gc.routed_to", req.Target); err != nil {
+		if req.Force && errors.Is(err, beads.ErrNotFound) {
+			return nil
+		}
+		return fmt.Errorf("setting gc.routed_to on %s: %w", req.BeadID, err)
+	}
+	return nil
 }

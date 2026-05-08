@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"hash/fnv"
 	"net"
 	"os"
 	"os/exec"
@@ -462,7 +463,7 @@ func TestDoltGCNudgeLockIgnoresDifferentTmpDirs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LookPath(sleep): %v", err)
 	}
-	lockDir := filepath.Join("/tmp", "gc-dolt-gc", "127.0.0.1-3307.lock.d")
+	lockDir := doltGCNudgeTestLockDir(t)
 	_ = os.RemoveAll(lockDir)
 	t.Cleanup(func() { _ = os.RemoveAll(lockDir) })
 
@@ -526,7 +527,7 @@ func TestDoltGCNudgeRecoversStaleLockMarker(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cityPath := writeDoltGCNudgeCity(t)
 			captureDir := t.TempDir()
-			lockDir := filepath.Join("/tmp", "gc-dolt-gc", "127.0.0.1-3307.lock.d")
+			lockDir := doltGCNudgeTestLockDir(t)
 			_ = os.RemoveAll(lockDir)
 			t.Cleanup(func() { _ = os.RemoveAll(lockDir) })
 			if err := os.MkdirAll(lockDir, 0o700); err != nil {
@@ -597,10 +598,10 @@ func TestDoltGCNudgeSkipsExternalRigDatabaseWithoutLocalData(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("dolt argv lines = %d, want 1 for local managed db only:\n%s", len(lines), argv)
 	}
-	if !strings.Contains(lines[0], "--database testdb") {
+	if !strings.Contains(lines[0], "--use-db testdb") {
 		t.Fatalf("dolt argv = %q, want local managed testdb", lines[0])
 	}
-	if strings.Contains(argv, "--database extdb") {
+	if strings.Contains(argv, "--use-db extdb") {
 		t.Fatalf("dolt argv should not target external rig db:\n%s", argv)
 	}
 }
@@ -634,7 +635,7 @@ func TestDoltGCNudgeDefaultsMissingDatabaseMetadataToBeads(t *testing.T) {
 	}
 
 	argv := strings.TrimSpace(readFileString(t, argvCapture))
-	if !strings.Contains(argv, "--database beads") {
+	if !strings.Contains(argv, "--use-db beads") {
 		t.Fatalf("dolt argv = %q, want default beads database", argv)
 	}
 }
@@ -673,10 +674,10 @@ func TestDoltGCNudgeSkipsInvalidDatabaseMetadata(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("dolt argv lines = %d, want 1 valid database:\n%s", len(lines), argv)
 	}
-	if !strings.Contains(lines[0], "--database testdb") {
+	if !strings.Contains(lines[0], "--use-db testdb") {
 		t.Fatalf("dolt argv = %q, want local managed testdb", lines[0])
 	}
-	if strings.Contains(argv, "--database --help") {
+	if strings.Contains(argv, "--use-db --help") {
 		t.Fatalf("dolt argv should not target invalid database:\n%s", argv)
 	}
 }
@@ -714,10 +715,10 @@ func TestDoltGCNudgeSkipsSystemDatabaseMetadata(t *testing.T) {
 	}
 
 	argv := strings.TrimSpace(readFileString(t, argvCapture))
-	if strings.Contains(argv, "--database mysql") {
+	if strings.Contains(argv, "--use-db mysql") {
 		t.Fatalf("dolt argv should not target system database:\n%s", argv)
 	}
-	if !strings.Contains(argv, "--database testdb") {
+	if !strings.Contains(argv, "--use-db testdb") {
 		t.Fatalf("dolt argv = %q, want valid testdb", argv)
 	}
 }
@@ -751,7 +752,7 @@ func TestDoltGCNudgeAllowsHyphenatedDatabaseMetadata(t *testing.T) {
 	}
 
 	argv := strings.TrimSpace(readFileString(t, argvCapture))
-	if !strings.Contains(argv, "--database frontend-db") {
+	if !strings.Contains(argv, "--use-db frontend-db") {
 		t.Fatalf("dolt argv = %q, want hyphenated database", argv)
 	}
 }
@@ -790,7 +791,7 @@ func TestDoltGCNudgeHonorsDataDirOverride(t *testing.T) {
 	}
 
 	argv := strings.TrimSpace(readFileString(t, argvCapture))
-	if !strings.Contains(argv, "--database testdb") {
+	if !strings.Contains(argv, "--use-db testdb") {
 		t.Fatalf("dolt argv = %q, want override-backed testdb", argv)
 	}
 }
@@ -821,7 +822,7 @@ func TestDoltGCNudgeDiscoversOrphanDatabaseDirs(t *testing.T) {
 	}
 
 	argv := strings.TrimSpace(readFileString(t, argvCapture))
-	if !strings.Contains(argv, "--database orphan-db") {
+	if !strings.Contains(argv, "--use-db orphan-db") {
 		t.Fatalf("dolt argv = %q, want orphan database", argv)
 	}
 }
@@ -873,7 +874,7 @@ func TestDoltGCNudgeAggregateThresholdTriggersSubthresholdDatabases(t *testing.T
 	}
 
 	argv := strings.TrimSpace(readFileString(t, argvCapture))
-	if !strings.Contains(argv, "--database testdb") || !strings.Contains(argv, "--database rigdb") {
+	if !strings.Contains(argv, "--use-db testdb") || !strings.Contains(argv, "--use-db rigdb") {
 		t.Fatalf("dolt argv = %q, want both subthreshold databases under aggregate trigger", argv)
 	}
 }
@@ -915,10 +916,10 @@ func TestDoltGCNudgeFallbackFindsLocalRigOutsideRigsDir(t *testing.T) {
 	if len(lines) != 2 {
 		t.Fatalf("dolt argv lines = %d, want 2 databases from fallback scan:\n%s", len(lines), argv)
 	}
-	if !strings.Contains(argv, "--database testdb") {
+	if !strings.Contains(argv, "--use-db testdb") {
 		t.Fatalf("dolt argv = %q, want city database", argv)
 	}
-	if !strings.Contains(argv, "--database frontenddb") {
+	if !strings.Contains(argv, "--use-db frontenddb") {
 		t.Fatalf("dolt argv = %q, want rig database outside rigs/ dir", argv)
 	}
 }
@@ -944,7 +945,7 @@ func TestDoltGCNudgeWarnsWhenRigListFailsBeforeFallback(t *testing.T) {
 	if !strings.Contains(string(out), "gc rig list failed rc=7") {
 		t.Fatalf("gc-nudge output = %q, want rig-list failure warning", out)
 	}
-	if !strings.Contains(readFileString(t, argvCapture), "--database testdb") {
+	if !strings.Contains(readFileString(t, argvCapture), "--use-db testdb") {
 		t.Fatalf("gc-nudge did not fall back to local metadata scan; output:\n%s", out)
 	}
 }
@@ -1003,8 +1004,32 @@ func doltGCNudgeCommand(t *testing.T, cityPath, binDir string, extraEnv ...strin
 		baseEnv = append(baseEnv, "GC_DOLT_MANAGED_LOCAL=1")
 	}
 	cmd.Env = append([]string{}, baseEnv...)
+	extraEnv = doltGCNudgeIsolatedEnv(t, extraEnv)
 	cmd.Env = append(cmd.Env, extraEnv...)
 	return cmd
+}
+
+func doltGCNudgeIsolatedEnv(t *testing.T, env []string) []string {
+	t.Helper()
+	out := append([]string{}, env...)
+	for i, entry := range out {
+		if entry == "GC_DOLT_PORT=3307" {
+			out[i] = "GC_DOLT_PORT=" + doltGCNudgeTestPort(t)
+		}
+	}
+	return out
+}
+
+func doltGCNudgeTestLockDir(t *testing.T) string {
+	t.Helper()
+	return filepath.Join("/tmp", "gc-dolt-gc", "127.0.0.1-"+doltGCNudgeTestPort(t)+".lock.d")
+}
+
+func doltGCNudgeTestPort(t *testing.T) string {
+	t.Helper()
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(t.Name()))
+	return strconv.Itoa(20000 + int(h.Sum32()%20000))
 }
 
 func doltGCNudgeEnvHasKey(env []string, key string) bool {

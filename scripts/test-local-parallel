@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+  cat >&2 <<'USAGE'
+usage: scripts/test-local-parallel <fast|cmd-gc-process|integration|full>
+
+Environment:
+  LOCAL_TEST_JOBS        max concurrent jobs (default: detected CPU count)
+  CMD_GC_PROCESS_TOTAL  cmd/gc shard count (default: 6)
+USAGE
+}
+
+if [[ $# -ne 1 ]]; then
+  usage
+  exit 1
+fi
+
+mode="$1"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+detect_cpus() {
+  nproc 2>/dev/null ||
+    getconf _NPROCESSORS_ONLN 2>/dev/null ||
+    sysctl -n hw.ncpu 2>/dev/null ||
+    printf '8\n'
+}
+
+local_jobs="${LOCAL_TEST_JOBS:-$(detect_cpus)}"
+cmd_gc_total="${CMD_GC_PROCESS_TOTAL:-6}"
+
+if ! [[ "$local_jobs" =~ ^[0-9]+$ && "$local_jobs" -gt 0 ]]; then
+  echo "LOCAL_TEST_JOBS must be a positive integer" >&2
+  exit 1
+fi
+if ! [[ "$cmd_gc_total" =~ ^[0-9]+$ && "$cmd_gc_total" -gt 0 ]]; then
+  echo "CMD_GC_PROCESS_TOTAL must be a positive integer" >&2
+  exit 1
+fi
+
+gopath_val="$(go env GOPATH)"
+gocache_val="$(go env GOCACHE)"
+gomodcache_val="$(go env GOMODCACHE)"
+gotmpdir_val="$(go env GOTMPDIR)"
+goroot_val="$(go env GOROOT)"
+
+jobspecs=()
+
+add_job() {
+  local label="$1"
+  local command="$2"
+  jobspecs+=("${label}::${command}")
+}
+
+add_fsys_compile_job() {
+  add_job "fsys-darwin-compile" \
+    'tmp=$(mktemp -d); trap '"'"'rm -rf "$tmp"'"'"' EXIT; GOOS=darwin GOARCH=arm64 go test -c -o "$tmp/fsys.test" ./internal/fsys'
+}
+
+add_unit_core_job() {
+  add_job "unit-core" \
+    'GC_FAST_UNIT=1 go test $(go list ./... | grep -v '"'"'^github.com/gastownhall/gascity/cmd/gc$'"'"')'
+}
+
+add_cmd_gc_shards() {
+  local label_prefix="$1"
+  local gc_fast_unit="$2"
+  local tags="$3"
+  local i command
+  for i in $(seq 1 "$cmd_gc_total"); do
+    command="GC_FAST_UNIT=${gc_fast_unit} GO_TEST_COUNT=1 GO_TEST_TIMEOUT=20m"
+    if [[ -n "$tags" ]]; then
+      command+=" GO_TEST_TAGS=${tags}"
+    fi
+    command+=" ./scripts/test-go-test-shard ./cmd/gc ${i} ${cmd_gc_total}"
+    add_job "${label_prefix}-${i}-of-${cmd_gc_total}" "$command"
+  done
+}
+
+add_integration_jobs() {
+  local i
+  for i in 1 2 3 4; do
+    add_job "integration-packages-core-${i}-of-4" "./scripts/test-integration-shard packages-core-${i}-of-4"
+  done
+  for i in 1 2 3 4 5 6; do
+    add_job "integration-packages-cmd-gc-${i}-of-6" "./scripts/test-integration-shard packages-cmd-gc-${i}-of-6"
+  done
+  for i in 1 2 3; do
+    add_job "integration-packages-runtime-tmux-${i}-of-3" "./scripts/test-integration-shard packages-runtime-tmux-${i}-of-3"
+  done
+  for i in 1 2; do
+    add_job "integration-review-formulas-basic-${i}-of-2" "./scripts/test-integration-shard review-formulas-basic-${i}-of-2"
+  done
+  for i in 1 2; do
+    add_job "integration-review-formulas-retries-${i}-of-2" "./scripts/test-integration-shard review-formulas-retries-${i}-of-2"
+  done
+  add_job "integration-review-formulas-recovery" "./scripts/test-integration-shard review-formulas-recovery"
+  add_job "integration-bdstore" "./scripts/test-integration-shard bdstore"
+  for i in 1 2; do
+    add_job "integration-rest-smoke-${i}-of-2" "./scripts/test-integration-shard rest-smoke-${i}-of-2"
+  done
+  for i in 1 2 3 4 5 6 7 8; do
+    add_job "integration-rest-full-${i}-of-8" "./scripts/test-integration-shard rest-full-${i}-of-8"
+  done
+}
+
+case "$mode" in
+  fast)
+    add_fsys_compile_job
+    add_unit_core_job
+    add_cmd_gc_shards "unit-cmd-gc" "1" ""
+    ;;
+  cmd-gc-process)
+    add_cmd_gc_shards "cmd-gc-process" "0" ""
+    ;;
+  integration)
+    add_integration_jobs
+    ;;
+  full)
+    add_fsys_compile_job
+    add_unit_core_job
+    add_cmd_gc_shards "cmd-gc-process" "0" ""
+    add_integration_jobs
+    ;;
+  *)
+    usage
+    exit 1
+    ;;
+esac
+
+if [[ ${#jobspecs[@]} -eq 0 ]]; then
+  echo "no jobs selected for mode ${mode}" >&2
+  exit 1
+fi
+
+cleanup_log_dir=1
+if [[ -n "${LOCAL_TEST_LOG_DIR:-}" ]]; then
+  log_dir="$LOCAL_TEST_LOG_DIR"
+  cleanup_log_dir=0
+else
+  log_dir="$(mktemp -d "${TMPDIR:-/tmp}/gc-local-tests.XXXXXX")"
+fi
+export LOCAL_TEST_LOG_DIR="$log_dir"
+export TEST_LOCAL_GOPATH="$gopath_val"
+export TEST_LOCAL_GOCACHE="$gocache_val"
+export TEST_LOCAL_GOMODCACHE="$gomodcache_val"
+export TEST_LOCAL_GOTMPDIR="$gotmpdir_val"
+export TEST_LOCAL_GOROOT="${GOROOT:-$goroot_val}"
+
+echo "Running ${#jobspecs[@]} ${mode} job(s) with LOCAL_TEST_JOBS=${local_jobs}"
+
+set +e
+printf '%s\0' "${jobspecs[@]}" | xargs -0 -n1 -P "$local_jobs" bash -c '
+  set -euo pipefail
+  spec="$1"
+  label="${spec%%::*}"
+  command="${spec#*::}"
+  safe_label="$(printf "%s" "$label" | tr -c "A-Za-z0-9._-" "_")"
+  log="$LOCAL_TEST_LOG_DIR/${safe_label}.log"
+
+  echo "[$label] start"
+  if env -i \
+    PATH="${PATH}" \
+    HOME="${HOME:-}" \
+    USER="${USER:-}" \
+    LOGNAME="${LOGNAME:-}" \
+    SHELL="${SHELL:-/bin/sh}" \
+    LANG="${LANG:-C.UTF-8}" \
+    TMPDIR="${TMPDIR:-/tmp}" \
+    XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
+    GOPATH="${TEST_LOCAL_GOPATH}" \
+    GOCACHE="${TEST_LOCAL_GOCACHE}" \
+    GOMODCACHE="${TEST_LOCAL_GOMODCACHE}" \
+    GOTMPDIR="${TEST_LOCAL_GOTMPDIR}" \
+    GOROOT="${TEST_LOCAL_GOROOT}" \
+    GOENV="${GOENV-}" \
+    GOFLAGS="${GOFLAGS-}" \
+    GO111MODULE="${GO111MODULE-}" \
+    GOEXPERIMENT="${GOEXPERIMENT-}" \
+    GOPROXY="${GOPROXY-}" \
+    GOPRIVATE="${GOPRIVATE-}" \
+    GONOPROXY="${GONOPROXY-}" \
+    GONOSUMDB="${GONOSUMDB-}" \
+    GOSUMDB="${GOSUMDB-}" \
+    GOINSECURE="${GOINSECURE-}" \
+    GOVCS="${GOVCS-}" \
+    GOWORK="${GOWORK-}" \
+    bash -lc "$command" >"$log" 2>&1; then
+    echo "[$label] ok"
+  else
+    status=$?
+    echo "[$label] failed with exit ${status}; log: ${log}" >&2
+    sed -n '"'"'1,240p'"'"' "$log" >&2
+    exit "$status"
+  fi
+' _
+status=$?
+set -e
+
+if [[ "$status" -eq 0 ]]; then
+  if [[ "$cleanup_log_dir" -eq 1 ]]; then
+    rm -rf "$log_dir"
+  fi
+  echo "All ${mode} jobs passed"
+else
+  echo "One or more ${mode} jobs failed; logs are in ${log_dir}" >&2
+fi
+
+exit "$status"

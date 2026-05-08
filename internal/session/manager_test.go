@@ -25,6 +25,24 @@ type noImmediateProvider struct {
 	runtime.Provider
 }
 
+type nonRunningStopRecorder struct {
+	*runtime.Fake
+	stopCalls int
+	stopErr   error
+}
+
+func (p *nonRunningStopRecorder) IsRunning(string) bool {
+	return false
+}
+
+func (p *nonRunningStopRecorder) Stop(name string) error {
+	p.stopCalls++
+	if p.stopErr != nil {
+		return p.stopErr
+	}
+	return p.Fake.Stop(name)
+}
+
 func (p *startOverrideProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	if p.startErr != nil {
 		return p.startErr
@@ -249,6 +267,51 @@ func TestCreate(t *testing.T) {
 	}
 }
 
+func TestCreateConfirmsStartedStateWithoutControllerDriftHash(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(
+		context.Background(),
+		"helper",
+		"my chat",
+		"claude",
+		"/tmp",
+		"claude",
+		map[string]string{"BEADS_DIR": "/tmp/beads"},
+		ProviderResume{},
+		runtime.Config{
+			Env:              map[string]string{"GC_CITY": "test-city"},
+			FingerprintExtra: map[string]string{"depends_on": "db"},
+			SessionLive:      []string{"echo live"},
+		},
+	)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := b.Metadata["started_config_hash"]; got != "" {
+		t.Fatalf("started_config_hash = %q, want empty so controller owns drift hashes", got)
+	}
+	if got := b.Metadata["started_live_hash"]; got != "" {
+		t.Fatalf("started_live_hash = %q, want empty so controller owns drift hashes", got)
+	}
+	if got := b.Metadata["live_hash"]; got != "" {
+		t.Fatalf("live_hash = %q, want empty so controller owns drift hashes", got)
+	}
+	if got := b.Metadata["state_reason"]; got != "creation_complete" {
+		t.Fatalf("state_reason = %q, want creation_complete", got)
+	}
+	if got := b.Metadata["creation_complete_at"]; got == "" {
+		t.Fatal("creation_complete_at is empty")
+	}
+}
+
 func TestCreateDefaultsTitleToTemplate(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -325,6 +388,28 @@ func TestCreateBeadOnly(t *testing.T) {
 	}
 	if b.Metadata["session_name"] == "" {
 		t.Error("bead missing session_name metadata")
+	}
+}
+
+func TestGetSurfacesAgentNameMetadata(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.CreateBeadOnly("helper", "my chat", "claude", "/tmp", "claude", "", nil, ProviderResume{})
+	if err != nil {
+		t.Fatalf("CreateBeadOnly: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, "agent_name", "myrig/helper-adhoc-123"); err != nil {
+		t.Fatalf("SetMetadata(agent_name): %v", err)
+	}
+
+	got, err := mgr.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.AgentName != "myrig/helper-adhoc-123" {
+		t.Fatalf("AgentName = %q, want %q", got.AgentName, "myrig/helper-adhoc-123")
 	}
 }
 
@@ -485,6 +570,32 @@ func TestCreateBeadOnlyNamed_UsesExplicitSessionName(t *testing.T) {
 	}
 }
 
+func TestCreateAliasedBeadOnlyNamed_SetsPendingCreateMetadata(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.CreateAliasedBeadOnlyNamed("worker", "test-city--worker", "worker", "queued", "claude", "/tmp", "claude", "", nil, ProviderResume{})
+	if err != nil {
+		t.Fatalf("CreateAliasedBeadOnlyNamed: %v", err)
+	}
+
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := b.Metadata["pending_create_claim"]; got != "true" {
+		t.Fatalf("pending_create_claim = %q, want true", got)
+	}
+	startedAt := b.Metadata["pending_create_started_at"]
+	if startedAt == "" {
+		t.Fatal("pending_create_started_at is empty")
+	}
+	if _, err := time.Parse(time.RFC3339, startedAt); err != nil {
+		t.Fatalf("pending_create_started_at = %q, want RFC3339: %v", startedAt, err)
+	}
+}
+
 func TestCreateBeadOnly_SetsPendingCreateClaimForWakeSignal(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -617,6 +728,35 @@ func TestClose(t *testing.T) {
 	// Close again is idempotent.
 	if err := mgr.Close(info.ID); err != nil {
 		t.Fatalf("Close (idempotent): %v", err)
+	}
+}
+
+func TestCloseRemovesRuntimeMCPSnapshot(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	cityPath := t.TempDir()
+	mgr := NewManagerWithCityPath(store, sp, cityPath)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := PersistRuntimeMCPServersSnapshot(cityPath, info.ID, []runtime.MCPServerConfig{{
+		Name:      "identity",
+		Transport: runtime.MCPTransportHTTP,
+		URL:       "https://example.invalid/mcp",
+	}}); err != nil {
+		t.Fatalf("PersistRuntimeMCPServersSnapshot: %v", err)
+	}
+	if _, err := os.Stat(runtimeMCPServersSnapshotPath(cityPath, info.ID)); err != nil {
+		t.Fatalf("Stat(runtime snapshot): %v", err)
+	}
+
+	if err := mgr.Close(info.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := os.Stat(runtimeMCPServersSnapshotPath(cityPath, info.ID)); !os.IsNotExist(err) {
+		t.Fatalf("runtime snapshot still exists after close, stat err = %v", err)
 	}
 }
 
@@ -1205,6 +1345,50 @@ func TestSuspendCrashedSession(t *testing.T) {
 	}
 	if got.State != StateSuspended {
 		t.Errorf("State = %q, want %q", got.State, StateSuspended)
+	}
+}
+
+func TestSuspendCleansDeadRuntimeArtifact(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &nonRunningStopRecorder{Fake: runtime.NewFake()}
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	if sp.stopCalls != 1 {
+		t.Fatalf("Stop calls = %d, want 1 to clean dead runtime artifact", sp.stopCalls)
+	}
+}
+
+func TestSuspendKeepsNonRunningCleanupBestEffort(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &nonRunningStopRecorder{Fake: runtime.NewFake(), stopErr: errors.New("cleanup unavailable")}
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	if sp.stopCalls != 1 {
+		t.Fatalf("Stop calls = %d, want 1", sp.stopCalls)
+	}
+	got, err := mgr.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.State != StateSuspended {
+		t.Fatalf("State = %q, want %q", got.State, StateSuspended)
 	}
 }
 
@@ -2089,7 +2273,7 @@ func TestSendBackfillsTransportForLegacyACPSession(t *testing.T) {
 		t.Fatalf("Start ACP session: %v", err)
 	}
 
-	mgr := NewManagerWithTransportResolver(store, autoSP, func(template string) string {
+	mgr := NewManagerWithTransportResolver(store, autoSP, func(template, _ string) string {
 		if template == "helper" {
 			return "acp"
 		}
@@ -2147,7 +2331,7 @@ func TestGetDoesNotPersistGuessedTransportForLegacySession(t *testing.T) {
 		t.Fatalf("Create legacy bead: %v", err)
 	}
 
-	mgr := NewManagerWithTransportResolver(store, autoSP, func(template string) string {
+	mgr := NewManagerWithTransportResolver(store, autoSP, func(template, _ string) string {
 		if template == "helper" {
 			return "acp"
 		}
@@ -2163,6 +2347,247 @@ func TestGetDoesNotPersistGuessedTransportForLegacySession(t *testing.T) {
 	}
 	if updated.Metadata["transport"] != "" {
 		t.Fatalf("transport metadata = %q, want empty on read-only lookup", updated.Metadata["transport"])
+	}
+}
+
+func TestGetUsesConfiguredTransportForPendingCreateWithoutRuntimeProbe(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+
+	deferred, err := store.Create(beads.Bead{
+		Title: "deferred acp",
+		Type:  BeadType,
+		Labels: []string{
+			LabelSession,
+			"template:helper",
+		},
+		Metadata: map[string]string{
+			"template":             "helper",
+			"state":                string(StateCreating),
+			"pending_create_claim": "true",
+			"provider":             "claude",
+			"work_dir":             "/tmp",
+			"command":              "claude",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create deferred bead: %v", err)
+	}
+
+	mgr := NewManagerWithTransportResolver(store, sp, func(template, _ string) string {
+		if template == "helper" {
+			return "acp"
+		}
+		return ""
+	})
+
+	info, err := mgr.Get(deferred.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := info.Transport; got != "acp" {
+		t.Fatalf("Transport = %q, want acp", got)
+	}
+	if len(sp.Calls) != 0 {
+		t.Fatalf("runtime calls = %#v, want none for pending create", sp.Calls)
+	}
+}
+
+func TestGetPrefersLiveTransportDetectionOverConfiguredTransportInference(t *testing.T) {
+	store := beads.NewMemStore()
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	autoSP := sessionauto.New(defaultSP, acpSP)
+
+	legacy, err := store.Create(beads.Bead{
+		Title: "legacy tmux",
+		Type:  BeadType,
+		Labels: []string{
+			LabelSession,
+			"template:helper",
+		},
+		Metadata: map[string]string{
+			"template": "helper",
+			"state":    string(StateActive),
+			"provider": "claude",
+			"work_dir": "/tmp",
+			"command":  "claude",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create legacy bead: %v", err)
+	}
+	sessName := sessionNameFor(legacy.ID)
+	if err := store.SetMetadata(legacy.ID, "session_name", sessName); err != nil {
+		t.Fatalf("SetMetadata(session_name): %v", err)
+	}
+	if err := defaultSP.Start(context.Background(), sessName, runtime.Config{WorkDir: "/tmp"}); err != nil {
+		t.Fatalf("Start default session: %v", err)
+	}
+
+	mgr := NewManagerWithTransportResolver(store, autoSP, func(template, _ string) string {
+		if template == "helper" {
+			return "acp"
+		}
+		return ""
+	})
+
+	info, err := mgr.Get(legacy.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := info.Transport; got != "" {
+		t.Fatalf("Transport = %q, want empty for live tmux session", got)
+	}
+
+	updated, err := store.Get(legacy.ID)
+	if err != nil {
+		t.Fatalf("Get updated bead: %v", err)
+	}
+	if got := updated.Metadata["transport"]; got != "" {
+		t.Fatalf("transport metadata = %q, want empty for live tmux session", got)
+	}
+}
+
+func TestGetDoesNotInferConfiguredTransportForStoppedLegacySession(t *testing.T) {
+	store := beads.NewMemStore()
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	autoSP := sessionauto.New(defaultSP, acpSP)
+
+	legacy, err := store.Create(beads.Bead{
+		Title: "legacy tmux",
+		Type:  BeadType,
+		Labels: []string{
+			LabelSession,
+			"template:helper",
+		},
+		Metadata: map[string]string{
+			"template": "helper",
+			"state":    string(StateAsleep),
+			"provider": "claude",
+			"work_dir": "/tmp",
+			"command":  "claude",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create legacy bead: %v", err)
+	}
+	sessName := sessionNameFor(legacy.ID)
+	if err := store.SetMetadata(legacy.ID, "session_name", sessName); err != nil {
+		t.Fatalf("SetMetadata(session_name): %v", err)
+	}
+
+	mgr := NewManagerWithTransportResolver(store, autoSP, func(template, _ string) string {
+		if template == "helper" {
+			return "acp"
+		}
+		return ""
+	})
+
+	info, err := mgr.Get(legacy.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := info.Transport; got != "" {
+		t.Fatalf("Transport = %q, want empty for stopped legacy session without stored transport", got)
+	}
+
+	updated, err := store.Get(legacy.ID)
+	if err != nil {
+		t.Fatalf("Get updated bead: %v", err)
+	}
+	if got := updated.Metadata["transport"]; got != "" {
+		t.Fatalf("transport metadata = %q, want empty for read-only lookup", got)
+	}
+}
+
+func TestGetDoesNotInferConfiguredTransportForStoppedLegacySessionWithPolicyFallback(t *testing.T) {
+	store := beads.NewMemStore()
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	autoSP := sessionauto.New(defaultSP, acpSP)
+
+	legacy, err := store.Create(beads.Bead{
+		Title: "legacy acp",
+		Type:  BeadType,
+		Labels: []string{
+			LabelSession,
+			"template:helper",
+		},
+		Metadata: map[string]string{
+			"template": "helper",
+			"state":    string(StateAsleep),
+			"provider": "claude",
+			"work_dir": "/tmp",
+			"command":  "claude",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create legacy bead: %v", err)
+	}
+	sessName := sessionNameFor(legacy.ID)
+	if err := store.SetMetadata(legacy.ID, "session_name", sessName); err != nil {
+		t.Fatalf("SetMetadata(session_name): %v", err)
+	}
+
+	mgr := NewManagerWithTransportPolicyResolverAndCityPath(store, autoSP, "", func(template, _ string) (string, bool) {
+		if template == "helper" {
+			return "acp", true
+		}
+		return "", false
+	})
+
+	info, err := mgr.Get(legacy.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := info.Transport; got != "" {
+		t.Fatalf("Transport = %q, want empty for stopped legacy session without stored evidence", got)
+	}
+
+	updated, err := store.Get(legacy.ID)
+	if err != nil {
+		t.Fatalf("Get updated bead: %v", err)
+	}
+	if got := updated.Metadata["transport"]; got != "" {
+		t.Fatalf("transport metadata = %q, want empty for read-only lookup", got)
+	}
+}
+
+func TestGetInfersACPTransportFromStoredMCPMetadata(t *testing.T) {
+	store := beads.NewMemStore()
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	autoSP := sessionauto.New(defaultSP, acpSP)
+
+	legacy, err := store.Create(beads.Bead{
+		Title: "legacy acp",
+		Type:  BeadType,
+		Labels: []string{
+			LabelSession,
+			"template:helper",
+		},
+		Metadata: map[string]string{
+			"template":                    "helper",
+			"state":                       string(StateAsleep),
+			"provider":                    "claude",
+			"work_dir":                    "/tmp",
+			"command":                     "claude",
+			MCPServersSnapshotMetadataKey: `[{"name":"filesystem","transport":"stdio","command":"/bin/mcp"}]`,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create legacy bead: %v", err)
+	}
+
+	mgr := NewManagerWithTransportResolver(store, autoSP, nil)
+	info, err := mgr.Get(legacy.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := info.Transport; got != "acp" {
+		t.Fatalf("Transport = %q, want acp from stored MCP metadata", got)
 	}
 }
 
@@ -2393,6 +2818,121 @@ func TestPendingAndRespond(t *testing.T) {
 	}
 }
 
+type pendingSessionGoneProvider struct {
+	*runtime.Fake
+}
+
+func (p *pendingSessionGoneProvider) Pending(_ string) (*runtime.PendingInteraction, error) {
+	return nil, fmt.Errorf("capturing pane: %w", runtime.ErrSessionNotFound)
+}
+
+type pendingSessionErrorProvider struct {
+	*runtime.Fake
+	err error
+}
+
+func (p *pendingSessionErrorProvider) Pending(_ string) (*runtime.PendingInteraction, error) {
+	return nil, p.err
+}
+
+type respondSessionGoneProvider struct {
+	*runtime.Fake
+}
+
+func (p *respondSessionGoneProvider) Pending(_ string) (*runtime.PendingInteraction, error) {
+	return &runtime.PendingInteraction{
+		RequestID: "req-1",
+		Kind:      "approval",
+		Prompt:    "approve?",
+	}, nil
+}
+
+func (p *respondSessionGoneProvider) Respond(_ string, _ runtime.InteractionResponse) error {
+	return fmt.Errorf("send-keys failed: %w", runtime.ErrSessionNotFound)
+}
+
+func TestPendingAndRespondTreatMissingRuntimeSessionAsNoPending(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &pendingSessionGoneProvider{Fake: runtime.NewFake()}
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	pending, supported, err := mgr.Pending(info.ID)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if !supported {
+		t.Fatal("Pending should report supported when the provider supports interactions")
+	}
+	if pending != nil {
+		t.Fatalf("Pending = %#v, want nil for missing runtime session", pending)
+	}
+
+	err = mgr.Respond(info.ID, runtime.InteractionResponse{Action: "approve"})
+	if !errors.Is(err, ErrNoPendingInteraction) {
+		t.Fatalf("Respond error = %v, want ErrNoPendingInteraction", err)
+	}
+}
+
+func TestRespondTreatsRuntimeSessionGoneDuringResponseAsNoPending(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &respondSessionGoneProvider{Fake: runtime.NewFake()}
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	err = mgr.Respond(info.ID, runtime.InteractionResponse{Action: "approve"})
+	if !errors.Is(err, ErrNoPendingInteraction) {
+		t.Fatalf("Respond error = %v, want ErrNoPendingInteraction", err)
+	}
+}
+
+func TestPendingAndRespondDoNotSwallowUnrelatedNotFoundErrors(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &pendingSessionErrorProvider{
+		Fake: runtime.NewFake(),
+		err:  fmt.Errorf("loading config file: not found"),
+	}
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	pending, supported, err := mgr.Pending(info.ID)
+	if err == nil {
+		t.Fatalf("Pending err = nil, want unrelated provider error")
+	}
+	if !supported {
+		t.Fatal("Pending should report supported when provider returned a non-session-gone error")
+	}
+	if pending != nil {
+		t.Fatalf("Pending = %#v, want nil on provider error", pending)
+	}
+	if !strings.Contains(err.Error(), "loading config file: not found") {
+		t.Fatalf("Pending err = %v, want original provider error", err)
+	}
+
+	err = mgr.Respond(info.ID, runtime.InteractionResponse{Action: "approve"})
+	if err == nil {
+		t.Fatalf("Respond err = nil, want unrelated provider error")
+	}
+	if errors.Is(err, ErrNoPendingInteraction) {
+		t.Fatalf("Respond err = %v, must not downgrade unrelated provider errors to ErrNoPendingInteraction", err)
+	}
+	if !strings.Contains(err.Error(), "loading config file: not found") {
+		t.Fatalf("Respond err = %v, want original provider error", err)
+	}
+}
+
 func TestSendRejectsPendingInteraction(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -2554,6 +3094,47 @@ func TestTranscriptPathSkipsAmbiguousWorkDirFallback(t *testing.T) {
 	}
 	if path != "" {
 		t.Errorf("TranscriptPath = %q, want empty when workdir fallback is ambiguous", path)
+	}
+}
+
+func TestTranscriptPathClosedSessionSkipsAmbiguousHistoricalWorkDirFallback(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	workDir := t.TempDir()
+	info1, err := mgr.Create(context.Background(), "helper", "one", "codex", workDir, "codex", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create one: %v", err)
+	}
+	info2, err := mgr.Create(context.Background(), "helper", "two", "codex", workDir, "codex", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create two: %v", err)
+	}
+	if err := mgr.Close(info1.ID); err != nil {
+		t.Fatalf("Close one: %v", err)
+	}
+	if err := mgr.Close(info2.ID); err != nil {
+		t.Fatalf("Close two: %v", err)
+	}
+
+	searchBase := t.TempDir()
+	dayDir := filepath.Join(searchBase, "2026", "05", "04")
+	if err := os.MkdirAll(dayDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	codexPath := filepath.Join(dayDir, "rollout-current.jsonl")
+	meta := `{"type":"session_meta","payload":{"cwd":"` + workDir + `"}}`
+	if err := os.WriteFile(codexPath, []byte(meta+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	path, err := mgr.TranscriptPath(info1.ID, []string{searchBase})
+	if err != nil {
+		t.Fatalf("TranscriptPath: %v", err)
+	}
+	if path != "" {
+		t.Errorf("TranscriptPath = %q, want empty for ambiguous historical codex workdir", path)
 	}
 }
 

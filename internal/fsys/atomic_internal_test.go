@@ -54,6 +54,61 @@ func TestWriteFileIfChangedAtomic_RewritesWithoutSnapshotIdentity(t *testing.T) 
 	}
 }
 
+func TestFileIdentityFromSys_NormalizesSignedDeviceField(t *testing.T) {
+	id, ok := fileIdentityFromSys(struct {
+		Dev int32
+		Ino uint64
+	}{
+		Dev: 7,
+		Ino: 11,
+	})
+	if !ok {
+		t.Fatalf("fileIdentityFromSys returned ok=false for signed Dev field")
+	}
+
+	want := fileIdentity{dev: 7, ino: 11}
+	if id != want {
+		t.Fatalf("fileIdentityFromSys = %#v, want %#v", id, want)
+	}
+}
+
+func TestFileIdentityFromSys_NormalizesSignedDeviceFieldPointer(t *testing.T) {
+	id, ok := fileIdentityFromSys(&struct {
+		Dev int32
+		Ino uint64
+	}{
+		Dev: 7,
+		Ino: 11,
+	})
+	if !ok {
+		t.Fatalf("fileIdentityFromSys returned ok=false for pointer-shaped signed Dev field")
+	}
+
+	want := fileIdentity{dev: 7, ino: 11}
+	if id != want {
+		t.Fatalf("fileIdentityFromSys = %#v, want %#v", id, want)
+	}
+}
+
+func TestFileIdentityFromSys_PreservesNegativeSignedDeviceFieldBits(t *testing.T) {
+	id, ok := fileIdentityFromSys(struct {
+		Dev int32
+		Ino uint64
+	}{
+		Dev: -1,
+		Ino: 11,
+	})
+	if !ok {
+		t.Fatalf("fileIdentityFromSys returned ok=false for negative signed Dev field")
+	}
+
+	dev := int32(-1)
+	want := fileIdentity{dev: uint64(dev), ino: 11}
+	if id != want {
+		t.Fatalf("fileIdentityFromSys = %#v, want %#v", id, want)
+	}
+}
+
 type identityChangingFS struct {
 	data        []byte
 	snapshotErr error

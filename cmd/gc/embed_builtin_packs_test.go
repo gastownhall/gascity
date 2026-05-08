@@ -111,18 +111,25 @@ func TestBuiltinDatabaseEnumeratorsSkipManagedProbeDatabase(t *testing.T) {
 		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
 	}
 
+	doltSystemNeedle := "information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe"
+	maintenanceScratchNeedle := "benchdb|testdb_*|beads_pt*|beads_vr*|doctest_*|doctortest_*"
+	maintenanceTempNeedle := "beads_t[0-9a-f]"
 	for _, tt := range []struct {
 		pack     string
 		rel      string
 		needle   string
 		minCount int
 	}{
-		{"maintenance", filepath.Join("assets", "scripts", "jsonl-export.sh"), "^dolt_cluster$\\|^__gc_probe$", 1},
-		{"maintenance", filepath.Join("assets", "scripts", "reaper.sh"), "^dolt_cluster$\\|^__gc_probe$", 1},
-		{"dolt", filepath.Join("commands", "list", "run.sh"), "information_schema|mysql|dolt_cluster|__gc_probe", 1},
-		{"dolt", filepath.Join("commands", "cleanup", "run.sh"), "information_schema|mysql|dolt_cluster|__gc_probe", 1},
-		{"dolt", filepath.Join("commands", "health", "run.sh"), "information_schema|mysql|dolt_cluster|__gc_probe", 2},
-		{"dolt", filepath.Join("commands", "sync", "run.sh"), "information_schema|mysql|dolt_cluster|__gc_probe", 2},
+		{"maintenance", filepath.Join("assets", "scripts", "jsonl-export.sh"), doltSystemNeedle, 1},
+		{"maintenance", filepath.Join("assets", "scripts", "jsonl-export.sh"), maintenanceScratchNeedle, 1},
+		{"maintenance", filepath.Join("assets", "scripts", "jsonl-export.sh"), maintenanceTempNeedle, 1},
+		{"maintenance", filepath.Join("assets", "scripts", "reaper.sh"), doltSystemNeedle, 1},
+		{"maintenance", filepath.Join("assets", "scripts", "reaper.sh"), maintenanceScratchNeedle, 1},
+		{"maintenance", filepath.Join("assets", "scripts", "reaper.sh"), maintenanceTempNeedle, 1},
+		{"dolt", filepath.Join("commands", "list", "run.sh"), doltSystemNeedle, 1},
+		{"dolt", filepath.Join("commands", "cleanup", "run.sh"), doltSystemNeedle, 1},
+		{"dolt", filepath.Join("commands", "health", "run.sh"), doltSystemNeedle, 2},
+		{"dolt", filepath.Join("commands", "sync", "run.sh"), doltSystemNeedle, 2},
 		{"dolt", filepath.Join("formulas", "mol-dog-stale-db.toml"), "__gc_probe", 1},
 		{"dolt", filepath.Join("formulas", "mol-dog-doctor.toml"), "__gc_probe", 1},
 	} {
@@ -138,7 +145,16 @@ func TestBuiltinDatabaseEnumeratorsSkipManagedProbeDatabase(t *testing.T) {
 }
 
 func TestDoltSyncRejectsManagedProbeDatabaseFilter(t *testing.T) {
-	for _, dbName := range []string{managedDoltProbeDatabase, strings.ToUpper(managedDoltProbeDatabase), " " + managedDoltProbeDatabase + " "} {
+	for _, dbName := range []string{
+		managedDoltProbeDatabase,
+		strings.ToUpper(managedDoltProbeDatabase),
+		" " + managedDoltProbeDatabase + " ",
+		"information_schema",
+		"mysql",
+		"dolt_cluster",
+		"performance_schema",
+		"sys",
+	} {
 		t.Run(dbName, func(t *testing.T) {
 			dir := t.TempDir()
 			if err := MaterializeBuiltinPacks(dir); err != nil {
@@ -152,14 +168,14 @@ func TestDoltSyncRejectsManagedProbeDatabaseFilter(t *testing.T) {
 			if err == nil {
 				t.Fatalf("gc dolt sync unexpectedly accepted %s:\n%s", dbName, out)
 			}
-			if !strings.Contains(string(out), "reserved Dolt database name: "+managedDoltProbeDatabase) {
+			if !strings.Contains(string(out), "reserved Dolt database name: "+strings.TrimSpace(dbName)) {
 				t.Fatalf("gc dolt sync output = %s, want reserved database error", out)
 			}
 		})
 	}
 }
 
-func TestBuiltinDoltDoctorAllowsOlderVersionWhenProbeSucceeds(t *testing.T) {
+func TestBuiltinDoltDoctorAllowsAtMinimumVersionWhenProbeSucceeds(t *testing.T) {
 	dir := t.TempDir()
 	if err := MaterializeBuiltinPacks(dir); err != nil {
 		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
@@ -170,7 +186,7 @@ func TestBuiltinDoltDoctorAllowsOlderVersionWhenProbeSucceeds(t *testing.T) {
 		name string
 		body string
 	}{
-		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 1.75.2\\n'\n"},
+		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 1.86.2\\n'\n"},
 		{name: "flock", body: "#!/bin/sh\nexit 0\n"},
 		{name: "lsof", body: "#!/bin/sh\nexit 0\n"},
 	} {
@@ -184,9 +200,9 @@ func TestBuiltinDoltDoctorAllowsOlderVersionWhenProbeSucceeds(t *testing.T) {
 	cmd.Env = append(sanitizedBaseEnv(), "PATH="+binDir+":"+os.Getenv("PATH"))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("check-dolt unexpectedly rejected old Dolt probe: %v\n%s", err, out)
+		t.Fatalf("check-dolt unexpectedly rejected Dolt probe at minimum: %v\n%s", err, out)
 	}
-	if !strings.Contains(string(out), "dolt available (dolt version 1.75.2)") {
+	if !strings.Contains(string(out), "dolt available (dolt version 1.86.2)") {
 		t.Fatalf("check-dolt output = %s, want successful version probe", out)
 	}
 }
@@ -207,7 +223,7 @@ func TestBuiltinDoltDoctorBoundsVersionProbe(t *testing.T) {
 			name: "timeout",
 			body: "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$TIMEOUT_CAPTURE\"\nif [ \"$1\" = \"--kill-after=2\" ]; then\n  shift\nfi\nshift\nexec \"$@\"\n",
 		},
-		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 1.86.1\\n'\n"},
+		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 1.86.10\\n'\n"},
 		{name: "flock", body: "#!/bin/sh\nexit 0\n"},
 		{name: "lsof", body: "#!/bin/sh\nexit 0\n"},
 	} {
@@ -324,6 +340,84 @@ func TestMaterializeBuiltinPacks_Idempotent(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, citylayout.SystemPacksRoot, "bd", "pack.toml")); err != nil {
 		t.Error("bd pack.toml missing after second call")
 	}
+}
+
+func TestMaterializeBuiltinPacksPiHookUsesCurrentExtensionAPI(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+	}
+
+	data := readMaterializedPiHook(t, dir)
+	for _, want := range []string{
+		"module.exports = function gascityPiExtension(pi)",
+		`pi.on("session_start"`,
+		`pi.on("session_compact"`,
+		`pi.on("before_agent_start"`,
+	} {
+		if !strings.Contains(data, want) {
+			t.Errorf("materialized Pi hook missing current extension API marker %q:\n%s", want, data)
+		}
+	}
+	if strings.Contains(data, "gc hook --inject") {
+		t.Errorf("materialized Pi hook should not install no-op gc hook --inject:\n%s", data)
+	}
+	for _, legacy := range []string{
+		"module.exports = {",
+		`"session.created"`,
+		`"session.compacted"`,
+		`"session.deleted"`,
+		`"experimental.chat.system.transform"`,
+	} {
+		if strings.Contains(data, legacy) {
+			t.Errorf("materialized Pi hook still contains legacy API marker %q:\n%s", legacy, data)
+		}
+	}
+}
+
+func TestMaterializeBuiltinPacksReplacesStaleMaterializedPiHook(t *testing.T) {
+	dir := t.TempDir()
+	hookPath := materializedPiHookPath(dir)
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", filepath.Dir(hookPath), err)
+	}
+	stale := []byte(`// Gas City hooks for Pi Coding Agent.
+module.exports = {
+  name: "gascity",
+  events: { "session.created": () => "" },
+  hooks: { "experimental.chat.system.transform": (system) => system },
+};
+`)
+	if err := os.WriteFile(hookPath, stale, 0o644); err != nil {
+		t.Fatalf("WriteFile(%s): %v", hookPath, err)
+	}
+
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+	}
+
+	data := readMaterializedPiHook(t, dir)
+	if data == string(stale) {
+		t.Fatal("stale materialized Pi hook was preserved; expected core pack materialization to repair it")
+	}
+	if !strings.Contains(data, `pi.on("session_start"`) {
+		t.Fatalf("repaired materialized Pi hook does not use current extension API:\n%s", data)
+	}
+}
+
+func materializedPiHookPath(dir string) string {
+	return filepath.Join(dir, citylayout.SystemPacksRoot, "core", "overlay", "per-provider", "pi", ".pi", "extensions", "gc-hooks.js")
+}
+
+func readMaterializedPiHook(t *testing.T, dir string) string {
+	t.Helper()
+	path := materializedPiHookPath(dir)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", path, err)
+	}
+	return string(data)
 }
 
 func TestMaterializeBuiltinPacks_DoesNotRewriteUnchangedFiles(t *testing.T) {

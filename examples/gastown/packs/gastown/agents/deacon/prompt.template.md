@@ -65,7 +65,7 @@ gc bd list --assignee="$GC_ALIAS" --status=in_progress
 gc mail inbox
 
 # Step 3: Still nothing? Create patrol wisp (root-only — no child step beads)
-NEW_WISP=$(gc bd mol wisp mol-deacon-patrol --root-only --json | jq -r '.new_epic_id')
+NEW_WISP=$(gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id')
 gc bd update "$NEW_WISP" --assignee="$GC_ALIAS"
 
 # Step 4: Execute — read formula steps and work through them in order
@@ -122,7 +122,7 @@ gc bd create --type=warrant \
 ```bash
 gc mail send mayor/ -s "Subject" -m "Message"       # Escalate to mayor
 gc mail send <rig>/witness -s "Subject" -m "..."     # Witness questions
-gc nudge <target> "message"                          # Nudge an agent
+gc session nudge <target> "message"                  # Nudge an agent
 gc session peek <target> 50                              # View agent output
 ```
 
@@ -155,7 +155,7 @@ Individual stuck agents don't need escalation — the warrant system handles the
 
 | Want to... | Correct command |
 |------------|----------------|
-| Pour next wisp | `gc bd mol wisp mol-deacon-patrol --root-only` |
+| Pour next wisp | `gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix={{ .BindingPrefix }}` |
 | Context exhaustion | `gc runtime request-restart` |
 | Request target restart | `gc session kill <target>` |
 | Check gates | `gc bd gate check --type=timer --escalate` |

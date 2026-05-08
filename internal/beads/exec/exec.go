@@ -255,6 +255,18 @@ func (s *Store) Close(id string) error {
 	return nil
 }
 
+// Reopen sets a bead's status to "open": script reopen <id>
+func (s *Store) Reopen(id string) error {
+	_, err := s.run(nil, "reopen", id)
+	if err != nil {
+		if isNotFoundError(err) {
+			return fmt.Errorf("reopening bead %q: %w", id, beads.ErrNotFound)
+		}
+		return fmt.Errorf("reopening bead %q: %w", id, err)
+	}
+	return nil
+}
+
 // CloseAll closes multiple beads and sets metadata on each.
 func (s *Store) CloseAll(ids []string, metadata map[string]string) (int, error) {
 	closed := 0
@@ -323,7 +335,7 @@ func (s *Store) ListOpen(status ...string) ([]beads.Bead, error) {
 
 // Ready returns actionable open beads (excluding infrastructure types):
 // script ready
-func (s *Store) Ready() ([]beads.Bead, error) {
+func (s *Store) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
 	out, err := s.run(nil, "ready")
 	if err != nil {
 		return nil, fmt.Errorf("exec beads ready: %w", err)
@@ -338,7 +350,11 @@ func (s *Store) Ready() ([]beads.Bead, error) {
 			result = append(result, b)
 		}
 	}
-	return result, nil
+	if len(query) == 0 {
+		return result, nil
+	}
+	q := query[0]
+	return beads.ApplyListQuery(result, beads.ListQuery{Assignee: q.Assignee, Limit: q.Limit}), nil
 }
 
 // Children returns non-closed beads whose ParentID matches by default:

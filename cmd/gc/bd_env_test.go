@@ -32,6 +32,75 @@ func TestCityRuntimeProcessEnvStripsAmbientGCDolt(t *testing.T) {
 	}
 }
 
+func TestBdStoreForCityResolvesIDPrefixFromScopeConfig(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "Metro City"
+prefix = "mc"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte("issue_prefix: hq\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := bdStoreForCity(cityDir, cityDir)
+	if got := store.IDPrefix(); got != "hq" {
+		t.Fatalf("IDPrefix() = %q, want hq", got)
+	}
+}
+
+func TestBdStoreForRigResolvesIDPrefixFromScopeConfig(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rigs", "repo")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte("issue_prefix: repo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "repo", Path: "rigs/repo", Prefix: "ga"}}}
+
+	store := bdStoreForRig(rigDir, cityDir, cfg)
+	if got := store.IDPrefix(); got != "repo" {
+		t.Fatalf("IDPrefix() = %q, want repo", got)
+	}
+}
+
+func TestBdStoreForRigPrefersScopeConfigOverKnownPrefix(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rigs", "repo")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte("issue_prefix: repo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "repo", Path: "rigs/repo", Prefix: "ga"}}}
+
+	store := bdStoreForRig(rigDir, cityDir, cfg, "stale")
+	if got := store.IDPrefix(); got != "repo" {
+		t.Fatalf("IDPrefix() = %q, want repo", got)
+	}
+}
+
+func TestBdStoreForRigFallsBackToConfiguredEffectivePrefix(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rigs", "repo")
+	if err := os.MkdirAll(rigDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "repo", Path: "rigs/repo", Prefix: "ga"}}}
+
+	store := bdStoreForRig(rigDir, cityDir, cfg)
+	if got := store.IDPrefix(); got != "ga" {
+		t.Fatalf("IDPrefix() = %q, want ga", got)
+	}
+}
+
 func TestBdRuntimeEnvIncludesDoltHost(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT_HOST", "mini2.hippo-tilapia.ts.net")

@@ -134,7 +134,7 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 		}
 		if step.IsRoot {
 			rootIncluded = true
-			if !opts.PreserveRootType && step.Metadata["gc.kind"] != "workflow" {
+			if !opts.PreserveRootType && !preserveExecutableRootType(step) {
 				node.Type = "molecule"
 			}
 			if opts.Title != "" {

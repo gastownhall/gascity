@@ -252,7 +252,7 @@ func TestHandleProviderPatchSet(t *testing.T) {
 	fs := newFakeMutatorState(t)
 	h := newTestCityHandler(t, fs)
 
-	body := `{"name":"claude","command":"my-claude"}`
+	body := `{"name":"claude","command":"my-claude","acp_command":"my-claude-acp","acp_args":["serve","--stdio"]}`
 	req := httptest.NewRequest("PUT", cityURL(fs, "/patches/providers"), strings.NewReader(body))
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
@@ -264,6 +264,12 @@ func TestHandleProviderPatchSet(t *testing.T) {
 
 	if len(fs.cfg.Patches.Providers) != 1 {
 		t.Fatalf("patches.providers count = %d, want 1", len(fs.cfg.Patches.Providers))
+	}
+	if got := fs.cfg.Patches.Providers[0].ACPCommand; got == nil || *got != "my-claude-acp" {
+		t.Fatalf("ACPCommand = %v, want %q", got, "my-claude-acp")
+	}
+	if got := fs.cfg.Patches.Providers[0].ACPArgs; len(got) != 2 || got[0] != "serve" || got[1] != "--stdio" {
+		t.Fatalf("ACPArgs = %#v, want [\"serve\" \"--stdio\"]", got)
 	}
 }
 

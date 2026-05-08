@@ -107,7 +107,13 @@ func comparableMode(mode os.FileMode) os.FileMode {
 }
 
 func fileIdentityFromInfo(info os.FileInfo) (fileIdentity, bool) {
-	stat := reflect.Indirect(reflect.ValueOf(info.Sys()))
+	return fileIdentityFromSys(info.Sys())
+}
+
+func fileIdentityFromSys(sys any) (fileIdentity, bool) {
+	// Signed stat fields follow Go's direct int-to-uint conversion so the
+	// Fstat and Lstat paths agree on device identity across Unix variants.
+	stat := reflect.Indirect(reflect.ValueOf(sys))
 	if !stat.IsValid() {
 		return fileIdentity{}, false
 	}
@@ -130,11 +136,7 @@ func fileIdentityFromInfo(info os.FileInfo) (fileIdentity, bool) {
 func numericFieldToUint64(v reflect.Value) (uint64, bool) {
 	switch v.Kind() {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		value := v.Int()
-		if value < 0 {
-			return 0, false
-		}
-		return uint64(value), true
+		return uint64(v.Int()), true
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
 		return v.Uint(), true
 	default:

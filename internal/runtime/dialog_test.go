@@ -79,12 +79,10 @@ func TestAcceptStartupDialogsAcceptsCodexTrustDialog(t *testing.T) {
 	dialogPollTimeout = time.Second
 
 	var sent []string
-	peekCall := 0
 	err := AcceptStartupDialogs(
 		context.Background(),
 		func(_ int) (string, error) {
-			peekCall++
-			if peekCall == 1 {
+			if len(sent) == 0 {
 				return "Do you trust the contents of this directory?", nil
 			}
 			return "user@host $", nil
@@ -107,12 +105,10 @@ func TestAcceptStartupDialogsAcceptsGeminiTrustDialog(t *testing.T) {
 	dialogPollTimeout = time.Second
 
 	var sent []string
-	peekCall := 0
 	err := AcceptStartupDialogs(
 		context.Background(),
 		func(_ int) (string, error) {
-			peekCall++
-			if peekCall == 1 {
+			if len(sent) == 0 {
 				return "Do you trust the files in this folder?\n● 1. Trust folder (city)\n  2. Trust parent folder\n  3. Don't trust", nil
 			}
 			return "Type your message or @path/to/file", nil
@@ -153,6 +149,97 @@ func TestAcceptStartupDialogsPeeksDeepEnoughForLateTrustDialog(t *testing.T) {
 	}
 	if !reflect.DeepEqual(sent, []string{"Enter"}) {
 		t.Fatalf("sent keys = %v, want [Enter]", sent)
+	}
+}
+
+func TestAcceptStartupDialogsSkipsCodexUpdateDialog(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = time.Second
+
+	var sent []string
+	err := AcceptStartupDialogs(
+		context.Background(),
+		func(lines int) (string, error) {
+			if lines < 100 {
+				return "loading...", nil
+			}
+			return "✨ Update available! 0.124.0 -> 0.125.0\n" +
+				"› 1. Update now (runs `bun install -g @openai/codex`)\n" +
+				"  2. Skip\n" +
+				"  3. Skip until next version\n" +
+				"Press enter to continue", nil
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogs returned error: %v", err)
+	}
+	if got, want := strings.Join(sent, ","), "Down,Enter"; got != want {
+		t.Fatalf("sent keys = %q, want %q", got, want)
+	}
+}
+
+func TestAcceptStartupDialogsSkipsUpdateThenHandlesTrustDialog(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = time.Second
+
+	var sent []string
+	staleUpdateReturned := false
+	err := AcceptStartupDialogs(
+		context.Background(),
+		func(lines int) (string, error) {
+			if lines < 100 {
+				return "loading...", nil
+			}
+			switch {
+			case len(sent) < 2:
+				return codexUpdateDialogFixture(), nil
+			case !staleUpdateReturned:
+				staleUpdateReturned = true
+				return codexUpdateDialogFixture(), nil
+			case len(sent) == 2:
+				return "Do you trust the contents of this directory?", nil
+			default:
+				return "› Implement {feature}", nil
+			}
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogs returned error: %v", err)
+	}
+	if got, want := strings.Join(sent, ","), "Down,Enter,Enter"; got != want {
+		t.Fatalf("sent keys = %q, want %q", got, want)
+	}
+}
+
+func TestAcceptStartupDialogsFromStreamSkipsCodexUpdateDialog(t *testing.T) {
+	var sent []string
+	snapshots := make(chan string, 2)
+	snapshots <- codexUpdateDialogFixture()
+	snapshots <- "› Implement {feature}"
+	close(snapshots)
+
+	err := AcceptStartupDialogsFromStream(
+		context.Background(),
+		time.Second,
+		snapshots,
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogsFromStream() error = %v", err)
+	}
+	if got, want := strings.Join(sent, ","), "Down,Enter"; got != want {
+		t.Fatalf("sent keys = %q, want %q", got, want)
 	}
 }
 
@@ -485,6 +572,11 @@ func TestContainsPromptIndicator(t *testing.T) {
 		{name: "angle prompt", content: "claude >", want: true},
 		{name: "powerline prompt", content: "dir \u276f", want: true},
 		{name: "claude nbsp prompt", content: "❯\u00a0", want: true},
+		{name: "codex prompt", content: "›", want: true},
+		{name: "codex prompt with nbsp", content: "›\u00a0", want: true},
+		{name: "codex prompt with placeholder", content: "› Improve documentation in @filename", want: true},
+		{name: "claude prompt with text", content: "❯ run tests", want: true},
+		{name: "codex numbered menu row", content: "› 1. Update now (runs `bun install -g @openai/codex`)", want: false},
 		{name: "empty content", content: "", want: false},
 		{name: "no prompt", content: "loading...", want: false},
 		{name: "blank lines only", content: "\n\n", want: false},
@@ -499,6 +591,14 @@ func TestContainsPromptIndicator(t *testing.T) {
 			}
 		})
 	}
+}
+
+func codexUpdateDialogFixture() string {
+	return "✨ Update available! 0.124.0 -> 0.125.0\n" +
+		"› 1. Update now (runs `bun install -g @openai/codex`)\n" +
+		"  2. Skip\n" +
+		"  3. Skip until next version\n" +
+		"Press enter to continue"
 }
 
 func TestExitsEarlyOnPrompt(t *testing.T) {
@@ -632,6 +732,8 @@ func TestContainsRateLimitDialog(t *testing.T) {
 		want    bool
 	}{
 		{name: "gemini usage limit", content: "Usage limit reached for gemini-3-flash-preview.", want: true},
+		{name: "claude hit limit", content: "You've hit your limit, Pro plan", want: true},
+		{name: "claude rate limit options", content: "/rate-limit-options", want: true},
 		{name: "generic rate limit", content: "rate limit exceeded", want: true},
 		{name: "Rate limit caps", content: "Rate limit: try again later", want: true},
 		{name: "normal output", content: "Hello world", want: false},
@@ -639,8 +741,32 @@ func TestContainsRateLimitDialog(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := containsRateLimitDialog(tt.content); got != tt.want {
-				t.Errorf("containsRateLimitDialog(%q) = %v, want %v", tt.content, got, tt.want)
+			if got := ContainsRateLimitDialog(tt.content); got != tt.want {
+				t.Errorf("ContainsRateLimitDialog(%q) = %v, want %v", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestContainsProviderRateLimitScreen(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{name: "gemini usage limit", content: "Usage limit reached for gemini-3-flash-preview.", want: true},
+		{name: "claude hit limit", content: "You've hit your limit, Pro plan", want: true},
+		{name: "claude rate limit options", content: "/rate-limit-options", want: true},
+		{name: "provider menu shape", content: "Rate limit reached\n1. Keep trying\n2. Stop", want: true},
+		{name: "generic crash output", content: "worker failed while parsing rate limit config", want: false},
+		{name: "generic lower-case mention", content: "rate limit exceeded", want: false},
+		{name: "normal output", content: "Hello world", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ContainsProviderRateLimitScreen(tt.content); got != tt.want {
+				t.Errorf("ContainsProviderRateLimitScreen(%q) = %v, want %v", tt.content, got, tt.want)
 			}
 		})
 	}

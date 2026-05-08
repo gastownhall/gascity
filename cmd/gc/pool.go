@@ -72,9 +72,7 @@ func shellCommand(command, dir string, timeout time.Duration, env map[string]str
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	if env != nil {
-		cmd.Env = mergeRuntimeEnv(os.Environ(), env)
-	}
+	cmd.Env = mergeRuntimeEnv(os.Environ(), env)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("running command %q: %w", command, err)
@@ -127,17 +125,10 @@ func evaluatePool(agentName string, sp scaleParams, dir string, env map[string]s
 		telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, sp.Min, err)
 		return sp.Min, fmt.Errorf("agent %q: %w", agentName, err)
 	}
-	trimmed := strings.TrimSpace(out)
-	if trimmed == "" {
-		checkErr := fmt.Errorf("agent %q: check %q produced empty output", agentName, sp.Check)
-		telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, sp.Min, checkErr)
-		return sp.Min, checkErr
-	}
-	n, err := strconv.Atoi(trimmed)
+	n, err := parseScaleCheckCount(agentName, sp.Check, out)
 	if err != nil {
-		parseErr := fmt.Errorf("agent %q: check output %q is not an integer", agentName, trimmed)
-		telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, sp.Min, parseErr)
-		return sp.Min, parseErr
+		telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, sp.Min, err)
+		return sp.Min, err
 	}
 	desired := n
 	if desired < sp.Min {
@@ -148,6 +139,38 @@ func evaluatePool(agentName string, sp scaleParams, dir string, env map[string]s
 	}
 	telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, desired, nil)
 	return desired, nil
+}
+
+func evaluatePoolNewDemand(agentName string, sp scaleParams, dir string, env map[string]string, runner ScaleCheckRunner) (int, error) {
+	start := time.Now()
+	out, err := runner(sp.Check, dir, env)
+	durationMs := float64(time.Since(start).Milliseconds())
+	if err != nil {
+		telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, 0, err)
+		return 0, fmt.Errorf("agent %q: %w", agentName, err)
+	}
+	n, err := parseScaleCheckCount(agentName, sp.Check, out)
+	if err != nil {
+		telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, 0, err)
+		return 0, err
+	}
+	telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, n, nil)
+	return n, nil
+}
+
+func parseScaleCheckCount(agentName, check, out string) (int, error) {
+	trimmed := strings.TrimSpace(out)
+	if trimmed == "" {
+		return 0, fmt.Errorf("agent %q: check %q produced empty output", agentName, check)
+	}
+	n, err := strconv.Atoi(trimmed)
+	if err != nil {
+		return 0, fmt.Errorf("agent %q: check output %q is not an integer", agentName, trimmed)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("agent %q: check output %q is negative", agentName, trimmed)
+	}
+	return n, nil
 }
 
 // SessionSetupContext holds template variables for session_setup command expansion.
@@ -405,7 +428,9 @@ func discoverPoolInstances(agentName, agentDir string, sp0 scaleParams, a *confi
 		for i := 1; i <= sp0.Max; i++ {
 			instanceName := poolInstanceName(agentName, i, a)
 			qn := instanceName
-			if agentDir != "" {
+			if a != nil {
+				qn = a.QualifiedInstanceName(instanceName)
+			} else if agentDir != "" {
 				qn = agentDir + "/" + instanceName
 			}
 			names = append(names, qn)
@@ -418,7 +443,9 @@ func discoverPoolInstances(agentName, agentDir string, sp0 scaleParams, a *confi
 	// When bead-derived session names ("s-{beadID}") are active, this prefix
 	// match will fail. Migrate to bead store query by template metadata.
 	qnPrefix := agentName + "-"
-	if agentDir != "" {
+	if a != nil {
+		qnPrefix = a.QualifiedName() + "-"
+	} else if agentDir != "" {
 		qnPrefix = agentDir + "/" + agentName + "-"
 	}
 	// Build the session name prefix to match against running sessions.
@@ -449,6 +476,7 @@ func discoverPoolInstances(agentName, agentDir string, sp0 scaleParams, a *confi
 
 func resolvePoolSessionRefs(
 	store beads.Store,
+	cfg *config.City,
 	agentName, agentDir string,
 	sp0 scaleParams, a *config.Agent,
 	cityName, sessionTemplate string,
@@ -456,12 +484,14 @@ func resolvePoolSessionRefs(
 	stderr io.Writer,
 ) []poolSessionRef {
 	template := agentName
-	if agentDir != "" {
+	if a != nil {
+		template = a.QualifiedName()
+	} else if agentDir != "" {
 		template = agentDir + "/" + agentName
 	}
 	seenSessions := make(map[string]bool)
 	var refs []poolSessionRef
-	poolSessions, err := lookupPoolSessionNames(store, template)
+	poolSessions, err := lookupPoolSessionNameCandidates(store, template, cfg, a)
 	if err != nil && stderr != nil {
 		fmt.Fprintf(stderr, "gc lifecycle: pool bead lookup for %s returned error (legacy discovery also runs): %v\n", template, err) //nolint:errcheck
 	}
@@ -471,15 +501,17 @@ func resolvePoolSessionRefs(
 	}
 	sort.Strings(poolInstances)
 	for _, qualifiedInstance := range poolInstances {
-		sessionName := poolSessions[qualifiedInstance]
-		if sessionName == "" || seenSessions[sessionName] {
-			continue
+		for _, candidate := range poolSessions[qualifiedInstance] {
+			sessionName := candidate.sessionName
+			if sessionName == "" || seenSessions[sessionName] {
+				continue
+			}
+			seenSessions[sessionName] = true
+			refs = append(refs, poolSessionRef{
+				qualifiedInstance: qualifiedInstance,
+				sessionName:       sessionName,
+			})
 		}
-		seenSessions[sessionName] = true
-		refs = append(refs, poolSessionRef{
-			qualifiedInstance: qualifiedInstance,
-			sessionName:       sessionName,
-		})
 	}
 	for _, qualifiedInstance := range discoverPoolInstances(agentName, agentDir, sp0, a, cityName, sessionTemplate, sp) {
 		sessionName := lookupSessionNameOrLegacy(store, cityName, qualifiedInstance, sessionTemplate)
@@ -493,4 +525,29 @@ func resolvePoolSessionRefs(
 		})
 	}
 	return refs
+}
+
+func selectRunningPoolSessionRefs(store beads.Store, sp runtime.Provider, cfg *config.City, refs []poolSessionRef) ([]poolSessionRef, error) {
+	grouped := make(map[string][]poolSessionRef)
+	order := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		if _, ok := grouped[ref.qualifiedInstance]; !ok {
+			order = append(order, ref.qualifiedInstance)
+		}
+		grouped[ref.qualifiedInstance] = append(grouped[ref.qualifiedInstance], ref)
+	}
+
+	live := make([]poolSessionRef, 0, len(order))
+	for _, qualifiedInstance := range order {
+		for _, ref := range grouped[qualifiedInstance] {
+			running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, ref.sessionName)
+			if err != nil {
+				return nil, fmt.Errorf("observing %s: %w", ref.sessionName, err)
+			}
+			if running {
+				live = append(live, ref)
+			}
+		}
+	}
+	return live, nil
 }

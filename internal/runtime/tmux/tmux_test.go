@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -266,6 +267,17 @@ func TestHiddenAttachedClientCanSendText(t *testing.T) {
 	}
 	out, _ := tm.CapturePaneAll(sessionName)
 	t.Fatalf("CapturePaneAll did not contain hidden attach text:\n%s", out)
+}
+
+func TestHiddenAttachScriptArgsArePlatformSpecific(t *testing.T) {
+	tmuxArgs := []string{"-u", "-L", "socket", "attach-session", "-t", "target"}
+
+	if got, want := hiddenAttachScriptArgs("darwin", tmuxArgs), []string{"-q", "/dev/null", "tmux", "-u", "-L", "socket", "attach-session", "-t", "target"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("darwin script args = %#v, want %#v", got, want)
+	}
+	if got, want := hiddenAttachScriptArgs("linux", tmuxArgs), []string{"-qfc", "tmux -u -L socket attach-session -t target", "/dev/null"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("linux script args = %#v, want %#v", got, want)
+	}
 }
 
 func TestSendKeysAndCapture(t *testing.T) {
@@ -1264,8 +1276,15 @@ func TestCollectReparentedGroupMembers(t *testing.T) {
 		if rpid == pid {
 			t.Errorf("collectReparentedGroupMembers returned known PID %s", pid)
 		}
-		// Each reparented PID should have PPID == 1
+		// Each reparented PID should have PPID == 1.
+		// The process may have exited between collection and this check
+		// (TOCTOU race), so skip verification if getParentPID returns empty.
 		ppid := getParentPID(rpid)
+		if ppid == "" && runtime.GOOS != "windows" {
+			if err := exec.Command("kill", "-0", rpid).Run(); err != nil {
+				continue
+			}
+		}
 		if ppid != "1" {
 			t.Errorf("collectReparentedGroupMembers returned PID %s with PPID %s (expected 1)", rpid, ppid)
 		}
@@ -2111,6 +2130,37 @@ func TestNudgeSessionSkipsEscapeForClaude(t *testing.T) {
 	}
 	if strings.Contains(out, "^[") {
 		t.Fatalf("CapturePaneAll contained Escape for claude nudge:\n%s", out)
+	}
+}
+
+func TestNudgeSessionSkipsEscapeForOpenCode(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	tm := testTmux()
+	sessionName := "gt-test-nudge-opencode-" + fmt.Sprintf("%d", time.Now().UnixNano()%10000)
+
+	_ = tm.KillSession(sessionName)
+	if err := tm.NewSessionWithCommandAndEnv(sessionName, os.TempDir(), "cat -v", map[string]string{
+		"GC_PROVIDER": "opencode",
+	}); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+	time.Sleep(300 * time.Millisecond)
+
+	if err := tm.NudgeSession(sessionName, "hello"); err != nil {
+		t.Fatalf("NudgeSession: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	out, err := tm.CapturePaneAll(sessionName)
+	if err != nil {
+		t.Fatalf("CapturePaneAll: %v", err)
+	}
+	if strings.Contains(out, "^[") {
+		t.Fatalf("CapturePaneAll contained Escape for opencode nudge:\n%s", out)
 	}
 }
 

@@ -222,7 +222,9 @@ func (s *Server) humaHandleProviderPatchSet(_ context.Context, input *ProviderPa
 	patch := config.ProviderPatch{
 		Name:         input.Body.Name,
 		Command:      input.Body.Command,
+		ACPCommand:   input.Body.ACPCommand,
 		Args:         input.Body.Args,
+		ACPArgs:      input.Body.ACPArgs,
 		PromptMode:   input.Body.PromptMode,
 		PromptFlag:   input.Body.PromptFlag,
 		ReadyDelayMs: input.Body.ReadyDelayMs,

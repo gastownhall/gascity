@@ -57,6 +57,12 @@ func TestInstallBeadHooksCreatesScripts(t *testing.T) {
 			if !strings.Contains(content, `"$GC_BIN" event emit`) {
 				t.Errorf("hook %s missing '\"$GC_BIN\" event emit':\n%s", tc.filename, content)
 			}
+			if !strings.Contains(content, `PAYLOAD=$(printf '{"bead":%s}' "$DATA")`) {
+				t.Errorf("hook %s does not wrap bd JSON as BeadEventPayload:\n%s", tc.filename, content)
+			}
+			if !strings.Contains(content, `--payload "$PAYLOAD"`) {
+				t.Errorf("hook %s emits raw DATA instead of wrapped PAYLOAD:\n%s", tc.filename, content)
+			}
 			// Best-effort: stderr redirected, || true.
 			if !strings.Contains(content, "|| true") {
 				t.Errorf("hook %s missing '|| true' (best-effort):\n%s", tc.filename, content)

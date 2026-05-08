@@ -58,10 +58,16 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 			pa.attempt()
 			list, err := store.List(query)
 			if err != nil {
-				pa.record("rig "+rigName, err)
-				continue
+				if beads.IsPartialResult(err) && len(list) > 0 {
+					pa.record("rig "+rigName, err)
+					pa.success()
+				} else {
+					pa.record("rig "+rigName, err)
+					continue
+				}
+			} else {
+				pa.success()
 			}
-			pa.success()
 			for _, b := range list {
 				dedupeKey := rigName + "\x00" + b.ID
 				if dedupe && seen[dedupeKey] {
@@ -130,10 +136,16 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 		pa.attempt()
 		ready, err := beads.ReadyLive(stores[rigName])
 		if err != nil {
-			pa.record("rig "+rigName, err)
-			continue
+			if beads.IsPartialResult(err) && len(ready) > 0 {
+				pa.record("rig "+rigName, err)
+				pa.success()
+			} else {
+				pa.record("rig "+rigName, err)
+				continue
+			}
+		} else {
+			pa.success()
 		}
-		pa.success()
 		all = append(all, ready...)
 	}
 	if pa.totalOutage() {
@@ -330,9 +342,15 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 func (s *Server) humaHandleBeadClose(_ context.Context, input *BeadCloseInput) (*OKResponse, error) {
 	id := input.ID
 	for _, store := range s.beadStoresForID(id) {
-		if err := store.Close(id); err != nil {
+		if _, err := store.Get(id); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
+			}
+			return nil, huma.Error500InternalServerError(err.Error())
+		}
+		if err := store.Close(id); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				return nil, huma.Error409Conflict("conflict: bead " + id + " was deleted concurrently")
 			}
 			return nil, huma.Error500InternalServerError(err.Error())
 		}
@@ -346,7 +364,6 @@ func (s *Server) humaHandleBeadClose(_ context.Context, input *BeadCloseInput) (
 // humaHandleBeadReopen is the Huma-typed handler for POST /v0/bead/{id}/reopen.
 func (s *Server) humaHandleBeadReopen(_ context.Context, input *BeadReopenInput) (*OKResponse, error) {
 	id := input.ID
-	status := "open"
 
 	for _, store := range s.beadStoresForID(id) {
 		b, err := store.Get(id)
@@ -359,7 +376,7 @@ func (s *Server) humaHandleBeadReopen(_ context.Context, input *BeadReopenInput)
 		if b.Status != "closed" {
 			return nil, huma.Error409Conflict("conflict: bead " + id + " is not closed (status: " + b.Status + ")")
 		}
-		if err := store.Update(id, beads.UpdateOpts{Status: &status}); err != nil {
+		if err := store.Reopen(id); err != nil {
 			return nil, huma.Error500InternalServerError(err.Error())
 		}
 		resp := &OKResponse{}
@@ -435,7 +452,8 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 	}
 
 	for _, store := range s.beadStoresForID(id) {
-		if _, err := store.Get(id); err != nil {
+		current, err := store.Get(id)
+		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
@@ -448,6 +466,10 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 			}
 			opts.Assignee = &assignee
 		}
+		waitStatus := current.Status
+		if opts.Status != nil {
+			waitStatus = *opts.Status
+		}
 		// Once Get succeeded in this store, treat Update-ErrNotFound as a
 		// concurrent-delete race (409) rather than iterating to the next
 		// store — otherwise a delete racing with update silently applies
@@ -457,6 +479,16 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 				return nil, huma.Error409Conflict("conflict: bead " + id + " was deleted concurrently")
 			}
 			return nil, huma.Error500InternalServerError(err.Error())
+		}
+		if opts.ParentID != nil && current.ParentID != *opts.ParentID && waitStatus != "closed" {
+			if waiter, ok := store.(beads.ParentProjectionWaiter); ok {
+				if err := waiter.WaitForParentProjection(ctx, id, current.ParentID, *opts.ParentID); err != nil {
+					if errors.Is(err, beads.ErrParentProjectionSuperseded) {
+						return nil, huma.Error409Conflict("conflict: bead " + id + " was reparented concurrently")
+					}
+					return nil, huma.Error500InternalServerError(err.Error())
+				}
+			}
 		}
 		resp := &OKResponse{}
 		resp.Body.Status = "updated"
@@ -472,9 +504,15 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 func (s *Server) humaHandleBeadDelete(_ context.Context, input *BeadDeleteInput) (*OKResponse, error) {
 	id := input.ID
 	for _, store := range s.beadStoresForID(id) {
-		if err := store.Close(id); err != nil {
+		if _, err := store.Get(id); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
+			}
+			return nil, huma.Error500InternalServerError(err.Error())
+		}
+		if err := store.Close(id); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				return nil, huma.Error409Conflict("conflict: bead " + id + " was deleted concurrently")
 			}
 			return nil, huma.Error500InternalServerError(err.Error())
 		}

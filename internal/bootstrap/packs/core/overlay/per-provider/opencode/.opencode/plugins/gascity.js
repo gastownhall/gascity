@@ -8,11 +8,12 @@
 // Gas City uses:
 //   - session.created / session.compacted → gc prime --hook (side effects such
 //     as session-id persistence and poller bootstrap)
-//   - session.deleted → gc hook --inject (pick up newly queued work on exit)
 //   - experimental.chat.system.transform → inject gc prime --hook, queued
 //     nudges, and unread mail into the system prompt for each turn
 
 import { execFile } from "node:child_process";
+import fs from "node:fs/promises";
+import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -33,7 +34,54 @@ async function run(directory, ...args) {
   }
 }
 
-export default async function gascityPlugin({ directory }) {
+function unwrapData(result) {
+  if (result && typeof result === "object" && "data" in result) {
+    return result.data;
+  }
+  return result;
+}
+
+function safeSessionID(sessionID) {
+  return String(sessionID || "").replace(/[^A-Za-z0-9_.-]/g, "_");
+}
+
+function sessionIDFromEvent(event) {
+  return (
+    event?.properties?.sessionID ||
+    event?.properties?.info?.sessionID ||
+    event?.properties?.message?.info?.sessionID ||
+    ""
+  );
+}
+
+async function mirrorTranscript(directory, client, sessionID) {
+  const exportDir = process.env.GC_OPENCODE_TRANSCRIPT_DIR || "";
+  const safeID = safeSessionID(sessionID);
+  if (!exportDir || !safeID || !client?.session) {
+    return;
+  }
+
+  try {
+    const [infoResult, messagesResult] = await Promise.all([
+      client.session.get({ path: { id: sessionID } }),
+      client.session.messages({ path: { id: sessionID } }),
+    ]);
+    const info = unwrapData(infoResult) || {};
+    const messages = unwrapData(messagesResult) || [];
+    if (!info.directory) {
+      info.directory = directory;
+    }
+    await fs.mkdir(exportDir, { recursive: true });
+    const dst = path.join(exportDir, `${safeID}.json`);
+    const tmp = `${dst}.tmp`;
+    await fs.writeFile(tmp, JSON.stringify({ info, messages }, null, 2));
+    await fs.rename(tmp, dst);
+  } catch {
+    return;
+  }
+}
+
+export default async function gascityPlugin({ directory, client }) {
   let cachedPrime = null;
 
   async function readPrime(force = false) {
@@ -60,9 +108,11 @@ export default async function gascityPlugin({ directory }) {
         case "session.created":
         case "session.compacted":
           await readPrime(true);
+          await mirrorTranscript(directory, client, sessionIDFromEvent(event));
           return;
-        case "session.deleted":
-          await run(directory, "hook", "--inject");
+        case "session.idle":
+        case "message.updated":
+          await mirrorTranscript(directory, client, sessionIDFromEvent(event));
           return;
         default:
           return;

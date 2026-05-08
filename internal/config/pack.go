@@ -1559,6 +1559,10 @@ func deepCopyProviderSpec(in ProviderSpec) ProviderSpec {
 	out.OptionDefaults = deepCopyStringMap(in.OptionDefaults)
 	out.OptionsSchema = deepCopyProviderOptions(in.OptionsSchema)
 	out.PrintArgs = append([]string(nil), in.PrintArgs...)
+	if in.ACPArgs != nil {
+		out.ACPArgs = make([]string, len(in.ACPArgs))
+		copy(out.ACPArgs, in.ACPArgs)
+	}
 	out.Base = copyStringPtr(in.Base)
 	out.EmitsPermissionWarning = copyBoolPtr(in.EmitsPermissionWarning)
 	out.SupportsACP = copyBoolPtr(in.SupportsACP)
@@ -1580,6 +1584,7 @@ func deepCopyOptionChoices(in []OptionChoice) []OptionChoice {
 	for i := range in {
 		out[i] = in[i]
 		out[i].FlagArgs = append([]string(nil), in[i].FlagArgs...)
+		out[i].FlagAliases = cloneStringSlices(in[i].FlagAliases)
 	}
 	return out
 }
@@ -2506,6 +2511,9 @@ func collectFiles(fs fsys.FS, base, prefix string, out *[]string) {
 	if prefix != "" {
 		dir = filepath.Join(base, prefix)
 	}
+	if prefix != "" && isIgnoredPackRuntimePath(prefix) {
+		return
+	}
 	entries, err := fs.ReadDir(dir)
 	if err != nil {
 		return
@@ -2515,12 +2523,32 @@ func collectFiles(fs fsys.FS, base, prefix string, out *[]string) {
 		if prefix != "" {
 			rel = prefix + "/" + e.Name()
 		}
+		if isIgnoredPackRuntimePath(rel) {
+			continue
+		}
 		if e.IsDir() {
 			collectFiles(fs, base, rel, out)
 		} else {
 			*out = append(*out, rel)
 		}
 	}
+}
+
+func isIgnoredPackRuntimePath(path string) bool {
+	parts := strings.FieldsFunc(filepath.ToSlash(path), func(r rune) bool { return r == '/' })
+	if len(parts) == 0 {
+		return false
+	}
+	switch parts[0] {
+	case ".beads", ".cache", ".gc", ".git", "state", "tmp":
+		return true
+	}
+	for _, part := range parts {
+		if part == "__pycache__" {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveNamedPacks translates named pack references to cache paths.

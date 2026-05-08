@@ -44,7 +44,9 @@ func (s *Server) humaHandleConfigGet(_ context.Context, _ *ConfigGetInput) (*Ind
 		providers[name] = providerSpecJSON{
 			DisplayName:  spec.DisplayName,
 			Command:      spec.Command,
+			ACPCommand:   spec.ACPCommand,
 			Args:         spec.Args,
+			ACPArgs:      optionalStringSlice(spec.ACPArgs),
 			PromptMode:   spec.PromptMode,
 			PromptFlag:   spec.PromptFlag,
 			ReadyDelayMs: spec.ReadyDelayMs,
@@ -129,7 +131,9 @@ func (s *Server) humaHandleConfigExplain(_ context.Context, _ *ConfigExplainInpu
 		provMap[name] = annotatedProviderResponse{
 			DisplayName:  spec.DisplayName,
 			Command:      spec.Command,
+			ACPCommand:   spec.ACPCommand,
 			Args:         spec.Args,
+			ACPArgs:      optionalStringSlice(spec.ACPArgs),
 			PromptMode:   spec.PromptMode,
 			PromptFlag:   spec.PromptFlag,
 			ReadyDelayMs: spec.ReadyDelayMs,
@@ -143,7 +147,9 @@ func (s *Server) humaHandleConfigExplain(_ context.Context, _ *ConfigExplainInpu
 			provMap[name] = annotatedProviderResponse{
 				DisplayName:  spec.DisplayName,
 				Command:      spec.Command,
+				ACPCommand:   spec.ACPCommand,
 				Args:         spec.Args,
+				ACPArgs:      optionalStringSlice(spec.ACPArgs),
 				PromptMode:   spec.PromptMode,
 				PromptFlag:   spec.PromptFlag,
 				ReadyDelayMs: spec.ReadyDelayMs,
@@ -220,7 +226,9 @@ type annotatedAgentResponse struct {
 type annotatedProviderResponse struct {
 	DisplayName  string            `json:"display_name,omitempty"`
 	Command      string            `json:"command,omitempty"`
+	ACPCommand   string            `json:"acp_command,omitempty"`
 	Args         []string          `json:"args,omitempty"`
+	ACPArgs      *[]string         `json:"acp_args,omitempty"`
 	PromptMode   string            `json:"prompt_mode,omitempty"`
 	PromptFlag   string            `json:"prompt_flag,omitempty"`
 	ReadyDelayMs int               `json:"ready_delay_ms,omitempty"`

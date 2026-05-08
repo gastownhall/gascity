@@ -33,6 +33,7 @@ var instanceTokenReader = rand.Reader
 // Compile-time check.
 var (
 	_ runtime.Provider                      = (*Provider)(nil)
+	_ runtime.DeadRuntimeSessionChecker     = (*Provider)(nil)
 	_ runtime.ImmediateNudgeProvider        = (*Provider)(nil)
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
@@ -226,6 +227,23 @@ func (p *Provider) Interrupt(name string) error {
 // are correctly excluded — only sessions with live panes are "running".
 func (p *Provider) IsRunning(name string) bool {
 	return p.cache.IsRunning(name)
+}
+
+// IsDeadRuntimeSession reports whether a visible tmux session is a
+// remain-on-exit corpse with no live panes.
+func (p *Provider) IsDeadRuntimeSession(name string) (bool, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false, nil
+	}
+	dead, err := p.tm.sessionPanesDead(name)
+	if err != nil {
+		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+			return false, nil
+		}
+		return false, err
+	}
+	return dead, nil
 }
 
 // IsAttached reports whether a user terminal is connected to the named session.

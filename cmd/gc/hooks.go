@@ -23,9 +23,10 @@ func hookScript(eventType string) string {
 # Args: $1=issue_id  $2=event_type  stdin=issue JSON
 GC_BIN="${GC_BIN:-gc}"
 DATA=$(cat)
+PAYLOAD=$(printf '{"bead":%%s}' "$DATA")
 title=$(echo "$DATA" | grep -o '"title":"[^"]*"' | head -1 | cut -d'"' -f4)
 (
-  "$GC_BIN" event emit %s --subject "$1" --message "$title" --payload "$DATA" >/dev/null 2>&1 || true
+  "$GC_BIN" event emit %s --subject "$1" --message "$title" --payload "$PAYLOAD" >/dev/null 2>&1 || true
 ) </dev/null >/dev/null 2>&1 &
 `, eventType)
 }
@@ -42,9 +43,10 @@ func closeHookScript() string {
 # Args: $1=issue_id  $2=event_type  stdin=issue JSON
 GC_BIN="${GC_BIN:-gc}"
 DATA=$(cat)
+PAYLOAD=$(printf '{"bead":%s}' "$DATA")
 title=$(echo "$DATA" | grep -o '"title":"[^"]*"' | head -1 | cut -d'"' -f4)
 (
-  "$GC_BIN" event emit bead.closed --subject "$1" --message "$title" --payload "$DATA" >/dev/null 2>&1 || true
+  "$GC_BIN" event emit bead.closed --subject "$1" --message "$title" --payload "$PAYLOAD" >/dev/null 2>&1 || true
   # Auto-close parent convoy if all siblings are now closed.
   "$GC_BIN" convoy autoclose "$1" >/dev/null 2>&1 || true
   # Auto-close open molecule/wisp children so they don't outlive the parent.

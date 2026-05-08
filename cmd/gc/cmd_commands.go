@@ -16,6 +16,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const docgenSkipAnnotation = "gc.docgen.skip"
+
 func addDiscoveredCommandsToRoot(root *cobra.Command, entries []config.DiscoveredCommand, cityPath, cityName string, stdout, stderr io.Writer, warnOnCollision bool) {
 	core := coreCommandNames(root)
 	grouped := make(map[string][]config.DiscoveredCommand)
@@ -46,8 +48,9 @@ func addDiscoveredCommandsToRoot(root *cobra.Command, entries []config.Discovere
 
 func newDiscoveredNamespaceCmd(binding string, entries []config.DiscoveredCommand, cityPath, cityName string, stdout, stderr io.Writer) *cobra.Command {
 	ns := &cobra.Command{
-		Use:   binding,
-		Short: fmt.Sprintf("Commands from the %s import", binding),
+		Use:         binding,
+		Short:       fmt.Sprintf("Commands from the %s import", binding),
+		Annotations: map[string]string{docgenSkipAnnotation: "true"},
 		RunE: func(c *cobra.Command, _ []string) error {
 			return c.Help()
 		},

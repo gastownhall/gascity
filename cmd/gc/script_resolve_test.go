@@ -312,6 +312,7 @@ func TestPruneLegacyConfiguredScripts_FallbackPreservesTopLevelScriptsTargets(t 
 func TestPrepareCityForSupervisorPrunesLegacyScripts(t *testing.T) {
 	dir := t.TempDir()
 	cityPath := filepath.Join(dir, "city")
+	cleanupManagedDoltTestCity(t, cityPath)
 	rigPath := filepath.Join(dir, "rig")
 	cityPackScripts := filepath.Join(dir, "packs/city/assets/scripts")
 	rigPackScripts := filepath.Join(dir, "packs/rig/assets/scripts")

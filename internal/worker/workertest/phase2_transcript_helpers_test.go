@@ -36,6 +36,12 @@ func writeMalformedHistoryTranscript(t *testing.T, profile Profile) string {
 			t.Fatalf("write malformed gemini transcript: %v", err)
 		}
 		return path
+	case ProfileOpenCodeTmuxCLI:
+		path := filepath.Join(t.TempDir(), "session.json")
+		if err := os.WriteFile(path, []byte(`{"info":{"id":"malformed-opencode","directory":"/tmp/gascity/phase2/opencode"},"messages":[`), 0o644); err != nil {
+			t.Fatalf("write malformed opencode transcript: %v", err)
+		}
+		return path
 	default:
 		t.Fatalf("unsupported profile %s", profile.ID)
 		return ""
@@ -70,6 +76,11 @@ func writeInteractionHistoryTranscript(t *testing.T, profile Profile) string {
 			t.Fatalf("write gemini interaction transcript: %v", err)
 		}
 		return path
+	case ProfileOpenCodeTmuxCLI:
+		return writeOpenCodeExportTranscript(t, "opencode-interaction-phase2", "/tmp/gascity/phase2/opencode", []string{
+			`{"info":{"id":"msg_user_1","sessionID":"opencode-interaction-phase2","role":"user","time":{"created":1770000000000}},"parts":[{"id":"part_user_1","type":"text","text":"run a tool"}]}`,
+			`{"info":{"id":"msg_assistant_1","sessionID":"opencode-interaction-phase2","role":"assistant","parentID":"msg_user_1","time":{"created":1770000001000}},"parts":[{"id":"part_interaction_1","type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"],"metadata":{"tool_name":"Read"}}]}`,
+		})
 	default:
 		t.Fatalf("unsupported profile %s", profile.ID)
 		return ""
@@ -111,6 +122,11 @@ func writeInteractionLifecycleTranscript(t *testing.T, profile Profile, finalSta
 			t.Fatalf("write gemini interaction lifecycle transcript: %v", err)
 		}
 		return path
+	case ProfileOpenCodeTmuxCLI:
+		return writeOpenCodeExportTranscript(t, "opencode-interaction-lifecycle-phase2", "/tmp/gascity/phase2/opencode", []string{
+			`{"info":{"id":"msg_assistant_1","sessionID":"opencode-interaction-lifecycle-phase2","role":"assistant","time":{"created":1770000000000}},"parts":[{"id":"part_interaction_1","type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"]}]}`,
+			fmt.Sprintf(`{"info":{"id":"msg_user_1","sessionID":"opencode-interaction-lifecycle-phase2","role":"user","parentID":"msg_assistant_1","time":{"created":1770000001000}},"parts":[{"id":"part_interaction_2","type":"interaction","request_id":"approval-1","kind":"approval","state":%q,"action":%q}]}`, finalStateText, finalAction),
+		})
 	default:
 		t.Fatalf("unsupported profile %s", profile.ID)
 		return ""
@@ -163,10 +179,32 @@ func writeToolTranscript(t *testing.T, profile Profile, openTail bool) string {
 			t.Fatalf("write gemini transcript: %v", err)
 		}
 		return path
+	case ProfileOpenCodeTmuxCLI:
+		state := `{"status":"running","input":{"path":"README.md"}}`
+		tail := ""
+		if !openTail {
+			state = `{"status":"completed","input":{"path":"README.md"},"output":"file data"}`
+			tail = `,{"info":{"id":"msg_assistant_2","sessionID":"opencode-tool-phase2","role":"assistant","parentID":"msg_assistant_1","time":{"created":1770000002000}},"parts":[{"id":"part_assistant_2","type":"text","text":"done"}]}`
+		}
+		return writeOpenCodeExportTranscript(t, "opencode-tool-phase2", "/tmp/gascity/phase2/opencode", []string{
+			`{"info":{"id":"msg_user_1","sessionID":"opencode-tool-phase2","role":"user","time":{"created":1770000000000}},"parts":[{"id":"part_user_1","type":"text","text":"read the file"}]}`,
+			`{"info":{"id":"msg_assistant_1","sessionID":"opencode-tool-phase2","role":"assistant","parentID":"msg_user_1","time":{"created":1770000001000}},"parts":[{"id":"part_tool_1","type":"tool","callID":"call-1","tool":"Read","state":` + state + `}]}` + tail,
+		})
 	default:
 		t.Fatalf("unsupported profile %s", profile.ID)
 		return ""
 	}
+}
+
+func writeOpenCodeExportTranscript(t *testing.T, sessionID, workDir string, messages []string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "session.json")
+	body := `{"info":{"id":` + fmt.Sprintf("%q", sessionID) + `,"directory":` + fmt.Sprintf("%q", workDir) + `},"messages":[` + strings.Join(messages, ",") + `]}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write opencode transcript: %v", err)
+	}
+	return path
 }
 
 func writeLinesFile(t *testing.T, rel string, lines []string) string {

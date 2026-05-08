@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -1320,8 +1321,8 @@ func TestEffectiveWorkQueryPoolDefault(t *testing.T) {
 	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --json --limit=1") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
 	}
-	if !strings.Contains(got, "bd list --metadata-field gc.routed_to=hello-world/polecat --status=open --type=molecule --no-assignee --json --limit=1") {
-		t.Errorf("EffectiveWorkQuery() missing tier 4 molecule route: %q", got)
+	if strings.Contains(got, "--type=molecule") {
+		t.Errorf("EffectiveWorkQuery() should not route molecule containers: %q", got)
 	}
 }
 
@@ -1373,8 +1374,8 @@ func TestEffectiveWorkQueryPoolNameOverride(t *testing.T) {
 	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --json --limit=1") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to with pool name: %q", got)
 	}
-	if !strings.Contains(got, "bd list --metadata-field gc.routed_to=hello-world/dog --status=open --type=molecule --no-assignee --json --limit=1") {
-		t.Errorf("EffectiveWorkQuery() missing tier 4 molecule route with pool name: %q", got)
+	if strings.Contains(got, "--type=molecule") {
+		t.Errorf("EffectiveWorkQuery() should not route molecule containers with pool name: %q", got)
 	}
 }
 
@@ -1489,11 +1490,11 @@ func TestDefaultPoolCheckUsesBdReady(t *testing.T) {
 	if !strings.Contains(check, "bd ready") {
 		t.Errorf("EffectiveScaleCheck() = %q, want bd ready for blocker-aware counting", check)
 	}
-	if !strings.Contains(check, "--status=in_progress") {
-		t.Errorf("EffectiveScaleCheck() = %q, want --status=in_progress for active work", check)
+	if strings.Contains(check, "--type=molecule") {
+		t.Errorf("EffectiveScaleCheck() = %q, should not count molecule containers as demand", check)
 	}
-	if !strings.Contains(check, "--type=molecule") {
-		t.Errorf("EffectiveScaleCheck() = %q, want --type=molecule for formula-dispatched work", check)
+	if strings.Contains(check, "--status=in_progress") || strings.Contains(check, "${active:-0}") {
+		t.Errorf("EffectiveScaleCheck() = %q, should not count in-progress work as new demand", check)
 	}
 }
 
@@ -1587,21 +1588,18 @@ func TestEffectiveScaleCheckDefaults(t *testing.T) {
 		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(1),
 	}
 	check := a.EffectiveScaleCheck()
-	// Default check uses bd ready (blocker-aware) + in_progress count + molecule count via gc.routed_to.
+	// Default check uses bd ready for blocker-aware routed demand.
 	if !strings.Contains(check, "gc.routed_to=refinery") {
 		t.Errorf("EffectiveScaleCheck = %q, want gc.routed_to=refinery", check)
 	}
-	if !strings.Contains(check, "--status=in_progress") {
-		t.Errorf("EffectiveScaleCheck = %q, want --status=in_progress for active work", check)
+	if !strings.Contains(check, "--unassigned") {
+		t.Errorf("EffectiveScaleCheck = %q, want --unassigned for new unassigned demand", check)
 	}
-	if !strings.Contains(check, "--no-assignee") {
-		t.Errorf("EffectiveScaleCheck = %q, want --no-assignee for active unassigned work", check)
+	if strings.Contains(check, "--type=molecule") || strings.Contains(check, "${molecules:-0}") {
+		t.Errorf("EffectiveScaleCheck = %q, should not count molecule containers as demand", check)
 	}
-	if !strings.Contains(check, "--type=molecule") {
-		t.Errorf("EffectiveScaleCheck = %q, want --type=molecule for formula-dispatched work", check)
-	}
-	if !strings.Contains(check, "${molecules:-0}") {
-		t.Errorf("EffectiveScaleCheck = %q, want ${molecules:-0} in arithmetic sum", check)
+	if strings.Contains(check, "--status=in_progress") || strings.Contains(check, "${active:-0}") {
+		t.Errorf("EffectiveScaleCheck = %q, should not count in-progress work as new demand", check)
 	}
 }
 
@@ -1616,20 +1614,20 @@ func TestEffectiveScaleCheckDefaultsQualified(t *testing.T) {
 	if !strings.Contains(check, "gc.routed_to=myproject/polecat") {
 		t.Errorf("EffectiveScaleCheck = %q, want gc.routed_to=myproject/polecat", check)
 	}
-	if !strings.Contains(check, "--status=in_progress") {
-		t.Errorf("EffectiveScaleCheck = %q, want --status=in_progress for active work", check)
+	if !strings.Contains(check, "--unassigned") {
+		t.Errorf("EffectiveScaleCheck = %q, want --unassigned for new unassigned demand", check)
 	}
-	if !strings.Contains(check, "--no-assignee") {
-		t.Errorf("EffectiveScaleCheck = %q, want --no-assignee for active unassigned work", check)
+	if strings.Contains(check, "--type=molecule") {
+		t.Errorf("EffectiveScaleCheck = %q, should not count molecule containers as demand", check)
 	}
-	if !strings.Contains(check, "--type=molecule") {
-		t.Errorf("EffectiveScaleCheck = %q, want --type=molecule for formula-dispatched work", check)
+	if strings.Contains(check, "--status=in_progress") || strings.Contains(check, "${active:-0}") {
+		t.Errorf("EffectiveScaleCheck = %q, should not count in-progress work as new demand", check)
 	}
 }
 
-func TestEffectiveScaleCheckMoleculeQuery(t *testing.T) {
-	// Regression test for GH #505: default scale check must detect
-	// formula-dispatched molecule beads that bd ready excludes.
+func TestEffectiveScaleCheckUsesReadyOnly(t *testing.T) {
+	// Formula-dispatched executable roots must be visible through ready()
+	// as runnable wisps/tasks; molecule containers are not demand.
 	a := Agent{
 		Name:              "worker",
 		Dir:               "myrig",
@@ -1637,31 +1635,27 @@ func TestEffectiveScaleCheckMoleculeQuery(t *testing.T) {
 	}
 	check := a.EffectiveScaleCheck()
 
-	// Must contain three separate queries summed together.
 	if !strings.Contains(check, "bd ready") {
 		t.Errorf("missing bd ready query for blocker-aware task counting")
 	}
-	if !strings.Contains(check, "--status=in_progress") {
-		t.Errorf("missing in_progress query for active work")
+	if strings.Contains(check, "--status=open --type=molecule") {
+		t.Errorf("unexpected molecule query in scale check: %q", check)
 	}
-	if !strings.Contains(check, "--status=open --type=molecule") {
-		t.Errorf("missing molecule query for formula-dispatched work (GH #505)")
-	}
-
-	// All three variables must appear in the arithmetic sum.
-	if !strings.Contains(check, "${ready:-0}") {
-		t.Errorf("missing ${ready:-0} in arithmetic sum")
-	}
-	if !strings.Contains(check, "${active:-0}") {
-		t.Errorf("missing ${active:-0} in arithmetic sum")
-	}
-	if !strings.Contains(check, "${molecules:-0}") {
-		t.Errorf("missing ${molecules:-0} in arithmetic sum")
+	if strings.Contains(check, "--status=in_progress") || strings.Contains(check, "${active:-0}") {
+		t.Errorf("EffectiveScaleCheck = %q, should not count in-progress work as new demand", check)
 	}
 
-	// Molecule query must use the qualified name for routing.
+	if !strings.Contains(check, "--limit 0") {
+		t.Errorf("missing --limit 0 for complete ready count")
+	}
+	if strings.Contains(check, "2>/dev/null") || strings.Contains(check, "${ready:-0}") || strings.Contains(check, "|| echo 0") {
+		t.Errorf("default scale_check masks bd ready failures as zero: %q", check)
+	}
+	if strings.Contains(check, "${molecules:-0}") {
+		t.Errorf("unexpected ${molecules:-0} in arithmetic sum")
+	}
 	if !strings.Contains(check, "gc.routed_to=myrig/worker") {
-		t.Errorf("molecule query missing gc.routed_to=myrig/worker")
+		t.Errorf("ready query missing gc.routed_to=myrig/worker")
 	}
 }
 
@@ -2099,6 +2093,41 @@ name = "mayor"
 	}
 	if got := cfg.Daemon.MaxRestartsOrDefault(); got != 0 {
 		t.Errorf("MaxRestartsOrDefault() = %d, want 0 (unlimited)", got)
+	}
+}
+
+func TestParseDaemonSessionCircuitBreaker(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test"
+
+[daemon]
+session_circuit_breaker = true
+session_circuit_breaker_max_restarts = 2
+session_circuit_breaker_window = "10m"
+session_circuit_breaker_reset_after = "25m"
+
+[[agent]]
+name = "worker"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !cfg.Daemon.SessionCircuitBreaker {
+		t.Fatal("Daemon.SessionCircuitBreaker = false, want true")
+	}
+	if cfg.Daemon.SessionCircuitBreakerMaxRestarts == nil || *cfg.Daemon.SessionCircuitBreakerMaxRestarts != 2 {
+		t.Fatalf("Daemon.SessionCircuitBreakerMaxRestarts = %v, want 2", cfg.Daemon.SessionCircuitBreakerMaxRestarts)
+	}
+	if got := cfg.Daemon.SessionCircuitBreakerMaxRestartsOrDefault(); got != 2 {
+		t.Fatalf("SessionCircuitBreakerMaxRestartsOrDefault() = %d, want 2", got)
+	}
+	if got := cfg.Daemon.SessionCircuitBreakerWindowDuration(); got != 10*time.Minute {
+		t.Fatalf("SessionCircuitBreakerWindowDuration() = %v, want 10m", got)
+	}
+	if got := cfg.Daemon.SessionCircuitBreakerResetAfterDuration(); got != 25*time.Minute {
+		t.Fatalf("SessionCircuitBreakerResetAfterDuration() = %v, want 25m", got)
 	}
 }
 
@@ -2556,6 +2585,17 @@ func TestValidateRigs_MissingPath(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "path is required") {
 		t.Errorf("error = %q, want 'path is required'", err)
+	}
+}
+
+func TestValidateRigs_WildcardNameRejected(t *testing.T) {
+	rigs := []Rig{{Name: "*", Path: "/a"}}
+	err := ValidateRigs(rigs, "ci")
+	if err == nil {
+		t.Fatal(`expected error for rig name "*"`)
+	}
+	if !strings.Contains(err.Error(), "wildcard") {
+		t.Errorf("error = %q, want 'wildcard'", err)
 	}
 }
 
@@ -3193,6 +3233,34 @@ func runEffectiveWorkQuery(t *testing.T, a Agent, env map[string]string, bdScrip
 	return string(out)
 }
 
+func runLifecycleHookCommand(t *testing.T, command string, env map[string]string, bdScript string) string {
+	t.Helper()
+
+	tmp := t.TempDir()
+	bdPath := filepath.Join(tmp, "bd")
+	if err := os.WriteFile(bdPath, []byte(bdScript), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	logPath := filepath.Join(tmp, "bd.log")
+
+	cmd := exec.Command("sh", "-c", command)
+	cmd.Env = []string{
+		"PATH=" + tmp + ":" + os.Getenv("PATH"),
+		"BD_LOG=" + logPath,
+	}
+	for k, v := range env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("run lifecycle hook: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read hook log: %v", err)
+	}
+	return string(data)
+}
+
 // TestEffectiveMethodsAgentRouting verifies that all agents use
 // gc.routed_to=<qualified-name> metadata routing.
 func TestEffectiveMethodsAgentRouting(t *testing.T) {
@@ -3556,7 +3624,7 @@ func TestEffectiveOnDeathDefault(t *testing.T) {
 		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
 	}
 	got := a.EffectiveOnDeath()
-	for _, want := range []string{"bd list --assignee=myrig/dog", "--status=in_progress", "--assignee \"\""} {
+	for _, want := range []string{"bd list --assignee=myrig/dog", "--status=in_progress", `--assignee "" --status open`, "--set-metadata gc.routed_to=myrig/dog"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("EffectiveOnDeath() = %q, want %q", got, want)
 		}
@@ -3577,10 +3645,70 @@ func TestEffectiveOnDeathCustom(t *testing.T) {
 func TestEffectiveOnDeathFixedAgent(t *testing.T) {
 	a := Agent{Name: "mayor"}
 	got := a.EffectiveOnDeath()
-	for _, want := range []string{"bd list --assignee=mayor", "--status=in_progress", "--assignee \"\""} {
+	for _, want := range []string{"bd list --assignee=mayor", "--status=in_progress", `--assignee "" --status open`, "--set-metadata gc.routed_to=mayor"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("EffectiveOnDeath() = %q, want %q", got, want)
 		}
+	}
+}
+
+func TestEffectiveOnDeathBackfillsMissingRouteOnReopen(t *testing.T) {
+	a := Agent{
+		Name:              "dog-1",
+		Dir:               "hello-world",
+		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
+		PoolName: "hello-world/dog",
+	}
+
+	log := runLifecycleHookCommand(t, a.EffectiveOnDeath(), nil, `#!/bin/sh
+set -eu
+case "$1" in
+  list)
+    printf '[{"id":"ga-missing","metadata":{}}]'
+    ;;
+  update)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`)
+	if !strings.Contains(log, "--status open") {
+		t.Fatalf("hook log = %q, want reopened status", log)
+	}
+	if !strings.Contains(log, "--set-metadata gc.routed_to=hello-world/dog") {
+		t.Fatalf("hook log = %q, want fallback route for ownerless reopened work", log)
+	}
+}
+
+func TestEffectiveOnDeathPreservesExistingRouteOnReopen(t *testing.T) {
+	a := Agent{
+		Name:              "dog-1",
+		Dir:               "hello-world",
+		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
+		PoolName: "hello-world/dog",
+	}
+
+	log := runLifecycleHookCommand(t, a.EffectiveOnDeath(), nil, `#!/bin/sh
+set -eu
+case "$1" in
+  list)
+    printf '[{"id":"ga-routed","metadata":{"gc.routed_to":"already/routed"}}]'
+    ;;
+  update)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`)
+	if !strings.Contains(log, "--status open") {
+		t.Fatalf("hook log = %q, want reopened status", log)
+	}
+	if strings.Contains(log, "--set-metadata") {
+		t.Fatalf("hook log = %q, want existing route preserved without overwrite", log)
 	}
 }
 
@@ -3591,10 +3719,13 @@ func TestEffectiveOnBootDefault(t *testing.T) {
 		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
 	}
 	got := a.EffectiveOnBoot()
-	for _, want := range []string{"bd list --metadata-field gc.routed_to=myrig/dog", "--status=in_progress", "--assignee \"\""} {
+	for _, want := range []string{"bd list --metadata-field gc.routed_to=myrig/dog", "--status=in_progress", "--no-assignee", "--status open"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("EffectiveOnBoot() = %q, want %q", got, want)
 		}
+	}
+	if strings.Contains(got, `--assignee ""`) {
+		t.Errorf("EffectiveOnBoot() = %q, want to target only ownerless work instead of bulk-unassigning routed work", got)
 	}
 }
 
@@ -3607,10 +3738,13 @@ func TestEffectiveOnBootDefaultPoolName(t *testing.T) {
 		PoolName: "myrig/dog",
 	}
 	got := a.EffectiveOnBoot()
-	for _, want := range []string{"bd list --metadata-field gc.routed_to=myrig/dog", "--status=in_progress", "--assignee \"\""} {
+	for _, want := range []string{"bd list --metadata-field gc.routed_to=myrig/dog", "--status=in_progress", "--no-assignee", "--status open"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("EffectiveOnBoot() = %q, want %q", got, want)
 		}
+	}
+	if strings.Contains(got, `--assignee ""`) {
+		t.Errorf("EffectiveOnBoot() = %q, want to target only ownerless work instead of bulk-unassigning routed work", got)
 	}
 }
 
@@ -3628,10 +3762,13 @@ func TestEffectiveOnBootCustom(t *testing.T) {
 func TestEffectiveOnBootNonPool(t *testing.T) {
 	a := Agent{Name: "mayor"}
 	got := a.EffectiveOnBoot()
-	for _, want := range []string{"bd list --metadata-field gc.routed_to=mayor", "--status=in_progress", "--assignee \"\""} {
+	for _, want := range []string{"bd list --metadata-field gc.routed_to=mayor", "--status=in_progress", "--no-assignee", "--status open"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("EffectiveOnBoot() = %q, want %q", got, want)
 		}
+	}
+	if strings.Contains(got, `--assignee ""`) {
+		t.Errorf("EffectiveOnBoot() = %q, want to target only ownerless work instead of bulk-unassigning routed work", got)
 	}
 }
 
@@ -4680,4 +4817,183 @@ schedule = "0 3 * * *"
 	if cfg.Orders.Overrides[0].Trigger == nil || *cfg.Orders.Overrides[0].Trigger != "cron" {
 		t.Fatalf("Trigger = %#v, want cron", cfg.Orders.Overrides[0].Trigger)
 	}
+}
+
+// TestControlDispatcherStartCommandTracesUnderGCRuntime pins the trace-log
+// default location for the built-in control-dispatcher worker.
+//
+// The control-dispatcher writes to ${GC_WORKFLOW_TRACE} every few seconds
+// while serving workflow control beads. The default path must live under
+// .gc/runtime/ so that the controller's recursive fsnotify watcher
+// (cmd/gc/controller.go shouldIgnoreConfigWatchEvent) ignores writes to it
+// — that function excludes the .gc and .beads path segments. Placing the
+// default at city root caused every append to fire markDirty() through the
+// 200ms debouncer, keeping patrol cycles in continuous reconciliation and
+// driving cycle duration well past the configured patrol_interval.
+//
+// Regression guard: do not move the trace default out of .gc/runtime/
+// without a paired update to the controller's watcher exclusion list.
+func TestControlDispatcherStartCommandTracesUnderGCRuntime(t *testing.T) {
+	const (
+		wantTraceExport    = `export GC_WORKFLOW_TRACE="${GC_WORKFLOW_TRACE:-${GC_CONTROL_DISPATCHER_TRACE_DEFAULT:-${GC_CITY}/` + citylayout.RuntimeDataRoot + `/control-dispatcher-trace.log}}"`
+		wantTraceDirExpr   = `trace_dir="${GC_WORKFLOW_TRACE%/*}"`
+		wantRootTraceGuard = `elif [ -z "$trace_dir" ]; then trace_dir="/"; fi`
+		wantMkdirSnip      = `mkdir -p "$trace_dir"`
+		oldTracePath       = "${GC_CITY}/control-dispatcher-trace.log"
+		qualifiedName      = "qcore/control-dispatcher"
+	)
+
+	t.Run("city-level constant", func(t *testing.T) {
+		got := ControlDispatcherStartCommand
+		if !strings.Contains(got, "GC_CONTROL_DISPATCHER_TRACE_DEFAULT") {
+			t.Errorf("ControlDispatcherStartCommand must route through GC_CONTROL_DISPATCHER_TRACE_DEFAULT so runtime-root trust decisions happen in Go\n got: %s", got)
+		}
+		if !strings.Contains(got, wantTraceExport) {
+			t.Errorf("ControlDispatcherStartCommand missing %q\n got: %s", wantTraceExport, got)
+		}
+		if !strings.Contains(got, wantTraceDirExpr) {
+			t.Errorf("ControlDispatcherStartCommand missing %q so explicit GC_WORKFLOW_TRACE overrides create their own parent dir\n got: %s", wantTraceDirExpr, got)
+		}
+		if !strings.Contains(got, wantRootTraceGuard) {
+			t.Errorf("ControlDispatcherStartCommand missing %q so absolute root trace overrides normalize to /\n got: %s", wantRootTraceGuard, got)
+		}
+		if !strings.Contains(got, wantMkdirSnip) {
+			t.Errorf("ControlDispatcherStartCommand missing %q (needed so the resolved trace parent exists on first start)\n got: %s", wantMkdirSnip, got)
+		}
+		if strings.Contains(got, oldTracePath) {
+			t.Errorf("ControlDispatcherStartCommand still references the old city-root trace path %q\n got: %s", oldTracePath, got)
+		}
+	})
+
+	t.Run("qualified-name builder", func(t *testing.T) {
+		got := ControlDispatcherStartCommandFor(qualifiedName)
+		if !strings.Contains(got, "GC_CONTROL_DISPATCHER_TRACE_DEFAULT") {
+			t.Errorf("ControlDispatcherStartCommandFor must route through GC_CONTROL_DISPATCHER_TRACE_DEFAULT so runtime-root trust decisions happen in Go\n got: %s", got)
+		}
+		if !strings.Contains(got, wantTraceExport) {
+			t.Errorf("ControlDispatcherStartCommandFor missing %q\n got: %s", wantTraceExport, got)
+		}
+		if !strings.Contains(got, wantTraceDirExpr) {
+			t.Errorf("ControlDispatcherStartCommandFor missing %q so explicit GC_WORKFLOW_TRACE overrides create their own parent dir\n got: %s", wantTraceDirExpr, got)
+		}
+		if !strings.Contains(got, wantRootTraceGuard) {
+			t.Errorf("ControlDispatcherStartCommandFor missing %q so absolute root trace overrides normalize to /\n got: %s", wantRootTraceGuard, got)
+		}
+		if !strings.Contains(got, wantMkdirSnip) {
+			t.Errorf("ControlDispatcherStartCommandFor missing %q\n got: %s", wantMkdirSnip, got)
+		}
+		if !strings.Contains(got, "--follow "+qualifiedName) {
+			t.Errorf("ControlDispatcherStartCommandFor must --follow the qualified name %q\n got: %s", qualifiedName, got)
+		}
+	})
+}
+
+func TestControlDispatcherStartCommandExecResolvesRuntimeTracePath(t *testing.T) {
+	t.Run("default runtime root", func(t *testing.T) {
+		cityDir := t.TempDir()
+		tracePath, args := runControlDispatcherStartCommand(t, ControlDispatcherStartCommand, cityDir, nil)
+		wantTracePath := filepath.Join(cityDir, citylayout.RuntimeDataRoot, "control-dispatcher-trace.log")
+		if tracePath != wantTracePath {
+			t.Fatalf("trace path = %q, want %q", tracePath, wantTracePath)
+		}
+		if args != "convoy control --serve --follow "+ControlDispatcherAgentName {
+			t.Fatalf("args = %q, want follow command for %q", args, ControlDispatcherAgentName)
+		}
+		if _, err := os.Stat(wantTracePath); err != nil {
+			t.Fatalf("trace file %q not created: %v", wantTracePath, err)
+		}
+	})
+
+	t.Run("injected trusted default override", func(t *testing.T) {
+		cityDir := t.TempDir()
+		runtimeDir := filepath.Join(t.TempDir(), "runtime-root")
+		tracePath, args := runControlDispatcherStartCommand(t, ControlDispatcherStartCommandFor("qcore/control-dispatcher"), cityDir, map[string]string{
+			"GC_CONTROL_DISPATCHER_TRACE_DEFAULT": filepath.Join(runtimeDir, "control-dispatcher-trace.log"),
+		})
+		wantTracePath := filepath.Join(runtimeDir, "control-dispatcher-trace.log")
+		if tracePath != wantTracePath {
+			t.Fatalf("trace path = %q, want %q", tracePath, wantTracePath)
+		}
+		if args != "convoy control --serve --follow qcore/control-dispatcher" {
+			t.Fatalf("args = %q, want qualified follow command", args)
+		}
+		if _, err := os.Stat(wantTracePath); err != nil {
+			t.Fatalf("trace file %q not created: %v", wantTracePath, err)
+		}
+	})
+
+	t.Run("explicit trace override ignores injected default", func(t *testing.T) {
+		cityDir := t.TempDir()
+		injectedDefault := filepath.Join(t.TempDir(), "runtime-root", "control-dispatcher-trace.log")
+		overrideTrace := filepath.Join(t.TempDir(), "override-runtime", "dispatcher.log")
+		tracePath, args := runControlDispatcherStartCommand(t, ControlDispatcherStartCommand, cityDir, map[string]string{
+			"GC_CONTROL_DISPATCHER_TRACE_DEFAULT": injectedDefault,
+			"GC_WORKFLOW_TRACE":                   overrideTrace,
+		})
+		if tracePath != overrideTrace {
+			t.Fatalf("trace path = %q, want explicit override %q", tracePath, overrideTrace)
+		}
+		if args != "convoy control --serve --follow "+ControlDispatcherAgentName {
+			t.Fatalf("args = %q, want follow command for %q", args, ControlDispatcherAgentName)
+		}
+		if _, err := os.Stat(overrideTrace); err != nil {
+			t.Fatalf("override trace file %q not created: %v", overrideTrace, err)
+		}
+	})
+}
+
+func runControlDispatcherStartCommand(t *testing.T, command, cityDir string, extraEnv map[string]string) (tracePath, args string) {
+	t.Helper()
+
+	tmp := t.TempDir()
+	resultPath := filepath.Join(tmp, "gc-result")
+	gcPath := filepath.Join(tmp, "gc")
+	gcScript := fmt.Sprintf(`#!/bin/sh
+set -eu
+trace_parent=${GC_WORKFLOW_TRACE%%/*}
+if [ "$trace_parent" = "$GC_WORKFLOW_TRACE" ]; then
+  trace_parent=.
+elif [ -z "$trace_parent" ]; then
+  trace_parent=/
+fi
+[ -d "$trace_parent" ]
+: > "$GC_WORKFLOW_TRACE"
+printf 'TRACE=%%s\nARGS=%%s\n' "$GC_WORKFLOW_TRACE" "$*" > %q
+`, resultPath)
+	if err := os.WriteFile(gcPath, []byte(gcScript), 0o755); err != nil {
+		t.Fatalf("write fake gc: %v", err)
+	}
+
+	cmd := exec.Command("sh", "-c", command)
+	cmd.Env = []string{
+		"PATH=" + tmp + ":" + os.Getenv("PATH"),
+		"GC_BIN=" + gcPath,
+		"GC_CITY=" + cityDir,
+	}
+	for key, value := range extraEnv {
+		cmd.Env = append(cmd.Env, key+"="+value)
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("run control-dispatcher start command: %v\n%s", err, out)
+	}
+
+	data, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatalf("read fake gc result: %v", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		switch {
+		case strings.HasPrefix(line, "TRACE="):
+			tracePath = strings.TrimPrefix(line, "TRACE=")
+		case strings.HasPrefix(line, "ARGS="):
+			args = strings.TrimPrefix(line, "ARGS=")
+		}
+	}
+	if tracePath == "" {
+		t.Fatalf("fake gc result missing trace path:\n%s", data)
+	}
+	if args == "" {
+		t.Fatalf("fake gc result missing args:\n%s", data)
+	}
+	return tracePath, args
 }

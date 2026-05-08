@@ -84,6 +84,13 @@ func (t nudgeTarget) agentKey() string {
 	return t.sessionName
 }
 
+func (t nudgeTarget) pollerKey() string {
+	if t.sessionID != "" {
+		return t.sessionID
+	}
+	return t.agentKey()
+}
+
 func (t nudgeTarget) queueKeys() []string {
 	var keys []string
 	seen := map[string]bool{}
@@ -357,7 +364,7 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	}
 	var writeErr error
 	if inject {
-		writeErr = writeProviderHookContext(stdout, hookFormat, out)
+		writeErr = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", out)
 	} else {
 		_, writeErr = io.WriteString(stdout, out)
 	}
@@ -450,7 +457,7 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 			return 0
 		}
 		missingSince = time.Time{}
-		delivered, pollErr := tryDeliverQueuedNudgesByPoller(target, store, sp, quiescence)
+		delivered, pollErr := tryDeliverQueuedNudgesByPoller(target, store, sp, quiescence, obs)
 		if pollErr != nil {
 			fmt.Fprintf(stderr, "gc nudge poll: %v\n", pollErr) //nolint:errcheck
 		}
@@ -719,8 +726,8 @@ func parseNudgeDeliveryMode(raw string) (nudgeDeliveryMode, error) {
 	}
 }
 
-func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store beads.Store, sp runtime.Provider, quiescence time.Duration) (bool, error) {
-	if !pollerSessionIdleEnough(target, store, sp, quiescence) {
+func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store beads.Store, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) (bool, error) {
+	if !pollerSessionIdleEnough(target, sp, quiescence, obs) {
 		return false, nil
 	}
 	items, err := claimDueQueuedNudgesForTarget(target.cityPath, target, time.Now())
@@ -779,12 +786,25 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store beads.Store, sp ru
 	return true, ackQueuedNudges(target.cityPath, queuedNudgeIDs(items))
 }
 
-func pollerSessionIdleEnough(target nudgeTarget, store beads.Store, sp runtime.Provider, quiescence time.Duration) bool {
-	obs, err := workerObserveNudgeTarget(target, store, sp)
-	if err != nil || obs.LastActivity == nil || obs.LastActivity.IsZero() {
+func pollerSessionIdleEnough(target nudgeTarget, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) bool {
+	if quiescence <= 0 {
+		return true
+	}
+	if obs.LastActivity != nil && !obs.LastActivity.IsZero() {
+		return time.Since(*obs.LastActivity) >= quiescence
+	}
+	if target.sessionName == "" {
 		return false
 	}
-	return time.Since(*obs.LastActivity) >= quiescence
+	waiter, ok := sp.(runtime.IdleWaitProvider)
+	if !ok {
+		return false
+	}
+	// The poller may take up to the quiescence window to exit while this
+	// runtime idle check is in progress.
+	ctx, cancel := context.WithTimeout(context.Background(), quiescence)
+	defer cancel()
+	return waiter.WaitForIdle(ctx, target.sessionName, quiescence) == nil
 }
 
 func maybeStartNudgePoller(target nudgeTarget) {
@@ -794,7 +814,7 @@ func maybeStartNudgePoller(target nudgeTarget) {
 	if target.sessionTransport() == "acp" {
 		return
 	}
-	if err := startNudgePoller(target.cityPath, target.agentKey(), target.sessionName); err != nil {
+	if err := startNudgePoller(target.cityPath, target.pollerKey(), target.sessionName); err != nil {
 		return
 	}
 }
@@ -1393,9 +1413,9 @@ func pruneExpiredQueuedNudges(state *nudgeQueueState, store beads.Store, now tim
 				item.LastError = "expired"
 			}
 			state.Dead = append(state.Dead, item)
-			if err := markQueuedNudgeTerminal(store, item, "expired", item.LastError, "", now); err != nil {
-				return err
-			}
+			// Best-effort: remove expired item from pending even if bead update fails.
+			// A failed bead update here would trap the item in pending forever.
+			_ = markQueuedNudgeTerminal(store, item, "expired", item.LastError, "", now)
 			continue
 		}
 		filtered = append(filtered, item)
@@ -1414,9 +1434,8 @@ func recoverExpiredInFlightNudges(state *nudgeQueueState, store beads.Store, now
 				item.LastError = "expired"
 			}
 			state.Dead = append(state.Dead, item)
-			if err := markQueuedNudgeTerminal(store, item, "expired", item.LastError, "", now); err != nil {
-				return err
-			}
+			// Best-effort: remove expired item from in-flight even if bead update fails.
+			_ = markQueuedNudgeTerminal(store, item, "expired", item.LastError, "", now)
 			continue
 		}
 		if item.LeaseUntil.IsZero() || !item.LeaseUntil.After(now) {

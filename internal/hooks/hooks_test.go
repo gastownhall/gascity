@@ -121,11 +121,14 @@ func TestInstallClaude(t *testing.T) {
 			return entries[0].Matcher
 		}())
 	}
-	if !strings.Contains(claudeHookCommand(t, runtimeData, "PreCompact"), `gc handoff "context cycle"`) {
-		t.Error("claude PreCompact hook should use gc handoff (not gc prime) to avoid context accumulation on compaction")
+	if !strings.Contains(claudeHookCommand(t, runtimeData, "PreCompact"), `gc handoff --auto "context cycle"`) {
+		t.Error("claude PreCompact hook should use gc handoff --auto (not gc prime or restart handoff) on compaction")
 	}
 	if !strings.Contains(s, "gc nudge drain --inject") {
 		t.Error("claude settings should contain gc nudge drain --inject")
+	}
+	if strings.Contains(s, "gc hook --inject") {
+		t.Error("fresh claude settings should not install no-op gc hook --inject")
 	}
 	if !strings.Contains(s, `"skipDangerousModePermissionPrompt": true`) {
 		t.Error("claude settings should contain skipDangerousModePermissionPrompt")
@@ -147,7 +150,7 @@ func TestInstallClaudeUpgradesStaleGeneratedFile(t *testing.T) {
 	// Build a realistic stale fixture: the embedded file stores the command
 	// as JSON, so the literal bytes contain escaped quotes. Matching that
 	// shape is what claudeFileNeedsUpgrade expects.
-	stale := strings.Replace(string(current), `gc handoff \"context cycle\"`, `gc prime --hook`, 1)
+	stale := strings.Replace(string(current), `gc handoff --auto \"context cycle\"`, `gc prime --hook`, 1)
 	if stale == string(current) {
 		t.Fatal("stale fixture did not diverge from current embedded config — check stale pattern")
 	}
@@ -160,11 +163,34 @@ func TestInstallClaudeUpgradesStaleGeneratedFile(t *testing.T) {
 
 	hookData := fs.Files["/city/hooks/claude.json"]
 	runtimeData := fs.Files["/city/.gc/settings.json"]
-	if !strings.Contains(claudeHookCommand(t, hookData, "PreCompact"), `gc handoff "context cycle"`) {
+	if !strings.Contains(claudeHookCommand(t, hookData, "PreCompact"), `gc handoff --auto "context cycle"`) {
 		t.Fatalf("upgraded claude hook missing gc handoff:\n%s", string(hookData))
 	}
 	if string(runtimeData) != string(hookData) {
 		t.Fatalf("runtime Claude settings should mirror upgraded hook settings:\n%s", string(runtimeData))
+	}
+}
+
+func TestInstallClaudeUpgradesRestartingPreCompactHandoff(t *testing.T) {
+	fs := fsys.NewFake()
+	current, err := readEmbedded("config/claude.json")
+	if err != nil {
+		t.Fatalf("readEmbedded: %v", err)
+	}
+	stale := strings.Replace(string(current), `gc handoff --auto \"context cycle\"`, `gc handoff \"context cycle\"`, 1)
+	if stale == string(current) {
+		t.Fatal("stale fixture did not diverge from current embedded config — check stale pattern")
+	}
+	fs.Files["/city/hooks/claude.json"] = []byte(stale)
+	fs.Files["/city/.gc/settings.json"] = []byte(stale)
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	hookData := fs.Files["/city/hooks/claude.json"]
+	if !strings.Contains(claudeHookCommand(t, hookData, "PreCompact"), `gc handoff --auto "context cycle"`) {
+		t.Fatalf("upgraded claude hook missing gc handoff --auto:\n%s", string(hookData))
 	}
 }
 
@@ -231,6 +257,61 @@ func TestInstallClaudeUpgradesGeneratedFileSessionStartMatcher(t *testing.T) {
 	}
 }
 
+func TestInstallCodexUpgradesGeneratedFileMissingHookFormat(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/work/.codex/hooks.json"] = []byte(`{
+  "hooks": {
+    "SessionStart": [{
+      "hooks": [{
+        "type": "command",
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc prime --hook"
+      }]
+    }]
+  }
+}`)
+
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	got := string(fs.Files["/work/.codex/hooks.json"])
+	if !strings.Contains(got, "--hook-format codex") {
+		t.Errorf("upgraded codex hooks missing Codex hook output format:\n%s", got)
+	}
+}
+
+func TestInstallCodexUpgradePreservesCustomHooks(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/work/.codex/hooks.json"] = []byte(`{
+  "hooks": {
+    "SessionStart": [{
+      "hooks": [{
+        "type": "command",
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc prime --hook"
+      }]
+    }],
+    "UserPromptSubmit": [{
+      "hooks": [{
+        "type": "command",
+        "command": "printf custom-codex-hook"
+      }]
+    }]
+  }
+}`)
+
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	got := string(fs.Files["/work/.codex/hooks.json"])
+	if !strings.Contains(got, "--hook-format codex") {
+		t.Errorf("upgraded codex hooks missing Codex hook output format:\n%s", got)
+	}
+	if !strings.Contains(got, "printf custom-codex-hook") {
+		t.Errorf("custom codex hook was not preserved:\n%s", got)
+	}
+}
+
 func TestInstallClaudeUpgradesGeneratedFileWithCombinedKnownDrift(t *testing.T) {
 	fs := fsys.NewFake()
 	current, err := readEmbedded("config/claude.json")
@@ -277,7 +358,7 @@ func TestInstallClaudeUpgradesGeneratedFileWithAllKnownDrift(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readEmbedded: %v", err)
 	}
-	stale := strings.Replace(string(current), `gc handoff \"context cycle\"`, `gc prime --hook`, 1)
+	stale := strings.Replace(string(current), `gc handoff --auto \"context cycle\"`, `gc prime --hook`, 1)
 	stale = strings.Replace(stale, `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook`, `gc prime --hook`, 1)
 	stale = strings.Replace(stale, `"matcher": "startup"`, `"matcher": ""`, 1)
 	if stale == string(current) {
@@ -307,7 +388,7 @@ func TestInstallClaudeUpgradesGeneratedFileWithAllKnownDrift(t *testing.T) {
 			return entries[0].Matcher
 		}())
 	}
-	if !strings.Contains(claudeHookCommand(t, hookData, "PreCompact"), `gc handoff "context cycle"`) {
+	if !strings.Contains(claudeHookCommand(t, hookData, "PreCompact"), `gc handoff --auto "context cycle"`) {
 		t.Fatalf("upgraded all-drift PreCompact hook missing gc handoff:\n%s", string(hookData))
 	}
 	if string(runtimeData) != string(hookData) {
@@ -683,6 +764,93 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 		if _, ok := fs.Files[rel]; !ok {
 			t.Errorf("expected overlay-managed provider file %s to be written", rel)
 		}
+	}
+	codexHooks := string(fs.Files["/work/.codex/hooks.json"])
+	if !strings.Contains(codexHooks, "--hook-format codex") {
+		t.Error("codex hooks should request Codex hook output format")
+	}
+	for _, rel := range []string{
+		"/work/.codex/hooks.json",
+		"/work/.gemini/settings.json",
+		"/work/.opencode/plugins/gascity.js",
+		"/work/.github/hooks/gascity.json",
+		"/work/.cursor/hooks.json",
+		"/work/.pi/extensions/gc-hooks.js",
+		"/work/.omp/hooks/gc-hook.ts",
+	} {
+		if strings.Contains(string(fs.Files[rel]), "gc hook --inject") {
+			t.Errorf("fresh overlay-managed provider file %s should not install no-op gc hook --inject", rel)
+		}
+	}
+}
+
+func TestInstallPiHookUsesCurrentExtensionAPI(t *testing.T) {
+	fs := fsys.NewFake()
+	if err := Install(fs, "/city", "/work", []string{"pi"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	data := string(fs.Files["/work/.pi/extensions/gc-hooks.js"])
+	for _, want := range []string{
+		"module.exports = function gascityPiExtension(pi)",
+		`pi.on("session_start"`,
+		`pi.on("session_compact"`,
+		`pi.on("before_agent_start"`,
+	} {
+		if !strings.Contains(data, want) {
+			t.Errorf("Pi hook missing current extension API marker %q:\n%s", want, data)
+		}
+	}
+	for _, legacy := range []string{
+		"module.exports = {",
+		`"session.created"`,
+		`"session.compacted"`,
+		`"session.deleted"`,
+		`"experimental.chat.system.transform"`,
+	} {
+		if strings.Contains(data, legacy) {
+			t.Errorf("Pi hook still contains legacy API marker %q:\n%s", legacy, data)
+		}
+	}
+}
+
+func TestInstallPiHookUpgradesLegacyObjectExport(t *testing.T) {
+	fs := fsys.NewFake()
+	legacy := []byte(`// Gas City hooks for Pi Coding Agent.
+module.exports = {
+  name: "gascity",
+  events: { "session.created": () => "" },
+  hooks: { "experimental.chat.system.transform": (system) => system },
+};
+`)
+	fs.Files["/work/.pi/extensions/gc-hooks.js"] = legacy
+
+	if err := Install(fs, "/city", "/work", []string{"pi"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	data := string(fs.Files["/work/.pi/extensions/gc-hooks.js"])
+	if data == string(legacy) {
+		t.Fatal("legacy Pi object-export hook was preserved; expected managed upgrade")
+	}
+	if !strings.Contains(data, `pi.on("session_start"`) {
+		t.Fatalf("upgraded Pi hook does not use current extension API:\n%s", data)
+	}
+}
+
+func TestInstallPiHookPreservesUserAuthoredFile(t *testing.T) {
+	fs := fsys.NewFake()
+	custom := []byte(`module.exports = function customPiExtension(pi) {
+  pi.on("session_start", () => {});
+};
+`)
+	fs.Files["/work/.pi/extensions/gc-hooks.js"] = custom
+
+	if err := Install(fs, "/city", "/work", []string{"pi"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if got := string(fs.Files["/work/.pi/extensions/gc-hooks.js"]); got != string(custom) {
+		t.Fatalf("user-authored Pi hook was overwritten:\n%s", got)
 	}
 }
 

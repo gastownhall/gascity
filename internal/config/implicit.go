@@ -28,29 +28,34 @@ type implicitImportFile struct {
 // ReadImplicitImports reads ~/.gc/implicit-import.toml (or $GC_HOME) and
 // returns its imports. Missing files are treated as empty.
 func ReadImplicitImports() (map[string]ImplicitImport, string, error) {
+	imports, path, _, err := readImplicitImportsWithData()
+	return imports, path, err
+}
+
+func readImplicitImportsWithData() (map[string]ImplicitImport, string, []byte, error) {
 	path := implicitImportPath()
 	if path == "" {
-		return map[string]ImplicitImport{}, "", nil
+		return map[string]ImplicitImport{}, "", nil, nil
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return map[string]ImplicitImport{}, path, nil
+			return map[string]ImplicitImport{}, path, nil, nil
 		}
-		return nil, path, fmt.Errorf("reading implicit imports: %w", err)
+		return nil, path, nil, fmt.Errorf("reading implicit imports: %w", err)
 	}
 
 	var file implicitImportFile
 	if _, err := toml.Decode(string(data), &file); err != nil {
-		return nil, path, fmt.Errorf("parsing implicit imports: %w", err)
+		return nil, path, nil, fmt.Errorf("parsing implicit imports: %w", err)
 	}
 	if file.Schema != 0 && file.Schema != implicitImportSchema {
-		return nil, path, fmt.Errorf("unsupported implicit import schema %d", file.Schema)
+		return nil, path, nil, fmt.Errorf("unsupported implicit import schema %d", file.Schema)
 	}
 	if file.Imports == nil {
 		file.Imports = make(map[string]ImplicitImport)
 	}
-	return file.Imports, path, nil
+	return file.Imports, path, data, nil
 }
 
 func implicitImportPath() string {

@@ -40,6 +40,31 @@ type eventsAPITransportError struct {
 	err error
 }
 
+type cliWireEvent struct {
+	Actor   string          `json:"actor"`
+	Message string          `json:"message,omitempty"`
+	Payload json.RawMessage `json:"payload,omitempty"`
+	Seq     int64           `json:"seq"`
+	Subject string          `json:"subject,omitempty"`
+	Ts      time.Time       `json:"ts"`
+	Type    string          `json:"type"`
+}
+
+type cliWireTaggedEvent struct {
+	Actor   string          `json:"actor"`
+	City    string          `json:"city"`
+	Message string          `json:"message,omitempty"`
+	Payload json.RawMessage `json:"payload,omitempty"`
+	Seq     int64           `json:"seq"`
+	Subject string          `json:"subject,omitempty"`
+	Ts      time.Time       `json:"ts"`
+	Type    string          `json:"type"`
+}
+
+type cliEventEnvelope = cliWireEvent
+
+type cliTaggedEventEnvelope = cliWireTaggedEvent
+
 func (e *eventsAPIError) Error() string {
 	if e == nil {
 		return "request failed"
@@ -498,7 +523,7 @@ func doEventsSeq(scope eventsAPIScope, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func readLocalCityEvents(scope eventsAPIScope, apiErr error, typeFilter, sinceFlag string, warningWriter io.Writer) ([]genclient.WireEvent, bool, error) {
+func readLocalCityEvents(scope eventsAPIScope, apiErr error, typeFilter, sinceFlag string, warningWriter io.Writer) ([]cliWireEvent, bool, error) {
 	if !shouldUseLocalCityEventsFallback(scope, apiErr) {
 		return nil, false, nil
 	}
@@ -512,7 +537,7 @@ func readLocalCityEvents(scope eventsAPIScope, apiErr error, typeFilter, sinceFl
 	if err != nil {
 		return nil, true, fmt.Errorf("reading local city events: %w", err)
 	}
-	items := make([]genclient.WireEvent, 0, len(all))
+	items := make([]cliWireEvent, 0, len(all))
 	for _, item := range all {
 		items = append(items, localWireEvent(item, warningWriter))
 	}
@@ -603,28 +628,47 @@ func eventsSinceCutoff(sinceFlag string) (time.Time, error) {
 	return time.Now().Add(-d), nil
 }
 
-func localWireEvent(e events.Event, warningWriter io.Writer) genclient.WireEvent {
-	item := genclient.WireEvent{
+func localWireEvent(e events.Event, _ io.Writer) cliWireEvent {
+	item := cliWireEvent{
 		Actor: e.Actor,
 		Seq:   int64(e.Seq),
 		Ts:    e.Ts,
 		Type:  e.Type,
 	}
 	if e.Subject != "" {
-		item.Subject = &e.Subject
+		item.Subject = e.Subject
 	}
 	if e.Message != "" {
-		item.Message = &e.Message
+		item.Message = e.Message
 	}
 	if len(e.Payload) > 0 && string(e.Payload) != "null" {
-		var payload genclient.EventPayload
-		if err := payload.UnmarshalJSON(e.Payload); err == nil {
-			item.Payload = &payload
-		} else if warningWriter != nil {
-			fmt.Fprintf(warningWriter, "gc events: warning: decoding local event payload for seq %d type %s: %v\n", e.Seq, e.Type, err) //nolint:errcheck // best-effort stderr
-		}
+		item.Payload = append(json.RawMessage(nil), e.Payload...)
 	}
 	return item
+}
+
+func cityWireEventFromTyped(item genclient.TypedEventStreamEnvelope) (cliWireEvent, error) {
+	data, err := json.Marshal(item)
+	if err != nil {
+		return cliWireEvent{}, err
+	}
+	var out cliWireEvent
+	if err := json.Unmarshal(data, &out); err != nil {
+		return cliWireEvent{}, err
+	}
+	return out, nil
+}
+
+func supervisorWireEventFromTyped(item genclient.TypedTaggedEventStreamEnvelope) (cliWireTaggedEvent, error) {
+	data, err := json.Marshal(item)
+	if err != nil {
+		return cliWireTaggedEvent{}, err
+	}
+	var out cliWireTaggedEvent
+	if err := json.Unmarshal(data, &out); err != nil {
+		return cliWireTaggedEvent{}, err
+	}
+	return out, nil
 }
 
 func doEventsFollow(scope eventsAPIScope, typeFilter string, payloadMatch map[string][]string, afterSeq uint64, afterCursor string, stdout, stderr io.Writer) int {
@@ -747,9 +791,9 @@ func probeCityEventsReachable(ctx context.Context, client *genclient.ClientWithR
 	return eventsListError(resp.StatusCode(), resp.ApplicationproblemJSONDefault)
 }
 
-func fetchCityEvents(ctx context.Context, client *genclient.ClientWithResponses, cityName, typeFilter, sinceFlag string) ([]genclient.WireEvent, error) {
+func fetchCityEvents(ctx context.Context, client *genclient.ClientWithResponses, cityName, typeFilter, sinceFlag string) ([]cliWireEvent, error) {
 	limit := int64(500)
-	var all []genclient.WireEvent
+	var all []cliWireEvent
 	var cursor *string
 
 	for {
@@ -773,7 +817,13 @@ func fetchCityEvents(ctx context.Context, client *genclient.ClientWithResponses,
 		if resp.JSON200 == nil || resp.JSON200.Items == nil {
 			return all, nil
 		}
-		all = append(all, *resp.JSON200.Items...)
+		for _, item := range *resp.JSON200.Items {
+			wire, err := cityWireEventFromTyped(item)
+			if err != nil {
+				return nil, fmt.Errorf("decoding city event list item: %w", err)
+			}
+			all = append(all, wire)
+		}
 		if resp.JSON200.NextCursor == nil || strings.TrimSpace(*resp.JSON200.NextCursor) == "" {
 			return all, nil
 		}
@@ -802,7 +852,7 @@ func fetchCityHeadIndex(ctx context.Context, client *genclient.ClientWithRespons
 	return index, nil
 }
 
-func fetchSupervisorEvents(ctx context.Context, client *genclient.ClientWithResponses, typeFilter, sinceFlag string) ([]genclient.WireTaggedEvent, error) {
+func fetchSupervisorEvents(ctx context.Context, client *genclient.ClientWithResponses, typeFilter, sinceFlag string) ([]cliWireTaggedEvent, error) {
 	return fetchSupervisorEventsWithLimit(ctx, client, typeFilter, sinceFlag, 0)
 }
 
@@ -811,7 +861,7 @@ func fetchSupervisorEvents(ctx context.Context, client *genclient.ClientWithResp
 // most recent `limit` events. Used by fetchSupervisorHeadCursor so
 // computing the head cursor is a cheap round-trip instead of downloading
 // every event in the supervisor's history.
-func fetchSupervisorEventsWithLimit(ctx context.Context, client *genclient.ClientWithResponses, typeFilter, sinceFlag string, limit int64) ([]genclient.WireTaggedEvent, error) {
+func fetchSupervisorEventsWithLimit(ctx context.Context, client *genclient.ClientWithResponses, typeFilter, sinceFlag string, limit int64) ([]cliWireTaggedEvent, error) {
 	params := &genclient.GetV0EventsParams{}
 	if strings.TrimSpace(typeFilter) != "" {
 		params.Type = &typeFilter
@@ -830,9 +880,17 @@ func fetchSupervisorEventsWithLimit(ctx context.Context, client *genclient.Clien
 		return nil, err
 	}
 	if resp.JSON200 == nil || resp.JSON200.Items == nil {
-		return []genclient.WireTaggedEvent{}, nil
+		return []cliWireTaggedEvent{}, nil
 	}
-	return *resp.JSON200.Items, nil
+	items := make([]cliWireTaggedEvent, 0, len(*resp.JSON200.Items))
+	for _, item := range *resp.JSON200.Items {
+		wire, err := supervisorWireEventFromTyped(item)
+		if err != nil {
+			return nil, fmt.Errorf("decoding supervisor event list item: %w", err)
+		}
+		items = append(items, wire)
+	}
+	return items, nil
 }
 
 // fetchSupervisorHeadCursor asks the supervisor for its current head
@@ -878,14 +936,14 @@ func eventsListError(statusCode int, problem *genclient.ErrorModel) error {
 
 func printJSONLines(items any, stdout, stderr io.Writer) int {
 	switch typed := items.(type) {
-	case []genclient.WireEvent:
+	case []cliWireEvent:
 		for _, item := range typed {
 			if err := writeJSONLValue(stdout, item); err != nil {
 				fmt.Fprintf(stderr, "gc events: marshal: %v\n", err) //nolint:errcheck
 				return 1
 			}
 		}
-	case []genclient.WireTaggedEvent:
+	case []cliWireTaggedEvent:
 		for _, item := range typed {
 			if err := writeJSONLValue(stdout, item); err != nil {
 				fmt.Fprintf(stderr, "gc events: marshal: %v\n", err) //nolint:errcheck
@@ -924,11 +982,11 @@ func writeJSONLValue(stdout io.Writer, value any) error {
 	return err
 }
 
-func filterCityEvents(items []genclient.WireEvent, afterSeq uint64, typeFilter string, payloadMatch map[string][]string) []genclient.WireEvent {
+func filterCityEvents(items []cliWireEvent, afterSeq uint64, typeFilter string, payloadMatch map[string][]string) []cliWireEvent {
 	if len(items) == 0 {
-		return []genclient.WireEvent{}
+		return []cliWireEvent{}
 	}
-	out := make([]genclient.WireEvent, 0, len(items))
+	out := make([]cliWireEvent, 0, len(items))
 	for _, item := range items {
 		if uint64(item.Seq) <= afterSeq {
 			continue
@@ -944,11 +1002,11 @@ func filterCityEvents(items []genclient.WireEvent, afterSeq uint64, typeFilter s
 	return out
 }
 
-func filterSupervisorEvents(items []genclient.WireTaggedEvent, typeFilter string, payloadMatch map[string][]string) []genclient.WireTaggedEvent {
+func filterSupervisorEvents(items []cliWireTaggedEvent, typeFilter string, payloadMatch map[string][]string) []cliWireTaggedEvent {
 	if len(items) == 0 {
-		return []genclient.WireTaggedEvent{}
+		return []cliWireTaggedEvent{}
 	}
-	out := make([]genclient.WireTaggedEvent, 0, len(items))
+	out := make([]cliWireTaggedEvent, 0, len(items))
 	for _, item := range items {
 		if typeFilter != "" && item.Type != typeFilter {
 			continue
@@ -961,9 +1019,9 @@ func filterSupervisorEvents(items []genclient.WireTaggedEvent, typeFilter string
 	return out
 }
 
-func filterSupervisorEventsAfterCursor(items []genclient.WireTaggedEvent, cursor, typeFilter string, payloadMatch map[string][]string) []genclient.WireTaggedEvent {
+func filterSupervisorEventsAfterCursor(items []cliWireTaggedEvent, cursor, typeFilter string, payloadMatch map[string][]string) []cliWireTaggedEvent {
 	cursors := events.ParseCursor(cursor)
-	out := make([]genclient.WireTaggedEvent, 0, len(items))
+	out := make([]cliWireTaggedEvent, 0, len(items))
 	for _, item := range items {
 		if uint64(item.Seq) <= cursors[item.City] {
 			continue
@@ -1302,7 +1360,7 @@ func (d *sseDecoder) Next() (sseFrame, error) {
 	return sseFrame{}, io.EOF
 }
 
-func supervisorCursorFor(items []genclient.WireTaggedEvent) string {
+func supervisorCursorFor(items []cliWireTaggedEvent) string {
 	if len(items) == 0 {
 		return ""
 	}
@@ -1320,39 +1378,16 @@ func supervisorCursorFor(items []genclient.WireTaggedEvent) string {
 // identical JSONL output. The only structural difference between the
 // two shapes is the optional Workflow projection that the stream
 // attaches to bead events; list results omit it.
-func cityEnvelopesFor(items []genclient.WireEvent) []genclient.EventStreamEnvelope {
-	out := make([]genclient.EventStreamEnvelope, 0, len(items))
-	for _, item := range items {
-		out = append(out, genclient.EventStreamEnvelope{
-			Actor:   item.Actor,
-			Message: item.Message,
-			Payload: item.Payload,
-			Seq:     item.Seq,
-			Subject: item.Subject,
-			Ts:      item.Ts,
-			Type:    item.Type,
-		})
-	}
-	return out
+func cityEnvelopesFor(items []cliWireEvent) []cliEventEnvelope {
+	out := make([]cliEventEnvelope, 0, len(items))
+	return append(out, items...)
 }
 
 // taggedEnvelopesFor is the supervisor-scope analog of cityEnvelopesFor,
 // preserving the City tag for the aggregated events stream.
-func taggedEnvelopesFor(items []genclient.WireTaggedEvent) []genclient.TaggedEventStreamEnvelope {
-	out := make([]genclient.TaggedEventStreamEnvelope, 0, len(items))
-	for _, item := range items {
-		out = append(out, genclient.TaggedEventStreamEnvelope{
-			Actor:   item.Actor,
-			City:    item.City,
-			Message: item.Message,
-			Payload: item.Payload,
-			Seq:     item.Seq,
-			Subject: item.Subject,
-			Ts:      item.Ts,
-			Type:    item.Type,
-		})
-	}
-	return out
+func taggedEnvelopesFor(items []cliWireTaggedEvent) []cliTaggedEventEnvelope {
+	out := make([]cliTaggedEventEnvelope, 0, len(items))
+	return append(out, items...)
 }
 
 func matchPayload(payload any, payloadMatch map[string][]string) bool {

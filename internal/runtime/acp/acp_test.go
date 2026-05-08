@@ -87,11 +87,10 @@ for line in sys.stdin:
         respond(msg_id, {"sessionId": session_id})
     elif method == "session/prompt":
         params = msg.get("params", {})
-        messages = params.get("messages", [])
+        blocks = params.get("prompt", [])
         text = ""
-        for m in messages:
-            for c in m.get("content", []):
-                text += c.get("text", "")
+        for b in blocks:
+            text += b.get("text", "")
         # Send update notification with echoed text
         notify("session/update", {
             "sessionId": session_id,

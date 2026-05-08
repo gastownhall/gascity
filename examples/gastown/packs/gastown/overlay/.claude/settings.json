@@ -21,7 +21,7 @@
           },
           {
             "type": "command",
-            "command": "gc handoff \"context cycle\""
+            "command": "gc handoff --auto \"context cycle\""
           }
         ]
       }

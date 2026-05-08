@@ -76,6 +76,9 @@ func ResolveProvider(agent *Agent, ws *Workspace, cityProviders map[string]Provi
 	// §Kind / provider-family propagation.
 	resolved.BuiltinAncestor = BuiltinFamily(name, cityProviders)
 	mergeAgentOverrides(resolved, agent)
+	if agent.ResumeCommand == "" {
+		completeResolvedProviderResumeCommand(resolved)
+	}
 
 	// Step 4b: workspace.start_command overrides the resolved command when
 	// the agent doesn't set its own. Unlike the escape hatch at step 2
@@ -137,9 +140,10 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 			// opt-out and must not fall through to legacy auto-inheritance.
 			if spec.Base != nil {
 				if strings.TrimSpace(*spec.Base) == "" {
-					return &spec, nil
+					standalone := normalizeProviderLayerArgsForSchema(spec, spec.OptionsSchema)
+					return &standalone, nil
 				}
-				resolved, err := ResolveProviderChain(name, spec, cityProviders)
+				resolved, err := resolveProviderChain(name, spec, cityProviders, false)
 				if err != nil {
 					return nil, err
 				}
@@ -150,14 +154,19 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 			// if the provider name or command matches a known builtin.
 			builtins := BuiltinProviders()
 			if base, ok := builtins[name]; ok {
-				merged := MergeProviderOverBuiltin(base, spec)
+				base = normalizeProviderLayerArgsForSchema(base, base.OptionsSchema)
+				child := normalizeProviderLayerArgsForSchema(spec, providerSchemaForLayerArgs(base, spec))
+				merged := MergeProviderOverBuiltin(base, child)
 				return &merged, nil
 			}
 			if base, ok := builtins[spec.Command]; ok {
-				merged := MergeProviderOverBuiltin(base, spec)
+				base = normalizeProviderLayerArgsForSchema(base, base.OptionsSchema)
+				child := normalizeProviderLayerArgsForSchema(spec, providerSchemaForLayerArgs(base, spec))
+				merged := MergeProviderOverBuiltin(base, child)
 				return &merged, nil
 			}
-			return &spec, nil
+			standalone := normalizeProviderLayerArgsForSchema(spec, spec.OptionsSchema)
+			return &standalone, nil
 		}
 	}
 
@@ -250,6 +259,9 @@ func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	if city.TitleModel != "" {
 		result.TitleModel = city.TitleModel
 	}
+	if city.ACPCommand != "" {
+		result.ACPCommand = city.ACPCommand
+	}
 
 	// Slice fields: replace entirely when non-nil.
 	if city.Args != nil {
@@ -273,6 +285,9 @@ func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	}
 	if city.PrintArgs != nil {
 		result.PrintArgs = city.PrintArgs
+	}
+	if city.ACPArgs != nil {
+		result.ACPArgs = city.ACPArgs
 	}
 
 	// Map fields: merge additively (city keys win).
@@ -378,6 +393,41 @@ func optionKeysRemovedByReplacement(base, replacement []ProviderOption) map[stri
 		}
 	}
 	return removed
+}
+
+func providerSchemaForLayerArgs(parent, child ProviderSpec) []ProviderOption {
+	if child.OptionsSchema == nil {
+		return parent.OptionsSchema
+	}
+	if child.OptionsSchemaMerge == "by_key" {
+		schema, _ := mergeOptionsSchemaByKey(parent.OptionsSchema, child.OptionsSchema)
+		return schema
+	}
+	return child.OptionsSchema
+}
+
+func normalizeProviderLayerArgsForSchema(spec ProviderSpec, schema []ProviderOption) ProviderSpec {
+	if len(schema) == 0 {
+		return spec
+	}
+	allFlags := CollectAllSchemaFlags(schema)
+	if len(allFlags) == 0 {
+		return spec
+	}
+	defaults := cloneStringMap(spec.OptionDefaults)
+	if defaults == nil {
+		defaults = make(map[string]string)
+	}
+	if spec.Args != nil {
+		spec.Args = stripArgsSlice(spec.Args, allFlags, schema, defaults)
+	}
+	if spec.ArgsAppend != nil {
+		spec.ArgsAppend = stripArgsSlice(spec.ArgsAppend, allFlags, schema, defaults)
+	}
+	if len(defaults) > 0 || spec.OptionDefaults != nil {
+		spec.OptionDefaults = defaults
+	}
+	return spec
 }
 
 // resolveProviderKind determines the canonical builtin provider name for a
@@ -486,6 +536,7 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 		ResumeCommand:          spec.ResumeCommand,
 		SessionIDFlag:          spec.SessionIDFlag,
 		TitleModel:             spec.TitleModel,
+		ACPCommand:             spec.ACPCommand,
 	}
 	// Deep-copy OptionsSchema to avoid aliasing the spec's slice.
 	if len(spec.OptionsSchema) > 0 {
@@ -500,6 +551,9 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 						rp.OptionsSchema[i].Choices[j].FlagArgs = make([]string, len(c.FlagArgs))
 						copy(rp.OptionsSchema[i].Choices[j].FlagArgs, c.FlagArgs)
 					}
+					if len(c.FlagAliases) > 0 {
+						rp.OptionsSchema[i].Choices[j].FlagAliases = cloneStringSlices(c.FlagAliases)
+					}
 				}
 			}
 		}
@@ -509,7 +563,7 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 		rp.InstructionsFile = "AGENTS.md"
 	}
 	// Copy slices to avoid aliasing.
-	if len(spec.Args) > 0 {
+	if spec.Args != nil {
 		rp.Args = make([]string, len(spec.Args))
 		copy(rp.Args, spec.Args)
 	}
@@ -518,10 +572,11 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 	// if a city.toml still has schema-managed flags in args (e.g.,
 	// --dangerously-skip-permissions), they get removed because the option is
 	// covered by OptionsSchema. Inferred defaults preserve user intent.
-	if len(rp.OptionsSchema) > 0 && len(rp.Args) > 0 {
+	if len(rp.OptionsSchema) > 0 && rp.Args != nil {
 		allFlags := CollectAllSchemaFlags(rp.OptionsSchema)
 		inferredDefaults := make(map[string]string)
-		// Seed with existing OptionDefaults so they aren't overridden.
+		// Seed with existing OptionDefaults; same-layer Args override them
+		// when stripArgsSlice infers a schema-managed choice.
 		for k, v := range spec.OptionDefaults {
 			inferredDefaults[k] = v
 		}
@@ -532,7 +587,6 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 	} else {
 		rp.EffectiveDefaults = ComputeEffectiveDefaults(rp.OptionsSchema, spec.OptionDefaults, nil)
 	}
-
 	if len(spec.ProcessNames) > 0 {
 		rp.ProcessNames = make([]string, len(spec.ProcessNames))
 		copy(rp.ProcessNames, spec.ProcessNames)
@@ -553,7 +607,15 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 		rp.PrintArgs = make([]string, len(spec.PrintArgs))
 		copy(rp.PrintArgs, spec.PrintArgs)
 	}
+	if spec.ACPArgs != nil {
+		rp.ACPArgs = make([]string, len(spec.ACPArgs))
+		copy(rp.ACPArgs, spec.ACPArgs)
+	}
 	return rp
+}
+
+func completeResolvedProviderResumeCommand(rp *ResolvedProvider) {
+	rp.ResumeCommand = completeResumeCommandDefaults(rp.ResumeCommand, rp.ResumeFlag, rp.ResumeStyle, rp.OptionsSchema, rp.EffectiveDefaults)
 }
 
 // AgentHasHooks reports whether an agent has provider hooks installed
@@ -700,6 +762,13 @@ func resolvedChainToSpec(r ResolvedProvider, leaf ProviderSpec) ProviderSpec {
 	if r.TitleModel != "" {
 		out.TitleModel = r.TitleModel
 	}
+	if r.ACPCommand != "" {
+		out.ACPCommand = r.ACPCommand
+	}
+	if r.ACPArgs != nil {
+		out.ACPArgs = make([]string, len(r.ACPArgs))
+		copy(out.ACPArgs, r.ACPArgs)
+	}
 	if r.PrintArgs != nil {
 		out.PrintArgs = append([]string(nil), r.PrintArgs...)
 	}
@@ -716,20 +785,13 @@ func resolvedChainToSpec(r ResolvedProvider, leaf ProviderSpec) ProviderSpec {
 		}
 	}
 	if r.OptionsSchema != nil {
-		out.OptionsSchema = append([]ProviderOption(nil), r.OptionsSchema...)
+		out.OptionsSchema = deepCopyProviderOptions(r.OptionsSchema)
 	}
-	// EffectiveDefaults on ResolvedProvider is the merged defaults; fold
-	// into OptionDefaults on the spec so downstream specToResolved picks
-	// it up when rebuilding.
+	// EffectiveDefaults on ResolvedProvider is the normalized merged defaults;
+	// replace OptionDefaults on the folded spec so same-layer schema-managed
+	// args cannot be shadowed again by the original stale leaf map.
 	if r.EffectiveDefaults != nil {
-		if out.OptionDefaults == nil {
-			out.OptionDefaults = make(map[string]string, len(r.EffectiveDefaults))
-		}
-		for k, v := range r.EffectiveDefaults {
-			if _, ok := out.OptionDefaults[k]; !ok {
-				out.OptionDefaults[k] = v
-			}
-		}
+		out.OptionDefaults = cloneStringMap(r.EffectiveDefaults)
 	}
 	return out
 }

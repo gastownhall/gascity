@@ -26,6 +26,7 @@ import (
 	sessionk8s "github.com/gastownhall/gascity/internal/runtime/k8s"
 	sessionsubprocess "github.com/gastownhall/gascity/internal/runtime/subprocess"
 	sessiontmux "github.com/gastownhall/gascity/internal/runtime/tmux"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
@@ -70,7 +71,10 @@ func sessionProviderContextForCity(cfg *config.City, cityPath, providerOverride 
 	return ctx
 }
 
-var openSessionProviderStore = openCityStoreAt
+var (
+	openSessionProviderStore   = openCityStoreAt
+	buildSessionProviderByName = newSessionProviderByName
+)
 
 // tmuxConfigFromSession converts a config.SessionConfig into a
 // sessiontmux.Config with resolved durations and defaults. If the
@@ -160,8 +164,28 @@ func newSessionProviderForCity(cfg *config.City, cityPath string) runtime.Provid
 	return newSessionProviderFromContext(ctx, sessionBeads)
 }
 
+func newStatusSessionProviderForCity(cfg *config.City, cityPath string) runtime.Provider {
+	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
+	return newSessionProviderFromContext(ctx, nil)
+}
+
+func newStatusSessionProviderForCityWithSnapshot(cfg *config.City, cityPath string, sessionBeads *sessionBeadSnapshot) runtime.Provider {
+	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
+	return newSessionProviderFromContext(ctx, sessionBeads)
+}
+
+func registerStatusProviderACPRoutes(sp runtime.Provider, snapshot *sessionBeadSnapshot, cityName string, cfg *config.City) {
+	router, ok := sp.(interface{ RouteACP(string) })
+	if !ok {
+		return
+	}
+	for _, sessName := range configuredACPRouteNames(snapshot, cityName, cfg) {
+		router.RouteACP(sessName)
+	}
+}
+
 func loadProviderSessionSnapshot(ctx sessionProviderContext) *sessionBeadSnapshot {
-	if ctx.cityPath == "" || ctx.providerName == "acp" || !hasACPAgents(ctx.agents) {
+	if ctx.cityPath == "" || ctx.providerName == "acp" {
 		return nil
 	}
 	store, err := openSessionProviderStore(ctx.cityPath)
@@ -176,47 +200,64 @@ func loadProviderSessionSnapshot(ctx sessionProviderContext) *sessionBeadSnapsho
 }
 
 func newSessionProviderFromContext(ctx sessionProviderContext, sessionBeads *sessionBeadSnapshot) runtime.Provider {
-	sp, err := newSessionProviderByName(ctx.providerName, ctx.sc, ctx.cityName, ctx.cityPath)
+	sp, err := newSessionProviderFromContextWithError(ctx, sessionBeads)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err) //nolint:errcheck // best-effort stderr
 		os.Exit(1)
+	}
+	return sp
+}
+
+func newSessionProviderFromContextWithError(ctx sessionProviderContext, sessionBeads *sessionBeadSnapshot) (runtime.Provider, error) {
+	sp, err := buildSessionProviderByName(ctx.providerName, ctx.sc, ctx.cityName, ctx.cityPath)
+	if err != nil {
+		return nil, err
 	}
 	// If the city-level provider is not ACP but some agents need ACP,
 	// wrap in an auto provider that routes per-session.
 	// NOTE: agents comes from loadCityConfig which applies pack overrides,
 	// so the Session field from overrides is already resolved here.
-	if ctx.providerName != "acp" && hasACPAgents(ctx.agents) {
-		acpSP, acpErr := newSessionProviderByName("acp", ctx.sc, ctx.cityName, ctx.cityPath)
+	requireACPWrapper := requiresACPProviderWrapper(sessionBeads, ctx.cityName, ctx.cfg)
+	if ctx.providerName != "acp" && needsACPProviderWrapper(sessionBeads, ctx.cityName, ctx.cfg) {
+		acpSP, acpErr := buildSessionProviderByName("acp", ctx.sc, ctx.cityName, ctx.cityPath)
 		if acpErr != nil {
-			fmt.Fprintf(os.Stderr, "acp provider: %v\n", acpErr) //nolint:errcheck // best-effort stderr
-			os.Exit(1)
+			if requireACPWrapper {
+				return nil, fmt.Errorf("acp provider: %w", acpErr)
+			}
+			return sp, nil
 		}
 		autoSP := sessionauto.New(sp, acpSP)
-		for _, sessName := range configuredACPSessionNames(sessionBeads, ctx.cityName, ctx.sessionTemplate, ctx.agents) {
+		for _, sessName := range configuredACPRouteNames(sessionBeads, ctx.cityName, ctx.cfg) {
 			autoSP.RouteACP(sessName)
 		}
-		return autoSP
+		return autoSP, nil
 	}
-	return sp
+	return sp, nil
 }
 
-// hasACPAgents reports whether any agent in the config uses session = "acp".
-func hasACPAgents(agents []config.Agent) bool {
-	for _, a := range agents {
-		if a.Session == "acp" {
-			return true
-		}
+func agentSessionCreateTransport(cfg *config.City, agentCfg config.Agent) string {
+	if cfg == nil {
+		return strings.TrimSpace(agentCfg.Session)
 	}
-	return false
+	resolved, err := config.ResolveProvider(
+		&agentCfg,
+		&cfg.Workspace,
+		cfg.Providers,
+		func(name string) (string, error) { return name, nil },
+	)
+	if err != nil {
+		return strings.TrimSpace(agentCfg.Session)
+	}
+	return config.ResolveSessionCreateTransport(agentCfg.Session, resolved)
 }
 
 // configuredACPSessionNames resolves the runtime session names for ACP-backed
 // agents using a single session-bead snapshot. When the snapshot is unavailable
 // or bead lookup fails, it falls back to the legacy deterministic name.
-func configuredACPSessionNames(snapshot *sessionBeadSnapshot, cityName, sessionTemplate string, agents []config.Agent) []string {
+func configuredACPSessionNames(snapshot *sessionBeadSnapshot, cityName, sessionTemplate string, cfg *config.City, agents []config.Agent) []string {
 	names := make([]string, 0, len(agents))
 	for _, a := range agents {
-		if a.Session != "acp" {
+		if agentSessionCreateTransport(cfg, a) != "acp" {
 			continue
 		}
 		sessName := agent.SessionNameFor(cityName, a.QualifiedName(), sessionTemplate)
@@ -226,6 +267,171 @@ func configuredACPSessionNames(snapshot *sessionBeadSnapshot, cityName, sessionT
 			}
 		}
 		names = append(names, sessName)
+	}
+	return names
+}
+
+func needsACPProviderWrapper(snapshot *sessionBeadSnapshot, cityName string, cfg *config.City) bool {
+	return requiresACPProviderWrapper(snapshot, cityName, cfg) || (cfg != nil && hasACPProviderTargets(cfg))
+}
+
+func requiresACPProviderWrapper(snapshot *sessionBeadSnapshot, cityName string, cfg *config.City) bool {
+	return len(configuredACPRouteNames(snapshot, cityName, cfg)) > 0
+}
+
+func hasACPProviderTargets(cfg *config.City) bool {
+	if cfg == nil {
+		return false
+	}
+	candidates := map[string]bool{}
+	add := func(name string) {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			candidates[name] = true
+		}
+	}
+	add(cfg.Workspace.Provider)
+	for name := range cfg.Providers {
+		add(name)
+	}
+	for _, agentCfg := range cfg.Agents {
+		add(agentCfg.Provider)
+	}
+	for name := range candidates {
+		if providerSessionCreateUsesACP(cfg, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func resolveProviderForACPTransport(cfg *config.City, providerName string) *config.ResolvedProvider {
+	if cfg == nil || strings.TrimSpace(providerName) == "" {
+		return nil
+	}
+	resolved, err := config.ResolveProvider(
+		&config.Agent{Provider: providerName},
+		&cfg.Workspace,
+		cfg.Providers,
+		func(name string) (string, error) { return name, nil },
+	)
+	if err != nil {
+		return nil
+	}
+	return resolved
+}
+
+func providerSessionCreateUsesACP(cfg *config.City, providerName string) bool {
+	resolved := resolveProviderForACPTransport(cfg, providerName)
+	return resolved != nil && resolved.ProviderSessionCreateTransport() == "acp"
+}
+
+func providerLegacyDefaultsToACP(cfg *config.City, providerName string) bool {
+	resolved := resolveProviderForACPTransport(cfg, providerName)
+	return resolved != nil && resolved.ProviderSessionCreateTransport() == "acp"
+}
+
+func observedACPSessionNames(snapshot *sessionBeadSnapshot, cfg *config.City) []string {
+	if snapshot == nil {
+		return nil
+	}
+	names := make([]string, 0, len(snapshot.open))
+	seen := make(map[string]bool, len(snapshot.open))
+	for _, bead := range snapshot.Open() {
+		if !beadUsesACPTransport(bead, cfg) {
+			continue
+		}
+		sessionName := strings.TrimSpace(bead.Metadata["session_name"])
+		if sessionName == "" || seen[sessionName] {
+			continue
+		}
+		seen[sessionName] = true
+		names = append(names, sessionName)
+	}
+	return names
+}
+
+func beadUsesACPTransport(bead beads.Bead, cfg *config.City) bool {
+	transport := strings.TrimSpace(bead.Metadata["transport"])
+	if transport != "" {
+		return transport == "acp"
+	}
+	providerName := strings.TrimSpace(bead.Metadata["provider"])
+	if providerName == "acp" {
+		return true
+	}
+	if strings.TrimSpace(bead.Metadata[session.MCPIdentityMetadataKey]) != "" ||
+		strings.TrimSpace(bead.Metadata[session.MCPServersSnapshotMetadataKey]) != "" {
+		return true
+	}
+	templateName := strings.TrimSpace(bead.Metadata["template"])
+	if cfg != nil {
+		if agentCfg, ok := resolveAgentIdentity(cfg, templateName, currentRigContext(cfg)); ok {
+			if strings.TrimSpace(agentCfg.Session) != "" && agentSessionCreateTransport(cfg, agentCfg) == "acp" {
+				return true
+			}
+			if strings.TrimSpace(bead.Metadata["command"]) == "" &&
+				strings.TrimSpace(bead.Metadata["pending_create_claim"]) == "true" &&
+				agentSessionCreateTransport(cfg, agentCfg) == "acp" {
+				return true
+			}
+			if providerName == "" {
+				providerName = strings.TrimSpace(agentCfg.Provider)
+			}
+		}
+		if providerName == "" {
+			providerName = templateName
+		}
+		resolved := resolveProviderForACPTransport(cfg, providerName)
+		if resolved != nil {
+			acpCommand := strings.TrimSpace(resolved.ACPCommandString())
+			defaultCommand := strings.TrimSpace(resolved.CommandString())
+			storedCommand := strings.TrimSpace(bead.Metadata["command"])
+			if acpCommand != "" && acpCommand != defaultCommand &&
+				(storedCommand == acpCommand || strings.HasPrefix(storedCommand, acpCommand+" ")) {
+				return true
+			}
+		}
+		if strings.TrimSpace(bead.Metadata["command"]) == "" &&
+			strings.TrimSpace(bead.Metadata["pending_create_claim"]) == "true" {
+			return providerLegacyDefaultsToACP(cfg, providerName)
+		}
+	}
+	return false
+}
+
+func configuredACPRouteNames(snapshot *sessionBeadSnapshot, cityName string, cfg *config.City) []string {
+	names := observedACPSessionNames(snapshot, cfg)
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		seen[name] = true
+	}
+	if cfg == nil {
+		return names
+	}
+	for _, name := range configuredACPSessionNames(snapshot, cityName, cfg.Workspace.SessionTemplate, cfg, cfg.Agents) {
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	for _, named := range cfg.NamedSessions {
+		agentCfg := config.FindAgent(cfg, named.TemplateQualifiedName())
+		if agentCfg == nil || agentSessionCreateTransport(cfg, *agentCfg) != "acp" {
+			continue
+		}
+		sessionName := config.NamedSessionRuntimeName(cityName, cfg.Workspace, named.QualifiedName())
+		if snapshot != nil {
+			if snapName := snapshot.FindSessionNameByNamedIdentity(named.QualifiedName()); snapName != "" {
+				sessionName = snapName
+			}
+		}
+		if sessionName == "" || seen[sessionName] {
+			continue
+		}
+		seen[sessionName] = true
+		names = append(names, sessionName)
 	}
 	return names
 }
@@ -240,6 +446,9 @@ func displayProviderName(name string) string {
 
 func configuredBeadsProviderValue(cityPath string) string {
 	if v := strings.TrimSpace(os.Getenv("GC_BEADS")); v != "" {
+		if scopedRoot := strings.TrimSpace(os.Getenv("GC_BEADS_SCOPE_ROOT")); scopedRoot != "" && cityPath != "" && !samePath(resolveStoreScopeRoot(cityPath, scopedRoot), cityPath) {
+			return strings.TrimSpace(peekBeadsProvider(filepath.Join(cityPath, "city.toml")))
+		}
 		return v
 	}
 	return strings.TrimSpace(peekBeadsProvider(filepath.Join(cityPath, "city.toml")))
@@ -379,6 +588,27 @@ func scopeUsesFileStoreContract(scopeRoot string) bool {
 	return err == nil
 }
 
+// bdProviderMismatchHint returns an actionable diagnostic when gc bd
+// rejects a scope as non-bd-backed. It names the marker that tipped
+// the resolver and suggests a fix. Returns "" when the cause is not
+// a local scope-marker issue (e.g., explicit city/env provider).
+func bdProviderMismatchHint(scopeRoot, resolvedProvider string) string {
+	if resolvedProvider == "file" && scopeUsesFileStoreContract(scopeRoot) {
+		return fmt.Sprintf(
+			"%s/.gc/beads.json exists, which marks this scope as file-backed. "+
+				"If it is a stale artifact from a previous city or pre-migration "+
+				"layout, move it aside (e.g., rename to .gc/beads.json.bak). To "+
+				"positively mark this scope as bd-backed, add "+
+				"%s/.beads/metadata.json (with backend=dolt and the dolt_database "+
+				"name).",
+			scopeRoot, scopeRoot)
+	}
+	if strings.TrimSpace(os.Getenv("GC_BEADS")) != "" {
+		return "GC_BEADS env var overrides the provider. Unset it, or set GC_BEADS=bd for this scope."
+	}
+	return "check city.toml [beads].provider and any per-rig provider overrides."
+}
+
 // beadsProvider returns the bead store provider name for lifecycle operations.
 // Maps "bd" → "exec:<cityPath>/.gc/system/packs/bd/assets/scripts/gc-beads-bd.sh"
 // so all lifecycle operations route through the exec: protocol. Other providers
@@ -417,7 +647,8 @@ func mailProviderName() string {
 
 // newMailProvider returns a mail.Provider based on the mail provider name
 // (env var → city.toml → default) and the given bead store (used as the
-// default backend).
+// default backend). Shared callers such as the API use the stateless beadmail
+// provider so long-lived instances observe fresh session state.
 //
 //   - "fake" → in-memory fake (all ops succeed)
 //   - "fail" → broken fake (all ops return errors)
@@ -438,20 +669,35 @@ func newMailProvider(store beads.Store) mail.Provider {
 	}
 }
 
+func newCommandMailProvider(store beads.Store) mail.Provider {
+	v := mailProviderName()
+	if strings.HasPrefix(v, "exec:") {
+		return mailexec.NewProvider(strings.TrimPrefix(v, "exec:"))
+	}
+	switch v {
+	case "fake":
+		return mail.NewFake()
+	case "fail":
+		return mail.NewFailFake()
+	default:
+		return beadmail.NewCached(store)
+	}
+}
+
 // openCityMailProvider opens the city's bead store and wraps it in a
 // mail.Provider. Returns (nil, exitCode) on failure.
 func openCityMailProvider(stderr io.Writer, cmdName string) (mail.Provider, int) {
 	// For exec: and test doubles, no store needed.
 	v := mailProviderName()
 	if strings.HasPrefix(v, "exec:") || v == "fake" || v == "fail" {
-		return newMailProvider(nil), 0
+		return newCommandMailProvider(nil), 0
 	}
 
 	store, code := openCityStore(stderr, cmdName)
 	if store == nil {
 		return nil, code
 	}
-	return newMailProvider(store), 0
+	return newCommandMailProvider(store), 0
 }
 
 // eventsProviderName returns the events provider name.

@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync/atomic"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -66,12 +67,73 @@ type ServerInfo struct {
 
 // InitializeParams is the params for the "initialize" request.
 type InitializeParams struct {
-	ClientInfo ClientInfo `json:"clientInfo"`
+	ProtocolVersion int        `json:"protocolVersion"`
+	ClientInfo      ClientInfo `json:"clientInfo"`
 }
 
 // InitializeResult is the result of the "initialize" request.
 type InitializeResult struct {
 	ServerInfo ServerInfo `json:"serverInfo"`
+}
+
+// SessionNewParams is the params for the "session/new" request.
+type SessionNewParams struct {
+	Cwd        string                `json:"cwd"`
+	McpServers []SessionNewMCPServer `json:"mcpServers"`
+}
+
+// SessionNewMCPServer is the ACP wire representation of one MCP server
+// attached to session/new.
+type SessionNewMCPServer struct {
+	Name      string
+	Transport runtime.MCPTransport
+	Command   string
+	Args      []string
+	Env       []runtime.MCPKeyValue
+	URL       string
+	Headers   []runtime.MCPKeyValue
+}
+
+type sessionNewMCPServerStdio struct {
+	Name    string                `json:"name"`
+	Command string                `json:"command"`
+	Args    []string              `json:"args"`
+	Env     []runtime.MCPKeyValue `json:"env"`
+}
+
+type sessionNewMCPServerHTTP struct {
+	Type    string                `json:"type"`
+	Name    string                `json:"name"`
+	URL     string                `json:"url"`
+	Headers []runtime.MCPKeyValue `json:"headers"`
+}
+
+// MarshalJSON emits the transport-specific ACP schema shape for one MCP
+// server. Stdio omits the type discriminator per spec.
+func (s SessionNewMCPServer) MarshalJSON() ([]byte, error) {
+	switch s.Transport {
+	case runtime.MCPTransportHTTP:
+		return json.Marshal(sessionNewMCPServerHTTP{
+			Type:    string(runtime.MCPTransportHTTP),
+			Name:    s.Name,
+			URL:     s.URL,
+			Headers: nonNilMCPKeyValues(s.Headers),
+		})
+	case runtime.MCPTransportSSE:
+		return json.Marshal(sessionNewMCPServerHTTP{
+			Type:    string(runtime.MCPTransportSSE),
+			Name:    s.Name,
+			URL:     s.URL,
+			Headers: nonNilMCPKeyValues(s.Headers),
+		})
+	default:
+		return json.Marshal(sessionNewMCPServerStdio{
+			Name:    s.Name,
+			Command: s.Command,
+			Args:    nonNilStrings(s.Args),
+			Env:     nonNilMCPKeyValues(s.Env),
+		})
+	}
 }
 
 // SessionNewResult is the result of the "session/new" request.
@@ -81,14 +143,8 @@ type SessionNewResult struct {
 
 // SessionPromptParams is the params for the "session/prompt" request.
 type SessionPromptParams struct {
-	SessionID string          `json:"sessionId"`
-	Messages  []PromptMessage `json:"messages"`
-}
-
-// PromptMessage is a message within a session/prompt request.
-type PromptMessage struct {
-	Role    string         `json:"role"`
-	Content []ContentBlock `json:"content"`
+	SessionID string         `json:"sessionId"`
+	Prompt    []ContentBlock `json:"prompt"`
 }
 
 // SessionUpdateParams is the params for "session/update" notifications.
@@ -123,7 +179,8 @@ func newNotification(method string) JSONRPCMessage {
 // newInitializeRequest creates an "initialize" request.
 func newInitializeRequest() (JSONRPCMessage, int64) {
 	return newRequest("initialize", InitializeParams{
-		ClientInfo: ClientInfo{Name: "gc", Version: "1.0"},
+		ProtocolVersion: 1,
+		ClientInfo:      ClientInfo{Name: "gc", Version: "1.0"},
 	})
 }
 
@@ -133,8 +190,61 @@ func newInitializedNotification() JSONRPCMessage {
 }
 
 // newSessionNewRequest creates a "session/new" request.
-func newSessionNewRequest() (JSONRPCMessage, int64) {
-	return newRequest("session/new", nil)
+func newSessionNewRequest(workDir string, mcpServers []runtime.MCPServerConfig) (JSONRPCMessage, int64) {
+	return newRequest("session/new", SessionNewParams{
+		Cwd:        workDir,
+		McpServers: sessionNewMCPServers(mcpServers),
+	})
+}
+
+func sessionNewMCPServers(servers []runtime.MCPServerConfig) []SessionNewMCPServer {
+	if len(servers) == 0 {
+		return []SessionNewMCPServer{}
+	}
+	normalized := runtime.NormalizeMCPServerConfigs(servers)
+	out := make([]SessionNewMCPServer, 0, len(normalized))
+	for _, server := range normalized {
+		out = append(out, SessionNewMCPServer{
+			Name:      server.Name,
+			Transport: server.Transport,
+			Command:   server.Command,
+			Args:      append([]string(nil), server.Args...),
+			Env:       sortedMCPKeyValues(server.Env),
+			URL:       server.URL,
+			Headers:   sortedMCPKeyValues(server.Headers),
+		})
+	}
+	return out
+}
+
+func sortedMCPKeyValues(values map[string]string) []runtime.MCPKeyValue {
+	if len(values) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]runtime.MCPKeyValue, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, runtime.MCPKeyValue{Name: key, Value: values[key]})
+	}
+	return out
+}
+
+func nonNilStrings(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return values
+}
+
+func nonNilMCPKeyValues(values []runtime.MCPKeyValue) []runtime.MCPKeyValue {
+	if values == nil {
+		return []runtime.MCPKeyValue{}
+	}
+	return values
 }
 
 // newSessionPromptRequest creates a "session/prompt" request from
@@ -157,12 +267,7 @@ func newSessionPromptRequest(sessionID string, content []runtime.ContentBlock) (
 	}
 	return newRequest("session/prompt", SessionPromptParams{
 		SessionID: sessionID,
-		Messages: []PromptMessage{
-			{
-				Role:    "user",
-				Content: blocks,
-			},
-		},
+		Prompt:    blocks,
 	})
 }
 

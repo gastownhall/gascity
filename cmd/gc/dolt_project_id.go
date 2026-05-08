@@ -239,10 +239,21 @@ func seedDatabaseProjectID(ctx context.Context, db *sql.DB, projectID string) (b
 		}
 		return false, nil
 	}
+	if err := ensureDatabaseMetadataTable(ctx, db); err != nil {
+		return false, err
+	}
 	if _, err := db.ExecContext(ctx, "INSERT INTO metadata (`key`, value) VALUES ('_project_id', ?) ON DUPLICATE KEY UPDATE value = VALUES(value)", projectID); err != nil {
 		return false, fmt.Errorf("seed database _project_id: %w", err)
 	}
 	return true, nil
+}
+
+func ensureDatabaseMetadataTable(ctx context.Context, db *sql.DB) error {
+	_, err := db.ExecContext(ctx, "CREATE TABLE IF NOT EXISTS metadata (`key` VARCHAR(255) PRIMARY KEY, value LONGTEXT)")
+	if err != nil {
+		return fmt.Errorf("ensure metadata table: %w", err)
+	}
+	return nil
 }
 
 func generateLocalProjectID() (string, error) {

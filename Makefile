@@ -1,4 +1,5 @@
 GOLANGCI_LINT_VERSION := 2.9.0
+BUILDX_VERSION := 0.21.2
 
 # Detect OS and arch for binary download.
 GOOS   := $(shell go env GOOS)
@@ -20,7 +21,7 @@ LDFLAGS := -X main.version=$(VERSION) \
            -X main.commit=$(COMMIT) \
            -X main.date=$(BUILD_TIME)
 
-.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-version-tag lint fmt-check fmt vet test test-cmd-gc-process test-worker-core test-worker-core-phase2 test-worker-core-phase2-real-transport test-worker-inference-phase3 test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-mcp-mail test-docker test-k8s test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev dashboard-smoke
+.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-version-tag lint fmt-check fmt vet test test-fast-parallel test-fsys-darwin-compile test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-worker-core test-worker-core-phase2 test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mcp-mail test-docker test-k8s test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev dashboard-smoke
 
 ## build: compile gc binary with version metadata
 build:
@@ -159,19 +160,55 @@ TEST_ENV = env -i \
 	GOINSECURE="$${GOINSECURE-}" \
 	GOVCS="$${GOVCS-}" \
 	GOWORK="$${GOWORK-}" \
+	ANTHROPIC_BASE_URL="$${ANTHROPIC_BASE_URL-}" \
+	ANTHROPIC_API_KEY="$${ANTHROPIC_API_KEY-}" \
+	ANTHROPIC_AUTH_TOKEN="$${ANTHROPIC_AUTH_TOKEN-}" \
+	ANTHROPIC_DEFAULT_HAIKU_MODEL="$${ANTHROPIC_DEFAULT_HAIKU_MODEL-}" \
+	ANTHROPIC_DEFAULT_SONNET_MODEL="$${ANTHROPIC_DEFAULT_SONNET_MODEL-}" \
+	ANTHROPIC_DEFAULT_OPUS_MODEL="$${ANTHROPIC_DEFAULT_OPUS_MODEL-}" \
+	CLAUDE_CODE_SUBAGENT_MODEL="$${CLAUDE_CODE_SUBAGENT_MODEL-}" \
+	CLAUDE_CODE_EFFORT_LEVEL="$${CLAUDE_CODE_EFFORT_LEVEL-}" \
+	CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="$${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC-}" \
+	OLLAMA_API_KEY="$${OLLAMA_API_KEY-}" \
 	$(EXTRA_TEST_ENV)
 
 ## test: run fast unit tests (skip integration-tagged and GC_FAST_UNIT-gated process tests)
 ## The skipped cmd/gc process-backed scenarios remain covered by
 ## `make test-cmd-gc-process` locally and the CI `cmd/gc process suite` job.
+## Bound package parallelism so subprocess-heavy packages do not starve each
+## other into false 5s probe/condition timeouts. Use -count=1 so pre-commit
+## reports actual test results instead of hanging after PASS while Go computes
+## cache input hashes over local working files.
 ## Wrapped in $(TEST_ENV) — see comment above for why.
-test:
-	$(TEST_ENV) GC_FAST_UNIT=1 go test ./...
+test: test-fsys-darwin-compile
+	$(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 ./...
+
+LOCAL_TEST_JOBS ?= $(shell nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 8)
+
+## test-fast-parallel: run the default fast suite with cmd/gc sharded locally
+test-fast-parallel:
+	LOCAL_TEST_JOBS=$(LOCAL_TEST_JOBS) CMD_GC_PROCESS_TOTAL=$(CMD_GC_PROCESS_TOTAL) ./scripts/test-local-parallel fast
+
+## test-fsys-darwin-compile: cross-compile internal/fsys for macOS so
+## unix.Stat_t field-type regressions fail in the default fast test path.
+test-fsys-darwin-compile:
+	@tmp=$$(mktemp -d); \
+	trap 'rm -rf "$$tmp"' EXIT; \
+	$(TEST_ENV) GOOS=darwin GOARCH=arm64 go test -c -o "$$tmp/fsys.test" ./internal/fsys
 
 ## test-cmd-gc-process: run the full non-short cmd/gc suite, including the
 ## process-backed lifecycle coverage routed out of the default fast loop
 test-cmd-gc-process:
-	$(TEST_ENV) GC_FAST_UNIT=0 go test -count=1 -timeout 20m ./cmd/gc
+	$(TEST_ENV) GC_FAST_UNIT=0 scripts/go-test-observable test-cmd-gc-process -- -timeout 25m ./cmd/gc
+
+CMD_GC_PROCESS_SHARD ?= 1
+CMD_GC_PROCESS_TOTAL ?= 6
+test-cmd-gc-process-shard:
+	$(TEST_ENV) GC_FAST_UNIT=0 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=20m ./scripts/test-go-test-shard ./cmd/gc $(CMD_GC_PROCESS_SHARD) $(CMD_GC_PROCESS_TOTAL)
+
+## test-cmd-gc-process-parallel: run all cmd/gc process shards concurrently
+test-cmd-gc-process-parallel:
+	LOCAL_TEST_JOBS=$(LOCAL_TEST_JOBS) CMD_GC_PROCESS_TOTAL=$(CMD_GC_PROCESS_TOTAL) ./scripts/test-local-parallel cmd-gc-process
 
 ## test-worker-core: run deterministic worker transcript and continuation conformance
 test-worker-core:
@@ -187,9 +224,18 @@ test-worker-core-phase2:
 test-worker-core-phase2-real-transport:
 	$(TEST_ENV) PROFILE="$${PROFILE-}" GC_WORKER_REPORT_DIR="$${GC_WORKER_REPORT_DIR-}" go test -count=1 -tags integration ./cmd/gc -run '^TestPhase2WorkerCoreRealTransportProof$$'
 
-## test-worker-inference-phase3: run the live worker inference conformance package
-test-worker-inference-phase3:
-	$(TEST_ENV) PROFILE="$${PROFILE-}" GC_WORKER_REPORT_DIR="$${GC_WORKER_REPORT_DIR-}" go test -count=1 -tags acceptance_c -timeout 45m -v ./test/acceptance/worker_inference
+WORKER_INFERENCE_PROFILE := $(if $(PROFILE),$(PROFILE),claude/tmux-cli)
+
+## setup-worker-inference: install the provider CLI for PROFILE (default claude/tmux-cli)
+setup-worker-inference:
+	python3 scripts/worker_inference_setup.py install --profile "$(WORKER_INFERENCE_PROFILE)"
+
+## test-worker-inference: run the live worker inference conformance package
+test-worker-inference:
+	$(TEST_ENV) PROFILE="$(WORKER_INFERENCE_PROFILE)" GC_WORKER_REPORT_DIR="$(GC_WORKER_REPORT_DIR)" go test -count=1 -tags acceptance_c -timeout 45m -v ./test/acceptance/worker_inference
+
+## test-worker-inference-phase3: alias for the live worker inference conformance package
+test-worker-inference-phase3: test-worker-inference
 
 ## test-acceptance: run acceptance tests (Tier A — fast, <5 min, every PR).
 ## ACCEPTANCE_TIMEOUT overrides the go-test timeout (defaults to 5m on
@@ -221,11 +267,19 @@ test-integration-huma:
 ## test-integration-shards: run the CI integration shards sequentially
 test-integration-shards: test-integration-packages test-integration-review-formulas test-integration-bdstore test-integration-rest-smoke test-integration-rest-full
 
+## test-integration-shards-parallel: run the CI integration shards concurrently
+test-integration-shards-parallel:
+	LOCAL_TEST_JOBS=$(LOCAL_TEST_JOBS) ./scripts/test-local-parallel integration
+
+## test-local-full-parallel: run fast unit, cmd/gc process, and integration shards concurrently
+test-local-full-parallel:
+	LOCAL_TEST_JOBS=$(LOCAL_TEST_JOBS) CMD_GC_PROCESS_TOTAL=$(CMD_GC_PROCESS_TOTAL) ./scripts/test-local-parallel full
+
 ## test-integration-shards-cover: run the CI integration coverage shards sequentially
 test-integration-shards-cover: test-integration-packages-cover test-integration-review-formulas-cover test-integration-bdstore-cover test-integration-rest-smoke-cover test-integration-rest-full-cover
 
 ## test-integration-packages: run all integration-tagged packages except ./test/integration
-## This shard is also the required non-short CI path for the slow cmd/gc process suite.
+## cmd/gc package shards default to GC_FAST_UNIT=1; use test-cmd-gc-process for the slow process suite.
 test-integration-packages:
 	./scripts/test-integration-shard packages
 
@@ -349,7 +403,7 @@ UNIT_COVER_PKGS := $(shell go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.Im
 ## test-cover: run fast unit-test coverage without the integration-tagged package sweep
 ## The skipped cmd/gc process-backed scenarios remain covered by
 ## `make test-cmd-gc-process` locally and the CI `cmd/gc process suite` job.
-test-cover:
+test-cover: test-fsys-darwin-compile
 	$(TEST_ENV) GC_FAST_UNIT=1 go test -timeout 8m -coverprofile=coverage.txt $(UNIT_COVER_PKGS)
 
 ## cover: run tests and show coverage report
@@ -361,8 +415,7 @@ install-tools: $(GOLANGCI_LINT) install-oapi-codegen
 
 $(GOLANGCI_LINT):
 	@echo "Installing golangci-lint v$(GOLANGCI_LINT_VERSION)..."
-	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | \
-		sh -s -- -b $(BIN_DIR) v$(GOLANGCI_LINT_VERSION)
+	GOBIN=$(BIN_DIR) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v$(GOLANGCI_LINT_VERSION)
 
 ## install-oapi-codegen: install pinned oapi-codegen so the spec→client drift
 ## test (TestGeneratedClientInSync) can regenerate client_gen.go without skipping.
@@ -376,10 +429,23 @@ install-oapi-codegen:
 ## install-buildx: install docker buildx plugin
 install-buildx:
 	@mkdir -p $(HOME)/.docker/cli-plugins
-	curl -sSfL "https://github.com/docker/buildx/releases/download/v0.21.2/buildx-v0.21.2.$$(go env GOOS)-$$(go env GOARCH)" \
-		-o $(HOME)/.docker/cli-plugins/docker-buildx
-	chmod +x $(HOME)/.docker/cli-plugins/docker-buildx
-	@echo "Installed docker-buildx v0.21.2"
+	@case "$(GOOS)-$(GOARCH)" in \
+		linux-amd64|linux-arm64) ;; \
+		*) echo "Unsupported docker-buildx platform: $(GOOS)-$(GOARCH)" >&2; exit 1 ;; \
+	esac; \
+	tmp="$$(mktemp)"; \
+	checksums="$$(mktemp)"; \
+	trap 'rm -f "$$tmp" "$$checksums"' EXIT; \
+	curl -sSfL "https://github.com/docker/buildx/releases/download/v$(BUILDX_VERSION)/checksums.txt" \
+		-o "$$checksums"; \
+	asset="buildx-v$(BUILDX_VERSION).$(GOOS)-$(GOARCH)"; \
+	expected_sha="$$(awk -v asset="*$$asset" '$$2 == asset {print $$1}' "$$checksums")"; \
+	if [ -z "$$expected_sha" ]; then echo "Missing checksum for $$asset" >&2; exit 1; fi; \
+	curl -sSfL "https://github.com/docker/buildx/releases/download/v$(BUILDX_VERSION)/buildx-v$(BUILDX_VERSION).$(GOOS)-$(GOARCH)" \
+		-o "$$tmp"; \
+	echo "$$expected_sha  $$tmp" | sha256sum -c -; \
+	install -m 0755 "$$tmp" $(HOME)/.docker/cli-plugins/docker-buildx
+	@echo "Installed docker-buildx v$(BUILDX_VERSION)"
 
 ## test-mcp-mail: run mcp_agent_mail live conformance test (auto-starts server)
 test-mcp-mail:
@@ -404,7 +470,7 @@ docs-dev:
 
 ## dashboard-build: regenerate SPA types + compile the dist bundle
 dashboard-build:
-	cd cmd/gc/dashboard/web && npm install --silent && npm run gen && npm run build
+	cd cmd/gc/dashboard/web && npm ci --silent && npm run gen && npm run build
 
 ## dashboard-dev: Vite dev server (HMR) for SPA iteration
 dashboard-dev:

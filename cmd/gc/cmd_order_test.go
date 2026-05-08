@@ -599,6 +599,37 @@ func TestOrderCheckWithStoresResolverUsesLegacyCityStore(t *testing.T) {
 	}
 }
 
+func TestOrderCheckConditionUsesCityScope(t *testing.T) {
+	cityDir := t.TempDir()
+	orderDir := filepath.Join(cityDir, "packs", "workflows", "orders")
+	check := fmt.Sprintf(
+		`test "$GC_CITY_PATH" = '%s' && test "$GC_STORE_ROOT" = '%s' && test "$GC_STORE_SCOPE" = city && test "$ORDER_DIR" = '%s'`,
+		cityDir,
+		cityDir,
+		orderDir,
+	)
+	aa := []orders.Order{{
+		Name:    "pr-review-router",
+		Trigger: "condition",
+		Check:   check,
+		Formula: "mol-pr-review-router",
+		Pool:    "workflows.pr-review-router",
+		Source:  filepath.Join(orderDir, "pr-review-router.toml"),
+	}}
+	resolver := func(orders.Order) ([]beads.Store, error) {
+		return []beads.Store{beads.NewMemStore()}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderCheckWithStoresResolverScoped(cityDir, &config.City{}, aa, time.Now(), nil, resolver, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderCheckWithStoresResolverScoped = %d, want 0; stderr: %s; stdout: %s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "yes") {
+		t.Fatalf("stdout missing due row:\n%s", stdout.String())
+	}
+}
+
 func TestOrderCheckWithStoresResolverFailsWhenLegacyEventCursorReadFails(t *testing.T) {
 	rigStore := beads.NewMemStore()
 	legacyStore := labelFailListStore{
@@ -688,6 +719,312 @@ func TestOrderRun(t *testing.T) {
 	if got := results[0].Metadata["gc.routed_to"]; got != "dog" {
 		t.Fatalf("gc.routed_to = %q, want dog", got)
 	}
+}
+
+func TestOrderRunEventExecAdvancesCursor(t *testing.T) {
+	cityDir := t.TempDir()
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+`)
+	store := beads.NewMemStore()
+	eventLog := events.NewFake()
+	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+	headSeq, err := eventLog.LatestSeq()
+	if err != nil {
+		t.Fatalf("LatestSeq(): %v", err)
+	}
+	aa := []orders.Order{{
+		Name:    "release-exec",
+		Trigger: "event",
+		On:      events.BeadClosed,
+		Exec:    "printf ok",
+	}}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "release-exec", "", cityDir, store, eventLog, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	results, err := store.ListByLabel("order-run:release-exec", 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
+	}
+	for _, want := range []string{"order:release-exec", fmt.Sprintf("seq:%d", headSeq), "exec"} {
+		if !slicesContain(results[0].Labels, want) {
+			t.Fatalf("tracking bead labels = %v, want %s", results[0].Labels, want)
+		}
+	}
+}
+
+func TestCmdOrderRunEventExecAdvancesCursor(t *testing.T) {
+	cityDir := t.TempDir()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_EVENTS", "")
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_CITY_ROOT", cityDir)
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	t.Chdir(cityDir)
+
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+`)
+	if err := os.MkdirAll(filepath.Join(cityDir, "orders"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cityDir, "orders", "release-exec.toml"), `[order]
+exec = "printf ok"
+trigger = "event"
+on = "bead.closed"
+`)
+	var eventStderr bytes.Buffer
+	eventLog, err := events.NewFileRecorder(filepath.Join(cityDir, ".gc", "events.jsonl"), &eventStderr)
+	if err != nil {
+		t.Fatalf("NewFileRecorder(): %v", err)
+	}
+	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+	headSeq, err := eventLog.LatestSeq()
+	if err != nil {
+		t.Fatalf("LatestSeq(): %v", err)
+	}
+	if err := eventLog.Close(); err != nil {
+		t.Fatalf("Close(): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderRun("release-exec", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdOrderRun = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(): %v", err)
+	}
+	results, err := store.ListByLabel("order-run:release-exec", 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
+	}
+	for _, want := range []string{"order:release-exec", fmt.Sprintf("seq:%d", headSeq), "exec"} {
+		if !slicesContain(results[0].Labels, want) {
+			t.Fatalf("tracking bead labels = %v, want %s", results[0].Labels, want)
+		}
+	}
+}
+
+func TestOrderRunEventFormulaLatestSeqErrorDoesNotInstantiate(t *testing.T) {
+	aa := []orders.Order{{
+		Name:         "release-watch",
+		Trigger:      "event",
+		On:           events.BeadClosed,
+		Formula:      "test-formula",
+		FormulaLayer: sharedTestFormulaDir,
+	}}
+	store := beads.NewMemStore()
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "release-watch", "", "/city", store, events.NewFailFake(), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doOrderRun = %d, want 1 when event cursor cannot be read; stdout: %s", code, stdout.String())
+	}
+	results, err := store.ListByLabel("order-run:release-watch", 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("store.ListByLabel() len = %d, want 0 (%#v)", len(results), results)
+	}
+	if !strings.Contains(stderr.String(), "reading event cursor for release-watch") {
+		t.Fatalf("stderr = %q, want event cursor read failure", stderr.String())
+	}
+}
+
+func TestOrderRunResolvesPackBindingForPool(t *testing.T) {
+	aa := []orders.Order{
+		{Name: "digest", Formula: "mol-digest", Trigger: "cooldown", Interval: "24h", Pool: "dog", FormulaLayer: sharedTestFormulaDir},
+	}
+	cityDir := t.TempDir()
+	writeOrderRunImportFixture(t, cityDir, "maintenance")
+	store := beads.NewMemStore()
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "digest", "", cityDir, store, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	results, err := store.ListByLabel("order-run:digest", 0)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
+	}
+	if got := results[0].Metadata["gc.routed_to"]; got != "maintenance.dog" {
+		t.Fatalf("gc.routed_to = %q, want maintenance.dog", got)
+	}
+	if !strings.Contains(stdout.String(), "gc.routed_to=maintenance.dog") {
+		t.Fatalf("stdout = %q, want binding-qualified route", stdout.String())
+	}
+}
+
+func TestOrderRunResolvesImportedPackPoolAgainstCityShadow(t *testing.T) {
+	cityDir := t.TempDir()
+	writeImportedDogOrderFixture(t, cityDir, true)
+	_, aa := loadImportedDogOrders(t, cityDir)
+	store := beads.NewMemStore()
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "digest", "", cityDir, store, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	results, err := store.ListByLabel("order-run:digest", 0)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
+	}
+	if got := results[0].Metadata["gc.routed_to"]; got != "maintenance.dog" {
+		t.Fatalf("gc.routed_to = %q, want maintenance.dog", got)
+	}
+}
+
+func TestOrderRunResolvesImportedPackPoolAgainstSiblingImportCollision(t *testing.T) {
+	cityDir := t.TempDir()
+	writeImportedDogOrderFixture(t, cityDir, false, "gastown")
+	_, aa := loadImportedDogOrders(t, cityDir)
+	store := beads.NewMemStore()
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "digest", "", cityDir, store, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	results, err := store.ListByLabel("order-run:digest", 0)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
+	}
+	if got := results[0].Metadata["gc.routed_to"]; got != "maintenance.dog" {
+		t.Fatalf("gc.routed_to = %q, want maintenance.dog", got)
+	}
+}
+
+func TestOrderRunPrefersCityShadowForPool(t *testing.T) {
+	aa := []orders.Order{
+		{Name: "digest", Formula: "mol-digest", Trigger: "cooldown", Interval: "24h", Pool: "dog", FormulaLayer: sharedTestFormulaDir},
+	}
+	cityDir := t.TempDir()
+	writeOrderRunImportFixture(t, cityDir, "maintenance")
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "shadow-city"
+prefix = "shd"
+
+[[agent]]
+name = "dog"
+`)
+	store := beads.NewMemStore()
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "digest", "", cityDir, store, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	results, err := store.ListByLabel("order-run:digest", 0)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
+	}
+	if got := results[0].Metadata["gc.routed_to"]; got != "dog" {
+		t.Fatalf("gc.routed_to = %q, want dog", got)
+	}
+	if !strings.Contains(stdout.String(), "gc.routed_to=dog") {
+		t.Fatalf("stdout = %q, want city-local route", stdout.String())
+	}
+}
+
+func TestOrderRunRejectsAmbiguousPackPool(t *testing.T) {
+	aa := []orders.Order{
+		{Name: "digest", Formula: "mol-digest", Trigger: "cooldown", Interval: "24h", Pool: "dog", FormulaLayer: sharedTestFormulaDir},
+	}
+	cityDir := t.TempDir()
+	writeOrderRunImportFixture(t, cityDir, "gastown", "maintenance")
+	store := beads.NewMemStore()
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "digest", "", cityDir, store, nil, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doOrderRun = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `ambiguous pool "dog"`) {
+		t.Fatalf("stderr = %q, want ambiguity error", stderr.String())
+	}
+	results, err := store.ListByLabel("order-run:digest", 0)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("store.ListByLabel() len = %d, want 0 (%#v)", len(results), results)
+	}
+}
+
+func writeOrderRunImportFixture(t *testing.T, cityDir string, bindings ...string) {
+	t.Helper()
+
+	packRoot := filepath.Join(cityDir, "packs")
+	if err := os.MkdirAll(packRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `
+[workspace]
+name = "test-city"
+`)
+
+	var packToml strings.Builder
+	packToml.WriteString(`
+[pack]
+name = "test-city"
+schema = 1
+`)
+	for _, binding := range bindings {
+		packDir := filepath.Join(packRoot, binding)
+		if err := os.MkdirAll(packDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(packDir, "pack.toml"), `
+[pack]
+name = "`+binding+`"
+schema = 1
+
+[[agent]]
+name = "dog"
+scope = "city"
+`)
+		packToml.WriteString(`
+[imports.` + binding + `]
+source = "./packs/` + binding + `"
+`)
+	}
+	writeFile(t, filepath.Join(cityDir, "pack.toml"), packToml.String())
 }
 
 func TestOrderRunNoPool(t *testing.T) {
@@ -831,8 +1168,8 @@ title = "Do work"
 			if bead.Assignee != config.ControlDispatcherAgentName {
 				t.Fatalf("finalizer assignee = %q, want %q", bead.Assignee, config.ControlDispatcherAgentName)
 			}
-			if bead.Metadata["gc.routed_to"] != config.ControlDispatcherAgentName {
-				t.Fatalf("finalizer gc.routed_to = %q, want %q", bead.Metadata["gc.routed_to"], config.ControlDispatcherAgentName)
+			if bead.Metadata["gc.routed_to"] != "" {
+				t.Fatalf("finalizer gc.routed_to = %q, want empty for concrete control dispatcher assignee", bead.Metadata["gc.routed_to"])
 			}
 			if bead.Metadata[graphExecutionRouteMetaKey] != "quinn" {
 				t.Fatalf("finalizer execution route = %q, want quinn", bead.Metadata[graphExecutionRouteMetaKey])

@@ -98,7 +98,7 @@ func cmdStop(args []string, stdout, stderr io.Writer) int {
 			desired[sn] = true
 		} else {
 			// Pool agent: resolve runtime session names from beads first, then legacy discovery.
-			for _, ref := range resolvePoolSessionRefs(store, a.Name, a.Dir, sp0, &a, cityName, st, sp, stderr) {
+			for _, ref := range resolvePoolSessionRefs(store, cfg, a.Name, a.Dir, sp0, &a, cityName, st, sp, stderr) {
 				sessionNames = append(sessionNames, ref.sessionName)
 				desired[ref.sessionName] = true
 			}
@@ -239,9 +239,34 @@ func waitForStandaloneControllerStop(cityPath string, timeout time.Duration) err
 func doStop(sessionNames []string, sp runtime.Provider, cfg *config.City, store beads.Store, timeout time.Duration,
 	rec events.Recorder, stdout, stderr io.Writer,
 ) int {
+	visible := map[string]bool{}
+	if sp != nil {
+		names, err := sp.ListRunning("")
+		partialList := runtime.IsPartialListError(err)
+		if err != nil && !partialList {
+			fmt.Fprintf(stderr, "gc stop: listing sessions: %v\n", err) //nolint:errcheck // best-effort stderr
+			names = nil
+		}
+		if partialList {
+			fmt.Fprintf(stderr, "gc stop: listing sessions partially failed: %v\n", err) //nolint:errcheck // best-effort stderr
+		}
+		for _, name := range names {
+			if name = strings.TrimSpace(name); name != "" {
+				visible[name] = true
+			}
+		}
+	}
 	var running []string
 	for _, sn := range sessionNames {
+		sn = strings.TrimSpace(sn)
+		if sn == "" {
+			continue
+		}
 		if alive, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, sn); err == nil && alive {
+			running = append(running, sn)
+			continue
+		}
+		if visible[sn] {
 			running = append(running, sn)
 		}
 	}

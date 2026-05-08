@@ -14,6 +14,13 @@ Use this workflow when the session reconciler does something unexpected:
 
 The trace stream is persisted locally under `.gc/runtime/session-reconciler-trace/`.
 
+If you see `gc convoy control --serve` warning about a legacy control-dispatcher
+trace path at `${GC_CITY}/control-dispatcher-trace.log`, treat it as a rollout
+action item, not just a symptom: any long-lived control-dispatcher session that
+still carries that baked-in `GC_WORKFLOW_TRACE` must be restarted or recycled
+after the upgrade so it picks up the watcher-safe default under
+`.gc/runtime/control-dispatcher-trace.log`.
+
 ## Fast Incident Workflow
 
 From the city root, start detail tracing on the exact normalized template:

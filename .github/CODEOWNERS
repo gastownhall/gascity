@@ -1,10 +1,18 @@
-# Keep ownership conservative for the initial open-source launch.
-# Add the rest of the maintainer set here before enabling required code owner review.
-
-* @julianknutsen
-
-# High-risk automation and policy files.
-.github/workflows/ @julianknutsen
-.github/CODEOWNERS @julianknutsen
-SECURITY.md @julianknutsen
-scripts/pre-commit @julianknutsen
+# Sensitive areas requiring Gas City project-admin ownership.
+/.github/CODEOWNERS @gastownhall/gascity-admin
+/.github/workflows/ @gastownhall/gascity-admin
+/.github/actions/ @gastownhall/gascity-admin
+/.github/actionlint.yaml @gastownhall/gascity-admin
+/.github/bugflow.toml @gastownhall/gascity-admin
+/.githooks/ @gastownhall/gascity-admin
+/SECURITY.md @gastownhall/gascity-admin
+/RELEASING.md @gastownhall/gascity-admin
+/Makefile @gastownhall/gascity-admin
+/go.mod @gastownhall/gascity-admin
+/go.sum @gastownhall/gascity-admin
+/Dockerfile* @gastownhall/gascity-admin
+/scripts/ @gastownhall/gascity-admin
+/contrib/k8s/ @gastownhall/gascity-admin
+/internal/buildimage/ @gastownhall/gascity-admin
+/cmd/gc/dashboard/web/package.json @gastownhall/gascity-admin
+/cmd/gc/dashboard/web/package-lock.json @gastownhall/gascity-admin

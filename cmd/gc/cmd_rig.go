@@ -229,9 +229,9 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		fmt.Fprintf(stderr, "gc rig add: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if cityUsesBdStoreContract(cityPath) && (cfg.Dolt.Host != "" || cfg.Dolt.Port != 0) {
-		cityDoltConfigs.Store(cityPath, cfg.Dolt)
-		defer cityDoltConfigs.Delete(cityPath)
+	if cityUsesBdStoreContract(cityPath) && cityDoltConfigHasLifecycleFields(cfg.Dolt) {
+		registerCityDoltConfig(cityPath, cfg.Dolt)
+		defer clearCityDoltConfig(cityPath)
 	}
 	rootDefaultRigImports, err := config.LoadRootPackDefaultRigImports(fs, cityPath)
 	if err != nil {
@@ -763,6 +763,7 @@ database remains accessible. Use "gc rig resume" to restore.`,
 			}
 			return nil
 		},
+		ValidArgsFunction: completeRigNames,
 	}
 }
 
@@ -843,6 +844,7 @@ The reconciler will start the rig's agents on its next tick.`,
 			}
 			return nil
 		},
+		ValidArgsFunction: completeRigNames,
 	}
 }
 
@@ -925,6 +927,7 @@ binding from .gc/site.toml.`,
 			}
 			return nil
 		},
+		ValidArgsFunction: completeRigNames,
 	}
 }
 

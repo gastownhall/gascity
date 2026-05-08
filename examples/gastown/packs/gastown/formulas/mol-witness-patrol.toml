@@ -55,7 +55,7 @@ the worktree. This makes the work schedulable again.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-witness-patrol"
-version = 7
+version = 8
 
 [vars]
 [vars.event_timeout]
@@ -134,7 +134,7 @@ This happens when:
 - An agent was removed from config
 - An agent crashed and the controller decided not to restart it (quarantine)
 
-**Step 1: Find orphaned beads.**
+**Step 1: Find orphaned beads via session-ID liveness.**
 
 List beads assigned to agents in YOUR rig:
 ```bash
@@ -142,25 +142,83 @@ gc bd list --status=in_progress --json --limit=0
 gc bd list --status=open --json --limit=0
 ```
 
-Filter for beads assigned to polecat-pattern agents (e.g., `<rig>/polecats/<name>`).
+Filter for beads with an assignee (skip unassigned beads). This pass does not
+solve the controller race where orphaned work may already have been released to
+open/unassigned before witness observes it; that requires a separate
+worktree-salvage scan keyed by `metadata.work_dir`.
 
-Cross-reference against running sessions and configured (desired) agents:
+Get the full session roster for liveness checks:
 ```bash
-gc session list --json   # running sessions
-gc config show           # configured agents (includes pool templates)
+gc session list --state=all --json
+gc bd list --type=session --label=gc:session --include-infra --include-gates --all --json --limit=0
 ```
 
-For each bead with a polecat assignee:
-- If the assigned agent has a running session → not orphaned, skip
-- If the assigned agent matches a configured agent name (or is a pool
-  instance like worker-3 matching template worker) → controller will
-  restart it, skip
-- If the agent is neither running nor configured → **orphaned bead**
+For each bead with an assignee, check **session-ID liveness** — NOT
+template pattern matching. Pool instances get new IDs on restart, so
+matching against a template pattern (e.g., `worker-3` matches template
+`worker`) gives false negatives: the old session ID is dead but the
+witness skips it thinking "the pool will restart it." The pool creates
+a NEW session with a different ID — the old one never comes back.
 
-**Important**: Do NOT recover beads assigned to agents that are simply
-restarting (crash recovery). The controller restarts crashed agents,
-and the fresh session resumes work from context. Only recover
-beads when the agent genuinely won't come back.
+**Liveness check procedure:**
+
+1. Resolve the bead assignee by exact identifier lookup. Do not extract a
+   session ID with a regex or fixed prefix list: rig prefixes are
+   configuration-derived, and assignees may be a session bead ID, session
+   name, alias, concrete agent name, or configured named identity. Build the
+   lookup from `gc session list --state=all --json` plus session bead metadata:
+   ```bash
+   SESSIONS_JSON=$(gc session list --state=all --json)
+   SESSION_BEADS_JSON=$(gc bd list --type=session --label=gc:session --include-infra --include-gates --all --json --limit=0)
+
+   MATCH_JSON=$(jq -n \
+     --arg assignee "$ASSIGNEE" \
+     --argjson sessions "$SESSIONS_JSON" \
+     --argjson session_beads "$SESSION_BEADS_JSON" '
+       def add($m; $key; $state; $closed):
+         if (($key // "") | length) == 0 then $m
+         else $m + {($key): {
+           state: (if $closed then "closed" else ($state // "") end)
+         }}
+         end;
+
+       (reduce $sessions[] as $s ({};
+         add(.; $s.ID; $s.State; ($s.Closed // false))
+         | add(.; $s.SessionName; $s.State; ($s.Closed // false))
+         | add(.; $s.Alias; $s.State; ($s.Closed // false))
+         | add(.; $s.AgentName; $s.State; ($s.Closed // false))
+       )) as $from_session_list
+       | reduce $session_beads[] as $b ($from_session_list;
+           add(.; $b.metadata.configured_named_identity; $b.metadata.state; ($b.status == "closed")))
+       | .[$assignee] // empty')
+   ```
+
+2. Classify an absent exact match separately from a dead resolved session:
+   ```bash
+   if [ -z "$MATCH_JSON" ]; then
+     STATE=absent
+   else
+     STATE=$(echo "$MATCH_JSON" | jq -r '.state // "absent"')
+   fi
+   ```
+   An absent match is orphaned only for pool/ephemeral work identities. If the
+   assignee is a refinery, witness, or other configured infrastructure identity,
+   skip it instead of recovering it.
+
+3. Classify:
+   - `active` or `awake` → **not orphaned** (may be stuck —
+     `check-polecat-health` handles that separately)
+   - `creating`, `asleep`, `drained`, `suspended`, `draining`, or
+     `quarantined` → **not orphaned** (controller or operator state still owns
+     the session)
+   - `archived`, `closed`, or `absent` after the exact lookup → **orphaned
+     bead** for pool/ephemeral work — the owning session is gone and will never
+     come back, regardless of whether the pool template still exists
+
+**Important**: Beads assigned to the refinery, witness, or other
+infrastructure agents (not pool instances) should be skipped — those
+agents have persistent identity and the controller manages their
+lifecycle directly.
 
 **Step 2: For each orphaned bead, salvage work from the worktree.**
 
@@ -326,7 +384,7 @@ wisp is stale, the refinery may be stuck.
 
 **Step 3: Nudge if needed:**
 ```bash
-gc nudge <rig>/refinery "Work beads waiting for merge. Please check queue."
+gc session nudge <rig>/refinery "Work beads waiting for merge. Please check queue."
 ```
 
 **Step 4: Escalate if needed:**

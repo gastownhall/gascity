@@ -260,6 +260,8 @@ func TestApplyPatches_ProviderDeepMerge(t *testing.T) {
 		Providers: map[string]ProviderSpec{
 			"custom": {
 				Command:    "agent",
+				ACPCommand: "agent-acp",
+				ACPArgs:    []string{"serve"},
 				PromptMode: "arg",
 				Env:        map[string]string{"KEY": "val"},
 			},
@@ -268,10 +270,12 @@ func TestApplyPatches_ProviderDeepMerge(t *testing.T) {
 	err := ApplyPatches(cfg, Patches{
 		Providers: []ProviderPatch{
 			{
-				Name:      "custom",
-				Command:   ptrStr("new-agent"),
-				Env:       map[string]string{"KEY2": "val2"},
-				EnvRemove: []string{"KEY"},
+				Name:       "custom",
+				Command:    ptrStr("new-agent"),
+				ACPCommand: ptrStr("new-agent-acp"),
+				ACPArgs:    []string{"rpc", "--stdio"},
+				Env:        map[string]string{"KEY2": "val2"},
+				EnvRemove:  []string{"KEY"},
 			},
 		},
 	})
@@ -281,6 +285,12 @@ func TestApplyPatches_ProviderDeepMerge(t *testing.T) {
 	p := cfg.Providers["custom"]
 	if p.Command != "new-agent" {
 		t.Errorf("Command = %q, want %q", p.Command, "new-agent")
+	}
+	if p.ACPCommand != "new-agent-acp" {
+		t.Errorf("ACPCommand = %q, want %q", p.ACPCommand, "new-agent-acp")
+	}
+	if got := strings.Join(p.ACPArgs, " "); got != "rpc --stdio" {
+		t.Errorf("ACPArgs = %q, want %q", got, "rpc --stdio")
 	}
 	if p.PromptMode != "arg" {
 		t.Errorf("PromptMode = %q, want %q (unchanged)", p.PromptMode, "arg")
@@ -298,6 +308,8 @@ func TestApplyPatches_ProviderReplace(t *testing.T) {
 		Providers: map[string]ProviderSpec{
 			"custom": {
 				Command:    "old-agent",
+				ACPCommand: "old-agent-acp",
+				ACPArgs:    []string{"serve"},
 				PromptMode: "arg",
 				Env:        map[string]string{"SECRET": "hidden"},
 			},
@@ -306,9 +318,11 @@ func TestApplyPatches_ProviderReplace(t *testing.T) {
 	err := ApplyPatches(cfg, Patches{
 		Providers: []ProviderPatch{
 			{
-				Name:    "custom",
-				Replace: true,
-				Command: ptrStr("new-agent"),
+				Name:       "custom",
+				Replace:    true,
+				Command:    ptrStr("new-agent"),
+				ACPCommand: ptrStr("new-agent-acp"),
+				ACPArgs:    []string{"rpc"},
 			},
 		},
 	})
@@ -318,6 +332,12 @@ func TestApplyPatches_ProviderReplace(t *testing.T) {
 	p := cfg.Providers["custom"]
 	if p.Command != "new-agent" {
 		t.Errorf("Command = %q, want %q", p.Command, "new-agent")
+	}
+	if p.ACPCommand != "new-agent-acp" {
+		t.Errorf("ACPCommand = %q, want %q", p.ACPCommand, "new-agent-acp")
+	}
+	if got := strings.Join(p.ACPArgs, " "); got != "rpc" {
+		t.Errorf("ACPArgs = %q, want %q", got, "rpc")
 	}
 	// Replace clears fields not in patch.
 	if p.PromptMode != "" {

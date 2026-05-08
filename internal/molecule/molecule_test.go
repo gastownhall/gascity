@@ -21,9 +21,7 @@ import (
 // graph will be missing the dep — which is exactly what we saw in
 // production.
 func TestBuildRecipeApplyPlanBugReportFlowV2(t *testing.T) {
-	prev := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
+	formulatest.EnableV2ForTest(t)
 
 	const toolingPath = "/home/ubuntu/tooling/formulas"
 	if _, err := os.Stat(filepath.Join(toolingPath, "mol-bug-report-flow-v2.formula.toml")); err != nil {
@@ -85,9 +83,7 @@ func TestBuildRecipeApplyPlanBugReportFlowV2(t *testing.T) {
 // soon as its non-attempt blockers (body scope) close, trips the
 // "latest attempt ... is open, not closed" invariant, and crash-loops.
 func TestCookTeardownRetryBlocksOnAttempt(t *testing.T) {
-	prevFormulaV2 := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prevFormulaV2) })
+	formulatest.EnableV2ForTest(t)
 	prevGraphApply := IsGraphApplyEnabled()
 	SetGraphApplyEnabled(true)
 	t.Cleanup(func() { SetGraphApplyEnabled(prevGraphApply) })
@@ -1238,6 +1234,43 @@ func TestInstantiateRootOnly(t *testing.T) {
 	all, _ := store.ListOpen()
 	if len(all) != 1 {
 		t.Errorf("store has %d beads, want 1", len(all))
+	}
+}
+
+func TestInstantiateRunnableWispRootPreservesTaskType(t *testing.T) {
+	store := beads.NewMemStore()
+	recipe := &formula.Recipe{
+		Name:     "patrol",
+		RootOnly: true,
+		Steps: []formula.RecipeStep{
+			{ID: "patrol", Title: "Patrol", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "wisp"}},
+			{ID: "patrol.scan", Title: "Scan", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "patrol.scan", DependsOnID: "patrol", Type: "parent-child"},
+		},
+	}
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	root, err := store.Get(result.RootID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", result.RootID, err)
+	}
+	if root.Type != "task" {
+		t.Fatalf("root Type = %q, want task", root.Type)
+	}
+	if got := root.Metadata["gc.kind"]; got != "wisp" {
+		t.Fatalf("root gc.kind = %q, want wisp", got)
+	}
+	ready, err := store.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	if len(ready) != 1 || ready[0].ID != result.RootID {
+		t.Fatalf("Ready() = %+v, want only root %s", ready, result.RootID)
 	}
 }
 

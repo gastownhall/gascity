@@ -1198,9 +1198,12 @@ func TestUpdateProvider(t *testing.T) {
 	ed := configedit.NewEditor(fsys.OSFS{}, path)
 
 	newCmd := "updated-cli"
+	newACPCmd := "updated-cli-acp"
 	newName := "Updated Agent"
 	err := ed.UpdateProvider("custom", configedit.ProviderUpdate{
 		Command:     &newCmd,
+		ACPCommand:  &newACPCmd,
+		ACPArgs:     []string{"rpc", "--stdio"},
 		DisplayName: &newName,
 	})
 	if err != nil {
@@ -1211,6 +1214,12 @@ func TestUpdateProvider(t *testing.T) {
 	got := cfg.Providers["custom"]
 	if got.Command != "updated-cli" {
 		t.Errorf("command = %q, want %q", got.Command, "updated-cli")
+	}
+	if got.ACPCommand != "updated-cli-acp" {
+		t.Errorf("acp_command = %q, want %q", got.ACPCommand, "updated-cli-acp")
+	}
+	if len(got.ACPArgs) != 2 || got.ACPArgs[0] != "rpc" || got.ACPArgs[1] != "--stdio" {
+		t.Errorf("acp_args = %#v, want [rpc --stdio]", got.ACPArgs)
 	}
 	if got.DisplayName != "Updated Agent" {
 		t.Errorf("display_name = %q, want %q", got.DisplayName, "Updated Agent")
