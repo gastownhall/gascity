@@ -1126,6 +1126,52 @@ func TestDoRigAdd_PrefixCollision(t *testing.T) {
 	}
 }
 
+func TestDoRigAdd_HQPrefixCollisionDoesNotMutateRig(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := "[workspace]\nname = \"gas-city\"\nprefix = \"tf\"\n\n[[agent]]\nname = \"mayor\"\n"
+	cityTomlPath := filepath.Join(cityPath, "city.toml")
+	if err := os.WriteFile(cityTomlPath, []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigPath := filepath.Join(t.TempDir(), "token-flames")
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", false, false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doRigAdd should fail for HQ prefix collision, got code %d; stdout: %s", code, stdout.String())
+	}
+	errMsg := stderr.String()
+	if !strings.Contains(errMsg, `rig "token-flames": prefix "tf" collides with HQ`) {
+		t.Fatalf("stderr should mention HQ collision, got: %s", errMsg)
+	}
+	if !strings.Contains(errMsg, "Use --prefix to specify a different prefix.") {
+		t.Fatalf("stderr should include --prefix hint, got: %s", errMsg)
+	}
+	if stdout.String() != "" {
+		t.Fatalf("stdout should be empty before mutation starts, got: %s", stdout.String())
+	}
+	if _, err := os.Stat(rigPath); !os.IsNotExist(err) {
+		t.Fatalf("rig directory should not be created, stat err: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(rigPath, ".beads")); !os.IsNotExist(err) {
+		t.Fatalf("rig .beads should not be created, stat err: %v", err)
+	}
+	data, err := os.ReadFile(cityTomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != cityToml {
+		t.Fatalf("city.toml changed unexpectedly:\n%s", data)
+	}
+}
+
 // Explicit --prefix resolves a collision that would otherwise fail.
 func TestDoRigAdd_ExplicitPrefixResolvesCollision(t *testing.T) {
 	cityPath := t.TempDir()
