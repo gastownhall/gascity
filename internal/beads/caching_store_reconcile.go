@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"sort"
 	"time"
 )
@@ -107,6 +108,12 @@ func (c *CachingStore) recordReconcileLatencyLocked(d time.Duration) {
 // latencyP95Locked returns the nearest-rank P95 of the latency window
 // and reports whether the window contains enough samples to be
 // meaningful (full to cacheLatencyWindowSize). Caller must hold c.mu.
+//
+// Nearest-rank P95 index = ceil(0.95 * N) - 1. For N=10 this equals
+// len(sorted)-1 (the max), which is why the prior implementation
+// happened to be correct at the current window size — but the formula
+// generalizes so the function stays P95 if cacheLatencyWindowSize is
+// raised later.
 func (c *CachingStore) latencyP95Locked() (time.Duration, bool) {
 	if len(c.latencyWindow) < cacheLatencyWindowSize {
 		return 0, false
@@ -114,8 +121,11 @@ func (c *CachingStore) latencyP95Locked() (time.Duration, bool) {
 	sorted := make([]time.Duration, len(c.latencyWindow))
 	copy(sorted, c.latencyWindow)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
-	// Nearest-rank P95: ceil(0.95 * N) - 1 = 9 for N=10.
-	return sorted[len(sorted)-1], true
+	idx := int(math.Ceil(0.95*float64(len(sorted)))) - 1
+	if idx < 0 {
+		idx = 0
+	}
+	return sorted[idx], true
 }
 
 // recomputeCadenceLocked updates the latency-driver hysteresis state
