@@ -181,11 +181,10 @@ dolt_sql() {
 # the caller falls through to its normal queries; those will fail in the
 # same way and surface the dolt-side problem through the script's regular
 # error-handling path.
-has_wisps_table() {
-    local db="$1"
-    local output
+has_wisps_table() (
+    db="$1"
     if ! output=$(dolt_sql -r csv -q "SHOW TABLES FROM \`$db\` LIKE 'wisps'" 2>/dev/null); then
         return 0
     fi
     [ "$(printf '%s\n' "$output" | tail -n +2 | head -1 | tr -d '\r')" = "wisps" ]
-}
+)
