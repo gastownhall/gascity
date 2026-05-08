@@ -61,6 +61,13 @@ func startNudgeWakeListener(ctx context.Context, cityPath string, wakeCh chan<- 
 	if err != nil {
 		return nil, fmt.Errorf("listening on nudge wake socket: %w", err)
 	}
+	// TOCTOU: there is a narrow window between Listen and Chmod where
+	// the socket exists at the umask-default permissions and a co-local
+	// user could connect. Worst case is a spurious dispatch tick — the
+	// socket carries a single signal byte with no payload or auth — so
+	// this is acceptable for now. A future hardening pass could set
+	// umask before Listen, or use platform-specific abstract namespace
+	// sockets where supported.
 	if err := os.Chmod(path, 0o600); err != nil {
 		_ = lis.Close()
 		return nil, fmt.Errorf("chmod nudge wake socket: %w", err)
