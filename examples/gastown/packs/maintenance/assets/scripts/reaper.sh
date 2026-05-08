@@ -308,9 +308,7 @@ has_wisps_table() {
     if ! output=$(dolt_sql -r csv -q "SHOW TABLES FROM \`$db\` LIKE 'wisps'" 2>/dev/null); then
         return 1
     fi
-    # SHOW TABLES emits one header row plus one row per matching table.
-    # When wisps is absent, only the header is present.
-    [ "$(printf '%s\n' "$output" | tail -n +2 | head -1)" = "wisps" ]
+    [ "$(printf '%s\n' "$output" | tail -n +2 | head -1 | tr -d '\r')" = "wisps" ]
 }
 
 while IFS= read -r DB; do

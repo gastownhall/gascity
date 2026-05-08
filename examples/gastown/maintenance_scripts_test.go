@@ -2657,6 +2657,13 @@ exit 0
 		t.Errorf("reaper did not query real_beads.wisps; expected normal processing:\n%s", log)
 	}
 
+	// The precheck itself ran for empty_db. Without this assertion the
+	// test could pass via an unrelated early-skip path that never
+	// reached the precheck.
+	if !strings.Contains(log, "SHOW TABLES FROM `empty_db` LIKE 'wisps'") {
+		t.Errorf("reaper did not run the SHOW TABLES precheck against empty_db:\n%s", log)
+	}
+
 	// empty_db has no wisps → reaper must skip without querying its
 	// wisps/issues/dependencies tables.
 	for _, forbidden := range []string{
