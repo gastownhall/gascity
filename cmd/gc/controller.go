@@ -961,7 +961,20 @@ func gracefulStopAll(
 	store beads.Store,
 	stdout, stderr io.Writer,
 ) {
-	if timeout <= 0 || len(names) == 0 {
+	gracefulStopAllWithForceSignal(names, sp, timeout, rec, cfg, store, stdout, stderr, nil)
+}
+
+func gracefulStopAllWithForceSignal(
+	names []string,
+	sp runtime.Provider,
+	timeout time.Duration,
+	rec events.Recorder,
+	cfg *config.City,
+	store beads.Store,
+	stdout, stderr io.Writer,
+	forceStopRequested func() bool,
+) {
+	if timeout <= 0 || len(names) == 0 || stopForceRequested(forceStopRequested) {
 		// Immediate kill (no grace period).
 		stopTargetsBounded(stopTargetsForNames(names, cfg, store, stderr), cfg, store, sp, rec, "gc", stdout, stderr)
 		return
@@ -978,14 +991,20 @@ func gracefulStopAll(
 	// The configured timeout is the post-dispatch grace window; dispatch
 	// latency is intentionally outside that budget so every interrupted
 	// session still gets the full graceful-exit wait once nudged.
-	sent := interruptTargetsBounded(targets, cfg, store, sp, stderr)
+	sent := interruptTargetsBoundedWithForceSignal(targets, cfg, store, sp, stderr, forceStopRequested)
 	fmt.Fprintf(stdout, "Sent interrupt to %d/%d agent(s), waiting %s...\n", //nolint:errcheck // best-effort stdout
 		sent, len(names), timeout)
 
 	// Poll until all agents exit or timeout expires (avoid sleeping full duration).
 	pollInterval := 500 * time.Millisecond
+	if forceStopRequested != nil {
+		pollInterval = 50 * time.Millisecond
+	}
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
+		if stopForceRequested(forceStopRequested) {
+			break
+		}
 		allExited := true
 		if runningSet, ok := runningSessionSet(sp, names); ok {
 			allExited = len(runningSet) == 0
@@ -1002,6 +1021,9 @@ func gracefulStopAll(
 			break
 		}
 		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
 		if remaining < pollInterval {
 			time.Sleep(remaining)
 		} else {
@@ -1039,6 +1061,10 @@ func gracefulStopAll(
 		survivors = append(survivors, name)
 	}
 	stopTargetsBounded(filterStopTargets(targets, survivors), cfg, store, sp, rec, "gc", stdout, stderr)
+}
+
+func stopForceRequested(forceStopRequested func() bool) bool {
+	return forceStopRequested != nil && forceStopRequested()
 }
 
 func runningSessionSet(sp runtime.Provider, names []string) (map[string]bool, bool) {

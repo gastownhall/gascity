@@ -85,16 +85,17 @@ func cmdStop(args []string, stdout, stderr io.Writer, wallClockTimeout time.Dura
 	case out := <-doneCh:
 		return out.code
 	case <-time.After(wallClockCap):
-		fmt.Fprintf(stderr, "gc stop: timed out after %s; some sessions may not have stopped — try gc stop --force --timeout=<longer-duration>\n", wallClockCap) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc stop: timed out after %s; some sessions may not have stopped — retry with --force if stop is wedged, or raise --timeout for large stop sets\n", wallClockCap) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 }
 
 // defaultStopWallClockTimeout returns the wall-clock cap used by cmdStop
-// when --timeout is not set. It budgets a full configured-session stop and a
-// second full orphan cleanup pass using the same bounded wave sizes as the
-// stop implementation. Unknown extra live pool sessions or orphans can still
-// require an explicit --timeout from the operator.
+// when --timeout is not set. Each pass budgets three sequential phases:
+// interrupt provider dispatch, the configured post-interrupt grace wait, and
+// bounded force-stop waves. A second pass covers orphan cleanup. Unknown extra
+// live pool sessions or orphans can still require an explicit --timeout from
+// the operator.
 func defaultStopWallClockTimeout(cfg *config.City) time.Duration {
 	base := 5 * time.Second
 	if cfg != nil {

@@ -129,8 +129,9 @@ var stopPerTargetTimeoutDefault = 30 * time.Second
 
 // interruptPerTargetTimeoutMargin is the headroom added on top of
 // cfg.Daemon.ShutdownTimeoutDuration() when computing the interrupt wave's
-// per-target timeout. The base shutdown grace is the post-interrupt wait;
-// this margin covers dispatch/tmux latency for the interrupt itself.
+// per-target dispatch timeout. defaultStopWallClockTimeout budgets this
+// dispatch cap separately from the post-interrupt grace wait because a blocked
+// provider Interrupt call and a graceful process exit are sequential phases.
 var interruptPerTargetTimeoutMargin = 2 * time.Second
 
 type startCandidate struct {
@@ -221,15 +222,22 @@ func (t *asyncStartTracker) start() (func(), bool) {
 }
 
 func (t *asyncStartTracker) wait(timeout time.Duration) bool {
+	return t.waitUntil(timeout, nil)
+}
+
+func (t *asyncStartTracker) waitUntil(timeout time.Duration, shouldStop func() bool) bool {
 	if t == nil {
 		return true
 	}
 	t.mu.Lock()
 	t.stopping = true
 	t.mu.Unlock()
-	if timeout < 0 {
+	if shouldStop == nil && timeout < 0 {
 		t.wg.Wait()
 		return true
+	}
+	if shouldStop != nil && shouldStop() {
+		return false
 	}
 	done := make(chan struct{})
 	go func() {
@@ -244,11 +252,41 @@ func (t *asyncStartTracker) wait(timeout time.Duration) bool {
 			return false
 		}
 	}
-	select {
-	case <-done:
-		return true
-	case <-time.After(timeout):
-		return false
+	if shouldStop == nil {
+		select {
+		case <-done:
+			return true
+		case <-time.After(timeout):
+			return false
+		}
+	}
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	if timeout < 0 {
+		for {
+			select {
+			case <-done:
+				return true
+			case <-ticker.C:
+				if shouldStop() {
+					return false
+				}
+			}
+		}
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		select {
+		case <-done:
+			return true
+		case <-timer.C:
+			return false
+		case <-ticker.C:
+			if shouldStop() {
+				return false
+			}
+		}
 	}
 }
 
@@ -1833,15 +1871,25 @@ func reachableSelectedDependencies(
 // semaphore and returns a stopResult per target. perTargetTimeout caps the
 // wall-clock each goroutine waits for run() to return; on expiry, that
 // target's outcome is "timed_out" and the inner goroutine is intentionally
-// leaked. The leak is acceptable because the only caller is the stop path,
-// which Layer 2 (tmux.tmuxSubprocessTimeout) bounds at the subprocess level
-// — leaked goroutines return when their tmux subprocess is SIGKILL'd at
-// the deadline, or when the process exits. perTargetTimeout <= 0 means no
+// leaked. Callers must only pass run functions that are wall-clock bounded by
+// their provider implementation; tmux satisfies this with its subprocess
+// timeout. Non-tmux providers must enforce an equivalent bound before using
+// this helper on long-lived controller paths. perTargetTimeout <= 0 means no
 // timeout (legacy behavior; useful only for tests that bypass the timeout).
 func executeTargetWave(
 	targets []stopTarget,
 	maxParallel int,
 	perTargetTimeout time.Duration,
+	run func(stopTarget) error,
+) []stopResult {
+	return executeTargetWaveUntil(targets, maxParallel, perTargetTimeout, nil, run)
+}
+
+func executeTargetWaveUntil(
+	targets []stopTarget,
+	maxParallel int,
+	perTargetTimeout time.Duration,
+	shouldStop func() bool,
 	run func(stopTarget) error,
 ) []stopResult {
 	if len(targets) == 0 {
@@ -1853,9 +1901,43 @@ func executeTargetWave(
 	results := make([]stopResult, len(targets))
 	sem := make(chan struct{}, maxParallel)
 	done := make(chan int, len(targets))
+	stopCh, stopWatchDone := lifecycleStopSignal(shouldStop)
+	defer stopWatchDone()
+	launched := 0
+	forceResult := func(target stopTarget) stopResult {
+		now := time.Now()
+		return stopResult{
+			target:   target,
+			err:      errors.New("target lifecycle op abandoned after force request"),
+			outcome:  "force_requested",
+			started:  now,
+			finished: now,
+		}
+	}
+	fillRemaining := func(from int) {
+		for j := from; j < len(targets); j++ {
+			results[j] = forceResult(targets[j])
+		}
+	}
+launchLoop:
 	for i, target := range targets {
 		i, target := i, target
-		sem <- struct{}{}
+		if lifecycleStopRequested(stopCh) {
+			fillRemaining(i)
+			break launchLoop
+		}
+		select {
+		case sem <- struct{}{}:
+		case <-stopCh:
+			fillRemaining(i)
+			break launchLoop
+		}
+		if lifecycleStopRequested(stopCh) {
+			<-sem
+			fillRemaining(i)
+			break launchLoop
+		}
+		launched++
 		go func() {
 			started := time.Now()
 			defer func() {
@@ -1899,9 +1981,23 @@ func executeTargetWave(
 						finished: time.Now(),
 						outcome:  "timed_out",
 					}
+				case <-stopCh:
+					rr = runResult{
+						err:      errors.New("target lifecycle op abandoned after force request"),
+						finished: time.Now(),
+						outcome:  "force_requested",
+					}
 				}
 			} else {
-				rr = <-inner
+				select {
+				case rr = <-inner:
+				case <-stopCh:
+					rr = runResult{
+						err:      errors.New("target lifecycle op abandoned after force request"),
+						finished: time.Now(),
+						outcome:  "force_requested",
+					}
+				}
 			}
 			results[i] = stopResult{
 				target:   target,
@@ -1912,10 +2008,58 @@ func executeTargetWave(
 			}
 		}()
 	}
-	for range targets {
+	for completed := 0; completed < launched; completed++ {
 		<-done
 	}
 	return results
+}
+
+func lifecycleStopSignal(shouldStop func() bool) (<-chan struct{}, func()) {
+	if shouldStop == nil {
+		return nil, func() {}
+	}
+	stopCh := make(chan struct{})
+	done := make(chan struct{})
+	var stopOnce sync.Once
+	closeStop := func() {
+		stopOnce.Do(func() {
+			close(stopCh)
+		})
+	}
+	if shouldStop() {
+		closeStop()
+		return stopCh, func() {}
+	}
+	go func() {
+		ticker := time.NewTicker(25 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				if shouldStop() {
+					closeStop()
+					return
+				}
+			}
+		}
+	}()
+	return stopCh, func() {
+		close(done)
+	}
+}
+
+func lifecycleStopRequested(stopCh <-chan struct{}) bool {
+	if stopCh == nil {
+		return false
+	}
+	select {
+	case <-stopCh:
+		return true
+	default:
+		return false
+	}
 }
 
 func stopTargetsForNames(names []string, cfg *config.City, store beads.Store, stderr io.Writer) []stopTarget {
@@ -2091,10 +2235,10 @@ func markCityStopSessionAsAsleep(store beads.Store, sessionID string, stderr io.
 }
 
 // interruptPerTargetTimeout returns the wall-clock cap an interrupt-wave
-// goroutine waits before declaring its target timed out. It composes the
-// configured shutdown grace (which is the post-interrupt wait the caller
-// itself imposes) with a small dispatch margin for the interrupt syscalls
-// themselves.
+// goroutine waits before declaring its target timed out. It deliberately tracks
+// the configured shutdown grace plus a small margin: if the provider's
+// Interrupt call itself wedges, that dispatch attempt can consume up to one
+// grace-sized budget before the post-dispatch graceful-exit wait begins.
 func interruptPerTargetTimeout(cfg *config.City) time.Duration {
 	base := 5 * time.Second
 	if cfg != nil {
@@ -2106,6 +2250,10 @@ func interruptPerTargetTimeout(cfg *config.City) time.Duration {
 }
 
 func interruptTargetsBounded(targets []stopTarget, cfg *config.City, store beads.Store, sp runtime.Provider, stderr io.Writer) int {
+	return interruptTargetsBoundedWithForceSignal(targets, cfg, store, sp, stderr, nil)
+}
+
+func interruptTargetsBoundedWithForceSignal(targets []stopTarget, cfg *config.City, store beads.Store, sp runtime.Provider, stderr io.Writer, shouldStop func() bool) int {
 	targets = hydrateStopTargets(targets, cfg, store, stderr)
 	// Pool-managed sessions have no human user, so Claude Code's
 	// interactive "What should Claude do instead?" prompt would hang
@@ -2141,7 +2289,7 @@ func interruptTargetsBounded(targets []stopTarget, cfg *config.City, store beads
 		return sent
 	}
 	waveStarted := time.Now()
-	results := executeTargetWave(interruptable, min(len(interruptable), defaultMaxParallelInterrupts), interruptPerTargetTimeout(cfg), func(target stopTarget) error {
+	results := executeTargetWaveUntil(interruptable, min(len(interruptable), defaultMaxParallelInterrupts), interruptPerTargetTimeout(cfg), shouldStop, func(target stopTarget) error {
 		targetID := strings.TrimSpace(target.sessionID)
 		if targetID == "" {
 			targetID = strings.TrimSpace(target.name)

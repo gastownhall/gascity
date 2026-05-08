@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -79,7 +80,7 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 	}
 	const seededSession = "seeded-session"
 
-	var controllerStdout, controllerStderr bytes.Buffer
+	var controllerStdout, controllerStderr lockedBuffer
 	done := make(chan struct{})
 	go func() {
 		runController(dir, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &controllerStdout, &controllerStderr)
@@ -97,12 +98,12 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 		}
 	})
 
-	waitForControllerAvailable(t, dir, 15*time.Second)
+	waitForControllerAvailable(t, dir)
 	if err := sp.Start(context.Background(), seededSession, runtime.Config{}); err != nil {
 		t.Fatal(err)
 	}
 
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 	stopDone := make(chan int, 1)
 	go func() {
 		stopDone <- cmdStop([]string{dir}, &stdout, &stderr, 0, false)
@@ -145,7 +146,7 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 	if !strings.Contains(stdout.String(), "City stopped.") {
 		t.Fatalf("stdout missing city stopped message: %q", stdout.String())
 	}
-	if stderr.Len() != 0 {
+	if stderr.String() != "" {
 		t.Fatalf("unexpected stderr: %q", stderr.String())
 	}
 }
@@ -227,7 +228,7 @@ func TestCmdStopForceDelegatesImmediateControllerStop(t *testing.T) {
 		return DesiredStateResult{State: map[string]TemplateParams{}}
 	}
 
-	var controllerStdout, controllerStderr bytes.Buffer
+	var controllerStdout, controllerStderr lockedBuffer
 	done := make(chan struct{})
 	go func() {
 		runController(dir, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &controllerStdout, &controllerStderr)
@@ -241,13 +242,13 @@ func TestCmdStopForceDelegatesImmediateControllerStop(t *testing.T) {
 		}
 	})
 
-	waitForControllerAvailable(t, dir, 15*time.Second)
+	waitForControllerAvailable(t, dir)
 	const sess = "force-stop-session"
 	if err := sp.Start(context.Background(), sess, runtime.Config{}); err != nil {
 		t.Fatal(err)
 	}
 
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 	stopDone := make(chan int, 1)
 	go func() {
 		stopDone <- cmdStop([]string{dir}, &stdout, &stderr, 2*time.Second, true)
@@ -274,6 +275,98 @@ func TestCmdStopForceDelegatesImmediateControllerStop(t *testing.T) {
 	}
 }
 
+func TestCmdStopForceEscalatesInProgressControllerStop(t *testing.T) {
+	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
+
+	dir := shortSocketTempDir(t, "gc-force-escalate-")
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "force-escalate-city"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "5s"},
+	}
+	data, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tomlPath := filepath.Join(dir, "city.toml")
+	if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sp := newGatedStopProvider()
+	buildFn := func(_ *config.City, _ runtime.Provider, _ beads.Store) DesiredStateResult {
+		return DesiredStateResult{State: map[string]TemplateParams{}}
+	}
+
+	var controllerStdout, controllerStderr lockedBuffer
+	done := make(chan struct{})
+	go func() {
+		runController(dir, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &controllerStdout, &controllerStderr)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		tryStopControllerWithForce(dir, io.Discard, true)
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
+	})
+
+	waitForControllerAvailable(t, dir)
+	const sess = "force-escalate-session"
+	if err := sp.Start(context.Background(), sess, runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+
+	var normalStdout, normalStderr lockedBuffer
+	normalDone := make(chan int, 1)
+	go func() {
+		normalDone <- cmdStop([]string{dir}, &normalStdout, &normalStderr, 10*time.Second, false)
+	}()
+
+	interrupted := sp.waitForInterrupts(t, 1)
+	if interrupted[0] != sess {
+		t.Fatalf("interrupted = %q, want %q", interrupted[0], sess)
+	}
+
+	var forceStdout, forceStderr lockedBuffer
+	forceDone := make(chan int, 1)
+	go func() {
+		forceDone <- cmdStop([]string{dir}, &forceStdout, &forceStderr, 10*time.Second, true)
+	}()
+
+	stopped := sp.waitForStops(t, 1)
+	if stopped[0] != sess {
+		t.Fatalf("stopped = %q, want %q", stopped[0], sess)
+	}
+	sp.release(stopped[0])
+	sp.releaseInterrupt(interrupted[0])
+
+	for _, result := range []struct {
+		name string
+		ch   <-chan int
+		out  *lockedBuffer
+		err  *lockedBuffer
+	}{
+		{name: "normal stop", ch: normalDone, out: &normalStdout, err: &normalStderr},
+		{name: "force stop", ch: forceDone, out: &forceStdout, err: &forceStderr},
+	} {
+		select {
+		case code := <-result.ch:
+			if code != 0 {
+				t.Fatalf("%s code = %d, want 0; stdout=%q stderr=%q controller stderr=%q",
+					result.name, code, result.out.String(), result.err.String(), controllerStderr.String())
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s did not finish after force escalation", result.name)
+		}
+	}
+}
+
 func TestDefaultStopWallClockTimeoutScalesWithConfiguredStopTargets(t *testing.T) {
 	origStop := stopPerTargetTimeoutDefault
 	origMargin := interruptPerTargetTimeoutMargin
@@ -292,6 +385,9 @@ func TestDefaultStopWallClockTimeoutScalesWithConfiguredStopTargets(t *testing.T
 	}
 
 	got := defaultStopWallClockTimeout(cfg)
+	// One stop pass budgets a 3s interrupt-dispatch cap, 2s graceful-exit
+	// wait, and three 10s stop waves. The default cap allows two passes plus
+	// one extra orphan-cleanup stop wave: 2*(3s+2s+30s)+10s.
 	want := 80 * time.Second
 	if got != want {
 		t.Fatalf("defaultStopWallClockTimeout() = %s, want %s", got, want)
@@ -340,9 +436,9 @@ func TestStopCityManagedBeadsProviderIfRunningStopsDefaultBD(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var stderr bytes.Buffer
+	var stderr lockedBuffer
 	stopCityManagedBeadsProviderIfRunning(cityDir, &stderr)
-	if stderr.Len() != 0 {
+	if stderr.String() != "" {
 		t.Fatalf("unexpected stderr: %q", stderr.String())
 	}
 	ops := readOpLog(t, logFile)
@@ -399,7 +495,7 @@ func TestCmdStopUsesTargetCitySessionProviderOutsideCityDir(t *testing.T) {
 		return runtime.NewFake()
 	}
 
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 	code := cmdStop([]string{cityDir}, &stdout, &stderr, 0, false)
 	if code != 0 {
 		t.Fatalf("cmdStop() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
@@ -445,7 +541,7 @@ func TestCmdStopMarginExhaustion(t *testing.T) {
 		return DesiredStateResult{State: map[string]TemplateParams{}}
 	}
 
-	var controllerStdout, controllerStderr bytes.Buffer
+	var controllerStdout, controllerStderr lockedBuffer
 	done := make(chan struct{})
 	go func() {
 		runController(dir, filepath.Join(dir, "city.toml"), cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &controllerStdout, &controllerStderr)
@@ -463,7 +559,7 @@ func TestCmdStopMarginExhaustion(t *testing.T) {
 		}
 	})
 
-	waitForControllerAvailable(t, dir, 15*time.Second)
+	waitForControllerAvailable(t, dir)
 
 	const sess = "margin-session"
 	if err := sp.Start(context.Background(), sess, runtime.Config{}); err != nil {
@@ -475,7 +571,7 @@ func TestCmdStopMarginExhaustion(t *testing.T) {
 		sp.releaseInterrupt(sess)
 	}()
 
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 	stopDone := make(chan int, 1)
 	go func() {
 		stopDone <- cmdStop([]string{dir}, &stdout, &stderr, 0, false)
@@ -513,9 +609,9 @@ func TestCmdStopMarginExhaustion(t *testing.T) {
 	}
 }
 
-func waitForControllerAvailable(t *testing.T, dir string, timeout time.Duration) {
+func waitForControllerAvailable(t *testing.T, dir string) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(15 * time.Second)
 	for {
 		if controllerAcceptsPing(dir, 100*time.Millisecond) {
 			return

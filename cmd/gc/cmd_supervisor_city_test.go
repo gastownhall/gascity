@@ -1025,14 +1025,22 @@ func TestUnregisterCityFromSupervisorWithForceSendsForceStop(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	lis, err := net.Listen("unix", controllerSocketPath(cityPath))
+	sockPath := controllerSocketPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lis, err := net.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer lis.Close()                               //nolint:errcheck
-	defer os.Remove(controllerSocketPath(cityPath)) //nolint:errcheck
+	defer lis.Close()         //nolint:errcheck
+	defer os.Remove(sockPath) //nolint:errcheck
 
-	commands := make(chan string, 1)
+	type observedForceCommand struct {
+		command                 string
+		registeredBeforeCommand bool
+	}
+	commands := make(chan observedForceCommand, 1)
 	go func() {
 		conn, acceptErr := lis.Accept()
 		if acceptErr != nil {
@@ -1041,7 +1049,15 @@ func TestUnregisterCityFromSupervisorWithForceSendsForceStop(t *testing.T) {
 		defer conn.Close() //nolint:errcheck
 		buf := make([]byte, 64)
 		n, _ := conn.Read(buf)
-		commands <- strings.TrimSpace(string(buf[:n]))
+		entries, listErr := reg.List()
+		if listErr != nil {
+			commands <- observedForceCommand{command: "list-error:" + listErr.Error()}
+		} else {
+			commands <- observedForceCommand{
+				command:                 strings.TrimSpace(string(buf[:n])),
+				registeredBeforeCommand: len(entries) == 1 && samePath(entries[0].Path, cityPath),
+			}
+		}
 		conn.Write([]byte("ok\n")) //nolint:errcheck
 	}()
 
@@ -1064,8 +1080,11 @@ func TestUnregisterCityFromSupervisorWithForceSendsForceStop(t *testing.T) {
 
 	select {
 	case got := <-commands:
-		if got != "stop-force" {
-			t.Fatalf("controller command = %q, want stop-force", got)
+		if got.command != "stop-force" {
+			t.Fatalf("controller command = %q, want stop-force", got.command)
+		}
+		if !got.registeredBeforeCommand {
+			t.Fatal("force stop reached controller after supervisor registry entry was removed")
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for force controller command")

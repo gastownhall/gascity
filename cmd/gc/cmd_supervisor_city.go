@@ -450,16 +450,15 @@ func unregisterCityFromSupervisorWithForce(cityPath string, stdout, stderr io.Wr
 	}
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if force && supervisorAliveHook() != 0 {
+		tryStopControllerWithForce(cityPath, io.Discard, true)
+	}
 	if err := reg.Unregister(cityPath); err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
 		return true, 1
 	}
 
 	fmt.Fprintf(stdout, "Unregistered city '%s' (%s)\n", entry.EffectiveName(), entry.Path) //nolint:errcheck // best-effort stdout
-
-	if force && supervisorAliveHook() != 0 {
-		tryStopControllerWithForce(cityPath, io.Discard, true)
-	}
 
 	// If the city directory is gone, there's nothing to wait on or restore.
 	// Skip the supervisor-side probes that would otherwise spew
