@@ -122,6 +122,7 @@ func TestProcessRetryEvalRetriesPassMissingRequiredOutputJSON(t *testing.T) {
 			"gc.max_attempts":         "3",
 			"gc.on_exhausted":         "hard_fail",
 			"gc.outcome":              "pass",
+			"gc.output_json_schema":   "review-quorum.lane.v1",
 			"gc.output_json_required": "true",
 		},
 	})

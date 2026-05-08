@@ -3,7 +3,6 @@ package reviewquorum
 import "strings"
 
 var transientFailureReasons = map[string]struct{}{
-	"opencode_rate_limited":  {},
 	"rate_limited":           {},
 	"provider_rate_limited":  {},
 	"temporary_unavailable":  {},
@@ -29,6 +28,9 @@ func IsTransientFailure(failureClass, failureReason string) bool {
 func ClassifyFailure(failureClass, failureReason string) (class, reason string) {
 	class = normalizeToken(failureClass)
 	reason = normalizeToken(failureReason)
+	if class == FailureClassNone && reason == "" {
+		return FailureClassNone, ""
+	}
 	if reason == "" {
 		reason = "unspecified"
 	}

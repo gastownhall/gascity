@@ -13,10 +13,9 @@ func Finalize(outputs []LaneOutput) Summary {
 	sortLaneOutputs(lanes)
 
 	summary := Summary{
-		Verdict:             VerdictAwaitingReviewers,
-		Summary:             "awaiting reviewer lane output",
-		ReadOnlyEnforcement: ReadOnlyEnforcement{Enabled: true, Passed: true},
-		Lanes:               lanes,
+		Verdict: VerdictAwaitingReviewers,
+		Summary: "awaiting reviewer lane output",
+		Lanes:   lanes,
 	}
 	if len(lanes) == 0 {
 		return summary
@@ -28,28 +27,43 @@ func Finalize(outputs []LaneOutput) Summary {
 	var laneSummaries []string
 	var hardFailures []string
 	var transientFailures []string
-	for _, lane := range lanes {
+	var readOnlyMutated bool
+	for i, lane := range lanes {
 		count := normalizedFindingsCount(lane)
 		summary.FindingsCount += count
 		summary.Findings = append(summary.Findings, lane.Findings...)
 		summary.Evidence = append(summary.Evidence, lane.Evidence...)
 		summary.Usage = addUsage(summary.Usage, lane.Usage)
 		summary.MutationsDelta = mergeMutationDeltas(summary.MutationsDelta, lane.MutationsDelta)
-		summary.ReadOnlyEnforcement = mergeReadOnly(summary.ReadOnlyEnforcement, lane.ReadOnlyEnforcement)
+		if i == 0 {
+			summary.ReadOnlyEnforcement = lane.ReadOnlyEnforcement
+		} else {
+			summary.ReadOnlyEnforcement = mergeReadOnly(summary.ReadOnlyEnforcement, lane.ReadOnlyEnforcement)
+		}
+		switch reason := readOnlyContractFailure(lane); reason {
+		case "":
+		case "read_only_mutation_detected":
+			readOnlyMutated = true
+		default:
+			hardFailures = append(hardFailures, formatLaneFailure(lane.LaneID, reason))
+		}
 
 		if strings.TrimSpace(lane.Summary) != "" {
 			laneSummaries = append(laneSummaries, fmt.Sprintf("%s: %s", lane.LaneID, strings.TrimSpace(lane.Summary)))
 		}
 		if lane.FailureClass != "" || lane.FailureReason != "" {
 			class, reason := ClassifyFailure(lane.FailureClass, lane.FailureReason)
-			if class == FailureClassTransient {
-				transientFailures = append(transientFailures, formatLaneFailure(lane.LaneID, reason))
-			} else {
-				hardFailures = append(hardFailures, formatLaneFailure(lane.LaneID, reason))
+			if class != FailureClassNone {
+				if class == FailureClassTransient {
+					transientFailures = append(transientFailures, formatLaneFailure(lane.LaneID, reason))
+				} else {
+					hardFailures = append(hardFailures, formatLaneFailure(lane.LaneID, reason))
+				}
+				continue
 			}
-			continue
 		}
 		switch normalizeToken(lane.Verdict) {
+		case VerdictPass:
 		case VerdictPassWithFindings:
 			summary.Verdict = VerdictPassWithFindings
 		case VerdictFail:
@@ -61,7 +75,13 @@ func Finalize(outputs []LaneOutput) Summary {
 			} else {
 				hardFailures = append(hardFailures, formatLaneFailure(lane.LaneID, reason))
 			}
+		default:
+			transientFailures = append(transientFailures, formatLaneFailure(lane.LaneID, "unknown_verdict_value"))
 		}
+	}
+
+	if readOnlyMutated {
+		hardFailures = append([]string{"read_only_mutation_detected"}, hardFailures...)
 	}
 
 	switch {
@@ -70,25 +90,35 @@ func Finalize(outputs []LaneOutput) Summary {
 		summary.FailureClass = FailureClassHard
 		summary.FailureReason = strings.Join(hardFailures, "; ")
 		summary.Summary = "review quorum failed: " + summary.FailureReason
-	case summary.FindingsCount > 0:
-		summary.Verdict = VerdictPassWithFindings
-		summary.Summary = fmt.Sprintf("review quorum found %d finding(s)", summary.FindingsCount)
 	case len(transientFailures) > 0:
 		summary.Verdict = VerdictBlocked
 		summary.FailureClass = FailureClassTransient
 		summary.FailureReason = strings.Join(transientFailures, "; ")
 		summary.Summary = "review quorum blocked with degraded coverage: " + summary.FailureReason
+	case summary.FindingsCount > 0:
+		summary.Verdict = VerdictPassWithFindings
+		summary.Summary = fmt.Sprintf("review quorum found %d finding(s)", summary.FindingsCount)
 	case len(laneSummaries) > 0:
 		summary.Summary = strings.Join(laneSummaries, "\n")
 	}
 
-	if len(summary.MutationsDelta.Changed) > 0 && summary.Verdict == VerdictPass {
-		summary.Verdict = VerdictFail
-		summary.FailureClass = FailureClassHard
-		summary.FailureReason = "read_only_mutation_detected"
-		summary.Summary = "review lane mutated the worktree"
-	}
 	return summary
+}
+
+func readOnlyContractFailure(lane LaneOutput) string {
+	if !lane.ReadOnlyEnforcement.Observed {
+		return "read_only_enforcement_missing"
+	}
+	if !lane.ReadOnlyEnforcement.Enabled {
+		return "read_only_enforcement_disabled"
+	}
+	if len(lane.MutationsDelta.Changed) > 0 {
+		return "read_only_mutation_detected"
+	}
+	if !lane.ReadOnlyEnforcement.Passed {
+		return "read_only_mutation_detected"
+	}
+	return ""
 }
 
 func addUsage(a, b Usage) Usage {
@@ -101,21 +131,51 @@ func addUsage(a, b Usage) Usage {
 }
 
 func mergeReadOnly(a, b ReadOnlyEnforcement) ReadOnlyEnforcement {
-	enabled := a.Enabled || b.Enabled
-	passed := a.Passed
-	if b.Enabled && !b.Passed {
-		passed = false
-	}
 	notes := append(append([]string(nil), a.Notes...), b.Notes...)
-	return ReadOnlyEnforcement{Enabled: enabled, Passed: passed, Notes: notes}
+	return ReadOnlyEnforcement{
+		Observed:        a.Observed && b.Observed,
+		Enabled:         a.Enabled && b.Enabled,
+		Passed:          a.Passed && b.Passed,
+		BaselineCommand: firstNonEmpty(a.BaselineCommand, b.BaselineCommand),
+		AfterCommand:    firstNonEmpty(a.AfterCommand, b.AfterCommand),
+		Notes:           notes,
+	}
 }
 
 func formatLaneFailure(laneID, reason string) string {
-	if laneID == "" {
-		laneID = "unknown_lane"
+	laneID = normalizeFailureFragment(laneID, "unknown_lane")
+	reason = normalizeFailureFragment(reason, "unspecified")
+	return "lane=" + laneID + " reason=" + reason
+}
+
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
 	}
-	if reason == "" {
-		reason = "unspecified"
+	return b
+}
+
+func normalizeFailureFragment(value, fallback string) string {
+	value = normalizeToken(value)
+	if value == "" {
+		return fallback
 	}
-	return laneID + ":" + reason
+	var b strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '_' || r == '-' || r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	normalized := strings.Trim(b.String(), "_")
+	if normalized == "" {
+		return fallback
+	}
+	return normalized
 }

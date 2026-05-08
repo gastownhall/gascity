@@ -2,81 +2,65 @@ package reviewquorum
 
 import "testing"
 
-func TestDefaultLaneConfigsValidate(t *testing.T) {
-	lanes := DefaultLaneConfigs()
-	if err := ValidateDefaultQuorum(lanes); err != nil {
-		t.Fatalf("ValidateDefaultQuorum(default) error = %v", err)
+func TestValidateLaneConfigsAcceptsConfiguredLanes(t *testing.T) {
+	lanes := []LaneConfig{
+		{ID: "primary", Provider: "provider-a", Model: "model-a"},
+		{ID: "secondary", Provider: "provider-b", Model: "model-b"},
 	}
-	if len(lanes) != 2 {
-		t.Fatalf("default lanes len = %d, want 2", len(lanes))
-	}
-	if lanes[0].ID != LaneKimi || lanes[0].Provider != ProviderOpenCode || lanes[0].Model != ModelKimi {
-		t.Fatalf("first lane = %+v, want kimi opencode lane", lanes[0])
-	}
-	if lanes[1].ID != LaneDeepSeek || lanes[1].Provider != ProviderOpenCode || lanes[1].Model != ModelDeepSeek {
-		t.Fatalf("second lane = %+v, want deepseek opencode lane", lanes[1])
+	if err := ValidateLaneConfigs(lanes); err != nil {
+		t.Fatalf("ValidateLaneConfigs() error = %v", err)
 	}
 }
 
-func TestValidateDefaultQuorumRejectsContractDrift(t *testing.T) {
+func TestValidateLaneConfigsRejectsContractDrift(t *testing.T) {
 	tests := []struct {
 		name  string
 		lanes []LaneConfig
 	}{
 		{
-			name: "missing lane",
+			name: "empty lane id",
 			lanes: []LaneConfig{
-				{ID: LaneKimi, Provider: ProviderOpenCode, Model: ModelKimi},
+				{ID: "", Provider: "provider-a", Model: "model-a"},
 			},
 		},
 		{
-			name: "unexpected lane",
+			name: "missing provider",
 			lanes: []LaneConfig{
-				{ID: LaneKimi, Provider: ProviderOpenCode, Model: ModelKimi},
-				{ID: "qwen", Provider: ProviderOpenCode, Model: "opencode-go/qwen"},
+				{ID: "primary", Provider: "", Model: "model-a"},
 			},
 		},
 		{
-			name: "wrong provider",
+			name: "missing model",
 			lanes: []LaneConfig{
-				{ID: LaneKimi, Provider: "codex", Model: ModelKimi},
-				{ID: LaneDeepSeek, Provider: ProviderOpenCode, Model: ModelDeepSeek},
-			},
-		},
-		{
-			name: "wrong model",
-			lanes: []LaneConfig{
-				{ID: LaneKimi, Provider: ProviderOpenCode, Model: "opencode-go/kimi-k2.5"},
-				{ID: LaneDeepSeek, Provider: ProviderOpenCode, Model: ModelDeepSeek},
+				{ID: "primary", Provider: "provider-a", Model: ""},
 			},
 		},
 		{
 			name: "uppercase id",
 			lanes: []LaneConfig{
-				{ID: "Kimi", Provider: ProviderOpenCode, Model: ModelKimi},
-				{ID: LaneDeepSeek, Provider: ProviderOpenCode, Model: ModelDeepSeek},
+				{ID: "Primary", Provider: "provider-a", Model: "model-a"},
 			},
 		},
 		{
 			name: "duplicate id",
 			lanes: []LaneConfig{
-				{ID: LaneKimi, Provider: ProviderOpenCode, Model: ModelKimi},
-				{ID: LaneKimi, Provider: ProviderOpenCode, Model: ModelDeepSeek},
+				{ID: "primary", Provider: "provider-a", Model: "model-a"},
+				{ID: "primary", Provider: "provider-b", Model: "model-b"},
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := ValidateDefaultQuorum(tt.lanes); err == nil {
-				t.Fatal("ValidateDefaultQuorum() error = nil, want error")
+			if err := ValidateLaneConfigs(tt.lanes); err == nil {
+				t.Fatal("ValidateLaneConfigs() error = nil, want error")
 			}
 		})
 	}
 }
 
 func TestRateLimitFailuresAreTransient(t *testing.T) {
-	for _, reason := range []string{"opencode_rate_limited", "rate_limited", "provider_rate_limited"} {
+	for reason := range transientFailureReasons {
 		if !IsTransientFailure("", reason) {
 			t.Fatalf("IsTransientFailure(%q) = false, want true", reason)
 		}
@@ -84,5 +68,19 @@ func TestRateLimitFailuresAreTransient(t *testing.T) {
 		if class != FailureClassTransient || gotReason != reason {
 			t.Fatalf("ClassifyFailure(%q) = %q/%q, want transient/%q", reason, class, gotReason, reason)
 		}
+	}
+}
+
+func TestClassifyFailureNoneNoFailure(t *testing.T) {
+	class, reason := ClassifyFailure(FailureClassNone, "")
+	if class != FailureClassNone || reason != "" {
+		t.Fatalf("ClassifyFailure(none, empty) = %q/%q, want none/empty", class, reason)
+	}
+}
+
+func TestClassifyFailureNoneWithReasonIsHardContractFailure(t *testing.T) {
+	class, reason := ClassifyFailure(FailureClassNone, "stale_reason")
+	if class != FailureClassHard || reason != "invalid_failure_class" {
+		t.Fatalf("ClassifyFailure(none, stale_reason) = %q/%q, want hard/invalid_failure_class", class, reason)
 	}
 }

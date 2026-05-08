@@ -70,3 +70,38 @@ func TestParseStatusPorcelainUsesRenameDestination(t *testing.T) {
 		t.Fatalf("ParseStatusPorcelain() = %+v, want %+v", got, want)
 	}
 }
+
+func TestParseStatusPorcelainZUsesRenameDestination(t *testing.T) {
+	got := ParseStatusPorcelain("R  new -> literal.go\x00old -> literal.go\x00")
+	want := []StatusEntry{{Path: "new -> literal.go", Status: "R"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ParseStatusPorcelain() = %+v, want %+v", got, want)
+	}
+}
+
+func TestParseStatusPorcelainUnquotesQuotedPath(t *testing.T) {
+	got := ParseStatusPorcelain(` M "dir/file with spaces.go"` + "\n")
+	want := []StatusEntry{{Path: "dir/file with spaces.go", Status: "M"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ParseStatusPorcelain() = %+v, want %+v", got, want)
+	}
+}
+
+func TestParseStatusPorcelainDoesNotSplitArrowInNonRenamePath(t *testing.T) {
+	got := ParseStatusPorcelain(" M fixtures/name -> literal.go\n")
+	want := []StatusEntry{{Path: "fixtures/name -> literal.go", Status: "M"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ParseStatusPorcelain() = %+v, want %+v", got, want)
+	}
+}
+
+func TestMergeMutationDeltasSamePathLastWriterWins(t *testing.T) {
+	got := mergeMutationDeltas(
+		MutationsDelta{Changed: []StatusEntry{{Path: "main.go", Status: "M"}}},
+		MutationsDelta{Changed: []StatusEntry{{Path: "main.go", Status: "D"}}},
+	)
+	want := MutationsDelta{Changed: []StatusEntry{{Path: "main.go", Status: "D"}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("mergeMutationDeltas() = %+v, want %+v", got, want)
+	}
+}

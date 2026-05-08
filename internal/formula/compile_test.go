@@ -1183,32 +1183,47 @@ func TestCompileReviewQuorumCoreFormula(t *testing.T) {
 					t.Fatalf("%s description missing structured output key %q", step.ID, required)
 				}
 			}
+			if !strings.Contains(step.Description, "{{base_ref}}") {
+				t.Fatalf("%s description missing base_ref prompt placeholder", step.ID)
+			}
 		}
 	}
-	if got, want := strings.Join(reviewerLanes, ","), "kimi,deepseek"; got != want {
+	if got, want := strings.Join(reviewerLanes, ","), "{{lane_one_id}},{{lane_two_id}}"; got != want {
 		t.Fatalf("reviewer lanes = %q, want %q", got, want)
 	}
-	if def := parsed.Vars["kimi_model"].Default; def == nil || *def != "opencode-go/kimi-k2.6" {
-		t.Fatalf("kimi_model default = %v, want opencode-go/kimi-k2.6", def)
-	}
-	if def := parsed.Vars["deepseek_model"].Default; def == nil || *def != "opencode-go/deepseek-v4-pro" {
-		t.Fatalf("deepseek_model default = %v, want opencode-go/deepseek-v4-pro", def)
-	}
-	if def := parsed.Vars["kimi_target"].Default; def == nil || *def != "opencode-kimi" {
-		t.Fatalf("kimi_target default = %v, want opencode-kimi", def)
-	}
-	if def := parsed.Vars["deepseek_target"].Default; def == nil || *def != "opencode-deepseek" {
-		t.Fatalf("deepseek_target default = %v, want opencode-deepseek", def)
+	for _, name := range []string{
+		"lane_one_id",
+		"lane_one_provider",
+		"lane_one_model",
+		"lane_one_target",
+		"lane_two_id",
+		"lane_two_provider",
+		"lane_two_model",
+		"lane_two_target",
+		"synthesis_target",
+	} {
+		if !parsed.Vars[name].Required {
+			t.Fatalf("%s required = false, want true", name)
+		}
 	}
 
 	recipe, err := Compile(context.Background(), "mol-review-quorum", []string{searchDir}, map[string]string{
-		"subject": "PR-123",
+		"subject":           "PR-123",
+		"lane_one_id":       "primary",
+		"lane_one_provider": "provider-a",
+		"lane_one_model":    "model-a",
+		"lane_one_target":   "target-a",
+		"lane_two_id":       "secondary",
+		"lane_two_provider": "provider-b",
+		"lane_two_model":    "model-b",
+		"lane_two_target":   "target-b",
+		"synthesis_target":  "custom-review-synthesis",
 	})
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
 
-	for _, stepID := range []string{"mol-review-quorum.review-kimi", "mol-review-quorum.review-deepseek"} {
+	for _, stepID := range []string{"mol-review-quorum.review-lane-one", "mol-review-quorum.review-lane-two"} {
 		control := recipe.StepByID(stepID)
 		if control == nil {
 			t.Fatalf("%s control step missing", stepID)
@@ -1226,14 +1241,20 @@ func TestCompileReviewQuorumCoreFormula(t *testing.T) {
 		if attempt == nil {
 			t.Fatalf("%s attempt.1 missing", stepID)
 		}
-		if got := attempt.Metadata["gc.output_json"]; got != "review-quorum.lane.v1" {
-			t.Fatalf("%s attempt gc.output_json = %q, want review-quorum.lane.v1", stepID, got)
+		if got := attempt.Metadata["gc.output_json"]; got != "" {
+			t.Fatalf("%s attempt gc.output_json = %q, want empty until worker writes JSON", stepID, got)
 		}
-		if got := attempt.Metadata["gc.provider"]; got != "opencode" {
-			t.Fatalf("%s attempt gc.provider = %q, want opencode", stepID, got)
+		if got := attempt.Metadata["gc.output_json_schema"]; got != "review-quorum.lane.v1" {
+			t.Fatalf("%s attempt gc.output_json_schema = %q, want review-quorum.lane.v1", stepID, got)
 		}
-		if got := attempt.Metadata["gc.model"]; got == "" {
-			t.Fatalf("%s attempt gc.model is empty", stepID)
+		if got := attempt.Metadata["gc.provider"]; !strings.HasPrefix(got, "{{lane_") {
+			t.Fatalf("%s attempt gc.provider = %q, want lane provider placeholder", stepID, got)
+		}
+		if got := attempt.Metadata["gc.model"]; !strings.HasPrefix(got, "{{lane_") {
+			t.Fatalf("%s attempt gc.model = %q, want lane model placeholder", stepID, got)
+		}
+		if !strings.Contains(attempt.Description, "{{base_ref}}") {
+			t.Fatalf("%s attempt description missing base_ref prompt placeholder", stepID)
 		}
 	}
 
@@ -1241,10 +1262,16 @@ func TestCompileReviewQuorumCoreFormula(t *testing.T) {
 	if synthesis == nil {
 		t.Fatal("synthesis step missing")
 	}
-	if got := synthesis.Metadata["gc.output_json"]; got != "review-quorum.summary.v1" {
-		t.Fatalf("synthesis gc.output_json = %q, want review-quorum.summary.v1", got)
+	if got := synthesis.Metadata["gc.output_json"]; got != "" {
+		t.Fatalf("synthesis gc.output_json = %q, want empty until worker writes JSON", got)
 	}
-	for _, dep := range []string{"mol-review-quorum.review-kimi", "mol-review-quorum.review-deepseek"} {
+	if got := synthesis.Metadata["gc.output_json_schema"]; got != "review-quorum.summary.v1" {
+		t.Fatalf("synthesis gc.output_json_schema = %q, want review-quorum.summary.v1", got)
+	}
+	if got := synthesis.Metadata["gc.run_target"]; got != "{{synthesis_target}}" {
+		t.Fatalf("synthesis gc.run_target = %q, want {{synthesis_target}}", got)
+	}
+	for _, dep := range []string{"mol-review-quorum.review-lane-one", "mol-review-quorum.review-lane-two"} {
 		if !hasRecipeDep(recipe.Deps, synthesis.ID, dep, "blocks") {
 			t.Fatalf("synthesis missing blocks dep on %s", dep)
 		}

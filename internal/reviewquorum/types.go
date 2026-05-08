@@ -9,21 +9,22 @@ import (
 )
 
 const (
-	ProviderOpenCode = "opencode"
-
-	LaneKimi     = "kimi"
-	LaneDeepSeek = "deepseek"
-
-	ModelKimi     = "opencode-go/kimi-k2.6"
-	ModelDeepSeek = "opencode-go/deepseek-v4-pro"
-
+	// FailureClassNone records a lane outcome with no infrastructure failure.
+	FailureClassNone = "none"
+	// FailureClassTransient records a retryable infrastructure failure.
 	FailureClassTransient = "transient"
-	FailureClassHard      = "hard"
+	// FailureClassHard records a non-retryable infrastructure failure.
+	FailureClassHard = "hard"
 
-	VerdictPass              = "pass"
-	VerdictPassWithFindings  = "pass_with_findings"
-	VerdictFail              = "fail"
-	VerdictBlocked           = "blocked"
+	// VerdictPass records a lane approval with no findings.
+	VerdictPass = "pass"
+	// VerdictPassWithFindings records approval with non-blocking findings.
+	VerdictPassWithFindings = "pass_with_findings"
+	// VerdictFail records a lane rejection.
+	VerdictFail = "fail"
+	// VerdictBlocked records a lane that could not complete review.
+	VerdictBlocked = "blocked"
+	// VerdictAwaitingReviewers records that quorum cannot finalize yet.
 	VerdictAwaitingReviewers = "awaiting_reviewers"
 )
 
@@ -32,42 +33,6 @@ type LaneConfig struct {
 	ID       string `json:"id"`
 	Provider string `json:"provider"`
 	Model    string `json:"model"`
-}
-
-// DefaultLaneConfigs returns the fixed two-lane OpenCode quorum.
-func DefaultLaneConfigs() []LaneConfig {
-	return []LaneConfig{
-		{ID: LaneKimi, Provider: ProviderOpenCode, Model: ModelKimi},
-		{ID: LaneDeepSeek, Provider: ProviderOpenCode, Model: ModelDeepSeek},
-	}
-}
-
-// ValidateDefaultQuorum checks that lanes are exactly the built-in Kimi and
-// DeepSeek OpenCode quorum, with no extras, aliases, or reordered duplicates.
-func ValidateDefaultQuorum(lanes []LaneConfig) error {
-	if err := ValidateLaneConfigs(lanes); err != nil {
-		return err
-	}
-	want := map[string]string{
-		LaneKimi:     ModelKimi,
-		LaneDeepSeek: ModelDeepSeek,
-	}
-	if len(lanes) != len(want) {
-		return fmt.Errorf("default review quorum must have exactly %d lanes, got %d", len(want), len(lanes))
-	}
-	for _, lane := range lanes {
-		model, ok := want[lane.ID]
-		if !ok {
-			return fmt.Errorf("default review quorum has unexpected lane %q", lane.ID)
-		}
-		if lane.Provider != ProviderOpenCode {
-			return fmt.Errorf("lane %q provider = %q, want %q", lane.ID, lane.Provider, ProviderOpenCode)
-		}
-		if lane.Model != model {
-			return fmt.Errorf("lane %q model = %q, want %q", lane.ID, lane.Model, model)
-		}
-	}
-	return nil
 }
 
 // ValidateLaneConfigs checks the generic lane invariants required by the
@@ -142,12 +107,15 @@ type Usage struct {
 	CostUSD      float64 `json:"cost_usd,omitempty"`
 }
 
-// ReadOnlyEnforcement records whether review lanes respected the no-mutation
-// contract.
+// ReadOnlyEnforcement records whether a review lane proved it respected the
+// no-mutation contract.
 type ReadOnlyEnforcement struct {
-	Enabled bool     `json:"enabled"`
-	Passed  bool     `json:"passed"`
-	Notes   []string `json:"notes,omitempty"`
+	Observed        bool     `json:"observed"`
+	Enabled         bool     `json:"enabled"`
+	Passed          bool     `json:"passed"`
+	BaselineCommand string   `json:"baseline_command,omitempty"`
+	AfterCommand    string   `json:"after_command,omitempty"`
+	Notes           []string `json:"notes,omitempty"`
 }
 
 // Summary is the durable synthesized review quorum result.

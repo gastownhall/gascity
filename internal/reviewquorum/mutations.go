@@ -2,6 +2,7 @@ package reviewquorum
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -45,17 +46,47 @@ func MutationDelta(before, after []StatusEntry) MutationsDelta {
 }
 
 // ParseStatusPorcelain parses stable path/status pairs from git porcelain v1
-// output. Rename/copy records use the destination path.
+// output. It accepts the preferred NUL-separated form produced by
+// git status --porcelain=v1 -z and the newline form used by older callers.
+// Rename/copy records use the destination path.
 func ParseStatusPorcelain(output string) []StatusEntry {
+	if strings.Contains(output, "\x00") {
+		return parseStatusPorcelainZ(output)
+	}
 	var entries []StatusEntry
 	for _, line := range strings.Split(output, "\n") {
 		if strings.TrimSpace(line) == "" || len(line) < 3 {
 			continue
 		}
 		status := strings.TrimSpace(line[:2])
-		path := strings.TrimSpace(line[3:])
-		if i := strings.LastIndex(path, " -> "); i >= 0 {
-			path = strings.TrimSpace(path[i+4:])
+		path := canonicalStatusPath(line[3:])
+		if isRenameOrCopy(status) {
+			if i := strings.LastIndex(path, " -> "); i >= 0 {
+				path = strings.TrimSpace(path[i+4:])
+			}
+		}
+		path = canonicalStatusPath(path)
+		if path == "" || status == "" {
+			continue
+		}
+		entries = append(entries, StatusEntry{Path: path, Status: status})
+	}
+	sortStatusEntries(entries)
+	return entries
+}
+
+func parseStatusPorcelainZ(output string) []StatusEntry {
+	var entries []StatusEntry
+	records := strings.Split(output, "\x00")
+	for i := 0; i < len(records); i++ {
+		record := records[i]
+		if strings.TrimSpace(record) == "" || len(record) < 3 {
+			continue
+		}
+		status := strings.TrimSpace(record[:2])
+		path := canonicalStatusPath(record[3:])
+		if isRenameOrCopy(status) && i+1 < len(records) {
+			i++
 		}
 		if path == "" || status == "" {
 			continue
@@ -64,6 +95,20 @@ func ParseStatusPorcelain(output string) []StatusEntry {
 	}
 	sortStatusEntries(entries)
 	return entries
+}
+
+func canonicalStatusPath(path string) string {
+	path = strings.TrimSpace(path)
+	if strings.HasPrefix(path, "\"") {
+		if unquoted, err := strconv.Unquote(path); err == nil {
+			path = unquoted
+		}
+	}
+	return path
+}
+
+func isRenameOrCopy(status string) bool {
+	return strings.Contains(status, "R") || strings.Contains(status, "C")
 }
 
 func statusByPath(entries []StatusEntry) map[string]StatusEntry {
@@ -87,6 +132,8 @@ func mergeMutationDeltas(deltas ...MutationsDelta) MutationsDelta {
 	byPath := map[string]StatusEntry{}
 	for _, delta := range deltas {
 		for _, entry := range delta.Changed {
+			// Callers pass deltas in deterministic lane order; the last entry
+			// wins when lanes report the same path with different statuses.
 			byPath[entry.Path] = entry
 		}
 	}
