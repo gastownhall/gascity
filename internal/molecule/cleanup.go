@@ -9,6 +9,14 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/closeorder"
 )
 
+// SubtreeClosedReason is the canonical close_reason stamped on every
+// bead in a molecule subtree when CloseSubtree force-closes it. Without
+// an explicit reason of >=20 chars, bd's validation.on-close=error
+// rejects the close, the subtree stays open, and downstream cleanup
+// (sling.CloseAttachedSubtree, formula teardown, etc.) is silently
+// incomplete.
+const SubtreeClosedReason = "molecule cleanup: subtree force-closed by CloseSubtree"
+
 // ListSubtree returns the root bead and all transitive parent-child
 // descendants, including already-closed beads so nested open descendants are
 // still reachable through a closed intermediate node.
@@ -132,5 +140,7 @@ func CloseSubtree(store beads.Store, rootID string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return store.CloseAll(ordered, nil)
+	return store.CloseAll(ordered, map[string]string{
+		"close_reason": SubtreeClosedReason,
+	})
 }
