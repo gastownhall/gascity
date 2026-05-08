@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -594,6 +596,9 @@ func TestConvoyClose(t *testing.T) {
 	if b.Status != "closed" {
 		t.Errorf("bead Status = %q, want %q", b.Status, "closed")
 	}
+	if got := b.Metadata["close_reason"]; got != convoyManualCloseReason {
+		t.Errorf("metadata.close_reason = %q, want %q", got, convoyManualCloseReason)
+	}
 }
 
 func TestConvoyCloseNotConvoy(t *testing.T) {
@@ -1044,6 +1049,68 @@ func TestConvoyCheckStampsCloseReason(t *testing.T) {
 	}
 }
 
+func TestCloseConvoyWithReasonReturnsMetadataError(t *testing.T) {
+	base := beads.NewMemStore()
+	_, _ = base.Create(beads.Bead{Title: "batch", Type: "convoy"}) // gc-1
+	store := failingSetMetadataStore{Store: base}
+
+	err := closeConvoyWithReason(store, "gc-1", convoyAutocloseReason)
+	if err == nil {
+		t.Fatal("closeConvoyWithReason returned nil, want metadata error")
+	}
+	if !strings.Contains(err.Error(), "stamping convoy gc-1 close reason") {
+		t.Fatalf("error = %v, want close reason context", err)
+	}
+
+	b, getErr := base.Get("gc-1")
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if b.Status != "open" {
+		t.Fatalf("convoy Status = %q, want open after metadata failure", b.Status)
+	}
+}
+
+type failingSetMetadataStore struct {
+	beads.Store
+}
+
+func (s failingSetMetadataStore) SetMetadata(string, string, string) error {
+	return errors.New("metadata write failed")
+}
+
+func TestCloseConvoyWithReasonBdStoreForwardsReasonWithoutShow(t *testing.T) {
+	const id = "bd-x"
+	var closeArgs []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			return nil, fmt.Errorf("unexpected command name: %s", name)
+		}
+		if len(args) > 0 && args[0] == "show" {
+			return nil, fmt.Errorf("unexpected bd show before convoy close")
+		}
+		switch strings.Join(args, " ") {
+		case "update --json " + id + " --set-metadata close_reason=" + convoyAutocloseReason:
+			return []byte(`[{"id":"bd-x","title":"batch","status":"open","issue_type":"convoy","created_at":"2025-01-15T10:30:00Z"}]`), nil
+		case "close --force --json --reason " + convoyAutocloseReason + " " + id:
+			closeArgs = append([]string(nil), args...)
+			return []byte(`[{"id":"bd-x","title":"batch","status":"closed","issue_type":"convoy","created_at":"2025-01-15T10:30:00Z"}]`), nil
+		default:
+			return nil, fmt.Errorf("unexpected command: bd %s", strings.Join(args, " "))
+		}
+	}
+	store := beads.NewBdStore("/city", runner)
+
+	if err := closeConvoyWithReason(store, id, convoyAutocloseReason); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"close", "--force", "--json", "--reason", convoyAutocloseReason, id}
+	if got := fmt.Sprint(closeArgs); got != fmt.Sprint(want) {
+		t.Fatalf("close args = %v, want %v", closeArgs, want)
+	}
+}
+
 // --- gc convoy land ---
 
 func TestConvoyLandHappyPath(t *testing.T) {
@@ -1069,6 +1136,9 @@ func TestConvoyLandHappyPath(t *testing.T) {
 	}
 	if b.Status != "closed" {
 		t.Errorf("convoy Status = %q, want %q", b.Status, "closed")
+	}
+	if got := b.Metadata["close_reason"]; got != convoyLandCloseReason {
+		t.Errorf("metadata.close_reason = %q, want %q", got, convoyLandCloseReason)
 	}
 }
 
