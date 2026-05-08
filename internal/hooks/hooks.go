@@ -381,16 +381,41 @@ func normalizeCodexHookCommands(existing []byte) ([]byte, bool, error) {
 	if err := json.Unmarshal(existing, &root); err != nil {
 		return nil, false, err
 	}
+	hasManagedCommand := codexHookValueHasManagedCommand(root)
 	changed := upgradeCodexHookValue(root)
 	data, err := json.MarshalIndent(root, "", "  ")
 	if err != nil {
 		return nil, false, err
 	}
 	data = append(data, '\n')
-	if !bytes.Equal(data, existing) {
+	if hasManagedCommand && !bytes.Equal(data, existing) {
 		changed = true
 	}
 	return data, changed, nil
+}
+
+func codexHookValueHasManagedCommand(v any) bool {
+	switch node := v.(type) {
+	case map[string]any:
+		for key, val := range node {
+			if key == "command" {
+				if command, ok := val.(string); ok && isCodexManagedHookCommand(command) {
+					return true
+				}
+				continue
+			}
+			if codexHookValueHasManagedCommand(val) {
+				return true
+			}
+		}
+	case []any:
+		for _, elem := range node {
+			if codexHookValueHasManagedCommand(elem) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func upgradeCodexHookValue(v any) bool {
@@ -425,16 +450,27 @@ func upgradeCodexHookValue(v any) bool {
 	}
 }
 
+var codexManagedHookCommandNeedles = []string{
+	`gc prime --hook`,
+	`gc nudge drain --inject`,
+	`gc mail check --inject`,
+	`gc hook --inject`,
+}
+
+func isCodexManagedHookCommand(command string) bool {
+	for _, needle := range codexManagedHookCommandNeedles {
+		if strings.Contains(command, needle) {
+			return true
+		}
+	}
+	return false
+}
+
 func upgradeCodexHookCommand(command string) (string, bool) {
 	if strings.Contains(command, `--hook-format codex`) {
 		return "", false
 	}
-	for _, needle := range []string{
-		`gc prime --hook`,
-		`gc nudge drain --inject`,
-		`gc mail check --inject`,
-		`gc hook --inject`,
-	} {
+	for _, needle := range codexManagedHookCommandNeedles {
 		if strings.Contains(command, needle) {
 			return strings.Replace(command, needle, needle+` --hook-format codex`, 1), true
 		}
