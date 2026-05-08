@@ -930,6 +930,115 @@ func TestDoSlingNudgePoolNoMembers(t *testing.T) {
 	}
 }
 
+func TestBuiltInSlingPoolRouteContractUsesMetadataOnly(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	maxPolecats := 5
+	maxRefinery := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "saitoc", Path: "/tmp/saitoc", Prefix: "gc"}},
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "saitoc", MaxActiveSessions: &maxPolecats},
+			{Name: "refinery", Dir: "saitoc", MaxActiveSessions: &maxRefinery},
+		},
+	}
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	store := newSlingTestStore()
+	deps.Store = store
+
+	created, err := store.Create(beads.Bead{Title: "route contract work", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	opts := testOpts(cfg.Agents[0], created.ID)
+	code := doSling(opts, deps, &fakeQuerier{bead: created}, stdout, stderr)
+	if code != 0 {
+		t.Fatalf("doSling returned %d; stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	routed, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get routed bead: %v", err)
+	}
+	if got := routed.Metadata["gc.routed_to"]; got != "saitoc/polecat" {
+		t.Fatalf("gc.routed_to = %q, want saitoc/polecat", got)
+	}
+	for _, label := range routed.Labels {
+		if strings.HasPrefix(label, "pool:") {
+			t.Fatalf("built-in sling added legacy pool label %q; labels=%v", label, routed.Labels)
+		}
+	}
+
+	counts, partials, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{
+		defaultScaleCheckTargetForAgent(sharedTestCityDir, cfg, &cfg.Agents[0], nil, map[string]beads.Store{"saitoc": store}),
+	})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errors: %v", errs)
+	}
+	if len(partials) != 0 {
+		t.Fatalf("defaultScaleCheckCounts partials: %v", partials)
+	}
+	if got := counts["saitoc/polecat"]; got != 1 {
+		t.Fatalf("polecat scale count after sling = %d, want 1", got)
+	}
+
+	inProgress := "in_progress"
+	polecatSession := "pc-1"
+	if err := store.Update(created.ID, beads.UpdateOpts{
+		Status:   &inProgress,
+		Assignee: &polecatSession,
+	}); err != nil {
+		t.Fatalf("claim update: %v", err)
+	}
+	claimed, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get claimed bead: %v", err)
+	}
+	states := ComputePoolDesiredStates(cfg, []beads.Bead{claimed}, []beads.Bead{{
+		ID:     polecatSession,
+		Status: "open",
+		Type:   sessionBeadType,
+		Metadata: map[string]string{
+			"template":     "saitoc/polecat",
+			"session_name": polecatSession,
+		},
+	}}, map[string]int{"saitoc/polecat": 0})
+	if len(states) != 1 || len(states[0].Requests) != 1 {
+		t.Fatalf("resume states = %#v, want one polecat resume request", states)
+	}
+	if req := states[0].Requests[0]; req.Tier != "resume" || req.WorkBeadID != created.ID || req.SessionBeadID != polecatSession {
+		t.Fatalf("resume request = %#v, want claimed work preserved for polecat session", req)
+	}
+
+	open := "open"
+	refinery := "saitoc/refinery"
+	if err := store.Update(created.ID, beads.UpdateOpts{
+		Status:   &open,
+		Assignee: &refinery,
+		Labels:   []string{"pool:saitoc/polecat"},
+		Metadata: map[string]string{"gc.routed_to": refinery},
+	}); err != nil {
+		t.Fatalf("handoff update: %v", err)
+	}
+	counts, partials, errs = defaultScaleCheckCounts([]defaultScaleCheckTarget{
+		defaultScaleCheckTargetForAgent(sharedTestCityDir, cfg, &cfg.Agents[0], nil, map[string]beads.Store{"saitoc": store}),
+		defaultScaleCheckTargetForAgent(sharedTestCityDir, cfg, &cfg.Agents[1], nil, map[string]beads.Store{"saitoc": store}),
+	})
+	if len(errs) != 0 {
+		t.Fatalf("post-handoff defaultScaleCheckCounts errors: %v", errs)
+	}
+	if len(partials) != 0 {
+		t.Fatalf("post-handoff defaultScaleCheckCounts partials: %v", partials)
+	}
+	if got := counts["saitoc/polecat"]; got != 0 {
+		t.Fatalf("polecat scale count after refinery handoff with stale pool label = %d, want 0", got)
+	}
+	if got := counts["saitoc/refinery"]; got != 0 {
+		t.Fatalf("refinery generic scale count for assigned handoff = %d, want 0", got)
+	}
+}
+
 func TestDoSlingCustomSlingQuery(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
