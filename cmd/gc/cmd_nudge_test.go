@@ -13,8 +13,8 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -1983,7 +1983,7 @@ func TestMarkQueuedNudgeTerminalStampsCloseReason(t *testing.T) {
 			store := beads.NewMemStore()
 			item := queuedNudge{
 				ID:        "nudge-" + tc.name,
-				Agent:     "deacon",
+				Agent:     "agent-terminal",
 				SessionID: "pc-qr6",
 				Source:    "session",
 				Message:   "DOG_DONE: reaper",
@@ -2117,4 +2117,3 @@ func TestEnqueueQueuedNudgeWithStore_RollbackStampsCloseReason(t *testing.T) {
 		t.Errorf("nudgeEnqueueRollbackCloseReason = %q (%d chars), want >=20 to satisfy validation.on-close=error", got, len(got))
 	}
 }
-
