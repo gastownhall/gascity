@@ -22,15 +22,19 @@ import (
 func TestHTTPAdapterPublishSetsCSRFHeader(t *testing.T) {
 	t.Parallel()
 
-	var gotHeader string
+	var (
+		handlerCalled bool
+		gotHeader     string
+	)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerCalled = true
 		if r.Method != http.MethodPost {
 			t.Errorf("expected POST, got %s", r.Method)
 		}
 		if !strings.HasSuffix(r.URL.Path, "/publish") {
 			t.Errorf("expected /publish suffix, got %s", r.URL.Path)
 		}
-		gotHeader = r.Header.Get("X-GC-Request")
+		gotHeader = r.Header.Get(csrfHeaderName)
 		_, _ = io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(wirePublishReceipt{
@@ -57,13 +61,17 @@ func TestHTTPAdapterPublishSetsCSRFHeader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
+	if !handlerCalled {
+		t.Fatalf("server handler was never invoked; request did not reach the callback URL")
+	}
 	if !receipt.Delivered {
 		t.Fatalf("expected Delivered=true, got receipt=%+v", receipt)
 	}
-	if gotHeader == "" {
-		t.Fatalf("expected X-GC-Request header on outbound request; got empty. " +
-			"This header is required by gc's /svc-proxy CSRF gate when the " +
-			"adapter callback URL points at a gc-internal proxy.")
+	if gotHeader != "true" {
+		t.Fatalf("expected %s=%q on outbound request, got %q. "+
+			"This header is required by gc's /svc-proxy CSRF gate when the "+
+			"adapter callback URL points at a gc-internal proxy.",
+			csrfHeaderName, "true", gotHeader)
 	}
 }
 
@@ -74,15 +82,19 @@ func TestHTTPAdapterPublishSetsCSRFHeader(t *testing.T) {
 func TestHTTPAdapterEnsureChildConversationSetsCSRFHeader(t *testing.T) {
 	t.Parallel()
 
-	var gotHeader string
+	var (
+		handlerCalled bool
+		gotHeader     string
+	)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerCalled = true
 		if r.Method != http.MethodPost {
 			t.Errorf("expected POST, got %s", r.Method)
 		}
 		if !strings.HasSuffix(r.URL.Path, "/child-conversation") {
 			t.Errorf("expected /child-conversation suffix, got %s", r.URL.Path)
 		}
-		gotHeader = r.Header.Get("X-GC-Request")
+		gotHeader = r.Header.Get(csrfHeaderName)
 		_, _ = io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(ConversationRef{
@@ -103,7 +115,11 @@ func TestHTTPAdapterEnsureChildConversationSetsCSRFHeader(t *testing.T) {
 	if _, err := adapter.EnsureChildConversation(context.Background(), parent, "test-label"); err != nil {
 		t.Fatalf("EnsureChildConversation: %v", err)
 	}
-	if gotHeader == "" {
-		t.Fatalf("expected X-GC-Request header on outbound child-conversation request; got empty.")
+	if !handlerCalled {
+		t.Fatalf("server handler was never invoked; request did not reach the callback URL")
+	}
+	if gotHeader != "true" {
+		t.Fatalf("expected %s=%q on outbound child-conversation request, got %q.",
+			csrfHeaderName, "true", gotHeader)
 	}
 }

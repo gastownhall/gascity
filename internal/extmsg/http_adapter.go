@@ -10,6 +10,14 @@ import (
 	"time"
 )
 
+// csrfHeaderName mirrors internal/api/city_scope.go:csrfHeaderName.
+// http_adapter's outbound requests must set it because adapters often
+// register a callback URL pointing at gc's own /svc/<service>/publish
+// proxy (proxy_process mode), which is gated by the same CSRF check
+// gc's CLI client already passes. Defined locally to avoid an import
+// cycle on internal/api.
+const csrfHeaderName = "X-GC-Request"
+
 // HTTPAdapter implements TransportAdapter by forwarding publish requests
 // to an external HTTP service at callbackURL. Used for out-of-process
 // adapters that register via the API.
@@ -64,14 +72,9 @@ func (a *HTTPAdapter) Publish(ctx context.Context, req PublishRequest) (*Publish
 		return nil, fmt.Errorf("creating HTTP request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	// Adapters often register a callback URL pointing at gc's own
-	// /svc/<service>/publish proxy (proxy_process mode). gc's CSRF gate
-	// for private-service-proxy mutations requires X-GC-Request != ""
-	// (see internal/api/handler_services.go:serviceRequestAllowed). The
-	// header is harmless when the callback is an external HTTP listener,
-	// so set it unconditionally — same convention as gc's CLI client
-	// (internal/api/client.go).
-	httpReq.Header.Set("X-GC-Request", "true")
+	// See csrfHeaderName above for why this is required on outbound
+	// callbacks. Harmless when callbackURL is an external HTTP listener.
+	httpReq.Header.Set(csrfHeaderName, "true")
 
 	resp, err := a.client.Do(httpReq)
 	if err != nil {
@@ -174,8 +177,7 @@ func (a *HTTPAdapter) EnsureChildConversation(ctx context.Context, ref Conversat
 		return nil, fmt.Errorf("creating HTTP request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	// Same /svc-proxy CSRF reasoning as Publish above.
-	httpReq.Header.Set("X-GC-Request", "true")
+	httpReq.Header.Set(csrfHeaderName, "true")
 
 	resp, err := a.client.Do(httpReq)
 	if err != nil {
