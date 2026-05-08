@@ -50,6 +50,8 @@ const (
 	// watchdog retries every 30s, and the order-firing pipeline silently
 	// wedges (no bead.created/closed events, only metadata churn).
 	staleOrderTrackingCloseReason = "order-tracking sweep: stale tracking bead exceeded retention window"
+
+	completedOrderTrackingCloseReason = "order dispatch completed: tracking bead lifecycle finished"
 )
 
 // orderDispatcher evaluates order trigger conditions and dispatches due
@@ -460,7 +462,7 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 	// Defer order matters: doneInflight runs last, after Close makes the
 	// tracking bead outcome observable to a waiting drain.
 	defer m.doneInflight()
-	defer store.Close(trackingID) //nolint:errcheck // best-effort close
+	defer closeOrderTrackingBead(store, trackingID) //nolint:errcheck // best-effort close
 
 	timeout := effectiveTimeout(a, m.maxTimeout)
 	childCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -478,6 +480,13 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 	} else {
 		m.dispatchWisp(childCtx, store, a, cityPath, trackingID)
 	}
+}
+
+func closeOrderTrackingBead(store beads.Store, trackingID string) error {
+	_, err := store.CloseAll([]string{trackingID}, map[string]string{
+		"close_reason": completedOrderTrackingCloseReason,
+	})
+	return err
 }
 
 // dispatchExec runs an exec order's shell command.

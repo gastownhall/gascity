@@ -71,6 +71,10 @@ type createdAtOverrideStore struct {
 	createdAt map[string]time.Time
 }
 
+type strictCloseReasonStore struct {
+	beads.Store
+}
+
 func (s selectiveUpdateFailStore) Update(id string, opts beads.UpdateOpts) error {
 	for _, label := range opts.Labels {
 		if strings.HasPrefix(label, "order-run:") {
@@ -139,6 +143,18 @@ func (s *createdAtOverrideStore) List(query beads.ListQuery) ([]beads.Bead, erro
 		}
 	}
 	return results, nil
+}
+
+func (s strictCloseReasonStore) Close(id string) error {
+	return fmt.Errorf("strict close validation rejected reasonless close for %s", id)
+}
+
+func (s strictCloseReasonStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	reason := strings.TrimSpace(metadata["close_reason"])
+	if len(reason) < 20 {
+		return 0, fmt.Errorf("strict close validation rejected close_reason %q", reason)
+	}
+	return s.Store.CloseAll(ids, metadata)
 }
 
 func TestOrderDispatcherNil(t *testing.T) {
@@ -2623,7 +2639,6 @@ func TestStartupSweepThenBuildDispatcher(t *testing.T) {
 	}
 }
 
-
 // TestSweepOrphanedOrderTracking_StampsCloseReason verifies that the
 // startup-time orphan sweep also stamps close_reason. The original
 // callsite passed nil metadata; under validation.on-close=error this
@@ -3953,7 +3968,7 @@ func (r *memRecorder) hasSubject(subject string) bool {
 // --- dedup / tracking bead lifecycle tests ---
 
 func TestOrderDispatchClosesTrackingBead(t *testing.T) {
-	store := beads.NewMemStore()
+	store := strictCloseReasonStore{Store: beads.NewMemStore()}
 	var rec memRecorder
 
 	fakeExec := func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
@@ -3978,6 +3993,9 @@ func TestOrderDispatchClosesTrackingBead(t *testing.T) {
 			if l == "order-run:health-check" {
 				if b.Status != "closed" {
 					t.Errorf("tracking bead status = %q, want %q", b.Status, "closed")
+				}
+				if got := b.Metadata["close_reason"]; got != completedOrderTrackingCloseReason {
+					t.Errorf("close_reason = %q, want %q", got, completedOrderTrackingCloseReason)
 				}
 				return
 			}

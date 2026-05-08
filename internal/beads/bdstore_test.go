@@ -676,6 +676,56 @@ func TestBdStoreCloseAllFallbackSuccessReturnsNil(t *testing.T) {
 	}
 }
 
+func TestBdStoreCloseAllFallbackForwardsCloseReason(t *testing.T) {
+	const reason = "order-tracking sweep: stale beyond watchdog window"
+	batchErr := errors.New("batch close failed")
+	var closeCalls [][]string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "update":
+			return []byte(`[]`), nil
+		case "close":
+			call := append([]string(nil), args...)
+			closeCalls = append(closeCalls, call)
+			key := strings.Join(args, " ")
+			switch key {
+			case "close --force --json --reason " + reason + " bd-1 bd-2":
+				return nil, batchErr
+			case "close --force --json --reason " + reason + " bd-1":
+				return []byte(`[{"id":"bd-1","title":"one","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+			case "close --force --json --reason " + reason + " bd-2":
+				return []byte(`[{"id":"bd-2","title":"two","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+			default:
+				return nil, fmt.Errorf("unexpected close args: %v", args)
+			}
+		case "show":
+			return []byte(`[{"id":"` + args[len(args)-1] + `","title":"open","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+		default:
+			return nil, fmt.Errorf("unexpected command: %v", args)
+		}
+	}
+
+	s := beads.NewBdStore("/city", runner)
+	closed, err := s.CloseAll([]string{"bd-1", "bd-2"}, map[string]string{
+		"close_reason": reason,
+	})
+	if err != nil {
+		t.Fatalf("CloseAll returned error after reason-aware fallback: %v", err)
+	}
+	if closed != 2 {
+		t.Fatalf("closed = %d, want 2", closed)
+	}
+
+	want := [][]string{
+		{"close", "--force", "--json", "--reason", reason, "bd-1", "bd-2"},
+		{"close", "--force", "--json", "--reason", reason, "bd-1"},
+		{"close", "--force", "--json", "--reason", reason, "bd-2"},
+	}
+	if got := fmt.Sprint(closeCalls); got != fmt.Sprint(want) {
+		t.Fatalf("close calls = %v, want %v", closeCalls, want)
+	}
+}
+
 // captureCloseAllRunner returns a CommandRunner that records the args
 // of any `close` invocation into the provided slice and returns canned
 // closed-status JSON for every bead in the batch. update calls (from
