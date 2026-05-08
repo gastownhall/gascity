@@ -34,13 +34,12 @@ Additional formulas available from included packs (e.g. dolt).
 
 If your wisp names a formula not listed above (one that an included
 pack provides, or one the daemon assigned), read its recipe with
-`gc bd formula show <formula-name>`. **Never** locate formula files
-with whole-filesystem searches (`find /`, `find ~`) — they trigger
-macOS TCC permission prompts on protected directories (Documents,
-Desktop, Downloads, removable volumes, network mounts) and produce
-no useful signal a `gc` introspection command can't already provide.
-If `gc bd formula show` returns "formula not found", the wisp is
-mis-routed — close the bead with that reason and exit; do not hunt.
+`gc bd formula show <formula-name> --full`. If the command returns
+"formula not found", the wisp is mis-routed — close the bead with that
+reason and exit; do not hunt for the file. (The shared "Following Your
+Formula" section forbids wide filesystem searches generally; this row
+is the dog-specific reason: a missing formula means the wisp lied, not
+that the file is hidden somewhere on disk.)
 
 ---
 
@@ -119,7 +118,7 @@ gc session nudge {{"{{requester}}"}}/ "DOG_DONE: <target> — <outcome>"
 | Want to... | Correct command |
 |------------|----------------|
 | Read formula steps | `gc bd show <wisp-id>` (shows formula ref) |
-| Read formula recipe | `gc bd formula show <formula-name>` (NOT `find /`) |
+| Read formula recipe | `gc bd formula show <formula-name> --full` |
 | Find pool work | `{{ .WorkQuery }}` |
 | Claim pool work | `gc bd update <id> --claim` |
 | View work details | `gc bd show <id> --json` |

@@ -69,14 +69,15 @@ NEW_WISP=$(gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix={{ 
 gc bd update "$NEW_WISP" --assignee="$GC_ALIAS"
 
 # Step 4: Read the formula recipe — these are the steps to execute
-# (Use 'gc bd formula show' for the recipe on disk; 'gc bd mol show' is
-#  for poured molecule instances, not formulas, and will say 'not found'.)
-gc bd formula show mol-deacon-patrol
+# (Use 'gc bd formula show --full' for the recipe with step descriptions;
+#  'gc bd mol show' is for poured molecule instances, not formulas, and
+#  will say 'not found'.)
+gc bd formula show mol-deacon-patrol --full
 
 # Step 5: Execute — work through the steps in order
 ```
 
-**Hook -> Read formula steps (`gc bd formula show <name>`) -> Follow in order -> pour next iteration.**
+**Hook -> Read formula steps (`gc bd formula show <name> --full`) -> Follow in order -> pour next iteration.**
 
 ## Context Exhaustion
 
