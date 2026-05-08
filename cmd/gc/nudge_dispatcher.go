@@ -168,7 +168,17 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store beads.Stor
 		if !matched {
 			continue
 		}
-		ok, err := tryDeliverQueuedNudgesByPoller(target, store, sp, defaultNudgePollQuiescence)
+		obs, err := workerObserveNudgeTarget(target, store, sp)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if !obs.Running {
+			continue
+		}
+		ok, err := tryDeliverQueuedNudgesByPoller(target, store, sp, defaultNudgePollQuiescence, obs)
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}
