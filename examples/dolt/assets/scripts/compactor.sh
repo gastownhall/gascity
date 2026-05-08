@@ -38,9 +38,44 @@ DATABASES_OVERRIDE="${GC_COMPACTOR_DATABASES:-}"
 DRY_RUN="${GC_COMPACTOR_DRY_RUN:-}"
 SKIP_GC="${GC_COMPACTOR_SKIP_GC:-}"
 DOLT_HOST="${GC_DOLT_HOST:-127.0.0.1}"
-DOLT_PORT="${GC_DOLT_PORT:-17360}"
 DOLT_USER="${GC_DOLT_USER:-root}"
 DOLT_PASSWORD="${GC_DOLT_PASSWORD:-}"
+
+# Port resolution: prefer GC_DOLT_PORT from env, otherwise read from the
+# managed dolt runtime state file (deterministic per-city port). Mirrors
+# the logic in maintenance/assets/scripts/dolt-target.sh; replicated here
+# rather than sourced because compactor.sh ships in a different pack.
+# The previous hardcoded default (17360) almost never matched the actual
+# managed port and would silently misroute against an unrelated server.
+resolve_dolt_port() {
+    local state_file="$1"
+    [ -f "$state_file" ] || return 0
+    local running pid port data_dir
+    running=$(sed -n 's/.*"running"[[:space:]]*:[[:space:]]*\([^,}[:space:]]*\).*/\1/p' "$state_file" 2>/dev/null | head -1)
+    pid=$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$state_file" 2>/dev/null | head -1)
+    port=$(sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$state_file" 2>/dev/null | head -1)
+    [ "$running" = "true" ] || return 0
+    [ -n "$pid" ] || return 0
+    [ -n "$port" ] || return 0
+    if kill -0 "$pid" 2>/dev/null; then
+        printf '%s\n' "$port"
+    fi
+}
+
+if [ -z "${GC_DOLT_PORT:-}" ]; then
+    DOLT_STATE_FILE="${GC_DOLT_STATE_FILE:-${GC_CITY_RUNTIME_DIR:-$CITY_ABS/.gc/runtime}/packs/dolt/dolt-state.json}"
+    GC_DOLT_PORT="$(resolve_dolt_port "$DOLT_STATE_FILE" || true)"
+fi
+: "${GC_DOLT_PORT:=3307}"
+
+case "$GC_DOLT_PORT" in
+    ''|*[!0-9]*)
+        printf 'compactor: invalid GC_DOLT_PORT: %q\n' "$GC_DOLT_PORT" >&2
+        exit 1
+        ;;
+esac
+
+DOLT_PORT="$GC_DOLT_PORT"
 
 if [ "$MODE" != "flatten" ]; then
     printf 'compactor: mode %q is not yet implemented; only "flatten" is supported.\n' "$MODE" >&2
@@ -69,6 +104,22 @@ dolt_q() {
 dolt_q_one() {
     # dolt_q_one "<sql>" — return single scalar from row 1, col 1.
     dolt_q "$1" | head -1 | tr -d '\r'
+}
+
+# valid_database_identifier — guard before interpolating any database
+# name into SQL. Mirrors reaper.sh:131-141. Without this, a name from
+# SHOW DATABASES (server-controlled) or GC_COMPACTOR_DATABASES (operator
+# env, medium risk) containing a backtick / apostrophe / semicolon
+# could escape the backtick-quoted SQL context and corrupt or inject
+# into DOLT_RESET / DOLT_COMMIT / DOLT_BRANCH calls.
+valid_database_identifier() {
+    local name="$1"
+    case "$name" in
+        ''|-*|*[!A-Za-z0-9_-]*)
+            return 1
+            ;;
+    esac
+    return 0
 }
 
 # is_user_database — filter out dolt/MySQL system DBs and known scratch
@@ -192,6 +243,12 @@ flatten_db() {
     local pre_head pre_counts post_counts root backup
     local commit_count
 
+    if ! valid_database_identifier "$db"; then
+        record_anomaly "$db" "rejected: not a valid identifier (alnum/_/- only); refusing to interpolate into SQL"
+        TOTAL_FAILED=$((TOTAL_FAILED + 1))
+        return 0
+    fi
+
     commit_count="$(count_commits "$db")"
     if [ -z "$commit_count" ] || ! [[ "$commit_count" =~ ^[0-9]+$ ]]; then
         record_anomaly "$db" "could not read commit count; skipping"
@@ -257,8 +314,15 @@ flatten_db() {
     # everything the soft-reset un-staged.
     if ! dolt_sql -q "USE \`$db\`; CALL DOLT_COMMIT('-Am', 'compaction: flatten history')" >/dev/null; then
         record_anomaly "$db" "DOLT_COMMIT failed; rolling back"
-        rollback_to_backup "$db" "$backup" || true
-        drop_backup "$db" "$backup"
+        # If rollback itself fails, retain the backup branch as the only
+        # remaining anchor to the prior HEAD. Dropping it unconditionally
+        # would leave the database with no path back to its pre-compaction
+        # state.
+        if rollback_to_backup "$db" "$backup"; then
+            drop_backup "$db" "$backup"
+        else
+            record_anomaly "$db" "rollback also failed; backup branch $backup retained as recovery anchor"
+        fi
         TOTAL_FAILED=$((TOTAL_FAILED + 1))
         return 0
     fi
