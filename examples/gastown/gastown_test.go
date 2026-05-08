@@ -324,6 +324,8 @@ func TestRefineryFormulaSupportsMergeStrategies(t *testing.T) {
 	for _, want := range []string{
 		".metadata.merge_strategy // \"direct\"",
 		"gh pr create",
+		"git credential fill",
+		"https://api.github.com/repos/$OWNER/$REPO",
 		"Pull request ready:",
 		"merge_strategy=local",
 	} {
@@ -588,7 +590,8 @@ func TestRefineryFormulaRespectsExistingPRMetadata(t *testing.T) {
 	body := string(data)
 	for _, want := range []string{
 		`EXISTING_PR=$(gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty')`,
-		`ORIGIN_REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner')`,
+		`ORIGIN_REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner' 2>/dev/null || true)`,
+		`ORIGIN_REPO=$(printf '%s\n' "$ORIGIN_URL"`,
 		`metadata.existing_pr requires pull-request handoff; using merge_strategy=mr`,
 		`block_existing_pr()`,
 		`--assignee=""`,
@@ -621,6 +624,13 @@ func TestRefineryFormulaRespectsExistingPRMetadata(t *testing.T) {
 		`PR_REF="$EXISTING_PR"`,
 		`PR_STATUS=$?`,
 		`if [ -n "$EXISTING_PR" ] && pr_lookup_missing "$PR_ERROR"; then`,
+		`command -v gh >/dev/null 2>&1`,
+		`printf 'protocol=https\nhost=github.com\n\n'`,
+		`git credential fill 2>/dev/null`,
+		`--data-urlencode "head=$OWNER:$BRANCH"`,
+		`-X POST "$API/pulls"`,
+		`state:(.state | ascii_upcase)`,
+		`headRepositoryOwner:{login:.head.repo.owner.login}`,
 		`PR_REPO=$(printf '%s\n' "$PR_URL" | sed -E 's#^https://github.com/([^/]+/[^/]+)/pull/[0-9]+$#\\1#')`,
 		`Existing PR $EXISTING_PR belongs to repo $PR_REPO, want $ORIGIN_REPO`,
 		`if [ -n "$EXISTING_PR" ]; then`,

@@ -379,7 +379,12 @@ BRANCH=$(gc bd show $WORK --json | jq -r '.[0].metadata.branch')
 TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{target_branch}}"')
 MERGE_STRATEGY=$(gc bd show $WORK --json | jq -r '.[0].metadata.merge_strategy // "direct"')
 EXISTING_PR=$(gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty')
-ORIGIN_REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner')
+ORIGIN_REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner' 2>/dev/null || true)
+if [ -z "$ORIGIN_REPO" ]; then
+  ORIGIN_URL=$(git remote get-url origin)
+  ORIGIN_REPO=$(printf '%s\n' "$ORIGIN_URL" \
+    | sed -E 's#^git@github.com:##; s#^https://github.com/##; s#\.git$##')
+fi
 if [ "$MERGE_STRATEGY" = "pr" ]; then
   MERGE_STRATEGY="mr"
 fi
@@ -573,14 +578,64 @@ EOF
 if [ -n "$EXISTING_PR" ]; then
   PR_REF="$EXISTING_PR"
 else
-  PR_URL=$(gh pr create \
-    --base "$TARGET" \
-    --head "$BRANCH" \
-    --title "$ISSUE_TITLE ($WORK)" \
-    --body "$PR_BODY" 2>/dev/null || true)
+  if command -v gh >/dev/null 2>&1; then
+    PR_URL=$(gh pr create \
+      --base "$TARGET" \
+      --head "$BRANCH" \
+      --title "$ISSUE_TITLE ($WORK)" \
+      --body "$PR_BODY" 2>/dev/null || true)
 
-  if [ -z "$PR_URL" ]; then
-    PR_URL=$(gh pr view "$BRANCH" --json url -q '.url')
+    if [ -z "$PR_URL" ]; then
+      PR_URL=$(gh pr view "$BRANCH" --json url -q '.url')
+    fi
+  else
+    TOKEN=$(
+      for key in GH_TOKEN GITHUB_TOKEN GIT_TOKEN; do
+        eval value=\${$key:-}
+        if [ -n "$value" ]; then printf '%s\n' "$value"; exit 0; fi
+      done
+      printf 'protocol=https\nhost=github.com\n\n' \
+        | git credential fill 2>/dev/null \
+        | sed -n 's/^password=//p' \
+        | head -n 1
+    )
+    if [ -z "$TOKEN" ]; then
+      echo "GitHub PR mode requires gh or a GitHub token available from env/git credential fill."
+      gc runtime drain-ack
+      exit 1
+    fi
+    OWNER=${ORIGIN_REPO%%/*}
+    REPO=${ORIGIN_REPO#*/}
+    API="https://api.github.com/repos/$OWNER/$REPO"
+    EXISTING=$(curl -fsS \
+      -H "Accept: application/vnd.github+json" \
+      -H "Authorization: Bearer $TOKEN" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      --get "$API/pulls" \
+      --data-urlencode "state=open" \
+      --data-urlencode "head=$OWNER:$BRANCH" \
+      --data-urlencode "base=$TARGET")
+    PR_NUMBER=$(printf '%s\n' "$EXISTING" | jq -r '.[0].number // empty')
+    if [ -z "$PR_NUMBER" ]; then
+      CREATE_PAYLOAD=$(jq -n \
+        --arg title "$ISSUE_TITLE ($WORK)" \
+        --arg head "$BRANCH" \
+        --arg base "$TARGET" \
+        --arg body "$PR_BODY" \
+        '{title:$title, head:$head, base:$base, body:$body}')
+      CREATED=$(curl -fsS \
+        -H "Accept: application/vnd.github+json" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        -X POST "$API/pulls" \
+        -d "$CREATE_PAYLOAD")
+      PR_NUMBER=$(printf '%s\n' "$CREATED" | jq -r '.number')
+    fi
+    PR_URL=$(curl -fsS \
+      -H "Accept: application/vnd.github+json" \
+      -H "Authorization: Bearer $TOKEN" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      "$API/pulls/$PR_NUMBER" | jq -r '.html_url')
   fi
   PR_REF="$BRANCH"
 fi
@@ -589,9 +644,57 @@ fi
 **3. Verify the pull request exists:**
 ```bash
 PR_ERR=$(mktemp)
-PR_INFO=$(gh pr view --json url,number,state,headRefName,baseRefName,headRepositoryOwner,headRepository -- "$PR_REF" 2>"$PR_ERR")
-PR_STATUS=$?
-PR_ERROR=$(cat "$PR_ERR")
+PR_STATUS=""
+if command -v gh >/dev/null 2>&1; then
+  PR_INFO=$(gh pr view --json url,number,state,headRefName,baseRefName,headRepositoryOwner,headRepository -- "$PR_REF" 2>"$PR_ERR")
+  PR_STATUS=$?
+  PR_ERROR=$(cat "$PR_ERR")
+else
+  TOKEN=$(
+    for key in GH_TOKEN GITHUB_TOKEN GIT_TOKEN; do
+      eval value=\${$key:-}
+      if [ -n "$value" ]; then printf '%s\n' "$value"; exit 0; fi
+    done
+    printf 'protocol=https\nhost=github.com\n\n' \
+      | git credential fill 2>/dev/null \
+      | sed -n 's/^password=//p' \
+      | head -n 1
+  )
+  OWNER=${ORIGIN_REPO%%/*}
+  REPO=${ORIGIN_REPO#*/}
+  API="https://api.github.com/repos/$OWNER/$REPO"
+  if [ -z "$TOKEN" ]; then
+    PR_INFO=""
+    PR_STATUS=1
+    PR_ERROR="GitHub PR mode requires gh or a GitHub token available from env/git credential fill."
+  elif [ -n "$EXISTING_PR" ]; then
+    PR_NUMBER=$(printf '%s\n' "$EXISTING_PR" | sed -E 's|^.*/pull/([0-9]+)$|\1|; s|^#([0-9]+)$|\1|')
+  else
+    PR_NUMBER=$(curl -fsS \
+      -H "Accept: application/vnd.github+json" \
+      -H "Authorization: Bearer $TOKEN" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      --get "$API/pulls" \
+      --data-urlencode "state=open" \
+      --data-urlencode "head=$OWNER:$BRANCH" \
+      --data-urlencode "base=$TARGET" \
+      | jq -r '.[0].number // empty')
+  fi
+  if [ -z "$PR_STATUS" ] && [ -z "$PR_NUMBER" ]; then
+    PR_INFO=""
+    PR_STATUS=1
+    PR_ERROR="Pull request $PR_REF was not found."
+  elif [ -z "$PR_STATUS" ]; then
+    PR_INFO=$(curl -fsS \
+      -H "Accept: application/vnd.github+json" \
+      -H "Authorization: Bearer $TOKEN" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      "$API/pulls/$PR_NUMBER" 2>"$PR_ERR" \
+      | jq '{url:.html_url, number, state:(.state | ascii_upcase), headRefName:.head.ref, baseRefName:.base.ref, headRepositoryOwner:{login:.head.repo.owner.login}, headRepository:{name:.head.repo.name}}')
+    PR_STATUS=$?
+    PR_ERROR=$(cat "$PR_ERR")
+  fi
+fi
 rm -f "$PR_ERR"
 if [ "$PR_STATUS" -ne 0 ] || [ -z "$PR_INFO" ]; then
   if [ -n "$EXISTING_PR" ] && pr_lookup_missing "$PR_ERROR"; then
