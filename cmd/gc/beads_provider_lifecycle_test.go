@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"syscall"
@@ -328,7 +329,7 @@ func TestNormalizeCanonicalBdScopeFilesPreservesExistingManagedProbeDatabase(t *
 	}
 
 	cfg := &config.City{Workspace: config.Workspace{Name: "dogfood-city"}}
-	if err := normalizeCanonicalBdScopeFiles(cityPath, cfg); err != nil {
+	if err := normalizeCanonicalBdScopeFiles(cityPath, cfg, io.Discard); err != nil {
 		t.Fatalf("normalizeCanonicalBdScopeFiles: %v", err)
 	}
 	got, ok, err := contract.ReadDoltDatabase(fsys.OSFS{}, metadataPath)
@@ -1241,7 +1242,7 @@ func TestCurrentManagedDoltPortUsesCanonicalPackStateOnly(t *testing.T) {
 func requireSyncConfiguredDoltPortFiles(t *testing.T, cityPath, provider string, cityDolt config.DoltConfig, cityPrefix string, rigs []config.Rig) {
 	t.Helper()
 	_ = provider
-	if err := syncConfiguredDoltPortFiles(cityPath, cityDolt, cityPrefix, rigs); err != nil {
+	if err := syncConfiguredDoltPortFiles(cityPath, cityDolt, cityPrefix, rigs, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1307,6 +1308,107 @@ func TestSyncConfiguredDoltPortFilesWritesArbitraryRigPaths(t *testing.T) {
 		if !strings.Contains(cfg, "gc.endpoint_status: verified") {
 			t.Fatalf("%s config missing gc.endpoint_status:\n%s", tc.dir, cfg)
 		}
+	}
+}
+
+func TestSyncConfiguredDoltPortFilesWarnsOnRigPortFileRewrite(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "drifty")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ln := listenOnRandomPort(t)
+	t.Cleanup(func() { _ = ln.Close() })
+	managedPort := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+
+	for _, dir := range []string{cityDir, rigDir} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte("dolt.auto-start: true\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Seed the rig with a stale port file pointing at a different port.
+	const stalePort = "29999"
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "dolt-server.port"), []byte(stalePort+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeDoltState(cityDir, doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      ln.Addr().(*net.TCPAddr).Port,
+		DataDir:   filepath.Join(cityDir, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var warn bytes.Buffer
+	if err := syncConfiguredDoltPortFiles(cityDir, config.DoltConfig{}, "gc", []config.Rig{{Name: "drifty", Path: rigDir}}, &warn); err != nil {
+		t.Fatalf("syncConfiguredDoltPortFiles error = %v", err)
+	}
+
+	out := warn.String()
+	if !strings.Contains(out, "WARN") {
+		t.Errorf("want WARN prefix in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "drifty") {
+		t.Errorf("want rig name in warning, got:\n%s", out)
+	}
+	if !strings.Contains(out, stalePort) || !strings.Contains(out, managedPort) {
+		t.Errorf("want both old port %s and new port %s in warning, got:\n%s", stalePort, managedPort, out)
+	}
+	// Confirm the rewrite happened.
+	data, err := os.ReadFile(filepath.Join(rigDir, ".beads", "dolt-server.port"))
+	if err != nil {
+		t.Fatalf("read rig port file: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != managedPort {
+		t.Errorf("rig port file = %q, want %q", got, managedPort)
+	}
+}
+
+func TestSyncConfiguredDoltPortFilesSilentOnNoChange(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "quiet")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ln := listenOnRandomPort(t)
+	t.Cleanup(func() { _ = ln.Close() })
+	managedPort := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+
+	for _, dir := range []string{cityDir, rigDir} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte("dolt.auto-start: true\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Rig port already matches the managed port — no rewrite, no warning.
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "dolt-server.port"), []byte(managedPort+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeDoltState(cityDir, doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      ln.Addr().(*net.TCPAddr).Port,
+		DataDir:   filepath.Join(cityDir, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var warn bytes.Buffer
+	if err := syncConfiguredDoltPortFiles(cityDir, config.DoltConfig{}, "gc", []config.Rig{{Name: "quiet", Path: rigDir}}, &warn); err != nil {
+		t.Fatalf("syncConfiguredDoltPortFiles error = %v", err)
+	}
+	if strings.Contains(warn.String(), "WARN") {
+		t.Errorf("want no WARN when port files already match, got:\n%s", warn.String())
 	}
 }
 
@@ -1905,7 +2007,7 @@ dolt.port: 3307
 		t.Fatal(err)
 	}
 	before := mustReadFile(t, filepath.Join(cityDir, ".beads", "config.yaml"))
-	err := syncConfiguredDoltPortFiles(cityDir, config.DoltConfig{}, "gc", []config.Rig{{Name: "frontend", Path: rigDir, Prefix: "fe"}})
+	err := syncConfiguredDoltPortFiles(cityDir, config.DoltConfig{}, "gc", []config.Rig{{Name: "frontend", Path: rigDir, Prefix: "fe"}}, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "invalid canonical city endpoint state") {
 		t.Fatalf("syncConfiguredDoltPortFiles() error = %v, want invalid canonical city endpoint state", err)
 	}
@@ -1950,7 +2052,7 @@ dolt.auto-start: false
 		t.Fatal(err)
 	}
 	before := mustReadFile(t, filepath.Join(rigDir, ".beads", "config.yaml"))
-	err := syncConfiguredDoltPortFiles(cityDir, config.DoltConfig{}, "gc", []config.Rig{{Name: "frontend", Path: rigDir, Prefix: "fe"}})
+	err := syncConfiguredDoltPortFiles(cityDir, config.DoltConfig{}, "gc", []config.Rig{{Name: "frontend", Path: rigDir, Prefix: "fe"}}, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "invalid canonical rig endpoint state") {
 		t.Fatalf("syncConfiguredDoltPortFiles() error = %v, want invalid canonical rig endpoint state", err)
 	}
@@ -6166,8 +6268,15 @@ data_dir: "$data_dir"
 
 behavior:
   auto_gc_behavior:
-    enable: true
+    enable: false
     archive_level: 0
+
+system_variables:
+  dolt_auto_gc_enabled: "OFF"
+  dolt_stats_enabled: "OFF"
+  dolt_stats_gc_enabled: "OFF"
+  dolt_stats_memory_only: "ON"
+  dolt_stats_paused: "ON"
 EOF
     ;;
   "dolt-state allocate-port")
@@ -6421,8 +6530,15 @@ data_dir: "$data_dir"
 
 behavior:
   auto_gc_behavior:
-    enable: true
+    enable: false
     archive_level: 0
+
+system_variables:
+  dolt_auto_gc_enabled: "OFF"
+  dolt_stats_enabled: "OFF"
+  dolt_stats_gc_enabled: "OFF"
+  dolt_stats_memory_only: "ON"
+  dolt_stats_paused: "ON"
 EOF
     printf '12345\n' > "$pid_file"
     printf '{"running":true,"pid":12345,"port":%%s,"data_dir":"%%s","started_at":"2026-04-14T00:00:00Z"}\n' "$port" "$data_dir" > "$state_file"
@@ -7750,7 +7866,7 @@ esac
 	shellConfigPath := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
 	goConfig := readManagedDoltConfigForTest(t, goConfigPath)
 	shellConfig := readManagedDoltConfigForTest(t, shellConfigPath)
-	if goConfig != shellConfig {
+	if !reflect.DeepEqual(goConfig, shellConfig) {
 		t.Fatalf("managed config mismatch\nGo: %+v\nShell: %+v", goConfig, shellConfig)
 	}
 }
@@ -7773,6 +7889,7 @@ type managedDoltConfigForTest struct {
 			ArchiveLevel int  `yaml:"archive_level"`
 		} `yaml:"auto_gc_behavior"`
 	} `yaml:"behavior"`
+	SystemVariables map[string]string `yaml:"system_variables"`
 }
 
 func readManagedDoltConfigForTest(t *testing.T, path string) managedDoltConfigForTest {
@@ -8863,7 +8980,7 @@ func TestNormalizeCanonicalBdScopeFilesRepairsCityAndRigScopeFiles(t *testing.T)
 		Workspace: config.Workspace{Name: "dogfood-city"},
 		Rigs:      []config.Rig{{Name: "frontend", Path: rigPath, Prefix: "fr"}},
 	}
-	if err := normalizeCanonicalBdScopeFiles(cityPath, cfg); err != nil {
+	if err := normalizeCanonicalBdScopeFiles(cityPath, cfg, io.Discard); err != nil {
 		t.Fatalf("normalizeCanonicalBdScopeFiles: %v", err)
 	}
 
@@ -9087,7 +9204,7 @@ func TestNormalizeCanonicalBdScopeFilesMaterializesMissingMetadata(t *testing.T)
 		Workspace: config.Workspace{Name: "dogfood-city"},
 		Rigs:      []config.Rig{{Name: "frontend", Path: rigPath, Prefix: "fr"}},
 	}
-	if err := normalizeCanonicalBdScopeFiles(cityPath, cfg); err != nil {
+	if err := normalizeCanonicalBdScopeFiles(cityPath, cfg, io.Discard); err != nil {
 		t.Fatalf("normalizeCanonicalBdScopeFiles: %v", err)
 	}
 

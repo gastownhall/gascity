@@ -352,6 +352,10 @@ const (
 	GroupRouteDefault GroupRouteMatch = "default"
 	// GroupRouteNoMatch means no routing match was found.
 	GroupRouteNoMatch GroupRouteMatch = "no_match"
+	// GroupRouteParticipantMatch means an outbound publish was authorized
+	// because the publishing session is a participant of the group bound
+	// to the conversation.
+	GroupRouteParticipantMatch GroupRouteMatch = "participant_match"
 )
 
 // GroupRouteDecision is the result of routing an inbound message within a group.
@@ -359,6 +363,18 @@ type GroupRouteDecision struct {
 	Match           GroupRouteMatch
 	TargetSessionID string
 	UpdateCursor    bool
+}
+
+// GroupOutboundDecision is the result of authorizing an outbound publish
+// against a conversation's group when no single-session binding exists.
+//
+// A non-nil decision with Match == GroupRouteParticipantMatch authorizes
+// the caller's session to publish on behalf of the group; any other Match
+// value (including GroupRouteNoMatch) means no authorization was found.
+type GroupOutboundDecision struct {
+	Match       GroupRouteMatch
+	GroupID     string
+	Participant ConversationGroupParticipant
 }
 
 // BindInput is the input for creating a session binding.
@@ -501,6 +517,7 @@ type GroupService interface {
 	UpsertParticipant(ctx context.Context, caller Caller, input UpsertParticipantInput) (ConversationGroupParticipant, error)
 	RemoveParticipant(ctx context.Context, caller Caller, input RemoveParticipantInput) error
 	ResolveInbound(ctx context.Context, event ExternalInboundMessage) (*GroupRouteDecision, error)
+	ResolveOutbound(ctx context.Context, ref ConversationRef, sessionID string) (*GroupOutboundDecision, error)
 	UpdateCursor(ctx context.Context, caller Caller, input UpdateCursorInput) error
 }
 

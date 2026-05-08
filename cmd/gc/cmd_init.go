@@ -948,12 +948,49 @@ func applyBootstrapProfile(cfg *config.City, profile string) {
 
 // installClaudeHooks writes Claude Code hook settings for the city.
 // Delegates to hooks.Install which is idempotent (won't overwrite existing files).
+//
+// Materializes pack-overlay universal files into cityPath first so the
+// Claude override file (.claude/settings.json) is in its final state when
+// hooks.Install reads it. Without this, pack overlays are materialized
+// asynchronously by tmux/adapter.go:Provider.Start() during the first
+// session start. That late write flips .gc/settings.json content on the
+// next supervisor reconcile, drifting the CopyFiles fingerprint and
+// draining every named session — including ones that never woke. See
+// stg-wvpl.
 func installClaudeHooks(fs fsys.FS, cityPath string, stderr io.Writer) int {
+	materializeCityRootPackOverlays(fs, cityPath, stderr)
 	if err := hooks.Install(fs, cityPath, cityPath, []string{"claude"}); err != nil {
 		fmt.Fprintf(stderr, "gc init: installing claude hooks: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	return 0
+}
+
+// materializeCityRootPackOverlays applies pack-overlay universal files into
+// cityPath. It mirrors the universal portion of overlay.CopyDirForProviders
+// for the cityRoot WorkDir case — agents whose work_dir defaults to cityRoot
+// (mayor, deacon, boot in gastown) cause the same materialization during
+// session start. Doing it before installClaude makes the supervisor's first
+// reconcile observe a stable .gc/settings.json source.
+//
+// Per-provider overlay files remain agent-scoped (materialized at session
+// start when the agent's provider is known); Claude's settings live outside
+// per-provider/, so universal-only is sufficient for the drift bug.
+//
+// Best-effort: if pack expansion fails (e.g. cityPath has no city.toml yet
+// in some early-init paths) or an overlay copy fails, we let installClaude
+// proceed against the pre-overlay state. Pre-fix behavior is the failure
+// mode, so degrading to it is acceptable.
+func materializeCityRootPackOverlays(fs fsys.FS, cityPath string, stderr io.Writer) {
+	cfg, _, err := config.LoadWithIncludes(fs, filepath.Join(cityPath, citylayout.CityConfigFile))
+	if err != nil || cfg == nil {
+		return
+	}
+	for _, od := range cfg.PackOverlayDirs {
+		if err := overlay.CopyDirForProviders(od, cityPath, nil, stderr); err != nil {
+			fmt.Fprintf(stderr, "gc init: materializing pack overlay %s: %v\n", od, err) //nolint:errcheck // best-effort stderr
+		}
+	}
 }
 
 func shouldBootstrapScopedFileStore(cfg *config.City) bool {

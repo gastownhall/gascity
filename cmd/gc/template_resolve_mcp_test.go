@@ -132,6 +132,22 @@ args = ["notes-mcp"]
 		}
 	})
 
+	t.Run("wrapped opencode provider accepts mcp", func(t *testing.T) {
+		cityCfg.Providers["wrapped-opencode"] = config.ProviderSpec{
+			Base:       stringPtr("builtin:opencode"),
+			Command:    "echo",
+			PromptMode: "none",
+		}
+		agent := &config.Agent{Name: "worker", Scope: "city", Provider: "wrapped-opencode"}
+		tp, err := resolveTemplate(buildParams("tmux"), agent, agent.QualifiedName(), nil)
+		if err != nil {
+			t.Fatalf("resolveTemplate: %v", err)
+		}
+		if tp.FPExtra["mcp:opencode"] == "" {
+			t.Fatalf("expected opencode mcp fingerprint entry, got %+v", tp.FPExtra)
+		}
+	})
+
 	t.Run("nil city hard-errors when MCP would resolve non-empty", func(t *testing.T) {
 		// Regression guard: the prior fallback silently constructed a
 		// synthetic City that omitted imports/implicit/bootstrap layers,

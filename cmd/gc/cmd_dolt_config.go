@@ -138,8 +138,20 @@ data_dir: %q
 
 behavior:
   auto_gc_behavior:
-    enable: true
+    enable: false
     archive_level: %d
+
+# Managed Gas City workloads generate short-lived probe and metadata queries.
+# Dolt's persistent stats worker can make those tiny databases grow large
+# stats stores and burn CPU, especially on macOS endpoint-managed machines.
+# Keep stats disabled for managed servers; use explicit gc dolt maintenance
+# commands for storage cleanup instead of background workers.
+system_variables:
+  dolt_auto_gc_enabled: "OFF"
+  dolt_stats_enabled: "OFF"
+  dolt_stats_gc_enabled: "OFF"
+  dolt_stats_memory_only: "ON"
+  dolt_stats_paused: "ON"
 `, logLevel, port, host, dataDir, archiveLevel)
 	if err := fsys.WriteFileAtomic(fsys.OSFS{}, path, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("write config file: %w", err)

@@ -3641,6 +3641,82 @@ func TestDoInitFromDirSuccess(t *testing.T) {
 	}
 }
 
+// TestDoInitFromDirMaterializesPackOverlayClaudeSettings locks the fix for
+// stg-wvpl: pack-overlay universal files (notably .claude/settings.json) must
+// be present at the city root by the end of `gc init`. Otherwise the file is
+// materialized later, during the first session's tmux/adapter.go:Start, and
+// the supervisor's reconcile sees a content drift on .gc/settings.json that
+// drains every still-waking session — including ones that never woke yet
+// (deacon).
+func TestDoInitFromDirMaterializesPackOverlayClaudeSettings(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+
+	dir := t.TempDir()
+
+	srcDir := filepath.Join(dir, "src")
+	if err := os.MkdirAll(filepath.Join(srcDir, "packs", "demo", "overlay", ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"),
+		[]byte("[workspace]\nname = \"template\"\nprovider = \"claude\"\nincludes = [\"packs/demo\"]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "pack.toml"),
+		[]byte("[pack]\nname = \"template\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "packs", "demo", "pack.toml"),
+		[]byte("[pack]\nname = \"demo\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	overlayPayload := []byte(`{"permissions":{"allow":["Bash"]}}`)
+	overlaySrc := filepath.Join(srcDir, "packs", "demo", "overlay", ".claude", "settings.json")
+	if err := os.WriteFile(overlaySrc, overlayPayload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cityPath := filepath.Join(dir, "city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doInitFromDir(srcDir, cityPath, &stdout, &stderr); code != 0 {
+		t.Fatalf("doInitFromDir = %d; stderr: %s", code, stderr.String())
+	}
+
+	overlayDst := filepath.Join(cityPath, ".claude", "settings.json")
+	got, err := os.ReadFile(overlayDst)
+	if err != nil {
+		t.Fatalf("expected %s materialized at init: %v", overlayDst, err)
+	}
+	// Compare structurally — the merge layer may re-marshal the JSON, but
+	// the overlay's content must be present.
+	var gotJSON, wantJSON map[string]any
+	if err := json.Unmarshal(got, &gotJSON); err != nil {
+		t.Fatalf("parsing materialized override: %v\n%s", err, got)
+	}
+	if err := json.Unmarshal(overlayPayload, &wantJSON); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(gotJSON, wantJSON) {
+		t.Errorf("city .claude/settings.json = %v, want %v", gotJSON, wantJSON)
+	}
+
+	// .gc/settings.json must reflect the overlay-merged base — without the
+	// fix it would only contain embedded defaults and be re-written on the
+	// first reconcile after session-start materialization.
+	runtime, err := os.ReadFile(filepath.Join(cityPath, ".gc", "settings.json"))
+	if err != nil {
+		t.Fatalf("reading runtime settings: %v", err)
+	}
+	if !strings.Contains(string(runtime), `"Bash"`) {
+		t.Errorf("runtime .gc/settings.json missing overlay-provided permission entry, got:\n%s", runtime)
+	}
+}
+
 func TestResolveCityName(t *testing.T) {
 	tests := []struct {
 		name         string

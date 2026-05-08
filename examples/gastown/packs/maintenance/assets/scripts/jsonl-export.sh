@@ -482,7 +482,7 @@ fi
 # Build scrub filter for the issues table.
 SCRUB_FILTER=""
 if [ "$SCRUB" = "true" ]; then
-    SCRUB_FILTER="WHERE type NOT IN ('message', 'event', 'wisp', 'agent') AND title NOT LIKE 'gc:%'"
+    SCRUB_FILTER="WHERE issue_type NOT IN ('message', 'event', 'wisp', 'agent') AND title NOT LIKE 'gc:%'"
 fi
 
 TOTAL_EXPORTED=0
@@ -515,6 +515,14 @@ while IFS= read -r DB; do
         FAILED_DB_COUNT=$((FAILED_DB_COUNT + 1))
         FAILED_DBS="${FAILED_DBS}$DB
 "
+        continue
+    fi
+    if ! has_wisps_table "$DB"; then
+        # Not a bd-managed bead store. Decrement the count we just
+        # bumped — schemaless DBs aren't part of the export universe
+        # and shouldn't appear in TOTAL_DBS or FAILED_DBS summaries.
+        # See dolt-target.sh:has_wisps_table and gastownhall/gascity#1816.
+        TOTAL_DBS=$((TOTAL_DBS - 1))
         continue
     fi
 

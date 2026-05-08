@@ -8,19 +8,47 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
 
-func TestExecCommandRunnerTimeoutKillsChildProcess(t *testing.T) {
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("sh unavailable")
+// TestExecCommandRunnerTimesOut verifies the runner returns a "timed
+// out" error when the command exceeds bdCommandTimeout. No race: we
+// only check the error path, not what the child did.
+func TestExecCommandRunnerTimesOut(t *testing.T) {
+	if _, err := exec.LookPath("sleep"); err != nil {
+		t.Skip("sleep unavailable")
 	}
 
 	oldTimeout := bdCommandTimeout
-	const commandTimeout = 3 * time.Second
-	bdCommandTimeout = commandTimeout
+	bdCommandTimeout = 3 * time.Second
 	t.Cleanup(func() { bdCommandTimeout = oldTimeout })
+
+	_, err := ExecCommandRunner()(t.TempDir(), "sleep", "30")
+	if err == nil {
+		t.Fatal("runner unexpectedly succeeded")
+	}
+	if !strings.Contains(err.Error(), "timed out after") {
+		t.Fatalf("error = %v, want timeout", err)
+	}
+}
+
+// TestKillCommandTreeKillsProcessGroup verifies killCommandTree kills
+// the entire process group, not just the direct child. The script
+// backgrounds a `sleep 30`; without process-group cleanup, that sleep
+// would survive its parent shell's death and leak — the failure mode
+// PR #1639 ("kill bd subprocess trees on timeout") fixed.
+//
+// No timeout involved — we wait synchronously for the script to fork
+// the sleep, then call killCommandTree directly. The previous version
+// of this test (TestExecCommandRunnerTimeoutKillsChildProcess) raced
+// the same assertion against a 50ms timeout, which lost on macOS where
+// first-exec of a new script file pays a ~150ms validation tax.
+func TestKillCommandTreeKillsProcessGroup(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh unavailable")
+	}
 
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "child.pid")
@@ -33,31 +61,30 @@ wait
 		t.Fatalf("write script: %v", err)
 	}
 
-	runner := ExecCommandRunner()
-	errCh := make(chan error, 1)
-	go func() {
-		_, err := runner(dir, script, pidFile)
-		errCh <- err
-	}()
-
-	pid := waitForNonEmptyFile(t, pidFile, commandTimeout)
-	err := <-errCh
-	if err == nil {
-		t.Fatal("runner unexpectedly succeeded")
+	cmd := exec.Command(script, pidFile)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
 	}
-	if !strings.Contains(err.Error(), "timed out after") {
-		t.Fatalf("error = %v, want timeout", err)
+	t.Cleanup(func() {
+		_ = killCommandTree(cmd)
+		_ = cmd.Wait()
+	})
+
+	childPid := waitForNonEmptyFile(t, pidFile, 5*time.Second)
+
+	if err := killCommandTree(cmd); err != nil {
+		t.Fatalf("killCommandTree: %v", err)
 	}
 
-	for range 20 {
-		if err := exec.Command("kill", "-0", pid).Run(); err != nil {
-			return
+	for range 50 {
+		if err := exec.Command("kill", "-0", childPid).Run(); err != nil {
+			return // child is gone
 		}
-		time.Sleep(25 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
 	}
-
-	_ = exec.Command("kill", "-KILL", pid).Run()
-	t.Fatalf("child process %s survived command timeout", pid)
+	_ = exec.Command("kill", "-KILL", childPid).Run()
+	t.Fatalf("child process %s survived killCommandTree", childPid)
 }
 
 func TestKillCommandTreeHandlesNilCommand(t *testing.T) {

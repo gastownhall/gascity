@@ -814,6 +814,12 @@ func maybeStartNudgePoller(target nudgeTarget) {
 	if target.sessionTransport() == "acp" {
 		return
 	}
+	// Supervisor-hosted dispatcher owns delivery in supervisor mode; the
+	// per-session poller would race with it and reintroduce the bd-shellout
+	// load it was designed to eliminate.
+	if nudgeDispatcherIsSupervisor(target.cfg) {
+		return
+	}
 	if err := startNudgePoller(target.cityPath, target.pollerKey(), target.sessionName); err != nil {
 		return
 	}
@@ -849,6 +855,16 @@ func withNudgeTargetFence(store beads.Store, target nudgeTarget) nudgeTarget {
 }
 
 var startNudgePoller = ensureNudgePoller
+
+// nudgeDispatcherIsSupervisor reports whether the city is configured to use
+// the supervisor-hosted nudge dispatcher rather than per-session pollers.
+// A nil cfg defaults to legacy mode, matching DaemonConfig.NudgeDispatcherMode.
+func nudgeDispatcherIsSupervisor(cfg *config.City) bool {
+	if cfg == nil {
+		return false
+	}
+	return cfg.Daemon.NudgeDispatcherMode() == "supervisor"
+}
 
 func splitQueuedNudgesForTarget(target nudgeTarget, items []queuedNudge) ([]queuedNudge, []queuedNudge) {
 	if len(items) == 0 {
@@ -1259,7 +1275,22 @@ func enqueueQueuedNudgeWithStore(cityPath string, store beads.Store, item queued
 		return nil
 	})
 	if err != nil && created && store != nil && beadID != "" {
-		_ = store.Close(beadID)
+		// Stamp metadata.close_reason before Close so BdStore.Close can forward
+		// it as `bd close --reason` and satisfy validation.on-close=error.
+		// Preserve the original enqueue error, but return rollback failures too
+		// so leaked open nudge beads are diagnosable.
+		if setErr := store.SetMetadata(beadID, "close_reason", nudgeEnqueueRollbackCloseReason); setErr != nil {
+			err = errors.Join(err, fmt.Errorf("stamping rollback nudge bead %q close reason: %w", beadID, setErr))
+		}
+		if closeErr := store.Close(beadID); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("closing rollback nudge bead %q: %w", beadID, closeErr))
+		}
+	}
+	if err == nil {
+		// Best-effort wake of the supervisor's nudge dispatcher. Legacy-mode
+		// cities and ad-hoc invocations (no listener) get a fast dial
+		// failure and fall through to the per-session poller / patrol tick.
+		pingNudgeWakeSocket(cityPath)
 	}
 	return err
 }

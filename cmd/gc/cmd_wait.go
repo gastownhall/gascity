@@ -696,10 +696,10 @@ func lookupSessionBeadByID(store beads.Store, id string) (beads.Bead, bool, erro
 }
 
 func dispatchReadyWaitNudges(cityPath string, store beads.Store, _ runtime.Provider, now time.Time) error {
-	return dispatchReadyWaitNudgesWithSnapshot(cityPath, store, now, nil)
+	return dispatchReadyWaitNudgesWithSnapshot(cityPath, nil, store, now, nil)
 }
 
-func dispatchReadyWaitNudgesWithSnapshot(cityPath string, store beads.Store, now time.Time, sessionBeads *sessionBeadSnapshot) error {
+func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, store beads.Store, now time.Time, sessionBeads *sessionBeadSnapshot) error {
 	waits, err := loadWaitBeads(store)
 	if err != nil {
 		return err
@@ -755,7 +755,7 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, store beads.Store, now
 		// aliases (e.g. [providers.my-wrapped-codex] base = "builtin:codex")
 		// already surface as "codex" here. The provider fallback covers
 		// sessions created before provider_kind was stamped.
-		if sessionProviderFamily(sessionBead) == "codex" {
+		if sessionProviderFamily(sessionBead) == "codex" && !nudgeDispatcherIsSupervisor(cfg) {
 			if err := startNudgePoller(cityPath, waitNudgeAgent(sessionBead), sessionBead.Metadata["session_name"]); err != nil {
 				return fmt.Errorf("starting wait nudge poller: %w", err)
 			}
