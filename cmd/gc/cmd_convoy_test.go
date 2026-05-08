@@ -991,6 +991,59 @@ func TestConvoyAutoclosePartialSiblings(t *testing.T) {
 	}
 }
 
+// TestConvoyAutocloseStampsCloseReason verifies that the hook-driven
+// autoclose path (doConvoyAutocloseWith) stamps the canonical
+// convoyAutocloseReason on the convoy bead before closing it. The
+// metadata is what BdStore.Close() forwards as `bd close --reason`,
+// which is what allows cities running with validation.on-close=error
+// to accept the close.
+func TestConvoyAutocloseStampsCloseReason(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "batch", Type: "convoy"})    // gc-1
+	_, _ = store.Create(beads.Bead{Title: "task A", ParentID: "gc-1"}) // gc-2
+	_ = store.Close("gc-2")
+
+	var stdout bytes.Buffer
+	doConvoyAutocloseWith(store, events.Discard, "gc-2", &stdout, &bytes.Buffer{})
+
+	b, err := store.Get("gc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Status != "closed" {
+		t.Fatalf("convoy Status = %q, want %q", b.Status, "closed")
+	}
+	if got := b.Metadata["close_reason"]; got != convoyAutocloseReason {
+		t.Errorf("metadata.close_reason = %q, want %q", got, convoyAutocloseReason)
+	}
+}
+
+// TestConvoyCheckStampsCloseReason verifies that the bulk autoclose
+// path (gc convoy check) stamps the same convoyAutocloseReason on
+// every convoy it auto-closes.
+func TestConvoyCheckStampsCloseReason(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "batch", Type: "convoy"})    // gc-1
+	_, _ = store.Create(beads.Bead{Title: "task A", ParentID: "gc-1"}) // gc-2
+	_ = store.Close("gc-2")
+
+	var stdout, stderr bytes.Buffer
+	if code := doConvoyCheck(store, events.Discard, &stdout, &stderr); code != 0 {
+		t.Fatalf("doConvoyCheck = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	b, err := store.Get("gc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Status != "closed" {
+		t.Fatalf("convoy Status = %q, want %q", b.Status, "closed")
+	}
+	if got := b.Metadata["close_reason"]; got != convoyAutocloseReason {
+		t.Errorf("metadata.close_reason = %q, want %q", got, convoyAutocloseReason)
+	}
+}
+
 // --- gc convoy land ---
 
 func TestConvoyLandHappyPath(t *testing.T) {

@@ -74,7 +74,7 @@ func (h *Handler) RetryHandler(_ context.Context, sourceBeadID, _ string, maxIte
 	// reconciler does not try to resume an incomplete convergence loop.
 	closeBead := func(cause error) error {
 		_ = h.Store.SetMetadata(newBeadID, FieldState, StateTerminated)
-		_ = h.Store.CloseBead(newBeadID)
+		_ = h.Store.CloseBead(newBeadID, CloseReasonRetryRollback)
 		return cause
 	}
 

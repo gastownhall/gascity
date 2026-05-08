@@ -1,6 +1,7 @@
 package hooks
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -278,6 +279,90 @@ func TestInstallCodexUpgradesGeneratedFileMissingHookFormat(t *testing.T) {
 	if !strings.Contains(got, "--hook-format codex") {
 		t.Errorf("upgraded codex hooks missing Codex hook output format:\n%s", got)
 	}
+	if !strings.Contains(got, `"PreCompact"`) {
+		t.Errorf("upgraded codex hooks missing PreCompact:\n%s", got)
+	}
+	if !strings.Contains(got, `gc handoff --auto --hook-format codex \"context cycle\"`) {
+		t.Errorf("upgraded codex PreCompact missing auto handoff command:\n%s", got)
+	}
+}
+
+func TestInstallCodexUpgradesManagedFileMissingPreCompact(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/work/.codex/hooks.json"] = []byte(`{
+  "hooks": {
+    "SessionStart": [{
+      "hooks": [{
+        "type": "command",
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc prime --hook --hook-format codex"
+      }]
+    }],
+    "UserPromptSubmit": [{
+      "hooks": [{
+        "type": "command",
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc mail check --inject --hook-format codex"
+      }]
+    }]
+  }
+}`)
+
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	got := string(fs.Files["/work/.codex/hooks.json"])
+	if !strings.Contains(got, `"PreCompact"`) {
+		t.Errorf("upgraded codex hooks missing PreCompact:\n%s", got)
+	}
+	if !strings.Contains(got, `gc handoff --auto --hook-format codex \"context cycle\"`) {
+		t.Errorf("upgraded codex PreCompact missing auto handoff command:\n%s", got)
+	}
+}
+
+func TestInstallCodexWritesCanonicalHookBytes(t *testing.T) {
+	fs := fsys.NewFake()
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	got := fs.Files["/work/.codex/hooks.json"]
+	normalized, changed, err := normalizeCodexHookCommands(got)
+	if err != nil {
+		t.Fatalf("normalizeCodexHookCommands: %v", err)
+	}
+	if changed || !bytes.Equal(normalized, got) {
+		t.Fatalf("codex hook install should write canonical bytes")
+	}
+}
+
+func TestInstallCodexIsByteStableAcrossRepeatedInstalls(t *testing.T) {
+	fs := fsys.NewFake()
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("first Install: %v", err)
+	}
+	before := append([]byte(nil), fs.Files["/work/.codex/hooks.json"]...)
+
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("second Install: %v", err)
+	}
+	after := fs.Files["/work/.codex/hooks.json"]
+	if !bytes.Equal(before, after) {
+		t.Fatalf("second Install rewrote codex hooks:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
+func TestInstallCodexPreservesCustomOnlyHooksByteForByte(t *testing.T) {
+	fs := fsys.NewFake()
+	custom := []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"command":"printf custom-codex-hook","type":"command"}]}]}}`)
+	fs.Files["/work/.codex/hooks.json"] = append([]byte(nil), custom...)
+
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	got := fs.Files["/work/.codex/hooks.json"]
+	if !bytes.Equal(custom, got) {
+		t.Fatalf("custom-only codex hooks were rewritten:\nbefore:\n%s\nafter:\n%s", custom, got)
+	}
 }
 
 func TestInstallCodexUpgradePreservesCustomHooks(t *testing.T) {
@@ -309,6 +394,126 @@ func TestInstallCodexUpgradePreservesCustomHooks(t *testing.T) {
 	}
 	if !strings.Contains(got, "printf custom-codex-hook") {
 		t.Errorf("custom codex hook was not preserved:\n%s", got)
+	}
+	if !strings.Contains(got, `"PreCompact"`) {
+		t.Errorf("managed codex upgrade should add PreCompact while preserving custom hooks:\n%s", got)
+	}
+}
+
+func TestInstallCodexPreservesFullyCustomHooks(t *testing.T) {
+	fs := fsys.NewFake()
+	custom := []byte(`{
+  "hooks": {
+    "UserPromptSubmit": [{
+      "hooks": [{
+        "type": "command",
+        "command": "printf custom-codex-hook"
+      }]
+    }]
+  }
+}`)
+	fs.Files["/work/.codex/hooks.json"] = custom
+
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	if got := string(fs.Files["/work/.codex/hooks.json"]); got != string(custom) {
+		t.Fatalf("fully custom codex hooks were overwritten:\n%s", got)
+	}
+}
+
+func TestUpgradeCodexHooksSkipsWhenDesiredPreCompactUnavailable(t *testing.T) {
+	existing := []byte(`{
+  "hooks": {
+    "SessionStart": [{
+      "hooks": [{
+        "type": "command",
+        "command": "gc prime --hook --hook-format codex"
+      }]
+    }]
+  }
+}`)
+	for name, desired := range map[string][]byte{
+		"malformed": []byte(`{not-json`),
+		"missing":   []byte(`{"hooks":{}}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, changed, err := upgradeCodexHooks(existing, desired); err != nil || changed {
+				t.Fatalf("changed = %v, err = %v, want unchanged without error", changed, err)
+			}
+		})
+	}
+}
+
+func TestAddCodexPreCompactHookRejectsInvalidRoots(t *testing.T) {
+	desired := []byte(`{"hooks":{"PreCompact":[{"hooks":[{"type":"command","command":"gc handoff --auto"}]}]}}`)
+	for name, root := range map[string]any{
+		"non-map-root": []any{},
+		"custom-only": map[string]any{
+			"hooks": map[string]any{
+				"UserPromptSubmit": []any{map[string]any{
+					"hooks": []any{map[string]any{"command": "printf custom"}},
+				}},
+			},
+		},
+		"missing-hooks-map": map[string]any{
+			"other": []any{map[string]any{"command": "gc prime --hook"}},
+		},
+		"already-has-precompact": map[string]any{
+			"hooks": map[string]any{
+				"SessionStart": []any{map[string]any{
+					"hooks": []any{map[string]any{"command": "gc prime --hook"}},
+				}},
+				"PreCompact": []any{},
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if addCodexPreCompactHook(root, desired) {
+				t.Fatalf("addCodexPreCompactHook(%s) = true, want false", name)
+			}
+		})
+	}
+}
+
+func TestDesiredCodexPreCompactHookFallsBackToEmbeddedOverlay(t *testing.T) {
+	if got := desiredCodexPreCompactHook(nil); got == nil {
+		t.Fatal("desiredCodexPreCompactHook(nil) = nil, want embedded PreCompact hook")
+	}
+}
+
+func TestInstallCodexPreservesUnreadableExistingHooks(t *testing.T) {
+	workDir := t.TempDir()
+	hookDir := filepath.Join(workDir, ".codex")
+	if err := os.MkdirAll(hookDir, 0o755); err != nil {
+		t.Fatalf("mkdir hooks dir: %v", err)
+	}
+	hookPath := filepath.Join(hookDir, "hooks.json")
+	custom := []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"printf custom"}]}]}}`)
+	if err := os.WriteFile(hookPath, custom, 0o644); err != nil {
+		t.Fatalf("write hooks: %v", err)
+	}
+	if err := os.Chmod(hookPath, 0); err != nil {
+		t.Fatalf("chmod hooks unreadable: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(hookPath, 0o644)
+	})
+
+	if err := Install(fsys.OSFS{}, "/city", workDir, []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	if err := os.Chmod(hookPath, 0o644); err != nil {
+		t.Fatalf("restore hooks mode: %v", err)
+	}
+	got, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatalf("read hooks: %v", err)
+	}
+	if string(got) != string(custom) {
+		t.Fatalf("unreadable codex hooks were overwritten:\n%s", string(got))
 	}
 }
 
@@ -768,6 +973,12 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	codexHooks := string(fs.Files["/work/.codex/hooks.json"])
 	if !strings.Contains(codexHooks, "--hook-format codex") {
 		t.Error("codex hooks should request Codex hook output format")
+	}
+	if !strings.Contains(codexHooks, `"PreCompact"`) {
+		t.Error("codex hooks should include PreCompact")
+	}
+	if !strings.Contains(codexHooks, `gc handoff --auto --hook-format codex \"context cycle\"`) {
+		t.Error("codex PreCompact should use auto handoff with Codex hook output format")
 	}
 	for _, rel := range []string{
 		"/work/.codex/hooks.json",

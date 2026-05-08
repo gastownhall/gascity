@@ -136,6 +136,9 @@ func releaseOrphanedPoolAssignments(
 			if assigneePreservesNamedSessionRoute(cfg, cityPath, template, assignee, workStoreRef, storeRefAware) {
 				continue
 			}
+			if liveOpenSessionAssignmentExists(store, assignee) {
+				continue
+			}
 		}
 
 		var ownerStore beads.Store
@@ -150,6 +153,9 @@ func releaseOrphanedPoolAssignments(
 			if ownerStore == nil {
 				continue
 			}
+		}
+		if !liveWorkAssignmentStillReleasable(ownerStore, wb.ID, assignee) {
+			continue
 		}
 		if !releaseOrphanedPoolAssignment(ownerStore, wb.ID) {
 			continue
@@ -261,6 +267,85 @@ func releaseOrphanedPoolAssignment(store beads.Store, id string) bool {
 		Status:   stringPtr("open"),
 	}
 	return store.Update(id, opts) == nil
+}
+
+func liveOpenSessionAssignmentExists(store beads.Store, assignee string) bool {
+	assignee = strings.TrimSpace(assignee)
+	if store == nil || assignee == "" {
+		return false
+	}
+	if liveSessionBeadExistsByIdentity(store, assignee) {
+		return true
+	}
+	sessions, err := store.List(beads.ListQuery{
+		Label: sessionBeadLabel,
+		Live:  true,
+	})
+	if err != nil {
+		log.Printf("releaseOrphanedPoolAssignments: live session validation failed for assignee %q: %v", assignee, err)
+		return true
+	}
+	for _, sb := range sessions {
+		if sb.Status == "closed" || !isSessionBead(sb) {
+			continue
+		}
+		if assignee == strings.TrimSpace(sb.ID) ||
+			assignee == strings.TrimSpace(sb.Metadata["session_name"]) ||
+			assignee == strings.TrimSpace(sb.Metadata["configured_named_identity"]) {
+			return true
+		}
+	}
+	return false
+}
+
+func liveSessionBeadExistsByIdentity(store beads.Store, assignee string) bool {
+	for _, id := range directSessionBeadIDCandidates(assignee) {
+		sb, err := store.Get(id)
+		if err != nil {
+			continue
+		}
+		if sb.Status != "closed" && isSessionBead(sb) &&
+			(assignee == strings.TrimSpace(sb.ID) ||
+				assignee == strings.TrimSpace(sb.Metadata["session_name"]) ||
+				assignee == strings.TrimSpace(sb.Metadata["configured_named_identity"])) {
+			return true
+		}
+	}
+	return false
+}
+
+func directSessionBeadIDCandidates(assignee string) []string {
+	assignee = strings.TrimSpace(assignee)
+	if assignee == "" {
+		return nil
+	}
+	candidates := []string{assignee}
+	if idx := strings.LastIndex(assignee, "-mc-"); idx >= 0 {
+		candidates = append(candidates, assignee[idx+1:])
+	}
+	return candidates
+}
+
+func liveWorkAssignmentStillReleasable(store beads.Store, id, assignee string) bool {
+	id = strings.TrimSpace(id)
+	if store == nil || id == "" {
+		return false
+	}
+	work, err := store.List(beads.ListQuery{
+		Status: "in_progress",
+		Live:   true,
+	})
+	if err != nil {
+		log.Printf("releaseOrphanedPoolAssignments: live work validation failed for %q: %v", id, err)
+		return false
+	}
+	for _, wb := range work {
+		if wb.ID != id {
+			continue
+		}
+		return strings.TrimSpace(wb.Assignee) == strings.TrimSpace(assignee)
+	}
+	return false
 }
 
 func assigneePreservesNamedSessionRoute(cfg *config.City, cityPath, template, assignee, workStoreRef string, storeRefAware bool) bool {

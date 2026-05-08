@@ -201,12 +201,16 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 	scopeRoot := resolveStoreScopeRoot(cs.cityPath, rigPath)
 	if strings.HasPrefix(provider, "exec:") {
 		s := beadsexec.NewStore(strings.TrimPrefix(provider, "exec:"))
-		s.SetEnv(gcExecStoreEnv(cs.cityPath, execStoreTarget{
+		env := gcExecStoreEnv(cs.cityPath, execStoreTarget{
 			ScopeRoot: scopeRoot,
 			ScopeKind: "rig",
 			Prefix:    prefix,
 			RigName:   rigName,
-		}, provider))
+		}, provider)
+		if execProviderNeedsScopedDoltStoreEnv(provider) {
+			copyExecProjectedDoltEnv(env, bdRuntimeEnvForRig(cs.cityPath, cfg, scopeRoot))
+		}
+		s.SetEnv(env)
 		return s
 	}
 	switch provider {

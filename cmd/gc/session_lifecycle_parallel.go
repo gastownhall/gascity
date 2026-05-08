@@ -691,16 +691,6 @@ func buildPreparedStart(
 		continuationEpoch,
 		instanceToken,
 	)
-	// When the bead has no alias but the template was identity-stamped
-	// (pool workers and dependency floors via setTemplateEnvIdentity),
-	// don't let mergeEnv's override-wins semantics clobber the stamped
-	// GC_ALIAS with the runtime's empty value. For ordinary sessions the
-	// resolver-stamped GC_ALIAS is left to be overwritten by the empty
-	// runtime value so the tmux runtime emits `env -u GC_ALIAS` and scrubs
-	// any inherited GC_ALIAS from the tmux server.
-	if beadAlias == "" && tp.EnvIdentityStamped {
-		delete(runtimeEnv, "GC_ALIAS")
-	}
 	agentCfg.Env = mergeEnv(agentCfg.Env, runtimeEnv)
 	if gcProvider := sessionProviderFamily(*session); gcProvider != "" {
 		agentCfg.Env = mergeEnv(agentCfg.Env, map[string]string{"GC_PROVIDER": gcProvider})

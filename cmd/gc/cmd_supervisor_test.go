@@ -509,6 +509,50 @@ func TestBuildSupervisorServiceDataIncludesProviderEnv(t *testing.T) {
 	}
 }
 
+func TestBuildSupervisorServiceDataOmitsProviderEnvWhenOptedOut(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("XDG_RUNTIME_DIR", "/tmp/gc-run")
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-123")
+	t.Setenv("ANTHROPIC_BASE_URL", "https://anthropic.example.test")
+	t.Setenv("OPENAI_API_KEY", "sk-openai-123")
+	t.Setenv("GEMINI_API_KEY", "gemini-123")
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "gc-project")
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(homeDir, ".claude"))
+	t.Setenv("GC_SUPERVISOR_ENV", "CUSTOM_PROVIDER_TOKEN")
+	t.Setenv("CUSTOM_PROVIDER_TOKEN", "custom-token")
+	t.Setenv(supervisorOmitProviderCredsEnv, "1")
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+
+	got := supervisorServiceEnvMap(data.ExtraEnv)
+	for _, key := range []string{
+		"ANTHROPIC_API_KEY",
+		"ANTHROPIC_BASE_URL",
+		"OPENAI_API_KEY",
+		"GEMINI_API_KEY",
+		"GOOGLE_CLOUD_PROJECT",
+	} {
+		if _, ok := got[key]; ok {
+			t.Fatalf("ExtraEnv should not include provider key %s when %s=1: %#v",
+				key, supervisorOmitProviderCredsEnv, got)
+		}
+	}
+	for key, want := range map[string]string{
+		"CLAUDE_CONFIG_DIR":     filepath.Join(homeDir, ".claude"),
+		"CUSTOM_PROVIDER_TOKEN": "custom-token",
+	} {
+		if got[key] != want {
+			t.Fatalf("ExtraEnv[%s] = %q, want %q (all env: %#v)", key, got[key], want, got)
+		}
+	}
+}
+
 func supervisorServiceEnvMap(vars []supervisorServiceEnvVar) map[string]string {
 	m := make(map[string]string, len(vars))
 	for _, item := range vars {

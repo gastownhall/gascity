@@ -273,6 +273,7 @@ DaemonConfig holds controller daemon settings.
 | `observe_paths` | []string |  |  | ObservePaths lists extra directories to search for Claude JSONL session files (e.g., aimux session paths). The default search path (~/.claude/projects/) is always included. |
 | `probe_concurrency` | integer |  | `8` | ProbeConcurrency bounds the number of concurrent bd subprocess probes issued by the pool scale_check and work_query paths. bd serializes on a shared dolt sql-server, so unbounded parallelism causes contention. Nil (unset) defaults to 8. Set higher for workspaces with a fast dedicated dolt server, or lower to reduce contention on slow storage. |
 | `max_wakes_per_tick` | integer |  | `5` | MaxWakesPerTick caps how many sessions the reconciler may start in a single tick. Nil (unset) defaults to 5. Values &lt;= 0 are treated as the default — set a positive integer to override. |
+| `nudge_dispatcher` | string |  | `legacy` | NudgeDispatcher selects how queued nudges get delivered to running sessions. "legacy" (default) auto-spawns a per-session `gc nudge poll` process that polls the file-backed queue every 2s. "supervisor" runs the delivery loop inside the city runtime instead, with a unix-socket wake fast path triggered by enqueue, eliminating the per-session bd shellout storm. Enum: `legacy`, `supervisor` |
 
 ## DoctorConfig
 

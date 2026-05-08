@@ -115,7 +115,7 @@ func TestDoInit_WritesGitignoreEntries(t *testing.T) {
 	f := fsys.NewFake()
 
 	var stdout, stderr bytes.Buffer
-	code := doInit(f, "/bright-lights", defaultWizardConfig(), "", &stdout, &stderr)
+	code := doInit(f, "/bright-lights", defaultWizardConfig(), "", &stdout, &stderr, false)
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -137,7 +137,7 @@ func TestDoInit_GitignoreIdempotent(t *testing.T) {
 	f := fsys.NewFake()
 
 	var stdout, stderr bytes.Buffer
-	code := doInit(f, "/bright-lights", defaultWizardConfig(), "", &stdout, &stderr)
+	code := doInit(f, "/bright-lights", defaultWizardConfig(), "", &stdout, &stderr, false)
 	if code != 0 {
 		t.Fatalf("first doInit = %d, want 0; stderr: %s", code, stderr.String())
 	}

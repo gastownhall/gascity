@@ -91,6 +91,7 @@ type CityRuntime struct {
 	reloadReqCh         chan reloadRequest       // receives structured reload requests from controller.sock
 	pokeCh              chan struct{}            // non-blocking signal to trigger immediate reconciler tick
 	controlDispatcherCh chan struct{}            // non-blocking signal for control-dispatcher-only reconcile
+	nudgeWakeCh         chan struct{}            // signal to dispatch queued nudges; fed by wake socket listener
 	activeReload        *reloadRequest
 	onStarted           func()
 	onStatus            func(string)
@@ -239,11 +240,12 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 			}
 			return make(chan struct{}, 1)
 		}(),
-		onStarted: p.OnStarted,
-		onStatus:  p.OnStatus,
-		logPrefix: logPrefix,
-		stdout:    p.Stdout,
-		stderr:    p.Stderr,
+		nudgeWakeCh: make(chan struct{}, 1),
+		onStarted:   p.OnStarted,
+		onStatus:    p.OnStatus,
+		logPrefix:   logPrefix,
+		stdout:      p.Stdout,
+		stderr:      p.Stderr,
 	}
 	cr.svc = workspacesvc.NewManager(&serviceRuntime{cr: cr})
 	if err := cr.svc.Reload(); err != nil {
@@ -509,6 +511,9 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// Track pool instance liveness for death detection.
 	var prevPoolRunning map[string]bool
 	runTick := func(trigger string) {
+		if ctx.Err() != nil {
+			return
+		}
 		cr.safeTick(func() {
 			cr.tick(ctx, dirty, &lastProviderName, cityRoot, &prevPoolRunning, trigger)
 		}, trigger)
@@ -524,6 +529,18 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	// Start the supervisor nudge dispatcher when configured. The wake-socket
+	// listener feeds nudgeWakeCh on every producer enqueue, giving sub-second
+	// dispatch latency. Patrol-tick fallback inside cr.tick() guarantees
+	// eventual delivery if the wake is missed (socket race, listener
+	// restart). Legacy mode skips the listener entirely; per-session
+	// pollers continue to own delivery.
+	if nudgeDispatcherIsSupervisor(cr.cfg) && cr.cityPath != "" {
+		if _, err := startNudgeWakeListener(ctx, cr.cityPath, cr.nudgeWakeCh, cr.stderr, cr.logPrefix); err != nil {
+			fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: %v (falling back to patrol-only delivery)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		}
+	}
+
 	for {
 		select {
 		case <-ticker.C:
@@ -533,6 +550,10 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			// session. Trigger an immediate tick so the reconciler sees the new
 			// work via workSet/poolDesired and wakes the target promptly.
 			runTick("poke")
+		case <-cr.nudgeWakeCh:
+			cr.safeTick(func() {
+				cr.nudgeDispatchTick(ctx)
+			}, "nudge-wake")
 		case <-cr.controlDispatcherCh:
 			cr.safeTick(func() {
 				cr.controlDispatcherTick(ctx)
@@ -615,6 +636,9 @@ func (cr *CityRuntime) tick(
 	prevPoolRunning *map[string]bool,
 	trigger string,
 ) {
+	if ctx.Err() != nil {
+		return
+	}
 	sessionBeads := cr.loadSessionBeadSnapshot()
 	traceTrigger := trigger
 	traceDetail := "controller_tick"
@@ -699,10 +723,16 @@ func (cr *CityRuntime) tick(
 			manualReloadCompleted = true
 		}
 	}
+	if ctx.Err() != nil {
+		return
+	}
 
 	// Order dispatch is intentionally before the expensive session reconcile
 	// phases so due formulas are not starved by slow startup/config drift work.
 	cr.dispatchOrders(ctx, cityRoot)
+	if ctx.Err() != nil {
+		return
+	}
 
 	// Session bead sync BEFORE reconciliation (one-tick state lag; see run()).
 	// Post-reconcile sync was intentionally removed: the daemon's next tick
@@ -713,6 +743,9 @@ func (cr *CityRuntime) tick(
 	cleanupDeadRuntimeSessionCorpses(sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
 	if reapStaleSessionBeads(cr.cityBeadStore(), cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr) > 0 {
 		sessionBeads = cr.loadSessionBeadSnapshot()
+	}
+	if ctx.Err() != nil {
+		return
 	}
 	demand := cr.loadDemandSnapshot(sessionBeads, trace, trigger, configChanged)
 	result := demand.result
@@ -1433,9 +1466,13 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	dispatchSessionBeads, err := loadSessionBeadSnapshot(store)
 	if err != nil {
 		fmt.Fprintf(cr.stderr, "%s: dispatching wait nudges: %v\n", cr.logPrefix, err) //nolint:errcheck
-	} else if err := dispatchReadyWaitNudgesWithSnapshot(cr.cityPath, store, time.Now(), dispatchSessionBeads); err != nil {
+	} else if err := dispatchReadyWaitNudgesWithSnapshot(cr.cityPath, cr.cfg, store, time.Now(), dispatchSessionBeads); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: dispatching wait nudges: %v\n", cr.logPrefix, err) //nolint:errcheck
 	}
+	// Patrol-tick fallback for the supervisor nudge dispatcher: ensures
+	// queued items get delivered even if the wake socket missed the
+	// enqueue (process race during supervisor restart, listener crash).
+	cr.nudgeDispatchTick(ctx)
 
 	// Idle recovery: detect pool sessions stuck at the prompt after
 }
@@ -1684,6 +1721,27 @@ func parseRFC3339Metadata(v string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return t, true
+}
+
+// nudgeDispatchTick runs one supervisor-side nudge dispatch pass. Called
+// from the main run loop on wake-socket signal and (belt-and-suspenders)
+// at the end of each patrol tick so a missed wake doesn't strand a queue
+// item past the patrol interval.
+func (cr *CityRuntime) nudgeDispatchTick(_ context.Context) {
+	if !nudgeDispatcherIsSupervisor(cr.cfg) {
+		return
+	}
+	store := cr.cityBeadStore()
+	if store == nil {
+		return
+	}
+	sessionBeads := cr.loadSessionBeadSnapshot()
+	if sessionBeads == nil {
+		return
+	}
+	if _, err := dispatchAllQueuedNudges(cr.cityPath, cr.cfg, store, cr.sp, sessionBeads); err != nil {
+		fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: %v\n", cr.logPrefix, err) //nolint:errcheck
+	}
 }
 
 func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {

@@ -15,6 +15,12 @@ import (
 
 const poolManagedMetadataKey = "pool_managed"
 
+type poolSessionCreateIdentity struct {
+	AgentName string
+	Alias     string
+	Slot      int
+}
+
 func isPoolManagedSessionBead(bead beads.Bead) bool {
 	if isEphemeralSessionBead(bead) {
 		return true
@@ -123,14 +129,22 @@ func createPoolSessionBead(
 	template string,
 	sessionBeads *sessionBeadSnapshot,
 	now time.Time,
+	identity poolSessionCreateIdentity,
 ) (beads.Bead, error) {
 	if store == nil {
 		return beads.Bead{}, fmt.Errorf("session store unavailable for pool template %q", template)
 	}
 	instanceToken := sessionpkg.NewInstanceToken()
+	agentName := strings.TrimSpace(identity.AgentName)
+	title := targetBasename(template)
+	if agentName == "" {
+		agentName = template
+	} else {
+		title = agentName
+	}
 	meta := map[string]string{
 		"template":                  template,
-		"agent_name":                template,
+		"agent_name":                agentName,
 		"state":                     "creating",
 		"pending_create_claim":      "true",
 		"pending_create_started_at": pendingCreateStartedAtNow(now),
@@ -141,10 +155,16 @@ func createPoolSessionBead(
 		"session_name":              pendingPoolSessionName(template, instanceToken),
 		poolManagedMetadataKey:      boolMetadata(true),
 	}
+	if alias := strings.TrimSpace(identity.Alias); alias != "" {
+		meta["alias"] = alias
+	}
+	if identity.Slot > 0 {
+		meta["pool_slot"] = strconv.Itoa(identity.Slot)
+	}
 	bead, err := store.Create(beads.Bead{
-		Title:    targetBasename(template),
+		Title:    title,
 		Type:     sessionBeadType,
-		Labels:   []string{sessionBeadLabel, "agent:" + template},
+		Labels:   []string{sessionBeadLabel, "agent:" + agentName},
 		Metadata: meta,
 	})
 	if err != nil {

@@ -300,6 +300,12 @@ while IFS= read -r DB; do
         record_anomaly "$DB" "unsafe Dolt database identifier skipped by reaper"
         continue
     fi
+    if ! has_wisps_table "$DB"; then
+        # Not a bd-managed bead store. Skip silently; recording an
+        # anomaly here would just turn every schemaless DB on the
+        # server into noise. See gastownhall/gascity#1816.
+        continue
+    fi
 
     DB_MUTATIONS=0
 

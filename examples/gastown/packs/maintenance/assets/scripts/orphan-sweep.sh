@@ -46,9 +46,31 @@ if [ -z "$AGENTS" ]; then
     exit 0
 fi
 
+# Step 2b: Collect identities of every live (non-closed) session so that
+# pool-spawned ephemeral assignees (e.g. gastown__polekitten-gc-q9j0om) are
+# treated as known. The Go-side releaseOrphanedPoolAssignments path validates
+# these via liveOpenSessionAssignmentExists, but this shell sweep ran without
+# that guard — an ephemeral assignee whose template-stripped form did not
+# match any agent name was incorrectly reset, racing against active polekitten
+# work and producing the false-orphan loop tracked in ga-nvx.
+SESSIONS_JSON=$(gc session list --json 2>/dev/null) || SESSIONS_JSON="[]"
+LIVE_SESSION_IDS=$(echo "$SESSIONS_JSON" | jq -r '
+    .[]
+    | select(.Closed == false)
+    | [.ID, .SessionName, .Alias, .AgentName]
+    | .[]
+    | select(. != null and . != "")
+' 2>/dev/null) || LIVE_SESSION_IDS=""
+
 agent_exists() {
     local candidate="$1"
     [ -n "$candidate" ] && printf '%s\n' "$AGENTS" | grep -Fxq -- "$candidate"
+}
+
+live_session_match() {
+    local candidate="$1"
+    [ -n "$candidate" ] && [ -n "$LIVE_SESSION_IDS" ] \
+        && printf '%s\n' "$LIVE_SESSION_IDS" | grep -Fxq -- "$candidate"
 }
 
 # Step 3: Find orphaned beads (assigned to non-existent agents).
@@ -56,7 +78,7 @@ agent_exists() {
 # the template name from config.
 is_known_agent() {
     local name="$1"
-    # Direct match.
+    # Direct match against a configured agent template name.
     if agent_exists "$name"; then return 0; fi
     # Pool instance: strip trailing -<digits> and check template name.
     local base="${name%-[0-9]*}"
@@ -72,6 +94,11 @@ is_known_agent() {
         local short_base="${short%-[0-9]*}"
         if [ "$short_base" != "$short" ] && agent_exists "$short_base"; then return 0; fi
     fi
+    # Live ephemeral session names like gastown__polekitten-gc-q9j0om won't
+    # match any template form — accept them as known when a non-closed session
+    # is currently running with a matching ID, SessionName, Alias, or
+    # AgentName. Mirrors liveOpenSessionAssignmentExists in the Go path.
+    if live_session_match "$name"; then return 0; fi
     return 1
 }
 

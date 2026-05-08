@@ -535,6 +535,41 @@ func TestControllerStateOpenRigStoreExecProjectsRigTarget(t *testing.T) {
 	}
 }
 
+func TestControllerStateOpenRigStoreExecBdProjectsRigDoltEnv(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := t.TempDir()
+	captureDir := t.TempDir()
+	script := writeNamedExecCaptureScript(t, captureDir, "gc-beads-bd.sh")
+	provider := "exec:" + script
+
+	cfg := &config.City{
+		Rigs: []config.Rig{{
+			Name:     "frontend",
+			Path:     rigDir,
+			Prefix:   "fe",
+			DoltHost: "rig-db.example.com",
+			DoltPort: "3308",
+		}},
+	}
+
+	t.Setenv("GC_DOLT_HOST", "ambient-dolt")
+	t.Setenv("GC_DOLT_PORT", "9911")
+
+	cs := &controllerState{cityPath: cityDir, cfg: cfg}
+	store := cs.openRigStore(provider, "frontend", rigDir, "fe", cfg)
+	if _, err := store.Create(beads.Bead{Title: "rig"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	rigEnv := readExecCaptureEnv(t, filepath.Join(captureDir, "frontend.env"))
+	if got := rigEnv["GC_DOLT_HOST"]; got != "rig-db.example.com" {
+		t.Fatalf("GC_DOLT_HOST = %q, want rig-db.example.com", got)
+	}
+	if got := rigEnv["GC_DOLT_PORT"]; got != "3308" {
+		t.Fatalf("GC_DOLT_PORT = %q, want 3308", got)
+	}
+}
+
 func TestOpenStoreAtForCityExecUsesUniversalStoreTargetEnv(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "rigs", "frontend")

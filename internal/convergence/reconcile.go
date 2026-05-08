@@ -220,7 +220,7 @@ func (r *Reconciler) reconcileCreating(beadID string) ReconcileDetail {
 			Error: fmt.Errorf("setting state to terminated: %w", err),
 		}
 	}
-	if err := r.Handler.Store.CloseBead(beadID); err != nil {
+	if err := r.Handler.Store.CloseBead(beadID, CloseReasonReconcileDone); err != nil {
 		return ReconcileDetail{
 			BeadID: beadID, Action: "completed_terminal",
 			Error: fmt.Errorf("closing bead: %w", err),
@@ -279,7 +279,7 @@ func (r *Reconciler) reconcileTerminatedNotClosed(beadID string, meta map[string
 	r.emitRecoveryEvent(EventTerminated, EventIDTerminated(beadID), beadID, termPayload)
 
 	// Close the bead.
-	if err := r.Handler.Store.CloseBead(beadID); err != nil {
+	if err := r.Handler.Store.CloseBead(beadID, CloseReasonReconcileDone); err != nil {
 		return ReconcileDetail{
 			BeadID: beadID, Action: "completed_terminal",
 			Error: fmt.Errorf("closing bead: %w", err),
@@ -561,7 +561,7 @@ func (r *Reconciler) completeTerminalTransition(beadID string, meta map[string]s
 	}
 
 	// Close the bead.
-	if err := r.Handler.Store.CloseBead(beadID); err != nil {
+	if err := r.Handler.Store.CloseBead(beadID, CloseReasonReconcileDone); err != nil {
 		return ReconcileDetail{
 			BeadID: beadID, Action: "completed_terminal",
 			Error: fmt.Errorf("closing bead: %w", err),

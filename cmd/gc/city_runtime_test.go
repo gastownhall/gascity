@@ -510,6 +510,70 @@ func TestCityRuntimeTickDispatchesOrdersBeforeDemandSnapshot(t *testing.T) {
 	}
 }
 
+func TestCityRuntimeTickReturnsBeforeDemandWhenCanceled(t *testing.T) {
+	store := beads.NewMemStore()
+	od := &recordingOrderDispatcher{}
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cityPath:            t.TempDir(),
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		sp:                  runtime.NewFake(),
+		standaloneCityStore: store,
+		od:                  od,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+	}
+	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+		t.Fatal("demand snapshot should not run after city context is canceled")
+		return DesiredStateResult{State: map[string]TemplateParams{}}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var dirty atomic.Bool
+	var lastProviderName string
+	var prevPoolRunning map[string]bool
+	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+
+	if od.called.Load() {
+		t.Fatal("order dispatcher should not run after city context is canceled")
+	}
+}
+
+func TestCityRuntimeTickReturnsBeforeDemandWhenCanceledDuringOrderDispatch(t *testing.T) {
+	store := beads.NewMemStore()
+	ctx, cancel := context.WithCancel(context.Background())
+	od := &recordingOrderDispatcher{
+		onDispatch: func(context.Context, string, time.Time) {
+			cancel()
+		},
+	}
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cityPath:            t.TempDir(),
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		sp:                  runtime.NewFake(),
+		standaloneCityStore: store,
+		od:                  od,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+	}
+	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+		t.Fatal("demand snapshot should not run after order dispatch cancels the city context")
+		return DesiredStateResult{State: map[string]TemplateParams{}}
+	}
+
+	var dirty atomic.Bool
+	var lastProviderName string
+	var prevPoolRunning map[string]bool
+	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+
+	if !od.called.Load() {
+		t.Fatal("order dispatcher was not called")
+	}
+}
+
 func TestCityRuntimeRunDispatchesOrdersBeforeStartupReconcile(t *testing.T) {
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
@@ -3235,6 +3299,9 @@ func TestCityRuntimeManualReloadReplyWaitsForTickCompletion(t *testing.T) {
 		Stdout: &stdout,
 		Stderr: io.Discard,
 	})
+	// This test asserts reload reply timing only; order subprocesses add
+	// unrelated tempdir cleanup races after the tick has completed.
+	cr.od = nil
 	cr.activeReload = &reloadRequest{doneCh: doneCh}
 	lastProviderName := "fake"
 	var prevPoolRunning map[string]bool
@@ -4219,6 +4286,7 @@ func loadCityRuntimeControllerConfig(t *testing.T, cityPath string) (*config.Cit
 func writeCityRuntimeConfigNamed(t *testing.T, tomlPath, name, provider string) {
 	t.Helper()
 	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfter(t)
 	data := []byte("[workspace]\nname = \"" + name + "\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"" + provider + "\"\n")
 	if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -4227,6 +4295,8 @@ func writeCityRuntimeConfigNamed(t *testing.T, tomlPath, name, provider string) 
 
 func writeCityRuntimeConfigWithShutdownTimeout(t *testing.T, tomlPath, provider, timeout string) {
 	t.Helper()
+	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfter(t)
 	data := []byte("[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"" + provider + "\"\n\n[daemon]\nshutdown_timeout = \"" + timeout + "\"\n")
 	if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -4245,6 +4315,7 @@ func warningsContain(warnings []string, substr string) bool {
 func writeCityRuntimeConfigWithIncludes(t *testing.T, tomlPath string, includes []string) {
 	t.Helper()
 	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfter(t)
 	var quoted []string
 	for _, include := range includes {
 		quoted = append(quoted, fmt.Sprintf("%q", include))

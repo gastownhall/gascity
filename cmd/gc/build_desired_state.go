@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
+	"github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
@@ -1528,7 +1529,7 @@ func realizePoolDesiredSessions(
 				prefer = &bead
 			}
 		}
-		sessionBead, err := selectOrCreatePoolSessionBead(bp, qualifiedName, prefer, used)
+		sessionBead, slot, err := selectOrCreatePoolSessionBead(bp, cfgAgent, qualifiedName, prefer, used, usedSlots)
 		if err != nil {
 			fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
 			continue
@@ -1537,7 +1538,6 @@ func realizePoolDesiredSessions(
 			continue
 		}
 		used[sessionBead.ID] = true
-		slot := claimPoolSlot(cfgAgent, sessionBead, usedSlots)
 		instanceName := poolInstanceName(cfgAgent.Name, slot, cfgAgent)
 		qualifiedInstance := cfgAgent.QualifiedInstanceName(instanceName)
 		instanceAgent := deepCopyAgent(cfgAgent, instanceName, cfgAgent.Dir)
@@ -1550,10 +1550,46 @@ func realizePoolDesiredSessions(
 		tp.Alias = qualifiedInstance
 		tp.InstanceName = qualifiedInstance
 		tp.PoolSlot = slot
-		setTemplateEnvIdentity(&tp, qualifiedInstance)
+		setPoolTemplateRuntimeIdentity(&tp, qualifiedInstance, sessionBead)
 		installAgentSideEffects(bp, &instanceAgent, tp, stderr)
 		desired[tp.SessionName] = tp
 	}
+}
+
+// setPoolTemplateRuntimeIdentity stamps the pool alias unless this bead is in a
+// known deferred-alias state. Stable legacy pool beads can lack alias metadata;
+// those keep their historic instance identity until syncSessionBeads backfills.
+func setPoolTemplateRuntimeIdentity(tp *TemplateParams, desiredAlias string, sessionBead beads.Bead) {
+	if tp == nil {
+		return
+	}
+	if strings.TrimSpace(sessionBead.Metadata["alias"]) != strings.TrimSpace(desiredAlias) && poolRuntimeAliasIsDeferred(sessionBead) {
+		tp.Alias = ""
+		if tp.Env == nil {
+			tp.Env = make(map[string]string)
+		}
+		tp.Env["GC_ALIAS"] = ""
+		if tp.SessionName != "" {
+			tp.Env["GC_AGENT"] = tp.SessionName
+		}
+		tp.EnvIdentityStamped = false
+		return
+	}
+	tp.Alias = desiredAlias
+	setTemplateEnvIdentity(tp, desiredAlias)
+}
+
+func poolRuntimeAliasIsDeferred(sessionBead beads.Bead) bool {
+	if strings.TrimSpace(sessionBead.Metadata["alias"]) != "" {
+		return false
+	}
+	if strings.TrimSpace(sessionBead.Metadata[poolAliasConflictMetadataKey]) != "" {
+		return true
+	}
+	if strings.TrimSpace(sessionBead.Metadata["pending_create_claim"]) == boolMetadata(true) {
+		return true
+	}
+	return strings.TrimSpace(sessionBead.Metadata["state"]) == "creating"
 }
 
 func setTemplateEnvIdentity(tp *TemplateParams, identity string) {
@@ -1871,14 +1907,22 @@ func findOpenSessionBeadByID(sessionBeads *sessionBeadSnapshot, id string) (bead
 
 func selectOrCreatePoolSessionBead(
 	bp *agentBuildParams,
+	cfgAgent *config.Agent,
 	template string,
 	preferred *beads.Bead,
 	used map[string]bool,
-) (beads.Bead, error) {
-	cfgAgent := findAgentByTemplate(&config.City{Agents: bp.agents}, template)
+	usedSlots map[int]bool,
+) (beads.Bead, int, error) {
+	if cfgAgent == nil {
+		cfgAgent = findAgentByTemplate(&config.City{Agents: bp.agents}, template)
+	}
+	if cfgAgent == nil {
+		return beads.Bead{}, 0, fmt.Errorf("pool template %q has no configured agent", template)
+	}
 	// Resume tier: reuse the session that has in-progress work assigned.
 	if preferred != nil && preferred.ID != "" && !used[preferred.ID] {
-		return *preferred, nil
+		slot := claimPoolSlot(cfgAgent, *preferred, usedSlots)
+		return *preferred, slot, nil
 	}
 	// Reuse an existing active/creating session bead. Skip drained, closed,
 	// and asleep — asleep ephemerals are not restarted; a fresh session is
@@ -1909,10 +1953,58 @@ func selectOrCreatePoolSessionBead(
 			continue
 		}
 		if desiredName := strings.TrimSpace(bead.Metadata["session_name"]); desiredName != "" {
-			return bead, nil
+			slot := claimPoolSlot(cfgAgent, bead, usedSlots)
+			return bead, slot, nil
 		}
 	}
-	return createPoolSessionBead(bp.beadStore, template, bp.sessionBeads, poolSessionCreateStartedAt(bp))
+	slot := claimPoolSlot(cfgAgent, beads.Bead{}, usedSlots)
+	instanceName := poolInstanceName(cfgAgent.Name, slot, cfgAgent)
+	qualifiedInstance := cfgAgent.QualifiedInstanceName(instanceName)
+	bead, err := createPoolSessionBeadWithGuardedAlias(bp, template, qualifiedInstance, slot)
+	if err != nil {
+		delete(usedSlots, slot)
+		return bead, 0, err
+	}
+	return bead, slot, nil
+}
+
+func createPoolSessionBeadWithGuardedAlias(
+	bp *agentBuildParams,
+	template string,
+	qualifiedInstance string,
+	slot int,
+) (beads.Bead, error) {
+	if bp == nil {
+		return beads.Bead{}, fmt.Errorf("creating pool session for %q: build params unavailable", template)
+	}
+	identity := poolSessionCreateIdentity{
+		AgentName: qualifiedInstance,
+		Slot:      slot,
+	}
+	alias := strings.TrimSpace(qualifiedInstance)
+	if alias == "" || bp.beadStore == nil {
+		return createPoolSessionBead(bp.beadStore, template, bp.sessionBeads, poolSessionCreateStartedAt(bp), identity)
+	}
+
+	var bead beads.Bead
+	createdWithLock := false
+	lockErr := session.WithCitySessionAliasLock(bp.cityPath, alias, func() error {
+		createIdentity := identity
+		if err := session.EnsureAliasAvailableWithConfig(bp.beadStore, bp.city, alias, ""); err == nil {
+			createIdentity.Alias = alias
+		}
+		var err error
+		bead, err = createPoolSessionBead(bp.beadStore, template, bp.sessionBeads, poolSessionCreateStartedAt(bp), createIdentity)
+		createdWithLock = true
+		return err
+	})
+	if createdWithLock {
+		return bead, lockErr
+	}
+	if lockErr != nil && bp.stderr != nil {
+		fmt.Fprintf(bp.stderr, "createPoolSessionBeadWithGuardedAlias: locking alias %q for %s: %v; creating without alias\n", alias, template, lockErr) //nolint:errcheck
+	}
+	return createPoolSessionBead(bp.beadStore, template, bp.sessionBeads, poolSessionCreateStartedAt(bp), identity)
 }
 
 func sessionBeadHasAssignedWork(workBeads []beads.Bead, sessionBead beads.Bead) bool {
@@ -1933,7 +2025,7 @@ func sessionBeadHasAssignedWork(workBeads []beads.Bead, sessionBead beads.Bead) 
 
 func selectOrCreateDependencyPoolSessionBead(
 	bp *agentBuildParams,
-	_ *config.Agent,
+	cfgAgent *config.Agent,
 	template string,
 ) (beads.Bead, error) {
 	for _, bead := range bp.sessionBeads.Open() {
@@ -1956,7 +2048,15 @@ func selectOrCreateDependencyPoolSessionBead(
 			return bead, nil
 		}
 	}
-	return createPoolSessionBead(bp.beadStore, template, bp.sessionBeads, poolSessionCreateStartedAt(bp))
+	if cfgAgent == nil {
+		cfgAgent = findAgentByTemplate(&config.City{Agents: bp.agents}, template)
+	}
+	if cfgAgent == nil {
+		return beads.Bead{}, fmt.Errorf("dependency pool template %q has no configured agent", template)
+	}
+	instanceName := poolInstanceName(cfgAgent.Name, 1, cfgAgent)
+	qualifiedInstance := cfgAgent.QualifiedInstanceName(instanceName)
+	return createPoolSessionBeadWithGuardedAlias(bp, template, qualifiedInstance, 1)
 }
 
 func poolSessionCreateStartedAt(_ *agentBuildParams) time.Time {
