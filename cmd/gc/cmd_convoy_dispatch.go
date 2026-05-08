@@ -768,7 +768,10 @@ func closeWorkflowMatches(matches []workflowStoreMatch) int {
 	closed := 0
 	for _, m := range matches {
 		ids := workflowBeadIDs(m.beads)
-		n, _ := m.store.CloseAll(ids, map[string]string{"gc.outcome": "skipped"})
+		n, _ := m.store.CloseAll(ids, map[string]string{
+			"gc.outcome":   "skipped",
+			"close_reason": sourceworkflow.WorkflowSkippedCloseReason,
+		})
 		closed += n
 	}
 	return closed
@@ -919,7 +922,10 @@ func openSourceWorkflowStoreRef(cfg *config.City, cityPath, storeRef string) (co
 
 func applySourceWorkflowMatchCleanup(match sourceWorkflowStoreMatch, deleteBeads bool, stderr io.Writer) (closed, deleted int, incomplete bool) {
 	ids := workflowBeadIDs(match.beads)
-	n, closeErr := match.store.CloseAll(ids, map[string]string{"gc.outcome": "skipped"})
+	n, closeErr := match.store.CloseAll(ids, map[string]string{
+		"gc.outcome":   "skipped",
+		"close_reason": sourceworkflow.WorkflowSkippedCloseReason,
+	})
 	closed += n
 	if closeErr != nil {
 		incomplete = true

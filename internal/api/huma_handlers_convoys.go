@@ -8,6 +8,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
 // convoyProgress is the shared {total, closed} progress shape used by
@@ -532,7 +533,10 @@ func (s *Server) humaDeleteWorkflow(workflowID string) (*OKResponse, error) {
 			continue
 		}
 		found = true
-		info.store.CloseAll(ids, map[string]string{"gc.outcome": "skipped"}) //nolint:errcheck
+		info.store.CloseAll(ids, map[string]string{ //nolint:errcheck
+			"gc.outcome":   "skipped",
+			"close_reason": sourceworkflow.WorkflowSkippedCloseReason,
+		})
 	}
 
 	if !found {
@@ -675,7 +679,10 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 		found = true
 
 		// Phase 1: Batch close all open beads.
-		n, closeErr := info.store.CloseAll(ids, map[string]string{"gc.outcome": "skipped"})
+		n, closeErr := info.store.CloseAll(ids, map[string]string{
+			"gc.outcome":   "skipped",
+			"close_reason": sourceworkflow.WorkflowSkippedCloseReason,
+		})
 		closed += n
 		if closeErr != nil {
 			pa.record("store "+info.scopeRef+" close", closeErr)

@@ -42,6 +42,18 @@ type ConflictError struct {
 // Used by WorkflowMatchesSource to scope cross-store singleton checks.
 const SourceStoreRefMetadataKey = "gc.source_store_ref"
 
+// WorkflowSkippedCloseReason is the canonical close_reason stamped on
+// workflow-subtree beads when they are force-closed via the
+// gc.outcome=skipped cleanup path (gc convoy delete --skip, force-replace
+// flows, or workflow-cleanup HTTP endpoints). Without an explicit reason
+// of >=20 chars, bd's validation.on-close=error rejects the close, the
+// bead stays open, and the cleanup is incomplete.
+//
+// Used in tandem with the gc.outcome=skipped metadata stamp (which
+// records the workflow-level outcome): close_reason satisfies the
+// validator; gc.outcome carries the semantic.
+const WorkflowSkippedCloseReason = "workflow cleanup: subtree bead force-closed via skip directive"
+
 // IsWorkflowRoot reports whether a bead is a source-workflow root. It must
 // stay in sync with sling.IsWorkflowAttachment: roots may be marked via the
 // legacy gc.kind=workflow label, via gc.formula_contract=graph.v2, or both.
@@ -434,7 +446,10 @@ func CloseWorkflowSubtree(store beads.Store, rootID string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return store.CloseAll(ordered, map[string]string{"gc.outcome": "skipped"})
+	return store.CloseAll(ordered, map[string]string{
+		"gc.outcome":   "skipped",
+		"close_reason": WorkflowSkippedCloseReason,
+	})
 }
 
 // WorkflowBeadSnapshot captures the mutable fields of a workflow subtree
