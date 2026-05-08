@@ -335,6 +335,16 @@ push_archive_main() {
         return 1
     }
 
+    # Local-only mode: no `origin` remote means the operator has chosen to
+    # keep the archive on disk only. Clear any pending push state and return
+    # success so the failure counter doesn't climb and the escalation never
+    # fires. Configure an `origin` remote to opt back in.
+    if ! git remote get-url origin >/dev/null 2>&1; then
+        set_consecutive_push_failures "0"
+        clear_pending_archive_push
+        return 0
+    fi
+
     if ! refresh_archive_remote_main; then
         if git rev-parse --verify refs/remotes/origin/main >/dev/null 2>&1; then
             record_archive_push_failure "jsonl-export: fetching origin/main failed"
@@ -482,7 +492,7 @@ fi
 # Build scrub filter for the issues table.
 SCRUB_FILTER=""
 if [ "$SCRUB" = "true" ]; then
-    SCRUB_FILTER="WHERE type NOT IN ('message', 'event', 'wisp', 'agent') AND title NOT LIKE 'gc:%'"
+    SCRUB_FILTER="WHERE issue_type NOT IN ('message', 'event', 'wisp', 'agent') AND title NOT LIKE 'gc:%'"
 fi
 
 TOTAL_EXPORTED=0
