@@ -261,6 +261,70 @@ func TestProcessScopeCheckPassWithRemainingOpenAvoidsClosedSnapshot(t *testing.T
 	}
 }
 
+func TestProcessScopeCheckKeepsControlOpenIfBodyCloseoutFails(t *testing.T) {
+	t.Parallel()
+
+	base := beads.NewMemStore()
+	store := &failBodyMetadataStore{Store: base}
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	body := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "body",
+		},
+	})
+	store.failID = body.ID
+	step := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "apply fixes",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+			"gc.outcome":      "pass",
+			"review.verdict":  "done",
+		},
+	})
+	control := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize scope for apply fixes",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope-check",
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "control",
+		},
+	})
+	mustDepAdd(t, store, control.ID, step.ID, "blocks")
+	mustDepAdd(t, store, body.ID, control.ID, "blocks")
+
+	_, err := ProcessControl(store, mustGetBead(t, store, control.ID), ProcessOptions{})
+	if err == nil {
+		t.Fatal("ProcessControl(scope-check) succeeded, want injected closeout error")
+	}
+
+	controlAfter := mustGetBead(t, store, control.ID)
+	if controlAfter.Status != "open" {
+		t.Fatalf("control status = %q, want open so dispatcher can retry body closeout", controlAfter.Status)
+	}
+	bodyAfter := mustGetBead(t, store, body.ID)
+	if bodyAfter.Status != "open" {
+		t.Fatalf("body status = %q, want open after failed closeout", bodyAfter.Status)
+	}
+}
+
 func TestProcessScopeCheckAbortsScopeOnFailure(t *testing.T) {
 	t.Parallel()
 
@@ -737,6 +801,18 @@ func (s *scopeSnapshotQueryGuardStore) List(query beads.ListQuery) ([]beads.Bead
 		}
 	}
 	return s.Store.List(query)
+}
+
+type failBodyMetadataStore struct {
+	beads.Store
+	failID string
+}
+
+func (s *failBodyMetadataStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if id == s.failID && kvs["review.verdict"] != "" {
+		return errors.New("injected body metadata failure")
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
 }
 
 func newStrictCloseStore() *strictCloseStore {
