@@ -2605,86 +2605,120 @@ func writeManagedRuntimeStateWithPID(t *testing.T, cityDir string, port int, pid
 	}
 }
 
-// TestReaperSkipsDatabasesWithoutWispsTable pins the schemaless-DB
-// precheck (gastownhall/gascity#1816). Reaper iterates the user
-// databases discovered by SHOW DATABASES, but a database that exists on
-// the server without bd schema (orphan CREATE DATABASE, partial migration,
-// system schemas not on the is_user_database blocklist) has nothing for
-// the reaper to do — querying its wisps table just produces spurious
-// "table not found" anomalies. Reaper now probes SHOW TABLES FROM <db>
-// LIKE 'wisps' and skips silently when the wisps table is absent.
-func TestReaperSkipsDatabasesWithoutWispsTable(t *testing.T) {
-	cityDir := t.TempDir()
-	binDir := t.TempDir()
-	stateDir := t.TempDir()
-	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
-	gcLog := filepath.Join(t.TempDir(), "gc.log")
+// TestMaintenanceDoltScriptsSkipDatabasesWithoutWispsTable pins the
+// schemaless-DB precheck (gastownhall/gascity#1816). Both reaper.sh and
+// jsonl-export.sh iterate user databases discovered by SHOW DATABASES,
+// but a database that exists on the server without bd schema (orphan
+// CREATE DATABASE, partial migration, system schemas not on the
+// is_user_database blocklist) has nothing for them to do — querying its
+// tables just produces spurious "table not found" anomalies (reaper) or
+// failed-DB summary entries (jsonl-export). Both scripts now probe
+// SHOW TABLES FROM <db> LIKE 'wisps' via the shared has_wisps_table
+// helper in dolt-target.sh and skip silently when wisps is absent.
+func TestMaintenanceDoltScriptsSkipDatabasesWithoutWispsTable(t *testing.T) {
+	tests := []struct {
+		name           string
+		script         string
+		env            map[string]string
+		forbiddenLogs  []string
+		gcLogForbidden string
+	}{
+		{
+			name:   "reaper",
+			script: filepath.Join("packs", "maintenance", "assets", "scripts", "reaper.sh"),
+			env:    map[string]string{"GC_REAPER_DRY_RUN": "1"},
+			forbiddenLogs: []string{
+				"`empty_db`.wisps",
+				"`empty_db`.issues",
+				"`empty_db`.dependencies",
+			},
+			gcLogForbidden: "empty_db",
+		},
+		{
+			name:   "jsonl export",
+			script: filepath.Join("packs", "maintenance", "assets", "scripts", "jsonl-export.sh"),
+			env: map[string]string{
+				"GC_JSONL_ARCHIVE_REPO":      "archive",
+				"GC_JSONL_MAX_PUSH_FAILURES": "99",
+			},
+			forbiddenLogs: []string{
+				"`empty_db`.issues",
+			},
+			// jsonl-export reports failures via DOG_DONE summary line in
+			// the gc nudge — empty_db must not show up there.
+			gcLogForbidden: "empty_db",
+		},
+	}
 
-	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			binDir := t.TempDir()
+			stateDir := t.TempDir()
+			doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+			gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+			writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
+			writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
 
-	env := map[string]string{
-		"DOLT_ARGS_LOG":          doltLog,
-		"DOLT_DBS":               "real_beads empty_db",
-		"DOLT_DBS_WITHOUT_WISPS": "empty_db",
-		"GC_CALL_LOG":            gcLog,
-		"GC_CITY":                cityDir,
-		"GC_CITY_PATH":           cityDir,
-		"GC_PACK_STATE_DIR":      stateDir,
-		"GC_DOLT_HOST":           "127.0.0.1",
-		"GC_DOLT_PORT":           "3307",
-		"GC_DOLT_USER":           "root",
-		"GC_DOLT_PASSWORD":       "",
-		"GC_REAPER_DRY_RUN":      "1",
-		"GIT_CONFIG_GLOBAL":      filepath.Join(t.TempDir(), "gitconfig"),
-		"GIT_CONFIG_NOSYSTEM":    "1",
-		"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
-	}
+			env := map[string]string{
+				"DOLT_ARGS_LOG":          doltLog,
+				"DOLT_DBS":               "real_beads empty_db",
+				"DOLT_DBS_WITHOUT_WISPS": "empty_db",
+				"GC_CALL_LOG":            gcLog,
+				"GC_CITY":                cityDir,
+				"GC_CITY_PATH":           cityDir,
+				"GC_PACK_STATE_DIR":      stateDir,
+				"GC_DOLT_HOST":           "127.0.0.1",
+				"GC_DOLT_PORT":           "3307",
+				"GC_DOLT_USER":           "root",
+				"GC_DOLT_PASSWORD":       "",
+				"GIT_CONFIG_GLOBAL":      filepath.Join(t.TempDir(), "gitconfig"),
+				"GIT_CONFIG_NOSYSTEM":    "1",
+				"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			}
+			for k, v := range tt.env {
+				if k == "GC_JSONL_ARCHIVE_REPO" {
+					v = filepath.Join(cityDir, v)
+				}
+				env[k] = v
+			}
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+			runScript(t, filepath.Join(exampleDir(), tt.script), env)
 
-	logData, err := os.ReadFile(doltLog)
-	if err != nil {
-		t.Fatalf("ReadFile(dolt log): %v", err)
-	}
-	log := string(logData)
+			logData, err := os.ReadFile(doltLog)
+			if err != nil {
+				t.Fatalf("ReadFile(dolt log): %v", err)
+			}
+			log := string(logData)
 
-	// real_beads has wisps → reaper should query its wisps table.
-	if !strings.Contains(log, "`real_beads`.wisps") {
-		t.Errorf("reaper did not query real_beads.wisps; expected normal processing:\n%s", log)
-	}
+			// The precheck itself ran for empty_db. Without this
+			// assertion the test could pass via an unrelated
+			// early-skip path that never reached the precheck.
+			if !strings.Contains(log, "SHOW TABLES FROM `empty_db` LIKE 'wisps'") {
+				t.Errorf("script did not run the SHOW TABLES precheck against empty_db:\n%s", log)
+			}
 
-	// The precheck itself ran for empty_db. Without this assertion the
-	// test could pass via an unrelated early-skip path that never
-	// reached the precheck.
-	if !strings.Contains(log, "SHOW TABLES FROM `empty_db` LIKE 'wisps'") {
-		t.Errorf("reaper did not run the SHOW TABLES precheck against empty_db:\n%s", log)
-	}
+			// empty_db has no wisps → script must skip without
+			// querying its tables.
+			for _, forbidden := range tt.forbiddenLogs {
+				if strings.Contains(log, forbidden) {
+					t.Errorf("script queried schemaless DB (%s); precheck did not skip:\n%s", forbidden, log)
+				}
+			}
 
-	// empty_db has no wisps → reaper must skip without querying its
-	// wisps/issues/dependencies tables.
-	for _, forbidden := range []string{
-		"`empty_db`.wisps",
-		"`empty_db`.issues",
-		"`empty_db`.dependencies",
-	} {
-		if strings.Contains(log, forbidden) {
-			t.Errorf("reaper queried schemaless DB (%s); precheck did not skip:\n%s", forbidden, log)
-		}
-	}
-
-	// No anomaly mail should be sent for empty_db. The reaper sends a
-	// single ESCALATION mail at end-of-run if any anomaly was recorded;
-	// with empty_db skipped silently, the gc log must not contain it.
-	gcData, err := os.ReadFile(gcLog)
-	if err != nil && !os.IsNotExist(err) {
-		t.Fatalf("ReadFile(gc log): %v", err)
-	}
-	if strings.Contains(string(gcData), "empty_db") {
-		t.Errorf("reaper escalated empty_db to mayor; precheck should have suppressed:\n%s", gcData)
+			// No anomaly / failure escalation should mention empty_db.
+			gcData, err := os.ReadFile(gcLog)
+			if err != nil && !os.IsNotExist(err) {
+				t.Fatalf("ReadFile(gc log): %v", err)
+			}
+			if strings.Contains(string(gcData), tt.gcLogForbidden) {
+				t.Errorf("script surfaced empty_db to gc/mayor; precheck should have suppressed:\n%s", gcData)
+			}
+		})
 	}
 }
 
@@ -3225,6 +3259,9 @@ func writeIssuesPayloadDoltStub(t *testing.T, binDir, issuesPayload string) {
 	t.Helper()
 	body := "#!/bin/sh\n" +
 		"case \"$*\" in\n" +
+		"  *\"SHOW TABLES FROM\"*\"LIKE 'wisps'\"*)\n" +
+		"    printf 'Tables_in_db\\nwisps\\n'\n" +
+		"    ;;\n" +
 		"  *\"SHOW DATABASES\"*)\n" +
 		"    printf 'Database\\nbeads\\n'\n" +
 		"    ;;\n" +
@@ -3263,6 +3300,9 @@ func writeEmptyIssuesPayloadDoltStub(t *testing.T, binDir string) {
 	t.Helper()
 	body := "#!/bin/sh\n" +
 		"case \"$*\" in\n" +
+		"  *\"SHOW TABLES FROM\"*\"LIKE 'wisps'\"*)\n" +
+		"    printf 'Tables_in_db\\nwisps\\n'\n" +
+		"    ;;\n" +
 		"  *\"SHOW DATABASES\"*)\n" +
 		"    printf 'Database\\nbeads\\n'\n" +
 		"    ;;\n" +
@@ -3280,6 +3320,9 @@ func writeIssuesExportFailureDoltStub(t *testing.T, binDir string) {
 	t.Helper()
 	body := "#!/bin/sh\n" +
 		"case \"$*\" in\n" +
+		"  *\"SHOW TABLES FROM\"*\"LIKE 'wisps'\"*)\n" +
+		"    printf 'Tables_in_db\\nwisps\\n'\n" +
+		"    ;;\n" +
 		"  *\"SHOW DATABASES\"*)\n" +
 		"    printf 'Database\\nbeads\\n'\n" +
 		"    ;;\n" +

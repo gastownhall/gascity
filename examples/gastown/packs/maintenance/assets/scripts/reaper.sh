@@ -294,29 +294,6 @@ SELECT ROW_COUNT();
     return 0
 }
 
-# has_wisps_table reports whether $1 contains a `wisps` table. Reaper
-# operates exclusively on bd-managed schemas; databases that exist on the
-# server without bd schema (orphan CREATE DATABASEs, system schemas not
-# on the is_user_database blocklist, partial migrations) have nothing
-# for the reaper to do, and querying their wisps table just produces
-# spurious "table not found" anomalies. Caller must have already
-# validated $1 via valid_database_identifier — this helper does not
-# re-quote against injection.
-has_wisps_table() {
-    local db="$1"
-    local output
-    if ! output=$(dolt_sql -r csv -q "SHOW TABLES FROM \`$db\` LIKE 'wisps'" 2>/dev/null); then
-        # Probe failed (dolt unreachable, connection dropped, etc.).
-        # Fall through to normal processing rather than silently
-        # skipping a real bead store on a transient error — the
-        # subsequent get_sql_count calls will fail in the same way
-        # and record proper anomalies, which is the right behavior
-        # for "dolt is broken" vs "this DB has no schema."
-        return 0
-    fi
-    [ "$(printf '%s\n' "$output" | tail -n +2 | head -1 | tr -d '\r')" = "wisps" ]
-}
-
 while IFS= read -r DB; do
     [ -z "$DB" ] && continue
     if ! valid_database_identifier "$DB"; then
