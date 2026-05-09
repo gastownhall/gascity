@@ -4915,6 +4915,79 @@ func TestJsonlExportPushModeAttemptsPushWhenOriginConfigured(t *testing.T) {
 	}
 }
 
+// TestJsonlExportLocalOnlyTransitionClearsStalePushFailureState covers the
+// push→local-only transition: when the operator removes origin after
+// push-failure state has accumulated, the next run must clear
+// consecutive_push_failures so a later push→local-only→push round-trip
+// starts from a clean counter (not from the stale value, which could trigger
+// a premature HIGH escalation on the very first failure after origin
+// returns). pending_archive_push is intentionally retained — it tracks that
+// local commits still need to be pushed once origin returns.
+func TestJsonlExportLocalOnlyTransitionClearsStalePushFailureState(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+
+	initSeedArchive(t, archiveRepo, 3)
+	writeMultiRecordDoltStub(t, binDir, 5)
+	writeJsonlExportGCStub(t, binDir)
+
+	if err := os.MkdirAll(filepath.Dir(stateFile), 0o755); err != nil {
+		t.Fatalf("MkdirAll(state dir): %v", err)
+	}
+	// Seed state: push mode was active, two push failures accumulated, the
+	// pending-push flag is set. Then operator removed origin (no remote on
+	// archive). Next tick should detect the transition and reset both fields.
+	priorState := `{"last_logged_mode":"push","last_logged_at":"2026-05-01T00:00:00Z","consecutive_push_failures":2,"pending_archive_push":true}` + "\n"
+	if err := os.WriteFile(stateFile, []byte(priorState), 0o644); err != nil {
+		t.Fatalf("WriteFile(state file): %v", err)
+	}
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	delete(env, "GC_JSONL_MAX_PUSH_FAILURES")
+
+	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	if err != nil {
+		t.Fatalf("jsonl-export.sh: %v\n%s", err, out)
+	}
+
+	if !strings.Contains(string(out), "archive running in local-only mode") {
+		t.Fatalf("expected local-only transition log, got:\n%s", out)
+	}
+
+	stateData, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("ReadFile(state file): %v", err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("Unmarshal(state file): %v\n%s", err, stateData)
+	}
+	if got := state["last_logged_mode"]; got != "local-only" {
+		t.Fatalf("last_logged_mode = %v, want local-only\nstate: %s", got, stateData)
+	}
+	// consecutive_push_failures must be cleared (json.Unmarshal decodes
+	// numbers as float64).
+	if got, ok := state["consecutive_push_failures"].(float64); !ok || got != 0 {
+		t.Fatalf("consecutive_push_failures = %v, want 0\nstate: %s", state["consecutive_push_failures"], stateData)
+	}
+	// pending_archive_push is retained — local commits still need to be
+	// pushed when origin returns. Verify it's present and true.
+	if got, ok := state["pending_archive_push"].(bool); !ok || !got {
+		t.Fatalf("pending_archive_push must remain true to track deferred push\nstate: %s", stateData)
+	}
+
+	// No HIGH escalation should have fired during the transition itself.
+	mailContents, err := os.ReadFile(mailLog)
+	if err == nil && strings.Contains(string(mailContents), "ESCALATION: JSONL push failed [HIGH]") {
+		t.Fatalf("local-only transition must not escalate; mail log:\n%s", mailContents)
+	}
+}
+
 // TestJsonlExportModeTransitionFromPushToLocalOnlyRelogs covers the operator
 // who previously had origin configured, ran the archive (so state already
 // carries last_logged_mode=push), then removed origin. The next run must log

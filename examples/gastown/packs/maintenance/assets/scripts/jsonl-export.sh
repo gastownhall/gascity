@@ -256,10 +256,22 @@ log_archive_mode_if_needed() {
     fi
     echo "$message" >&2
 
+    # On entering local-only mode, clear consecutive_push_failures so a later
+    # return to push mode starts from a clean counter. Without this, a
+    # push→local-only→push round-trip (operator removes then re-adds origin)
+    # would carry the old failure count forward and could trigger a premature
+    # HIGH escalation on the very first failure after origin returns.
+    # pending_archive_push is intentionally NOT cleared here — it correctly
+    # tracks that local commits still need to be pushed once origin returns.
+    # shellcheck disable=SC2016  # $mode/$at are jq variables, not bash
+    local jq_filter='.last_logged_mode = $mode | .last_logged_at = $at'
+    if [ "$current_mode" = "local-only" ]; then
+        jq_filter="$jq_filter | .consecutive_push_failures = 0"
+    fi
+
     write_state_json "$(
         printf '%s\n' "$state_json" \
-            | jq -c --arg mode "$current_mode" --arg at "$now" \
-                '.last_logged_mode = $mode | .last_logged_at = $at'
+            | jq -c --arg mode "$current_mode" --arg at "$now" "$jq_filter"
     )"
 }
 
@@ -436,8 +448,11 @@ ESCALATION
         return 1
     }
 
-    fetch_err=$(git fetch origin main -q 2>&1 >/dev/null) || true
-    if [ -n "$fetch_err" ] || ! git rev-parse --verify refs/remotes/origin/main >/dev/null 2>&1; then
+    # Branch on the actual git exit status, not on whether stderr is non-empty.
+    # Successful git commands can emit benign stderr (e.g. "warning: redirecting
+    # to https://...", credential-helper notes, protocol upgrade hints) which
+    # would otherwise misclassify the run as a failure and falsely escalate.
+    if ! fetch_err=$(git fetch origin main -q 2>&1 >/dev/null); then
         if git rev-parse --verify refs/remotes/origin/main >/dev/null 2>&1; then
             record_archive_push_failure \
                 "jsonl-export: fetching origin/main failed" \
@@ -449,13 +464,13 @@ ESCALATION
 
     if git rev-parse --verify refs/remotes/origin/main >/dev/null 2>&1; then
         if ! git merge-base --is-ancestor refs/remotes/origin/main HEAD >/dev/null 2>&1; then
-            rebase_err=$(git rebase refs/remotes/origin/main 2>&1 >/dev/null) || {
+            if ! rebase_err=$(git rebase refs/remotes/origin/main 2>&1 >/dev/null); then
                 git rebase --abort >/dev/null 2>&1 || true
                 record_archive_push_failure \
                     "jsonl-export: rebase onto origin/main failed during archive push recovery" \
                     "$rebase_err"
                 return 1
-            }
+            fi
         fi
         if ! archive_has_local_only_commits_from_tracking; then
             set_consecutive_push_failures "0"
@@ -464,12 +479,12 @@ ESCALATION
         fi
     fi
 
-    push_err=$(git push origin main -q 2>&1 >/dev/null) || {
+    if ! push_err=$(git push origin main -q 2>&1 >/dev/null); then
         record_archive_push_failure \
             "jsonl-export: pushing archive main failed" \
             "$push_err"
         return 1
-    }
+    fi
 
     set_consecutive_push_failures "0"
     clear_pending_archive_push
