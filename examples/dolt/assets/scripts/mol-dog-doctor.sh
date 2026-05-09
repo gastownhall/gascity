@@ -2,7 +2,7 @@
 # mol-dog-doctor — probe Dolt server health and report findings.
 #
 # Replaces mol-dog-doctor formula. All checks are read-only: SQL probe,
-# PROCESSLIST count, disk usage, orphan DB detection, backup freshness.
+# PROCESSLIST count, disk usage, orphan DB detection, backup artifact freshness.
 # No LLM judgment needed — runs inline in the controller.
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
@@ -18,11 +18,57 @@ LATENCY_WARN_S="${GC_DOCTOR_LATENCY_WARN_S:-1}"
 CONN_MAX="${GC_DOCTOR_CONN_MAX:-50}"
 CONN_WARN_PCT="${GC_DOCTOR_CONN_WARN_PCT:-80}"
 BACKUP_STALE_S="${GC_DOCTOR_BACKUP_STALE_S:-43200}"  # 2x 6h backup interval
+BACKUP_ARTIFACT_DIR="${GC_BACKUP_ARTIFACT_DIR:-$GC_CITY_PATH/.dolt-backup}"
 
 dolt_sql() {
     DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}" \
         run_bounded 10 \
         dolt --host "$HOST" --port "$PORT" --user "$USER" --no-tls sql "$@"
+}
+
+file_mtime() {
+    file_path="$1"
+    file_mtime_value=$(stat -c %Y "$file_path" 2>/dev/null \
+        || stat -f %m "$file_path" 2>/dev/null || echo "0")
+    case "$file_mtime_value" in
+        ''|*[!0-9]*) file_mtime_value=0 ;;
+    esac
+    printf '%s\n' "$file_mtime_value"
+}
+
+backup_path_matches_db() {
+    db_name="$1"
+    backup_rel_path="$2"
+    case "$backup_rel_path" in
+        "$db_name"|"$db_name"/*|"$db_name".*|"$db_name"-*|*"/$db_name"|*"/$db_name"/*|*"/$db_name".*|*"/$db_name"-*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+newest_backup_mtime_for_db() {
+    db_name="$1"
+    newest_mtime=0
+    while IFS= read -r -d '' backup_path; do
+        backup_rel_path="${backup_path#$BACKUP_ARTIFACT_DIR/}"
+        if backup_path_matches_db "$db_name" "$backup_rel_path"; then
+            backup_mtime=$(file_mtime "$backup_path")
+            if [ "$backup_mtime" -gt "$newest_mtime" ]; then
+                newest_mtime="$backup_mtime"
+            fi
+        fi
+    done < <(find "$BACKUP_ARTIFACT_DIR" -type f -print0 2>/dev/null)
+    printf '%s\n' "$newest_mtime"
+}
+
+append_backup_stale() {
+    backup_stale_item="$1"
+    if [ -n "$BACKUP_STALE_ITEMS" ]; then
+        BACKUP_STALE_ITEMS="$BACKUP_STALE_ITEMS, $backup_stale_item"
+    else
+        BACKUP_STALE_ITEMS="$backup_stale_item"
+    fi
 }
 
 # --- Step 1: Probe connectivity and measure latency ---
@@ -60,26 +106,36 @@ DISK_USAGE=$(du -sh "$DOLT_DATA_DIR" 2>/dev/null | cut -f1 || echo "unknown")
 # Orphan database detection.
 ALL_DBS=$(dolt_sql -r csv -q "SHOW DATABASES" 2>/dev/null | tail -n +2 || true)
 ORPHAN_PATTERNS="^testdb_\|^beads_t\|^beads_pt\|^beads_vr\|^doctest_\|^doctortest_"
-SYSTEM_DBS="^information_schema$\|^mysql$\|^dolt_cluster$\|^__gc_probe$"
-ORPHANS=$(echo "$ALL_DBS" | grep -i "$ORPHAN_PATTERNS" | grep -vi "$SYSTEM_DBS" || true)
-ORPHAN_COUNT=$(echo "$ORPHANS" | grep -c . || echo "0")
+SYSTEM_DBS="^information_schema$\|^mysql$\|^dolt_cluster$\|^__gc_probe$\|^performance_schema$\|^sys$"
+USER_DBS=$(printf '%s\n' "$ALL_DBS" | grep -vi "$SYSTEM_DBS" || true)
+ORPHANS=$(printf '%s\n' "$USER_DBS" | grep -i "$ORPHAN_PATTERNS" || true)
+ORPHAN_COUNT=$(printf '%s\n' "$ORPHANS" | awk 'NF {count++} END {print count + 0}')
 ORPHAN_WARN=""
 if [ "${ORPHAN_COUNT:-0}" -gt 0 ]; then
     ORPHAN_WARN=" [WARN: $ORPHAN_COUNT orphan DBs detected — run gc dolt cleanup]"
 fi
 
-# Backup freshness: check mtime of most-recently-modified backup file.
+# Backup freshness: check newest backup artifact per database.
 BACKUP_STALE=""
-if [ -d "$DOLT_DATA_DIR" ]; then
-    NEWEST_BACKUP=$(find "$DOLT_DATA_DIR" -name "*.bak" -o -name "*.backup" 2>/dev/null \
-        | xargs ls -t 2>/dev/null | head -1 || true)
-    if [ -n "$NEWEST_BACKUP" ]; then
-        BACKUP_MTIME=$(stat -c %Y "$NEWEST_BACKUP" 2>/dev/null \
-            || stat -f %m "$NEWEST_BACKUP" 2>/dev/null || echo "0")
+if [ -n "$USER_DBS" ]; then
+    if [ ! -d "$BACKUP_ARTIFACT_DIR" ]; then
+        BACKUP_STALE=" [WARN: backup artifact dir missing]"
+    else
+        BACKUP_STALE_ITEMS=""
         NOW_S=$(date +%s)
-        BACKUP_AGE=$((NOW_S - BACKUP_MTIME))
-        if [ "$BACKUP_AGE" -gt "$BACKUP_STALE_S" ]; then
-            BACKUP_STALE=" [WARN: newest backup is $((BACKUP_AGE / 3600))h old]"
+        for db in $USER_DBS; do
+            NEWEST_BACKUP_MTIME=$(newest_backup_mtime_for_db "$db")
+            if [ "$NEWEST_BACKUP_MTIME" -le 0 ]; then
+                append_backup_stale "$db backup missing"
+                continue
+            fi
+            BACKUP_AGE=$((NOW_S - NEWEST_BACKUP_MTIME))
+            if [ "$BACKUP_AGE" -gt "$BACKUP_STALE_S" ]; then
+                append_backup_stale "$db backup is $((BACKUP_AGE / 3600))h old"
+            fi
+        done
+        if [ -n "$BACKUP_STALE_ITEMS" ]; then
+            BACKUP_STALE=" [WARN: backup freshness: $BACKUP_STALE_ITEMS]"
         fi
     fi
 fi

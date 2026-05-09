@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -916,6 +917,12 @@ source = "`+doltDir+`"
 		t.Fatalf("scanAllOrders: %v; stderr: %s", err, stderr.String())
 	}
 
+	wantExecDogOrders := map[string]string{
+		"mol-dog-backup":     "mol-dog-backup.sh",
+		"mol-dog-doctor":     "mol-dog-doctor.sh",
+		"mol-dog-phantom-db": "mol-dog-phantom-db.sh",
+	}
+	gotExecDogOrders := map[string]bool{}
 	const wantFormulaDogOrders = 2
 	var gotFormulaDogOrders int
 	for _, a := range aa {
@@ -923,6 +930,27 @@ source = "`+doltDir+`"
 			continue
 		}
 		if a.Exec != "" {
+			scriptName, ok := wantExecDogOrders[a.Name]
+			if !ok {
+				t.Fatalf("unexpected exec dog order %q", a.Name)
+			}
+			if a.Pool != "" {
+				t.Fatalf("%s exec order pool = %q, want empty", a.Name, a.Pool)
+			}
+			wantExec := "$PACK_DIR/assets/scripts/" + scriptName
+			if a.Exec != wantExec {
+				t.Fatalf("%s exec = %q, want %q", a.Name, a.Exec, wantExec)
+			}
+			scriptPath := filepath.Join(doltDir, "assets", "scripts", scriptName)
+			if _, err := os.Stat(scriptPath); err != nil {
+				t.Fatalf("%s exec script missing: %v", a.Name, err)
+			}
+			if _, err := exec.LookPath("bash"); err == nil {
+				if out, err := exec.Command("bash", "-n", scriptPath).CombinedOutput(); err != nil {
+					t.Fatalf("%s bash -n failed: %v\n%s", a.Name, err, out)
+				}
+			}
+			gotExecDogOrders[a.Name] = true
 			continue
 		}
 		gotFormulaDogOrders++
@@ -939,6 +967,9 @@ source = "`+doltDir+`"
 	}
 	if gotFormulaDogOrders != wantFormulaDogOrders {
 		t.Fatalf("Dolt formula-based dog order count = %d, want %d", gotFormulaDogOrders, wantFormulaDogOrders)
+	}
+	if len(gotExecDogOrders) != len(wantExecDogOrders) {
+		t.Fatalf("Dolt exec dog orders = %v, want %v", gotExecDogOrders, wantExecDogOrders)
 	}
 }
 
