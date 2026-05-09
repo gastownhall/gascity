@@ -3457,14 +3457,13 @@ func initEmptyArchiveRemote(t *testing.T, archiveRepo string, prevCount int) str
 // Used by tests that specifically exercise the push-failure recovery paths:
 // push mode is active (so `should_attempt_push` returns true) but the remote
 // cannot be reached.
-func initSeedArchiveWithUnreachableRemote(t *testing.T, archiveRepo string, prevCount int) string {
+func initSeedArchiveWithUnreachableRemote(t *testing.T, archiveRepo string, prevCount int) {
 	t.Helper()
-	head := initSeedArchive(t, archiveRepo, prevCount)
+	initSeedArchive(t, archiveRepo, prevCount)
 	unreachable := filepath.Join(t.TempDir(), "nonexistent-remote.git")
 	if out, err := exec.Command("git", "-C", archiveRepo, "remote", "add", "origin", unreachable).CombinedOutput(); err != nil {
 		t.Fatalf("git remote add origin: %v\n%s", err, out)
 	}
-	return head
 }
 
 func advanceArchiveRemoteMain(t *testing.T, remoteRepo string) string {
