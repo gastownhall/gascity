@@ -5,14 +5,18 @@ import (
 	"strings"
 )
 
-// Finalize synthesizes durable lane outputs into a quorum summary. It returns
-// a terminal blocked summary when at least one lane output exists and another
-// lane soft-failed transiently; awaiting states are reserved for zero output.
-func Finalize(outputs []LaneOutput) Summary {
+// Finalize synthesizes durable lane outputs into a quorum summary for subject
+// relative to baseRef. The identity arguments are required durable summary
+// fields. It returns a terminal blocked summary when at least one lane output
+// exists and another lane soft-failed transiently; awaiting states are reserved
+// for zero output.
+func Finalize(subject, baseRef string, outputs []LaneOutput) Summary {
 	lanes := append([]LaneOutput{}, outputs...)
 	sortLaneOutputs(lanes)
 
 	summary := Summary{
+		Subject:       strings.TrimSpace(subject),
+		BaseRef:       strings.TrimSpace(baseRef),
 		Verdict:       VerdictAwaitingReviewers,
 		Summary:       "awaiting reviewer lane output",
 		Findings:      []Finding{},
@@ -21,7 +25,20 @@ func Finalize(outputs []LaneOutput) Summary {
 		FailureReason: "",
 		Lanes:         lanes,
 	}
+	var hardFailures []string
+	if summary.Subject == "" {
+		hardFailures = append(hardFailures, "summary_subject_missing")
+	}
+	if summary.BaseRef == "" {
+		hardFailures = append(hardFailures, "summary_base_ref_missing")
+	}
 	if len(lanes) == 0 {
+		if len(hardFailures) > 0 {
+			summary.Verdict = VerdictFail
+			summary.FailureClass = FailureClassHard
+			summary.FailureReason = strings.Join(hardFailures, "; ")
+			summary.Summary = "review quorum failed: " + summary.FailureReason
+		}
 		return summary
 	}
 
@@ -31,9 +48,12 @@ func Finalize(outputs []LaneOutput) Summary {
 	findingAccumulators := map[string]Finding{}
 	var findingOrder []string
 	var laneSummaries []string
-	var hardFailures []string
 	var transientFailures []string
 	for i, lane := range lanes {
+		laneFailures := laneContractFailures(lane)
+		for _, reason := range laneFailures {
+			hardFailures = append(hardFailures, formatLaneFailure(lane.LaneID, reason))
+		}
 		mergeLaneFindings(findingAccumulators, &findingOrder, lane)
 		summary.Evidence = append(summary.Evidence, lane.Evidence...)
 		summary.Usage = addUsage(summary.Usage, lane.Usage)
@@ -62,6 +82,9 @@ func Finalize(outputs []LaneOutput) Summary {
 				}
 				continue
 			}
+		}
+		if len(laneFailures) > 0 {
+			continue
 		}
 		switch normalizeToken(lane.Verdict) {
 		case VerdictPass:
@@ -105,6 +128,20 @@ func Finalize(outputs []LaneOutput) Summary {
 	}
 
 	return summary
+}
+
+func laneContractFailures(lane LaneOutput) []string {
+	var failures []string
+	if lane.FindingsCount != len(lane.Findings) {
+		failures = append(failures, "findings_count_mismatch")
+	}
+	switch normalizeToken(lane.Verdict) {
+	case VerdictPassWithFindings, VerdictFail:
+		if len(lane.Findings) == 0 {
+			failures = append(failures, "materialized_findings_missing")
+		}
+	}
+	return failures
 }
 
 func mergeLaneFindings(accumulators map[string]Finding, order *[]string, lane LaneOutput) {

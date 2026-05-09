@@ -9,20 +9,104 @@ import (
 const (
 	lanePrimary   = "primary"
 	laneSecondary = "secondary"
+	reviewSubject = "gh:gastownhall/gascity#1694"
+	reviewBaseRef = "origin/main"
 )
 
+func finalize(outputs []LaneOutput) Summary {
+	return Finalize(reviewSubject, reviewBaseRef, outputs)
+}
+
 func TestFinalizeReturnsAwaitingOnlyWithoutLaneOutputs(t *testing.T) {
-	got := Finalize(nil)
+	got := finalize(nil)
 	if got.Verdict != VerdictAwaitingReviewers {
 		t.Fatalf("Verdict = %q, want %q", got.Verdict, VerdictAwaitingReviewers)
+	}
+	if got.Subject != reviewSubject || got.BaseRef != reviewBaseRef {
+		t.Fatalf("identity = %q/%q, want %q/%q", got.Subject, got.BaseRef, reviewSubject, reviewBaseRef)
 	}
 	if len(got.Lanes) != 0 {
 		t.Fatalf("Lanes len = %d, want 0", len(got.Lanes))
 	}
 }
 
+func TestFinalizePropagatesReviewIdentityToSummaryJSON(t *testing.T) {
+	got := Finalize(reviewSubject, reviewBaseRef, []LaneOutput{
+		{
+			LaneID:              lanePrimary,
+			Verdict:             VerdictPass,
+			FindingsCount:       0,
+			ReadOnlyEnforcement: ReadOnlyEnforcement{Observed: true, Enabled: true, Passed: true},
+		},
+	})
+
+	if got.Subject != reviewSubject || got.BaseRef != reviewBaseRef {
+		t.Fatalf("identity = %q/%q, want %q/%q", got.Subject, got.BaseRef, reviewSubject, reviewBaseRef)
+	}
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if string(fields["subject"]) != `"`+reviewSubject+`"` || string(fields["base_ref"]) != `"`+reviewBaseRef+`"` {
+		t.Fatalf("JSON identity = %s/%s, want %q/%q", fields["subject"], fields["base_ref"], reviewSubject, reviewBaseRef)
+	}
+}
+
+func TestFinalizeRejectsFindingsCountMismatch(t *testing.T) {
+	got := finalize([]LaneOutput{
+		{
+			LaneID:        lanePrimary,
+			Verdict:       VerdictPassWithFindings,
+			FindingsCount: 2,
+			Findings: []Finding{
+				{Title: "missing peer", File: "main.go", Start: 12},
+			},
+			ReadOnlyEnforcement: ReadOnlyEnforcement{Observed: true, Enabled: true, Passed: true},
+		},
+	})
+
+	if got.Verdict != VerdictFail {
+		t.Fatalf("Verdict = %q, want fail", got.Verdict)
+	}
+	if got.FailureClass != FailureClassHard {
+		t.Fatalf("FailureClass = %q, want hard", got.FailureClass)
+	}
+	if got.FailureReason != "lane=primary reason=findings_count_mismatch" {
+		t.Fatalf("FailureReason = %q, want findings_count_mismatch", got.FailureReason)
+	}
+}
+
+func TestFinalizeRejectsFindingsBearingVerdictsWithoutFindings(t *testing.T) {
+	for _, verdict := range []string{VerdictPassWithFindings, VerdictFail} {
+		t.Run(verdict, func(t *testing.T) {
+			got := finalize([]LaneOutput{
+				{
+					LaneID:              lanePrimary,
+					Verdict:             verdict,
+					FindingsCount:       0,
+					ReadOnlyEnforcement: ReadOnlyEnforcement{Observed: true, Enabled: true, Passed: true},
+				},
+			})
+
+			if got.Verdict != VerdictFail {
+				t.Fatalf("Verdict = %q, want fail", got.Verdict)
+			}
+			if got.FailureClass != FailureClassHard {
+				t.Fatalf("FailureClass = %q, want hard", got.FailureClass)
+			}
+			if got.FailureReason != "lane=primary reason=materialized_findings_missing" {
+				t.Fatalf("FailureReason = %q, want materialized_findings_missing", got.FailureReason)
+			}
+		})
+	}
+}
+
 func TestFinalizeSoftFailsTransientLaneWithoutAwaitingFinalize(t *testing.T) {
-	got := Finalize([]LaneOutput{
+	got := finalize([]LaneOutput{
 		{
 			LaneID:        lanePrimary,
 			Provider:      "local",
@@ -70,10 +154,11 @@ func TestFinalizeSoftFailsTransientLaneWithoutAwaitingFinalize(t *testing.T) {
 }
 
 func TestFinalizeFindingsRequestChanges(t *testing.T) {
-	got := Finalize([]LaneOutput{
+	got := finalize([]LaneOutput{
 		{
-			LaneID:  lanePrimary,
-			Verdict: VerdictPass,
+			LaneID:        lanePrimary,
+			Verdict:       VerdictPass,
+			FindingsCount: 1,
 			Findings: []Finding{
 				{Title: "bug", File: "main.go", Start: 12},
 			},
@@ -94,10 +179,11 @@ func TestFinalizeFindingsRequestChanges(t *testing.T) {
 }
 
 func TestFinalizeDeduplicatesFindingsWithLaneEvidence(t *testing.T) {
-	got := Finalize([]LaneOutput{
+	got := finalize([]LaneOutput{
 		{
-			LaneID:  lanePrimary,
-			Verdict: VerdictPassWithFindings,
+			LaneID:        lanePrimary,
+			Verdict:       VerdictPassWithFindings,
+			FindingsCount: 1,
 			Findings: []Finding{
 				{
 					Severity: "major",
@@ -112,8 +198,9 @@ func TestFinalizeDeduplicatesFindingsWithLaneEvidence(t *testing.T) {
 			ReadOnlyEnforcement: ReadOnlyEnforcement{Observed: true, Enabled: true, Passed: true},
 		},
 		{
-			LaneID:  laneSecondary,
-			Verdict: VerdictPassWithFindings,
+			LaneID:        laneSecondary,
+			Verdict:       VerdictPassWithFindings,
+			FindingsCount: 1,
 			Findings: []Finding{
 				{
 					Severity: "major",
@@ -144,7 +231,7 @@ func TestFinalizeDeduplicatesFindingsWithLaneEvidence(t *testing.T) {
 }
 
 func TestFinalizeIgnoresFailureClassNoneOnPassingLane(t *testing.T) {
-	got := Finalize([]LaneOutput{
+	got := finalize([]LaneOutput{
 		{
 			LaneID:              lanePrimary,
 			Verdict:             VerdictPass,
@@ -167,7 +254,7 @@ func TestFinalizeIgnoresFailureClassNoneOnPassingLane(t *testing.T) {
 }
 
 func TestFinalizeSuccessUsesDurableNoFailureContract(t *testing.T) {
-	got := Finalize([]LaneOutput{
+	got := finalize([]LaneOutput{
 		{
 			LaneID:              lanePrimary,
 			Verdict:             VerdictPass,
@@ -207,10 +294,12 @@ func TestFinalizeSuccessUsesDurableNoFailureContract(t *testing.T) {
 }
 
 func TestFinalizeFailureClassNoneStillHonorsLaneVerdict(t *testing.T) {
-	got := Finalize([]LaneOutput{
+	got := finalize([]LaneOutput{
 		{
 			LaneID:              lanePrimary,
 			Verdict:             VerdictFail,
+			FindingsCount:       1,
+			Findings:            []Finding{{Title: "blocking issue", File: "main.go", Start: 12}},
 			FailureClass:        FailureClassNone,
 			ReadOnlyEnforcement: ReadOnlyEnforcement{Observed: true, Enabled: true, Passed: true},
 		},
@@ -224,7 +313,7 @@ func TestFinalizeFailureClassNoneStillHonorsLaneVerdict(t *testing.T) {
 }
 
 func TestFinalizeMutationsRequestChanges(t *testing.T) {
-	got := Finalize([]LaneOutput{
+	got := finalize([]LaneOutput{
 		{
 			LaneID:  lanePrimary,
 			Verdict: VerdictPass,
@@ -243,10 +332,11 @@ func TestFinalizeMutationsRequestChanges(t *testing.T) {
 }
 
 func TestFinalizeReadOnlyViolationOverridesFindings(t *testing.T) {
-	got := Finalize([]LaneOutput{
+	got := finalize([]LaneOutput{
 		{
-			LaneID:  lanePrimary,
-			Verdict: VerdictPass,
+			LaneID:        lanePrimary,
+			Verdict:       VerdictPass,
+			FindingsCount: 1,
 			Findings: []Finding{
 				{Title: "bug", File: "main.go", Start: 12},
 			},
@@ -276,7 +366,7 @@ func TestFinalizeReadOnlyViolationOverridesFindings(t *testing.T) {
 }
 
 func TestFinalizeReadOnlyViolationOverridesTransientFailure(t *testing.T) {
-	got := Finalize([]LaneOutput{
+	got := finalize([]LaneOutput{
 		{
 			LaneID:        lanePrimary,
 			Verdict:       VerdictBlocked,
@@ -309,7 +399,7 @@ func TestFinalizeReadOnlyViolationOverridesTransientFailure(t *testing.T) {
 }
 
 func TestFinalizeUnknownVerdictFailsWithHardContractFailure(t *testing.T) {
-	got := Finalize([]LaneOutput{
+	got := finalize([]LaneOutput{
 		{
 			LaneID:              lanePrimary,
 			Verdict:             "approve",
@@ -328,10 +418,11 @@ func TestFinalizeUnknownVerdictFailsWithHardContractFailure(t *testing.T) {
 }
 
 func TestFinalizeTransientFailureOutranksFindings(t *testing.T) {
-	got := Finalize([]LaneOutput{
+	got := finalize([]LaneOutput{
 		{
-			LaneID:  lanePrimary,
-			Verdict: VerdictPassWithFindings,
+			LaneID:        lanePrimary,
+			Verdict:       VerdictPassWithFindings,
+			FindingsCount: 1,
 			Findings: []Finding{
 				{Title: "bug", File: "main.go", Start: 12},
 			},
@@ -361,7 +452,7 @@ func TestFinalizeTransientFailureOutranksFindings(t *testing.T) {
 }
 
 func TestFinalizeMissingReadOnlyEnforcementHardFails(t *testing.T) {
-	got := Finalize([]LaneOutput{
+	got := finalize([]LaneOutput{
 		{
 			LaneID:  lanePrimary,
 			Verdict: VerdictPass,
@@ -382,7 +473,7 @@ func TestFinalizeMissingReadOnlyEnforcementHardFails(t *testing.T) {
 }
 
 func TestFinalizeDisabledReadOnlyEnforcementHardFails(t *testing.T) {
-	got := Finalize([]LaneOutput{
+	got := finalize([]LaneOutput{
 		{
 			LaneID:  lanePrimary,
 			Verdict: VerdictPass,
@@ -405,7 +496,7 @@ func TestFinalizeDisabledReadOnlyEnforcementHardFails(t *testing.T) {
 }
 
 func TestFinalizeReadOnlyMutationFailureIdentifiesAllMutatingLanes(t *testing.T) {
-	got := Finalize([]LaneOutput{
+	got := finalize([]LaneOutput{
 		{
 			LaneID:  lanePrimary,
 			Verdict: VerdictPass,
@@ -431,7 +522,7 @@ func TestFinalizeReadOnlyMutationFailureIdentifiesAllMutatingLanes(t *testing.T)
 
 func TestFinalizeCopiesFirstReadOnlyNotes(t *testing.T) {
 	notes := []string{"baseline captured"}
-	got := Finalize([]LaneOutput{
+	got := finalize([]LaneOutput{
 		{
 			LaneID:              lanePrimary,
 			Verdict:             VerdictPass,
@@ -445,7 +536,7 @@ func TestFinalizeCopiesFirstReadOnlyNotes(t *testing.T) {
 }
 
 func TestFinalizeMergesMutationsInLaneOrder(t *testing.T) {
-	got := Finalize([]LaneOutput{
+	got := finalize([]LaneOutput{
 		{
 			LaneID:  laneSecondary,
 			Verdict: VerdictPass,
