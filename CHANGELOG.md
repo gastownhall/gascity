@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tmux and runtime provider-overlay staging now surface nonfatal preservation
   warnings on stderr, including the Kiro `AGENTS.md` preservation notice when
   project instructions already exist.
+- `jsonl-export.sh` no longer mis-classifies a bead database with an empty
+  `issues` table as a failed export. `dolt sql -r json` returns `{}` (not
+  `{"rows":[]}`) when a queried table is empty; `validate_exported_issues` now
+  treats the bare-object form as zero rows so the database lands in the
+  success path with an `issues.jsonl` committed to the archive instead of
+  appearing in the `failed:` summary.
 - The built-in `control-dispatcher` trace now defaults to
   `${GC_CITY_RUNTIME_DIR}/control-dispatcher-trace.log` (falling back to
   `${GC_CITY}/.gc/runtime/control-dispatcher-trace.log`) instead of writing at

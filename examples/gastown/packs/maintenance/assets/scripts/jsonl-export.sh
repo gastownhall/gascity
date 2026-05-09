@@ -67,7 +67,7 @@ scrub_exported_issues() {
 
 validate_exported_issues() {
     jq -e -c '
-        if (type == "object") and ((.rows? | type) == "array") then
+        if (type == "object") and ((.rows? // [] | type) == "array") then
             .
         else
             error("issues export must be a JSON object with a rows array")

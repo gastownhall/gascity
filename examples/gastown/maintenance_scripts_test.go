@@ -4534,6 +4534,54 @@ func TestJsonlExportEmptyIssuesPayloadDoesNotCommitBrokenOutputs(t *testing.T) {
 	}
 }
 
+// TestJsonlExportEmptyDatabaseDoesNotAppearInFailedSummary is the regression
+// test for #1898: an empty `issues` table in dolt produces `{}` (not
+// `{"rows":[]}`) from `dolt sql -r json`. Before the fix in
+// validate_exported_issues, that bare-object payload was rejected as malformed
+// JSON and the database was logged in `failed:` even though nothing was wrong
+// with it. After widening the type check (`.rows? // [] | type == "array"`),
+// `{}` is treated as zero rows and the DB lands in the success path with an
+// `issues.jsonl` committed to the archive.
+func TestJsonlExportEmptyDatabaseDoesNotAppearInFailedSummary(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+
+	initSeedArchive(t, archiveRepo, 0)
+	// `{}` is the dolt-empty-result encoding the validator must accept.
+	writeIssuesPayloadDoltStub(t, binDir, `{}`)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	log := string(gcData)
+	if strings.Contains(log, "failed: beads") {
+		t.Fatalf("empty issues table must not land in failed: summary; gc log:\n%s", log)
+	}
+	if !strings.Contains(log, "DOG_DONE: jsonl — exported 1/1") {
+		t.Fatalf("expected success summary `exported 1/1`, got:\n%s", log)
+	}
+
+	// The DB should have an issues.jsonl committed in the archive, even though
+	// the payload is the empty `{}` form.
+	committed, err := exec.Command("git", "-C", archiveRepo, "show", "HEAD:beads/issues.jsonl").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git show HEAD:beads/issues.jsonl: %v\n%s", err, committed)
+	}
+	if len(strings.TrimSpace(string(committed))) == 0 {
+		t.Fatalf("expected issues.jsonl to be committed (even if empty rows), got empty file")
+	}
+}
+
 func TestJsonlExportPushFailureRecoversFromMalformedState(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
