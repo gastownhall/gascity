@@ -25,7 +25,7 @@ func StageWorkDir(workDir, overlayDir string, copyFiles []CopyEntry) error {
 // and CopyFiles staging before a provider starts the session process.
 func StageSessionWorkDir(cfg Config) error {
 	if cfg.WorkDir != "" {
-		overlayProviders := append([]string{cfg.ProviderName}, cfg.InstallAgentHooks...)
+		overlayProviders := OverlayProviderNames(cfg)
 		for _, od := range cfg.PackOverlayDirs {
 			if err := stageProviderOverlayStrict(od, cfg.WorkDir, overlayProviders); err != nil {
 				return fmt.Errorf("pack overlay %q -> %q: %w", od, cfg.WorkDir, err)
@@ -66,10 +66,26 @@ func stageProviderOverlayStrict(srcDir, dstDir string, providers []string) error
 	if err := overlay.CopyDirForProviders(srcDir, dstDir, providers, &stderr); err != nil {
 		return err
 	}
-	if stderr.Len() > 0 {
-		return fmt.Errorf("%s", strings.TrimSpace(stderr.String()))
+	if fatal := fatalOverlayWarnings(stderr.String()); fatal != "" {
+		return fmt.Errorf("%s", fatal)
 	}
 	return nil
+}
+
+func fatalOverlayWarnings(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	var fatal []string
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "overlay: preserving existing ") {
+			continue
+		}
+		fatal = append(fatal, line)
+	}
+	return strings.Join(fatal, "\n")
 }
 
 func stageDirStrict(srcDir, dstDir string) error {

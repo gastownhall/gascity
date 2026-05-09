@@ -1703,7 +1703,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "Args are default command-line arguments passed to the provider."
+          "description": "Args are default command-line arguments passed to the provider. The\nbuilt-in Kiro provider defaults to\n[\"chat\", \"--no-interactive\", \"--agent\", \"gascity\", \"--trust-all-tools\"];\nremove or replace \"--trust-all-tools\" by defining [providers.kiro].args\nexplicitly in city.toml."
         },
         "prompt_mode": {
           "type": "string",

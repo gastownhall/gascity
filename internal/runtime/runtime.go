@@ -431,14 +431,16 @@ type Config struct {
 	SessionLive []string
 
 	// ProviderName is the resolved provider name (e.g., "claude", "codex").
-	// Used for per-provider overlay filtering: files from
-	// overlay/per-provider/<ProviderName>/ are copied alongside any extras
-	// listed in InstallAgentHooks.
+	// Used for launch/runtime behavior that follows a built-in family.
 	ProviderName string
+
+	// ProviderOverlayName is the concrete provider name used for per-provider
+	// overlay filtering. When empty, ProviderName is used for compatibility.
+	ProviderOverlayName string
 
 	// InstallAgentHooks lists additional provider hook slots whose
 	// overlay/per-provider/<name>/ content should be staged alongside
-	// ProviderName's. Populated from the agent's install_agent_hooks
+	// ProviderOverlayName's. Populated from the agent's install_agent_hooks
 	// config, so an agent running Claude can still get a materialized
 	// .gemini/settings.json for parallel tooling.
 	InstallAgentHooks []string
@@ -478,6 +480,18 @@ type Config struct {
 	// separately so the tmux adapter's file-expansion path can
 	// reconstruct the command correctly for long prompts.
 	PromptFlag string
+}
+
+// OverlayProviderNames returns the provider overlay slots to stage for cfg.
+func OverlayProviderNames(cfg Config) []string {
+	primary := strings.TrimSpace(cfg.ProviderOverlayName)
+	if primary == "" {
+		primary = strings.TrimSpace(cfg.ProviderName)
+	}
+	providers := make([]string, 0, 1+len(cfg.InstallAgentHooks))
+	providers = append(providers, primary)
+	providers = append(providers, cfg.InstallAgentHooks...)
+	return providers
 }
 
 // SyncWorkDirEnv returns cfg with GC_DIR synchronized to WorkDir.

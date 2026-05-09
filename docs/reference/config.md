@@ -487,7 +487,7 @@ ProviderSpec defines a named provider's startup parameters.
 | `options_schema_merge` | string |  |  | OptionsSchemaMerge controls OptionsSchema merge mode across the chain: "replace" (default) or "by_key". Enum: `replace`, `by_key` |
 | `display_name` | string |  |  | DisplayName is the human-readable name shown in UI and logs. |
 | `command` | string |  |  | Command is the executable to run for this provider. |
-| `args` | []string |  |  | Args are default command-line arguments passed to the provider. |
+| `args` | []string |  |  | Args are default command-line arguments passed to the provider. The built-in Kiro provider defaults to ["chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"]; remove or replace "--trust-all-tools" by defining [providers.kiro].args explicitly in city.toml. |
 | `prompt_mode` | string |  | `arg` | PromptMode controls how prompts are delivered: "arg", "flag", or "none". Enum: `arg`, `flag`, `none` |
 | `prompt_flag` | string |  |  | PromptFlag is the CLI flag used when prompt_mode is "flag" (e.g. "--prompt"). |
 | `ready_delay_ms` | integer |  |  | ReadyDelayMs is milliseconds to wait after launch before the provider is considered ready. |

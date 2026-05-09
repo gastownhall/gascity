@@ -1,9 +1,11 @@
 package overlay
 
 import (
+	"bytes"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -173,6 +175,23 @@ func TestCopyDirForProviders_KiroPreservesEarlierInstructionsAcrossOverlayLayers
 	}
 	if string(data) != "pack fallback" {
 		t.Fatalf("AGENTS.md = %q, want earlier Kiro instructions preserved", string(data))
+	}
+}
+
+func TestCopyDirForProviders_KiroWarnsWhenPreservingExistingInstructions(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+
+	mustMkdirAll(t, filepath.Join(src, "per-provider", "kiro"))
+	mustWriteFile(t, filepath.Join(src, "per-provider", "kiro", "AGENTS.md"), []byte("fallback instructions"), 0o644)
+	mustWriteFile(t, filepath.Join(dst, "AGENTS.md"), []byte("project instructions"), 0o600)
+
+	var stderr bytes.Buffer
+	if err := CopyDirForProviders(src, dst, []string{"kiro"}, &stderr); err != nil {
+		t.Fatalf("CopyDirForProviders: %v", err)
+	}
+	if got := stderr.String(); !strings.Contains(got, "preserving existing") || !strings.Contains(got, "AGENTS.md") {
+		t.Fatalf("stderr = %q, want preservation warning for AGENTS.md", got)
 	}
 }
 

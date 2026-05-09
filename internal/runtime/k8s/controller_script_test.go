@@ -317,6 +317,12 @@ exit 1
 	cmd.Env = append(os.Environ(),
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"CLAUDE_DIR="+claudeDir,
+		"GC_BIN="+fakeGC,
+		"GC_DOLT_HOST=",
+		"GC_DOLT_PORT=",
+		"GC_K8S_DOLT_HOST=",
+		"GC_K8S_DOLT_PORT=",
+		"GC_CITY_PATH=",
 	)
 	for key, value := range opts.Env {
 		cmd.Env = append(cmd.Env, key+"="+value)

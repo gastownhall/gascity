@@ -82,7 +82,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// V2 per-provider overlay support: CopyDirForProviders copies universal
 	// files then per-provider/<provider>/ slots for ProviderName plus any
 	// InstallAgentHooks entries (flattened).
-	overlayProviders := append([]string{cfg.ProviderName}, cfg.InstallAgentHooks...)
+	overlayProviders := runtime.OverlayProviderNames(cfg)
 	if cfg.WorkDir != "" {
 		for _, od := range cfg.PackOverlayDirs {
 			if err := overlay.CopyDirForProviders(od, cfg.WorkDir, overlayProviders, io.Discard); err != nil {

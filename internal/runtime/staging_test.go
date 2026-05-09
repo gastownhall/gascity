@@ -89,3 +89,45 @@ func TestStageWorkDirFailsWhenOverlayCopyWarns(t *testing.T) {
 		t.Fatalf("copied overlay file = %q, want %q", string(data), "copied")
 	}
 }
+
+func TestStageSessionWorkDirUsesConcreteProviderOverlayName(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	packOverlay := t.TempDir()
+
+	kiroConfig := filepath.Join(packOverlay, "per-provider", "kiro", ".kiro", "agents", "gascity.json")
+	if err := os.MkdirAll(filepath.Dir(kiroConfig), 0o755); err != nil {
+		t.Fatalf("mkdir Kiro overlay: %v", err)
+	}
+	if err := os.WriteFile(kiroConfig, []byte(`{"name":"gascity"}`), 0o644); err != nil {
+		t.Fatalf("write Kiro overlay: %v", err)
+	}
+	claudeConfig := filepath.Join(packOverlay, "per-provider", "claude", "CLAUDE.md")
+	if err := os.MkdirAll(filepath.Dir(claudeConfig), 0o755); err != nil {
+		t.Fatalf("mkdir Claude overlay: %v", err)
+	}
+	if err := os.WriteFile(claudeConfig, []byte("claude instructions"), 0o644); err != nil {
+		t.Fatalf("write Claude overlay: %v", err)
+	}
+
+	err := StageSessionWorkDir(Config{
+		WorkDir:             workDir,
+		ProviderName:        "claude",
+		ProviderOverlayName: "kiro",
+		PackOverlayDirs:     []string{packOverlay},
+	})
+	if err != nil {
+		t.Fatalf("StageSessionWorkDir: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(workDir, ".kiro", "agents", "gascity.json")); err != nil {
+		t.Fatalf("read staged Kiro config: %v", err)
+	} else if string(got) != `{"name":"gascity"}` {
+		t.Fatalf("staged Kiro config = %q, want gascity config", got)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, "CLAUDE.md")); err == nil {
+		t.Fatal("staged Claude overlay for Kiro provider inheriting Claude launch behavior")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat Claude overlay: %v", err)
+	}
+}

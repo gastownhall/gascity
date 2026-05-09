@@ -978,8 +978,8 @@ name = "mayor"
 	if kiro.Command != "kiro-cli" {
 		t.Errorf("Command = %q, want %q", kiro.Command, "kiro-cli")
 	}
-	if len(kiro.Args) != 5 || kiro.Args[0] != "chat" || kiro.Args[1] != "--no-interactive" || kiro.Args[2] != "--agent" || kiro.Args[3] != "gascity" {
-		t.Errorf("Args = %v, want [chat --no-interactive --agent gascity --trust-all-tools]", kiro.Args)
+	if want := []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"}; !reflect.DeepEqual(kiro.Args, want) {
+		t.Errorf("Args = %v, want %v", kiro.Args, want)
 	}
 	if kiro.PromptMode != "arg" {
 		t.Errorf("PromptMode = %q, want %q", kiro.PromptMode, "arg")
@@ -1185,8 +1185,8 @@ func TestProvidersRoundTrip(t *testing.T) {
 	if kiro.Command != "kiro-cli" {
 		t.Errorf("Command = %q, want %q", kiro.Command, "kiro-cli")
 	}
-	if len(kiro.Args) != 5 || kiro.Args[0] != "chat" || kiro.Args[1] != "--no-interactive" || kiro.Args[2] != "--agent" || kiro.Args[3] != "gascity" {
-		t.Errorf("Args = %v, want [chat --no-interactive --agent gascity --trust-all-tools]", kiro.Args)
+	if want := []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"}; !reflect.DeepEqual(kiro.Args, want) {
+		t.Errorf("Args = %v, want %v", kiro.Args, want)
 	}
 	if kiro.PromptMode != "arg" {
 		t.Errorf("PromptMode = %q, want %q", kiro.PromptMode, "arg")

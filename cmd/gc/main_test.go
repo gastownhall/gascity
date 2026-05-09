@@ -3109,6 +3109,35 @@ func TestDoInitWithOpenCodeProviderInstallsWorkspaceHooks(t *testing.T) {
 	}
 }
 
+func TestDoInitWithKiroProviderInstallsWorkspaceHooks(t *testing.T) {
+	f := fsys.NewFake()
+	wiz := wizardConfig{
+		configName: "minimal",
+		provider:   "kiro",
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doInit(f, "/kiro-city", wiz, "", &stdout, &stderr, false)
+	if code != 0 {
+		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	data := f.Files[filepath.Join("/kiro-city", "city.toml")]
+	cfg, err := config.Parse(data)
+	if err != nil {
+		t.Fatalf("parsing written config: %v", err)
+	}
+	if cfg.Workspace.Provider != "kiro" {
+		t.Errorf("Workspace.Provider = %q, want %q", cfg.Workspace.Provider, "kiro")
+	}
+	if len(cfg.Workspace.InstallAgentHooks) != 1 || cfg.Workspace.InstallAgentHooks[0] != "kiro" {
+		t.Errorf("Workspace.InstallAgentHooks = %v, want [kiro]", cfg.Workspace.InstallAgentHooks)
+	}
+	if !strings.Contains(string(data), "install_agent_hooks") {
+		t.Errorf("city.toml missing install_agent_hooks:\n%s", data)
+	}
+}
+
 func TestDoInitWithClaudeProviderLeavesWorkspaceHooksEmpty(t *testing.T) {
 	f := fsys.NewFake()
 	wiz := wizardConfig{

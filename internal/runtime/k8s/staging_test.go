@@ -172,6 +172,44 @@ func TestStageFilesStagesKiroPackOverlayAtPodWorkDirForRigWorkDir(t *testing.T) 
 	}
 }
 
+func TestStageFilesUsesConcreteProviderOverlayName(t *testing.T) {
+	workDir := t.TempDir()
+	packOverlay := t.TempDir()
+
+	kiroConfig := filepath.Join(packOverlay, "per-provider", "kiro", ".kiro", "agents", "gascity.json")
+	if err := os.MkdirAll(filepath.Dir(kiroConfig), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", filepath.Dir(kiroConfig), err)
+	}
+	if err := os.WriteFile(kiroConfig, []byte(`{"name":"gascity"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", kiroConfig, err)
+	}
+	claudeInstructions := filepath.Join(packOverlay, "per-provider", "claude", "CLAUDE.md")
+	if err := os.MkdirAll(filepath.Dir(claudeInstructions), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", filepath.Dir(claudeInstructions), err)
+	}
+	if err := os.WriteFile(claudeInstructions, []byte("claude instructions"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", claudeInstructions, err)
+	}
+
+	ops := newCapturingStageOps()
+	err := stageFiles(context.Background(), ops, "gc-kiro", runtime.Config{
+		WorkDir:             workDir,
+		ProviderName:        "claude",
+		ProviderOverlayName: "kiro",
+		PackOverlayDirs:     []string{packOverlay},
+	}, "", io.Discard)
+	if err != nil {
+		t.Fatalf("stageFiles: %v", err)
+	}
+
+	if got := ops.files["/workspace/.kiro/agents/gascity.json"]; got != `{"name":"gascity"}` {
+		t.Fatalf("staged Kiro agent config = %q, want root gascity config", got)
+	}
+	if _, ok := ops.files["/workspace/CLAUDE.md"]; ok {
+		t.Fatal("staged Claude overlay for Kiro provider inheriting Claude launch behavior")
+	}
+}
+
 type capturingStageOps struct {
 	files map[string]string
 }
