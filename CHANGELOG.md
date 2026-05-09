@@ -55,7 +55,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   synthesis-created changes, lane mutation deltas remain under their lane
   records, lane-scoped finalizer failures use
   `lane=<lane_id> reason=<stable_reason>` entries, and unknown lane verdict
-  values are hard contract failures.
+  values are hard contract failures. Reviewer lane prompts now require durable
+  `lane_id`, `provider`, and `model` fields, and the finalizer rejects blank
+  lane IDs without merging contract-invalid lane findings, evidence, or usage
+  into the synthesized summary.
 - `[[orders.overrides]]` rig matching is stricter and clearer. A rigless
   override (`rig` unset) still matches **only** city-level orders; if the
   named order exists only as per-rig instances, the error now names every

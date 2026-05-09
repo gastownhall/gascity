@@ -12,7 +12,7 @@ import (
 // unknown verdict values, or explicit lane failures, transient blocked for
 // retryable lane failures, and pass/pass_with_findings otherwise.
 func Finalize(subject, baseRef string, outputs []LaneOutput) Summary {
-	lanes := append([]LaneOutput{}, outputs...)
+	lanes := cloneLaneOutputs(outputs)
 	sortLaneOutputs(lanes)
 
 	summary := Summary{
@@ -50,16 +50,21 @@ func Finalize(subject, baseRef string, outputs []LaneOutput) Summary {
 	var findingOrder []string
 	var laneSummaries []string
 	var transientFailures []string
-	for i, lane := range lanes {
+	readOnlyMerged := false
+	for _, lane := range lanes {
 		laneFailures := laneContractFailures(lane)
 		for _, reason := range laneFailures {
 			hardFailures = append(hardFailures, formatLaneFailure(lane.LaneID, reason))
 		}
+		if len(laneFailures) > 0 {
+			continue
+		}
 		mergeLaneFindings(findingAccumulators, &findingOrder, lane)
-		summary.Evidence = append(summary.Evidence, lane.Evidence...)
+		summary.Evidence = append(summary.Evidence, cloneEvidence(lane.Evidence)...)
 		summary.Usage = addUsage(summary.Usage, lane.Usage)
-		if i == 0 {
+		if !readOnlyMerged {
 			summary.ReadOnlyEnforcement = cloneReadOnlyEnforcement(lane.ReadOnlyEnforcement)
+			readOnlyMerged = true
 		} else {
 			summary.ReadOnlyEnforcement = mergeReadOnly(summary.ReadOnlyEnforcement, lane.ReadOnlyEnforcement)
 		}
@@ -82,9 +87,6 @@ func Finalize(subject, baseRef string, outputs []LaneOutput) Summary {
 				}
 				continue
 			}
-		}
-		if len(laneFailures) > 0 {
-			continue
 		}
 		switch normalizeToken(lane.Verdict) {
 		case VerdictPass:
@@ -132,6 +134,9 @@ func Finalize(subject, baseRef string, outputs []LaneOutput) Summary {
 
 func laneContractFailures(lane LaneOutput) []string {
 	var failures []string
+	if strings.TrimSpace(lane.LaneID) == "" {
+		failures = append(failures, "lane_id_missing")
+	}
 	if strings.TrimSpace(lane.Provider) == "" {
 		failures = append(failures, "provider_missing")
 	}
@@ -155,7 +160,7 @@ func mergeLaneFindings(accumulators map[string]Finding, order *[]string, lane La
 		key := findingKey(finding)
 		merged, ok := accumulators[key]
 		if !ok {
-			merged = cloneFinding(finding)
+			merged = finding
 			merged.Lanes = nil
 			merged.Evidence = nil
 			*order = append(*order, key)
@@ -182,14 +187,51 @@ func findingKey(finding Finding) string {
 	)
 }
 
-func cloneFinding(finding Finding) Finding {
-	finding.Lanes = append([]string(nil), finding.Lanes...)
-	finding.Evidence = cloneEvidence(finding.Evidence)
-	return finding
-}
-
 func cloneEvidence(evidence []Evidence) []Evidence {
 	return append([]Evidence(nil), evidence...)
+}
+
+func cloneLaneOutputs(outputs []LaneOutput) []LaneOutput {
+	lanes := make([]LaneOutput, len(outputs))
+	for i, output := range outputs {
+		lanes[i] = cloneLaneOutput(output)
+	}
+	return lanes
+}
+
+func cloneLaneOutput(output LaneOutput) LaneOutput {
+	output.Findings = cloneFindings(output.Findings)
+	output.Evidence = cloneEvidence(output.Evidence)
+	output.Usage = cloneUsage(output.Usage)
+	output.ReadOnlyEnforcement = cloneReadOnlyEnforcement(output.ReadOnlyEnforcement)
+	output.MutationsDelta = cloneMutationsDelta(output.MutationsDelta)
+	return output
+}
+
+func cloneFindings(findings []Finding) []Finding {
+	if findings == nil {
+		return nil
+	}
+	cloned := make([]Finding, len(findings))
+	for i, finding := range findings {
+		finding.Lanes = append([]string(nil), finding.Lanes...)
+		finding.Evidence = cloneEvidence(finding.Evidence)
+		cloned[i] = finding
+	}
+	return cloned
+}
+
+func cloneUsage(usage *Usage) *Usage {
+	if usage == nil {
+		return nil
+	}
+	cloned := *usage
+	return &cloned
+}
+
+func cloneMutationsDelta(delta MutationsDelta) MutationsDelta {
+	delta.Changed = append([]StatusEntry(nil), delta.Changed...)
+	return delta
 }
 
 func appendUniqueStrings(values []string, additions ...string) []string {

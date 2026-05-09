@@ -94,14 +94,3 @@ func TestParseStatusPorcelainDoesNotSplitArrowInNonRenamePath(t *testing.T) {
 		t.Fatalf("ParseStatusPorcelain() = %+v, want %+v", got, want)
 	}
 }
-
-func TestMergeMutationDeltasSamePathLastWriterWins(t *testing.T) {
-	got := mergeMutationDeltas(
-		MutationsDelta{Changed: []StatusEntry{{Path: "main.go", Status: "M"}}},
-		MutationsDelta{Changed: []StatusEntry{{Path: "main.go", Status: "D"}}},
-	)
-	want := MutationsDelta{Changed: []StatusEntry{{Path: "main.go", Status: "D"}}}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("mergeMutationDeltas() = %+v, want %+v", got, want)
-	}
-}

@@ -106,6 +106,16 @@ func TestClassifyFailureInvalidClassWithTransientReasonIsHard(t *testing.T) {
 	}
 }
 
+func TestExplicitHardFailureWithTransientReasonStaysHard(t *testing.T) {
+	if IsTransientFailure(FailureClassHard, "provider_timeout") {
+		t.Fatal("IsTransientFailure(hard, provider_timeout) = true, want false")
+	}
+	class, reason := ClassifyFailure(FailureClassHard, "provider_timeout")
+	if class != FailureClassHard || reason != "provider_timeout" {
+		t.Fatalf("ClassifyFailure(hard, provider_timeout) = %q/%q, want hard/provider_timeout", class, reason)
+	}
+}
+
 func TestLaneOutputJSONMatchesFormulaRequiredKeys(t *testing.T) {
 	out := LaneOutput{
 		LaneID:        lanePrimary,

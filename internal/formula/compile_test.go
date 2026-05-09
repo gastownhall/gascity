@@ -1170,6 +1170,9 @@ func TestCompileReviewQuorumCoreFormula(t *testing.T) {
 				t.Fatalf("%s retry on_exhausted = %q, want soft_fail", step.ID, step.Retry.OnExhausted)
 			}
 			for _, required := range []string{
+				"lane_id",
+				"provider",
+				"model",
 				"verdict",
 				"findings_count",
 				"evidence",

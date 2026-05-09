@@ -86,8 +86,8 @@ Reviewer lanes use retry semantics with
 continue with degraded coverage when one lane exhausts its retry budget.
 
 Reviewer and synthesis steps must persist structured JSON state for future
-automation. The lane output contract includes `verdict`, `summary`,
-`findings_count`, `findings`, `evidence`, `usage`,
+automation. The lane output contract includes `lane_id`, `provider`, `model`,
+`verdict`, `summary`, `findings_count`, `findings`, `evidence`, `usage`,
 `read_only_enforcement`, `mutations_delta`, `failure_class`, and
 `failure_reason`.
 The summary output keeps reviewer mutation deltas under each lane and reserves

@@ -83,9 +83,10 @@ coverage instead of failing the whole formula. The synthesis step is hard-fail
 because it is responsible for persisting the final durable state.
 
 Reviewer output is structured for future automation. Lanes must write
-`verdict`, `summary`, `findings_count`, `findings`, `evidence`, `usage`,
-`read_only_enforcement`, `mutations_delta`, `failure_class`, and
-`failure_reason`; synthesis preserves lane provenance and writes a
+`lane_id`, `provider`, `model`, `verdict`, `summary`, `findings_count`,
+`findings`, `evidence`, `usage`, `read_only_enforcement`, `mutations_delta`,
+`failure_class`, and `failure_reason`; synthesis preserves lane provenance and
+writes a
 `review-quorum.summary.v1` output. `internal/reviewquorum` defines the durable
 Go contract and finalizer, but the current formula synthesis step is
 agent-executed and does not call `reviewquorum.Finalize` directly. Future
