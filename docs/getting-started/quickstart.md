@@ -56,4 +56,4 @@ bd show <bead-id> --watch
 ```
 
 For a fuller walkthrough of the same path, continue to
-[Tutorial 01](/docs/tutorials/01-cities-and-rigs.md).
+[Tutorial 01](/tutorials/01-cities-and-rigs).
