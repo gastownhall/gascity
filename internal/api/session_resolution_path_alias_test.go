@@ -328,3 +328,31 @@ func TestResolveSessionTargetID_PathAliasResolvesViaContextHelper(t *testing.T) 
 		t.Fatalf("resolved id = %q, want %q", id, pool.ID)
 	}
 }
+
+// TestResolveSessionTargetID_SessionNameWinsOverPathAliasTitle verifies the
+// resolver-chain ordering: when one bead's session_name matches the
+// identifier and a different bead's Title matches the same identifier,
+// session.ResolveSessionID (session_name/alias index) wins. The Title-based
+// path-alias step runs after, so its match is used only when nothing more
+// specific resolved. Guards against the cross-bead collision codex flagged
+// during /gascity-ship review.
+func TestResolveSessionTargetID_SessionNameWinsOverPathAliasTitle(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg = &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	srv := New(fs)
+
+	// Bead A: session_name match (session.ResolveSessionID will catch this).
+	matchByName := createPoolSessionBead(t, fs.cityBeadStore, "different-title", "shared-id", "active")
+
+	// Bead B: Title match for the same identifier (path-alias step would
+	// otherwise catch this).
+	createPoolSessionBead(t, fs.cityBeadStore, "shared-id", "different-name", "active")
+
+	id, err := srv.resolveSessionIDWithConfig(fs.cityBeadStore, "shared-id")
+	if err != nil {
+		t.Fatalf("resolveSessionIDWithConfig(shared-id): %v", err)
+	}
+	if id != matchByName.ID {
+		t.Fatalf("resolved id = %q, want session_name match %q (path-alias should run after session.ResolveSessionID)", id, matchByName.ID)
+	}
+}
