@@ -1,6 +1,10 @@
 package reviewquorum
 
-import "testing"
+import (
+	"encoding/json"
+	"reflect"
+	"testing"
+)
 
 const (
 	lanePrimary   = "primary"
@@ -26,7 +30,7 @@ func TestFinalizeSoftFailsTransientLaneWithoutAwaitingFinalize(t *testing.T) {
 			Verdict:       VerdictPass,
 			Summary:       "no issues found",
 			FindingsCount: 0,
-			Usage:         Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
+			Usage:         &Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
 			ReadOnlyEnforcement: ReadOnlyEnforcement{
 				Observed: true,
 				Enabled:  true,
@@ -60,8 +64,8 @@ func TestFinalizeSoftFailsTransientLaneWithoutAwaitingFinalize(t *testing.T) {
 	if got.Summary == "awaiting_finalize" || got.Verdict == "awaiting_finalize" {
 		t.Fatalf("summary must not use ambiguous awaiting_finalize: %+v", got)
 	}
-	if got.Usage.TotalTokens != 15 {
-		t.Fatalf("Usage.TotalTokens = %d, want 15", got.Usage.TotalTokens)
+	if got.Usage == nil || got.Usage.TotalTokens != 15 {
+		t.Fatalf("Usage = %+v, want TotalTokens 15", got.Usage)
 	}
 }
 
@@ -89,6 +93,56 @@ func TestFinalizeFindingsRequestChanges(t *testing.T) {
 	}
 }
 
+func TestFinalizeDeduplicatesFindingsWithLaneEvidence(t *testing.T) {
+	got := Finalize([]LaneOutput{
+		{
+			LaneID:  lanePrimary,
+			Verdict: VerdictPassWithFindings,
+			Findings: []Finding{
+				{
+					Severity: "major",
+					Title:    "double counted finding",
+					Body:     "same issue",
+					File:     "internal/reviewquorum/finalize.go",
+					Start:    32,
+					End:      34,
+				},
+			},
+			Evidence:            []Evidence{{Kind: "file", Path: "internal/reviewquorum/finalize.go", Note: "primary"}},
+			ReadOnlyEnforcement: ReadOnlyEnforcement{Observed: true, Enabled: true, Passed: true},
+		},
+		{
+			LaneID:  laneSecondary,
+			Verdict: VerdictPassWithFindings,
+			Findings: []Finding{
+				{
+					Severity: "major",
+					Title:    "double counted finding",
+					Body:     "same issue",
+					File:     "internal/reviewquorum/finalize.go",
+					Start:    32,
+					End:      34,
+				},
+			},
+			Evidence:            []Evidence{{Kind: "file", Path: "internal/reviewquorum/finalize.go", Note: "secondary"}},
+			ReadOnlyEnforcement: ReadOnlyEnforcement{Observed: true, Enabled: true, Passed: true},
+		},
+	})
+	if got.FindingsCount != 1 {
+		t.Fatalf("FindingsCount = %d, want deduplicated count 1", got.FindingsCount)
+	}
+	if len(got.Findings) != 1 {
+		t.Fatalf("Findings len = %d, want 1", len(got.Findings))
+	}
+	wantLanes := []string{lanePrimary, laneSecondary}
+	if !reflect.DeepEqual(got.Findings[0].Lanes, wantLanes) {
+		t.Fatalf("Findings[0].Lanes = %+v, want %+v", got.Findings[0].Lanes, wantLanes)
+	}
+	if len(got.Findings[0].Evidence) != 2 {
+		t.Fatalf("Findings[0].Evidence len = %d, want 2", len(got.Findings[0].Evidence))
+	}
+}
+
 func TestFinalizeIgnoresFailureClassNoneOnPassingLane(t *testing.T) {
 	got := Finalize([]LaneOutput{
 		{
@@ -107,8 +161,48 @@ func TestFinalizeIgnoresFailureClassNoneOnPassingLane(t *testing.T) {
 	if got.Verdict != VerdictPass {
 		t.Fatalf("Verdict = %q, want pass", got.Verdict)
 	}
-	if got.FailureClass != "" || got.FailureReason != "" {
-		t.Fatalf("failure = %q/%q, want empty", got.FailureClass, got.FailureReason)
+	if got.FailureClass != FailureClassNone || got.FailureReason != "" {
+		t.Fatalf("failure = %q/%q, want none/empty", got.FailureClass, got.FailureReason)
+	}
+}
+
+func TestFinalizeSuccessUsesDurableNoFailureContract(t *testing.T) {
+	got := Finalize([]LaneOutput{
+		{
+			LaneID:              lanePrimary,
+			Verdict:             VerdictPass,
+			ReadOnlyEnforcement: ReadOnlyEnforcement{Observed: true, Enabled: true, Passed: true},
+		},
+	})
+	if got.FailureClass != FailureClassNone || got.FailureReason != "" {
+		t.Fatalf("failure = %q/%q, want none/empty", got.FailureClass, got.FailureReason)
+	}
+	if got.Findings == nil {
+		t.Fatal("Findings = nil, want empty array for durable JSON")
+	}
+	if got.Evidence == nil {
+		t.Fatal("Evidence = nil, want empty array for durable JSON")
+	}
+	if got.Lanes == nil {
+		t.Fatal("Lanes = nil, want empty or populated array for durable JSON")
+	}
+
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if string(fields["failure_class"]) != `"`+FailureClassNone+`"` {
+		t.Fatalf("failure_class JSON = %s, want %q", fields["failure_class"], FailureClassNone)
+	}
+	if string(fields["findings"]) != "[]" {
+		t.Fatalf("findings JSON = %s, want []", fields["findings"])
+	}
+	if string(fields["evidence"]) != "[]" {
+		t.Fatalf("evidence JSON = %s, want []", fields["evidence"])
 	}
 }
 
@@ -173,8 +267,11 @@ func TestFinalizeReadOnlyViolationOverridesFindings(t *testing.T) {
 	if got.FailureClass != FailureClassHard {
 		t.Fatalf("FailureClass = %q, want hard", got.FailureClass)
 	}
-	if got.FailureReason != "read_only_mutation_detected" {
-		t.Fatalf("FailureReason = %q, want read_only_mutation_detected", got.FailureReason)
+	if got.FailureReason != "lane=secondary reason=read_only_mutation_detected" {
+		t.Fatalf("FailureReason = %q, want lane=secondary reason=read_only_mutation_detected", got.FailureReason)
+	}
+	if got.FindingsCount != 1 || len(got.Findings) != 1 {
+		t.Fatalf("Findings = %d/%d, want preserved finding despite read-only failure", got.FindingsCount, len(got.Findings))
 	}
 }
 
@@ -206,12 +303,12 @@ func TestFinalizeReadOnlyViolationOverridesTransientFailure(t *testing.T) {
 	if got.FailureClass != FailureClassHard {
 		t.Fatalf("FailureClass = %q, want hard", got.FailureClass)
 	}
-	if got.FailureReason != "read_only_mutation_detected" {
-		t.Fatalf("FailureReason = %q, want read_only_mutation_detected", got.FailureReason)
+	if got.FailureReason != "lane=secondary reason=read_only_mutation_detected" {
+		t.Fatalf("FailureReason = %q, want lane=secondary reason=read_only_mutation_detected", got.FailureReason)
 	}
 }
 
-func TestFinalizeUnknownVerdictBlocksWithContractFailure(t *testing.T) {
+func TestFinalizeUnknownVerdictFailsWithHardContractFailure(t *testing.T) {
 	got := Finalize([]LaneOutput{
 		{
 			LaneID:              lanePrimary,
@@ -219,11 +316,11 @@ func TestFinalizeUnknownVerdictBlocksWithContractFailure(t *testing.T) {
 			ReadOnlyEnforcement: ReadOnlyEnforcement{Observed: true, Enabled: true, Passed: true},
 		},
 	})
-	if got.Verdict != VerdictBlocked {
-		t.Fatalf("Verdict = %q, want blocked", got.Verdict)
+	if got.Verdict != VerdictFail {
+		t.Fatalf("Verdict = %q, want fail", got.Verdict)
 	}
-	if got.FailureClass != FailureClassTransient {
-		t.Fatalf("FailureClass = %q, want transient", got.FailureClass)
+	if got.FailureClass != FailureClassHard {
+		t.Fatalf("FailureClass = %q, want hard", got.FailureClass)
 	}
 	if got.FailureReason != "lane=primary reason=unknown_verdict_value" {
 		t.Fatalf("FailureReason = %q, want lane=primary reason=unknown_verdict_value", got.FailureReason)
@@ -304,5 +401,70 @@ func TestFinalizeDisabledReadOnlyEnforcementHardFails(t *testing.T) {
 	}
 	if got.FailureReason != "lane=primary reason=read_only_enforcement_disabled" {
 		t.Fatalf("FailureReason = %q, want read_only_enforcement_disabled", got.FailureReason)
+	}
+}
+
+func TestFinalizeReadOnlyMutationFailureIdentifiesAllMutatingLanes(t *testing.T) {
+	got := Finalize([]LaneOutput{
+		{
+			LaneID:  lanePrimary,
+			Verdict: VerdictPass,
+			MutationsDelta: MutationsDelta{Changed: []StatusEntry{
+				{Path: "primary.go", Status: "M"},
+			}},
+			ReadOnlyEnforcement: ReadOnlyEnforcement{Observed: true, Enabled: true, Passed: false},
+		},
+		{
+			LaneID:  laneSecondary,
+			Verdict: VerdictPass,
+			MutationsDelta: MutationsDelta{Changed: []StatusEntry{
+				{Path: "secondary.go", Status: "M"},
+			}},
+			ReadOnlyEnforcement: ReadOnlyEnforcement{Observed: true, Enabled: true, Passed: false},
+		},
+	})
+	want := "lane=primary reason=read_only_mutation_detected; lane=secondary reason=read_only_mutation_detected"
+	if got.FailureReason != want {
+		t.Fatalf("FailureReason = %q, want %q", got.FailureReason, want)
+	}
+}
+
+func TestFinalizeCopiesFirstReadOnlyNotes(t *testing.T) {
+	notes := []string{"baseline captured"}
+	got := Finalize([]LaneOutput{
+		{
+			LaneID:              lanePrimary,
+			Verdict:             VerdictPass,
+			ReadOnlyEnforcement: ReadOnlyEnforcement{Observed: true, Enabled: true, Passed: true, Notes: notes},
+		},
+	})
+	notes[0] = "mutated after finalize"
+	if got.ReadOnlyEnforcement.Notes[0] != "baseline captured" {
+		t.Fatalf("ReadOnlyEnforcement.Notes[0] = %q, want copied note", got.ReadOnlyEnforcement.Notes[0])
+	}
+}
+
+func TestFinalizeMergesMutationsInLaneOrder(t *testing.T) {
+	got := Finalize([]LaneOutput{
+		{
+			LaneID:  laneSecondary,
+			Verdict: VerdictPass,
+			MutationsDelta: MutationsDelta{Changed: []StatusEntry{
+				{Path: "same.go", Status: "D"},
+			}},
+			ReadOnlyEnforcement: ReadOnlyEnforcement{Observed: true, Enabled: true, Passed: false},
+		},
+		{
+			LaneID:  lanePrimary,
+			Verdict: VerdictPass,
+			MutationsDelta: MutationsDelta{Changed: []StatusEntry{
+				{Path: "same.go", Status: "M"},
+			}},
+			ReadOnlyEnforcement: ReadOnlyEnforcement{Observed: true, Enabled: true, Passed: false},
+		},
+	})
+	want := MutationsDelta{Changed: []StatusEntry{{Path: "same.go", Status: "D"}}}
+	if !reflect.DeepEqual(got.MutationsDelta, want) {
+		t.Fatalf("MutationsDelta = %+v, want %+v", got.MutationsDelta, want)
 	}
 }

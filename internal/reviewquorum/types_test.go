@@ -1,6 +1,10 @@
 package reviewquorum
 
-import "testing"
+import (
+	"encoding/json"
+	"reflect"
+	"testing"
+)
 
 func TestValidateLaneConfigsAcceptsConfiguredLanes(t *testing.T) {
 	lanes := []LaneConfig{
@@ -80,7 +84,96 @@ func TestClassifyFailureNoneNoFailure(t *testing.T) {
 
 func TestClassifyFailureNoneWithReasonIsHardContractFailure(t *testing.T) {
 	class, reason := ClassifyFailure(FailureClassNone, "stale_reason")
-	if class != FailureClassHard || reason != "invalid_failure_class" {
-		t.Fatalf("ClassifyFailure(none, stale_reason) = %q/%q, want hard/invalid_failure_class", class, reason)
+	if class != FailureClassHard || reason != "invalid_failure_class_stale_reason" {
+		t.Fatalf("ClassifyFailure(none, stale_reason) = %q/%q, want hard/invalid_failure_class_stale_reason", class, reason)
+	}
+}
+
+func TestClassifyFailureInvalidClassPreservesReason(t *testing.T) {
+	class, reason := ClassifyFailure("retry_later", "provider exploded")
+	if class != FailureClassHard || reason != "invalid_failure_class_provider_exploded" {
+		t.Fatalf("ClassifyFailure(retry_later, provider exploded) = %q/%q, want hard/invalid_failure_class_provider_exploded", class, reason)
+	}
+}
+
+func TestLaneOutputJSONMatchesFormulaRequiredKeys(t *testing.T) {
+	out := LaneOutput{
+		LaneID:        lanePrimary,
+		Provider:      "codex",
+		Model:         "gpt-5.5",
+		Verdict:       VerdictPass,
+		Summary:       "clean",
+		FindingsCount: 0,
+		Findings:      []Finding{},
+		Evidence:      []Evidence{},
+		Usage:         nil,
+		ReadOnlyEnforcement: ReadOnlyEnforcement{
+			Observed:        true,
+			Enabled:         true,
+			Passed:          true,
+			BaselineCommand: "git status --porcelain=v1 -z",
+			AfterCommand:    "git status --porcelain=v1 -z",
+		},
+		MutationsDelta: MutationsDelta{},
+		FailureClass:   FailureClassNone,
+		FailureReason:  "",
+	}
+
+	got, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	want := `{"lane_id":"primary","provider":"codex","model":"gpt-5.5","verdict":"pass","summary":"clean","findings_count":0,"findings":[],"evidence":[],"usage":null,"read_only_enforcement":{"observed":true,"enabled":true,"passed":true,"baseline_command":"git status --porcelain=v1 -z","after_command":"git status --porcelain=v1 -z"},"mutations_delta":{},"failure_class":"none","failure_reason":""}`
+	if string(got) != want {
+		t.Fatalf("LaneOutput JSON = %s, want %s", got, want)
+	}
+
+	var roundTripped LaneOutput
+	if err := json.Unmarshal(got, &roundTripped); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if !reflect.DeepEqual(roundTripped, out) {
+		t.Fatalf("round trip = %+v, want %+v", roundTripped, out)
+	}
+}
+
+func TestSummaryJSONMatchesFormulaRequiredKeys(t *testing.T) {
+	out := Summary{
+		Subject:       "gh:gastownhall/gascity#1694",
+		BaseRef:       "origin/main",
+		Verdict:       VerdictPass,
+		Summary:       "clean",
+		FindingsCount: 0,
+		Findings:      []Finding{},
+		Evidence:      []Evidence{},
+		Usage:         nil,
+		ReadOnlyEnforcement: ReadOnlyEnforcement{
+			Observed:        true,
+			Enabled:         true,
+			Passed:          true,
+			BaselineCommand: "git status --porcelain=v1 -z",
+			AfterCommand:    "git status --porcelain=v1 -z",
+		},
+		MutationsDelta: MutationsDelta{},
+		FailureClass:   FailureClassNone,
+		FailureReason:  "",
+		Lanes:          []LaneOutput{},
+	}
+
+	got, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	want := `{"subject":"gh:gastownhall/gascity#1694","base_ref":"origin/main","verdict":"pass","summary":"clean","findings_count":0,"findings":[],"evidence":[],"usage":null,"read_only_enforcement":{"observed":true,"enabled":true,"passed":true,"baseline_command":"git status --porcelain=v1 -z","after_command":"git status --porcelain=v1 -z"},"mutations_delta":{},"failure_class":"none","failure_reason":"","lanes":[]}`
+	if string(got) != want {
+		t.Fatalf("Summary JSON = %s, want %s", got, want)
+	}
+
+	var roundTripped Summary
+	if err := json.Unmarshal(got, &roundTripped); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if !reflect.DeepEqual(roundTripped, out) {
+		t.Fatalf("round trip = %+v, want %+v", roundTripped, out)
 	}
 }

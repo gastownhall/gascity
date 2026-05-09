@@ -43,7 +43,7 @@ func ClassifyFailure(failureClass, failureReason string) (class, reason string) 
 	if class == "" {
 		return FailureClassHard, reason
 	}
-	return FailureClassHard, "invalid_failure_class"
+	return FailureClassHard, "invalid_failure_class_" + normalizeFailureFragment(reason, "unspecified")
 }
 
 func normalizeToken(value string) string {

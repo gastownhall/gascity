@@ -9,13 +9,17 @@ import (
 // a terminal blocked summary when at least one lane output exists and another
 // lane soft-failed transiently; awaiting states are reserved for zero output.
 func Finalize(outputs []LaneOutput) Summary {
-	lanes := append([]LaneOutput(nil), outputs...)
+	lanes := append([]LaneOutput{}, outputs...)
 	sortLaneOutputs(lanes)
 
 	summary := Summary{
-		Verdict: VerdictAwaitingReviewers,
-		Summary: "awaiting reviewer lane output",
-		Lanes:   lanes,
+		Verdict:       VerdictAwaitingReviewers,
+		Summary:       "awaiting reviewer lane output",
+		Findings:      []Finding{},
+		Evidence:      []Evidence{},
+		FailureClass:  FailureClassNone,
+		FailureReason: "",
+		Lanes:         lanes,
 	}
 	if len(lanes) == 0 {
 		return summary
@@ -24,26 +28,23 @@ func Finalize(outputs []LaneOutput) Summary {
 	summary.Verdict = VerdictPass
 	summary.Summary = "review quorum passed with no findings"
 
+	findingAccumulators := map[string]Finding{}
+	var findingOrder []string
 	var laneSummaries []string
 	var hardFailures []string
 	var transientFailures []string
-	var readOnlyMutated bool
 	for i, lane := range lanes {
-		count := normalizedFindingsCount(lane)
-		summary.FindingsCount += count
-		summary.Findings = append(summary.Findings, lane.Findings...)
+		mergeLaneFindings(findingAccumulators, &findingOrder, lane)
 		summary.Evidence = append(summary.Evidence, lane.Evidence...)
 		summary.Usage = addUsage(summary.Usage, lane.Usage)
 		summary.MutationsDelta = mergeMutationDeltas(summary.MutationsDelta, lane.MutationsDelta)
 		if i == 0 {
-			summary.ReadOnlyEnforcement = lane.ReadOnlyEnforcement
+			summary.ReadOnlyEnforcement = cloneReadOnlyEnforcement(lane.ReadOnlyEnforcement)
 		} else {
 			summary.ReadOnlyEnforcement = mergeReadOnly(summary.ReadOnlyEnforcement, lane.ReadOnlyEnforcement)
 		}
 		switch reason := readOnlyContractFailure(lane); reason {
 		case "":
-		case "read_only_mutation_detected":
-			readOnlyMutated = true
 		default:
 			hardFailures = append(hardFailures, formatLaneFailure(lane.LaneID, reason))
 		}
@@ -76,13 +77,14 @@ func Finalize(outputs []LaneOutput) Summary {
 				hardFailures = append(hardFailures, formatLaneFailure(lane.LaneID, reason))
 			}
 		default:
-			transientFailures = append(transientFailures, formatLaneFailure(lane.LaneID, "unknown_verdict_value"))
+			hardFailures = append(hardFailures, formatLaneFailure(lane.LaneID, "unknown_verdict_value"))
 		}
 	}
 
-	if readOnlyMutated {
-		hardFailures = append([]string{"read_only_mutation_detected"}, hardFailures...)
+	for _, key := range findingOrder {
+		summary.Findings = append(summary.Findings, findingAccumulators[key])
 	}
+	summary.FindingsCount = len(summary.Findings)
 
 	switch {
 	case len(hardFailures) > 0:
@@ -105,6 +107,67 @@ func Finalize(outputs []LaneOutput) Summary {
 	return summary
 }
 
+func mergeLaneFindings(accumulators map[string]Finding, order *[]string, lane LaneOutput) {
+	for _, finding := range lane.Findings {
+		key := findingKey(finding)
+		merged, ok := accumulators[key]
+		if !ok {
+			merged = cloneFinding(finding)
+			merged.Lanes = nil
+			merged.Evidence = nil
+			*order = append(*order, key)
+		}
+		merged.Lanes = appendUniqueStrings(merged.Lanes, lane.LaneID)
+		merged.Lanes = appendUniqueStrings(merged.Lanes, finding.Lanes...)
+		if len(finding.Evidence) > 0 {
+			merged.Evidence = append(merged.Evidence, cloneEvidence(finding.Evidence)...)
+		} else {
+			merged.Evidence = append(merged.Evidence, cloneEvidence(lane.Evidence)...)
+		}
+		accumulators[key] = merged
+	}
+}
+
+func findingKey(finding Finding) string {
+	return fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%d\x00%d",
+		normalizeToken(finding.Severity),
+		normalizeToken(finding.Title),
+		strings.TrimSpace(finding.Body),
+		strings.TrimSpace(finding.File),
+		finding.Start,
+		finding.End,
+	)
+}
+
+func cloneFinding(finding Finding) Finding {
+	finding.Lanes = append([]string(nil), finding.Lanes...)
+	finding.Evidence = cloneEvidence(finding.Evidence)
+	return finding
+}
+
+func cloneEvidence(evidence []Evidence) []Evidence {
+	return append([]Evidence(nil), evidence...)
+}
+
+func appendUniqueStrings(values []string, additions ...string) []string {
+	seen := make(map[string]struct{}, len(values)+len(additions))
+	for _, value := range values {
+		seen[value] = struct{}{}
+	}
+	for _, addition := range additions {
+		addition = strings.TrimSpace(addition)
+		if addition == "" {
+			continue
+		}
+		if _, ok := seen[addition]; ok {
+			continue
+		}
+		seen[addition] = struct{}{}
+		values = append(values, addition)
+	}
+	return values
+}
+
 func readOnlyContractFailure(lane LaneOutput) string {
 	if !lane.ReadOnlyEnforcement.Observed {
 		return "read_only_enforcement_missing"
@@ -121,13 +184,29 @@ func readOnlyContractFailure(lane LaneOutput) string {
 	return ""
 }
 
-func addUsage(a, b Usage) Usage {
-	return Usage{
+func addUsage(a, b *Usage) *Usage {
+	if a == nil && b == nil {
+		return nil
+	}
+	if a == nil {
+		usage := *b
+		return &usage
+	}
+	if b == nil {
+		usage := *a
+		return &usage
+	}
+	return &Usage{
 		InputTokens:  a.InputTokens + b.InputTokens,
 		OutputTokens: a.OutputTokens + b.OutputTokens,
 		TotalTokens:  a.TotalTokens + b.TotalTokens,
 		CostUSD:      a.CostUSD + b.CostUSD,
 	}
+}
+
+func cloneReadOnlyEnforcement(value ReadOnlyEnforcement) ReadOnlyEnforcement {
+	value.Notes = append([]string(nil), value.Notes...)
+	return value
 }
 
 func mergeReadOnly(a, b ReadOnlyEnforcement) ReadOnlyEnforcement {
