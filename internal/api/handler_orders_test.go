@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strconv"
 	"testing"
@@ -1112,7 +1113,7 @@ func TestHandleOrderHistoryBeforeUsesBufferedBoundedFetch(t *testing.T) {
 
 	h := newTestCityHandler(t, fs)
 	before := midRun.CreatedAt.Format(time.RFC3339Nano)
-	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/history?scoped_name=nightly-review&limit=1&before="+before), nil)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/history?scoped_name=nightly-review&limit=1&before="+url.QueryEscape(before)), nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -1174,7 +1175,7 @@ func TestHandleOrderHistoryBeforeFiltersBeforeStoreLimit(t *testing.T) {
 
 	h := newTestCityHandler(t, fs)
 	before := cursorRun.CreatedAt.Format(time.RFC3339Nano)
-	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/history?scoped_name=nightly-review&limit=1&before="+before), nil)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/history?scoped_name=nightly-review&limit=1&before="+url.QueryEscape(before)), nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -1240,7 +1241,7 @@ func TestHandleOrderHistoryBeforeFiltersBeforeMergedLimit(t *testing.T) {
 
 	h := newTestCityHandler(t, fs)
 	before := cursorRun.CreatedAt.Format(time.RFC3339Nano)
-	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/history?scoped_name=nightly-review:rig:myrig&limit=1&before="+before), nil)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/history?scoped_name=nightly-review:rig:myrig&limit=1&before="+url.QueryEscape(before)), nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 

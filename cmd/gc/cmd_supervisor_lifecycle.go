@@ -743,7 +743,10 @@ func shouldPersistSupervisorEnv(key string) bool {
 	if supervisorServiceEnvKeys[key] {
 		return true
 	}
-	return isProviderCredentialEnv(key)
+	if isProviderCredentialEnv(key) {
+		return os.Getenv(supervisorOmitProviderCredsEnv) != "1"
+	}
+	return false
 }
 
 func isProviderCredentialEnv(key string) bool {

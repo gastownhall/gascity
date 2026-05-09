@@ -880,6 +880,62 @@ func TestGastownPatrolWispCommandsPropagateRoutingNamespace(t *testing.T) {
 	}
 }
 
+func TestBootPromptMatchesNamedSessionLifecycle(t *testing.T) {
+	cfg := loadExpanded(t)
+	bootSession := config.FindNamedSession(cfg, "boot")
+	if bootSession == nil {
+		t.Fatal("boot named_session missing; prompt documents its lifecycle")
+	}
+	if got := bootSession.ModeOrDefault(); got != "always" {
+		t.Fatalf("boot named_session mode = %q, want %q because prompt documents that lifecycle", got, "always")
+	}
+	bootAgent := config.FindAgent(cfg, bootSession.TemplateQualifiedName())
+	if bootAgent == nil {
+		t.Fatalf("boot agent template %q missing; named_session and prompt must refer to a real agent", bootSession.TemplateQualifiedName())
+	}
+	if got := bootAgent.EffectiveWakeMode(); got != "fresh" {
+		t.Fatalf("boot agent wake_mode = %q, want %q because prompt documents fresh provider context", got, "fresh")
+	}
+
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "agents", "boot", "prompt.template.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading boot prompt: %v", err)
+	}
+	body := string(data)
+
+	for _, stale := range []string{
+		"{{ cmd }} agent peek",
+		"Controller tick",
+		"Spawn Boot (fresh session each time)",
+		"on each tick",
+		"Next Boot tick",
+		"Narrow scope makes restarts cheap",
+		"always fresh",
+		"no persistent state",
+	} {
+		if strings.Contains(body, stale) {
+			t.Fatalf("boot prompt still contains stale lifecycle or command guidance %q:\n%s", stale, body)
+		}
+	}
+
+	for _, want := range []string{
+		"{{ cmd }} session peek deacon --lines 1",
+		"{{ cmd }} session peek deacon --lines 30",
+		"configured `boot` named session",
+		"`mode = \"always\"` keeps the `boot` identity present",
+		"`wake_mode = \"fresh\"`",
+		"gives each wake a new provider context",
+		"Narrow scope keeps each wake cheap.",
+		"Next Boot wake will re-evaluate.",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("boot prompt missing current lifecycle or command guidance %q:\n%s", want, body)
+		}
+	}
+}
+
 func TestIdeaToPlanFormulaUsesSupportedPrimitives(t *testing.T) {
 	dir := exampleDir()
 	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-idea-to-plan.toml")

@@ -244,7 +244,7 @@ func TestControllerSocketFallbackUsesShortPathForLongCityPath(t *testing.T) {
 	pokeCh := make(chan struct{}, 1)
 	controlDispatcherCh := make(chan struct{}, 1)
 	configDirty := &atomic.Bool{}
-	lis, err := startControllerSocket(cityPath, cancel, configDirty, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
+	lis, err := startControllerSocket(cityPath, cancel, nil, configDirty, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
 	}
@@ -494,8 +494,6 @@ func TestControllerReloadsConfig(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
-
-	cancel()
 
 	deadline = time.After(1500 * time.Millisecond)
 	for {
@@ -1288,7 +1286,7 @@ func TestHandleControllerConnControlDispatcher(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		handleControllerConn(server, cityPath, func() {}, nil, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
+		handleControllerConn(server, cityPath, func() {}, nil, nil, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
 		close(done)
 	}()
 
@@ -1793,7 +1791,8 @@ func TestControllerReloadInvalidConfig(t *testing.T) {
 	debounceDelay = 5 * time.Millisecond
 	t.Cleanup(func() { debounceDelay = old })
 
-	dir := shortSocketTempDir(t, "gc-invalid-")
+	dir := shortSocketTempDir(t, "gc-reload-invalid-")
+	cleanupManagedDoltTestCity(t, dir)
 	tomlPath := writeCityTOML(t, dir, "test", "mayor")
 
 	cfg, err := config.Load(osFS{}, tomlPath)

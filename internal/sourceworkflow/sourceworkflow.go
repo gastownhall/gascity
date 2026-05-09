@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/closeorder"
 	"github.com/gastownhall/gascity/internal/citylayout"
 )
 
@@ -371,8 +372,10 @@ func ListWorkflowBeads(store beads.Store, rootID string) ([]beads.Bead, error) {
 }
 
 // CloseWorkflowSubtree closes the root and every open descendant of a
-// workflow, marking each gc.outcome=skipped. Returns the count of newly
-// closed beads.
+// workflow, marking each gc.outcome=skipped. It closes descendants before the
+// root and honors in-batch "blocks" dependencies so strict stores can close
+// workflow step chains without rejecting blocked-before-blocker order. Returns
+// the count of newly closed beads.
 func CloseWorkflowSubtree(store beads.Store, rootID string) (int, error) {
 	matched, err := ListWorkflowBeads(store, rootID)
 	if err != nil {
@@ -427,7 +430,11 @@ func CloseWorkflowSubtree(store beads.Store, rootID string) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	return store.CloseAll(ids, map[string]string{"gc.outcome": "skipped"})
+	ordered, err := closeorder.Order(store, ids)
+	if err != nil {
+		return 0, err
+	}
+	return store.CloseAll(ordered, map[string]string{"gc.outcome": "skipped"})
 }
 
 // WorkflowBeadSnapshot captures the mutable fields of a workflow subtree

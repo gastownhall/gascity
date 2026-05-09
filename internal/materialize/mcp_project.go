@@ -24,6 +24,8 @@ const (
 	MCPProviderCodex = "codex"
 	// MCPProviderGemini projects to Gemini CLI's project-native settings file.
 	MCPProviderGemini = "gemini"
+	// MCPProviderOpenCode projects to OpenCode's project-native JSON config.
+	MCPProviderOpenCode = "opencode"
 )
 
 // MCPProjection is one provider-native MCP payload for a single target file.
@@ -43,6 +45,7 @@ func BuildMCPProjection(providerKind, workdir string, servers []MCPServer) (MCPP
 	case MCPProviderClaude:
 	case MCPProviderCodex:
 	case MCPProviderGemini:
+	case MCPProviderOpenCode:
 	default:
 		return MCPProjection{}, fmt.Errorf("unsupported MCP provider %q", providerKind)
 	}
@@ -61,6 +64,8 @@ func BuildMCPProjection(providerKind, workdir string, servers []MCPServer) (MCPP
 		out.Target = filepath.Join(workdir, ".codex", "config.toml")
 	case MCPProviderGemini:
 		out.Target = filepath.Join(workdir, ".gemini", "settings.json")
+	case MCPProviderOpenCode:
+		out.Target = filepath.Join(workdir, "opencode.json")
 	}
 	return out, nil
 }
@@ -134,6 +139,8 @@ func (p MCPProjection) applyWithStderr(fs fsys.FS, stderr io.Writer) error {
 			return p.applyCodex(fs)
 		case MCPProviderGemini:
 			return p.applyGemini(fs)
+		case MCPProviderOpenCode:
+			return p.applyOpenCode(fs)
 		default:
 			return fmt.Errorf("unsupported MCP provider %q", p.Provider)
 		}
@@ -245,6 +252,39 @@ func (p MCPProjection) applyCodex(fs fsys.FS) error {
 	return p.writeManagedMarker(fs)
 }
 
+func (p MCPProjection) applyOpenCode(fs fsys.FS) error {
+	managed := p.isManaged(fs)
+	if len(p.Servers) == 0 && !managed {
+		return nil
+	}
+	doc, err := readJSONDoc(fs, p.Target)
+	if err != nil {
+		return err
+	}
+	if len(p.Servers) == 0 {
+		delete(doc, "mcp")
+		if len(doc) == 0 {
+			if err := removeManagedMCPFile(fs, p.Target); err != nil {
+				return err
+			}
+			return removeManagedMCPFile(fs, p.markerPath())
+		}
+	} else {
+		doc["mcp"] = p.opencodeServersDoc()
+	}
+	data, err := marshalJSONDoc(doc)
+	if err != nil {
+		return err
+	}
+	if err := writeManagedMCPFile(fs, p.Target, data); err != nil {
+		return err
+	}
+	if len(p.Servers) == 0 {
+		return removeManagedMCPFile(fs, p.markerPath())
+	}
+	return p.writeManagedMarker(fs)
+}
+
 func (p MCPProjection) claudeServersDoc() map[string]any {
 	out := make(map[string]any, len(p.Servers))
 	for _, server := range p.Servers {
@@ -311,6 +351,34 @@ func (p MCPProjection) codexServersDoc() map[string]any {
 			entry["url"] = server.URL
 			if len(server.Headers) > 0 {
 				entry["http_headers"] = cloneStringMap(server.Headers)
+			}
+		}
+		out[server.Name] = entry
+	}
+	return out
+}
+
+func (p MCPProjection) opencodeServersDoc() map[string]any {
+	out := make(map[string]any, len(p.Servers))
+	for _, server := range p.Servers {
+		entry := map[string]any{"enabled": true}
+		switch server.Transport {
+		case MCPTransportStdio:
+			entry["type"] = "local"
+			command := make([]string, 0, 1+len(server.Args))
+			if server.Command != "" {
+				command = append(command, server.Command)
+			}
+			command = append(command, server.Args...)
+			entry["command"] = command
+			if len(server.Env) > 0 {
+				entry["environment"] = cloneStringMap(server.Env)
+			}
+		case MCPTransportHTTP:
+			entry["type"] = "remote"
+			entry["url"] = server.URL
+			if len(server.Headers) > 0 {
+				entry["headers"] = cloneStringMap(server.Headers)
 			}
 		}
 		out[server.Name] = entry

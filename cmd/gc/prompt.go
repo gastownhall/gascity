@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/promptmeta"
 )
 
 const (
@@ -39,6 +40,20 @@ type PromptContext struct {
 	Env           map[string]string // from Agent.Env — custom vars
 }
 
+// PromptRenderResult holds the rendered text plus the version and rendered
+// content SHA introduced by issue #1256 (1e).
+//
+// Version comes from the template's `version` frontmatter field — a human
+// label that surfaces in dashboards and `gc analyze` output. SHA is the
+// SHA-256 of the rendered text (after text/template substitution); two
+// runs with the same Version but diverging SHAs reveal an unbumped
+// template edit.
+type PromptRenderResult struct {
+	Text    string
+	Version string
+	SHA     string
+}
+
 // renderPrompt reads a prompt template file and renders it with the given
 // context. cityName is used internally by template functions (e.g. session)
 // but not exposed as a template variable. sessionTemplate is the custom
@@ -50,21 +65,34 @@ type PromptContext struct {
 // or the file doesn't exist. On parse or execute error, logs a warning to
 // stderr and returns the raw text (graceful fallback).
 func renderPrompt(fs fsys.FS, cityPath, cityName, templatePath string, ctx PromptContext, sessionTemplate string, stderr io.Writer, packDirs []string, injectFragments []string, store beads.Store) string {
+	return renderPromptWithMeta(fs, cityPath, cityName, templatePath, ctx, sessionTemplate, stderr, packDirs, injectFragments, store).Text
+}
+
+// renderPromptWithMeta is renderPrompt's variant that additionally returns
+// the template's frontmatter version and the SHA of the rendered output.
+// Callers persisting prompt provenance (session metadata, WorkerOperation
+// payloads) should use this entry point.
+func renderPromptWithMeta(fs fsys.FS, cityPath, cityName, templatePath string, ctx PromptContext, sessionTemplate string, stderr io.Writer, packDirs []string, injectFragments []string, store beads.Store) PromptRenderResult {
 	if templatePath == "" {
-		return ""
+		return PromptRenderResult{}
 	}
 	sourcePath := promptTemplateSourcePath(cityPath, templatePath)
 	data, err := fs.ReadFile(sourcePath)
 	if err != nil {
-		return ""
+		return PromptRenderResult{}
 	}
 	raw := string(data)
+	fm, body := promptmeta.Parse(raw)
 
 	// Canonical prompt templates use .template.md. Legacy .md.tmpl files
-	// remain supported temporarily for compatibility; plain .md files are
-	// returned as-is.
+	// remain supported temporarily for compatibility; plain .md files skip
+	// template execution but still strip frontmatter before hashing/returning.
 	if !isPromptTemplatePath(templatePath) {
-		return raw
+		return PromptRenderResult{
+			Text:    body,
+			Version: fm.Version,
+			SHA:     promptmeta.SHA(body),
+		}
 	}
 
 	tmpl := template.New("prompt").
@@ -94,17 +122,27 @@ func renderPrompt(fs fsys.FS, cityPath, cityName, templatePath string, ctx Promp
 	loadSharedTemplates(fs, tmpl, agentFragDir, stderr)
 
 	// Parse main template last — its body becomes the "prompt" template.
-	tmpl, err = tmpl.Parse(raw)
+	// Frontmatter is stripped before parsing so it doesn't appear in
+	// rendered output.
+	tmpl, err = tmpl.Parse(body)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc: prompt template %q: %v\n", templatePath, err) //nolint:errcheck // best-effort stderr
-		return raw
+		return PromptRenderResult{
+			Text:    body,
+			Version: fm.Version,
+			SHA:     promptmeta.SHA(body),
+		}
 	}
 
 	td := buildTemplateData(ctx)
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, td); err != nil {
 		fmt.Fprintf(stderr, "gc: prompt template %q: %v\n", templatePath, err) //nolint:errcheck // best-effort stderr
-		return raw
+		return PromptRenderResult{
+			Text:    body,
+			Version: fm.Version,
+			SHA:     promptmeta.SHA(body),
+		}
 	}
 
 	// Append injected fragments.
@@ -123,7 +161,12 @@ func renderPrompt(fs fsys.FS, cityPath, cityName, templatePath string, ctx Promp
 		buf.Write(fbuf.Bytes())
 	}
 
-	return buf.String()
+	rendered := buf.String()
+	return PromptRenderResult{
+		Text:    rendered,
+		Version: fm.Version,
+		SHA:     promptmeta.SHA(rendered),
+	}
 }
 
 func promptTemplateSourcePath(cityPath, templatePath string) string {

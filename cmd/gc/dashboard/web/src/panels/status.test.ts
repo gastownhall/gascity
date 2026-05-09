@@ -9,8 +9,11 @@ vi.mock("../api", () => ({
 
 function installStatusDOM(): void {
   document.body.innerHTML = `
-    <div class="scope-banner detached" id="scope-banner">
-      <span id="scope-badge" class="badge badge-muted">Loading</span>
+    <div class="scope-banner" id="scope-banner">
+      <div class="scope-info">
+        <span class="scope-title">Selected Scope</span>
+        <span id="scope-badge" class="badge badge-muted">Loading</span>
+      </div>
       <div id="scope-status"></div>
     </div>
     <div id="status-banner"></div>
@@ -36,6 +39,16 @@ function flushPromises(): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, 0);
   });
+}
+
+function scopeStats(): Record<string, string> {
+  const stats: Record<string, string> = {};
+  document.querySelectorAll(".scope-stat").forEach((stat) => {
+    const label = stat.querySelector(".scope-stat-label")?.textContent ?? "";
+    const value = stat.querySelector(".scope-stat-value")?.textContent ?? "";
+    stats[label] = value;
+  });
+  return stats;
 }
 
 describe("status panel scope rendering", () => {
@@ -142,8 +155,13 @@ describe("status panel scope rendering", () => {
     const render = renderStatus();
     await flushPromises();
 
-    expect(document.getElementById("scope-badge")?.textContent).toBe("Detached");
-    expect(document.getElementById("scope-status")?.textContent).toContain("control-dispatcher");
+    expect(document.getElementById("scope-badge")?.textContent).toBe("City");
+    expect(scopeStats()).toMatchObject({
+      City: "alpha",
+      Session: "control-dispatcher",
+      Terminal: "Detached",
+      State: "Running",
+    });
 
     cityStatus.resolve(ok({
       agents: { running: 2 },
@@ -189,7 +207,8 @@ describe("status panel scope rendering", () => {
     await vi.advanceTimersByTimeAsync(1_000);
     await render;
 
-    expect(document.getElementById("scope-badge")?.textContent).toBe("Detached");
+    expect(document.getElementById("scope-badge")?.textContent).toBe("City");
+    expect(scopeStats().Terminal).toBe("Detached");
     expect(document.getElementById("status-banner")?.textContent).toContain("Status API slow");
     expect(document.getElementById("status-banner")?.textContent).toContain("1");
   });
@@ -224,9 +243,51 @@ describe("status panel scope rendering", () => {
     const { renderStatus } = await import("./status");
     await renderStatus();
 
-    expect(document.getElementById("scope-badge")?.textContent).toBe("Detached");
-    expect(document.getElementById("scope-status")?.textContent).toContain("alpha");
-    expect(document.getElementById("scope-status")?.textContent).toContain("control-dispatcher");
-    expect(document.getElementById("scope-status")?.textContent).toContain("Running");
+    expect(document.getElementById("scope-badge")?.textContent).toBe("City");
+    expect(scopeStats()).toMatchObject({
+      City: "alpha",
+      Session: "control-dispatcher",
+      Terminal: "Detached",
+      State: "Running",
+    });
+  });
+
+  it("keeps terminal attachment separate from the city scope badge", async () => {
+    window.history.pushState({}, "", "/dashboard?city=alpha");
+    const now = new Date().toISOString();
+    apiGet.mockImplementation((path: string) => {
+      if (path.includes("/status")) {
+        return Promise.resolve(ok({
+          agents: { running: 1 },
+          mail: { unread: 0 },
+          work: { in_progress: 0, open: 0 },
+        }));
+      }
+      if (path.includes("/sessions")) {
+        return Promise.resolve(ok({
+          items: [{
+            attached: true,
+            configured_named_session: true,
+            last_active: now,
+            running: true,
+            template: "control-dispatcher",
+          }],
+        }));
+      }
+      if (path.includes("/beads")) return Promise.resolve(ok({ items: [] }));
+      if (path.includes("/convoys")) return Promise.resolve(ok({ items: [] }));
+      return Promise.resolve(ok({}));
+    });
+
+    const { renderStatus } = await import("./status");
+    await renderStatus();
+
+    expect(document.getElementById("scope-badge")?.textContent).toBe("City");
+    expect(scopeStats()).toMatchObject({
+      City: "alpha",
+      Session: "control-dispatcher",
+      Terminal: "Attached",
+      State: "Running",
+    });
   });
 });

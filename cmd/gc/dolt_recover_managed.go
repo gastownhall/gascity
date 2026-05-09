@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ type managedDoltRecoverReport struct {
 	PID               int
 	Port              int
 	Healthy           bool
+	Restarted         bool
 }
 
 func recoverManagedDoltProcess(cityPath, host, port, user, logLevel string, timeout time.Duration) (managedDoltRecoverReport, error) {
@@ -92,6 +94,17 @@ func recoverManagedDoltProcess(cityPath, host, port, user, logLevel string, time
 		health, healthErr := managedDoltHealthCheck(host, port, user, true)
 		if healthErr == nil && health.ReadOnly == "true" {
 			report.DiagnosedReadOnly = true
+		} else if healthErr == nil && health.QueryReady && health.ReadOnly == "false" {
+			report.Ready = true
+			report.Healthy = true
+			if err := recoverManagedDoltRepairRuntimeStateForHealthyPort(cityPath, port); err != nil {
+				return report, err
+			}
+			if err := publishManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
+				return report, fmt.Errorf("publish managed dolt runtime state: %w", err)
+			}
+			recoverManagedDoltPopulateReportFromRuntimeState(cityPath, port, &report)
+			return report, nil
 		}
 	}
 
@@ -110,6 +123,7 @@ func recoverManagedDoltProcess(cityPath, host, port, user, logLevel string, time
 	time.Sleep(time.Second)
 
 	startReport, err := startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel, -1, timeout, false)
+	report.Restarted = true
 	report.Ready = startReport.Ready
 	if startReport.PID > 0 {
 		report.PID = startReport.PID
@@ -182,6 +196,7 @@ func managedDoltRecoverFields(report managedDoltRecoverReport) []string {
 		"pid\t" + strconv.Itoa(report.PID),
 		"port\t" + strconv.Itoa(report.Port),
 		"healthy\t" + strconv.FormatBool(report.Healthy),
+		"restarted\t" + strconv.FormatBool(report.Restarted),
 	}
 }
 
@@ -221,6 +236,64 @@ func recoverManagedDoltObservedRebindPossible(cityPath, requestedPort string) bo
 		}
 	}
 	return false
+}
+
+func recoverManagedDoltRepairRuntimeStateForHealthyPort(cityPath, requestedPort string) error {
+	owned, err := managedDoltLifecycleOwned(cityPath)
+	if err != nil || !owned {
+		return err
+	}
+	portNum, err := strconv.Atoi(strings.TrimSpace(requestedPort))
+	if err != nil || portNum <= 0 {
+		return nil
+	}
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		return err
+	}
+	state := doltRuntimeState{
+		Running: true,
+		Port:    portNum,
+		DataDir: layout.DataDir,
+	}
+	repaired, ok := repairedManagedDoltRuntimeState(cityPath, layout, state)
+	if !ok {
+		return nil
+	}
+	if err := writeDoltRuntimeStateFile(layout.StateFile, repaired); err != nil {
+		return fmt.Errorf("repair provider dolt runtime state: %w", err)
+	}
+	return nil
+}
+
+func recoverManagedDoltPopulateReportFromRuntimeState(cityPath, requestedPort string, report *managedDoltRecoverReport) {
+	if report == nil {
+		return
+	}
+	for _, path := range []string{providerManagedDoltStatePath(cityPath), managedDoltStatePath(cityPath)} {
+		state, err := readDoltRuntimeStateFile(path)
+		if err != nil || !recoverManagedDoltRuntimeStateMatchesRequest(cityPath, requestedPort, state) {
+			continue
+		}
+		report.HadPID = true
+		report.PID = state.PID
+		report.Port = state.Port
+		return
+	}
+}
+
+func recoverManagedDoltRuntimeStateMatchesRequest(cityPath, requestedPort string, state doltRuntimeState) bool {
+	if !state.Running || state.PID <= 0 || state.Port <= 0 {
+		return false
+	}
+	requestedPort = strings.TrimSpace(requestedPort)
+	if requestedPort != "" && strconv.Itoa(state.Port) != requestedPort {
+		return false
+	}
+	if dataDir := strings.TrimSpace(state.DataDir); dataDir != "" && !samePath(dataDir, filepath.Join(cityPath, ".beads", "dolt")) {
+		return false
+	}
+	return true
 }
 
 func waitForManagedDoltLifecycleOrReady(cityPath, host, port, user string, timeout time.Duration, lockFile *os.File, _ managedDoltRuntimeLayout, report *managedDoltRecoverReport) (bool, bool, error) {

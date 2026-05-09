@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
@@ -763,11 +764,58 @@ func BeadMetadataTarget(store beads.Store, beadID string) string {
 
 // SlingFormulaSearchPaths returns the formula search paths for the current
 // sling context.
+//
+// FormulaLayers.SearchPaths is keyed by rig NAME, but agent.Dir may be
+// either a rig name OR a filesystem path (the docs/examples allow both).
+// Resolve to the rig name first so pack-imported formula layers (under
+// fl.Rigs[<name>]) are reachable when an agent is configured with a path
+// instead of a name. Without this resolution the lookup silently falls
+// back to fl.City and pack-imported formulas appear "not found in search
+// paths" — `gc formula list` would still find them by scanning every
+// configured search path (city + every rig), so the lookup-versus-list
+// asymmetry is the surface symptom. See gastownhall/gascity#1801.
 func SlingFormulaSearchPaths(deps SlingDeps, a config.Agent) []string {
 	if deps.Cfg == nil {
 		return nil
 	}
-	return deps.Cfg.FormulaLayers.SearchPaths(a.Dir)
+	rigName := rigNameForAgent(deps.Cfg, a)
+	return deps.Cfg.FormulaLayers.SearchPaths(rigName)
+}
+
+// rigNameForAgent returns the rig name for an agent. Handles both
+// configuration shapes:
+//   - a.Dir is a rig name (`dir = "gascity"`) — return as-is after a
+//     defensive existence check against cfg.Rigs.
+//   - a.Dir is a filesystem path (`dir = "/home/ds/gascity"`) — find the
+//     rig whose Path matches (after symlink resolution + normalization)
+//     and return its Name.
+//
+// Returns "" when the agent is city-scoped (a.Dir empty) or no rig
+// matches; SearchPaths handles "" by returning city-level layers.
+func rigNameForAgent(cfg *config.City, a config.Agent) string {
+	dir := strings.TrimSpace(a.Dir)
+	if dir == "" {
+		return ""
+	}
+	for _, r := range cfg.Rigs {
+		if r.Name == dir {
+			return r.Name
+		}
+	}
+	for _, r := range cfg.Rigs {
+		if strings.TrimSpace(r.Path) == "" {
+			continue
+		}
+		// Use SamePath so paths that differ only by trailing slashes,
+		// symlink resolution (/tmp vs /private/tmp on macOS), or other
+		// normalization quirks still match. Strict string equality
+		// would re-introduce the #1801 fall-through under those
+		// conditions.
+		if pathutil.SamePath(r.Path, dir) {
+			return r.Name
+		}
+	}
+	return ""
 }
 
 // SlingFormulaUsesBaseBranch reports whether the formula conventionally

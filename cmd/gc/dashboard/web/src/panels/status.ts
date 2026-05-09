@@ -1,5 +1,6 @@
 import { api, cityScope, type DashboardSchema } from "../api";
 import { logWarn } from "../logger";
+import { currentCityStatus, isKnownUnavailableCity } from "../state";
 import { byId, clear, el } from "../util/dom";
 import { ACTIVE_WINDOW_MS, beadPriority, formatTimestamp } from "../util/legacy";
 
@@ -21,6 +22,16 @@ export async function renderStatus(): Promise<void> {
   if (!banner) return;
   if (!city) {
     await renderSupervisorStatus(banner);
+    return;
+  }
+
+  const status = currentCityStatus();
+  if (isKnownUnavailableCity(status)) {
+    const reason = status.kind === "not-running"
+      ? (status.city.error ?? status.city.status ?? "City not running")
+      : "City unavailable";
+    renderCityScopeBannerUnavailable(city, "Sessions unavailable");
+    renderUnavailableCitySummary(banner, reason);
     return;
   }
 
@@ -106,6 +117,22 @@ export async function renderStatus(): Promise<void> {
     clear(banner);
     banner.append(stats, alerts);
   }
+}
+
+function renderUnavailableCitySummary(banner: HTMLElement, reason: string): void {
+  lastStatusBannerKey = "";
+  clear(banner);
+  const stats = el("div", { class: "summary-stats" }, [
+    statChip(0, "Agents"),
+    statChip(0, "Assigned"),
+    statChip(0, "Beads"),
+    statChip(0, "Convoys"),
+    statChip("n/a", "Unread"),
+  ]);
+  const alerts = el("div", { class: "summary-alerts" }, [
+    el("span", { class: "alert-item alert-yellow" }, [reason]),
+  ]);
+  banner.append(stats, alerts);
 }
 
 async function requestWithTimeout<T>(
@@ -224,31 +251,30 @@ function renderCityScopeBanner(city: string, sessions: SessionSummary[]): void {
     sessions.find((s) => !s.rig && !s.pool);
 
   if (!overseer) {
-    banner.classList.remove("attached");
-    banner.classList.add("detached");
-    badge.className = "badge badge-muted";
-    badge.textContent = "Detached";
+    banner.classList.remove("attached", "detached");
+    badge.className = "badge badge-cyan";
+    badge.textContent = "City";
     clear(status);
     status.append(
-      scopeStat("Scope", city),
-      scopeStat("Overseer", "none"),
+      scopeStat("City", city),
+      scopeStat("Session", "none"),
     );
     return;
   }
 
   banner.classList.remove("attached", "detached");
-  banner.classList.add(overseer.attached ? "attached" : "detached");
-  badge.className = `badge ${overseer.attached ? "badge-green" : "badge-muted"}`;
-  badge.textContent = overseer.attached ? "Attached" : "Detached";
+  badge.className = "badge badge-cyan";
+  badge.textContent = "City";
   clear(status);
 
   const active = overseer.last_active
     ? Date.now() - new Date(overseer.last_active).getTime() < ACTIVE_WINDOW_MS
     : false;
   status.append(
-    scopeStat("Scope", city),
+    scopeStat("City", city),
     scopeStat("Session", overseer.template),
     scopeStat("Activity", overseer.last_active ? formatTimestamp(overseer.last_active) : "Unknown", active ? "active" : "idle"),
+    scopeStat("Terminal", overseer.attached ? "Attached" : "Detached"),
     scopeStat("State", overseer.running ? "Running" : "Stopped"),
   );
 }
@@ -259,7 +285,6 @@ function renderCityScopeBannerUnavailable(city: string, reason: string): void {
   const status = byId("scope-status");
   if (!banner || !badge || !status) return;
   banner.classList.remove("attached", "detached");
-  banner.classList.add("detached");
   badge.className = "badge badge-muted";
   badge.textContent = "Unknown";
   clear(status);
@@ -274,8 +299,7 @@ function renderCityScopeBannerFleet(): void {
   const badge = byId("scope-badge");
   const status = byId("scope-status");
   if (!banner || !badge || !status) return;
-  banner.classList.remove("attached");
-  banner.classList.add("detached");
+  banner.classList.remove("attached", "detached");
   badge.className = "badge badge-muted";
   badge.textContent = "Supervisor";
   clear(status);

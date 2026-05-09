@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"strings"
 	"sync"
@@ -76,6 +77,10 @@ type CacheStats struct {
 	LastProblemAt           time.Time
 	LastProblem             string
 	State                   string
+	// StaggerOffsetMs is the one-shot startup delay applied between Prime
+	// and the first reconciler tick, in milliseconds. Set once when
+	// StartReconciler runs; zero if stagger is disabled.
+	StaggerOffsetMs int64
 }
 
 const (
@@ -85,6 +90,69 @@ const (
 	cacheReconcileIntervalMedium = 60 * time.Second
 	cacheReconcileIntervalLarge  = 120 * time.Second
 )
+
+// StaggerOption configures the deterministic startup stagger applied
+// between Prime and the first reconciler tick. N agents starting in
+// lockstep would otherwise hit the shared dolt server simultaneously;
+// the stagger spreads first-tick load across a 0–30 s window.
+//
+// Construct one via WithStaggerAuto, WithStaggerOff, or
+// WithStaggerFixed at the call site for self-documenting intent. The
+// zero value is equivalent to WithStaggerOff().
+type StaggerOption struct {
+	auto     bool
+	fixed    bool
+	explicit time.Duration
+}
+
+// WithStaggerAuto enables a deterministic per-agent stagger derived
+// from FNV-32a(agentID) mod cacheReconcileIntervalSmall. The stagger
+// is reproducible across runs given the same agent ID.
+func WithStaggerAuto() StaggerOption {
+	return StaggerOption{auto: true}
+}
+
+// WithStaggerOff disables stagger; the reconciler enters its loop with
+// no startup delay. This is the default for tests so existing behavior
+// is preserved.
+func WithStaggerOff() StaggerOption {
+	return StaggerOption{}
+}
+
+// WithStaggerFixed sets an explicit stagger duration regardless of
+// agentID. Negative durations clamp to zero.
+func WithStaggerFixed(d time.Duration) StaggerOption {
+	if d < 0 {
+		d = 0
+	}
+	return StaggerOption{fixed: true, explicit: d}
+}
+
+// resolve returns the concrete stagger duration for this option.
+// agentID is consulted only when the option is WithStaggerAuto.
+func (o StaggerOption) resolve(agentID string) time.Duration {
+	switch {
+	case o.fixed:
+		return o.explicit
+	case o.auto:
+		return computeAutoStagger(agentID)
+	}
+	return 0
+}
+
+// computeAutoStagger hashes agentID with FNV-32a and reduces it modulo
+// cacheReconcileIntervalSmall (in milliseconds). The result lies in
+// [0, cacheReconcileIntervalSmall) and is fully deterministic — no
+// time-seeding — so test runs reproduce.
+func computeAutoStagger(agentID string) time.Duration {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(agentID))
+	modMs := cacheReconcileIntervalSmall.Milliseconds()
+	if modMs <= 0 {
+		return 0
+	}
+	return time.Duration(int64(h.Sum32())%modMs) * time.Millisecond
+}
 
 // NewCachingStore wraps a BdStore with an in-memory read cache.
 // Call Prime() before serving reads, then StartReconciler() for
@@ -357,10 +425,24 @@ func (c *CachingStore) Prime(_ context.Context) error {
 }
 
 // StartReconciler launches watchdog reconciliation. Cancel ctx to stop.
-func (c *CachingStore) StartReconciler(ctx context.Context) {
+// The stagger applies a one-time delay between this call and the first
+// reconciler tick (see StaggerOption); agentID is consulted only when
+// stagger is WithStaggerAuto. A single "beads cache: stagger=Nms
+// agent=..." log line is emitted before the loop starts, even when the
+// resolved stagger is zero, so absence is unambiguous.
+func (c *CachingStore) StartReconciler(ctx context.Context, stagger StaggerOption, agentID string) {
 	ctx, cancel := context.WithCancel(ctx)
 	c.cancelFn = cancel
-	go c.reconcileLoop(ctx)
+
+	offset := stagger.resolve(agentID)
+
+	c.mu.Lock()
+	c.stats.StaggerOffsetMs = offset.Milliseconds()
+	c.mu.Unlock()
+
+	log.Printf("beads cache: stagger=%dms agent=%s", offset.Milliseconds(), agentID)
+
+	go c.reconcileLoop(ctx, offset)
 }
 
 // StopReconciler cancels the background reconciler.

@@ -433,10 +433,10 @@ Do NOT kill the agent directly. File a warrant bead and let the dog pool
 handle the shutdown dance (multi-stage interrogation with due process):
 
 ```bash
-gc bd create --type=warrant \
+gc bd create --type=task \
   --title="Stuck: <agent>" \
   --metadata '{"target":"<session-name>","reason":"No progress on <bead> for <duration>","requester":"witness"}' \
-  --label=pool:dog
+  --label=warrant,pool:dog
 ```
 
 The dog pool picks up the warrant and runs `mol-shutdown-dance`, which

@@ -174,7 +174,11 @@ case "$op" in
     printf '{"id":"%s","from":"%s","to":"%s","subject":"%s","body":"%s","created_at":"%s","thread_id":"%s","reply_to":"%s"}\n' "$new_msgid" "$from" "$orig_from" "$subject" "$body" "$ts" "$orig_thread" "$msgid"
     ;;
   thread)
-    thread_id="$1"
+    id="$1"
+    thread_id="$id"
+    if [ -f "$STATE/messages/$id" ]; then
+      thread_id=$(sed -n '8p' "$STATE/messages/$id")
+    fi
     result=""
     for f in "$STATE"/messages/*; do
       [ -f "$f" ] || continue

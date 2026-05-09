@@ -1438,6 +1438,31 @@ func TestHealState_DeadActiveHealsToAsleep(t *testing.T) {
 	}
 }
 
+// TestHealState_NoopOnClosedBead verifies healState returns early without
+// writing when session.Status == "closed". Without this guard the lifecycle
+// projection still resolves to BaseStateDrained for closed beads, so
+// healState would rewrite state=asleep on every reconciler tick of a
+// terminal bead — alternating with the gc_swept / orphaned writes from
+// closeBead and producing the closed-bead metadata flap.
+func TestHealState_NoopOnClosedBead(t *testing.T) {
+	store := newTestStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 29, 4, 0, 0, 0, time.UTC)}
+
+	session := makeBead("b1", map[string]string{
+		"state": "active",
+	})
+	session.Status = "closed"
+
+	healState(&session, false, store, clk)
+	if got := len(store.metadata["b1"]); got != 0 {
+		t.Errorf("healState wrote %d metadata entries on closed bead; want 0", got)
+	}
+	if session.Metadata["state"] != "active" {
+		t.Errorf("session.Metadata[state] = %q, want active (no-op should not mutate in-memory bead)",
+			session.Metadata["state"])
+	}
+}
+
 func TestHealState_PreservesCreatingWhileStartRequested(t *testing.T) {
 	store := newTestStore()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 29, 4, 0, 0, 0, time.UTC)}

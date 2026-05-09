@@ -13,7 +13,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/doltauth"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 )
@@ -167,7 +166,7 @@ func applyOrderExecCanonicalDoltEnv(cityPath, scopeRoot string, env map[string]s
 		return
 	}
 	applyCanonicalDoltTargetEnv(env, target)
-	applyResolvedDoltAuthEnv(env, doltauth.AuthScopeRoot(cityPath, scopeRoot, target), strings.TrimSpace(target.User))
+	applyCanonicalDoltAuthEnv(env, cityPath, scopeRoot, target)
 	if target.External {
 		env["GC_DOLT_MANAGED_LOCAL"] = "0"
 		clearManagedDoltRuntimeLayoutEnv(env, cityPath)
@@ -206,8 +205,11 @@ func applyOrderExecManagedDoltFallback(cityPath, scopeRoot string, env map[strin
 	}
 	env["GC_DOLT_MANAGED_LOCAL"] = "1"
 	applyManagedDoltRuntimeLayoutEnv(env, cityPath)
-	target := contract.DoltConnectionTarget{EndpointOrigin: resolved.State.EndpointOrigin}
-	applyResolvedDoltAuthEnv(env, doltauth.AuthScopeRoot(cityPath, scopeRoot, target), strings.TrimSpace(resolved.State.DoltUser))
+	target := contract.DoltConnectionTarget{
+		User:           strings.TrimSpace(resolved.State.DoltUser),
+		EndpointOrigin: resolved.State.EndpointOrigin,
+	}
+	applyCanonicalDoltAuthEnv(env, cityPath, scopeRoot, target)
 	mirrorBeadsDoltEnv(env)
 	return true
 }

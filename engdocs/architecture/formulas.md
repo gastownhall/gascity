@@ -64,6 +64,39 @@ Store.MolCook / Store.MolCookOn
         \--> Mem/File    -> simplified molecule root for tests/tutorials
 ```
 
+### Review Quorum Formula
+
+`internal/bootstrap/packs/core/formulas/mol-review-quorum.toml` is a Gas
+City-owned review quorum formula scaffold. It is a core `graph.v2` formula,
+not a separate lifecycle controller. The graph has exactly two reviewer lanes,
+with lane IDs, providers, models, and dispatch targets supplied by formula
+variables, followed by a configured synthesis step.
+
+The reviewer lane identity and runtime binding are intentionally configured in
+one obvious place: formula vars. `lane_one_id`, `lane_one_provider`,
+`lane_one_model`, `lane_one_target`, `lane_two_id`, `lane_two_provider`,
+`lane_two_model`, and `lane_two_target` are required when the formula is
+instantiated. The synthesis dispatch target is configured separately through
+`synthesis_target`. Each reviewer lane has `[steps.retry] max_attempts = 3` and
+`on_exhausted = "soft_fail"` so transient provider exhaustion degrades quorum
+coverage instead of failing the whole formula. The synthesis step is hard-fail
+because it is responsible for persisting the final durable state.
+
+Reviewer output is structured for future automation. Lanes must write
+`verdict`, `summary`, `findings_count`, `findings`, `evidence`, `usage`,
+`read_only_enforcement`, `mutations_delta`, `failure_class`, and
+`failure_reason`; synthesis preserves lane provenance and writes a
+`review-quorum.summary.v1` output. `internal/reviewquorum` defines the durable
+Go contract and finalizer, but the current formula synthesis step is
+agent-executed and does not call `reviewquorum.Finalize` directly. Future
+`dx-review summarize` compatibility can consume that state, but `dx-review` is
+not the lifecycle owner.
+
+Read-only enforcement is defined as a mutation baseline delta. A reviewer must
+record the workspace state before review with `git status --porcelain=v1 -z`
+and compare after review against that baseline; pre-existing tracked changes and
+untracked files do not count as reviewer-created mutations.
+
 ### Resolution
 
 `ComputeFormulaLayers()` in `internal/config/pack.go` computes the ordered
@@ -154,6 +187,7 @@ Closed wisps are purged by the controller's wisp GC in
 | `internal/beads/memstore.go` | Simplified in-memory molecule creation |
 | `internal/beads/filestore.go` | Persistent wrapper over `MemStore` |
 | `internal/convergence/formula.go` | Convergence-specific formula validation |
+| `internal/bootstrap/packs/core/formulas/mol-review-quorum.toml` | Core two-lane review quorum formula scaffold |
 
 ## Configuration
 

@@ -1989,6 +1989,43 @@ name = "mayor"
 	}
 }
 
+func TestParseDaemonNudgeDispatcher(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test"
+
+[daemon]
+nudge_dispatcher = "supervisor"
+
+[[agent]]
+name = "mayor"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Daemon.NudgeDispatcher != "supervisor" {
+		t.Errorf("Daemon.NudgeDispatcher = %q, want %q", cfg.Daemon.NudgeDispatcher, "supervisor")
+	}
+	if got := cfg.Daemon.NudgeDispatcherMode(); got != "supervisor" {
+		t.Errorf("NudgeDispatcherMode() = %q, want %q", got, "supervisor")
+	}
+}
+
+func TestDaemonNudgeDispatcherDefault(t *testing.T) {
+	d := DaemonConfig{}
+	if got := d.NudgeDispatcherMode(); got != "legacy" {
+		t.Errorf("NudgeDispatcherMode() = %q, want %q", got, "legacy")
+	}
+}
+
+func TestDaemonNudgeDispatcherUnknownFallsBack(t *testing.T) {
+	d := DaemonConfig{NudgeDispatcher: "garbage"}
+	if got := d.NudgeDispatcherMode(); got != "legacy" {
+		t.Errorf("NudgeDispatcherMode() with unknown value = %q, want %q", got, "legacy")
+	}
+}
+
 func TestDaemonMaxRestartsDefault(t *testing.T) {
 	d := DaemonConfig{}
 	got := d.MaxRestartsOrDefault()

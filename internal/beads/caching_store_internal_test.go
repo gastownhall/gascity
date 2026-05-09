@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -615,6 +616,112 @@ func TestCachingStoreSparseUpdatedEventFallsBackWhenCompleteCoverageIsMissingDep
 	}
 	if _, ok := cache.CachedReady(); ok {
 		t.Fatal("CachedReady answered from cache after dependency coverage became incomplete")
+	}
+}
+
+func TestCachingStoreNoOpUpdatedEventSequencesDependencyCoverageInvalidation(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	bead, err := backing.Create(Bead{Title: "target"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	cache.mu.Lock()
+	cache.deps[bead.ID] = nil
+	cache.depsComplete = true
+	cache.mu.Unlock()
+
+	cache.mu.RLock()
+	startMutationSeq := cache.mutationSeq
+	cache.mu.RUnlock()
+
+	payload, err := json.Marshal(bead)
+	if err != nil {
+		t.Fatalf("Marshal bead: %v", err)
+	}
+	cache.ApplyEvent("bead.updated", payload)
+
+	cache.mu.RLock()
+	gotMutationSeq := cache.mutationSeq
+	gotBeadSeq, hasBeadSeq := cache.beadSeq[bead.ID]
+	depsComplete := cache.depsComplete
+	_, hasDeps := cache.deps[bead.ID]
+	cache.mu.RUnlock()
+	if gotMutationSeq <= startMutationSeq {
+		t.Fatalf("mutationSeq = %d, want advanced past %d", gotMutationSeq, startMutationSeq)
+	}
+	if !hasBeadSeq || gotBeadSeq <= startMutationSeq {
+		t.Fatalf("beadSeq[%s] = (%d, %v), want sequenced after %d", bead.ID, gotBeadSeq, hasBeadSeq, startMutationSeq)
+	}
+	if depsComplete {
+		t.Fatal("depsComplete = true, want dependency-omitting update to mark coverage incomplete")
+	}
+	if hasDeps {
+		t.Fatalf("deps[%s] still cached after dependency-omitting update", bead.ID)
+	}
+	if ready, ok := cache.CachedReady(); ok {
+		t.Fatalf("CachedReady answered from cache after dependency coverage became incomplete: %v", ready)
+	}
+}
+
+func TestCachingStoreNoOpUpdatedEventPreservesCachedMetadataMap(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	bead, err := backing.Create(Bead{
+		Title:    "target",
+		Metadata: map[string]string{"key": "value"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	cache.mu.RLock()
+	startMutationSeq := cache.mutationSeq
+	beforeMetadata := reflect.ValueOf(cache.beads[bead.ID].Metadata).Pointer()
+	cache.mu.RUnlock()
+
+	payload, err := json.Marshal(struct {
+		ID           string            `json:"id"`
+		Title        string            `json:"title"`
+		Status       string            `json:"status"`
+		Type         string            `json:"issue_type"`
+		CreatedAt    time.Time         `json:"created_at"`
+		Metadata     map[string]string `json:"metadata"`
+		Dependencies []Dep             `json:"dependencies"`
+	}{
+		ID:           bead.ID,
+		Title:        bead.Title,
+		Status:       bead.Status,
+		Type:         bead.Type,
+		CreatedAt:    bead.CreatedAt,
+		Metadata:     bead.Metadata,
+		Dependencies: []Dep{},
+	})
+	if err != nil {
+		t.Fatalf("Marshal payload: %v", err)
+	}
+	cache.ApplyEvent("bead.updated", payload)
+
+	cache.mu.RLock()
+	gotMutationSeq := cache.mutationSeq
+	afterMetadata := reflect.ValueOf(cache.beads[bead.ID].Metadata).Pointer()
+	cache.mu.RUnlock()
+	if gotMutationSeq != startMutationSeq {
+		t.Fatalf("mutationSeq = %d, want unchanged %d", gotMutationSeq, startMutationSeq)
+	}
+	if afterMetadata != beforeMetadata {
+		t.Fatalf("metadata map pointer = %x, want unchanged %x", afterMetadata, beforeMetadata)
 	}
 }
 

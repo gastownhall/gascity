@@ -2387,19 +2387,48 @@ type DoltConfigExpectedValue struct {
 //
 // This is intentionally a contract subset, not a byte-for-byte mirror of
 // writeManagedDoltConfigFile in cmd/gc/cmd_dolt_config.go. It covers the keys
-// whose drift would change managed runtime behavior materially. Dynamic values
-// such as data_dir are checked by DoltConfigCheck because they depend on the
-// inspected city path.
+// whose drift would change managed runtime behavior materially. wait_timeout
+// follows the same GC_DOLT_WAIT_TIMEOUT environment override as config
+// generation. Dynamic values such as data_dir are checked by DoltConfigCheck
+// because they depend on the inspected city path.
 func DoltConfigExpectedValues() []DoltConfigExpectedValue {
-	return []DoltConfigExpectedValue{
-		{"behavior.auto_gc_behavior.enable", true},
+	values := []DoltConfigExpectedValue{
+		{"behavior.auto_gc_behavior.enable", false},
 		{"behavior.auto_gc_behavior.archive_level", 0},
+		{"system_variables.dolt_auto_gc_enabled", "OFF"},
+		{"system_variables.dolt_stats_enabled", "OFF"},
+		{"system_variables.dolt_stats_gc_enabled", "OFF"},
+		{"system_variables.dolt_stats_memory_only", "ON"},
+		{"system_variables.dolt_stats_paused", "ON"},
 		{"listener.read_timeout_millis", 300000},
 		{"listener.write_timeout_millis", 300000},
 		{"listener.max_connections", 1000},
 		{"listener.back_log", 50},
 		{"listener.max_connections_timeout_millis", 5000},
 	}
+	if waitTimeout := managedDoltConfigExpectedWaitTimeout(); waitTimeout > 0 {
+		values = append(values, DoltConfigExpectedValue{
+			Path:  "system_variables.wait_timeout",
+			Value: strconv.Itoa(waitTimeout),
+		})
+	}
+	return values
+}
+
+func managedDoltConfigExpectedWaitTimeout() int {
+	const defaultWaitTimeout = 30
+	raw := os.Getenv("GC_DOLT_WAIT_TIMEOUT")
+	if raw == "" {
+		return defaultWaitTimeout
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return defaultWaitTimeout
+	}
+	if n < 0 {
+		return 0
+	}
+	return n
 }
 
 // lookupYAMLPath walks a dotted key path through a decoded YAML map and

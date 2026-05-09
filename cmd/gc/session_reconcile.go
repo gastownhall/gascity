@@ -872,6 +872,15 @@ func healState(session *beads.Bead, alive bool, store beads.Store, clk clock.Clo
 	if session == nil {
 		return
 	}
+	// healState is the third writer in the closed-bead flap cycle. The
+	// lifecycle projection still resolves to BaseStateDrained for closed
+	// beads, so without this guard healState writes state=asleep on
+	// every reconciler tick of a terminal bead — alternating with the
+	// gc_swept / orphaned writes from the closeBead path. Closed beads
+	// are terminal; their advisory state metadata should not move.
+	if session.Status == "closed" {
+		return
+	}
 	batch := healStatePatch(*session, alive, clk)
 	if len(batch) == 0 {
 		return

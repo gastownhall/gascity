@@ -205,6 +205,18 @@ func (c *CachingStore) CloseAll(ids []string, metadata map[string]string) (int, 
 
 // SetMetadata sets a single metadata key-value on a bead.
 func (c *CachingStore) SetMetadata(id, key, value string) error {
+	// Idempotence: if the cached bead already has metadata[key] == value,
+	// the backing call is a no-op semantically. Skipping it avoids the
+	// bd subprocess invocation and — crucially — avoids firing bd's
+	// on_update hook, which calls "gc event emit bead.updated" and
+	// appends a line to the city's events.jsonl. Reconciler tick logic
+	// repeatedly writes the same heartbeat / deferral fields every ~2s,
+	// producing thousands of no-op events per hour. The cache is the
+	// supervisor's authoritative read source, so a value-match here is
+	// a value-match in the store.
+	if c.metadataAlreadyMatchesCached(id, map[string]string{key: value}) {
+		return nil
+	}
 	if err := c.backing.SetMetadata(id, key, value); err != nil {
 		return err
 	}
@@ -228,6 +240,18 @@ func (c *CachingStore) SetMetadata(id, key, value string) error {
 
 // SetMetadataBatch sets multiple metadata key-values on a bead.
 func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if len(kvs) == 0 {
+		return nil
+	}
+	// Idempotence: see SetMetadata. If every kv pair already matches the
+	// cached bead's metadata, skip the backing write — no bd subprocess,
+	// no on_update hook fire, no events.jsonl entry. Reconciler ticks
+	// re-stamp deferral timestamps and other "I observed this" markers
+	// on every cycle; without this guard each cycle generates a
+	// bead.updated event even when nothing changed.
+	if c.metadataAlreadyMatchesCached(id, kvs) {
+		return nil
+	}
 	if err := c.backing.SetMetadataBatch(id, kvs); err != nil {
 		return err
 	}
@@ -249,6 +273,41 @@ func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error 
 	c.updateStatsLocked()
 	c.mu.Unlock()
 	return nil
+}
+
+// metadataAlreadyMatchesCached returns true when the cache holds a primed
+// copy of the bead and every key/value in kvs is already present with the
+// same value. A cache miss returns false (we cannot prove no-op), so the
+// caller falls through to the backing write. Empty maps (no keys) match
+// trivially, but callers should handle len==0 explicitly to avoid acquiring
+// the lock for a guaranteed no-op.
+func (c *CachingStore) metadataAlreadyMatchesCached(id string, kvs map[string]string) bool {
+	if id == "" {
+		return false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	b, ok := c.beads[id]
+	if !ok {
+		return false
+	}
+	if b.Metadata == nil {
+		// Cache has the bead but no metadata map — any non-empty value
+		// would be a write; an empty value (clearing a never-set key)
+		// is already the desired state.
+		for _, v := range kvs {
+			if v != "" {
+				return false
+			}
+		}
+		return true
+	}
+	for k, v := range kvs {
+		if b.Metadata[k] != v {
+			return false
+		}
+	}
+	return true
 }
 
 // DepAdd adds a dependency and updates the cache.

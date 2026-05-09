@@ -1148,6 +1148,12 @@ For controller-restartable sessions, equivalent to:
   gc mail send $GC_ALIAS &lt;subject&gt; [message]
   gc runtime request-restart
 
+Under normal operation the controller stops controller-restartable
+self-handoff sessions before this command returns. If the controller does not
+act within a bounded timeout, gc handoff exits 1 with a diagnostic instead of
+blocking indefinitely. If interrupted, the restart request remains set for the
+controller to process on its next reconcile tick.
+
 Auto handoff (--auto): sends mail to self and returns without requesting a
 restart. This is for PreCompact hooks, where the provider is already managing
 the context compaction lifecycle.
@@ -1173,6 +1179,7 @@ gc handoff [subject] [message] [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--auto` | bool |  | Send handoff mail without requesting restart (for PreCompact hooks) |
+| `--hook-format` | string |  | format hook output for a provider |
 | `--target` | string |  | Remote session alias or ID to handoff (kills only controller-restartable sessions) |
 
 ## gc help
@@ -1311,6 +1318,10 @@ the standard top-level directories, and .template.md prompt templates, then
 materializes builtin packs under .gc/system/packs. Use --provider to create the default minimal city
 non-interactively, or --file to initialize from an existing TOML config file.
 
+Pass --preserve-existing to keep any pre-authored pack.toml, city.toml, or
+agent prompt files in the target directory (useful when bootstrapping a
+committed workspace — e.g. from a bootstrap.sh shipped in the repo).
+
 ```
 gc init [path] [flags]
 ```
@@ -1325,6 +1336,7 @@ gc init
   gc init --name my-city
   gc init --from ~/elan --name elan /city
   gc init --file examples/gastown.toml ~/bright-lights
+  gc init --file city.toml --preserve-existing .
 ```
 
 | Flag | Type | Default | Description |
@@ -1333,6 +1345,7 @@ gc init
 | `--file` | string |  | path to a TOML file to use as city.toml |
 | `--from` | string |  | path to an example city directory to copy |
 | `--name` | string |  | workspace name (default: target directory basename) |
+| `--preserve-existing` | bool |  | keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them |
 | `--provider` | string |  | built-in workspace provider to use for the default mayor config |
 | `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
 
@@ -1525,10 +1538,10 @@ gc mail send mayor "Build is green"
 
 ## gc mail thread
 
-Show all messages sharing a thread ID, ordered by time.
+Show all messages sharing a thread ID or message ID, ordered by time.
 
 ```
-gc mail thread <thread-id>
+gc mail thread <id>
 ```
 
 ## gc mcp
@@ -1959,6 +1972,10 @@ Set the canonical endpoint ownership for a rig.
 
 Use --inherit to make a rig derive its endpoint from the current city
 topology. Use --external to pin the rig to its own external Dolt endpoint.
+Use --self to mark the rig as running its own local Dolt server on
+127.0.0.1 at the given --port; while the city is in managed_city mode the
+command requires --force because the rig's .beads/dolt-server.port mirror
+will no longer track the managed city Dolt.
 
 This command owns the rig's canonical .beads/config.yaml topology state.
 
@@ -1972,6 +1989,7 @@ gc rig set-endpoint <rig> [flags]
 gc rig set-endpoint frontend --inherit
   gc rig set-endpoint frontend --external --host db.example.com --port 3307
   gc rig set-endpoint frontend --external --host db.example.com --port 3307 --user agent --adopt-unverified
+  gc rig set-endpoint frontend --self --port 28232 --force
   gc rig set-endpoint frontend --inherit --dry-run
 ```
 
@@ -1980,9 +1998,11 @@ gc rig set-endpoint frontend --inherit
 | `--adopt-unverified` | bool |  | record the endpoint without live validation |
 | `--dry-run` | bool |  | show the canonical changes without writing files |
 | `--external` | bool |  | set an explicit external endpoint for the rig |
+| `--force` | bool |  | acknowledge conflicting managed-city state when using --self |
 | `--host` | string |  | external Dolt host |
 | `--inherit` | bool |  | inherit the city endpoint |
-| `--port` | string |  | external Dolt port |
+| `--port` | string |  | external Dolt port (required with --external or --self) |
+| `--self` | bool |  | mark the rig as running its own local Dolt on 127.0.0.1 |
 | `--user` | string |  | external Dolt user |
 
 ## gc rig status
@@ -2636,9 +2656,20 @@ shutdown timeout, then force-kills any remaining sessions. Also stops
 the Dolt server and cleans up orphan sessions. If a controller is
 running, delegates shutdown to it.
 
+Use --timeout=DURATION to cap the wall-clock time gc stop will spend
+before giving up; the default budgets configured session interrupt and
+stop waves, the configured shutdown grace wait, and a second orphan
+cleanup pass. Use --force to skip the interrupt grace period and go
+straight to kill.
+
 ```
-gc stop [path]
+gc stop [path] [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--force` | bool |  | skip the interrupt grace period and force-kill all sessions immediately |
+| `--timeout` | duration | `0s` | wall-clock cap for the stop sequence (0 = derive from city config) |
 
 ## gc supervisor
 

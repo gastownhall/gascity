@@ -141,13 +141,16 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 		resolveRigPaths(cityPath, cfg.Rigs)
 		if workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs) {
 			d.Register(newDoltTopologyCheck(cityPath, cfg))
+			d.Register(newDoltDriftCheck(cityPath, cfg))
 		}
 		d.Register(doctor.NewConfigValidCheck(cfg))
 		d.Register(doctor.NewConfigRefsCheck(cfg, cityPath))
+		d.Register(doctor.NewPreStartScriptsCheck(cfg))
 		d.Register(doctor.NewBuiltinPackFamilyCheck(cfg, cityPath))
 		d.Register(doctor.NewConfigSemanticsCheck(cfg, filepath.Join(cityPath, "city.toml")))
 		d.Register(doctor.NewDurationRangeCheck(cfg))
 		d.Register(doctor.NewSkillCollisionCheck(cfg, cityPath))
+		d.Register(newCodexHooksDriftCheck(codexHookWorkDirs(cityPath, cfg)))
 		d.Register(newMCPConfigDoctorCheck(cityPath, cfg, exec.LookPath))
 		d.Register(newMCPSharedTargetDoctorCheck(cityPath, cfg, exec.LookPath))
 	}

@@ -468,7 +468,7 @@ set -eu
 	}
 }
 
-func TestGcBdSuppressesBdAutoExportForJsonShowAndUpdate(t *testing.T) {
+func TestGcBdSuppressesBdAutoExportInChildEnv(t *testing.T) {
 	origCityFlag := cityFlag
 	origRigFlag := rigFlag
 	defer func() {
