@@ -880,6 +880,16 @@ func TestGastownPatrolWispCommandsPropagateRoutingNamespace(t *testing.T) {
 			formula: "mol-refinery-patrol",
 			vars:    []string{"--var target_branch=", "--var rig_name=", "--var binding_prefix="},
 		},
+		{
+			rel:     "packs/gastown/agents/witness/prompt.template.md",
+			formula: "mol-witness-patrol",
+			vars:    []string{"--var binding_prefix="},
+		},
+		{
+			rel:     "packs/gastown/formulas/mol-witness-patrol.toml",
+			formula: "mol-witness-patrol",
+			vars:    []string{"--var binding_prefix="},
+		},
 	}
 	for _, check := range checks {
 		data, err := os.ReadFile(filepath.Join(dir, check.rel))
@@ -906,6 +916,7 @@ func TestGastownPatrolWispCommandsPropagateRoutingNamespace(t *testing.T) {
 	for _, rel := range []string{
 		"packs/gastown/formulas/mol-deacon-patrol.toml",
 		"packs/gastown/formulas/mol-refinery-patrol.toml",
+		"packs/gastown/formulas/mol-witness-patrol.toml",
 	} {
 		data, err := os.ReadFile(filepath.Join(dir, rel))
 		if err != nil {

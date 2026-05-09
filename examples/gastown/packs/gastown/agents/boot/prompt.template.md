@@ -97,7 +97,8 @@ Drain-ack and exit. Next Boot wake will re-evaluate.
 gc bd create --type=task \
   --title="Stuck: deacon" \
   --metadata '{"target":"deacon","reason":"Stale patrol wisp, no activity","requester":"boot"}' \
-  --label=warrant,pool:dog
+  --label=warrant \
+  --set-metadata gc.routed_to={{ .BindingPrefix }}dog
 ```
 The dog pool picks up the warrant and runs the shutdown dance.
 
@@ -130,7 +131,7 @@ with a fresh provider context.
 | View deacon output | `{{ cmd }} session peek deacon --lines 30` |
 | Check deacon work | `gc bd list --assignee=deacon --status=in_progress --json` |
 | Nudge deacon | `{{ cmd }} session nudge deacon "message"` |
-| File stuck warrant | `gc bd create --type=task --label=warrant,pool:dog --metadata '{...}'` |
+| File stuck warrant | `gc bd create --type=task --label=warrant --set-metadata gc.routed_to={{ .BindingPrefix }}dog --metadata '{...}'` |
 | Check active sessions | `{{ cmd }} session list` |
 
 Working directory: {{ .WorkDir }}
