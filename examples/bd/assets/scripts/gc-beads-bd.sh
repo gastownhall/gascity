@@ -1462,6 +1462,7 @@ load_recover_managed_from_gc() {
     GC_RECOVER_PID=""
     GC_RECOVER_PORT="$DOLT_PORT"
     GC_RECOVER_HEALTHY="false"
+    GC_RECOVER_RESTARTED="false"
     [ -n "$gc_bin" ] || return 1
     GC_RECOVER_MANAGED_USED="true"
     output=$("$gc_bin" dolt-state recover-managed --city "$GC_CITY_PATH" --host "$DOLT_HOST" --port "$DOLT_PORT" --user "$DOLT_USER" --log-level "$DOLT_LOGLEVEL" --timeout-ms 30000 </dev/null 2>/dev/null)
@@ -1494,6 +1495,10 @@ load_recover_managed_from_gc() {
                 ;;
             healthy)
                 GC_RECOVER_HEALTHY="$value"
+                parsed=true
+                ;;
+            restarted)
+                GC_RECOVER_RESTARTED="$value"
                 parsed=true
                 ;;
         esac
