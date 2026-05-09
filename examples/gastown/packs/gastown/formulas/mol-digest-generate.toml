@@ -10,7 +10,7 @@ in `city.toml` under `[formulas]`:
 formula = "mol-digest-generate"
 trigger = "cooldown"
 interval = "24h"
-pool = "gastown.dog"
+pool = "dog"
 ```
 
 The deacon checks if enough time has passed since the last run

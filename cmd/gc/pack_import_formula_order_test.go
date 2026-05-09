@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
@@ -110,6 +112,107 @@ pool = "sidecar.watcher"
 	assertSymlinkExists(t, filepath.Join(rigDir, ".beads", "formulas", "rig-visible.toml"))
 }
 
+func TestTransitiveGastownPackDigestOrderResolvesAndRuns(t *testing.T) {
+	cityDir := t.TempDir()
+	wrapperPackDir := filepath.Join(cityDir, "packs", "wrapper")
+	if err := os.MkdirAll(wrapperPackDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	gastownRoot, err := filepath.Abs(filepath.Join("..", "..", "examples", "gastown"))
+	if err != nil {
+		t.Fatalf("Abs(examples/gastown): %v", err)
+	}
+	gastownPackDir := filepath.Join(gastownRoot, "packs", "gastown")
+	maintenancePackDir := filepath.Join(gastownRoot, "packs", "maintenance")
+	digestFormulaLayer := filepath.Join(gastownPackDir, "formulas")
+	digestFormulaFile := filepath.Join(digestFormulaLayer, "mol-digest-generate.toml")
+
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `
+[workspace]
+name = "wrapper-city"
+
+[daemon]
+formula_v2 = true
+`)
+	writeFile(t, filepath.Join(cityDir, "pack.toml"), `
+[pack]
+name = "wrapper-city"
+schema = 2
+
+[imports.wrapper]
+source = "./packs/wrapper"
+`)
+	writeFile(t, filepath.Join(wrapperPackDir, "pack.toml"), `
+[pack]
+name = "wrapper"
+schema = 2
+
+[imports.gastown]
+source = "`+gastownPackDir+`"
+`)
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	assertContainsString(t, cfg.FormulaLayers.City, filepath.Join(maintenancePackDir, "formulas"))
+	assertContainsString(t, cfg.FormulaLayers.City, digestFormulaLayer)
+	assertAgentQualifiedName(t, cfg.Agents, "wrapper.dog")
+
+	var stderr bytes.Buffer
+	discovered, err := scanAllOrders(cityDir, cfg, &stderr, "gc order list")
+	if err != nil {
+		t.Fatalf("scanAllOrders: %v; stderr: %s", err, stderr.String())
+	}
+	digest, ok := findOrder(discovered, "digest-generate", "")
+	if !ok {
+		t.Fatalf("missing digest-generate order in %#v", discovered)
+	}
+	if digest.Source != filepath.Join(gastownPackDir, "orders", "digest-generate.toml") {
+		t.Fatalf("digest source = %q, want nested gastown order", digest.Source)
+	}
+	if digest.FormulaLayer != digestFormulaLayer {
+		t.Fatalf("digest FormulaLayer = %q, want %q", digest.FormulaLayer, digestFormulaLayer)
+	}
+	if digest.Formula != "mol-digest-generate" {
+		t.Fatalf("digest Formula = %q, want mol-digest-generate", digest.Formula)
+	}
+	if digest.Pool != "dog" {
+		t.Fatalf("digest Pool = %q, want portable bare dog", digest.Pool)
+	}
+	resolvedPool, err := qualifyOrderPool(digest, cfg)
+	if err != nil {
+		t.Fatalf("qualifyOrderPool(digest-generate): %v", err)
+	}
+	if resolvedPool != "wrapper.dog" {
+		t.Fatalf("qualifyOrderPool(digest-generate) = %q, want wrapper.dog", resolvedPool)
+	}
+
+	if err := ResolveFormulas(cityDir, cfg.FormulaLayers.City); err != nil {
+		t.Fatalf("ResolveFormulas(city): %v", err)
+	}
+	assertSymlinkTarget(t, filepath.Join(cityDir, ".beads", "formulas", "mol-digest-generate.toml"), digestFormulaFile)
+
+	store := beads.NewMemStore()
+	var stdout bytes.Buffer
+	stderr.Reset()
+	code := doOrderRun(discovered, "digest-generate", "", cityDir, store, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRun = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runs, err := store.ListByLabel("order-run:digest-generate", 0)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(order-run:digest-generate): %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("order run count = %d, want 1 (%#v)", len(runs), runs)
+	}
+	if got := runs[0].Metadata["gc.routed_to"]; got != "wrapper.dog" {
+		t.Fatalf("gc.routed_to = %q, want wrapper.dog", got)
+	}
+}
+
 func assertContainsString(t *testing.T, got []string, want string) {
 	t.Helper()
 	for _, item := range got {
@@ -151,6 +254,30 @@ func assertSymlinkExists(t *testing.T, path string) {
 	if info.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("%s is not a symlink", path)
 	}
+}
+
+func assertSymlinkTarget(t *testing.T, path, want string) {
+	t.Helper()
+	assertSymlinkExists(t, path)
+	got, err := os.Readlink(path)
+	if err != nil {
+		t.Fatalf("Readlink(%s): %v", path, err)
+	}
+	if got != want {
+		t.Fatalf("Readlink(%s) = %q, want %q", path, got, want)
+	}
+}
+
+func assertAgentQualifiedName(t *testing.T, agents []config.Agent, want string) {
+	t.Helper()
+	var got []string
+	for _, agent := range agents {
+		got = append(got, agent.QualifiedName())
+		if agent.QualifiedName() == want {
+			return
+		}
+	}
+	t.Fatalf("missing agent %q in %#v", want, got)
 }
 
 func assertPathAbsent(t *testing.T, path string) {
