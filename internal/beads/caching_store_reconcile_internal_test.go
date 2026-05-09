@@ -17,6 +17,10 @@ type reconcileRaceStore struct {
 	mu    sync.Mutex
 	block bool
 	once  sync.Once
+
+	afterStaleDepListID string
+	afterStaleDepList   func()
+	depOnce             sync.Once
 }
 
 func (s *reconcileRaceStore) List(query ListQuery) ([]Bead, error) {
@@ -38,6 +42,14 @@ func (s *reconcileRaceStore) List(query ListQuery) ([]Bead, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]Bead(nil), s.stale...), nil
+}
+
+func (s *reconcileRaceStore) DepList(id, direction string) ([]Dep, error) {
+	deps, err := s.Store.DepList(id, direction)
+	if err == nil && id == s.afterStaleDepListID && s.afterStaleDepList != nil {
+		s.depOnce.Do(s.afterStaleDepList)
+	}
+	return deps, err
 }
 
 func TestCachingStoreReconciliationPreservesConcurrentMutation(t *testing.T) {
@@ -130,6 +142,53 @@ func TestCachingStoreReconciliationPreservesConcurrentEvent(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].Title != eventBead.Title {
 		t.Fatalf("ListOpen = %#v, want event title %q", items, eventBead.Title)
+	}
+}
+
+func TestCachingStoreReconciliationPreservesConcurrentDependencyInvalidation(t *testing.T) {
+	mem := NewMemStore()
+	blocker, err := mem.Create(Bead{Title: "blocker"})
+	if err != nil {
+		t.Fatalf("Create(blocker): %v", err)
+	}
+	target, err := mem.Create(Bead{Title: "target"})
+	if err != nil {
+		t.Fatalf("Create(target): %v", err)
+	}
+
+	backing := &reconcileRaceStore{Store: mem}
+	cs := NewCachingStoreForTest(backing, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	backing.afterStaleDepListID = target.ID
+	backing.afterStaleDepList = func() {
+		if err := mem.DepAdd(target.ID, blocker.ID, "blocks"); err != nil {
+			t.Errorf("DepAdd: %v", err)
+			return
+		}
+		payload, err := json.Marshal(target)
+		if err != nil {
+			t.Errorf("Marshal: %v", err)
+			return
+		}
+		cs.ApplyEvent("bead.updated", payload)
+	}
+
+	cs.runReconciliation()
+
+	if ready, ok := cs.CachedReady(); ok {
+		t.Fatalf("CachedReady answered from stale dependency cache after concurrent invalidation: %v", ready)
+	}
+	ready, err := cs.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	for _, bead := range ready {
+		if bead.ID == target.ID {
+			t.Fatalf("Ready includes %s after backing dependency add; ready=%v", target.ID, ready)
+		}
 	}
 }
 
