@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/closeorder"
 )
 
 // ListSubtree returns the root bead and all transitive parent-child
@@ -68,10 +69,10 @@ func ListSubtree(store beads.Store, rootID string) ([]beads.Bead, error) {
 // Descendants are closed before the root so stores with stricter
 // parent/child close rules can still accept the operation. Within the
 // open set, closes are emitted in topological order honoring "blocks"
-// dependency edges between subtree members (blockers first), so that
-// the bd close validator does not reject a bead while its in-batch
-// blocker is still open. Parent/child depth (deepest first) is used as
-// the tie-breaker when no blocks edge constrains the order.
+// dependency edges between subtree members (blockers first), so strict
+// stores do not reject a bead while its in-batch blocker is still open.
+// Parent/child depth (deepest first) is used as the tie-breaker when no
+// blocks edge constrains the order.
 func CloseSubtree(store beads.Store, rootID string) (int, error) {
 	matched, err := ListSubtree(store, rootID)
 	if err != nil {
@@ -127,96 +128,9 @@ func CloseSubtree(store beads.Store, rootID string) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	ordered := orderForClose(store, ids)
+	ordered, err := closeorder.Order(store, ids)
+	if err != nil {
+		return 0, err
+	}
 	return store.CloseAll(ordered, nil)
-}
-
-// orderForClose returns ids reordered so that, for any "blocks" edge
-// whose blocker and blocked are both in ids, the blocker appears
-// first. Input order is treated as the priority among nodes that are
-// not constrained relative to each other (preserving the depth-then-id
-// tie-break the caller computed). Cycles or unresolvable nodes are
-// appended in input order so the cascade never deadlocks.
-func orderForClose(store beads.Store, ids []string) []string {
-	if len(ids) <= 1 {
-		return ids
-	}
-	inSet := make(map[string]bool, len(ids))
-	priority := make(map[string]int, len(ids))
-	for i, id := range ids {
-		inSet[id] = true
-		priority[id] = i
-	}
-	// blockedBy[x] = ids in the batch that x must wait for (blockers).
-	// blocks[x]    = ids in the batch that x is a blocker for.
-	blockedBy := make(map[string]map[string]struct{}, len(ids))
-	blocks := make(map[string]map[string]struct{}, len(ids))
-	for _, id := range ids {
-		deps, err := store.DepList(id, "down")
-		if err != nil {
-			continue
-		}
-		for _, d := range deps {
-			if d.IssueID != id || d.Type != "blocks" {
-				continue
-			}
-			if !inSet[d.DependsOnID] {
-				continue
-			}
-			if d.DependsOnID == id {
-				continue
-			}
-			if blockedBy[id] == nil {
-				blockedBy[id] = make(map[string]struct{})
-			}
-			blockedBy[id][d.DependsOnID] = struct{}{}
-			if blocks[d.DependsOnID] == nil {
-				blocks[d.DependsOnID] = make(map[string]struct{})
-			}
-			blocks[d.DependsOnID][id] = struct{}{}
-		}
-	}
-	// Kahn's algorithm: repeatedly emit a node with no remaining
-	// in-batch blockers, breaking ties on the caller-supplied priority
-	// (depth-descending, id-ascending).
-	out := make([]string, 0, len(ids))
-	emitted := make(map[string]bool, len(ids))
-	for len(out) < len(ids) {
-		var pick string
-		pickPrio := -1
-		for _, id := range ids {
-			if emitted[id] {
-				continue
-			}
-			ready := true
-			for blocker := range blockedBy[id] {
-				if !emitted[blocker] {
-					ready = false
-					break
-				}
-			}
-			if !ready {
-				continue
-			}
-			if pick == "" || priority[id] < pickPrio {
-				pick = id
-				pickPrio = priority[id]
-			}
-		}
-		if pick == "" {
-			// Cycle (or unresolvable graph): append remaining nodes in
-			// input order. CloseAll will still try them; the bd
-			// validator may reject some, but we never deadlock here.
-			for _, id := range ids {
-				if !emitted[id] {
-					out = append(out, id)
-					emitted[id] = true
-				}
-			}
-			break
-		}
-		out = append(out, pick)
-		emitted[pick] = true
-	}
-	return out
 }

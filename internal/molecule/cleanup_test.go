@@ -7,11 +7,10 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// blockValidatingStore wraps a beads.Store and rejects Close (and the
-// per-id fallback inside CloseAll) when the target has any open
-// "blocks"-type blocker still in the store. This mirrors the bd CLI
-// close validator's upfront check, which is what production CloseSubtree
-// runs into when a subtree contains a blocks-chained step set.
+// blockValidatingStore wraps a beads.Store and rejects CloseAll when the
+// target has any open "blocks"-type blocker still in the store. This models a
+// strict Store implementation so CloseSubtree's ordering contract stays covered
+// even when the concrete store permits force-closing blocked beads.
 type blockValidatingStore struct {
 	beads.Store
 }
@@ -145,11 +144,9 @@ func TestCloseSubtreeClosesLogicalRootMembersAndTheirChildren(t *testing.T) {
 
 // TestCloseSubtreeOrdersBlockersBeforeBlocked models the typical
 // formula step subtree: a molecule root with N child step beads chained
-// by depends_on. A real bd store rejects closing a bead while any of
-// its blockers is still open, even when the blocker is in the same
-// batch. CloseSubtree must emit closes in topological (blockers-first)
-// order; otherwise the validator rejects mid-cascade and leaves
-// orphaned step beads.
+// by depends_on. CloseSubtree must emit closes in topological
+// (blockers-first) order so strict stores can close the whole subtree in
+// one pass without rejecting a bead whose in-batch blocker is still open.
 //
 // To make this test exercise the topological-vs-id-order distinction
 // regardless of how MemStore assigns IDs, the chain is built so the
@@ -212,6 +209,35 @@ func TestCloseSubtreeOrdersBlockersBeforeBlocked(t *testing.T) {
 		if b.Status != "closed" {
 			t.Fatalf("%s status = %q, want closed", id, b.Status)
 		}
+	}
+}
+
+type depListFailingStore struct {
+	beads.Store
+	failID string
+}
+
+func (s *depListFailingStore) DepList(id, direction string) ([]beads.Dep, error) {
+	if id == s.failID {
+		return nil, fmt.Errorf("dependency list unavailable for %s", id)
+	}
+	return s.Store.DepList(id, direction)
+}
+
+func TestCloseSubtreeReturnsDepListError(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{Title: "root", Type: "molecule"})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	child, err := store.Create(beads.Bead{Title: "child", ParentID: root.ID})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+
+	guarded := &depListFailingStore{Store: store, failID: child.ID}
+	if _, err := CloseSubtree(guarded, root.ID); err == nil {
+		t.Fatalf("CloseSubtree succeeded, want dependency list error")
 	}
 }
 
