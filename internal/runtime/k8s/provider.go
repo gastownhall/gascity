@@ -37,14 +37,21 @@ type Provider struct {
 	memRequest         string
 	cpuLimit           string
 	memLimit           string
-	serviceAccount     string        // pod service account name (GC_K8S_SERVICE_ACCOUNT)
-	prebaked           bool          // skip staging + init container for prebaked images
+	serviceAccount     string              // pod service account name (GC_K8S_SERVICE_ACCOUNT)
+	prebaked           bool                // skip staging + init container for prebaked images
 	nodeSelector       map[string]string   // GC_K8S_NODE_SELECTOR (JSON)
 	tolerations        []corev1.Toleration // GC_K8S_TOLERATIONS (JSON)
 	affinity           *corev1.Affinity    // GC_K8S_AFFINITY (JSON)
 	priorityClassName  string              // GC_K8S_PRIORITY_CLASS_NAME
-	postStartSettle    time.Duration // settle time before post-start liveness check
-	stderr             io.Writer     // warning output (default os.Stderr)
+	postStartSettle    time.Duration       // settle time before post-start liveness check
+	stderr             io.Writer           // warning output (default os.Stderr)
+}
+
+type schedulingFields struct {
+	nodeSelector      map[string]string
+	tolerations       []corev1.Toleration
+	affinity          *corev1.Affinity
+	priorityClassName string
 }
 
 // NewProvider creates a K8s session provider.
@@ -83,26 +90,11 @@ func NewProvider() (*Provider, error) {
 		return nil, err
 	}
 
-	var nodeSelector map[string]string
-	if v := os.Getenv("GC_K8S_NODE_SELECTOR"); v != "" {
-		if err := json.Unmarshal([]byte(v), &nodeSelector); err != nil {
-			return nil, fmt.Errorf("parsing GC_K8S_NODE_SELECTOR: %w", err)
-		}
+	scheduling, err := parseSchedulingEnv()
+	if err != nil {
+		return nil, err
 	}
-	var tolerations []corev1.Toleration
-	if v := os.Getenv("GC_K8S_TOLERATIONS"); v != "" {
-		if err := json.Unmarshal([]byte(v), &tolerations); err != nil {
-			return nil, fmt.Errorf("parsing GC_K8S_TOLERATIONS: %w", err)
-		}
-	}
-	var affinity *corev1.Affinity
-	if v := os.Getenv("GC_K8S_AFFINITY"); v != "" {
-		affinity = &corev1.Affinity{}
-		if err := json.Unmarshal([]byte(v), affinity); err != nil {
-			return nil, fmt.Errorf("parsing GC_K8S_AFFINITY: %w", err)
-		}
-	}
-	priorityClassName := os.Getenv("GC_K8S_PRIORITY_CLASS_NAME")
+
 	return &Provider{
 		ops: &realK8sOps{
 			clientset:  clientset,
@@ -122,11 +114,32 @@ func NewProvider() (*Provider, error) {
 		prebaked:           os.Getenv("GC_K8S_PREBAKED") == "true",
 		postStartSettle:    3 * time.Second,
 		stderr:             os.Stderr,
-		nodeSelector:       nodeSelector,
-		tolerations:        tolerations,
-		affinity:           affinity,
-		priorityClassName:  priorityClassName,
+		nodeSelector:       scheduling.nodeSelector,
+		tolerations:        scheduling.tolerations,
+		affinity:           scheduling.affinity,
+		priorityClassName:  scheduling.priorityClassName,
 	}, nil
+}
+
+func parseSchedulingEnv() (schedulingFields, error) {
+	var scheduling schedulingFields
+	if v := os.Getenv("GC_K8S_NODE_SELECTOR"); v != "" {
+		if err := json.Unmarshal([]byte(v), &scheduling.nodeSelector); err != nil {
+			return schedulingFields{}, fmt.Errorf("parsing GC_K8S_NODE_SELECTOR: %w", err)
+		}
+	}
+	if v := os.Getenv("GC_K8S_TOLERATIONS"); v != "" {
+		if err := json.Unmarshal([]byte(v), &scheduling.tolerations); err != nil {
+			return schedulingFields{}, fmt.Errorf("parsing GC_K8S_TOLERATIONS: %w", err)
+		}
+	}
+	if v := os.Getenv("GC_K8S_AFFINITY"); v != "" {
+		if err := json.Unmarshal([]byte(v), &scheduling.affinity); err != nil {
+			return schedulingFields{}, fmt.Errorf("parsing GC_K8S_AFFINITY: %w", err)
+		}
+	}
+	scheduling.priorityClassName = os.Getenv("GC_K8S_PRIORITY_CLASS_NAME")
+	return scheduling, nil
 }
 
 // newProviderWithOps creates a provider with a custom k8sOps (for testing).

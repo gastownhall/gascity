@@ -3,6 +3,7 @@ package k8s
 import (
 	"encoding/base64"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -323,9 +324,11 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	}
 
 	// Apply optional scheduling fields.
-	pod.Spec.NodeSelector = p.nodeSelector
-	pod.Spec.Tolerations = p.tolerations
-	pod.Spec.Affinity = p.affinity
+	pod.Spec.NodeSelector = maps.Clone(p.nodeSelector)
+	pod.Spec.Tolerations = cloneTolerations(p.tolerations)
+	if p.affinity != nil {
+		pod.Spec.Affinity = p.affinity.DeepCopy()
+	}
 	pod.Spec.PriorityClassName = p.priorityClassName
 
 	// Add init container when staging is needed (skip when prebaked).
@@ -348,6 +351,20 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	}
 
 	return pod, nil
+}
+
+func cloneTolerations(in []corev1.Toleration) []corev1.Toleration {
+	if len(in) == 0 {
+		return nil
+	}
+	out := append([]corev1.Toleration(nil), in...)
+	for i := range out {
+		if in[i].TolerationSeconds != nil {
+			seconds := *in[i].TolerationSeconds
+			out[i].TolerationSeconds = &seconds
+		}
+	}
+	return out
 }
 
 // agentSecurityContext returns a container security context.

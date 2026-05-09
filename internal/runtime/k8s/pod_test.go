@@ -60,6 +60,10 @@ func TestBuildPod_Affinity(t *testing.T) {
 	if pod.Spec.Affinity.NodeAffinity == nil {
 		t.Fatal("NodeAffinity is nil")
 	}
+	expressions := pod.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms[0].MatchExpressions
+	if expressions[0].Values[0] != "gpu" {
+		t.Fatalf("affinity value = %q, want gpu", expressions[0].Values[0])
+	}
 }
 
 func TestBuildPod_PriorityClassName(t *testing.T) {
@@ -92,5 +96,48 @@ func TestBuildPod_NoSchedulingFields_NoBehaviorChange(t *testing.T) {
 	}
 	if pod.Spec.PriorityClassName != "" {
 		t.Errorf("PriorityClassName should be empty when not set")
+	}
+}
+
+func TestBuildPod_ClonesSchedulingFields(t *testing.T) {
+	seconds := int64(30)
+	p := newProviderWithOps(newFakeK8sOps())
+	p.nodeSelector = map[string]string{"workload": "gc-agents"}
+	p.tolerations = []corev1.Toleration{{
+		Key:               "gc-agents",
+		Operator:          corev1.TolerationOpExists,
+		Effect:            corev1.TaintEffectNoSchedule,
+		TolerationSeconds: &seconds,
+	}}
+	p.affinity = &corev1.Affinity{
+		NodeAffinity: &corev1.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+				NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+					MatchExpressions: []corev1.NodeSelectorRequirement{{
+						Key: "node-type", Operator: corev1.NodeSelectorOpIn, Values: []string{"gpu"},
+					}},
+				}},
+			},
+		},
+	}
+
+	pod, err := buildPod("test-session", runtime.Config{Command: "/bin/bash"}, p)
+	if err != nil {
+		t.Fatalf("buildPod: %v", err)
+	}
+
+	pod.Spec.NodeSelector["workload"] = "changed"
+	pod.Spec.Tolerations[0].Key = "changed"
+	pod.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms[0].MatchExpressions[0].Values[0] = "changed"
+
+	if p.nodeSelector["workload"] != "gc-agents" {
+		t.Fatalf("provider nodeSelector mutated to %q", p.nodeSelector["workload"])
+	}
+	if p.tolerations[0].Key != "gc-agents" {
+		t.Fatalf("provider toleration key mutated to %q", p.tolerations[0].Key)
+	}
+	values := p.affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms[0].MatchExpressions[0].Values
+	if values[0] != "gpu" {
+		t.Fatalf("provider affinity value mutated to %q", values[0])
 	}
 }
