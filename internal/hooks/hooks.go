@@ -154,6 +154,11 @@ func installOverlayManaged(fs fsys.FS, workDir, provider string) error {
 		if provider == "codex" && rel == path.Join(".codex", "hooks.json") {
 			return writeCodexHooksManaged(fs, dst, data)
 		}
+		if overlay.IsMergeablePath(filepath.FromSlash(rel)) {
+			if normalized, normErr := overlay.CanonicalJSON(data); normErr == nil {
+				data = normalized
+			}
+		}
 		return writeEmbeddedManaged(fs, dst, data, overlayManagedNeedsUpgrade(provider, rel))
 	})
 }
@@ -387,11 +392,10 @@ func upgradeCodexHooks(existing, desired []byte) ([]byte, bool, error) {
 	if addCodexPreCompactHook(root, desired) {
 		changed = true
 	}
-	data, err := json.MarshalIndent(root, "", "  ")
+	data, err := overlay.MarshalCanonicalJSON(root)
 	if err != nil {
 		return nil, false, err
 	}
-	data = append(data, '\n')
 	if hasManagedCommand && !needsPreCompact && !bytes.Equal(data, existing) {
 		changed = true
 	}
@@ -405,11 +409,10 @@ func normalizeCodexHookCommands(existing []byte) ([]byte, bool, error) {
 	}
 	hasManagedCommand := codexHookValueHasManagedCommand(root)
 	changed := upgradeCodexHookValue(root)
-	data, err := json.MarshalIndent(root, "", "  ")
+	data, err := overlay.MarshalCanonicalJSON(root)
 	if err != nil {
 		return nil, false, err
 	}
-	data = append(data, '\n')
 	if hasManagedCommand && !bytes.Equal(data, existing) {
 		changed = true
 	}
@@ -574,6 +577,9 @@ func desiredCodexPreCompactHook(desired []byte) any {
 }
 
 func writeManagedFile(fs fsys.FS, dst string, data []byte, policy writeManagedFilePolicy) error {
+	if normalized, err := overlay.CanonicalJSON(data); err == nil {
+		data = normalized
+	}
 	existing, readErr := fs.ReadFile(dst)
 	if readErr == nil && bytes.Equal(existing, data) {
 		return nil

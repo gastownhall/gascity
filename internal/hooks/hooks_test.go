@@ -1090,6 +1090,25 @@ func TestInstallMultipleProviders(t *testing.T) {
 	}
 }
 
+func TestInstallCodexWritesCanonicalJSON(t *testing.T) {
+	fs := fsys.NewFake()
+
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	data := fs.Files["/work/.codex/hooks.json"]
+	if bytes.Contains(data, []byte(`\u0026`)) {
+		t.Fatalf("codex hook escaped command operator:\n%s", data)
+	}
+	if !bytes.Contains(data, []byte(` && gc prime`)) {
+		t.Fatalf("codex hook missing literal command operator:\n%s", data)
+	}
+	if !bytes.HasSuffix(data, []byte("\n")) {
+		t.Fatalf("codex hook missing trailing newline:\n%s", data)
+	}
+}
+
 func TestInstallIdempotent(t *testing.T) {
 	fs := fsys.NewFake()
 	// Pre-populate with a legacy hook file that carries a custom key. Under

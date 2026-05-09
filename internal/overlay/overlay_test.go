@@ -313,7 +313,43 @@ func TestCopyDir_MergeableNewFile(t *testing.T) {
 		t.Fatalf("CopyDir: %v", err)
 	}
 
-	assertFileContent(t, filepath.Join(dst, ".claude", "settings.json"), overJSON)
+	data, err := os.ReadFile(filepath.Join(dst, ".claude", "settings.json"))
+	if err != nil {
+		t.Fatalf("reading copied settings: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("unmarshal copied settings: %v", err)
+	}
+	if !bytes.Contains(data, []byte("\n  ")) {
+		t.Fatalf("copied mergeable JSON was not canonicalized:\n%s", data)
+	}
+}
+
+func TestCopyDir_MergeableNewFileCanonicalizesJSON(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+
+	writeFile(t, filepath.Join(src, ".codex", "hooks.json"), `{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"gc prime && gc hook"}]}]}}`)
+
+	var stderr bytes.Buffer
+	if err := CopyDir(src, dst, &stderr); err != nil {
+		t.Fatalf("CopyDir: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dst, ".codex", "hooks.json"))
+	if err != nil {
+		t.Fatalf("reading copied hooks: %v", err)
+	}
+	if bytes.Contains(data, []byte(`\u0026`)) {
+		t.Fatalf("copied mergeable JSON escaped command operator:\n%s", data)
+	}
+	if !bytes.Contains(data, []byte("\n  ")) {
+		t.Fatalf("copied mergeable JSON was not pretty canonicalized:\n%s", data)
+	}
+	if !bytes.HasSuffix(data, []byte("\n")) {
+		t.Fatalf("copied mergeable JSON missing trailing newline:\n%s", data)
+	}
 }
 
 func TestCopyDir_MergeInvalidJSON(t *testing.T) {

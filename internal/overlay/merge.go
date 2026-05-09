@@ -2,6 +2,7 @@
 package overlay
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -63,12 +64,35 @@ func MergeSettingsJSON(base, overlay []byte) ([]byte, error) {
 		}
 	}
 
-	out, err := json.MarshalIndent(result, "", "  ")
+	out, err := MarshalCanonicalJSON(result)
 	if err != nil {
 		return nil, fmt.Errorf("merge: marshaling result: %w", err)
 	}
-	out = append(out, '\n')
 	return out, nil
+}
+
+// CanonicalJSON parses and re-emits a JSON document with stable formatting.
+func CanonicalJSON(data []byte) ([]byte, error) {
+	var doc any
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	if err := dec.Decode(&doc); err != nil {
+		return nil, err
+	}
+	return MarshalCanonicalJSON(doc)
+}
+
+// MarshalCanonicalJSON emits JSON with deterministic indentation, no HTML
+// escaping, and a trailing newline.
+func MarshalCanonicalJSON(doc any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(doc); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 // mergeHooksMap unions hook categories from base and overlay.
