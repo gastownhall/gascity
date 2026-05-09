@@ -697,7 +697,11 @@ func TestGastownRoutedToTargetsUseBindingPrefix(t *testing.T) {
 		rel  string
 		want string
 	}{
-		{"packs/gastown/formulas/mol-deacon-patrol.toml", "gc.routed_to={{binding_prefix}}dog"},
+		{"packs/gastown/formulas/mol-deacon-patrol.toml", `"gc.routed_to":"{{binding_prefix}}dog"`},
+		{"packs/gastown/formulas/mol-witness-patrol.toml", `"gc.routed_to":"{{binding_prefix}}dog"`},
+		{"packs/gastown/agents/boot/prompt.template.md", `"gc.routed_to":"{{ .BindingPrefix }}dog"`},
+		{"packs/gastown/agents/deacon/prompt.template.md", `"gc.routed_to":"{{ .BindingPrefix }}dog"`},
+		{"packs/gastown/agents/witness/prompt.template.md", `"gc.routed_to":"{{ .BindingPrefix }}dog"`},
 		{"packs/gastown/formulas/mol-polecat-work.toml", `${GC_RIG:+$GC_RIG/}{{binding_prefix}}refinery`},
 		{"packs/gastown/formulas/mol-refinery-patrol.toml", `${GC_RIG:+$GC_RIG/}{{binding_prefix}}polecat`},
 		{"packs/gastown/formulas/mol-idea-to-plan.toml", "$GC_RIG/{{binding_prefix}}polecat"},
@@ -727,6 +731,39 @@ func TestGastownRoutedToTargetsUseBindingPrefix(t *testing.T) {
 		} {
 			if strings.Contains(body, bad) {
 				t.Errorf("%s still contains short-form route %q", check.rel, bad)
+			}
+		}
+	}
+}
+
+func TestGastownWarrantCreateCommandsUseCreateMetadata(t *testing.T) {
+	dir := exampleDir()
+	files := []string{
+		"packs/gastown/agents/boot/prompt.template.md",
+		"packs/gastown/agents/deacon/prompt.template.md",
+		"packs/gastown/agents/witness/prompt.template.md",
+		"packs/gastown/formulas/mol-deacon-patrol.toml",
+		"packs/gastown/formulas/mol-witness-patrol.toml",
+		"packs/maintenance/formulas/mol-shutdown-dance.toml",
+	}
+	for _, rel := range files {
+		data, err := os.ReadFile(filepath.Join(dir, rel))
+		if err != nil {
+			t.Fatalf("reading %s: %v", rel, err)
+		}
+		inCreate := false
+		for lineNo, line := range strings.Split(string(data), "\n") {
+			if strings.Contains(line, "bd create") {
+				inCreate = true
+			}
+			if !inCreate {
+				continue
+			}
+			if strings.Contains(line, "--set-metadata") {
+				t.Errorf("%s:%d bd create command uses update-only --set-metadata:\n%s", rel, lineNo+1, line)
+			}
+			if !strings.HasSuffix(strings.TrimSpace(line), "\\") {
+				inCreate = false
 			}
 		}
 	}
