@@ -7,15 +7,43 @@ import (
 	"testing"
 )
 
-// TestOperationEventCarriesAgentNameWhenAliasSet verifies the 1a addition
-// (issue #1252): when a session has an alias, WorkerOperation events
-// surface it as agent_name so dashboards can group by agent identity.
-func TestOperationEventCarriesAgentNameWhenAliasSet(t *testing.T) {
+// TestOperationEventCarriesAgentNameFromMetadata verifies the 1a addition
+// (issue #1252): when a session has canonical agent_name metadata,
+// WorkerOperation events surface it so dashboards can group by agent
+// identity even when the optional alias is empty.
+func TestOperationEventCarriesAgentNameFromMetadata(t *testing.T) {
 	recorder := &recordingEventRecorder{}
 	handle, _, _, _ := newTestSessionHandleWithRecorder(t, SessionSpec{
 		Profile:  ProfileClaudeTmuxCLI,
 		Template: "polecat",
-		Alias:    "myrig/polecat-1",
+		Title:    "Polecat",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+		Metadata: map[string]string{
+			"agent_name": "myrig/polecat-1",
+		},
+	}, recorder)
+
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	var payload operationEventPayload
+	if err := json.Unmarshal(lastRecordedWorkerOperation(t, recorder).Payload, &payload); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if payload.AgentName != "myrig/polecat-1" {
+		t.Errorf("AgentName = %q, want %q", payload.AgentName, "myrig/polecat-1")
+	}
+}
+
+func TestOperationEventCarriesAgentNameFromAliasFallback(t *testing.T) {
+	recorder := &recordingEventRecorder{}
+	handle, _, _, _ := newTestSessionHandleWithRecorder(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "polecat",
+		Alias:    "myrig/polecat-alias",
 		Title:    "Polecat",
 		Command:  "claude",
 		WorkDir:  t.TempDir(),
@@ -30,8 +58,8 @@ func TestOperationEventCarriesAgentNameWhenAliasSet(t *testing.T) {
 	if err := json.Unmarshal(lastRecordedWorkerOperation(t, recorder).Payload, &payload); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	if payload.AgentName != "myrig/polecat-1" {
-		t.Errorf("AgentName = %q, want %q", payload.AgentName, "myrig/polecat-1")
+	if payload.AgentName != "myrig/polecat-alias" {
+		t.Errorf("AgentName = %q, want alias fallback", payload.AgentName)
 	}
 }
 

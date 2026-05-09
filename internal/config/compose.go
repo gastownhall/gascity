@@ -15,10 +15,13 @@ import (
 
 // mergePricingByKey merges base and override pricing slices keyed by
 // (provider, model). When the same key appears in both, the override entry
-// wins. The returned slice preserves base order followed by override-only
-// entries in their original order. Used to compose pack→city pricing layers
-// during config load.
+// wins. Duplicate keys within either input are collapsed to their last
+// occurrence. The returned slice preserves surviving base order followed by
+// surviving override-only entries in their original order. Used to compose
+// pack→city pricing layers during config load.
 func mergePricingByKey(base, override []pricing.ModelPricing) []pricing.ModelPricing {
+	base = dedupePricingByKey(base)
+	override = dedupePricingByKey(override)
 	if len(base) == 0 {
 		out := make([]pricing.ModelPricing, len(override))
 		copy(out, override)
@@ -41,6 +44,23 @@ func mergePricingByKey(base, override []pricing.ModelPricing) []pricing.ModelPri
 	for i, o := range override {
 		if !usedOverride[i] {
 			out = append(out, o)
+		}
+	}
+	return out
+}
+
+func dedupePricingByKey(in []pricing.ModelPricing) []pricing.ModelPricing {
+	if len(in) == 0 {
+		return nil
+	}
+	lastIdx := make(map[string]int, len(in))
+	for i, p := range in {
+		lastIdx[pricing.Key(p.Provider, p.Model)] = i
+	}
+	out := make([]pricing.ModelPricing, 0, len(lastIdx))
+	for i, p := range in {
+		if lastIdx[pricing.Key(p.Provider, p.Model)] == i {
+			out = append(out, p)
 		}
 	}
 	return out
@@ -102,6 +122,8 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	prov.recordSource(path, data)
 	prov.Warnings = append(prov.Warnings, rootWarnings...)
 	cityAgentsForProvenance := root.Agents
+	root.Pricing = dedupePricingByKey(root.Pricing)
+	root.CityPricing = append([]pricing.ModelPricing(nil), root.Pricing...)
 
 	// V2: if a pack.toml exists alongside city.toml, it is the city's
 	// definition layer. Parse it and merge its content (imports, agents,
@@ -177,6 +199,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		}
 		// Merge pack.toml pricing (pack is base, city wins by (provider, model) key).
 		if len(pc.Pricing) > 0 {
+			root.PackPricing = mergePricingByKey(root.PackPricing, pc.Pricing)
 			root.Pricing = mergePricingByKey(pc.Pricing, root.Pricing)
 		}
 		// Merge named sessions.
@@ -783,6 +806,12 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 
 	// Packs: additive merge.
 	mergePacks(base, fragment, fragPath, prov)
+
+	// Pricing: city fragments are city-layer overrides.
+	if len(fragment.Pricing) > 0 {
+		base.CityPricing = mergePricingByKey(base.CityPricing, fragment.Pricing)
+		base.Pricing = mergePricingByKey(base.Pricing, fragment.Pricing)
+	}
 
 	// Patches: accumulate from fragments (applied after all merges).
 	base.Patches.Agents = append(base.Patches.Agents, fragment.Patches.Agents...)

@@ -88,6 +88,9 @@ func Parse(raw string) (FrontMatter, string) {
 	body := rest[bodyStart:]
 
 	fm := parseBlock(block)
+	if fm.IsZero() {
+		return FrontMatter{}, raw
+	}
 	return fm, body
 }
 

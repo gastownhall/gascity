@@ -13,10 +13,10 @@ import (
 	"unicode"
 
 	"github.com/BurntSushi/toml"
-	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/pricing"
 )
 
 // validAgentName matches names safe for use in session identifiers.
@@ -332,6 +332,12 @@ type City struct {
 	// defaults shipped with the pricing package. See internal/pricing for the
 	// estimation seam introduced by issue #1255 (1d).
 	Pricing []pricing.ModelPricing `toml:"pricing,omitempty"`
+	// PackPricing preserves the pack-level pricing layer before Pricing is
+	// flattened for legacy callers. Runtime-only.
+	PackPricing []pricing.ModelPricing `toml:"-" json:"-"`
+	// CityPricing preserves the city-level pricing layer before Pricing is
+	// flattened for legacy callers. Runtime-only.
+	CityPricing []pricing.ModelPricing `toml:"-" json:"-"`
 }
 
 // NamedSession defines a canonical persistent session backed by an agent

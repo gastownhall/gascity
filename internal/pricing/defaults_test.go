@@ -37,6 +37,66 @@ func TestDefaultPricingsCoverKnownClaudeModels(t *testing.T) {
 	}
 }
 
+func TestDefaultPricingsCurrentClaudeRates(t *testing.T) {
+	tests := []struct {
+		model         string
+		prompt        float64
+		completion    float64
+		cacheRead     float64
+		cacheCreation float64
+	}{
+		{
+			model:         "claude-opus-4",
+			prompt:        15.00,
+			completion:    75.00,
+			cacheRead:     1.50,
+			cacheCreation: 18.75,
+		},
+		{
+			model:         "claude-sonnet-4-6",
+			prompt:        3.00,
+			completion:    15.00,
+			cacheRead:     0.30,
+			cacheCreation: 3.75,
+		},
+		{
+			model:         "claude-opus-4-7",
+			prompt:        5.00,
+			completion:    25.00,
+			cacheRead:     0.50,
+			cacheCreation: 6.25,
+		},
+		{
+			model:         "claude-haiku-4-5-20251001",
+			prompt:        1.00,
+			completion:    5.00,
+			cacheRead:     0.10,
+			cacheCreation: 1.25,
+		},
+	}
+	r := New(DefaultPricings())
+	for _, tc := range tests {
+		t.Run(tc.model, func(t *testing.T) {
+			got, ok := r.Lookup("claude", tc.model)
+			if !ok {
+				t.Fatalf("missing default pricing for %q", tc.model)
+			}
+			if got.Tier.PromptUSDPer1M != tc.prompt {
+				t.Errorf("PromptUSDPer1M = %v, want %v", got.Tier.PromptUSDPer1M, tc.prompt)
+			}
+			if got.Tier.CompletionUSDPer1M != tc.completion {
+				t.Errorf("CompletionUSDPer1M = %v, want %v", got.Tier.CompletionUSDPer1M, tc.completion)
+			}
+			if got.Tier.CacheReadUSDPer1M != tc.cacheRead {
+				t.Errorf("CacheReadUSDPer1M = %v, want %v", got.Tier.CacheReadUSDPer1M, tc.cacheRead)
+			}
+			if got.Tier.CacheCreationUSDPer1M != tc.cacheCreation {
+				t.Errorf("CacheCreationUSDPer1M = %v, want %v", got.Tier.CacheCreationUSDPer1M, tc.cacheCreation)
+			}
+		})
+	}
+}
+
 // TestDefaultPricingsCacheReadIsCheaperThanPrompt protects against
 // regressions that would conflate prompt and cache-read tiers — the
 // motivating concern in #1255.

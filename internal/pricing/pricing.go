@@ -244,12 +244,12 @@ func (r *Registry) All() []ModelPricing {
 	return out
 }
 
-// PricingProvider is an optional interface implemented by packages that ship
+// Provider is an optional interface implemented by packages that ship
 // default pricing data. The runtime can type-assert against this interface
 // to discover provider-supplied pricing without coupling the core Provider
 // contract to per-provider knowledge. Mirrors the optional-interface pattern
 // used by IdleWaitProvider, DialogProvider in internal/runtime/runtime.go.
-type PricingProvider interface {
+type Provider interface {
 	// DefaultPricing returns the provider's published rates by model, with
 	// LastVerified set to the date they were confirmed. The returned slice
 	// is owned by the implementation; callers must not mutate.

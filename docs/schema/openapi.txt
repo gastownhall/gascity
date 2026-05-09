@@ -11191,7 +11191,7 @@
         "additionalProperties": false,
         "properties": {
           "agent_name": {
-            "description": "Qualified agent identity (best-effort, absent if the session has no alias).",
+            "description": "Qualified agent identity (best-effort, absent if the session has no agent_name metadata or alias).",
             "type": "string"
           },
           "bead_id": {

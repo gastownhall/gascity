@@ -152,9 +152,9 @@ func (h *SessionHandle) populateOperationEventIdentity(payload *operationEventPa
 		if strings.TrimSpace(payload.Template) == "" {
 			payload.Template = strings.TrimSpace(info.Template)
 		}
-		// 1a: AgentName from the session's alias when set. Alias carries
-		// the qualified-name identity (e.g. "rig/polecat-1") that maps to
-		// the agent template instance, which is what dashboards group by.
+		if strings.TrimSpace(payload.AgentName) == "" {
+			payload.AgentName = strings.TrimSpace(info.AgentName)
+		}
 		if strings.TrimSpace(payload.AgentName) == "" {
 			payload.AgentName = strings.TrimSpace(info.Alias)
 		}

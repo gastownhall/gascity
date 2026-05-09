@@ -151,8 +151,8 @@ func TestWorkerOperationPayloadByteOverhead(t *testing.T) {
 	// approximately matching the session-lifecycle event share. The
 	// scenarios below bracket the realistic range an operator might see.
 	scenarios := []struct {
-		name           string
-		eventsPerHour  int
+		name          string
+		eventsPerHour int
 	}{
 		{"idle city (mostly polling)", 100},
 		{"typical city (a few active agents)", 600},

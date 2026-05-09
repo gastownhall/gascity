@@ -22,17 +22,17 @@ func BuildRegistry(packPricings, cityPricings []ModelPricing) *Registry {
 	return r
 }
 
-// CollectFromProviders type-asserts each input value against PricingProvider
+// CollectFromProviders type-asserts each input value against Provider
 // and returns the union of their DefaultPricing() entries. Used by callers
 // that want to seed a Registry from a list of provider plugins without
 // hardcoding which ones implement the interface.
 //
-// Inputs that don't implement PricingProvider are silently skipped — that's
+// Inputs that don't implement Provider are silently skipped — that's
 // the whole point of the optional-interface pattern.
 func CollectFromProviders(providers ...any) []ModelPricing {
 	var out []ModelPricing
 	for _, p := range providers {
-		pp, ok := p.(PricingProvider)
+		pp, ok := p.(Provider)
 		if !ok {
 			continue
 		}

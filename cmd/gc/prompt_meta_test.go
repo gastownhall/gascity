@@ -79,9 +79,11 @@ func TestRenderPromptWithMeta_SHADetectsUnbumpedEdit(t *testing.T) {
 
 func TestRenderPromptWithMeta_PlainMarkdownStillReports(t *testing.T) {
 	f := fsys.NewFake()
-	body := "---\nversion: v2\n---\nA plain markdown body.\n"
-	f.Files["/city/prompts/p.md"] = []byte(body)
-	// Plain .md: no template execution, but frontmatter still parsed.
+	raw := "---\nversion: v2\n---\nA plain markdown body.\n"
+	body := "A plain markdown body.\n"
+	f.Files["/city/prompts/p.md"] = []byte(raw)
+	// Plain .md: no template execution, but frontmatter is still stripped
+	// so Text and SHA both represent the prompt bytes sent to the agent.
 	res := renderPromptWithMeta(f, "/city", "", "prompts/p.md",
 		PromptContext{}, "", io.Discard, nil, nil, nil)
 	if res.Version != "v2" {
@@ -90,9 +92,15 @@ func TestRenderPromptWithMeta_PlainMarkdownStillReports(t *testing.T) {
 	if res.SHA == "" {
 		t.Error("plain markdown should still get SHA")
 	}
-	// Plain markdown returns raw bytes, including frontmatter.
 	if res.Text != body {
 		t.Errorf("plain Text = %q", res.Text)
+	}
+
+	f.Files["/city/prompts/p.md"] = []byte("---\nversion: v3\n---\n" + body)
+	bumped := renderPromptWithMeta(f, "/city", "", "prompts/p.md",
+		PromptContext{}, "", io.Discard, nil, nil, nil)
+	if bumped.SHA != res.SHA {
+		t.Fatalf("version-only plain markdown edit changed SHA: %q != %q", bumped.SHA, res.SHA)
 	}
 }
 

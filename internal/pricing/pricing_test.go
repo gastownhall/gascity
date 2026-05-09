@@ -292,8 +292,8 @@ func TestRegistryLayerPackOverridesDefault(t *testing.T) {
 func TestRegistrySetLayerSkipsInvalid(t *testing.T) {
 	r := New(nil)
 	r.SetLayer(LayerCity, []ModelPricing{
-		{Provider: "", Model: "x"},                                    // missing provider
-		{Provider: "claude", Model: ""},                               // missing model
+		{Provider: "", Model: "x"},      // missing provider
+		{Provider: "claude", Model: ""}, // missing model
 		{Provider: "claude", Model: "opus", Tier: Tier{PromptUSDPer1M: -1}},
 		{Provider: "claude", Model: "good", Tier: Tier{PromptUSDPer1M: 1}},
 	})
@@ -349,7 +349,7 @@ func TestRegistryAll(t *testing.T) {
 	}
 }
 
-func TestRegistryConcurrentReadWrite(t *testing.T) {
+func TestRegistryConcurrentReadWrite(_ *testing.T) {
 	r := New([]ModelPricing{
 		{Provider: "claude", Model: "opus", Tier: Tier{PromptUSDPer1M: 15}},
 	})
@@ -368,7 +368,7 @@ func TestRegistryConcurrentReadWrite(t *testing.T) {
 	<-done
 }
 
-// fakePricingProvider is a minimal PricingProvider implementation used by
+// fakePricingProvider is a minimal Provider implementation used by
 // the interface-conformance test below.
 type fakePricingProvider struct{}
 
@@ -378,8 +378,8 @@ func (fakePricingProvider) DefaultPricing() []ModelPricing {
 	}
 }
 
-func TestPricingProviderInterface(t *testing.T) {
-	var p PricingProvider = fakePricingProvider{}
+func TestProviderInterface(t *testing.T) {
+	var p Provider = fakePricingProvider{}
 	got := p.DefaultPricing()
 	if len(got) != 1 || got[0].Model != "m" {
 		t.Fatalf("DefaultPricing() = %+v, want one entry for fake/m", got)

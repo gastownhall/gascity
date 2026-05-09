@@ -85,13 +85,13 @@ func renderPromptWithMeta(fs fsys.FS, cityPath, cityName, templatePath string, c
 	fm, body := promptmeta.Parse(raw)
 
 	// Canonical prompt templates use .template.md. Legacy .md.tmpl files
-	// remain supported temporarily for compatibility; plain .md files are
-	// returned as-is.
+	// remain supported temporarily for compatibility; plain .md files skip
+	// template execution but still strip frontmatter before hashing/returning.
 	if !isPromptTemplatePath(templatePath) {
 		return PromptRenderResult{
-			Text:    raw,
+			Text:    body,
 			Version: fm.Version,
-			SHA:     promptmeta.SHA(raw),
+			SHA:     promptmeta.SHA(body),
 		}
 	}
 

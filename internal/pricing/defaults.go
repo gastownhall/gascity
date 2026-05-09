@@ -91,24 +91,24 @@ var claudeDefaults = []ModelPricing{
 	{
 		Provider:     "claude",
 		Model:        "claude-opus-4-7",
-		LastVerified: "2026-04-25",
+		LastVerified: "2026-05-09",
 		Tier: Tier{
-			PromptUSDPer1M:        15.00,
-			CompletionUSDPer1M:    75.00,
-			CacheReadUSDPer1M:     1.50,
-			CacheCreationUSDPer1M: 18.75,
+			PromptUSDPer1M:        5.00,
+			CompletionUSDPer1M:    25.00,
+			CacheReadUSDPer1M:     0.50,
+			CacheCreationUSDPer1M: 6.25,
 		},
 	},
 	// Claude 4.5 Haiku.
 	{
 		Provider:     "claude",
 		Model:        "claude-haiku-4-5-20251001",
-		LastVerified: "2026-04-25",
+		LastVerified: "2026-05-09",
 		Tier: Tier{
-			PromptUSDPer1M:        0.80,
-			CompletionUSDPer1M:    4.00,
-			CacheReadUSDPer1M:     0.08,
-			CacheCreationUSDPer1M: 1.00,
+			PromptUSDPer1M:        1.00,
+			CompletionUSDPer1M:    5.00,
+			CacheReadUSDPer1M:     0.10,
+			CacheCreationUSDPer1M: 1.25,
 		},
 	},
 }

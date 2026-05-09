@@ -62,6 +62,24 @@ func TestMergePricingByKey_OverrideAddsNew(t *testing.T) {
 	}
 }
 
+func TestMergePricingByKey_DeduplicatesOverrideByLastKey(t *testing.T) {
+	override := []pricing.ModelPricing{
+		{Provider: "claude", Model: "opus", Tier: pricing.Tier{PromptUSDPer1M: 1}},
+		{Provider: "claude", Model: "sonnet", Tier: pricing.Tier{PromptUSDPer1M: 3}},
+		{Provider: "CLAUDE", Model: "OPUS", Tier: pricing.Tier{PromptUSDPer1M: 2}},
+	}
+	got := mergePricingByKey(nil, override)
+	if len(got) != 2 {
+		t.Fatalf("got %d entries, want 2 after duplicate override collapse: %+v", len(got), got)
+	}
+	if got[0].Model != "sonnet" {
+		t.Fatalf("first surviving entry = %q, want sonnet: %+v", got[0].Model, got)
+	}
+	if got[1].Tier.PromptUSDPer1M != 2 {
+		t.Fatalf("last opus override should win, got %+v", got[1])
+	}
+}
+
 func TestMergePricingByKey_KeyIsCaseInsensitive(t *testing.T) {
 	base := []pricing.ModelPricing{
 		{Provider: "claude", Model: "opus", Tier: pricing.Tier{PromptUSDPer1M: 15}},
@@ -75,6 +93,59 @@ func TestMergePricingByKey_KeyIsCaseInsensitive(t *testing.T) {
 	}
 	if got[0].Tier.PromptUSDPer1M != 10 {
 		t.Errorf("override should win: got %v", got[0].Tier.PromptUSDPer1M)
+	}
+}
+
+func TestLoadWithIncludes_PreservesPackAndCityPricingLayers(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+
+[[pricing]]
+provider = "claude"
+model = "claude-opus-4-7"
+[pricing.tier]
+prompt_usd_per_1m = 10.0
+`)
+	fs.Files["/city/pack.toml"] = []byte(`
+[pack]
+name = "test"
+schema = 2
+
+[[pricing]]
+provider = "claude"
+model = "claude-opus-4-7"
+[pricing.tier]
+prompt_usd_per_1m = 15.0
+
+[[pricing]]
+provider = "claude"
+model = "claude-sonnet-4-6"
+[pricing.tier]
+prompt_usd_per_1m = 3.0
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if len(cfg.PackPricing) != 2 {
+		t.Fatalf("PackPricing = %+v, want two pack-layer entries", cfg.PackPricing)
+	}
+	if len(cfg.CityPricing) != 1 {
+		t.Fatalf("CityPricing = %+v, want one city-layer entry", cfg.CityPricing)
+	}
+
+	r := pricing.BuildRegistry(cfg.PackPricing, cfg.CityPricing)
+	got, ok := r.Lookup("claude", "claude-opus-4-7")
+	if !ok {
+		t.Fatal("opus pricing missing from registry")
+	}
+	if got.Tier.PromptUSDPer1M != 10.0 {
+		t.Errorf("registry city override lost: %v", got.Tier.PromptUSDPer1M)
+	}
+	if got.Source != string(pricing.LayerCity) {
+		t.Errorf("registry source = %q, want %q", got.Source, pricing.LayerCity)
 	}
 }
 

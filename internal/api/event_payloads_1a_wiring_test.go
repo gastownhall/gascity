@@ -29,7 +29,7 @@ import (
 // receiving populated fields without the corresponding announcement.
 func TestWorkerOperationPayload1aWiringStatusPin(t *testing.T) {
 	wiredAlready := map[string]string{
-		"agent_name": "session.Info.Alias via populateOperationEventIdentity (PR #1272)",
+		"agent_name": "session.Info.AgentName with Alias fallback via populateOperationEventIdentity (PR #1272)",
 	}
 	notWiredYet := map[string]string{
 		"model":                 "follow-up: tail sessionlog at finish() to extract msg.Model",
@@ -143,18 +143,15 @@ func nonZeroPayloadForField(field string) WorkerOperationEventPayload {
 	return p
 }
 
-// captureWorkerOperationEventToday simulates a producer-side emission
-// path by registering a payload with the canonical RegisterPayload
-// machinery, then projecting it through the same JSON marshalling the
-// SSE wire uses. Returns the raw JSON; the caller asserts which fields
-// appear.
+// captureWorkerOperationEventToday documents the API-layer projection by
+// constructing the payload shape that is wired today, then projecting it
+// through the same JSON marshaling the SSE wire uses. Returns the raw JSON;
+// the caller asserts which fields appear.
 //
-// This proxies the producer side because we can't import internal/worker
-// from internal/api (api is at a lower layer). The test suite-side
-// pin in internal/worker (TestOperationEventNew1aFieldsAreOmitEmpty)
-// already exercises the actual producer; this complementary test
-// pins the api-layer projection — the place a downstream consumer
-// reads from /v0/events/stream.
+// The test suite-side pin in internal/worker
+// (TestOperationEventNew1aFieldsAreOmitEmpty) exercises the actual producer;
+// this complementary test pins the api-layer projection — the place a
+// downstream consumer reads from /v0/events/stream.
 func captureWorkerOperationEventToday(t *testing.T) string {
 	t.Helper()
 	// Today's wiring populates AgentName, nothing else from 1a. Mirror

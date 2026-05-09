@@ -37,6 +37,17 @@ func TestParse_BasicVersion(t *testing.T) {
 	}
 }
 
+func TestParse_DelimiterOnlyMarkdownIsNotFrontMatter(t *testing.T) {
+	in := "---\nThis is a markdown divider section.\n---\nBody line that should reach the agent.\n"
+	fm, body := Parse(in)
+	if !fm.IsZero() {
+		t.Fatalf("delimiter-only markdown should not parse as frontmatter: %+v", fm)
+	}
+	if body != in {
+		t.Fatalf("body = %q, want original input", body)
+	}
+}
+
 func TestParse_QuotedValues(t *testing.T) {
 	cases := []string{
 		`version: "v3"`,

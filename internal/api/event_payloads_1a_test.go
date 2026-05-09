@@ -2,6 +2,12 @@ package api
 
 import (
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -94,4 +100,80 @@ func TestWorkerOperationEventPayload1aFieldsOmitEmpty(t *testing.T) {
 			t.Errorf("minimal payload contains %q without source data: %s", banned, raw)
 		}
 	}
+}
+
+func TestWorkerOperationEventPayloadMatchesWorkerJSONShape(t *testing.T) {
+	apiFields := jsonFieldNamesFromReflectType(t, reflect.TypeOf(WorkerOperationEventPayload{}))
+	workerFields := jsonFieldNamesFromSourceStruct(t, filepath.Join("..", "worker", "operation_events.go"), "operationEventPayload")
+
+	if got, want := strings.Join(workerFields, ","), strings.Join(apiFields, ","); got != want {
+		t.Fatalf("worker.operation payload JSON fields drifted\nworker: %s\napi:    %s", got, want)
+	}
+}
+
+func jsonFieldNamesFromReflectType(t *testing.T, typ reflect.Type) []string {
+	t.Helper()
+	var out []string
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		name := jsonTagName(field.Tag.Get("json"), field.Name)
+		if name == "" {
+			continue
+		}
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func jsonFieldNamesFromSourceStruct(t *testing.T, path, typeName string) []string {
+	t.Helper()
+	file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	var out []string
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.TYPE {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			ts, ok := spec.(*ast.TypeSpec)
+			if !ok || ts.Name.Name != typeName {
+				continue
+			}
+			st, ok := ts.Type.(*ast.StructType)
+			if !ok {
+				t.Fatalf("%s is not a struct", typeName)
+			}
+			for _, field := range st.Fields.List {
+				if field.Tag == nil {
+					continue
+				}
+				tag := reflect.StructTag(strings.Trim(field.Tag.Value, "`"))
+				for _, name := range field.Names {
+					jsonName := jsonTagName(tag.Get("json"), name.Name)
+					if jsonName != "" {
+						out = append(out, jsonName)
+					}
+				}
+			}
+			sort.Strings(out)
+			return out
+		}
+	}
+	t.Fatalf("type %s not found in %s", typeName, path)
+	return nil
+}
+
+func jsonTagName(tag, fallback string) string {
+	if tag == "-" {
+		return ""
+	}
+	name, _, _ := strings.Cut(tag, ",")
+	if name == "" {
+		return fallback
+	}
+	return name
 }

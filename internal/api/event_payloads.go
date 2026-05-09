@@ -224,9 +224,8 @@ func decodeBeadEventPayloadBead(data []byte) (beads.Bead, error) {
 //
 // Aggregations that sum across events (per-agent cost, per-rig token
 // volumes) MUST filter to events that actually carry the field — for
-// example by checking `Model != ""` before bucketing by model. The 1c
-// reliability analyzer (internal/reliability) handles this; new
-// consumers should mirror its approach.
+// example by checking `Model != ""` before bucketing by model. New
+// consumers should keep that presence check at their input boundary.
 //
 // # Wiring status (snapshot at PR #1272 merge)
 //
@@ -264,10 +263,9 @@ type WorkerOperationEventPayload struct {
 	// (e.g. "rig/polecat-1"). Distinct from SessionName which carries
 	// the canonical session identity.
 	//
-	// Wired: YES — sourced from session.Info.Alias in
-	// populateOperationEventIdentity. Absent for sessions without an
-	// alias (ad-hoc starts).
-	AgentName string `json:"agent_name,omitempty" doc:"Qualified agent identity (best-effort, absent if the session has no alias)."`
+	// Wired: YES — sourced from session.Info.AgentName, with
+	// session.Info.Alias as a compatibility fallback.
+	AgentName string `json:"agent_name,omitempty" doc:"Qualified agent identity (best-effort, absent if the session has no agent_name metadata or alias)."`
 	// PromptVersion is the human-readable template version label from
 	// frontmatter (`version:` field). Surfaced in dashboards for grouping.
 	//
