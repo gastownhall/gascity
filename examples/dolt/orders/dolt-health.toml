@@ -2,4 +2,4 @@
 description = "Check dolt server health"
 trigger = "cooldown"
 interval = "30s"
-exec = "gc dolt health --json"
+exec = "gc dolt health --json | gc dolt health-check"

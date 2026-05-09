@@ -15,12 +15,13 @@ version = 1
 id = "check"
 title = "Check dolt health"
 description = """
-Run the structured Dolt health check:
+Run the structured Dolt health check through the order parser:
 
 ```bash
-gc dolt health --json
+gc dolt health --json | gc dolt health-check
 ```
 
-Close this step after the health check completes. Health state is signaled in
-the JSON payload; lifecycle actions should be explicit follow-up work, not a
-hidden side effect of the cooldown order."""
+Close this step after the health check completes. The parser fails the order
+with a concise message for critical data-plane failures such as
+`server.reachable=false`; lifecycle actions should be explicit follow-up work,
+not a hidden side effect of the cooldown order."""
