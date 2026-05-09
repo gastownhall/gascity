@@ -44,14 +44,14 @@ func ParseIterationFromKey(key string) (int, bool) {
 // <20 chars) accepts the close. The reason also lands in the closed
 // bead's metadata for audit.
 const (
-	CloseReasonCreateRollback   = "convergence: bead-create rollback after error"
-	CloseReasonRetryRollback    = "convergence: retry-create rollback after error"
-	CloseReasonManualApprove    = "convergence: iteration closed by manual approve"
-	CloseReasonManualSupersede  = "convergence: active wisp superseded during manual stop"
-	CloseReasonManualStop       = "convergence: iteration closed by manual stop"
-	CloseReasonReconcileDone    = "convergence reconcile: terminated-state bead closed"
-	CloseReasonHandlerCleanup   = "convergence: terminated state observed; closing root"
-	CloseReasonHandlerRoot      = "convergence: workflow handler closing root after terminate"
+	CloseReasonCreateRollback  = "convergence: bead-create rollback after error"
+	CloseReasonRetryRollback   = "convergence: retry-create rollback after error"
+	CloseReasonManualApprove   = "convergence: iteration closed by manual approve"
+	CloseReasonManualSupersede = "convergence: active wisp superseded during manual stop"
+	CloseReasonManualStop      = "convergence: iteration closed by manual stop"
+	CloseReasonReconcileDone   = "convergence reconcile: terminated-state bead closed"
+	CloseReasonHandlerCleanup  = "convergence: terminated state observed; closing root"
+	CloseReasonHandlerRoot     = "convergence: workflow handler closing root after terminate"
 )
 
 // BeadInfo holds the minimal bead information needed by the handler.
