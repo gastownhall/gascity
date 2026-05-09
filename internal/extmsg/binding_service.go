@@ -548,7 +548,7 @@ func CloseSessionBindings(ctx context.Context, store beads.Store, sessionID stri
 	return closeSessionMemberships(ctx, svc, caller, sessionID, now)
 }
 
-// closeSessionParticipants closes every gc:extmsg-participant bead labelled
+// closeSessionParticipants closes every gc:extmsg-participant bead labeled
 // for sessionID by delegating to RemoveParticipant, which also cleans up the
 // group-owned portion of the corresponding membership.
 func closeSessionParticipants(ctx context.Context, store beads.Store, svc Services, caller Caller, sessionID string) error {
