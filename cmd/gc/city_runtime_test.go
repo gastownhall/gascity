@@ -2566,8 +2566,6 @@ func TestCityRuntimeReloadAllowsRegistryAliasDifferentFromWorkspaceName(t *testi
 }
 
 func TestCityRuntimeReloadLifecycleFailureKeepsOldConfig(t *testing.T) {
-	t.Setenv("GC_BEADS", "")
-	t.Setenv("GC_BIN", "")
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	writeCityRuntimeConfig(t, tomlPath, "fake")
@@ -2653,8 +2651,6 @@ func TestCityRuntimeReloadLifecycleFailureKeepsOldConfig(t *testing.T) {
 }
 
 func TestCityRuntimeReloadRetriesTransientLifecycleFailure(t *testing.T) {
-	t.Setenv("GC_BEADS", "")
-	t.Setenv("GC_BIN", "")
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	writeCityRuntimeConfig(t, tomlPath, "fake")
@@ -2743,8 +2739,6 @@ func TestCityRuntimeReloadRetriesTransientLifecycleFailure(t *testing.T) {
 }
 
 func TestCityRuntimeReloadStrictWarningsReturnedOnFailure(t *testing.T) {
-	t.Setenv("GC_BEADS", "")
-	t.Setenv("GC_BIN", "")
 	oldStrict := strictMode
 	strictMode = true
 	t.Cleanup(func() { strictMode = oldStrict })
@@ -2820,8 +2814,6 @@ install_agent_hooks = ["codex"]
 }
 
 func TestCityRuntimeReloadNonStrictWarningsReturnedOnValidationFailure(t *testing.T) {
-	t.Setenv("GC_BEADS", "")
-	t.Setenv("GC_BIN", "")
 	oldStrict := strictMode
 	strictMode = false
 	t.Cleanup(func() { strictMode = oldStrict })
@@ -2954,8 +2946,6 @@ func TestCityRuntimeHandleReloadRequestInitializesConfigDirty(t *testing.T) {
 }
 
 func TestCityRuntimeReloadSameRevisionIsNoOp(t *testing.T) {
-	t.Setenv("GC_BEADS", "")
-	t.Setenv("GC_BIN", "")
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	writeCityRuntimeConfig(t, tomlPath, "fake")
@@ -3228,8 +3218,6 @@ func TestNewCityRuntimeUsesRegisteredAliasForEffectiveIdentity(t *testing.T) {
 }
 
 func TestCityRuntimeReloadKeepsRegisteredAliasForEffectiveIdentity(t *testing.T) {
-	t.Setenv("GC_BEADS", "")
-	t.Setenv("GC_BIN", "")
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	writeCityRuntimeConfigNamed(t, tomlPath, "declared-city", "fake")
@@ -3334,8 +3322,6 @@ func TestCityRuntimeManualReloadReplyWaitsForTickCompletion(t *testing.T) {
 }
 
 func TestCityRuntimeReloadRestartsConfigWatcherWithNewPackTargets(t *testing.T) {
-	t.Setenv("GC_BEADS", "")
-	t.Setenv("GC_BIN", "")
 	old := debounceDelay
 	debounceDelay = 5 * time.Millisecond
 	t.Cleanup(func() { debounceDelay = old })
@@ -3524,8 +3510,6 @@ func TestCityRuntimeWatchReloadPanicRestoresDirty(t *testing.T) {
 }
 
 func TestCityRuntimeRunStopsBeforeStartedWhenCanceledDuringStartup(t *testing.T) {
-	t.Setenv("GC_BEADS", "")
-	t.Setenv("GC_BIN", "")
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	writeCityRuntimeConfig(t, tomlPath, "fake")
@@ -3644,8 +3628,6 @@ func TestCityRuntimeSafeTick_PassesThroughWhenNoPanic(t *testing.T) {
 // startup-poke branch invokes cr.tick(), which calls BuildFn a second
 // time; that call cancels ctx and run() exits cleanly.
 func TestCityRuntimeRun_PanicInStartupDoesNotShutdownCity(t *testing.T) {
-	t.Setenv("GC_BEADS", "")
-	t.Setenv("GC_BIN", "")
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	writeCityRuntimeConfig(t, tomlPath, "fake")
