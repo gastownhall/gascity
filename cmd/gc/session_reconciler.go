@@ -629,6 +629,25 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if err != nil {
 				providerAlive = false
 			}
+			if !storeQueryPartial && !providerAlive && shouldRollbackPendingCreate(session) {
+				var startupTimeout time.Duration
+				if cfg != nil {
+					startupTimeout = cfg.Session.StartupTimeoutDuration()
+				}
+				if pendingCreateLeaseExpiredForRollback(*session, clk, startupTimeout) {
+					template := normalizedSessionTemplate(*session, cfg)
+					if template == "" {
+						template = session.Metadata["template"]
+					}
+					peek := cachedSessionPeek(cityPath, store, sp, cfg, session.ID, nil)
+					rateLimitHit, rateLimitErr := checkRateLimitStability(session, cfg, providerAlive, dt, store, clk, peek)
+					if rateLimitHit || rateLimitErr != nil {
+						continue
+					}
+					attemptRollbackPendingCreate(session, template, name, "pending_create_lease_expired", "lease expired and no live runtime")
+					continue
+				}
+			}
 			preserveNamed := preserveConfiguredNamedSessionBead(*session, cfg, cityName)
 			var (
 				preservedTP  TemplateParams

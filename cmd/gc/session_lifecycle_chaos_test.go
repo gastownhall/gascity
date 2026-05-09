@@ -40,6 +40,92 @@ func TestSessionLifecycleChaosInvariantsAllowFailedCreatePendingClaim(t *testing
 	h.assertInvariants()
 }
 
+func TestReconciler_RollsBackExpiredPendingCreateForConfiguredNamedSession(t *testing.T) {
+	h := newSessionChaosHarness(t, 20260508)
+	h.createSessionIntent()
+	h.assertCreatingIntent()
+
+	identity := "chaos-worker"
+	h.env.cfg.NamedSessions = []config.NamedSession{{
+		Name:     identity,
+		Template: h.template,
+	}}
+	if err := h.env.store.SetMetadataBatch(h.sessionID, map[string]string{
+		"alias":                      identity,
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: identity,
+		namedSessionModeMetadata:     "on_demand",
+		"pending_create_started_at":  h.env.clk.Now().Add(-pendingCreateNeverStartedTimeout - time.Minute).UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("mark named pending create stale: %v", err)
+	}
+	h.setDesired(false)
+	h.reconcileTick()
+
+	got, err := h.env.store.Get(h.sessionID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", h.sessionID, err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed after stale pending create rollback", got.Status)
+	}
+	if got.Metadata["state"] != "failed-create" {
+		t.Fatalf("state = %q, want failed-create", got.Metadata["state"])
+	}
+	if got.Metadata["pending_create_claim"] != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared", got.Metadata["pending_create_claim"])
+	}
+}
+
+func TestReconciler_DefersStalePendingCreateRollbackWhenStoreQueryPartial(t *testing.T) {
+	h := newSessionChaosHarness(t, 20260514)
+	h.createSessionIntent()
+	h.assertCreatingIntent()
+
+	identity := "chaos-worker"
+	h.env.cfg.NamedSessions = []config.NamedSession{{
+		Name:     identity,
+		Template: h.template,
+	}}
+	if err := h.env.store.SetMetadataBatch(h.sessionID, map[string]string{
+		"alias":                      identity,
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: identity,
+		namedSessionModeMetadata:     "on_demand",
+		"pending_create_started_at":  h.env.clk.Now().Add(-pendingCreateNeverStartedTimeout - time.Minute).UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("mark named pending create stale: %v", err)
+	}
+	h.setDesired(false)
+
+	sessions, err := loadSessionBeads(h.env.store)
+	if err != nil {
+		t.Fatalf("loadSessionBeads: %v", err)
+	}
+	poolDesired := make(map[string]int)
+	for _, tp := range h.env.desiredState {
+		if tp.TemplateName != "" {
+			poolDesired[tp.TemplateName]++
+		}
+	}
+	reconcileSessionBeads(
+		context.Background(), sessions, h.env.desiredState, configuredSessionNames(h.env.cfg, "", h.env.store),
+		h.env.cfg, h.env.sp, h.env.store, nil, nil, nil, h.env.dt, poolDesired, true, nil, "",
+		nil, h.env.clk, h.env.rec, 0, 0, &h.env.stdout, &h.env.stderr,
+	)
+
+	got, err := h.env.store.Get(h.sessionID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", h.sessionID, err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("status = closed, want rollback deferred when store query is partial")
+	}
+	if got.Metadata["pending_create_claim"] == "" {
+		t.Fatal("pending_create_claim was cleared, want preserved when store query is partial")
+	}
+}
+
 func TestSessionLifecycleChaosPendingInteractionDoesNotOverrideOrphanDrain(t *testing.T) {
 	h := newSessionChaosHarness(t, 20260415)
 	h.createSessionIntent()

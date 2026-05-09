@@ -1655,7 +1655,20 @@ func rollbackPendingCreate(session *beads.Bead, store beads.Store, now time.Time
 			session.Metadata["session_name"] = ""
 		}
 	}
-	closeBead(store, session.ID, string(sessionpkg.StateFailedCreate), now, stderr)
+	if closeBead(store, session.ID, string(sessionpkg.StateFailedCreate), now, stderr) {
+		if setMeta(store, session.ID, "pending_create_claim", "", stderr) == nil {
+			if session.Metadata == nil {
+				session.Metadata = make(map[string]string)
+			}
+			session.Metadata["pending_create_claim"] = ""
+		}
+		if setMeta(store, session.ID, "pending_create_started_at", "", stderr) == nil {
+			if session.Metadata == nil {
+				session.Metadata = make(map[string]string)
+			}
+			session.Metadata["pending_create_started_at"] = ""
+		}
+	}
 }
 
 func executePlannedStarts(
