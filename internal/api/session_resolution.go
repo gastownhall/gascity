@@ -372,8 +372,18 @@ func (s *Server) materializeNamedSession(store beads.Store, spec apiNamedSession
 //
 // Only beads with Status != "closed" and runtime state "active" or "awake"
 // (the awake/active-equivalent state the lifecycle projection settles on)
-// are considered, so closed/asleep/draining sessions intentionally fall
-// through to apiSessionTargetNotFound.
+// are considered, so closed/asleep/draining/creating sessions intentionally
+// fall through to apiSessionTargetNotFound.
+//
+// StateCreating is excluded even though it's a live state in
+// session/state_machine.go's transition diagram (StateNone → StateCreating →
+// StateActive). Routing an inbound to a creating-state session would call
+// sendBackgroundMessageToSession against a runtime that's still booting; the
+// resulting failure is worse than fall-through "not found." Once the
+// reconciler flips state=active, subsequent inbounds resolve correctly.
+//
+// StateDraining is also excluded: a draining session is on its way out and
+// shouldn't receive new external messages.
 //
 // Configured named-session beads are skipped here so the orphan-rejection
 // path in resolveSessionTargetIDWithContext (around session.ResolveSessionID)

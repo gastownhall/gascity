@@ -66,31 +66,98 @@ func TestResolveSessionTargetID_PoolPathAliasAwakeStateMatches(t *testing.T) {
 	}
 }
 
-// TestResolveSessionTargetID_PathAliasTiebreakerPrefersMostRecent verifies
+// pathAliasFakeStore is a minimal beads.Store implementing only List —
+// the single method resolveLiveSessionByPathAlias touches. Lets the
+// tiebreaker test inject beads with explicit CreatedAt values without
+// going through MemStore's time.Now() stamping (which has limited
+// resolution on coarse-clock hosts and would couple the test to wall-
+// clock timing).
+type pathAliasFakeStore struct {
+	beads.Store
+	items []beads.Bead
+}
+
+func (p *pathAliasFakeStore) List(_ beads.ListQuery) ([]beads.Bead, error) {
+	return p.items, nil
+}
+
+// TestResolveLiveSessionByPathAlias_TiebreakerPrefersMostRecent verifies
 // that when two active pool sessions share the same path-alias (Title) — a
-// rare misconfiguration — the most-recently-created bead wins. CreatedAt is
-// the documented tiebreaker.
-func TestResolveSessionTargetID_PathAliasTiebreakerPrefersMostRecent(t *testing.T) {
+// rare misconfiguration — the most-recently-created bead wins. Uses an
+// in-test fake store with explicit CreatedAt values so the test is
+// deterministic regardless of host clock resolution or load.
+func TestResolveLiveSessionByPathAlias_TiebreakerPrefersMostRecent(t *testing.T) {
+	base := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
+	older := beads.Bead{
+		ID:        "gc-older",
+		Title:     "shared-pl",
+		Type:      session.BeadType,
+		Labels:    []string{session.LabelSession},
+		Metadata:  map[string]string{"state": "active"},
+		CreatedAt: base,
+	}
+	newer := beads.Bead{
+		ID:        "gc-newer",
+		Title:     "shared-pl",
+		Type:      session.BeadType,
+		Labels:    []string{session.LabelSession},
+		Metadata:  map[string]string{"state": "active"},
+		CreatedAt: base.Add(time.Hour),
+	}
+
+	store := &pathAliasFakeStore{items: []beads.Bead{older, newer}}
+	id, ok, err := resolveLiveSessionByPathAlias(store, "shared-pl")
+	if err != nil {
+		t.Fatalf("resolveLiveSessionByPathAlias: %v", err)
+	}
+	if !ok || id != newer.ID {
+		t.Fatalf("resolved id = %q ok = %v, want most-recent bead %q", id, ok, newer.ID)
+	}
+
+	// Reverse the input order to confirm CreatedAt drives the tiebreaker,
+	// not the iteration order.
+	store = &pathAliasFakeStore{items: []beads.Bead{newer, older}}
+	id, ok, err = resolveLiveSessionByPathAlias(store, "shared-pl")
+	if err != nil {
+		t.Fatalf("resolveLiveSessionByPathAlias (reversed): %v", err)
+	}
+	if !ok || id != newer.ID {
+		t.Fatalf("resolved id = %q ok = %v, want most-recent bead %q (input order should not matter)", id, ok, newer.ID)
+	}
+}
+
+// TestResolveSessionTargetID_PathAliasDrainingSessionNotFound parallels
+// the asleep-skip test: draining sessions are on their way out and the
+// resolver intentionally treats them as not-found so new external
+// messages aren't routed to them.
+func TestResolveSessionTargetID_PathAliasDrainingSessionNotFound(t *testing.T) {
 	fs := newSessionFakeState(t)
 	fs.cfg = &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	srv := New(fs)
 
-	older := createPoolSessionBead(t, fs.cityBeadStore, "shared-pl", "s-gc-pool-older", "active")
-	// Force a measurable CreatedAt gap: MemStore stamps CreatedAt at Create
-	// time; sleeping 5ms keeps the test fast while preserving ordering.
-	time.Sleep(5 * time.Millisecond)
-	newer := createPoolSessionBead(t, fs.cityBeadStore, "shared-pl", "s-gc-pool-newer", "active")
+	createPoolSessionBead(t, fs.cityBeadStore, "draining-pl", "s-gc-pool-draining", string(session.StateDraining))
 
-	if !newer.CreatedAt.After(older.CreatedAt) {
-		t.Fatalf("setup: newer.CreatedAt (%v) is not after older.CreatedAt (%v)", newer.CreatedAt, older.CreatedAt)
+	_, err := srv.resolveSessionIDWithConfig(fs.cityBeadStore, "draining-pl")
+	if !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("resolveSessionIDWithConfig(draining path-alias) = %v, want ErrSessionNotFound", err)
 	}
+}
 
-	id, err := srv.resolveSessionIDWithConfig(fs.cityBeadStore, "shared-pl")
-	if err != nil {
-		t.Fatalf("resolveSessionIDWithConfig(shared path-alias): %v", err)
-	}
-	if id != newer.ID {
-		t.Fatalf("resolved id = %q, want most-recent bead %q (older was %q)", id, newer.ID, older.ID)
+// TestResolveSessionTargetID_PathAliasCreatingSessionNotFound documents
+// the intentional StateCreating exclusion: routing an inbound to a
+// session whose runtime is still booting would deliver against a partial
+// provider state. The function falls through to apiSessionTargetNotFound
+// until the reconciler flips state=active.
+func TestResolveSessionTargetID_PathAliasCreatingSessionNotFound(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg = &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	srv := New(fs)
+
+	createPoolSessionBead(t, fs.cityBeadStore, "creating-pl", "s-gc-pool-creating", string(session.StateCreating))
+
+	_, err := srv.resolveSessionIDWithConfig(fs.cityBeadStore, "creating-pl")
+	if !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("resolveSessionIDWithConfig(creating path-alias) = %v, want ErrSessionNotFound", err)
 	}
 }
 
