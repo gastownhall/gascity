@@ -294,7 +294,7 @@ func TestResolveProviderChain_KiroStandaloneNoBase(t *testing.T) {
 	custom := map[string]ProviderSpec{
 		"kiro": {
 			Command:          "kiro-cli",
-			Args:             []string{"chat", "--agent", "gascity", "--trust-all-tools"},
+			Args:             []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
 			PromptMode:       "arg",
 			ReadyDelayMs:     5000,
 			ProcessNames:     []string{"kiro", "node"},
@@ -335,7 +335,7 @@ func TestResolveProviderChain_KiroInheritsFromClaude(t *testing.T) {
 		"kiro": {
 			Base:         basePtr("builtin:claude"),
 			Command:      "kiro-cli",
-			Args:         []string{"chat", "--agent", "gascity", "--trust-all-tools"},
+			Args:         []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
 			ReadyDelayMs: 5000,
 			ProcessNames: []string{"kiro", "node"},
 			Env:          map[string]string{"KIRO_AGENT_MODE": "headless"},

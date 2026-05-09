@@ -269,7 +269,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 	"kiro": {
 		DisplayName:      "Kiro",
 		Command:          "kiro-cli",
-		Args:             []string{"chat", "--agent", "gascity", "--trust-all-tools"},
+		Args:             []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
 		PromptMode:       "arg",
 		ReadyDelayMs:     5000,
 		ProcessNames:     []string{"kiro-cli", "kiro", "node"},

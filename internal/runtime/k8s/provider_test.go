@@ -1289,7 +1289,7 @@ func TestPodManifestAddsInitContainerForPackOverlayCityAgent(t *testing.T) {
 	p := newProviderWithOps(newFakeK8sOps())
 
 	cfg := runtime.Config{
-		Command:         "kiro-cli chat --agent gascity",
+		Command:         "kiro-cli chat --no-interactive --agent gascity",
 		WorkDir:         "/city",
 		ProviderName:    "kiro",
 		PackOverlayDirs: []string{"/packs/core/overlay"},

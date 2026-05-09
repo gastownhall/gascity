@@ -2196,7 +2196,7 @@ name = "test"
 [providers.kiro]
 base = "builtin:claude"
 command = "kiro-cli"
-args = ["chat", "--agent", "gascity", "--trust-all-tools"]
+args = ["chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"]
 ready_delay_ms = 5000
 process_names = ["kiro-cli", "kiro", "node"]
 instructions_file = "AGENTS.md"
@@ -2269,7 +2269,7 @@ name = "test"
 
 [providers.kiro]
 command = "kiro-cli"
-args = ["chat", "--agent", "gascity", "--trust-all-tools"]
+args = ["chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"]
 prompt_mode = "arg"
 ready_delay_ms = 5000
 process_names = ["kiro-cli", "kiro", "node"]
@@ -2315,8 +2315,8 @@ provider = "kiro"
 	if rp.BuiltinAncestor != "kiro" {
 		t.Errorf("BuiltinAncestor = %q, want \"kiro\"", rp.BuiltinAncestor)
 	}
-	if rp.CommandString() != "kiro-cli chat --agent gascity --trust-all-tools" {
-		t.Errorf("CommandString() = %q, want kiro-cli chat --agent gascity --trust-all-tools", rp.CommandString())
+	if rp.CommandString() != "kiro-cli chat --no-interactive --agent gascity --trust-all-tools" {
+		t.Errorf("CommandString() = %q, want kiro-cli chat --no-interactive --agent gascity --trust-all-tools", rp.CommandString())
 	}
 	if rp.ReadyDelayMs != 5000 {
 		t.Errorf("ReadyDelayMs = %d, want 5000", rp.ReadyDelayMs)
@@ -2351,7 +2351,7 @@ name = "test"
 
 [providers.kiro]
 command = "kiro-cli"
-args = ["chat", "--agent", "gascity", "--trust-all-tools"]
+args = ["chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"]
 prompt_mode = "arg"
 ready_delay_ms = 5000
 

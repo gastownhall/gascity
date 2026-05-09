@@ -945,7 +945,7 @@ provider = "claude"
 
 [providers.kiro]
 command = "kiro-cli"
-args = ["chat", "--agent", "gascity", "--trust-all-tools"]
+args = ["chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"]
 prompt_mode = "arg"
 ready_delay_ms = 5000
 process_names = ["kiro-cli", "kiro", "node"]
@@ -978,8 +978,8 @@ name = "mayor"
 	if kiro.Command != "kiro-cli" {
 		t.Errorf("Command = %q, want %q", kiro.Command, "kiro-cli")
 	}
-	if len(kiro.Args) != 4 || kiro.Args[0] != "chat" || kiro.Args[1] != "--agent" || kiro.Args[2] != "gascity" {
-		t.Errorf("Args = %v, want [chat --agent gascity --trust-all-tools]", kiro.Args)
+	if len(kiro.Args) != 5 || kiro.Args[0] != "chat" || kiro.Args[1] != "--no-interactive" || kiro.Args[2] != "--agent" || kiro.Args[3] != "gascity" {
+		t.Errorf("Args = %v, want [chat --no-interactive --agent gascity --trust-all-tools]", kiro.Args)
 	}
 	if kiro.PromptMode != "arg" {
 		t.Errorf("PromptMode = %q, want %q", kiro.PromptMode, "arg")
@@ -1020,7 +1020,7 @@ name = "test"
 
 [providers.kiro]
 command = "kiro-cli"
-args = ["chat", "--agent", "gascity", "--trust-all-tools"]
+args = ["chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"]
 prompt_mode = "arg"
 ready_delay_ms = 5000
 
@@ -1153,7 +1153,7 @@ func TestProvidersRoundTrip(t *testing.T) {
 		Providers: map[string]ProviderSpec{
 			"kiro": {
 				Command:          "kiro-cli",
-				Args:             []string{"chat", "--agent", "gascity", "--trust-all-tools"},
+				Args:             []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
 				PromptMode:       "arg",
 				ReadyDelayMs:     5000,
 				ProcessNames:     []string{"kiro-cli", "kiro", "node"},
@@ -1185,8 +1185,8 @@ func TestProvidersRoundTrip(t *testing.T) {
 	if kiro.Command != "kiro-cli" {
 		t.Errorf("Command = %q, want %q", kiro.Command, "kiro-cli")
 	}
-	if len(kiro.Args) != 4 || kiro.Args[0] != "chat" || kiro.Args[1] != "--agent" || kiro.Args[2] != "gascity" {
-		t.Errorf("Args = %v, want [chat --agent gascity --trust-all-tools]", kiro.Args)
+	if len(kiro.Args) != 5 || kiro.Args[0] != "chat" || kiro.Args[1] != "--no-interactive" || kiro.Args[2] != "--agent" || kiro.Args[3] != "gascity" {
+		t.Errorf("Args = %v, want [chat --no-interactive --agent gascity --trust-all-tools]", kiro.Args)
 	}
 	if kiro.PromptMode != "arg" {
 		t.Errorf("PromptMode = %q, want %q", kiro.PromptMode, "arg")

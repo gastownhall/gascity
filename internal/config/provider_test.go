@@ -222,8 +222,8 @@ func TestBuiltinProvidersKiro(t *testing.T) {
 	if p.Command != "kiro-cli" {
 		t.Errorf("Command = %q, want %q", p.Command, "kiro-cli")
 	}
-	if !reflect.DeepEqual(p.Args, []string{"chat", "--agent", "gascity", "--trust-all-tools"}) {
-		t.Errorf("Args = %v, want [chat --agent gascity --trust-all-tools]", p.Args)
+	if !reflect.DeepEqual(p.Args, []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"}) {
+		t.Errorf("Args = %v, want [chat --no-interactive --agent gascity --trust-all-tools]", p.Args)
 	}
 	if !reflect.DeepEqual(p.ACPArgs, []string{"acp", "--agent", "gascity"}) {
 		t.Errorf("ACPArgs = %v, want [acp --agent gascity]", p.ACPArgs)
@@ -465,7 +465,7 @@ func TestProviderSessionCreateTransportBuiltinKiroStaysOnCLIByDefault(t *testing
 	rp := &ResolvedProvider{
 		Name:        "kiro",
 		Command:     "kiro-cli",
-		Args:        []string{"chat", "--agent", "gascity", "--trust-all-tools"},
+		Args:        []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
 		SupportsACP: true,
 		ACPArgs:     []string{"acp", "--agent", "gascity"},
 	}
