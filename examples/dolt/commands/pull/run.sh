@@ -3,6 +3,7 @@
 #
 # Uses the live Dolt SQL server when reachable so pull does not contend with
 # active databases. Falls back to CLI mode only when no server is running.
+# Pulls the configured remote's `main` branch in both SQL and CLI modes.
 #
 # Environment: GC_CITY_PATH, GC_DOLT_PORT, GC_DOLT_USER, GC_DOLT_PASSWORD
 set -e
@@ -69,8 +70,8 @@ dolt_sql() {
 
 find_remote_sql() {
   db="$1"
-  dolt_sql "USE \`$db\`; SELECT name, url FROM dolt_remotes LIMIT 1" \
-    | awk -F, 'NR > 1 && $1 != "" {print $1 "|" $2; exit}'
+  remote_csv=$(dolt_sql "USE \`$db\`; SELECT name, url FROM dolt_remotes LIMIT 1") || return 1
+  printf '%s\n' "$remote_csv" | awk -F, 'NR > 1 && $1 != "" {print $1 "|" $2; exit}'
 }
 
 pull_database_sql() {
@@ -95,7 +96,7 @@ pull_database_sql() {
     return 1
   fi
 
-  if dolt_sql "USE \`$name\`; CALL DOLT_PULL('$remote_name')" >/dev/null 2>&1; then
+  if dolt_sql "USE \`$name\`; CALL DOLT_PULL('$remote_name', 'main')" >/dev/null 2>&1; then
     echo "  $name: pulled from $remote_url"
     return 0
   fi

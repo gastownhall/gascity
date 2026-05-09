@@ -1022,7 +1022,7 @@ cleanup_stale_locks() {
 # Overwritten on each server start. Without read/write timeouts, CLOSE_WAIT connections
 # accumulate and the server enters unrecoverable read-only mode.
 write_config_yaml() {
-    local archive_level gc_bin wait_timeout_line
+    local archive_level gc_bin raw_wait_timeout wait_timeout_line
     archive_level=${GC_DOLT_ARCHIVE_LEVEL:-0}
     case "$archive_level" in
         ''|*[!0-9]*)
@@ -1041,11 +1041,23 @@ write_config_yaml() {
         return 0
     fi
     wait_timeout_line='  wait_timeout: "30"'
-    case "${GC_DOLT_WAIT_TIMEOUT:-}" in
-        -*) wait_timeout_line="" ;;
+    raw_wait_timeout=${GC_DOLT_WAIT_TIMEOUT:-}
+    case "$raw_wait_timeout" in
         '' ) ;;
+        -*)
+            case "${raw_wait_timeout#-}" in
+                ''|*[!0-9]* ) ;;
+                * ) wait_timeout_line="" ;;
+            esac
+            ;;
         *[!0-9]* ) ;;
-        * ) wait_timeout_line="  wait_timeout: \"${GC_DOLT_WAIT_TIMEOUT}\"" ;;
+        * )
+            if [ "$raw_wait_timeout" -gt 0 ] 2>/dev/null; then
+                wait_timeout_line="  wait_timeout: \"$raw_wait_timeout\""
+            else
+                wait_timeout_line=""
+            fi
+            ;;
     esac
     local tmp
     tmp=$(mktemp "$CONFIG_FILE.tmp.XXXXXX")

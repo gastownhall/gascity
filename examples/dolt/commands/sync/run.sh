@@ -3,6 +3,8 @@
 #
 # Uses the live Dolt SQL server when reachable so sync does not restart
 # active databases. Falls back to CLI mode only when no server is running.
+# Pushes committed `main` branch state only; it does not auto-commit working
+# changes before pushing.
 # Use --gc to purge closed ephemeral beads before syncing.
 # Use --dry-run to preview without pushing.
 #
@@ -108,8 +110,8 @@ dolt_sql() {
 
 find_remote_sql() {
   db="$1"
-  dolt_sql "USE \`$db\`; SELECT name, url FROM dolt_remotes LIMIT 1" \
-    | awk -F, 'NR > 1 && $1 != "" {print $1 "|" $2; exit}'
+  remote_csv=$(dolt_sql "USE \`$db\`; SELECT name, url FROM dolt_remotes LIMIT 1") || return 1
+  printf '%s\n' "$remote_csv" | awk -F, 'NR > 1 && $1 != "" {print $1 "|" $2; exit}'
 }
 
 sync_database_sql() {
@@ -139,9 +141,6 @@ sync_database_sql() {
     return 0
   fi
 
-  dolt_sql "USE \`$name\`; CALL DOLT_ADD('-A')" >/dev/null 2>&1 || true
-  dolt_sql "USE \`$name\`; CALL DOLT_COMMIT('-m', 'gc dolt sync: auto-commit working changes', '--allow-empty', '--author', 'Gas City Sync <sync@gascity.local>')" >/dev/null 2>&1 || true
-
   if [ "$force" = true ]; then
     push_query="USE \`$name\`; CALL DOLT_PUSH('--force', '$remote_name', 'main')"
   else
@@ -161,14 +160,21 @@ sync_database_cli() {
   name="$2"
 
   # Check for remote.
+  remote_name=""
   remote=""
   if [ -f "$d/.dolt/remotes.json" ]; then
+    remote_name=$(grep -o '"name":"[^"]*"' "$d/.dolt/remotes.json" 2>/dev/null | head -1 | sed 's/"name":"//;s/"//' || true)
     remote=$(grep -o '"url":"[^"]*"' "$d/.dolt/remotes.json" 2>/dev/null | head -1 | sed 's/"url":"//;s/"//' || true)
   fi
+  [ -z "$remote_name" ] && remote_name="origin"
 
   if [ -z "$remote" ]; then
     echo "  $name: skipped (no remote)"
     return 0
+  fi
+  if ! valid_remote_name "$remote_name"; then
+    echo "  $name: ERROR: invalid remote name: $remote_name" >&2
+    return 1
   fi
 
   if [ "$dry_run" = true ]; then
@@ -176,10 +182,12 @@ sync_database_cli() {
     return 0
   fi
 
-  push_args="push"
-  [ "$force" = true ] && push_args="push --force"
-
-  if (cd "$d" && dolt $push_args 2>&1); then
+  if [ "$force" = true ]; then
+    if (cd "$d" && dolt push --force "$remote_name" main 2>&1); then
+      echo "  $name: pushed to $remote"
+      return 0
+    fi
+  elif (cd "$d" && dolt push "$remote_name" main 2>&1); then
     echo "  $name: pushed to $remote"
     return 0
   fi
