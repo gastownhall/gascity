@@ -21,17 +21,17 @@ bridges that gap.
 Controller reconciliation
     +-- Keep configured `boot` named session present (`mode = "always"`)
         +-- Wake Boot with fresh provider context (`wake_mode = "fresh"`)
-        +-- Boot runs triage
-            |-- Observe (deacon wisp freshness, pane output, mail)
-            |-- Decide (healthy / idle / stuck)
-            |-- Act (nothing / nudge / file warrant)
-            +-- Drain-ack and exit
+            +-- Boot runs triage
+                |-- Observe (deacon wisp freshness, pane output, mail)
+                |-- Decide (healthy / idle / stuck)
+                |-- Act (nothing / nudge / file warrant)
+                +-- Drain-ack and exit
 ```
 
 `mode = "always"` keeps the `boot` identity present. `wake_mode = "fresh"`
 gives each wake a new provider context, so treat every run as single-pass
 triage over live state. Do not rely on prior conversation context or handoff
-mail. Narrow scope makes restarts cheap. The controller manages your
+mail. Narrow scope keeps each wake cheap. The controller manages your
 lifecycle.
 
 ---
@@ -90,7 +90,7 @@ Use judgment — there are no hardcoded thresholds. Consider:
 ```bash
 {{ cmd }} session nudge deacon "Boot check: are you making progress?"
 ```
-Drain-ack and exit. Next Boot tick will re-evaluate.
+Drain-ack and exit. Next Boot wake will re-evaluate.
 
 **Clearly stuck (very stale wisp, no output, errors visible):** File a warrant:
 ```bash
