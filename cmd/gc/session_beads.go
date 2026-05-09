@@ -861,7 +861,6 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 	for sn, tp := range desiredState {
 		agentCfg := templateParamsToConfig(tp)
 		liveHash := runtime.LiveFingerprint(agentCfg)
-		managedAlias := strings.TrimSpace(tp.Alias)
 		isConfiguredNamed := strings.TrimSpace(tp.ConfiguredNamedIdentity) != ""
 		if isConfiguredNamed && blockedReconfiguredNamedIdentities[strings.TrimSpace(tp.ConfiguredNamedIdentity)] {
 			continue
@@ -881,6 +880,10 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		}
 		isManagedPool := origin == "ephemeral"
 		isPoolInstance := poolSlot > 0
+		managedAlias := strings.TrimSpace(tp.Alias)
+		if managedAlias == "" && isManagedPool && isPoolInstance {
+			managedAlias = strings.TrimSpace(tp.InstanceName)
+		}
 
 		b, exists := bySessionName[sn]
 		if !exists && isPoolInstance {
@@ -1288,7 +1291,12 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			queueMeta(poolAliasConflictCountMetadataKey, strconv.Itoa(count+1))
 			queueMeta(poolAliasConflictAtMetadataKey, now.Format(time.RFC3339))
 		}
-		if needsAliasSync {
+		// Stable managed pool aliases are intentionally revalidated every sync
+		// tick. Pool create holds the alias lock through persistence, but manual
+		// sessions and legacy/pre-stamped beads can still introduce conflicts
+		// outside that path; this O(pool sessions) check is the recovery point.
+		needsManagedPoolAliasValidation := !needsAliasSync && managedAlias != "" && isManagedPool && isPoolInstance
+		if needsAliasSync || needsManagedPoolAliasValidation {
 			lockAlias := managedAlias
 			if lockAlias == "" {
 				lockAlias = strings.TrimSpace(b.Metadata["alias"])
@@ -1303,11 +1311,16 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				}
 				if err != nil {
 					recordAliasConflict()
+					if needsManagedPoolAliasValidation {
+						queueMeta("alias", "")
+					}
 					fmt.Fprintf(stderr, "session beads: alias %q for %s unavailable: %v\n", managedAlias, agentName, err) //nolint:errcheck
 				} else {
 					clearAliasConflict()
-					for key, value := range session.UpdatedAliasMetadata(b.Metadata, managedAlias) {
-						queueMeta(key, value)
+					if needsAliasSync {
+						for key, value := range session.UpdatedAliasMetadata(b.Metadata, managedAlias) {
+							queueMeta(key, value)
+						}
 					}
 					mergeAliasGuardedBatch()
 				}
@@ -1319,6 +1332,10 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				fmt.Fprintf(stderr, "session beads: locking alias %q for %s: %v\n", lockAlias, agentName, lockErr) //nolint:errcheck
 			}
 			if appliedWithLock {
+				continue
+			}
+			if needsManagedPoolAliasValidation {
+				applyBatch()
 				continue
 			}
 		}

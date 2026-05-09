@@ -873,6 +873,19 @@ func (s *BdStore) CloseAll(ids []string, metadata map[string]string) (int, error
 // Close sets a bead's status to closed via bd close. If the bead already has
 // metadata.close_reason, the trimmed value is forwarded as bd close --reason.
 // Idempotent: closing an already-closed bead returns nil.
+//
+// Reads metadata.close_reason from the bead (set by callers like the
+// session reconciler or convoy autoclose via SetMetadata or
+// SetMetadataBatch before invoking Close) and forwards it as the
+// --reason argument to bd close. Without this, bd assigns its default
+// reason "Closed", silently discarding caller intent and (when the city
+// runs with validation.on-close=error) failing the close outright.
+//
+// Callers are responsible for providing a reason that satisfies any
+// configured validator — e.g. bd's validation.on-close=error rejects
+// reasons under 20 characters. This function does not pad or rewrite
+// the supplied reason; it forwards what the caller set, or omits
+// --reason entirely when no metadata is set.
 func (s *BdStore) Close(id string) error {
 	reason := ""
 	if b, err := s.Get(id); err == nil {

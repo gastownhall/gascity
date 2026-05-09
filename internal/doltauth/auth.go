@@ -50,7 +50,16 @@ func ResolveFromEnv(scopeRoot, fallbackUser string, env map[string]string) Resol
 	if !ok {
 		port = 0
 	}
-	return Resolve(scopeRoot, fallbackUser, host, port)
+	overridePath := strings.TrimSpace(env["BEADS_CREDENTIALS_FILE"])
+	if overridePath == "" {
+		overridePath = strings.TrimSpace(os.Getenv("BEADS_CREDENTIALS_FILE"))
+	}
+	envPass := strings.TrimSpace(env["BEADS_DOLT_PASSWORD"])
+	return Resolved{
+		User:                    resolveUser(fallbackUser),
+		Password:                resolvePasswordWithEnv(envPass, scopeRoot, host, port, overridePath),
+		CredentialsFileOverride: overridePath,
+	}
 }
 
 func resolveUser(fallbackUser string) string {
@@ -61,10 +70,20 @@ func resolveUser(fallbackUser string) string {
 }
 
 func resolvePassword(scopeRoot, host string, port int, overridePath string) string {
+	return resolvePasswordWithEnv("", scopeRoot, host, port, overridePath)
+}
+
+func resolvePasswordWithEnv(envPass, scopeRoot, host string, port int, overridePath string) string {
 	if pass := strings.TrimSpace(os.Getenv("GC_DOLT_PASSWORD")); pass != "" {
 		return pass
 	}
 	if pass := ReadStoreLocalPassword(scopeRoot); pass != "" {
+		return pass
+	}
+	if envPass != "" {
+		return envPass
+	}
+	if pass := strings.TrimSpace(os.Getenv("BEADS_DOLT_PASSWORD")); pass != "" {
 		return pass
 	}
 	host = strings.TrimSpace(host)

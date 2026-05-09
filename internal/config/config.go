@@ -1411,6 +1411,13 @@ type DaemonConfig struct {
 	// single tick. Nil (unset) defaults to 5. Values <= 0 are treated as the
 	// default — set a positive integer to override.
 	MaxWakesPerTick *int `toml:"max_wakes_per_tick,omitempty" jsonschema:"default=5"`
+	// NudgeDispatcher selects how queued nudges get delivered to running
+	// sessions. "legacy" (default) auto-spawns a per-session `gc nudge poll`
+	// process that polls the file-backed queue every 2s. "supervisor" runs
+	// the delivery loop inside the city runtime instead, with a unix-socket
+	// wake fast path triggered by enqueue, eliminating the per-session bd
+	// shellout storm.
+	NudgeDispatcher string `toml:"nudge_dispatcher,omitempty" jsonschema:"default=legacy,enum=legacy,enum=supervisor"`
 }
 
 // PatrolIntervalDuration returns the patrol interval as a time.Duration.
@@ -1424,6 +1431,18 @@ func (d *DaemonConfig) PatrolIntervalDuration() time.Duration {
 		return 30 * time.Second
 	}
 	return dur
+}
+
+// NudgeDispatcherMode returns the nudge dispatcher mode, defaulting to
+// "legacy". Unknown values are treated as "legacy" so a malformed config
+// does not silently disable the per-session pollers.
+func (d *DaemonConfig) NudgeDispatcherMode() string {
+	switch d.NudgeDispatcher {
+	case "supervisor":
+		return "supervisor"
+	default:
+		return "legacy"
+	}
 }
 
 // MaxRestartsOrDefault returns the max restarts threshold. Nil (unset) defaults

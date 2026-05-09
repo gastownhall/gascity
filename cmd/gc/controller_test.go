@@ -495,8 +495,6 @@ func TestControllerReloadsConfig(t *testing.T) {
 		}
 	}
 
-	cancel()
-
 	deadline = time.After(1500 * time.Millisecond)
 	for {
 		names, _ := lastAgentNames.Load().([]string)

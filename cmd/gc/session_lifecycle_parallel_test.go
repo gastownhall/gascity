@@ -5187,15 +5187,20 @@ func TestPrepareStartCandidateUsesBuiltinAncestorForGCProviderEnv(t *testing.T) 
 	}
 }
 
-func TestPrepareStartCandidate_EmptyBeadAliasPreservesTemplateGCAlias(t *testing.T) {
+func TestPrepareStartCandidate_EmptyPoolBeadAliasScrubsStampedTemplateIdentity(t *testing.T) {
 	store := beads.NewMemStore()
 	bead, err := store.Create(beads.Bead{
 		Title: "ants-ant-1",
 		Type:  "task",
 		Metadata: map[string]string{
-			"session_name": "ants-ant-1",
-			"provider":     "claude",
-			"state":        "creating",
+			"session_name":        "ants-pool-gc123",
+			"provider":            "claude",
+			"state":               "creating",
+			"template":            "ants",
+			"session_origin":      "ephemeral",
+			"pool_managed":        "true",
+			"pool_slot":           "1",
+			"pool_alias_conflict": "ants-ant-1",
 		},
 	})
 	if err != nil {
@@ -5204,11 +5209,12 @@ func TestPrepareStartCandidate_EmptyBeadAliasPreservesTemplateGCAlias(t *testing
 
 	tp := TemplateParams{
 		Command: "claude",
-		// Shape matches setTemplateEnvIdentity output (GC_ALIAS+GC_AGENT stamped)
-		// plus an unrelated template key to verify the merge preserves it.
+		// Shape matches a stale setTemplateEnvIdentity output from an earlier
+		// build. The persisted bead alias is authoritative; an empty alias must
+		// scrub this contested template identity before runtime launch.
 		Env:                map[string]string{"GC_ALIAS": "ants-ant-1", "GC_AGENT": "ants-ant-1", "TEMPLATE_KEY": "keep"},
 		WorkDir:            t.TempDir(),
-		SessionName:        "ants-ant-1",
+		SessionName:        "ants-pool-gc123",
 		InstanceName:       "ants-ant-1",
 		PoolSlot:           1,
 		EnvIdentityStamped: true,
@@ -5226,11 +5232,13 @@ func TestPrepareStartCandidate_EmptyBeadAliasPreservesTemplateGCAlias(t *testing
 		t.Fatalf("prepareStartCandidate: %v", err)
 	}
 
-	if got := prepared.cfg.Env["GC_ALIAS"]; got != "ants-ant-1" {
-		t.Fatalf("GC_ALIAS = %q, want %q (template value must survive merge when bead alias is empty)", got, "ants-ant-1")
+	if got, ok := prepared.cfg.Env["GC_ALIAS"]; !ok {
+		t.Fatalf("GC_ALIAS should be present with empty value so tmux emits `env -u GC_ALIAS`; got absent")
+	} else if got != "" {
+		t.Fatalf("GC_ALIAS = %q, want empty because the pool alias is deferred", got)
 	}
-	if got := prepared.cfg.Env["GC_AGENT"]; got != "ants-ant-1" {
-		t.Fatalf("GC_AGENT = %q, want %q (companion identity key must also survive)", got, "ants-ant-1")
+	if got := prepared.cfg.Env["GC_AGENT"]; got != "ants-pool-gc123" {
+		t.Fatalf("GC_AGENT = %q, want non-conflicting session name %q", got, "ants-pool-gc123")
 	}
 	if got := prepared.cfg.Env["TEMPLATE_KEY"]; got != "keep" {
 		t.Fatalf("TEMPLATE_KEY = %q, want %q (unrelated template env must survive merge)", got, "keep")

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -402,6 +403,125 @@ func TestBdStoreCloseCLINotFound(t *testing.T) {
 	}
 	if !errors.Is(err, beads.ErrNotFound) {
 		t.Errorf("error = %v, want ErrNotFound", err)
+	}
+}
+
+// TestBdStoreCloseForwardsMetadataReason verifies that when a bead has
+// metadata.close_reason set, BdStore.Close() forwards it as the
+// --reason argument to bd close. This is required for cities running
+// with validation.on-close=error, where bd rejects close calls without
+// an explicit reason. Callers (e.g. session_reconcile, convoy
+// autoclose) set metadata.close_reason before invoking Close; this
+// test pins that the value flows through.
+func TestBdStoreCloseForwardsMetadataReason(t *testing.T) {
+	const reason = "convoy autoclose: all children closed"
+	var closeArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "show":
+			return []byte(`[{"id":"bd-x","title":"t","status":"open","issue_type":"convoy","created_at":"2025-01-15T10:30:00Z","metadata":{"close_reason":"convoy autoclose: all children closed"}}]`), nil
+		case "close":
+			closeArgs = append([]string{}, args...)
+			return []byte(`[{"id":"bd-x","title":"t","status":"closed","issue_type":"convoy","created_at":"2025-01-15T10:30:00Z"}]`), nil
+		}
+		return nil, fmt.Errorf("unexpected command: %v", args)
+	}
+	s := beads.NewBdStore("/city", runner)
+	if err := s.Close("bd-x"); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"close", "--force", "--json", "--reason", reason, "bd-x"}
+	if !reflect.DeepEqual(closeArgs, want) {
+		t.Errorf("close args = %v, want %v", closeArgs, want)
+	}
+}
+
+// TestBdStoreCloseOmitsReasonWhenMetadataAbsent verifies that when no
+// close_reason metadata is present, BdStore.Close() does not pass
+// --reason and lets bd assign its default. This preserves backward
+// compatibility for callers that don't pre-stamp a reason.
+func TestBdStoreCloseOmitsReasonWhenMetadataAbsent(t *testing.T) {
+	var closeArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "show":
+			return []byte(`[{"id":"bd-x","title":"t","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+		case "close":
+			closeArgs = append([]string{}, args...)
+			return []byte(`[{"id":"bd-x","title":"t","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+		}
+		return nil, fmt.Errorf("unexpected command: %v", args)
+	}
+	s := beads.NewBdStore("/city", runner)
+	if err := s.Close("bd-x"); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"close", "--force", "--json", "bd-x"}
+	if !reflect.DeepEqual(closeArgs, want) {
+		t.Errorf("close args = %v, want %v (no --reason when metadata absent)", closeArgs, want)
+	}
+}
+
+// TestBdStoreCloseTrimsMetadataReason verifies that whitespace
+// surrounding metadata.close_reason is stripped before forwarding, so
+// leading/trailing newlines or spaces from metadata persistence don't
+// pass through to bd's validator.
+func TestBdStoreCloseTrimsMetadataReason(t *testing.T) {
+	var closeArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "show":
+			return []byte(`[{"id":"bd-x","title":"t","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","metadata":{"close_reason":"  convoy autoclose: all children closed  \n"}}]`), nil
+		case "close":
+			closeArgs = append([]string{}, args...)
+			return []byte(`[{"id":"bd-x","title":"t","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+		}
+		return nil, fmt.Errorf("unexpected command: %v", args)
+	}
+	s := beads.NewBdStore("/city", runner)
+	if err := s.Close("bd-x"); err != nil {
+		t.Fatal(err)
+	}
+
+	const want = "convoy autoclose: all children closed"
+	for i, arg := range closeArgs {
+		if arg == "--reason" && i+1 < len(closeArgs) {
+			if closeArgs[i+1] != want {
+				t.Errorf("forwarded reason = %q, want %q (trimmed)", closeArgs[i+1], want)
+			}
+			return
+		}
+	}
+	t.Errorf("close args missing --reason: %v", closeArgs)
+}
+
+// TestBdStoreCloseWhitespaceMetadataReason verifies that a
+// whitespace-only metadata.close_reason is treated as absent — no
+// --reason is forwarded. Mirrors the trim-then-empty-check pattern.
+func TestBdStoreCloseWhitespaceMetadataReason(t *testing.T) {
+	var closeArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "show":
+			return []byte(`[{"id":"bd-x","title":"t","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","metadata":{"close_reason":"   "}}]`), nil
+		case "close":
+			closeArgs = append([]string{}, args...)
+			return []byte(`[{"id":"bd-x","title":"t","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+		}
+		return nil, fmt.Errorf("unexpected command: %v", args)
+	}
+	s := beads.NewBdStore("/city", runner)
+	if err := s.Close("bd-x"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, arg := range closeArgs {
+		if arg == "--reason" {
+			t.Errorf("close args contain --reason for whitespace-only metadata: %v", closeArgs)
+			return
+		}
 	}
 }
 

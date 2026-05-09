@@ -38,6 +38,22 @@ func ParseIterationFromKey(key string) (int, bool) {
 	return n, true
 }
 
+// Canonical close_reason strings for convergence-handler-driven closes.
+// Every CloseBead caller uses one of these so bd's
+// validation.on-close=error validator (which rejects close_reason of
+// <20 chars) accepts the close. The reason also lands in the closed
+// bead's metadata for audit.
+const (
+	CloseReasonCreateRollback  = "convergence: bead-create rollback after error"
+	CloseReasonRetryRollback   = "convergence: retry-create rollback after error"
+	CloseReasonManualApprove   = "convergence: iteration closed by manual approve"
+	CloseReasonManualSupersede = "convergence: active wisp superseded during manual stop"
+	CloseReasonManualStop      = "convergence: iteration closed by manual stop"
+	CloseReasonReconcileDone   = "convergence reconcile: terminated-state bead closed"
+	CloseReasonHandlerCleanup  = "convergence: terminated state observed; closing root"
+	CloseReasonHandlerRoot     = "convergence: workflow handler closing root after terminate"
+)
+
 // BeadInfo holds the minimal bead information needed by the handler.
 type BeadInfo struct {
 	ID             string
@@ -62,8 +78,11 @@ type Store interface {
 	// SetMetadata writes a single metadata key-value pair.
 	SetMetadata(id, key, value string) error
 
-	// CloseBead sets a bead's status to "closed".
-	CloseBead(id string) error
+	// CloseBead sets a bead's status to "closed" and stamps reason as
+	// the bead's close_reason metadata. reason must be >=20 chars to
+	// satisfy bd's validation.on-close=error validator. Use one of the
+	// CloseReason* constants below for canonical wording.
+	CloseBead(id, reason string) error
 
 	// DeleteBead permanently removes a bead. Used to burn discarded
 	// speculative wisps so they are not counted as completed iterations.
@@ -149,7 +168,7 @@ func (h *Handler) HandleWispClosed(ctx context.Context, rootBeadID, wispID strin
 	// Step 1: Guard check.
 	state := meta[FieldState]
 	if state == StateTerminated {
-		_ = h.Store.CloseBead(rootBeadID) // best-effort cleanup
+		_ = h.Store.CloseBead(rootBeadID, CloseReasonHandlerCleanup) // best-effort cleanup
 		return HandlerResult{Action: ActionSkipped}, nil
 	}
 
@@ -600,7 +619,7 @@ func (h *Handler) terminate(
 	if err := h.Store.SetMetadata(rootBeadID, FieldState, StateTerminated); err != nil {
 		return HandlerResult{}, fmt.Errorf("setting state to terminated: %w", err)
 	}
-	if err := h.Store.CloseBead(rootBeadID); err != nil {
+	if err := h.Store.CloseBead(rootBeadID, CloseReasonHandlerRoot); err != nil {
 		return HandlerResult{}, fmt.Errorf("closing root bead: %w", err)
 	}
 	if err := h.Store.SetMetadata(rootBeadID, FieldLastProcessedWisp, wispID); err != nil {
