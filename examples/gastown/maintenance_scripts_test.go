@@ -4877,6 +4877,12 @@ func TestJsonlExportPushModeAttemptsPushWhenOriginConfigured(t *testing.T) {
 	writeJsonlExportGCStub(t, binDir)
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	// initSeedArchiveWithRemote seeds 100 prev rows; the multi-record stub
+	// returns 5. The default 20% spike threshold would flag this 95% drop and
+	// route the run through the HALT path, which suppresses the push. This
+	// test is scoped to push behavior, not spike detection — raise MIN_PREV
+	// above 100 so the percent check is skipped here.
+	env["GC_JSONL_MIN_PREV_FOR_SPIKE"] = "1000"
 
 	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
 	if err != nil {
