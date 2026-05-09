@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -212,6 +213,34 @@ func newShutdownWaitProvider() *shutdownWaitProvider {
 func (p *shutdownWaitProvider) ListRunning(prefix string) ([]string, error) {
 	p.listOnce.Do(func() { close(p.listCalled) })
 	return p.Fake.ListRunning(prefix)
+}
+
+type lateAsyncStartListProvider struct {
+	*gatedStartProvider
+	listCalls int
+}
+
+func newLateAsyncStartListProvider() *lateAsyncStartListProvider {
+	return &lateAsyncStartListProvider{
+		gatedStartProvider: newGatedStartProvider(),
+	}
+}
+
+func (p *lateAsyncStartListProvider) ListRunning(prefix string) ([]string, error) {
+	p.mu.Lock()
+	p.listCalls++
+	call := p.listCalls
+	p.mu.Unlock()
+
+	running, err := p.Fake.ListRunning(prefix)
+	if call == 1 {
+		p.release("worker")
+		deadline := time.Now().Add(2 * time.Second)
+		for !p.IsRunning("worker") && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	return running, err
 }
 
 func creatingMeta(meta map[string]string) map[string]string {
@@ -1874,6 +1903,78 @@ func TestCityRuntimeShutdownWaitsForTrackedAsyncStartsBeforeStopSnapshot(t *test
 	}
 	if sp.IsRunning("worker") {
 		t.Fatal("shutdown should stop the runtime that the async start created")
+	}
+}
+
+func TestCityRuntimeForceShutdownRelistsLateAsyncStart(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 26, 0, time.UTC)}
+	session, err := store.Create(beads.Bead{
+		ID:     "gc-worker",
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: creatingMeta(map[string]string{
+			"session_name":         "worker",
+			"template":             "worker",
+			"generation":           "1",
+			"continuation_epoch":   "1",
+			"instance_token":       "tok-worker",
+			"pending_create_claim": "true",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp := newLateAsyncStartListProvider()
+	cfg := &config.City{
+		Daemon: config.DaemonConfig{ShutdownTimeout: "500ms"},
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	forceStop := &atomic.Bool{}
+	forceStop.Store(true)
+	cr := &CityRuntime{
+		cfg:                 cfg,
+		sp:                  sp,
+		rec:                 events.Discard,
+		standaloneCityStore: store,
+		asyncStartLimiter:   newAsyncStartLimiter(maxParallelStartsPerTick(cfg)),
+		forceStopShutdown:   forceStop,
+		logPrefix:           "gc test",
+		stdout:              ioDiscard{},
+		stderr:              ioDiscard{},
+	}
+	tp := TemplateParams{Command: "worker", SessionName: "worker", TemplateName: "worker"}
+	if got := executePlannedStartsTraced(
+		context.Background(),
+		[]startCandidate{{session: &session, tp: tp}},
+		cfg,
+		map[string]TemplateParams{"worker": tp},
+		sp,
+		store,
+		"test-city",
+		"",
+		clk,
+		events.Discard,
+		time.Minute,
+		ioDiscard{},
+		ioDiscard{},
+		nil,
+		withAsyncStartExecution(),
+		withAsyncStartLimiter(cr.ensureAsyncStartLimiter()),
+		withAsyncStartTracker(&cr.asyncStarts),
+	); got != 1 {
+		t.Fatalf("woken = %d, want 1", got)
+	}
+	sp.waitForStarts(t, 1)
+
+	cr.shutdown()
+
+	if sp.IsRunning("worker") {
+		t.Fatal("force shutdown missed late async-started runtime")
+	}
+	if sp.listCalls < 2 {
+		t.Fatalf("ListRunning calls = %d, want a second snapshot for force async-start cleanup", sp.listCalls)
 	}
 }
 
@@ -4508,7 +4609,7 @@ func TestExecutePreparedStartWave_PanicIncludesStackTrace(t *testing.T) {
 }
 
 func TestExecuteTargetWave_PanicIncludesStackTrace(t *testing.T) {
-	results := executeTargetWave([]stopTarget{{name: "worker"}}, 1, func(stopTarget) error {
+	results := executeTargetWave([]stopTarget{{name: "worker"}}, 1, time.Second, func(stopTarget) error {
 		panic("boom")
 	})
 	if len(results) != 1 {

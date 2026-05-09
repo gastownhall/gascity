@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -14,6 +15,19 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
+
+type mkdirAllErrorFS struct {
+	fsys.FS
+	path string
+	err  error
+}
+
+func (f mkdirAllErrorFS) MkdirAll(path string, perm os.FileMode) error {
+	if path == f.path {
+		return f.err
+	}
+	return f.FS.MkdirAll(path, perm)
+}
 
 func TestDoRigAdd_Basic(t *testing.T) {
 	cityPath := t.TempDir()
@@ -370,6 +384,36 @@ func TestDoRigAdd_ReAddUsesExistingPrefix(t *testing.T) {
 	}
 }
 
+func TestDoRigAdd_ReAddMissingPathUsesCandidateConfig(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	rigPath := filepath.Join(t.TempDir(), "my-frontend")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"my-frontend\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", false, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigAdd should succeed, got code %d, stderr: %s", code, stderr.String())
+	}
+
+	if !strings.Contains(stdout.String(), "Rig re-initialized.") {
+		t.Fatalf("stdout should report re-initialization, got: %s", stdout.String())
+	}
+}
+
 func TestDoRigAdd_ReAddWarnsDifferingFlags(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
@@ -531,6 +575,103 @@ func TestDoRigAdd_ConfigUnchangedOnInfraFailure(t *testing.T) {
 	}
 	if strings.Contains(string(data), "fake-rig") {
 		t.Errorf("city.toml should be unchanged after infrastructure failure:\n%s", data)
+	}
+}
+
+func TestDoRigAdd_RootPackDefaultRigImportsErrorDoesNotMutateRig(t *testing.T) {
+	f := fsys.NewFake()
+	cityPath := "/city"
+	rigPath := "/rigs/my-project"
+	originalToml := "[workspace]\nname = \"test\"\n\n[[agent]]\nname = \"mayor\"\n"
+
+	f.Dirs[cityPath] = true
+	f.Dirs[filepath.Join(cityPath, ".gc")] = true
+	f.Files[filepath.Join(cityPath, "city.toml")] = []byte(originalToml)
+	f.Errors[filepath.Join(cityPath, "pack.toml")] = errors.New("read denied")
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(f, cityPath, rigPath, nil, "", "", false, false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected failure, got code %d; stdout: %s", code, stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "gc rig add: loading root pack defaults: loading city pack.toml") {
+		t.Fatalf("stderr should mention root pack defaults load failure, got: %s", stderr.String())
+	}
+	if f.Dirs[rigPath] {
+		t.Fatalf("rig directory should not be created before root pack defaults load succeeds")
+	}
+	if got := string(f.Files[filepath.Join(cityPath, "city.toml")]); got != originalToml {
+		t.Fatalf("city.toml changed unexpectedly:\n%s", got)
+	}
+}
+
+func TestDoRigAdd_CandidateValidationErrorDoesNotCreateMissingRig(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"registered\"\n"
+	cityTomlPath := filepath.Join(cityPath, "city.toml")
+	if err := os.WriteFile(cityTomlPath, []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigPath := filepath.Join(t.TempDir(), "my-project")
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", false, false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected validation failure, got code %d; stdout: %s", code, stdout.String())
+	}
+	if !strings.Contains(stderr.String(), `rig "registered": path is required`) {
+		t.Fatalf("stderr should mention rig validation failure, got: %s", stderr.String())
+	}
+	if _, err := os.Stat(rigPath); !os.IsNotExist(err) {
+		t.Fatalf("rig directory should not be created before candidate validation succeeds, stat err: %v", err)
+	}
+	data, err := os.ReadFile(cityTomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != cityToml {
+		t.Fatalf("city.toml changed unexpectedly:\n%s", data)
+	}
+}
+
+func TestDoRigAdd_CreateMissingRigDirectoryError(t *testing.T) {
+	base := fsys.NewFake()
+	cityPath := "/city"
+	rigPath := "/rigs/my-project"
+	originalToml := "[workspace]\nname = \"test\"\n\n[[agent]]\nname = \"mayor\"\n"
+	mkdirErr := errors.New("mkdir denied")
+
+	base.Dirs[cityPath] = true
+	base.Dirs[filepath.Join(cityPath, ".gc")] = true
+	base.Files[filepath.Join(cityPath, "city.toml")] = []byte(originalToml)
+	f := mkdirAllErrorFS{FS: base, path: rigPath, err: mkdirErr}
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(f, cityPath, rigPath, nil, "", "", false, false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected mkdir failure, got code %d; stdout: %s", code, stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "gc rig add: creating "+rigPath+": mkdir denied") {
+		t.Fatalf("stderr should mention rig directory create failure, got: %s", stderr.String())
+	}
+	if base.Dirs[rigPath] {
+		t.Fatalf("rig directory should not be recorded after MkdirAll failure")
+	}
+	if got := string(base.Files[filepath.Join(cityPath, "city.toml")]); got != originalToml {
+		t.Fatalf("city.toml changed unexpectedly:\n%s", got)
 	}
 }
 
@@ -1123,6 +1264,52 @@ func TestDoRigAdd_PrefixCollision(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "collides") {
 		t.Errorf("stderr should mention collision: %s", stderr.String())
+	}
+}
+
+func TestDoRigAdd_HQPrefixCollisionDoesNotMutateRig(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := "[workspace]\nname = \"gas-city\"\nprefix = \"tf\"\n\n[[agent]]\nname = \"mayor\"\n"
+	cityTomlPath := filepath.Join(cityPath, "city.toml")
+	if err := os.WriteFile(cityTomlPath, []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigPath := filepath.Join(t.TempDir(), "token-flames")
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", false, false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doRigAdd should fail for HQ prefix collision, got code %d; stdout: %s", code, stdout.String())
+	}
+	errMsg := stderr.String()
+	if !strings.Contains(errMsg, `rig "token-flames": prefix "tf" collides with HQ`) {
+		t.Fatalf("stderr should mention HQ collision, got: %s", errMsg)
+	}
+	if !strings.Contains(errMsg, "Use --prefix to specify a different prefix.") {
+		t.Fatalf("stderr should include --prefix hint, got: %s", errMsg)
+	}
+	if stdout.String() != "" {
+		t.Fatalf("stdout should be empty before mutation starts, got: %s", stdout.String())
+	}
+	if _, err := os.Stat(rigPath); !os.IsNotExist(err) {
+		t.Fatalf("rig directory should not be created, stat err: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(rigPath, ".beads")); !os.IsNotExist(err) {
+		t.Fatalf("rig .beads should not be created, stat err: %v", err)
+	}
+	data, err := os.ReadFile(cityTomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != cityToml {
+		t.Fatalf("city.toml changed unexpectedly:\n%s", data)
 	}
 }
 

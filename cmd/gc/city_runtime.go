@@ -98,6 +98,7 @@ type CityRuntime struct {
 
 	shutdownOnce             sync.Once
 	preserveSessionsShutdown atomic.Bool
+	forceStopShutdown        *atomic.Bool
 	logPrefix                string // "gc start" or "gc supervisor"
 	stdout, stderr           io.Writer
 }
@@ -132,6 +133,7 @@ type CityRuntimeParams struct {
 
 	PoolSessions      map[string]time.Duration
 	PoolDeathHandlers map[string]poolDeathInfo
+	ForceStopShutdown *atomic.Bool
 
 	ConvergenceReqCh    chan convergenceRequest // may be nil
 	ReloadReqCh         chan reloadRequest      // may be nil; receives structured reload commands
@@ -219,6 +221,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		rec:                     p.Rec,
 		poolSessions:            p.PoolSessions,
 		poolDeathHandlers:       p.PoolDeathHandlers,
+		forceStopShutdown:       p.ForceStopShutdown,
 		suspendedNames:          suspendedNames,
 		asyncStartLimiter:       newAsyncStartLimiter(maxParallelStartsPerTick(p.Cfg)),
 		convergenceReqCh:        p.ConvergenceReqCh,
@@ -1556,9 +1559,9 @@ func (cr *CityRuntime) requestAsyncStartFollowUpTick() {
 	}
 }
 
-func (cr *CityRuntime) waitForAsyncStarts() {
+func (cr *CityRuntime) waitForAsyncStarts() bool {
 	if cr == nil {
-		return
+		return true
 	}
 	timeout := time.Duration(0)
 	if cr.cfg != nil {
@@ -1567,9 +1570,17 @@ func (cr *CityRuntime) waitForAsyncStarts() {
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
-	if !cr.asyncStarts.wait(timeout) && cr.stderr != nil {
-		fmt.Fprintf(cr.stderr, "%s: async session starts still running after %s; continuing shutdown\n", cr.logPrefix, timeout) //nolint:errcheck // best-effort stderr
+	// A force stop may leave provider Start calls to finish after shutdown has
+	// stopped waiting. That favors bounded shutdown; the next controller start
+	// re-lists live runtime sessions after the first stop pass so late-created
+	// sessions do not survive the shutdown that abandoned the async wait.
+	if !cr.asyncStarts.waitUntil(timeout, cr.forceStopRequested) {
+		if cr.stderr != nil && !cr.forceStopRequested() {
+			fmt.Fprintf(cr.stderr, "%s: async session starts still running after %s; continuing shutdown\n", cr.logPrefix, timeout) //nolint:errcheck // best-effort stderr
+		}
+		return false
 	}
+	return true
 }
 
 func sweepUndesiredPoolSessionBeads(
@@ -2111,7 +2122,7 @@ func (cr *CityRuntime) recordPreservedShutdownTrace() {
 // normal shutdown) — only the first call takes effect.
 func (cr *CityRuntime) shutdown() {
 	cr.shutdownOnce.Do(func() {
-		cr.waitForAsyncStarts()
+		asyncStartsDrained := cr.waitForAsyncStarts()
 		preserveSessions := cr.preserveSessionsShutdown.Load()
 		if preserveSessions {
 			cr.recordPreservedShutdownTrace()
@@ -2139,8 +2150,14 @@ func (cr *CityRuntime) shutdown() {
 		// sweepOrphanedOrderTrackingRetry on next start.
 		total := cr.cfg.Daemon.ShutdownTimeoutDuration()
 		gracefulTimeout := total
+		if cr.forceStopRequested() {
+			gracefulTimeout = 0
+		}
 		if cr.od != nil || len(cr.retiredOrderDispatchers) > 0 {
 			drainTimeout := orderShutdownDrainTimeout(total)
+			if cr.forceStopRequested() {
+				drainTimeout = 0
+			}
 			drainCtx, drainCancel := context.WithTimeout(context.Background(), drainTimeout)
 			cr.drainOrderDispatchers(drainCtx)
 			drainCancel()
@@ -2155,10 +2172,28 @@ func (cr *CityRuntime) shutdown() {
 		}
 		store := cr.cityBeadStore()
 		markCityStopSessionSleepReason(store, cr.stderr)
-		gracefulStopAll(running, cr.sp, gracefulTimeout, cr.rec, cr.cfg, store, cr.stdout, cr.stderr)
+		gracefulStopAllWithForceSignal(running, cr.sp, gracefulTimeout, cr.rec, cr.cfg, store, cr.stdout, cr.stderr, cr.forceStopRequested)
+		if !asyncStartsDrained && cr.forceStopRequested() {
+			lateRunning, lateListErr := cr.sp.ListRunning("")
+			if lateListErr != nil {
+				if runtime.IsPartialListError(lateListErr) {
+					fmt.Fprintf(cr.stderr, "%s: force shutdown late async-start listing partially failed; stopping %d visible agent(s): %v\n", cr.logPrefix, len(lateRunning), lateListErr) //nolint:errcheck // best-effort stderr
+				} else {
+					fmt.Fprintf(cr.stderr, "%s: force shutdown late async-start listing failed: %v\n", cr.logPrefix, lateListErr) //nolint:errcheck // best-effort stderr
+				}
+			}
+			if len(lateRunning) > 0 {
+				markCityStopSessionSleepReason(store, cr.stderr)
+				gracefulStopAllWithForceSignal(lateRunning, cr.sp, 0, cr.rec, cr.cfg, store, cr.stdout, cr.stderr, cr.forceStopRequested)
+			}
+		}
 	})
 }
 
 func (cr *CityRuntime) preserveSessionsOnShutdown() {
 	cr.preserveSessionsShutdown.Store(true)
+}
+
+func (cr *CityRuntime) forceStopRequested() bool {
+	return cr != nil && cr.forceStopShutdown != nil && cr.forceStopShutdown.Load()
 }

@@ -261,7 +261,7 @@ func TestBuildDoltDSNUsesResolvedUserAndPassword(t *testing.T) {
 
 func clearDoltAuthEnv(t *testing.T) {
 	t.Helper()
-	for _, key := range []string{"GC_DOLT_USER", "GC_DOLT_PASSWORD", "BEADS_CREDENTIALS_FILE"} {
+	for _, key := range []string{"GC_DOLT_USER", "GC_DOLT_PASSWORD", "BEADS_DOLT_PASSWORD", "BEADS_CREDENTIALS_FILE"} {
 		t.Setenv(key, "")
 	}
 }

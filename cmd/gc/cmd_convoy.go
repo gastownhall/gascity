@@ -771,7 +771,7 @@ func doConvoyClose(store beads.Store, rec events.Recorder, args []string, stdout
 		return 1
 	}
 
-	if err := store.Close(id); err != nil {
+	if err := closeConvoyWithReason(store, id, convoyManualCloseReason); err != nil {
 		fmt.Fprintf(stderr, "gc convoy close: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -830,21 +830,33 @@ func hasLabel(labels []string, target string) bool { //nolint:unparam // general
 // requirement while remaining a meaningful audit-trail entry.
 const convoyAutocloseReason = "convoy autoclose: all children closed"
 
+const convoyManualCloseReason = "convoy close: requested by operator"
+
+const convoyLandCloseReason = "convoy land: completed owned convoy"
+
+type explicitReasonCloser interface {
+	CloseWithReason(id, reason string) error
+}
+
 // closeConvoyWithReason stamps a close_reason metadata key on the
-// convoy bead before closing it. BdStore.Close() forwards
-// metadata.close_reason as `bd close --reason ...`, which lets cities
+// convoy bead before closing it. BdStore can receive the same reason
+// directly as `bd close --reason ...`, which lets cities
 // running with validation.on-close=error accept system-driven
 // auto-closes (whose default reason "Closed" would otherwise be
 // rejected as terse). For stores whose Close path does not consult
 // the metadata, the field still serves as a permanent audit trail of
-// why the convoy was auto-closed.
+// why the convoy was closed.
 func closeConvoyWithReason(store beads.Store, id, reason string) error {
-	// Best-effort metadata write: if it fails (transient store error,
-	// race with another writer), continue to Close anyway. Close still
-	// commits the status change; under strict validation it'll surface
-	// the failure there rather than here, where the caller already has
-	// error-handling for the close.
-	_ = store.SetMetadata(id, "close_reason", reason)
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return store.Close(id)
+	}
+	if err := store.SetMetadata(id, "close_reason", reason); err != nil {
+		return fmt.Errorf("stamping convoy %s close reason: %w", id, err)
+	}
+	if closer, ok := store.(explicitReasonCloser); ok {
+		return closer.CloseWithReason(id, reason)
+	}
 	return store.Close(id)
 }
 
@@ -1088,7 +1100,7 @@ func doConvoyLand(store beads.Store, rec events.Recorder, args []string, opts la
 	}
 
 	// Close the convoy.
-	if err := store.Close(convoyID); err != nil {
+	if err := closeConvoyWithReason(store, convoyID, convoyLandCloseReason); err != nil {
 		fmt.Fprintf(stderr, "gc convoy land: closing convoy: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

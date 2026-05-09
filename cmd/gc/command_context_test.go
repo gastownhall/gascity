@@ -174,7 +174,7 @@ func TestRigAnywhere_CmdStopFromRigDir(t *testing.T) {
 			setCwd(t, fx.workDir)
 
 			var stdout, stderr bytes.Buffer
-			code := cmdStop(nil, &stdout, &stderr)
+			code := cmdStop(nil, &stdout, &stderr, 0, false)
 			if code != 0 {
 				t.Fatalf("cmdStop() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 			}

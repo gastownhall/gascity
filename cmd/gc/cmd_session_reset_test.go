@@ -74,6 +74,7 @@ func TestCmdSessionReset_ClearsCircuitBreaker(t *testing.T) {
 		cityDir,
 		func() {},
 		nil,
+		nil,
 		make(chan reloadRequest),
 		make(chan convergenceRequest, 1),
 		make(chan struct{}, 1),

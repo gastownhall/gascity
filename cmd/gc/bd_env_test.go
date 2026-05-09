@@ -2185,6 +2185,7 @@ func TestSessionDoltEnvExplicitRigUsesRigStorePassword(t *testing.T) {
 	t.Setenv("GC_DOLT_PORT", "")
 	t.Setenv("GC_DOLT_USER", "")
 	t.Setenv("GC_DOLT_PASSWORD", "")
+	t.Setenv("BEADS_DOLT_PASSWORD", "")
 	t.Setenv("BEADS_CREDENTIALS_FILE", "")
 
 	cityPath := t.TempDir()
@@ -2230,6 +2231,115 @@ dolt.user: rig-user
 	}
 }
 
+func TestBdRuntimeEnvForExplicitRigUsesCredentialsFileWhenRigStoreSecretMissing(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_DOLT_HOST", "")
+	t.Setenv("GC_DOLT_PORT", "")
+	t.Setenv("GC_DOLT_USER", "")
+	t.Setenv("GC_DOLT_PASSWORD", "")
+	t.Setenv("BEADS_DOLT_PASSWORD", "")
+
+	cityPath := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "repo")
+	for _, dir := range []string{cityPath, rigDir} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: city-db.example.com
+dolt.port: 3307
+dolt.user: city-user
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", ".env"), []byte("BEADS_DOLT_PASSWORD=city-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	credentialsPath := filepath.Join(t.TempDir(), "credentials")
+	if err := os.WriteFile(credentialsPath, []byte("[rig-db.example.com:3308]\npassword=rig-credentials-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_CREDENTIALS_FILE", credentialsPath)
+
+	env := bdRuntimeEnvForRig(cityPath, &config.City{Rigs: []config.Rig{{
+		Name:     "repo",
+		Path:     rigDir,
+		DoltHost: "rig-db.example.com",
+		DoltPort: "3308",
+	}}}, rigDir)
+	if got := env["GC_DOLT_PASSWORD"]; got != "rig-credentials-secret" {
+		t.Fatalf("GC_DOLT_PASSWORD = %q, want %q", got, "rig-credentials-secret")
+	}
+	if got := env["BEADS_DOLT_PASSWORD"]; got != "rig-credentials-secret" {
+		t.Fatalf("BEADS_DOLT_PASSWORD = %q, want %q", got, "rig-credentials-secret")
+	}
+}
+
+func TestBdRuntimeEnvForCanonicalExplicitRigUsesCredentialsFileWhenRigStoreSecretMissing(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_DOLT_HOST", "")
+	t.Setenv("GC_DOLT_PORT", "")
+	t.Setenv("GC_DOLT_USER", "")
+	t.Setenv("GC_DOLT_PASSWORD", "")
+	t.Setenv("BEADS_DOLT_PASSWORD", "")
+
+	cityPath := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "repo")
+	for _, dir := range []string{cityPath, rigDir} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: city-db.example.com
+dolt.port: 3307
+dolt.user: city-user
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", ".env"), []byte("BEADS_DOLT_PASSWORD=city-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: repo
+gc.endpoint_origin: explicit
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: rig-db.example.com
+dolt.port: 3308
+dolt.user: rig-user
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	credentialsPath := filepath.Join(t.TempDir(), "credentials")
+	if err := os.WriteFile(credentialsPath, []byte("[rig-db.example.com:3308]\npassword=rig-credentials-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_CREDENTIALS_FILE", credentialsPath)
+
+	env := bdRuntimeEnvForRig(cityPath, &config.City{Rigs: []config.Rig{{
+		Name: "repo",
+		Path: rigDir,
+	}}}, rigDir)
+	if got := env["GC_DOLT_HOST"]; got != "rig-db.example.com" {
+		t.Fatalf("GC_DOLT_HOST = %q, want %q", got, "rig-db.example.com")
+	}
+	if got := env["GC_DOLT_PASSWORD"]; got != "rig-credentials-secret" {
+		t.Fatalf("GC_DOLT_PASSWORD = %q, want %q", got, "rig-credentials-secret")
+	}
+	if got := env["BEADS_DOLT_PASSWORD"]; got != "rig-credentials-secret" {
+		t.Fatalf("BEADS_DOLT_PASSWORD = %q, want %q", got, "rig-credentials-secret")
+	}
+}
+
 func TestCityRuntimeProcessEnvForwardsBeadsCredentialsFile(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
@@ -2237,6 +2347,7 @@ func TestCityRuntimeProcessEnvForwardsBeadsCredentialsFile(t *testing.T) {
 	t.Setenv("GC_DOLT_PORT", "")
 	t.Setenv("GC_DOLT_USER", "")
 	t.Setenv("GC_DOLT_PASSWORD", "")
+	t.Setenv("BEADS_DOLT_PASSWORD", "")
 
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {

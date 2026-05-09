@@ -360,6 +360,36 @@ func TestBdStoreCloseForwardsStampedCloseReason(t *testing.T) {
 	}
 }
 
+func TestBdStoreCloseWithReasonUsesExplicitReasonWithoutShow(t *testing.T) {
+	const reason = "convoy autoclose: all children closed"
+	var closeArgs []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			return nil, fmt.Errorf("unexpected command name: %s", name)
+		}
+		if len(args) > 0 && args[0] == "show" {
+			return nil, fmt.Errorf("unexpected bd show before explicit-reason close")
+		}
+		switch strings.Join(args, " ") {
+		case "close --force --json --reason " + reason + " bd-x":
+			closeArgs = append([]string(nil), args...)
+			return []byte(`[{"id":"bd-x","title":"t","status":"closed","issue_type":"convoy","created_at":"2025-01-15T10:30:00Z"}]`), nil
+		default:
+			return nil, fmt.Errorf("unexpected command: bd %s", strings.Join(args, " "))
+		}
+	}
+
+	s := beads.NewBdStore("/city", runner)
+	if err := s.CloseWithReason("bd-x", "  "+reason+"  "); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"close", "--force", "--json", "--reason", reason, "bd-x"}
+	if got := fmt.Sprint(closeArgs); got != fmt.Sprint(want) {
+		t.Fatalf("close args = %v, want %v", closeArgs, want)
+	}
+}
+
 func TestBdStoreReopenUsesReopenCommand(t *testing.T) {
 	runner := fakeRunner(map[string]struct {
 		out []byte
