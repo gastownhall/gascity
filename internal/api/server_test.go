@@ -49,8 +49,8 @@ func TestCORSOnRegularRequest(t *testing.T) {
 	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "http://127.0.0.1:8080" {
 		t.Errorf("CORS origin = %q, want %q", got, "http://127.0.0.1:8080")
 	}
-	if got := rec.Header().Get("Access-Control-Expose-Headers"); got != "X-GC-Index, X-GC-Request-Id" {
-		t.Errorf("CORS expose = %q, want %q", got, "X-GC-Index, X-GC-Request-Id")
+	if got := rec.Header().Get("Access-Control-Expose-Headers"); got != "X-GC-Index, X-GC-Request-Id, Retry-After" {
+		t.Errorf("CORS expose = %q, want %q", got, "X-GC-Index, X-GC-Request-Id, Retry-After")
 	}
 }
 

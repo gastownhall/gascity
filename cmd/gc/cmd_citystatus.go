@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -105,12 +106,17 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 		return 1
 	}
 
-	sp := newSessionProvider()
+	store, code := openCityStatusStore(cityPath, stderr)
+	if code != 0 {
+		return code
+	}
+	statusSnapshot := loadStatusSessionSnapshot(store)
+	sp := newStatusSessionProviderForCityWithSnapshot(cfg, cityPath, statusSnapshot)
 	dops := newDrainOps(sp)
 	if jsonOutput {
-		return doCityStatusJSON(sp, cfg, cityPath, stdout, stderr)
+		return doCityStatusJSONWithStoreAndSnapshot(sp, cfg, cityPath, store, statusSnapshot, stdout, stderr)
 	}
-	return doCityStatus(sp, dops, cfg, cityPath, stdout, stderr)
+	return doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, statusSnapshot, stdout, stderr)
 }
 
 func observeSessionTargetWithWarning(
@@ -119,14 +125,61 @@ func observeSessionTargetWithWarning(
 	store beads.Store,
 	sp runtime.Provider,
 	cfg *config.City,
-	target string,
+	target statusObservationTarget,
 	stderr io.Writer,
 ) worker.LiveObservation {
-	obs, err := observeSessionTargetForStatus(cityPath, store, sp, cfg, target)
+	if store != nil && target.sessionID != "" {
+		handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, target.sessionID)
+		if err == nil {
+			obs, err := worker.ObserveHandle(context.Background(), handle)
+			if err == nil {
+				return obs
+			}
+		}
+	}
+
+	// Status already passes a concrete runtime session name. Resolving that
+	// string back through the bead store turns stopped pool instances such as
+	// "dog-1" into invalid bd show lookups, which can block the overview.
+	obs, err := observeSessionTargetForStatus(cityPath, nil, sp, cfg, target.runtimeSessionName)
 	if err != nil && stderr != nil {
-		fmt.Fprintf(stderr, "%s: observing %q: %v\n", cmdName, target, err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: observing %q: %v\n", cmdName, target.runtimeSessionName, err) //nolint:errcheck // best-effort stderr
 	}
 	return obs
+}
+
+type statusObservationTarget struct {
+	runtimeSessionName string
+	sessionID          string
+}
+
+func loadStatusSessionSnapshot(store beads.Store) *sessionBeadSnapshot {
+	snapshot, err := loadSessionBeadSnapshot(store)
+	if err != nil {
+		return nil
+	}
+	return snapshot
+}
+
+func statusObservationTargetForIdentity(
+	snapshot *sessionBeadSnapshot,
+	cityName string,
+	identity string,
+	sessionTemplate string,
+) statusObservationTarget {
+	if snapshot != nil {
+		if bead, ok := snapshot.FindSessionBeadByTemplate(identity); ok {
+			if sessionName := strings.TrimSpace(bead.Metadata["session_name"]); sessionName != "" {
+				return statusObservationTarget{
+					runtimeSessionName: sessionName,
+					sessionID:          bead.ID,
+				}
+			}
+		}
+	}
+	return statusObservationTarget{
+		runtimeSessionName: sessionName(nil, cityName, identity, sessionTemplate),
+	}
 }
 
 func namedSessionBlockedBySuspension(cfg *config.City, agentCfg *config.Agent, suspendedRigs map[string]bool) bool {
@@ -155,8 +208,19 @@ func doCityStatus(
 	if code != 0 {
 		return code
 	}
+	return doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, loadStatusSessionSnapshot(store), stdout, stderr)
+}
 
-	snapshot := collectCityStatusSnapshot(sp, cfg, cityPath, store, stderr)
+func doCityStatusWithStoreAndSnapshot(
+	sp runtime.Provider,
+	dops drainOps,
+	cfg *config.City,
+	cityPath string,
+	store beads.Store,
+	statusSnapshot *sessionBeadSnapshot,
+	stdout, stderr io.Writer,
+) int {
+	snapshot := collectCityStatusSnapshotFromStoreSnapshot(sp, cfg, cityPath, store, statusSnapshot, stderr)
 	renderCityStatusText(snapshot, dops, stdout)
 
 	if store != nil {
@@ -186,8 +250,18 @@ func doCityStatusJSON(
 	if code != 0 {
 		return code
 	}
+	return doCityStatusJSONWithStoreAndSnapshot(sp, cfg, cityPath, store, loadStatusSessionSnapshot(store), stdout, stderr)
+}
 
-	snapshot := collectCityStatusSnapshot(sp, cfg, cityPath, store, stderr)
+func doCityStatusJSONWithStoreAndSnapshot(
+	sp runtime.Provider,
+	cfg *config.City,
+	cityPath string,
+	store beads.Store,
+	statusSnapshot *sessionBeadSnapshot,
+	stdout, stderr io.Writer,
+) int {
+	snapshot := collectCityStatusSnapshotFromStoreSnapshot(sp, cfg, cityPath, store, statusSnapshot, stderr)
 	if store != nil {
 		sessions, err := collectCitySessionCounts(cityPath, store, sp, cfg)
 		if err != nil {

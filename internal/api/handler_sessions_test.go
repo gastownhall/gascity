@@ -217,6 +217,16 @@ func (s *cachedOnlyListStoreForSessionTest) CachedList(query beads.ListQuery) ([
 	return rows, true
 }
 
+type apiListQueryCaptureStore struct {
+	beads.Store
+	listCalls []beads.ListQuery
+}
+
+func (s *apiListQueryCaptureStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.listCalls = append(s.listCalls, query)
+	return s.Store.List(query)
+}
+
 type partialPrimeSessionStore struct {
 	*beads.MemStore
 	partialRows    []beads.Bead
@@ -364,6 +374,29 @@ func (p *transportCapableProvider) SupportsTransport(transport string) bool {
 	return transport == "acp"
 }
 
+type blockingStartProvider struct {
+	*runtime.Fake
+	started chan struct{}
+	unblock chan struct{}
+	once    sync.Once
+}
+
+func (p *blockingStartProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if p.started != nil {
+		p.once.Do(func() {
+			close(p.started)
+		})
+	}
+	if p.unblock != nil {
+		select {
+		case <-p.unblock:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return p.Fake.Start(ctx, name, cfg)
+}
+
 type blockingNudgeProvider struct {
 	*runtime.Fake
 	started chan struct{}
@@ -376,6 +409,14 @@ func (p *blockingNudgeProvider) Nudge(name string, content []runtime.ContentBloc
 	}
 	<-p.unblock
 	return p.Fake.Nudge(name, content)
+}
+
+type pendingSessionMissingProvider struct {
+	*runtime.Fake
+}
+
+func (p *pendingSessionMissingProvider) Pending(_ string) (*runtime.PendingInteraction, error) {
+	return nil, fmt.Errorf("capturing pane: %w", runtime.ErrSessionNotFound)
 }
 
 type stateWithSessionProvider struct {
@@ -1911,6 +1952,42 @@ func TestHandleSessionCreateRejectsACPAgentWithoutACPRouting(t *testing.T) {
 	}
 }
 
+func TestHandleSessionCreateRejectsExplicitTmuxAgentWhenCitySessionProviderIsACP(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg.Session.Provider = "acp"
+	fs.cfg.Agents[0].Provider = "opencode"
+	fs.cfg.Agents[0].Session = "tmux"
+	fs.cfg.Providers["opencode"] = config.ProviderSpec{
+		DisplayName: "OpenCode",
+		Command:     "/bin/echo",
+		PathCheck:   "true",
+	}
+	state := &stateWithSessionProvider{
+		fakeState: fs,
+		provider:  &transportCapableProvider{Fake: runtime.NewFake()},
+	}
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"agent","name":"myrig/worker"}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "requires tmux transport") {
+		t.Fatalf("body = %q, want tmux transport error", rec.Body.String())
+	}
+	items, err := fs.cityBeadStore.ListByLabel(session.LabelSession, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("session bead count = %d, want 0", len(items))
+	}
+}
+
 func TestHumaHandleSessionCreateRejectsACPAgentWithoutACPRouting(t *testing.T) {
 	supportsACP := true
 	fs := newSessionFakeState(t)
@@ -2099,10 +2176,52 @@ func TestHandleSessionCreateAsync(t *testing.T) {
 	}
 }
 
-func TestHandleSessionCreateAsyncEmitsBeforeMetadataPersistenceCompletes(t *testing.T) {
+func TestHandleSessionCreateAsyncResultIsCommandable(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	body := `{"kind":"agent","name":"myrig/worker","alias":"commandable","async":true}`
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("create status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	accepted := decodeAsyncAccepted(t, rec.Body)
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
+	}
+	if success.Session.State == string(session.StateCreating) {
+		t.Fatalf("session create result state = %q, want commandable state", success.Session.State)
+	}
+
+	suspendReq := newPostRequest(cityURL(fs, "/session/")+success.Session.ID+"/suspend", nil)
+	suspendRec := httptest.NewRecorder()
+	h.ServeHTTP(suspendRec, suspendReq)
+
+	if suspendRec.Code != http.StatusOK {
+		t.Fatalf("suspend status = %d, want %d; body: %s", suspendRec.Code, http.StatusOK, suspendRec.Body.String())
+	}
+	bead, err := fs.cityBeadStore.Get(success.Session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", success.Session.ID, err)
+	}
+	if got := bead.Metadata["state"]; got != string(session.StateSuspended) {
+		t.Fatalf("state after suspend = %q, want %q", got, session.StateSuspended)
+	}
+}
+
+func TestHandleSessionCreateAsyncEmitsBeforeOptionalMetadataPersistenceCompletes(t *testing.T) {
 	fs := newSessionFakeState(t)
 	blocking := &blockingSetMetadataBatchStore{
-		Store:   fs.cityBeadStore,
+		Store: fs.cityBeadStore,
+		shouldBlock: func(kvs map[string]string) bool {
+			return kvs["real_world_app_session_kind"] == "agent" &&
+				kvs["real_world_app_project_id"] == "myrig"
+		},
 		entered: make(chan struct{}),
 		release: make(chan struct{}),
 	}
@@ -2144,14 +2263,17 @@ func TestHandleSessionCreateAsyncEmitsBeforeMetadataPersistenceCompletes(t *test
 
 type blockingSetMetadataBatchStore struct {
 	beads.Store
-	entered chan struct{}
-	release chan struct{}
-	once    sync.Once
+	shouldBlock func(map[string]string) bool
+	entered     chan struct{}
+	release     chan struct{}
+	once        sync.Once
 }
 
 func (s *blockingSetMetadataBatchStore) SetMetadataBatch(id string, kvs map[string]string) error {
-	s.once.Do(func() { close(s.entered) })
-	<-s.release
+	if s.shouldBlock != nil && s.shouldBlock(kvs) {
+		s.once.Do(func() { close(s.entered) })
+		<-s.release
+	}
 	return s.Store.SetMetadataBatch(id, kvs)
 }
 
@@ -3324,8 +3446,6 @@ func TestHandleSessionMessageMaterializedNamedSessionUsesLaunchCommandDefaults(t
 
 func TestHandleSessionMessageQueuesSuspendedSessionMessage(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
-	h := newTestCityHandlerWith(t, fs, srv)
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Resume Me")
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -3333,23 +3453,52 @@ func TestHandleSessionMessageQueuesSuspendedSessionMessage(t *testing.T) {
 		t.Fatalf("Suspend: %v", err)
 	}
 
-	callsBefore := len(fs.sp.Calls)
+	blocker := &blockingStartProvider{
+		Fake:    fs.sp,
+		started: make(chan struct{}),
+		unblock: make(chan struct{}),
+	}
+	var unblockOnce sync.Once
+	unblock := func() {
+		unblockOnce.Do(func() {
+			close(blocker.unblock)
+		})
+	}
+	t.Cleanup(unblock)
+
+	srv := New(&stateWithSessionProvider{fakeState: fs, provider: blocker})
+	h := newTestCityHandlerWith(t, fs, srv)
 
 	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/messages", strings.NewReader(`{"message":"hello"}`))
 	req.Header.Set("Idempotency-Key", "sess-msg-1")
 	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(w, req)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler blocked on suspended-session start instead of returning accepted")
+	}
 
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
 	}
-	for _, call := range fs.sp.Calls[callsBefore:] {
-		if call.Method == "Start" {
-			t.Fatalf("sp.Start should not be called synchronously — message should be queued for async delivery")
-		}
-		if call.Method == "Nudge" {
-			t.Fatalf("sp.Nudge should not be called synchronously — message should be queued for async delivery")
-		}
+	accepted := decodeAsyncAccepted(t, w.Body)
+
+	select {
+	case <-blocker.started:
+	case <-time.After(testEventTimeout):
+		t.Fatal("provider start was not reached")
+	}
+	unblock()
+
+	success, failure := waitForSessionMessageResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session message failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
 	}
 }
 
@@ -3751,6 +3900,115 @@ func TestResolveSessionIDMaterializingNamed_QualifiedAliasBasenameDoesNotStealNa
 	}
 	if got := bead.Metadata[apiNamedSessionMetadataKey]; got != "true" {
 		t.Fatalf("configured_named_session = %q, want true", got)
+	}
+}
+
+func TestResolveConfiguredNamedSessionIDWithContext_BoundedListCalls(t *testing.T) {
+	fs := newSessionFakeState(t)
+	store := &apiListQueryCaptureStore{Store: beads.NewMemStore()}
+	fs.cityBeadStore = store
+	srv := New(fs)
+
+	spec, ok, err := srv.findNamedSessionSpecForTarget(store, "worker")
+	if err != nil {
+		t.Fatalf("findNamedSessionSpecForTarget(worker): %v", err)
+	}
+	if !ok {
+		t.Fatal("expected named session spec for worker")
+	}
+	for i := 0; i < 200; i++ {
+		if _, err := store.Create(beads.Bead{
+			Type:   session.BeadType,
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"session_name": fmt.Sprintf("worker-%d", i),
+			},
+		}); err != nil {
+			t.Fatalf("create irrelevant session %d: %v", i, err)
+		}
+	}
+	target, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name":             spec.SessionName,
+			"alias":                    spec.Identity,
+			apiNamedSessionMetadataKey: "true",
+			apiNamedSessionIdentityKey: spec.Identity,
+			apiNamedSessionModeKey:     spec.Mode,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create canonical named session: %v", err)
+	}
+
+	id, matched, err := srv.resolveConfiguredNamedSessionIDWithContext(context.Background(), store, "worker", apiSessionResolveOptions{})
+	if err != nil {
+		t.Fatalf("resolveConfiguredNamedSessionIDWithContext(worker): %v", err)
+	}
+	if !matched {
+		t.Fatal("matched = false, want true")
+	}
+	if id != target.ID {
+		t.Fatalf("id = %q, want canonical %q", id, target.ID)
+	}
+	if len(store.listCalls) != 1 {
+		t.Fatalf("List calls = %d, want 1 canonical lookup", len(store.listCalls))
+	}
+	assertSessionResolverMetadataFilteredListCalls(t, store.listCalls)
+}
+
+func TestResolveConfiguredNamedSessionIDWithContext_BoundedConflictListCalls(t *testing.T) {
+	fs := newSessionFakeState(t)
+	store := &apiListQueryCaptureStore{Store: beads.NewMemStore()}
+	fs.cityBeadStore = store
+	srv := New(fs)
+
+	spec, ok, err := srv.findNamedSessionSpecForTarget(store, "worker")
+	if err != nil {
+		t.Fatalf("findNamedSessionSpecForTarget(worker): %v", err)
+	}
+	if !ok {
+		t.Fatal("expected named session spec for worker")
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": spec.SessionName,
+			"template":     "other/worker",
+			"agent_name":   "other/worker",
+			"state":        "asleep",
+		},
+	}); err != nil {
+		t.Fatalf("create wrong-template runtime bead: %v", err)
+	}
+
+	_, matched, err := srv.resolveConfiguredNamedSessionIDWithContext(context.Background(), store, "worker", apiSessionResolveOptions{})
+	if err == nil {
+		t.Fatal("resolveConfiguredNamedSessionIDWithContext(worker) succeeded, want conflict")
+	}
+	if !matched {
+		t.Fatal("matched = false, want true")
+	}
+	if !errors.Is(err, errConfiguredNamedSessionConflict) {
+		t.Fatalf("error = %v, want errConfiguredNamedSessionConflict", err)
+	}
+	if len(store.listCalls) > 4 {
+		t.Fatalf("List calls = %d, want bounded small constant without duplicate session_name lookup", len(store.listCalls))
+	}
+	assertSessionResolverMetadataFilteredListCalls(t, store.listCalls)
+}
+
+func assertSessionResolverMetadataFilteredListCalls(t *testing.T, calls []beads.ListQuery) {
+	t.Helper()
+	if len(calls) == 0 {
+		t.Fatal("expected at least one List call")
+	}
+	for i, query := range calls {
+		if len(query.Metadata) == 0 {
+			t.Fatalf("List call #%d has no metadata filter (would scan broad bead sets): %+v", i, query)
+		}
 	}
 }
 
@@ -4247,6 +4505,46 @@ func TestHandleSessionPendingAndRespond(t *testing.T) {
 	}
 }
 
+func TestHandleSessionPendingReturnsEmptyWhenRuntimeSessionMissing(t *testing.T) {
+	fs := newSessionFakeState(t)
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Interactive")
+	state := &stateWithSessionProvider{
+		fakeState: fs,
+		provider:  &pendingSessionMissingProvider{Fake: fs.sp},
+	}
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/pending", nil)
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pending status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var pendingResp sessionPendingResponse
+	if err := json.NewDecoder(rec.Body).Decode(&pendingResp); err != nil {
+		t.Fatalf("decode pending: %v", err)
+	}
+	if !pendingResp.Supported {
+		t.Fatalf("Supported = false, want true for interaction-capable provider")
+	}
+	if pendingResp.Pending != nil {
+		t.Fatalf("Pending = %#v, want nil when runtime session is gone", pendingResp.Pending)
+	}
+
+	respondReq := newPostRequest(cityURL(fs, "/session/")+info.ID+"/respond", strings.NewReader(`{"action":"approve"}`))
+	respondRec := httptest.NewRecorder()
+	h.ServeHTTP(respondRec, respondReq)
+
+	if respondRec.Code != http.StatusConflict {
+		t.Fatalf("respond status = %d, want %d; body: %s", respondRec.Code, http.StatusConflict, respondRec.Body.String())
+	}
+	if !strings.Contains(respondRec.Body.String(), "no_pending") {
+		t.Fatalf("respond body = %q, want no_pending problem", respondRec.Body.String())
+	}
+}
+
 func TestHandleSessionMessageRejectsPendingInteraction(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
@@ -4397,6 +4695,53 @@ func TestHandleSessionStreamStoppedWithoutOutputReturnsNotFound(t *testing.T) {
 	}
 }
 
+func TestHandleSessionStreamRawStoppedWithoutOutputReturnsNotFound(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	srv.sessionLogSearchPaths = []string{t.TempDir()}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	info, err := mgr.Create(context.Background(), "default", "No Output", "echo test", t.TempDir(), "test", nil, session.ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/stream?format=raw", nil)
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("got status %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+}
+
+func TestLegacySessionStreamRawStoppedWithoutOutputReturnsNotFound(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{t.TempDir()}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	info, err := mgr.Create(context.Background(), "default", "No Output", "echo test", t.TempDir(), "test", nil, session.ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream?format=raw", nil)
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("got status %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+}
+
 func TestHandleSessionStreamClosedSessionReturnsSnapshot(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
@@ -4447,6 +4792,58 @@ func TestHandleSessionStreamClosedSessionReturnsSnapshot(t *testing.T) {
 		if event.Type == events.WorkerOperation {
 			t.Fatalf("closed session stream emitted worker operation event: %#v", event)
 		}
+	}
+}
+
+func TestHandleSessionStreamStoppedSessionCommitsStatusHeaders(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{searchBase}
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+	)
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+cityURL(fs, "/session/")+info.ID+"/stream", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	cancel()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if got := resp.Header.Get("GC-Session-State"); got != "suspended" {
+		t.Fatalf("committed GC-Session-State = %q, want %q", got, "suspended")
+	}
+	if got := resp.Header.Get("GC-Session-Status"); got != "stopped" {
+		t.Fatalf("committed GC-Session-Status = %q, want %q", got, "stopped")
 	}
 }
 
@@ -4577,6 +4974,68 @@ func TestStreamSessionTranscriptHistoryDoesNotSkipTurnsAcrossCompactionBoundarie
 	if !strings.Contains(body, "after second boundary") {
 		t.Fatalf("stream body missing turn written after new compact boundary: %s", body)
 	}
+}
+
+func TestStreamSessionTranscriptHistoryReloadsChangesWrittenAfterInitialHistory(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	searchBase := t.TempDir()
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"uuid":"a","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"before initial history\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+	)
+
+	handle, err := srv.workerHandleForSession(fs.cityBeadStore, info.ID)
+	if err != nil {
+		t.Fatalf("workerHandleForSession: %v", err)
+	}
+	initial, err := handle.History(context.Background(), worker.HistoryRequest{})
+	if err != nil {
+		t.Fatalf("History(initial): %v", err)
+	}
+
+	logPath := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir), info.SessionKey+".jsonl")
+	appendFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	if _, err := appendFile.WriteString(
+		`{"uuid":"b","parentUuid":"a","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"after initial history\"}","timestamp":"2025-01-01T00:00:01Z"}` + "\n",
+	); err != nil {
+		_ = appendFile.Close()
+		t.Fatalf("append transcript: %v", err)
+	}
+	if err := appendFile.Close(); err != nil {
+		t.Fatalf("close transcript: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	rec := newSyncResponseRecorder()
+	done := make(chan struct{})
+	go func() {
+		srv.streamSessionTranscriptHistory(ctx, rec, info, handle, initial)
+		close(done)
+	}()
+
+	if body := waitForRecorderSubstring(t, rec, "after initial history", time.Second); !strings.Contains(body, "after initial history") {
+		t.Fatalf("stream body missing post-initial-history turn: %s", body)
+	}
+	cancel()
+	<-done
 }
 
 func TestCityScopedSessionStreamReloadsRotatedGeminiTranscriptAcrossRestart(t *testing.T) {
@@ -5277,6 +5736,171 @@ func TestHandleSessionTranscriptRawIncludesAllTypes(t *testing.T) {
 	// Raw format should include ALL entry types (user, assistant, tool_use, tool_result).
 	if len(resp.Messages) != 4 {
 		t.Fatalf("got %d raw messages, want 4 (all types included)", len(resp.Messages))
+	}
+}
+
+func TestHandleSessionTranscriptRawIncludesCodexCustomToolCalls(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "codex", workDir, "codex", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	codexDir := filepath.Join(searchBase, "2026", "05", "02")
+	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll codex session dir: %v", err)
+	}
+	codexPayload := strings.Join([]string{
+		fmt.Sprintf(`{"timestamp":"2025-01-01T00:00:00Z","type":"session_meta","payload":{"cwd":%q}}`, workDir),
+		`{"timestamp":"2025-01-01T00:00:04Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-edit","name":"apply_patch","input":"*** Begin Patch\n*** Update File: city.toml\n@@\n+# Created by Chris Sells\n [workspace]\n*** End Patch\n"}}`,
+		`{"timestamp":"2025-01-01T00:00:05Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-edit","output":"{\"output\":\"Success. Updated the following files:\\nM city.toml\\n\"}"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(codexDir, "rollout-2026-05-02T00-00-00-test.jsonl"), []byte(codexPayload), 0o644); err != nil {
+		t.Fatalf("WriteFile codex session: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/transcript?format=raw&tail=0", nil)
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp SessionStreamRawMessageEvent
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Messages) != 2 {
+		t.Fatalf("got %d raw messages, want 2 Codex custom tool frames", len(resp.Messages))
+	}
+	rawJSON, err := json.Marshal(resp.Messages)
+	if err != nil {
+		t.Fatalf("marshal raw transcript messages: %v", err)
+	}
+	rawJoined := string(rawJSON)
+	if !strings.Contains(rawJoined, `"custom_tool_call"`) ||
+		!strings.Contains(rawJoined, `"custom_tool_call_output"`) {
+		t.Fatalf("raw transcript missing Codex custom tool frames: %s", rawJoined)
+	}
+	if !strings.Contains(rawJoined, "apply_patch") ||
+		!strings.Contains(rawJoined, "Created by Chris Sells") ||
+		!strings.Contains(rawJoined, "Success. Updated the following files") {
+		t.Fatalf("raw transcript missing Codex custom tool payloads: %s", rawJoined)
+	}
+}
+
+func TestHandleSessionTranscriptConversationIncludesCodexErrorFrame(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "codex", workDir, "codex", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	codexDir := filepath.Join(searchBase, "2026", "05", "02")
+	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll codex session dir: %v", err)
+	}
+	codexPayload := strings.Join([]string{
+		fmt.Sprintf(`{"timestamp":"2025-01-01T00:00:00Z","type":"session_meta","payload":{"cwd":%q}}`, workDir),
+		`{"timestamp":"2025-01-01T00:00:04Z","type":"event_msg","payload":{"type":"error","message":"You've hit your usage limit.","codex_error_info":"usage_limit_exceeded"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(codexDir, "rollout-2026-05-02T00-00-00-test.jsonl"), []byte(codexPayload), 0o644); err != nil {
+		t.Fatalf("WriteFile codex session: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/transcript?tail=0", nil)
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp sessionTranscriptResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Format != "conversation" {
+		t.Fatalf("Format = %q, want conversation", resp.Format)
+	}
+	if got := len(resp.Turns); got != 1 {
+		t.Fatalf("turns = %d, want Codex error turn; body: %s", got, w.Body.String())
+	}
+	if resp.Turns[0].Role != "system" {
+		t.Fatalf("turn role = %q, want system", resp.Turns[0].Role)
+	}
+	if !strings.Contains(resp.Turns[0].Text, "usage_limit_exceeded") || !strings.Contains(resp.Turns[0].Text, "You've hit your usage limit.") {
+		t.Fatalf("turn text = %q, want Codex error code and message", resp.Turns[0].Text)
+	}
+}
+
+func TestHandleSessionStreamConversationIncludesCodexErrorFrame(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "codex", workDir, "codex", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	codexDir := filepath.Join(searchBase, "2026", "05", "02")
+	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll codex session dir: %v", err)
+	}
+	codexPayload := strings.Join([]string{
+		fmt.Sprintf(`{"timestamp":"2025-01-01T00:00:00Z","type":"session_meta","payload":{"cwd":%q}}`, workDir),
+		`{"timestamp":"2025-01-01T00:00:04Z","type":"event_msg","payload":{"type":"error","message":"You've hit your usage limit.","codex_error_info":"usage_limit_exceeded"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(codexDir, "rollout-2026-05-02T00-00-00-test.jsonl"), []byte(codexPayload), 0o644); err != nil {
+		t.Fatalf("WriteFile codex session: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "usage_limit_exceeded") || !strings.Contains(body, "You've hit your usage limit.") {
+		t.Fatalf("conversation stream body missing Codex error frame: %s", body)
 	}
 }
 

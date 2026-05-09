@@ -31,8 +31,17 @@ gomodcache_val="$(go env GOMODCACHE)"
 gotmpdir_val="$(go env GOTMPDIR)"
 goroot_val="$(go env GOROOT)"
 
+extra_env=()
+while IFS='=' read -r name _; do
+  case "$name" in
+    ANTHROPIC_*|CLAUDE_CODE_*|GC_ACCEPTANCE_KEEP|GC_TIERC_FORCE|GC_TUTORIAL_GOLDENS_USE_CLAUDE_FOR_CODEX)
+      extra_env+=("${name}=${!name}")
+      ;;
+  esac
+done < <(env)
+
 run_go_test() {
-  env -i \
+  local base_env=(
     PATH="${PATH}" \
     HOME="${HOME:-}" \
     USER="${USER:-}" \
@@ -58,8 +67,13 @@ run_go_test() {
     GOINSECURE="${GOINSECURE-}" \
     GOVCS="${GOVCS-}" \
     GOWORK="${GOWORK-}" \
-    GC_FAST_UNIT="${GC_FAST_UNIT:-0}" \
-    go test "$@"
+    GC_FAST_UNIT="${GC_FAST_UNIT:-0}"
+  )
+  if (( ${#extra_env[@]} > 0 )); then
+    env -i "${base_env[@]}" "${extra_env[@]}" go test "$@"
+  else
+    env -i "${base_env[@]}" go test "$@"
+  fi
 }
 
 go_test_args=(-timeout "$timeout")
@@ -73,11 +87,18 @@ if [[ -n "${GO_TEST_COVERPROFILE:-}" ]]; then
   go_test_args+=(-coverpkg=./... -coverprofile "$GO_TEST_COVERPROFILE")
 fi
 
+list_output="$(run_go_test "${go_test_args[@]}" "$test_pkg" -list '^Test' 2>&1)"
 tests=()
 while IFS= read -r line; do
   [[ "$line" == Test* ]] || continue
   tests+=("$line")
-done < <(run_go_test "${go_test_args[@]}" "$test_pkg" -list '^Test')
+done <<< "$list_output"
+
+if [[ ${#tests[@]} -eq 0 ]]; then
+  echo "no tests discovered for ${test_pkg}; go test -list output:" >&2
+  printf '%s\n' "$list_output" >&2
+  exit 1
+fi
 
 selected=()
 for i in "${!tests[@]}"; do

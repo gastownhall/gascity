@@ -713,33 +713,34 @@ func mustBuildPodEnv(t *testing.T, cfgEnv map[string]string, podWorkDir, managed
 
 func TestBuildPodEnvRemapsVars(t *testing.T) {
 	cfgEnv := map[string]string{
-		"GC_AGENT":               "mayor",
-		"GC_CITY":                "/host/city",
-		"GC_CITY_PATH":           "/host/city",
-		"GC_DIR":                 "/host/city/rig",
-		"GC_RIG_ROOT":            "/host/city/rig",
-		"GC_STORE_ROOT":          "/host/city/rig",
-		"BEADS_DIR":              "/host/city/rig/.beads",
-		"GT_ROOT":                "/host/city",
-		"GC_CITY_RUNTIME_DIR":    "/host/city/.gc/runtime",
-		"GC_PACK_STATE_DIR":      "/host/city/.gc/runtime/packs/rlm",
-		"GC_PACK_DIR":            "/host/city/packs/maintenance",
-		"GC_SESSION":             "exec:gc-session-k8s",
-		"GC_BEADS":               "exec:something",
-		"GC_EVENTS":              "exec:other",
-		"GC_DOLT_HOST":           "",
-		"GC_DOLT_PORT":           "3307",
-		"BEADS_DOLT_SERVER_HOST": "",
-		"BEADS_DOLT_SERVER_PORT": "3307",
-		"GC_K8S_DOLT_HOST":       "legacy-dolt.example.com",
-		"GC_K8S_DOLT_PORT":       "3308",
-		"GC_DOLT_USER":           "admin",
-		"GC_DOLT_PASSWORD":       "secret",
-		"BEADS_DOLT_SERVER_USER": "admin",
-		"BEADS_DOLT_PASSWORD":    "secret",
-		"GC_MAIL":                "exec:mail",
-		"GC_MCP_MAIL_URL":        "http://localhost:8765",
-		"CUSTOM_VAR":             "preserved",
+		"GC_AGENT":                            "mayor",
+		"GC_CITY":                             "/host/city",
+		"GC_CITY_PATH":                        "/host/city",
+		"GC_DIR":                              "/host/city/rig",
+		"GC_RIG_ROOT":                         "/host/city/rig",
+		"GC_STORE_ROOT":                       "/host/city/rig",
+		"BEADS_DIR":                           "/host/city/rig/.beads",
+		"GT_ROOT":                             "/host/city",
+		"GC_CITY_RUNTIME_DIR":                 "/host/city/.gc/runtime",
+		"GC_CONTROL_DISPATCHER_TRACE_DEFAULT": "/host/city/.gc/runtime/control-dispatcher-trace.log",
+		"GC_PACK_STATE_DIR":                   "/host/city/.gc/runtime/packs/rlm",
+		"GC_PACK_DIR":                         "/host/city/packs/maintenance",
+		"GC_SESSION":                          "exec:gc-session-k8s",
+		"GC_BEADS":                            "exec:something",
+		"GC_EVENTS":                           "exec:other",
+		"GC_DOLT_HOST":                        "",
+		"GC_DOLT_PORT":                        "3307",
+		"BEADS_DOLT_SERVER_HOST":              "",
+		"BEADS_DOLT_SERVER_PORT":              "3307",
+		"GC_K8S_DOLT_HOST":                    "legacy-dolt.example.com",
+		"GC_K8S_DOLT_PORT":                    "3308",
+		"GC_DOLT_USER":                        "admin",
+		"GC_DOLT_PASSWORD":                    "secret",
+		"BEADS_DOLT_SERVER_USER":              "admin",
+		"BEADS_DOLT_PASSWORD":                 "secret",
+		"GC_MAIL":                             "exec:mail",
+		"GC_MCP_MAIL_URL":                     "http://localhost:8765",
+		"CUSTOM_VAR":                          "preserved",
 	}
 
 	env := mustBuildPodEnv(t, cfgEnv, "/workspace/rig", podManagedDoltHost, podManagedDoltPort)
@@ -785,6 +786,11 @@ func TestBuildPodEnvRemapsVars(t *testing.T) {
 	// GC_CITY_RUNTIME_DIR should be remapped.
 	if envMap["GC_CITY_RUNTIME_DIR"] != "/workspace/.gc/runtime" {
 		t.Errorf("GC_CITY_RUNTIME_DIR = %q, want /workspace/.gc/runtime", envMap["GC_CITY_RUNTIME_DIR"])
+	}
+
+	// GC_CONTROL_DISPATCHER_TRACE_DEFAULT should be remapped.
+	if envMap["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"] != "/workspace/.gc/runtime/control-dispatcher-trace.log" {
+		t.Errorf("GC_CONTROL_DISPATCHER_TRACE_DEFAULT = %q, want /workspace/.gc/runtime/control-dispatcher-trace.log", envMap["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"])
 	}
 
 	// GC_PACK_STATE_DIR should be remapped.
@@ -840,6 +846,33 @@ func TestBuildPodEnvRemapsVars(t *testing.T) {
 	// GC_TMUX_SESSION should be added.
 	if envMap["GC_TMUX_SESSION"] != "main" {
 		t.Errorf("GC_TMUX_SESSION = %q, want main", envMap["GC_TMUX_SESSION"])
+	}
+}
+
+func TestBuildPodEnvReprojectsExternalRuntimeRoots(t *testing.T) {
+	cfgEnv := map[string]string{
+		"GC_CITY":                             "/host/city",
+		"GC_CITY_PATH":                        "/host/city",
+		"GC_CITY_RUNTIME_DIR":                 "/var/tmp/gascity-runtime",
+		"GC_CONTROL_DISPATCHER_TRACE_DEFAULT": "/var/tmp/gascity-runtime/control-dispatcher-trace.log",
+		"GC_PACK_STATE_DIR":                   "/var/tmp/gascity-runtime/packs/rlm",
+	}
+
+	env := mustBuildPodEnv(t, cfgEnv, "/workspace", podManagedDoltHost, podManagedDoltPort)
+
+	envMap := map[string]string{}
+	for _, e := range env {
+		envMap[e.Name] = e.Value
+	}
+
+	if envMap["GC_CITY_RUNTIME_DIR"] != "/workspace/.gc/runtime" {
+		t.Fatalf("GC_CITY_RUNTIME_DIR = %q, want /workspace/.gc/runtime", envMap["GC_CITY_RUNTIME_DIR"])
+	}
+	if envMap["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"] != "/workspace/.gc/runtime/control-dispatcher-trace.log" {
+		t.Fatalf("GC_CONTROL_DISPATCHER_TRACE_DEFAULT = %q, want /workspace/.gc/runtime/control-dispatcher-trace.log", envMap["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"])
+	}
+	if envMap["GC_PACK_STATE_DIR"] != "/workspace/.gc/runtime/packs/rlm" {
+		t.Fatalf("GC_PACK_STATE_DIR = %q, want /workspace/.gc/runtime/packs/rlm", envMap["GC_PACK_STATE_DIR"])
 	}
 }
 

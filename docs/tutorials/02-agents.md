@@ -60,7 +60,7 @@ and execute it.
 4. Check for more work. Repeat until the queue is empty.
 ```
 
-The `gc prime` command let's an agent running in GC how to behave, specially how
+The `gc prime` command let's an agent running in GC know how to behave, specifically how
 to look for work that's been assigned to it. In [tutorial
 01](/tutorials/01-cities-and-rigs), we learned that slinging work to an agent created a
 bead. Looking here at the default prompt, it should be clear how the agent can

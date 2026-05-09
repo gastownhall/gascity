@@ -34,6 +34,7 @@ City is the top-level configuration for a Gas City instance.
 | `doctor` | DoctorConfig |  |  | Doctor configures gc doctor thresholds and policy toggles (worktree size warnings, nested-worktree auto-prune). |
 | `service` | []Service |  |  | Services declares workspace-owned HTTP services mounted on the controller edge under /svc/&#123;name&#125;. |
 | `agent_defaults` | AgentDefaults |  |  | AgentDefaults provides city-level defaults for agents that don't override them (canonical TOML key: agent_defaults). The runtime currently applies default_sling_formula and append_fragments; the attachment-list fields remain tombstones, and the other fields are parsed/composed but not yet inherited automatically. |
+| `pricing` | []ModelPricing |  |  | Pricing holds per-model cost rate overrides keyed by (provider, model). City-level entries override pack-level entries which override the defaults shipped with the pricing package. See internal/pricing for the estimation seam introduced by issue #1255 (1d). |
 
 ## ACPSessionConfig
 
@@ -70,7 +71,7 @@ Agent defines a configured agent in the city.
 | `pre_start` | []string |  |  | PreStart is a list of shell commands run before session creation. Commands run on the target filesystem: locally for tmux, inside the pod/container for exec providers. Template variables same as session_setup. |
 | `prompt_template` | string |  |  | PromptTemplate is the path to this agent's prompt template file. Relative paths resolve against the city directory. |
 | `nudge` | string |  |  | Nudge is text typed into the agent's tmux session after startup. Used for CLI agents that don't accept command-line prompts. |
-| `session` | string |  |  | Session overrides the session transport for this agent. "" (default) uses the city-level session provider (typically tmux). "acp" uses the Agent Client Protocol (JSON-RPC over stdio). The agent's resolved provider must have supports_acp = true. Enum: `acp` |
+| `session` | string |  |  | Session overrides the session transport for this agent. "" (default) uses the provider default. "tmux" uses the tmux-backed CLI path even when the provider supports ACP. "acp" uses the Agent Client Protocol (JSON-RPC over stdio); the agent's resolved provider must have supports_acp = true. Enum: `acp`, `tmux` |
 | `provider` | string |  |  | Provider names the provider preset to use for this agent. |
 | `start_command` | string |  |  | StartCommand overrides the provider's command for this agent. |
 | `args` | []string |  |  | Args overrides the provider's default arguments. |
@@ -142,7 +143,7 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `env_remove` | []string |  |  | EnvRemove lists env var keys to remove. |
 | `pre_start` | []string |  |  | PreStart overrides the agent's pre_start commands. |
 | `prompt_template` | string |  |  | PromptTemplate overrides the prompt template path. Relative paths resolve against the city directory. |
-| `session` | string |  |  | Session overrides the session transport ("acp"). |
+| `session` | string |  |  | Session overrides the session transport ("acp" or "tmux"). |
 | `provider` | string |  |  | Provider overrides the provider name. |
 | `start_command` | string |  |  | StartCommand overrides the start command. |
 | `nudge` | string |  |  | Nudge overrides the nudge text. |
@@ -192,7 +193,7 @@ AgentPatch modifies an existing agent identified by (Dir, Name).
 | `env_remove` | []string |  |  | EnvRemove lists env var keys to remove after merging. |
 | `pre_start` | []string |  |  | PreStart overrides the agent's pre_start commands. |
 | `prompt_template` | string |  |  | PromptTemplate overrides the prompt template path. Relative paths resolve against the city directory. |
-| `session` | string |  |  | Session overrides the session transport ("acp"). |
+| `session` | string |  |  | Session overrides the session transport ("acp" or "tmux"). |
 | `provider` | string |  |  | Provider overrides the provider name. |
 | `start_command` | string |  |  | StartCommand overrides the start command. |
 | `nudge` | string |  |  | Nudge overrides the nudge text. |
@@ -262,6 +263,10 @@ DaemonConfig holds controller daemon settings.
 | `patrol_interval` | string |  | `30s` | PatrolInterval is the health patrol interval. Duration string (e.g., "30s", "5m", "1h"). Defaults to "30s". |
 | `max_restarts` | integer |  | `5` | MaxRestarts is the maximum number of agent restarts within RestartWindow before the agent is quarantined. 0 means unlimited (no crash loop detection). Defaults to 5. |
 | `restart_window` | string |  | `1h` | RestartWindow is the sliding time window for counting restarts. Duration string (e.g., "30s", "5m", "1h"). Defaults to "1h". |
+| `session_circuit_breaker` | boolean |  |  | SessionCircuitBreaker enables the named-session respawn circuit breaker. When enabled, the controller suppresses no-progress named-session respawns after the configured restart threshold is exceeded. |
+| `session_circuit_breaker_max_restarts` | integer |  | `5` | SessionCircuitBreakerMaxRestarts overrides MaxRestarts for the named-session respawn circuit breaker. Nil reuses MaxRestartsOrDefault. 0 disables the circuit breaker even when SessionCircuitBreaker is true. |
+| `session_circuit_breaker_window` | string |  | `1h` | SessionCircuitBreakerWindow overrides RestartWindow for the named-session respawn circuit breaker. Empty reuses RestartWindowDuration. |
+| `session_circuit_breaker_reset_after` | string |  |  | SessionCircuitBreakerResetAfter is the cooldown before an open named-session breaker resets automatically. Empty defaults to 2 * SessionCircuitBreakerWindowDuration. |
 | `shutdown_timeout` | string |  | `5s` | ShutdownTimeout is the time to wait after sending Ctrl-C before force-killing agents during shutdown. Duration string (e.g., "5s", "30s"). Set to "0s" for immediate kill. Defaults to "5s". |
 | `wisp_gc_interval` | string |  |  | WispGCInterval is how often wisp GC runs. Duration string (e.g., "5m", "1h"). Wisp GC is disabled unless both WispGCInterval and WispTTL are set. |
 | `wisp_ttl` | string |  |  | WispTTL is how long a closed molecule survives before being purged. Duration string (e.g., "24h", "7d"). Wisp GC is disabled unless both WispGCInterval and WispTTL are set. |
@@ -269,6 +274,7 @@ DaemonConfig holds controller daemon settings.
 | `observe_paths` | []string |  |  | ObservePaths lists extra directories to search for Claude JSONL session files (e.g., aimux session paths). The default search path (~/.claude/projects/) is always included. |
 | `probe_concurrency` | integer |  | `8` | ProbeConcurrency bounds the number of concurrent bd subprocess probes issued by the pool scale_check and work_query paths. bd serializes on a shared dolt sql-server, so unbounded parallelism causes contention. Nil (unset) defaults to 8. Set higher for workspaces with a fast dedicated dolt server, or lower to reduce contention on slow storage. |
 | `max_wakes_per_tick` | integer |  | `5` | MaxWakesPerTick caps how many sessions the reconciler may start in a single tick. Nil (unset) defaults to 5. Values &lt;= 0 are treated as the default — set a positive integer to override. |
+| `nudge_dispatcher` | string |  | `legacy` | NudgeDispatcher selects how queued nudges get delivered to running sessions. "legacy" (default) auto-spawns a per-session `gc nudge poll` process that polls the file-backed queue every 2s. "supervisor" runs the delivery loop inside the city runtime instead, with a unix-socket wake fast path triggered by enqueue, eliminating the per-session bd shellout storm. Enum: `legacy`, `supervisor` |
 
 ## DoctorConfig
 
@@ -288,6 +294,7 @@ DoltConfig holds optional dolt server overrides.
 |-------|------|----------|---------|-------------|
 | `port` | integer |  | `0` | Port is the dolt server port. 0 means use ephemeral port allocation (hashed from city path). Set explicitly to override. |
 | `host` | string |  | `localhost` | Host is the dolt server hostname. Defaults to localhost. |
+| `archive_level` | integer |  | `0` | ArchiveLevel controls Dolt's auto_gc archive aggressiveness. 0 disables archive compaction (lower CPU on startup). 1 enables archive compaction (higher CPU on startup). nil (omitted) defaults to 0. |
 
 ## EventsConfig
 
@@ -340,6 +347,17 @@ MailConfig holds mail provider settings.
 |-------|------|----------|---------|-------------|
 | `provider` | string |  |  | Provider selects the mail backend: "fake", "fail", "exec:&lt;script&gt;", or "" (default: beadmail). |
 
+## ModelPricing
+
+ModelPricing is a complete pricing entry for a (Provider, Model) pair.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `provider` | string | **yes** |  | Provider is the LLM provider label (e.g. "claude", "codex", "gemini"). |
+| `model` | string | **yes** |  | Model is the provider-specific model identifier (e.g. "claude-opus-4-7"). |
+| `tier` | Tier | **yes** |  | Tier holds the per-token-type rates. |
+| `last_verified` | string | **yes** |  | LastVerified is the date these rates were confirmed (YYYY-MM-DD). |
+
 ## NamedSession
 
 NamedSession defines a canonical persistent session backed by an agent template.
@@ -370,7 +388,7 @@ OrderOverride modifies a scanned order's scheduling fields.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `name` | string | **yes** |  | Name is the order name to target (required). |
-| `rig` | string |  |  | Rig scopes the override to a specific rig's order. Empty matches city-level orders. |
+| `rig` | string |  |  | Rig scopes the override to a specific rig's order. Empty matches ONLY city-level orders (those with no rig); it does NOT match per-rig instances of the same name — those expand at scan time and require an explicit rig. Use rig = "*" as a wildcard to match every instance of the named order (city-level + every rig-scoped copy). The literal "*" is reserved and rejected as a real rig name by config validation. |
 | `enabled` | boolean |  |  | Enabled overrides whether the order is active. |
 | `trigger` | string |  |  | Trigger overrides the trigger type. |
 | `gate` | string |  |  | Gate is a deprecated alias for Trigger accepted during the gate-&gt;trigger migration. Parsed inputs are normalized to Trigger. |
@@ -483,7 +501,7 @@ ProviderSpec defines a named provider's startup parameters.
 | `instructions_file` | string |  |  | InstructionsFile is the filename the provider reads for project instructions (e.g., "CLAUDE.md", "AGENTS.md"). Empty defaults to "AGENTS.md". |
 | `resume_flag` | string |  |  | ResumeFlag is the CLI flag for resuming a session by ID. Empty means the provider does not support resume. Examples: "--resume" (claude), "resume" (codex) |
 | `resume_style` | string |  |  | ResumeStyle controls how ResumeFlag is applied:   "flag"       → command --resume &lt;key&gt;              (default)   "subcommand" → command resume &lt;key&gt; |
-| `resume_command` | string |  |  | ResumeCommand is the full shell command to run when resuming a session. Supports &#123;&#123;.SessionKey&#125;&#125; template variable. When set, takes precedence over ResumeFlag/ResumeStyle. Example:   "claude --resume &#123;&#123;.SessionKey&#125;&#125; --dangerously-skip-permissions" |
+| `resume_command` | string |  |  | ResumeCommand is the full shell command to run when resuming a session. Supports only the &#123;&#123;.SessionKey&#125;&#125; template variable. When set, takes precedence over ResumeFlag/ResumeStyle. When schema-managed defaults are inserted, the resolver tokenizes and re-emits the command; for subcommand-style resume it inserts after the ResumeFlag token that precedes &#123;&#123;.SessionKey&#125;&#125;. Example:   "claude --resume &#123;&#123;.SessionKey&#125;&#125; --dangerously-skip-permissions" Schema-managed defaults missing from a subcommand-style resume command are inserted before &#123;&#123;.SessionKey&#125;&#125; during provider resolution. |
 | `session_id_flag` | string |  |  | SessionIDFlag is the CLI flag for creating a session with a specific ID. Enables the Generate & Pass strategy for session key management. Example: "--session-id" (claude) |
 | `permission_modes` | map[string]string |  |  | PermissionModes maps permission mode names to CLI flags. Example: &#123;"unrestricted": "--dangerously-skip-permissions", "plan": "--permission-mode plan"&#125; This is a config-only lookup table consumed by external clients (e.g., real-world app) to populate permission mode dropdowns. Launch-time flag substitution is planned for a follow-up PR — currently no runtime code reads this field. |
 | `option_defaults` | map[string]string |  |  | OptionDefaults overrides the Default value in OptionsSchema entries without redefining the schema itself. Keys are option keys (e.g., "permission_mode"), values are choice values (e.g., "unrestricted"). city.toml users set this to customize provider behavior without touching Args or OptionsSchema. |
@@ -594,6 +612,17 @@ SessionSleepConfig configures default idle sleep policies by session class.
 | `interactive_resume` | string |  |  | InteractiveResume applies to attachable sessions using wake_mode=resume. Accepts a duration string or "off". |
 | `interactive_fresh` | string |  |  | InteractiveFresh applies to attachable sessions using wake_mode=fresh. Accepts a duration string or "off". |
 | `noninteractive` | string |  |  | NonInteractive applies to sessions with attach=false. Accepts a duration string or "off". |
+
+## Tier
+
+Tier defines per-token-type rates in USD per 1 million tokens.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `prompt_usd_per_1m` | number | **yes** |  |  |
+| `completion_usd_per_1m` | number | **yes** |  |  |
+| `cache_read_usd_per_1m` | number | **yes** |  |  |
+| `cache_creation_usd_per_1m` | number | **yes** |  |  |
 
 ## Workspace
 

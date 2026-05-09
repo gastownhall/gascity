@@ -57,12 +57,12 @@ func resolveConfiguredNamedSessionID(
 	if !ok {
 		return "", false, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
-	candidates, err := session.NamedSessionResolutionCandidates(store, spec)
+	lookup, err := session.LookupConfiguredNamedSession(store, spec)
 	if err != nil {
-		return "", true, err
+		return "", true, fmt.Errorf("looking up configured named session: %w", err)
 	}
-	if bead, ok := session.FindCanonicalNamedSessionBead(candidates, spec); ok {
-		return bead.ID, true, nil
+	if lookup.HasCanonical {
+		return lookup.Canonical.ID, true, nil
 	}
 	// When materializing, check for a closed bead with this identity and
 	// reopen it (preserves bead ID for reference continuity).
@@ -73,8 +73,8 @@ func resolveConfiguredNamedSessionID(
 			return bead.ID, true, nil
 		}
 	}
-	if bead, conflict := session.FindNamedSessionConflict(candidates, spec); conflict {
-		return "", true, fmt.Errorf("%w: %q conflicts with configured named session %q via live bead %s", errNamedSessionConflict, identifier, spec.Identity, bead.ID)
+	if lookup.HasConflict {
+		return "", true, fmt.Errorf("%w: %q conflicts with configured named session %q via live bead %s", errNamedSessionConflict, identifier, spec.Identity, lookup.Conflict.ID)
 	}
 	if !opts.materialize {
 		return "", false, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)

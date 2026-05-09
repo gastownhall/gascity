@@ -156,6 +156,33 @@ func TestEventStream(t *testing.T) {
 	}
 }
 
+func TestEventStreamCommitsHeadersBeforeFirstEvent(t *testing.T) {
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+	server := httptest.NewServer(h)
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+cityURL(state, "/events/stream"), nil)
+	if err != nil {
+		t.Fatalf("build stream request: %v", err)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET events stream before first event: %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
+		t.Fatalf("Content-Type = %q, want text/event-stream", ct)
+	}
+}
+
 func TestEventStreamProjectsWorkflowMetadata(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]

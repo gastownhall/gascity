@@ -423,6 +423,11 @@ Named sessions add a second desired-state source:
   - the template has pending work, or
   - dependency wake requires the named-session identity
 
+An `always` named session is visible on a fresh city as a canonical session
+bead in `creating` state before the runtime process is confirmed. This is the
+same controller-owned creation intent used for any desired session; it is not a
+separate operator action.
+
 Dependency wake is evaluated over the validated graph of fully qualified
 template identities after pack expansion, not over ambiguous bare
 template strings. Each configured named session maps 1:1 to one

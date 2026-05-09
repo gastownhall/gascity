@@ -44,6 +44,14 @@ type entry struct {
 	spec   config.Service
 	status Status
 	inst   Instance
+	// nextConstructionRetry is the earliest time Tick may re-attempt
+	// construction for this entry when inst is nil. Set by Reload (and
+	// failed Tick retries) for proxy_process services whose initial
+	// construction failed; ignored when inst is non-nil. Without this
+	// retry path, a transient construction failure (e.g. dependency
+	// endpoint not yet reachable at boot) leaves the service permanently
+	// dead until manual Restart. See gastownhall/gascity#1774.
+	nextConstructionRetry time.Time
 }
 
 type closeTarget struct {
@@ -166,7 +174,9 @@ func (m *Manager) Reload() error {
 				base.State = "degraded"
 				base.LocalState = "config_error"
 				base.Reason = err.Error()
-				next[svc.Name] = &entry{spec: svc, status: base}
+				// Schedule a Tick retry rather than leaving the entry
+				// permanently nil-inst (gastownhall/gascity#1774).
+				next[svc.Name] = &entry{spec: svc, status: base, nextConstructionRetry: now.Add(proxyProcessRestartBackoff)}
 				continue
 			}
 			base = mergeStatus(base, inst.Status())
@@ -216,6 +226,47 @@ func (m *Manager) Tick(ctx context.Context, now time.Time) {
 	refs := m.currentPublicationRefs()
 	for _, e := range entries {
 		if e.inst == nil {
+			// proxy_process services whose initial construction failed
+			// get retried here; without this, a transient boot-order
+			// failure (e.g. city not yet running when the proxy tries
+			// to register) leaves the service dead until manual
+			// Restart. See gastownhall/gascity#1774.
+			if e.spec.KindOrDefault() != "proxy_process" {
+				continue
+			}
+			if !e.nextConstructionRetry.IsZero() && now.Before(e.nextConstructionRetry) {
+				continue
+			}
+			base := baseStatus(m.rt.Config(), m.rt.PublicationConfig(), refs, e.spec, now)
+			inst, err := newProxyProcessInstance(m.rt, e.spec, base)
+			if err != nil {
+				m.mu.Lock()
+				if cur, ok := m.entries[e.spec.Name]; ok && cur.inst == nil {
+					base.State = "degraded"
+					base.LocalState = "config_error"
+					base.Reason = err.Error()
+					cur.status = base
+					cur.nextConstructionRetry = now.Add(proxyProcessRestartBackoff)
+				}
+				m.mu.Unlock()
+				continue
+			}
+			m.mu.Lock()
+			cur, ok := m.entries[e.spec.Name]
+			if ok && cur.inst == nil {
+				cur.inst = inst
+				cur.status = mergeStatus(base, inst.Status())
+				cur.nextConstructionRetry = time.Time{}
+			}
+			m.mu.Unlock()
+			if !ok || cur.inst != inst {
+				// Race: entry was Reloaded out from under us, or another
+				// Tick installed an inst first. Close the orphan we just
+				// constructed so it doesn't leak.
+				if err := inst.Close(); err != nil {
+					log.Printf("workspacesvc: close orphan proxy process %s after retry race: %v", e.spec.Name, err)
+				}
+			}
 			continue
 		}
 		base := baseStatus(m.rt.Config(), m.rt.PublicationConfig(), refs, e.spec, now)

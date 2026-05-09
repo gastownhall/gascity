@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
 )
@@ -810,10 +811,9 @@ name = "test-city"
 }
 
 func TestLoadCityConfigFSAppliesFeatureFlags(t *testing.T) {
-	oldFormulaV2 := formula.IsFormulaV2Enabled()
+	formulatest.HoldV2ForTest(t)
 	oldGraphApply := molecule.IsGraphApplyEnabled()
 	t.Cleanup(func() {
-		formula.SetFormulaV2Enabled(oldFormulaV2)
 		molecule.SetGraphApplyEnabled(oldGraphApply)
 	})
 

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -75,6 +76,98 @@ func TestHandoffSuccess(t *testing.T) {
 	}
 }
 
+func TestWaitForControllerRestartHandoffFlagCleared(t *testing.T) {
+	dops := &drainOpsWithCountdown{fakeDrainOps: newFakeDrainOps(), remaining: 2}
+	if err := dops.setRestartRequested("worker"); err != nil {
+		t.Fatalf("setRestartRequested: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	code := waitForControllerRestart(context.Background(), dops, "worker", "gc handoff",
+		10*time.Millisecond, 5*time.Second, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0 when flag cleared; stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() > 0 {
+		t.Errorf("unexpected stderr: %q", stderr.String())
+	}
+	if dops.restartRequested["worker"] {
+		t.Error("restart flag should be cleared by the simulated reconciler")
+	}
+}
+
+func TestWaitForControllerRestartHandoffTimeout(t *testing.T) {
+	dops := newFakeDrainOps()
+	if err := dops.setRestartRequested("worker"); err != nil {
+		t.Fatalf("setRestartRequested: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	code := waitForControllerRestart(context.Background(), dops, "worker", "gc handoff",
+		10*time.Millisecond, 25*time.Millisecond, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 on timeout", code)
+	}
+	if got := stderr.String(); !strings.Contains(got, "gc handoff: controller did not act within") {
+		t.Errorf("stderr = %q, want handoff timeout diagnostic", got)
+	}
+	if !strings.Contains(stderr.String(), "gc dashboard") {
+		t.Errorf("stderr = %q, want gc dashboard hint", stderr.String())
+	}
+}
+
+func TestWaitForControllerRestartHandoffTimeoutReportsLastPollError(t *testing.T) {
+	dops := newFakeDrainOps()
+	if err := dops.setRestartRequested("worker"); err != nil {
+		t.Fatalf("setRestartRequested: %v", err)
+	}
+	dops.restartReadErr = errors.New("metadata read failed")
+
+	var stderr bytes.Buffer
+	code := waitForControllerRestart(context.Background(), dops, "worker", "gc handoff",
+		10*time.Millisecond, 25*time.Millisecond, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 on timeout", code)
+	}
+	if got := stderr.String(); !strings.Contains(got, "last poll error: metadata read failed") {
+		t.Errorf("stderr = %q, want last poll error", got)
+	}
+}
+
+func TestWaitForControllerRestartHandoffContextCancel(t *testing.T) {
+	dops := newFakeDrainOps()
+	if err := dops.setRestartRequested("worker"); err != nil {
+		t.Fatalf("setRestartRequested: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var stderr bytes.Buffer
+
+	done := make(chan int, 1)
+	go func() {
+		done <- waitForControllerRestart(ctx, dops, "worker", "gc handoff",
+			10*time.Millisecond, 30*time.Second, &stderr)
+	}()
+
+	time.Sleep(30 * time.Millisecond)
+	cancel()
+
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("code = %d, want 0 on context cancel", code)
+		}
+		if !dops.restartRequested["worker"] {
+			t.Error("restart flag should remain set after context cancel")
+		}
+		if got := stderr.String(); !strings.Contains(got, "gc handoff: signal received; restart request remains set") {
+			t.Errorf("stderr = %q, want pending restart warning", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("waitForControllerRestart did not exit on context cancel")
+	}
+}
+
 func TestCmdHandoffAutoSendsMailWithoutBlocking(t *testing.T) {
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
@@ -121,6 +214,65 @@ func TestCmdHandoffAutoSendsMailWithoutBlocking(t *testing.T) {
 	}
 }
 
+func TestCmdHandoffAutoHookFormatCodex(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_ALIAS", "mayor")
+	t.Setenv("GC_SESSION_NAME", "mayor")
+
+	var stdout, stderr bytes.Buffer
+	cmd := newHandoffCmd(&stdout, &stderr)
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetArgs([]string{"--auto", "--hook-format", "codex", "context cycle"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("gc handoff --auto --hook-format codex failed: %v; stderr=%s", err, stderr.String())
+	}
+
+	var payload struct {
+		HookSpecificOutput struct {
+			HookEventName     string `json:"hookEventName"`
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not Codex hook JSON: %v\n%s", err, stdout.String())
+	}
+	if got, want := payload.HookSpecificOutput.HookEventName, "PreCompact"; got != want {
+		t.Fatalf("hookEventName = %q, want %q", got, want)
+	}
+	if !strings.Contains(payload.HookSpecificOutput.AdditionalContext, "Handoff: sent auto mail") {
+		t.Fatalf("additionalContext = %q, want handoff confirmation", payload.HookSpecificOutput.AdditionalContext)
+	}
+}
+
+func TestDoHandoffAutoReportsHookOutputWriteError(t *testing.T) {
+	store := beads.NewMemStore()
+	rec := events.NewFake()
+	var stderr bytes.Buffer
+
+	code := doHandoffAuto(store, rec, "mayor", []string{"context cycle"}, "codex", errWriter{}, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "writing hook output") {
+		t.Fatalf("stderr = %q, want hook output write error", stderr.String())
+	}
+	all, err := store.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("open beads = %d, want handoff mail still created", len(all))
+	}
+}
+
 func TestCmdHandoffAutoUsesDefaultSubject(t *testing.T) {
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
@@ -158,9 +310,15 @@ func TestCmdHandoffAutoUsesDefaultSubject(t *testing.T) {
 	}
 }
 
+type errWriter struct{}
+
+func (errWriter) Write([]byte) (int, error) {
+	return 0, errors.New("write failed")
+}
+
 func TestCmdHandoffAutoRejectsTarget(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if code := cmdHandoff([]string{"context cycle"}, "mayor", true, &stdout, &stderr); code == 0 {
+	if code := cmdHandoff([]string{"context cycle"}, "mayor", true, "", &stdout, &stderr); code == 0 {
 		t.Fatal("cmdHandoff returned 0 for --auto with --target")
 	}
 	if !strings.Contains(stderr.String(), "--auto cannot be used with --target") {
@@ -402,7 +560,7 @@ func TestCmdHandoff_Regression744_NamedSessionReturnsWithoutBlocking(t *testing.
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- cmdHandoff([]string{"HANDOFF: context full"}, "", false, &stdout, &stderr)
+		done <- cmdHandoff([]string{"HANDOFF: context full"}, "", false, "", &stdout, &stderr)
 	}()
 
 	select {

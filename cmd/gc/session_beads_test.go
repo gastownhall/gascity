@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -49,6 +50,63 @@ type failingCloseStore struct {
 type stopHookProvider struct {
 	*runtime.Fake
 	beforeStop func(string)
+}
+
+type deadRuntimeArtifactProvider struct {
+	*runtime.Fake
+	visible   map[string]bool
+	live      map[string]bool
+	dead      map[string]bool
+	deadErrs  map[string]error
+	stopErrs  map[string]error
+	listErr   error
+	stopped   []string
+	stopCalls map[string]int
+}
+
+func newDeadRuntimeArtifactProvider() *deadRuntimeArtifactProvider {
+	return &deadRuntimeArtifactProvider{
+		Fake:      runtime.NewFake(),
+		visible:   make(map[string]bool),
+		live:      make(map[string]bool),
+		dead:      make(map[string]bool),
+		deadErrs:  make(map[string]error),
+		stopErrs:  make(map[string]error),
+		stopCalls: make(map[string]int),
+	}
+}
+
+func (p *deadRuntimeArtifactProvider) ListRunning(prefix string) ([]string, error) {
+	var names []string
+	for name := range p.visible {
+		if strings.HasPrefix(name, prefix) {
+			names = append(names, name)
+		}
+	}
+	return names, p.listErr
+}
+
+func (p *deadRuntimeArtifactProvider) IsRunning(name string) bool {
+	return p.live[name]
+}
+
+func (p *deadRuntimeArtifactProvider) IsDeadRuntimeSession(name string) (bool, error) {
+	if err := p.deadErrs[name]; err != nil {
+		return false, err
+	}
+	return p.dead[name], nil
+}
+
+func (p *deadRuntimeArtifactProvider) Stop(name string) error {
+	p.stopCalls[name]++
+	if err := p.stopErrs[name]; err != nil {
+		return err
+	}
+	p.stopped = append(p.stopped, name)
+	delete(p.visible, name)
+	delete(p.live, name)
+	delete(p.dead, name)
+	return nil
 }
 
 func (s *failingCloseStore) Close(_ string) error {
@@ -154,6 +212,38 @@ func TestSyncSessionBeads_CreatesNewBeads(t *testing.T) {
 	}
 	if b.Metadata["instance_token"] == "" {
 		t.Error("instance_token is empty")
+	}
+}
+
+func TestSyncSessionBeads_CreatesNonActiveBeadWithPendingCreateStartedAt(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+
+	ds := map[string]TemplateParams{
+		"helper": {TemplateName: "helper", Command: "true"},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+
+	all := allSessionBeads(t, store)
+	if len(all) != 1 {
+		t.Fatalf("expected 1 bead, got %d", len(all))
+	}
+	b := all[0]
+	if got := b.Metadata["state"]; got != "creating" {
+		t.Fatalf("state = %q, want creating", got)
+	}
+	if got := b.Metadata["pending_create_claim"]; got != "true" {
+		t.Fatalf("pending_create_claim = %q, want true", got)
+	}
+	if got, want := b.Metadata["pending_create_started_at"], pendingCreateStartedAtNow(clk.Now()); got != want {
+		t.Fatalf("pending_create_started_at = %q, want %q", got, want)
 	}
 }
 
@@ -915,8 +1005,70 @@ func TestSyncSessionBeads_ReopensClosedConfiguredNamedSession(t *testing.T) {
 	if got := all[0].Metadata["pending_create_claim"]; got != "true" {
 		t.Fatalf("pending_create_claim = %q, want true", got)
 	}
+	if got, want := all[0].Metadata["pending_create_started_at"], pendingCreateStartedAtNow(clk.Now()); got != want {
+		t.Fatalf("pending_create_started_at = %q, want %q", got, want)
+	}
 	if got := all[0].Metadata["session_name"]; got != sessionName {
 		t.Fatalf("session_name = %q, want %q", got, sessionName)
+	}
+}
+
+func TestReopenClosedConfiguredNamedSessionBeadClearsPendingCreateStartedAtWhenActive(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	now := time.Date(2026, 5, 1, 9, 30, 0, 0, time.UTC)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "refinery", StartCommand: "true", MaxActiveSessions: intPtr(2)},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "refinery", Mode: "on_demand"},
+		},
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "refinery")
+	closed, err := store.Create(beads.Bead{
+		Title:  "refinery",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               sessionName,
+			"alias":                      "refinery",
+			"template":                   "refinery",
+			"state":                      "suspended",
+			"close_reason":               "suspended",
+			"pending_create_started_at":  pendingCreateStartedAtNow(now.Add(-2 * time.Minute)),
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "refinery",
+			namedSessionModeMetadata:     "on_demand",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create closed canonical bead: %v", err)
+	}
+	if err := store.Close(closed.ID); err != nil {
+		t.Fatalf("close canonical bead: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	reopened, ok := reopenClosedConfiguredNamedSessionBead(
+		cityPath, store, cfg, "test-city", "refinery", sessionName, "active", now, nil, &stderr,
+	)
+	if !ok {
+		t.Fatalf("reopenClosedConfiguredNamedSessionBead failed: %s", stderr.String())
+	}
+	if reopened.Metadata["pending_create_claim"] != "" {
+		t.Fatalf("pending_create_claim = %q, want empty", reopened.Metadata["pending_create_claim"])
+	}
+	if reopened.Metadata["pending_create_started_at"] != "" {
+		t.Fatalf("pending_create_started_at = %q, want empty", reopened.Metadata["pending_create_started_at"])
+	}
+	stored, err := store.Get(closed.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", closed.ID, err)
+	}
+	if stored.Metadata["pending_create_started_at"] != "" {
+		t.Fatalf("stored pending_create_started_at = %q, want empty", stored.Metadata["pending_create_started_at"])
 	}
 }
 
@@ -1577,6 +1729,64 @@ func TestCloseSessionBeadIfRuntimeStoppedAndUnassigned_StopLeavesRunningKeepsBea
 }
 
 func TestSyncSessionBeads_PreservesConfiguredNamedSessionWithoutDesiredEntry(t *testing.T) {
+	// A configured named session with state=stopped + non-empty sleep_reason
+	// (deliberate sleep marker) must remain Status=open so gc start /
+	// next-wake reuses the same bead. See ga-ue1r policy Q1.
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "refinery", StartCommand: "true", MaxActiveSessions: intPtr(2)},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "refinery", Mode: "on_demand"},
+		},
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "refinery")
+	bead, err := store.Create(beads.Bead{
+		Title:  "refinery",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               sessionName,
+			"alias":                      "refinery",
+			"template":                   "refinery",
+			"state":                      "stopped",
+			"sleep_reason":               "city-stop",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "refinery",
+			namedSessionModeMetadata:     "on_demand",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create canonical bead: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, nil, sp, map[string]bool{sessionName: true}, cfg, clk, &stderr, false)
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", bead.ID, err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("status = %q, want open", got.Status)
+	}
+	if got.Metadata["close_reason"] != "" {
+		t.Fatalf("close_reason = %q, want empty", got.Metadata["close_reason"])
+	}
+}
+
+// TestSyncSessionBeads_ReleasesStoppedNamedBeadWithoutSleepReason covers the
+// converse of the test above: a stopped bead with no sleep_reason and no
+// fresh last_woke_at is dead, not deliberately asleep. Its alias must be
+// released (close the bead) so the next spawn can claim the identity. The
+// existing close→reopen path (TestSyncSessionBeads_ReopensClosedConfiguredNamedSession)
+// preserves continuity by reusing the same bead ID on next demand. See
+// ga-ue1r policy Q2.
+func TestSyncSessionBeads_ReleasesStoppedNamedBeadWithoutSleepReason(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
 	sp := runtime.NewFake()
@@ -1615,11 +1825,8 @@ func TestSyncSessionBeads_PreservesConfiguredNamedSessionWithoutDesiredEntry(t *
 	if err != nil {
 		t.Fatalf("Get(%s): %v", bead.ID, err)
 	}
-	if got.Status != "open" {
-		t.Fatalf("status = %q, want open", got.Status)
-	}
-	if got.Metadata["close_reason"] != "" {
-		t.Fatalf("close_reason = %q, want empty", got.Metadata["close_reason"])
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed (alias released for re-claim)", got.Status)
 	}
 }
 
@@ -2134,6 +2341,140 @@ func TestSyncSessionBeads_BatchesExistingMetadataBackfill(t *testing.T) {
 	}
 }
 
+// eofOnBeadStore wraps a MemStore and returns one unexpected-EOF error from
+// SetMetadataBatch, simulating a transient Dolt packet failure on a single
+// write. All other writes pass through to the underlying MemStore.
+type eofOnBeadStore struct {
+	*beads.MemStore
+	failNext  bool
+	failedID  string
+	failCalls int
+}
+
+func (s *eofOnBeadStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if s.failNext {
+		s.failNext = false
+		s.failedID = id
+		s.failCalls++
+		return fmt.Errorf(
+			"setting metadata on %q: exit status 1: [mysql] 2026/04/12 22:39:29 packets.go:58 unexpected EOF",
+			id,
+		)
+	}
+	return s.MemStore.SetMetadataBatch(id, kvs)
+}
+
+// TestSyncSessionBeads_IsolatesSetMetadataBatchEOFToSingleBead is a
+// regression test for issue #663: a transient unexpected-EOF on a single
+// session bead's SetMetadataBatch write must not prevent other session
+// beads in the same reconciliation tick from being updated. Per-bead
+// isolation keeps the reconciler resilient to transient Dolt packet
+// failures without cascading into a full-city interrupt wave.
+//
+// Before this contract was enforced, a single EOF from the Dolt MySQL
+// driver during the supervisor's reconciliation loop could propagate
+// through syncSessionBeads and trigger downstream failure handling that
+// stopped every managed session. The reconciler MUST iterate through the
+// remaining beads after one fails, logging the error but continuing.
+func TestSyncSessionBeads_IsolatesSetMetadataBatchEOFToSingleBead(t *testing.T) {
+	inner := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+
+	// Seed three session beads, each missing the template field so
+	// syncSessionBeads will queue a backfill batch write for every bead.
+	seed := func(name string) beads.Bead {
+		b, err := inner.Create(beads.Bead{
+			Title:  name,
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel, "agent:" + name},
+			Metadata: map[string]string{
+				"session_name": name,
+				"state":        "active",
+			},
+		})
+		if err != nil {
+			t.Fatalf("creating bead %s: %v", name, err)
+		}
+		return b
+	}
+	beadA := seed("configured-alpha")
+	beadB := seed("configured-beta")
+	beadC := seed("configured-gamma")
+
+	ds := map[string]TemplateParams{
+		"configured-alpha": {TemplateName: "configured-alpha", Command: "true"},
+		"configured-beta":  {TemplateName: "configured-beta", Command: "true"},
+		"configured-gamma": {TemplateName: "configured-gamma", Command: "true"},
+	}
+	expectedTemplates := map[string]string{
+		beadA.ID: "configured-alpha",
+		beadB.ID: "configured-beta",
+		beadC.ID: "configured-gamma",
+	}
+
+	// Wrap the store so the first SetMetadataBatch returns an EOF-shaped
+	// error. Because syncSessionBeads ranges over a map, failing the first
+	// metadata write makes the continuation assertion order-independent.
+	store := &eofOnBeadStore{MemStore: inner, failNext: true}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+
+	// The EOF must have been observed on exactly one seeded bead.
+	if store.failCalls != 1 {
+		t.Fatalf("SetMetadataBatch failure calls = %d, want 1", store.failCalls)
+	}
+	failedID := store.failedID
+	failedTemplate, ok := expectedTemplates[failedID]
+	if failedID == "" || !ok {
+		t.Fatalf("failed metadata write ID = %q, want one of %v", failedID, expectedTemplates)
+	}
+
+	// stderr must identify the failed bead and the transient EOF marker
+	// so operators can correlate the log with the underlying transport
+	// failure.
+	msg := stderr.String()
+	if !strings.Contains(msg, failedID) {
+		t.Errorf("stderr missing failed bead ID %q:\n%s", failedID, msg)
+	}
+	if !strings.Contains(strings.ToLower(msg), "unexpected eof") {
+		t.Errorf("stderr missing 'unexpected EOF' marker:\n%s", msg)
+	}
+
+	// Every non-failed bead MUST have its template backfilled in the same
+	// tick. The failed bead MUST remain unwritten so the next tick retries
+	// the full backfill from a clean state.
+	for id, want := range expectedTemplates {
+		got, err := inner.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if id == failedID {
+			if got.Metadata["template"] != "" {
+				t.Errorf("failed bead template = %q, want empty (EOF should block write)",
+					got.Metadata["template"])
+			}
+			continue
+		}
+		if got.Metadata["template"] != want {
+			t.Errorf("non-failed bead %s template = %q, want %q (isolation broken)",
+				id, got.Metadata["template"], want)
+		}
+	}
+
+	var retryStderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &retryStderr, false)
+
+	retried, err := inner.Get(failedID)
+	if err != nil {
+		t.Fatalf("Get(%s) after retry: %v", failedID, err)
+	}
+	if retried.Metadata["template"] != failedTemplate {
+		t.Errorf("retried bead template = %q, want %q", retried.Metadata["template"], failedTemplate)
+	}
+}
+
 func TestSyncSessionBeads_DoesNotRewriteReconcilerOwnedState(t *testing.T) {
 	store := newCountingMetadataStore()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
@@ -2462,7 +2803,7 @@ func TestSyncSessionBeads_StalePoolSnapshotReusesVisibleOwner(t *testing.T) {
 	sp := runtime.NewFake()
 	template := "pack/worker"
 
-	owner, err := createPoolSessionBead(store, template, nil)
+	owner, err := createPoolSessionBead(store, template, nil, clk.Now(), poolSessionCreateIdentity{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2513,11 +2854,526 @@ func TestSyncSessionBeads_StalePoolSnapshotReusesVisibleOwner(t *testing.T) {
 	}
 }
 
+func TestSyncSessionBeads_DoesNotCompactLivePoolSlotIdentity(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 5, 17, 30, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "pack",
+			MaxActiveSessions: intPtr(10),
+		}},
+	}
+	template := "pack/worker"
+	sessionName := "pack-worker-mc-live"
+
+	live, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + template},
+		Metadata: map[string]string{
+			"template":             template,
+			"session_name":         sessionName,
+			"agent_name":           "pack/worker-6",
+			"alias":                "pack/worker-6",
+			"pool_slot":            "6",
+			"state":                "awake",
+			"session_origin":       "ephemeral",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	desired := map[string]TemplateParams{
+		sessionName: {
+			TemplateName: template,
+			InstanceName: "pack/worker-6",
+			Alias:        "pack/worker-6",
+			PoolSlot:     6,
+		},
+		"pack-worker-mc-other": {
+			TemplateName: template,
+			InstanceName: "pack/worker-1",
+			Alias:        "pack/worker-1",
+			PoolSlot:     1,
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, desired, sp, allConfiguredDS(desired), cfg, clk, &stderr, false)
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+
+	got, err := store.Get(live.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["pool_slot"] != "6" {
+		t.Fatalf("pool_slot = %q, want live identity slot 6", got.Metadata["pool_slot"])
+	}
+	if got.Metadata["alias"] != "pack/worker-6" {
+		t.Fatalf("alias = %q, want pack/worker-6", got.Metadata["alias"])
+	}
+	if got.Metadata["agent_name"] != "pack/worker-6" {
+		t.Fatalf("agent_name = %q, want pack/worker-6", got.Metadata["agent_name"])
+	}
+}
+
+func TestSyncSessionBeads_RewritesStalePoolSlotWhenConcreteIdentityAgrees(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 6, 2, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "pack",
+			MaxActiveSessions: intPtr(10),
+		}},
+	}
+	template := "pack/worker"
+	sessionName := "pack-worker-live"
+
+	live, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + template},
+		Metadata: map[string]string{
+			"template":             template,
+			"session_name":         sessionName,
+			"agent_name":           "pack/worker-6",
+			"alias":                "pack/worker-6",
+			"pool_slot":            "1",
+			"state":                "awake",
+			"session_origin":       "ephemeral",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	desired := map[string]TemplateParams{
+		sessionName: {
+			TemplateName: template,
+			InstanceName: "pack/worker-6",
+			Alias:        "pack/worker-6",
+			PoolSlot:     6,
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, desired, sp, allConfiguredDS(desired), cfg, clk, &stderr, false)
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+
+	got, err := store.Get(live.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["pool_slot"] != "6" {
+		t.Fatalf("pool_slot = %q, want repaired slot 6", got.Metadata["pool_slot"])
+	}
+}
+
+func TestSyncSessionBeads_DoesNotRewriteOwnershipWhenAliasRepairFails(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 6, 2, 5, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "pack",
+			MaxActiveSessions: intPtr(10),
+		}},
+	}
+	template := "pack/worker"
+	if _, err := store.Create(beads.Bead{
+		Title:  "incumbent",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + template},
+		Metadata: map[string]string{
+			"template":             template,
+			"session_name":         "pack-worker-incumbent",
+			"agent_name":           "pack/worker-2",
+			"alias":                "pack/worker-2",
+			"pool_slot":            "2",
+			"state":                "awake",
+			"session_origin":       "ephemeral",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	live, err := store.Create(beads.Bead{
+		Title:  "legacy worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + template},
+		Metadata: map[string]string{
+			"template":             template,
+			"session_name":         "pack-worker-legacy",
+			"agent_name":           template,
+			"state":                "awake",
+			"session_origin":       "ephemeral",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	desired := map[string]TemplateParams{
+		"pack-worker-legacy": {
+			TemplateName: template,
+			InstanceName: "pack/worker-2",
+			Alias:        "pack/worker-2",
+			PoolSlot:     2,
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, desired, sp, allConfiguredDS(desired), cfg, clk, &stderr, false)
+	got, err := store.Get(live.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["agent_name"] != template {
+		t.Fatalf("agent_name = %q, want unchanged template identity after alias conflict", got.Metadata["agent_name"])
+	}
+	if got.Metadata["pool_slot"] != "" {
+		t.Fatalf("pool_slot = %q, want unset after alias conflict", got.Metadata["pool_slot"])
+	}
+	if got.Metadata["alias"] != "" {
+		t.Fatalf("alias = %q, want unchanged empty alias after conflict", got.Metadata["alias"])
+	}
+	if got.Metadata[poolAliasConflictMetadataKey] != "pack/worker-2" {
+		t.Fatalf("pool_alias_conflict = %q, want pack/worker-2", got.Metadata[poolAliasConflictMetadataKey])
+	}
+	if got.Metadata[poolAliasConflictCountMetadataKey] != "1" {
+		t.Fatalf("pool_alias_conflict_count = %q, want 1", got.Metadata[poolAliasConflictCountMetadataKey])
+	}
+	if got.Metadata[poolAliasConflictAtMetadataKey] != "2026-05-06T02:05:00Z" {
+		t.Fatalf("pool_alias_conflict_at = %q, want 2026-05-06T02:05:00Z", got.Metadata[poolAliasConflictAtMetadataKey])
+	}
+	if !strings.Contains(stderr.String(), "unavailable") {
+		t.Fatalf("stderr %q does not mention alias conflict", stderr.String())
+	}
+}
+
+func TestSyncSessionBeads_DoesNotReservePoolSlotForAliasConflictBead(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 6, 2, 10, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "pack",
+			MaxActiveSessions: intPtr(10),
+		}},
+	}
+	template := "pack/worker"
+	if _, err := store.Create(beads.Bead{
+		Title:  "alias owner",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + template},
+		Metadata: map[string]string{
+			"template":             template,
+			"session_name":         "pack-worker-owner-2",
+			"agent_name":           "pack/worker-2",
+			"alias":                "pack/worker-2",
+			"pool_slot":            "2",
+			"state":                "awake",
+			"session_origin":       "ephemeral",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:  "legacy worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + template},
+		Metadata: map[string]string{
+			"template":             template,
+			"session_name":         "pack-worker-a-legacy",
+			"agent_name":           template,
+			"pool_slot":            "6",
+			"state":                "awake",
+			"session_origin":       "ephemeral",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	live, err := store.Create(beads.Bead{
+		Title:  "live worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + template},
+		Metadata: map[string]string{
+			"template":             template,
+			"session_name":         "pack-worker-z-live",
+			"agent_name":           "pack/worker-6",
+			"alias":                "pack/worker-6",
+			"pool_slot":            "6",
+			"state":                "awake",
+			"session_origin":       "ephemeral",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	desired := map[string]TemplateParams{
+		"pack-worker-a-legacy": {
+			TemplateName: template,
+			InstanceName: "pack/worker-2",
+			Alias:        "pack/worker-2",
+			PoolSlot:     2,
+		},
+		"pack-worker-z-live": {
+			TemplateName: template,
+			InstanceName: "pack/worker-6",
+			Alias:        "pack/worker-6",
+			PoolSlot:     6,
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, desired, sp, allConfiguredDS(desired), cfg, clk, &stderr, false)
+	if !strings.Contains(stderr.String(), "unavailable") {
+		t.Fatalf("stderr %q does not mention alias conflict", stderr.String())
+	}
+
+	got, err := store.Get(live.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["pool_slot"] != "6" {
+		t.Fatalf("pool_slot = %q, want live identity slot 6 preserved", got.Metadata["pool_slot"])
+	}
+}
+
+func TestSyncSessionBeads_ValidatesPreStampedPoolAlias(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 6, 2, 12, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "pack",
+			MaxActiveSessions: intPtr(10),
+		}},
+	}
+	template := "pack/worker"
+	if _, err := store.Create(beads.Bead{
+		Title:  "manual alias owner",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:pack/manual"},
+		Metadata: map[string]string{
+			"template":       "pack/manual",
+			"session_name":   "manual-pack-worker-2",
+			"agent_name":     "pack/manual",
+			"alias":          "pack/worker-2",
+			"state":          "awake",
+			"session_origin": "manual",
+			"manual_session": "true",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	live, err := store.Create(beads.Bead{
+		Title:  "pre-stamped worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + template},
+		Metadata: map[string]string{
+			"template":             template,
+			"session_name":         "pack-worker-live",
+			"agent_name":           "pack/worker-2",
+			"alias":                "pack/worker-2",
+			"pool_slot":            "2",
+			"state":                "awake",
+			"session_origin":       "ephemeral",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	desired := map[string]TemplateParams{
+		"pack-worker-live": {
+			TemplateName: template,
+			InstanceName: "pack/worker-2",
+			Alias:        "pack/worker-2",
+			PoolSlot:     2,
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, desired, sp, allConfiguredDS(desired), cfg, clk, &stderr, false)
+	got, err := store.Get(live.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["alias"] != "" {
+		t.Fatalf("alias = %q, want cleared after conflict", got.Metadata["alias"])
+	}
+	if got.Metadata[poolAliasConflictMetadataKey] != "pack/worker-2" {
+		t.Fatalf("pool_alias_conflict = %q, want pack/worker-2", got.Metadata[poolAliasConflictMetadataKey])
+	}
+	if got.Metadata[poolAliasConflictCountMetadataKey] != "1" {
+		t.Fatalf("pool_alias_conflict_count = %q, want 1", got.Metadata[poolAliasConflictCountMetadataKey])
+	}
+	if got.Metadata[poolAliasConflictAtMetadataKey] != "2026-05-06T02:12:00Z" {
+		t.Fatalf("pool_alias_conflict_at = %q, want 2026-05-06T02:12:00Z", got.Metadata[poolAliasConflictAtMetadataKey])
+	}
+	if !strings.Contains(stderr.String(), "unavailable") {
+		t.Fatalf("stderr %q does not mention alias conflict", stderr.String())
+	}
+}
+
+func TestSyncSessionBeads_ManagedPoolAliasValidationKeepsCleanAlias(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 6, 2, 14, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "pack",
+			MaxActiveSessions: intPtr(10),
+		}},
+	}
+	template := "pack/worker"
+	live, err := store.Create(beads.Bead{
+		Title:  "pre-stamped worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + template},
+		Metadata: map[string]string{
+			"template":             template,
+			"session_name":         "pack-worker-live",
+			"agent_name":           "pack/worker-2",
+			"alias":                "pack/worker-2",
+			"pool_slot":            "2",
+			"state":                "awake",
+			"session_origin":       "ephemeral",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	desired := map[string]TemplateParams{
+		"pack-worker-live": {
+			TemplateName: template,
+			InstanceName: "pack/worker-2",
+			Alias:        "pack/worker-2",
+			PoolSlot:     2,
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, desired, sp, allConfiguredDS(desired), cfg, clk, &stderr, false)
+	got, err := store.Get(live.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["alias"] != "pack/worker-2" {
+		t.Fatalf("alias = %q, want clean managed alias preserved", got.Metadata["alias"])
+	}
+	if got.Metadata[poolAliasConflictMetadataKey] != "" {
+		t.Fatalf("pool_alias_conflict = %q, want empty", got.Metadata[poolAliasConflictMetadataKey])
+	}
+	if got.Metadata[poolAliasConflictCountMetadataKey] != "" {
+		t.Fatalf("pool_alias_conflict_count = %q, want empty", got.Metadata[poolAliasConflictCountMetadataKey])
+	}
+	if got.Metadata[poolAliasConflictAtMetadataKey] != "" {
+		t.Fatalf("pool_alias_conflict_at = %q, want empty", got.Metadata[poolAliasConflictAtMetadataKey])
+	}
+	if strings.Contains(stderr.String(), "unavailable") {
+		t.Fatalf("stderr %q unexpectedly mentions alias conflict", stderr.String())
+	}
+}
+
+func TestSyncSessionBeads_PreservesStablePoolAliasConflictMetadataWhenAliasLockFails(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 6, 2, 15, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "pack",
+			MaxActiveSessions: intPtr(10),
+		}},
+	}
+	template := "pack/worker"
+	live, err := store.Create(beads.Bead{
+		Title:  "stable worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + template},
+		Metadata: map[string]string{
+			"template":                        template,
+			"session_name":                    "pack-worker-live",
+			"agent_name":                      "pack/worker-2",
+			"alias":                           "pack/worker-2",
+			"pool_slot":                       "2",
+			"state":                           "awake",
+			"session_origin":                  "ephemeral",
+			poolManagedMetadataKey:            boolMetadata(true),
+			poolAliasConflictMetadataKey:      "pack/worker-2",
+			poolAliasConflictCountMetadataKey: "3",
+			poolAliasConflictAtMetadataKey:    "2026-05-06T02:10:00Z",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	desired := map[string]TemplateParams{
+		"pack-worker-live": {
+			TemplateName: template,
+			InstanceName: "pack/worker-2",
+			Alias:        "pack/worker-2",
+			PoolSlot:     2,
+		},
+	}
+
+	cityRoot := t.TempDir()
+	cityPath := filepath.Join(cityRoot, "not-a-dir")
+	if err := os.WriteFile(cityPath, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads(cityPath, store, desired, sp, allConfiguredDS(desired), cfg, clk, &stderr, false)
+	got, err := store.Get(live.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata[poolAliasConflictMetadataKey] != "pack/worker-2" {
+		t.Fatalf("pool_alias_conflict = %q, want preserved %q", got.Metadata[poolAliasConflictMetadataKey], "pack/worker-2")
+	}
+	if got.Metadata[poolAliasConflictCountMetadataKey] != "3" {
+		t.Fatalf("pool_alias_conflict_count = %q, want preserved %q", got.Metadata[poolAliasConflictCountMetadataKey], "3")
+	}
+	if got.Metadata[poolAliasConflictAtMetadataKey] != "2026-05-06T02:10:00Z" {
+		t.Fatalf("pool_alias_conflict_at = %q, want preserved %q", got.Metadata[poolAliasConflictAtMetadataKey], "2026-05-06T02:10:00Z")
+	}
+	if !strings.Contains(stderr.String(), "locking alias") {
+		t.Fatalf("stderr %q does not mention alias lock failure", stderr.String())
+	}
+}
+
 func TestCreatePoolSessionBead_MetadataFailureLeavesReachablePlaceholder(t *testing.T) {
 	store := &failingPoolSessionNameStore{MemStore: beads.NewMemStore()}
 	template := "pack/worker"
 
-	if _, err := createPoolSessionBead(store, template, nil); err == nil {
+	if _, err := createPoolSessionBead(store, template, nil, time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC), poolSessionCreateIdentity{}); err == nil {
 		t.Fatal("createPoolSessionBead returned nil error, want session_name metadata failure")
 	}
 
@@ -4141,6 +4997,236 @@ func TestReapStaleSessionBeads_NilStoreAndProvider(t *testing.T) {
 	}
 }
 
+func TestCleanupDeadRuntimeSessionCorpsesStopsVisibleDeadSessions(t *testing.T) {
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible["dead-worker"] = true
+	sp.visible["live-worker"] = true
+	sp.visible["untracked-worker"] = true
+	sp.live["live-worker"] = true
+	sp.dead["dead-worker"] = true
+
+	snapshot := newSessionBeadSnapshot([]beads.Bead{
+		{
+			ID:     "s1",
+			Status: "open",
+			Metadata: map[string]string{
+				"session_name": "dead-worker",
+				"template":     "worker",
+			},
+		},
+		{
+			ID:     "s2",
+			Status: "open",
+			Metadata: map[string]string{
+				"session_name": "live-worker",
+				"template":     "worker",
+			},
+		},
+		{
+			ID:     "s3",
+			Status: "open",
+			Metadata: map[string]string{
+				"session_name": "absent-worker",
+				"template":     "worker",
+			},
+		},
+	})
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(snapshot, nil, sp, &stderr)
+	if got != 1 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
+	}
+	if len(sp.stopped) != 1 || sp.stopped[0] != "dead-worker" {
+		t.Fatalf("stopped = %v, want [dead-worker]", sp.stopped)
+	}
+	if !sp.visible["live-worker"] || !sp.visible["untracked-worker"] {
+		t.Fatalf("cleanup stopped live or untracked session: visible=%v", sp.visible)
+	}
+}
+
+func TestCleanupDeadRuntimeSessionCorpsesSkipsLivenessUncertainty(t *testing.T) {
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible["worker"] = true
+	sp.deadErrs["worker"] = errors.New("pane state unavailable")
+
+	snapshot := newSessionBeadSnapshot([]beads.Bead{{
+		ID:     "s1",
+		Status: "open",
+		Metadata: map[string]string{
+			"session_name": "worker",
+		},
+	}})
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(snapshot, nil, sp, &stderr)
+	if got != 0 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 0", got)
+	}
+	if sp.stopCalls["worker"] != 0 {
+		t.Fatalf("Stop called for liveness-uncertain session: calls=%d stderr=%q", sp.stopCalls["worker"], stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "confirming dead runtime session worker") {
+		t.Fatalf("stderr = %q, want dead-confirmation warning", stderr.String())
+	}
+}
+
+func TestCleanupDeadRuntimeSessionCorpsesSkipsVisibleSessionWhenCheckerReportsLive(t *testing.T) {
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible["mixed-pane-worker"] = true
+
+	snapshot := newSessionBeadSnapshot([]beads.Bead{{
+		ID:     "s1",
+		Status: "open",
+		Metadata: map[string]string{
+			"session_name": "mixed-pane-worker",
+		},
+	}})
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(snapshot, nil, sp, &stderr)
+	if got != 0 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 0", got)
+	}
+	if sp.stopCalls["mixed-pane-worker"] != 0 {
+		t.Fatalf("Stop calls = %d, want 0 for checker-live session", sp.stopCalls["mixed-pane-worker"])
+	}
+}
+
+func TestCleanupDeadRuntimeSessionCorpsesUsesPartialListResults(t *testing.T) {
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible["worker"] = true
+	sp.dead["worker"] = true
+	sp.listErr = &runtime.PartialListError{Err: errors.New("remote backend down")}
+
+	snapshot := newSessionBeadSnapshot([]beads.Bead{{
+		ID:     "s1",
+		Status: "open",
+		Metadata: map[string]string{
+			"session_name": "worker",
+		},
+	}})
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(snapshot, nil, sp, &stderr)
+	if got != 1 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
+	}
+	if sp.stopCalls["worker"] != 1 {
+		t.Fatalf("Stop calls = %d, want 1", sp.stopCalls["worker"])
+	}
+	if !strings.Contains(stderr.String(), "listing runtime sessions partially failed") {
+		t.Fatalf("stderr = %q, want partial-list warning", stderr.String())
+	}
+}
+
+func TestCleanupDeadRuntimeSessionCorpsesSkipsLifecycleOwnedBeads(t *testing.T) {
+	sp := newDeadRuntimeArtifactProvider()
+	for _, name := range []string{"pending-worker", "draining-worker", "named-worker", "ordinary-worker"} {
+		sp.visible[name] = true
+		sp.dead[name] = true
+	}
+
+	dt := newDrainTracker()
+	dt.set("draining", &drainState{reason: "user"})
+	snapshot := newSessionBeadSnapshot([]beads.Bead{
+		{
+			ID:     "pending",
+			Status: "open",
+			Metadata: map[string]string{
+				"session_name":         "pending-worker",
+				"pending_create_claim": "true",
+			},
+		},
+		{
+			ID:     "draining",
+			Status: "open",
+			Metadata: map[string]string{
+				"session_name": "draining-worker",
+			},
+		},
+		{
+			ID:     "named",
+			Status: "open",
+			Metadata: map[string]string{
+				"session_name":                       "named-worker",
+				session.NamedSessionMetadataKey:      "true",
+				session.NamedSessionIdentityMetadata: "rig/worker",
+				session.NamedSessionModeMetadata:     "always",
+			},
+		},
+		{
+			ID:     "ordinary",
+			Status: "open",
+			Metadata: map[string]string{
+				"session_name": "ordinary-worker",
+			},
+		},
+	})
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(snapshot, dt, sp, &stderr)
+	if got != 1 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
+	}
+	if sp.stopCalls["ordinary-worker"] != 1 {
+		t.Fatalf("ordinary Stop calls = %d, want 1", sp.stopCalls["ordinary-worker"])
+	}
+	for _, name := range []string{"pending-worker", "draining-worker", "named-worker"} {
+		if sp.stopCalls[name] != 0 {
+			t.Fatalf("Stop(%s) calls = %d, want 0", name, sp.stopCalls[name])
+		}
+	}
+}
+
+func TestCleanupDeadRuntimeSessionCorpsesSkipsBlankAndDeduplicatesNames(t *testing.T) {
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible["worker"] = true
+	sp.dead["worker"] = true
+
+	snapshot := newSessionBeadSnapshot([]beads.Bead{
+		{ID: "blank", Status: "open", Metadata: map[string]string{"session_name": "  "}},
+		{ID: "first", Status: "open", Metadata: map[string]string{"session_name": "worker"}},
+		{ID: "second", Status: "open", Metadata: map[string]string{"session_name": " worker "}},
+	})
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(snapshot, nil, sp, &stderr)
+	if got != 1 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
+	}
+	if sp.stopCalls["worker"] != 1 {
+		t.Fatalf("Stop calls = %d, want 1", sp.stopCalls["worker"])
+	}
+}
+
+func TestCleanupDeadRuntimeSessionCorpsesReportsStopErrors(t *testing.T) {
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible["worker"] = true
+	sp.dead["worker"] = true
+	sp.stopErrs["worker"] = errors.New("stop failed")
+
+	snapshot := newSessionBeadSnapshot([]beads.Bead{{
+		ID:     "s1",
+		Status: "open",
+		Metadata: map[string]string{
+			"session_name": "worker",
+		},
+	}})
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(snapshot, nil, sp, &stderr)
+	if got != 0 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 0", got)
+	}
+	if sp.stopCalls["worker"] != 1 {
+		t.Fatalf("Stop calls = %d, want 1", sp.stopCalls["worker"])
+	}
+	if !strings.Contains(stderr.String(), "cleaning dead runtime session worker: stop failed") {
+		t.Fatalf("stderr = %q, want Stop error", stderr.String())
+	}
+}
+
 // TestUnclaimResetsInProgressStatus verifies the Bug 2 fix: unclaiming a
 // retired session's in_progress work must reset status to "open" so a fresh
 // worker can re-claim via the routed queue (Tier 3: gc.routed_to +
@@ -4255,6 +5341,66 @@ func TestCloseBeadDoesNotDuplicateOwnershipGuard(t *testing.T) {
 	}
 	if got.Status != "closed" {
 		t.Fatalf("session bead status = %q, want closed", got.Status)
+	}
+}
+
+// TestCloseBeadIsNoopOnAlreadyClosedBead verifies the idempotence guard:
+// closeBead returns false and does not mutate metadata when called on a
+// bead whose status is already closed. Without this guard, the three
+// reconciler paths that funnel into closeBead
+// (closeSessionBeadIfUnassigned, closeSessionBeadIfRuntimeStoppedAndUnassigned,
+// closeSessionBeadIfReachableStoreUnassigned) can each re-stamp a different
+// terminal close_reason on the same bead every tick, producing an unbounded
+// metadata flap that fires bd's on_update hook on every write.
+func TestCloseBeadIsNoopOnAlreadyClosedBead(t *testing.T) {
+	store := beads.NewMemStore()
+
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker-1",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	now := time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)
+
+	// First close transitions the bead to closed and stamps close_reason.
+	if !closeBead(store, sessionBead.ID, "stale-session", now, &stderr) {
+		t.Fatalf("first closeBead returned false: stderr=%s", stderr.String())
+	}
+	afterFirst, err := store.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("get after first close: %v", err)
+	}
+	if afterFirst.Status != "closed" {
+		t.Fatalf("first close did not close bead: status=%q", afterFirst.Status)
+	}
+
+	// Second close on the already-closed bead must return false and must
+	// leave metadata identical to the post-first-close snapshot — no
+	// re-stamp of close_reason, closed_at, or state.
+	if closeBead(store, sessionBead.ID, "orphaned", now.Add(time.Minute), &stderr) {
+		t.Fatalf("closeBead on already-closed bead returned true; want false")
+	}
+	afterSecond, err := store.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("get after second close: %v", err)
+	}
+	if len(afterFirst.Metadata) != len(afterSecond.Metadata) {
+		t.Errorf("metadata size changed on no-op close: first=%d, second=%d",
+			len(afterFirst.Metadata), len(afterSecond.Metadata))
+	}
+	for k, v := range afterFirst.Metadata {
+		if got := afterSecond.Metadata[k]; got != v {
+			t.Errorf("metadata[%q] mutated on no-op close: first=%q, second=%q", k, v, got)
+		}
 	}
 }
 
@@ -4492,5 +5638,77 @@ func TestSyncSessionBeadsWithSnapshotAndRigStoresLeavesOrphanedSessionBeadOpenWh
 	}
 	if got.Status != "open" {
 		t.Fatalf("session bead status = %q, want open because rig-store work still owns it", got.Status)
+	}
+}
+
+// TestPreserveConfiguredNamedSessionBead_StateGate covers ga-ue1r: a named
+// bead in a terminal-ish state (state="stopped" with no sleep_reason and no
+// fresh last_woke_at, or state="failed-create") must release its alias so the
+// next spawn can claim the identity.
+func TestPreserveConfiguredNamedSessionBead_StateGate(t *testing.T) {
+	cityName := "test-city"
+	workspace := config.Workspace{Name: cityName}
+	cfg := &config.City{
+		Workspace: workspace,
+		Agents: []config.Agent{
+			{Name: "mayor", StartCommand: "true"},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "mayor", Mode: "always"},
+		},
+	}
+	sessionName := config.NamedSessionRuntimeName(cityName, workspace, "mayor")
+	freshWoke := time.Now().UTC().Add(-30 * time.Second).Format(time.RFC3339Nano)
+	staleWoke := time.Now().UTC().Add(-2 * time.Minute).Format(time.RFC3339Nano)
+
+	cases := []struct {
+		name        string
+		state       string
+		sleepReason string
+		lastWokeAt  string
+		want        bool
+	}{
+		{name: "active live bead", state: "active", want: true},
+		{name: "asleep with idle-timeout reason", state: "asleep", sleepReason: "idle-timeout", want: true},
+		{name: "stopped with city-stop reason holds", state: "stopped", sleepReason: "city-stop", want: true},
+		{name: "stopped with idle-timeout reason holds", state: "stopped", sleepReason: "idle-timeout", lastWokeAt: freshWoke, want: true},
+		{name: "stopped fresh wake holds (race guard)", state: "stopped", lastWokeAt: freshWoke, want: true},
+		{name: "stopped stale wake releases", state: "stopped", lastWokeAt: staleWoke, want: false},
+		{name: "stopped never woke releases", state: "stopped", want: false},
+		{name: "failed-create always releases", state: "failed-create", want: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			meta := map[string]string{
+				"session_name":               sessionName,
+				"alias":                      "mayor",
+				"template":                   "mayor",
+				"agent_name":                 "mayor",
+				"state":                      tc.state,
+				namedSessionMetadataKey:      "true",
+				namedSessionIdentityMetadata: "mayor",
+				namedSessionModeMetadata:     "always",
+			}
+			if tc.sleepReason != "" {
+				meta["sleep_reason"] = tc.sleepReason
+			}
+			if tc.lastWokeAt != "" {
+				meta["last_woke_at"] = tc.lastWokeAt
+			}
+			b := beads.Bead{
+				ID:       "gm-test-" + tc.name,
+				Title:    "mayor",
+				Type:     sessionBeadType,
+				Status:   "open",
+				Labels:   []string{sessionBeadLabel, "agent:mayor"},
+				Metadata: meta,
+			}
+			got := preserveConfiguredNamedSessionBead(b, cfg, cityName)
+			if got != tc.want {
+				t.Fatalf("preserveConfiguredNamedSessionBead(state=%q sleep_reason=%q last_woke_at=%q) = %v, want %v",
+					tc.state, tc.sleepReason, tc.lastWokeAt, got, tc.want)
+			}
+		})
 	}
 }

@@ -2,12 +2,12 @@
 title: "Dispatch (Sling)"
 ---
 
-> Last verified against code: 2026-03-01
+> Last verified against code: 2026-04-25
 
 ## Summary
 
 Dispatch is Gas City's work routing mechanism -- a Layer 2-4 derived
-mechanism that composes primitives (Agent Protocol, Bead Store, Event Bus,
+mechanism that composes primitives (Session, Bead Store, Event Bus,
 Config) to route work to agents. The `gc sling` command resolves a target
 agent or pool, optionally instantiates a formula as a wisp, executes the
 agent's sling query to route each bead, optionally wraps single beads in
@@ -51,6 +51,13 @@ expanded to their open children before routing.
   materialized to `.gc/system-formulas/` at startup. System formulas
   are always overwritten to stay in sync with the binary version. Stale
   files are cleaned up. Implemented in `cmd/gc/system_formulas.go`.
+
+- **Review Quorum Formula**: `mol-review-quorum` is a core pack
+  `graph.v2` formula that dispatches exactly two read-only reviewer
+  lanes using formula-supplied lane IDs, providers, models, and targets,
+  and then routes a synthesis step. Dispatch treats it like any other
+  formula-backed wisp; it does not give
+  `dx-review` lifecycle ownership.
 
 ## Architecture
 
@@ -183,7 +190,8 @@ CLI layer (cmd/gc/cmd_sling.go)
 | `internal/beads` (Store) | `MolCook` for wisp instantiation, `Create` for auto-convoy, `Get`/`Children` for container expansion, `Update` for ParentID linking, `SetMetadata` for merge strategy |
 | `internal/config` | Agent resolution, `EffectiveSlingQuery`, pool detection via `IsPool`, `PoolConfig` for sizing, `Suspended` flag |
 | `internal/runtime` | `Provider.IsRunning` and `Provider.Nudge` for agent nudging via `doSlingNudge` |
-| `internal/agent` | `SessionNameFor` to compute session names, `agent.New` + `Nudge` to deliver nudge text |
+| `internal/agent` | `SessionNameFor` to compute session names |
+| `internal/worker` | `Handle.Nudge` at the worker boundary for direct nudge delivery |
 | `internal/telemetry` | `RecordSling` for metrics and log events on every dispatch |
 | `cmd/gc/cmd_agent.go` | `resolveAgentIdentity` for 2-step target resolution (literal then contextual) |
 
@@ -245,6 +253,22 @@ System formulas are embedded in the `gc` binary and materialized to
 `.gc/system-formulas/` at startup. They form the lowest-priority formula
 layer (Layer 0) in the formula resolution stack. Pack and city-level
 formulas override system formulas by name.
+
+`mol-review-quorum` is provided by the core pack formula layer. Its reviewer
+lane IDs, providers, models, and dispatch targets are all supplied through
+formula vars; the synthesis target is configured separately with
+`synthesis_target`. Each reviewer lane is expected to produce durable structured
+output with verdict, findings, evidence, usage, failure classification, and
+read-only mutation-baseline delta.
+The synthesis step writes the combined `review-quorum.summary.v1` state for
+future consumers such as `dx-review summarize`. The `internal/reviewquorum`
+Go finalizer defines the durable contract but is not invoked by formula
+synthesis yet.
+
+Read-only mutation checks are baseline-relative. Dispatch and review consumers
+must compare reviewer after-state to the reviewer-recorded before baseline, not
+to an absolute clean-worktree expectation; pre-existing untracked files are not
+reviewer-created mutations.
 
 ## Testing
 

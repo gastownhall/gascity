@@ -8,8 +8,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 func TestMailLifecycle(t *testing.T) {
@@ -199,6 +201,52 @@ func TestMailCount(t *testing.T) {
 	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
 	if resp["unread"] != 2 {
 		t.Errorf("unread = %d, want 2", resp["unread"])
+	}
+}
+
+func TestMailInboxSeesHistoricalAliasSessionAddedAfterInitialMiss(t *testing.T) {
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/mail?agent=old-worker"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("initial inbox status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	store := state.stores["myrig"]
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "worker",
+			"alias_history": "old-worker",
+		},
+	}); err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	if _, err := state.cityMailProv.Send("human", "worker", "Fresh session", "visible after initial miss"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/mail?agent=old-worker"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second inbox status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var inbox struct {
+		Items []mail.Message `json:"items"`
+		Total int            `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&inbox); err != nil {
+		t.Fatalf("decode inbox: %v", err)
+	}
+	if inbox.Total != 1 {
+		t.Fatalf("second inbox Total = %d, want 1", inbox.Total)
+	}
+	if len(inbox.Items) != 1 || inbox.Items[0].Body != "visible after initial miss" {
+		t.Fatalf("second inbox items = %#v, want visible historical-alias message", inbox.Items)
 	}
 }
 

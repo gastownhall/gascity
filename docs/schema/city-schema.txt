@@ -92,9 +92,10 @@
         "session": {
           "type": "string",
           "enum": [
-            "acp"
+            "acp",
+            "tmux"
           ],
-          "description": "Session overrides the session transport for this agent.\n\"\" (default) uses the city-level session provider (typically tmux).\n\"acp\" uses the Agent Client Protocol (JSON-RPC over stdio).\nThe agent's resolved provider must have supports_acp = true."
+          "description": "Session overrides the session transport for this agent.\n\"\" (default) uses the provider default.\n\"tmux\" uses the tmux-backed CLI path even when the provider supports ACP.\n\"acp\" uses the Agent Client Protocol (JSON-RPC over stdio); the agent's\nresolved provider must have supports_acp = true."
         },
         "provider": {
           "type": "string",
@@ -419,7 +420,7 @@
         },
         "session": {
           "type": "string",
-          "description": "Session overrides the session transport (\"acp\")."
+          "description": "Session overrides the session transport (\"acp\" or \"tmux\")."
         },
         "provider": {
           "type": "string",
@@ -662,7 +663,7 @@
         },
         "session": {
           "type": "string",
-          "description": "Session overrides the session transport (\"acp\")."
+          "description": "Session overrides the session transport (\"acp\" or \"tmux\")."
         },
         "provider": {
           "type": "string",
@@ -997,6 +998,13 @@
         "agent_defaults": {
           "$ref": "#/$defs/AgentDefaults",
           "description": "AgentDefaults provides city-level defaults for agents that don't\noverride them (canonical TOML key: agent_defaults). The runtime\ncurrently applies default_sling_formula and append_fragments; the\nattachment-list fields remain tombstones, and the other fields are\nparsed/composed but not yet inherited automatically."
+        },
+        "pricing": {
+          "items": {
+            "$ref": "#/$defs/ModelPricing"
+          },
+          "type": "array",
+          "description": "Pricing holds per-model cost rate overrides keyed by (provider, model).\nCity-level entries override pack-level entries which override the\ndefaults shipped with the pricing package. See internal/pricing for the\nestimation seam introduced by issue #1255 (1d)."
         }
       },
       "additionalProperties": false,
@@ -1049,6 +1057,24 @@
           "description": "RestartWindow is the sliding time window for counting restarts.\nDuration string (e.g., \"30s\", \"5m\", \"1h\"). Defaults to \"1h\".",
           "default": "1h"
         },
+        "session_circuit_breaker": {
+          "type": "boolean",
+          "description": "SessionCircuitBreaker enables the named-session respawn circuit breaker.\nWhen enabled, the controller suppresses no-progress named-session respawns\nafter the configured restart threshold is exceeded."
+        },
+        "session_circuit_breaker_max_restarts": {
+          "type": "integer",
+          "description": "SessionCircuitBreakerMaxRestarts overrides MaxRestarts for the\nnamed-session respawn circuit breaker. Nil reuses MaxRestartsOrDefault.\n0 disables the circuit breaker even when SessionCircuitBreaker is true.",
+          "default": 5
+        },
+        "session_circuit_breaker_window": {
+          "type": "string",
+          "description": "SessionCircuitBreakerWindow overrides RestartWindow for the named-session\nrespawn circuit breaker. Empty reuses RestartWindowDuration.",
+          "default": "1h"
+        },
+        "session_circuit_breaker_reset_after": {
+          "type": "string",
+          "description": "SessionCircuitBreakerResetAfter is the cooldown before an open named-session\nbreaker resets automatically. Empty defaults to 2 * SessionCircuitBreakerWindowDuration."
+        },
         "shutdown_timeout": {
           "type": "string",
           "description": "ShutdownTimeout is the time to wait after sending Ctrl-C before force-killing\nagents during shutdown. Duration string (e.g., \"5s\", \"30s\"). Set to \"0s\"\nfor immediate kill. Defaults to \"5s\".",
@@ -1083,6 +1109,15 @@
           "type": "integer",
           "description": "MaxWakesPerTick caps how many sessions the reconciler may start in a\nsingle tick. Nil (unset) defaults to 5. Values \u003c= 0 are treated as the\ndefault — set a positive integer to override.",
           "default": 5
+        },
+        "nudge_dispatcher": {
+          "type": "string",
+          "enum": [
+            "legacy",
+            "supervisor"
+          ],
+          "description": "NudgeDispatcher selects how queued nudges get delivered to running\nsessions. \"legacy\" (default) auto-spawns a per-session `gc nudge poll`\nprocess that polls the file-backed queue every 2s. \"supervisor\" runs\nthe delivery loop inside the city runtime instead, with a unix-socket\nwake fast path triggered by enqueue, eliminating the per-session bd\nshellout storm.",
+          "default": "legacy"
         }
       },
       "additionalProperties": false,
@@ -1122,6 +1157,11 @@
           "type": "string",
           "description": "Host is the dolt server hostname. Defaults to localhost.",
           "default": "localhost"
+        },
+        "archive_level": {
+          "type": "integer",
+          "description": "ArchiveLevel controls Dolt's auto_gc archive aggressiveness.\n0 disables archive compaction (lower CPU on startup).\n1 enables archive compaction (higher CPU on startup).\nnil (omitted) defaults to 0.",
+          "default": 0
         }
       },
       "additionalProperties": false,
@@ -1240,6 +1280,35 @@
       "type": "object",
       "description": "MailConfig holds mail provider settings."
     },
+    "ModelPricing": {
+      "properties": {
+        "provider": {
+          "type": "string",
+          "description": "Provider is the LLM provider label (e.g. \"claude\", \"codex\", \"gemini\")."
+        },
+        "model": {
+          "type": "string",
+          "description": "Model is the provider-specific model identifier (e.g. \"claude-opus-4-7\")."
+        },
+        "tier": {
+          "$ref": "#/$defs/Tier",
+          "description": "Tier holds the per-token-type rates."
+        },
+        "last_verified": {
+          "type": "string",
+          "description": "LastVerified is the date these rates were confirmed (YYYY-MM-DD)."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "provider",
+        "model",
+        "tier",
+        "last_verified"
+      ],
+      "description": "ModelPricing is a complete pricing entry for a (Provider, Model) pair."
+    },
     "NamedSession": {
       "properties": {
         "name": {
@@ -1321,7 +1390,7 @@
         },
         "rig": {
           "type": "string",
-          "description": "Rig scopes the override to a specific rig's order.\nEmpty matches city-level orders."
+          "description": "Rig scopes the override to a specific rig's order. Empty matches\nONLY city-level orders (those with no rig); it does NOT match\nper-rig instances of the same name — those expand at scan time\nand require an explicit rig. Use rig = \"*\" as a wildcard to match\nevery instance of the named order (city-level + every rig-scoped\ncopy). The literal \"*\" is reserved and rejected as a real rig\nname by config validation."
         },
         "enabled": {
           "type": "boolean",
@@ -1703,7 +1772,7 @@
         },
         "resume_command": {
           "type": "string",
-          "description": "ResumeCommand is the full shell command to run when resuming a session.\nSupports {{.SessionKey}} template variable. When set, takes precedence\nover ResumeFlag/ResumeStyle. Example:\n  \"claude --resume {{.SessionKey}} --dangerously-skip-permissions\""
+          "description": "ResumeCommand is the full shell command to run when resuming a session.\nSupports only the {{.SessionKey}} template variable. When set, takes precedence\nover ResumeFlag/ResumeStyle. When schema-managed defaults are inserted, the\nresolver tokenizes and re-emits the command; for subcommand-style resume it\ninserts after the ResumeFlag token that precedes {{.SessionKey}}. Example:\n  \"claude --resume {{.SessionKey}} --dangerously-skip-permissions\"\nSchema-managed defaults missing from a subcommand-style resume command\nare inserted before {{.SessionKey}} during provider resolution."
         },
         "session_id_flag": {
           "type": "string",
@@ -2040,6 +2109,31 @@
       "additionalProperties": false,
       "type": "object",
       "description": "SessionSleepConfig configures default idle sleep policies by session class."
+    },
+    "Tier": {
+      "properties": {
+        "prompt_usd_per_1m": {
+          "type": "number"
+        },
+        "completion_usd_per_1m": {
+          "type": "number"
+        },
+        "cache_read_usd_per_1m": {
+          "type": "number"
+        },
+        "cache_creation_usd_per_1m": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "prompt_usd_per_1m",
+        "completion_usd_per_1m",
+        "cache_read_usd_per_1m",
+        "cache_creation_usd_per_1m"
+      ],
+      "description": "Tier defines per-token-type rates in USD per 1 million tokens."
     },
     "Workspace": {
       "properties": {

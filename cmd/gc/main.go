@@ -150,6 +150,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		"path to the city directory (default: walk up from cwd)")
 	root.PersistentFlags().StringVar(&rigFlag, "rig", "",
 		"rig name or path (default: discover from cwd)")
+	_ = root.RegisterFlagCompletionFunc("rig", completeRigFlagNames)
 	root.AddCommand(
 		newStartCmd(stdout, stderr),
 		newInitCmd(stdout, stderr),
@@ -198,6 +199,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newFormulaCmd(stdout, stderr),
 		newBdCmd(stdout, stderr),
 		newBdStoreBridgeCmd(stdout, stderr),
+		newDoltCleanupCmd(stdout, stderr),
 		newDoltConfigCmd(stdout, stderr),
 		newDoltStateCmd(stdout, stderr),
 		newShellCmd(stdout, stderr),

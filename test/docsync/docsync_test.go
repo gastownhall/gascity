@@ -30,12 +30,16 @@ var markdownLinkRE = regexp.MustCompile(`\[[^][]+\]\(([^)]+)\)`)
 // and should be link-checked. Update this list when adding or removing doc
 // directories. TestDocDirCoverage will fail if a new directory with markdown
 // appears that is not accounted for here or in docTreeIgnored.
-var docTreeDirs = []string{"contrib", "docs", "engdocs"}
+var docTreeDirs = []string{"contrib", "docs", "engdocs", "release-gates"}
 
 // docTreeIgnored lists directories that contain markdown but are not
 // documentation trees (e.g., embedded prompt templates, test fixtures,
 // gitignored scratch space for local work).
-var docTreeIgnored = []string{"cmd", "examples", "internal", "plans", "scripts", "test", "tmp"}
+var docTreeIgnored = []string{"cmd", "examples", "internal", "plans", "release-gates", "scripts", "test", "tmp"}
+
+var markdownFileNameIgnored = map[string]bool{
+	"README.md": true,
+}
 
 // knownBrokenLinks lists links to docs that do not exist yet. These are
 // excluded from TestLocalMarkdownLinks failures but still logged. Remove
@@ -58,6 +62,9 @@ func allDocsMarkdownFiles(root string) ([]string, error) {
 		if e.IsDir() {
 			continue
 		}
+		if markdownFileNameIgnored[e.Name()] {
+			continue
+		}
 		ext := filepath.Ext(e.Name())
 		if ext == ".md" || ext == ".mdx" {
 			files = append(files, filepath.Join(root, e.Name()))
@@ -74,6 +81,9 @@ func allDocsMarkdownFiles(root string) ([]string, error) {
 			if d.IsDir() {
 				return nil
 			}
+			if markdownFileNameIgnored[d.Name()] {
+				return nil
+			}
 			ext := filepath.Ext(path)
 			if ext == ".md" || ext == ".mdx" {
 				files = append(files, path)
@@ -87,6 +97,24 @@ func allDocsMarkdownFiles(root string) ([]string, error) {
 
 	sort.Strings(files)
 	return files, nil
+}
+
+func TestAllDocsMarkdownFilesExcludesREADMEs(t *testing.T) {
+	root := repoRoot()
+	files, err := allDocsMarkdownFiles(root)
+	if err != nil {
+		t.Fatalf("collecting markdown files: %v", err)
+	}
+
+	excluded := map[string]bool{
+		filepath.Join(root, "README.md"):         true,
+		filepath.Join(root, "docs", "README.md"): true,
+	}
+	for _, path := range files {
+		if excluded[path] {
+			t.Fatalf("%s should not be included in docs link checks", path)
+		}
+	}
 }
 
 func publicSurfaceMarkdownFiles(root string) ([]string, error) {
@@ -570,7 +598,7 @@ func TestNoKnownStaleDocReferences(t *testing.T) {
 		"agent.NewFake",
 		"session.Fake",
 		"agent.Fake",
-		"internal/dolt",
+		"internal/dolt/",
 	}
 
 	var hits []string

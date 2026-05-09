@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os/signal"
+	"syscall"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -18,6 +20,7 @@ import (
 func newHandoffCmd(stdout, stderr io.Writer) *cobra.Command {
 	var target string
 	var auto bool
+	var hookFormat string
 	cmd := &cobra.Command{
 		Use:   "handoff [subject] [message]",
 		Short: "Send handoff mail and restart controller-managed sessions",
@@ -33,6 +36,12 @@ For controller-restartable sessions, equivalent to:
 
   gc mail send $GC_ALIAS <subject> [message]
   gc runtime request-restart
+
+Under normal operation the controller stops controller-restartable
+self-handoff sessions before this command returns. If the controller does not
+act within a bounded timeout, gc handoff exits 1 with a diagnostic instead of
+blocking indefinitely. If interrupted, the restart request remains set for the
+controller to process on its next reconcile tick.
 
 Auto handoff (--auto): sends mail to self and returns without requesting a
 restart. This is for PreCompact hooks, where the provider is already managing
@@ -58,7 +67,7 @@ or ID. Subject is required unless --auto is set.`,
 			return cobra.RangeArgs(1, 2)(cmd, args)
 		},
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdHandoff(args, target, auto, stdout, stderr) != 0 {
+			if cmdHandoff(args, target, auto, hookFormat, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -66,10 +75,11 @@ or ID. Subject is required unless --auto is set.`,
 	}
 	cmd.Flags().StringVar(&target, "target", "", "Remote session alias or ID to handoff (kills only controller-restartable sessions)")
 	cmd.Flags().BoolVar(&auto, "auto", false, "Send handoff mail without requesting restart (for PreCompact hooks)")
+	cmd.Flags().StringVar(&hookFormat, "hook-format", "", "format hook output for a provider")
 	return cmd
 }
 
-func cmdHandoff(args []string, target string, auto bool, stdout, stderr io.Writer) int {
+func cmdHandoff(args []string, target string, auto bool, hookFormat string, stdout, stderr io.Writer) int {
 	if target != "" {
 		if auto {
 			fmt.Fprintln(stderr, "gc handoff: --auto cannot be used with --target") //nolint:errcheck // best-effort stderr
@@ -92,7 +102,7 @@ func cmdHandoff(args []string, target string, auto bool, stdout, stderr io.Write
 	}
 	rec := openCityRecorderAt(current.cityPath, stderr)
 	if auto {
-		return doHandoffAuto(store, rec, current.display, args, stdout, stderr)
+		return doHandoffAuto(store, rec, current.display, args, hookFormat, stdout, stderr)
 	}
 
 	sp := newSessionProvider()
@@ -108,8 +118,10 @@ func cmdHandoff(args []string, target string, auto bool, stdout, stderr io.Write
 		return 0
 	}
 
-	// Block forever. The controller will kill the entire process tree.
-	select {}
+	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return waitForControllerRestart(sigCtx, dops, current.sessionName, "gc handoff",
+		controllerRestartPollInterval, controllerRestartTimeout(cfg), stderr)
 }
 
 // cmdHandoffRemote sends handoff mail to a remote session and kills its runtime.
@@ -212,12 +224,16 @@ func doHandoffWithOutcome(store beads.Store, rec events.Recorder, dops drainOps,
 }
 
 // doHandoffAuto sends handoff mail to self without requesting restart.
-func doHandoffAuto(store beads.Store, rec events.Recorder, sessionAddress string, args []string, stdout, stderr io.Writer) int {
+func doHandoffAuto(store beads.Store, rec events.Recorder, sessionAddress string, args []string, hookFormat string, stdout, stderr io.Writer) int {
 	b, ok := createHandoffMail(store, rec, sessionAddress, sessionAddress, args, "context cycle", stderr)
 	if !ok {
 		return 1
 	}
-	fmt.Fprintf(stdout, "Handoff: sent auto mail %s (restart skipped).\n", b.ID) //nolint:errcheck // best-effort stdout
+	message := fmt.Sprintf("Handoff: sent auto mail %s (restart skipped).\n", b.ID)
+	if err := writeProviderHookContextForEvent(stdout, hookFormat, "PreCompact", message); err != nil {
+		fmt.Fprintf(stderr, "gc handoff: writing hook output: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	return 0
 }
 

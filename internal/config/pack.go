@@ -14,6 +14,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/pricing"
 )
 
 // packFile is the expected filename inside a pack directory.
@@ -39,6 +40,7 @@ type packConfig struct {
 	Doctor         []PackDoctorEntry       `toml:"doctor,omitempty"`
 	Commands       []PackCommandEntry      `toml:"commands,omitempty"`
 	Global         PackGlobal              `toml:"global,omitempty"`
+	Pricing        []pricing.ModelPricing  `toml:"pricing,omitempty"`
 }
 
 type packDefaults struct {
@@ -2511,6 +2513,9 @@ func collectFiles(fs fsys.FS, base, prefix string, out *[]string) {
 	if prefix != "" {
 		dir = filepath.Join(base, prefix)
 	}
+	if prefix != "" && isIgnoredPackRuntimePath(prefix) {
+		return
+	}
 	entries, err := fs.ReadDir(dir)
 	if err != nil {
 		return
@@ -2520,12 +2525,32 @@ func collectFiles(fs fsys.FS, base, prefix string, out *[]string) {
 		if prefix != "" {
 			rel = prefix + "/" + e.Name()
 		}
+		if isIgnoredPackRuntimePath(rel) {
+			continue
+		}
 		if e.IsDir() {
 			collectFiles(fs, base, rel, out)
 		} else {
 			*out = append(*out, rel)
 		}
 	}
+}
+
+func isIgnoredPackRuntimePath(path string) bool {
+	parts := strings.FieldsFunc(filepath.ToSlash(path), func(r rune) bool { return r == '/' })
+	if len(parts) == 0 {
+		return false
+	}
+	switch parts[0] {
+	case ".beads", ".cache", ".gc", ".git", "state", "tmp":
+		return true
+	}
+	for _, part := range parts {
+		if part == "__pycache__" {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveNamedPacks translates named pack references to cache paths.

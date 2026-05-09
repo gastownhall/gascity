@@ -458,7 +458,10 @@ func deferredSubmitAgentKey(b beads.Bead) string {
 	return b.Title
 }
 
-var startSessionSubmitPoller = ensureSessionSubmitPoller
+var (
+	startSessionSubmitPoller      = ensureSessionSubmitPoller
+	sessionSubmitPollerExecutable = os.Executable
+)
 
 func ensureSessionSubmitPoller(cityPath, agentName, sessionName string) error {
 	pidPath := sessionSubmitPollerPIDPath(cityPath, sessionName)
@@ -466,9 +469,12 @@ func ensureSessionSubmitPoller(cityPath, agentName, sessionName string) error {
 		if running, _ := existingSessionSubmitPollerPID(pidPath); running {
 			return nil
 		}
-		exe, err := os.Executable()
+		exe, err := sessionSubmitPollerExecutable()
 		if err != nil {
 			return err
+		}
+		if isGoTestExecutable(exe) {
+			return fmt.Errorf("refusing to start nudge poller with Go test binary %q", exe)
 		}
 		cmd := exec.Command(exe, "nudge", "poll", "--city", cityPath, "--session", sessionName, agentName)
 		cmd.Env = os.Environ()
@@ -490,6 +496,10 @@ func ensureSessionSubmitPoller(cityPath, agentName, sessionName string) error {
 		}
 		return cmd.Process.Release()
 	})
+}
+
+func isGoTestExecutable(path string) bool {
+	return strings.HasSuffix(filepath.Base(path), ".test")
 }
 
 func sessionSubmitPollerPIDPath(cityPath, sessionName string) string {

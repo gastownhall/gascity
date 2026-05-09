@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -13,6 +14,26 @@ import (
 )
 
 const lookPathCacheTTL = 30 * time.Second
+
+// agentVisibilityPollInterval is how often WaitForAgentVisibilityIn re-reads
+// the cfg snapshot while waiting for a freshly created agent to become
+// resolvable through findAgent. Kept short because the typical race window
+// (a runtime config-reload tick that started before the mutation but applies
+// after it) is sub-second; the fast cadence keeps the POST /agents response
+// from blocking the caller for a perceptible time on the happy path.
+const agentVisibilityPollInterval = 50 * time.Millisecond
+
+// defaultAgentVisibilityWaitTimeout bounds the POST /agents read-after-write wait.
+// The controller should converge much faster; this timeout prevents a broken
+// projection from tying up the handler after the config mutation succeeded.
+const defaultAgentVisibilityWaitTimeout = 3 * time.Second
+
+func (s *Server) agentCreateVisibilityWaitTimeout() time.Duration {
+	if s.agentVisibilityWaitTimeout > 0 {
+		return s.agentVisibilityWaitTimeout
+	}
+	return defaultAgentVisibilityWaitTimeout
+}
 
 type agentResponse struct {
 	Name        string       `json:"name"`
@@ -149,6 +170,44 @@ func discoverUnlimitedPool(a config.Agent, poolName, cityName, sessTmpl string, 
 // using the canonical naming contract from agent.SessionNameFor.
 func agentSessionName(cityName, qualifiedName, sessionTemplate string) string {
 	return agent.SessionNameFor(cityName, qualifiedName, sessionTemplate)
+}
+
+// WaitForAgentVisibilityIn polls cfgSnapshot() until findAgent resolves the
+// given qualified agent name, or returns an error if ctx is done. It is the
+// shared building block for AgentVisibilityWaiter implementations.
+//
+// Callers pass cs.Config (or any other snapshot accessor that returns the
+// hot-reloaded *config.City) so the polling reads the live snapshot, not a
+// stale capture. The first check happens before the first sleep so the
+// happy path returns immediately when no runtime race occurred.
+func WaitForAgentVisibilityIn(ctx context.Context, cfgSnapshot func() *config.City, qualifiedName string) error {
+	return waitForAgentVisibilityIn(ctx, cfgSnapshot, qualifiedName, agentVisibilityPollInterval)
+}
+
+func waitForAgentVisibilityIn(ctx context.Context, cfgSnapshot func() *config.City, qualifiedName string, interval time.Duration) error {
+	check := func() bool {
+		cfg := cfgSnapshot()
+		if cfg == nil {
+			return false
+		}
+		_, ok := findAgent(cfg, qualifiedName)
+		return ok
+	}
+	if check() {
+		return nil
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("waiting for agent %q to become visible: %w", qualifiedName, ctx.Err())
+		case <-ticker.C:
+		}
+		if check() {
+			return nil
+		}
+	}
 }
 
 // findAgent looks up an agent by qualified name in the config.

@@ -309,12 +309,16 @@ func CoreFingerprintBreakdown(cfg Config) map[string]string {
 	}
 }
 
-// LogCoreFingerprintDrift writes diagnostic output when config-drift is
-// detected, showing per-field hash breakdown and values for the current
-// config. Compare against stored breakdown (from session start metadata)
-// to identify which field changed.
-func LogCoreFingerprintDrift(w io.Writer, name string, storedBreakdown map[string]string, current Config) {
-	currentBreakdown := CoreFingerprintBreakdown(current)
+// CoreFingerprintDriftFields returns sorted core fingerprint field names whose
+// current hashes differ from the stored per-field breakdown.
+func CoreFingerprintDriftFields(storedBreakdown map[string]string, current Config) []string {
+	if len(storedBreakdown) == 0 {
+		return nil
+	}
+	return coreFingerprintDriftFields(storedBreakdown, CoreFingerprintBreakdown(current))
+}
+
+func coreFingerprintDriftFields(storedBreakdown, currentBreakdown map[string]string) []string {
 	var diffs []string
 	for field, ch := range currentBreakdown {
 		sh := storedBreakdown[field]
@@ -323,6 +327,16 @@ func LogCoreFingerprintDrift(w io.Writer, name string, storedBreakdown map[strin
 		}
 	}
 	sort.Strings(diffs)
+	return diffs
+}
+
+// LogCoreFingerprintDrift writes diagnostic output when config-drift is
+// detected, showing per-field hash breakdown and values for the current
+// config. Compare against stored breakdown (from session start metadata)
+// to identify which field changed.
+func LogCoreFingerprintDrift(w io.Writer, name string, storedBreakdown map[string]string, current Config) {
+	currentBreakdown := CoreFingerprintBreakdown(current)
+	diffs := coreFingerprintDriftFields(storedBreakdown, currentBreakdown)
 	if len(diffs) == 0 {
 		// No stored breakdown available or all fields match — log full breakdown.
 		if len(storedBreakdown) == 0 {

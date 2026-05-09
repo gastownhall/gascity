@@ -2171,7 +2171,7 @@
             background: var(--green);
         }
 
-        /* Mayor status banner */
+        /* Selected scope banner */
         .scope-banner {
             display: flex;
             align-items: center;
@@ -2181,16 +2181,6 @@
             background: var(--bg-elevated);
             border-radius: 8px;
             border: 1px solid var(--border);
-        }
-
-        .scope-banner.attached {
-            border-color: var(--green);
-            background: rgba(166, 209, 137, 0.08);
-        }
-
-        .scope-banner.detached {
-            border-color: var(--text-muted);
-            opacity: 0.7;
         }
 
         .scope-info {

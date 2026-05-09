@@ -25,7 +25,14 @@ import (
 // respond, suspend, close, wake, rename). Split out of huma_handlers_sessions.go
 // to isolate mutation logic from reads and streaming.
 
-var sessionMessageAsyncTimeout = sessionMessageTimeout
+var (
+	sessionMessageAsyncTimeout      = sessionMessageTimeout
+	sessionCreateCommandableTimeout = 120 * time.Second
+)
+
+type sessionCommandableWaiter interface {
+	WaitForSessionCommandable(context.Context, string) (session.Info, error)
+}
 
 func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCreateInput) (*SessionCreateOutput, error) {
 	store := s.state.CityBeadStore()
@@ -119,6 +126,10 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 	if reqIDErr != nil {
 		return nil, huma.Error500InternalServerError(reqIDErr.Error())
 	}
+	eventCursor, cursorErr := s.currentCityEventCursor()
+	if cursorErr != nil {
+		return nil, huma.Error500InternalServerError(cursorErr.Error())
+	}
 
 	go func() {
 		defer s.recoverAsRequestFailed(reqID, RequestOperationSessionCreate)
@@ -152,6 +163,11 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 			return
 		}
 		var info session.Info
+		createMode := worker.CreateModeStarted
+		waiter, waitForCommandable := s.state.(sessionCommandableWaiter)
+		if waitForCommandable {
+			createMode = worker.CreateModeDeferred
+		}
 		reservationIDs := []string{alias, explicitName}
 		reserveConcreteIdentity := agentCfg.SupportsMultipleSessions() && strings.TrimSpace(workDirQualifiedName) != ""
 		if reserveConcreteIdentity {
@@ -170,19 +186,31 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 				return nameErr
 			}
 			var err error
-			info, err = handle.Create(context.Background(), worker.CreateModeDeferred)
+			info, err = handle.Create(context.Background(), createMode)
 			return err
 		})
 		if createErr != nil {
 			s.emitSessionCreateFailed(reqID, "create_failed", createErr.Error())
 			return
 		}
+		if waitForCommandable {
+			s.state.Poke()
+			waitCtx, cancel := context.WithTimeout(context.Background(), sessionCreateCommandableTimeout)
+			info, createErr = waiter.WaitForSessionCommandable(waitCtx, info.ID)
+			cancel()
+			if createErr != nil {
+				s.emitSessionCreateFailed(reqID, "create_failed", createErr.Error())
+				return
+			}
+		}
 
 		resp := sessionToResponse(info, s.state.Config())
 		resp.Kind = "agent"
 		s.emitSessionCreateSucceeded(reqID, resp)
 		s.persistSessionMeta(store, info.ID, "agent", body.ProjectID, nil)
-		s.state.Poke()
+		if !waitForCommandable {
+			s.state.Poke()
+		}
 
 		titleProvider := s.resolveTitleProvider()
 		MaybeGenerateTitleAsync(store, info.ID, body.Title, body.Message, titleProvider, info.WorkDir, func(format string, args ...any) {
@@ -193,6 +221,7 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 	out := &SessionCreateOutput{Status: http.StatusAccepted}
 	out.Body.Status = "accepted"
 	out.Body.RequestID = reqID
+	out.Body.EventCursor = eventCursor
 	return out, nil
 }
 
@@ -284,6 +313,10 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Store,
 	if reqIDErr != nil {
 		return nil, huma.Error500InternalServerError(reqIDErr.Error())
 	}
+	eventCursor, cursorErr := s.currentCityEventCursor()
+	if cursorErr != nil {
+		return nil, huma.Error500InternalServerError(cursorErr.Error())
+	}
 	go func() {
 		defer s.recoverAsRequestFailed(reqID, RequestOperationSessionCreate)
 		resolvedCfg, cfgErr := resolvedSessionConfigForProvider(alias, "", template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
@@ -333,6 +366,7 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Store,
 	out := &SessionCreateOutput{Status: http.StatusAccepted}
 	out.Body.Status = "accepted"
 	out.Body.RequestID = reqID
+	out.Body.EventCursor = eventCursor
 	return out, nil
 }
 
@@ -439,6 +473,10 @@ func (s *Server) humaHandleSessionSubmit(_ context.Context, input *SessionSubmit
 	if reqIDErr != nil {
 		return nil, huma.Error500InternalServerError(reqIDErr.Error())
 	}
+	eventCursor, cursorErr := s.currentCityEventCursor()
+	if cursorErr != nil {
+		return nil, huma.Error500InternalServerError(cursorErr.Error())
+	}
 	message := input.Body.Message
 	sessionTarget := input.ID
 	go func() {
@@ -459,6 +497,7 @@ func (s *Server) humaHandleSessionSubmit(_ context.Context, input *SessionSubmit
 	out := &SessionSubmitOutput{}
 	out.Body.Status = "accepted"
 	out.Body.RequestID = reqID
+	out.Body.EventCursor = eventCursor
 	return out, nil
 }
 
@@ -475,6 +514,10 @@ func (s *Server) humaHandleSessionMessage(_ context.Context, input *SessionMessa
 	reqID, reqIDErr := newRequestID()
 	if reqIDErr != nil {
 		return nil, huma.Error500InternalServerError(reqIDErr.Error())
+	}
+	eventCursor, cursorErr := s.currentCityEventCursor()
+	if cursorErr != nil {
+		return nil, huma.Error500InternalServerError(cursorErr.Error())
 	}
 	message := input.Body.Message
 	sessionTarget := input.ID
@@ -555,6 +598,7 @@ func (s *Server) humaHandleSessionMessage(_ context.Context, input *SessionMessa
 	out := &SessionMessageOutput{}
 	out.Body.Status = "accepted"
 	out.Body.RequestID = reqID
+	out.Body.EventCursor = eventCursor
 	return out, nil
 }
 

@@ -533,6 +533,34 @@ args = ["{{.AgentName}}", "{{.WorkDir}}", "{{.TemplateName}}"]
 	}
 }
 
+func TestCmdSessionNewRejectsExplicitTmuxAgentWhenCitySessionProviderIsACP(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	oldBuild := buildSessionProviderByName
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+	buildSessionProviderByName = func(name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+		if name == "acp" {
+			return &transportCapableSessionProvider{Fake: runtime.NewFake()}, nil
+		}
+		return oldBuild(name, sc, cityName, cityPath)
+	}
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writePoolACPCityExplicitTmuxAgentTOML(t, cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, &stdout, &stderr); code == 0 {
+		t.Fatalf("cmdSessionNew(explicit tmux on ACP city) = %d, want failure", code)
+	}
+	if !strings.Contains(stderr.String(), "requires tmux transport") {
+		t.Fatalf("stderr = %q, want tmux transport error", stderr.String())
+	}
+	if got := sessionBeads(t, cityDir); len(got) != 0 {
+		t.Fatalf("session bead count = %d, want 0", len(got))
+	}
+}
+
 func TestCmdSessionNew_PoolTemplateRejectsAliasMatchingConcreteIdentity(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
@@ -838,6 +866,77 @@ func TestBuildResumeCommandUsesBuiltinAncestorForClaudeSettings(t *testing.T) {
 	wantSettings := fmt.Sprintf("--settings %q", filepath.Join(cityDir, ".gc", "settings.json"))
 	if !strings.Contains(cmd, wantSettings) {
 		t.Fatalf("wrapped Claude resume command missing settings:\n  got:  %s\n  want: ...%s...", cmd, wantSettings)
+	}
+}
+
+func TestBuildResumeCommandIncludesWrappedCodexResumeDefaults(t *testing.T) {
+	cityDir := t.TempDir()
+	base := "builtin:codex"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "worker", Provider: "codex-mini"},
+		},
+		Providers: map[string]config.ProviderSpec{
+			"codex-mini": {
+				Base:    &base,
+				Command: "aimux",
+				Args: []string{
+					"run", "codex", "--",
+					"--dangerously-bypass-approvals-and-sandbox",
+					"-m", "gpt-5.3-codex-spark",
+					"-c", "model_reasoning_effort=\"medium\"",
+				},
+				PathCheck:     "true",
+				ResumeCommand: "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex-spark resume {{.SessionKey}}",
+			},
+		},
+	}
+	info := session.Info{
+		Template:   "worker",
+		Command:    "codex",
+		Provider:   "codex-mini",
+		WorkDir:    "/tmp/workdir",
+		SessionKey: "abc-123",
+	}
+
+	cmd, _ := buildResumeCommand(cityDir, cfg, info, "", io.Discard)
+	want := "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex-spark resume -c model_reasoning_effort=medium abc-123"
+	if cmd != want {
+		t.Fatalf("resume command = %q, want %q", cmd, want)
+	}
+}
+
+func TestBuildResumeCommandProviderKindSkipsTemplateCollision(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "runner", Provider: "agent-provider"},
+		},
+		Providers: map[string]config.ProviderSpec{
+			"runner": {
+				Command:    "true",
+				Args:       []string{"provider"},
+				ResumeFlag: "--resume",
+			},
+			"agent-provider": {
+				Command:    "true",
+				Args:       []string{"agent"},
+				ResumeFlag: "--resume",
+			},
+		},
+	}
+	info := session.Info{
+		Template:   "runner",
+		Command:    "stale",
+		WorkDir:    "/tmp/workdir",
+		SessionKey: "abc-123",
+	}
+
+	cmd, _ := buildResumeCommand(t.TempDir(), cfg, info, "provider", io.Discard)
+	want := "true provider --resume abc-123"
+	if cmd != want {
+		t.Fatalf("resume command = %q, want %q", cmd, want)
 	}
 }
 
@@ -1361,6 +1460,42 @@ acp_args = ["acp"]
 	}
 }
 
+func writePoolACPCityExplicitTmuxAgentTOML(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+	rigRoot := filepath.Join(dir, "repos", "demo")
+	if err := os.MkdirAll(rigRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rig root): %v", err)
+	}
+	data := []byte(fmt.Sprintf(`[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[session]
+provider = "acp"
+
+[[rigs]]
+name = "demo"
+path = %q
+
+[[agent]]
+name = "ant"
+dir = "demo"
+provider = "codex"
+session = "tmux"
+work_dir = ".gc/worktrees/{{.Rig}}/ants/{{.AgentBase}}"
+min_active_sessions = 0
+max_active_sessions = 4
+`, rigRoot))
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), data, 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+}
+
 func sessionBeads(t *testing.T, cityDir string) []beads.Bead {
 	t.Helper()
 	store, err := openCityStoreAt(cityDir)
@@ -1623,6 +1758,32 @@ func TestValidateResolvedSessionTransportAcceptsRoutedACPProvider(t *testing.T) 
 		SupportsACP: true,
 	}, "acp", &transportCapableSessionProvider{Fake: runtime.NewFake()}); err != nil {
 		t.Fatalf("validateResolvedSessionTransport() = %v, want nil", err)
+	}
+}
+
+func TestValidateResolvedSessionTransportAcceptsTmuxTransport(t *testing.T) {
+	if err := validateResolvedSessionTransport(&config.ResolvedProvider{
+		Name: "opencode",
+	}, config.SessionTransportTmux, runtime.NewFake()); err != nil {
+		t.Fatalf("validateResolvedSessionTransport() = %v, want nil", err)
+	}
+}
+
+func TestValidateResolvedSessionTransportRejectsTmuxWhenSessionProviderIsACPOnly(t *testing.T) {
+	err := validateResolvedSessionTransport(&config.ResolvedProvider{
+		Name: "opencode",
+	}, config.SessionTransportTmux, &transportCapableSessionProvider{Fake: runtime.NewFake()})
+	if err == nil || !strings.Contains(err.Error(), "requires tmux transport") {
+		t.Fatalf("validateResolvedSessionTransport() error = %v, want tmux routing error", err)
+	}
+}
+
+func TestValidateResolvedSessionTransportRejectsUnknownTransport(t *testing.T) {
+	err := validateResolvedSessionTransport(&config.ResolvedProvider{
+		Name: "opencode",
+	}, "stdio", runtime.NewFake())
+	if err == nil || !strings.Contains(err.Error(), "unknown session transport") {
+		t.Fatalf("validateResolvedSessionTransport() error = %v, want unknown transport error", err)
 	}
 }
 

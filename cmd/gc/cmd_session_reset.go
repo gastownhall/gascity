@@ -17,7 +17,9 @@ func newSessionResetCmd(stdout, stderr io.Writer) *cobra.Command {
 
 The controller stops the current runtime and starts the same session again with
 fresh provider conversation state. Session identity, alias, mail, and queued
-work remain attached to the existing session bead.
+work remain attached to the existing session bead. For named sessions, reset
+also clears any tripped named-session respawn circuit breaker before requesting
+the fresh restart.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Args: cobra.ExactArgs(1),
@@ -27,6 +29,7 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 			}
 			return nil
 		},
+		ValidArgsFunction: completeSessionIDs,
 	}
 }
 
@@ -68,6 +71,20 @@ func cmdSessionReset(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc session reset: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+
+	bead, err := store.Get(sessionID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session reset: loading session %s: %v\n", sessionID, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	identity := namedSessionIdentity(bead)
+	if identity != "" {
+		if err := resetSessionCircuitBreakerOnController(cityPath, sessionID, identity); err != nil {
+			fmt.Fprintf(stderr, "gc session reset: clearing session circuit breaker for %q: %v\n", identity, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
+
 	if err := handle.Reset(context.Background()); err != nil {
 		fmt.Fprintf(stderr, "gc session reset: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

@@ -75,7 +75,7 @@ type TemplateParams struct {
 	RigRoot string
 	// WakeMode controls whether the next wake resumes or starts fresh conversation state.
 	WakeMode string
-	// IsACP is true if session = "acp".
+	// IsACP is true when the resolved session transport is SessionTransportACP.
 	IsACP bool
 	// HookEnabled reports whether provider hooks are installed for this agent.
 	// Hooks complement startup delivery but do not replace the initial
@@ -131,8 +131,14 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 	sessionTransport := config.ResolveSessionCreateTransport(cfgAgent.Session, resolved)
 	// Step 2: Validate session vs provider compatibility.
-	if sessionTransport == "acp" && !resolved.SupportsACP {
-		return TemplateParams{}, fmt.Errorf("agent %q: session = \"acp\" but provider %q does not support ACP (set supports_acp = true on the provider)", qualifiedName, resolved.Name)
+	switch sessionTransport {
+	case config.SessionTransportACP:
+		if !resolved.SupportsACP {
+			return TemplateParams{}, fmt.Errorf("agent %q: session = \"acp\" but provider %q does not support ACP (set supports_acp = true on the provider)", qualifiedName, resolved.Name)
+		}
+	case "", config.SessionTransportTmux:
+	default:
+		return TemplateParams{}, fmt.Errorf("agent %q: unknown session transport %q", qualifiedName, sessionTransport)
 	}
 
 	// Step 3: Expand dir template.
@@ -151,10 +157,13 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// Step 5: Build copy_files and command with settings args + schema defaults.
 	var copyFiles []runtime.CopyEntry
 	var command string
-	if sessionTransport == "acp" {
+	switch sessionTransport {
+	case config.SessionTransportACP:
 		command = resolved.ACPCommandString()
-	} else {
+	case "", config.SessionTransportTmux:
 		command = resolved.CommandString()
+	default:
+		return TemplateParams{}, fmt.Errorf("agent %q: unknown session transport %q", qualifiedName, sessionTransport)
 	}
 	// Append schema-derived default args (e.g., --dangerously-skip-permissions
 	// from EffectiveDefaults["permission_mode"] = "unrestricted").
@@ -243,7 +252,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		// Rig-scoped agents override the rig-specific keys below.
 		"GT_ROOT": p.cityPath,
 	}
-	for key, value := range citylayout.CityRuntimeEnvMap(p.cityPath) {
+	for key, value := range cityRuntimeEnvMapForCity(p.cityPath) {
 		agentEnv[key] = value
 	}
 	agentEnv["GC_BEADS"] = rawBeadsProviderForScope(rigRoot, p.cityPath)
@@ -344,7 +353,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 
 	// Step 10: Merge environment layers.
-	env := convergence.ScrubTokenEnv(mergeEnv(passthroughEnv(), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env), agentEnv))
+	env := mergeEnv(passthroughEnv(), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env), agentEnv)
+	prependGCBinDirToPATH(env, env["GC_BIN"])
+	env = convergence.ScrubTokenEnv(env)
 
 	// Step 11: Expand session setup templates.
 	configDir := p.cityPath
@@ -479,7 +490,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		}
 	}
 	var mcpServers []runtime.MCPServerConfig
-	if sessionTransport == "acp" {
+	if sessionTransport == config.SessionTransportACP {
 		mcpServers = materialize.RuntimeMCPServers(mcpCatalog.Servers)
 	}
 
@@ -516,7 +527,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		RigName:          rigName,
 		RigRoot:          rigRoot,
 		WakeMode:         cfgAgent.WakeMode,
-		IsACP:            sessionTransport == "acp",
+		IsACP:            sessionTransport == config.SessionTransportACP,
 		HookEnabled:      hasHooks,
 		MCPServers:       mcpServers,
 	}, nil
@@ -563,14 +574,14 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		// SessionStart hooks can enrich context, but the startup prompt still
 		// needs a first-turn delivery mechanism. Without argv/flag/nudge
 		// delivery, freshly spawned workers sit idle at the provider prompt.
-		if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none" {
-			if nudge != "" {
-				nudge = tp.Prompt + "\n\n---\n\n" + nudge
-			} else {
-				nudge = tp.Prompt
-			}
+		switch {
+		case tp.IsACP:
+			nudge = prependStartupPromptToNudge(tp.Prompt, nudge)
 			startupPromptDelivered = true
-		} else {
+		case tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none":
+			nudge = prependStartupPromptToNudge(tp.Prompt, nudge)
+			startupPromptDelivered = true
+		default:
 			promptSuffix = shellquote.Quote(tp.Prompt)
 			startupPromptDelivered = promptSuffix != ""
 			if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "flag" {
@@ -616,4 +627,11 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		CopyFiles:              tp.Hints.CopyFiles,
 		FingerprintExtra:       tp.FPExtra,
 	}
+}
+
+func prependStartupPromptToNudge(prompt, nudge string) string {
+	if nudge != "" {
+		return prompt + "\n\n---\n\n" + nudge
+	}
+	return prompt
 }

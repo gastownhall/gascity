@@ -480,6 +480,9 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 		// Start the runtime session.
 		if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 			if runtimeSessionMatchesBead(m.sp, sessName, b.ID, meta["instance_token"]) {
+				if metaErr := m.confirmStartedRuntimeMetadata(b.ID, &b); metaErr != nil {
+					return metaErr
+				}
 				info = m.infoFromBead(b)
 				return nil
 			}
@@ -494,6 +497,15 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 			}
 			return fmt.Errorf("starting session: %w", err)
 		}
+		if metaErr := m.confirmStartedRuntimeMetadata(b.ID, &b); metaErr != nil {
+			if stopErr := m.sp.Stop(sessName); stopErr != nil {
+				metaErr = errors.Join(metaErr, fmt.Errorf("stopping runtime after metadata failure: %w", stopErr))
+			}
+			if rbErr := rollbackFailedCreate(); rbErr != nil {
+				return errors.Join(metaErr, rbErr)
+			}
+			return metaErr
+		}
 
 		info = m.infoFromBead(b)
 		return nil
@@ -502,6 +514,22 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 		return Info{}, err
 	}
 	return info, nil
+}
+
+func (m *Manager) confirmStartedRuntimeMetadata(id string, b *beads.Bead) error {
+	metadata := ConfirmStartedPatch(time.Now().UTC())
+	if err := m.store.SetMetadataBatch(id, metadata); err != nil {
+		return fmt.Errorf("storing started runtime metadata: %w", err)
+	}
+	if b != nil {
+		if b.Metadata == nil {
+			b.Metadata = make(map[string]string, len(metadata))
+		}
+		for k, v := range metadata {
+			b.Metadata[k] = v
+		}
+	}
+	return nil
 }
 
 // CreateNamedWithTransport creates a new chat session bead with an optional
@@ -616,6 +644,7 @@ func (m *Manager) createAliasedBeadOnlyNamed(alias, explicitName, template, titl
 			meta["session_key"] = sessionKey
 		}
 		meta["pending_create_claim"] = "true"
+		meta["pending_create_started_at"] = pendingCreateStartedAt(time.Now().UTC())
 		if explicitName != "" {
 			meta["session_name"] = explicitName
 			meta["session_name_explicit"] = "true"
@@ -720,9 +749,19 @@ func (m *Manager) Suspend(id string) error {
 			return err
 		}
 
-		// Kill the runtime session (skip if already dead).
-		if m.sp.IsRunning(sessName) {
-			if err := m.sp.Stop(sessName); err != nil {
+		// Kill the runtime session. Stop is provider-idempotent, so call it
+		// even when liveness already reports false; tmux remain-on-exit panes
+		// can be non-running but still need their session artifact removed.
+		if strings.TrimSpace(sessName) != "" {
+			running := m.sp.IsRunning(sessName)
+			err := m.sp.Stop(sessName)
+			if err != nil && !running {
+				// Preserve historical Suspend semantics for already-dead
+				// sessions: cleanup is best-effort when the runtime did not
+				// report a live process before Stop.
+				err = nil
+			}
+			if err != nil {
 				return fmt.Errorf("stopping runtime session: %w", err)
 			}
 		}
@@ -822,6 +861,7 @@ func (m *Manager) retireConfiguredNamedSessionIdentifiers(id string, b beads.Bea
 	update.Metadata["session_name"] = ""
 	update.Metadata["session_name_explicit"] = ""
 	update.Metadata["pending_create_claim"] = ""
+	update.Metadata["pending_create_started_at"] = ""
 	if err := m.store.Update(id, update); err != nil {
 		return fmt.Errorf("retiring configured named session identifiers: %w", err)
 	}
@@ -1099,33 +1139,45 @@ func (m *Manager) PruneDetailed(before time.Time) (PruneResult, error) {
 
 // Get returns info about a single session.
 func (m *Manager) Get(id string) (Info, error) {
-	b, _, err := m.loadSessionBead(id, true)
-	if err != nil {
-		return Info{}, err
-	}
-	return m.infoFromBead(b), nil
+	info, _, err := m.GetWithBead(id)
+	return info, err
 }
 
-// ObserveRuntime reports live provider state for the current session runtime.
-func (m *Manager) ObserveRuntime(id string, processNames []string) (RuntimeObservation, error) {
-	info, err := m.Get(id)
+// GetWithBead returns session info and the underlying bead in a single
+// store fetch, for callers that need both views (e.g. spec build plus
+// metadata lookup) without a redundant store.Get.
+func (m *Manager) GetWithBead(id string) (Info, beads.Bead, error) {
+	b, _, err := m.loadSessionBead(id, true)
 	if err != nil {
-		return RuntimeObservation{}, err
+		return Info{}, beads.Bead{}, err
 	}
+	return m.infoFromBead(b), b, nil
+}
+
+// SessionInfoFromBead converts an already-loaded session bead to Info,
+// applying the same enrichment as Get. Callers that have just resolved
+// the bead can use this to avoid a second store.Get.
+func (m *Manager) SessionInfoFromBead(b beads.Bead) Info {
+	return m.infoFromBead(b)
+}
+
+// ObserveRuntimeForInfo reports live provider state for a session whose Info
+// has already been loaded by the caller, avoiding a redundant store fetch.
+func (m *Manager) ObserveRuntimeForInfo(info Info, processNames []string) RuntimeObservation {
 	obs := RuntimeObservation{SessionName: info.SessionName}
 	if strings.TrimSpace(info.SessionName) == "" || m.sp == nil {
-		return obs, nil
+		return obs
 	}
 	obs.Running = m.sp.IsRunning(info.SessionName)
 	if !obs.Running {
-		return obs, nil
+		return obs
 	}
 	obs.Alive = m.sp.ProcessAlive(info.SessionName, processNames)
 	obs.Attached = m.sp.IsAttached(info.SessionName)
 	if lastActive, err := m.sp.GetLastActivity(info.SessionName); err == nil {
 		obs.LastActive = lastActive
 	}
-	return obs, nil
+	return obs
 }
 
 // ListResult holds the results of a ListFull call, including the raw beads

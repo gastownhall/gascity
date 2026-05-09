@@ -164,6 +164,26 @@ func newSessionProviderForCity(cfg *config.City, cityPath string) runtime.Provid
 	return newSessionProviderFromContext(ctx, sessionBeads)
 }
 
+func newStatusSessionProviderForCity(cfg *config.City, cityPath string) runtime.Provider {
+	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
+	return newSessionProviderFromContext(ctx, nil)
+}
+
+func newStatusSessionProviderForCityWithSnapshot(cfg *config.City, cityPath string, sessionBeads *sessionBeadSnapshot) runtime.Provider {
+	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
+	return newSessionProviderFromContext(ctx, sessionBeads)
+}
+
+func registerStatusProviderACPRoutes(sp runtime.Provider, snapshot *sessionBeadSnapshot, cityName string, cfg *config.City) {
+	router, ok := sp.(interface{ RouteACP(string) })
+	if !ok {
+		return
+	}
+	for _, sessName := range configuredACPRouteNames(snapshot, cityName, cfg) {
+		router.RouteACP(sessName)
+	}
+}
+
 func loadProviderSessionSnapshot(ctx sessionProviderContext) *sessionBeadSnapshot {
 	if ctx.cityPath == "" || ctx.providerName == "acp" {
 		return nil
@@ -189,7 +209,7 @@ func newSessionProviderFromContext(ctx sessionProviderContext, sessionBeads *ses
 }
 
 func newSessionProviderFromContextWithError(ctx sessionProviderContext, sessionBeads *sessionBeadSnapshot) (runtime.Provider, error) {
-	sp, err := newSessionProviderByName(ctx.providerName, ctx.sc, ctx.cityName, ctx.cityPath)
+	sp, err := buildSessionProviderByName(ctx.providerName, ctx.sc, ctx.cityName, ctx.cityPath)
 	if err != nil {
 		return nil, err
 	}
@@ -568,6 +588,27 @@ func scopeUsesFileStoreContract(scopeRoot string) bool {
 	return err == nil
 }
 
+// bdProviderMismatchHint returns an actionable diagnostic when gc bd
+// rejects a scope as non-bd-backed. It names the marker that tipped
+// the resolver and suggests a fix. Returns "" when the cause is not
+// a local scope-marker issue (e.g., explicit city/env provider).
+func bdProviderMismatchHint(scopeRoot, resolvedProvider string) string {
+	if resolvedProvider == "file" && scopeUsesFileStoreContract(scopeRoot) {
+		return fmt.Sprintf(
+			"%s/.gc/beads.json exists, which marks this scope as file-backed. "+
+				"If it is a stale artifact from a previous city or pre-migration "+
+				"layout, move it aside (e.g., rename to .gc/beads.json.bak). To "+
+				"positively mark this scope as bd-backed, add "+
+				"%s/.beads/metadata.json (with backend=dolt and the dolt_database "+
+				"name).",
+			scopeRoot, scopeRoot)
+	}
+	if strings.TrimSpace(os.Getenv("GC_BEADS")) != "" {
+		return "GC_BEADS env var overrides the provider. Unset it, or set GC_BEADS=bd for this scope."
+	}
+	return "check city.toml [beads].provider and any per-rig provider overrides."
+}
+
 // beadsProvider returns the bead store provider name for lifecycle operations.
 // Maps "bd" → "exec:<cityPath>/.gc/system/packs/bd/assets/scripts/gc-beads-bd.sh"
 // so all lifecycle operations route through the exec: protocol. Other providers
@@ -606,7 +647,8 @@ func mailProviderName() string {
 
 // newMailProvider returns a mail.Provider based on the mail provider name
 // (env var → city.toml → default) and the given bead store (used as the
-// default backend).
+// default backend). Shared callers such as the API use the stateless beadmail
+// provider so long-lived instances observe fresh session state.
 //
 //   - "fake" → in-memory fake (all ops succeed)
 //   - "fail" → broken fake (all ops return errors)
@@ -627,20 +669,35 @@ func newMailProvider(store beads.Store) mail.Provider {
 	}
 }
 
+func newCommandMailProvider(store beads.Store) mail.Provider {
+	v := mailProviderName()
+	if strings.HasPrefix(v, "exec:") {
+		return mailexec.NewProvider(strings.TrimPrefix(v, "exec:"))
+	}
+	switch v {
+	case "fake":
+		return mail.NewFake()
+	case "fail":
+		return mail.NewFailFake()
+	default:
+		return beadmail.NewCached(store)
+	}
+}
+
 // openCityMailProvider opens the city's bead store and wraps it in a
 // mail.Provider. Returns (nil, exitCode) on failure.
 func openCityMailProvider(stderr io.Writer, cmdName string) (mail.Provider, int) {
 	// For exec: and test doubles, no store needed.
 	v := mailProviderName()
 	if strings.HasPrefix(v, "exec:") || v == "fake" || v == "fail" {
-		return newMailProvider(nil), 0
+		return newCommandMailProvider(nil), 0
 	}
 
 	store, code := openCityStore(stderr, cmdName)
 	if store == nil {
 		return nil, code
 	}
-	return newMailProvider(store), 0
+	return newCommandMailProvider(store), 0
 }
 
 // eventsProviderName returns the events provider name.

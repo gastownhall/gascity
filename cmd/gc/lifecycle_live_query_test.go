@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"testing"
 
@@ -9,7 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
-func TestCollectAssignedWorkBeads_UsesLiveReadyForAssignedOpenHandoff(t *testing.T) {
+func TestCollectAssignedWorkBeads_UsesCachedReadyEventStateForAssignedOpenHandoff(t *testing.T) {
 	t.Parallel()
 
 	backing := beads.NewMemStore()
@@ -46,11 +47,101 @@ func TestCollectAssignedWorkBeads_UsesLiveReadyForAssignedOpenHandoff(t *testing
 	if err := backing.Update(blocker.ID, beads.UpdateOpts{Status: &closed}); err != nil {
 		t.Fatalf("Update(%s, closed): %v", blocker.ID, err)
 	}
+	closedBlocker, err := backing.Get(blocker.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", blocker.ID, err)
+	}
+	payload, err := json.Marshal(closedBlocker)
+	if err != nil {
+		t.Fatalf("Marshal(%s): %v", blocker.ID, err)
+	}
+	cache.ApplyEvent("bead.updated", payload)
 
 	got, _ := collectAssignedWorkBeads(&config.City{}, cache)
 	if len(got) != 1 || got[0].ID != handoff.ID {
-		t.Fatalf("collectAssignedWorkBeads() = %#v, want [%s] from live ready state", got, handoff.ID)
+		t.Fatalf("collectAssignedWorkBeads() = %#v, want [%s] from cached ready event state", got, handoff.ID)
 	}
+}
+
+func TestCollectAssignedWorkBeads_UsesExplicitDepEventsForCachedReady(t *testing.T) {
+	t.Parallel()
+
+	t.Run("dep add", func(t *testing.T) {
+		t.Parallel()
+
+		backing := beads.NewMemStore()
+		blocker, err := backing.Create(beads.Bead{
+			Title:  "blocker",
+			Type:   "task",
+			Status: "open",
+		})
+		if err != nil {
+			t.Fatalf("Create(blocker): %v", err)
+		}
+		handoff, err := backing.Create(beads.Bead{
+			Title:    "handoff",
+			Type:     "task",
+			Status:   "open",
+			Assignee: "worker",
+		})
+		if err != nil {
+			t.Fatalf("Create(handoff): %v", err)
+		}
+		cache := beads.NewCachingStoreForTest(backing, nil)
+		if err := cache.PrimeActive(); err != nil {
+			t.Fatalf("PrimeActive: %v", err)
+		}
+
+		if err := backing.DepAdd(handoff.ID, blocker.ID, "blocks"); err != nil {
+			t.Fatalf("backing DepAdd(%s <- %s): %v", handoff.ID, blocker.ID, err)
+		}
+		cache.ApplyDepEvent(handoff.ID, []beads.Dep{{IssueID: handoff.ID, DependsOnID: blocker.ID, Type: "blocks"}})
+
+		got, _ := collectAssignedWorkBeads(&config.City{}, cache)
+		if len(got) != 0 {
+			t.Fatalf("collectAssignedWorkBeads() = %#v, want explicit dep-add event to block handoff", got)
+		}
+	})
+
+	t.Run("dep remove", func(t *testing.T) {
+		t.Parallel()
+
+		backing := beads.NewMemStore()
+		blocker, err := backing.Create(beads.Bead{
+			Title:  "blocker",
+			Type:   "task",
+			Status: "open",
+		})
+		if err != nil {
+			t.Fatalf("Create(blocker): %v", err)
+		}
+		handoff, err := backing.Create(beads.Bead{
+			Title:    "handoff",
+			Type:     "task",
+			Status:   "open",
+			Assignee: "worker",
+		})
+		if err != nil {
+			t.Fatalf("Create(handoff): %v", err)
+		}
+		if err := backing.DepAdd(handoff.ID, blocker.ID, "blocks"); err != nil {
+			t.Fatalf("backing DepAdd(%s <- %s): %v", handoff.ID, blocker.ID, err)
+		}
+		cache := beads.NewCachingStoreForTest(backing, nil)
+		if err := cache.PrimeActive(); err != nil {
+			t.Fatalf("PrimeActive: %v", err)
+		}
+
+		if err := backing.DepRemove(handoff.ID, blocker.ID); err != nil {
+			t.Fatalf("backing DepRemove(%s <- %s): %v", handoff.ID, blocker.ID, err)
+		}
+		cache.ApplyDepEvent(handoff.ID, nil)
+
+		got, _ := collectAssignedWorkBeads(&config.City{}, cache)
+		if len(got) != 1 || got[0].ID != handoff.ID {
+			t.Fatalf("collectAssignedWorkBeads() = %#v, want [%s] after explicit dep-remove event", got, handoff.ID)
+		}
+	})
 }
 
 func TestSessionHasOpenAssignedWorkInStore_UsesLiveOpenOwnership(t *testing.T) {

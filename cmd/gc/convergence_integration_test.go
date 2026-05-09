@@ -485,9 +485,21 @@ func TestConvergenceIndex_MaintainedOnStateTransitions(t *testing.T) {
 		t.Error("bead should be in index after state=waiting_manual")
 	}
 
-	// CloseBead should remove from index.
-	_ = adapter.CloseBead(b.ID)
+	// CloseBead should remove from index AND stamp close_reason on the
+	// underlying bead so bd's validation.on-close=error accepts the
+	// close.
+	if got := len(convergence.CloseReasonHandlerCleanup); got < 20 {
+		t.Fatalf("CloseReasonHandlerCleanup = %q (%d chars), want >=20", convergence.CloseReasonHandlerCleanup, got)
+	}
+	_ = adapter.CloseBead(b.ID, convergence.CloseReasonHandlerCleanup)
 	if _, ok := adapter.activeIndex[b.ID]; ok {
 		t.Error("bead should not be in index after CloseBead")
+	}
+	closed, _ := store.Get(b.ID)
+	if got := closed.Metadata["close_reason"]; got != convergence.CloseReasonHandlerCleanup {
+		t.Errorf("close_reason = %q, want %q", got, convergence.CloseReasonHandlerCleanup)
+	}
+	if closed.Status != "closed" {
+		t.Errorf("status = %q, want closed", closed.Status)
 	}
 }

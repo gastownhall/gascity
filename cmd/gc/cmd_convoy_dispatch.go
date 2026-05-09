@@ -154,10 +154,29 @@ func runControlDispatcherInStore(cityPath, storePath, beadID string, stdout, std
 		return fmt.Errorf("loading bead %s from scoped control store %q: %w", beadID, storePath, err)
 	}
 
-	return runControlDispatcherWithStore(cityPath, storePath, store, bead, beadID, stdout, stderr)
+	return runControlDispatcherWithStoreAndConfig(cityPath, storePath, store, bead, beadID, cfg, stdout, stderr)
 }
 
 func runControlDispatcherWithStore(cityPath, storePath string, store beads.Store, bead beads.Bead, beadID string, stdout, stderr io.Writer) error {
+	return runControlDispatcherWithStoreAndConfig(cityPath, storePath, store, bead, beadID, nil, stdout, stderr)
+}
+
+func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store beads.Store, bead beads.Bead, beadID string, cfg *config.City, stdout, stderr io.Writer) error {
+	restoreTraceWarnings := useWorkflowTraceWarnings(stderr)
+	defer restoreTraceWarnings()
+	var cfgLoadErr error
+	if cfg == nil {
+		cfg, cfgLoadErr = loadCityConfig(cityPath, stderr)
+		if cfg != nil {
+			resolveRigPaths(cityPath, cfg.Rigs)
+		}
+	}
+	if cfg != nil {
+		warnLegacyWorkflowTracePath(cityPath, cfg.Rigs, stderr)
+	} else {
+		warnLegacyWorkflowTracePath(cityPath, nil, stderr)
+	}
+
 	opts := dispatch.ProcessOptions{CityPath: cityPath, StorePath: storePath}
 	opts.Tracef = workflowTracef
 	loadCfg := false
@@ -170,11 +189,12 @@ func runControlDispatcherWithStore(cityPath, storePath string, store beads.Store
 		loadCfg = true
 	}
 	if loadCfg {
-		cfg, err := loadCityConfig(cityPath, stderr)
-		if err != nil {
-			return err
+		if cfg == nil {
+			if cfgLoadErr != nil {
+				return cfgLoadErr
+			}
+			return fmt.Errorf("loading city config for %s: unavailable after warning-only load", cityPath)
 		}
-		resolveRigPaths(cityPath, cfg.Rigs)
 		opts.ResolveStoreRef = makeStoreRefResolver(cityPath, cfg)
 		if bead.Metadata["gc.kind"] == "workflow-finalize" {
 			sourceWorkflowCtx, cancelSourceWorkflowCtx := sourceWorkflowCommandContext()
@@ -331,21 +351,28 @@ func sourceWorkflowLockScopeForStoreRef(cityPath string, cfg *config.City, defau
 }
 
 func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
+	scopeRoot := resolveStoreScopeRoot(cityPath, storePath)
+	provider := rawBeadsProviderForScope(scopeRoot, cityPath)
+	if provider == "file" || strings.HasPrefix(provider, "exec:") {
+		return openStoreAtForCity(storePath, cityPath)
+	}
+	if samePath(scopeRoot, cityPath) {
+		return controlBdStoreForCity(scopeRoot, cityPath, cfg), nil
+	}
 	if cfg != nil {
 		for _, rig := range cfg.Rigs {
 			rigPath := rig.Path
 			if !filepath.IsAbs(rigPath) {
 				rigPath = filepath.Join(cityPath, rigPath)
 			}
-			if samePath(rigPath, storePath) {
-				if !scopeUsesManagedBdStoreContract(cityPath, storePath) {
-					return openStoreAtForCity(storePath, cityPath)
-				}
-				return bdStoreForRig(storePath, cityPath, cfg), nil
+			if samePath(rigPath, scopeRoot) {
+				return controlBdStoreForRig(scopeRoot, cityPath, cfg), nil
 			}
 		}
 	}
-	return openStoreAtForCity(storePath, cityPath)
+	// A bd-backed scope can outlive its rig entry in city.toml. Control paths
+	// still need write-capable bd commands with auto-export suppressed.
+	return controlBdStoreForRig(scopeRoot, cityPath, cfg), nil
 }
 
 // findBeadAcrossStores tries the city store first, then all rig stores,

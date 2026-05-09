@@ -166,6 +166,23 @@ func TestAsyncAcceptedRequestIDDescriptionsNameTypedResultEvents(t *testing.T) {
 	assertDescription("AsyncAcceptedBody", "request.result.session.submit")
 	assertDescription("AsyncAcceptedResponse", "request.result.city.create")
 	assertDescription("AsyncAcceptedResponse", "request.result.city.unregister")
+
+	assertCursorDescription := func(schema, want string) {
+		t.Helper()
+		got := openAPI.Components.Schemas[schema].Properties["event_cursor"].Description
+		if !bytes.Contains([]byte(got), []byte(want)) {
+			t.Fatalf("%s event_cursor description = %q, want to mention %q", schema, got, want)
+		}
+	}
+	assertCursorDescription("AsyncAcceptedBody", "after_seq")
+	assertCursorDescription("AsyncAcceptedResponse", "after_cursor")
+	assertCursorDescription("AsyncAcceptedBody", "no event provider")
+	assertCursorDescription("AsyncAcceptedResponse", "no event provider")
+
+	got := openAPI.Components.Schemas["SessionCreateSucceededPayload"].Properties["session"].Description
+	if !bytes.Contains([]byte(got), []byte("lifecycle commands")) {
+		t.Fatalf("SessionCreateSucceededPayload session description = %q, want to mention lifecycle commands", got)
+	}
 }
 
 func TestOrderResponseSchemaKeepsMigrationFieldsOptional(t *testing.T) {

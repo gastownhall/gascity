@@ -25,6 +25,7 @@ canonical bead so the reconciler can start it when unblocked.`,
 			}
 			return nil
 		},
+		ValidArgsFunction: completeSessionIDs,
 	}
 }
 
@@ -43,6 +44,7 @@ normal wake/sleep rules on its next pass.`,
 			}
 			return nil
 		},
+		ValidArgsFunction: completeSessionIDs,
 	}
 }
 
@@ -79,8 +81,9 @@ func cmdSessionSetPin(args []string, pinned bool, stdout, stderr io.Writer) int 
 		id, err = resolveSessionIDWithConfig(cityPath, cfg, store, args[0])
 		if err != nil {
 			id, err = resolveSessionIDMaterializingNamedWithMetadata(cityPath, cfg, store, args[0], map[string]string{
-				"pin_awake":            "true",
-				"pending_create_claim": "",
+				"pin_awake":                 "true",
+				"pending_create_claim":      "",
+				"pending_create_started_at": "",
 			})
 			materializedForPin = err == nil
 		}

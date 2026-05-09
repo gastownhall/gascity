@@ -19,6 +19,7 @@ type Provider struct {
 
 var (
 	_ runtime.Provider                      = (*Provider)(nil)
+	_ runtime.DeadRuntimeSessionChecker     = (*Provider)(nil)
 	_ runtime.InteractionProvider           = (*Provider)(nil)
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
@@ -55,6 +56,16 @@ func (p *Provider) Interrupt(name string) error {
 // IsRunning delegates to the routed backend.
 func (p *Provider) IsRunning(name string) bool {
 	return p.route(name).IsRunning(name)
+}
+
+// IsDeadRuntimeSession delegates to the routed backend when it can positively
+// distinguish live sessions from visible dead artifacts.
+func (p *Provider) IsDeadRuntimeSession(name string) (bool, error) {
+	checker, ok := p.route(name).(runtime.DeadRuntimeSessionChecker)
+	if !ok {
+		return false, nil
+	}
+	return checker.IsDeadRuntimeSession(name)
 }
 
 // IsAttached delegates to the routed backend.

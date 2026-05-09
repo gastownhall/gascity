@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -113,6 +114,65 @@ func (p *promptFooterExecutor) execute(args []string) (string, error) {
 
 func (p *promptFooterExecutor) executeCtx(_ context.Context, args []string) (string, error) {
 	return p.execute(args)
+}
+
+// ctxBlockingExecutor blocks executeCtx until ctx is canceled. Used to
+// verify that callers honor a wall-clock deadline on the subprocess.
+type ctxBlockingExecutor struct {
+	calls [][]string
+}
+
+func (b *ctxBlockingExecutor) execute(args []string) (string, error) {
+	cp := make([]string, len(args))
+	copy(cp, args)
+	b.calls = append(b.calls, cp)
+	return "", nil
+}
+
+func (b *ctxBlockingExecutor) executeCtx(ctx context.Context, args []string) (string, error) {
+	cp := make([]string, len(args))
+	copy(cp, args)
+	b.calls = append(b.calls, cp)
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+// TestRunBoundsByTmuxSubprocessTimeout verifies that Tmux.run applies a
+// wall-clock cap to subprocess invocations. A wedged tmux subprocess must
+// not be able to hang the shutdown path indefinitely.
+func TestRunBoundsByTmuxSubprocessTimeout(t *testing.T) {
+	orig := tmuxSubprocessTimeout
+	tmuxSubprocessTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { tmuxSubprocessTimeout = orig })
+
+	bx := &ctxBlockingExecutor{}
+	tm := &Tmux{cfg: DefaultConfig(), exec: bx}
+
+	type result struct {
+		err error
+	}
+	done := make(chan result, 1)
+	start := time.Now()
+	go func() {
+		_, err := tm.run("list-sessions")
+		done <- result{err: err}
+	}()
+
+	select {
+	case r := <-done:
+		elapsed := time.Since(start)
+		if r.err == nil {
+			t.Fatalf("err = nil after %s, want context.DeadlineExceeded", elapsed)
+		}
+		if !errors.Is(r.err, context.DeadlineExceeded) {
+			t.Fatalf("err = %v, want context.DeadlineExceeded chain", r.err)
+		}
+		if elapsed > 500*time.Millisecond {
+			t.Fatalf("elapsed = %s, want < 500ms", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("tm.run did not return within 2s — tmuxSubprocessTimeout not applied")
+	}
 }
 
 func TestRunInjectsSocketFlag(t *testing.T) {
@@ -268,6 +328,67 @@ func TestIsSessionRunningFallsBackToSessionExistsOnPaneQueryError(t *testing.T) 
 
 	if !tm.IsSessionRunning("runner") {
 		t.Fatal("IsSessionRunning = false, want true when pane query fails after session exists")
+	}
+}
+
+func TestProviderIsDeadRuntimeSessionRequiresEveryPaneDead(t *testing.T) {
+	fe := &fakeExecutor{
+		out: "1\n0",
+	}
+	tm := &Tmux{cfg: Config{SocketName: "x"}, exec: fe}
+	p := &Provider{tm: tm}
+
+	dead, err := p.IsDeadRuntimeSession("runner")
+	if err != nil {
+		t.Fatalf("IsDeadRuntimeSession: %v", err)
+	}
+	if dead {
+		t.Fatal("IsDeadRuntimeSession = true, want false when any pane is live")
+	}
+
+	if len(fe.calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(fe.calls))
+	}
+	want := []string{"-u", "-L", "x", "list-panes", "-s", "-t", "=runner", "-F", "#{pane_dead}"}
+	if len(fe.calls[0]) != len(want) {
+		t.Fatalf("call = %v, want %v", fe.calls[0], want)
+	}
+	for i := range want {
+		if fe.calls[0][i] != want[i] {
+			t.Fatalf("call arg %d = %q, want %q; call=%v", i, fe.calls[0][i], want[i], fe.calls[0])
+		}
+	}
+}
+
+func TestProviderIsDeadRuntimeSessionTrueWhenAllPanesDead(t *testing.T) {
+	fe := &fakeExecutor{
+		out: "1\n1",
+	}
+	tm := &Tmux{cfg: Config{SocketName: "x"}, exec: fe}
+	p := &Provider{tm: tm}
+
+	dead, err := p.IsDeadRuntimeSession("runner")
+	if err != nil {
+		t.Fatalf("IsDeadRuntimeSession: %v", err)
+	}
+	if !dead {
+		t.Fatal("IsDeadRuntimeSession = false, want true when all panes are dead")
+	}
+}
+
+func TestProviderIsDeadRuntimeSessionTreatsAbsentSessionAsNotDead(t *testing.T) {
+	fe := &fakeExecutor{
+		err: ErrSessionNotFound,
+	}
+	tm := &Tmux{cfg: Config{SocketName: "x"}, exec: fe}
+	p := &Provider{tm: tm}
+
+	dead, err := p.IsDeadRuntimeSession("missing")
+	if err != nil {
+		t.Fatalf("IsDeadRuntimeSession: %v", err)
+	}
+	if dead {
+		t.Fatal("IsDeadRuntimeSession = true, want false for absent session")
 	}
 }
 

@@ -110,7 +110,7 @@ func (s *fakeStore) SetMetadata(id, key, value string) error {
 	return nil
 }
 
-func (s *fakeStore) CloseBead(id string) error {
+func (s *fakeStore) CloseBead(id, reason string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec, ok := s.beads[id]
@@ -119,6 +119,12 @@ func (s *fakeStore) CloseBead(id string) error {
 	}
 	rec.info.Status = "closed"
 	rec.info.ClosedAt = time.Now()
+	if reason != "" {
+		if rec.metadata == nil {
+			rec.metadata = map[string]string{}
+		}
+		rec.metadata["close_reason"] = reason
+	}
 	return nil
 }
 

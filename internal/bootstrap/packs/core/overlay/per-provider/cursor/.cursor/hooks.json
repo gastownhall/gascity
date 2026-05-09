@@ -8,7 +8,7 @@
     ],
     "preCompact": [
       {
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc handoff \"context cycle\""
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc handoff --auto \"context cycle\""
       }
     ],
     "beforeSubmitPrompt": [

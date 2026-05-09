@@ -104,7 +104,7 @@ export async function renderCrew(): Promise<void> {
   renderPooledAgents(sessions);
 }
 
-function resetCrewNoCity(): void {
+export function resetCrewNoCity(): void {
   const crewLoading = byId("crew-loading");
   const crewTable = byId<HTMLTableElement>("crew-table");
   const crewEmpty = byId("crew-empty");

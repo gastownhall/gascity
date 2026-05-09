@@ -598,7 +598,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	)
 
 	open := sessionBeads.Open()
-	if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(oneShotStore, cfg, open, dsResult, rigStores); len(released) > 0 {
+	if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(oneShotStore, cfg, cityPath, open, dsResult, rigStores); len(released) > 0 {
 		for _, r := range released {
 			fmt.Fprintf(stderr, "released orphaned pool work: %s\n", r.ID) //nolint:errcheck
 		}
@@ -615,15 +615,22 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	}
 
 	dt := newDrainTracker()
-	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(
-		cfg, dsResult.AssignedWorkBeads, open, dsResult.ScaleCheckCounts))
+	poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, open, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
+	poolDesired := retainScaleCheckPartialPoolDesired(
+		PoolDesiredCounts(ComputePoolDesiredStates(
+			cfg, poolWorkBeads, open, dsResult.ScaleCheckCounts)),
+		sessionBeads,
+		dsResult.PoolScaleCheckPartialTemplates,
+	)
 	if poolDesired == nil {
 		poolDesired = make(map[string]int)
 	}
 	mergeNamedSessionDemand(poolDesired, dsResult.NamedSessionDemand, cfg)
-	reconcileSessionBeadsAtPath(
+	awakeAssignedWorkBeads := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, open, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
+	reconcileSessionBeadsAtPathWithNamedDemand(
 		sigCtx, cityPath, open, ds, cfgNames, cfg, sp, oneShotStore,
-		nil, dsResult.AssignedWorkBeads, rigStores, nil, dt, poolDesired,
+		nil, awakeAssignedWorkBeads, rigStores, nil, dt, poolDesired,
+		dsResult.NamedSessionDemand,
 		dsResult.snapshotQueryPartial(),
 		nil, cityName,
 		nil, clock.Real{}, recorder, cfg.Session.StartupTimeoutDuration(), 0,

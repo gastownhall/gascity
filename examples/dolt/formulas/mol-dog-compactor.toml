@@ -178,7 +178,7 @@ Generate summary of compaction cycle.
 
 **2. Signal completion:**
 ```bash
-gc nudge deacon/ "DOG_DONE: compactor — compacted <count> databases, mode: {{mode}}"
+gc session nudge deacon/ "DOG_DONE: compactor — compacted <count> databases, mode: {{mode}}"
 ```
 
 **3. Close work and exit:**

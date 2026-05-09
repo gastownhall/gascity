@@ -220,6 +220,10 @@ export type AnnotatedProviderResponse = {
 
 export type AsyncAcceptedBody = {
     /**
+     * City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or the event log is empty.
+     */
+    event_cursor: string;
+    /**
      * Correlation ID. Watch the city event stream for request.result.session.create, request.result.session.message, request.result.session.submit, or request.failed with this request_id.
      */
     request_id: string;
@@ -230,6 +234,10 @@ export type AsyncAcceptedBody = {
 };
 
 export type AsyncAcceptedResponse = {
+    /**
+     * Supervisor event-stream cursor captured before the async request was accepted. Pass this value as after_cursor to /v0/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or every event log is empty.
+     */
+    event_cursor: string;
     /**
      * Correlation ID. Watch /v0/events/stream for request.result.city.create, request.result.city.unregister, or request.failed with this request_id.
      */
@@ -2310,7 +2318,7 @@ export type SessionCreateSucceededPayload = {
      */
     request_id: string;
     /**
-     * Full session state as returned by GET /session/{id}.
+     * Full session state as returned by GET /session/{id}. For session.create, this result is emitted only after the session has left creating and can accept normal metadata and lifecycle commands.
      */
     session: SessionResponse;
 };
@@ -2732,6 +2740,10 @@ export type SupervisorCitiesOutputBody = {
 };
 
 export type SupervisorEventListOutputBody = {
+    /**
+     * Supervisor event-stream cursor captured before the history snapshot was listed. Pass this value as after_cursor to /v0/events/stream to receive events emitted after the snapshot boundary without replaying unrelated historical backlog.
+     */
+    event_cursor: string;
     items: Array<TypedTaggedEventStreamEnvelope> | null;
     total: number;
 };
@@ -4338,12 +4350,56 @@ export type UnboundEventPayload = {
 };
 
 export type WorkerOperationEventPayload = {
+    /**
+     * Qualified agent identity (best-effort, absent if the session has no agent_name metadata or alias).
+     */
+    agent_name?: string;
+    /**
+     * Work bead this operation is acting on (best-effort, may be absent for non-bead-scoped ops).
+     */
+    bead_id?: string;
+    /**
+     * Input tokens written into the prompt cache (best-effort, currently always absent).
+     */
+    cache_creation_tokens?: number;
+    /**
+     * Cached input tokens read (best-effort, currently always absent).
+     */
+    cache_read_tokens?: number;
+    /**
+     * Output tokens (best-effort, currently always absent).
+     */
+    completion_tokens?: number;
+    /**
+     * Estimated invocation cost in USD (best-effort, currently always absent; see #1255 for pricing seam).
+     */
+    cost_usd_estimate?: number;
     delivered?: boolean;
     duration_ms: number;
     error?: string;
     finished_at: string;
+    /**
+     * LLM invocation wall-clock latency (best-effort, currently always absent — no source).
+     */
+    latency_ms?: number;
+    /**
+     * LLM model identifier (best-effort, may be absent until follow-up wiring lands).
+     */
+    model?: string;
     op_id: string;
     operation: string;
+    /**
+     * SHA-256 of the rendered prompt (best-effort, currently always absent; #1256 follow-up).
+     */
+    prompt_sha?: string;
+    /**
+     * Non-cached input tokens (best-effort, currently always absent; treat zero as 'not measured', not 'free').
+     */
+    prompt_tokens?: number;
+    /**
+     * Template version frontmatter (best-effort, currently always absent; #1256 follow-up).
+     */
+    prompt_version?: string;
     provider?: string;
     queued?: boolean;
     result: string;
@@ -6233,7 +6289,7 @@ export type StreamEventsData = {
     body?: never;
     headers?: {
         /**
-         * SSE reconnect position from the last received event ID.
+         * SSE reconnect position from the last received event ID. Omit Last-Event-ID and after_seq to start at the current city event head.
          */
         'Last-Event-ID'?: string;
     };
@@ -6245,7 +6301,7 @@ export type StreamEventsData = {
     };
     query?: {
         /**
-         * Reconnect position: only deliver events after this sequence number.
+         * Reconnect position: only deliver events after this sequence number. Omit after_seq and Last-Event-ID to start at the current city event head.
          */
         after_seq?: string;
     };
@@ -7270,7 +7326,7 @@ export type GetV0CityByCityNameMailThreadByIdData = {
          */
         cityName: string;
         /**
-         * Thread ID.
+         * Thread ID, or any message ID in the thread.
          */
         id: string;
     };
@@ -10087,14 +10143,14 @@ export type StreamSupervisorEventsData = {
     body?: never;
     headers?: {
         /**
-         * Reconnect cursor (composite per-city cursor).
+         * Reconnect cursor (composite per-city cursor). Omit Last-Event-ID and after_cursor to start at the current supervisor event head.
          */
         'Last-Event-ID'?: string;
     };
     path?: never;
     query?: {
         /**
-         * Alternative to Last-Event-ID for browsers that can't set custom headers.
+         * Alternative to Last-Event-ID for browsers that can't set custom headers. Omit after_cursor and Last-Event-ID to start at the current supervisor event head.
          */
         after_cursor?: string;
     };

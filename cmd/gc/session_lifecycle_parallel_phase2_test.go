@@ -133,16 +133,20 @@ func preparePhase2Start(t *testing.T, tc phase2ProviderCase, startedConfigHash s
 	}
 
 	store := beads.NewMemStore()
+	metadata := map[string]string{
+		"session_name":        "phase2-" + tc.family,
+		"template":            "worker",
+		"template_overrides":  string(rawOverrides),
+		"started_config_hash": startedConfigHash,
+	}
+	if startedConfigHash != "" {
+		metadata["session_key"] = "phase2-resume-key"
+	}
 	session, err := store.Create(beads.Bead{
-		Title:  "phase2-" + tc.family,
-		Type:   sessionBeadType,
-		Labels: []string{sessionBeadLabel},
-		Metadata: map[string]string{
-			"session_name":        "phase2-" + tc.family,
-			"template":            "worker",
-			"template_overrides":  string(rawOverrides),
-			"started_config_hash": startedConfigHash,
-		},
+		Title:    "phase2-" + tc.family,
+		Type:     sessionBeadType,
+		Labels:   []string{sessionBeadLabel},
+		Metadata: metadata,
 	})
 	if err != nil {
 		t.Fatalf("Create session bead: %v", err)

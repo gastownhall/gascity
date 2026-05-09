@@ -4,6 +4,12 @@
 # rollback, cleanup, health) for the Dolt SQL server backing bead storage.
 #
 # Dog-backed formulas and orders rely on the city's maintenance pack.
+#
+# Minimum dolt version: 1.86.2. Earlier versions have a GC/writer deadlock
+# that hangs sql-server during dolt_backup sync under heavy concurrent write
+# load. See dolthub/dolt commit ccf7bde206 (PR #10876). The doctor check
+# (doctor/check-dolt) fails closed; mol-dog-backup preflight records the same
+# failure outcome, and the sync step checks it before running backup sync.
 
 [pack]
 name = "dolt"

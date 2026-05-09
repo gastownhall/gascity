@@ -85,7 +85,8 @@ type cityCreateRequest struct {
 // request.result.city.create or request.failed with the returned
 // request_id. Polling is unnecessary.
 type asyncAcceptedResponse struct {
-	RequestID string `json:"request_id" doc:"Correlation ID. Watch /v0/events/stream for request.result.city.create, request.result.city.unregister, or request.failed with this request_id."`
+	RequestID   string `json:"request_id" doc:"Correlation ID. Watch /v0/events/stream for request.result.city.create, request.result.city.unregister, or request.failed with this request_id."`
+	EventCursor string `json:"event_cursor" doc:"Supervisor event-stream cursor captured before the async request was accepted. Pass this value as after_cursor to /v0/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or every event log is empty."`
 }
 
 // SupervisorCityCreateInput is the input for POST /v0/city.
@@ -134,15 +135,16 @@ type SupervisorEventListInput struct {
 // SupervisorEventListOutput is the response for GET /v0/events (supervisor scope).
 type SupervisorEventListOutput struct {
 	Body struct {
-		Items []WireTaggedEvent `json:"items"`
-		Total int               `json:"total"`
+		EventCursor string            `json:"event_cursor" doc:"Supervisor event-stream cursor captured before the history snapshot was listed. Pass this value as after_cursor to /v0/events/stream to receive events emitted after the snapshot boundary without replaying unrelated historical backlog."`
+		Items       []WireTaggedEvent `json:"items"`
+		Total       int               `json:"total"`
 	}
 }
 
 // SupervisorEventStreamInput is the input for GET /v0/events/stream (supervisor scope).
 type SupervisorEventStreamInput struct {
-	LastEventID string `header:"Last-Event-ID" required:"false" doc:"Reconnect cursor (composite per-city cursor)."`
-	AfterCursor string `query:"after_cursor" required:"false" doc:"Alternative to Last-Event-ID for browsers that can't set custom headers."`
+	LastEventID string `header:"Last-Event-ID" required:"false" doc:"Reconnect cursor (composite per-city cursor). Omit Last-Event-ID and after_cursor to start at the current supervisor event head."`
+	AfterCursor string `query:"after_cursor" required:"false" doc:"Alternative to Last-Event-ID for browsers that can't set custom headers. Omit after_cursor and Last-Event-ID to start at the current supervisor event head."`
 }
 
 // --- Huma API setup ---
@@ -219,6 +221,7 @@ func (sm *SupervisorMux) registerSupervisorRoutes() {
 		Method:      http.MethodGet,
 		Path:        "/v0/events/stream",
 		Summary:     "Stream tagged events from all running cities.",
+		Description: "Server-Sent Events stream of supervisor-tagged events. Supports reconnection via Last-Event-ID header or after_cursor query param; omitting both starts at the current supervisor event head.",
 	}, map[string]any{
 		"tagged_event": sseEventContract{
 			runtimeSample: &taggedEventStreamEnvelope{},
@@ -352,6 +355,10 @@ func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *Superv
 	if err != nil {
 		return nil, huma.Error500InternalServerError(fmt.Sprintf("generating request ID: %v", err))
 	}
+	eventCursor, cursorErr := sm.currentSupervisorEventCursor()
+	if cursorErr != nil {
+		return nil, huma.Error500InternalServerError(cursorErr.Error())
+	}
 	pendingStored := false
 	if store, ok := sm.resolver.(PendingRequestStore); ok {
 		if err := store.StorePendingRequestID(dir, reqID); err != nil {
@@ -399,7 +406,7 @@ func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *Superv
 	out := &SupervisorCityCreateOutput{
 		Status: http.StatusAccepted,
 	}
-	out.Body = asyncAcceptedResponse{RequestID: reqID}
+	out.Body = asyncAcceptedResponse{RequestID: reqID, EventCursor: eventCursor}
 	return out, nil
 }
 
@@ -507,6 +514,10 @@ func (sm *SupervisorMux) humaHandleCityUnregister(ctx context.Context, input *Su
 	if err != nil {
 		return nil, huma.Error500InternalServerError(fmt.Sprintf("generating request ID: %v", err))
 	}
+	eventCursor, cursorErr := sm.currentSupervisorEventCursor()
+	if cursorErr != nil {
+		return nil, huma.Error500InternalServerError(cursorErr.Error())
+	}
 
 	// Store the pending request_id BEFORE Unregister triggers a
 	// reconciler reload, so the reconciler can correlate the
@@ -549,7 +560,7 @@ func (sm *SupervisorMux) humaHandleCityUnregister(ctx context.Context, input *Su
 	}
 
 	out := &SupervisorCityUnregisterOutput{Status: http.StatusAccepted}
-	out.Body = cityUnregisterResponse{RequestID: reqID}
+	out.Body = cityUnregisterResponse{RequestID: reqID, EventCursor: eventCursor}
 	return out, nil
 }
 
@@ -592,13 +603,24 @@ func cityDirAlreadyInitialized(dir string) bool {
 
 func (sm *SupervisorMux) humaHandleEventList(_ context.Context, input *SupervisorEventListInput) (*SupervisorEventListOutput, error) {
 	mux := sm.buildMultiplexer()
+	eventCursor, cursorErr := supervisorEventCursorFromMux(mux)
+	if cursorErr != nil {
+		return nil, huma.Error500InternalServerError(cursorErr.Error())
+	}
 	filter := events.Filter{Type: input.Type, Actor: input.Actor}
 	if d, ok, err := parseEventSince(input.Since); err != nil {
 		return nil, err
 	} else if ok {
 		filter.Since = time.Now().Add(-d)
 	}
-	evts, err := mux.ListAll(filter)
+	var evts []events.TaggedEvent
+	var err error
+	optimizedTail := input.Limit > 0 && supervisorEventListFilterIsEmpty(filter)
+	if optimizedTail {
+		evts, err = mux.ListTail(filter, input.Limit)
+	} else {
+		evts, err = mux.ListAll(filter)
+	}
 	if err != nil {
 		return nil, huma.Error500InternalServerError("internal: " + err.Error())
 	}
@@ -611,17 +633,64 @@ func (sm *SupervisorMux) humaHandleEventList(_ context.Context, input *Superviso
 		wires = append(wires, w)
 	}
 	out := &SupervisorEventListOutput{}
+	out.Body.EventCursor = eventCursor
 	// Total is the full match count so clients can distinguish "limit
 	// truncated" from "the server only had N events."
 	out.Body.Total = len(wires)
+	if optimizedTail {
+		out.Body.Total = sm.currentSupervisorEventTotal()
+	}
 	// Limit clamp: take the N most recent events (wires is already
 	// chronologically ordered). Critical for `gc events --seq` which
 	// computes the head cursor from the last event only.
-	if input.Limit > 0 && input.Limit < len(wires) {
+	if !optimizedTail && input.Limit > 0 && input.Limit < len(wires) {
 		wires = wires[len(wires)-input.Limit:]
 	}
 	out.Body.Items = wires
 	return out, nil
+}
+
+func supervisorEventListFilterIsEmpty(filter events.Filter) bool {
+	return filter == (events.Filter{})
+}
+
+func (sm *SupervisorMux) currentSupervisorEventTotal() int {
+	mux := sm.buildMultiplexer()
+	cursors, err := mux.LatestCursor()
+	if err != nil {
+		log.Printf("api: supervisor events total: %v", err)
+	}
+	// This optimized unfiltered total treats LatestSeq as an event count because
+	// event logs are append-only, gap-free, and unpruned today. Any future
+	// retention/pruning/compaction must replace this path with an explicit count
+	// API.
+	const maxInt = int(^uint(0) >> 1)
+	total := 0
+	for _, seq := range cursors {
+		if seq > uint64(maxInt-total) {
+			return maxInt
+		}
+		total += int(seq)
+	}
+	return total
+}
+
+func (sm *SupervisorMux) currentSupervisorEventCursor() (string, error) {
+	return supervisorEventCursorFromMux(sm.buildMultiplexer())
+}
+
+func supervisorEventCursorFromMux(mux *events.Multiplexer) (string, error) {
+	cursors, err := mux.LatestCursor()
+	if err != nil {
+		// Async writes and history-to-SSE handoffs need a complete cursor for
+		// all cities. Fail before accepting the request or returning history so
+		// clients never wait from an ambiguous cursor.
+		return "", fmt.Errorf("capturing supervisor event cursor: %w", err)
+	}
+	if cursor := events.FormatCursor(cursors); cursor != "" {
+		return cursor, nil
+	}
+	return "0", nil
 }
 
 // --- Supervisor global events stream (Fix 3g final wiring) ---
@@ -657,28 +726,36 @@ func (sm *SupervisorMux) precheckGlobalEventStream(ctx context.Context, _ *Super
 	return nil
 }
 
-// streamGlobalEvents emits tagged events with composite per-city cursor
-// IDs. Called after headers commit; failures terminate the stream cleanly
-// (there's no way to return an HTTP error at this point). This is the
-// final wiring of Fix 3g — it replaces the raw writeSSEWithStringID loop
-// that previously lived in streamProjectedGlobalEvents.
+// streamGlobalEvents emits tagged events with composite per-city cursor IDs.
+// Once the stream is prepared and headers are committed, failures terminate
+// the stream cleanly because there is no way to return an HTTP error.
 func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *SupervisorEventStreamInput, send StringIDSender) {
 	cursor := strings.TrimSpace(input.LastEventID)
 	if cursor == "" {
 		cursor = strings.TrimSpace(input.AfterCursor)
 	}
-	cursors := events.ParseCursor(cursor)
+
+	mux := sm.buildMultiplexer()
+	var cursors map[string]uint64
+	if cursor == "" {
+		var err error
+		cursors, err = mux.LatestCursor()
+		if err != nil {
+			log.Printf("api: supervisor events-stream: latest cursor failed: %v", err)
+		}
+	} else {
+		cursors = events.ParseCursor(cursor)
+	}
 	if cursors == nil {
 		cursors = make(map[string]uint64)
 	}
-
-	mux := sm.buildMultiplexer()
 	mw, err := mux.Watch(hctx.Context(), cursors)
 	if err != nil {
 		log.Printf("api: supervisor events-stream: Watch failed cursors=%v: %v", cursors, err)
 		return
 	}
 	defer mw.Close() //nolint:errcheck
+	flushSSEHeaders(hctx)
 
 	keepalive := time.NewTicker(sseKeepalive)
 	defer keepalive.Stop()

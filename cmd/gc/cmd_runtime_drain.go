@@ -496,6 +496,10 @@ func doRuntimeRequestRestart(ctx context.Context, dops drainOps, persistRestart 
 	})
 	fmt.Fprintf(stdout, "Restart requested. Waiting up to %s for controller to stop this session...\n", timeout) //nolint:errcheck // best-effort stdout
 
+	return waitForControllerRestart(ctx, dops, sn, "gc runtime request-restart", pollInterval, timeout, stderr)
+}
+
+func waitForControllerRestart(ctx context.Context, dops drainOps, sn, command string, pollInterval, timeout time.Duration, stderr io.Writer) int {
 	deadline := time.Now().Add(timeout)
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
@@ -505,7 +509,7 @@ func doRuntimeRequestRestart(ctx context.Context, dops drainOps, persistRestart 
 		select {
 		case <-ctx.Done():
 			// Signal received; leave the flag set so the controller still acts on its next tick.
-			fmt.Fprintln(stderr, "gc runtime request-restart: signal received; restart request remains set; controller will stop this session on its next reconcile tick") //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: signal received; restart request remains set; controller will stop this session on its next reconcile tick\n", command) //nolint:errcheck // best-effort stderr
 			return 0
 		case <-ticker.C:
 			requested, err := dops.isRestartRequested(sn)
@@ -520,9 +524,9 @@ func doRuntimeRequestRestart(ctx context.Context, dops drainOps, persistRestart 
 			}
 			if time.Now().After(deadline) {
 				if lastPollErr != nil {
-					fmt.Fprintf(stderr, "gc runtime request-restart: controller did not act within %s; last poll error: %v; check `gc dashboard` or `gc trace`\n", timeout, lastPollErr) //nolint:errcheck // best-effort stderr
+					fmt.Fprintf(stderr, "%s: controller did not act within %s; last poll error: %v; check `gc dashboard` or `gc trace`\n", command, timeout, lastPollErr) //nolint:errcheck // best-effort stderr
 				} else {
-					fmt.Fprintf(stderr, "gc runtime request-restart: controller did not act within %s; check `gc dashboard` or `gc trace`\n", timeout) //nolint:errcheck // best-effort stderr
+					fmt.Fprintf(stderr, "%s: controller did not act within %s; check `gc dashboard` or `gc trace`\n", command, timeout) //nolint:errcheck // best-effort stderr
 				}
 				return 1
 			}

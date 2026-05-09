@@ -97,12 +97,15 @@ orphan_count=0
 for d in "$data_dir"/*/; do
   [ ! -d "$d/.dolt" ] && continue
   name="$(basename "$d")"
-  case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|__gc_probe) continue ;; esac
+  case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe) continue ;; esac
   case "$referenced" in
     *" $name "*) continue ;; # referenced, not orphan
   esac
-  # Calculate size.
-  size_bytes=$(du -sb "$d" 2>/dev/null | cut -f1 || echo 0)
+  # Calculate size. Use du -sk (POSIX, KB) and multiply — du -sb is GNU-only;
+  # macOS BSD du has no -b flag, which would leave size_bytes empty and break
+  # the integer comparisons below.
+  size_kb=$(du -sk "$d" 2>/dev/null | cut -f1)
+  size_bytes=$(( ${size_kb:-0} * 1024 ))
   if [ "$size_bytes" -ge 1073741824 ]; then
     size=$(awk "BEGIN {printf \"%.1f GB\", $size_bytes/1073741824}")
   elif [ "$size_bytes" -ge 1048576 ]; then

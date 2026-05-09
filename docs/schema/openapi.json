@@ -727,6 +727,10 @@
       "AsyncAcceptedBody": {
         "additionalProperties": false,
         "properties": {
+          "event_cursor": {
+            "description": "City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or the event log is empty.",
+            "type": "string"
+          },
           "request_id": {
             "description": "Correlation ID. Watch the city event stream for request.result.session.create, request.result.session.message, request.result.session.submit, or request.failed with this request_id.",
             "type": "string"
@@ -741,20 +745,26 @@
         },
         "required": [
           "status",
-          "request_id"
+          "request_id",
+          "event_cursor"
         ],
         "type": "object"
       },
       "AsyncAcceptedResponse": {
         "additionalProperties": false,
         "properties": {
+          "event_cursor": {
+            "description": "Supervisor event-stream cursor captured before the async request was accepted. Pass this value as after_cursor to /v0/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or every event log is empty.",
+            "type": "string"
+          },
           "request_id": {
             "description": "Correlation ID. Watch /v0/events/stream for request.result.city.create, request.result.city.unregister, or request.failed with this request_id.",
             "type": "string"
           }
         },
         "required": [
-          "request_id"
+          "request_id",
+          "event_cursor"
         ],
         "type": "object"
       },
@@ -5632,7 +5642,7 @@
           },
           "session": {
             "$ref": "#/components/schemas/SessionResponse",
-            "description": "Full session state as returned by GET /session/{id}."
+            "description": "Full session state as returned by GET /session/{id}. For session.create, this result is emitted only after the session has left creating and can accept normal metadata and lifecycle commands."
           }
         },
         "required": [
@@ -6481,6 +6491,10 @@
       "SupervisorEventListOutputBody": {
         "additionalProperties": false,
         "properties": {
+          "event_cursor": {
+            "description": "Supervisor event-stream cursor captured before the history snapshot was listed. Pass this value as after_cursor to /v0/events/stream to receive events emitted after the snapshot boundary without replaying unrelated historical backlog.",
+            "type": "string"
+          },
           "items": {
             "items": {
               "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelope"
@@ -6496,6 +6510,7 @@
           }
         },
         "required": [
+          "event_cursor",
           "items",
           "total"
         ],
@@ -11175,6 +11190,34 @@
       "WorkerOperationEventPayload": {
         "additionalProperties": false,
         "properties": {
+          "agent_name": {
+            "description": "Qualified agent identity (best-effort, absent if the session has no agent_name metadata or alias).",
+            "type": "string"
+          },
+          "bead_id": {
+            "description": "Work bead this operation is acting on (best-effort, may be absent for non-bead-scoped ops).",
+            "type": "string"
+          },
+          "cache_creation_tokens": {
+            "description": "Input tokens written into the prompt cache (best-effort, currently always absent).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "cache_read_tokens": {
+            "description": "Cached input tokens read (best-effort, currently always absent).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "completion_tokens": {
+            "description": "Output tokens (best-effort, currently always absent).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "cost_usd_estimate": {
+            "description": "Estimated invocation cost in USD (best-effort, currently always absent; see #1255 for pricing seam).",
+            "format": "double",
+            "type": "number"
+          },
           "delivered": {
             "type": "boolean"
           },
@@ -11189,10 +11232,32 @@
             "format": "date-time",
             "type": "string"
           },
+          "latency_ms": {
+            "description": "LLM invocation wall-clock latency (best-effort, currently always absent — no source).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "model": {
+            "description": "LLM model identifier (best-effort, may be absent until follow-up wiring lands).",
+            "type": "string"
+          },
           "op_id": {
             "type": "string"
           },
           "operation": {
+            "type": "string"
+          },
+          "prompt_sha": {
+            "description": "SHA-256 of the rendered prompt (best-effort, currently always absent; #1256 follow-up).",
+            "type": "string"
+          },
+          "prompt_tokens": {
+            "description": "Non-cached input tokens (best-effort, currently always absent; treat zero as 'not measured', not 'free').",
+            "format": "int64",
+            "type": "integer"
+          },
+          "prompt_version": {
+            "description": "Template version frontmatter (best-effort, currently always absent; #1256 follow-up).",
             "type": "string"
           },
           "provider": {
@@ -13066,6 +13131,7 @@
         "summary": "Get v0 city by city name agents"
       },
       "post": {
+        "description": "Creates an agent and waits until it is visible to immediate follow-up operations. If the agent is durably created but visibility confirmation is canceled or times out, the retryable 503/504 response includes a Retry-After header.",
         "operationId": "create-agent",
         "parameters": [
           {
@@ -15150,7 +15216,7 @@
     },
     "/v0/city/{cityName}/events/stream": {
       "get": {
-        "description": "Server-Sent Events stream of city events with optional workflow projections. Supports reconnection via Last-Event-ID header or after_seq query param.",
+        "description": "Server-Sent Events stream of city events with optional workflow projections. Supports reconnection via Last-Event-ID header or after_seq query param; omitting both starts at the current city event head.",
         "operationId": "stream-events",
         "parameters": [
           {
@@ -15166,21 +15232,21 @@
             }
           },
           {
-            "description": "Reconnect position: only deliver events after this sequence number.",
+            "description": "Reconnect position: only deliver events after this sequence number. Omit after_seq and Last-Event-ID to start at the current city event head.",
             "explode": false,
             "in": "query",
             "name": "after_seq",
             "schema": {
-              "description": "Reconnect position: only deliver events after this sequence number.",
+              "description": "Reconnect position: only deliver events after this sequence number. Omit after_seq and Last-Event-ID to start at the current city event head.",
               "type": "string"
             }
           },
           {
-            "description": "SSE reconnect position from the last received event ID.",
+            "description": "SSE reconnect position from the last received event ID. Omit Last-Event-ID and after_seq to start at the current city event head.",
             "in": "header",
             "name": "Last-Event-ID",
             "schema": {
-              "description": "SSE reconnect position from the last received event ID.",
+              "description": "SSE reconnect position from the last received event ID. Omit Last-Event-ID and after_seq to start at the current city event head.",
               "type": "string"
             }
           }
@@ -17234,12 +17300,12 @@
             }
           },
           {
-            "description": "Thread ID.",
+            "description": "Thread ID, or any message ID in the thread.",
             "in": "path",
             "name": "id",
             "required": true,
             "schema": {
-              "description": "Thread ID.",
+              "description": "Thread ID, or any message ID in the thread.",
               "type": "string"
             }
           },
@@ -22745,24 +22811,25 @@
     },
     "/v0/events/stream": {
       "get": {
+        "description": "Server-Sent Events stream of supervisor-tagged events. Supports reconnection via Last-Event-ID header or after_cursor query param; omitting both starts at the current supervisor event head.",
         "operationId": "stream-supervisor-events",
         "parameters": [
           {
-            "description": "Reconnect cursor (composite per-city cursor).",
+            "description": "Reconnect cursor (composite per-city cursor). Omit Last-Event-ID and after_cursor to start at the current supervisor event head.",
             "in": "header",
             "name": "Last-Event-ID",
             "schema": {
-              "description": "Reconnect cursor (composite per-city cursor).",
+              "description": "Reconnect cursor (composite per-city cursor). Omit Last-Event-ID and after_cursor to start at the current supervisor event head.",
               "type": "string"
             }
           },
           {
-            "description": "Alternative to Last-Event-ID for browsers that can't set custom headers.",
+            "description": "Alternative to Last-Event-ID for browsers that can't set custom headers. Omit after_cursor and Last-Event-ID to start at the current supervisor event head.",
             "explode": false,
             "in": "query",
             "name": "after_cursor",
             "schema": {
-              "description": "Alternative to Last-Event-ID for browsers that can't set custom headers.",
+              "description": "Alternative to Last-Event-ID for browsers that can't set custom headers. Omit after_cursor and Last-Event-ID to start at the current supervisor event head.",
               "type": "string"
             }
           }

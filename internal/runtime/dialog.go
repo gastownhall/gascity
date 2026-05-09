@@ -30,10 +30,11 @@ func StartupDialogTimeout() time.Duration {
 
 // AcceptStartupDialogs dismisses startup dialogs that can block automated
 // sessions. Handles (in order):
-//  1. Codex update dialog ("Update available") — requires Down+Enter to skip
-//  2. Workspace trust dialog (Claude "Quick safety check", Codex "Do you trust the contents of this directory?")
-//  3. Bypass permissions warning ("Bypass Permissions mode") — requires Down+Enter
-//  4. Claude custom API key confirmation — requires Up+Enter to select "Yes"
+//  1. Claude resume selector — requires Down+Enter to resume the full session
+//  2. Codex update dialog ("Update available") — requires Down+Enter to skip
+//  3. Workspace trust dialog (Claude "Quick safety check", Codex "Do you trust the contents of this directory?")
+//  4. Bypass permissions warning ("Bypass Permissions mode") — requires Down+Enter
+//  5. Claude custom API key confirmation — requires Up+Enter to select "Yes"
 //
 // The peek function should return the last N lines of the session's terminal output.
 // The sendKeys function should send bare tmux-style keystrokes (e.g., "Enter", "Down").
@@ -76,7 +77,18 @@ func AcceptStartupDialogsFromStreamWithStatus(
 		return sendKeys(keys...)
 	}
 
-	phaseObserved, err := acceptCodexUpdateDialogFromStream(ctx, timeout, stream, trackingSendKeys)
+	phaseObserved, err := acceptClaudeResumeDialogFromStream(ctx, timeout, stream, trackingSendKeys)
+	if err != nil {
+		return observed, fmt.Errorf("claude resume dialog: %w", err)
+	}
+	observed = observed || phaseObserved
+	if !phaseObserved && !observed {
+		return false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return observed, err
+	}
+	phaseObserved, err = acceptCodexUpdateDialogFromStream(ctx, timeout, stream, trackingSendKeys)
 	if err != nil {
 		return observed, fmt.Errorf("codex update dialog: %w", err)
 	}
@@ -148,6 +160,12 @@ func AcceptStartupDialogsWithTimeout(
 	peek func(lines int) (string, error),
 	sendKeys func(keys ...string) error,
 ) error {
+	if err := acceptClaudeResumeDialog(ctx, timeout, peek, sendKeys); err != nil {
+		return fmt.Errorf("claude resume dialog: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := acceptCodexUpdateDialog(ctx, timeout, peek, sendKeys); err != nil {
 		return fmt.Errorf("codex update dialog: %w", err)
 	}
@@ -176,6 +194,78 @@ func AcceptStartupDialogsWithTimeout(
 		return fmt.Errorf("rate limit dialog: %w", err)
 	}
 	return nil
+}
+
+// acceptClaudeResumeDialog dismisses Claude's high-token/old-session resume
+// selector. The menu cursor uses the same ❯ prefix as the normal input prompt,
+// so this must run before generic prompt detection. Choose "Resume full session
+// as-is" to preserve the in-flight workflow context instead of summarizing it.
+func acceptClaudeResumeDialog(
+	ctx context.Context,
+	timeout time.Duration,
+	peek func(lines int) (string, error),
+	sendKeys func(keys ...string) error,
+) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		content, err := peek(startupDialogPeekLines)
+		if err != nil {
+			return err
+		}
+
+		if containsClaudeResumeDialog(content) {
+			if err := sendKeys("Down"); err != nil {
+				return err
+			}
+			sleep(ctx, bypassDialogConfirmDelay)
+			return sendKeys("Enter")
+		}
+
+		if containsPromptIndicator(content) ||
+			containsCodexUpdateDialog(content) ||
+			containsWorkspaceTrustDialog(content) ||
+			strings.Contains(content, "Bypass Permissions mode") ||
+			containsCustomAPIKeyDialog(content) ||
+			ContainsRateLimitDialog(content) {
+			return nil
+		}
+
+		sleep(ctx, dialogPollInterval)
+	}
+	return nil
+}
+
+func containsClaudeResumeDialog(content string) bool {
+	return strings.Contains(content, "Resume from summary") &&
+		strings.Contains(content, "Resume full session as-is") &&
+		strings.Contains(content, "Enter to confirm")
+}
+
+func acceptClaudeResumeDialogFromStream(
+	ctx context.Context,
+	timeout time.Duration,
+	snapshots *replayableSnapshotCursor,
+	sendKeys func(keys ...string) error,
+) (bool, error) {
+	return acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
+		match:       containsClaudeResumeDialog,
+		matchKeys:   []string{"Down", "Enter"},
+		matchDelay:  bypassDialogConfirmDelay,
+		ready:       containsPromptIndicator,
+		readyOrNext: containsPostClaudeResumeStartupDialog,
+	})
+}
+
+func containsPostClaudeResumeStartupDialog(content string) bool {
+	return containsCodexUpdateDialog(content) ||
+		containsWorkspaceTrustDialog(content) ||
+		strings.Contains(content, "Bypass Permissions mode") ||
+		containsCustomAPIKeyDialog(content) ||
+		ContainsRateLimitDialog(content)
 }
 
 // acceptCodexUpdateDialog skips Codex's interactive update prompt. The default
@@ -209,7 +299,7 @@ func acceptCodexUpdateDialog(
 			containsWorkspaceTrustDialog(content) ||
 			strings.Contains(content, "Bypass Permissions mode") ||
 			containsCustomAPIKeyDialog(content) ||
-			containsRateLimitDialog(content) {
+			ContainsRateLimitDialog(content) {
 			return nil
 		}
 
@@ -243,7 +333,7 @@ func containsPostUpdateStartupDialog(content string) bool {
 	return containsWorkspaceTrustDialog(content) ||
 		strings.Contains(content, "Bypass Permissions mode") ||
 		containsCustomAPIKeyDialog(content) ||
-		containsRateLimitDialog(content)
+		ContainsRateLimitDialog(content)
 }
 
 // acceptWorkspaceTrustDialog dismisses workspace trust dialogs for supported
@@ -314,7 +404,7 @@ func containsWorkspaceTrustDialog(content string) bool {
 func containsPostTrustStartupDialog(content string) bool {
 	return strings.Contains(content, "Bypass Permissions mode") ||
 		containsCustomAPIKeyDialog(content) ||
-		containsRateLimitDialog(content)
+		ContainsRateLimitDialog(content)
 }
 
 // acceptBypassPermissionsWarning dismisses the Claude Code bypass permissions
@@ -370,7 +460,7 @@ func acceptBypassPermissionsWarningFromStream(
 }
 
 func containsPostBypassStartupDialog(content string) bool {
-	return containsCustomAPIKeyDialog(content) || containsRateLimitDialog(content)
+	return containsCustomAPIKeyDialog(content) || ContainsRateLimitDialog(content)
 }
 
 // acceptCustomAPIKeyDialog dismisses Claude's API-key confirmation prompt.
@@ -402,7 +492,7 @@ func acceptCustomAPIKeyDialog(
 			return sendKeys("Enter")
 		}
 
-		if containsPromptIndicator(content) || containsRateLimitDialog(content) {
+		if containsPromptIndicator(content) || ContainsRateLimitDialog(content) {
 			return nil
 		}
 
@@ -422,7 +512,7 @@ func acceptCustomAPIKeyDialogFromStream(
 		matchKeys:   []string{"Up", "Enter"},
 		matchDelay:  bypassDialogConfirmDelay,
 		ready:       containsPromptIndicator,
-		readyOrNext: containsRateLimitDialog,
+		readyOrNext: ContainsRateLimitDialog,
 	})
 }
 
@@ -433,8 +523,9 @@ func containsCustomAPIKeyDialog(content string) bool {
 
 // dismissRateLimitDialog detects rate limit / usage limit dialogs (e.g.,
 // Gemini's "Usage limit reached") and selects "Stop" to let the session
-// exit cleanly. The reconciler treats the exit as a startup failure and
-// retries later when the rate limit resets.
+// exit cleanly. The reconciler then peeks the pane and quarantines provider
+// rate-limit exits with sleep_reason=rate_limit instead of counting them as
+// wake failures.
 func dismissRateLimitDialog(
 	ctx context.Context,
 	timeout time.Duration,
@@ -452,7 +543,7 @@ func dismissRateLimitDialog(
 			return err
 		}
 
-		if containsRateLimitDialog(content) {
+		if ContainsRateLimitDialog(content) {
 			// Select "Stop" (option 2). The menu has "Keep trying" selected
 			// by default, so press Down then Enter.
 			if err := sendKeys("Down"); err != nil {
@@ -478,7 +569,7 @@ func dismissRateLimitDialogFromStream(
 	sendKeys func(keys ...string) error,
 ) (bool, error) {
 	return acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
-		match:      containsRateLimitDialog,
+		match:      ContainsRateLimitDialog,
 		matchKeys:  []string{"Down", "Enter"},
 		matchDelay: bypassDialogConfirmDelay,
 		ready:      containsPromptIndicator,
@@ -718,10 +809,29 @@ func sendDialogKeys(
 	return nil
 }
 
-func containsRateLimitDialog(content string) bool {
+// ContainsRateLimitDialog reports whether pane content shows a provider
+// rate-limit or usage-limit startup dialog. It is intentionally permissive for
+// startup compatibility; use ContainsProviderRateLimitScreen when classifying
+// arbitrary post-crash scrollback.
+func ContainsRateLimitDialog(content string) bool {
 	return strings.Contains(content, "Usage limit reached") ||
+		strings.Contains(content, "You've hit your limit") ||
+		strings.Contains(content, "/rate-limit-options") ||
 		strings.Contains(content, "rate limit") ||
 		strings.Contains(content, "Rate limit")
+}
+
+// ContainsProviderRateLimitScreen reports whether pane content has
+// high-confidence provider rate-limit screen evidence.
+func ContainsProviderRateLimitScreen(content string) bool {
+	if strings.Contains(content, "Usage limit reached") ||
+		strings.Contains(content, "You've hit your limit") ||
+		strings.Contains(content, "/rate-limit-options") {
+		return true
+	}
+	return strings.Contains(strings.ToLower(content), "rate limit") &&
+		strings.Contains(content, "Keep trying") &&
+		strings.Contains(content, "Stop")
 }
 
 // containsPromptIndicator checks whether any line in the content looks like a

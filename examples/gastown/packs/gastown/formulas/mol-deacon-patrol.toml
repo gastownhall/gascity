@@ -159,7 +159,7 @@ something is stuck. This is exactly why an LLM does it, not Go code.
 
 **For stuck coordination agents, file a warrant:**
 ```bash
-gc bd create --type=warrant \
+gc bd create --type=task --label=warrant \
   --title="Stuck: <rig>/<role>" \
   --metadata '{"target":"<session>","reason":"<reason>","requester":"deacon"}' \
   --set-metadata gc.routed_to={{binding_prefix}}dog
@@ -199,7 +199,7 @@ No hardcoded thresholds. Use judgment.
 
 **Step 3: For stuck utility agents, file a warrant:**
 ```bash
-gc bd create --type=warrant \
+gc bd create --type=task --label=warrant \
   --title="Stuck dog: <agent>" \
   --metadata '{"target":"<session>","reason":"<reason>","requester":"deacon"}' \
   --set-metadata gc.routed_to={{binding_prefix}}dog
@@ -265,14 +265,14 @@ The compactor dog (`mol-dog-compactor`) may have failed. Log for awareness.
 If the compactor order is configured, it will self-dispatch. Otherwise
 nudge the dog pool:
 ```bash
-gc nudge dog/ "Compactor needed: <db_name> has <count> commits"
+gc session nudge dog/ "Compactor needed: <db_name> has <count> commits"
 ```
 
 **Stale backups:**
 The backup dog (`mol-dog-backup`) may have failed. Same pattern — log and
 nudge if order hasn't self-healed:
 ```bash
-gc nudge dog/ "Backup needed: dolt backup is <age> old"
+gc session nudge dog/ "Backup needed: dolt backup is <age> old"
 ```
 
 **Zombie processes:**

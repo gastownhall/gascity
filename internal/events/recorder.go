@@ -98,6 +98,11 @@ func (r *FileRecorder) List(filter Filter) ([]Event, error) {
 	return ReadFiltered(r.path, filter)
 }
 
+// ListTail returns trailing matching events from the underlying file.
+func (r *FileRecorder) ListTail(filter Filter, limit int) ([]Event, error) {
+	return ReadFilteredTail(r.path, filter, limit)
+}
+
 // LatestSeq returns the highest sequence number in the event log.
 func (r *FileRecorder) LatestSeq() (uint64, error) {
 	r.mu.Lock()

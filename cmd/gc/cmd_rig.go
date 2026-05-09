@@ -188,31 +188,21 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 	}
 	includes = cleaned
 
-	fi, err := fs.Stat(rigPath)
-	if err != nil {
+	rigPathExists := false
+	if fi, err := fs.Stat(rigPath); err != nil {
 		if adopt {
 			fmt.Fprintf(stderr, "gc rig add: --adopt requires an existing directory: %s\n", rigPath) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		if err := fs.MkdirAll(rigPath, 0o755); err != nil {
-			fmt.Fprintf(stderr, "gc rig add: creating %s: %v\n", rigPath, err) //nolint:errcheck // best-effort stderr
+		if !os.IsNotExist(err) {
+			fmt.Fprintf(stderr, "gc rig add: checking %s: %v\n", rigPath, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	} else if !fi.IsDir() {
 		fmt.Fprintf(stderr, "gc rig add: %s is not a directory\n", rigPath) //nolint:errcheck // best-effort stderr
 		return 1
-	}
-
-	if adopt {
-		metaPath := filepath.Join(rigPath, ".beads", "metadata.json")
-		if _, err := fs.Stat(metaPath); err != nil {
-			fmt.Fprintf(stderr, "gc rig add: --adopt requires .beads/metadata.json in %s\n", rigPath) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		if _, ok := readBeadsPrefix(fs, rigPath); !ok {
-			fmt.Fprintf(stderr, "gc rig add: --adopt requires a valid issue_prefix in .beads/config.yaml in %s\n", rigPath) //nolint:errcheck // best-effort stderr
-			return 1
-		}
+	} else {
+		rigPathExists = true
 	}
 
 	name := nameOverride
@@ -220,26 +210,16 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		name = filepath.Base(rigPath)
 	}
 
-	_, gitErr := fs.Stat(filepath.Join(rigPath, ".git"))
-	hasGit := gitErr == nil
-
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	cfg, err := loadCityConfigForEditFS(fs, tomlPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig add: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if cityUsesBdStoreContract(cityPath) && (cfg.Dolt.Host != "" || cfg.Dolt.Port != 0) {
-		cityDoltConfigs.Store(cityPath, cfg.Dolt)
-		defer cityDoltConfigs.Delete(cityPath)
+	if cityUsesBdStoreContract(cityPath) && cityDoltConfigHasLifecycleFields(cfg.Dolt) {
+		registerCityDoltConfig(cityPath, cfg.Dolt)
+		defer clearCityDoltConfig(cityPath)
 	}
-	rootDefaultRigImports, err := config.LoadRootPackDefaultRigImports(fs, cityPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc rig add: loading root pack defaults: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	defaultRigIncludes := append([]string{}, cfg.Workspace.DefaultRigIncludes...)
-
 	var reAdd bool
 	var reAddNeedsConfigWrite bool
 	existingRigIdx := -1
@@ -275,6 +255,89 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		prefix = strings.ToLower(prefixOverride)
 	default:
 		prefix = config.DeriveBeadsPrefix(name)
+	}
+
+	if !reAdd {
+		prefixKey := strings.ToLower(prefix)
+		if prefixKey == strings.ToLower(config.EffectiveHQPrefix(cfg)) {
+			fmt.Fprintf(stderr, "gc rig add: rig %q: prefix %q collides with HQ. Use --prefix to specify a different prefix.\n", name, prefixKey) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		for _, rig := range cfg.Rigs {
+			if prefixKey == strings.ToLower(rig.EffectivePrefix()) {
+				fmt.Fprintf(stderr, "gc rig add: rig %q: prefix %q collides with %s. Use --prefix to specify a different prefix.\n", name, prefixKey, rig.Name) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+		}
+	}
+
+	rootDefaultRigImports, err := config.LoadRootPackDefaultRigImports(fs, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc rig add: loading root pack defaults: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	defaultRigIncludes := append([]string{}, cfg.Workspace.DefaultRigIncludes...)
+
+	nextCfg := cfg
+	needsValidation := !reAdd || reAddNeedsConfigWrite
+	if reAddNeedsConfigWrite {
+		next := *cfg
+		next.Rigs = append([]config.Rig{}, cfg.Rigs...)
+		next.Rigs[existingRigIdx].Path = rigPath
+		nextCfg = &next
+	} else if !reAdd {
+		storedPrefix := ""
+		if prefixOverride != "" {
+			storedPrefix = strings.ToLower(prefixOverride)
+		}
+		rig := config.Rig{
+			Name:      name,
+			Path:      rigPath,
+			Prefix:    storedPrefix,
+			Suspended: startSuspended,
+		}
+		switch {
+		case len(includes) > 0:
+			rig.Includes = slices.Clone(includes)
+		default:
+			if len(rootDefaultRigImports) > 0 {
+				rig.Imports = make(map[string]config.Import, len(rootDefaultRigImports))
+				for _, bound := range rootDefaultRigImports {
+					rig.Imports[bound.Binding] = bound.Import
+				}
+			}
+			if len(defaultRigIncludes) > 0 {
+				rig.Includes = slices.Clone(defaultRigIncludes)
+			}
+		}
+		next := *cfg
+		next.Rigs = append(append([]config.Rig{}, cfg.Rigs...), rig)
+		nextCfg = &next
+	}
+	if needsValidation {
+		if err := config.ValidateRigs(nextCfg.Rigs, config.EffectiveHQPrefix(nextCfg)); err != nil {
+			fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
+
+	if !rigPathExists {
+		if err := fs.MkdirAll(rigPath, 0o755); err != nil {
+			fmt.Fprintf(stderr, "gc rig add: creating %s: %v\n", rigPath, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
+
+	if adopt {
+		metaPath := filepath.Join(rigPath, ".beads", "metadata.json")
+		if _, err := fs.Stat(metaPath); err != nil {
+			fmt.Fprintf(stderr, "gc rig add: --adopt requires .beads/metadata.json in %s\n", rigPath) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if _, ok := readBeadsPrefix(fs, rigPath); !ok {
+			fmt.Fprintf(stderr, "gc rig add: --adopt requires a valid issue_prefix in .beads/config.yaml in %s\n", rigPath) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 
 	if existingPrefix, ok := readBeadsPrefix(fs, rigPath); ok && existingPrefix != prefix {
@@ -319,6 +382,9 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 			return 1
 		}
 	}
+
+	_, gitErr := fs.Stat(filepath.Join(rigPath, ".git"))
+	hasGit := gitErr == nil
 
 	// --- Phase 1: Infrastructure (all fallible, before touching city.toml) ---
 
@@ -383,57 +449,13 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		}
 	}
 
-	var nextCfg *config.City
-	if reAdd {
-		if reAddNeedsConfigWrite {
-			next := *cfg
-			next.Rigs = append([]config.Rig{}, cfg.Rigs...)
-			next.Rigs[existingRigIdx].Path = rigPath
-			nextCfg = &next
-		} else {
-			nextCfg = cfg
-		}
-	} else {
-		storedPrefix := ""
-		if prefixOverride != "" {
-			storedPrefix = strings.ToLower(prefixOverride)
-		}
-		rig := config.Rig{
-			Name:      name,
-			Path:      rigPath,
-			Prefix:    storedPrefix,
-			Suspended: startSuspended,
-		}
-		switch {
-		case len(includes) > 0:
-			rig.Includes = slices.Clone(includes)
-		default:
-			if len(rootDefaultRigImports) > 0 {
-				rig.Imports = make(map[string]config.Import, len(rootDefaultRigImports))
-				for _, bound := range rootDefaultRigImports {
-					rig.Imports[bound.Binding] = bound.Import
-				}
-			}
-			if len(defaultRigIncludes) > 0 {
-				rig.Includes = slices.Clone(defaultRigIncludes)
-			}
-		}
-		next := *cfg
-		next.Rigs = append(append([]config.Rig{}, cfg.Rigs...), rig)
-		if err := config.ValidateRigs(next.Rigs, config.EffectiveHQPrefix(&next)); err != nil {
-			fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		nextCfg = &next
-	}
-
 	snapshots, err := snapshotRigAddTopologyFiles(fs, cityPath, nextCfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig add: snapshot canonical files: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if !reAdd || reAddNeedsConfigWrite {
-		if err := normalizeCanonicalBdScopeFiles(cityPath, nextCfg); err != nil {
+		if err := normalizeCanonicalBdScopeFiles(cityPath, nextCfg, io.Discard); err != nil {
 			writeRigAddRollbackError(fs, stderr, snapshots, "canonicalizing rig topology", err)
 			return 1
 		}
@@ -763,6 +785,7 @@ database remains accessible. Use "gc rig resume" to restore.`,
 			}
 			return nil
 		},
+		ValidArgsFunction: completeRigNames,
 	}
 }
 
@@ -843,6 +866,7 @@ The reconciler will start the rig's agents on its next tick.`,
 			}
 			return nil
 		},
+		ValidArgsFunction: completeRigNames,
 	}
 }
 
@@ -925,6 +949,7 @@ binding from .gc/site.toml.`,
 			}
 			return nil
 		},
+		ValidArgsFunction: completeRigNames,
 	}
 }
 

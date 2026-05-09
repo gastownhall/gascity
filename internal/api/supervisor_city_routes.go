@@ -61,6 +61,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Method:        http.MethodPost,
 		Path:          "/agents",
 		Summary:       "Create an agent",
+		Description:   "Creates an agent and waits until it is visible to immediate follow-up operations. If the agent is durably created but visibility confirmation is canceled or times out, the retryable 503/504 response includes a Retry-After header.",
 		DefaultStatus: http.StatusCreated,
 	}, (*Server).humaHandleAgentCreate)
 	cityPatch(sm, "/agent/{dir}/{base}", (*Server).humaHandleAgentUpdateQualified)
@@ -310,7 +311,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Path:        cityScopePrefix + "/events/stream",
 		Summary:     "Stream city events in real time",
 		Description: "Server-Sent Events stream of city events with optional workflow projections. " +
-			"Supports reconnection via Last-Event-ID header or after_seq query param.",
+			"Supports reconnection via Last-Event-ID header or after_seq query param; omitting both starts at the current city event head.",
 	}, map[string]any{
 		"event": sseEventContract{
 			runtimeSample: eventStreamEnvelope{},

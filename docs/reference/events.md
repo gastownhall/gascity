@@ -86,6 +86,9 @@ stdout, but the line schema is different from list mode.
   stdout.
 - If `--watch` times out without a match, stdout is empty and the command exits
   successfully.
+- API streams without `after_seq`, `after_cursor`, or `Last-Event-ID` start
+  at the current event head. Pass the `event_cursor` returned by async POST
+  responses when waiting for request-result events after the POST returns.
 
 #### City Scope
 

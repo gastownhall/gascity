@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -80,7 +81,7 @@ func TestFileRecorderPayloadRoundTrip(t *testing.T) {
 	payload := json.RawMessage(`{"type":"merge-request","title":"Fix bug","labels":["urgent"]}`)
 	rec.Record(Event{
 		Type:    BeadCreated,
-		Actor:   "polecat",
+		Actor:   "actor-payload",
 		Subject: "gc-42",
 		Payload: payload,
 	})
@@ -335,7 +336,7 @@ func TestFakeList(t *testing.T) {
 	f := NewFake()
 	f.Record(Event{Type: BeadCreated, Actor: "human", Subject: "gc-1"})
 	f.Record(Event{Type: BeadClosed, Actor: "human", Subject: "gc-1"})
-	f.Record(Event{Type: SessionWoke, Actor: "gc", Subject: "mayor"})
+	f.Record(Event{Type: SessionWoke, Actor: "gc", Subject: "session-alpha"})
 
 	all, err := f.List(Filter{})
 	if err != nil {
@@ -351,6 +352,38 @@ func TestFakeList(t *testing.T) {
 	}
 	if len(byType) != 1 {
 		t.Fatalf("List(type) = %d, want 1", len(byType))
+	}
+}
+
+func TestFakeListTailFiltersLimitModesAndErrors(t *testing.T) {
+	f := NewFake()
+	f.Record(Event{Type: BeadCreated, Actor: "human", Subject: "old"})
+	f.Record(Event{Type: BeadClosed, Actor: "human", Subject: "ignored"})
+	f.Record(Event{Type: BeadCreated, Actor: "human", Subject: "middle"})
+	f.Record(Event{Type: BeadCreated, Actor: "gc", Subject: "wrong-actor"})
+	f.Record(Event{Type: BeadCreated, Actor: "human", Subject: "new"})
+
+	tail, err := f.ListTail(Filter{Type: BeadCreated, Actor: "human"}, 2)
+	if err != nil {
+		t.Fatalf("ListTail(limit): %v", err)
+	}
+	if len(tail) != 2 {
+		t.Fatalf("ListTail(limit) got %d events, want 2", len(tail))
+	}
+	if tail[0].Subject != "middle" || tail[1].Subject != "new" {
+		t.Fatalf("tail subjects = [%s %s], want [middle new]", tail[0].Subject, tail[1].Subject)
+	}
+
+	all, err := f.ListTail(Filter{Type: BeadCreated, Actor: "human"}, 0)
+	if err != nil {
+		t.Fatalf("ListTail(limit=0): %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("ListTail(limit=0) got %d events, want 3", len(all))
+	}
+
+	if _, err := NewFailFake().ListTail(Filter{}, 1); err == nil {
+		t.Fatal("ListTail on broken fake returned nil error")
 	}
 }
 
@@ -463,7 +496,7 @@ func TestReadFiltered(t *testing.T) {
 	past := now.Add(-2 * time.Hour)
 	rec.Record(Event{Type: BeadCreated, Actor: "human", Subject: "gc-1", Ts: past})
 	rec.Record(Event{Type: BeadClosed, Actor: "human", Subject: "gc-1", Ts: past})
-	rec.Record(Event{Type: SessionWoke, Actor: "gc", Subject: "mayor", Ts: now})
+	rec.Record(Event{Type: SessionWoke, Actor: "gc", Subject: "session-alpha", Ts: now})
 	rec.Close() //nolint:errcheck // test cleanup
 
 	t.Run("by_type", func(t *testing.T) {
@@ -527,6 +560,85 @@ func TestReadFiltered(t *testing.T) {
 	})
 }
 
+func TestReadFilteredMissingFile(t *testing.T) {
+	got, err := ReadFiltered(filepath.Join(t.TempDir(), "missing.jsonl"), Filter{})
+	if err != nil {
+		t.Fatalf("ReadFiltered(missing): %v", err)
+	}
+	if got != nil {
+		t.Fatalf("ReadFiltered(missing) = %v, want nil", got)
+	}
+}
+
+func TestReadFilteredSkipsMalformedLines(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	data := strings.Join([]string{
+		`not-json`,
+		`{"seq":1,"type":"bead.created","ts":"2025-06-15T10:30:00Z","actor":"actor-a","subject":"gc-1"}`,
+		``,
+	}, "\n")
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ReadFiltered(path, Filter{})
+	if err != nil {
+		t.Fatalf("ReadFiltered: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d events, want 1", len(got))
+	}
+	if got[0].Subject != "gc-1" {
+		t.Errorf("Subject = %q, want gc-1", got[0].Subject)
+	}
+}
+
+func TestReadFilteredScannerError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	first := `{"seq":1,"type":"bead.created","ts":"2025-06-15T10:30:00Z","actor":"actor-a","subject":"gc-1"}` + "\n"
+	oversizedLine := strings.Repeat("x", 1024*1024+1)
+	if err := os.WriteFile(path, []byte(first+oversizedLine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ReadFiltered(path, Filter{})
+	if err == nil {
+		t.Fatal("ReadFiltered returned nil error, want scanner error")
+	}
+	if !strings.Contains(err.Error(), "scanning events") {
+		t.Fatalf("ReadFiltered error = %q, want scanning events context", err.Error())
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d partial events, want 1", len(got))
+	}
+	if got[0].Subject != "gc-1" {
+		t.Errorf("partial Subject = %q, want gc-1", got[0].Subject)
+	}
+}
+
+func TestReadFilteredLimitStopsScanning(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	first := `{"seq":1,"type":"bead.created","ts":"2025-06-15T10:30:00Z","actor":"actor-a","subject":"gc-1"}` + "\n"
+	oversizedLine := strings.Repeat("x", 1024*1024+1) + "\n"
+	if err := os.WriteFile(path, []byte(first+oversizedLine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ReadFiltered(path, Filter{Limit: 1})
+	if err != nil {
+		t.Fatalf("ReadFiltered: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d events, want 1", len(got))
+	}
+	if got[0].Seq != 1 {
+		t.Errorf("got[0].Seq = %d, want 1", got[0].Seq)
+	}
+}
+
 func TestReadFilteredAfterSeq(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "events.jsonl")
@@ -583,6 +695,113 @@ func TestReadFilteredAfterSeqCombined(t *testing.T) {
 	}
 	if got[1].Seq != 5 {
 		t.Errorf("got[1].Seq = %d, want 5", got[1].Seq)
+	}
+}
+
+func TestReadFilteredTail(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Record(Event{Type: BeadCreated, Actor: "human"}) // seq 1
+	rec.Record(Event{Type: BeadClosed, Actor: "human"})  // seq 2
+	rec.Record(Event{Type: BeadCreated, Actor: "human"}) // seq 3
+	rec.Record(Event{Type: BeadClosed, Actor: "human"})  // seq 4
+	rec.Record(Event{Type: BeadCreated, Actor: "human"}) // seq 5
+	rec.Close()                                          //nolint:errcheck // test cleanup
+
+	got, err := ReadFilteredTail(path, Filter{Type: BeadCreated}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d events, want 2", len(got))
+	}
+	if got[0].Seq != 3 || got[1].Seq != 5 {
+		t.Fatalf("tail seqs = [%d %d], want [3 5]", got[0].Seq, got[1].Seq)
+	}
+}
+
+func TestReadFilteredTailScansBackwardsAcrossChunks(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	base := time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC)
+	var buf bytes.Buffer
+	appendEvent := func(e Event, ending string) {
+		t.Helper()
+		raw, err := json.Marshal(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		buf.Write(raw)
+		buf.WriteString(ending)
+	}
+
+	appendEvent(Event{Seq: 1, Type: SessionWoke, Actor: "api", Subject: "too-low-seq", Ts: base.Add(9 * time.Second)}, "\n")
+	appendEvent(Event{
+		Seq:     2,
+		Type:    SessionWoke,
+		Actor:   "api",
+		Subject: "cross-chunk",
+		Ts:      base.Add(10 * time.Second),
+		Message: string(bytes.Repeat([]byte("x"), 70*1024)),
+	}, "\n")
+	appendEvent(Event{Seq: 3, Type: SessionStopped, Actor: "api", Subject: "wrong-type", Ts: base.Add(11 * time.Second)}, "\n")
+	appendEvent(Event{Seq: 4, Type: SessionWoke, Actor: "worker", Subject: "wrong-actor", Ts: base.Add(12 * time.Second)}, "\n")
+	appendEvent(Event{Seq: 5, Type: SessionWoke, Actor: "api", Subject: "too-old", Ts: base.Add(-time.Second)}, "\n")
+	buf.WriteString("\nnot-json\n")
+	appendEvent(Event{Seq: 6, Type: SessionWoke, Actor: "api", Subject: "tail-match", Ts: base.Add(20 * time.Second)}, "\r\n")
+
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ReadFilteredTail(path, Filter{
+		AfterSeq: 1,
+		Type:     SessionWoke,
+		Actor:    "api",
+		Since:    base,
+	}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d events, want 2: %+v", len(got), got)
+	}
+	if got[0].Subject != "cross-chunk" || got[1].Subject != "tail-match" {
+		t.Fatalf("subjects = [%s %s], want [cross-chunk tail-match]", got[0].Subject, got[1].Subject)
+	}
+}
+
+func TestReadFilteredTailLimitModesAndMissingFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Record(Event{Type: BeadCreated, Actor: "human", Subject: "created"})
+	rec.Record(Event{Type: BeadClosed, Actor: "human", Subject: "closed"})
+	rec.Close() //nolint:errcheck // test cleanup
+
+	got, err := ReadFilteredTail(path, Filter{Actor: "human"}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("limit=0 got %d events, want 2", len(got))
+	}
+
+	missing, err := ReadFilteredTail(filepath.Join(dir, "missing.jsonl"), Filter{}, 1)
+	if err != nil {
+		t.Fatalf("missing file error: %v", err)
+	}
+	if missing != nil {
+		t.Fatalf("missing file got %+v, want nil", missing)
 	}
 }
 
@@ -696,7 +915,7 @@ func TestReadFrom(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec2.Record(Event{Type: SessionWoke, Actor: "gc", Subject: "mayor"})
+	rec2.Record(Event{Type: SessionWoke, Actor: "gc", Subject: "session-alpha"})
 	rec2.Close() //nolint:errcheck // test cleanup
 
 	// Read from mid-file offset → only new event
@@ -772,7 +991,7 @@ func TestFileRecorderList(t *testing.T) {
 
 	rec.Record(Event{Type: BeadCreated, Actor: "human", Subject: "gc-1"})
 	rec.Record(Event{Type: BeadClosed, Actor: "human", Subject: "gc-1"})
-	rec.Record(Event{Type: SessionWoke, Actor: "gc", Subject: "mayor"})
+	rec.Record(Event{Type: SessionWoke, Actor: "gc", Subject: "session-alpha"})
 
 	// List all
 	all, err := rec.List(Filter{})
@@ -793,6 +1012,32 @@ func TestFileRecorderList(t *testing.T) {
 	}
 	if created[0].Subject != "gc-1" {
 		t.Errorf("Subject = %q, want %q", created[0].Subject, "gc-1")
+	}
+}
+
+func TestFileRecorderListTail(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+
+	rec.Record(Event{Type: BeadCreated, Actor: "human", Subject: "old"})
+	rec.Record(Event{Type: BeadClosed, Actor: "human", Subject: "ignored"})
+	rec.Record(Event{Type: BeadCreated, Actor: "human", Subject: "new"})
+
+	got, err := rec.ListTail(Filter{Type: BeadCreated}, 1)
+	if err != nil {
+		t.Fatalf("ListTail: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("ListTail got %d events, want 1", len(got))
+	}
+	if got[0].Subject != "new" {
+		t.Fatalf("subject = %q, want new", got[0].Subject)
 	}
 }
 

@@ -434,7 +434,11 @@ func statusDisplayText(status string) string {
 	}
 }
 
-func unregisterCityFromSupervisor(cityPath string, stdout, stderr io.Writer, commandName string) (bool, int) {
+func unregisterCityFromSupervisor(cityPath string, stdout, stderr io.Writer) (bool, int) {
+	return unregisterCityFromSupervisorWithForce(cityPath, stdout, stderr, "gc unregister", false)
+}
+
+func unregisterCityFromSupervisorWithForce(cityPath string, stdout, stderr io.Writer, commandName string, force bool) (bool, int) {
 	cityPath = normalizePathForCompare(cityPath)
 	entry, registered, err := registeredCityEntry(cityPath)
 	if err != nil {
@@ -446,6 +450,9 @@ func unregisterCityFromSupervisor(cityPath string, stdout, stderr io.Writer, com
 	}
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if force && supervisorAliveHook() != 0 {
+		tryStopControllerWithForce(cityPath, io.Discard, true)
+	}
 	if err := reg.Unregister(cityPath); err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
 		return true, 1
