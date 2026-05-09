@@ -1840,6 +1840,10 @@
           "type": "string",
           "description": "Prefix overrides the auto-derived bead ID prefix for this rig."
         },
+        "default_branch": {
+          "type": "string",
+          "description": "DefaultBranch is the rig repository's mainline branch (e.g. \"main\",\n\"master\", \"develop\"). When set, polecats and the refinery use this\nas the default merge target instead of probing origin/HEAD at sling\ntime. Captured by `gc rig add` from the rig's git config; set\nmanually for rigs whose mainline isn't reachable via origin/HEAD."
+        },
         "suspended": {
           "type": "boolean",
           "description": "Suspended prevents the reconciler from spawning agents in this rig. Toggle with gc rig suspend/resume."
@@ -1917,6 +1921,10 @@
         "prefix": {
           "type": "string",
           "description": "Prefix overrides the bead ID prefix."
+        },
+        "default_branch": {
+          "type": "string",
+          "description": "DefaultBranch overrides the rig's recorded mainline branch."
         },
         "suspended": {
           "type": "boolean",

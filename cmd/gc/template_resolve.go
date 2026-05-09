@@ -291,7 +291,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		RigRoot:       rigRoot,
 		WorkDir:       workDir,
 		IssuePrefix:   findRigPrefix(rigName, p.rigs),
-		DefaultBranch: defaultBranchFor(workDir),
+		DefaultBranch: defaultBranchForRig(rigName, p.rigs, workDir),
 		WorkQuery:     expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "work_query", cfgAgent.EffectiveWorkQuery(), p.stderr),
 		SlingQuery:    expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "sling_query", cfgAgent.EffectiveSlingQuery(), p.stderr),
 		Env:           cfgAgent.Env,

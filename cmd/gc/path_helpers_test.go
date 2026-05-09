@@ -35,6 +35,7 @@ func clearInheritedBeadsEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
 		"GC_BEADS",
+		"GC_BIN",
 		"GC_DOLT",
 		"GC_DOLT_HOST",
 		"GC_DOLT_PORT",

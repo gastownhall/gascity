@@ -995,42 +995,18 @@ func buildSlingFormulaVars(formulaName, beadID string, userVars []string, a conf
 // slingFormulaSearchPaths returns the formula search paths for the current
 // sling context. Uses the target agent's rig to select rig-specific layers,
 // falling back to city-level layers via FormulaLayers.SearchPaths.
+//
+// slingFormulaTargetBranch resolves the branch used as base_branch /
+// target_branch in formula vars. Resolution order:
+//  1. metadata.target on the work bead (or convoy ancestor)
+//  2. DefaultBranch recorded on the bead's rig in city.toml
+//  3. DefaultBranch recorded on the agent's rig in city.toml
+//  4. Live probe of the rig repo (git symbolic-ref origin/HEAD)
 func slingFormulaTargetBranch(beadID string, deps slingDeps, a config.Agent) string {
-	if target := beadMetadataTarget(deps.Store, beadID); target != "" {
-		return target
+	if deps.Branches == nil {
+		deps.Branches = cliBranchResolver{}
 	}
-	return defaultBranchFor(slingFormulaRepoDir(beadID, deps, a))
-}
-
-func beadMetadataTarget(store beads.Store, beadID string) string {
-	if store == nil || beadID == "" {
-		return ""
-	}
-
-	seen := make(map[string]struct{}, 8)
-	rootID := beadID
-	for beadID != "" {
-		if _, ok := seen[beadID]; ok {
-			return ""
-		}
-		seen[beadID] = struct{}{}
-
-		b, err := store.Get(beadID)
-		if err != nil {
-			return ""
-		}
-		if target := strings.TrimSpace(b.Metadata["target"]); target != "" {
-			if beadID == rootID || b.Type == "convoy" {
-				return target
-			}
-		}
-		beadID = strings.TrimSpace(b.ParentID)
-	}
-	return ""
-}
-
-func slingFormulaRepoDir(beadID string, deps slingDeps, a config.Agent) string {
-	return resolveSlingStoreRoot(deps.Cfg, deps.CityPath, beadID, a)
+	return sling.SlingFormulaTargetBranch(beadID, deps, a)
 }
 
 func slingFormulaUsesBaseBranch(formula string) bool {

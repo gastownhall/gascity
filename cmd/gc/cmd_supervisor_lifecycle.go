@@ -43,6 +43,21 @@ var (
 		out, err := exec.Command("launchctl", "print", supervisorLaunchdServiceTarget(label)).Output()
 		return err == nil && launchdPrintReportsRunning(out)
 	}
+	// supervisorLaunchctlGetenv reads a value from `launchctl getenv` on
+	// macOS so users can set per-domain env (e.g. GC_DOLT_LOGLEVEL) and
+	// have it flow into the supervisor's launchd plist. Returns "" on
+	// non-Darwin or when the key is unset / launchctl is unavailable.
+	supervisorLaunchctlGetenv = func(key string) string {
+		if supervisorRuntimeGOOS != "darwin" {
+			return ""
+		}
+		out, err := exec.Command("launchctl", "getenv", key).Output()
+		if err != nil {
+			return ""
+		}
+		val := strings.TrimSuffix(string(out), "\n")
+		return strings.TrimSuffix(val, "\r")
+	}
 	supervisorSystemctlRun = func(args ...string) error {
 		return exec.Command("systemctl", args...).Run()
 	}
@@ -684,6 +699,9 @@ var supervisorServiceEnvKeys = map[string]bool{
 	"CLAUDE_CODE_OAUTH_TOKEN":                  true,
 	"CLAUDE_CODE_SUBAGENT_MODEL":               true,
 	"CLAUDE_CONFIG_DIR":                        true,
+	"GC_DOLT_LOGLEVEL":                         true,
+	"GC_DOLT_PASSWORD":                         true,
+	"GC_DOLT_USER":                             true,
 	"HOME":                                     true,
 	"LANG":                                     true,
 	"LC_ALL":                                   true,
@@ -711,6 +729,7 @@ var supervisorServiceFixedEnvKeys = map[string]bool{
 
 func supervisorServiceExtraEnv() []supervisorServiceEnvVar {
 	env := make(map[string]string)
+	explicitEnvKeys := supervisorServiceExplicitEnvKeys(os.Getenv("GC_SUPERVISOR_ENV"))
 	for _, entry := range os.Environ() {
 		key, val, ok := strings.Cut(entry, "=")
 		if !ok || val == "" || !shouldPersistSupervisorEnv(key) {
@@ -718,8 +737,36 @@ func supervisorServiceExtraEnv() []supervisorServiceEnvVar {
 		}
 		env[key] = val
 	}
-	for _, key := range supervisorServiceExplicitEnvKeys(os.Getenv("GC_SUPERVISOR_ENV")) {
+	for _, key := range explicitEnvKeys {
 		if val := os.Getenv(key); val != "" {
+			env[key] = val
+		}
+	}
+	// Fall back to `launchctl getenv` for known-allowlisted keys and
+	// for GC_SUPERVISOR_ENV opt-ins. Without this, launchctl-set
+	// documented Dolt credential/logging settings are silently dropped:
+	// the plist's EnvironmentVariables block scopes the spawned
+	// supervisor's env, and `os.Environ()` only sees what's exported in
+	// the calling shell.
+	launchctlKeys := make([]string, 0, len(supervisorServiceEnvKeys)+len(explicitEnvKeys))
+	launchctlSeen := make(map[string]bool, cap(launchctlKeys))
+	for key := range supervisorServiceEnvKeys {
+		launchctlSeen[key] = true
+		launchctlKeys = append(launchctlKeys, key)
+	}
+	for _, key := range explicitEnvKeys {
+		if launchctlSeen[key] {
+			continue
+		}
+		launchctlSeen[key] = true
+		launchctlKeys = append(launchctlKeys, key)
+	}
+	sort.Strings(launchctlKeys)
+	for _, key := range launchctlKeys {
+		if _, ok := env[key]; ok {
+			continue
+		}
+		if val := supervisorLaunchctlGetenv(key); val != "" {
 			env[key] = val
 		}
 	}

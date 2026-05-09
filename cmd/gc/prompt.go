@@ -299,6 +299,24 @@ func defaultBranchFor(dir string) string {
 	return branch
 }
 
+// defaultBranchForRig returns the rig's recorded DefaultBranch when set,
+// falling back to a runtime probe of dir. Use this in prompt/template
+// rendering so polecats and the refinery target the rig's true mainline
+// even when origin/HEAD is unset on the local clone.
+func defaultBranchForRig(rigName string, rigs []config.Rig, dir string) string {
+	if rigName != "" {
+		for i := range rigs {
+			if rigs[i].Name == rigName {
+				if branch := rigs[i].EffectiveDefaultBranch(); branch != "" {
+					return branch
+				}
+				break
+			}
+		}
+	}
+	return defaultBranchFor(dir)
+}
+
 // promptFuncMap returns template functions available in prompt templates.
 // sessionTemplate is the custom session naming template (empty = default).
 // store is used by the "session" function to look up bead-derived session

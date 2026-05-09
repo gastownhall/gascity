@@ -5293,6 +5293,10 @@
       "RigCreateInputBody": {
         "additionalProperties": false,
         "properties": {
+          "default_branch": {
+            "description": "Mainline branch (e.g. main, master). Auto-detected when omitted.",
+            "type": "string"
+          },
           "name": {
             "description": "Rig name.",
             "minLength": 1,
@@ -5338,6 +5342,12 @@
       "RigPatch": {
         "additionalProperties": false,
         "properties": {
+          "DefaultBranch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "Name": {
             "type": "string"
           },
@@ -5364,6 +5374,7 @@
           "Name",
           "Path",
           "Prefix",
+          "DefaultBranch",
           "Suspended"
         ],
         "type": "object"
@@ -5371,6 +5382,10 @@
       "RigPatchSetInputBody": {
         "additionalProperties": false,
         "properties": {
+          "default_branch": {
+            "description": "Override mainline branch.",
+            "type": "string"
+          },
           "name": {
             "description": "Rig name.",
             "type": "string"
@@ -5396,6 +5411,9 @@
           "agent_count": {
             "format": "int64",
             "type": "integer"
+          },
+          "default_branch": {
+            "type": "string"
           },
           "git": {
             "$ref": "#/components/schemas/GitStatus"
@@ -5433,6 +5451,10 @@
       "RigUpdateInputBody": {
         "additionalProperties": false,
         "properties": {
+          "default_branch": {
+            "description": "Mainline branch (e.g. main, master).",
+            "type": "string"
+          },
           "path": {
             "description": "Filesystem path.",
             "type": "string"

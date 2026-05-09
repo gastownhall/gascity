@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/spf13/cobra"
 )
@@ -62,6 +63,7 @@ func newRigAddCmd(stdout, stderr io.Writer) *cobra.Command {
 	var startSuspended bool
 	var nameFlag string
 	var prefixFlag string
+	var defaultBranchFlag string
 	var adoptFlag bool
 	cmd := &cobra.Command{
 		Use:   "add <path>",
@@ -76,6 +78,10 @@ repeat the flag to compose multiple packs for one rig.
 
 Use --name to set the rig name explicitly (default: directory basename).
 Use --prefix to set the bead ID prefix explicitly (default: derived from name).
+Use --default-branch to set the rig's mainline branch explicitly. By default,
+gc rig add probes the repo's origin/HEAD (and falls back to the currently
+checked-out branch) and stores the result in city.toml so polecats and the
+refinery target the right branch without manual metadata patching.
 Use --start-suspended to add the rig in a suspended state (dormant-by-default).
 The rig's agents won't spawn until explicitly resumed with "gc rig resume".
 
@@ -85,13 +91,14 @@ Skips beads init; the git repo check remains informational.`,
 		Example: `  gc rig add /path/to/project
   gc rig add /path/to/project --name myrig
   gc rig add /path/to/project --prefix r1
+  gc rig add /path/to/master-repo --default-branch master
   gc rig add ./my-project --include packs/gastown
   gc rig add ./my-project --include packs/planner --include packs/architect
   gc rig add ./my-project --include packs/gastown --start-suspended
   gc rig add /path/to/existing --adopt`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdRigAdd(args, includes, nameFlag, prefixFlag, startSuspended, adoptFlag, stdout, stderr) != 0 {
+			if cmdRigAdd(args, includes, nameFlag, prefixFlag, defaultBranchFlag, startSuspended, adoptFlag, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -100,6 +107,7 @@ Skips beads init; the git repo check remains informational.`,
 	cmd.Flags().StringArrayVar(&includes, "include", nil, "pack directory for rig agents (repeatable)")
 	cmd.Flags().StringVar(&nameFlag, "name", "", "rig name (default: directory basename)")
 	cmd.Flags().StringVar(&prefixFlag, "prefix", "", "bead ID prefix (default: derived from name)")
+	cmd.Flags().StringVar(&defaultBranchFlag, "default-branch", "", "mainline branch (default: auto-detect from origin/HEAD or current branch)")
 	cmd.Flags().BoolVar(&startSuspended, "start-suspended", false, "add rig in suspended state (dormant-by-default)")
 	cmd.Flags().BoolVar(&adoptFlag, "adopt", false, "adopt existing .beads/ directory (skip init)")
 	return cmd
@@ -110,10 +118,11 @@ func newRigListCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List registered rigs",
-		Long: `List all registered rigs with their paths, prefixes, and beads status.
+		Long: `List all registered rigs with their paths, prefixes, default branches, and beads status.
 
 Shows the HQ rig (the city itself) and all configured rigs. Each rig
-displays its bead ID prefix and whether its beads database is initialized.`,
+displays its bead ID prefix, recorded default branch when set, and whether
+its beads database is initialized.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdRigList(args, jsonFlag, stdout, stderr) != 0 {
@@ -127,7 +136,7 @@ displays its bead ID prefix and whether its beads database is initialized.`,
 }
 
 // cmdRigAdd registers an external project directory as a rig in the city.
-func cmdRigAdd(args []string, includes []string, nameOverride, prefixOverride string, startSuspended, adopt bool, stdout, stderr io.Writer) int {
+func cmdRigAdd(args []string, includes []string, nameOverride, prefixOverride, defaultBranchOverride string, startSuspended, adopt bool, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "gc rig add: missing path") //nolint:errcheck // best-effort stderr
 		return 1
@@ -144,7 +153,7 @@ func cmdRigAdd(args []string, includes []string, nameOverride, prefixOverride st
 		fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	return doRigAdd(fsys.OSFS{}, cityPath, rigPath, includes, nameOverride, prefixOverride, startSuspended, adopt, stdout, stderr)
+	return doRigAdd(fsys.OSFS{}, cityPath, rigPath, includes, nameOverride, prefixOverride, defaultBranchOverride, startSuspended, adopt, stdout, stderr)
 }
 
 func resolveRigAddPath(cityPath, rigArg string) (string, error) {
@@ -169,7 +178,7 @@ func resolveRigAddPath(cityPath, rigArg string) (string, error) {
 // city.toml is written last — if any earlier step fails, config is unchanged.
 // This prevents partial-state bugs where city.toml lists a rig but the rig's
 // infrastructure (beads, routes) was never created.
-func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverride, prefixOverride string, startSuspended, adopt bool, stdout, stderr io.Writer) int {
+func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverride, prefixOverride, defaultBranchOverride string, startSuspended, adopt bool, stdout, stderr io.Writer) int {
 	// Validate prefix format: hyphens break beadPrefix() which splits on
 	// the first '-' to extract the rig prefix from a bead ID.
 	if prefixOverride != "" && strings.Contains(prefixOverride, "-") {
@@ -208,6 +217,14 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 	name := nameOverride
 	if name == "" {
 		name = filepath.Base(rigPath)
+	}
+
+	_, gitErr := fs.Stat(filepath.Join(rigPath, ".git"))
+	hasGit := gitErr == nil
+	defaultBranchOverride = strings.TrimSpace(defaultBranchOverride)
+	resolvedDefaultBranch := defaultBranchOverride
+	if resolvedDefaultBranch == "" && hasGit {
+		resolvedDefaultBranch = git.New(rigPath).ProbeDefaultBranch()
 	}
 
 	tomlPath := filepath.Join(cityPath, "city.toml")
@@ -270,6 +287,9 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 			}
 		}
 	}
+	if reAdd && existingRig != nil && existingRig.EffectiveDefaultBranch() == "" && resolvedDefaultBranch != "" {
+		reAddNeedsConfigWrite = true
+	}
 
 	rootDefaultRigImports, err := config.LoadRootPackDefaultRigImports(fs, cityPath)
 	if err != nil {
@@ -283,7 +303,12 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 	if reAddNeedsConfigWrite {
 		next := *cfg
 		next.Rigs = append([]config.Rig{}, cfg.Rigs...)
-		next.Rigs[existingRigIdx].Path = rigPath
+		if strings.TrimSpace(next.Rigs[existingRigIdx].Path) == "" {
+			next.Rigs[existingRigIdx].Path = rigPath
+		}
+		if next.Rigs[existingRigIdx].EffectiveDefaultBranch() == "" && resolvedDefaultBranch != "" {
+			next.Rigs[existingRigIdx].DefaultBranch = resolvedDefaultBranch
+		}
 		nextCfg = &next
 	} else if !reAdd {
 		storedPrefix := ""
@@ -291,10 +316,11 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 			storedPrefix = strings.ToLower(prefixOverride)
 		}
 		rig := config.Rig{
-			Name:      name,
-			Path:      rigPath,
-			Prefix:    storedPrefix,
-			Suspended: startSuspended,
+			Name:          name,
+			Path:          rigPath,
+			Prefix:        storedPrefix,
+			DefaultBranch: resolvedDefaultBranch,
+			Suspended:     startSuspended,
 		}
 		switch {
 		case len(includes) > 0:
@@ -383,9 +409,6 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		}
 	}
 
-	_, gitErr := fs.Stat(filepath.Join(rigPath, ".git"))
-	hasGit := gitErr == nil
-
 	// --- Phase 1: Infrastructure (all fallible, before touching city.toml) ---
 
 	w := func(s string) { fmt.Fprintln(stdout, s) } //nolint:errcheck // best-effort stdout
@@ -400,6 +423,11 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		if prefixOverride != "" && strings.ToLower(prefixOverride) != existingRig.EffectivePrefix() {
 			fmt.Fprintf(stderr, "gc rig add: warning: --prefix=%s ignored (existing: %s); edit city.toml to change\n", prefixOverride, existingRig.EffectivePrefix()) //nolint:errcheck // best-effort stderr
 		}
+		if defaultBranchOverride != "" &&
+			defaultBranchOverride != existingRig.EffectiveDefaultBranch() &&
+			(existingRig.EffectiveDefaultBranch() != "" || resolvedDefaultBranch != defaultBranchOverride) {
+			fmt.Fprintf(stderr, "gc rig add: warning: --default-branch=%s ignored (existing: %s); edit city.toml to change\n", defaultBranchOverride, existingRig.EffectiveDefaultBranch()) //nolint:errcheck // best-effort stderr
+		}
 	} else {
 		w(fmt.Sprintf("Adding rig '%s'...", name))
 	}
@@ -407,6 +435,9 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		w(fmt.Sprintf("  Detected git repo at %s", rigPath))
 	}
 	w(fmt.Sprintf("  Prefix: %s", prefix))
+	if !reAdd && resolvedDefaultBranch != "" {
+		w(fmt.Sprintf("  Default branch: %s", resolvedDefaultBranch))
+	}
 	if !reAdd {
 		switch {
 		case len(includes) > 0:
@@ -675,11 +706,12 @@ type RigListItem struct {
 	// Path is the absolute filesystem path to the rig directory, resolved from
 	// city.toml by resolveRigPaths. Always absolute in output, regardless of
 	// the relative form stored in city.toml.
-	Path      string `json:"path"`
-	Prefix    string `json:"prefix"`
-	HQ        bool   `json:"hq"`
-	Suspended bool   `json:"suspended"`
-	Beads     string `json:"beads"`
+	Path          string `json:"path"`
+	Prefix        string `json:"prefix"`
+	DefaultBranch string `json:"default_branch,omitempty"`
+	HQ            bool   `json:"hq"`
+	Suspended     bool   `json:"suspended"`
+	Beads         string `json:"beads"`
 }
 
 // doRigList is the pure logic for "gc rig list". It reads rigs from city.toml
@@ -715,11 +747,12 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 		})
 		for i := range cfg.Rigs {
 			result.Rigs = append(result.Rigs, RigListItem{
-				Name:      cfg.Rigs[i].Name,
-				Path:      cfg.Rigs[i].Path,
-				Prefix:    cfg.Rigs[i].EffectivePrefix(),
-				Suspended: cfg.Rigs[i].Suspended,
-				Beads:     rigBeadsStatus(fs, cfg.Rigs[i].Path),
+				Name:          cfg.Rigs[i].Name,
+				Path:          cfg.Rigs[i].Path,
+				Prefix:        cfg.Rigs[i].EffectivePrefix(),
+				DefaultBranch: cfg.Rigs[i].EffectiveDefaultBranch(),
+				Suspended:     cfg.Rigs[i].Suspended,
+				Beads:         rigBeadsStatus(fs, cfg.Rigs[i].Path),
 			})
 		}
 		enc := json.NewEncoder(stdout)
@@ -755,6 +788,9 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 		w(fmt.Sprintf("  %s:", header))
 		w(fmt.Sprintf("    Path:   %s", cfg.Rigs[i].Path))
 		w(fmt.Sprintf("    Prefix: %s", prefix))
+		if branch := cfg.Rigs[i].EffectiveDefaultBranch(); branch != "" {
+			w(fmt.Sprintf("    Default branch: %s", branch))
+		}
 		w(fmt.Sprintf("    Beads:  %s", beads))
 	}
 	return 0

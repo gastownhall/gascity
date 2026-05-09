@@ -680,7 +680,7 @@ func TestDoRigAddCreatesDirIfMissing(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", false, false, &stdout, &stderr)
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doRigAdd = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -700,7 +700,7 @@ func TestDoRigAddMkdirRigPathFails(t *testing.T) {
 	f.Errors["/projects/myapp"] = fmt.Errorf("permission denied")
 
 	var stderr bytes.Buffer
-	code := doRigAdd(f, "/city", "/projects/myapp", nil, "", "", false, false, &bytes.Buffer{}, &stderr)
+	code := doRigAdd(f, "/city", "/projects/myapp", nil, "", "", "", false, false, &bytes.Buffer{}, &stderr)
 	if code != 1 {
 		t.Errorf("doRigAdd = %d, want 1", code)
 	}
@@ -714,7 +714,7 @@ func TestDoRigAddNotADirectory(t *testing.T) {
 	f.Files["/projects/myapp"] = []byte("not a dir") // file, not directory
 
 	var stderr bytes.Buffer
-	code := doRigAdd(f, "/city", "/projects/myapp", nil, "", "", false, false, &bytes.Buffer{}, &stderr)
+	code := doRigAdd(f, "/city", "/projects/myapp", nil, "", "", "", false, false, &bytes.Buffer{}, &stderr)
 	if code != 1 {
 		t.Errorf("doRigAdd = %d, want 1", code)
 	}
@@ -744,7 +744,7 @@ func TestDoRigAddWithGit(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", false, false, &stdout, &stderr)
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doRigAdd = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -774,7 +774,7 @@ func TestDoRigAddWithoutGit(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", false, false, &stdout, &stderr)
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doRigAdd = %d, want 0; stderr: %s", code, stderr.String())
 	}

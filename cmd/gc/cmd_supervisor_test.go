@@ -561,6 +561,219 @@ func supervisorServiceEnvMap(vars []supervisorServiceEnvVar) map[string]string {
 	return m
 }
 
+func TestBuildSupervisorServiceDataReadsAllowlistedDoltCredentialKeysFromLaunchctl(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("XDG_RUNTIME_DIR", "/tmp/gc-run")
+	for _, key := range []string{
+		"GC_DOLT_USER",
+		"GC_DOLT_PASSWORD",
+		"GC_DOLT_LOGLEVEL",
+	} {
+		t.Setenv(key, "")
+	}
+
+	stub := map[string]string{
+		"GC_DOLT_USER":     "gc_user",
+		"GC_DOLT_PASSWORD": "redacted-test-value",
+		"GC_DOLT_LOGLEVEL": "debug",
+	}
+	prev := supervisorLaunchctlGetenv
+	supervisorLaunchctlGetenv = func(key string) string { return stub[key] }
+	t.Cleanup(func() { supervisorLaunchctlGetenv = prev })
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	got := supervisorServiceEnvMap(data.ExtraEnv)
+	for key, want := range stub {
+		if got[key] != want {
+			t.Fatalf("ExtraEnv[%s] = %q, want %q (all env: %#v)", key, got[key], want, got)
+		}
+	}
+}
+
+func TestBuildSupervisorServiceDataSkipsDoltEndpointEnvUnlessExplicitlyOptedIn(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("XDG_RUNTIME_DIR", "/tmp/gc-run")
+	t.Setenv("GC_DOLT_HOST", "127.0.0.1")
+	t.Setenv("GC_DOLT_PORT", "3306")
+
+	prev := supervisorLaunchctlGetenv
+	supervisorLaunchctlGetenv = func(key string) string {
+		switch key {
+		case "GC_DOLT_HOST":
+			return "launchctl.example"
+		case "GC_DOLT_PORT":
+			return "4406"
+		default:
+			return ""
+		}
+	}
+	t.Cleanup(func() { supervisorLaunchctlGetenv = prev })
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	got := supervisorServiceEnvMap(data.ExtraEnv)
+	for _, key := range []string{"GC_DOLT_HOST", "GC_DOLT_PORT"} {
+		if _, ok := got[key]; ok {
+			t.Fatalf("ExtraEnv should not include default Dolt endpoint key %s (all env: %#v)", key, got)
+		}
+	}
+
+	t.Setenv("GC_SUPERVISOR_ENV", "GC_DOLT_HOST GC_DOLT_PORT")
+	data, err = buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData with explicit opt-in: %v", err)
+	}
+	got = supervisorServiceEnvMap(data.ExtraEnv)
+	for key, want := range map[string]string{
+		"GC_DOLT_HOST": "127.0.0.1",
+		"GC_DOLT_PORT": "3306",
+	} {
+		if got[key] != want {
+			t.Fatalf("ExtraEnv[%s] = %q, want %q after explicit opt-in (all env: %#v)", key, got[key], want, got)
+		}
+	}
+}
+
+func TestBuildSupervisorServiceDataPrefersOSEnvOverLaunchctl(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("GC_DOLT_LOGLEVEL", "trace")
+
+	prev := supervisorLaunchctlGetenv
+	supervisorLaunchctlGetenv = func(key string) string {
+		if key == "GC_DOLT_LOGLEVEL" {
+			return "debug"
+		}
+		return ""
+	}
+	t.Cleanup(func() { supervisorLaunchctlGetenv = prev })
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	got := supervisorServiceEnvMap(data.ExtraEnv)
+	if got["GC_DOLT_LOGLEVEL"] != "trace" {
+		t.Fatalf("ExtraEnv[GC_DOLT_LOGLEVEL] = %q, want %q (os.Environ should win over launchctl)",
+			got["GC_DOLT_LOGLEVEL"], "trace")
+	}
+}
+
+func TestBuildSupervisorServiceDataReadsExplicitEnvOptInFromLaunchctl(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("GC_SUPERVISOR_ENV", "GC_DOLT_DATA_DIR")
+	// GC_DOLT_DATA_DIR is not in os.Environ; only launchctl has it.
+	t.Setenv("GC_DOLT_DATA_DIR", "")
+
+	prev := supervisorLaunchctlGetenv
+	supervisorLaunchctlGetenv = func(key string) string {
+		if key == "GC_DOLT_DATA_DIR" {
+			return "/srv/gc/dolt"
+		}
+		return ""
+	}
+	t.Cleanup(func() { supervisorLaunchctlGetenv = prev })
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	got := supervisorServiceEnvMap(data.ExtraEnv)
+	if got["GC_DOLT_DATA_DIR"] != "/srv/gc/dolt" {
+		t.Fatalf("ExtraEnv[GC_DOLT_DATA_DIR] = %q, want %q (launchctl fallback for GC_SUPERVISOR_ENV opt-in)",
+			got["GC_DOLT_DATA_DIR"], "/srv/gc/dolt")
+	}
+}
+
+func TestBuildSupervisorServiceDataDeduplicatesLaunchctlFallbackProbes(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("GC_SUPERVISOR_ENV", "GC_DOLT_LOGLEVEL CUSTOM_ONLY")
+	t.Setenv("GC_DOLT_LOGLEVEL", "")
+	t.Setenv("CUSTOM_ONLY", "")
+
+	calls := map[string]int{}
+	prev := supervisorLaunchctlGetenv
+	supervisorLaunchctlGetenv = func(key string) string {
+		calls[key]++
+		return ""
+	}
+	t.Cleanup(func() { supervisorLaunchctlGetenv = prev })
+
+	if _, err := buildSupervisorServiceData(); err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	for _, key := range []string{"GC_DOLT_LOGLEVEL", "CUSTOM_ONLY"} {
+		if calls[key] != 1 {
+			t.Fatalf("launchctl getenv calls for %s = %d, want 1 (all calls: %#v)", key, calls[key], calls)
+		}
+	}
+}
+
+func TestSupervisorLaunchctlGetenvSkipsNonDarwin(t *testing.T) {
+	oldGOOS := supervisorRuntimeGOOS
+	supervisorRuntimeGOOS = "linux"
+	t.Cleanup(func() { supervisorRuntimeGOOS = oldGOOS })
+
+	binDir := t.TempDir()
+	logFile := filepath.Join(t.TempDir(), "launchctl.log")
+	script := filepath.Join(binDir, "launchctl")
+	content := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GC_TEST_LAUNCHCTL_LOG\"\nprintf 'should-not-run\\n'\n"
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatalf("WriteFile(%q): %v", script, err)
+	}
+	t.Setenv("GC_TEST_LAUNCHCTL_LOG", logFile)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if got := supervisorLaunchctlGetenv("GC_DOLT_LOGLEVEL"); got != "" {
+		t.Fatalf("supervisorLaunchctlGetenv on linux = %q, want empty", got)
+	}
+	if log := readCommandLog(t, logFile); log != "" {
+		t.Fatalf("launchctl was invoked on linux: %q", log)
+	}
+}
+
+func TestSupervisorLaunchctlGetenvStripsDarwinOutputNewline(t *testing.T) {
+	oldGOOS := supervisorRuntimeGOOS
+	supervisorRuntimeGOOS = "darwin"
+	t.Cleanup(func() { supervisorRuntimeGOOS = oldGOOS })
+
+	binDir := t.TempDir()
+	logFile := filepath.Join(t.TempDir(), "launchctl.log")
+	script := filepath.Join(binDir, "launchctl")
+	content := "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$*\" >> \"$GC_TEST_LAUNCHCTL_LOG\"\nif [ \"$1\" = \"getenv\" ] && [ \"$2\" = \"GC_DOLT_LOGLEVEL\" ]; then\n  printf '  debug  \\n'\n  exit 0\nfi\nexit 1\n"
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatalf("WriteFile(%q): %v", script, err)
+	}
+	t.Setenv("GC_TEST_LAUNCHCTL_LOG", logFile)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if got := supervisorLaunchctlGetenv("GC_DOLT_LOGLEVEL"); got != "  debug  " {
+		t.Fatalf("supervisorLaunchctlGetenv = %q, want %q", got, "  debug  ")
+	}
+	if log := readCommandLog(t, logFile); strings.TrimSpace(log) != "getenv GC_DOLT_LOGLEVEL" {
+		t.Fatalf("launchctl log = %q, want getenv GC_DOLT_LOGLEVEL", log)
+	}
+}
+
 func TestBuildSupervisorServiceDataExpandsUserManagedPath(t *testing.T) {
 	homeDir := t.TempDir()
 	nvmBin := filepath.Join(homeDir, ".nvm", "versions", "node", "v22.14.0", "bin")

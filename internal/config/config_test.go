@@ -116,6 +116,38 @@ start_command = "claude --dangerously-skip-permissions"
 	}
 }
 
+func TestParseRigDefaultBranch(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "lights"
+
+[[rigs]]
+name = "scamper"
+path = "/scamper"
+default_branch = "master"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(cfg.Rigs) != 1 {
+		t.Fatalf("len(Rigs) = %d, want 1", len(cfg.Rigs))
+	}
+	if got := cfg.Rigs[0].DefaultBranch; got != "master" {
+		t.Errorf("DefaultBranch = %q, want %q", got, "master")
+	}
+	if got := cfg.Rigs[0].EffectiveDefaultBranch(); got != "master" {
+		t.Errorf("EffectiveDefaultBranch = %q, want %q", got, "master")
+	}
+}
+
+func TestEffectiveDefaultBranch_EmptyWhenUnset(t *testing.T) {
+	r := Rig{Name: "rig"}
+	if got := r.EffectiveDefaultBranch(); got != "" {
+		t.Errorf("EffectiveDefaultBranch() = %q, want empty", got)
+	}
+}
+
 func TestParseAgentSkillsAndMCP(t *testing.T) {
 	data := []byte(`
 [workspace]

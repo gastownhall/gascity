@@ -307,3 +307,22 @@ func TestHandleExtMsgOutboundNotifiesDeliveredConversationMembers(t *testing.T) 
 		t.Fatalf("delivered conversation peer nudge not found; calls=%#v", fs.sp.Calls)
 	}
 }
+
+func TestTitleCaseProvider(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"slack", "Slack"},
+		{"discord", "Discord"},
+		{"", ""},
+		{"a", "A"},
+		{"Slack", "Slack"},
+		{"X", "X"},
+		{"123", "123"},
+	}
+	for _, tc := range cases {
+		if got := titleCaseProvider(tc.in); got != tc.want {
+			t.Errorf("titleCaseProvider(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

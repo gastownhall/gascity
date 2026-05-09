@@ -186,7 +186,7 @@ func TestHandleRigPatchSet(t *testing.T) {
 	fs := newFakeMutatorState(t)
 	h := newTestCityHandler(t, fs)
 
-	body := `{"name":"myrig","suspended":true}`
+	body := `{"name":"myrig","default_branch":"develop","suspended":true}`
 	req := httptest.NewRequest("PUT", cityURL(fs, "/patches/rigs"), strings.NewReader(body))
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
@@ -198,6 +198,9 @@ func TestHandleRigPatchSet(t *testing.T) {
 
 	if len(fs.cfg.Patches.Rigs) != 1 {
 		t.Fatalf("patches.rigs count = %d, want 1", len(fs.cfg.Patches.Rigs))
+	}
+	if fs.cfg.Patches.Rigs[0].DefaultBranch == nil || *fs.cfg.Patches.Rigs[0].DefaultBranch != "develop" {
+		t.Fatalf("DefaultBranch = %v, want develop", fs.cfg.Patches.Rigs[0].DefaultBranch)
 	}
 }
 

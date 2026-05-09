@@ -2083,6 +2083,9 @@ type RigActionBody struct {
 
 // RigCreateInputBody defines model for RigCreateInputBody.
 type RigCreateInputBody struct {
+	// DefaultBranch Mainline branch (e.g. main, master). Auto-detected when omitted.
+	DefaultBranch *string `json:"default_branch,omitempty"`
+
 	// Name Rig name.
 	Name string `json:"name"`
 
@@ -2104,14 +2107,18 @@ type RigCreatedOutputBody struct {
 
 // RigPatch defines model for RigPatch.
 type RigPatch struct {
-	Name      string  `json:"Name"`
-	Path      *string `json:"Path"`
-	Prefix    *string `json:"Prefix"`
-	Suspended *bool   `json:"Suspended"`
+	DefaultBranch *string `json:"DefaultBranch"`
+	Name          string  `json:"Name"`
+	Path          *string `json:"Path"`
+	Prefix        *string `json:"Prefix"`
+	Suspended     *bool   `json:"Suspended"`
 }
 
 // RigPatchSetInputBody defines model for RigPatchSetInputBody.
 type RigPatchSetInputBody struct {
+	// DefaultBranch Override mainline branch.
+	DefaultBranch *string `json:"default_branch,omitempty"`
+
 	// Name Rig name.
 	Name *string `json:"name,omitempty"`
 
@@ -2127,18 +2134,22 @@ type RigPatchSetInputBody struct {
 
 // RigResponse defines model for RigResponse.
 type RigResponse struct {
-	AgentCount   int64      `json:"agent_count"`
-	Git          *GitStatus `json:"git,omitempty"`
-	LastActivity *time.Time `json:"last_activity,omitempty"`
-	Name         string     `json:"name"`
-	Path         string     `json:"path"`
-	Prefix       *string    `json:"prefix,omitempty"`
-	RunningCount int64      `json:"running_count"`
-	Suspended    bool       `json:"suspended"`
+	AgentCount    int64      `json:"agent_count"`
+	DefaultBranch *string    `json:"default_branch,omitempty"`
+	Git           *GitStatus `json:"git,omitempty"`
+	LastActivity  *time.Time `json:"last_activity,omitempty"`
+	Name          string     `json:"name"`
+	Path          string     `json:"path"`
+	Prefix        *string    `json:"prefix,omitempty"`
+	RunningCount  int64      `json:"running_count"`
+	Suspended     bool       `json:"suspended"`
 }
 
 // RigUpdateInputBody defines model for RigUpdateInputBody.
 type RigUpdateInputBody struct {
+	// DefaultBranch Mainline branch (e.g. main, master).
+	DefaultBranch *string `json:"default_branch,omitempty"`
+
 	// Path Filesystem path.
 	Path *string `json:"path,omitempty"`
 

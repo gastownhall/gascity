@@ -104,9 +104,10 @@ type AgentUpdate struct {
 // RigUpdate holds optional fields for a partial rig update. Pointer fields
 // distinguish "not set" from "set to zero value."
 type RigUpdate struct {
-	Path      string
-	Prefix    string
-	Suspended *bool
+	Path          string
+	Prefix        string
+	DefaultBranch string
+	Suspended     *bool
 }
 
 // ProviderUpdate holds optional fields for a partial provider update.

@@ -3095,3 +3095,135 @@ func TestSlingFormulaSearchPaths_UnknownDir(t *testing.T) {
 		t.Fatalf("SlingFormulaSearchPaths(unknown dir) = %v, want %v", got, want)
 	}
 }
+
+// fixedBranchResolver returns a constant branch regardless of dir.
+type fixedBranchResolver struct{ branch string }
+
+func (r fixedBranchResolver) DefaultBranch(string) string { return r.branch }
+
+func TestSlingFormulaTargetBranch_PrefersBeadMetadata(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs: []config.Rig{
+			{Name: "scamper", Path: "/scamper", Prefix: "SC", DefaultBranch: "master"},
+		},
+	}
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{Metadata: map[string]string{"target": "release/v2"}})
+	if err != nil {
+		t.Fatalf("seeding bead: %v", err)
+	}
+	deps := SlingDeps{
+		Cfg:      cfg,
+		Store:    store,
+		Branches: fixedBranchResolver{branch: "main"},
+	}
+	a := config.Agent{Name: "polecat", Dir: "scamper"}
+
+	got := SlingFormulaTargetBranch(bead.ID, deps, a)
+	if got != "release/v2" {
+		t.Errorf("SlingFormulaTargetBranch = %q, want %q (bead metadata wins)", got, "release/v2")
+	}
+}
+
+func TestSlingFormulaTargetBranch_UsesRigDefaultBranchByBead(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs: []config.Rig{
+			{Name: "scamper", Path: "/scamper", Prefix: "SC", DefaultBranch: "master"},
+		},
+	}
+	deps := SlingDeps{
+		Cfg:      cfg,
+		Store:    beads.NewMemStore(),
+		Branches: fixedBranchResolver{branch: "main"},
+	}
+	a := config.Agent{Name: "polecat"} // no Dir — bead-prefix lookup must win
+
+	got := SlingFormulaTargetBranch("SC-1", deps, a)
+	if got != "master" {
+		t.Errorf("SlingFormulaTargetBranch = %q, want %q (rig stored default by bead prefix)", got, "master")
+	}
+}
+
+func TestSlingFormulaTargetBranch_UsesRigDefaultBranchByHyphenatedBeadPrefix(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs: []config.Rig{
+			{Name: "agent-diagnostics", Path: "/agent-diagnostics", Prefix: "agent-diagnostics", DefaultBranch: "master"},
+		},
+	}
+	deps := SlingDeps{
+		Cfg:      cfg,
+		Store:    beads.NewMemStore(),
+		Branches: fixedBranchResolver{branch: "main"},
+	}
+	a := config.Agent{Name: "polecat"} // no Dir - bead-prefix lookup must handle hyphenated prefixes
+
+	got := SlingFormulaTargetBranch("agent-diagnostics-hnn", deps, a)
+	if got != "master" {
+		t.Errorf("SlingFormulaTargetBranch = %q, want %q (hyphenated rig prefix stored default)", got, "master")
+	}
+}
+
+func TestSlingFormulaTargetBranch_UsesRigDefaultBranchByAgent(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs: []config.Rig{
+			{Name: "scamper", Path: "/scamper", Prefix: "SC", DefaultBranch: "master"},
+		},
+	}
+	deps := SlingDeps{
+		Cfg:      cfg,
+		Store:    beads.NewMemStore(),
+		Branches: fixedBranchResolver{branch: "main"},
+	}
+	a := config.Agent{Name: "refinery", Dir: "scamper"}
+
+	// No bead ID — agent.Dir lookup must find the rig.
+	got := SlingFormulaTargetBranch("", deps, a)
+	if got != "master" {
+		t.Errorf("SlingFormulaTargetBranch = %q, want %q (rig stored default by agent.Dir)", got, "master")
+	}
+}
+
+func TestSlingFormulaTargetBranch_UsesRigDefaultBranchByAgentPath(t *testing.T) {
+	rigPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs: []config.Rig{
+			{Name: "scamper", Path: rigPath, Prefix: "SC", DefaultBranch: "master"},
+		},
+	}
+	deps := SlingDeps{
+		Cfg:      cfg,
+		Store:    beads.NewMemStore(),
+		Branches: fixedBranchResolver{branch: "main"},
+	}
+	a := config.Agent{Name: "refinery", Dir: rigPath}
+
+	got := SlingFormulaTargetBranch("", deps, a)
+	if got != "master" {
+		t.Errorf("SlingFormulaTargetBranch = %q, want %q (rig stored default by agent path)", got, "master")
+	}
+}
+
+func TestSlingFormulaTargetBranch_FallsBackToProbeWhenUnset(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs: []config.Rig{
+			{Name: "scamper", Path: "/scamper", Prefix: "SC"}, // no DefaultBranch
+		},
+	}
+	deps := SlingDeps{
+		Cfg:      cfg,
+		Store:    beads.NewMemStore(),
+		Branches: fixedBranchResolver{branch: "trunk"},
+	}
+	a := config.Agent{Name: "refinery", Dir: "scamper"}
+
+	got := SlingFormulaTargetBranch("SC-1", deps, a)
+	if got != "trunk" {
+		t.Errorf("SlingFormulaTargetBranch = %q, want %q (fallback to live probe)", got, "trunk")
+	}
+}

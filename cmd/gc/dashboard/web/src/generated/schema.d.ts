@@ -3522,6 +3522,8 @@ export interface components {
             status: string;
         };
         RigCreateInputBody: {
+            /** @description Mainline branch (e.g. main, master). Auto-detected when omitted. */
+            default_branch?: string;
             /** @description Rig name. */
             name: string;
             /** @description Filesystem path. */
@@ -3539,12 +3541,15 @@ export interface components {
             status: string;
         };
         RigPatch: {
+            DefaultBranch: string | null;
             Name: string;
             Path: string | null;
             Prefix: string | null;
             Suspended: boolean | null;
         };
         RigPatchSetInputBody: {
+            /** @description Override mainline branch. */
+            default_branch?: string;
             /** @description Rig name. */
             name?: string;
             /** @description Override filesystem path. */
@@ -3557,6 +3562,7 @@ export interface components {
         RigResponse: {
             /** Format: int64 */
             agent_count: number;
+            default_branch?: string;
             git?: components["schemas"]["GitStatus"];
             /** Format: date-time */
             last_activity?: string;
@@ -3568,6 +3574,8 @@ export interface components {
             suspended: boolean;
         };
         RigUpdateInputBody: {
+            /** @description Mainline branch (e.g. main, master). */
+            default_branch?: string;
             /** @description Filesystem path. */
             path?: string;
             /** @description Session name prefix. */

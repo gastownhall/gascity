@@ -2146,6 +2146,10 @@ export type RigActionBody = {
 
 export type RigCreateInputBody = {
     /**
+     * Mainline branch (e.g. main, master). Auto-detected when omitted.
+     */
+    default_branch?: string;
+    /**
      * Rig name.
      */
     name: string;
@@ -2171,6 +2175,7 @@ export type RigCreatedOutputBody = {
 };
 
 export type RigPatch = {
+    DefaultBranch: string | null;
     Name: string;
     Path: string | null;
     Prefix: string | null;
@@ -2178,6 +2183,10 @@ export type RigPatch = {
 };
 
 export type RigPatchSetInputBody = {
+    /**
+     * Override mainline branch.
+     */
+    default_branch?: string;
     /**
      * Rig name.
      */
@@ -2198,6 +2207,7 @@ export type RigPatchSetInputBody = {
 
 export type RigResponse = {
     agent_count: number;
+    default_branch?: string;
     git?: GitStatus;
     last_activity?: string;
     name: string;
@@ -2208,6 +2218,10 @@ export type RigResponse = {
 };
 
 export type RigUpdateInputBody = {
+    /**
+     * Mainline branch (e.g. main, master).
+     */
+    default_branch?: string;
     /**
      * Filesystem path.
      */

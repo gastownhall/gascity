@@ -125,6 +125,49 @@ func TestDefaultBranch_FromOriginHEAD(t *testing.T) {
 	}
 }
 
+func TestProbeDefaultBranch_FromOriginHEAD(t *testing.T) {
+	bare := t.TempDir()
+	runGit(t, bare, "init", "--bare")
+
+	clone := t.TempDir()
+	runGit(t, clone, "clone", bare, ".")
+	runGit(t, clone, "config", "user.email", "test@test.com")
+	runGit(t, clone, "config", "user.name", "Test")
+	runGit(t, clone, "commit", "--allow-empty", "-m", "init")
+
+	target := "refs/remotes/origin/master"
+	runGit(t, clone, "update-ref", target, "HEAD")
+	runGit(t, clone, "symbolic-ref", "refs/remotes/origin/HEAD", target)
+
+	g := New(clone)
+	got := g.ProbeDefaultBranch()
+	if got != "master" {
+		t.Errorf("ProbeDefaultBranch() = %q, want %q", got, "master")
+	}
+}
+
+func TestProbeDefaultBranch_FallsBackToCurrentBranch(t *testing.T) {
+	repo := initTestRepo(t)
+	// Force a known branch name; the test repo's default may be "main"
+	// or "master" depending on the host's git init.defaultBranch.
+	runGit(t, repo, "checkout", "-b", "develop")
+	g := New(repo)
+	got := g.ProbeDefaultBranch()
+	if got != "develop" {
+		t.Errorf("ProbeDefaultBranch() = %q, want %q (current branch fallback)", got, "develop")
+	}
+}
+
+func TestProbeDefaultBranch_NoRepo(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(dir))
+	g := New(dir)
+	got := g.ProbeDefaultBranch()
+	if got != "" {
+		t.Errorf("ProbeDefaultBranch() = %q, want empty (no repo)", got)
+	}
+}
+
 func TestWorktreeRemove(t *testing.T) {
 	repo := initTestRepo(t)
 	g := New(repo)

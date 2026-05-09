@@ -255,6 +255,9 @@ func (f *fakeMutatorState) UpdateRig(name string, patch RigUpdate) error {
 			if patch.Prefix != "" {
 				f.cfg.Rigs[i].Prefix = patch.Prefix
 			}
+			if patch.DefaultBranch != "" {
+				f.cfg.Rigs[i].DefaultBranch = patch.DefaultBranch
+			}
 			if patch.Suspended != nil {
 				f.cfg.Rigs[i].Suspended = *patch.Suspended
 			}

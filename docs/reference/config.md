@@ -520,6 +520,7 @@ Rig defines an external project registered in the city.
 | `name` | string | **yes** |  | Name is the unique identifier for this rig. |
 | `path` | string |  |  | Path is the absolute filesystem path to the rig's repository. |
 | `prefix` | string |  |  | Prefix overrides the auto-derived bead ID prefix for this rig. |
+| `default_branch` | string |  |  | DefaultBranch is the rig repository's mainline branch (e.g. "main", "master", "develop"). When set, polecats and the refinery use this as the default merge target instead of probing origin/HEAD at sling time. Captured by `gc rig add` from the rig's git config; set manually for rigs whose mainline isn't reachable via origin/HEAD. |
 | `suspended` | boolean |  |  | Suspended prevents the reconciler from spawning agents in this rig. Toggle with gc rig suspend/resume. |
 | `formulas_dir` | string |  |  | FormulasDir is a rig-local formula directory (Layer 4). Overrides pack formulas for this rig by filename. Relative paths resolve against the city directory. |
 | `includes` | []string |  |  | Includes lists pack directories or URLs for this rig (V1 mechanism). Each entry is a local path, a git source//sub#ref URL, or a GitHub tree URL. |
@@ -541,6 +542,7 @@ RigPatch modifies an existing rig identified by Name.
 | `name` | string | **yes** |  | Name is the targeting key (required). Must match an existing rig's name. |
 | `path` | string |  |  | Path overrides the rig's filesystem path. |
 | `prefix` | string |  |  | Prefix overrides the bead ID prefix. |
+| `default_branch` | string |  |  | DefaultBranch overrides the rig's recorded mainline branch. |
 | `suspended` | boolean |  |  | Suspended overrides the rig's suspended state. |
 
 ## Service
