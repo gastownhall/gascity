@@ -1148,6 +1148,12 @@ For controller-restartable sessions, equivalent to:
   gc mail send $GC_ALIAS &lt;subject&gt; [message]
   gc runtime request-restart
 
+Under normal operation the controller stops controller-restartable
+self-handoff sessions before this command returns. If the controller does not
+act within a bounded timeout, gc handoff exits 1 with a diagnostic instead of
+blocking indefinitely. If interrupted, the restart request remains set for the
+controller to process on its next reconcile tick.
+
 Auto handoff (--auto): sends mail to self and returns without requesting a
 restart. This is for PreCompact hooks, where the provider is already managing
 the context compaction lifecycle.
