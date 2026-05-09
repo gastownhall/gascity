@@ -225,6 +225,10 @@ if [ -d "$data_dir" ]; then
     name="$(basename "$d")"
     case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe) continue ;; esac
     [ -n "$db_filter" ] && [ "$name" != "$db_filter" ] && continue
+    if [ -f "$d/.no-sync" ]; then
+      echo "  $name: skipped (.no-sync)"
+      continue
+    fi
 
     if [ "$server_running" = true ]; then
       sync_database_sql "$name" || exit_code=1

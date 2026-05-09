@@ -126,3 +126,50 @@ func TestSyncUsesLiveSQLWhenManagedServerReachable(t *testing.T) {
 		}
 	}
 }
+
+func TestSyncSkipsDatabasesWithNoSyncMarker(t *testing.T) {
+	root := repoRoot(t)
+	script := filepath.Join(root, syncScript)
+
+	port, cleanup := startReachableTCPListener(t)
+	defer cleanup()
+
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "data")
+	dbDir := filepath.Join(dataDir, "app")
+	if err := os.MkdirAll(filepath.Join(dbDir, ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dbDir, ".no-sync"), []byte("skip\n"), 0o644); err != nil {
+		t.Fatalf("write no-sync marker: %v", err)
+	}
+
+	binDir := t.TempDir()
+	doltLog := writeSyncFakeDolt(t, binDir)
+	_ = writeSyncFakeBeadsBD(t, cityPath)
+
+	cmd := exec.Command("sh", script, "--db", "app")
+	cmd.Env = append(filteredEnv(
+		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
+		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
+	),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+dataDir,
+		fmt.Sprintf("GC_DOLT_PORT=%d", port),
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("gc dolt sync failed: %v\n%s", err, out)
+	}
+
+	if data, err := os.ReadFile(doltLog); err == nil && strings.TrimSpace(string(data)) != "" {
+		t.Fatalf("sync touched database with .no-sync marker: %q\noutput:\n%s", data, out)
+	}
+	if !strings.Contains(string(out), "app: skipped (.no-sync)") {
+		t.Fatalf("output missing .no-sync skip:\n%s", out)
+	}
+}
