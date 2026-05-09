@@ -4775,3 +4775,260 @@ func TestStopSupervisorWithWaitTimesOutWhenSocketKeepsAnswering(t *testing.T) {
 		t.Fatalf("stderr = %q, want timeout message", stderr.String())
 	}
 }
+
+func TestResolveStableSupervisorBinaryPath(t *testing.T) {
+	newRunningExe := func(t *testing.T) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "gc")
+		if err := os.WriteFile(path, []byte{}, 0o755); err != nil {
+			t.Fatalf("write running exe: %v", err)
+		}
+		return path
+	}
+
+	cases := []struct {
+		name  string
+		setup func(t *testing.T) (homeDir, gopath, currentExe, want string)
+	}{
+		{
+			name: "local_bin_symlink_resolves_to_running_exe",
+			setup: func(t *testing.T) (string, string, string, string) {
+				running := newRunningExe(t)
+				homeDir := t.TempDir()
+				binDir := filepath.Join(homeDir, ".local", "bin")
+				if err := os.MkdirAll(binDir, 0o755); err != nil {
+					t.Fatalf("mkdir local bin: %v", err)
+				}
+				symlink := filepath.Join(binDir, "gc")
+				if err := os.Symlink(running, symlink); err != nil {
+					t.Fatalf("symlink: %v", err)
+				}
+				return homeDir, "", running, symlink
+			},
+		},
+		{
+			name: "local_bin_hardlink_matches_running_exe_inode",
+			setup: func(t *testing.T) (string, string, string, string) {
+				running := newRunningExe(t)
+				homeDir := t.TempDir()
+				binDir := filepath.Join(homeDir, ".local", "bin")
+				if err := os.MkdirAll(binDir, 0o755); err != nil {
+					t.Fatalf("mkdir local bin: %v", err)
+				}
+				hardlink := filepath.Join(binDir, "gc")
+				if err := os.Link(running, hardlink); err != nil {
+					t.Skipf("os.Link not supported on this filesystem: %v", err)
+				}
+				return homeDir, "", running, hardlink
+			},
+		},
+		{
+			name: "only_gopath_bin_matches_running_exe",
+			setup: func(t *testing.T) (string, string, string, string) {
+				running := newRunningExe(t)
+				homeDir := t.TempDir()
+				gopath := t.TempDir()
+				binDir := filepath.Join(gopath, "bin")
+				if err := os.MkdirAll(binDir, 0o755); err != nil {
+					t.Fatalf("mkdir gopath bin: %v", err)
+				}
+				symlink := filepath.Join(binDir, "gc")
+				if err := os.Symlink(running, symlink); err != nil {
+					t.Fatalf("symlink: %v", err)
+				}
+				return homeDir, gopath, running, symlink
+			},
+		},
+		{
+			name: "candidates_point_to_different_binary_falls_through",
+			setup: func(t *testing.T) (string, string, string, string) {
+				running := newRunningExe(t)
+				other := filepath.Join(t.TempDir(), "other-gc")
+				if err := os.WriteFile(other, []byte("decoy"), 0o755); err != nil {
+					t.Fatalf("write decoy: %v", err)
+				}
+				homeDir := t.TempDir()
+				gopath := t.TempDir()
+				localBin := filepath.Join(homeDir, ".local", "bin")
+				if err := os.MkdirAll(localBin, 0o755); err != nil {
+					t.Fatalf("mkdir local bin: %v", err)
+				}
+				if err := os.Symlink(other, filepath.Join(localBin, "gc")); err != nil {
+					t.Fatalf("symlink local: %v", err)
+				}
+				gopathBin := filepath.Join(gopath, "bin")
+				if err := os.MkdirAll(gopathBin, 0o755); err != nil {
+					t.Fatalf("mkdir gopath bin: %v", err)
+				}
+				if err := os.Symlink(other, filepath.Join(gopathBin, "gc")); err != nil {
+					t.Fatalf("symlink gopath: %v", err)
+				}
+				return homeDir, gopath, running, running
+			},
+		},
+		{
+			name: "no_candidates_exist_falls_through",
+			setup: func(t *testing.T) (string, string, string, string) {
+				running := newRunningExe(t)
+				return t.TempDir(), t.TempDir(), running, running
+			},
+		},
+		{
+			name: "local_bin_not_executable_falls_through",
+			setup: func(t *testing.T) (string, string, string, string) {
+				running := newRunningExe(t)
+				homeDir := t.TempDir()
+				binDir := filepath.Join(homeDir, ".local", "bin")
+				if err := os.MkdirAll(binDir, 0o755); err != nil {
+					t.Fatalf("mkdir local bin: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(binDir, "gc"), []byte{}, 0o644); err != nil {
+					t.Fatalf("write non-executable: %v", err)
+				}
+				return homeDir, "", running, running
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			homeDir, gopath, currentExe, want := tc.setup(t)
+			got := resolveStableSupervisorBinaryPath(homeDir, gopath, currentExe)
+			if got != want {
+				t.Fatalf("resolveStableSupervisorBinaryPath(%q, %q, %q) = %q, want %q",
+					homeDir, gopath, currentExe, got, want)
+			}
+		})
+	}
+}
+
+func TestBuildSupervisorServiceDataPrefersUserLocalBinExecPath(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("symlink behavior not exercised on windows here")
+	}
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("XDG_RUNTIME_DIR", "/tmp/gc-run")
+
+	runningExe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	binDir := filepath.Join(homeDir, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir local bin: %v", err)
+	}
+	stable := filepath.Join(binDir, "gc")
+	if err := os.Symlink(runningExe, stable); err != nil {
+		t.Fatalf("symlink stable path: %v", err)
+	}
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	if data.GCPath != stable {
+		t.Fatalf("GCPath = %q, want %q (stable user-local-bin path)", data.GCPath, stable)
+	}
+
+	systemdContent, err := renderSupervisorTemplate(supervisorSystemdTemplate, data)
+	if err != nil {
+		t.Fatalf("renderSupervisorTemplate: %v", err)
+	}
+	wantExec := "ExecStart=" + stable + " supervisor run"
+	if !strings.Contains(systemdContent, wantExec) {
+		t.Fatalf("systemd unit missing %q:\n%s", wantExec, systemdContent)
+	}
+}
+
+func TestInstallSupervisorSystemdRefreshesStaleTmpExecStart(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("systemd path only applies on linux")
+	}
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+
+	runningExe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	binDir := filepath.Join(homeDir, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir local bin: %v", err)
+	}
+	stable := filepath.Join(binDir, "gc")
+	if err := os.Symlink(runningExe, stable); err != nil {
+		t.Fatalf("symlink stable: %v", err)
+	}
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	if data.GCPath != stable {
+		t.Fatalf("GCPath = %q, want %q", data.GCPath, stable)
+	}
+
+	path := supervisorSystemdServicePath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir unit dir: %v", err)
+	}
+	stale := "[Unit]\nDescription=Gas City machine supervisor\n[Service]\nExecStart=/tmp/gc supervisor run\n"
+	if err := os.WriteFile(path, []byte(stale), 0o600); err != nil {
+		t.Fatalf("write stale unit: %v", err)
+	}
+
+	oldRun := supervisorSystemctlRun
+	oldActive := supervisorSystemctlActive
+	var calls []string
+	supervisorSystemctlRun = func(args ...string) error {
+		call := strings.Join(args, " ")
+		calls = append(calls, call)
+		return nil
+	}
+	supervisorSystemctlActive = func(service string) bool {
+		if service != "gascity-supervisor.service" {
+			return false
+		}
+		for _, call := range calls {
+			if call == "--user kill --kill-who=main --signal=SIGTERM "+service {
+				return false
+			}
+		}
+		return true
+	}
+	stubSupervisorRunningPreserveSignalReady(t, true)
+	t.Cleanup(func() {
+		supervisorSystemctlRun = oldRun
+		supervisorSystemctlActive = oldActive
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := installSupervisorSystemd(data, &stdout, &stderr); code != 0 {
+		t.Fatalf("installSupervisorSystemd code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read refreshed unit: %v", err)
+	}
+	wantExec := "ExecStart=" + stable + " supervisor run"
+	if !strings.Contains(string(contents), wantExec) {
+		t.Fatalf("refreshed unit missing %q:\n%s", wantExec, string(contents))
+	}
+	if strings.Contains(string(contents), "ExecStart=/tmp/gc ") {
+		t.Fatalf("refreshed unit still references stale /tmp/gc:\n%s", string(contents))
+	}
+	joined := strings.Join(calls, "\n")
+	for _, want := range []string{
+		"--user daemon-reload",
+		"--user kill --kill-who=main --signal=SIGTERM gascity-supervisor.service",
+		"--user start gascity-supervisor.service",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("systemctl calls = %v, want %q (warm-refresh path)", calls, want)
+		}
+	}
+}

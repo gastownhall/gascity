@@ -659,11 +659,12 @@ type supervisorServiceEnvVar struct {
 }
 
 func buildSupervisorServiceData() (*supervisorServiceData, error) {
-	gcPath, err := os.Executable()
+	gcExe, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("finding executable: %w", err)
 	}
 	homeDir, _ := os.UserHomeDir()
+	gcPath := resolveStableSupervisorBinaryPath(homeDir, stableSupervisorBinaryGopath(homeDir), gcExe)
 	home := supervisor.DefaultHome()
 	xdgRuntimeDir := strings.TrimSpace(os.Getenv("XDG_RUNTIME_DIR"))
 	if supervisor.UsesIsolatedGCHomeOverride() {
@@ -679,6 +680,65 @@ func buildSupervisorServiceData() (*supervisorServiceData, error) {
 		Path:          searchpath.ExpandPath(homeDir, goruntime.GOOS, os.Getenv("PATH")),
 		ExtraEnv:      supervisorServiceExtraEnv(),
 	}, nil
+}
+
+const (
+	supervisorBinaryName       = "gc"
+	supervisorUserLocalBinPath = ".local/bin"
+	supervisorGopathBinPath    = "bin"
+)
+
+// resolveStableSupervisorBinaryPath picks a stable install path for the
+// supervisor service unit's ExecStart when one points at the same binary as
+// currentExe; otherwise it returns currentExe. This prevents `gc supervisor
+// install` from pinning the unit to a transient path (e.g. /tmp/gc) that
+// later install paths (`make install`, gcsync) never refresh.
+func resolveStableSupervisorBinaryPath(homeDir, gopath, currentExe string) string {
+	if currentExe == "" {
+		return currentExe
+	}
+	runningInfo, err := os.Stat(currentExe)
+	if err != nil {
+		return currentExe
+	}
+	for _, candidate := range stableSupervisorBinaryCandidates(homeDir, gopath) {
+		if supervisorBinaryCandidateMatches(candidate, runningInfo) {
+			return candidate
+		}
+	}
+	return currentExe
+}
+
+func stableSupervisorBinaryCandidates(homeDir, gopath string) []string {
+	var out []string
+	if homeDir != "" {
+		out = append(out, filepath.Join(homeDir, supervisorUserLocalBinPath, supervisorBinaryName))
+	}
+	if gopath != "" {
+		out = append(out, filepath.Join(gopath, supervisorGopathBinPath, supervisorBinaryName))
+	}
+	return out
+}
+
+func supervisorBinaryCandidateMatches(candidate string, runningInfo os.FileInfo) bool {
+	info, err := os.Stat(candidate)
+	if err != nil || info.IsDir() {
+		return false
+	}
+	if info.Mode()&0o111 == 0 {
+		return false
+	}
+	return os.SameFile(info, runningInfo)
+}
+
+func stableSupervisorBinaryGopath(homeDir string) string {
+	if v := strings.TrimSpace(os.Getenv("GOPATH")); v != "" {
+		return v
+	}
+	if homeDir == "" {
+		return ""
+	}
+	return filepath.Join(homeDir, "go")
 }
 
 func sanitizeServiceName(name string) string {
