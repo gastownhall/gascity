@@ -24,6 +24,13 @@
 # preserved because soft-reset keeps working tree intact and DOLT_COMMIT
 # captures everything as a single new commit. The backup branch is the
 # rollback anchor; if anything goes wrong, the prior HEAD is recoverable.
+#
+# Test seams (env-gated, no production effect when unset):
+#   GC_COMPACTOR_TEST_INDUCE_MISMATCH=1
+#     After DOLT_COMMIT and before the post-flight row-count check,
+#     delete one row from each user table. Forces the row-count
+#     mismatch branch and exercises the rollback path. Used by
+#     compactor_test.sh test 6.
 
 set -euo pipefail
 
@@ -304,8 +311,14 @@ flatten_db() {
     # Soft reset main to root (HEAD pointer moves; working tree unchanged).
     if ! dolt_sql -q "USE \`$db\`; CALL DOLT_RESET('--soft', '$root')" >/dev/null; then
         record_anomaly "$db" "DOLT_RESET --soft failed; rolling back"
-        rollback_to_backup "$db" "$backup" || true
-        drop_backup "$db" "$backup"
+        # Same backup-retention pattern as the DOLT_COMMIT path below: if
+        # rollback also fails, retain the backup branch as the only
+        # remaining anchor to the prior HEAD rather than dropping it.
+        if rollback_to_backup "$db" "$backup"; then
+            drop_backup "$db" "$backup"
+        else
+            record_anomaly "$db" "rollback also failed; backup branch $backup retained as recovery anchor"
+        fi
         TOTAL_FAILED=$((TOTAL_FAILED + 1))
         return 0
     fi
@@ -327,11 +340,30 @@ flatten_db() {
         return 0
     fi
 
+    # Test-only seam: when GC_COMPACTOR_TEST_INDUCE_MISMATCH is set,
+    # delete one row from each user table after commit-all to force a
+    # row-count mismatch and exercise the rollback path. Documented
+    # under "Test seams" at the top of this file; gated by env var so
+    # production runs are unaffected.
+    if [ -n "${GC_COMPACTOR_TEST_INDUCE_MISMATCH:-}" ]; then
+        local _t
+        while IFS= read -r _t; do
+            [ -z "$_t" ] && continue
+            dolt_sql -q "USE \`$db\`; DELETE FROM \`$db\`.\`$_t\` LIMIT 1" >/dev/null 2>&1 || true
+        done < <(user_tables_for "$db")
+    fi
+
     post_counts="$(count_rows "$db")"
     if [ "$pre_counts" != "$post_counts" ]; then
         record_anomaly "$db" "row count mismatch (pre vs post); rolling back. pre=$(printf '%s' "$pre_counts" | tr '\n' ';') post=$(printf '%s' "$post_counts" | tr '\n' ';')"
-        rollback_to_backup "$db" "$backup" || true
-        drop_backup "$db" "$backup"
+        # Same backup-retention pattern as the DOLT_COMMIT path: retain
+        # backup if rollback also fails so the operator has a recovery
+        # anchor.
+        if rollback_to_backup "$db" "$backup"; then
+            drop_backup "$db" "$backup"
+        else
+            record_anomaly "$db" "rollback also failed; backup branch $backup retained as recovery anchor"
+        fi
         TOTAL_FAILED=$((TOTAL_FAILED + 1))
         return 0
     fi

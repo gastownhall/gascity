@@ -211,4 +211,48 @@ if GC_COMPACTOR_MODE=surgical bash "$COMPACTOR" >/dev/null 2>&1; then
 fi
 printf '  ok surgical-mode rejected (not yet implemented)\n'
 
+# ------------------------------------------------------------------
+# Test 6: rollback path — induced row-count mismatch
+#
+# Exercises the integrity check that compares pre/post-flight row
+# counts after compaction. The GC_COMPACTOR_TEST_INDUCE_MISMATCH hook
+# in compactor.sh deletes one row from each user table after
+# DOLT_COMMIT, forcing the mismatch. The test asserts:
+#   a. the compactor exits non-zero (TOTAL_FAILED > 0)
+#   b. all rows are restored (rollback fired and main is back at the
+#      pre-compaction HEAD)
+#   c. no leftover compact-backup-* branches (rollback succeeded so
+#      the backup was dropped per spec)
+# ------------------------------------------------------------------
+printf '\n[test 6] rollback path on row-count mismatch\n'
+
+setup_db_with_commits "$TEST_DB" 10
+PRE_COMMITS="$(count_commits "$TEST_DB")"
+PRE_ISSUES="$(count_issues "$TEST_DB")"
+PRE_HEAD="$(sql_csv_one "SELECT commit_hash FROM \`$TEST_DB\`.dolt_log ORDER BY date DESC LIMIT 1")"
+printf '  pre: commits=%s issues=%s head=%.10s\n' "$PRE_COMMITS" "$PRE_ISSUES" "$PRE_HEAD"
+
+set +e
+GC_COMPACTOR_COMMIT_THRESHOLD=5 GC_COMPACTOR_TEST_INDUCE_MISMATCH=1 \
+    run_compactor >"$TMP/test6.log" 2>&1
+RC=$?
+set -e
+
+POST_ISSUES="$(count_issues "$TEST_DB")"
+POST_HEAD="$(sql_csv_one "SELECT commit_hash FROM \`$TEST_DB\`.dolt_log ORDER BY date DESC LIMIT 1")"
+BACKUP_BRANCHES="$(sql_csv_one "SELECT COUNT(*) FROM \`$TEST_DB\`.dolt_branches WHERE name LIKE 'compact-backup-%'")"
+printf '  post: rc=%s issues=%s head=%.10s backup-branches=%s\n' \
+    "$RC" "$POST_ISSUES" "$POST_HEAD" "$BACKUP_BRANCHES"
+
+if ! grep -q "row count mismatch" "$TMP/test6.log"; then
+    cat "$TMP/test6.log" >&2
+    printf 'ASSERT FAIL: expected "row count mismatch" anomaly in log\n' >&2
+    exit 1
+fi
+printf '  ok row-count-mismatch anomaly recorded\n'
+
+assert_eq "rows restored to pre-flight count" "$POST_ISSUES" "$PRE_ISSUES"
+assert_eq "main rolled back to pre HEAD" "$POST_HEAD" "$PRE_HEAD"
+assert_eq "backup branch dropped after successful rollback" "$BACKUP_BRANCHES" "0"
+
 printf '\ncompactor_test: ALL TESTS PASSED\n'
