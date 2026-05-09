@@ -96,6 +96,16 @@ func TestClassifyFailureInvalidClassPreservesReason(t *testing.T) {
 	}
 }
 
+func TestClassifyFailureInvalidClassWithTransientReasonIsHard(t *testing.T) {
+	if IsTransientFailure("retry_later", "provider_timeout") {
+		t.Fatal("IsTransientFailure(retry_later, provider_timeout) = true, want false")
+	}
+	class, reason := ClassifyFailure("retry_later", "provider_timeout")
+	if class != FailureClassHard || reason != "invalid_failure_class_provider_timeout" {
+		t.Fatalf("ClassifyFailure(retry_later, provider_timeout) = %q/%q, want hard/invalid_failure_class_provider_timeout", class, reason)
+	}
+}
+
 func TestLaneOutputJSONMatchesFormulaRequiredKeys(t *testing.T) {
 	out := LaneOutput{
 		LaneID:        lanePrimary,

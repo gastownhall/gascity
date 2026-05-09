@@ -50,6 +50,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Custom ACP overlays that previously expected a literal `per-provider/`
   subtree in the session workdir should move provider-specific files under the
   matching provider slot so they are flattened at launch.
+- The review-quorum durable contract now documents that synthesized
+  `findings_count` is deduplicated, top-level `mutations_delta` is reserved for
+  synthesis-created changes, lane mutation deltas remain under their lane
+  records, lane-scoped finalizer failures use
+  `lane=<lane_id> reason=<stable_reason>` entries, and unknown lane verdict
+  values are hard contract failures.
 - `[[orders.overrides]]` rig matching is stricter and clearer. A rigless
   override (`rig` unset) still matches **only** city-level orders; if the
   named order exists only as per-rig instances, the error now names every

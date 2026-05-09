@@ -91,6 +91,11 @@ Go contract and finalizer, but the current formula synthesis step is
 agent-executed and does not call `reviewquorum.Finalize` directly. Future
 `dx-review summarize` compatibility can consume that state, but `dx-review` is
 not the lifecycle owner.
+The summary `findings_count` is deduplicated, top-level `mutations_delta` is
+reserved for synthesis-created changes, and reviewer mutation deltas stay under
+the corresponding lane. Go finalizer lane failures use
+`lane=<lane_id> reason=<stable_reason>` entries joined by `; `; unknown lane
+verdict values are hard contract failures.
 
 Read-only enforcement is defined as a mutation baseline delta. A reviewer must
 record the workspace state before review with `git status --porcelain=v1 -z`

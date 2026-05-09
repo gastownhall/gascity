@@ -122,19 +122,22 @@ type ReadOnlyEnforcement struct {
 
 // Summary is the durable synthesized review quorum result.
 type Summary struct {
-	Subject             string              `json:"subject"`
-	BaseRef             string              `json:"base_ref"`
-	Verdict             string              `json:"verdict"`
-	Summary             string              `json:"summary"`
+	Subject string `json:"subject"`
+	BaseRef string `json:"base_ref"`
+	Verdict string `json:"verdict"`
+	Summary string `json:"summary"`
+	// FindingsCount is the count of deduplicated synthesized findings.
 	FindingsCount       int                 `json:"findings_count"`
 	Findings            []Finding           `json:"findings"`
 	Evidence            []Evidence          `json:"evidence"`
 	Usage               *Usage              `json:"usage"`
 	ReadOnlyEnforcement ReadOnlyEnforcement `json:"read_only_enforcement"`
-	MutationsDelta      MutationsDelta      `json:"mutations_delta"`
-	FailureClass        string              `json:"failure_class"`
-	FailureReason       string              `json:"failure_reason"`
-	Lanes               []LaneOutput        `json:"lanes"`
+	// MutationsDelta records synthesis-created mutations only; reviewer lane
+	// mutation deltas remain in Lanes.
+	MutationsDelta MutationsDelta `json:"mutations_delta"`
+	FailureClass   string         `json:"failure_class"`
+	FailureReason  string         `json:"failure_reason"`
+	Lanes          []LaneOutput   `json:"lanes"`
 }
 
 func sortLaneOutputs(outputs []LaneOutput) {

@@ -90,6 +90,12 @@ automation. The lane output contract includes `verdict`, `summary`,
 `findings_count`, `findings`, `evidence`, `usage`,
 `read_only_enforcement`, `mutations_delta`, `failure_class`, and
 `failure_reason`.
+The summary output keeps reviewer mutation deltas under each lane and reserves
+top-level `mutations_delta` for synthesis-created changes. Summary
+`findings_count` is the deduplicated finding count. When the Go finalizer
+emits lane-scoped failures, `failure_reason` uses
+`lane=<lane_id> reason=<stable_reason>` entries joined by `; `; unknown lane
+verdict values are hard contract failures.
 
 Read-only enforcement is baseline-relative: reviewers compare the after state
 against the mutation baseline they recorded before review with

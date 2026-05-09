@@ -14,7 +14,16 @@ const (
 )
 
 func finalize(outputs []LaneOutput) Summary {
-	return Finalize(reviewSubject, reviewBaseRef, outputs)
+	lanes := append([]LaneOutput(nil), outputs...)
+	for i := range lanes {
+		if lanes[i].Provider == "" {
+			lanes[i].Provider = "test-provider"
+		}
+		if lanes[i].Model == "" {
+			lanes[i].Model = "test-model"
+		}
+	}
+	return Finalize(reviewSubject, reviewBaseRef, lanes)
 }
 
 func TestFinalizeReturnsAwaitingOnlyWithoutLaneOutputs(t *testing.T) {
@@ -31,7 +40,7 @@ func TestFinalizeReturnsAwaitingOnlyWithoutLaneOutputs(t *testing.T) {
 }
 
 func TestFinalizePropagatesReviewIdentityToSummaryJSON(t *testing.T) {
-	got := Finalize(reviewSubject, reviewBaseRef, []LaneOutput{
+	got := finalize([]LaneOutput{
 		{
 			LaneID:              lanePrimary,
 			Verdict:             VerdictPass,
@@ -53,6 +62,50 @@ func TestFinalizePropagatesReviewIdentityToSummaryJSON(t *testing.T) {
 	}
 	if string(fields["subject"]) != `"`+reviewSubject+`"` || string(fields["base_ref"]) != `"`+reviewBaseRef+`"` {
 		t.Fatalf("JSON identity = %s/%s, want %q/%q", fields["subject"], fields["base_ref"], reviewSubject, reviewBaseRef)
+	}
+}
+
+func TestFinalizeRejectsMissingLaneIdentityFields(t *testing.T) {
+	tests := []struct {
+		name   string
+		lane   LaneOutput
+		reason string
+	}{
+		{
+			name: "missing provider",
+			lane: LaneOutput{
+				LaneID:              lanePrimary,
+				Model:               "model-a",
+				Verdict:             VerdictPass,
+				ReadOnlyEnforcement: ReadOnlyEnforcement{Observed: true, Enabled: true, Passed: true},
+			},
+			reason: "lane=primary reason=provider_missing",
+		},
+		{
+			name: "missing model",
+			lane: LaneOutput{
+				LaneID:              lanePrimary,
+				Provider:            "provider-a",
+				Verdict:             VerdictPass,
+				ReadOnlyEnforcement: ReadOnlyEnforcement{Observed: true, Enabled: true, Passed: true},
+			},
+			reason: "lane=primary reason=model_missing",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Finalize(reviewSubject, reviewBaseRef, []LaneOutput{tt.lane})
+			if got.Verdict != VerdictFail {
+				t.Fatalf("Verdict = %q, want fail", got.Verdict)
+			}
+			if got.FailureClass != FailureClassHard {
+				t.Fatalf("FailureClass = %q, want hard", got.FailureClass)
+			}
+			if got.FailureReason != tt.reason {
+				t.Fatalf("FailureReason = %q, want %q", got.FailureReason, tt.reason)
+			}
+		})
 	}
 }
 
@@ -225,8 +278,8 @@ func TestFinalizeDeduplicatesFindingsWithLaneEvidence(t *testing.T) {
 	if !reflect.DeepEqual(got.Findings[0].Lanes, wantLanes) {
 		t.Fatalf("Findings[0].Lanes = %+v, want %+v", got.Findings[0].Lanes, wantLanes)
 	}
-	if len(got.Findings[0].Evidence) != 2 {
-		t.Fatalf("Findings[0].Evidence len = %d, want 2", len(got.Findings[0].Evidence))
+	if len(got.Findings[0].Evidence) != 1 {
+		t.Fatalf("Findings[0].Evidence len = %d, want first lane-level evidence only", len(got.Findings[0].Evidence))
 	}
 }
 
@@ -535,7 +588,7 @@ func TestFinalizeCopiesFirstReadOnlyNotes(t *testing.T) {
 	}
 }
 
-func TestFinalizeMergesMutationsInLaneOrder(t *testing.T) {
+func TestFinalizeKeepsLaneMutationsOutOfSummaryDelta(t *testing.T) {
 	got := finalize([]LaneOutput{
 		{
 			LaneID:  laneSecondary,
@@ -554,8 +607,14 @@ func TestFinalizeMergesMutationsInLaneOrder(t *testing.T) {
 			ReadOnlyEnforcement: ReadOnlyEnforcement{Observed: true, Enabled: true, Passed: false},
 		},
 	})
-	want := MutationsDelta{Changed: []StatusEntry{{Path: "same.go", Status: "D"}}}
-	if !reflect.DeepEqual(got.MutationsDelta, want) {
-		t.Fatalf("MutationsDelta = %+v, want %+v", got.MutationsDelta, want)
+	if len(got.MutationsDelta.Changed) != 0 {
+		t.Fatalf("summary MutationsDelta = %+v, want synthesis-only empty delta", got.MutationsDelta)
+	}
+	if len(got.Lanes) != 2 {
+		t.Fatalf("Lanes len = %d, want 2", len(got.Lanes))
+	}
+	want := MutationsDelta{Changed: []StatusEntry{{Path: "same.go", Status: "M"}}}
+	if !reflect.DeepEqual(got.Lanes[0].MutationsDelta, want) {
+		t.Fatalf("primary lane MutationsDelta = %+v, want %+v", got.Lanes[0].MutationsDelta, want)
 	}
 }

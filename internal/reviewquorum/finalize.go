@@ -7,9 +7,10 @@ import (
 
 // Finalize synthesizes durable lane outputs into a quorum summary for subject
 // relative to baseRef. The identity arguments are required durable summary
-// fields. It returns a terminal blocked summary when at least one lane output
-// exists and another lane soft-failed transiently; awaiting states are reserved
-// for zero output.
+// fields. It returns awaiting only for zero lane output, hard failure for
+// summary identity drift, lane contract violations, read-only mutations,
+// unknown verdict values, or explicit lane failures, transient blocked for
+// retryable lane failures, and pass/pass_with_findings otherwise.
 func Finalize(subject, baseRef string, outputs []LaneOutput) Summary {
 	lanes := append([]LaneOutput{}, outputs...)
 	sortLaneOutputs(lanes)
@@ -57,7 +58,6 @@ func Finalize(subject, baseRef string, outputs []LaneOutput) Summary {
 		mergeLaneFindings(findingAccumulators, &findingOrder, lane)
 		summary.Evidence = append(summary.Evidence, lane.Evidence...)
 		summary.Usage = addUsage(summary.Usage, lane.Usage)
-		summary.MutationsDelta = mergeMutationDeltas(summary.MutationsDelta, lane.MutationsDelta)
 		if i == 0 {
 			summary.ReadOnlyEnforcement = cloneReadOnlyEnforcement(lane.ReadOnlyEnforcement)
 		} else {
@@ -132,6 +132,12 @@ func Finalize(subject, baseRef string, outputs []LaneOutput) Summary {
 
 func laneContractFailures(lane LaneOutput) []string {
 	var failures []string
+	if strings.TrimSpace(lane.Provider) == "" {
+		failures = append(failures, "provider_missing")
+	}
+	if strings.TrimSpace(lane.Model) == "" {
+		failures = append(failures, "model_missing")
+	}
 	if lane.FindingsCount != len(lane.Findings) {
 		failures = append(failures, "findings_count_mismatch")
 	}
@@ -158,7 +164,7 @@ func mergeLaneFindings(accumulators map[string]Finding, order *[]string, lane La
 		merged.Lanes = appendUniqueStrings(merged.Lanes, finding.Lanes...)
 		if len(finding.Evidence) > 0 {
 			merged.Evidence = append(merged.Evidence, cloneEvidence(finding.Evidence)...)
-		} else {
+		} else if len(merged.Evidence) == 0 {
 			merged.Evidence = append(merged.Evidence, cloneEvidence(lane.Evidence)...)
 		}
 		accumulators[key] = merged
