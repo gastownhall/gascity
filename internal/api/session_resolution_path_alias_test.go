@@ -143,6 +143,41 @@ func TestResolveSessionTargetID_PathAliasDrainingSessionNotFound(t *testing.T) {
 	}
 }
 
+// TestResolveSessionTargetID_PathAliasEmptyStateTreatedAsActive verifies
+// that legacy/upgrade beads with no persisted state metadata
+// (Metadata["state"] == "" → StateNone) resolve cleanly, matching the
+// convention in internal/session/manager.go:741,813 where reconciler
+// paths normalize StateNone to StateActive. Without this, a path-alias
+// query against a bead created before the state-metadata convention
+// landed would silently fall through to "not found."
+func TestResolveSessionTargetID_PathAliasEmptyStateTreatedAsActive(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg = &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	srv := New(fs)
+
+	// Create a bead with no "state" entry in Metadata (legacy shape).
+	pool, err := fs.cityBeadStore.Create(beads.Bead{
+		Title:  "legacy-pl",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "s-gc-pool-legacy",
+			"template":     "default",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create legacy pool bead: %v", err)
+	}
+
+	id, err := srv.resolveSessionIDWithConfig(fs.cityBeadStore, "legacy-pl")
+	if err != nil {
+		t.Fatalf("resolveSessionIDWithConfig(legacy path-alias): %v", err)
+	}
+	if id != pool.ID {
+		t.Fatalf("resolved id = %q, want legacy pool bead %q", id, pool.ID)
+	}
+}
+
 // TestResolveSessionTargetID_PathAliasCreatingSessionNotFound documents
 // the intentional StateCreating exclusion: routing an inbound to a
 // session whose runtime is still booting would deliver against a partial
@@ -194,7 +229,7 @@ func TestResolveSessionTargetID_PathAliasAsleepSessionNotFound(t *testing.T) {
 // TestResolveSessionTargetID_ExactIDWinsOverPathAlias seeds two beads where
 // one is addressable by exact ID and another shares its ID string as a
 // path-alias on a different (active) session. The exact-ID branch (step 2)
-// must win before the path-alias branch (step 4) runs.
+// must win before the Title/path-alias branch (step 5) runs.
 func TestResolveSessionTargetID_ExactIDWinsOverPathAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
 	fs.cfg = &config.City{Workspace: config.Workspace{Name: "test-city"}}
@@ -216,7 +251,7 @@ func TestResolveSessionTargetID_ExactIDWinsOverPathAlias(t *testing.T) {
 // TestResolveSessionTargetID_ConfiguredNamedSessionWinsOverPathAlias seeds
 // a configured named-session with identity "myrig/worker" alongside a pool
 // session whose Title shadows that identity. The configured-named-session
-// branch (step 3) must win before the path-alias branch (step 4).
+// branch (step 3) must win before the Title/path-alias branch (step 5).
 func TestResolveSessionTargetID_ConfiguredNamedSessionWinsOverPathAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)

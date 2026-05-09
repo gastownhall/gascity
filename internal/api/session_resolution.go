@@ -368,7 +368,10 @@ func (s *Server) materializeNamedSession(store beads.Store, spec apiNamedSession
 // so they are invisible to session.ResolveSessionID's session_name/alias
 // indexes.
 //
-// State filter accepts only {active, awake}. Excluded states intentionally
+// State filter accepts {active, awake, none}. Empty state (StateNone)
+// is treated as active for legacy/upgrade beads — matches the convention
+// in internal/session/manager.go:741,813 where reconciler paths normalize
+// `current == StateNone` to StateActive. Excluded states intentionally
 // fall through to apiSessionTargetNotFound:
 //   - asleep: not running, can't receive messages.
 //   - draining: on its way out, shouldn't get new external messages.
@@ -410,7 +413,7 @@ func resolveLiveSessionByPathAlias(store beads.Store, identifier string) (string
 			continue
 		}
 		state := session.State(b.Metadata["state"])
-		if state != session.StateActive && state != session.StateAwake {
+		if state != session.StateActive && state != session.StateAwake && state != session.StateNone {
 			continue
 		}
 		if !found || b.CreatedAt.After(best.CreatedAt) {
