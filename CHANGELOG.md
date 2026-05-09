@@ -37,6 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- ACP, subprocess, and Kubernetes session staging now apply pack and agent
+  overlays through the provider-aware `per-provider/<provider>/` contract.
+  Custom ACP overlays that previously expected a literal `per-provider/`
+  subtree in the session workdir should move provider-specific files under the
+  matching provider slot so they are flattened at launch.
 - `[[orders.overrides]]` rig matching is stricter and clearer. A rigless
   override (`rig` unset) still matches **only** city-level orders; if the
   named order exists only as per-rig instances, the error now names every

@@ -15,8 +15,8 @@ func TestCopyDirForProvider_UniversalAndProviderSpecific(t *testing.T) {
 	mustWriteFile(t, filepath.Join(src, "AGENTS.md"), []byte("universal"), 0o644)
 
 	// Create per-provider files.
-	mustMkdirAll(t, filepath.Join(src, "per-provider", "claude"), 0o755)
-	mustMkdirAll(t, filepath.Join(src, "per-provider", "codex"), 0o755)
+	mustMkdirAll(t, filepath.Join(src, "per-provider", "claude"))
+	mustMkdirAll(t, filepath.Join(src, "per-provider", "codex"))
 	mustWriteFile(t, filepath.Join(src, "per-provider", "claude", "CLAUDE.md"), []byte("claude-specific"), 0o644)
 	mustWriteFile(t, filepath.Join(src, "per-provider", "codex", "AGENTS.md"), []byte("codex-specific"), 0o644)
 
@@ -73,7 +73,7 @@ func TestCopyDirForProvider_EmptyProviderName(t *testing.T) {
 	dst := t.TempDir()
 
 	mustWriteFile(t, filepath.Join(src, "file.txt"), []byte("content"), 0o644)
-	mustMkdirAll(t, filepath.Join(src, "per-provider", "claude"), 0o755)
+	mustMkdirAll(t, filepath.Join(src, "per-provider", "claude"))
 	mustWriteFile(t, filepath.Join(src, "per-provider", "claude", "CLAUDE.md"), []byte("claude"), 0o644)
 
 	// Empty provider name: only universal files copied.
@@ -98,9 +98,87 @@ func TestCopyDirForProvider_MissingSrcDir(t *testing.T) {
 	}
 }
 
-func mustMkdirAll(t *testing.T, path string, perm os.FileMode) {
+func TestCopyDirForProviders_KiroPreservesExistingWorkspaceInstructions(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+
+	mustMkdirAll(t, filepath.Join(src, "per-provider", "kiro", ".kiro", "agents"))
+	mustWriteFile(t, filepath.Join(src, "per-provider", "kiro", "AGENTS.md"), []byte("fallback instructions"), 0o644)
+	mustWriteFile(t, filepath.Join(src, "per-provider", "kiro", ".kiro", "agents", "gascity.json"), []byte(`{"name":"gascity"}`), 0o644)
+	mustWriteFile(t, filepath.Join(dst, "AGENTS.md"), []byte("project instructions"), 0o600)
+
+	if err := CopyDirForProviders(src, dst, []string{"kiro"}, io.Discard); err != nil {
+		t.Fatalf("CopyDirForProviders: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dst, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	if string(data) != "project instructions" {
+		t.Fatalf("AGENTS.md = %q, want existing project instructions preserved", string(data))
+	}
+	info, err := os.Stat(filepath.Join(dst, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("stat AGENTS.md: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("AGENTS.md mode = %v, want 0600", got)
+	}
+	if _, err := os.Stat(filepath.Join(dst, ".kiro", "agents", "gascity.json")); err != nil {
+		t.Fatalf("expected Kiro agent config to be staged: %v", err)
+	}
+}
+
+func TestCopyDirForProviders_KiroInstallsFallbackInstructionsWhenMissing(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+
+	mustMkdirAll(t, filepath.Join(src, "per-provider", "kiro"))
+	mustWriteFile(t, filepath.Join(src, "per-provider", "kiro", "AGENTS.md"), []byte("fallback instructions"), 0o644)
+
+	if err := CopyDirForProviders(src, dst, []string{"kiro"}, io.Discard); err != nil {
+		t.Fatalf("CopyDirForProviders: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dst, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	if string(data) != "fallback instructions" {
+		t.Fatalf("AGENTS.md = %q, want fallback instructions", string(data))
+	}
+}
+
+func TestCopyDirForProviders_KiroPreservesEarlierInstructionsAcrossOverlayLayers(t *testing.T) {
+	packOverlay := t.TempDir()
+	agentOverlay := t.TempDir()
+	dst := t.TempDir()
+
+	mustMkdirAll(t, filepath.Join(packOverlay, "per-provider", "kiro"))
+	mustWriteFile(t, filepath.Join(packOverlay, "per-provider", "kiro", "AGENTS.md"), []byte("pack fallback"), 0o644)
+	mustMkdirAll(t, filepath.Join(agentOverlay, "per-provider", "kiro"))
+	mustWriteFile(t, filepath.Join(agentOverlay, "per-provider", "kiro", "AGENTS.md"), []byte("agent override"), 0o644)
+
+	if err := CopyDirForProviders(packOverlay, dst, []string{"kiro"}, io.Discard); err != nil {
+		t.Fatalf("CopyDirForProviders(pack): %v", err)
+	}
+	if err := CopyDirForProviders(agentOverlay, dst, []string{"kiro"}, io.Discard); err != nil {
+		t.Fatalf("CopyDirForProviders(agent): %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dst, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	if string(data) != "pack fallback" {
+		t.Fatalf("AGENTS.md = %q, want earlier Kiro instructions preserved", string(data))
+	}
+}
+
+func mustMkdirAll(t *testing.T, path string) {
 	t.Helper()
-	if err := os.MkdirAll(path, perm); err != nil {
+	if err := os.MkdirAll(path, 0o755); err != nil {
 		t.Fatalf("MkdirAll(%q): %v", path, err)
 	}
 }

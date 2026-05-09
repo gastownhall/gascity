@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -35,19 +36,7 @@ func stageFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Con
 		}
 	}
 
-	// Copy pack-level overlays (lower priority, merged additively).
-	for _, od := range cfg.PackOverlayDirs {
-		if err := copyDirToPod(ctx, ops, podName, "stage", od, "/workspace"); err != nil {
-			fmt.Fprintf(warn, "gc: warning: staging pack overlay %s: %v\n", od, err) //nolint:errcheck
-		}
-	}
-
-	// Copy agent overlay_dir (highest priority, overwrites on conflict).
-	if cfg.OverlayDir != "" {
-		if err := copyDirToPod(ctx, ops, podName, "stage", cfg.OverlayDir, "/workspace"); err != nil {
-			fmt.Fprintf(warn, "gc: warning: staging overlay %s: %v\n", cfg.OverlayDir, err) //nolint:errcheck
-		}
-	}
+	stageProviderOverlaysToPod(ctx, ops, podName, cfg, podWorkDir, warn)
 
 	// Copy each copy_files entry.
 	for _, entry := range cfg.CopyFiles {
@@ -70,6 +59,61 @@ func stageFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Con
 	_, err := ops.execInPod(ctx, podName, "stage",
 		[]string{"touch", "/workspace/.gc-ready"}, nil)
 	return err
+}
+
+func stageProviderOverlaysToPod(ctx context.Context, ops k8sOps, podName string, cfg runtime.Config, podWorkDir string, warn io.Writer) {
+	if len(cfg.PackOverlayDirs) == 0 && cfg.OverlayDir == "" {
+		return
+	}
+	if podWorkDir == "" {
+		podWorkDir = "/workspace"
+	}
+
+	stageDir, err := os.MkdirTemp("", "gc-k8s-overlays-")
+	if err != nil {
+		fmt.Fprintf(warn, "gc: warning: preparing provider overlays: %v\n", err) //nolint:errcheck
+		return
+	}
+	defer os.RemoveAll(stageDir) //nolint:errcheck
+
+	seedExistingInstructions(cfg.WorkDir, stageDir, warn)
+	providers := append([]string{cfg.ProviderName}, cfg.InstallAgentHooks...)
+	for _, od := range cfg.PackOverlayDirs {
+		stageProviderOverlay(od, stageDir, providers, "pack overlay", warn)
+	}
+	if cfg.OverlayDir != "" {
+		stageProviderOverlay(cfg.OverlayDir, stageDir, providers, "overlay", warn)
+	}
+	if err := copyDirToPod(ctx, ops, podName, "stage", stageDir, podWorkDir); err != nil {
+		fmt.Fprintf(warn, "gc: warning: staging provider overlays: %v\n", err) //nolint:errcheck
+	}
+}
+
+func seedExistingInstructions(workDir, stageDir string, warn io.Writer) {
+	if workDir == "" {
+		return
+	}
+	src := filepath.Join(workDir, "AGENTS.md")
+	if _, err := os.Stat(src); os.IsNotExist(err) {
+		return
+	} else if err != nil {
+		fmt.Fprintf(warn, "gc: warning: checking existing AGENTS.md: %v\n", err) //nolint:errcheck
+		return
+	}
+	if err := runtime.StagePath(src, filepath.Join(stageDir, "AGENTS.md")); err != nil {
+		fmt.Fprintf(warn, "gc: warning: preserving existing AGENTS.md: %v\n", err) //nolint:errcheck
+	}
+}
+
+func stageProviderOverlay(srcDir, dstDir string, providers []string, label string, warn io.Writer) {
+	var stderr bytes.Buffer
+	if err := overlay.CopyDirForProviders(srcDir, dstDir, providers, &stderr); err != nil {
+		fmt.Fprintf(warn, "gc: warning: staging %s %s: %v\n", label, srcDir, err) //nolint:errcheck
+		return
+	}
+	if stderr.Len() > 0 {
+		fmt.Fprintf(warn, "gc: warning: staging %s %s: %s\n", label, srcDir, strings.TrimSpace(stderr.String())) //nolint:errcheck
+	}
 }
 
 // waitForInitContainer waits for the init container to be running.

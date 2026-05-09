@@ -283,6 +283,18 @@ func (rp *ResolvedProvider) ProviderSessionCreateTransport() string {
 	if transport := rp.DefaultSessionTransport(); transport != "" {
 		return transport
 	}
+	family := strings.TrimSpace(rp.BuiltinAncestor)
+	if family == "" {
+		family = strings.TrimSpace(rp.Kind)
+	}
+	if family == "" {
+		family = strings.TrimSpace(rp.Name)
+	}
+	if family == "kiro" {
+		// Kiro supports explicit ACP sessions, but its chat transport carries
+		// the non-interactive tool trust contract required by coding agents.
+		return ""
+	}
 	if strings.TrimSpace(rp.ACPCommand) != "" || rp.ACPArgs != nil {
 		return SessionTransportACP
 	}

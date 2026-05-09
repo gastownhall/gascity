@@ -272,7 +272,7 @@ func TestResolveProviderUserDefinedProvider(t *testing.T) {
 	cityProviders := map[string]ProviderSpec{
 		"kiro": {
 			Command:          "kiro-cli",
-			Args:             []string{"chat", "--no-interactive", "--trust-all-tools"},
+			Args:             []string{"chat", "--agent", "gascity", "--trust-all-tools"},
 			PromptMode:       "arg",
 			ReadyDelayMs:     5000,
 			ProcessNames:     []string{"kiro", "node"},
@@ -291,8 +291,8 @@ func TestResolveProviderUserDefinedProvider(t *testing.T) {
 	if rp.Name != "kiro" {
 		t.Errorf("Name = %q, want %q", rp.Name, "kiro")
 	}
-	if rp.CommandString() != "kiro-cli chat --no-interactive --trust-all-tools" {
-		t.Errorf("CommandString() = %q, want %q", rp.CommandString(), "kiro-cli chat --no-interactive --trust-all-tools")
+	if rp.CommandString() != "kiro-cli chat --agent gascity --trust-all-tools" {
+		t.Errorf("CommandString() = %q, want %q", rp.CommandString(), "kiro-cli chat --agent gascity --trust-all-tools")
 	}
 	if rp.ReadyDelayMs != 5000 {
 		t.Errorf("ReadyDelayMs = %d, want 5000", rp.ReadyDelayMs)
@@ -324,12 +324,12 @@ func TestResolveProviderKiroAgentArgsOverride(t *testing.T) {
 	agent := &Agent{
 		Name:     "scout",
 		Provider: "kiro",
-		Args:     []string{"chat", "--no-interactive", "--verbose"},
+		Args:     []string{"chat", "--agent", "gascity", "--verbose"},
 	}
 	cityProviders := map[string]ProviderSpec{
 		"kiro": {
 			Command:      "kiro-cli",
-			Args:         []string{"chat", "--no-interactive", "--trust-all-tools"},
+			Args:         []string{"chat", "--agent", "gascity", "--trust-all-tools"},
 			PromptMode:   "arg",
 			ReadyDelayMs: 5000,
 			ProcessNames: []string{"kiro", "node"},
@@ -339,11 +339,42 @@ func TestResolveProviderKiroAgentArgsOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
-	if len(rp.Args) != 3 || rp.Args[2] != "--verbose" {
-		t.Errorf("Args = %v, want [chat --no-interactive --verbose]", rp.Args)
+	if len(rp.Args) != 4 || rp.Args[3] != "--verbose" {
+		t.Errorf("Args = %v, want [chat --agent gascity --verbose]", rp.Args)
 	}
 	if rp.ReadyDelayMs != 5000 {
 		t.Errorf("ReadyDelayMs = %d, want 5000 (provider default preserved)", rp.ReadyDelayMs)
+	}
+}
+
+func TestResolveProviderBuiltinKiroACPCommand(t *testing.T) {
+	agent := &Agent{Name: "scout", Provider: "kiro"}
+	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if !rp.SupportsACP {
+		t.Fatal("SupportsACP = false, want true")
+	}
+	if got := rp.ACPCommandString(); got != "kiro-cli acp --agent gascity" {
+		t.Errorf("ACPCommandString() = %q, want %q", got, "kiro-cli acp --agent gascity")
+	}
+	if got := ResolveSessionCreateTransport("", rp); got != "" {
+		t.Errorf("ResolveSessionCreateTransport(empty) = %q, want empty default transport", got)
+	}
+	cmd, err := BuildProviderLaunchCommand("/city", rp, nil, SessionTransportTmux)
+	if err != nil {
+		t.Fatalf("BuildProviderLaunchCommand(tmux): %v", err)
+	}
+	if cmd.Command != "kiro-cli chat --agent gascity --trust-all-tools" {
+		t.Errorf("tmux launch command = %q, want kiro-cli chat --agent gascity --trust-all-tools", cmd.Command)
+	}
+	acp, err := BuildProviderLaunchCommand("/city", rp, nil, SessionTransportACP)
+	if err != nil {
+		t.Fatalf("BuildProviderLaunchCommand(acp): %v", err)
+	}
+	if acp.Command != "kiro-cli acp --agent gascity" {
+		t.Errorf("acp launch command = %q, want kiro-cli acp --agent gascity", acp.Command)
 	}
 }
 
@@ -404,7 +435,7 @@ func TestResolveProviderKiroOptionsSchemaResolveDefaultArgs(t *testing.T) {
 	cityProviders := map[string]ProviderSpec{
 		"kiro": {
 			Command:    "kiro-cli",
-			Args:       []string{"chat", "--no-interactive", "--trust-all-tools"},
+			Args:       []string{"chat", "--agent", "gascity", "--trust-all-tools"},
 			PromptMode: "arg",
 			OptionDefaults: map[string]string{
 				"permission_mode": "unrestricted",

@@ -35,6 +35,12 @@ func CopyFileOrDir(src, dst string, stderr io.Writer) error {
 // If srcDir does not exist, returns nil (no-op).
 // Individual file copy failures are logged to stderr but don't abort.
 func CopyDir(srcDir, dstDir string, stderr io.Writer) error {
+	return copyDir(srcDir, dstDir, stderr, nil)
+}
+
+type preserveExistingFunc func(relPath string) bool
+
+func copyDir(srcDir, dstDir string, stderr io.Writer, preserveExisting preserveExistingFunc) error {
 	info, err := os.Stat(srcDir)
 	if os.IsNotExist(err) {
 		return nil // Missing source dir is a no-op (like Gas Town).
@@ -45,11 +51,11 @@ func CopyDir(srcDir, dstDir string, stderr io.Writer) error {
 	if !info.IsDir() {
 		return fmt.Errorf("overlay: %q is not a directory", srcDir)
 	}
-	return copyDirRecursive(srcDir, dstDir, "", stderr)
+	return copyDirRecursive(srcDir, dstDir, "", stderr, preserveExisting)
 }
 
 // copyDirRecursive walks srcBase/rel and copies files into dstBase/rel.
-func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer) error {
+func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer, preserveExisting preserveExistingFunc) error {
 	srcPath := srcBase
 	if rel != "" {
 		srcPath = filepath.Join(srcBase, rel)
@@ -73,7 +79,7 @@ func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer) error {
 				fmt.Fprintf(stderr, "overlay: mkdir %q: %v\n", dstSubDir, err) //nolint:errcheck
 				continue
 			}
-			if err := copyDirRecursive(srcBase, dstBase, entryRel, stderr); err != nil {
+			if err := copyDirRecursive(srcBase, dstBase, entryRel, stderr, preserveExisting); err != nil {
 				fmt.Fprintf(stderr, "overlay: %v\n", err) //nolint:errcheck
 			}
 			continue
@@ -82,6 +88,14 @@ func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer) error {
 		// Copy file (merge if applicable).
 		src := filepath.Join(srcBase, entryRel)
 		dst := filepath.Join(dstBase, entryRel)
+		if preserveExisting != nil && preserveExisting(entryRel) {
+			if _, err := os.Stat(dst); err == nil {
+				continue
+			} else if !os.IsNotExist(err) {
+				fmt.Fprintf(stderr, "overlay: stat %q: %v\n", dst, err) //nolint:errcheck
+				continue
+			}
+		}
 		if err := copyOrMergeFile(src, dst, IsMergeablePath(entryRel)); err != nil {
 			fmt.Fprintf(stderr, "overlay: %v\n", err) //nolint:errcheck
 		}
@@ -190,7 +204,7 @@ func CopyDirForProvider(srcDir, dstDir, providerName string, stderr io.Writer) e
 	// Step 2: copy provider-specific files (flattened into dst).
 	if providerName != "" {
 		providerDir := filepath.Join(srcDir, PerProviderDir, providerName)
-		if err := CopyDir(providerDir, dstDir, stderr); err != nil {
+		if err := copyDir(providerDir, dstDir, stderr, providerPreserveExisting(providerName)); err != nil {
 			return err
 		}
 	}
@@ -238,11 +252,23 @@ func CopyDirForProviders(srcDir, dstDir string, providers []string, stderr io.Wr
 		}
 		seen[p] = true
 		providerDir := filepath.Join(srcDir, PerProviderDir, p)
-		if err := CopyDir(providerDir, dstDir, stderr); err != nil {
+		if err := copyDir(providerDir, dstDir, stderr, providerPreserveExisting(p)); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func providerPreserveExisting(providerName string) preserveExistingFunc {
+	if providerName != "kiro" {
+		return nil
+	}
+	return func(relPath string) bool {
+		// Kiro's AGENTS.md is a workspace-root instruction fallback. Once any
+		// workspace, pack, or earlier overlay has provided it, later Kiro
+		// overlays preserve that file instead of replacing instructions.
+		return filepath.Clean(relPath) == "AGENTS.md"
+	}
 }
 
 // copyOrMergeFile copies src to dst, optionally merging JSON if merge is true

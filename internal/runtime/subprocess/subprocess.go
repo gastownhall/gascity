@@ -100,7 +100,7 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 		delete(p.workDirs, name)
 	}
 
-	if err := runtime.StageWorkDir(cfg.WorkDir, cfg.OverlayDir, cfg.CopyFiles); err != nil {
+	if err := runtime.StageSessionWorkDir(cfg); err != nil {
 		clearWorkDir()
 		return fmt.Errorf("staging workdir for %q: %w", name, err)
 	}

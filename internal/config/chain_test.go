@@ -287,14 +287,14 @@ func TestResolveProviderChain_SharedAncestorDAG(t *testing.T) {
 // --- Kiro overlay materialization tests ---
 //
 // These test custom "kiro" provider overlays via base-chain inheritance.
-// Kiro is not a builtin, so these verify the standalone custom provider
-// path as well as the base = "builtin:claude" inheritance path.
+// They verify the standalone custom provider path as well as the
+// base = "builtin:claude" inheritance path.
 
 func TestResolveProviderChain_KiroStandaloneNoBase(t *testing.T) {
 	custom := map[string]ProviderSpec{
 		"kiro": {
 			Command:          "kiro-cli",
-			Args:             []string{"chat", "--no-interactive", "--trust-all-tools"},
+			Args:             []string{"chat", "--agent", "gascity", "--trust-all-tools"},
 			PromptMode:       "arg",
 			ReadyDelayMs:     5000,
 			ProcessNames:     []string{"kiro", "node"},
@@ -335,7 +335,7 @@ func TestResolveProviderChain_KiroInheritsFromClaude(t *testing.T) {
 		"kiro": {
 			Base:         basePtr("builtin:claude"),
 			Command:      "kiro-cli",
-			Args:         []string{"chat", "--no-interactive", "--trust-all-tools"},
+			Args:         []string{"chat", "--agent", "gascity", "--trust-all-tools"},
 			ReadyDelayMs: 5000,
 			ProcessNames: []string{"kiro", "node"},
 			Env:          map[string]string{"KIRO_AGENT_MODE": "headless"},
