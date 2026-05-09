@@ -1092,6 +1092,23 @@ get_connection_count() {
     echo "$output" | tail -1 | tr -d '[:space:]'
 }
 
+# drain_connections_before_stop waits briefly for in-flight SQL work to leave
+# before SIGTERM. It is best-effort: an unreachable or wedged server should not
+# block explicit stop/recover forever.
+drain_connections_before_stop() {
+    local count waited
+    waited=0
+    while [ "$waited" -lt 100 ]; do
+        count=$(get_connection_count 2>/dev/null) || return 0
+        case "$count" in
+            ''|*[!0-9]*) return 0 ;;
+        esac
+        [ "$count" -le 1 ] && return 0
+        sleep 0.1 2>/dev/null || sleep 1
+        waited=$((waited + 1))
+    done
+}
+
 # check_read_only tests if the dolt server is in read-only mode.
 # Returns 0 if read-only, 1 if writable, 2 if the write probe is inconclusive.
 check_read_only() {
@@ -2413,6 +2430,8 @@ op_stop_impl() {
         return 0
     fi
     GC_STOP_HAD_PID="true"
+
+    drain_connections_before_stop
 
     # SIGTERM and wait (10 × 500ms = 5s grace, matches upstream).
     kill "$pid" 2>/dev/null || true
