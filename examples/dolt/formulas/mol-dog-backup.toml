@@ -8,8 +8,8 @@ storage for replication.
 ## Dog Contract
 
 This is infrastructure work. You:
-1. Discover backup remotes configured by gc init
-2. Sync each production database to its backup remote
+1. Discover backup remotes configured by operator/bootstrap setup
+2. Sync each production database to its backup remotes
 3. Rsync local backups to offsite storage
 4. Report results and exit
 5. Return to kennel
@@ -77,18 +77,23 @@ sync. This formula does not wire scoped-abort metadata; this check is the
 enforcement point.
 
 **2. Determine databases:**
-Use configured databases list, or auto-discover all databases in the
-data directory (skip __gc_probe and other internal databases).
+Use the configured databases list when it is non-empty. Otherwise,
+auto-discover databases by scanning `<data_dir>/*/` and including only
+directories that contain `.dolt/`. Skip the system/internal database names
+`information_schema`, `mysql`, `dolt_cluster`, `performance_schema`, `sys`,
+and `__gc_probe` case-insensitively. Also skip database directories marked by
+configured non-sync markers such as `.no-sync`. Do not treat backup/export
+directories without `.dolt/` as databases.
 
-**3. For each database, discover its backup remote:**
+**3. For each database, discover its backup remotes:**
 ```bash
 cd <data_dir>/<db>
 dolt backup
 ```
-This lists configured backup names. Use whatever name `dolt backup`
-returns — do NOT assume a naming convention. The remote name was set
-by `gc init` and may be `backup_export`, `<db>-backup`, or any other
-valid name.
+This lists configured backup names, one per line. Sync every name returned by
+`dolt backup`; do NOT assume a naming convention and do NOT choose an arbitrary
+single remote when multiple backups are configured. Backup names are configured
+by operator/bootstrap setup and may vary by deployment.
 
 If `dolt backup` returns no configured backups, skip the database and
 record it as "no backup configured".
@@ -97,12 +102,16 @@ record it as "no backup configured".
 ```bash
 dolt backup sync <backup_name>
 ```
+For each attempted backup, record one result row keyed by
+`(database, backup_name)`. After syncing, read `dolt backup -v` in that
+database and capture the matching `backup_url` for the row, so offsite sync can
+operate on the exact `(database, backup_name, backup_url)` tuple.
 
 **5. Record results:**
-- Databases synced successfully (with backup remote name used)
+- Databases and backup remotes synced successfully
 - Databases skipped (no backup configured)
-- Databases that failed (with error)
-- Duration per database
+- Backup remotes that failed (with database, backup name, and error)
+- Duration per `(database, backup_name)`
 
 **Exit criteria:** All databases attempted, results recorded."""
 
@@ -113,28 +122,36 @@ needs = ["sync"]
 description = """
 Rsync local backups to offsite storage for replication.
 
-**1. Locate backup directory:**
-Check the backup remote URL from the sync step to find the local
-backup path. The path is encoded in the dolt backup URL
-(e.g., `file:///path/to/.beads/backup`). Use `dolt backup -v` in
-any synced database to discover it if needed.
+**1. Locate backup directories:**
+Use the successful `(database, backup_name, backup_url)` rows recorded by the
+sync step. Handle each row independently. If a `backup_url` is missing, run
+`dolt backup -v` in that row's database and match the exact backup name.
+
+Only `file://` backup URLs have a local directory that can be copied with
+`rsync`. For non-`file://` URLs, skip offsite for that row and record
+`offsite_skip=remote_scheme` with the URL scheme.
 
 **2. Check prerequisites:**
-- Backup directory exists and has content
+- For each file-backed row, the decoded backup directory exists and has content
 - Offsite path is accessible
 
-**3. Run offsite sync:**
+**3. Run offsite sync per database and backup:**
 ```bash
-rsync -a --delete <backup_dir>/ <offsite_path>/
+mkdir -p <offsite_path>/<db>/<backup_name>/
+rsync -a --delete <backup_dir>/ <offsite_path>/<db>/<backup_name>/
 ```
+Keep the destination scoped to `<db>/<backup_name>/` so `--delete` can only
+remove files for the specific backup row being copied.
 
 **4. Record results:**
-- Success/failure
-- Duration
+- Success/failure per `(database, backup_name)`
+- Skipped non-file backup URLs with `offsite_skip=remote_scheme`
+- Duration per offsite copy
 
 **Note:** If offsite is unavailable, log and continue — not a fatal error.
 
-**Exit criteria:** Offsite sync attempted."""
+**Exit criteria:** Offsite sync attempted for every successful file-backed
+backup row, and non-file rows skipped observably."""
 
 [[steps]]
 id = "report"
@@ -144,10 +161,11 @@ description = """
 Generate summary and signal completion.
 
 **1. Generate report summary:**
-- Databases synced: count/total
+- Backup remotes synced: count/total
 - Databases skipped (no backup configured): count
 - Offsite sync status
-- Per-database breakdown: backup remote name, status, duration
+- Per-backup breakdown: database, backup remote name, sync status, offsite
+  status, duration
 - Any failures
 
 **2. Signal completion:**
