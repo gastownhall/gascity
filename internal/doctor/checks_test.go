@@ -2959,6 +2959,7 @@ func writeDoctorManagedDoltConfig(t *testing.T, cityPath string, overrides map[s
 			"dolt_stats_gc_enabled":  "OFF",
 			"dolt_stats_memory_only": "ON",
 			"dolt_stats_paused":      "ON",
+			"wait_timeout":           "30",
 		},
 	}
 	for k, v := range overrides {

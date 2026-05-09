@@ -1022,7 +1022,7 @@ cleanup_stale_locks() {
 # Overwritten on each server start. Without read/write timeouts, CLOSE_WAIT connections
 # accumulate and the server enters unrecoverable read-only mode.
 write_config_yaml() {
-    local archive_level gc_bin
+    local archive_level gc_bin wait_timeout_line
     archive_level=${GC_DOLT_ARCHIVE_LEVEL:-0}
     case "$archive_level" in
         ''|*[!0-9]*)
@@ -1040,6 +1040,13 @@ write_config_yaml() {
             --archive-level "$archive_level" || die "failed to write managed dolt config via gc helper $gc_bin"
         return 0
     fi
+    wait_timeout_line='  wait_timeout: "30"'
+    case "${GC_DOLT_WAIT_TIMEOUT:-}" in
+        -*) wait_timeout_line="" ;;
+        '' ) ;;
+        *[!0-9]* ) ;;
+        * ) wait_timeout_line="  wait_timeout: \"${GC_DOLT_WAIT_TIMEOUT}\"" ;;
+    esac
     local tmp
     tmp=$(mktemp "$CONFIG_FILE.tmp.XXXXXX")
     cat > "$tmp" <<YAML
@@ -1077,6 +1084,7 @@ system_variables:
   dolt_stats_gc_enabled: "OFF"
   dolt_stats_memory_only: "ON"
   dolt_stats_paused: "ON"
+$wait_timeout_line
 YAML
     mv "$tmp" "$CONFIG_FILE"
 }
