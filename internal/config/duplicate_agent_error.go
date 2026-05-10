@@ -24,12 +24,7 @@ import (
 //  5. fall through (sourceUnknown or any unstamped agent) → render an
 //     identity hint: "<unknown: binding=…>" or "<unknown: name=…>"
 //     or "<unknown>".
-//
-// cityRoot is accepted but currently unused; the hook is reserved for
-// future relativization without breaking the call sites already passing
-// it through.
-func (a *Agent) describeSource(cityRoot, cityFile string) string {
-	_ = cityRoot
+func (a *Agent) describeSource(cityFile string) string {
 	if a.SourceDir != "" {
 		return a.SourceDir
 	}
@@ -70,18 +65,16 @@ func (a *Agent) describeSource(cityRoot, cityFile string) string {
 // Every rendered descriptor is non-empty (the contract ga-tpfc.1 fixed),
 // so the error never carries an empty quoted "" path.
 //
-// cityRoot and cityFile are passed through to describeSource. Both may
-// be empty when the helper is called from validation paths that do not
-// know the city's filesystem context (e.g., test fixtures that build
-// []Agent directly).
-func formatDuplicateAgentError(a, b Agent, cityRoot, cityFile string) error {
+// The validation paths that call this helper do not know the city's filesystem
+// context, so source descriptors render without a city.toml filename.
+func formatDuplicateAgentError(a, b Agent) error {
 	if v1, v2, ok := orderV1V2(a, b); ok {
-		return formatV1V2MigrationError(v1, v2, cityRoot, cityFile)
+		return formatV1V2MigrationError(v1, v2)
 	}
 	return fmt.Errorf("agent %q: duplicate name (from %q and %q)",
 		a.QualifiedName(),
-		a.describeSource(cityRoot, cityFile),
-		b.describeSource(cityRoot, cityFile))
+		a.describeSource(""),
+		b.describeSource(""))
 }
 
 // orderV1V2 reports whether (a, b) is exactly the (V1Inline,
@@ -105,9 +98,9 @@ const migrationGuideDocPath = "docs/packv2/migration.mdx"
 // formatV1V2MigrationError renders the migration-guidance variant of
 // the duplicate-agent-name error. The headline is byte-stable; the
 // body prose may evolve.
-func formatV1V2MigrationError(v1, v2 Agent, cityRoot, cityFile string) error {
-	v1Source := v1.describeSource(cityRoot, cityFile) + "/pack.toml ([[agent]] " + v1.Name + ")"
-	v2Source := v2.describeSource(cityRoot, cityFile) + "/agents/" + v2.Name + "/agent.toml"
+func formatV1V2MigrationError(v1, v2 Agent) error {
+	v1Source := v1.describeSource("") + "/pack.toml ([[agent]] " + v1.Name + ")"
+	v2Source := v2.describeSource("") + "/agents/" + v2.Name + "/agent.toml"
 	return fmt.Errorf(
 		"agent %q: pack v1/v2 layout collision\n"+
 			"  v1 source: %s\n"+

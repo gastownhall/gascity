@@ -14,13 +14,11 @@ import (
 // for every reachable source category so the error never contains an empty
 // quoted "" path (the visible bug ga-tpfc.1 fixes).
 func TestDescribeSource(t *testing.T) {
-	cityRoot := "/home/u/proj"
 	cityFile := "/home/u/proj/city.toml"
 
 	tests := []struct {
 		name      string
 		agent     Agent
-		cityRoot  string
 		cityFile  string
 		want      string
 		wantOneOf []string // any-of match when format is non-deterministic
@@ -28,21 +26,18 @@ func TestDescribeSource(t *testing.T) {
 		{
 			name:     "SourceDir wins over source enum",
 			agent:    Agent{Name: "mayor", SourceDir: "packs/gastown", source: sourceAutoImport},
-			cityRoot: cityRoot,
 			cityFile: cityFile,
 			want:     "packs/gastown",
 		},
 		{
 			name:     "explicit pack with SourceDir",
 			agent:    Agent{Name: "mayor", SourceDir: "packs/extras", source: sourcePack},
-			cityRoot: cityRoot,
 			cityFile: cityFile,
 			want:     "packs/extras",
 		},
 		{
 			name:     "auto-import resolves to bracketed kind/path",
 			agent:    Agent{Name: "mayor", BindingName: "gastown", source: sourceAutoImport},
-			cityRoot: cityRoot,
 			cityFile: cityFile,
 			wantOneOf: []string{
 				"<auto-import: gastown>",
@@ -52,21 +47,18 @@ func TestDescribeSource(t *testing.T) {
 		{
 			name:     "inline with cityFile renders <inline: file>",
 			agent:    Agent{Name: "mayor", source: sourceInline},
-			cityRoot: cityRoot,
 			cityFile: cityFile,
 			want:     "<inline: city.toml>",
 		},
 		{
 			name:     "inline with empty cityFile renders bare <inline>",
 			agent:    Agent{Name: "mayor", source: sourceInline},
-			cityRoot: "",
 			cityFile: "",
 			want:     "<inline>",
 		},
 		{
 			name:     "unknown source must not be empty",
 			agent:    Agent{Name: "mayor"},
-			cityRoot: cityRoot,
 			cityFile: cityFile,
 			wantOneOf: []string{
 				"<unknown: name=mayor>",
@@ -76,7 +68,6 @@ func TestDescribeSource(t *testing.T) {
 		{
 			name:     "unknown source falls back to BindingName when present",
 			agent:    Agent{Name: "polecat", BindingName: "gastown"},
-			cityRoot: cityRoot,
 			cityFile: cityFile,
 			wantOneOf: []string{
 				"<unknown: binding=gastown>",
@@ -87,7 +78,7 @@ func TestDescribeSource(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := tc.agent.describeSource(tc.cityRoot, tc.cityFile)
+			got := tc.agent.describeSource(tc.cityFile)
 			if got == "" {
 				t.Fatalf("describeSource returned empty string — descriptor must always be non-empty")
 			}
@@ -232,7 +223,7 @@ func TestFormatDuplicateAgentError_LayoutMatrix(t *testing.T) {
 		for _, lb := range layouts {
 			a := Agent{Name: "mayor", SourceDir: "packs/a", layout: la}
 			b := Agent{Name: "mayor", SourceDir: "packs/b", layout: lb}
-			err := formatDuplicateAgentError(a, b, "", "")
+			err := formatDuplicateAgentError(a, b)
 			if err == nil {
 				t.Errorf("formatDuplicateAgentError returned nil for layouts (%v, %v)", la, lb)
 				continue
@@ -267,7 +258,7 @@ func TestFormatDuplicateAgentError_LayoutMatrix(t *testing.T) {
 func TestFormatDuplicateAgentError_MigrationHeadlinePinned(t *testing.T) {
 	a := Agent{Name: "mayor", SourceDir: "packs/gastown", layout: layoutV1Inline}
 	b := Agent{Name: "mayor", BindingName: "gastown", layout: layoutV2Convention}
-	err := formatDuplicateAgentError(a, b, "", "")
+	err := formatDuplicateAgentError(a, b)
 	if err == nil {
 		t.Fatal("expected migration error")
 	}
@@ -292,7 +283,7 @@ func TestFormatDuplicateAgentError_MigrationContainsBothSources(t *testing.T) {
 		{v1, v2},
 		{v2, v1},
 	} {
-		err := formatDuplicateAgentError(order.a, order.b, "", "")
+		err := formatDuplicateAgentError(order.a, order.b)
 		if err == nil {
 			t.Fatal("expected migration error")
 		}
@@ -315,6 +306,19 @@ func TestFormatDuplicateAgentError_MigrationContainsBothSources(t *testing.T) {
 	}
 }
 
+// TestMigrationGuideDocPathExists protects the migration diagnostic from
+// pointing operators at documentation that is not present in the repository.
+func TestMigrationGuideDocPathExists(t *testing.T) {
+	path := filepath.Clean(filepath.Join("..", "..", migrationGuideDocPath))
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("migration guide %q is missing: %v", migrationGuideDocPath, err)
+	}
+	if info.IsDir() {
+		t.Fatalf("migration guide %q resolves to a directory", migrationGuideDocPath)
+	}
+}
+
 // TestValidateAgents_V1V2LayoutCollisionRepro reproduces the bug ga-9ogb
 // fixes: a v1 [[agent]] block in one pack + a v2 agents/<name>/agent.toml
 // in another pack both declare "mayor". Today (pre-fix) the operator
@@ -332,6 +336,69 @@ func TestValidateAgents_V1V2LayoutCollisionRepro(t *testing.T) {
 	got := err.Error()
 	if !strings.Contains(got, "pack v1/v2 layout collision") {
 		t.Errorf("expected migration headline, got: %s", got)
+	}
+}
+
+// TestValidateAgents_CityPackV1CollisionWithImportedV2Convention asserts
+// the root city pack.toml path stamps v1 [[agent]] blocks with layout
+// provenance before imported v2 convention agents are validated.
+func TestValidateAgents_CityPackV1CollisionWithImportedV2Convention(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	importDir := filepath.Join(dir, "sys")
+	if err := os.MkdirAll(cityDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	agentDir := filepath.Join(importDir, "agents", "worker")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+[workspace]
+name = "test"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte(`
+[pack]
+name = "city"
+schema = 1
+
+[imports.sys]
+source = "../sys"
+
+[[agent]]
+name = "worker"
+scope = "city"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(importDir, "pack.toml"), []byte(`
+[pack]
+name = "sys"
+schema = 1
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "agent.toml"), []byte(`
+scope = "city"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	err = ValidateAgents(cfg.Agents)
+	if err == nil {
+		t.Fatal("expected duplicate-name error")
+	}
+	got := err.Error()
+	if !strings.Contains(got, "pack v1/v2 layout collision") {
+		t.Fatalf("expected migration diagnostic, got: %s", got)
 	}
 }
 

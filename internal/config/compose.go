@@ -111,10 +111,11 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		var packAgents []Agent
 		for _, a := range pc.Agents {
 			if !cityAgentNames[a.Name] {
-				// Stamp source on the city pack's own [[agent]] blocks
-				// so duplicate-name errors against city.toml inline
-				// agents render a non-empty descriptor (ga-tpfc.1).
+				// Stamp provenance on the city pack's own [[agent]]
+				// blocks; these are v1 inline pack agents, distinct
+				// from v2 convention-discovered agents.
 				a.source = sourcePack
+				a.layout = layoutV1Inline
 				packAgents = append(packAgents, a)
 			}
 		}
