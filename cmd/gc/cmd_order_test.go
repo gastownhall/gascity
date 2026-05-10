@@ -18,6 +18,15 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
+func readFileString(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
 // --- gc order list ---
 
 func TestOrderListEmpty(t *testing.T) {
@@ -1439,7 +1448,7 @@ prefix = "ct"
 
 	outPath := filepath.Join(cityDir, "exec-managed-marker.txt")
 	a := orders.Order{
-		Name:     "dolt-gc-nudge",
+		Name:     "dolt-test-cooldown",
 		Trigger:  "cooldown",
 		Interval: "1m",
 		Exec:     fmt.Sprintf(`printf 'managed=<%%s>\nhost=<%%s>\nport=<%%s>\npack_state=<%%s>\ndata=<%%s>\nconfig=<%%s>\nstate=<%%s>\n' "$GC_DOLT_MANAGED_LOCAL" "$GC_DOLT_HOST" "$GC_DOLT_PORT" "$GC_PACK_STATE_DIR" "$GC_DOLT_DATA_DIR" "$GC_DOLT_CONFIG_FILE" "$GC_DOLT_STATE_FILE" > %q`, outPath),
@@ -1518,7 +1527,7 @@ prefix = "ct"
 	t.Setenv("GC_DOLT_STATE_FILE", filepath.Join(t.TempDir(), "poison-state.json"))
 	outPath := filepath.Join(cityDir, "exec-managed-layout.txt")
 	a := orders.Order{
-		Name:     "dolt-gc-nudge",
+		Name:     "dolt-test-cooldown",
 		Trigger:  "cooldown",
 		Interval: "1m",
 		Exec:     fmt.Sprintf(`printf 'managed=<%%s>\nport=<%%s>\ndata=<%%s>\nconfig=<%%s>\n' "$GC_DOLT_MANAGED_LOCAL" "$GC_DOLT_PORT" "$GC_DOLT_DATA_DIR" "$GC_DOLT_CONFIG_FILE" > %q`, outPath),

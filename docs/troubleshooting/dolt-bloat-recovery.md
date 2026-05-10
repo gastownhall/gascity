@@ -89,7 +89,11 @@ If GC finishes but the size barely moves, the chunks are nearly all live
   It ships embedded in the dolt pack and runs `gc dolt compact` once a
   managed database crosses the commit threshold. Compaction fetches the
   configured remote, flattens live history, runs `CALL DOLT_GC('--full')`,
-  and pushes the rewritten main branch back upstream.
+  and pushes the rewritten main branch back upstream. Dolt 1.86.x does not
+  support an atomic `DOLT_PUSH('--force-with-lease', ...)`, so the script
+  re-fetches and compares the remote head immediately before its force push.
+  That check prevents known drift but cannot eliminate a remote write in the
+  small fetch-to-push window.
 - **Mind `orders.max_timeout` if you set one.** The compactor order asks
   for a 24-hour timeout to accommodate serialized full-GC runs on large
   stores. A city-level `orders.max_timeout` below 24h will cap the

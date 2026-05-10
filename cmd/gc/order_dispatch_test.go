@@ -1747,10 +1747,10 @@ provider = "bd"
 		return nil, nil
 	}
 	aa := []orders.Order{{
-		Name:     "dolt-gc-nudge",
+		Name:     "dolt-test-cooldown",
 		Trigger:  "cooldown",
 		Interval: "1m",
-		Exec:     "gc dolt gc-nudge",
+		Exec:     "echo test",
 	}}
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
 	ad.dispatch(context.Background(), cityDir, time.Now())
@@ -1819,10 +1819,10 @@ provider = "bd"
 		return nil, nil
 	}
 	aa := []orders.Order{{
-		Name:     "dolt-gc-nudge",
+		Name:     "dolt-test-cooldown",
 		Trigger:  "cooldown",
 		Interval: "1m",
-		Exec:     "gc dolt gc-nudge",
+		Exec:     "echo test",
 	}}
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
 	ad.dispatch(context.Background(), cityDir, time.Now())
@@ -1956,10 +1956,10 @@ func TestOrderDispatchExecMarksExternalDoltTargetForManagedLocalOnlyOrders(t *te
 		return nil, nil
 	}
 	aa := []orders.Order{{
-		Name:     "dolt-gc-nudge",
+		Name:     "dolt-test-cooldown",
 		Trigger:  "cooldown",
 		Interval: "1m",
-		Exec:     "gc dolt gc-nudge",
+		Exec:     "echo test",
 	}}
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
 	ad.dispatch(context.Background(), cityDir, time.Now())
@@ -2030,10 +2030,10 @@ func TestOrderDispatchExecPropagatesManagedDoltLayout(t *testing.T) {
 		return nil, nil
 	}
 	aa := []orders.Order{{
-		Name:     "dolt-gc-nudge",
+		Name:     "dolt-test-cooldown",
 		Trigger:  "cooldown",
 		Interval: "1m",
-		Exec:     "gc dolt gc-nudge",
+		Exec:     "echo test",
 	}}
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
 	ad.dispatch(context.Background(), cityDir, time.Now())
@@ -2096,10 +2096,10 @@ func TestOrderDispatchExecPropagatesLegacyManagedDoltDataDir(t *testing.T) {
 		return nil, nil
 	}
 	aa := []orders.Order{{
-		Name:     "dolt-gc-nudge",
+		Name:     "dolt-test-cooldown",
 		Trigger:  "cooldown",
 		Interval: "1m",
-		Exec:     "gc dolt gc-nudge",
+		Exec:     "echo test",
 	}}
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
 	ad.dispatch(context.Background(), cityDir, time.Now())
@@ -2160,10 +2160,10 @@ func TestOrderDispatchExecIgnoresPublishedRunningDataDirWithUnreachablePort(t *t
 		return nil, nil
 	}
 	aa := []orders.Order{{
-		Name:     "dolt-gc-nudge",
+		Name:     "dolt-test-cooldown",
 		Trigger:  "cooldown",
 		Interval: "1m",
-		Exec:     "gc dolt gc-nudge",
+		Exec:     "echo test",
 	}}
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
 	ad.dispatch(context.Background(), cityDir, time.Now())
