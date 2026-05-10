@@ -347,6 +347,38 @@ func TestResolveProviderKiroAgentArgsOverride(t *testing.T) {
 	}
 }
 
+func TestResolveProviderKiroProviderArgsOverrideOmitsTrustAllTools(t *testing.T) {
+	agent := &Agent{
+		Name:     "scout",
+		Provider: "kiro",
+	}
+	cityProviders := map[string]ProviderSpec{
+		"kiro": {
+			Command:    "kiro-cli",
+			Args:       []string{"chat", "--no-interactive", "--agent", "gascity"},
+			PromptMode: "arg",
+		},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	wantArgs := []string{"chat", "--no-interactive", "--agent", "gascity"}
+	if !reflect.DeepEqual(rp.Args, wantArgs) {
+		t.Fatalf("Args = %v, want %v", rp.Args, wantArgs)
+	}
+	if strings.Contains(rp.CommandString(), "--trust-all-tools") {
+		t.Fatalf("CommandString() = %q, want provider override without --trust-all-tools", rp.CommandString())
+	}
+	cmd, err := BuildProviderLaunchCommand("/city", rp, nil, SessionTransportTmux)
+	if err != nil {
+		t.Fatalf("BuildProviderLaunchCommand(tmux): %v", err)
+	}
+	if strings.Contains(cmd.Command, "--trust-all-tools") {
+		t.Fatalf("tmux launch command = %q, want provider override without --trust-all-tools", cmd.Command)
+	}
+}
+
 func TestResolveProviderBuiltinKiroACPCommand(t *testing.T) {
 	agent := &Agent{Name: "scout", Provider: "kiro"}
 	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("kiro-cli"))

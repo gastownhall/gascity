@@ -482,16 +482,32 @@ type Config struct {
 	PromptFlag string
 }
 
-// OverlayProviderNames returns the provider overlay slots to stage for cfg.
+// OverlayProviderNames returns the effective provider overlay slots to stage for
+// cfg, preserving first-use order while skipping empty and duplicate names.
 func OverlayProviderNames(cfg Config) []string {
 	primary := strings.TrimSpace(cfg.ProviderOverlayName)
 	if primary == "" {
 		primary = strings.TrimSpace(cfg.ProviderName)
 	}
 	providers := make([]string, 0, 1+len(cfg.InstallAgentHooks))
-	providers = append(providers, primary)
-	providers = append(providers, cfg.InstallAgentHooks...)
+	providers = appendOverlayProviderName(providers, primary)
+	for _, hook := range cfg.InstallAgentHooks {
+		providers = appendOverlayProviderName(providers, hook)
+	}
 	return providers
+}
+
+func appendOverlayProviderName(providers []string, name string) []string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return providers
+	}
+	for _, existing := range providers {
+		if existing == name {
+			return providers
+		}
+	}
+	return append(providers, name)
 }
 
 // SyncWorkDirEnv returns cfg with GC_DIR synchronized to WorkDir.

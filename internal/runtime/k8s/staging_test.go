@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -207,6 +208,39 @@ func TestStageFilesUsesConcreteProviderOverlayName(t *testing.T) {
 	}
 	if _, ok := ops.files["/workspace/CLAUDE.md"]; ok {
 		t.Fatal("staged Claude overlay for Kiro provider inheriting Claude launch behavior")
+	}
+}
+
+func TestStageFilesSurfacesKiroPreservationWarning(t *testing.T) {
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "AGENTS.md"), []byte("project instructions"), 0o600); err != nil {
+		t.Fatalf("write project instructions: %v", err)
+	}
+
+	packOverlay := t.TempDir()
+	fallbackInstructions := filepath.Join(packOverlay, "per-provider", "kiro", "AGENTS.md")
+	if err := os.MkdirAll(filepath.Dir(fallbackInstructions), 0o755); err != nil {
+		t.Fatalf("mkdir Kiro fallback instructions: %v", err)
+	}
+	if err := os.WriteFile(fallbackInstructions, []byte("fallback instructions"), 0o644); err != nil {
+		t.Fatalf("write Kiro fallback instructions: %v", err)
+	}
+
+	var warnings bytes.Buffer
+	ops := newCapturingStageOps()
+	err := stageFiles(context.Background(), ops, "gc-kiro", runtime.Config{
+		WorkDir:         workDir,
+		ProviderName:    "kiro",
+		PackOverlayDirs: []string{packOverlay},
+	}, "", &warnings)
+	if err != nil {
+		t.Fatalf("stageFiles: %v", err)
+	}
+	if got := ops.files["/workspace/AGENTS.md"]; got != "project instructions" {
+		t.Fatalf("staged AGENTS.md = %q, want project instructions preserved", got)
+	}
+	if got := warnings.String(); !strings.Contains(got, "overlay: preserving existing") || !strings.Contains(got, "AGENTS.md") {
+		t.Fatalf("warnings = %q, want Kiro preservation warning", got)
 	}
 }
 

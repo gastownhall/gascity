@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -106,13 +105,13 @@ func seedExistingInstructions(workDir, stageDir string, warn io.Writer) {
 }
 
 func stageProviderOverlay(srcDir, dstDir string, providers []string, label string, warn io.Writer) {
-	var stderr bytes.Buffer
-	if err := overlay.CopyDirForProviders(srcDir, dstDir, providers, &stderr); err != nil {
+	var warnings bytes.Buffer
+	if err := runtime.StageProviderOverlayDir(srcDir, dstDir, providers, &warnings); err != nil {
 		fmt.Fprintf(warn, "gc: warning: staging %s %s: %v\n", label, srcDir, err) //nolint:errcheck
 		return
 	}
-	if stderr.Len() > 0 {
-		fmt.Fprintf(warn, "gc: warning: staging %s %s: %s\n", label, srcDir, strings.TrimSpace(stderr.String())) //nolint:errcheck
+	if warnings.Len() > 0 {
+		fmt.Fprintf(warn, "gc: warning: staging %s %s: %s\n", label, srcDir, strings.TrimSpace(warnings.String())) //nolint:errcheck
 	}
 }
 

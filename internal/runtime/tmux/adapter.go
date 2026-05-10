@@ -94,8 +94,8 @@ func stageStartFiles(cfg runtime.Config, warnings io.Writer) error {
 	// Copy overlays and CopyFiles before creating the tmux session.
 	// Local provider: files are on the same filesystem.
 	// V2 per-provider overlay support: StageProviderOverlayDir copies universal
-	// files then per-provider/<provider>/ slots for ProviderName plus any
-	// InstallAgentHooks entries (flattened).
+	// files then flattened per-provider/<provider>/ slots for ProviderOverlayName
+	// with ProviderName fallback, plus any InstallAgentHooks entries.
 	overlayProviders := runtime.OverlayProviderNames(cfg)
 	if cfg.WorkDir != "" {
 		for _, od := range cfg.PackOverlayDirs {

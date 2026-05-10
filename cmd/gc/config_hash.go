@@ -17,12 +17,14 @@ import (
 // that require a session restart when changed are included:
 //
 // Included: command, prompt content hash, sorted env, work_dir, pre_start,
-// session_setup, session_setup_script, session_live, overlay_dir, copy_files.
+// session_setup, session_setup_script, session_live, overlay_dir, effective
+// provider overlay slots, copy_files.
 //
-// Excluded: name, title, pool scaling, provider name, rig name, and nudge.
-// Nudge is treated as delivery-time work, not stable session identity; hashing
-// it causes false config-drift restarts when the reconciler injects per-tick
-// work nudges (for example the control-dispatcher workflow lane).
+// Excluded: name, title, pool scaling, launch provider name outside overlay
+// fallback identity, rig name, and nudge. Nudge is treated as delivery-time
+// work, not stable session identity; hashing it causes false config-drift
+// restarts when the reconciler injects per-tick work nudges (for example the
+// control-dispatcher workflow lane).
 //
 // Returns the first 16 hex characters of the SHA-256. Same config always
 // produces the same hash regardless of map iteration order.
@@ -99,6 +101,12 @@ func canonicalConfigHash(params TemplateParams, overlay map[string]string) strin
 	h.Write([]byte(params.Hints.OverlayDir)) //nolint:errcheck
 	h.Write([]byte{0})                       //nolint:errcheck
 
+	hashOverlayProviderNames(h, effectiveOverlayProviderNames(
+		params.Hints.ProviderName,
+		params.Hints.ProviderOverlayName,
+		params.Hints.InstallAgentHooks,
+	))
+
 	// CopyFiles.
 	for _, cf := range params.Hints.CopyFiles {
 		h.Write([]byte(cf.Src))    //nolint:errcheck
@@ -138,6 +146,45 @@ func stripBeaconPrefix(prompt string) string {
 		return prompt
 	}
 	return prompt[idx+2:]
+}
+
+func effectiveOverlayProviderNames(providerName, providerOverlayName string, installAgentHooks []string) []string {
+	primary := strings.TrimSpace(providerOverlayName)
+	if primary == "" {
+		primary = strings.TrimSpace(providerName)
+	}
+	providers := make([]string, 0, 1+len(installAgentHooks))
+	providers = appendOverlayProviderName(providers, primary)
+	for _, hook := range installAgentHooks {
+		providers = appendOverlayProviderName(providers, hook)
+	}
+	return providers
+}
+
+func appendOverlayProviderName(providers []string, name string) []string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return providers
+	}
+	for _, existing := range providers {
+		if existing == name {
+			return providers
+		}
+	}
+	return append(providers, name)
+}
+
+func hashOverlayProviderNames(h interface{ Write([]byte) (int, error) }, providers []string) {
+	if len(providers) == 0 {
+		return
+	}
+	h.Write([]byte("overlay-providers")) //nolint:errcheck
+	h.Write([]byte{0})                   //nolint:errcheck
+	for _, provider := range providers {
+		h.Write([]byte(provider)) //nolint:errcheck
+		h.Write([]byte{0})        //nolint:errcheck
+	}
+	h.Write([]byte{1}) //nolint:errcheck
 }
 
 // hashSortedStringMap writes map entries to h in deterministic sorted order.
