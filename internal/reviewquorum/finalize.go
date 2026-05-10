@@ -143,13 +143,39 @@ func laneContractFailures(lane LaneOutput) []string {
 	if strings.TrimSpace(lane.Model) == "" {
 		failures = append(failures, "model_missing")
 	}
+	if len(failures) > 0 {
+		return failures
+	}
 	if lane.FindingsCount != len(lane.Findings) {
 		failures = append(failures, "findings_count_mismatch")
+	}
+	switch normalizeToken(lane.Verdict) {
+	case VerdictPass, VerdictPassWithFindings:
+		switch class := normalizeToken(lane.FailureClass); class {
+		case "":
+			failures = append(failures, "failure_class_missing")
+		case FailureClassNone:
+			if strings.TrimSpace(lane.FailureReason) != "" {
+				_, reason := ClassifyFailure(lane.FailureClass, lane.FailureReason)
+				failures = append(failures, reason)
+			}
+		case FailureClassTransient, FailureClassHard:
+			failures = append(failures, "success_failure_class_not_none")
+		default:
+			_, reason := ClassifyFailure(lane.FailureClass, lane.FailureReason)
+			failures = append(failures, reason)
+		}
 	}
 	switch normalizeToken(lane.Verdict) {
 	case VerdictPassWithFindings, VerdictFail:
 		if len(lane.Findings) == 0 {
 			failures = append(failures, "materialized_findings_missing")
+		}
+	}
+	for _, finding := range lane.Findings {
+		if len(finding.Lanes) > 0 {
+			failures = append(failures, "finding_lanes_not_allowed")
+			break
 		}
 	}
 	return failures
@@ -166,7 +192,6 @@ func mergeLaneFindings(accumulators map[string]Finding, order *[]string, lane La
 			*order = append(*order, key)
 		}
 		merged.Lanes = appendUniqueStrings(merged.Lanes, lane.LaneID)
-		merged.Lanes = appendUniqueStrings(merged.Lanes, finding.Lanes...)
 		if len(finding.Evidence) > 0 {
 			merged.Evidence = append(merged.Evidence, cloneEvidence(finding.Evidence)...)
 		} else if len(merged.Evidence) == 0 {
@@ -188,6 +213,9 @@ func findingKey(finding Finding) string {
 }
 
 func cloneEvidence(evidence []Evidence) []Evidence {
+	if evidence == nil {
+		return []Evidence{}
+	}
 	return append([]Evidence(nil), evidence...)
 }
 
@@ -210,7 +238,7 @@ func cloneLaneOutput(output LaneOutput) LaneOutput {
 
 func cloneFindings(findings []Finding) []Finding {
 	if findings == nil {
-		return nil
+		return []Finding{}
 	}
 	cloned := make([]Finding, len(findings))
 	for i, finding := range findings {
@@ -259,6 +287,12 @@ func readOnlyContractFailure(lane LaneOutput) string {
 	}
 	if !lane.ReadOnlyEnforcement.Enabled {
 		return "read_only_enforcement_disabled"
+	}
+	if lane.ReadOnlyEnforcement.Passed && strings.TrimSpace(lane.ReadOnlyEnforcement.BaselineCommand) == "" {
+		return "read_only_baseline_command_missing"
+	}
+	if lane.ReadOnlyEnforcement.Passed && strings.TrimSpace(lane.ReadOnlyEnforcement.AfterCommand) == "" {
+		return "read_only_after_command_missing"
 	}
 	if len(lane.MutationsDelta.Changed) > 0 {
 		return "read_only_mutation_detected"

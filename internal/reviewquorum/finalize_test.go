@@ -8,10 +8,11 @@ import (
 )
 
 const (
-	lanePrimary   = "primary"
-	laneSecondary = "secondary"
-	reviewSubject = "gh:gastownhall/gascity#1694"
-	reviewBaseRef = "origin/main"
+	lanePrimary           = "primary"
+	laneSecondary         = "secondary"
+	reviewSubject         = "gh:gastownhall/gascity#1694"
+	reviewBaseRef         = "origin/main"
+	readOnlyStatusCommand = "git status --porcelain=v1 -z"
 )
 
 func finalize(outputs []LaneOutput) Summary {
@@ -22,6 +23,19 @@ func finalize(outputs []LaneOutput) Summary {
 		}
 		if lanes[i].Model == "" {
 			lanes[i].Model = "test-model"
+		}
+		if lanes[i].FailureClass == "" && lanes[i].FailureReason == "" {
+			lanes[i].FailureClass = FailureClassNone
+		}
+		if lanes[i].ReadOnlyEnforcement.Observed &&
+			lanes[i].ReadOnlyEnforcement.Enabled &&
+			lanes[i].ReadOnlyEnforcement.Passed {
+			if lanes[i].ReadOnlyEnforcement.BaselineCommand == "" {
+				lanes[i].ReadOnlyEnforcement.BaselineCommand = readOnlyStatusCommand
+			}
+			if lanes[i].ReadOnlyEnforcement.AfterCommand == "" {
+				lanes[i].ReadOnlyEnforcement.AfterCommand = readOnlyStatusCommand
+			}
 		}
 	}
 	return Finalize(reviewSubject, reviewBaseRef, lanes)
@@ -259,11 +273,14 @@ func TestFinalizeSkipsContractInvalidLaneDataFromSummary(t *testing.T) {
 			FindingsCount: 0,
 			Usage:         &Usage{InputTokens: 1, OutputTokens: 2, TotalTokens: 3},
 			ReadOnlyEnforcement: ReadOnlyEnforcement{
-				Observed: true,
-				Enabled:  true,
-				Passed:   true,
-				Notes:    []string{"valid lane note"},
+				Observed:        true,
+				Enabled:         true,
+				Passed:          true,
+				BaselineCommand: readOnlyStatusCommand,
+				AfterCommand:    readOnlyStatusCommand,
+				Notes:           []string{"valid lane note"},
 			},
+			FailureClass: FailureClassNone,
 		},
 	})
 
@@ -432,7 +449,6 @@ func TestFinalizeDeepCopiesLaneOutputs(t *testing.T) {
 					Title:    "finding",
 					File:     "internal/reviewquorum/finalize.go",
 					Start:    12,
-					Lanes:    []string{"reported"},
 					Evidence: []Evidence{{Kind: "file", Path: "finding.go"}},
 				},
 			},
@@ -450,7 +466,6 @@ func TestFinalizeDeepCopiesLaneOutputs(t *testing.T) {
 	got := Finalize(reviewSubject, reviewBaseRef, outputs)
 
 	outputs[0].Findings[0].Title = "mutated"
-	outputs[0].Findings[0].Lanes[0] = "mutated"
 	outputs[0].Findings[0].Evidence[0].Path = "mutated.go"
 	outputs[0].Evidence[0].Path = "mutated-lane.go"
 	outputs[0].Usage.TotalTokens = 99
@@ -460,9 +475,6 @@ func TestFinalizeDeepCopiesLaneOutputs(t *testing.T) {
 	lane := got.Lanes[0]
 	if lane.Findings[0].Title != "finding" {
 		t.Fatalf("lane finding title = %q, want copied finding", lane.Findings[0].Title)
-	}
-	if lane.Findings[0].Lanes[0] != "reported" {
-		t.Fatalf("lane finding lanes = %+v, want copied finding lanes", lane.Findings[0].Lanes)
 	}
 	if lane.Findings[0].Evidence[0].Path != "finding.go" {
 		t.Fatalf("lane finding evidence = %+v, want copied finding evidence", lane.Findings[0].Evidence)
@@ -501,6 +513,155 @@ func TestFinalizeIgnoresFailureClassNoneOnPassingLane(t *testing.T) {
 	}
 	if got.FailureClass != FailureClassNone || got.FailureReason != "" {
 		t.Fatalf("failure = %q/%q, want none/empty", got.FailureClass, got.FailureReason)
+	}
+}
+
+func TestFinalizeRejectsMissingSuccessFailureClass(t *testing.T) {
+	got := Finalize(reviewSubject, reviewBaseRef, []LaneOutput{
+		{
+			LaneID:        lanePrimary,
+			Provider:      "test-provider",
+			Model:         "test-model",
+			Verdict:       VerdictPass,
+			FindingsCount: 0,
+			ReadOnlyEnforcement: ReadOnlyEnforcement{
+				Observed:        true,
+				Enabled:         true,
+				Passed:          true,
+				BaselineCommand: readOnlyStatusCommand,
+				AfterCommand:    readOnlyStatusCommand,
+			},
+		},
+	})
+	if got.Verdict != VerdictFail {
+		t.Fatalf("Verdict = %q, want fail", got.Verdict)
+	}
+	if got.FailureClass != FailureClassHard {
+		t.Fatalf("FailureClass = %q, want hard", got.FailureClass)
+	}
+	if got.FailureReason != "lane=primary reason=failure_class_missing" {
+		t.Fatalf("FailureReason = %q, want failure_class_missing", got.FailureReason)
+	}
+}
+
+func TestFinalizeRejectsMissingReadOnlyProofCommands(t *testing.T) {
+	tests := []struct {
+		name            string
+		baselineCommand string
+		afterCommand    string
+		reason          string
+	}{
+		{
+			name:            "missing baseline command",
+			baselineCommand: "",
+			afterCommand:    readOnlyStatusCommand,
+			reason:          "lane=primary reason=read_only_baseline_command_missing",
+		},
+		{
+			name:            "missing after command",
+			baselineCommand: readOnlyStatusCommand,
+			afterCommand:    " ",
+			reason:          "lane=primary reason=read_only_after_command_missing",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Finalize(reviewSubject, reviewBaseRef, []LaneOutput{
+				{
+					LaneID:        lanePrimary,
+					Provider:      "test-provider",
+					Model:         "test-model",
+					Verdict:       VerdictPass,
+					FindingsCount: 0,
+					ReadOnlyEnforcement: ReadOnlyEnforcement{
+						Observed:        true,
+						Enabled:         true,
+						Passed:          true,
+						BaselineCommand: tt.baselineCommand,
+						AfterCommand:    tt.afterCommand,
+					},
+					FailureClass: FailureClassNone,
+				},
+			})
+			if got.Verdict != VerdictFail {
+				t.Fatalf("Verdict = %q, want fail", got.Verdict)
+			}
+			if got.FailureClass != FailureClassHard {
+				t.Fatalf("FailureClass = %q, want hard", got.FailureClass)
+			}
+			if got.FailureReason != tt.reason {
+				t.Fatalf("FailureReason = %q, want %q", got.FailureReason, tt.reason)
+			}
+		})
+	}
+}
+
+func TestFinalizeRejectsLaneProvidedFindingProvenance(t *testing.T) {
+	got := finalize([]LaneOutput{
+		{
+			LaneID:        lanePrimary,
+			Verdict:       VerdictPassWithFindings,
+			FindingsCount: 1,
+			Findings: []Finding{
+				{
+					Title: "finding",
+					File:  "internal/reviewquorum/finalize.go",
+					Start: 12,
+					Lanes: []string{"reviewer-supplied"},
+				},
+			},
+			ReadOnlyEnforcement: ReadOnlyEnforcement{Observed: true, Enabled: true, Passed: true},
+		},
+	})
+	if got.Verdict != VerdictFail {
+		t.Fatalf("Verdict = %q, want fail", got.Verdict)
+	}
+	if got.FailureReason != "lane=primary reason=finding_lanes_not_allowed" {
+		t.Fatalf("FailureReason = %q, want finding_lanes_not_allowed", got.FailureReason)
+	}
+	if got.FindingsCount != 0 || len(got.Findings) != 0 {
+		t.Fatalf("Findings = %d/%d, want invalid lane finding excluded", got.FindingsCount, len(got.Findings))
+	}
+}
+
+func TestFinalizeNormalizesNilLaneArraysInSummaryJSON(t *testing.T) {
+	got := finalize([]LaneOutput{
+		{
+			LaneID:              lanePrimary,
+			Verdict:             VerdictPass,
+			FindingsCount:       0,
+			ReadOnlyEnforcement: ReadOnlyEnforcement{Observed: true, Enabled: true, Passed: true},
+		},
+	})
+	if len(got.Lanes) != 1 {
+		t.Fatalf("Lanes len = %d, want 1", len(got.Lanes))
+	}
+	if got.Lanes[0].Findings == nil {
+		t.Fatal("lane Findings = nil, want empty array for durable JSON")
+	}
+	if got.Lanes[0].Evidence == nil {
+		t.Fatal("lane Evidence = nil, want empty array for durable JSON")
+	}
+
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	var summary struct {
+		Lanes []struct {
+			Findings json.RawMessage `json:"findings"`
+			Evidence json.RawMessage `json:"evidence"`
+		} `json:"lanes"`
+	}
+	if err := json.Unmarshal(raw, &summary); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if string(summary.Lanes[0].Findings) != "[]" {
+		t.Fatalf("lane findings JSON = %s, want []", summary.Lanes[0].Findings)
+	}
+	if string(summary.Lanes[0].Evidence) != "[]" {
+		t.Fatalf("lane evidence JSON = %s, want []", summary.Lanes[0].Evidence)
 	}
 }
 
