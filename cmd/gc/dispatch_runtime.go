@@ -68,6 +68,7 @@ func applyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string,
 var (
 	workflowServeList               = nextWorkflowServeBeads
 	controlDispatcherServe          = runControlDispatcherInStore
+	workflowServeQuarantineControl  = quarantineWorkflowServeControlBead
 	workflowServeOpenEventsProvider = func(stderr io.Writer) (events.Provider, error) {
 		ep, code := openCityEventsProvider(stderr, "gc convoy control --serve")
 		if ep == nil {
@@ -484,7 +485,13 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 					legacyOversizedCount++
 					continue
 				}
-				return result, fmt.Errorf("processing control bead %s: %w", beadID, err)
+				workflowTracef("serve quarantine bead=%s kind=%s err=%v", beadID, kind, err)
+				if qerr := workflowServeQuarantineControl(cityPath, storePath, beadID, err, stderr); qerr != nil {
+					return result, fmt.Errorf("quarantining control bead %s after processing error %w: %w", beadID, err, qerr)
+				}
+				result.processedAny = true
+				processedThisCycle = true
+				continue
 			}
 			workflowTracef("serve processed bead=%s kind=%s", beadID, kind)
 			result.processedAny = true
@@ -516,6 +523,42 @@ func isLegacyOversizedControlEventError(err error) bool {
 	return strings.Contains(msg, "recording attempt log") &&
 		strings.Contains(msg, "old_value") &&
 		strings.Contains(msg, "too large")
+}
+
+func quarantineWorkflowServeControlBead(cityPath, storePath, beadID string, cause error, stderr io.Writer) error {
+	if storePath == "" {
+		storePath = cityPath
+	}
+	cfg, err := loadCityConfig(cityPath, stderr)
+	if err != nil {
+		return err
+	}
+	resolveRigPaths(cityPath, cfg.Rigs)
+	store, err := openControlStoreAtForCity(storePath, cityPath, cfg)
+	if err != nil {
+		return fmt.Errorf("opening scoped control store %q: %w", storePath, err)
+	}
+	return quarantineWorkflowServeControlInStore(store, beadID, cause)
+}
+
+func quarantineWorkflowServeControlInStore(store beads.Store, beadID string, cause error) error {
+	reason := ""
+	if cause != nil {
+		reason = cause.Error()
+	}
+	status := "closed"
+	return store.Update(beadID, beads.UpdateOpts{
+		Status: &status,
+		Labels: []string{"gc:control-quarantined"},
+		Metadata: map[string]string{
+			"gc.outcome":                   "fail",
+			"gc.failure_class":             "controller",
+			"gc.failure_reason":            "control_dispatcher_error",
+			"gc.control_quarantined":       "true",
+			"gc.control_quarantine_reason": reason,
+			"gc.control_quarantined_at":    time.Now().UTC().Format(time.RFC3339),
+		},
+	})
 }
 
 func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuery string, workEnv map[string]string, stderr io.Writer) error {

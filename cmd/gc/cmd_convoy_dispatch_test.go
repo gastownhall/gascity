@@ -1501,6 +1501,119 @@ func TestRequireWorkflowServeFollowSessionEnvAllowsManagedSession(t *testing.T) 
 	}
 }
 
+func TestRunWorkflowServeQuarantinesBadControlBeadAndContinues(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+
+	prevCityFlag := cityFlag
+	prevList := workflowServeList
+	prevControl := controlDispatcherServe
+	prevQuarantine := workflowServeQuarantineControl
+	prevInterval := workflowServeIdlePollInterval
+	prevAttempts := workflowServeIdlePollAttempts
+	cityFlag = ""
+	workflowServeIdlePollInterval = 0
+	workflowServeIdlePollAttempts = 0
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+		workflowServeList = prevList
+		controlDispatcherServe = prevControl
+		workflowServeQuarantineControl = prevQuarantine
+		workflowServeIdlePollInterval = prevInterval
+		workflowServeIdlePollAttempts = prevAttempts
+	})
+
+	calls := 0
+	var controlled []string
+	var quarantined []string
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		calls++
+		if calls == 1 {
+			return []hookBead{
+				{ID: "gc-ctrl-bad", Metadata: map[string]string{"gc.kind": "fanout"}},
+				{ID: "gc-ctrl-good", Metadata: map[string]string{"gc.kind": "scope-check"}},
+			}, nil
+		}
+		return nil, nil
+	}
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+		controlled = append(controlled, beadID)
+		if beadID == "gc-ctrl-bad" {
+			return fmt.Errorf("bad workflow")
+		}
+		return nil
+	}
+	workflowServeQuarantineControl = func(_, _ string, beadID string, cause error, _ io.Writer) error {
+		quarantined = append(quarantined, beadID)
+		if cause == nil || !strings.Contains(cause.Error(), "bad workflow") {
+			t.Fatalf("quarantine cause = %v, want bad workflow", cause)
+		}
+		return nil
+	}
+
+	if err := runWorkflowServe("", false, io.Discard, io.Discard); err != nil {
+		t.Fatalf("runWorkflowServe: %v", err)
+	}
+
+	if !slices.Equal(controlled, []string{"gc-ctrl-bad", "gc-ctrl-good"}) {
+		t.Fatalf("controlled beads = %#v, want bad bead quarantined then good bead processed", controlled)
+	}
+	if !slices.Equal(quarantined, []string{"gc-ctrl-bad"}) {
+		t.Fatalf("quarantined beads = %#v, want bad bead only", quarantined)
+	}
+}
+
+func TestQuarantineWorkflowServeControlInStoreClosesWithDiagnostics(t *testing.T) {
+	store := beads.NewMemStore()
+	control, err := store.Create(beads.Bead{
+		Title:  "control",
+		Status: "open",
+		Labels: []string{"gc:control"},
+		Metadata: map[string]string{
+			"gc.kind": "fanout",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+
+	if err := quarantineWorkflowServeControlInStore(store, control.ID, fmt.Errorf("bad workflow")); err != nil {
+		t.Fatalf("quarantineWorkflowServeControlInStore: %v", err)
+	}
+
+	got, err := store.Get(control.ID)
+	if err != nil {
+		t.Fatalf("get control: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed", got.Status)
+	}
+	if got.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("outcome = %q, want fail", got.Metadata["gc.outcome"])
+	}
+	if got.Metadata["gc.failure_class"] != "controller" {
+		t.Fatalf("failure_class = %q, want controller", got.Metadata["gc.failure_class"])
+	}
+	if got.Metadata["gc.failure_reason"] != "control_dispatcher_error" {
+		t.Fatalf("failure_reason = %q, want control_dispatcher_error", got.Metadata["gc.failure_reason"])
+	}
+	if got.Metadata["gc.control_quarantined"] != "true" {
+		t.Fatalf("control_quarantined = %q, want true", got.Metadata["gc.control_quarantined"])
+	}
+	if !strings.Contains(got.Metadata["gc.control_quarantine_reason"], "bad workflow") {
+		t.Fatalf("control_quarantine_reason = %q, want bad workflow", got.Metadata["gc.control_quarantine_reason"])
+	}
+	if got.Metadata["gc.control_quarantined_at"] == "" {
+		t.Fatal("control_quarantined_at is empty")
+	}
+	if !slices.Contains(got.Labels, "gc:control-quarantined") {
+		t.Fatalf("labels = %#v, want gc:control-quarantined", got.Labels)
+	}
+}
+
 func TestRunWorkflowServeRoutesTraceOpenWarningsToCommandStderr(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
