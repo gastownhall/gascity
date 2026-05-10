@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
@@ -65,9 +66,16 @@ func clearInheritedBeadsEnv(t *testing.T) {
 // (discoverDoltProcesses returns nil there). The test-config allowlist keeps
 // unrelated city/runtime dolt servers out of the diff so background activity
 // does not false-positive the cleanup check.
-func requireNoLeakedDoltAfter(t *testing.T) {
+func requireNoLeakedDoltAfterForPaths(t *testing.T, paths ...string) {
 	t.Helper()
-	requireNoLeakedDoltAfterWith(t, discoverDoltProcesses)
+	requireNoLeakedDoltAfterWithFilter(t, discoverDoltProcesses, func(configPath string) bool {
+		for _, path := range paths {
+			if path != "" && pathutil.PathWithin(path, configPath) {
+				return true
+			}
+		}
+		return false
+	})
 }
 
 // requireNoLeakedDoltAfterWith is the testReporter+injectable-enumerator
@@ -77,9 +85,18 @@ func requireNoLeakedDoltAfter(t *testing.T) {
 // without spawning real dolt children.
 func requireNoLeakedDoltAfterWith(t testReporter, enumerate func() ([]DoltProcInfo, error)) {
 	t.Helper()
-	initial := snapshotDoltProcessPIDsWith(t, enumerate)
+	homeDir, _ := os.UserHomeDir()
+	tempDir := os.TempDir()
+	requireNoLeakedDoltAfterWithFilter(t, enumerate, func(configPath string) bool {
+		return isTestConfigPath(configPath, homeDir, tempDir)
+	})
+}
+
+func requireNoLeakedDoltAfterWithFilter(t testReporter, enumerate func() ([]DoltProcInfo, error), includeConfigPath func(string) bool) {
+	t.Helper()
+	initial := snapshotDoltProcessPIDsWithFilter(t, enumerate, includeConfigPath)
 	t.Cleanup(func() {
-		leaked := snapshotDoltProcessPIDsWith(t, enumerate)
+		leaked := snapshotDoltProcessPIDsWithFilter(t, enumerate, includeConfigPath)
 		for pid := range initial {
 			delete(leaked, pid)
 		}
@@ -108,15 +125,22 @@ func requireNoLeakedDoltAfterWith(t testReporter, enumerate func() ([]DoltProcIn
 // swallowed discovery failure can never silently mask a real leak.
 func snapshotDoltProcessPIDsWith(t testReporter, enumerate func() ([]DoltProcInfo, error)) map[int]string {
 	t.Helper()
+	homeDir, _ := os.UserHomeDir()
+	tempDir := os.TempDir()
+	return snapshotDoltProcessPIDsWithFilter(t, enumerate, func(configPath string) bool {
+		return isTestConfigPath(configPath, homeDir, tempDir)
+	})
+}
+
+func snapshotDoltProcessPIDsWithFilter(t testReporter, enumerate func() ([]DoltProcInfo, error), includeConfigPath func(string) bool) map[int]string {
+	t.Helper()
 	procs, err := enumerate()
 	if err != nil {
 		t.Fatalf("discoverDoltProcesses: %v", err)
 	}
-	homeDir, _ := os.UserHomeDir()
-	tempDir := os.TempDir()
 	out := make(map[int]string, len(procs))
 	for _, p := range procs {
-		if !isTestConfigPath(extractConfigPath(p.Argv), homeDir, tempDir) {
+		if !includeConfigPath(extractConfigPath(p.Argv)) {
 			continue
 		}
 		out[p.PID] = strings.Join(p.Argv, " ")
