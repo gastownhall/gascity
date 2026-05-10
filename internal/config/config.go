@@ -2658,7 +2658,7 @@ func ValidateAgents(agents []Agent) error {
 		}
 		key := agentKey{dir: a.Dir, name: a.Name}
 		if priorIdx, dup := seen[key]; dup {
-			return formatDuplicateAgentError(agents[priorIdx], a, "", "")
+			return formatDuplicateAgentError(agents[priorIdx], a)
 		}
 		seen[key] = i
 		// Scope enum.

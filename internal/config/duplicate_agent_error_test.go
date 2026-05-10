@@ -14,71 +14,63 @@ import (
 // for every reachable source category so the error never contains an empty
 // quoted "" path (the visible bug ga-tpfc.1 fixes).
 func TestDescribeSource(t *testing.T) {
-	cityRoot := "/home/u/proj"
-	cityFile := "/home/u/proj/city.toml"
-
 	tests := []struct {
-		name      string
-		agent     Agent
-		cityRoot  string
-		cityFile  string
-		want      string
-		wantOneOf []string // any-of match when format is non-deterministic
+		name         string
+		agent        Agent
+		want         string
+		wantContains []string
 	}{
 		{
-			name:     "SourceDir wins over source enum",
-			agent:    Agent{Name: "mayor", SourceDir: "packs/gastown", source: sourceAutoImport},
-			cityRoot: cityRoot,
-			cityFile: cityFile,
-			want:     "packs/gastown",
+			name:  "auto-import with SourceDir renders kind and path",
+			agent: Agent{Name: "mayor", SourceDir: "packs/gastown", BindingName: "gastown", source: sourceAutoImport},
+			wantContains: []string{
+				"<auto-import: gastown>",
+				"packs/gastown",
+			},
 		},
 		{
-			name:     "explicit pack with SourceDir",
-			agent:    Agent{Name: "mayor", SourceDir: "packs/extras", source: sourcePack},
-			cityRoot: cityRoot,
-			cityFile: cityFile,
-			want:     "packs/extras",
+			name:  "explicit pack with SourceDir renders kind and path",
+			agent: Agent{Name: "mayor", SourceDir: "packs/extras", BindingName: "extras", source: sourcePack},
+			wantContains: []string{
+				"<pack: extras>",
+				"packs/extras",
+			},
 		},
 		{
-			name:     "auto-import resolves to bracketed kind/path",
-			agent:    Agent{Name: "mayor", BindingName: "gastown", source: sourceAutoImport},
-			cityRoot: cityRoot,
-			cityFile: cityFile,
-			wantOneOf: []string{
+			name:  "pack without binding keeps SourceDir",
+			agent: Agent{Name: "mayor", SourceDir: "packs/extras", source: sourcePack},
+			want:  "packs/extras",
+		},
+		{
+			name:  "auto-import resolves to bracketed kind",
+			agent: Agent{Name: "mayor", BindingName: "gastown", source: sourceAutoImport},
+			wantContains: []string{
 				"<auto-import: gastown>",
 				"<auto-import: ",
 			},
 		},
 		{
-			name:     "inline with cityFile renders <inline: file>",
-			agent:    Agent{Name: "mayor", source: sourceInline},
-			cityRoot: cityRoot,
-			cityFile: cityFile,
-			want:     "<inline: city.toml>",
+			name:  "inline with empty SourceDir renders bare <inline>",
+			agent: Agent{Name: "mayor", source: sourceInline},
+			want:  "<inline>",
 		},
 		{
-			name:     "inline with empty cityFile renders bare <inline>",
-			agent:    Agent{Name: "mayor", source: sourceInline},
-			cityRoot: "",
-			cityFile: "",
-			want:     "<inline>",
+			name:  "inline fragment with SourceDir renders path",
+			agent: Agent{Name: "mayor", SourceDir: "fragments/agents.toml", source: sourceInline},
+			want:  "fragments/agents.toml",
 		},
 		{
-			name:     "unknown source must not be empty",
-			agent:    Agent{Name: "mayor"},
-			cityRoot: cityRoot,
-			cityFile: cityFile,
-			wantOneOf: []string{
+			name:  "unknown source must not be empty",
+			agent: Agent{Name: "mayor"},
+			wantContains: []string{
 				"<unknown: name=mayor>",
 				"<unknown:",
 			},
 		},
 		{
-			name:     "unknown source falls back to BindingName when present",
-			agent:    Agent{Name: "polecat", BindingName: "gastown"},
-			cityRoot: cityRoot,
-			cityFile: cityFile,
-			wantOneOf: []string{
+			name:  "unknown source falls back to BindingName when present",
+			agent: Agent{Name: "polecat", BindingName: "gastown"},
+			wantContains: []string{
 				"<unknown: binding=gastown>",
 				"<unknown: ",
 			},
@@ -87,23 +79,22 @@ func TestDescribeSource(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := tc.agent.describeSource(tc.cityRoot, tc.cityFile)
+			got := tc.agent.describeSource()
 			if got == "" {
 				t.Fatalf("describeSource returned empty string — descriptor must always be non-empty")
 			}
 			if tc.want != "" && got != tc.want {
 				t.Errorf("describeSource = %q, want %q", got, tc.want)
 			}
-			if len(tc.wantOneOf) > 0 {
-				ok := false
-				for _, sub := range tc.wantOneOf {
-					if strings.Contains(got, sub) {
-						ok = true
-						break
+			if len(tc.wantContains) > 0 {
+				missing := []string{}
+				for _, sub := range tc.wantContains {
+					if !strings.Contains(got, sub) {
+						missing = append(missing, sub)
 					}
 				}
-				if !ok {
-					t.Errorf("describeSource = %q, want it to contain one of %v", got, tc.wantOneOf)
+				if len(missing) > 0 {
+					t.Errorf("describeSource = %q, missing substrings %v", got, missing)
 				}
 			}
 		})
@@ -191,6 +182,146 @@ scope = "city"
 	}
 	if mayor.source != sourceInline {
 		t.Errorf("mayor.source = %v, want sourceInline", mayor.source)
+	}
+}
+
+func writeDuplicateAgentSourceTestFile(t *testing.T, root, rel, data string) {
+	t.Helper()
+	path := filepath.Join(root, rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", path, err)
+	}
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("WriteFile(%s): %v", path, err)
+	}
+}
+
+func TestValidateAgents_LoadedPackCollisionRendersPackBinding(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+
+	dir := t.TempDir()
+	writeDuplicateAgentSourceTestFile(t, dir, "city.toml", `
+[workspace]
+name = "test-city"
+
+[imports.tools]
+source = "./packs/tools"
+
+[[agent]]
+name = "worker"
+`)
+	writeDuplicateAgentSourceTestFile(t, dir, "packs/tools/pack.toml", `
+[pack]
+name = "tools"
+schema = 1
+
+[[agent]]
+name = "worker"
+scope = "city"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	err = ValidateAgents(cfg.Agents)
+	if err == nil {
+		t.Fatal("expected duplicate-name error")
+	}
+	got := err.Error()
+	if strings.Contains(got, `""`) {
+		t.Fatalf(`error contains empty quoted ""; full error: %s`, got)
+	}
+	if !strings.Contains(got, "<pack: tools>") {
+		t.Fatalf("error should include pack binding provenance, got: %s", got)
+	}
+	if !strings.Contains(got, filepath.Join(dir, "packs/tools")) {
+		t.Fatalf("error should include pack source dir, got: %s", got)
+	}
+	if !strings.Contains(got, "<inline>") {
+		t.Fatalf("error should include inline provenance, got: %s", got)
+	}
+}
+
+func TestValidateAgents_DefaultRigImportCollisionRendersAutoImportBinding(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	packDir := filepath.Join(dir, "gastown")
+	writeDuplicateAgentSourceTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test-city"
+
+[[rigs]]
+name = "proj"
+path = "/tmp/proj"
+
+[rigs.imports.gs]
+source = "../gastown"
+
+[[agent]]
+name = "worker"
+dir = "proj"
+`)
+	writeDuplicateAgentSourceTestFile(t, cityDir, "pack.toml", `
+[pack]
+name = "test-city"
+schema = 2
+
+[defaults.rig.imports.gs]
+source = "../gastown"
+`)
+	writeDuplicateAgentSourceTestFile(t, packDir, "pack.toml", `
+[pack]
+name = "gastown"
+schema = 1
+
+[[agent]]
+name = "worker"
+scope = "rig"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	var imported *Agent
+	for i := range cfg.Agents {
+		a := &cfg.Agents[i]
+		if a.Dir == "proj" && a.Name == "worker" && a.BindingName == "gs" {
+			imported = a
+			break
+		}
+	}
+	if imported == nil {
+		t.Fatal("imported rig agent not found")
+	}
+	if imported.source != sourceAutoImport {
+		t.Fatalf("imported source = %v, want sourceAutoImport", imported.source)
+	}
+	if imported.SourceDir == "" {
+		t.Fatal("imported source dir is empty; test must use the real pack-loaded shape")
+	}
+
+	err = ValidateAgents(cfg.Agents)
+	if err == nil {
+		t.Fatal("expected duplicate-name error")
+	}
+	got := err.Error()
+	if strings.Contains(got, `""`) {
+		t.Fatalf(`error contains empty quoted ""; full error: %s`, got)
+	}
+	if !strings.Contains(got, "<auto-import: gs>") {
+		t.Fatalf("error should include auto-import binding provenance, got: %s", got)
+	}
+	if !strings.Contains(got, packDir) {
+		t.Fatalf("error should include auto-import source dir, got: %s", got)
+	}
+	if !strings.Contains(got, "<inline>") {
+		t.Fatalf("error should include inline provenance, got: %s", got)
 	}
 }
 

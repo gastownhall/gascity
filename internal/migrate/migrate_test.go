@@ -648,6 +648,9 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		"PoolName":                     true,
 		"BindingName":                  true,
 		"PackName":                     true,
+		// source is config-package-internal provenance used while composing
+		// configs; per-agent migration files intentionally do not persist it.
+		"source": true,
 		// v0.15.1 tombstones — still on Agent but intentionally not propagated
 		// by migrate (removed in v0.16).
 		"Skills":       true,
