@@ -261,7 +261,11 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// wins over both passthroughEnv and the uniform city default seeded by
 	// cityRuntimeEnvMapForCity above.
 	if cfgAgent.Name == config.ControlDispatcherAgentName {
-		agentEnv["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"] = citylayout.ControlDispatcherTraceDefaultPathFor(p.cityPath, qualifiedName)
+		agentEnv["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"] = citylayout.ControlDispatcherTraceDefaultPathForRuntimeDirAndName(
+			p.cityPath,
+			agentEnv["GC_CITY_RUNTIME_DIR"],
+			qualifiedName,
+		)
 	}
 	agentEnv["GC_BEADS"] = rawBeadsProviderForScope(rigRoot, p.cityPath)
 	if exe, err := os.Executable(); err == nil && exe != "" {

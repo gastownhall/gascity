@@ -135,6 +135,41 @@ func TestResolveTemplateUsesTrustedRuntimeRootForControlTraceDefault(t *testing.
 	}
 }
 
+func TestResolveTemplateUsesTrustedRuntimeRootForControlDispatcherTraceDefault(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	customRuntimeDir := filepath.Join(t.TempDir(), "runtime-root")
+	t.Setenv("GC_CITY_PATH", cityPath)
+	t.Setenv("GC_CITY_RUNTIME_DIR", customRuntimeDir)
+
+	params := &agentBuildParams{
+		cityName:   "city",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Provider: "test"},
+		providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+
+	qualifiedName := "app/" + config.ControlDispatcherAgentName
+	agent := &config.Agent{Name: config.ControlDispatcherAgentName, Dir: "app"}
+	tp, err := resolveTemplate(params, agent, qualifiedName, nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+
+	if got := tp.Env["GC_CITY_RUNTIME_DIR"]; got != customRuntimeDir {
+		t.Fatalf("GC_CITY_RUNTIME_DIR = %q, want %q", got, customRuntimeDir)
+	}
+	wantTraceDefault := filepath.Join(customRuntimeDir, "app--control-dispatcher-trace.log")
+	if got := tp.Env["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"]; got != wantTraceDefault {
+		t.Fatalf("GC_CONTROL_DISPATCHER_TRACE_DEFAULT = %q, want %q", got, wantTraceDefault)
+	}
+}
+
 // TestResolveTemplateInjectsPerDispatcherTraceDefault asserts that
 // resolveTemplate produces a per-dispatcher GC_CONTROL_DISPATCHER_TRACE_DEFAULT
 // in agentEnv for control-dispatcher agents (closes #1650). The override
