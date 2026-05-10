@@ -1593,6 +1593,7 @@ func closeFailedCreateBead(store beads.Store, id string, now time.Time, stderr i
 	patch := session.ClosePatch(now.UTC(), string(session.StateFailedCreate))
 	patch["pending_create_claim"] = ""
 	patch["pending_create_started_at"] = ""
+	patch["sleep_intent"] = ""
 	if setMetaBatch(store, id, patch, stderr) != nil {
 		return false
 	}
@@ -1868,6 +1869,9 @@ func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Wr
 	// that should be no-op on terminal beads.
 	if existing, err := store.Get(id); err == nil && existing.Status == "closed" {
 		return false
+	}
+	if reason == string(session.StateFailedCreate) {
+		return closeFailedCreateBead(store, id, now, stderr)
 	}
 	if setMetaBatch(store, id, session.ClosePatch(now, reason), stderr) != nil {
 		return false

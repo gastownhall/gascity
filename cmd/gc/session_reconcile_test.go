@@ -1609,6 +1609,47 @@ func TestHealStatePatchProjectsRuntimeLiveness(t *testing.T) {
 				"continuation_reset_pending": "true",
 			},
 		},
+		{
+			name:  "failed-create heals to asleep with failed-create sleep reason",
+			alive: false,
+			session: makeBead("b1", map[string]string{
+				"state": "failed-create",
+			}),
+			want: map[string]string{
+				"state":        "asleep",
+				"sleep_reason": "failed-create",
+			},
+		},
+		{
+			name:  "failed-create with existing sleep_reason preserved",
+			alive: false,
+			session: makeBead("b1", map[string]string{
+				"state":        "failed-create",
+				"sleep_reason": "auth-failure",
+			}),
+			want: map[string]string{
+				"state": "asleep",
+			},
+		},
+		{
+			// Regression: previously pending_create_claim=true caused
+			// sessionStartRequested to flip target back to "creating",
+			// ping-ponging the bead between failed-create and creating
+			// and leaving pending_create_claim set forever. The heal path
+			// must force target=asleep for state=failed-create+!alive
+			// and clear the stale claim in the same batch.
+			name:  "failed-create with stale pending_create_claim heals to asleep and clears claim",
+			alive: false,
+			session: makeBead("b1", map[string]string{
+				"state":                "failed-create",
+				"pending_create_claim": "true",
+			}),
+			want: map[string]string{
+				"state":                "asleep",
+				"sleep_reason":         "failed-create",
+				"pending_create_claim": "",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1629,6 +1670,33 @@ func TestHealStatePatchNilClockKeepsCreatingFresh(t *testing.T) {
 
 	if got := healStatePatch(session, false, nil); got != nil {
 		t.Fatalf("healStatePatch with nil clock = %#v, want nil patch for fresh-compatible creating", got)
+	}
+}
+
+func TestIsDeliberateSleepReason(t *testing.T) {
+	cases := []struct {
+		reason string
+		want   bool
+	}{
+		{"idle", true},
+		{"idle-timeout", true},
+		{"no-wake-reason", true},
+		{"config-drift", true},
+		{"drained", true},
+		{"user-hold", true},
+		{"wait-hold", true},
+		{"failed-create", true},
+		{"", false},
+		{"crash", false},
+		{"context-churn", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.reason, func(t *testing.T) {
+			got := isDeliberateSleepReason(tc.reason)
+			if got != tc.want {
+				t.Fatalf("isDeliberateSleepReason(%q) = %v, want %v", tc.reason, got, tc.want)
+			}
+		})
 	}
 }
 

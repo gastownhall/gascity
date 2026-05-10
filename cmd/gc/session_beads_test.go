@@ -2537,7 +2537,13 @@ func TestSyncSessionBeads_DoesNotRewriteReconcilerOwnedState(t *testing.T) {
 	}
 }
 
-func TestCloseBeadPreservesPendingCreateClaimWhenCloseFails(t *testing.T) {
+// TestCloseFailedCreateBeadClearsPendingCreateClaimEvenWhenCloseFails documents
+// the corrected failed-create contract: the terminal metadata batch clears the
+// stale create claim before store.Close runs. If store.Close then fails, the
+// bead is left with state=failed-create + closed_at set but Status=open; the
+// reconciler can close it on a later tick without resurrecting it into
+// StateCreating.
+func TestCloseBeadClearsPendingCreateClaimEvenWhenCloseFails(t *testing.T) {
 	store := &failingCloseStore{MemStore: beads.NewMemStore()}
 	now := time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)
 	b, err := store.Create(beads.Bead{
@@ -2552,15 +2558,21 @@ func TestCloseBeadPreservesPendingCreateClaimWhenCloseFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if closeBead(store, b.ID, "failed-create", now, ioDiscard{}) {
-		t.Fatal("closeBead returned true, want false when Close fails")
+	if closeFailedCreateBead(store, b.ID, now, ioDiscard{}) {
+		t.Fatal("closeFailedCreateBead returned true, want false when Close fails")
 	}
 	got, err := store.Get(b.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Metadata["pending_create_claim"] != "true" {
-		t.Fatalf("pending_create_claim = %q, want preserved when close fails", got.Metadata["pending_create_claim"])
+	if got.Metadata["pending_create_claim"] != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared (terminal close writes atomic metadata; stale claim would ping-pong the reconciler)", got.Metadata["pending_create_claim"])
+	}
+	if got.Metadata["state"] != "failed-create" {
+		t.Fatalf("state = %q, want failed-create", got.Metadata["state"])
+	}
+	if want := session.CanonicalCloseReason(string(session.StateFailedCreate)); got.Metadata["close_reason"] != want {
+		t.Fatalf("close_reason = %q, want %q", got.Metadata["close_reason"], want)
 	}
 }
 

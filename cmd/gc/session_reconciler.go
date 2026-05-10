@@ -688,6 +688,34 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				}
 				continue
 			}
+			if isFailedCreateSessionBead(*session) {
+				template := normalizedSessionTemplate(*session, cfg)
+				if template == "" {
+					template = session.Metadata["template"]
+				}
+				if pendingCreateSessionStillLeased(*session, cfg, clk) {
+					if trace != nil {
+						trace.recordDecision("reconciler.session.pending_create_preserved", template, name, "pending_create", "kept_open", traceRecordPayload{
+							"pending_create_claim": strings.TrimSpace(session.Metadata["pending_create_claim"]),
+							"provider_alive":       providerAlive,
+							"state":                session.Metadata["state"],
+						}, nil, "")
+					}
+					continue
+				}
+				if !providerAlive {
+					if trace != nil {
+						trace.recordDecision("reconciler.session.close_failed_create", template, name, string(sessionpkg.StateFailedCreate), "closed", nil, nil, "")
+					}
+					if storeQueryPartial {
+						continue
+					}
+					if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, *session, string(sessionpkg.StateFailedCreate), clk.Now().UTC(), stderr) {
+						session.Status = "closed"
+					}
+					continue
+				}
+			}
 			// Heal state using provider liveness, not agent membership.
 			healState(session, providerAlive, store, clk)
 			switch {

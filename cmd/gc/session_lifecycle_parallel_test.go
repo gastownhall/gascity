@@ -3243,8 +3243,8 @@ func TestCommitAsyncStartResultWithContext_StopsCanceledSuccessfulPendingCreateR
 	if got := updated.Metadata["last_woke_at"]; got != "" {
 		t.Fatalf("last_woke_at = %q, want cleared so the next controller can retry", got)
 	}
-	if got := updated.Metadata["pending_create_claim"]; got != "true" {
-		t.Fatalf("pending_create_claim = %q, want true for next-tick retry", got)
+	if got := updated.Metadata["pending_create_claim"]; got != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared on failed-create rollback", got)
 	}
 }
 
@@ -3350,8 +3350,8 @@ func TestCommitAsyncStartResultWithContext_RollsBackCanceledPendingCreateSuccess
 	if updated.Status != "closed" {
 		t.Fatalf("status = %q, want closed so canceled create cannot strand a creating bead", updated.Status)
 	}
-	if got := updated.Metadata["pending_create_claim"]; got != "true" {
-		t.Fatalf("pending_create_claim = %q, want preserved on closed failed-create bead for audit", got)
+	if got := updated.Metadata["pending_create_claim"]; got != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared on closed failed-create bead", got)
 	}
 	if pendingCreateStartInFlight(updated, clk, 0) {
 		t.Fatal("canceled async success left the pending-create bead leased")
@@ -3465,8 +3465,8 @@ func TestCommitStartResult_RollbackPendingErrorClearsInFlightLeaseWhenCloseFails
 	if got := updated.Metadata["last_woke_at"]; got != "" {
 		t.Fatalf("last_woke_at = %q, want cleared so the next reconciler tick can retry", got)
 	}
-	if got := updated.Metadata["pending_create_claim"]; got != "true" {
-		t.Fatalf("pending_create_claim = %q, want true for pending-create retry", got)
+	if got := updated.Metadata["pending_create_claim"]; got != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared after failed-create metadata lands", got)
 	}
 	if pendingCreateStartInFlight(updated, clk, 0) {
 		t.Fatal("rollback-pending error left the pending-create bead leased")

@@ -43,7 +43,7 @@ func isPoolSessionSlotFreeable(session beads.Bead) bool {
 	}
 	reason := strings.TrimSpace(session.Metadata["sleep_reason"])
 	switch reason {
-	case "idle", "idle-timeout":
+	case "idle", "idle-timeout", "failed-create":
 		return true
 	}
 	return false
