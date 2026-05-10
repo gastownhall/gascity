@@ -107,6 +107,13 @@ func TestCityPackTomlParses(t *testing.T) {
 	if gastownImp.Source != "packs/gastown" {
 		t.Errorf("pack.toml imports[\"gastown\"].Source = %q, want %q", gastownImp.Source, "packs/gastown")
 	}
+	gastownDefault, ok := tc.Defaults.Rig.Imports["gastown"]
+	if !ok {
+		t.Fatalf("pack.toml defaults.rig.imports = %v, want entry for \"gastown\"", tc.Defaults.Rig.Imports)
+	}
+	if gastownDefault.Source != "packs/gastown" {
+		t.Errorf("pack.toml defaults.rig.imports[\"gastown\"].Source = %q, want %q", gastownDefault.Source, "packs/gastown")
+	}
 }
 
 func TestCityTomlValidates(t *testing.T) {
@@ -1344,8 +1351,13 @@ func TestDaemonConfig(t *testing.T) {
 
 // packFileConfig mirrors the pack.toml structure for test parsing.
 type packFileConfig struct {
-	Pack    config.PackMeta          `toml:"pack"`
-	Imports map[string]config.Import `toml:"imports"`
+	Pack     config.PackMeta          `toml:"pack"`
+	Imports  map[string]config.Import `toml:"imports"`
+	Defaults struct {
+		Rig struct {
+			Imports map[string]config.Import `toml:"imports"`
+		} `toml:"rig"`
+	} `toml:"defaults"`
 }
 
 func discoverPackAgents(t *testing.T, rel string) []config.Agent {
