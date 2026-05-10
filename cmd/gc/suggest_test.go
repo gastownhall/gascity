@@ -67,8 +67,8 @@ func TestSuggestSimilarNeverEchoesInput(t *testing.T) {
 		t.Errorf("suggestSimilar should not echo the input; got %q", got)
 	}
 	// And the suggester should still suggest a close non-equal match.
-	if got := suggestSimilar("ar.interfac-lead", candidates); got == "" {
-		t.Error("suggestSimilar should still suggest a close non-equal match")
+	if got := suggestSimilar("ar.interfac-lead", candidates); !strings.Contains(got, "ar.interface-lead") {
+		t.Errorf("suggestSimilar should suggest the closest non-equal match; got %q", got)
 	}
 }
 

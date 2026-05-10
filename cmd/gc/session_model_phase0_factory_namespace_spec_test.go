@@ -81,6 +81,48 @@ func TestResolveSessionTemplate_BareNameFallbackForBoundAgent(t *testing.T) {
 	}
 }
 
+func TestResolveSessionTemplate_BindingQualifiedUsesCurrentRig(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "interface-lead", BindingName: "ar", Dir: "demo"},
+			{Name: "interface-lead", BindingName: "ar", Dir: "other"},
+		},
+	}
+	a, ok := resolveSessionTemplate(cfg, "ar.interface-lead", "demo")
+	if !ok {
+		t.Fatal("resolveSessionTemplate(ar.interface-lead, demo) failed; expected current-rig binding-qualified match")
+	}
+	if got := a.QualifiedName(); got != "demo/ar.interface-lead" {
+		t.Errorf("matched agent QualifiedName = %q, want demo/ar.interface-lead", got)
+	}
+}
+
+func TestResolveSessionTemplate_BindingQualifiedRequiresCurrentRig(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "interface-lead", BindingName: "ar", Dir: "demo"},
+		},
+	}
+	if _, ok := resolveSessionTemplate(cfg, "ar.interface-lead", "other"); ok {
+		t.Fatal("resolveSessionTemplate(ar.interface-lead, other) succeeded; wrong current rig must not match")
+	}
+}
+
+func TestResolveSessionTemplate_RigBindingQualifiedExactMatch(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "interface-lead", BindingName: "ar", Dir: "demo"},
+		},
+	}
+	a, ok := resolveSessionTemplate(cfg, "demo/ar.interface-lead", "")
+	if !ok {
+		t.Fatal("resolveSessionTemplate(demo/ar.interface-lead) failed; expected rig binding-qualified match")
+	}
+	if got := a.QualifiedName(); got != "demo/ar.interface-lead" {
+		t.Errorf("matched agent QualifiedName = %q, want demo/ar.interface-lead", got)
+	}
+}
+
 func TestPhase0SessionTargeting_RejectsTemplateToken(t *testing.T) {
 	t.Setenv("GC_SESSION", "phase0")
 
