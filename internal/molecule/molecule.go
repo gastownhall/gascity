@@ -386,7 +386,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 	var createdIDs []string
 	embeddedDeps := make(map[string]bool)
 	pendingAssignees := make(map[string]string)
-	graphWorkflow := len(recipe.Steps) > 0 && recipe.Steps[0].Metadata["gc.kind"] == "workflow"
+	graphWorkflow := preservesGraphActionTypes(recipe)
 
 	for i, step := range recipe.Steps {
 		// For RootOnly recipes, only create the root bead.
@@ -434,9 +434,10 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 				b.Metadata["idempotency_key"] = opts.IdempotencyKey
 			}
 		} else {
-			// graph.v2 workflows use step beads as independently routable
-			// actionable work, not scaffolding — skip the #1039 coercion
-			// so Ready() still surfaces them for worker claim.
+			// graph.v2 workflows and their retry/Ralph attempt sub-recipes
+			// use step beads as independently routable actionable work, not
+			// scaffolding — skip the #1039 coercion so Ready() still surfaces
+			// them for worker claim.
 			if !graphWorkflow {
 				b.Type = nonRootStepBeadType(b.Type)
 			}
@@ -810,6 +811,17 @@ func nonRootStepBeadType(currentType string) string {
 		return "step"
 	}
 	return currentType
+}
+
+func preservesGraphActionTypes(recipe *formula.Recipe) bool {
+	if recipe == nil || len(recipe.Steps) == 0 {
+		return false
+	}
+	root := recipe.Steps[0]
+	if root.Metadata["gc.kind"] == "workflow" {
+		return true
+	}
+	return root.Metadata["gc.attempt"] != "" && root.Metadata["gc.step_ref"] != ""
 }
 
 // stepToBead converts a RecipeStep to a Bead with variable substitution.

@@ -147,9 +147,16 @@ jobs:
           - label: basic
             command: make test-integration-review-formulas-basic-cover
             coverprofile: coverage.integration-review-formulas-basic.txt
-          - label: retries
-            command: make test-integration-review-formulas-retries-cover
-            coverprofile: coverage.integration-review-formulas-retries.txt
+          - label: retries-1-of-2
+            command: >-
+              GO_TEST_COVERPROFILE=coverage.integration-review-formulas-retries-1-of-2.txt
+              ./scripts/test-integration-shard review-formulas-retries-1-of-2
+            coverprofile: coverage.integration-review-formulas-retries-1-of-2.txt
+          - label: retries-2-of-2
+            command: >-
+              GO_TEST_COVERPROFILE=coverage.integration-review-formulas-retries-2-of-2.txt
+              ./scripts/test-integration-shard review-formulas-retries-2-of-2
+            coverprofile: coverage.integration-review-formulas-retries-2-of-2.txt
           - label: recovery
             command: make test-integration-review-formulas-recovery-cover
             coverprofile: coverage.integration-review-formulas-recovery.txt

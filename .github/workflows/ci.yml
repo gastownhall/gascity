@@ -348,9 +348,12 @@ jobs:
           - shard_name: review-formulas-basic
             timeout_minutes: 30
             command: make test-integration-review-formulas-basic
-          - shard_name: review-formulas-retries
-            timeout_minutes: 30
-            command: make test-integration-review-formulas-retries
+          - shard_name: review-formulas-retries-1-of-2
+            timeout_minutes: 20
+            command: ./scripts/test-integration-shard review-formulas-retries-1-of-2
+          - shard_name: review-formulas-retries-2-of-2
+            timeout_minutes: 20
+            command: ./scripts/test-integration-shard review-formulas-retries-2-of-2
           - shard_name: review-formulas-recovery
             timeout_minutes: 25
             command: make test-integration-review-formulas-recovery

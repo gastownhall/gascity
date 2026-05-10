@@ -2454,6 +2454,73 @@ func TestBuildRecipeApplyPlan_GraphWorkflowSkipsStepCoercion(t *testing.T) {
 	}
 }
 
+func TestInstantiate_GraphAttemptRecipeSkipsStepCoercion(t *testing.T) {
+	store := beads.NewMemStore()
+	recipe := graphAttemptRecipeForStepTypeTest()
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+
+	body, err := store.Get(result.IDMapping["wf.review.iteration.1.body"])
+	if err != nil {
+		t.Fatalf("Get(body): %v", err)
+	}
+	if body.Type != "task" {
+		t.Errorf("graph-attempt child Type = %q, want %q (must stay actionable)", body.Type, "task")
+	}
+}
+
+func TestBuildRecipeApplyPlan_GraphAttemptRecipeSkipsStepCoercion(t *testing.T) {
+	recipe := graphAttemptRecipeForStepTypeTest()
+
+	plan, _, _, err := buildRecipeApplyPlan(recipe, Options{})
+	if err != nil {
+		t.Fatalf("buildRecipeApplyPlan: %v", err)
+	}
+	for _, n := range plan.Nodes {
+		if n.Key == "wf.review.iteration.1.body" && n.Type != "task" {
+			t.Errorf("graph-attempt child node Type = %q, want %q (must stay actionable)", n.Type, "task")
+		}
+	}
+}
+
+func graphAttemptRecipeForStepTypeTest() *formula.Recipe {
+	return &formula.Recipe{
+		Name: "wf.review.iteration.1",
+		Steps: []formula.RecipeStep{
+			{
+				ID:     "wf.review.iteration.1",
+				Title:  "Review iteration",
+				Type:   "task",
+				IsRoot: true,
+				Metadata: map[string]string{
+					"gc.kind":     "scope",
+					"gc.attempt":  "1",
+					"gc.step_ref": "wf.review.iteration.1",
+				},
+			},
+			{
+				ID:    "wf.review.iteration.1.body",
+				Title: "Body work",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.scope_ref": "wf.review.iteration.1",
+					"gc.step_ref":  "wf.review.iteration.1.body",
+				},
+			},
+		},
+		Deps: []formula.RecipeDep{
+			{
+				StepID:      "wf.review.iteration.1",
+				DependsOnID: "wf.review.iteration.1.body",
+				Type:        "blocks",
+			},
+		},
+	}
+}
+
 func TestNonRootStepBeadType(t *testing.T) {
 	cases := []struct {
 		name        string
