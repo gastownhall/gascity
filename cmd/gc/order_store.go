@@ -100,8 +100,7 @@ func orderExecEnv(cityPath string, cfg *config.City, target execStoreTarget, a o
 	env["GC_BEADS_PREFIX"] = target.Prefix
 	// Tag every bd interaction this exec order produces with the order's
 	// name so audit logs and the dashboard can attribute housekeeping
-	// activity to the responsible order rather than to the controller's
-	// default identity. Overrides bdRuntimeEnv's "controller" default.
+	// activity to the responsible order rather than an ambient identity.
 	if name := strings.TrimSpace(a.Name); name != "" {
 		env["BEADS_ACTOR"] = "order:" + name
 	}

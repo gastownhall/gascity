@@ -2653,12 +2653,7 @@ dolt.port: 3307
 	}
 }
 
-// TestBdRuntimeEnvDefaultsBeadsActorToControllerWhenUnset verifies that the
-// supervisor (and any gc context lacking an explicit identity) gets a
-// non-OS-user actor for bd shell-outs. Without this default, bd's actor
-// resolution falls through to git config user.name and supervisor activity
-// is audit-logged as if the human typed it.
-func TestBdRuntimeEnvDefaultsBeadsActorToControllerWhenUnset(t *testing.T) {
+func TestBdRuntimeEnvDoesNotDefaultBeadsActorWhenUnset(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
 	_ = os.Unsetenv("BEADS_ACTOR")
@@ -2666,16 +2661,16 @@ func TestBdRuntimeEnvDefaultsBeadsActorToControllerWhenUnset(t *testing.T) {
 	cityPath := t.TempDir()
 	env := bdRuntimeEnv(cityPath)
 
-	if got := env["BEADS_ACTOR"]; got != "controller" {
-		t.Fatalf("BEADS_ACTOR = %q, want %q (supervisor should default to controller)", got, "controller")
+	if _, present := env["BEADS_ACTOR"]; present {
+		t.Fatalf("BEADS_ACTOR = %q, want absent for neutral bd runtime env", env["BEADS_ACTOR"])
 	}
 }
 
 // TestBdRuntimeEnvPreservesInheritedBeadsActor verifies that session
 // contexts (template_resolve.go sets BEADS_ACTOR=<sessname>) and exec
 // orders (orderExecEnv sets BEADS_ACTOR=order:<name>) are not clobbered by
-// the controller default. The override is conditional precisely so the
-// inherited value passes through mergeEnv unchanged.
+// the neutral bd runtime env. The key is omitted so the inherited value
+// passes through mergeEnv unchanged.
 func TestBdRuntimeEnvPreservesInheritedBeadsActor(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
@@ -2686,5 +2681,38 @@ func TestBdRuntimeEnvPreservesInheritedBeadsActor(t *testing.T) {
 
 	if _, present := env["BEADS_ACTOR"]; present {
 		t.Fatalf("env[BEADS_ACTOR] = %q, expected key absent so parent value passes through", env["BEADS_ACTOR"])
+	}
+}
+
+func TestControlBdCommandRunnerDefaultsBeadsActorToControllerWhenUnset(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	_ = os.Unsetenv("BEADS_ACTOR")
+
+	origRunner := beadsExecCommandRunnerWithEnv
+	t.Cleanup(func() { beadsExecCommandRunnerWithEnv = origRunner })
+
+	var captured map[string]string
+	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
+		captured = map[string]string{}
+		for key, value := range env {
+			captured[key] = value
+		}
+		return func(_ string, _ string, _ ...string) ([]byte, error) {
+			return []byte("ok"), nil
+		}
+	}
+
+	cityPath := t.TempDir()
+	runner := controlBdCommandRunnerForCity(cityPath)
+	if _, err := runner(cityPath, "bd", "list", "--json"); err != nil {
+		t.Fatalf("control runner error = %v, want nil", err)
+	}
+
+	if got := captured["BEADS_ACTOR"]; got != "controller" {
+		t.Fatalf("BEADS_ACTOR = %q, want controller for controller-owned bd runner", got)
+	}
+	if got := captured["BD_EXPORT_AUTO"]; got != "false" {
+		t.Fatalf("BD_EXPORT_AUTO = %q, want false", got)
 	}
 }

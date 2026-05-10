@@ -855,6 +855,55 @@ func TestMatchPayload(t *testing.T) {
 			t.Fatal("expected nested key OR-list to match task")
 		}
 	})
+
+	t.Run("matches literal dotted key below nested map", func(t *testing.T) {
+		payload := map[string]any{
+			"bead": map[string]any{
+				"metadata": map[string]any{
+					"gc.root_bead_id": "ga-root",
+				},
+			},
+		}
+		if !matchPayload(payload, map[string][]string{"bead.metadata.gc.root_bead_id": {"ga-root"}}) {
+			t.Fatal("expected dotted path to match literal metadata key gc.root_bead_id")
+		}
+	})
+
+	t.Run("matches deeper nested payload via dotted path", func(t *testing.T) {
+		payload := map[string]any{
+			"request": map[string]any{
+				"result": map[string]any{
+					"status": "ok",
+				},
+			},
+		}
+		if !matchPayload(payload, map[string][]string{"request.result.status": {"ok"}}) {
+			t.Fatal("expected 3-segment nested key to match")
+		}
+	})
+
+	t.Run("matches flat and nested filters together", func(t *testing.T) {
+		payload := map[string]any{
+			"type": "bead.closed",
+			"bead": map[string]any{"issue_type": "task"},
+		}
+		filter := map[string][]string{
+			"type":            {"bead.closed"},
+			"bead.issue_type": {"task"},
+		}
+		if !matchPayload(payload, filter) {
+			t.Fatal("expected combined flat and nested filters to match")
+		}
+	})
+
+	t.Run("matches nested numeric payload value", func(t *testing.T) {
+		payload := map[string]any{
+			"bead": map[string]any{"priority": 2.0},
+		}
+		if !matchPayload(payload, map[string][]string{"bead.priority": {"2"}}) {
+			t.Fatal("expected nested numeric value to match string form")
+		}
+	})
 }
 
 func TestParsePayloadMatch(t *testing.T) {

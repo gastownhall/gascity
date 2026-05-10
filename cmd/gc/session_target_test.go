@@ -95,8 +95,8 @@ func TestEventActorPrefersAliasThenSessionID(t *testing.T) {
 // fan out to `gc event emit ...` without --actor; that subprocess inherits
 // no GC_ALIAS/GC_AGENT/GC_SESSION_ID from the controller. Without this
 // fallback, every supervisor-initiated bead change shows up in the
-// dashboard as "human". With BEADS_ACTOR set (by bdRuntimeEnv to
-// "controller", or by orderExecEnv to "order:<name>"), the fallback
+// dashboard as "human". With BEADS_ACTOR set by controller bd wrappers
+// or by orderExecEnv to "order:<name>", the fallback
 // recovers the right identity.
 func TestEventActorFallsBackToBeadsActorBeforeHuman(t *testing.T) {
 	t.Setenv("GC_ALIAS", "")

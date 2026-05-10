@@ -4490,7 +4490,7 @@ func TestLockedWriterSerializesConcurrentWrites(t *testing.T) {
 // spawned by the controller carry an order-scoped BEADS_ACTOR into their
 // subprocess env, so any bd shell-out from inside the order's command
 // (e.g., `gc order sweep-tracking` → `bd close`) is audit-logged as
-// "order:<name>" rather than the controller default. This is what gives
+// "order:<name>" rather than an ambient identity. This is what gives
 // the dashboard fine-grained attribution per order.
 func TestOrderExecEnvSetsBeadsActorToOrderName(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")

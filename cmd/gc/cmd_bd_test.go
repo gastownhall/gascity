@@ -300,6 +300,10 @@ func TestResolveBdScopeTargetErrorsOnForeignRedirect(t *testing.T) {
 }
 
 func TestBdCommandEnvUsesCanonicalRigTarget(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	_ = os.Unsetenv("BEADS_ACTOR")
+
 	cityDir := t.TempDir()
 	wantPort := strconv.Itoa(writeReachableManagedDoltState(t, cityDir))
 	rigDir := filepath.Join(t.TempDir(), "repo")
@@ -340,6 +344,39 @@ dolt.auto-start: false
 	}
 	if got := env["GC_BEADS_PREFIX"]; got != "repo" {
 		t.Fatalf("GC_BEADS_PREFIX = %q, want %q", got, "repo")
+	}
+	if _, present := env["BEADS_ACTOR"]; present {
+		t.Fatalf("BEADS_ACTOR = %q, want absent for direct gc bd env without explicit actor", env["BEADS_ACTOR"])
+	}
+}
+
+func TestBdCommandRunnerForCityDoesNotDefaultBeadsActorWhenUnset(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	_ = os.Unsetenv("BEADS_ACTOR")
+
+	origRunner := beadsExecCommandRunnerWithEnv
+	t.Cleanup(func() { beadsExecCommandRunnerWithEnv = origRunner })
+
+	var captured map[string]string
+	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
+		captured = map[string]string{}
+		for key, value := range env {
+			captured[key] = value
+		}
+		return func(_ string, _ string, _ ...string) ([]byte, error) {
+			return []byte("ok"), nil
+		}
+	}
+
+	cityPath := t.TempDir()
+	runner := bdCommandRunnerForCity(cityPath)
+	if _, err := runner(cityPath, "bd", "list", "--json"); err != nil {
+		t.Fatalf("bd runner error = %v, want nil", err)
+	}
+
+	if _, present := captured["BEADS_ACTOR"]; present {
+		t.Fatalf("BEADS_ACTOR = %q, want absent for normal bd runner without explicit actor", captured["BEADS_ACTOR"])
 	}
 }
 
