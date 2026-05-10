@@ -122,9 +122,20 @@ gc bd show $WORK --json | jq '.[0].metadata'
 The bead MUST have `metadata.branch`. If `metadata.target` is missing,
 use {{target_branch}} as default. Note the work bead ID and close this step.
 
-If NO work found: wait for assignment:
+If NO work found: wait for assignment.
+
+Capture SEQ **before** the final list check so any bead routed during
+the window between check and watch is covered by the subscription:
 ```bash
 SEQ=$(gc events --seq)
+WORK=$(gc bd list --assignee=$GC_AGENT --status=open \
+  --exclude-type=epic --limit=1 --json | jq -r '.[0].id // empty')
+```
+
+If WORK is now non-empty (routed in the gap): proceed as if found above.
+
+Otherwise watch:
+```bash
 gc events --watch --type=bead.updated \
   --after=$SEQ --timeout {{event_timeout}}s
 ```
@@ -376,10 +387,17 @@ fi
 
 **If MERGE_STRATEGY = "direct" (default):**
 
-**1. Merge and push target branch:**
+**1. Advance target branch and push:**
+
+Use `git update-ref` instead of `checkout + merge` so the branch
+pointer advances regardless of which branch any worktree has checked
+out. A `git checkout $TARGET` in an environment where a worktree
+is already on a different branch silently merges into that worktree's
+HEAD instead of $TARGET.
+
 ```bash
-git checkout $TARGET
-git merge --ff-only temp
+NEW_SHA=$(git rev-parse temp)
+git update-ref refs/heads/$TARGET "$NEW_SHA"
 git push origin $TARGET
 ```
 
