@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -26,6 +27,8 @@ import (
 // (BEADS_DOLT_SERVER_HOST) is already derived from GC_DOLT_HOST by
 // cmd/gc/bd_env.go#mirrorBeadsDoltEnv, so a single env var serves both
 // the gc-internal direct connection (this helper) and bd subprocesses.
+// Ambient GC_DOLT_HOST redirects managed-city targets too; unset it when
+// default managed loopback behavior is desired.
 const ManagedCityHostEnv = "GC_DOLT_HOST"
 
 // managedCityHost returns the host to use for managed-city Dolt
@@ -36,6 +39,26 @@ func managedCityHost() string {
 		return host
 	}
 	return "127.0.0.1"
+}
+
+// DoltHostIsLocal reports whether host names the caller's local network
+// namespace for managed Dolt process ownership decisions.
+func DoltHostIsLocal(host string) bool {
+	host = strings.Trim(strings.ToLower(strings.TrimSpace(host)), "[]")
+	if host == "" || host == "localhost" {
+		return true
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	return addr.IsLoopback() || addr.IsUnspecified()
+}
+
+func managedCityHostRequiresLocalPID(host string) bool {
+	// Non-local host aliases can point at a host namespace whose PIDs are not
+	// meaningful to this process, so those deployments rely on port reachability.
+	return DoltHostIsLocal(host)
 }
 
 // DoltConnectionTarget is the resolved connection info for a beads scope.
@@ -682,21 +705,22 @@ func validManagedRuntimeState(state managedRuntimeState, cityRoot string) bool {
 	if filepath.Clean(strings.TrimSpace(state.DataDir)) != filepath.Clean(expectedDataDir) {
 		return false
 	}
-	if !contractPIDAlive(state.PID) {
+	host := managedCityHost()
+	if managedCityHostRequiresLocalPID(host) && !contractPIDAlive(state.PID) {
 		return false
 	}
-	return contractPortReachable(strconv.Itoa(state.Port))
+	return contractPortReachable(host, strconv.Itoa(state.Port))
 }
 
 func contractPIDAlive(pid int) bool {
 	return pidutil.Alive(pid)
 }
 
-func contractPortReachable(port string) bool {
+func contractPortReachable(host, port string) bool {
 	if strings.TrimSpace(port) == "" {
 		return false
 	}
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort(managedCityHost(), port), 250*time.Millisecond)
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 250*time.Millisecond)
 	if err != nil {
 		return false
 	}

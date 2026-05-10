@@ -18,6 +18,8 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
+const defaultManagedDoltHost = "127.0.0.1"
+
 // bdCommandRunnerForCity centralizes bd subprocess env construction so all
 // GC-managed bd calls resolve Dolt against the same city-scoped runtime.
 // Env is rebuilt on each call so GC_DOLT_PORT reflects the current managed
@@ -155,8 +157,8 @@ func applyCanonicalDoltTargetEnv(env map[string]string, target contract.DoltConn
 	// GC-owned projections must use the resolved target, not ambient parent
 	// shell host/port. Stale GC_DOLT_HOST/PORT was causing gc bd and projected
 	// session flows to drift away from the canonical external endpoint.
-	if target.External {
-		env["GC_DOLT_HOST"] = target.Host
+	if shouldProjectResolvedDoltHost(target) {
+		env["GC_DOLT_HOST"] = strings.TrimSpace(target.Host)
 	} else {
 		delete(env, "GC_DOLT_HOST")
 	}
@@ -165,6 +167,17 @@ func applyCanonicalDoltTargetEnv(env map[string]string, target contract.DoltConn
 	} else {
 		delete(env, "GC_DOLT_PORT")
 	}
+}
+
+func shouldProjectResolvedDoltHost(target contract.DoltConnectionTarget) bool {
+	host := strings.TrimSpace(target.Host)
+	if host == "" {
+		return false
+	}
+	if target.External {
+		return true
+	}
+	return !managedLocalDoltHost(host)
 }
 
 func applyCanonicalDoltAuthEnv(env map[string]string, cityPath, scopeRoot string, target contract.DoltConnectionTarget) {
@@ -284,13 +297,7 @@ func clearProjectedDoltPasswordEnv(env map[string]string) {
 }
 
 func managedLocalDoltHost(host string) bool {
-	host = strings.TrimSpace(strings.ToLower(host))
-	switch host {
-	case "", "127.0.0.1", "localhost", "0.0.0.0", "::1", "::":
-		return true
-	default:
-		return false
-	}
+	return contract.DoltHostIsLocal(host)
 }
 
 func resolvedRuntimeCityDoltTarget(cityPath string, allowRecovery bool) (contract.DoltConnectionTarget, bool, error) {
@@ -317,12 +324,12 @@ func resolvedRuntimeCityDoltTarget(cityPath string, allowRecovery bool) (contrac
 	}
 
 	if port := currentManagedDoltPort(cityPath); port != "" {
-		return contract.DoltConnectionTarget{Host: "127.0.0.1", Port: port}, true, nil
+		return contract.DoltConnectionTarget{Host: defaultManagedDoltHost, Port: port}, true, nil
 	}
 	if allowRecovery {
 		if err := healthBeadsProvider(cityPath); err == nil {
 			if port := currentManagedDoltPort(cityPath); port != "" {
-				return contract.DoltConnectionTarget{Host: "127.0.0.1", Port: port}, true, nil
+				return contract.DoltConnectionTarget{Host: defaultManagedDoltHost, Port: port}, true, nil
 			}
 		}
 	}
@@ -330,9 +337,6 @@ func resolvedRuntimeCityDoltTarget(cityPath string, allowRecovery bool) (contrac
 }
 
 func managedLocalDoltEnv(env map[string]string) bool {
-	if len(env) == 0 {
-		return false
-	}
 	return managedLocalDoltHost(env["GC_DOLT_HOST"])
 }
 
@@ -341,9 +345,9 @@ func managedBDRecoveryAllowed(cityPath, scopeRoot string, env map[string]string)
 		scopeRoot = cityPath
 	}
 	if target, ok, err := canonicalScopeDoltTarget(cityPath, scopeRoot); err != nil {
-		return contract.IsManagedRuntimeUnavailable(err)
+		return contract.IsManagedRuntimeUnavailable(err) && managedLocalDoltEnv(env)
 	} else if ok {
-		return !target.External
+		return !target.External && managedLocalDoltHost(target.Host)
 	}
 	return managedLocalDoltEnv(env)
 }

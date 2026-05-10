@@ -15,6 +15,11 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
+func TestMain(m *testing.M) {
+	_ = os.Unsetenv(ManagedCityHostEnv)
+	os.Exit(m.Run())
+}
+
 func TestResolveDoltConnectionTargetManagedCity(t *testing.T) {
 	fs := fsys.OSFS{}
 	city := t.TempDir()
@@ -308,6 +313,37 @@ func TestResolveDoltConnectionTargetInheritedManagedRigUsesCityRuntime(t *testin
 	}
 }
 
+func TestResolveDoltConnectionTargetInheritedManagedRig_EnvOverride(t *testing.T) {
+	host := reachableNonLoopbackHost(t)
+	t.Setenv(ManagedCityHostEnv, host)
+	fs := fsys.OSFS{}
+	city := t.TempDir()
+	rig := filepath.Join(t.TempDir(), "frontend")
+	writeCanonicalConfig(t, fs, city, ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: EndpointOriginManagedCity,
+		EndpointStatus: EndpointStatusVerified,
+	})
+	writeCanonicalConfig(t, fs, rig, ConfigState{
+		IssuePrefix:    "fe",
+		EndpointOrigin: EndpointOriginInheritedCity,
+		EndpointStatus: EndpointStatusVerified,
+	})
+	writeCanonicalMetadata(t, fs, rig, "fe")
+	port := writeReachableRuntimeStateOnHost(t, fs, city, host)
+
+	target, err := ResolveDoltConnectionTarget(fs, city, rig)
+	if err != nil {
+		t.Fatalf("ResolveDoltConnectionTarget() error = %v", err)
+	}
+	if target.External {
+		t.Fatal("inherited managed rig should not resolve external target")
+	}
+	if target.Host != host || target.Port != port || target.Database != "fe" {
+		t.Fatalf("target = %+v", target)
+	}
+}
+
 func TestResolveDoltConnectionTargetLegacyInheritedManagedRigUsesCityRuntime(t *testing.T) {
 	fs := fsys.OSFS{}
 	city := t.TempDir()
@@ -397,6 +433,45 @@ func TestResolveDoltConnectionTargetRejectsManagedRuntimeStateWithDeadPID(t *tes
 
 	if _, err := ResolveDoltConnectionTarget(fs, city, city); err == nil || !strings.Contains(err.Error(), "dolt runtime state unavailable") {
 		t.Fatalf("ResolveDoltConnectionTarget() error = %v, want stale managed runtime rejection", err)
+	}
+}
+
+func TestResolveDoltConnectionTargetManagedCity_EnvOverrideSkipsLocalPID(t *testing.T) {
+	host := reachableNonLoopbackHost(t)
+	t.Setenv(ManagedCityHostEnv, host)
+	fs := fsys.OSFS{}
+	city := t.TempDir()
+	writeCanonicalConfig(t, fs, city, ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: EndpointOriginManagedCity,
+		EndpointStatus: EndpointStatusVerified,
+	})
+	writeCanonicalMetadata(t, fs, city, "hq")
+	port := writeReachableRuntimeStateOnHostWithPID(t, fs, city, host, 99999999)
+
+	target, err := ResolveDoltConnectionTarget(fs, city, city)
+	if err != nil {
+		t.Fatalf("ResolveDoltConnectionTarget() error = %v", err)
+	}
+	if target.Host != host || target.Port != port || target.Database != "hq" {
+		t.Fatalf("target = %+v", target)
+	}
+}
+
+func TestResolveDoltConnectionTargetManagedCity_LoopbackAliasRequiresLocalPID(t *testing.T) {
+	t.Setenv(ManagedCityHostEnv, "127.0.0.2")
+	fs := fsys.OSFS{}
+	city := t.TempDir()
+	writeCanonicalConfig(t, fs, city, ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: EndpointOriginManagedCity,
+		EndpointStatus: EndpointStatusVerified,
+	})
+	writeCanonicalMetadata(t, fs, city, "hq")
+	writeRuntimeState(t, fs, city, fmt.Sprintf(`{"running":true,"pid":99999999,"port":3307,"data_dir":%q}`, filepath.Join(city, ".beads", "dolt")))
+
+	if _, err := ResolveDoltConnectionTarget(fs, city, city); err == nil || !strings.Contains(err.Error(), "dolt runtime state unavailable") {
+		t.Fatalf("ResolveDoltConnectionTarget() error = %v, want stale loopback runtime rejection", err)
 	}
 }
 
@@ -955,14 +1030,60 @@ func writeReachableRuntimeState(t *testing.T, fs fsys.FS, city string) string {
 
 func writeReachableRuntimeStateWithDataDir(t *testing.T, fs fsys.FS, city, dataDir string) string {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	return writeReachableRuntimeStateOnHostWithPIDAndDataDir(t, fs, city, "127.0.0.1", os.Getpid(), dataDir)
+}
+
+func writeReachableRuntimeStateOnHost(t *testing.T, fs fsys.FS, city, host string) string {
+	t.Helper()
+	return writeReachableRuntimeStateOnHostWithPID(t, fs, city, host, os.Getpid())
+}
+
+func writeReachableRuntimeStateOnHostWithPID(t *testing.T, fs fsys.FS, city, host string, pid int) string {
+	t.Helper()
+	return writeReachableRuntimeStateOnHostWithPIDAndDataDir(t, fs, city, host, pid, filepath.Join(city, ".beads", "dolt"))
+}
+
+func writeReachableRuntimeStateOnHostWithPIDAndDataDir(t *testing.T, fs fsys.FS, city, host string, pid int, dataDir string) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
 	port := listener.Addr().(*net.TCPAddr).Port
-	writeRuntimeState(t, fs, city, fmt.Sprintf(`{"running":true,"pid":%d,"port":%d,"data_dir":%q}`, os.Getpid(), port, dataDir))
+	writeRuntimeState(t, fs, city, fmt.Sprintf(`{"running":true,"pid":%d,"port":%d,"data_dir":%q}`, pid, port, dataDir))
 	return fmt.Sprintf("%d", port)
+}
+
+func reachableNonLoopbackHost(t *testing.T) string {
+	t.Helper()
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, addr := range addrs {
+		var ip net.IP
+		switch typed := addr.(type) {
+		case *net.IPNet:
+			ip = typed.IP
+		case *net.IPAddr:
+			ip = typed.IP
+		default:
+			continue
+		}
+		ip = ip.To4()
+		if ip == nil || ip.IsLoopback() || ip.IsUnspecified() {
+			continue
+		}
+		listener, err := net.Listen("tcp", net.JoinHostPort(ip.String(), "0"))
+		if err != nil {
+			continue
+		}
+		_ = listener.Close()
+		return ip.String()
+	}
+	t.Skip("no bindable non-loopback IPv4 address")
+	return ""
 }
 
 //nolint:unparam // helper keeps FS explicit in tests
@@ -989,7 +1110,7 @@ func TestManagedCityHost_Default(t *testing.T) {
 	}
 }
 
-// TestManagedCityHost_EnvOverride asserts BEADS_DOLT_SERVER_HOST overrides the
+// TestManagedCityHost_EnvOverride asserts GC_DOLT_HOST overrides the
 // default loopback — this is how containerised callers (MCP servers, proxies
 // on Docker Desktop) redirect away from the container's own 127.0.0.1.
 func TestManagedCityHost_EnvOverride(t *testing.T) {
@@ -1010,11 +1131,10 @@ func TestManagedCityHost_EnvTrimmed(t *testing.T) {
 }
 
 // TestResolveDoltConnectionTargetManagedCity_EnvOverride asserts that a
-// managed-city resolve honors BEADS_DOLT_SERVER_HOST. Uses 127.0.0.1 as the
-// override value so the liveness check (contractPortReachable) passes — the
-// override is the same host the listener is bound to.
+// managed-city resolve honors GC_DOLT_HOST with a value distinguishable from
+// the unset default.
 func TestResolveDoltConnectionTargetManagedCity_EnvOverride(t *testing.T) {
-	t.Setenv(ManagedCityHostEnv, "127.0.0.1")
+	t.Setenv(ManagedCityHostEnv, "127.0.0.2")
 	fs := fsys.OSFS{}
 	city := t.TempDir()
 	writeCanonicalConfig(t, fs, city, ConfigState{
@@ -1023,14 +1143,14 @@ func TestResolveDoltConnectionTargetManagedCity_EnvOverride(t *testing.T) {
 		EndpointStatus: EndpointStatusVerified,
 	})
 	writeCanonicalMetadata(t, fs, city, "hq")
-	port := writeReachableRuntimeState(t, fs, city)
+	port := writeReachableRuntimeStateOnHost(t, fs, city, "127.0.0.2")
 
 	target, err := ResolveDoltConnectionTarget(fs, city, city)
 	if err != nil {
 		t.Fatalf("ResolveDoltConnectionTarget() error = %v", err)
 	}
-	if target.Host != "127.0.0.1" || target.Port != port {
-		t.Fatalf("target = %+v, want host 127.0.0.1 port %q", target, port)
+	if target.Host != "127.0.0.2" || target.Port != port {
+		t.Fatalf("target = %+v, want host 127.0.0.2 port %q", target, port)
 	}
 }
 
