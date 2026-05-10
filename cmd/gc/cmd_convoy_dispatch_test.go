@@ -1477,6 +1477,30 @@ func TestRunWorkflowServeDrainsReadyBatchBeforeRequery(t *testing.T) {
 	}
 }
 
+func TestRunWorkflowServeFollowRequiresManagedSessionEnv(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv("GC_TEMPLATE", "")
+
+	err := runWorkflowServe("control-dispatcher", true, io.Discard, io.Discard)
+	if err == nil {
+		t.Fatal("runWorkflowServe returned nil error, want missing managed session env")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "GC_SESSION_ID") || !strings.Contains(msg, "GC_SESSION_NAME") {
+		t.Fatalf("runWorkflowServe error = %q, want missing GC_SESSION_ID and GC_SESSION_NAME", msg)
+	}
+}
+
+func TestRequireWorkflowServeFollowSessionEnvAllowsManagedSession(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv("GC_SESSION_ID", "sess-123")
+	t.Setenv("GC_SESSION_NAME", "test-city/control-dispatcher")
+
+	if err := requireWorkflowServeFollowSessionEnv(); err != nil {
+		t.Fatalf("requireWorkflowServeFollowSessionEnv: %v", err)
+	}
+}
+
 func TestRunWorkflowServeRoutesTraceOpenWarningsToCommandStderr(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)

@@ -276,6 +276,12 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 	restoreTraceWarnings := useWorkflowTraceWarnings(stderr)
 	defer restoreTraceWarnings()
 
+	if follow {
+		if err := requireWorkflowServeFollowSessionEnv(); err != nil {
+			return err
+		}
+	}
+
 	cityPath, err := resolveCity()
 	if err != nil {
 		return err
@@ -323,6 +329,19 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 		return err
 	}
 	return runWorkflowServeFollow(agentCfg, cityPath, workDir, workQuery, workEnv, stderr)
+}
+
+func requireWorkflowServeFollowSessionEnv() error {
+	var missing []string
+	for _, key := range []string{"GC_SESSION_ID", "GC_SESSION_NAME"} {
+		if strings.TrimSpace(os.Getenv(key)) == "" {
+			missing = append(missing, key)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("control dispatcher follow mode requires managed session env (%s not set)", strings.Join(missing, ", "))
+	}
+	return nil
 }
 
 func legacyWorkflowTracePaths(cityPath string, rigs []config.Rig) []string {
