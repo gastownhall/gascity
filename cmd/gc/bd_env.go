@@ -370,6 +370,14 @@ func bdTransportRetryableError(cityPath, scopeRoot string, env map[string]string
 		"unexpected eof",
 		"bad connection",
 		"use of closed network connection",
+		// bd silently falls back to opening the on-disk store when it cannot
+		// reach the managed Dolt server. On an empty .beads/dolt/ that fallback
+		// triggers a JSONL auto-import, which presents as a 2m command timeout
+		// rather than a network error. Treat the auto-import marker as a
+		// transport failure so the managed-retry path republishes the correct
+		// port and retries against the live server. See gastownhall/gascity#1930.
+		"auto-importing",
+		"into empty database",
 	})
 }
 
@@ -378,6 +386,11 @@ func bdTransportRecoverableError(cityPath, scopeRoot string, env map[string]stri
 		"server unreachable",
 		"dial tcp",
 		"connection refused",
+		// When bd auto-imports into an empty on-disk store it has lost the
+		// managed Dolt server; republishing the port via the recovery path
+		// is what unsticks the next attempt. See gastownhall/gascity#1930.
+		"auto-importing",
+		"into empty database",
 	})
 }
 

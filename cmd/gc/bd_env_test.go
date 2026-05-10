@@ -2503,6 +2503,27 @@ func TestBdTransportTransientDisconnectDoesNotTriggerManagedRecovery(t *testing.
 	}
 }
 
+// When bd cannot reach the Dolt server it silently falls back to opening the
+// on-disk store and triggers a JSONL auto-import, which manifests as a 2-minute
+// timeout rather than a transport error. Treat the auto-import marker as a
+// transport failure so the managed-retry path can republish the correct port.
+// See gastownhall/gascity#1930.
+func TestBdTransportRetryableErrorTreatsAutoImportAsTransportFailure(t *testing.T) {
+	env := map[string]string{"GC_DOLT_HOST": ""}
+	t.Setenv("GC_BEADS", "bd")
+	cityPath := t.TempDir()
+
+	cases := []string{
+		"bd create: timed out after 2m0s: auto-importing 1927846 bytes from /foo/.beads/issues.jsonl into empty database...",
+		"auto-importing 1899171 bytes from issues.jsonl into empty database",
+	}
+	for _, msg := range cases {
+		if !bdTransportRetryableError(cityPath, cityPath, env, fmt.Errorf("%s", msg)) {
+			t.Fatalf("auto-import fallback should be transport-retryable: %q", msg)
+		}
+	}
+}
+
 func TestBdTransportRetryableErrorUsesScopeProviderForMixedRig(t *testing.T) {
 	cityPath := t.TempDir()
 	_ = writeReachableManagedDoltState(t, cityPath)
@@ -2532,6 +2553,62 @@ dolt.auto-start: false
 
 	if !bdTransportRetryableError(cityPath, rigDir, env, fmt.Errorf("server unreachable at 127.0.0.1:3307")) {
 		t.Fatal("bd-backed rig under file-backed city should still be transport-retryable")
+	}
+}
+
+// Regression for gastownhall/gascity#1930: when bd silently falls back to the
+// on-disk store and triggers a JSONL auto-import, the managed-retry path must
+// republish the Dolt port and rerun the command.
+func TestBdCommandRunnerWithManagedRetryRecoversFromAutoImportFallback(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	origRunner := beadsExecCommandRunnerWithEnv
+	origRecover := recoverManagedBDCommand
+	t.Cleanup(func() {
+		beadsExecCommandRunnerWithEnv = origRunner
+		recoverManagedBDCommand = origRecover
+	})
+
+	port := "3307"
+	attempts := 0
+	recoverCalls := 0
+
+	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
+		copied := map[string]string{}
+		for key, value := range env {
+			copied[key] = value
+		}
+		return func(_ string, _ string, _ ...string) ([]byte, error) {
+			attempts++
+			if attempts == 1 {
+				msg := "timed out after 2m0s: auto-importing 1927846 bytes from /foo/.beads/issues.jsonl into empty database"
+				return nil, fmt.Errorf("%s", msg)
+			}
+			return []byte("ok"), nil
+		}
+	}
+	recoverManagedBDCommand = func(_ string) error {
+		recoverCalls++
+		port = "3308"
+		return nil
+	}
+
+	runner := bdCommandRunnerWithManagedRetry(t.TempDir(), func(_ string) map[string]string {
+		return map[string]string{"GC_DOLT_PORT": port}
+	})
+
+	out, err := runner(t.TempDir(), "bd", "create", "--json", "title")
+	if err != nil {
+		t.Fatalf("runner error = %v, want nil", err)
+	}
+	if string(out) != "ok" {
+		t.Fatalf("runner output = %q, want %q", out, "ok")
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2 (first auto-import, retry succeeds)", attempts)
+	}
+	if recoverCalls != 1 {
+		t.Fatalf("recoverCalls = %d, want 1", recoverCalls)
 	}
 }
 
