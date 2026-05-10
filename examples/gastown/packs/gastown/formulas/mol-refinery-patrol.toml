@@ -395,7 +395,17 @@ out. A `git checkout $TARGET` in an environment where a worktree
 is already on a different branch silently merges into that worktree's
 HEAD instead of $TARGET.
 
+The `merge-base --is-ancestor` check below restores the
+fast-forward safety that `git merge --ff-only` provided: if `temp`
+is not an ancestor of `origin/$TARGET` (i.e. `$TARGET` has moved on
+remotely since the polecat branched), abort before `update-ref`
+silently rewinds the local pointer. The push would fail-safe at the
+remote either way; this guard fails earlier and at the right layer.
+
 ```bash
+git fetch origin $TARGET
+git merge-base --is-ancestor "origin/$TARGET" temp \
+  || { echo "non-FF: refinery aborts" >&2; exit 1; }
 NEW_SHA=$(git rev-parse temp)
 git update-ref refs/heads/$TARGET "$NEW_SHA"
 git push origin $TARGET
