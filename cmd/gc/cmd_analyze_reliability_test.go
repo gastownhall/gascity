@@ -96,9 +96,8 @@ func TestParseTimeFlag(t *testing.T) {
 	})
 }
 
-// writeEventsFile populates an events.jsonl with the provided events,
-// returning the path. Used by the integration tests below.
-func writeEventsFile(t *testing.T, dir string, es []events.Event) string {
+// writeEventsFile populates an events.jsonl with the provided events.
+func writeEventsFile(t *testing.T, dir string, es []events.Event) {
 	t.Helper()
 	path := filepath.Join(dir, citylayout.RuntimeRoot, "events.jsonl")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -115,13 +114,21 @@ func writeEventsFile(t *testing.T, dir string, es []events.Event) string {
 			t.Fatalf("encode event: %v", err)
 		}
 	}
-	return path
+}
+
+func writeAnalyzeReliabilityCity(t *testing.T, dir string, es []events.Event) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	writeEventsFile(t, dir, es)
 }
 
 func mockWorkerOpEvent(t *testing.T, seq uint64, ts time.Time, sessionID, model, version, agent string) events.Event {
 	t.Helper()
 	payload, err := json.Marshal(map[string]string{
 		"session_id":     sessionID,
+		"session_name":   sessionID,
 		"model":          model,
 		"prompt_version": version,
 		"agent_name":     agent,
@@ -144,8 +151,8 @@ func TestRunAnalyzeReliability_TableOutput(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now().UTC()
 	es := []events.Event{
-		mockWorkerOpEvent(t, 1, now, "sA", "claude-opus-4-7", "v3", "rigA/polecat-1"),
-		mockWorkerOpEvent(t, 2, now, "sB", "claude-sonnet-4-6", "v3", "rigA/polecat-2"),
+		mockWorkerOpEvent(t, 1, now, "sA", "claude-opus-4-7", "v3", "rigA/worker-1"),
+		mockWorkerOpEvent(t, 2, now, "sB", "claude-sonnet-4-6", "v3", "rigA/worker-2"),
 		{Seq: 3, Type: "session.crashed", Ts: now, Subject: "sA"},
 	}
 	writeEventsFile(t, dir, es)
@@ -253,6 +260,9 @@ func TestRunAnalyzeReliability_ExplicitEventsPath(t *testing.T) {
 
 func TestRunAnalyzeReliability_MissingEventsFile(t *testing.T) {
 	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
 	// Don't create events.jsonl — exercise the "file missing" path.
 	var stdout, stderr bytes.Buffer
 	err := runAnalyzeReliability(reliabilityCmdOptions{
@@ -261,6 +271,37 @@ func TestRunAnalyzeReliability_MissingEventsFile(t *testing.T) {
 	}, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("missing events.jsonl should be benign empty input, got: %v", err)
+	}
+}
+
+func TestRunAnalyzeReliability_MissingExplicitEventsFile(t *testing.T) {
+	dir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	missing := filepath.Join(dir, "missing-events.jsonl")
+	err := runAnalyzeReliability(reliabilityCmdOptions{
+		eventPath: missing,
+		since:     "30d",
+	}, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("missing explicit --events path should return an error")
+	}
+	if !strings.Contains(err.Error(), "--events") {
+		t.Fatalf("error should mention --events, got: %v", err)
+	}
+}
+
+func TestRunAnalyzeReliability_MissingExplicitCityPath(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	missing := filepath.Join(t.TempDir(), "missing-city")
+	err := runAnalyzeReliability(reliabilityCmdOptions{
+		cityPath: missing,
+		since:    "30d",
+	}, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("missing explicit --city path should return an error")
+	}
+	if !strings.Contains(err.Error(), "--city") {
+		t.Fatalf("error should mention --city, got: %v", err)
 	}
 }
 
@@ -278,6 +319,78 @@ func TestRunAnalyzeReliability_BadSinceFlag(t *testing.T) {
 	}
 }
 
+func TestAnalyzeReliabilityCommand_UsesRootPersistentCityFlag(t *testing.T) {
+	prevCityFlag, prevRigFlag := cityFlag, rigFlag
+	cityFlag, rigFlag = "", ""
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+		rigFlag = prevRigFlag
+	})
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_DIR", "")
+
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	writeAnalyzeReliabilityCity(t, dir, []events.Event{
+		mockWorkerOpEvent(t, 1, now, "sA", "root-opus", "v1", "rig/p"),
+		{Seq: 2, Type: "session.crashed", Ts: now, Subject: "sA"},
+	})
+
+	var stdout, stderr bytes.Buffer
+	cmd := newRootCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{"--city", dir, "analyze", "reliability", "--since", "30d"})
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v\nstderr: %s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "root-opus") {
+		t.Fatalf("root --city was not used; stdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+}
+
+func TestAnalyzeReliabilityCommand_SubcommandCityFlagWins(t *testing.T) {
+	prevCityFlag, prevRigFlag := cityFlag, rigFlag
+	cityFlag, rigFlag = "", ""
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+		rigFlag = prevRigFlag
+	})
+
+	rootCity := t.TempDir()
+	subcommandCity := t.TempDir()
+	now := time.Now().UTC()
+	writeAnalyzeReliabilityCity(t, rootCity, []events.Event{
+		mockWorkerOpEvent(t, 1, now, "root", "root-model", "v1", "rig/p"),
+	})
+	writeAnalyzeReliabilityCity(t, subcommandCity, []events.Event{
+		mockWorkerOpEvent(t, 1, now, "sub", "subcommand-model", "v1", "rig/p"),
+	})
+
+	var stdout, stderr bytes.Buffer
+	cmd := newRootCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{
+		"--city", rootCity,
+		"analyze", "reliability",
+		"--city", subcommandCity,
+		"--since", "30d",
+	})
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v\nstderr: %s", err, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "subcommand-model") {
+		t.Fatalf("subcommand --city was not used; stdout:\n%s\nstderr:\n%s", out, stderr.String())
+	}
+	if strings.Contains(out, "root-model") {
+		t.Fatalf("subcommand --city should override root --city; stdout:\n%s", out)
+	}
+}
+
 func TestResolveEventsPath_ExplicitWins(t *testing.T) {
 	got, err := resolveEventsPath(reliabilityCmdOptions{
 		eventPath: "/explicit/events.jsonl",
@@ -292,36 +405,45 @@ func TestResolveEventsPath_ExplicitWins(t *testing.T) {
 }
 
 func TestResolveEventsPath_CityFlagComputesPath(t *testing.T) {
-	got, err := resolveEventsPath(reliabilityCmdOptions{cityPath: "/my/city"})
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	got, err := resolveEventsPath(reliabilityCmdOptions{cityPath: dir})
 	if err != nil {
 		t.Fatalf("resolveEventsPath: %v", err)
 	}
-	want := filepath.Join("/my/city", citylayout.RuntimeRoot, "events.jsonl")
+	want := filepath.Join(dir, citylayout.RuntimeRoot, "events.jsonl")
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
 
-func TestResolveEventsPath_NoSourceReturnsEmpty(t *testing.T) {
+func TestResolveEventsPath_NoSourceReturnsError(t *testing.T) {
 	t.Setenv("GC_CITY", "")
 	t.Setenv("GC_CITY_PATH", "")
 	t.Setenv("GC_CITY_ROOT", "")
 	t.Setenv("GC_DIR", "")
+	prevCityFlag, prevRigFlag := cityFlag, rigFlag
+	cityFlag, rigFlag = "", ""
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+		rigFlag = prevRigFlag
+	})
+	origCwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
 	cwd := t.TempDir()
 	if err := os.Chdir(cwd); err != nil {
 		t.Fatalf("chdir: %v", err)
 	}
 	t.Cleanup(func() {
-		if origCwd, err := os.UserHomeDir(); err == nil {
-			_ = os.Chdir(origCwd) //nolint:errcheck
-		}
+		_ = os.Chdir(origCwd) //nolint:errcheck
 	})
-	got, err := resolveEventsPath(reliabilityCmdOptions{})
-	if err != nil {
-		t.Fatalf("resolveEventsPath: %v", err)
-	}
-	if got != "" {
-		t.Errorf("expected empty path when no city findable, got %q", got)
+	_, err = resolveEventsPath(reliabilityCmdOptions{})
+	if err == nil {
+		t.Fatal("expected error when no city is findable")
 	}
 }
 
@@ -332,9 +454,9 @@ func TestRunAnalyzeReliability_FullPipelineMatchesGoldenSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 4, 25, 12, 0, 0, 0, time.UTC)
 	es := []events.Event{
-		mockWorkerOpEvent(t, 1, now, "sA", "opus", "v3", "rigA/polecat-1"),
-		mockWorkerOpEvent(t, 2, now, "sB", "opus", "v3", "rigA/polecat-2"),
-		mockWorkerOpEvent(t, 3, now, "sC", "sonnet", "v3", "rigB/polecat-1"),
+		mockWorkerOpEvent(t, 1, now, "sA", "opus", "v3", "rigA/worker-1"),
+		mockWorkerOpEvent(t, 2, now, "sB", "opus", "v3", "rigA/worker-2"),
+		mockWorkerOpEvent(t, 3, now, "sC", "sonnet", "v3", "rigB/worker-1"),
 		{Seq: 4, Type: "session.crashed", Ts: now, Subject: "sA"},
 		{Seq: 5, Type: "session.crashed", Ts: now, Subject: "sC"},
 		{Seq: 6, Type: "session.idle_killed", Ts: now, Subject: "sA"},
@@ -383,4 +505,3 @@ func TestNewAnalyzeCmd_HasReliabilitySubcommand(t *testing.T) {
 		t.Error("`gc analyze` is missing the `reliability` subcommand")
 	}
 }
-

@@ -9,7 +9,8 @@ import (
 
 // FormatTable writes the report as an aligned plain-text table to w.
 // Columns: Model | Version | Rig | Sessions | Crashed | Quarantined |
-//   IdleKilled | Drained | Crash% | Unhealthy%
+//
+//	IdleKilled | Drained | Crash% | Unhealthy%
 //
 // Empty group fields render as "—" so missing instrumentation is
 // visually distinct from an explicit empty value.
@@ -56,11 +57,43 @@ func FormatTable(w io.Writer, r Report) error {
 			return err
 		}
 	}
-	if r.Skipped > 0 {
-		_, err := fmt.Fprintf(w, "\n%d lifecycle event(s) skipped: no worker.operation observed for the session (instrumentation gap).\n", r.Skipped)
+	notes := reportNotes(r)
+	if len(notes) == 0 {
+		return nil
+	}
+	if _, err := fmt.Fprintln(w); err != nil {
 		return err
 	}
+	for _, note := range notes {
+		if _, err := fmt.Fprintln(w, note); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func reportNotes(r Report) []string {
+	notes := make([]string, 0, 4)
+	if dropped := r.Skipped + r.AmbiguousAliases; dropped > 0 {
+		notes = append(notes, fmt.Sprintf("%d lifecycle event(s) dropped before grouping (skipped + ambiguous_aliases).", dropped))
+	}
+	if r.Skipped > 0 {
+		notes = append(notes, fmt.Sprintf("%d lifecycle event(s) skipped: no worker.operation observed for the session at or before the event (instrumentation gap).", r.Skipped))
+	}
+	if r.AmbiguousAliases > 0 {
+		notes = append(notes, fmt.Sprintf("%d lifecycle event(s) counted as ambiguous_aliases: ambiguous worker.operation alias matched multiple sessions.", r.AmbiguousAliases))
+	}
+	inst := r.Instrumentation
+	if inst.WorkerOperations > 0 && (inst.MissingModel > 0 || inst.MissingPromptVersion > 0) {
+		notes = append(notes, fmt.Sprintf(
+			"warning: model/prompt_version instrumentation incomplete: model missing on %d/%d worker.operation event(s), prompt_version missing on %d/%d (event counts, not session counts).",
+			inst.MissingModel, inst.WorkerOperations, inst.MissingPromptVersion, inst.WorkerOperations,
+		))
+	}
+	if inst.QuarantineSignalStatus == quarantineSignalStatusNotEmitted {
+		notes = append(notes, "note: session.quarantined is not emitted by current production paths; the Quarantined column is reserved pending instrumentation.")
+	}
+	return notes
 }
 
 // FormatJSON writes the report as JSON. Indent is two spaces; the

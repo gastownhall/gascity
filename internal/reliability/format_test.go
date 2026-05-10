@@ -11,8 +11,8 @@ func sampleReport() Report {
 	return Report{
 		Groups: []Group{
 			{
-				Key:            GroupKey{Model: "claude-opus-4-7", PromptVersion: "v3", Rig: "rigA"},
-				Sessions:       100, Crashed: 5, Quarantined: 1, IdleKilled: 2, Drained: 3,
+				Key:      GroupKey{Model: "claude-opus-4-7", PromptVersion: "v3", Rig: "rigA"},
+				Sessions: 100, Crashed: 5, Quarantined: 1, IdleKilled: 2, Drained: 3,
 				UnhealthyTotal: 11,
 			},
 			{
@@ -85,6 +85,68 @@ func TestFormatTable_NoSkippedNoteWhenZero(t *testing.T) {
 	}
 }
 
+func TestFormatTable_AmbiguousAliasNoteWhenNonZero(t *testing.T) {
+	r := sampleReport()
+	r.AmbiguousAliases = 2
+	var buf bytes.Buffer
+	if err := FormatTable(&buf, r); err != nil {
+		t.Fatalf("FormatTable: %v", err)
+	}
+	if !strings.Contains(buf.String(), "2 lifecycle event(s) counted as ambiguous_aliases") {
+		t.Errorf("expected ambiguous alias note, got:\n%s", buf.String())
+	}
+}
+
+func TestFormatTable_DroppedLifecycleSummary(t *testing.T) {
+	r := sampleReport()
+	r.Skipped = 3
+	r.AmbiguousAliases = 2
+	var buf bytes.Buffer
+	if err := FormatTable(&buf, r); err != nil {
+		t.Fatalf("FormatTable: %v", err)
+	}
+	if !strings.Contains(buf.String(), "5 lifecycle event(s) dropped before grouping (skipped + ambiguous_aliases)") {
+		t.Errorf("expected dropped lifecycle summary, got:\n%s", buf.String())
+	}
+}
+
+func TestFormatTable_InstrumentationNotes(t *testing.T) {
+	r := sampleReport()
+	r.Instrumentation = Instrumentation{
+		WorkerOperations:       3,
+		MissingModel:           2,
+		MissingPromptVersion:   1,
+		QuarantineSignalStatus: quarantineSignalStatusNotEmitted,
+	}
+	var buf bytes.Buffer
+	if err := FormatTable(&buf, r); err != nil {
+		t.Fatalf("FormatTable: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{
+		"model/prompt_version instrumentation incomplete",
+		"model missing on 2/3 worker.operation event(s)",
+		"event counts, not session counts",
+		"session.quarantined is not emitted by current production paths",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("instrumentation note missing %q\n%s", want, out)
+		}
+	}
+}
+
+func TestFormatTable_NoQuarantineNoteWhenObserved(t *testing.T) {
+	r := sampleReport()
+	r.Instrumentation.QuarantineSignalStatus = quarantineSignalStatusObserved
+	var buf bytes.Buffer
+	if err := FormatTable(&buf, r); err != nil {
+		t.Fatalf("FormatTable: %v", err)
+	}
+	if strings.Contains(buf.String(), "session.quarantined is not emitted") {
+		t.Errorf("observed quarantine signal should suppress not-emitted note:\n%s", buf.String())
+	}
+}
+
 func TestFormatJSON(t *testing.T) {
 	var buf bytes.Buffer
 	if err := FormatJSON(&buf, sampleReport()); err != nil {
@@ -100,6 +162,35 @@ func TestFormatJSON(t *testing.T) {
 	}
 	if _, ok := parsed["total"]; !ok {
 		t.Error("JSON missing 'total' field")
+	}
+}
+
+func TestFormatJSON_GroupKeyUsesSnakeCaseFields(t *testing.T) {
+	var buf bytes.Buffer
+	if err := FormatJSON(&buf, sampleReport()); err != nil {
+		t.Fatalf("FormatJSON: %v", err)
+	}
+	var parsed struct {
+		Groups []struct {
+			Key map[string]any `json:"key"`
+		} `json:"groups"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
+	}
+	if len(parsed.Groups) == 0 {
+		t.Fatal("expected at least one group")
+	}
+	key := parsed.Groups[0].Key
+	for _, want := range []string{"model", "prompt_version", "rig"} {
+		if _, ok := key[want]; !ok {
+			t.Fatalf("group key missing %q: %#v", want, key)
+		}
+	}
+	for _, unwanted := range []string{"Model", "PromptVersion", "Rig"} {
+		if _, ok := key[unwanted]; ok {
+			t.Fatalf("group key should not include %q: %#v", unwanted, key)
+		}
 	}
 }
 

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -35,20 +37,22 @@ func newAnalyzeReliabilityCmd(stdout, stderr io.Writer) *cobra.Command {
 the tracked session-lifecycle events:
 
   session.crashed
-  session.quarantined
+  session.quarantined (reserved; current production paths do not emit it)
   session.idle_killed
   session.draining
 
 Worker.operation events from #1252 supply the (model, prompt_version,
 agent_name) tuple per session. Lifecycle events get attributed via the
-session id they share. Sessions with worker.operation events but no
-lifecycle events count toward the per-group total — they're the
-denominator side of crash-rate calculations.
+session id or producer aliases from worker.operation payloads. Sessions
+with worker.operation events but no lifecycle events count toward the
+per-group total — they're the denominator side of crash-rate
+calculations. Model and prompt_version are best-effort dimensions; the
+report warns when the source event stream is missing them.
 
 Read-only: this command never writes events or beads.`,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			if err := runAnalyzeReliability(opts, stdout, stderr); err != nil {
-				if err == errExit {
+				if errors.Is(err, errExit) {
 					return err
 				}
 				fmt.Fprintf(stderr, "gc analyze reliability: %v\n", err) //nolint:errcheck
@@ -61,7 +65,7 @@ Read-only: this command never writes events or beads.`,
 	cmd.Flags().StringVar(&opts.since, "since", "7d",
 		"start of the analysis window — duration (1h, 7d) or RFC3339 timestamp")
 	cmd.Flags().StringVar(&opts.until, "until", "",
-		"end of the analysis window — duration (0s = now) or RFC3339 timestamp")
+		"end of the analysis window — duration (0s = now, 30m = 30 minutes ago) or RFC3339 timestamp")
 	cmd.Flags().StringVar(&opts.model, "model", "", "filter to a specific model")
 	cmd.Flags().StringVar(&opts.rig, "rig", "", "filter to a specific rig")
 	cmd.Flags().BoolVar(&opts.jsonOut, "json", false, "emit JSON instead of a table")
@@ -72,7 +76,7 @@ Read-only: this command never writes events or beads.`,
 // runAnalyzeReliability is the testable core: resolves inputs, loads
 // events, runs the analyzer, and writes output. Returns an error so the
 // cobra wrapper can decide between user-facing messages and exit codes.
-func runAnalyzeReliability(opts reliabilityCmdOptions, stdout, stderr io.Writer) error {
+func runAnalyzeReliability(opts reliabilityCmdOptions, stdout, _ io.Writer) error {
 	now := time.Now().UTC()
 	since, err := parseTimeFlag(opts.since, now)
 	if err != nil {
@@ -90,8 +94,10 @@ func runAnalyzeReliability(opts reliabilityCmdOptions, stdout, stderr io.Writer)
 	if err != nil {
 		return err
 	}
-	if eventsPath == "" {
-		return fmt.Errorf("could not locate events.jsonl; pass --city or --events")
+	if strings.TrimSpace(opts.eventPath) != "" {
+		if err := validateExplicitEventsPath(eventsPath); err != nil {
+			return err
+		}
 	}
 
 	all, err := events.ReadAll(eventsPath)
@@ -116,20 +122,36 @@ func resolveEventsPath(opts reliabilityCmdOptions) (string, error) {
 		return opts.eventPath, nil
 	}
 	cityPath := strings.TrimSpace(opts.cityPath)
-	if cityPath == "" {
-		if envPath, ok := resolveExplicitCityPathEnv(); ok {
-			cityPath = envPath
+	if cityPath != "" {
+		resolved, err := validateCityPath(cityPath)
+		if err != nil {
+			return "", fmt.Errorf("--city %s: %w", cityPath, err)
 		}
+		return filepath.Join(resolved, citylayout.RuntimeRoot, "events.jsonl"), nil
 	}
-	if cityPath == "" {
-		if cwdPath, ok := resolveCityPathFromCwd(); ok {
-			cityPath = cwdPath
+
+	resolved, err := resolveCity()
+	if err != nil {
+		if rootCity := strings.TrimSpace(cityFlag); rootCity != "" {
+			return "", fmt.Errorf("--city %s: %w", rootCity, err)
 		}
+		return "", fmt.Errorf("could not locate events.jsonl; pass --city or --events: %w", err)
 	}
-	if cityPath == "" {
-		return "", nil
+	return filepath.Join(resolved, citylayout.RuntimeRoot, "events.jsonl"), nil
+}
+
+func validateExplicitEventsPath(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("--events %s: file does not exist", path)
+		}
+		return fmt.Errorf("--events %s: %w", path, err)
 	}
-	return filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl"), nil
+	if info.IsDir() {
+		return fmt.Errorf("--events %s: expected a file, got a directory", path)
+	}
+	return nil
 }
 
 // parseTimeFlag accepts either a Go duration ("7d", "12h") interpreted

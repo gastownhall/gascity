@@ -23,11 +23,12 @@ func workerOp(t *testing.T, seq uint64, ts time.Time, sessionID, model, version,
 	t.Helper()
 	return events.Event{
 		Seq:     seq,
-		Type:    eventWorkerOperation,
+		Type:    events.WorkerOperation,
 		Ts:      ts,
 		Subject: sessionID,
 		Payload: mustEncode(t, workerOperationPayload{
 			SessionID:     sessionID,
+			SessionName:   sessionID,
 			Model:         model,
 			AgentName:     agentName,
 			PromptVersion: version,
@@ -41,6 +42,53 @@ func lifecycle(seq uint64, eventType, sessionID string, ts time.Time) events.Eve
 		Type:    eventType,
 		Ts:      ts,
 		Subject: sessionID,
+	}
+}
+
+func crashedLifecycleWithPayload(t *testing.T, seq uint64, subject, sessionID string, ts time.Time) events.Event {
+	t.Helper()
+	return events.Event{
+		Seq:     seq,
+		Type:    events.SessionCrashed,
+		Ts:      ts,
+		Subject: subject,
+		Payload: mustEncode(t, map[string]string{"session_id": sessionID}),
+	}
+}
+
+func TestWorkerOperationPayloadDecodesCanonicalJSONSubset(t *testing.T) {
+	raw := []byte(`{
+		"session_id": "sess-123",
+		"session_name": "rig-worker-1",
+		"model": "claude-opus-4-7",
+		"agent_name": "rig/worker-1",
+		"prompt_version": "v3",
+		"provider": "anthropic",
+		"operation": "start",
+		"result": "succeeded"
+	}`)
+
+	var p workerOperationPayload
+	if err := json.Unmarshal(raw, &p); err != nil {
+		t.Fatalf("unmarshal workerOperationPayload: %v", err)
+	}
+	if p.SessionID != "sess-123" {
+		t.Fatalf("SessionID = %q, want sess-123", p.SessionID)
+	}
+	if p.SessionName != "rig-worker-1" {
+		t.Fatalf("SessionName = %q, want rig-worker-1", p.SessionName)
+	}
+	if p.Model != "claude-opus-4-7" {
+		t.Fatalf("Model = %q, want claude-opus-4-7", p.Model)
+	}
+	if p.AgentName != "rig/worker-1" {
+		t.Fatalf("AgentName = %q, want rig/worker-1", p.AgentName)
+	}
+	if p.PromptVersion != "v3" {
+		t.Fatalf("PromptVersion = %q, want v3", p.PromptVersion)
+	}
+	if p.Provider != "anthropic" {
+		t.Fatalf("Provider = %q, want anthropic", p.Provider)
 	}
 }
 
@@ -68,12 +116,12 @@ func TestClassifyType(t *testing.T) {
 		in   string
 		want LifecycleKind
 	}{
-		{"session.crashed", LifecycleCrashed},
-		{"session.quarantined", LifecycleQuarantined},
-		{"session.idle_killed", LifecycleIdleKilled},
-		{"session.draining", LifecycleDraining},
+		{events.SessionCrashed, LifecycleCrashed},
+		{events.SessionQuarantined, LifecycleQuarantined},
+		{events.SessionIdleKilled, LifecycleIdleKilled},
+		{events.SessionDraining, LifecycleDraining},
 		{"session.woke", LifecycleUnknown},
-		{"worker.operation", LifecycleUnknown},
+		{events.WorkerOperation, LifecycleUnknown},
 		{"", LifecycleUnknown},
 	}
 	for _, tc := range cases {
@@ -88,9 +136,9 @@ func TestSessionAttrsRig(t *testing.T) {
 		agentName string
 		want      string
 	}{
-		{"rig/polecat-1", "rig"},
-		{"myrig/polecat-2", "myrig"},
-		{"mayor", ""},
+		{"rig/worker-1", "rig"},
+		{"myrig/worker-2", "myrig"},
+		{"coordinator", ""},
 		{"", ""},
 		{"/orphan", ""}, // leading slash → no rig
 	}
@@ -144,12 +192,12 @@ func TestWindowContains(t *testing.T) {
 func TestAnalyzeBasicCorrelation(t *testing.T) {
 	now := time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC)
 	es := []events.Event{
-		workerOp(t, 1, now, "sess-A", "claude-opus-4-7", "v3", "rigA/polecat-1"),
-		workerOp(t, 2, now, "sess-B", "claude-sonnet-4-6", "v3", "rigA/polecat-2"),
-		workerOp(t, 3, now, "sess-C", "claude-opus-4-7", "v2", "rigB/polecat-1"),
-		lifecycle(4, eventSessionCrashed, "sess-A", now),
-		lifecycle(5, eventSessionQuarantined, "sess-A", now),
-		lifecycle(6, eventSessionCrashed, "sess-C", now),
+		workerOp(t, 1, now, "sess-A", "claude-opus-4-7", "v3", "rigA/worker-1"),
+		workerOp(t, 2, now, "sess-B", "claude-sonnet-4-6", "v3", "rigA/worker-2"),
+		workerOp(t, 3, now, "sess-C", "claude-opus-4-7", "v2", "rigB/worker-1"),
+		lifecycle(4, events.SessionCrashed, "sess-A", now),
+		lifecycle(5, events.SessionQuarantined, "sess-A", now),
+		lifecycle(6, events.SessionCrashed, "sess-C", now),
 	}
 	r := Analyze(es, Window{}, Filter{})
 	if len(r.Groups) != 3 {
@@ -170,7 +218,7 @@ func TestAnalyzeBasicCorrelation(t *testing.T) {
 func TestAnalyzeIgnoresUnknownEventTypes(t *testing.T) {
 	now := time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC)
 	es := []events.Event{
-		workerOp(t, 1, now, "sess-A", "claude-opus-4-7", "v3", "rigA/polecat-1"),
+		workerOp(t, 1, now, "sess-A", "claude-opus-4-7", "v3", "rigA/worker-1"),
 		{Seq: 2, Type: "session.woke", Ts: now, Subject: "sess-A"},
 		{Seq: 3, Type: "controller.started", Ts: now, Subject: "sess-A"},
 		{Seq: 4, Type: "bead.created", Ts: now, Subject: "rigA-1"},
@@ -193,9 +241,9 @@ func TestAnalyzeWindowBounds(t *testing.T) {
 		workerOp(t, 1, t0, "old", "m", "v1", "rig/p"),
 		workerOp(t, 2, t1, "mid", "m", "v1", "rig/p"),
 		workerOp(t, 3, t2, "new", "m", "v1", "rig/p"),
-		lifecycle(4, eventSessionCrashed, "old", t0),
-		lifecycle(5, eventSessionCrashed, "mid", t1),
-		lifecycle(6, eventSessionCrashed, "new", t2),
+		lifecycle(4, events.SessionCrashed, "old", t0),
+		lifecycle(5, events.SessionCrashed, "mid", t1),
+		lifecycle(6, events.SessionCrashed, "new", t2),
 	}
 	win := Window{
 		Since: t1.Add(-time.Hour),
@@ -212,8 +260,8 @@ func TestAnalyzeFilterByModel(t *testing.T) {
 	es := []events.Event{
 		workerOp(t, 1, now, "sA", "opus", "v1", "rig/a"),
 		workerOp(t, 2, now, "sB", "sonnet", "v1", "rig/b"),
-		lifecycle(3, eventSessionCrashed, "sA", now),
-		lifecycle(4, eventSessionCrashed, "sB", now),
+		lifecycle(3, events.SessionCrashed, "sA", now),
+		lifecycle(4, events.SessionCrashed, "sB", now),
 	}
 	r := Analyze(es, Window{}, Filter{Model: "opus"})
 	if r.Total.Crashed != 1 {
@@ -231,8 +279,8 @@ func TestAnalyzeFilterByRig(t *testing.T) {
 	es := []events.Event{
 		workerOp(t, 1, now, "sA", "opus", "v1", "rigA/p1"),
 		workerOp(t, 2, now, "sB", "opus", "v1", "rigB/p1"),
-		lifecycle(3, eventSessionCrashed, "sA", now),
-		lifecycle(4, eventSessionCrashed, "sB", now),
+		lifecycle(3, events.SessionCrashed, "sA", now),
+		lifecycle(4, events.SessionCrashed, "sB", now),
 	}
 	r := Analyze(es, Window{}, Filter{Rig: "rigB"})
 	if r.Total.Crashed != 1 {
@@ -250,7 +298,7 @@ func TestAnalyzeSkippedWhenNoAttrs(t *testing.T) {
 	// Lifecycle event with no preceding worker.operation — no attributes
 	// to group by. Shouldn't be silently bucketed under empty key.
 	es := []events.Event{
-		lifecycle(1, eventSessionCrashed, "lonely", now),
+		lifecycle(1, events.SessionCrashed, "lonely", now),
 	}
 	r := Analyze(es, Window{}, Filter{})
 	if r.Skipped != 1 {
@@ -269,7 +317,7 @@ func TestAnalyzeLatestAttrsWin(t *testing.T) {
 		// Later op (higher seq) records new version.
 		workerOp(t, 5, now, "sA", "opus", "v2", "rig/p"),
 		// Lifecycle event after — should attribute to v2.
-		lifecycle(6, eventSessionCrashed, "sA", now),
+		lifecycle(6, events.SessionCrashed, "sA", now),
 	}
 	r := Analyze(es, Window{}, Filter{})
 	if len(r.Groups) != 1 {
@@ -280,13 +328,125 @@ func TestAnalyzeLatestAttrsWin(t *testing.T) {
 	}
 }
 
+func TestAnalyzeLifecycleUsesLatestAttrsAtOrBeforeEvent(t *testing.T) {
+	now := time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC)
+	es := []events.Event{
+		workerOp(t, 1, now, "sA", "opus", "v1", "rig/worker"),
+		lifecycle(2, events.SessionCrashed, "sA", now.Add(time.Minute)),
+		workerOp(t, 3, now.Add(2*time.Hour), "sA", "opus", "v2", "rig/worker"),
+	}
+	r := Analyze(es, Window{Since: now.Add(-time.Hour), Until: now.Add(time.Hour)}, Filter{})
+	if len(r.Groups) != 1 {
+		t.Fatalf("groups: %+v", r.Groups)
+	}
+	if r.Groups[0].Key.PromptVersion != "v1" {
+		t.Fatalf("crash attributed to version %q, want v1", r.Groups[0].Key.PromptVersion)
+	}
+}
+
+func TestAnalyzeWindowAttributionMatrix(t *testing.T) {
+	base := time.Date(2026, 4, 25, 12, 0, 0, 0, time.UTC)
+	win := Window{Since: base.Add(-time.Hour), Until: base.Add(time.Hour)}
+	cases := []struct {
+		name           string
+		events         []events.Event
+		wantCrashed    int
+		wantSkipped    int
+		wantAmbiguous  int
+		wantVersion    string
+		wantTotalGroup int
+	}{
+		{
+			name: "worker operation before window still attributes lifecycle in window",
+			events: []events.Event{
+				workerOp(t, 1, base.Add(-2*time.Hour), "sA", "opus", "before-window", "rig/worker"),
+				lifecycle(2, events.SessionCrashed, "sA", base),
+			},
+			wantCrashed:    1,
+			wantVersion:    "before-window",
+			wantTotalGroup: 1,
+		},
+		{
+			name: "worker operation after lifecycle is skipped",
+			events: []events.Event{
+				lifecycle(1, events.SessionCrashed, "sA", base),
+				workerOp(t, 2, base.Add(time.Minute), "sA", "opus", "after-lifecycle", "rig/worker"),
+			},
+			wantSkipped: 1,
+		},
+		{
+			name: "post-window worker operation does not rebucket lifecycle",
+			events: []events.Event{
+				workerOp(t, 1, base.Add(-2*time.Hour), "sA", "opus", "before-window", "rig/worker"),
+				lifecycle(2, events.SessionCrashed, "sA", base),
+				workerOp(t, 3, base.Add(2*time.Hour), "sA", "opus", "after-window", "rig/worker"),
+			},
+			wantCrashed:    1,
+			wantVersion:    "before-window",
+			wantTotalGroup: 1,
+		},
+		{
+			name: "cross-rig display alias is ambiguous only after second rig appears",
+			events: []events.Event{
+				workerOp(t, 1, base, "sA", "opus", "rigA-version", "rigA/worker-1"),
+				lifecycle(2, events.SessionCrashed, "worker-1", base.Add(time.Minute)),
+				workerOp(t, 3, base.Add(2*time.Minute), "sB", "sonnet", "rigB-version", "rigB/worker-1"),
+				lifecycle(4, events.SessionCrashed, "worker-1", base.Add(3*time.Minute)),
+			},
+			wantCrashed:   1,
+			wantAmbiguous: 1,
+			wantVersion:   "rigA-version",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := Analyze(tc.events, win, Filter{})
+			if r.Total.Crashed != tc.wantCrashed {
+				t.Fatalf("crashed = %d, want %d; report=%+v", r.Total.Crashed, tc.wantCrashed, r)
+			}
+			if r.Skipped != tc.wantSkipped {
+				t.Fatalf("skipped = %d, want %d", r.Skipped, tc.wantSkipped)
+			}
+			if r.AmbiguousAliases != tc.wantAmbiguous {
+				t.Fatalf("ambiguous aliases = %d, want %d", r.AmbiguousAliases, tc.wantAmbiguous)
+			}
+			if tc.wantVersion != "" {
+				if len(r.Groups) == 0 {
+					t.Fatalf("groups = %+v, want version %q", r.Groups, tc.wantVersion)
+				}
+				if r.Groups[0].Key.PromptVersion != tc.wantVersion {
+					t.Fatalf("version = %q, want %q", r.Groups[0].Key.PromptVersion, tc.wantVersion)
+				}
+			}
+			if tc.wantTotalGroup != 0 && len(r.Groups) != tc.wantTotalGroup {
+				t.Fatalf("groups = %+v, want %d group(s)", r.Groups, tc.wantTotalGroup)
+			}
+		})
+	}
+}
+
+func TestAnalyzeSkipsLifecycleBeforeFirstWorkerOperation(t *testing.T) {
+	now := time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC)
+	es := []events.Event{
+		lifecycle(1, events.SessionCrashed, "sA", now),
+		workerOp(t, 2, now.Add(time.Minute), "sA", "opus", "v1", "rig/worker"),
+	}
+	r := Analyze(es, Window{}, Filter{})
+	if r.Total.Crashed != 0 {
+		t.Fatalf("crashed = %d, want 0", r.Total.Crashed)
+	}
+	if r.Skipped != 1 {
+		t.Fatalf("skipped = %d, want 1", r.Skipped)
+	}
+}
+
 func TestAnalyzeOutOfOrderEventsHandled(t *testing.T) {
 	now := time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC)
 	// Lifecycle event arrives BEFORE the worker.operation in the slice
 	// but we walk in order. The two-pass design (build-attrs first, then
 	// classify) makes this work regardless of iteration order.
 	es := []events.Event{
-		lifecycle(2, eventSessionCrashed, "sA", now),
+		lifecycle(2, events.SessionCrashed, "sA", now),
 		workerOp(t, 1, now, "sA", "opus", "v1", "rig/p"),
 	}
 	r := Analyze(es, Window{}, Filter{})
@@ -303,9 +463,9 @@ func TestAnalyzeSessionsCountedOnce(t *testing.T) {
 	es := []events.Event{
 		workerOp(t, 1, now, "sA", "opus", "v1", "rig/p"),
 		// Same session, three lifecycle events.
-		lifecycle(2, eventSessionCrashed, "sA", now),
-		lifecycle(3, eventSessionQuarantined, "sA", now),
-		lifecycle(4, eventSessionDraining, "sA", now),
+		lifecycle(2, events.SessionCrashed, "sA", now),
+		lifecycle(3, events.SessionQuarantined, "sA", now),
+		lifecycle(4, events.SessionDraining, "sA", now),
 	}
 	r := Analyze(es, Window{}, Filter{})
 	if len(r.Groups) != 1 {
@@ -319,6 +479,30 @@ func TestAnalyzeSessionsCountedOnce(t *testing.T) {
 	}
 }
 
+func TestAnalyzeTotalSessionsDedupesSessionAcrossAttributeChanges(t *testing.T) {
+	now := time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC)
+	es := []events.Event{
+		workerOp(t, 1, now, "sA", "opus", "v1", "rig/worker"),
+		lifecycle(2, events.SessionCrashed, "sA", now.Add(time.Minute)),
+		workerOp(t, 3, now.Add(2*time.Minute), "sA", "opus", "v2", "rig/worker"),
+	}
+
+	r := Analyze(es, Window{}, Filter{})
+
+	if len(r.Groups) != 2 {
+		t.Fatalf("groups = %+v, want crash group plus latest denominator group", r.Groups)
+	}
+	if r.Total.Sessions != 1 {
+		t.Fatalf("total sessions = %d, want one unique session", r.Total.Sessions)
+	}
+	if r.Total.Crashed != 1 {
+		t.Fatalf("total crashed = %d, want 1", r.Total.Crashed)
+	}
+	if got := r.Total.CrashRate(); got != 1 {
+		t.Fatalf("total crash rate = %v, want 1", got)
+	}
+}
+
 func TestAnalyzeSessionsIncludeBenign(t *testing.T) {
 	// A session that had a worker.operation but no lifecycle events
 	// should still count toward total Sessions for its group — this is
@@ -327,7 +511,7 @@ func TestAnalyzeSessionsIncludeBenign(t *testing.T) {
 	es := []events.Event{
 		workerOp(t, 1, now, "sA", "opus", "v1", "rig/p"),
 		workerOp(t, 2, now, "sB", "opus", "v1", "rig/p"),
-		lifecycle(3, eventSessionCrashed, "sA", now),
+		lifecycle(3, events.SessionCrashed, "sA", now),
 	}
 	r := Analyze(es, Window{}, Filter{})
 	if len(r.Groups) != 1 {
@@ -352,12 +536,12 @@ func TestAnalyzeSortStability(t *testing.T) {
 		workerOp(t, 1, now, "s1", "modelA", "v1", "rigA/p"),
 		workerOp(t, 2, now, "s2", "modelB", "v1", "rigB/p"),
 		workerOp(t, 3, now, "s3", "modelC", "v1", "rigC/p"),
-		lifecycle(4, eventSessionCrashed, "s1", now),
-		lifecycle(5, eventSessionCrashed, "s2", now),
-		lifecycle(6, eventSessionCrashed, "s2", now),
-		lifecycle(7, eventSessionCrashed, "s3", now),
-		lifecycle(8, eventSessionCrashed, "s3", now),
-		lifecycle(9, eventSessionCrashed, "s3", now),
+		lifecycle(4, events.SessionCrashed, "s1", now),
+		lifecycle(5, events.SessionCrashed, "s2", now),
+		lifecycle(6, events.SessionCrashed, "s2", now),
+		lifecycle(7, events.SessionCrashed, "s3", now),
+		lifecycle(8, events.SessionCrashed, "s3", now),
+		lifecycle(9, events.SessionCrashed, "s3", now),
 	}
 	r := Analyze(es, Window{}, Filter{})
 	if len(r.Groups) != 3 {
@@ -377,16 +561,269 @@ func TestAnalyzeMalformedPayloadIgnored(t *testing.T) {
 	es := []events.Event{
 		{
 			Seq:     1,
-			Type:    eventWorkerOperation,
+			Type:    events.WorkerOperation,
 			Ts:      now,
 			Subject: "sA",
 			Payload: json.RawMessage("not json"),
 		},
-		lifecycle(2, eventSessionCrashed, "sA", now),
+		lifecycle(2, events.SessionCrashed, "sA", now),
 	}
 	r := Analyze(es, Window{}, Filter{})
 	if r.Skipped != 1 {
 		t.Errorf("expected to skip 1 (no attrs from malformed payload), got %d", r.Skipped)
+	}
+}
+
+func TestAnalyzeCorrelatesLifecycleSubjectByWorkerOperationAlias(t *testing.T) {
+	now := time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC)
+	es := []events.Event{
+		{
+			Seq:     1,
+			Type:    events.WorkerOperation,
+			Ts:      now,
+			Subject: "session-uuid",
+			Payload: mustEncode(t, workerOperationPayload{
+				SessionID:     "session-uuid",
+				SessionName:   "worker-1",
+				Model:         "opus",
+				AgentName:     "rigA/workflows.worker",
+				PromptVersion: "v1",
+			}),
+		},
+		lifecycle(2, events.SessionCrashed, "worker-1", now),
+	}
+
+	r := Analyze(es, Window{}, Filter{})
+
+	if r.Skipped != 0 {
+		t.Fatalf("producer-shaped lifecycle subject should not be skipped: %d", r.Skipped)
+	}
+	if r.Total.Crashed != 1 {
+		t.Fatalf("crashed = %d, want 1", r.Total.Crashed)
+	}
+	if len(r.Groups) != 1 || r.Groups[0].Sessions != 1 {
+		t.Fatalf("groups = %+v, want one session in one group", r.Groups)
+	}
+}
+
+func TestAnalyzeCorrelatesProducerDisplayNameThroughAgentAlias(t *testing.T) {
+	now := time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC)
+	es := []events.Event{
+		{
+			Seq:     1,
+			Type:    events.WorkerOperation,
+			Ts:      now,
+			Subject: "session-uuid",
+			Payload: mustEncode(t, workerOperationPayload{
+				SessionID:     "session-uuid",
+				SessionName:   "city-rigA-worker-1",
+				Model:         "opus",
+				AgentName:     "rigA/worker-1",
+				PromptVersion: "v1",
+			}),
+		},
+		lifecycle(2, events.SessionCrashed, "worker-1", now),
+	}
+
+	r := Analyze(es, Window{}, Filter{})
+
+	if r.Skipped != 0 {
+		t.Fatalf("producer display-name subject should not be skipped: %d", r.Skipped)
+	}
+	if r.Total.Crashed != 1 {
+		t.Fatalf("crashed = %d, want 1", r.Total.Crashed)
+	}
+	var found bool
+	for _, g := range r.Groups {
+		if g.Key.Rig == "rigA" && g.Crashed == 1 {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("groups = %+v, want crash attributed to rigA", r.Groups)
+	}
+}
+
+func TestAnalyzePrefersLifecyclePayloadSessionIDOverAmbiguousSubject(t *testing.T) {
+	now := time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC)
+	es := []events.Event{
+		{
+			Seq:     1,
+			Type:    events.WorkerOperation,
+			Ts:      now,
+			Subject: "session-A",
+			Payload: mustEncode(t, workerOperationPayload{
+				SessionID:     "session-A",
+				SessionName:   "city-rigA-worker-1",
+				Model:         "opus",
+				AgentName:     "rigA/worker-1",
+				PromptVersion: "v1",
+			}),
+		},
+		{
+			Seq:     2,
+			Type:    events.WorkerOperation,
+			Ts:      now,
+			Subject: "session-B",
+			Payload: mustEncode(t, workerOperationPayload{
+				SessionID:     "session-B",
+				SessionName:   "city-rigB-worker-1",
+				Model:         "sonnet",
+				AgentName:     "rigB/worker-1",
+				PromptVersion: "v1",
+			}),
+		},
+		crashedLifecycleWithPayload(t, 3, "worker-1", "session-A", now),
+	}
+
+	r := Analyze(es, Window{}, Filter{})
+
+	if r.AmbiguousAliases != 0 {
+		t.Fatalf("payload session_id should bypass ambiguous subject alias, ambiguous=%d", r.AmbiguousAliases)
+	}
+	if r.Skipped != 0 {
+		t.Fatalf("payload session_id should not be skipped, skipped=%d", r.Skipped)
+	}
+	if r.Total.Crashed != 1 {
+		t.Fatalf("crashed = %d, want 1", r.Total.Crashed)
+	}
+	var found bool
+	for _, g := range r.Groups {
+		if g.Key.Rig == "rigA" && g.Crashed == 1 {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("groups = %+v, want crash attributed to rigA", r.Groups)
+	}
+}
+
+func TestAnalyzeReportsAmbiguousDisplayNameAlias(t *testing.T) {
+	now := time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC)
+	es := []events.Event{
+		{
+			Seq:     1,
+			Type:    events.WorkerOperation,
+			Ts:      now,
+			Subject: "session-A",
+			Payload: mustEncode(t, workerOperationPayload{
+				SessionID:     "session-A",
+				SessionName:   "city-rigA-worker-1",
+				Model:         "opus",
+				AgentName:     "rigA/worker-1",
+				PromptVersion: "v1",
+			}),
+		},
+		{
+			Seq:     2,
+			Type:    events.WorkerOperation,
+			Ts:      now,
+			Subject: "session-B",
+			Payload: mustEncode(t, workerOperationPayload{
+				SessionID:     "session-B",
+				SessionName:   "city-rigB-worker-1",
+				Model:         "sonnet",
+				AgentName:     "rigB/worker-1",
+				PromptVersion: "v1",
+			}),
+		},
+		lifecycle(3, events.SessionCrashed, "worker-1", now),
+	}
+
+	r := Analyze(es, Window{}, Filter{})
+
+	if r.Total.Crashed != 0 {
+		t.Fatalf("ambiguous display-name crash should not be attributed: total=%+v", r.Total)
+	}
+	if r.AmbiguousAliases != 1 {
+		t.Fatalf("ambiguous aliases = %d, want 1", r.AmbiguousAliases)
+	}
+}
+
+func TestAnalyzeCorrelatesRepeatedDisplayNameThroughLatestSameAgent(t *testing.T) {
+	now := time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC)
+	es := []events.Event{
+		{
+			Seq:     1,
+			Type:    events.WorkerOperation,
+			Ts:      now,
+			Subject: "session-A",
+			Payload: mustEncode(t, workerOperationPayload{
+				SessionID:     "session-A",
+				SessionName:   "city-rig-worker-1-a",
+				Model:         "opus",
+				AgentName:     "rig/worker-1",
+				PromptVersion: "v1",
+			}),
+		},
+		lifecycle(2, events.SessionCrashed, "worker-1", now.Add(time.Minute)),
+		{
+			Seq:     3,
+			Type:    events.WorkerOperation,
+			Ts:      now.Add(2 * time.Minute),
+			Subject: "session-B",
+			Payload: mustEncode(t, workerOperationPayload{
+				SessionID:     "session-B",
+				SessionName:   "city-rig-worker-1-b",
+				Model:         "sonnet",
+				AgentName:     "rig/worker-1",
+				PromptVersion: "v2",
+			}),
+		},
+		lifecycle(4, events.SessionCrashed, "worker-1", now.Add(3*time.Minute)),
+	}
+
+	r := Analyze(es, Window{}, Filter{})
+
+	if r.AmbiguousAliases != 0 {
+		t.Fatalf("same-agent display-name reuse should not be ambiguous: %d", r.AmbiguousAliases)
+	}
+	if r.Total.Crashed != 2 {
+		t.Fatalf("crashed = %d, want both reused display-name crashes attributed", r.Total.Crashed)
+	}
+	if len(r.Groups) != 2 {
+		t.Fatalf("groups = %+v, want separate groups for v1 and v2", r.Groups)
+	}
+}
+
+func TestAnalyzeInstrumentationCountsMissingModelAndPromptVersion(t *testing.T) {
+	now := time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC)
+	es := []events.Event{
+		workerOp(t, 1, now, "complete", "opus", "v1", "rig/worker-1"),
+		workerOp(t, 2, now, "missing-model", "", "v1", "rig/worker-2"),
+		workerOp(t, 3, now, "missing-version", "sonnet", "", "rig/worker-3"),
+		workerOp(t, 4, now.Add(-48*time.Hour), "outside-window", "", "", "rig/worker-4"),
+	}
+
+	r := Analyze(es, Window{Since: now.Add(-time.Hour)}, Filter{})
+
+	if got := r.Instrumentation.WorkerOperations; got != 3 {
+		t.Fatalf("worker operations = %d, want 3", got)
+	}
+	if got := r.Instrumentation.MissingModel; got != 1 {
+		t.Fatalf("missing model = %d, want 1", got)
+	}
+	if got := r.Instrumentation.MissingPromptVersion; got != 1 {
+		t.Fatalf("missing prompt version = %d, want 1", got)
+	}
+	if got := r.Instrumentation.QuarantineSignalStatus; got != quarantineSignalStatusNotEmitted {
+		t.Fatalf("quarantine signal status = %q, want %q", got, quarantineSignalStatusNotEmitted)
+	}
+}
+
+func TestAnalyzeInstrumentationReportsObservedQuarantineSignal(t *testing.T) {
+	now := time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC)
+	es := []events.Event{
+		workerOp(t, 1, now, "complete", "opus", "v1", "rig/worker-1"),
+		lifecycle(2, events.SessionQuarantined, "complete", now),
+	}
+
+	r := Analyze(es, Window{Since: now.Add(-time.Hour)}, Filter{})
+
+	if got := r.Instrumentation.QuarantineSignalStatus; got != quarantineSignalStatusObserved {
+		t.Fatalf("quarantine signal status = %q, want %q", got, quarantineSignalStatusObserved)
 	}
 }
 

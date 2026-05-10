@@ -17,15 +17,9 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 )
 
-// Lifecycle event types tracked by the reliability report. Mirrors the
-// constants in internal/events but kept local so this package compiles
-// with only an events import.
 const (
-	eventSessionCrashed     = "session.crashed"
-	eventSessionQuarantined = "session.quarantined"
-	eventSessionIdleKilled  = "session.idle_killed"
-	eventSessionDraining    = "session.draining"
-	eventWorkerOperation    = "worker.operation"
+	quarantineSignalStatusNotEmitted = "not_emitted_by_production"
+	quarantineSignalStatusObserved   = "observed"
 )
 
 // LifecycleKind names a tracked session-lifecycle event class. Strongly
@@ -64,13 +58,13 @@ func (k LifecycleKind) String() string {
 // classifyType maps an events.Event.Type to a LifecycleKind.
 func classifyType(eventType string) LifecycleKind {
 	switch eventType {
-	case eventSessionCrashed:
+	case events.SessionCrashed:
 		return LifecycleCrashed
-	case eventSessionQuarantined:
+	case events.SessionQuarantined:
 		return LifecycleQuarantined
-	case eventSessionIdleKilled:
+	case events.SessionIdleKilled:
 		return LifecycleIdleKilled
-	case eventSessionDraining:
+	case events.SessionDraining:
 		return LifecycleDraining
 	default:
 		return LifecycleUnknown
@@ -82,12 +76,12 @@ func classifyType(eventType string) LifecycleKind {
 type SessionAttrs struct {
 	Model         string
 	PromptVersion string
-	AgentName     string // qualified, e.g. "rig/polecat-1"
+	AgentName     string // qualified, e.g. "rig/worker-1"
 	Provider      string
 }
 
-// Rig parses agent name into the rig portion. For "rig/polecat-1" it
-// returns "rig"; for "mayor" (no slash) it returns "" (city-level).
+// Rig parses agent name into the rig portion. For "rig/worker-1" it
+// returns "rig"; for "coordinator" (no slash) it returns "" (city-level).
 func (a SessionAttrs) Rig() string {
 	if i := strings.IndexByte(a.AgentName, '/'); i > 0 {
 		return a.AgentName[:i]
@@ -100,9 +94,9 @@ func (a SessionAttrs) Rig() string {
 // "city-level"); they appear in their own buckets so operators can spot
 // missing instrumentation.
 type GroupKey struct {
-	Model         string
-	PromptVersion string
-	Rig           string
+	Model         string `json:"model"`
+	PromptVersion string `json:"prompt_version"`
+	Rig           string `json:"rig"`
 }
 
 // Group reports per-(model, version, rig) reliability counts.
@@ -162,11 +156,22 @@ type Filter struct {
 
 // Report is the top-level result of an analysis pass.
 type Report struct {
-	Window  Window  `json:"-"`
-	Filter  Filter  `json:"-"`
-	Groups  []Group `json:"groups"`
-	Total   Group   `json:"total"`
-	Skipped int     `json:"skipped"` // events without enough attribute data to group
+	Window           Window          `json:"-"`
+	Filter           Filter          `json:"-"`
+	Groups           []Group         `json:"groups"`
+	Total            Group           `json:"total"`
+	Skipped          int             `json:"skipped"` // events without enough attribute data to group
+	AmbiguousAliases int             `json:"ambiguous_aliases"`
+	Instrumentation  Instrumentation `json:"instrumentation"`
+}
+
+// Instrumentation summarizes whether the source event stream can support
+// the requested reliability dimensions.
+type Instrumentation struct {
+	WorkerOperations       int    `json:"worker_operations"`
+	MissingModel           int    `json:"missing_model"`
+	MissingPromptVersion   int    `json:"missing_prompt_version"`
+	QuarantineSignalStatus string `json:"quarantine_signal_status,omitempty"`
 }
 
 // workerOperationPayload is the minimal structural subset of
@@ -175,21 +180,38 @@ type Report struct {
 // would create a cycle once 1c gets surfaced via the supervisor API).
 type workerOperationPayload struct {
 	SessionID     string `json:"session_id"`
+	SessionName   string `json:"session_name"`
 	Model         string `json:"model"`
 	AgentName     string `json:"agent_name"`
 	PromptVersion string `json:"prompt_version"`
 	Provider      string `json:"provider"`
 }
 
+type sessionLifecyclePayload struct {
+	SessionID string `json:"session_id"`
+}
+
+type sessionRecord struct {
+	id    string
+	seq   uint64
+	attrs SessionAttrs
+}
+
 // Analyze produces a reliability report from the supplied events.
 //
 // The two passes are:
 //
-//  1. Build a session-attribute map from worker.operation event payloads.
-//     The most recent (highest Seq) payload per session wins, since
-//     attributes can change across reruns (model swap, prompt edit).
-//  2. Walk lifecycle events, look up their session's attributes, and
-//     bucket by GroupKey.
+//  1. Build a session-attribute index from worker.operation event payloads.
+//     For each lifecycle event, the latest payload at or before that event's
+//     Seq wins, since attributes can change across reruns (model swap, prompt
+//     edit) and future payloads must not rebucket past lifecycle events. The
+//     index includes the worker-operation session ID plus payload aliases such
+//     as session_name and agent_name because current lifecycle emitters do not
+//     all use the session ID as Event.Subject. Display aliases that only reuse
+//     the same qualified agent name resolve to the latest eligible record;
+//     display aliases spanning multiple qualified agents count as ambiguous.
+//  2. Walk lifecycle events, look up their session's attributes through that
+//     alias index, and bucket by GroupKey.
 //
 // Events outside the window are dropped silently. Events with a
 // LifecycleUnknown type are dropped silently. Events whose session has
@@ -197,10 +219,11 @@ type workerOperationPayload struct {
 // produce a (model="", version="", rig="") bucket otherwise, which
 // hides instrumentation gaps rather than surfacing them.
 func Analyze(es []events.Event, win Window, flt Filter) Report {
-	attrs := buildSessionAttrs(es)
+	sessionIndex := buildSessionIndex(es)
 	sessionsByGroup := make(map[GroupKey]map[string]struct{})
+	workerSessions := make(map[string]sessionRecord)
 	groups := make(map[GroupKey]*Group)
-	report := Report{Window: win, Filter: flt}
+	report := Report{Window: win, Filter: flt, Instrumentation: analyzeInstrumentation(es, win)}
 
 	keep := func(g GroupKey) bool {
 		if flt.Model != "" && !strings.EqualFold(g.Model, flt.Model) {
@@ -234,11 +257,10 @@ func Analyze(es []events.Event, win Window, flt Filter) Report {
 		if !win.Contains(e.Ts) {
 			continue
 		}
-		if e.Type == eventWorkerOperation {
-			if a, ok := attrs[e.Subject]; ok {
-				key := GroupKey{Model: a.Model, PromptVersion: a.PromptVersion, Rig: a.Rig()}
-				if keep(key) {
-					addSession(key, e.Subject)
+		if e.Type == events.WorkerOperation {
+			if rec, status := sessionIndex.lookup(e.Subject, e.Seq); status == lookupFound {
+				if cur, ok := workerSessions[rec.id]; !ok || cur.seq < rec.seq {
+					workerSessions[rec.id] = rec
 				}
 			}
 			continue
@@ -247,12 +269,16 @@ func Analyze(es []events.Event, win Window, flt Filter) Report {
 		if kind == LifecycleUnknown {
 			continue
 		}
-		a, ok := attrs[e.Subject]
-		if !ok {
+		rec, status := sessionIndex.lookup(lifecycleLookupSubject(e), e.Seq)
+		if status == lookupAmbiguous {
+			report.AmbiguousAliases++
+			continue
+		}
+		if status == lookupMiss {
 			report.Skipped++
 			continue
 		}
-		key := GroupKey{Model: a.Model, PromptVersion: a.PromptVersion, Rig: a.Rig()}
+		key := GroupKey{Model: rec.attrs.Model, PromptVersion: rec.attrs.PromptVersion, Rig: rec.attrs.Rig()}
 		if !keep(key) {
 			continue
 		}
@@ -268,7 +294,14 @@ func Analyze(es []events.Event, win Window, flt Filter) Report {
 			g.Drained++
 		}
 		g.UnhealthyTotal++
-		addSession(key, e.Subject)
+		addSession(key, rec.id)
+	}
+
+	for _, rec := range workerSessions {
+		key := GroupKey{Model: rec.attrs.Model, PromptVersion: rec.attrs.PromptVersion, Rig: rec.attrs.Rig()}
+		if keep(key) {
+			addSession(key, rec.id)
+		}
 	}
 
 	// Materialize Sessions counts and totals.
@@ -285,34 +318,66 @@ func Analyze(es []events.Event, win Window, flt Filter) Report {
 	}
 
 	report.Groups = sortedGroups(groups)
-	report.Total = totalGroup(report.Groups)
+	report.Total = totalGroup(report.Groups, sessionsByGroup)
 	return report
 }
 
-// buildSessionAttrs walks events and records the latest worker.operation
-// payload attributes per session. Subsequent events with higher Seq for
-// the same session override earlier ones.
-func buildSessionAttrs(es []events.Event) map[string]SessionAttrs {
-	type seqEntry struct {
-		seq   uint64
-		attrs SessionAttrs
+type lookupStatus int
+
+const (
+	lookupMiss lookupStatus = iota
+	lookupFound
+	lookupAmbiguous
+)
+
+type sessionIndex struct {
+	records map[string][]sessionRecord
+}
+
+func (idx sessionIndex) lookup(subject string, maxSeq uint64) (sessionRecord, lookupStatus) {
+	subject = strings.TrimSpace(subject)
+	if subject == "" {
+		return sessionRecord{}, lookupMiss
 	}
-	latest := make(map[string]seqEntry)
+	records := idx.records[subject]
+	if len(records) == 0 {
+		return sessionRecord{}, lookupMiss
+	}
+	i := sort.Search(len(records), func(i int) bool {
+		return records[i].seq > maxSeq
+	})
+	if i == 0 {
+		return sessionRecord{}, lookupMiss
+	}
+	if recordsAmbiguous(records[:i]) {
+		return sessionRecord{}, lookupAmbiguous
+	}
+	return records[i-1], lookupFound
+}
+
+// buildSessionIndex walks events and records worker.operation payload history
+// per subject alias. Ambiguity is resolved at lookup time so a later
+// cross-rig collision does not invalidate earlier lifecycle events for
+// the same display name.
+func buildSessionIndex(es []events.Event) sessionIndex {
+	records := make(map[string][]sessionRecord)
 	for _, e := range es {
-		if e.Type != eventWorkerOperation {
+		if e.Type != events.WorkerOperation {
 			continue
 		}
-		if e.Subject == "" || len(e.Payload) == 0 {
+		if len(e.Payload) == 0 {
 			continue
 		}
 		var p workerOperationPayload
 		if err := json.Unmarshal(e.Payload, &p); err != nil {
 			continue
 		}
-		if cur, ok := latest[e.Subject]; ok && cur.seq >= e.Seq {
+		sessionID := firstNonEmpty(p.SessionID, e.Subject, p.SessionName)
+		if sessionID == "" {
 			continue
 		}
-		latest[e.Subject] = seqEntry{
+		rec := sessionRecord{
+			id:  sessionID,
 			seq: e.Seq,
 			attrs: SessionAttrs{
 				Model:         p.Model,
@@ -321,12 +386,118 @@ func buildSessionAttrs(es []events.Event) map[string]SessionAttrs {
 				Provider:      p.Provider,
 			},
 		}
+		for _, alias := range workerOperationAliases(e, p, sessionID) {
+			records[alias] = append(records[alias], rec)
+		}
 	}
-	out := make(map[string]SessionAttrs, len(latest))
-	for k, v := range latest {
-		out[k] = v.attrs
+	for alias := range records {
+		sort.Slice(records[alias], func(i, j int) bool {
+			return records[alias][i].seq < records[alias][j].seq
+		})
+	}
+	return sessionIndex{records: records}
+}
+
+func lifecycleLookupSubject(e events.Event) string {
+	if len(e.Payload) == 0 {
+		return e.Subject
+	}
+	var p sessionLifecyclePayload
+	if err := json.Unmarshal(e.Payload, &p); err != nil {
+		return e.Subject
+	}
+	if sessionID := strings.TrimSpace(p.SessionID); sessionID != "" {
+		return sessionID
+	}
+	return e.Subject
+}
+
+func recordsAmbiguous(records []sessionRecord) bool {
+	sessionIDs := make(map[string]struct{})
+	owners := make(map[string]struct{})
+	for _, rec := range records {
+		sessionIDs[rec.id] = struct{}{}
+		owners[recordOwnerKey(rec)] = struct{}{}
+	}
+	return len(sessionIDs) > 1 && len(owners) > 1
+}
+
+func recordOwnerKey(rec sessionRecord) string {
+	if agentName := strings.TrimSpace(rec.attrs.AgentName); agentName != "" {
+		return "agent:" + agentName
+	}
+	return "session:" + rec.id
+}
+
+func analyzeInstrumentation(es []events.Event, win Window) Instrumentation {
+	out := Instrumentation{QuarantineSignalStatus: quarantineSignalStatusNotEmitted}
+	for _, e := range es {
+		if e.Type == events.SessionQuarantined {
+			// This is a stream-level feature signal, not a windowed metric.
+			out.QuarantineSignalStatus = quarantineSignalStatusObserved
+		}
+		if e.Type != events.WorkerOperation || !win.Contains(e.Ts) || len(e.Payload) == 0 {
+			continue
+		}
+		var p workerOperationPayload
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			continue
+		}
+		out.WorkerOperations++
+		if strings.TrimSpace(p.Model) == "" {
+			out.MissingModel++
+		}
+		if strings.TrimSpace(p.PromptVersion) == "" {
+			out.MissingPromptVersion++
+		}
 	}
 	return out
+}
+
+func workerOperationAliases(e events.Event, p workerOperationPayload, sessionID string) []string {
+	return compactStrings(
+		sessionID,
+		e.Subject,
+		p.SessionID,
+		p.SessionName,
+		p.AgentName,
+		unqualifiedName(p.AgentName),
+		unqualifiedName(p.SessionName),
+	)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func compactStrings(values ...string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	return out
+}
+
+func unqualifiedName(name string) string {
+	name = strings.TrimSpace(name)
+	if i := strings.LastIndexByte(name, '/'); i >= 0 && i < len(name)-1 {
+		return name[i+1:]
+	}
+	return name
 }
 
 // sortedGroups returns the report groups sorted deterministically:
@@ -352,17 +523,24 @@ func sortedGroups(groups map[GroupKey]*Group) []Group {
 	return out
 }
 
-// totalGroup sums counts across all groups. The Key is left zero-valued
-// since the total spans every key combination.
-func totalGroup(groups []Group) Group {
+// totalGroup sums event counts across all groups and de-duplicates session
+// IDs for the total denominator. The Key is left zero-valued since the
+// total spans every key combination.
+func totalGroup(groups []Group, sessionsByGroup map[GroupKey]map[string]struct{}) Group {
 	var t Group
 	for _, g := range groups {
-		t.Sessions += g.Sessions
 		t.Crashed += g.Crashed
 		t.Quarantined += g.Quarantined
 		t.IdleKilled += g.IdleKilled
 		t.Drained += g.Drained
 		t.UnhealthyTotal += g.UnhealthyTotal
 	}
+	uniqueSessions := make(map[string]struct{})
+	for _, sessions := range sessionsByGroup {
+		for sessionID := range sessions {
+			uniqueSessions[sessionID] = struct{}{}
+		}
+	}
+	t.Sessions = len(uniqueSessions)
 	return t
 }
