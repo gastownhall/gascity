@@ -2,6 +2,7 @@ package session
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -653,16 +654,21 @@ func TestCanonicalCloseReasonMeetsValidatorThreshold(t *testing.T) {
 	}
 	for _, code := range stateCodes {
 		got := CanonicalCloseReason(code)
-		if len(got) < 20 {
-			t.Errorf("CanonicalCloseReason(%q) = %q (%d chars); want >=20", code, got, len(got))
+		trimmed := strings.TrimSpace(got)
+		if len(trimmed) < 20 {
+			t.Errorf("CanonicalCloseReason(%q) = %q (%d trimmed chars); want >=20", code, got, len(trimmed))
 		}
 	}
 }
 
 func TestCanonicalCloseReasonUnknownCodeFallback(t *testing.T) {
 	got := CanonicalCloseReason("xyz")
-	if len(got) < 20 {
-		t.Errorf("fallback for unknown short code = %q (%d chars); want >=20", got, len(got))
+	if trimmed := strings.TrimSpace(got); len(trimmed) < 20 {
+		t.Errorf("fallback for unknown short code = %q (%d trimmed chars); want >=20", got, len(trimmed))
+	}
+	empty := CanonicalCloseReason("")
+	if trimmed := strings.TrimSpace(empty); len(trimmed) < 20 {
+		t.Errorf("fallback for empty code = %q (%d trimmed chars); want >=20", empty, len(trimmed))
 	}
 	long := "an-already-long-state-code-of-thirty-plus-characters"
 	if got := CanonicalCloseReason(long); got != long {
@@ -677,8 +683,8 @@ func TestClosePatchKeepsShortStateCode(t *testing.T) {
 	if patch["state"] != "orphaned" {
 		t.Errorf("state = %q, want %q (short stateCode preserved)", patch["state"], "orphaned")
 	}
-	if len(patch["close_reason"]) < 20 {
-		t.Errorf("close_reason = %q (%d chars); want >=20 to satisfy validator",
-			patch["close_reason"], len(patch["close_reason"]))
+	if trimmed := strings.TrimSpace(patch["close_reason"]); len(trimmed) < 20 {
+		t.Errorf("close_reason = %q (%d trimmed chars); want >=20 to satisfy validator",
+			patch["close_reason"], len(trimmed))
 	}
 }

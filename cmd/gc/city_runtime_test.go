@@ -2205,7 +2205,7 @@ func TestCityRuntimeTick_RefreshesManualSessionOverlayAfterSync(t *testing.T) {
 	if got.Status == "closed" {
 		t.Fatalf("manual session bead was closed after refreshed overlay should have preserved it: %+v", got)
 	}
-	if got.Metadata["state"] == "orphaned" || got.Metadata["close_reason"] == "orphaned" {
+	if got.Metadata["state"] == "orphaned" {
 		t.Fatalf("manual session bead was marked orphaned after refreshed overlay: %+v", got.Metadata)
 	}
 }

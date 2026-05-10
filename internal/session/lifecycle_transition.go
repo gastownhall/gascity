@@ -358,11 +358,12 @@ func ClosePatch(now time.Time, stateCode string) MetadataPatch {
 // close reason of at least 20 characters, suitable for use as
 // `bd close --reason` under validation.on-close=error.
 //
-// Unknown codes fall back to "session terminated: <code>" which is
-// always >= 20 characters for any non-empty code shorter than 20 chars.
+// Unknown non-empty codes fall back to "session terminated: <code>".
 // Codes already 20+ characters pass through unchanged.
 func CanonicalCloseReason(stateCode string) string {
 	switch stateCode {
+	case "":
+		return "session terminated: unknown state"
 	case "gc_swept":
 		return "session swept: no assigned work in any rig"
 	case "orphaned":
