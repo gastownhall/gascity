@@ -395,7 +395,7 @@ func TestRenderSupervisorSystemdTemplate(t *testing.T) {
 		"[Service]",
 		`KillMode=process`,
 		`Environment=GC_SUPERVISOR_PRESERVE_SESSIONS_ON_SIGNAL="1"`,
-		`ExecStart=/usr/local/bin/gc supervisor run`,
+		`ExecStart="/usr/local/bin/gc" supervisor run`,
 		`StandardOutput=append:/home/user/.gc/supervisor.log`,
 		`Environment=GC_HOME="/home/user/.gc"`,
 		`Environment=XDG_RUNTIME_DIR="/tmp/gc-run"`,
@@ -411,7 +411,7 @@ func TestRenderSupervisorSystemdTemplate(t *testing.T) {
 		"# (control-group) would cascade SIGTERM to tmux servers spawned by\n" +
 		"# 'gc supervisor run' that live in this cgroup, killing one-per-bead\n" +
 		"# session conversation history. The reconciler re-adopts tmux on start.\n" +
-		"KillMode=process\nExecStart=/usr/local/bin/gc supervisor run\n"
+		"KillMode=process\nExecStart=\"/usr/local/bin/gc\" supervisor run\n"
 	if !strings.Contains(content, wantBlock) {
 		t.Fatalf("systemd template missing ordered KillMode=process block under [Service]; got:\n%s", content)
 	}
@@ -4937,7 +4937,7 @@ func TestBuildSupervisorServiceDataPrefersUserLocalBinExecPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("renderSupervisorTemplate: %v", err)
 	}
-	wantExec := "ExecStart=" + stable + " supervisor run"
+	wantExec := `ExecStart="` + stable + `" supervisor run`
 	if !strings.Contains(systemdContent, wantExec) {
 		t.Fatalf("systemd unit missing %q:\n%s", wantExec, systemdContent)
 	}
@@ -5014,11 +5014,11 @@ func TestInstallSupervisorSystemdRefreshesStaleTmpExecStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read refreshed unit: %v", err)
 	}
-	wantExec := "ExecStart=" + stable + " supervisor run"
+	wantExec := `ExecStart="` + stable + `" supervisor run`
 	if !strings.Contains(string(contents), wantExec) {
 		t.Fatalf("refreshed unit missing %q:\n%s", wantExec, string(contents))
 	}
-	if strings.Contains(string(contents), "ExecStart=/tmp/gc ") {
+	if strings.Contains(string(contents), `ExecStart="/tmp/gc"`) {
 		t.Fatalf("refreshed unit still references stale /tmp/gc:\n%s", string(contents))
 	}
 	joined := strings.Join(calls, "\n")
@@ -5030,5 +5030,56 @@ func TestInstallSupervisorSystemdRefreshesStaleTmpExecStart(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("systemctl calls = %v, want %q (warm-refresh path)", calls, want)
 		}
+	}
+}
+
+func TestRenderSupervisorSystemdTemplateQuotesGCPathWithSpaces(t *testing.T) {
+	cases := []struct {
+		name   string
+		gcPath string
+		want   string
+	}{
+		{
+			name:   "plain_ascii",
+			gcPath: "/usr/local/bin/gc",
+			want:   `ExecStart="/usr/local/bin/gc" supervisor run`,
+		},
+		{
+			name:   "home_derived_spacy_path",
+			gcPath: "/home/user with spaces/.local/bin/gc",
+			want:   `ExecStart="/home/user with spaces/.local/bin/gc" supervisor run`,
+		},
+		{
+			name:   "gopath_derived_spacy_path",
+			gcPath: "/opt/go path/bin/gc",
+			want:   `ExecStart="/opt/go path/bin/gc" supervisor run`,
+		},
+		{
+			name:   `path_with_embedded_backslash`,
+			gcPath: `/opt/foo\bar/gc`,
+			want:   `ExecStart="/opt/foo\\bar/gc" supervisor run`,
+		},
+		{
+			name:   `paranoia_spaces_and_embedded_quotes`,
+			gcPath: `/srv/binaries/edge "case"/gc`,
+			want:   `ExecStart="/srv/binaries/edge \"case\"/gc" supervisor run`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			data := &supervisorServiceData{
+				GCPath:  tc.gcPath,
+				LogPath: "/tmp/gc-home/supervisor.log",
+				GCHome:  "/tmp/gc-home",
+				Path:    "/usr/local/bin:/usr/bin:/bin",
+			}
+			content, err := renderSupervisorTemplate(supervisorSystemdTemplate, data)
+			if err != nil {
+				t.Fatalf("renderSupervisorTemplate: %v", err)
+			}
+			if !strings.Contains(content, tc.want) {
+				t.Fatalf("rendered systemd unit missing %q; full:\n%s", tc.want, content)
+			}
+		})
 	}
 }

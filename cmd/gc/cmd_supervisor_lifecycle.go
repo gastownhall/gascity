@@ -970,7 +970,7 @@ Type=simple
 # 'gc supervisor run' that live in this cgroup, killing one-per-bead
 # session conversation history. The reconciler re-adopts tmux on start.
 KillMode=process
-ExecStart={{.GCPath}} supervisor run
+ExecStart={{systemdpath .GCPath}} supervisor run
 Restart=always
 RestartSec=5s
 StandardOutput=append:{{.LogPath}}
@@ -996,7 +996,7 @@ func systemdEnv(name, value string) string {
 }
 
 func renderSupervisorTemplate(tmplStr string, data *supervisorServiceData) (string, error) {
-	funcMap := template.FuncMap{"xmlesc": xmlEscape, "systemdenv": systemdEnv}
+	funcMap := template.FuncMap{"xmlesc": xmlEscape, "systemdenv": systemdEnv, "systemdpath": strconv.Quote}
 	tmpl, err := template.New("service").Funcs(funcMap).Parse(tmplStr)
 	if err != nil {
 		return "", err
