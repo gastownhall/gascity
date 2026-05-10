@@ -457,7 +457,7 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 			return 0
 		}
 		missingSince = time.Time{}
-		delivered, pollErr := tryDeliverQueuedNudgesByPoller(target, store, sp, quiescence)
+		delivered, pollErr := tryDeliverQueuedNudgesByPoller(target, store, sp, quiescence, obs)
 		if pollErr != nil {
 			fmt.Fprintf(stderr, "gc nudge poll: %v\n", pollErr) //nolint:errcheck
 		}
@@ -726,8 +726,8 @@ func parseNudgeDeliveryMode(raw string) (nudgeDeliveryMode, error) {
 	}
 }
 
-func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store beads.Store, sp runtime.Provider, quiescence time.Duration) (bool, error) {
-	if !pollerSessionIdleEnough(target, store, sp, quiescence) {
+func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store beads.Store, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) (bool, error) {
+	if !pollerSessionIdleEnough(target, sp, quiescence, obs) {
 		return false, nil
 	}
 	items, err := claimDueQueuedNudgesForTarget(target.cityPath, target, time.Now())
@@ -786,11 +786,7 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store beads.Store, sp ru
 	return true, ackQueuedNudges(target.cityPath, queuedNudgeIDs(items))
 }
 
-func pollerSessionIdleEnough(target nudgeTarget, store beads.Store, sp runtime.Provider, quiescence time.Duration) bool {
-	obs, err := workerObserveNudgeTarget(target, store, sp)
-	if err != nil {
-		return false
-	}
+func pollerSessionIdleEnough(target nudgeTarget, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) bool {
 	if quiescence <= 0 {
 		return true
 	}
@@ -816,6 +812,12 @@ func maybeStartNudgePoller(target nudgeTarget) {
 		return
 	}
 	if target.sessionTransport() == "acp" {
+		return
+	}
+	// Supervisor-hosted dispatcher owns delivery in supervisor mode; the
+	// per-session poller would race with it and reintroduce the bd-shellout
+	// load it was designed to eliminate.
+	if nudgeDispatcherIsSupervisor(target.cfg) {
 		return
 	}
 	if err := startNudgePoller(target.cityPath, target.pollerKey(), target.sessionName); err != nil {
@@ -853,6 +855,16 @@ func withNudgeTargetFence(store beads.Store, target nudgeTarget) nudgeTarget {
 }
 
 var startNudgePoller = ensureNudgePoller
+
+// nudgeDispatcherIsSupervisor reports whether the city is configured to use
+// the supervisor-hosted nudge dispatcher rather than per-session pollers.
+// A nil cfg defaults to legacy mode, matching DaemonConfig.NudgeDispatcherMode.
+func nudgeDispatcherIsSupervisor(cfg *config.City) bool {
+	if cfg == nil {
+		return false
+	}
+	return cfg.Daemon.NudgeDispatcherMode() == "supervisor"
+}
 
 func splitQueuedNudgesForTarget(target nudgeTarget, items []queuedNudge) ([]queuedNudge, []queuedNudge) {
 	if len(items) == 0 {
@@ -1263,7 +1275,22 @@ func enqueueQueuedNudgeWithStore(cityPath string, store beads.Store, item queued
 		return nil
 	})
 	if err != nil && created && store != nil && beadID != "" {
-		_ = store.Close(beadID)
+		// Stamp metadata.close_reason before Close so BdStore.Close can forward
+		// it as `bd close --reason` and satisfy validation.on-close=error.
+		// Preserve the original enqueue error, but return rollback failures too
+		// so leaked open nudge beads are diagnosable.
+		if setErr := store.SetMetadata(beadID, "close_reason", nudgeEnqueueRollbackCloseReason); setErr != nil {
+			err = errors.Join(err, fmt.Errorf("stamping rollback nudge bead %q close reason: %w", beadID, setErr))
+		}
+		if closeErr := store.Close(beadID); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("closing rollback nudge bead %q: %w", beadID, closeErr))
+		}
+	}
+	if err == nil {
+		// Best-effort wake of the supervisor's nudge dispatcher. Legacy-mode
+		// cities and ad-hoc invocations (no listener) get a fast dial
+		// failure and fall through to the per-session poller / patrol tick.
+		pingNudgeWakeSocket(cityPath)
 	}
 	return err
 }

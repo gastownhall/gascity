@@ -1,0 +1,20 @@
+{
+  "name": "gascity",
+  "description": "Gas City orchestration agent",
+  "prompt": "file://../../AGENTS.md",
+  "hooks": {
+    "agentSpawn": [
+      {
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc prime --hook"
+      }
+    ],
+    "userPromptSubmit": [
+      {
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc nudge drain --inject"
+      },
+      {
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc mail check --inject"
+      }
+    ]
+  }
+}

@@ -33,7 +33,7 @@ func (c *sessionModelDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 		r.Message = fmt.Sprintf("session model diagnostics skipped: %v", err)
 		return r
 	}
-	all, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true, Sort: beads.SortCreatedAsc})
+	all, err := loadSessionModelDoctorBeads(store)
 	if err != nil {
 		r.Status = doctor.StatusWarning
 		r.Message = fmt.Sprintf("session model diagnostics skipped: %v", err)
@@ -120,6 +120,44 @@ func (c *sessionModelDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 	r.Message = fmt.Sprintf("%d session model finding(s)", len(findings))
 	r.Details = findings
 	return r
+}
+
+func loadSessionModelDoctorBeads(store beads.Store) ([]beads.Bead, error) {
+	type listStep struct {
+		name  string
+		query beads.ListQuery
+	}
+	steps := []listStep{
+		{
+			name:  "session label",
+			query: beads.ListQuery{Label: session.LabelSession, IncludeClosed: true, Sort: beads.SortCreatedAsc},
+		},
+		{
+			name:  "session type",
+			query: beads.ListQuery{Type: session.BeadType, IncludeClosed: true, Sort: beads.SortCreatedAsc},
+		},
+		{
+			name:  "open work",
+			query: beads.ListQuery{AllowScan: true, Sort: beads.SortCreatedAsc},
+		},
+	}
+
+	seen := make(map[string]bool)
+	var all []beads.Bead
+	for _, step := range steps {
+		items, err := store.List(step.query)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", step.name, err)
+		}
+		for _, item := range items {
+			if seen[item.ID] {
+				continue
+			}
+			seen[item.ID] = true
+			all = append(all, item)
+		}
+	}
+	return all, nil
 }
 
 func isRetiredSessionModelOwner(b beads.Bead) bool {

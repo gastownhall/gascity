@@ -117,3 +117,33 @@ func TestIsOutsideDir(t *testing.T) {
 		}
 	}
 }
+
+func TestPathWithin(t *testing.T) {
+	root := t.TempDir()
+	child := filepath.Join(root, "nested", "child")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !PathWithin(root, child) {
+		t.Fatalf("PathWithin(%q, %q) = false, want true", root, child)
+	}
+	if !PathWithin(root, root) {
+		t.Fatalf("PathWithin(%q, %q) = false, want true for identical paths", root, root)
+	}
+}
+
+func TestPathWithinSymlinkedMissingLeaf(t *testing.T) {
+	root := t.TempDir()
+	realPath := filepath.Join(root, "real")
+	if err := os.MkdirAll(realPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(realPath, link); err != nil {
+		t.Skip("symlinks not supported")
+	}
+	candidate := filepath.Join(link, "missing", "leaf")
+	if !PathWithin(realPath, candidate) {
+		t.Fatalf("PathWithin(%q, %q) = false, want true through symlink ancestor", realPath, candidate)
+	}
+}

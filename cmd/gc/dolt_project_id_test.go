@@ -258,7 +258,7 @@ func TestManagedDoltWaitReadyWithPasswordUsesDirectQueryProbe(t *testing.T) {
 	}
 }
 
-func TestRecoverManagedDoltProcessWithPasswordUsesDirectHelpersAgainstRealServer(t *testing.T) {
+func TestRecoverManagedDoltProcessWithPasswordReusesHealthyRealServer(t *testing.T) {
 	skipSlowCmdGCTest(t, "requires a managed dolt server; run make test-cmd-gc-process for full coverage")
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
@@ -300,8 +300,17 @@ func TestRecoverManagedDoltProcessWithPasswordUsesDirectHelpersAgainstRealServer
 	if !report.Ready || !report.Healthy {
 		t.Fatalf("recoverManagedDoltProcess() = %+v, want ready healthy", report)
 	}
-	if report.PID == 0 || report.PID == pid {
-		t.Fatalf("recoverManagedDoltProcess() pid = %d, want new pid", report.PID)
+	if !report.HadPID {
+		t.Fatalf("recoverManagedDoltProcess() HadPID = false, want true")
+	}
+	if report.PID != pid {
+		t.Fatalf("recoverManagedDoltProcess() pid = %d, want reused pid %d", report.PID, pid)
+	}
+	if report.Port != port {
+		t.Fatalf("recoverManagedDoltProcess() port = %d, want %d", report.Port, port)
+	}
+	if report.Restarted {
+		t.Fatalf("recoverManagedDoltProcess() Restarted = true, want false")
 	}
 }
 

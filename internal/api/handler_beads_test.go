@@ -194,8 +194,8 @@ func (s *prefixedAliasStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	return out, nil
 }
 
-func (s *prefixedAliasStore) Ready() ([]beads.Bead, error) {
-	items, err := s.base.Ready()
+func (s *prefixedAliasStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	items, err := s.base.Ready(query...)
 	if err != nil {
 		return nil, err
 	}
@@ -460,6 +460,73 @@ func TestBeadCRUD(t *testing.T) {
 	if got.Status != "closed" {
 		t.Errorf("Status = %q, want %q", got.Status, "closed")
 	}
+}
+
+type laggyParentProjectionStore struct {
+	beads.Store
+	pendingChildren map[string]string
+	waitCalls       int
+}
+
+func newLaggyParentProjectionStore() *laggyParentProjectionStore {
+	return &laggyParentProjectionStore{
+		Store:           beads.NewMemStore(),
+		pendingChildren: make(map[string]string),
+	}
+}
+
+func (s *laggyParentProjectionStore) Update(id string, opts beads.UpdateOpts) error {
+	parentChanged := false
+	newParentID := ""
+	if opts.ParentID != nil {
+		current, err := s.Get(id)
+		if err != nil {
+			return err
+		}
+		parentChanged = current.ParentID != *opts.ParentID
+		newParentID = *opts.ParentID
+	}
+	if err := s.Store.Update(id, opts); err != nil {
+		return err
+	}
+	if parentChanged && newParentID != "" {
+		s.pendingChildren[id] = newParentID
+	}
+	return nil
+}
+
+func (s *laggyParentProjectionStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	items, err := s.Store.List(query)
+	if err != nil {
+		return nil, err
+	}
+	if query.ParentID == "" || len(s.pendingChildren) == 0 {
+		return items, nil
+	}
+	filtered := make([]beads.Bead, 0, len(items))
+	for _, item := range items {
+		if s.pendingChildren[item.ID] == query.ParentID {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered, nil
+}
+
+func (s *laggyParentProjectionStore) WaitForParentProjection(_ context.Context, id string, _, _ string) error {
+	s.waitCalls++
+	delete(s.pendingChildren, id)
+	return nil
+}
+
+type projectionConflictStore struct {
+	beads.Store
+	waitCalls int
+}
+
+func (s *projectionConflictStore) WaitForParentProjection(_ context.Context, _, _, _ string) error {
+	s.waitCalls++
+	return beads.ErrParentProjectionSuperseded
 }
 
 func TestBeadListFiltering(t *testing.T) {
@@ -896,6 +963,146 @@ func TestBeadUpdateSetsAndClearsParent(t *testing.T) {
 	}
 	if got.ParentID != "" {
 		t.Fatalf("parent after clear = %q, want empty", got.ParentID)
+	}
+}
+
+func TestBeadUpdateWaitsForParentProjectionBeforeReturning(t *testing.T) {
+	state := newFakeState(t)
+	store := newLaggyParentProjectionStore()
+	state.stores["myrig"] = store
+	parent, err := store.Create(beads.Bead{Title: "Parent"})
+	if err != nil {
+		t.Fatalf("Create(parent): %v", err)
+	}
+	child, err := store.Create(beads.Bead{Title: "Child"})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	h := newTestCityHandler(t, state)
+
+	req := newPostRequest(cityURL(state, "/bead/")+child.ID+"/update", bytes.NewBufferString(`{"parent":"`+parent.ID+`"}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if store.waitCalls != 1 {
+		t.Fatalf("waitCalls = %d, want 1", store.waitCalls)
+	}
+
+	req = httptest.NewRequest("GET", cityURL(state, "/bead/")+parent.ID+"/deps", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("deps status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Children []beads.Bead `json:"children"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("Decode(): %v", err)
+	}
+	if len(resp.Children) != 1 || resp.Children[0].ID != child.ID {
+		t.Fatalf("children = %#v, want [%s]", resp.Children, child.ID)
+	}
+}
+
+func TestBeadUpdateWaitsForParentProjectionThroughCachingStore(t *testing.T) {
+	state := newFakeState(t)
+	backing := newLaggyParentProjectionStore()
+	state.stores["myrig"] = beads.NewCachingStoreForTest(backing, nil)
+	parent, err := state.stores["myrig"].Create(beads.Bead{Title: "Parent"})
+	if err != nil {
+		t.Fatalf("Create(parent): %v", err)
+	}
+	child, err := state.stores["myrig"].Create(beads.Bead{Title: "Child"})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	h := newTestCityHandler(t, state)
+
+	req := newPostRequest(cityURL(state, "/bead/")+child.ID+"/update", bytes.NewBufferString(`{"parent":"`+parent.ID+`"}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if backing.waitCalls != 1 {
+		t.Fatalf("waitCalls = %d, want 1", backing.waitCalls)
+	}
+
+	req = httptest.NewRequest("GET", cityURL(state, "/bead/")+parent.ID+"/deps", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("deps status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Children []beads.Bead `json:"children"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("Decode(): %v", err)
+	}
+	if len(resp.Children) != 1 || resp.Children[0].ID != child.ID {
+		t.Fatalf("children = %#v, want [%s]", resp.Children, child.ID)
+	}
+}
+
+func TestBeadUpdateSkipsParentProjectionWaitForClosedBead(t *testing.T) {
+	state := newFakeState(t)
+	store := newLaggyParentProjectionStore()
+	state.stores["myrig"] = store
+	parent, err := store.Create(beads.Bead{Title: "Parent"})
+	if err != nil {
+		t.Fatalf("Create(parent): %v", err)
+	}
+	child, err := store.Create(beads.Bead{Title: "Child"})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	h := newTestCityHandler(t, state)
+
+	req := newPostRequest(cityURL(state, "/bead/")+child.ID+"/update", bytes.NewBufferString(`{"parent":"`+parent.ID+`","status":"closed"}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if store.waitCalls != 0 {
+		t.Fatalf("waitCalls = %d, want 0", store.waitCalls)
+	}
+}
+
+func TestBeadUpdateReturnsConflictWhenParentProjectionIsSuperseded(t *testing.T) {
+	state := newFakeState(t)
+	store := &projectionConflictStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = store
+	parent, err := store.Create(beads.Bead{Title: "Parent"})
+	if err != nil {
+		t.Fatalf("Create(parent): %v", err)
+	}
+	child, err := store.Create(beads.Bead{Title: "Child"})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	h := newTestCityHandler(t, state)
+
+	req := newPostRequest(cityURL(state, "/bead/")+child.ID+"/update", bytes.NewBufferString(`{"parent":"`+parent.ID+`"}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	if store.waitCalls != 1 {
+		t.Fatalf("waitCalls = %d, want 1", store.waitCalls)
 	}
 }
 

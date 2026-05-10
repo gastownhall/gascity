@@ -13,13 +13,11 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
-
-type noActivityCapabilityProvider struct {
-	*runtime.Fake
-}
 
 func intPtrNudge(n int) *int { return &n }
 
@@ -73,8 +71,13 @@ func (s *unrelatedNotFoundNudgeBeadStore) SetMetadataBatch(id string, kvs map[st
 	return s.MemStore.SetMetadataBatch(id, kvs)
 }
 
-func (p *noActivityCapabilityProvider) Capabilities() runtime.ProviderCapabilities {
-	return runtime.ProviderCapabilities{}
+type rollbackCloseFailStore struct {
+	*beads.MemStore
+	closeErr error
+}
+
+func (s *rollbackCloseFailStore) Close(string) error {
+	return s.closeErr
 }
 
 func TestMarkQueuedNudgeTerminalFallsBackWhenStoredBeadIDEmpty(t *testing.T) {
@@ -573,16 +576,19 @@ func TestDeliverSessionNudgeWithProviderWaitIdleStartsClaudePollerWhenQueued(t *
 	}
 }
 
-func TestPollerSessionIdleEnoughUsesLastActivityWithoutCapabilityFlag(t *testing.T) {
-	fake := runtime.NewFake()
-	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	fake.SetActivity("sess-worker", time.Now().Add(-5*time.Second))
+func TestPollerSessionIdleEnoughUsesSuppliedLastActivity(t *testing.T) {
 	target := nudgeTarget{sessionName: "sess-worker"}
+	last := time.Now().Add(-5 * time.Second)
+	obs := worker.LiveObservation{LastActivity: &last}
 
-	if !pollerSessionIdleEnough(target, nil, &noActivityCapabilityProvider{Fake: fake}, 3*time.Second) {
-		t.Fatal("pollerSessionIdleEnough = false, want true when last activity is old enough")
+	if !pollerSessionIdleEnough(target, nil, 3*time.Second, obs) {
+		t.Fatal("pollerSessionIdleEnough = false, want true when supplied last activity is old enough")
+	}
+
+	recent := time.Now().Add(-1 * time.Second)
+	obs.LastActivity = &recent
+	if pollerSessionIdleEnough(target, nil, 3*time.Second, obs) {
+		t.Fatal("pollerSessionIdleEnough = true, want false when supplied last activity is too recent")
 	}
 }
 
@@ -593,8 +599,9 @@ func TestPollerSessionIdleEnoughFallsBackToIdleWaitWhenActivityUnavailable(t *te
 	}
 	fake.WaitForIdleErrors["sess-worker"] = nil
 	target := nudgeTarget{sessionName: "sess-worker"}
+	obs := worker.LiveObservation{}
 
-	if !pollerSessionIdleEnough(target, nil, fake, 3*time.Second) {
+	if !pollerSessionIdleEnough(target, fake, 3*time.Second, obs) {
 		t.Fatal("pollerSessionIdleEnough = false, want idle wait fallback to allow delivery")
 	}
 
@@ -610,7 +617,7 @@ func TestPollerSessionIdleEnoughFallsBackToIdleWaitWhenActivityUnavailable(t *te
 	}
 
 	fake.WaitForIdleErrors["sess-worker"] = errors.New("timed out waiting for idle")
-	if pollerSessionIdleEnough(target, nil, fake, 3*time.Second) {
+	if pollerSessionIdleEnough(target, fake, 3*time.Second, obs) {
 		t.Fatal("pollerSessionIdleEnough = true, want idle wait error to suppress delivery")
 	}
 }
@@ -1153,7 +1160,8 @@ func TestTryDeliverQueuedNudgesByPollerDeliversAndAcks(t *testing.T) {
 	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	fake.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-10 * time.Second)}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
 
 	target := nudgeTarget{
 		cityPath:    dir,
@@ -1162,8 +1170,9 @@ func TestTryDeliverQueuedNudgesByPollerDeliversAndAcks(t *testing.T) {
 		resolved:    &config.ResolvedProvider{Name: "codex"},
 		sessionName: info.SessionName,
 	}
+	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
 
-	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, fake, 3*time.Second)
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, fake, 3*time.Second, obs)
 	if err != nil {
 		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
 	}
@@ -1214,7 +1223,8 @@ func TestTryDeliverQueuedNudgesByPollerLeavesACPDeliveryUnwrapped(t *testing.T) 
 	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	fake.Activity = map[string]time.Time{"sess-worker": time.Now().Add(-10 * time.Second)}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{"sess-worker": idleSince}
 
 	target := nudgeTarget{
 		cityPath:    dir,
@@ -1223,8 +1233,9 @@ func TestTryDeliverQueuedNudgesByPollerLeavesACPDeliveryUnwrapped(t *testing.T) 
 		resolved:    &config.ResolvedProvider{Name: "codex"},
 		sessionName: "sess-worker",
 	}
+	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
 
-	delivered, err := tryDeliverQueuedNudgesByPoller(target, openNudgeBeadStore(dir), fake, 3*time.Second)
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, openNudgeBeadStore(dir), fake, 3*time.Second, obs)
 	if err != nil {
 		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
 	}
@@ -2037,5 +2048,202 @@ func TestListQueuedNudges_CategorizesPendingAndDead(t *testing.T) {
 	}
 	if len(deadList) != 1 || deadList[0].ID != "n-stale" {
 		t.Fatalf("dead = %v, want [n-stale]", deadList)
+	}
+}
+
+// TestMarkQueuedNudgeTerminalStampsCloseReason verifies that
+// markQueuedNudgeTerminal stamps a canonical close_reason on the nudge
+// bead's metadata before invoking store.Close. BdStore.Close forwards
+// metadata.close_reason as `bd close --reason ...`; without this stamp,
+// cities running with validation.on-close=error reject the close, the
+// withNudgeQueueState transaction rolls back, and the nudge bounces
+// between Pending and InFlight forever, generating a bead.updated event
+// per claim attempt for every wedged nudge.
+//
+// This test pins the contract that the close_reason metadata flows
+// through every state markQueuedNudgeTerminal handles. The
+// nudgeCanonicalCloseReason helper guarantees the >=20 char floor.
+func TestMarkQueuedNudgeTerminalStampsCloseReason(t *testing.T) {
+	cases := []struct {
+		name           string
+		state          string
+		reason         string
+		commitBoundary string
+	}{
+		{name: "failed_fence_mismatch", state: "failed", reason: "queued nudge session fence mismatch"},
+		{name: "expired", state: "expired", reason: "expired"},
+		{name: "superseded", state: "superseded", reason: "superseded"},
+		{name: "injected", state: "injected", reason: "", commitBoundary: "provider-nudge-return"},
+		{name: "accepted_for_injection", state: "accepted_for_injection", reason: "", commitBoundary: "hook-transport-accepted"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			item := queuedNudge{
+				ID:        "nudge-" + tc.name,
+				Agent:     "agent-terminal",
+				SessionID: "pc-qr6",
+				Source:    "session",
+				Message:   "DOG_DONE: reaper",
+				CreatedAt: time.Now().Add(-time.Minute).UTC(),
+			}
+			createdID, _, err := ensureQueuedNudgeBead(store, item)
+			if err != nil {
+				t.Fatalf("ensureQueuedNudgeBead: %v", err)
+			}
+
+			now := time.Now().UTC()
+			item.LastError = tc.reason
+			if err := markQueuedNudgeTerminal(store, item, tc.state, tc.reason, tc.commitBoundary, now); err != nil {
+				t.Fatalf("markQueuedNudgeTerminal: %v", err)
+			}
+
+			bead, err := store.Get(createdID)
+			if err != nil {
+				t.Fatalf("Get(%q): %v", createdID, err)
+			}
+			if bead.Status != "closed" {
+				t.Fatalf("bead.Status = %q, want closed", bead.Status)
+			}
+			want := nudgeCanonicalCloseReason(tc.state)
+			if got := bead.Metadata["close_reason"]; got != want {
+				t.Errorf("close_reason = %q, want %q", got, want)
+			}
+			// Existing audit metadata must remain stamped alongside close_reason.
+			if got := bead.Metadata["state"]; got != tc.state {
+				t.Errorf("state = %q, want %q", got, tc.state)
+			}
+			if got := bead.Metadata["terminal_reason"]; got != tc.reason {
+				t.Errorf("terminal_reason = %q, want %q", got, tc.reason)
+			}
+		})
+	}
+}
+
+// TestNudgeCanonicalCloseReasonMeetsValidatorThreshold pins the >=20
+// char floor for every known queue terminalization state and the
+// unknown-code fallback. The validator (bd's validation.on-close=error,
+// per gastownhall/beads#2654) rejects close reasons under 20 chars, so
+// any helper output that drops below the floor would silently break
+// nudge close under strict cities and reintroduce the queue-bounce loop.
+func TestNudgeCanonicalCloseReasonMeetsValidatorThreshold(t *testing.T) {
+	// All states that markQueuedNudgeTerminal is invoked with across the
+	// nudge codepaths (recordQueuedNudgeFailureDetailed,
+	// pruneExpiredQueuedNudges, recoverExpiredInFlightNudges,
+	// ackQueuedNudgesWithOutcome, supersession in enqueueQueuedNudgeWithStore,
+	// terminalizeBlockedQueuedNudges → ackQueuedNudgesWithOutcome).
+	knownStates := []string{
+		"failed",
+		"expired",
+		"superseded",
+		"injected",
+		"accepted_for_injection",
+	}
+	for _, s := range knownStates {
+		got := nudgeCanonicalCloseReason(s)
+		if len(got) < 20 {
+			t.Errorf("nudgeCanonicalCloseReason(%q) = %q (%d chars), want >=20", s, got, len(got))
+		}
+	}
+	// Unknown short code falls back to a >=20 char canonical phrase.
+	if got := nudgeCanonicalCloseReason("x"); len(got) < 20 {
+		t.Errorf("unknown-short-code fallback = %q (%d chars), want >=20", got, len(got))
+	}
+	// Empty input also yields a >=20 char fallback (avoids accidental
+	// short close_reason if a caller passes "").
+	if got := strings.TrimSpace(nudgeCanonicalCloseReason("")); len(got) < 20 {
+		t.Errorf("trimmed empty-code fallback = %q (%d chars), want >=20", got, len(got))
+	}
+	// Codes already >=20 characters pass through unchanged.
+	const long = "a-very-long-state-code-already-sufficient"
+	if got := nudgeCanonicalCloseReason(long); got != long {
+		t.Errorf("long-code passthrough = %q, want %q", got, long)
+	}
+}
+
+// TestEnqueueQueuedNudgeWithStore_RollbackStampsCloseReason verifies that
+// enqueueQueuedNudgeWithStore's rollback path stamps a canonical
+// metadata.close_reason on the partially-created nudge bead before
+// invoking store.Close. Without the stamp, BdStore.Close has no
+// metadata.close_reason to forward, the validator (under
+// validation.on-close=error) rejects the close, and the rollback leaks
+// an OPEN nudge bead with metadata.state="queued".
+//
+// Triggers the rollback by writing corrupt JSON to the queue state
+// file before the call, which fails LoadState inside withNudgeQueueState
+// and propagates the error up to the rollback site.
+func TestEnqueueQueuedNudgeWithStore_RollbackStampsCloseReason(t *testing.T) {
+	dir := t.TempDir()
+
+	// Force LoadState to fail by pre-populating state.json with corrupt
+	// JSON. WithState propagates the parse error up, which means
+	// enqueueQueuedNudgeWithStore enters its rollback branch.
+	statePath := nudgequeue.StatePath(dir)
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(statePath, []byte("{not-valid-json"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	item := newQueuedNudgeWithOptions("worker", "rollback test", "session", time.Now(), queuedNudgeOptions{
+		ID: "nudge-rollback-target",
+	})
+
+	err := enqueueQueuedNudgeWithStore(dir, store, item)
+	if err == nil {
+		t.Fatal("enqueueQueuedNudgeWithStore: expected error from corrupt queue state")
+	}
+
+	bead, ok, err := findAnyQueuedNudgeBead(store, item.ID)
+	if err != nil {
+		t.Fatalf("findAnyQueuedNudgeBead: %v", err)
+	}
+	if !ok {
+		t.Fatal("findAnyQueuedNudgeBead: bead not found; rollback should leave a closed bead, not delete it")
+	}
+	if bead.Status != "closed" {
+		t.Fatalf("bead.Status = %q, want closed (rollback should have closed via store.Close)", bead.Status)
+	}
+	if got := bead.Metadata["close_reason"]; got != nudgeEnqueueRollbackCloseReason {
+		t.Errorf("close_reason = %q, want %q", got, nudgeEnqueueRollbackCloseReason)
+	}
+	// Belt-and-braces: the canonical reason itself meets the validator
+	// floor. If someone shortens it without thinking, this guard fires.
+	if got := nudgeEnqueueRollbackCloseReason; len(got) < 20 {
+		t.Errorf("nudgeEnqueueRollbackCloseReason = %q (%d chars), want >=20 to satisfy validation.on-close=error", got, len(got))
+	}
+}
+
+func TestEnqueueQueuedNudgeWithStore_RollbackReturnsCloseFailure(t *testing.T) {
+	dir := t.TempDir()
+
+	statePath := nudgequeue.StatePath(dir)
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(statePath, []byte("{not-valid-json"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	closeErr := errors.New("rollback close failed")
+	store := &rollbackCloseFailStore{
+		MemStore: beads.NewMemStore(),
+		closeErr: closeErr,
+	}
+	item := newQueuedNudgeWithOptions("worker", "rollback close failure", "session", time.Now(), queuedNudgeOptions{
+		ID: "nudge-rollback-close-failure",
+	})
+
+	err := enqueueQueuedNudgeWithStore(dir, store, item)
+	if err == nil {
+		t.Fatal("enqueueQueuedNudgeWithStore: expected error from corrupt queue state and rollback close failure")
+	}
+	if !errors.Is(err, closeErr) {
+		t.Fatalf("error = %v, want joined rollback close failure", err)
+	}
+	if !strings.Contains(err.Error(), "rollback nudge bead") {
+		t.Fatalf("error = %q, want rollback context", err)
 	}
 }

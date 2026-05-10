@@ -10,20 +10,14 @@ import (
 	bdpack "github.com/gastownhall/gascity/examples/bd"
 )
 
-func TestDoltServerEnv_AppendsDefaultWhenMissing(t *testing.T) {
+func TestDoltServerEnv_DoesNotInjectGCSchedulerDefault(t *testing.T) {
 	parent := []string{"PATH=/usr/bin", "HOME=/home/test"}
 	out := doltServerEnv(parent)
 
-	want := "DOLT_GC_SCHEDULER=NONE"
-	found := false
 	for _, kv := range out {
-		if kv == want {
-			found = true
-			break
+		if strings.HasPrefix(kv, "DOLT_GC_SCHEDULER=") {
+			t.Fatalf("managed Dolt env should not inject GC scheduler default, got %v", out)
 		}
-	}
-	if !found {
-		t.Fatalf("expected %q in env, got %v", want, out)
 	}
 	// Original entries preserved.
 	for _, kv := range parent {
@@ -59,19 +53,15 @@ func TestDoltServerEnv_RespectsUserOverride(t *testing.T) {
 	}
 }
 
-func TestDoltServerEnv_RespectsEmptyUserValue(t *testing.T) {
-	// An explicit empty value (DOLT_GC_SCHEDULER=) is still a user
-	// override and we must not replace it.
+func TestDoltServerEnv_PreservesEmptyUserValue(t *testing.T) {
 	parent := []string{"DOLT_GC_SCHEDULER="}
 	out := doltServerEnv(parent)
-	for _, kv := range out {
-		if kv == "DOLT_GC_SCHEDULER=NONE" {
-			t.Fatalf("explicit empty-value override clobbered: %v", out)
-		}
+	if len(out) != 1 || out[0] != "DOLT_GC_SCHEDULER=" {
+		t.Fatalf("explicit empty-value env not preserved: %v", out)
 	}
 }
 
-func TestGCBeadsBDScript_RespectsEmptyUserValue(t *testing.T) {
+func TestGCBeadsBDScript_DoesNotDefaultDoltGCScheduler(t *testing.T) {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller(0) failed")
@@ -83,11 +73,10 @@ func TestGCBeadsBDScript_RespectsEmptyUserValue(t *testing.T) {
 	}
 	script := string(data)
 
-	if !strings.Contains(script, `${DOLT_GC_SCHEDULER=NONE}`) {
-		t.Fatalf("gc-beads-bd.sh must default DOLT_GC_SCHEDULER only when unset")
-	}
-	if strings.Contains(script, `${DOLT_GC_SCHEDULER:=NONE}`) {
-		t.Fatalf("gc-beads-bd.sh must not clobber an explicitly empty DOLT_GC_SCHEDULER")
+	for _, forbidden := range []string{`DOLT_GC_SCHEDULER=NONE`, `DOLT_GC_SCHEDULER:=NONE`} {
+		if strings.Contains(script, forbidden) {
+			t.Fatalf("gc-beads-bd.sh must not default DOLT_GC_SCHEDULER; found %q", forbidden)
+		}
 	}
 }
 
@@ -150,5 +139,133 @@ func TestGCBeadsBDScript_QuarantinesRetiredReplacementDatabases(t *testing.T) {
 	}
 	if strings.Contains(script, "quarantining phantom database") {
 		t.Fatal("gc-beads-bd.sh still logs the broader fallback as phantom-only")
+	}
+}
+
+func TestManagedDoltStartFields(t *testing.T) {
+	report := managedDoltStartReport{
+		Ready:        true,
+		PID:          4321,
+		Port:         3312,
+		AddressInUse: false,
+		Attempts:     2,
+	}
+	fields := managedDoltStartFields(report)
+	want := []string{
+		"ready\ttrue",
+		"pid\t4321",
+		"port\t3312",
+		"address_in_use\tfalse",
+		"attempts\t2",
+	}
+	if len(fields) != len(want) {
+		t.Fatalf("got %d fields, want %d", len(fields), len(want))
+	}
+	for i, w := range want {
+		if fields[i] != w {
+			t.Errorf("fields[%d] = %q, want %q", i, fields[i], w)
+		}
+	}
+}
+
+func TestManagedDoltLogSize(t *testing.T) {
+	t.Run("existing file", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "dolt.log")
+		if err := os.WriteFile(path, []byte("hello world\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		got, err := managedDoltLogSize(path)
+		if err != nil {
+			t.Fatalf("managedDoltLogSize: %v", err)
+		}
+		if got != 12 {
+			t.Errorf("managedDoltLogSize = %d, want 12", got)
+		}
+	})
+
+	t.Run("missing file returns zero", func(t *testing.T) {
+		got, err := managedDoltLogSize(filepath.Join(t.TempDir(), "no-such.log"))
+		if err != nil {
+			t.Fatalf("managedDoltLogSize: %v", err)
+		}
+		if got != 0 {
+			t.Errorf("managedDoltLogSize = %d, want 0", got)
+		}
+	})
+}
+
+func TestManagedDoltLogSuffix(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dolt.log")
+	content := "line one\nline two\nline three\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	t.Run("from offset", func(t *testing.T) {
+		got, err := managedDoltLogSuffix(path, 9)
+		if err != nil {
+			t.Fatalf("managedDoltLogSuffix: %v", err)
+		}
+		if got != "line two\nline three\n" {
+			t.Errorf("got %q, want %q", got, "line two\nline three\n")
+		}
+	})
+
+	t.Run("offset past end returns empty", func(t *testing.T) {
+		got, err := managedDoltLogSuffix(path, int64(len(content)+10))
+		if err != nil {
+			t.Fatalf("managedDoltLogSuffix: %v", err)
+		}
+		if got != "" {
+			t.Errorf("got %q, want empty", got)
+		}
+	})
+
+	t.Run("negative offset treated as zero", func(t *testing.T) {
+		got, err := managedDoltLogSuffix(path, -5)
+		if err != nil {
+			t.Fatalf("managedDoltLogSuffix: %v", err)
+		}
+		if got != content {
+			t.Errorf("got %q, want %q", got, content)
+		}
+	})
+
+	t.Run("missing file returns empty", func(t *testing.T) {
+		got, err := managedDoltLogSuffix(filepath.Join(dir, "no-such.log"), 0)
+		if err != nil {
+			t.Fatalf("managedDoltLogSuffix: %v", err)
+		}
+		if got != "" {
+			t.Errorf("got %q, want empty", got)
+		}
+	})
+}
+
+func TestResolveDoltArchiveLevel(t *testing.T) {
+	tests := []struct {
+		name     string
+		explicit int
+		envVal   string
+		want     int
+	}{
+		{name: "explicit zero", explicit: 0, want: 0},
+		{name: "explicit positive", explicit: 1, want: 1},
+		{name: "explicit large", explicit: 42, want: 42},
+		{name: "negative defaults to zero", explicit: -1, want: 0},
+		{name: "negative with valid env", explicit: -1, envVal: "1", want: 1},
+		{name: "negative with env zero", explicit: -1, envVal: "0", want: 0},
+		{name: "negative with non-numeric env falls back", explicit: -1, envVal: "abc", want: 0},
+		{name: "negative with empty env", explicit: -1, envVal: "", want: 0},
+		{name: "explicit overrides env", explicit: 2, envVal: "5", want: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GC_DOLT_ARCHIVE_LEVEL", tt.envVal)
+			if got := resolveDoltArchiveLevel(tt.explicit); got != tt.want {
+				t.Errorf("resolveDoltArchiveLevel(%d) = %d, want %d", tt.explicit, got, tt.want)
+			}
+		})
 	}
 }

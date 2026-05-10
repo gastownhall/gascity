@@ -55,7 +55,11 @@ type ProviderSpec struct {
 	DisplayName string `toml:"display_name,omitempty"`
 	// Command is the executable to run for this provider.
 	Command string `toml:"command,omitempty"`
-	// Args are default command-line arguments passed to the provider.
+	// Args are default command-line arguments passed to the provider. The
+	// built-in Kiro provider defaults to
+	// ["chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"];
+	// remove or replace "--trust-all-tools" by defining [providers.kiro].args
+	// explicitly in city.toml.
 	Args []string `toml:"args,omitempty"`
 	// PromptMode controls how prompts are delivered: "arg", "flag", or "none".
 	PromptMode string `toml:"prompt_mode,omitempty" jsonschema:"enum=arg,enum=flag,enum=none,default=arg"`
@@ -282,6 +286,18 @@ func (rp *ResolvedProvider) ProviderSessionCreateTransport() string {
 	}
 	if transport := rp.DefaultSessionTransport(); transport != "" {
 		return transport
+	}
+	family := strings.TrimSpace(rp.BuiltinAncestor)
+	if family == "" {
+		family = strings.TrimSpace(rp.Kind)
+	}
+	if family == "" {
+		family = strings.TrimSpace(rp.Name)
+	}
+	if family == "kiro" {
+		// Kiro supports explicit ACP sessions, but its chat transport carries
+		// the non-interactive tool trust contract required by coding agents.
+		return ""
 	}
 	if strings.TrimSpace(rp.ACPCommand) != "" || rp.ACPArgs != nil {
 		return SessionTransportACP

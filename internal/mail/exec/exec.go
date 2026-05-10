@@ -183,10 +183,11 @@ func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
 	return unmarshalMessage(out)
 }
 
-// Thread delegates to: script thread <thread-id>
-func (p *Provider) Thread(threadID string) ([]mail.Message, error) {
+// Thread delegates to: script thread <id>, where id may be a thread ID or
+// any message ID in that thread.
+func (p *Provider) Thread(id string) ([]mail.Message, error) {
 	p.ensureRunning()
-	out, err := p.run(nil, "thread", threadID)
+	out, err := p.run(nil, "thread", id)
 	if err != nil {
 		return nil, err
 	}

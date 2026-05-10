@@ -88,7 +88,7 @@ var (
 	}
 )
 
-const providerProbeCacheTTL = 2 * time.Second
+var providerProbeCacheTTL = 2 * time.Second
 
 type providerReadinessResponse struct {
 	Providers map[string]providerReadiness `json:"providers"`
@@ -333,7 +333,7 @@ func probeClaude(ctx context.Context, homeDir string) providerProbeResult {
 		return providerProbeResult{status: probeStatusNotInstalled, detail: "claude executable not found in probe PATH"}
 	}
 
-	stdout, _, err := runProbeCommand(ctx, homeDir, 5*time.Second, path, "auth", "status", "--json")
+	stdout, _, err := runProbeCommandWithEnv(ctx, homeDir, 5*time.Second, claudeProbeCommandEnv(), path, "auth", "status", "--json")
 	if err != nil && strings.TrimSpace(stdout) == "" {
 		return providerProbeResult{status: probeStatusProbeError, detail: "claude auth status failed before returning JSON"}
 	}
@@ -345,12 +345,24 @@ func probeClaude(ctx context.Context, homeDir string) providerProbeResult {
 	if !status.LoggedIn {
 		return providerProbeResult{status: probeStatusNeedsAuth, detail: "claude is installed but not logged in"}
 	}
-	// Onboarding only supports the first-party claude.ai OAuth flow. API-key
-	// or alternate providers are intentionally treated as unsupported.
-	if status.AuthMethod == "claude.ai" && status.APIProvider == "firstParty" {
+	// Onboarding supports the first-party claude.ai OAuth flow. Both the
+	// interactive `claude /login` flow ("claude.ai") and the long-lived
+	// token from `claude setup-token` ("oauth_token") are accepted — the
+	// latter is needed in headless / containerised environments where the
+	// interactive browser flow is not available. API-key or alternate
+	// providers are intentionally treated as unsupported.
+	if claudeFirstPartyAuthMethod(status.AuthMethod) && status.APIProvider == "firstParty" {
 		return providerProbeResult{status: probeStatusConfigured}
 	}
-	return providerProbeResult{status: probeStatusInvalidConfiguration, detail: "claude must use claude.ai first-party auth"}
+	return providerProbeResult{status: probeStatusInvalidConfiguration, detail: "claude must use claude.ai or oauth_token first-party auth"}
+}
+
+func claudeFirstPartyAuthMethod(method string) bool {
+	switch method {
+	case "claude.ai", "oauth_token":
+		return true
+	}
+	return false
 }
 
 func probeCodex(homeDir string) providerProbeResult {
@@ -478,10 +490,11 @@ func githubCLITokenConfigured() bool {
 }
 
 func probeGitHubCLIAuthStatus(ctx context.Context, homeDir, ghPath string) providerProbeResult {
-	stdout, stderr, err := runProbeCommand(
+	stdout, stderr, err := runProbeCommandWithEnv(
 		ctx,
 		homeDir,
 		5*time.Second,
+		gitHubCLIProbeCommandEnv(),
 		ghPath,
 		"auth",
 		"status",
@@ -528,10 +541,11 @@ func providerProbeSearchPath(homeDir string) string {
 	return searchpath.ExpandPath(homeDir, providerProbeGOOS, providerProbePathEnv)
 }
 
-func runProbeCommand(
+func runProbeCommandWithEnv(
 	ctx context.Context,
 	homeDir string,
 	timeout time.Duration,
+	extraEnv []string,
 	path string,
 	args ...string,
 ) (string, string, error) {
@@ -540,7 +554,7 @@ func runProbeCommand(
 
 	cmd := providerProbeCommandContext(ctx, path, args...)
 	cmd.Dir = homeDir
-	cmd.Env = probeCommandEnv(homeDir)
+	cmd.Env = append(probeCommandEnv(homeDir), extraEnv...)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -576,16 +590,27 @@ func probeCommandEnv(homeDir string) []string {
 	} else {
 		env = append(env, "XDG_STATE_HOME="+filepath.Join(homeDir, ".local", "state"))
 	}
-	if configDir := strings.TrimSpace(os.Getenv("GH_CONFIG_DIR")); configDir != "" {
-		env = append(env, "GH_CONFIG_DIR="+configDir)
-	}
-	for _, key := range []string{
+	return env
+}
+
+func claudeProbeCommandEnv() []string {
+	return probeEnvVars("CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN")
+}
+
+func gitHubCLIProbeCommandEnv() []string {
+	return probeEnvVars(
+		"GH_CONFIG_DIR",
 		"GH_HOST",
 		"GH_TOKEN",
 		"GITHUB_TOKEN",
 		"GH_ENTERPRISE_TOKEN",
 		"GITHUB_ENTERPRISE_TOKEN",
-	} {
+	)
+}
+
+func probeEnvVars(keys ...string) []string {
+	env := make([]string, 0, len(keys))
+	for _, key := range keys {
 		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 			env = append(env, key+"="+value)
 		}

@@ -56,6 +56,17 @@ func openCityStatusStore(cityPath string, stderr io.Writer) (beads.Store, int) {
 }
 
 func collectCityStatusSnapshot(sp runtime.Provider, cfg *config.City, cityPath string, store beads.Store, stderr io.Writer) cityStatusSnapshot {
+	return collectCityStatusSnapshotFromStoreSnapshot(sp, cfg, cityPath, store, loadStatusSessionSnapshot(store), stderr)
+}
+
+func collectCityStatusSnapshotFromStoreSnapshot(
+	sp runtime.Provider,
+	cfg *config.City,
+	cityPath string,
+	store beads.Store,
+	statusSnapshot *sessionBeadSnapshot,
+	stderr io.Writer,
+) cityStatusSnapshot {
 	suspended := os.Getenv("GC_SUSPENDED") == "1"
 	if cfg != nil {
 		suspended = citySuspended(cfg)
@@ -66,6 +77,7 @@ func collectCityStatusSnapshot(sp runtime.Provider, cfg *config.City, cityPath s
 		Suspended:  suspended,
 	}
 	snapshot.CityName = loadedCityName(cfg, cityPath)
+	registerStatusProviderACPRoutes(sp, statusSnapshot, snapshot.CityName, cfg)
 	if cfg == nil {
 		return snapshot
 	}
@@ -109,8 +121,8 @@ func collectCityStatusSnapshot(sp runtime.Provider, cfg *config.City, cityPath s
 			scaleLabel := fmt.Sprintf("scaled (min=%d, %s)", sp0.Min, maxDisplay)
 			headerShown := false
 			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, snapshot.CityName, cfg.Workspace.SessionTemplate, sp) {
-				sn := cliSessionName(cityPath, snapshot.CityName, qualifiedInstance, cfg.Workspace.SessionTemplate)
-				obs := observeSessionTargetWithWarning("gc status", cityPath, store, sp, cfg, sn, stderr)
+				target := statusObservationTargetForIdentity(statusSnapshot, snapshot.CityName, qualifiedInstance, cfg.Workspace.SessionTemplate)
+				obs := observeSessionTargetWithWarning("gc status", cityPath, store, sp, cfg, target, stderr)
 				_, instanceName := config.ParseQualifiedName(qualifiedInstance)
 				row := cityStatusAgentRow{
 					Agent: StatusAgentJSON{
@@ -121,7 +133,7 @@ func collectCityStatusSnapshot(sp runtime.Provider, cfg *config.City, cityPath s
 						Suspended:     suspended || obs.Suspended,
 						Pool:          nil,
 					},
-					SessionName: sn,
+					SessionName: target.runtimeSessionName,
 					GroupName:   a.QualifiedName(),
 					Expanded:    true,
 				}
@@ -139,8 +151,8 @@ func collectCityStatusSnapshot(sp runtime.Provider, cfg *config.City, cityPath s
 			continue
 		}
 
-		sn := cliSessionName(cityPath, snapshot.CityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
-		obs := observeSessionTargetWithWarning("gc status", cityPath, store, sp, cfg, sn, stderr)
+		target := statusObservationTargetForIdentity(statusSnapshot, snapshot.CityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
+		obs := observeSessionTargetWithWarning("gc status", cityPath, store, sp, cfg, target, stderr)
 		snapshot.Agents = append(snapshot.Agents, cityStatusAgentRow{
 			Agent: StatusAgentJSON{
 				Name:          a.Name,
@@ -149,7 +161,7 @@ func collectCityStatusSnapshot(sp runtime.Provider, cfg *config.City, cityPath s
 				Running:       obs.Running,
 				Suspended:     suspended || obs.Suspended,
 			},
-			SessionName: sn,
+			SessionName: target.runtimeSessionName,
 			GroupName:   a.QualifiedName(),
 			Expanded:    false,
 		})

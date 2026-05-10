@@ -112,7 +112,14 @@ func (a *convergenceStoreAdapter) SetMetadata(id, key, value string) error {
 	return nil
 }
 
-func (a *convergenceStoreAdapter) CloseBead(id string) error {
+func (a *convergenceStoreAdapter) CloseBead(id, reason string) error {
+	// Stamp close_reason before Close so validation.on-close=error sees
+	// it on the close that follows. Best-effort: an error here is not
+	// fatal — Close still proceeds and any pre-existing close_reason is
+	// preserved.
+	if reason != "" {
+		_ = a.store.SetMetadata(id, "close_reason", reason)
+	}
 	if err := a.store.Close(id); err != nil {
 		return err
 	}

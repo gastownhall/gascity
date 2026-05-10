@@ -6,6 +6,8 @@ import (
 	"fmt"
 	iofs "io/fs"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -39,7 +41,11 @@ func runPurgeStage(report *CleanupReport, opts cleanupOptions) {
 
 	var totalBytes int64
 	bytesByRigDB := map[string]int64{}
+	eligibleRigDBs := map[string]bool{}
 	for _, rig := range opts.Rigs {
+		if !rigSharesResolvedDoltServer(rig, opts) {
+			continue
+		}
 		root := filepath.Join(rig.Path, droppedDatabasesDir)
 		bytes, err := sumBytesUnder(opts.FS, root)
 		if err != nil {
@@ -47,7 +53,9 @@ func runPurgeStage(report *CleanupReport, opts cleanupOptions) {
 			continue
 		}
 		totalBytes += bytes
-		bytesByRigDB[rigDoltDatabaseName(rig, opts.FS)] += bytes
+		dbName := rigDoltDatabaseName(rig, opts.FS)
+		bytesByRigDB[dbName] += bytes
+		eligibleRigDBs[dbName] = true
 	}
 
 	if !opts.Force {
@@ -77,6 +85,9 @@ func runPurgeStage(report *CleanupReport, opts cleanupOptions) {
 	allOK := true
 	var reclaimedBytes int64
 	for _, rp := range report.RigsProtected {
+		if !eligibleRigDBs[rp.DB] {
+			continue
+		}
 		if !live[rp.DB] {
 			if bytesByRigDB[rp.DB] > 0 {
 				allOK = false
@@ -106,6 +117,53 @@ func runPurgeStage(report *CleanupReport, opts cleanupOptions) {
 	}
 	report.Purge.BytesReclaimed = reclaimedBytes
 	report.Purge.OK = allOK
+}
+
+func rigSharesResolvedDoltServer(rig resolverRig, opts cleanupOptions) bool {
+	if opts.PortResolution.Port <= 0 || opts.FS == nil {
+		return true
+	}
+	port, state := rigPortFileValue(rig, opts.FS)
+	switch state {
+	case rigPortFileValid:
+		return port == opts.PortResolution.Port
+	case rigPortFileMissing:
+		return opts.PortResolution.Fallback || cityConfigPortSelectsRig(rig, opts)
+	default:
+		return false
+	}
+}
+
+func cityConfigPortSelectsRig(_ resolverRig, opts cleanupOptions) bool {
+	return opts.PortResolution.Source == cityConfigDoltPortSource &&
+		opts.CityPort == opts.PortResolution.Port
+}
+
+type rigPortFileState int
+
+const (
+	rigPortFileMissing rigPortFileState = iota
+	rigPortFileInvalid
+	rigPortFileValid
+)
+
+func rigPortFileValue(rig resolverRig, fs fsys.FS) (int, rigPortFileState) {
+	data, err := fs.ReadFile(filepath.Join(rig.Path, ".beads", "dolt-server.port"))
+	if err != nil {
+		if errors.Is(err, iofs.ErrNotExist) {
+			return 0, rigPortFileMissing
+		}
+		return 0, rigPortFileInvalid
+	}
+	text := strings.TrimSpace(string(data))
+	if text == "" {
+		return 0, rigPortFileInvalid
+	}
+	port, err := strconv.Atoi(text)
+	if err != nil || !validDoltPort(port) {
+		return 0, rigPortFileInvalid
+	}
+	return port, rigPortFileValid
 }
 
 // sumBytesUnder walks the given root recursively and returns the total

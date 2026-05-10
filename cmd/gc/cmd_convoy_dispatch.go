@@ -154,10 +154,29 @@ func runControlDispatcherInStore(cityPath, storePath, beadID string, stdout, std
 		return fmt.Errorf("loading bead %s from scoped control store %q: %w", beadID, storePath, err)
 	}
 
-	return runControlDispatcherWithStore(cityPath, storePath, store, bead, beadID, stdout, stderr)
+	return runControlDispatcherWithStoreAndConfig(cityPath, storePath, store, bead, beadID, cfg, stdout, stderr)
 }
 
 func runControlDispatcherWithStore(cityPath, storePath string, store beads.Store, bead beads.Bead, beadID string, stdout, stderr io.Writer) error {
+	return runControlDispatcherWithStoreAndConfig(cityPath, storePath, store, bead, beadID, nil, stdout, stderr)
+}
+
+func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store beads.Store, bead beads.Bead, beadID string, cfg *config.City, stdout, stderr io.Writer) error {
+	restoreTraceWarnings := useWorkflowTraceWarnings(stderr)
+	defer restoreTraceWarnings()
+	var cfgLoadErr error
+	if cfg == nil {
+		cfg, cfgLoadErr = loadCityConfig(cityPath, stderr)
+		if cfg != nil {
+			resolveRigPaths(cityPath, cfg.Rigs)
+		}
+	}
+	if cfg != nil {
+		warnLegacyWorkflowTracePath(cityPath, cfg.Rigs, stderr)
+	} else {
+		warnLegacyWorkflowTracePath(cityPath, nil, stderr)
+	}
+
 	opts := dispatch.ProcessOptions{CityPath: cityPath, StorePath: storePath}
 	opts.Tracef = workflowTracef
 	loadCfg := false
@@ -170,11 +189,12 @@ func runControlDispatcherWithStore(cityPath, storePath string, store beads.Store
 		loadCfg = true
 	}
 	if loadCfg {
-		cfg, err := loadCityConfig(cityPath, stderr)
-		if err != nil {
-			return err
+		if cfg == nil {
+			if cfgLoadErr != nil {
+				return cfgLoadErr
+			}
+			return fmt.Errorf("loading city config for %s: unavailable after warning-only load", cityPath)
 		}
-		resolveRigPaths(cityPath, cfg.Rigs)
 		opts.ResolveStoreRef = makeStoreRefResolver(cityPath, cfg)
 		if bead.Metadata["gc.kind"] == "workflow-finalize" {
 			sourceWorkflowCtx, cancelSourceWorkflowCtx := sourceWorkflowCommandContext()

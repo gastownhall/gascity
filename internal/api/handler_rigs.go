@@ -13,14 +13,15 @@ import (
 )
 
 type rigResponse struct {
-	Name         string     `json:"name"`
-	Path         string     `json:"path"`
-	Suspended    bool       `json:"suspended"`
-	Prefix       string     `json:"prefix,omitempty"`
-	AgentCount   int        `json:"agent_count"`
-	RunningCount int        `json:"running_count"`
-	LastActivity *time.Time `json:"last_activity,omitempty"`
-	Git          *gitStatus `json:"git,omitempty"`
+	Name          string     `json:"name"`
+	Path          string     `json:"path"`
+	Suspended     bool       `json:"suspended"`
+	Prefix        string     `json:"prefix,omitempty"`
+	DefaultBranch string     `json:"default_branch,omitempty"`
+	AgentCount    int        `json:"agent_count"`
+	RunningCount  int        `json:"running_count"`
+	LastActivity  *time.Time `json:"last_activity,omitempty"`
+	Git           *gitStatus `json:"git,omitempty"`
 }
 
 type gitStatus struct {
@@ -56,12 +57,13 @@ func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.P
 	}
 
 	resp := rigResponse{
-		Name:         rig.Name,
-		Path:         rig.Path,
-		Suspended:    s.rigSuspended(cfg, rig, sp, cityName, cityPath),
-		Prefix:       rig.Prefix,
-		AgentCount:   agentCount,
-		RunningCount: runningCount,
+		Name:          rig.Name,
+		Path:          rig.Path,
+		Suspended:     s.rigSuspended(cfg, rig, sp, cityName, cityPath),
+		Prefix:        rig.Prefix,
+		DefaultBranch: rig.DefaultBranch,
+		AgentCount:    agentCount,
+		RunningCount:  runningCount,
 	}
 	if !maxActivity.IsZero() {
 		resp.LastActivity = &maxActivity

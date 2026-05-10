@@ -2,12 +2,15 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -305,6 +308,62 @@ mode = "on_demand"
 	out := stdout.String() + stderr.String()
 	if !strings.Contains(out, "configured-named-conflict") {
 		t.Fatalf("doctor output missing configured-named-conflict finding:\n%s", out)
+	}
+}
+
+type sessionModelDoctorQuerySpyStore struct {
+	*beads.MemStore
+	queries []beads.ListQuery
+}
+
+func (s *sessionModelDoctorQuerySpyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.queries = append(s.queries, query)
+	if query.AllowScan && query.IncludeClosed && query.Label == "" && query.Type == "" {
+		return nil, errors.New("unfiltered closed scan")
+	}
+	return s.MemStore.List(query)
+}
+
+func TestPhase0DoctorSessionModelAvoidsUnfilteredClosedScan(t *testing.T) {
+	store := &sessionModelDoctorQuerySpyStore{MemStore: beads.NewMemStore()}
+	closed, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "s-gc-closed",
+			"template":     "worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	if err := store.Close(closed.ID); err != nil {
+		t.Fatalf("Close(%s): %v", closed.ID, err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:     "task",
+		Status:   "open",
+		Title:    "stale owner",
+		Assignee: closed.ID,
+	}); err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+
+	check := &sessionModelDoctorCheck{
+		cfg:      &config.City{},
+		cityPath: "/city",
+		newStore: func(string) (beads.Store, error) {
+			return store, nil
+		},
+	}
+	result := check.Run(&doctor.CheckContext{Verbose: true})
+	if result.Status != doctor.StatusWarning || !strings.Contains(strings.Join(result.Details, "\n"), "closed-bead-owner") {
+		t.Fatalf("session-model result = %#v, want closed-bead-owner warning", result)
+	}
+	for _, query := range store.queries {
+		if query.AllowScan && query.IncludeClosed && query.Label == "" && query.Type == "" {
+			t.Fatalf("session-model used unfiltered closed scan: %#v", query)
+		}
 	}
 }
 

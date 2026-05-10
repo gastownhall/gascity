@@ -90,6 +90,65 @@ func TestTemplateParamsToConfigFlagModePrependsFlag(t *testing.T) {
 	}
 }
 
+func TestTemplateParamsToConfigACPUsesProtocolNudgeForStartupPrompt(t *testing.T) {
+	tp := TemplateParams{
+		Command: "opencode acp",
+		Prompt:  "You are an agent.",
+		IsACP:   true,
+		ResolvedProvider: &config.ResolvedProvider{
+			Name:       "opencode",
+			Command:    "opencode",
+			PromptMode: "flag",
+			PromptFlag: "--prompt",
+		},
+	}
+
+	cfg := templateParamsToConfig(tp)
+
+	if cfg.Command != "opencode acp" {
+		t.Fatalf("Command = %q, want ACP server command unchanged", cfg.Command)
+	}
+	if cfg.PromptSuffix != "" {
+		t.Fatalf("PromptSuffix = %q, want empty for ACP startup prompt", cfg.PromptSuffix)
+	}
+	if cfg.PromptFlag != "" {
+		t.Fatalf("PromptFlag = %q, want empty for ACP startup prompt", cfg.PromptFlag)
+	}
+	if cfg.Nudge != "You are an agent." {
+		t.Fatalf("Nudge = %q, want startup prompt delivered over ACP", cfg.Nudge)
+	}
+	if cfg.Env[startupPromptDeliveredEnv] != "1" {
+		t.Fatalf("%s not marked for ACP startup prompt delivery", startupPromptDeliveredEnv)
+	}
+}
+
+func TestTemplateParamsToConfigACPCombinesStartupPromptWithExistingNudge(t *testing.T) {
+	tp := TemplateParams{
+		Command: "opencode acp",
+		Prompt:  "startup prompt",
+		IsACP:   true,
+		Hints: agent.StartupHints{
+			Nudge: "existing nudge",
+		},
+		ResolvedProvider: &config.ResolvedProvider{
+			Name:       "opencode",
+			Command:    "opencode",
+			PromptMode: "flag",
+			PromptFlag: "--prompt",
+		},
+	}
+
+	cfg := templateParamsToConfig(tp)
+
+	if cfg.PromptSuffix != "" {
+		t.Fatalf("PromptSuffix = %q, want empty for ACP startup prompt", cfg.PromptSuffix)
+	}
+	want := "startup prompt\n\n---\n\nexisting nudge"
+	if cfg.Nudge != want {
+		t.Fatalf("Nudge = %q, want %q", cfg.Nudge, want)
+	}
+}
+
 func TestTemplateParamsToConfigFlagModeMissingFlagDoesNotMarkPromptDelivered(t *testing.T) {
 	tp := TemplateParams{
 		Command: "myprovider",
@@ -310,7 +369,7 @@ func TestTemplateParamsToConfigNilResolvedProvider(t *testing.T) {
 	}
 }
 
-func TestResolveTemplateNoneModeRetainsPromptForDeferredDelivery(t *testing.T) {
+func TestResolveTemplateFlagModeRetainsPromptForStartupDelivery(t *testing.T) {
 	cityPath := t.TempDir()
 	fs := fsys.NewFake()
 	fs.Files[cityPath+"/prompts/pool-worker.md"] = []byte("pool prompt body")
@@ -338,7 +397,10 @@ func TestResolveTemplateNoneModeRetainsPromptForDeferredDelivery(t *testing.T) {
 		t.Fatalf("resolveTemplate: %v", err)
 	}
 	if tp.Prompt == "" {
-		t.Fatal("Prompt should be preserved for PromptMode=none providers so it can be delivered via nudge")
+		t.Fatal("Prompt should be preserved for flag-mode providers so it can be delivered at startup")
+	}
+	if tp.ResolvedProvider == nil || tp.ResolvedProvider.PromptMode != "flag" || tp.ResolvedProvider.PromptFlag != "--prompt" {
+		t.Fatalf("ResolvedProvider prompt delivery = %#v, want flag --prompt", tp.ResolvedProvider)
 	}
 	if !strings.Contains(tp.Prompt, "pool prompt body") {
 		t.Fatalf("Prompt missing rendered template body: %q", tp.Prompt)
@@ -461,6 +523,60 @@ func TestResolveTemplateHookEnabledOpencodeOmitsPrimeInstruction(t *testing.T) {
 	}
 	if strings.Contains(tp.Prompt, "Run `gc prime`") {
 		t.Fatalf("hook-enabled prompt should omit manual gc prime instruction: %q", tp.Prompt)
+	}
+}
+
+func TestResolveTemplateKeepsConcreteProviderForOverlays(t *testing.T) {
+	cityPath := t.TempDir()
+	fs := fsys.NewFake()
+	fs.Files[cityPath+"/prompts/worker.md"] = []byte("worker prompt body")
+
+	base := "builtin:claude"
+	providers := config.BuiltinProviders()
+	providers["kiro"] = config.ProviderSpec{
+		Base:             &base,
+		Command:          "kiro-cli",
+		Args:             []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
+		PromptMode:       "arg",
+		ReadyDelayMs:     5000,
+		ProcessNames:     []string{"kiro-cli", "kiro", "node"},
+		InstructionsFile: "AGENTS.md",
+	}
+	params := &agentBuildParams{
+		fs:              fs,
+		cityName:        "bright-lights",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Name: "bright-lights"},
+		providers:       providers,
+		lookPath:        func(string) (string, error) { return "/usr/bin/kiro-cli", nil },
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:           "worker",
+		PromptTemplate: "prompts/worker.md",
+		Provider:       "kiro",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if got, want := tp.Hints.ProviderName, "claude"; got != want {
+		t.Fatalf("ProviderName = %q, want launch family %q", got, want)
+	}
+	if got, want := tp.Hints.ProviderOverlayName, "kiro"; got != want {
+		t.Fatalf("ProviderOverlayName = %q, want concrete provider %q", got, want)
+	}
+
+	cfg := templateParamsToConfig(tp)
+	if got, want := cfg.ProviderName, "claude"; got != want {
+		t.Fatalf("runtime ProviderName = %q, want launch family %q", got, want)
+	}
+	if got, want := cfg.ProviderOverlayName, "kiro"; got != want {
+		t.Fatalf("runtime ProviderOverlayName = %q, want concrete provider %q", got, want)
 	}
 }
 

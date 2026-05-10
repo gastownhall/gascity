@@ -229,7 +229,10 @@ export interface paths {
         /** Get v0 city by city name agents */
         get: operations["get-v0-city-by-city-name-agents"];
         put?: never;
-        /** Create an agent */
+        /**
+         * Create an agent
+         * @description Creates an agent and waits until it is visible to immediate follow-up operations. If the agent is durably created but visibility confirmation is canceled or times out, the retryable 503/504 response includes a Retry-After header.
+         */
         post: operations["create-agent"];
         delete?: never;
         options?: never;
@@ -3519,6 +3522,8 @@ export interface components {
             status: string;
         };
         RigCreateInputBody: {
+            /** @description Mainline branch (e.g. main, master). Auto-detected when omitted. */
+            default_branch?: string;
             /** @description Rig name. */
             name: string;
             /** @description Filesystem path. */
@@ -3536,12 +3541,15 @@ export interface components {
             status: string;
         };
         RigPatch: {
+            DefaultBranch: string | null;
             Name: string;
             Path: string | null;
             Prefix: string | null;
             Suspended: boolean | null;
         };
         RigPatchSetInputBody: {
+            /** @description Override mainline branch. */
+            default_branch?: string;
             /** @description Rig name. */
             name?: string;
             /** @description Override filesystem path. */
@@ -3554,6 +3562,7 @@ export interface components {
         RigResponse: {
             /** Format: int64 */
             agent_count: number;
+            default_branch?: string;
             git?: components["schemas"]["GitStatus"];
             /** Format: date-time */
             last_activity?: string;
@@ -3565,6 +3574,8 @@ export interface components {
             suspended: boolean;
         };
         RigUpdateInputBody: {
+            /** @description Mainline branch (e.g. main, master). */
+            default_branch?: string;
             /** @description Filesystem path. */
             path?: string;
             /** @description Session name prefix. */
@@ -3969,6 +3980,8 @@ export interface components {
             total: number;
         };
         SupervisorEventListOutputBody: {
+            /** @description Supervisor event-stream cursor captured before the history snapshot was listed. Pass this value as after_cursor to /v0/events/stream to receive events emitted after the snapshot boundary without replaying unrelated historical backlog. */
+            event_cursor: string;
             items: components["schemas"]["TypedTaggedEventStreamEnvelope"][] | null;
             /** Format: int64 */
             total: number;
@@ -5653,14 +5666,54 @@ export interface components {
             session_id: string;
         };
         WorkerOperationEventPayload: {
+            /** @description Qualified agent identity (best-effort, absent if the session has no agent_name metadata or alias). */
+            agent_name?: string;
+            /** @description Work bead this operation is acting on (best-effort, may be absent for non-bead-scoped ops). */
+            bead_id?: string;
+            /**
+             * Format: int64
+             * @description Input tokens written into the prompt cache (best-effort, currently always absent).
+             */
+            cache_creation_tokens?: number;
+            /**
+             * Format: int64
+             * @description Cached input tokens read (best-effort, currently always absent).
+             */
+            cache_read_tokens?: number;
+            /**
+             * Format: int64
+             * @description Output tokens (best-effort, currently always absent).
+             */
+            completion_tokens?: number;
+            /**
+             * Format: double
+             * @description Estimated invocation cost in USD (best-effort, currently always absent; see #1255 for pricing seam).
+             */
+            cost_usd_estimate?: number;
             delivered?: boolean;
             /** Format: int64 */
             duration_ms: number;
             error?: string;
             /** Format: date-time */
             finished_at: string;
+            /**
+             * Format: int64
+             * @description LLM invocation wall-clock latency (best-effort, currently always absent — no source).
+             */
+            latency_ms?: number;
+            /** @description LLM model identifier (best-effort, may be absent until follow-up wiring lands). */
+            model?: string;
             op_id: string;
             operation: string;
+            /** @description SHA-256 of the rendered prompt (best-effort, currently always absent; #1256 follow-up). */
+            prompt_sha?: string;
+            /**
+             * Format: int64
+             * @description Non-cached input tokens (best-effort, currently always absent; treat zero as 'not measured', not 'free').
+             */
+            prompt_tokens?: number;
+            /** @description Template version frontmatter (best-effort, currently always absent; #1256 follow-up). */
+            prompt_version?: string;
             provider?: string;
             queued?: boolean;
             result: string;
@@ -8659,7 +8712,7 @@ export interface operations {
             path: {
                 /** @description City name. */
                 cityName: string;
-                /** @description Thread ID. */
+                /** @description Thread ID, or any message ID in the thread. */
                 id: string;
             };
             cookie?: never;

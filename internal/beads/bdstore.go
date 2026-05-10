@@ -18,9 +18,15 @@ import (
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
+const (
+	bdParentProjectionPollInterval = 50 * time.Millisecond
+)
+
 // CommandRunner executes a command in the given directory and returns stdout bytes.
 // The dir argument sets the working directory; name and args specify the command.
 type CommandRunner func(dir, name string, args ...string) ([]byte, error)
+
+var bdCommandTimeout = 120 * time.Second
 
 // ExecCommandRunner returns a CommandRunner that uses os/exec to run commands.
 // Captures stdout for parsing and stderr for error diagnostics.
@@ -53,11 +59,15 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 				time.Now().UTC().Format(time.RFC3339Nano), status, time.Since(start), dir, name, args, msg)
 		}
 		trace("start", nil)
-		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), bdCommandTimeout)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, name, args...)
 		cmd.WaitDelay = 2 * time.Second
+		prepareCommandForTimeout(cmd)
 		cmd.Dir = dir
+		cmd.Cancel = func() error {
+			return killCommandTree(cmd)
+		}
 		if len(env) > 0 {
 			cmd.Env = mergeEnv(os.Environ(), env)
 		}
@@ -70,7 +80,7 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 				err, out, stderr.String())
 		}
 		if ctx.Err() == context.DeadlineExceeded {
-			timeoutErr := fmt.Errorf("timed out after 120s")
+			timeoutErr := fmt.Errorf("timed out after %s", bdCommandTimeout)
 			trace("timeout", timeoutErr)
 			if stderr.Len() > 0 {
 				return out, fmt.Errorf("%w: %s", timeoutErr, stderr.String())
@@ -669,6 +679,77 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 	return nil
 }
 
+// WaitForParentProjection blocks until bd's parent-child listing projection
+// reflects a successful reparent from oldParentID to newParentID for id.
+func (s *BdStore) WaitForParentProjection(ctx context.Context, id, oldParentID, newParentID string) error {
+	return s.waitForParentProjection(ctx, id, oldParentID, newParentID)
+}
+
+func (s *BdStore) waitForParentProjection(ctx context.Context, id, oldParentID, newParentID string) error {
+	ticker := time.NewTicker(bdParentProjectionPollInterval)
+	defer ticker.Stop()
+
+	var lastErr error
+	for {
+		current, err := s.Get(id)
+		if err == nil {
+			switch current.ParentID {
+			case newParentID:
+				matches, matchErr := s.parentProjectionMatches(id, oldParentID, newParentID)
+				if matchErr == nil && matches {
+					return nil
+				}
+				lastErr = matchErr
+			case oldParentID:
+				lastErr = nil
+			default:
+				return fmt.Errorf("updating bead %q: %w", id, ErrParentProjectionSuperseded)
+			}
+		} else {
+			lastErr = err
+		}
+		select {
+		case <-ctx.Done():
+			if lastErr != nil {
+				return fmt.Errorf("updating bead %q: waiting for parent projection from %q to %q: %w (last check error: %w)", id, oldParentID, newParentID, ctx.Err(), lastErr)
+			}
+			return fmt.Errorf("updating bead %q: waiting for parent projection from %q to %q: %w", id, oldParentID, newParentID, ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func (s *BdStore) parentProjectionMatches(id, oldParentID, newParentID string) (bool, error) {
+	if oldParentID != "" {
+		oldChildren, err := s.List(ListQuery{ParentID: oldParentID})
+		if err != nil {
+			return false, fmt.Errorf("listing old parent %q children: %w", oldParentID, err)
+		}
+		if beadSliceContains(oldChildren, id) {
+			return false, nil
+		}
+	}
+	if newParentID != "" {
+		newChildren, err := s.List(ListQuery{ParentID: newParentID})
+		if err != nil {
+			return false, fmt.Errorf("listing new parent %q children: %w", newParentID, err)
+		}
+		if !beadSliceContains(newChildren, id) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func beadSliceContains(items []Bead, id string) bool {
+	for _, item := range items {
+		if item.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 // SetMetadata sets a key-value metadata pair on a bead via bd update.
 func (s *BdStore) SetMetadata(id, key, value string) error {
 	err := s.runBDTransientWrite("update", "--json", id,
@@ -740,6 +821,17 @@ func (s *BdStore) Ping() error {
 
 // CloseAll closes multiple beads in batch and sets metadata on each.
 // Idempotent: closing an already-closed bead returns nil.
+//
+// Forwards metadata["close_reason"] as the --reason argument to bd close,
+// so callers can satisfy validators like validation.on-close=error (which
+// rejects close calls without an explicit --reason of >=20 characters).
+// Whitespace is trimmed; an empty or whitespace-only value is treated as
+// absent and no --reason flag is added, preserving backward compatibility
+// for callers that don't pre-stamp a reason. The same map is also written
+// via SetMetadataBatch on each bead before close, so the reason is persisted
+// in the bead's metadata as well as forwarded to bd. If batch close falls
+// back to per-id closes, the same shared reason is forwarded to every
+// fallback close.
 func (s *BdStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
@@ -755,15 +847,16 @@ func (s *BdStore) CloseAll(ids []string, metadata map[string]string) (int, error
 		}
 	}
 
-	// Batch close: bd close id1 id2 id3 ...
-	args := append([]string{"close", "--force", "--json"}, ids...)
+	// Batch close: bd close [--reason "..."] id1 id2 id3 ...
+	reason := strings.TrimSpace(metadata["close_reason"])
+	args := bdCloseArgs(reason, ids...)
 	_, err := s.runner(s.dir, "bd", args...)
 	if err != nil {
 		// Fall back to individual closes on batch failure.
 		closed := 0
 		var fallbackErr error
 		for _, id := range ids {
-			if closeErr := s.Close(id); closeErr == nil {
+			if closeErr := s.close(id, reason); closeErr == nil {
 				closed++
 			} else {
 				fallbackErr = errors.Join(fallbackErr, closeErr)
@@ -777,10 +870,47 @@ func (s *BdStore) CloseAll(ids []string, metadata map[string]string) (int, error
 	return len(ids), nil
 }
 
-// Close sets a bead's status to closed via bd close.
+// Close sets a bead's status to closed via bd close. If the bead already has
+// metadata.close_reason, the trimmed value is forwarded as bd close --reason.
 // Idempotent: closing an already-closed bead returns nil.
+//
+// Reads metadata.close_reason from the bead (set by callers like the
+// session reconciler or convoy autoclose via SetMetadata or
+// SetMetadataBatch before invoking Close) and forwards it as the
+// --reason argument to bd close. Without this, bd assigns its default
+// reason "Closed", silently discarding caller intent and (when the city
+// runs with validation.on-close=error) failing the close outright.
+//
+// Callers are responsible for providing a reason that satisfies any
+// configured validator — e.g. bd's validation.on-close=error rejects
+// reasons under 20 characters. This function does not pad or rewrite
+// the supplied reason; it forwards what the caller set, or omits
+// --reason entirely when no metadata is set.
 func (s *BdStore) Close(id string) error {
-	_, err := s.runner(s.dir, "bd", "close", "--force", "--json", id)
+	reason := ""
+	if b, err := s.Get(id); err == nil {
+		reason = strings.TrimSpace(b.Metadata["close_reason"])
+	}
+	return s.close(id, reason)
+}
+
+// CloseWithReason closes a bead with an explicit reason without first reading
+// the bead metadata. Callers that need close_reason persisted for audit trails
+// should write metadata before calling this method.
+func (s *BdStore) CloseWithReason(id, reason string) error {
+	return s.close(id, strings.TrimSpace(reason))
+}
+
+func bdCloseArgs(reason string, ids ...string) []string {
+	args := []string{"close", "--force", "--json"}
+	if reason != "" {
+		args = append(args, "--reason", reason)
+	}
+	return append(args, ids...)
+}
+
+func (s *BdStore) close(id, reason string) error {
+	_, err := s.runner(s.dir, "bd", bdCloseArgs(reason, id)...)
 	if err != nil {
 		// Some bd error paths collapse to a bare exit status without a helpful
 		// not-found string. Re-read the bead to distinguish "already closed" from
@@ -941,9 +1071,19 @@ func (s *BdStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error) {
 	})
 }
 
-// Ready returns all open beads via bd ready.
-func (s *BdStore) Ready() ([]Bead, error) {
-	out, err := s.runner(s.dir, "bd", "ready", "--json", "--limit", "0")
+// Ready returns open ready beads via bd ready.
+func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
+	q := readyQueryFromArgs(query)
+	args := []string{"ready", "--json"}
+	if q.Assignee != "" {
+		args = append(args, "--assignee", q.Assignee)
+	}
+	if q.Limit > 0 {
+		args = append(args, "--limit", strconv.Itoa(q.Limit))
+	} else {
+		args = append(args, "--limit", "0")
+	}
+	out, err := s.runner(s.dir, "bd", args...)
 	if err != nil {
 		return nil, fmt.Errorf("bd ready: %w", err)
 	}
@@ -952,6 +1092,9 @@ func (s *BdStore) Ready() ([]Bead, error) {
 	for i := range issues {
 		bead := issues[i].toBead()
 		if IsReadyExcludedType(bead.Type) {
+			continue
+		}
+		if q.Assignee != "" && bead.Assignee != q.Assignee {
 			continue
 		}
 		result = append(result, bead)

@@ -2,9 +2,11 @@ package main
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -15,6 +17,8 @@ import (
 // explicitly.
 type sessionBeadSnapshot struct {
 	open                      []beads.Bead
+	beadIDByAgentName         map[string]string
+	beadIDByTemplateHint      map[string]string
 	sessionNameByAgentName    map[string]string
 	sessionNameByTemplateHint map[string]string
 }
@@ -40,6 +44,8 @@ func loadSessionBeadSnapshot(store beads.Store) (*sessionBeadSnapshot, error) {
 
 func newSessionBeadSnapshot(beadsIn []beads.Bead) *sessionBeadSnapshot {
 	filtered := make([]beads.Bead, 0, len(beadsIn))
+	beadIDByAgentName := make(map[string]string)
+	beadIDByTemplateHint := make(map[string]string)
 	sessionNameByAgentName := make(map[string]string)
 	sessionNameByTemplateHint := make(map[string]string)
 
@@ -56,7 +62,7 @@ func newSessionBeadSnapshot(beadsIn []beads.Bead) *sessionBeadSnapshot {
 		isCanonicalNamed := strings.TrimSpace(b.Metadata["configured_named_identity"]) != ""
 		if agentName := sessionBeadAgentName(b); agentName != "" {
 			if isPoolManagedSessionBead(b) && agentName == b.Metadata["template"] {
-				agentName = ""
+				agentName = stampedPoolQualifiedIdentity(b)
 			}
 			if agentName == "" {
 				continue
@@ -65,6 +71,7 @@ func newSessionBeadSnapshot(beadsIn []beads.Bead) *sessionBeadSnapshot {
 			// resolveSessionName returns the correct session_name even
 			// when leaked pool-style beads exist for the same template.
 			if _, exists := sessionNameByAgentName[agentName]; !exists || isCanonicalNamed {
+				beadIDByAgentName[agentName] = b.ID
 				sessionNameByAgentName[agentName] = sn
 			}
 		}
@@ -73,11 +80,13 @@ func newSessionBeadSnapshot(beadsIn []beads.Bead) *sessionBeadSnapshot {
 		}
 		if template := b.Metadata["template"]; template != "" {
 			if _, exists := sessionNameByTemplateHint[template]; !exists || isCanonicalNamed {
+				beadIDByTemplateHint[template] = b.ID
 				sessionNameByTemplateHint[template] = sn
 			}
 		}
 		if commonName := b.Metadata["common_name"]; commonName != "" {
 			if _, exists := sessionNameByTemplateHint[commonName]; !exists {
+				beadIDByTemplateHint[commonName] = b.ID
 				sessionNameByTemplateHint[commonName] = sn
 			}
 		}
@@ -85,6 +94,8 @@ func newSessionBeadSnapshot(beadsIn []beads.Bead) *sessionBeadSnapshot {
 
 	return &sessionBeadSnapshot{
 		open:                      filtered,
+		beadIDByAgentName:         beadIDByAgentName,
+		beadIDByTemplateHint:      beadIDByTemplateHint,
 		sessionNameByAgentName:    sessionNameByAgentName,
 		sessionNameByTemplateHint: sessionNameByTemplateHint,
 	}
@@ -132,6 +143,19 @@ func (s *sessionBeadSnapshot) FindSessionNameByTemplate(template string) string 
 	return s.sessionNameByTemplateHint[template]
 }
 
+func (s *sessionBeadSnapshot) FindSessionBeadByTemplate(template string) (beads.Bead, bool) {
+	if s == nil {
+		return beads.Bead{}, false
+	}
+	if id := s.beadIDByAgentName[template]; id != "" {
+		return s.FindByID(id)
+	}
+	if id := s.beadIDByTemplateHint[template]; id != "" {
+		return s.FindByID(id)
+	}
+	return beads.Bead{}, false
+}
+
 func (s *sessionBeadSnapshot) FindByID(id string) (beads.Bead, bool) {
 	if s == nil || strings.TrimSpace(id) == "" {
 		return beads.Bead{}, false
@@ -157,4 +181,27 @@ func (s *sessionBeadSnapshot) FindSessionNameByNamedIdentity(identity string) st
 		}
 	}
 	return ""
+}
+
+func stampedPoolQualifiedIdentity(bead beads.Bead) string {
+	if !isPoolManagedSessionBead(bead) {
+		return ""
+	}
+	slot, err := strconv.Atoi(strings.TrimSpace(bead.Metadata["pool_slot"]))
+	if err != nil || slot <= 0 {
+		return ""
+	}
+	template := strings.TrimSpace(bead.Metadata["template"])
+	if template == "" {
+		return ""
+	}
+	scope, name := config.ParseQualifiedName(template)
+	if name == "" {
+		return ""
+	}
+	instance := fmt.Sprintf("%s-%d", name, slot)
+	if scope != "" {
+		return scope + "/" + instance
+	}
+	return instance
 }

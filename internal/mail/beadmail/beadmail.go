@@ -8,9 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/mail"
@@ -26,12 +26,59 @@ const (
 
 // Provider implements [mail.Provider] using [beads.Store] as the backend.
 type Provider struct {
-	store beads.Store
+	store        beads.Store
+	sessionCache *sessionBeadCache
+}
+
+type sessionBeadCache struct {
+	mu      sync.Mutex
+	list    []beads.Bead
+	fetched bool
 }
 
 // New returns a beadmail provider backed by the given store.
+//
+// The default provider is stateless so long-lived shared users such as the API
+// always see fresh session topology.
 func New(store beads.Store) *Provider {
 	return &Provider{store: store}
+}
+
+// NewCached returns a beadmail provider backed by the given store with a
+// provider-local session enumeration cache for command-scoped reuse.
+func NewCached(store beads.Store) *Provider {
+	return &Provider{
+		store:        store,
+		sessionCache: &sessionBeadCache{},
+	}
+}
+
+// cachedSessionBeads returns the full set of session beads (open + closed).
+// Cached providers reuse a single enumeration; stateless providers fetch
+// fresh results on every call.
+func (p *Provider) cachedSessionBeads() ([]beads.Bead, error) {
+	if p.store == nil {
+		return nil, nil
+	}
+	if p.sessionCache == nil {
+		return p.store.List(beads.ListQuery{Label: session.LabelSession, IncludeClosed: true})
+	}
+	return p.sessionCache.get(p.store)
+}
+
+func (c *sessionBeadCache) get(store beads.Store) ([]beads.Bead, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.fetched {
+		return c.list, nil
+	}
+	list, err := store.List(beads.ListQuery{Label: session.LabelSession, IncludeClosed: true})
+	if err != nil {
+		return nil, err
+	}
+	c.list = list
+	c.fetched = true
+	return list, nil
 }
 
 // Send creates a message bead with subject in Title and body in Description.
@@ -172,6 +219,13 @@ func (p *Provider) MarkUnread(id string) error {
 	})
 }
 
+// MailArchivedCloseReason is the canonical close_reason stamped on
+// message beads when they are archived (or deleted, which has the same
+// storage semantics — see DeleteMany). Without an explicit reason of
+// >=20 chars, bd's validation.on-close=error rejects the close, the
+// message stays open, and the archive operation silently fails.
+const MailArchivedCloseReason = "beadmail: message archived without read"
+
 // Archive closes a message bead without reading it.
 func (p *Provider) Archive(id string) error {
 	b, err := p.store.Get(id)
@@ -184,6 +238,11 @@ func (p *Provider) Archive(id string) error {
 	if b.Status == "closed" {
 		return mail.ErrAlreadyArchived
 	}
+	// Stamp close_reason before Close so validation.on-close=error sees
+	// it on the close that follows. Best-effort: an error here is not
+	// fatal — Close still proceeds and any pre-existing close_reason is
+	// preserved.
+	_ = p.store.SetMetadata(id, "close_reason", MailArchivedCloseReason)
 	if err := p.store.Close(id); err != nil {
 		return fmt.Errorf("beadmail archive: %w", err)
 	}
@@ -230,8 +289,13 @@ func (p *Provider) ArchiveMany(ids []string) ([]mail.ArchiveResult, error) {
 	if len(openIDs) == 0 {
 		return results, nil
 	}
-	if _, err := p.store.CloseAll(openIDs, nil); err != nil {
+	if _, err := p.store.CloseAll(openIDs, map[string]string{
+		"close_reason": MailArchivedCloseReason,
+	}); err != nil {
 		for k, id := range openIDs {
+			// Per-id fallback also stamps the canonical reason so the
+			// retry path is validation-safe under on-close=error.
+			_ = p.store.SetMetadata(id, "close_reason", MailArchivedCloseReason)
 			if closeErr := p.store.Close(id); closeErr != nil {
 				results[openIdx[k]].Err = fmt.Errorf("beadmail archive: %w", closeErr)
 			}
@@ -340,7 +404,27 @@ func deriveReplyTitle(subject, originalTitle, body string) string {
 }
 
 // Thread returns all messages sharing a thread ID, ordered by creation time.
-func (p *Provider) Thread(threadID string) ([]mail.Message, error) {
+// Callers may pass either an actual thread ID or any message bead ID in the
+// thread — the latter is what `gc mail thread <id>` from the CLI hands us.
+// If the input resolves to an existing message bead with a `thread:` label,
+// that label is used; otherwise the input is treated as a thread ID directly
+// so callers that already know the thread ID still work.
+func (p *Provider) Thread(id string) ([]mail.Message, error) {
+	threadID := id
+	msgBead, err := p.store.Get(id)
+	switch {
+	case err == nil:
+		if msgBead.Type != "message" {
+			return nil, fmt.Errorf("beadmail thread: bead %q is type %q, want message", id, msgBead.Type)
+		}
+		if t := extractLabel(msgBead.Labels, "thread:"); t != "" {
+			threadID = t
+		}
+	case errors.Is(err, beads.ErrNotFound):
+		// Caller passed a non-bead-id (e.g., a real thread-id); fall through.
+	default:
+		return nil, fmt.Errorf("beadmail thread: resolving %q: %w", id, err)
+	}
 	bs, err := p.store.List(beads.ListQuery{
 		Label: "thread:" + threadID,
 		Type:  "message",
@@ -353,10 +437,8 @@ func (p *Provider) Thread(threadID string) ([]mail.Message, error) {
 	for i, b := range bs {
 		msgs[i] = beadToMessage(b)
 	}
-	// Sort by creation time ascending.
-	sort.Slice(msgs, func(i, j int) bool {
-		return msgs[i].CreatedAt.Before(msgs[j].CreatedAt)
-	})
+	// Note: store.List already sorts by SortCreatedAsc with an ID tie-break
+	// (see sortBeadsForQuery in internal/beads/query.go), so no post-sort here.
 	return msgs, nil
 }
 
@@ -543,7 +625,7 @@ func appendSessionRecipientRoutes(routes []string, b beads.Bead) []string {
 }
 
 func (p *Provider) recipientRoutesByHistoricalAlias(recipient string, routes []string) []string {
-	sessions, err := p.store.List(beads.ListQuery{Label: session.LabelSession, IncludeClosed: true})
+	sessions, err := p.cachedSessionBeads()
 	if err != nil {
 		log.Printf("beadmail: listing sessions for historical recipient route %q: %v", recipient, err)
 		return routes

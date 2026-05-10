@@ -164,6 +164,26 @@ func newSessionProviderForCity(cfg *config.City, cityPath string) runtime.Provid
 	return newSessionProviderFromContext(ctx, sessionBeads)
 }
 
+func newStatusSessionProviderForCity(cfg *config.City, cityPath string) runtime.Provider {
+	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
+	return newSessionProviderFromContext(ctx, nil)
+}
+
+func newStatusSessionProviderForCityWithSnapshot(cfg *config.City, cityPath string, sessionBeads *sessionBeadSnapshot) runtime.Provider {
+	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
+	return newSessionProviderFromContext(ctx, sessionBeads)
+}
+
+func registerStatusProviderACPRoutes(sp runtime.Provider, snapshot *sessionBeadSnapshot, cityName string, cfg *config.City) {
+	router, ok := sp.(interface{ RouteACP(string) })
+	if !ok {
+		return
+	}
+	for _, sessName := range configuredACPRouteNames(snapshot, cityName, cfg) {
+		router.RouteACP(sessName)
+	}
+}
+
 func loadProviderSessionSnapshot(ctx sessionProviderContext) *sessionBeadSnapshot {
 	if ctx.cityPath == "" || ctx.providerName == "acp" {
 		return nil
@@ -627,7 +647,8 @@ func mailProviderName() string {
 
 // newMailProvider returns a mail.Provider based on the mail provider name
 // (env var → city.toml → default) and the given bead store (used as the
-// default backend).
+// default backend). Shared callers such as the API use the stateless beadmail
+// provider so long-lived instances observe fresh session state.
 //
 //   - "fake" → in-memory fake (all ops succeed)
 //   - "fail" → broken fake (all ops return errors)
@@ -648,20 +669,35 @@ func newMailProvider(store beads.Store) mail.Provider {
 	}
 }
 
+func newCommandMailProvider(store beads.Store) mail.Provider {
+	v := mailProviderName()
+	if strings.HasPrefix(v, "exec:") {
+		return mailexec.NewProvider(strings.TrimPrefix(v, "exec:"))
+	}
+	switch v {
+	case "fake":
+		return mail.NewFake()
+	case "fail":
+		return mail.NewFailFake()
+	default:
+		return beadmail.NewCached(store)
+	}
+}
+
 // openCityMailProvider opens the city's bead store and wraps it in a
 // mail.Provider. Returns (nil, exitCode) on failure.
 func openCityMailProvider(stderr io.Writer, cmdName string) (mail.Provider, int) {
 	// For exec: and test doubles, no store needed.
 	v := mailProviderName()
 	if strings.HasPrefix(v, "exec:") || v == "fake" || v == "fail" {
-		return newMailProvider(nil), 0
+		return newCommandMailProvider(nil), 0
 	}
 
 	store, code := openCityStore(stderr, cmdName)
 	if store == nil {
 		return nil, code
 	}
-	return newMailProvider(store), 0
+	return newCommandMailProvider(store), 0
 }
 
 // eventsProviderName returns the events provider name.

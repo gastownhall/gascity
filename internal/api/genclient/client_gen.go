@@ -2083,6 +2083,9 @@ type RigActionBody struct {
 
 // RigCreateInputBody defines model for RigCreateInputBody.
 type RigCreateInputBody struct {
+	// DefaultBranch Mainline branch (e.g. main, master). Auto-detected when omitted.
+	DefaultBranch *string `json:"default_branch,omitempty"`
+
 	// Name Rig name.
 	Name string `json:"name"`
 
@@ -2104,14 +2107,18 @@ type RigCreatedOutputBody struct {
 
 // RigPatch defines model for RigPatch.
 type RigPatch struct {
-	Name      string  `json:"Name"`
-	Path      *string `json:"Path"`
-	Prefix    *string `json:"Prefix"`
-	Suspended *bool   `json:"Suspended"`
+	DefaultBranch *string `json:"DefaultBranch"`
+	Name          string  `json:"Name"`
+	Path          *string `json:"Path"`
+	Prefix        *string `json:"Prefix"`
+	Suspended     *bool   `json:"Suspended"`
 }
 
 // RigPatchSetInputBody defines model for RigPatchSetInputBody.
 type RigPatchSetInputBody struct {
+	// DefaultBranch Override mainline branch.
+	DefaultBranch *string `json:"default_branch,omitempty"`
+
 	// Name Rig name.
 	Name *string `json:"name,omitempty"`
 
@@ -2127,18 +2134,22 @@ type RigPatchSetInputBody struct {
 
 // RigResponse defines model for RigResponse.
 type RigResponse struct {
-	AgentCount   int64      `json:"agent_count"`
-	Git          *GitStatus `json:"git,omitempty"`
-	LastActivity *time.Time `json:"last_activity,omitempty"`
-	Name         string     `json:"name"`
-	Path         string     `json:"path"`
-	Prefix       *string    `json:"prefix,omitempty"`
-	RunningCount int64      `json:"running_count"`
-	Suspended    bool       `json:"suspended"`
+	AgentCount    int64      `json:"agent_count"`
+	DefaultBranch *string    `json:"default_branch,omitempty"`
+	Git           *GitStatus `json:"git,omitempty"`
+	LastActivity  *time.Time `json:"last_activity,omitempty"`
+	Name          string     `json:"name"`
+	Path          string     `json:"path"`
+	Prefix        *string    `json:"prefix,omitempty"`
+	RunningCount  int64      `json:"running_count"`
+	Suspended     bool       `json:"suspended"`
 }
 
 // RigUpdateInputBody defines model for RigUpdateInputBody.
 type RigUpdateInputBody struct {
+	// DefaultBranch Mainline branch (e.g. main, master).
+	DefaultBranch *string `json:"default_branch,omitempty"`
+
 	// Path Filesystem path.
 	Path *string `json:"path,omitempty"`
 
@@ -2573,8 +2584,10 @@ type SupervisorCitiesOutputBody struct {
 
 // SupervisorEventListOutputBody defines model for SupervisorEventListOutputBody.
 type SupervisorEventListOutputBody struct {
-	Items *[]TypedTaggedEventStreamEnvelope `json:"items"`
-	Total int64                             `json:"total"`
+	// EventCursor Supervisor event-stream cursor captured before the history snapshot was listed. Pass this value as after_cursor to /v0/events/stream to receive events emitted after the snapshot boundary without replaying unrelated historical backlog.
+	EventCursor string                            `json:"event_cursor"`
+	Items       *[]TypedTaggedEventStreamEnvelope `json:"items"`
+	Total       int64                             `json:"total"`
 }
 
 // SupervisorHealthOutputBody defines model for SupervisorHealthOutputBody.
@@ -3795,20 +3808,52 @@ type UnboundEventPayload struct {
 
 // WorkerOperationEventPayload defines model for WorkerOperationEventPayload.
 type WorkerOperationEventPayload struct {
-	Delivered   *bool     `json:"delivered,omitempty"`
-	DurationMs  int64     `json:"duration_ms"`
-	Error       *string   `json:"error,omitempty"`
-	FinishedAt  time.Time `json:"finished_at"`
-	OpId        string    `json:"op_id"`
-	Operation   string    `json:"operation"`
-	Provider    *string   `json:"provider,omitempty"`
-	Queued      *bool     `json:"queued,omitempty"`
-	Result      string    `json:"result"`
-	SessionId   *string   `json:"session_id,omitempty"`
-	SessionName *string   `json:"session_name,omitempty"`
-	StartedAt   time.Time `json:"started_at"`
-	Template    *string   `json:"template,omitempty"`
-	Transport   *string   `json:"transport,omitempty"`
+	// AgentName Qualified agent identity (best-effort, absent if the session has no agent_name metadata or alias).
+	AgentName *string `json:"agent_name,omitempty"`
+
+	// BeadId Work bead this operation is acting on (best-effort, may be absent for non-bead-scoped ops).
+	BeadId *string `json:"bead_id,omitempty"`
+
+	// CacheCreationTokens Input tokens written into the prompt cache (best-effort, currently always absent).
+	CacheCreationTokens *int64 `json:"cache_creation_tokens,omitempty"`
+
+	// CacheReadTokens Cached input tokens read (best-effort, currently always absent).
+	CacheReadTokens *int64 `json:"cache_read_tokens,omitempty"`
+
+	// CompletionTokens Output tokens (best-effort, currently always absent).
+	CompletionTokens *int64 `json:"completion_tokens,omitempty"`
+
+	// CostUsdEstimate Estimated invocation cost in USD (best-effort, currently always absent; see #1255 for pricing seam).
+	CostUsdEstimate *float64  `json:"cost_usd_estimate,omitempty"`
+	Delivered       *bool     `json:"delivered,omitempty"`
+	DurationMs      int64     `json:"duration_ms"`
+	Error           *string   `json:"error,omitempty"`
+	FinishedAt      time.Time `json:"finished_at"`
+
+	// LatencyMs LLM invocation wall-clock latency (best-effort, currently always absent — no source).
+	LatencyMs *int64 `json:"latency_ms,omitempty"`
+
+	// Model LLM model identifier (best-effort, may be absent until follow-up wiring lands).
+	Model     *string `json:"model,omitempty"`
+	OpId      string  `json:"op_id"`
+	Operation string  `json:"operation"`
+
+	// PromptSha SHA-256 of the rendered prompt (best-effort, currently always absent; #1256 follow-up).
+	PromptSha *string `json:"prompt_sha,omitempty"`
+
+	// PromptTokens Non-cached input tokens (best-effort, currently always absent; treat zero as 'not measured', not 'free').
+	PromptTokens *int64 `json:"prompt_tokens,omitempty"`
+
+	// PromptVersion Template version frontmatter (best-effort, currently always absent; #1256 follow-up).
+	PromptVersion *string   `json:"prompt_version,omitempty"`
+	Provider      *string   `json:"provider,omitempty"`
+	Queued        *bool     `json:"queued,omitempty"`
+	Result        string    `json:"result"`
+	SessionId     *string   `json:"session_id,omitempty"`
+	SessionName   *string   `json:"session_name,omitempty"`
+	StartedAt     time.Time `json:"started_at"`
+	Template      *string   `json:"template,omitempty"`
+	Transport     *string   `json:"transport,omitempty"`
 }
 
 // WorkflowAttemptSummary defines model for WorkflowAttemptSummary.

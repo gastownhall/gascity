@@ -150,6 +150,10 @@ in the arguments.
 
 All arguments after "gc bd" are forwarded to bd unchanged.
 
+gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
+from wedging the wrapper after printing command output. If you need
+auto-export behavior, invoke bd directly.
+
 ```
 gc bd [bd-args...]
 ```
@@ -919,20 +923,36 @@ cleanup tool. It resolves the Dolt server port via the AD-04 chain
 drops stale test/agent databases, calls DOLT_PURGE_DROPPED_DATABASES
 to reclaim disk, and reaps orphaned dolt sql-server processes left
 over from leaked test harnesses. Invalid explicit ports and unreadable
-or invalid rig port files fail closed before cleanup stages run; only
-absent rig port files can reach the legacy default.
+or invalid city/rig port settings fail closed before cleanup stages run;
+only absent rig port files can reach the legacy default. The legacy
+default is a connection fallback only; it does not protect port 3307
+from orphan-process reaping.
 
 Dry-run by default. Pass --force to actually drop, purge, and kill.
-Active rig dolt servers, registered rig databases, and processes
-outside the test-config-path allowlist (/tmp/Test*, os.TempDir()/Test*,
-~/.gotmp/Test*) are always protected — see the PROTECTED section of the
+Pass --max-orphan-dbs with --force to refuse all destructive cleanup
+stages if the live apply-time stale database count exceeds the
+scan-time threshold. The default 0 disables this guard; negative values
+are rejected before any city lookup or cleanup stage runs.
+Active rig dolt servers, registered rig databases, active test temp roots,
+and processes outside the test-config-path allowlist (/tmp/Test*,
+os.TempDir()/Test*, known Gas City test prefixes, ~/.gotmp/Test*) are always
+protected — see the PROTECTED section of the
 report. Destructive drops are limited to known stale test database name
 shapes and conservative SQL identifier characters; skipped stale matches
 are reported in dropped.skipped. Rig dolt_database names used for purge
 must use the same identifier shape: ASCII letters, digits, underscores,
-and non-leading hyphens.
+and non-leading hyphens. Missing or silent rig metadata disables forced
+drop/purge because the live database name cannot be proven safe.
 
-JSON envelope schema is stable: gc.dolt.cleanup.v1.
+JSON envelope schema is stable: gc.dolt.cleanup.v1. Automation that
+uses --json must inspect summary.errors_total and errors, and must also
+refuse to invoke --force when dry-run force_blockers is non-empty.
+force_blockers reports conditions that would block forced cleanup without
+incrementing errors_total. The rig-protection blocker is intentionally
+global: missing or silent rig metadata prevents forced drop/purge because
+the command cannot prove all registered rig databases are protected.
+Cleanup stage errors are reported in the envelope even when the command
+can still return successfully after emitting the report.
 
 ```
 gc dolt-cleanup [flags]
@@ -942,6 +962,7 @@ gc dolt-cleanup [flags]
 |------|------|---------|-------------|
 | `--force` | bool |  | actually drop, purge, and kill orphaned resources (default: dry-run) |
 | `--json` | bool |  | emit JSON envelope (gc.dolt.cleanup.v1) |
+| `--max-orphan-dbs` | int |  | with --force, refuse cleanup when live stale database count exceeds this limit |
 | `--port` | string |  | override the resolved Dolt port |
 | `--probe` | bool |  | TCP-probe the resolved port; fail if unreachable |
 
@@ -1008,7 +1029,7 @@ gc events
 | `--after-cursor` | string |  | Resume from this supervisor event cursor (supervisor scope only) |
 | `--api` | string |  | GC API server URL override (auto-discovered by default) |
 | `--follow` | bool |  | Continuously stream events as they arrive |
-| `--payload-match` | stringArray |  | Filter by payload field (key=value, repeatable) |
+| `--payload-match` | stringArray |  | Filter by payload field (key=value or key.subkey=value, repeatable) |
 | `--seq` | bool |  | Print the current head cursor and exit |
 | `--since` | string |  | Show events since duration ago (e.g. 1h, 30m) |
 | `--timeout` | string | `30s` | Max wait duration for --watch (e.g. 30s, 5m) |
@@ -1127,6 +1148,12 @@ For controller-restartable sessions, equivalent to:
   gc mail send $GC_ALIAS &lt;subject&gt; [message]
   gc runtime request-restart
 
+Under normal operation the controller stops controller-restartable
+self-handoff sessions before this command returns. If the controller does not
+act within a bounded timeout, gc handoff exits 1 with a diagnostic instead of
+blocking indefinitely. If interrupted, the restart request remains set for the
+controller to process on its next reconcile tick.
+
 Auto handoff (--auto): sends mail to self and returns without requesting a
 restart. This is for PreCompact hooks, where the provider is already managing
 the context compaction lifecycle.
@@ -1152,6 +1179,7 @@ gc handoff [subject] [message] [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--auto` | bool |  | Send handoff mail without requesting restart (for PreCompact hooks) |
+| `--hook-format` | string |  | format hook output for a provider |
 | `--target` | string |  | Remote session alias or ID to handoff (kills only controller-restartable sessions) |
 
 ## gc help
@@ -1290,6 +1318,10 @@ the standard top-level directories, and .template.md prompt templates, then
 materializes builtin packs under .gc/system/packs. Use --provider to create the default minimal city
 non-interactively, or --file to initialize from an existing TOML config file.
 
+Pass --preserve-existing to keep any pre-authored pack.toml, city.toml, or
+agent prompt files in the target directory (useful when bootstrapping a
+committed workspace — e.g. from a bootstrap.sh shipped in the repo).
+
 ```
 gc init [path] [flags]
 ```
@@ -1304,6 +1336,7 @@ gc init
   gc init --name my-city
   gc init --from ~/elan --name elan /city
   gc init --file examples/gastown.toml ~/bright-lights
+  gc init --file city.toml --preserve-existing .
 ```
 
 | Flag | Type | Default | Description |
@@ -1312,6 +1345,7 @@ gc init
 | `--file` | string |  | path to a TOML file to use as city.toml |
 | `--from` | string |  | path to an example city directory to copy |
 | `--name` | string |  | workspace name (default: target directory basename) |
+| `--preserve-existing` | bool |  | keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them |
 | `--provider` | string |  | built-in workspace provider to use for the default mayor config |
 | `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
 
@@ -1504,10 +1538,10 @@ gc mail send mayor "Build is green"
 
 ## gc mail thread
 
-Show all messages sharing a thread ID, ordered by time.
+Show all messages sharing a thread ID or message ID, ordered by time.
 
 ```
-gc mail thread <thread-id>
+gc mail thread <id>
 ```
 
 ## gc mcp
@@ -1584,6 +1618,7 @@ gc order
 | [gc order list](#gc-order-list) | List available orders |
 | [gc order run](#gc-order-run) | Execute an order manually |
 | [gc order show](#gc-order-show) | Show details of an order |
+| [gc order sweep-tracking](#gc-order-sweep-tracking) | Close stale order-tracking beads |
 
 ## gc order check
 
@@ -1654,6 +1689,22 @@ gc order show <name> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--rig` | string |  | rig name to disambiguate same-name orders |
+
+## gc order sweep-tracking
+
+Close stale open order-tracking beads.
+
+This is intended for maintenance exec orders. It only closes tracking beads
+older than --stale-after so a fresh in-flight order is not interrupted.
+
+```
+gc order sweep-tracking [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--quiet` | bool |  | suppress success output |
+| `--stale-after` | duration | `10m0s` | minimum age for an open tracking bead to be closed |
 
 ## gc pack
 
@@ -1831,6 +1882,10 @@ repeat the flag to compose multiple packs for one rig.
 
 Use --name to set the rig name explicitly (default: directory basename).
 Use --prefix to set the bead ID prefix explicitly (default: derived from name).
+Use --default-branch to set the rig's mainline branch explicitly. By default,
+gc rig add probes the repo's origin/HEAD (and falls back to the currently
+checked-out branch) and stores the result in city.toml so polecats and the
+refinery target the right branch without manual metadata patching.
 Use --start-suspended to add the rig in a suspended state (dormant-by-default).
 The rig's agents won't spawn until explicitly resumed with "gc rig resume".
 
@@ -1848,6 +1903,7 @@ gc rig add <path> [flags]
 gc rig add /path/to/project
   gc rig add /path/to/project --name myrig
   gc rig add /path/to/project --prefix r1
+  gc rig add /path/to/master-repo --default-branch master
   gc rig add ./my-project --include packs/gastown
   gc rig add ./my-project --include packs/planner --include packs/architect
   gc rig add ./my-project --include packs/gastown --start-suspended
@@ -1857,6 +1913,7 @@ gc rig add /path/to/project
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--adopt` | bool |  | adopt existing .beads/ directory (skip init) |
+| `--default-branch` | string |  | mainline branch (default: auto-detect from origin/HEAD or current branch) |
 | `--include` | stringArray |  | pack directory for rig agents (repeatable) |
 | `--name` | string |  | rig name (default: directory basename) |
 | `--prefix` | string |  | bead ID prefix (default: derived from name) |
@@ -1864,10 +1921,11 @@ gc rig add /path/to/project
 
 ## gc rig list
 
-List all registered rigs with their paths, prefixes, and beads status.
+List all registered rigs with their paths, prefixes, default branches, and beads status.
 
 Shows the HQ rig (the city itself) and all configured rigs. Each rig
-displays its bead ID prefix and whether its beads database is initialized.
+displays its bead ID prefix, recorded default branch when set, and whether
+its beads database is initialized.
 
 ```
 gc rig list [flags]
@@ -1921,6 +1979,10 @@ Set the canonical endpoint ownership for a rig.
 
 Use --inherit to make a rig derive its endpoint from the current city
 topology. Use --external to pin the rig to its own external Dolt endpoint.
+Use --self to mark the rig as running its own local Dolt server on
+127.0.0.1 at the given --port; while the city is in managed_city mode the
+command requires --force because the rig's .beads/dolt-server.port mirror
+will no longer track the managed city Dolt.
 
 This command owns the rig's canonical .beads/config.yaml topology state.
 
@@ -1934,6 +1996,7 @@ gc rig set-endpoint <rig> [flags]
 gc rig set-endpoint frontend --inherit
   gc rig set-endpoint frontend --external --host db.example.com --port 3307
   gc rig set-endpoint frontend --external --host db.example.com --port 3307 --user agent --adopt-unverified
+  gc rig set-endpoint frontend --self --port 28232 --force
   gc rig set-endpoint frontend --inherit --dry-run
 ```
 
@@ -1942,9 +2005,11 @@ gc rig set-endpoint frontend --inherit
 | `--adopt-unverified` | bool |  | record the endpoint without live validation |
 | `--dry-run` | bool |  | show the canonical changes without writing files |
 | `--external` | bool |  | set an explicit external endpoint for the rig |
+| `--force` | bool |  | acknowledge conflicting managed-city state when using --self |
 | `--host` | string |  | external Dolt host |
 | `--inherit` | bool |  | inherit the city endpoint |
-| `--port` | string |  | external Dolt port |
+| `--port` | string |  | external Dolt port (required with --external or --self) |
+| `--self` | bool |  | mark the rig as running its own local Dolt on 127.0.0.1 |
 | `--user` | string |  | external Dolt user |
 
 ## gc rig status
@@ -2334,7 +2399,9 @@ Request a fresh restart for an existing session without closing its bead.
 
 The controller stops the current runtime and starts the same session again with
 fresh provider conversation state. Session identity, alias, mail, and queued
-work remain attached to the existing session bead.
+work remain attached to the existing session bead. For named sessions, reset
+also clears any tripped named-session respawn circuit breaker before requesting
+the fresh restart.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 
@@ -2596,9 +2663,20 @@ shutdown timeout, then force-kills any remaining sessions. Also stops
 the Dolt server and cleans up orphan sessions. If a controller is
 running, delegates shutdown to it.
 
+Use --timeout=DURATION to cap the wall-clock time gc stop will spend
+before giving up; the default budgets configured session interrupt and
+stop waves, the configured shutdown grace wait, and a second orphan
+cleanup pass. Use --force to skip the interrupt grace period and go
+straight to kill.
+
 ```
-gc stop [path]
+gc stop [path] [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--force` | bool |  | skip the interrupt grace period and force-kill all sessions immediately |
+| `--timeout` | duration | `0s` | wall-clock cap for the stop sequence (0 = derive from city config) |
 
 ## gc supervisor
 

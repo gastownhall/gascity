@@ -21,7 +21,9 @@ When you file a bead, default to immediately dispatching it to a polecat:
 
 ```bash
 gc bd create "Fix the auth timeout bug" -t task --json   # file it
-gc bd update <bead-id> --set-metadata gc.routed_to=<rig>/{{ .BindingPrefix }}polecat  # dispatch to polecat pool (pool reconciler picks up routed metadata)
+TARGET_RIG="${GC_RIG:-}"  # set to the target rig, or leave empty in an HQ-only city
+POLECAT_TARGET="${TARGET_RIG:+$TARGET_RIG/}{{ .BindingPrefix }}polecat"
+gc sling "$POLECAT_TARGET" <bead-id>                     # dispatch to polecat pool (sets gc.routed_to metadata for controller scale_check)
 ```
 
 **Why this is the default:**
@@ -200,7 +202,7 @@ gh pr create --repo $(git remote get-url origin | sed 's/.*github.com[:/]\(.*\)\
 {{ cmd }} mail read <id>                              # Read a specific message
 {{ cmd }} mail send <addr> -s "Subject" -m "Message"  # Send mail
 {{ cmd }} session nudge <target> "message"            # Wake an agent
-{{ cmd }} agent list                                  # List all agents
+{{ cmd }} session list                                # List active sessions
 {{ cmd }} rig list                                    # List all rigs
 ```
 
@@ -214,8 +216,8 @@ gh pr create --repo $(git remote get-url origin | sed 's/.*github.com[:/]\(.*\)\
 
 | Want to... | Correct command | Common mistake |
 |------------|----------------|----------------|
-| Dispatch work to polecat | `gc bd update <bead> --label=pool:<rig>/polecat` | ~~gc polecat spawn~~ / ~~--assignee=<rig>/polecat~~ |
-| Drain stuck polecat | `{{ cmd }} agent drain <name>` | ~~gc polecat kill~~ (not a command) |
+| Dispatch work to polecat | `gc sling <rig>/{{ .BindingPrefix }}polecat <bead>` | ~~gc bd update --label=pool:...~~ (labels don't trigger scale_check); plain `<rig>/polecat` won't match binding-prefixed polecats imported via PackV2 |
+| Drain stuck polecat | `{{ cmd }} runtime drain <name>` | ~~gc polecat kill~~ (not a command) |
 | Pause rig (daemon won't restart) | `{{ cmd }} rig suspend <rig>` | ~~gc rig stop~~ (daemon will restart it) |
 | Re-enable suspended rig | `{{ cmd }} rig resume <rig>` | |
 | Create convoy for batch work | `{{ cmd }} convoy create "name" <issues>` | |

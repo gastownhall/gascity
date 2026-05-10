@@ -2388,19 +2388,48 @@ type DoltConfigExpectedValue struct {
 //
 // This is intentionally a contract subset, not a byte-for-byte mirror of
 // writeManagedDoltConfigFile in cmd/gc/cmd_dolt_config.go. It covers the keys
-// whose drift would change managed runtime behavior materially. Dynamic values
-// such as data_dir are checked by DoltConfigCheck because they depend on the
-// inspected city path.
+// whose drift would change managed runtime behavior materially. wait_timeout
+// follows the same GC_DOLT_WAIT_TIMEOUT environment override as config
+// generation. Dynamic values such as data_dir are checked by DoltConfigCheck
+// because they depend on the inspected city path.
 func DoltConfigExpectedValues() []DoltConfigExpectedValue {
-	return []DoltConfigExpectedValue{
-		{"behavior.auto_gc_behavior.enable", true},
-		{"behavior.auto_gc_behavior.archive_level", 1},
+	values := []DoltConfigExpectedValue{
+		{"behavior.auto_gc_behavior.enable", false},
+		{"behavior.auto_gc_behavior.archive_level", 0},
+		{"system_variables.dolt_auto_gc_enabled", "OFF"},
+		{"system_variables.dolt_stats_enabled", "OFF"},
+		{"system_variables.dolt_stats_gc_enabled", "OFF"},
+		{"system_variables.dolt_stats_memory_only", "ON"},
+		{"system_variables.dolt_stats_paused", "ON"},
 		{"listener.read_timeout_millis", 300000},
 		{"listener.write_timeout_millis", 300000},
 		{"listener.max_connections", 1000},
 		{"listener.back_log", 50},
 		{"listener.max_connections_timeout_millis", 5000},
 	}
+	if waitTimeout := managedDoltConfigExpectedWaitTimeout(); waitTimeout > 0 {
+		values = append(values, DoltConfigExpectedValue{
+			Path:  "system_variables.wait_timeout",
+			Value: strconv.Itoa(waitTimeout),
+		})
+	}
+	return values
+}
+
+func managedDoltConfigExpectedWaitTimeout() int {
+	const defaultWaitTimeout = 30
+	raw := os.Getenv("GC_DOLT_WAIT_TIMEOUT")
+	if raw == "" {
+		return defaultWaitTimeout
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return defaultWaitTimeout
+	}
+	if n < 0 {
+		return 0
+	}
+	return n
 }
 
 // lookupYAMLPath walks a dotted key path through a decoded YAML map and
@@ -2524,7 +2553,7 @@ func (c *DoltConfigCheck) Run(_ *CheckContext) *CheckResult {
 				drifted = append(drifted, fmt.Sprintf("%s (got %v, want %v)", exp.Path, got, want))
 			}
 		case int:
-			if !yamlIntEqual(got, want) {
+			if !doltConfigExpectedIntEqual(exp.Path, got, want) {
 				drifted = append(drifted, fmt.Sprintf("%s (got %v, want %d)", exp.Path, got, want))
 			}
 		default:
@@ -2553,6 +2582,20 @@ func (c *DoltConfigCheck) Run(_ *CheckContext) *CheckResult {
 	r.Status = StatusOK
 	r.Message = "dolt config OK"
 	return r
+}
+
+func doltConfigExpectedIntEqual(path string, got any, want int) bool {
+	if yamlIntEqual(got, want) {
+		return true
+	}
+	// Managed configs written before archive_level defaulted to 0 can contain
+	// archive_level: 1. Accept that one-release compatibility value so first
+	// post-upgrade doctor runs do not report drift before gc start rewrites the
+	// managed config.
+	if path == "behavior.auto_gc_behavior.archive_level" && want == 0 {
+		return yamlIntEqual(got, 1)
+	}
+	return false
 }
 
 // CanFix returns false. TODO: wire Fix() into the same code path as

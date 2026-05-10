@@ -94,7 +94,7 @@ func (ce ConditionEnv) Environ() []string {
 		"GC_CUMULATIVE_DURATION_MS=" + strconv.FormatInt(ce.CumulativeDurationMs, 10),
 		"GC_MAX_ITERATIONS=" + strconv.Itoa(ce.MaxIterations),
 	}
-	env = append(env, citylayout.CityRuntimeEnv(ce.CityPath)...)
+	env = append(env, citylayout.CityRuntimeEnvForRuntimeDir(ce.CityPath, citylayout.TrustedAmbientCityRuntimeDir(ce.CityPath))...)
 
 	// Optional fields: only include if non-empty.
 	if ce.DocPath != "" {

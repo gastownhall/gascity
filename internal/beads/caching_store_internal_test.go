@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -580,6 +581,147 @@ func TestCachingStoreApplyEventRecordsProblemOnMalformedPayload(t *testing.T) {
 	}
 	if stats.LastProblemAt.IsZero() {
 		t.Fatal("LastProblemAt should be set")
+	}
+}
+
+func TestCachingStoreSparseUpdatedEventFallsBackWhenCompleteCoverageIsMissingDeps(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	bead, err := backing.Create(Bead{Title: "target"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	cache.mu.Lock()
+	delete(cache.deps, bead.ID)
+	cache.depsComplete = true
+	cache.mu.Unlock()
+
+	cache.ApplyEvent("bead.updated", json.RawMessage(`{"id":"`+bead.ID+`","title":"target"}`))
+
+	cache.mu.RLock()
+	depsComplete := cache.depsComplete
+	lastProblem := cache.stats.LastProblem
+	cache.mu.RUnlock()
+	if depsComplete {
+		t.Fatal("depsComplete = true, want incomplete coverage after missing deps invariant break")
+	}
+	if !strings.Contains(lastProblem, "missing deps for "+bead.ID) {
+		t.Fatalf("LastProblem = %q, want missing deps diagnostic for %s", lastProblem, bead.ID)
+	}
+	if _, ok := cache.CachedReady(); ok {
+		t.Fatal("CachedReady answered from cache after dependency coverage became incomplete")
+	}
+}
+
+func TestCachingStoreNoOpUpdatedEventSequencesDependencyCoverageInvalidation(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	bead, err := backing.Create(Bead{Title: "target"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	cache.mu.Lock()
+	cache.deps[bead.ID] = nil
+	cache.depsComplete = true
+	cache.mu.Unlock()
+
+	cache.mu.RLock()
+	startMutationSeq := cache.mutationSeq
+	cache.mu.RUnlock()
+
+	payload, err := json.Marshal(bead)
+	if err != nil {
+		t.Fatalf("Marshal bead: %v", err)
+	}
+	cache.ApplyEvent("bead.updated", payload)
+
+	cache.mu.RLock()
+	gotMutationSeq := cache.mutationSeq
+	gotBeadSeq, hasBeadSeq := cache.beadSeq[bead.ID]
+	depsComplete := cache.depsComplete
+	_, hasDeps := cache.deps[bead.ID]
+	cache.mu.RUnlock()
+	if gotMutationSeq <= startMutationSeq {
+		t.Fatalf("mutationSeq = %d, want advanced past %d", gotMutationSeq, startMutationSeq)
+	}
+	if !hasBeadSeq || gotBeadSeq <= startMutationSeq {
+		t.Fatalf("beadSeq[%s] = (%d, %v), want sequenced after %d", bead.ID, gotBeadSeq, hasBeadSeq, startMutationSeq)
+	}
+	if depsComplete {
+		t.Fatal("depsComplete = true, want dependency-omitting update to mark coverage incomplete")
+	}
+	if hasDeps {
+		t.Fatalf("deps[%s] still cached after dependency-omitting update", bead.ID)
+	}
+	if ready, ok := cache.CachedReady(); ok {
+		t.Fatalf("CachedReady answered from cache after dependency coverage became incomplete: %v", ready)
+	}
+}
+
+func TestCachingStoreNoOpUpdatedEventPreservesCachedMetadataMap(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	bead, err := backing.Create(Bead{
+		Title:    "target",
+		Metadata: map[string]string{"key": "value"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	cache.mu.RLock()
+	startMutationSeq := cache.mutationSeq
+	beforeMetadata := reflect.ValueOf(cache.beads[bead.ID].Metadata).Pointer()
+	cache.mu.RUnlock()
+
+	payload, err := json.Marshal(struct {
+		ID           string            `json:"id"`
+		Title        string            `json:"title"`
+		Status       string            `json:"status"`
+		Type         string            `json:"issue_type"`
+		CreatedAt    time.Time         `json:"created_at"`
+		Metadata     map[string]string `json:"metadata"`
+		Dependencies []Dep             `json:"dependencies"`
+	}{
+		ID:           bead.ID,
+		Title:        bead.Title,
+		Status:       bead.Status,
+		Type:         bead.Type,
+		CreatedAt:    bead.CreatedAt,
+		Metadata:     bead.Metadata,
+		Dependencies: []Dep{},
+	})
+	if err != nil {
+		t.Fatalf("Marshal payload: %v", err)
+	}
+	cache.ApplyEvent("bead.updated", payload)
+
+	cache.mu.RLock()
+	gotMutationSeq := cache.mutationSeq
+	afterMetadata := reflect.ValueOf(cache.beads[bead.ID].Metadata).Pointer()
+	cache.mu.RUnlock()
+	if gotMutationSeq != startMutationSeq {
+		t.Fatalf("mutationSeq = %d, want unchanged %d", gotMutationSeq, startMutationSeq)
+	}
+	if afterMetadata != beforeMetadata {
+		t.Fatalf("metadata map pointer = %x, want unchanged %x", afterMetadata, beforeMetadata)
 	}
 }
 
@@ -1393,9 +1535,9 @@ type readyCountingPartialListStore struct {
 	readyCalls int
 }
 
-func (s *readyCountingPartialListStore) Ready() ([]Bead, error) {
+func (s *readyCountingPartialListStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	s.readyCalls++
-	return s.partialListErrorStore.Ready()
+	return s.partialListErrorStore.Ready(query...)
 }
 
 func hasBead(items []Bead, id string) bool {
@@ -1581,6 +1723,118 @@ func TestCachingStoreBdPrimeAndReconcileSkipFullDepScan(t *testing.T) {
 	}
 }
 
+func TestCachingStoreBdPrimeActiveUsesListDependenciesForCachedReady(t *testing.T) {
+	t.Parallel()
+
+	var depListCalls int
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			t.Fatalf("command name = %q, want bd", name)
+		}
+		if len(args) > 0 && args[0] == "dep" {
+			depListCalls++
+			t.Fatalf("unexpected dep scan command: %v", args)
+		}
+		if len(args) > 0 && args[0] == "list" {
+			argLine := strings.Join(args, " ")
+			if strings.Contains(argLine, "--status=open") {
+				return []byte(`[
+					{"id":"bd-blocker","title":"blocker","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z","labels":["task"],"metadata":{}},
+					{"id":"bd-blocked","title":"blocked","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:01Z","labels":["task"],"metadata":{},"dependencies":[{"issue_id":"bd-blocked","depends_on_id":"bd-blocker","type":"blocks"}]}
+				]`), nil
+			}
+			if strings.Contains(argLine, "--status=in_progress") {
+				return []byte(`[]`), nil
+			}
+		}
+		return []byte(`[]`), nil
+	}
+	cache := NewCachingStoreForTest(NewBdStore("/city", runner), nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	ready, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable")
+	}
+	ids := map[string]bool{}
+	for _, b := range ready {
+		ids[b.ID] = true
+	}
+	if !ids["bd-blocker"] || ids["bd-blocked"] {
+		t.Fatalf("CachedReady ids = %v, want blocker ready and blocked excluded", ids)
+	}
+	if depListCalls != 0 {
+		t.Fatalf("dep list calls = %d, want 0", depListCalls)
+	}
+}
+
+func TestCachingStoreBdReconcileRefreshesListDependenciesForCachedReady(t *testing.T) {
+	t.Parallel()
+
+	runner := newCachingStoreBdDepRunner(t)
+	cache := NewCachingStore(NewBdStore("/city", runner.run), nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	assertCachedReadyContains := func(wantReady bool) {
+		t.Helper()
+		ready, ok := cache.CachedReady()
+		if !ok {
+			t.Fatal("CachedReady reported cache unavailable")
+		}
+		readyByID := make(map[string]bool, len(ready))
+		for _, bead := range ready {
+			readyByID[bead.ID] = true
+		}
+		if readyByID["bd-1"] != wantReady {
+			t.Fatalf("CachedReady includes bd-1 = %v, want %v; ready=%v", readyByID["bd-1"], wantReady, readyByID)
+		}
+	}
+
+	assertCachedReadyContains(true)
+
+	runner.deps["bd-1"] = []Dep{{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks"}}
+	cache.runReconciliation()
+	assertCachedReadyContains(false)
+
+	runner.deps["bd-1"] = nil
+	cache.runReconciliation()
+	assertCachedReadyContains(true)
+
+	if runner.depScanCalls != 0 {
+		t.Fatalf("dep scan calls = %d, want 0", runner.depScanCalls)
+	}
+}
+
+func TestCachingStoreBdReconcileClearsCachedDepsWhenListOmitsDependencies(t *testing.T) {
+	t.Parallel()
+
+	runner := newCachingStoreBdDepRunner(t)
+	runner.deps["bd-1"] = []Dep{{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks"}}
+	cache := NewCachingStore(NewBdStore("/city", runner.run), nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	runner.deps["bd-1"] = nil
+	cache.runReconciliation()
+
+	ready, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable")
+	}
+	readyByID := make(map[string]bool, len(ready))
+	for _, bead := range ready {
+		readyByID[bead.ID] = true
+	}
+	if !readyByID["bd-1"] {
+		t.Fatalf("CachedReady excludes bd-1 after omitted deps, ready=%v", readyByID)
+	}
+}
+
 func TestCachingStoreBdIncompleteDepsUseBackingForDownDepList(t *testing.T) {
 	t.Parallel()
 
@@ -1693,12 +1947,7 @@ func (r *cachingStoreBdDepRunner) run(_, name string, args ...string) ([]byte, e
 	}
 	switch args[0] {
 	case "list":
-		return []byte(`[
-			{"id":"bd-1","title":"task","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z","labels":["task"],"metadata":{}},
-			{"id":"bd-2","title":"dep 2","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z","labels":["task"],"metadata":{}},
-			{"id":"bd-3","title":"dep 3","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z","labels":["task"],"metadata":{}},
-			{"id":"bd-4","title":"dep 4","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z","labels":["task"],"metadata":{}}
-		]`), nil
+		return r.listOutput(), nil
 	case "ready":
 		return []byte(`[]`), nil
 	case "dep":
@@ -1735,6 +1984,31 @@ func (r *cachingStoreBdDepRunner) runDep(args ...string) ([]byte, error) {
 	}
 	r.t.Fatalf("unexpected dep command: %v", args)
 	return nil, nil
+}
+
+func (r *cachingStoreBdDepRunner) listOutput() []byte {
+	var b strings.Builder
+	ids := []string{"bd-1", "bd-2", "bd-3", "bd-4"}
+	b.WriteByte('[')
+	for i, id := range ids {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `{"id":%q,"title":%q,"status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z","labels":["task"],"metadata":{}`, id, "dep "+strings.TrimPrefix(id, "bd-"))
+		if deps := r.deps[id]; len(deps) > 0 {
+			b.WriteString(`,"dependencies":[`)
+			for depIdx, dep := range deps {
+				if depIdx > 0 {
+					b.WriteByte(',')
+				}
+				fmt.Fprintf(&b, `{"issue_id":%q,"depends_on_id":%q,"type":%q}`, dep.IssueID, dep.DependsOnID, dep.Type)
+			}
+			b.WriteByte(']')
+		}
+		b.WriteByte('}')
+	}
+	b.WriteByte(']')
+	return []byte(b.String())
 }
 
 func (r *cachingStoreBdDepRunner) depListOutput(issueID string) []byte {

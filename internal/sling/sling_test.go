@@ -322,6 +322,7 @@ func TestBeadPrefixForCityLongestMatch(t *testing.T) {
 		want string
 	}{
 		{"agent-diagnostics-hnn", "agent-diagnostics"},
+		{"agent-diagnostics-spawn-storm", "agent-diagnostics"},
 		{"agent-x1", "agent"},
 		{"fe-42", "fe"},
 		{"unknown-7", "unknown"}, // falls back to BeadPrefix.
@@ -2966,5 +2967,263 @@ func TestDoSlingForceSkipsCrossRig(t *testing.T) {
 	}, deps, nil)
 	if err != nil {
 		t.Fatalf("DoSling with --force should not error on cross-rig: %v", err)
+	}
+}
+
+// TestSlingFormulaSearchPaths_RigNameKey: agent.Dir = rig name should
+// resolve to the rig-specific FormulaLayers entry. This is the legacy
+// shape and was already working pre-#1801.
+func TestSlingFormulaSearchPaths_RigNameKey(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "gascity", Path: "/home/ds/gascity"},
+		},
+		FormulaLayers: config.FormulaLayers{
+			City: []string{"/city/formulas"},
+			Rigs: map[string][]string{
+				"gascity": {"/rig/formulas", "/pack/formulas"},
+			},
+		},
+	}
+	a := config.Agent{Name: "polecat", Dir: "gascity"}
+	deps := SlingDeps{Cfg: cfg}
+
+	got := SlingFormulaSearchPaths(deps, a)
+	want := []string{"/rig/formulas", "/pack/formulas"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("SlingFormulaSearchPaths(rig-name agent) = %v, want %v", got, want)
+	}
+}
+
+// TestSlingFormulaSearchPaths_RigPathKey: agent.Dir = filesystem path
+// should ALSO resolve to the rig-specific FormulaLayers entry by mapping
+// the path to the rig name. Prior to #1801 this fell through to
+// fl.City silently, which made every pack-imported formula appear
+// "not found in search paths" when sling tried to instantiate it.
+func TestSlingFormulaSearchPaths_RigPathKey(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "gascity", Path: "/home/ds/gascity"},
+		},
+		FormulaLayers: config.FormulaLayers{
+			City: []string{"/city/formulas"},
+			Rigs: map[string][]string{
+				"gascity": {"/rig/formulas", "/pack/formulas"},
+			},
+		},
+	}
+	a := config.Agent{Name: "polecat", Dir: "/home/ds/gascity"}
+	deps := SlingDeps{Cfg: cfg}
+
+	got := SlingFormulaSearchPaths(deps, a)
+	want := []string{"/rig/formulas", "/pack/formulas"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("SlingFormulaSearchPaths(rig-path agent) = %v, want %v (regression of #1801)", got, want)
+	}
+}
+
+// TestSlingFormulaSearchPaths_CityScoped: agent with empty Dir should
+// fall back to fl.City layers. Verifies the city-scoped path remains
+// untouched by the #1801 fix.
+func TestSlingFormulaSearchPaths_CityScoped(t *testing.T) {
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{"/city/formulas"},
+			Rigs: map[string][]string{
+				"gascity": {"/rig/formulas"},
+			},
+		},
+	}
+	a := config.Agent{Name: "mayor", Dir: ""}
+	deps := SlingDeps{Cfg: cfg}
+
+	got := SlingFormulaSearchPaths(deps, a)
+	want := []string{"/city/formulas"}
+	if len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("SlingFormulaSearchPaths(city-scoped) = %v, want %v", got, want)
+	}
+}
+
+// TestSlingFormulaSearchPaths_RigPathKey_TrailingSlash: agent.Dir with a
+// trailing slash should match the rig path after normalization. Strict
+// string equality (which the first version of this fix used) re-introduces
+// the #1801 fall-through whenever the operator writes `dir =
+// "/home/ds/gascity/"` in agent.toml.
+func TestSlingFormulaSearchPaths_RigPathKey_TrailingSlash(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "gascity", Path: "/home/ds/gascity"},
+		},
+		FormulaLayers: config.FormulaLayers{
+			City: []string{"/city/formulas"},
+			Rigs: map[string][]string{
+				"gascity": {"/rig/formulas"},
+			},
+		},
+	}
+	a := config.Agent{Name: "polecat", Dir: "/home/ds/gascity/"}
+	deps := SlingDeps{Cfg: cfg}
+
+	got := SlingFormulaSearchPaths(deps, a)
+	want := []string{"/rig/formulas"}
+	if len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("SlingFormulaSearchPaths(trailing-slash dir) = %v, want %v", got, want)
+	}
+}
+
+// TestSlingFormulaSearchPaths_UnknownDir: agent.Dir matching neither a
+// rig name nor a rig path should fall back to fl.City (the existing
+// SearchPaths fallback when the rig key is absent).
+func TestSlingFormulaSearchPaths_UnknownDir(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "gascity", Path: "/home/ds/gascity"},
+		},
+		FormulaLayers: config.FormulaLayers{
+			City: []string{"/city/formulas"},
+			Rigs: map[string][]string{
+				"gascity": {"/rig/formulas"},
+			},
+		},
+	}
+	a := config.Agent{Name: "mystery", Dir: "/some/other/place"}
+	deps := SlingDeps{Cfg: cfg}
+
+	got := SlingFormulaSearchPaths(deps, a)
+	want := []string{"/city/formulas"}
+	if len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("SlingFormulaSearchPaths(unknown dir) = %v, want %v", got, want)
+	}
+}
+
+// fixedBranchResolver returns a constant branch regardless of dir.
+type fixedBranchResolver struct{ branch string }
+
+func (r fixedBranchResolver) DefaultBranch(string) string { return r.branch }
+
+func TestSlingFormulaTargetBranch_PrefersBeadMetadata(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs: []config.Rig{
+			{Name: "scamper", Path: "/scamper", Prefix: "SC", DefaultBranch: "master"},
+		},
+	}
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{Metadata: map[string]string{"target": "release/v2"}})
+	if err != nil {
+		t.Fatalf("seeding bead: %v", err)
+	}
+	deps := SlingDeps{
+		Cfg:      cfg,
+		Store:    store,
+		Branches: fixedBranchResolver{branch: "main"},
+	}
+	a := config.Agent{Name: "polecat", Dir: "scamper"}
+
+	got := SlingFormulaTargetBranch(bead.ID, deps, a)
+	if got != "release/v2" {
+		t.Errorf("SlingFormulaTargetBranch = %q, want %q (bead metadata wins)", got, "release/v2")
+	}
+}
+
+func TestSlingFormulaTargetBranch_UsesRigDefaultBranchByBead(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs: []config.Rig{
+			{Name: "scamper", Path: "/scamper", Prefix: "SC", DefaultBranch: "master"},
+		},
+	}
+	deps := SlingDeps{
+		Cfg:      cfg,
+		Store:    beads.NewMemStore(),
+		Branches: fixedBranchResolver{branch: "main"},
+	}
+	a := config.Agent{Name: "polecat"} // no Dir — bead-prefix lookup must win
+
+	got := SlingFormulaTargetBranch("SC-1", deps, a)
+	if got != "master" {
+		t.Errorf("SlingFormulaTargetBranch = %q, want %q (rig stored default by bead prefix)", got, "master")
+	}
+}
+
+func TestSlingFormulaTargetBranch_UsesRigDefaultBranchByHyphenatedBeadPrefix(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs: []config.Rig{
+			{Name: "agent-diagnostics", Path: "/agent-diagnostics", Prefix: "agent-diagnostics", DefaultBranch: "master"},
+		},
+	}
+	deps := SlingDeps{
+		Cfg:      cfg,
+		Store:    beads.NewMemStore(),
+		Branches: fixedBranchResolver{branch: "main"},
+	}
+	a := config.Agent{Name: "polecat"} // no Dir - bead-prefix lookup must handle hyphenated prefixes
+
+	got := SlingFormulaTargetBranch("agent-diagnostics-hnn", deps, a)
+	if got != "master" {
+		t.Errorf("SlingFormulaTargetBranch = %q, want %q (hyphenated rig prefix stored default)", got, "master")
+	}
+}
+
+func TestSlingFormulaTargetBranch_UsesRigDefaultBranchByAgent(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs: []config.Rig{
+			{Name: "scamper", Path: "/scamper", Prefix: "SC", DefaultBranch: "master"},
+		},
+	}
+	deps := SlingDeps{
+		Cfg:      cfg,
+		Store:    beads.NewMemStore(),
+		Branches: fixedBranchResolver{branch: "main"},
+	}
+	a := config.Agent{Name: "refinery", Dir: "scamper"}
+
+	// No bead ID — agent.Dir lookup must find the rig.
+	got := SlingFormulaTargetBranch("", deps, a)
+	if got != "master" {
+		t.Errorf("SlingFormulaTargetBranch = %q, want %q (rig stored default by agent.Dir)", got, "master")
+	}
+}
+
+func TestSlingFormulaTargetBranch_UsesRigDefaultBranchByAgentPath(t *testing.T) {
+	rigPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs: []config.Rig{
+			{Name: "scamper", Path: rigPath, Prefix: "SC", DefaultBranch: "master"},
+		},
+	}
+	deps := SlingDeps{
+		Cfg:      cfg,
+		Store:    beads.NewMemStore(),
+		Branches: fixedBranchResolver{branch: "main"},
+	}
+	a := config.Agent{Name: "refinery", Dir: rigPath}
+
+	got := SlingFormulaTargetBranch("", deps, a)
+	if got != "master" {
+		t.Errorf("SlingFormulaTargetBranch = %q, want %q (rig stored default by agent path)", got, "master")
+	}
+}
+
+func TestSlingFormulaTargetBranch_FallsBackToProbeWhenUnset(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs: []config.Rig{
+			{Name: "scamper", Path: "/scamper", Prefix: "SC"}, // no DefaultBranch
+		},
+	}
+	deps := SlingDeps{
+		Cfg:      cfg,
+		Store:    beads.NewMemStore(),
+		Branches: fixedBranchResolver{branch: "trunk"},
+	}
+	a := config.Agent{Name: "refinery", Dir: "scamper"}
+
+	got := SlingFormulaTargetBranch("SC-1", deps, a)
+	if got != "trunk" {
+		t.Errorf("SlingFormulaTargetBranch = %q, want %q (fallback to live probe)", got, "trunk")
 	}
 }

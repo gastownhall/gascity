@@ -119,6 +119,9 @@ func initCityWithManagedDoltRecovery(t *testing.T, env []string, configPath, cit
 	for attempt := 1; attempt <= 2; attempt++ {
 		out, err = runGCDoltWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
 		if err == nil {
+			if readyOut, readyErr := waitForManagedDoltCityReady(env, cityDir, 20*time.Second); readyErr != nil {
+				t.Fatalf("gc init succeeded but managed Dolt city never became ready: %v\nlast bd output: %s", readyErr, readyOut)
+			}
 			return
 		}
 

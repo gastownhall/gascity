@@ -2186,3 +2186,201 @@ func TestPopulateAgentLocalAssetDirsPreservesExisting(t *testing.T) {
 		t.Errorf("MCPDir overwritten: %q", cfg.Agents[0].MCPDir)
 	}
 }
+
+func TestLoadWithIncludes_KiroProviderBaseClaudeThroughResolve(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+
+[providers.kiro]
+base = "builtin:claude"
+command = "kiro-cli"
+args = ["chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"]
+ready_delay_ms = 5000
+process_names = ["kiro-cli", "kiro", "node"]
+instructions_file = "AGENTS.md"
+
+[providers.kiro.env]
+KIRO_AGENT_MODE = "headless"
+
+[[agent]]
+name = "worker"
+provider = "kiro"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	spec, ok := cfg.Providers["kiro"]
+	if !ok {
+		t.Fatal("kiro provider not loaded")
+	}
+	if spec.Base == nil || *spec.Base != "builtin:claude" {
+		t.Fatalf("Base = %v, want builtin:claude", spec.Base)
+	}
+
+	var worker *Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Name == "worker" {
+			worker = &cfg.Agents[i]
+			break
+		}
+	}
+	if worker == nil {
+		t.Fatal("worker agent not found")
+	}
+
+	rp, err := ResolveProvider(worker, &cfg.Workspace, cfg.Providers, lookPathAll)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.Command != "kiro-cli" {
+		t.Errorf("Command = %q, want kiro", rp.Command)
+	}
+	if rp.BuiltinAncestor != "claude" {
+		t.Errorf("BuiltinAncestor = %q, want claude", rp.BuiltinAncestor)
+	}
+	if rp.InstructionsFile != "AGENTS.md" {
+		t.Errorf("InstructionsFile = %q, want AGENTS.md (kiro override)", rp.InstructionsFile)
+	}
+	if rp.ResumeFlag != "--resume" {
+		t.Errorf("ResumeFlag = %q, want --resume (inherited from claude)", rp.ResumeFlag)
+	}
+	if rp.SessionIDFlag != "--session-id" {
+		t.Errorf("SessionIDFlag = %q, want --session-id (inherited from claude)", rp.SessionIDFlag)
+	}
+	if !rp.SupportsHooks {
+		t.Error("SupportsHooks = false, want true (inherited from claude)")
+	}
+	if rp.Env["KIRO_AGENT_MODE"] != "headless" {
+		t.Errorf("Env[KIRO_AGENT_MODE] = %q, want headless", rp.Env["KIRO_AGENT_MODE"])
+	}
+	if rp.PermissionModes == nil || rp.PermissionModes["unrestricted"] != "--dangerously-skip-permissions" {
+		t.Errorf("PermissionModes[unrestricted] = %q, want --dangerously-skip-permissions (inherited)", rp.PermissionModes["unrestricted"])
+	}
+}
+
+func TestLoadWithIncludes_KiroStandaloneProviderThroughResolve(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+
+[providers.kiro]
+command = "kiro-cli"
+args = ["chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"]
+prompt_mode = "arg"
+ready_delay_ms = 5000
+process_names = ["kiro-cli", "kiro", "node"]
+supports_hooks = true
+instructions_file = "AGENTS.md"
+resume_flag = "--resume"
+resume_style = "flag"
+
+[providers.kiro.env]
+KIRO_AGENT_MODE = "headless"
+
+[providers.kiro.permission_modes]
+unrestricted = "--trust-mode full"
+default = "--trust-mode default"
+
+[[agent]]
+name = "worker"
+provider = "kiro"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	var worker *Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Name == "worker" {
+			worker = &cfg.Agents[i]
+			break
+		}
+	}
+	if worker == nil {
+		t.Fatal("worker agent not found")
+	}
+
+	rp, err := ResolveProvider(worker, &cfg.Workspace, cfg.Providers, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.Name != "kiro" {
+		t.Errorf("Name = %q, want kiro", rp.Name)
+	}
+	if rp.BuiltinAncestor != "kiro" {
+		t.Errorf("BuiltinAncestor = %q, want \"kiro\"", rp.BuiltinAncestor)
+	}
+	if rp.CommandString() != "kiro-cli chat --no-interactive --agent gascity --trust-all-tools" {
+		t.Errorf("CommandString() = %q, want kiro-cli chat --no-interactive --agent gascity --trust-all-tools", rp.CommandString())
+	}
+	if rp.ReadyDelayMs != 5000 {
+		t.Errorf("ReadyDelayMs = %d, want 5000", rp.ReadyDelayMs)
+	}
+	if !rp.SupportsHooks {
+		t.Error("SupportsHooks = false, want true")
+	}
+	if rp.InstructionsFile != "AGENTS.md" {
+		t.Errorf("InstructionsFile = %q, want AGENTS.md", rp.InstructionsFile)
+	}
+	if rp.ResumeFlag != "--resume" {
+		t.Errorf("ResumeFlag = %q, want --resume", rp.ResumeFlag)
+	}
+	if rp.ResumeStyle != "flag" {
+		t.Errorf("ResumeStyle = %q, want flag", rp.ResumeStyle)
+	}
+	if rp.Env["KIRO_AGENT_MODE"] != "headless" {
+		t.Errorf("Env[KIRO_AGENT_MODE] = %q, want headless", rp.Env["KIRO_AGENT_MODE"])
+	}
+	if rp.PermissionModes["unrestricted"] != "--trust-mode full" {
+		t.Errorf("PermissionModes[unrestricted] = %q, want --trust-mode full", rp.PermissionModes["unrestricted"])
+	}
+}
+
+func TestLoadWithIncludes_KiroFragmentOverlay(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["kiro-overlay.toml"]
+
+[workspace]
+name = "test"
+
+[providers.kiro]
+command = "kiro-cli"
+args = ["chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"]
+prompt_mode = "arg"
+ready_delay_ms = 5000
+
+[[agent]]
+name = "worker"
+provider = "kiro"
+`)
+	fs.Files["/city/kiro-overlay.toml"] = []byte(`
+[providers.kiro]
+ready_delay_ms = 8000
+
+[providers.kiro.env]
+KIRO_AGENT_MODE = "headless"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	kiro, ok := cfg.Providers["kiro"]
+	if !ok {
+		t.Fatal("kiro provider not loaded")
+	}
+	if kiro.ReadyDelayMs != 8000 {
+		t.Errorf("ReadyDelayMs = %d, want 8000 (fragment override)", kiro.ReadyDelayMs)
+	}
+	if kiro.Env["KIRO_AGENT_MODE"] != "headless" {
+		t.Errorf("Env[KIRO_AGENT_MODE] = %q, want headless (from fragment)", kiro.Env["KIRO_AGENT_MODE"])
+	}
+	if kiro.Command != "kiro-cli" {
+		t.Errorf("Command = %q, want kiro (from root)", kiro.Command)
+	}
+}

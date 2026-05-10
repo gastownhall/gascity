@@ -126,6 +126,74 @@ func TestAcceptStartupDialogsAcceptsGeminiTrustDialog(t *testing.T) {
 	}
 }
 
+func TestAcceptStartupDialogsSelectsClaudeResumeAsIs(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = time.Second
+
+	var sent []string
+	err := AcceptStartupDialogs(
+		context.Background(),
+		func(_ int) (string, error) {
+			if len(sent) == 0 {
+				return strings.Join([]string{
+					"This session is 1h 55m old and 212.7k tokens.",
+					"",
+					"❯ 1. Resume from summary (recommended)",
+					"  2. Resume full session as-is",
+					"  3. Don't ask me again",
+					"",
+					"Enter to confirm · Esc to cancel",
+				}, "\n"), nil
+			}
+			return "❯ ", nil
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogs() error = %v", err)
+	}
+	if !reflect.DeepEqual(sent, []string{"Down", "Enter"}) {
+		t.Fatalf("sent keys = %v, want [Down Enter]", sent)
+	}
+}
+
+func TestAcceptStartupDialogsFromStreamSelectsClaudeResumeAsIs(t *testing.T) {
+	withZeroDialogTimings(t)
+
+	snapshots := make(chan string, 2)
+	snapshots <- strings.Join([]string{
+		"This session is 1h 55m old and 212.7k tokens.",
+		"",
+		"❯ 1. Resume from summary (recommended)",
+		"  2. Resume full session as-is",
+		"  3. Don't ask me again",
+		"",
+		"Enter to confirm · Esc to cancel",
+	}, "\n")
+	snapshots <- "❯ "
+	close(snapshots)
+
+	var sent []string
+	err := AcceptStartupDialogsFromStream(
+		context.Background(),
+		time.Second,
+		snapshots,
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogsFromStream() error = %v", err)
+	}
+	if !reflect.DeepEqual(sent, []string{"Down", "Enter"}) {
+		t.Fatalf("sent keys = %v, want [Down Enter]", sent)
+	}
+}
+
 func TestAcceptStartupDialogsPeeksDeepEnoughForLateTrustDialog(t *testing.T) {
 	withZeroDialogTimings(t)
 	dialogPollTimeout = time.Second
@@ -732,6 +800,8 @@ func TestContainsRateLimitDialog(t *testing.T) {
 		want    bool
 	}{
 		{name: "gemini usage limit", content: "Usage limit reached for gemini-3-flash-preview.", want: true},
+		{name: "claude hit limit", content: "You've hit your limit, Pro plan", want: true},
+		{name: "claude rate limit options", content: "/rate-limit-options", want: true},
 		{name: "generic rate limit", content: "rate limit exceeded", want: true},
 		{name: "Rate limit caps", content: "Rate limit: try again later", want: true},
 		{name: "normal output", content: "Hello world", want: false},
@@ -739,8 +809,32 @@ func TestContainsRateLimitDialog(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := containsRateLimitDialog(tt.content); got != tt.want {
-				t.Errorf("containsRateLimitDialog(%q) = %v, want %v", tt.content, got, tt.want)
+			if got := ContainsRateLimitDialog(tt.content); got != tt.want {
+				t.Errorf("ContainsRateLimitDialog(%q) = %v, want %v", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestContainsProviderRateLimitScreen(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{name: "gemini usage limit", content: "Usage limit reached for gemini-3-flash-preview.", want: true},
+		{name: "claude hit limit", content: "You've hit your limit, Pro plan", want: true},
+		{name: "claude rate limit options", content: "/rate-limit-options", want: true},
+		{name: "provider menu shape", content: "Rate limit reached\n1. Keep trying\n2. Stop", want: true},
+		{name: "generic crash output", content: "worker failed while parsing rate limit config", want: false},
+		{name: "generic lower-case mention", content: "rate limit exceeded", want: false},
+		{name: "normal output", content: "Hello world", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ContainsProviderRateLimitScreen(tt.content); got != tt.want {
+				t.Errorf("ContainsProviderRateLimitScreen(%q) = %v, want %v", tt.content, got, tt.want)
 			}
 		})
 	}

@@ -923,10 +923,6 @@ func addSessionCircuitResolverKey(resolve map[string]string, ambiguous map[strin
 	resolve[key] = identity
 }
 
-// SessionCircuitBreakerSnapshot is the exported status hook: it returns the
-// current breaker state for all tracked named-session identities. The
-// "gc status" command and any future dashboard can call this to surface
-// tripped breakers without reaching into package internals.
-func SessionCircuitBreakerSnapshot(now time.Time) []CircuitBreakerSnapshot {
+func sessionCircuitBreakerSnapshot(now time.Time) []CircuitBreakerSnapshot {
 	return defaultSessionCircuitBreaker().Snapshot(now)
 }

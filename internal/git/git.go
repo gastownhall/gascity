@@ -66,6 +66,31 @@ func (g *Git) DefaultBranch() (string, error) {
 	return strings.TrimPrefix(ref, "refs/remotes/origin/"), nil
 }
 
+// ProbeDefaultBranch returns the repo's mainline branch name with a richer
+// fallback chain than DefaultBranch:
+//  1. refs/remotes/origin/HEAD symref (the configured default)
+//  2. the currently checked-out branch (when origin/HEAD is unset, the
+//     first branch is usually the mainline)
+//  3. empty string (caller decides)
+//
+// Use this at registration time (gc rig add) where we want to record the
+// repo's actual mainline rather than a generic "main" placeholder.
+func (g *Git) ProbeDefaultBranch() string {
+	if out, err := g.run("symbolic-ref", "refs/remotes/origin/HEAD"); err == nil {
+		ref := strings.TrimSpace(out)
+		if branch := strings.TrimPrefix(ref, "refs/remotes/origin/"); branch != "" {
+			return branch
+		}
+	}
+	if branch, err := g.CurrentBranch(); err == nil {
+		branch = strings.TrimSpace(branch)
+		if branch != "" && branch != "HEAD" {
+			return branch
+		}
+	}
+	return ""
+}
+
 // WorktreeRemove removes a worktree. If force is true, removes even with
 // uncommitted changes.
 func (g *Git) WorktreeRemove(path string, force bool) error {

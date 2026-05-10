@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
@@ -341,13 +342,14 @@ func RigDirForBead(cfg *config.City, beadID string) string {
 }
 
 // RigDirForAgent returns the rig directory for an agent by matching its Dir
-// field to a rig Name.
+// field to a rig name or configured rig path.
 func RigDirForAgent(cfg *config.City, a config.Agent) string {
-	if a.Dir == "" {
+	rigName := rigNameForAgent(cfg, a)
+	if rigName == "" {
 		return ""
 	}
 	for _, r := range cfg.Rigs {
-		if r.Name == a.Dir {
+		if r.Name == rigName {
 			return r.Path
 		}
 	}
@@ -413,12 +415,14 @@ func BeadPrefix(beadID string) string {
 }
 
 // BeadPrefixForCity returns the configured rig (or HQ) prefix that beadID
-// belongs to, preferring the longest match so hyphenated rig prefixes
-// resolve correctly. Falls back to BeadPrefix when no configured prefix
-// matches. Returns "" if the bead has no dash and no configured-prefix
+// belongs to, preferring the longest match so hyphenated rig prefixes resolve
+// correctly. It does not require the suffix to pass the short bead-ID shape
+// gate; callers that need to decide bead ID vs inline text should use
+// LooksLikeConfiguredBeadID. Falls back to BeadPrefix when no configured
+// prefix matches. Returns "" if the bead has no dash and no configured-prefix
 // match.
 func BeadPrefixForCity(cfg *config.City, beadID string) string {
-	if p := matchConfiguredBeadPrefix(cfg, beadID); p != "" {
+	if p := matchConfiguredBeadPrefixCandidate(cfg, beadID); p != "" {
 		return p
 	}
 	return BeadPrefix(beadID)
@@ -440,6 +444,14 @@ func LooksLikeConfiguredBeadID(cfg *config.City, s string) bool {
 // prefix; the returned value is the lower-cased configured prefix.
 // Returns "" if no configured prefix matches.
 func matchConfiguredBeadPrefix(cfg *config.City, beadID string) string {
+	return matchConfiguredBeadPrefixBySuffix(cfg, beadID, true)
+}
+
+func matchConfiguredBeadPrefixCandidate(cfg *config.City, beadID string) string {
+	return matchConfiguredBeadPrefixBySuffix(cfg, beadID, false)
+}
+
+func matchConfiguredBeadPrefixBySuffix(cfg *config.City, beadID string, requireValidSuffix bool) string {
 	beadID = strings.TrimSpace(beadID)
 	if cfg == nil || beadID == "" || strings.ContainsAny(beadID, " \t\n") {
 		return ""
@@ -458,9 +470,11 @@ func matchConfiguredBeadPrefix(cfg *config.City, beadID string) string {
 		if !strings.HasPrefix(lower, lp+"-") {
 			continue
 		}
-		suffix := beadID[len(lp)+1:]
-		if !validBeadSuffix(suffix) {
-			continue
+		if requireValidSuffix {
+			suffix := beadID[len(lp)+1:]
+			if !validBeadSuffix(suffix) {
+				continue
+			}
 		}
 		best = lp
 		bestLen = len(lp)
@@ -752,11 +766,58 @@ func BeadMetadataTarget(store beads.Store, beadID string) string {
 
 // SlingFormulaSearchPaths returns the formula search paths for the current
 // sling context.
+//
+// FormulaLayers.SearchPaths is keyed by rig NAME, but agent.Dir may be
+// either a rig name OR a filesystem path (the docs/examples allow both).
+// Resolve to the rig name first so pack-imported formula layers (under
+// fl.Rigs[<name>]) are reachable when an agent is configured with a path
+// instead of a name. Without this resolution the lookup silently falls
+// back to fl.City and pack-imported formulas appear "not found in search
+// paths" — `gc formula list` would still find them by scanning every
+// configured search path (city + every rig), so the lookup-versus-list
+// asymmetry is the surface symptom. See gastownhall/gascity#1801.
 func SlingFormulaSearchPaths(deps SlingDeps, a config.Agent) []string {
 	if deps.Cfg == nil {
 		return nil
 	}
-	return deps.Cfg.FormulaLayers.SearchPaths(a.Dir)
+	rigName := rigNameForAgent(deps.Cfg, a)
+	return deps.Cfg.FormulaLayers.SearchPaths(rigName)
+}
+
+// rigNameForAgent returns the rig name for an agent. Handles both
+// configuration shapes:
+//   - a.Dir is a rig name (`dir = "gascity"`) — return as-is after a
+//     defensive existence check against cfg.Rigs.
+//   - a.Dir is a filesystem path (`dir = "/home/ds/gascity"`) — find the
+//     rig whose Path matches (after symlink resolution + normalization)
+//     and return its Name.
+//
+// Returns "" when the agent is city-scoped (a.Dir empty) or no rig
+// matches; SearchPaths handles "" by returning city-level layers.
+func rigNameForAgent(cfg *config.City, a config.Agent) string {
+	dir := strings.TrimSpace(a.Dir)
+	if dir == "" {
+		return ""
+	}
+	for _, r := range cfg.Rigs {
+		if r.Name == dir {
+			return r.Name
+		}
+	}
+	for _, r := range cfg.Rigs {
+		if strings.TrimSpace(r.Path) == "" {
+			continue
+		}
+		// Use SamePath so paths that differ only by trailing slashes,
+		// symlink resolution (/tmp vs /private/tmp on macOS), or other
+		// normalization quirks still match. Strict string equality
+		// would re-introduce the #1801 fall-through under those
+		// conditions.
+		if pathutil.SamePath(r.Path, dir) {
+			return r.Name
+		}
+	}
+	return ""
 }
 
 // SlingFormulaUsesBaseBranch reports whether the formula conventionally
@@ -776,22 +837,70 @@ func SlingFormulaUsesTargetBranch(formulaName string) bool {
 func SlingFormulaRepoDir(beadID string, deps SlingDeps, a config.Agent) string {
 	if deps.Cfg != nil {
 		if dir := RigDirForBead(deps.Cfg, beadID); dir != "" {
-			return dir
+			return resolveScopeRoot(deps.CityPath, dir)
 		}
 		if dir := RigDirForAgent(deps.Cfg, a); dir != "" {
-			return dir
+			return resolveScopeRoot(deps.CityPath, dir)
 		}
 	}
-	return deps.CityPath
+	return resolveScopeRoot(deps.CityPath, deps.CityPath)
+}
+
+func resolveScopeRoot(cityPath, storePath string) string {
+	scopeRoot := strings.TrimSpace(storePath)
+	if scopeRoot == "" {
+		scopeRoot = cityPath
+	}
+	if !filepath.IsAbs(scopeRoot) {
+		scopeRoot = filepath.Join(cityPath, scopeRoot)
+	}
+	return filepath.Clean(scopeRoot)
 }
 
 // SlingFormulaTargetBranch resolves the target branch for formula variables.
+// Resolution order:
+//  1. metadata.target on the work bead (per-bead override)
+//  2. DefaultBranch recorded on the bead's rig in city.toml (set by gc rig add)
+//  3. DefaultBranch recorded on the agent's rig in city.toml
+//  4. Live probe via deps.Branches.DefaultBranch (git symbolic-ref origin/HEAD)
 func SlingFormulaTargetBranch(beadID string, deps SlingDeps, a config.Agent) string {
 	if target := BeadMetadataTarget(deps.Store, beadID); target != "" {
 		return target
 	}
+	if branch := rigStoredDefaultBranch(deps.Cfg, beadID, a); branch != "" {
+		return branch
+	}
 	if deps.Branches != nil {
 		return deps.Branches.DefaultBranch(SlingFormulaRepoDir(beadID, deps, a))
+	}
+	return ""
+}
+
+// rigStoredDefaultBranch returns the DefaultBranch recorded on the rig the
+// bead/agent belongs to, or empty string if no match has a stored value.
+// Bead lookup wins over agent lookup so cross-rig sling targets still pick
+// the right rig.
+func rigStoredDefaultBranch(cfg *config.City, beadID string, a config.Agent) string {
+	if cfg == nil {
+		return ""
+	}
+	if beadID != "" {
+		if bp := BeadPrefixForCity(cfg, beadID); bp != "" && !IsHQPrefix(cfg, bp) {
+			if rig, ok := FindRigByPrefix(cfg, bp); ok {
+				if branch := rig.EffectiveDefaultBranch(); branch != "" {
+					return branch
+				}
+			}
+		}
+	}
+	if rigName := rigNameForAgent(cfg, a); rigName != "" {
+		for _, r := range cfg.Rigs {
+			if r.Name == rigName {
+				if branch := r.EffectiveDefaultBranch(); branch != "" {
+					return branch
+				}
+			}
+		}
 	}
 	return ""
 }

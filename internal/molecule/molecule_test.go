@@ -21,9 +21,7 @@ import (
 // graph will be missing the dep — which is exactly what we saw in
 // production.
 func TestBuildRecipeApplyPlanBugReportFlowV2(t *testing.T) {
-	prev := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
+	formulatest.EnableV2ForTest(t)
 
 	const toolingPath = "/home/ubuntu/tooling/formulas"
 	if _, err := os.Stat(filepath.Join(toolingPath, "mol-bug-report-flow-v2.formula.toml")); err != nil {
@@ -78,6 +76,100 @@ func TestBuildRecipeApplyPlanBugReportFlowV2(t *testing.T) {
 	}
 }
 
+func TestBuildRecipeApplyPlanReviewQuorumSubstitutesSynthesisTarget(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	repoRoot := filepath.Clean(filepath.Join(cwd, "..", ".."))
+	searchDir := filepath.Join(repoRoot, "internal", "bootstrap", "packs", "core", "formulas")
+	recipe, err := formula.Compile(context.Background(), "mol-review-quorum", []string{searchDir}, map[string]string{
+		"subject":           "PR-123",
+		"lane_one_id":       "primary",
+		"lane_one_provider": "provider-a",
+		"lane_one_model":    "model-a",
+		"lane_one_target":   "target-a",
+		"lane_two_id":       "secondary",
+		"lane_two_provider": "provider-b",
+		"lane_two_model":    "model-b",
+		"lane_two_target":   "target-b",
+		"synthesis_target":  "custom-review-synthesis",
+	})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	plan, _, _, err := buildRecipeApplyPlan(recipe, Options{Vars: map[string]string{
+		"lane_one_id":       "primary",
+		"lane_one_provider": "provider-a",
+		"lane_one_model":    "model-a",
+		"lane_one_target":   "target-a",
+		"lane_two_id":       "secondary",
+		"lane_two_provider": "provider-b",
+		"lane_two_model":    "model-b",
+		"lane_two_target":   "target-b",
+		"synthesis_target":  "custom-review-synthesis",
+	}})
+	if err != nil {
+		t.Fatalf("buildRecipeApplyPlan: %v", err)
+	}
+	var synthesisNode *beads.GraphApplyNode
+	for i := range plan.Nodes {
+		if plan.Nodes[i].Key == "mol-review-quorum.synthesize-review-quorum" {
+			synthesisNode = &plan.Nodes[i]
+			break
+		}
+	}
+	if synthesisNode == nil {
+		t.Fatal("synthesis node missing")
+	}
+	if got := synthesisNode.Metadata["gc.run_target"]; got != "custom-review-synthesis" {
+		t.Fatalf("synthesis gc.run_target = %q, want custom-review-synthesis", got)
+	}
+	wantNodes := map[string]map[string]string{
+		"mol-review-quorum.review-lane-one.attempt.1": {
+			"gc.run_target":         "target-a",
+			"gc.provider":           "provider-a",
+			"gc.model":              "model-a",
+			"gc.review_quorum_lane": "primary",
+		},
+		"mol-review-quorum.review-lane-two.attempt.1": {
+			"gc.run_target":         "target-b",
+			"gc.provider":           "provider-b",
+			"gc.model":              "model-b",
+			"gc.review_quorum_lane": "secondary",
+		},
+	}
+	for key, wantMetadata := range wantNodes {
+		node := nodeByKey(plan.Nodes, key)
+		if node == nil {
+			t.Fatalf("node %s missing", key)
+		}
+		for name, want := range wantMetadata {
+			if got := node.Metadata[name]; got != want {
+				t.Fatalf("%s %s = %q, want %q", key, name, got, want)
+			}
+		}
+		if got := node.Metadata["gc.output_json"]; got != "" {
+			t.Fatalf("%s gc.output_json = %q, want empty until worker writes JSON", key, got)
+		}
+		if got := node.Metadata["gc.output_json_schema"]; got != "review-quorum.lane.v1" {
+			t.Fatalf("%s gc.output_json_schema = %q, want review-quorum.lane.v1", key, got)
+		}
+	}
+}
+
+func nodeByKey(nodes []beads.GraphApplyNode, key string) *beads.GraphApplyNode {
+	for i := range nodes {
+		if nodes[i].Key == key {
+			return &nodes[i]
+		}
+	}
+	return nil
+}
+
 // TestCookTeardownRetryBlocksOnAttempt exercises the end-to-end Cook
 // path (compile → instantiate) to confirm that a teardown-scoped retry
 // control bead ends up with a blocks dep on its attempt bead. Without
@@ -85,9 +177,7 @@ func TestBuildRecipeApplyPlanBugReportFlowV2(t *testing.T) {
 // soon as its non-attempt blockers (body scope) close, trips the
 // "latest attempt ... is open, not closed" invariant, and crash-loops.
 func TestCookTeardownRetryBlocksOnAttempt(t *testing.T) {
-	prevFormulaV2 := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prevFormulaV2) })
+	formulatest.EnableV2ForTest(t)
 	prevGraphApply := IsGraphApplyEnabled()
 	SetGraphApplyEnabled(true)
 	t.Cleanup(func() { SetGraphApplyEnabled(prevGraphApply) })

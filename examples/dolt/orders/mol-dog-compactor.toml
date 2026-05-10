@@ -1,6 +1,6 @@
 [order]
 description = "Flatten Dolt commit history to reduce storage"
-formula = "mol-dog-compactor"
 trigger = "cooldown"
 interval = "24h"
-pool = "dog"
+exec = "gc dolt compact"
+timeout = "24h"

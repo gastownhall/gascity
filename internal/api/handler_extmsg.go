@@ -118,16 +118,20 @@ func (s *Server) extmsgNotifyMembers(
 
 	notifyResolved := func(sessionSelector, resolvedID string) {
 		handle := s.extmsgSessionHandleForResolvedID(resolvedID, sessionSelector)
+		// Normalize for the CLI hint — gc subcommands are lowercase. The
+		// human-facing prose uses titleCaseProvider for display.
+		providerCLI := strings.ToLower(conv.Provider)
+		providerDisplay := titleCaseProvider(providerCLI)
 		nudge := fmt.Sprintf("<system-reminder>\nNew message in shared conversation %s/%s:\n\n"+
 			"- %s (%s): %s\n\n"+
-			"To reply in Discord, write your response to a file and run:\n"+
-			"  gc discord reply-current --conversation-id %s --body-file <path>\n"+
+			"To reply in %s, write your response to a file and run:\n"+
+			"  gc %s reply-current --conversation-id %s --body-file <path>\n"+
 			"Prefix your reply with your agent handle in bold (e.g., **%s:** your message).\n"+
-			"Run 'gc transcript read --ack' after responding to mark as read.\n"+
 			"</system-reminder>",
 			conv.Provider, conv.ConversationID,
 			actorDisplayName, actorKind, text,
-			conv.ConversationID,
+			providerDisplay,
+			providerCLI, conv.ConversationID,
 			handle,
 		)
 		if err := s.sendBackgroundMessageToSession(ctx, store, resolvedID, nudge); err != nil {
@@ -174,4 +178,19 @@ func (s *Server) extmsgNotifyInboundMembers(ctx context.Context, msg extmsg.Exte
 		actorKind = "human"
 	}
 	s.extmsgNotifyMembers(ctx, msg.Conversation, msg.Actor.DisplayName, actorKind, msg.Text, "")
+}
+
+// titleCaseProvider uppercases the first ASCII byte of a provider name.
+// Used to avoid a golang.org/x/text/cases dependency just for one
+// capitalization in the inbound nudge — provider names are always
+// short lowercase ASCII identifiers (slack, discord, ...).
+func titleCaseProvider(name string) string {
+	if name == "" {
+		return ""
+	}
+	first := name[0]
+	if first >= 'a' && first <= 'z' {
+		return string(first-'a'+'A') + name[1:]
+	}
+	return name
 }

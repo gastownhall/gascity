@@ -108,6 +108,14 @@ Every HTTP + SSE endpoint is registered through Huma against
 annotated Go types. Huma generates the OpenAPI 3.1 spec from those
 types; the spec drives everything downstream.
 
+Per-city routes are available only after the supervisor resolver
+returns a running `State` for that city. During supervisor startup a
+city may appear in `GET /v0/cities` with `running=false` and a startup
+status such as `starting_agents`; `/v0/city/{cityName}/...` requests in
+that window return `404` with the typed not-found problem detail. The
+city list and lifecycle events are the readiness boundary for clients
+that need to issue per-city requests.
+
 ### The generated Go client
 
 `internal/api/genclient/` has three in-tree consumer categories,

@@ -150,7 +150,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		p.mu.Unlock()
 	}
 
-	if err := runtime.StageWorkDir(cfg.WorkDir, cfg.OverlayDir, cfg.CopyFiles); err != nil {
+	if err := runtime.StageSessionWorkDir(cfg); err != nil {
 		clearSentinel()
 		return fmt.Errorf("staging workdir for %q: %w", name, err)
 	}

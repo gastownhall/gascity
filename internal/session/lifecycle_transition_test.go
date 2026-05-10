@@ -17,18 +17,19 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 	}{
 		{
 			name:  "request wake",
-			patch: RequestWakePatch("explicit"),
+			patch: RequestWakePatch("explicit", now),
 			want: MetadataPatch{
-				"state":                string(StateCreating),
-				"state_reason":         "explicit",
-				"pending_create_claim": "true",
-				"held_until":           "",
-				"quarantined_until":    "",
-				"sleep_reason":         "",
-				"wait_hold":            "",
-				"sleep_intent":         "",
-				"wake_attempts":        "0",
-				"churn_count":          "0",
+				"state":                     string(StateCreating),
+				"state_reason":              "explicit",
+				"pending_create_claim":      "true",
+				"pending_create_started_at": now.UTC().Format(time.RFC3339),
+				"held_until":                "",
+				"quarantined_until":         "",
+				"sleep_reason":              "",
+				"wait_hold":                 "",
+				"sleep_intent":              "",
+				"wake_attempts":             "0",
+				"churn_count":               "0",
 			},
 		},
 		{
@@ -81,11 +82,12 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			name:  "confirm started",
 			patch: ConfirmStartedPatch(now),
 			want: MetadataPatch{
-				"state":                string(StateActive),
-				"state_reason":         "creation_complete",
-				"creation_complete_at": now.UTC().Format(time.RFC3339),
-				"pending_create_claim": "",
-				"sleep_reason":         "",
+				"state":                     string(StateActive),
+				"state_reason":              "creation_complete",
+				"creation_complete_at":      now.UTC().Format(time.RFC3339),
+				"pending_create_claim":      "",
+				"pending_create_started_at": "",
+				"sleep_reason":              "",
 			},
 		},
 		{
@@ -101,21 +103,23 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			name:  "sleep",
 			patch: SleepPatch(now, "idle-timeout"),
 			want: MetadataPatch{
-				"state":                string(StateAsleep),
-				"sleep_reason":         "idle-timeout",
-				"last_woke_at":         "",
-				"pending_create_claim": "",
-				"sleep_intent":         "",
-				"slept_at":             now.Format(time.RFC3339),
+				"state":                     string(StateAsleep),
+				"sleep_reason":              "idle-timeout",
+				"last_woke_at":              "",
+				"pending_create_claim":      "",
+				"pending_create_started_at": "",
+				"sleep_intent":              "",
+				"slept_at":                  now.Format(time.RFC3339),
 			},
 		},
 		{
 			name:  "acknowledge drain resume mode",
 			patch: AcknowledgeDrainPatch(false),
 			want: MetadataPatch{
-				"state":                "drained",
-				"last_woke_at":         "",
-				"pending_create_claim": "",
+				"state":                     "drained",
+				"last_woke_at":              "",
+				"pending_create_claim":      "",
+				"pending_create_started_at": "",
 			},
 		},
 		{
@@ -125,6 +129,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"state":                      "drained",
 				"last_woke_at":               "",
 				"pending_create_claim":       "",
+				"pending_create_started_at":  "",
 				"session_key":                "",
 				"started_config_hash":        "",
 				"started_live_hash":          "",
@@ -141,6 +146,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"sleep_reason":               "idle",
 				"last_woke_at":               "",
 				"pending_create_claim":       "",
+				"pending_create_started_at":  "",
 				"sleep_intent":               "",
 				"slept_at":                   now.Format(time.RFC3339),
 				"session_key":                "",
@@ -160,6 +166,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"continuation_reset_pending": "true",
 				"last_woke_at":               "",
 				"pending_create_claim":       "",
+				"pending_create_started_at":  "",
 				"session_key":                "new-session-key",
 			},
 		},
@@ -172,11 +179,12 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"continuation_reset_pending": "true",
 				"last_woke_at":               "",
 				"pending_create_claim":       "",
+				"pending_create_started_at":  "",
 			},
 		},
 		{
 			name:  "config drift reset to creating",
-			patch: ConfigDriftResetPatch(StateCreating, "new-session-key"),
+			patch: ConfigDriftResetPatch(StateCreating, "new-session-key", now),
 			want: MetadataPatch{
 				"state":                      string(StateCreating),
 				"started_config_hash":        "",
@@ -187,12 +195,13 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"restart_requested":          "",
 				"continuation_reset_pending": "true",
 				"pending_create_claim":       "true",
+				"pending_create_started_at":  now.UTC().Format(time.RFC3339),
 				"session_key":                "new-session-key",
 			},
 		},
 		{
 			name:  "config drift reset to asleep",
-			patch: ConfigDriftResetPatch(StateAsleep, "new-session-key"),
+			patch: ConfigDriftResetPatch(StateAsleep, "new-session-key", now),
 			want: MetadataPatch{
 				"state":                      string(StateAsleep),
 				"started_config_hash":        "",
@@ -203,12 +212,13 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"restart_requested":          "",
 				"continuation_reset_pending": "true",
 				"pending_create_claim":       "",
+				"pending_create_started_at":  "",
 				"session_key":                "new-session-key",
 			},
 		},
 		{
 			name:  "config drift reset to asleep without rotated key",
-			patch: ConfigDriftResetPatch(StateAsleep, ""),
+			patch: ConfigDriftResetPatch(StateAsleep, "", now),
 			want: MetadataPatch{
 				"state":                      string(StateAsleep),
 				"started_config_hash":        "",
@@ -219,28 +229,31 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"restart_requested":          "",
 				"continuation_reset_pending": "true",
 				"pending_create_claim":       "",
+				"pending_create_started_at":  "",
 			},
 		},
 		{
 			name:  "archive continuity eligible",
 			patch: ArchivePatch(now, "drain_complete", true),
 			want: MetadataPatch{
-				"state":                string(StateArchived),
-				"state_reason":         "drain_complete",
-				"archived_at":          now.Format(time.RFC3339),
-				"continuity_eligible":  "true",
-				"pending_create_claim": "",
+				"state":                     string(StateArchived),
+				"state_reason":              "drain_complete",
+				"archived_at":               now.Format(time.RFC3339),
+				"continuity_eligible":       "true",
+				"pending_create_claim":      "",
+				"pending_create_started_at": "",
 			},
 		},
 		{
 			name:  "archive historical only",
 			patch: ArchivePatch(now, "duplicate-repair", false),
 			want: MetadataPatch{
-				"state":                string(StateArchived),
-				"state_reason":         "duplicate-repair",
-				"archived_at":          now.Format(time.RFC3339),
-				"continuity_eligible":  "false",
-				"pending_create_claim": "",
+				"state":                     string(StateArchived),
+				"state_reason":              "duplicate-repair",
+				"archived_at":               now.Format(time.RFC3339),
+				"continuity_eligible":       "false",
+				"pending_create_claim":      "",
+				"pending_create_started_at": "",
 			},
 		},
 		{
@@ -257,21 +270,22 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			name:  "retire named session",
 			patch: RetireNamedSessionPatch(now, "duplicate-repair", "worker"),
 			want: MetadataPatch{
-				"state":                  string(StateArchived),
-				"state_reason":           "duplicate-repair",
-				"archived_at":            now.Format(time.RFC3339),
-				"continuity_eligible":    "false",
-				"alias":                  "",
-				"session_name":           "",
-				"session_name_explicit":  "",
-				"pending_create_claim":   "",
-				"retired_named_identity": "worker",
-				"synced_at":              now.Format(time.RFC3339),
-				"held_until":             "",
-				"quarantined_until":      "",
-				"wait_hold":              "",
-				"sleep_intent":           "",
-				"sleep_reason":           "",
+				"state":                     string(StateArchived),
+				"state_reason":              "duplicate-repair",
+				"archived_at":               now.Format(time.RFC3339),
+				"continuity_eligible":       "false",
+				"alias":                     "",
+				"session_name":              "",
+				"session_name_explicit":     "",
+				"pending_create_claim":      "",
+				"pending_create_started_at": "",
+				"retired_named_identity":    "worker",
+				"synced_at":                 now.Format(time.RFC3339),
+				"held_until":                "",
+				"quarantined_until":         "",
+				"wait_hold":                 "",
+				"sleep_intent":              "",
+				"sleep_reason":              "",
 			},
 		},
 		{
@@ -289,26 +303,28 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			name:  "reactivate continuity eligible",
 			patch: ReactivatePatch(true),
 			want: MetadataPatch{
-				"state":                string(StateAsleep),
-				"state_reason":         "reactivated",
-				"pending_create_claim": "",
-				"continuity_eligible":  "true",
-				"quarantined_until":    "",
-				"crash_count":          "0",
-				"archived_at":          "",
+				"state":                     string(StateAsleep),
+				"state_reason":              "reactivated",
+				"pending_create_claim":      "",
+				"pending_create_started_at": "",
+				"continuity_eligible":       "true",
+				"quarantined_until":         "",
+				"crash_count":               "0",
+				"archived_at":               "",
 			},
 		},
 		{
 			name:  "reactivate historical only",
 			patch: ReactivatePatch(false),
 			want: MetadataPatch{
-				"state":                string(StateAsleep),
-				"state_reason":         "reactivated",
-				"pending_create_claim": "",
-				"continuity_eligible":  "false",
-				"quarantined_until":    "",
-				"crash_count":          "0",
-				"archived_at":          "",
+				"state":                     string(StateAsleep),
+				"state_reason":              "reactivated",
+				"pending_create_claim":      "",
+				"pending_create_started_at": "",
+				"continuity_eligible":       "false",
+				"quarantined_until":         "",
+				"crash_count":               "0",
+				"archived_at":               "",
 			},
 		},
 		{
@@ -347,6 +363,16 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			},
 		},
 		{
+			name:  "clear expired rate limit",
+			patch: ClearExpiredQuarantinePatch("rate_limit"),
+			want: MetadataPatch{
+				"quarantined_until": "",
+				"wake_attempts":     "0",
+				"churn_count":       "0",
+				"sleep_reason":      "",
+			},
+		},
+		{
 			name:  "clear expired non-quarantine timer",
 			patch: ClearExpiredQuarantinePatch("idle"),
 			want: MetadataPatch{
@@ -371,7 +397,7 @@ func TestMetadataPatchApplyReturnsMergedCopy(t *testing.T) {
 		"state":        string(StateAsleep),
 		"session_name": "s-worker",
 	}
-	patch := RequestWakePatch("pin")
+	patch := RequestWakePatch("pin", time.Date(2026, 4, 15, 13, 0, 0, 0, time.UTC))
 
 	merged := patch.Apply(original)
 	if merged["state"] != string(StateCreating) {
@@ -398,15 +424,16 @@ func TestCommitStartedPatchBuildsAtomicStartMetadata(t *testing.T) {
 	})
 
 	want := MetadataPatch{
-		"started_config_hash":  "core-hash",
-		"live_hash":            "live-hash",
-		"started_live_hash":    "live-hash",
-		"core_hash_breakdown":  `{"command":"core-hash"}`,
-		"state":                string(StateActive),
-		"state_reason":         "creation_complete",
-		"creation_complete_at": now.Format(time.RFC3339),
-		"sleep_reason":         "",
-		"pending_create_claim": "",
+		"started_config_hash":       "core-hash",
+		"live_hash":                 "live-hash",
+		"started_live_hash":         "live-hash",
+		"core_hash_breakdown":       `{"command":"core-hash"}`,
+		"state":                     string(StateActive),
+		"state_reason":              "creation_complete",
+		"creation_complete_at":      now.Format(time.RFC3339),
+		"sleep_reason":              "",
+		"pending_create_claim":      "",
+		"pending_create_started_at": "",
 	}
 	if !reflect.DeepEqual(patch, want) {
 		t.Fatalf("patch = %#v, want %#v", patch, want)
@@ -426,7 +453,7 @@ func TestCommitStartedPatchClearsPendingCreateClaimAtomicallyWithStateTransition
 		ClearPendingCreateClaim: true,
 		Now:                     now,
 	})
-	required := []string{"state", "state_reason", "creation_complete_at", "pending_create_claim"}
+	required := []string{"state", "state_reason", "creation_complete_at", "pending_create_claim", "pending_create_started_at"}
 	for _, key := range required {
 		if _, ok := patch[key]; !ok {
 			t.Fatalf("patch missing %q — sweep-visibility atomicity broken: %#v", key, patch)
@@ -434,6 +461,9 @@ func TestCommitStartedPatchClearsPendingCreateClaimAtomicallyWithStateTransition
 	}
 	if patch["pending_create_claim"] != "" {
 		t.Fatalf("pending_create_claim = %q, want cleared", patch["pending_create_claim"])
+	}
+	if patch["pending_create_started_at"] != "" {
+		t.Fatalf("pending_create_started_at = %q, want cleared", patch["pending_create_started_at"])
 	}
 }
 
@@ -519,6 +549,20 @@ func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
 				"churn_count":       "0",
 			},
 		},
+		{
+			name:        "rate limit reason is cleared",
+			state:       StateAsleep,
+			sleepReason: "rate_limit",
+			want: MetadataPatch{
+				"held_until":        "",
+				"quarantined_until": "",
+				"wait_hold":         "",
+				"sleep_intent":      "",
+				"wake_attempts":     "0",
+				"churn_count":       "0",
+				"sleep_reason":      "",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -532,7 +576,8 @@ func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
 }
 
 func TestRequestWakePatchClearsStaleWakeBlockers(t *testing.T) {
-	merged := RequestWakePatch("manual").Apply(map[string]string{
+	now := time.Date(2026, 4, 15, 13, 0, 0, 0, time.UTC)
+	merged := RequestWakePatch("manual", now).Apply(map[string]string{
 		"state":             string(StateAsleep),
 		"held_until":        "9999-12-31T23:59:59Z",
 		"quarantined_until": "9999-12-31T23:59:59Z",
@@ -553,6 +598,9 @@ func TestRequestWakePatchClearsStaleWakeBlockers(t *testing.T) {
 			t.Fatalf("%s = %q, want reset to 0", key, merged[key])
 		}
 	}
+	if got, want := merged["pending_create_started_at"], now.UTC().Format(time.RFC3339); got != want {
+		t.Fatalf("pending_create_started_at = %q, want %q", got, want)
+	}
 }
 
 func TestArchivePatchClearsStaleCreateClaim(t *testing.T) {
@@ -567,6 +615,9 @@ func TestArchivePatchClearsStaleCreateClaim(t *testing.T) {
 	}
 	if merged["pending_create_claim"] != "" {
 		t.Fatalf("pending_create_claim = %q, want cleared", merged["pending_create_claim"])
+	}
+	if merged["pending_create_started_at"] != "" {
+		t.Fatalf("pending_create_started_at = %q, want cleared", merged["pending_create_started_at"])
 	}
 }
 

@@ -66,6 +66,8 @@ type CityRuntime struct {
 	retiredOrderDispatchers []orderDispatcher
 	trace                   *sessionReconcilerTraceManager
 
+	orderSweepWatchdogLast time.Time
+
 	rec events.Recorder
 	cs  *controllerState // nil when controller-managed bead stores are unavailable
 	svc *workspacesvc.Manager
@@ -89,12 +91,14 @@ type CityRuntime struct {
 	reloadReqCh         chan reloadRequest       // receives structured reload requests from controller.sock
 	pokeCh              chan struct{}            // non-blocking signal to trigger immediate reconciler tick
 	controlDispatcherCh chan struct{}            // non-blocking signal for control-dispatcher-only reconcile
+	nudgeWakeCh         chan struct{}            // signal to dispatch queued nudges; fed by wake socket listener
 	activeReload        *reloadRequest
 	onStarted           func()
 	onStatus            func(string)
 
 	shutdownOnce             sync.Once
 	preserveSessionsShutdown atomic.Bool
+	forceStopShutdown        *atomic.Bool
 	logPrefix                string // "gc start" or "gc supervisor"
 	stdout, stderr           io.Writer
 }
@@ -129,6 +133,7 @@ type CityRuntimeParams struct {
 
 	PoolSessions      map[string]time.Duration
 	PoolDeathHandlers map[string]poolDeathInfo
+	ForceStopShutdown *atomic.Bool
 
 	ConvergenceReqCh    chan convergenceRequest // may be nil
 	ReloadReqCh         chan reloadRequest      // may be nil; receives structured reload commands
@@ -216,6 +221,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		rec:                     p.Rec,
 		poolSessions:            p.PoolSessions,
 		poolDeathHandlers:       p.PoolDeathHandlers,
+		forceStopShutdown:       p.ForceStopShutdown,
 		suspendedNames:          suspendedNames,
 		asyncStartLimiter:       newAsyncStartLimiter(maxParallelStartsPerTick(p.Cfg)),
 		convergenceReqCh:        p.ConvergenceReqCh,
@@ -237,11 +243,12 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 			}
 			return make(chan struct{}, 1)
 		}(),
-		onStarted: p.OnStarted,
-		onStatus:  p.OnStatus,
-		logPrefix: logPrefix,
-		stdout:    p.Stdout,
-		stderr:    p.Stderr,
+		nudgeWakeCh: make(chan struct{}, 1),
+		onStarted:   p.OnStarted,
+		onStatus:    p.OnStatus,
+		logPrefix:   logPrefix,
+		stdout:      p.Stdout,
+		stderr:      p.Stderr,
 	}
 	cr.svc = workspacesvc.NewManager(&serviceRuntime{cr: cr})
 	if err := cr.svc.Reload(); err != nil {
@@ -507,6 +514,9 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// Track pool instance liveness for death detection.
 	var prevPoolRunning map[string]bool
 	runTick := func(trigger string) {
+		if ctx.Err() != nil {
+			return
+		}
 		cr.safeTick(func() {
 			cr.tick(ctx, dirty, &lastProviderName, cityRoot, &prevPoolRunning, trigger)
 		}, trigger)
@@ -522,6 +532,18 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	// Start the supervisor nudge dispatcher when configured. The wake-socket
+	// listener feeds nudgeWakeCh on every producer enqueue, giving sub-second
+	// dispatch latency. Patrol-tick fallback inside cr.tick() guarantees
+	// eventual delivery if the wake is missed (socket race, listener
+	// restart). Legacy mode skips the listener entirely; per-session
+	// pollers continue to own delivery.
+	if nudgeDispatcherIsSupervisor(cr.cfg) && cr.cityPath != "" {
+		if _, err := startNudgeWakeListener(ctx, cr.cityPath, cr.nudgeWakeCh, cr.stderr, cr.logPrefix); err != nil {
+			fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: %v (falling back to patrol-only delivery)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		}
+	}
+
 	for {
 		select {
 		case <-ticker.C:
@@ -531,6 +553,10 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			// session. Trigger an immediate tick so the reconciler sees the new
 			// work via workSet/poolDesired and wakes the target promptly.
 			runTick("poke")
+		case <-cr.nudgeWakeCh:
+			cr.safeTick(func() {
+				cr.nudgeDispatchTick(ctx)
+			}, "nudge-wake")
 		case <-cr.controlDispatcherCh:
 			cr.safeTick(func() {
 				cr.controlDispatcherTick(ctx)
@@ -613,6 +639,9 @@ func (cr *CityRuntime) tick(
 	prevPoolRunning *map[string]bool,
 	trigger string,
 ) {
+	if ctx.Err() != nil {
+		return
+	}
 	sessionBeads := cr.loadSessionBeadSnapshot()
 	traceTrigger := trigger
 	traceDetail := "controller_tick"
@@ -697,10 +726,16 @@ func (cr *CityRuntime) tick(
 			manualReloadCompleted = true
 		}
 	}
+	if ctx.Err() != nil {
+		return
+	}
 
 	// Order dispatch is intentionally before the expensive session reconcile
 	// phases so due formulas are not starved by slow startup/config drift work.
 	cr.dispatchOrders(ctx, cityRoot)
+	if ctx.Err() != nil {
+		return
+	}
 
 	// Session bead sync BEFORE reconciliation (one-tick state lag; see run()).
 	// Post-reconcile sync was intentionally removed: the daemon's next tick
@@ -711,6 +746,9 @@ func (cr *CityRuntime) tick(
 	cleanupDeadRuntimeSessionCorpses(sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
 	if reapStaleSessionBeads(cr.cityBeadStore(), cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr) > 0 {
 		sessionBeads = cr.loadSessionBeadSnapshot()
+	}
+	if ctx.Err() != nil {
+		return
 	}
 	demand := cr.loadDemandSnapshot(sessionBeads, trace, trigger, configChanged)
 	result := demand.result
@@ -791,8 +829,35 @@ func (cr *CityRuntime) dispatchOrders(ctx context.Context, cityRoot string) {
 	if ctx.Err() != nil {
 		return
 	}
+	now := time.Now()
+	cr.runOrderTrackingSweepWatchdog(now)
 	if cr.od != nil {
-		cr.od.dispatch(ctx, cityRoot, time.Now())
+		cr.od.dispatch(ctx, cityRoot, now)
+	}
+}
+
+func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
+	if !cr.orderSweepWatchdogLast.IsZero() && now.Sub(cr.orderSweepWatchdogLast) < orderTrackingSweepWatchdogInterval {
+		return
+	}
+	cr.orderSweepWatchdogLast = now
+
+	store := cr.cityBeadStore()
+	if store == nil {
+		return
+	}
+	onlyOrders := map[string]struct{}{
+		orderTrackingSweepOrder: {},
+	}
+	n, err := sweepStaleOrderTracking(store, now, orderTrackingSweepWatchdogStaleAfter, onlyOrders, orderTrackingWatchdogMetadataInitiator)
+	if err != nil {
+		if cr.stderr != nil {
+			fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		}
+		return
+	}
+	if n > 0 && cr.stderr != nil {
+		fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog closed %d stale tracking bead(s)\n", cr.logPrefix, n) //nolint:errcheck // best-effort stderr
 	}
 }
 
@@ -1236,8 +1301,12 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	poolDesired := result.PoolDesiredCounts
 	if poolDesired == nil {
 		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cr.cfg, cr.cityPath, sessionBeads.Open(), assignedWorkBeads, assignedWorkStoreRefs)
-		poolDesired = PoolDesiredCounts(ComputePoolDesiredStatesTraced(
-			cr.cfg, poolWorkBeads, sessionBeads.Open(), result.ScaleCheckCounts, trace))
+		poolDesired = retainScaleCheckPartialPoolDesired(
+			PoolDesiredCounts(ComputePoolDesiredStatesTraced(
+				cr.cfg, poolWorkBeads, sessionBeads.Open(), result.ScaleCheckCounts, trace)),
+			sessionBeads,
+			result.PoolScaleCheckPartialTemplates,
+		)
 	}
 	// Merge named-session assignee demand so on-demand named sessions with
 	// direct work (Assignee match, no gc.routed_to) stay config-eligible.
@@ -1281,13 +1350,10 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		readyWaitSet = nil
 	}
 
-	// workSet: defense-in-depth wake signal from work_query. When work_query
-	// detects pending work but scale_check hasn't caught up yet, workSet
-	// ensures at least one session wakes without waiting for the next tick.
-	workSet := result.WorkSet
-	if workSet == nil {
-		workSet = computeWorkSet(cr.cfg, shellScaleCheck, cityName, cr.cityPath, store, sessionBeads, cr.stderr)
-	}
+	// Controller wake demand comes from assigned-work scans and scale_check.
+	// work_query remains the agent-side gc hook claim path; running every
+	// work_query here can block assigned-work resumes behind unrelated probes.
+	workSet := make(map[string]bool)
 	if trace != nil {
 		templateNames := make(map[string]struct{})
 		openCounts := make(map[string]int)
@@ -1332,15 +1398,19 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 			})
 		}
 		trace.RecordCycleInputSnapshot(map[string]any{
-			"desired_session_count":  len(desiredState),
-			"open_session_count":     len(open),
-			"scale_check_counts":     result.ScaleCheckCounts,
-			"pool_desired":           poolDesired,
-			"ready_wait_count":       len(readyWaitSet),
-			"work_set_count":         len(workSet),
-			"store_query_partial":    result.StoreQueryPartial,
-			"session_query_partial":  result.SessionQueryPartial,
-			"snapshot_query_partial": result.snapshotQueryPartial(),
+			"desired_session_count":               len(desiredState),
+			"open_session_count":                  len(open),
+			"scale_check_counts":                  result.ScaleCheckCounts,
+			"pool_desired":                        poolDesired,
+			"ready_wait_count":                    len(readyWaitSet),
+			"work_set_count":                      len(workSet),
+			"store_query_partial":                 result.StoreQueryPartial,
+			"scale_check_query_partial":           len(result.ScaleCheckPartialTemplates) > 0,
+			"scale_check_partial_templates":       sortedBoolMapKeys(result.ScaleCheckPartialTemplates),
+			"pool_scale_check_partial_templates":  sortedBoolMapKeys(result.PoolScaleCheckPartialTemplates),
+			"named_scale_check_partial_templates": sortedBoolMapKeys(result.NamedScaleCheckPartialTemplates),
+			"session_query_partial":               result.SessionQueryPartial,
+			"snapshot_query_partial":              result.snapshotQueryPartial(),
 		})
 		for _, agent := range cr.cfg.Agents {
 			template := agent.QualifiedName()
@@ -1368,10 +1438,11 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	}
 
 	awakeAssignedWorkBeads := filterAssignedWorkBeadsForSessionWake(cr.cfg, cr.cityPath, open, assignedWorkBeads, assignedWorkStoreRefs)
-	reconcileSessionBeadsTraced(
+	reconcileSessionBeadsTracedWithNamedDemand(
 		ctx, cr.cityPath, open, desiredState, cfgNames, cr.cfg, cr.sp, store,
 		cr.dops,
 		awakeAssignedWorkBeads, rigStores, readyWaitSet, cr.sessionDrains, poolDesired,
+		result.NamedSessionDemand,
 		result.snapshotQueryPartial(),
 		workSet, cityName,
 		cr.it, clock.Real{}, cr.rec, cr.cfg.Session.StartupTimeoutDuration(),
@@ -1398,9 +1469,13 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	dispatchSessionBeads, err := loadSessionBeadSnapshot(store)
 	if err != nil {
 		fmt.Fprintf(cr.stderr, "%s: dispatching wait nudges: %v\n", cr.logPrefix, err) //nolint:errcheck
-	} else if err := dispatchReadyWaitNudgesWithSnapshot(cr.cityPath, store, time.Now(), dispatchSessionBeads); err != nil {
+	} else if err := dispatchReadyWaitNudgesWithSnapshot(cr.cityPath, cr.cfg, store, time.Now(), dispatchSessionBeads); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: dispatching wait nudges: %v\n", cr.logPrefix, err) //nolint:errcheck
 	}
+	// Patrol-tick fallback for the supervisor nudge dispatcher: ensures
+	// queued items get delivered even if the wake socket missed the
+	// enqueue (process race during supervisor restart, listener crash).
+	cr.nudgeDispatchTick(ctx)
 
 	// Idle recovery: detect pool sessions stuck at the prompt after
 }
@@ -1484,9 +1559,9 @@ func (cr *CityRuntime) requestAsyncStartFollowUpTick() {
 	}
 }
 
-func (cr *CityRuntime) waitForAsyncStarts() {
+func (cr *CityRuntime) waitForAsyncStarts() bool {
 	if cr == nil {
-		return
+		return true
 	}
 	timeout := time.Duration(0)
 	if cr.cfg != nil {
@@ -1495,9 +1570,17 @@ func (cr *CityRuntime) waitForAsyncStarts() {
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
-	if !cr.asyncStarts.wait(timeout) && cr.stderr != nil {
-		fmt.Fprintf(cr.stderr, "%s: async session starts still running after %s; continuing shutdown\n", cr.logPrefix, timeout) //nolint:errcheck // best-effort stderr
+	// A force stop may leave provider Start calls to finish after shutdown has
+	// stopped waiting. That favors bounded shutdown; the next controller start
+	// re-lists live runtime sessions after the first stop pass so late-created
+	// sessions do not survive the shutdown that abandoned the async wait.
+	if !cr.asyncStarts.waitUntil(timeout, cr.forceStopRequested) {
+		if cr.stderr != nil && !cr.forceStopRequested() {
+			fmt.Fprintf(cr.stderr, "%s: async session starts still running after %s; continuing shutdown\n", cr.logPrefix, timeout) //nolint:errcheck // best-effort stderr
+		}
+		return false
 	}
+	return true
 }
 
 func sweepUndesiredPoolSessionBeads(
@@ -1512,6 +1595,7 @@ func sweepUndesiredPoolSessionBeads(
 	if store == nil || sessionBeads == nil || cfg == nil || storeQueryPartial {
 		return 0
 	}
+	startupTimeout := cfg.Session.StartupTimeoutDuration()
 	var candidates []beads.Bead
 	for _, bead := range sessionBeads.Open() {
 		if bead.Status == "closed" {
@@ -1527,11 +1611,11 @@ func sweepUndesiredPoolSessionBeads(
 			continue
 		}
 		// Don't sweep beads that the reconciler still considers "start
-		// requested" — their work assignment window hasn't opened. Mirrors
-		// sessionStartRequested (session_reconcile.go) exactly so the two
-		// loops agree about ownership:
-		//   - pending_create_claim=true: in-flight create claim, protected
-		//     regardless of age until the lifecycle clears it.
+		// requested" — their work assignment window hasn't opened. The
+		// pending_create_claim lease mirrors the reconciler's recovery model:
+		// fresh start-in-flight and never-started queue entries are protected,
+		// but once that lease expires the crashed creator must not strand the
+		// pool slot forever.
 		//   - state=creating: protected until staleCreatingState would
 		//     return true (i.e., until staleCreatingStateTimeout has
 		//     elapsed; zero CreatedAt is treated as stale, matching
@@ -1540,10 +1624,10 @@ func sweepUndesiredPoolSessionBeads(
 		// on the same tick it's created (no work assigned →
 		// GCSweepSessionBeads closes it), spinning the pool in a rapid
 		// create→sweep→recreate loop.
-		if strings.TrimSpace(bead.Metadata["pending_create_claim"]) == "true" {
+		if pendingCreateClaimStillLeasedForSweep(bead, startupTimeout) {
 			continue
 		}
-		if strings.TrimSpace(bead.Metadata["state"]) == "creating" && !isStaleCreating(bead.CreatedAt) {
+		if strings.TrimSpace(bead.Metadata["state"]) == "creating" && !isStaleCreating(bead) {
 			continue
 		}
 		// Age grace period for the post-creating, pre-wake window. After
@@ -1606,21 +1690,33 @@ func sweepUndesiredPoolSessionBeads(
 	return len(GCSweepSessionBeads(store, rigStores, candidates))
 }
 
-// isStaleCreating mirrors staleCreatingState in session_reconcile.go without
-// requiring a clock.Clock dependency: a zero CreatedAt is treated as stale,
-// and otherwise the bead is stale once staleCreatingStateTimeout has elapsed.
-// Keeping this shape identical to the reconciler's predicate means the sweep
-// and the reconciler agree about which in-flight create beads are still alive.
-func isStaleCreating(createdAt time.Time) bool {
-	if createdAt.IsZero() {
-		return true
-	}
-	return time.Since(createdAt) >= staleCreatingStateTimeout
+// pendingCreateClaimStillLeasedForSweep keeps pending_create_claim protection
+// aligned with the reconciler: start-in-flight claims stay protected for the
+// provider-start lease, never-started creates get the longer queue lease, and
+// stale claims stop blocking pool-slot recovery.
+func pendingCreateClaimStillLeasedForSweep(bead beads.Bead, startupTimeout time.Duration) bool {
+	return pendingCreateLeaseActive(bead, nil, startupTimeout)
 }
 
-// parseRFC3339Metadata parses an RFC3339 timestamp metadata value. A missing
-// or unparseable value returns ok=false; the caller treats that as "no per-
-// start marker present" so older beads (pre-creation_complete_at rollout)
+// isStaleCreating mirrors staleCreatingState in session_reconcile.go without
+// requiring a clock.Clock dependency. It prefers the per-attempt
+// pending_create_started_at marker and falls back to CreatedAt for older beads
+// so the sweep and reconciler agree about which in-flight create beads are
+// still alive.
+func isStaleCreating(bead beads.Bead) bool {
+	now := time.Now()
+	if started, ok := parseRFC3339Metadata(bead.Metadata["pending_create_started_at"]); ok {
+		return !now.Before(started.Add(staleCreatingStateTimeout))
+	}
+	if bead.CreatedAt.IsZero() {
+		return true
+	}
+	return !now.Before(bead.CreatedAt.Add(staleCreatingStateTimeout))
+}
+
+// parseRFC3339Metadata parses an RFC3339 timestamp metadata value. A missing,
+// zero, or unparseable value returns ok=false; the caller treats that as "no
+// per-start marker present" so older beads (pre-creation_complete_at rollout)
 // fall through to the default sweepable path rather than being protected
 // indefinitely.
 func parseRFC3339Metadata(v string) (time.Time, bool) {
@@ -1632,7 +1728,31 @@ func parseRFC3339Metadata(v string) (time.Time, bool) {
 	if err != nil {
 		return time.Time{}, false
 	}
+	if t.IsZero() {
+		return time.Time{}, false
+	}
 	return t, true
+}
+
+// nudgeDispatchTick runs one supervisor-side nudge dispatch pass. Called
+// from the main run loop on wake-socket signal and (belt-and-suspenders)
+// at the end of each patrol tick so a missed wake doesn't strand a queue
+// item past the patrol interval.
+func (cr *CityRuntime) nudgeDispatchTick(_ context.Context) {
+	if !nudgeDispatcherIsSupervisor(cr.cfg) {
+		return
+	}
+	store := cr.cityBeadStore()
+	if store == nil {
+		return
+	}
+	sessionBeads := cr.loadSessionBeadSnapshot()
+	if sessionBeads == nil {
+		return
+	}
+	if _, err := dispatchAllQueuedNudges(cr.cityPath, cr.cfg, store, cr.sp, sessionBeads); err != nil {
+		fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: %v\n", cr.logPrefix, err) //nolint:errcheck
+	}
 }
 
 func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
@@ -1676,13 +1796,17 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	)
 	open := filterSessionBeadsByName(updated, cfgNames)
 	poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(filteredCfg, cr.cityPath, open, wfcResult.AssignedWorkBeads, wfcResult.AssignedWorkStoreRefs)
-	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(
-		filteredCfg, poolWorkBeads, open, wfcResult.ScaleCheckCounts))
+	poolDesired := retainScaleCheckPartialPoolDesired(
+		PoolDesiredCounts(ComputePoolDesiredStates(
+			filteredCfg, poolWorkBeads, open, wfcResult.ScaleCheckCounts)),
+		newSessionBeadSnapshot(open),
+		wfcResult.PoolScaleCheckPartialTemplates,
+	)
 	if poolDesired == nil {
 		poolDesired = make(map[string]int)
 	}
 	mergeNamedSessionDemand(poolDesired, wfcResult.NamedSessionDemand, filteredCfg)
-	reconcileSessionBeadsAtPath(
+	reconcileSessionBeadsAtPathWithNamedDemand(
 		ctx,
 		cr.cityPath,
 		open,
@@ -1697,6 +1821,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		nil, // control-dispatcher ticks only need ownership continuity, not main-tick assigned/ready snapshots
 		cr.sessionDrains,
 		poolDesired,
+		wfcResult.NamedSessionDemand,
 		false, // storeQueryPartial: config-change path doesn't query work beads
 		nil,   // workSet: not computed for config-change reconcile
 		cr.cityName,
@@ -1793,13 +1918,17 @@ func (cr *CityRuntime) loadDemandSnapshot(
 			openSessionBeads = sessionBeads.Open()
 		}
 		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cr.cfg, cr.cityPath, openSessionBeads, result.AssignedWorkBeads, result.AssignedWorkStoreRefs)
-		result.PoolDesiredCounts = PoolDesiredCounts(ComputePoolDesiredStatesTraced(
-			cr.cfg, poolWorkBeads, openSessionBeads, result.ScaleCheckCounts, trace))
+		result.PoolDesiredCounts = retainScaleCheckPartialPoolDesired(
+			PoolDesiredCounts(ComputePoolDesiredStatesTraced(
+				cr.cfg, poolWorkBeads, openSessionBeads, result.ScaleCheckCounts, trace)),
+			sessionBeads,
+			result.PoolScaleCheckPartialTemplates,
+		)
 		if result.PoolDesiredCounts == nil {
 			result.PoolDesiredCounts = make(map[string]int)
 		}
 		mergeNamedSessionDemand(result.PoolDesiredCounts, result.NamedSessionDemand, cr.cfg)
-		result.WorkSet = computeWorkSet(cr.cfg, shellScaleCheck, cr.cityName, cr.cityPath, cr.cityBeadStore(), sessionBeads, cr.stderr)
+		result.WorkSet = make(map[string]bool)
 		cr.demandSnapshot = &runtimeDemandSnapshot{
 			createdAt:          time.Now(),
 			sessionFingerprint: sessionFingerprint,
@@ -1843,7 +1972,7 @@ func demandSnapshotDemandSourcesEventBacked(cfg *config.City) bool {
 		return false
 	}
 	for i := range cfg.Agents {
-		if strings.TrimSpace(cfg.Agents[i].ScaleCheck) != "" || strings.TrimSpace(cfg.Agents[i].WorkQuery) != "" {
+		if strings.TrimSpace(cfg.Agents[i].ScaleCheck) != "" {
 			return false
 		}
 	}
@@ -1993,7 +2122,7 @@ func (cr *CityRuntime) recordPreservedShutdownTrace() {
 // normal shutdown) — only the first call takes effect.
 func (cr *CityRuntime) shutdown() {
 	cr.shutdownOnce.Do(func() {
-		cr.waitForAsyncStarts()
+		asyncStartsDrained := cr.waitForAsyncStarts()
 		preserveSessions := cr.preserveSessionsShutdown.Load()
 		if preserveSessions {
 			cr.recordPreservedShutdownTrace()
@@ -2021,8 +2150,14 @@ func (cr *CityRuntime) shutdown() {
 		// sweepOrphanedOrderTrackingRetry on next start.
 		total := cr.cfg.Daemon.ShutdownTimeoutDuration()
 		gracefulTimeout := total
+		if cr.forceStopRequested() {
+			gracefulTimeout = 0
+		}
 		if cr.od != nil || len(cr.retiredOrderDispatchers) > 0 {
 			drainTimeout := orderShutdownDrainTimeout(total)
+			if cr.forceStopRequested() {
+				drainTimeout = 0
+			}
 			drainCtx, drainCancel := context.WithTimeout(context.Background(), drainTimeout)
 			cr.drainOrderDispatchers(drainCtx)
 			drainCancel()
@@ -2037,10 +2172,28 @@ func (cr *CityRuntime) shutdown() {
 		}
 		store := cr.cityBeadStore()
 		markCityStopSessionSleepReason(store, cr.stderr)
-		gracefulStopAll(running, cr.sp, gracefulTimeout, cr.rec, cr.cfg, store, cr.stdout, cr.stderr)
+		gracefulStopAllWithForceSignal(running, cr.sp, gracefulTimeout, cr.rec, cr.cfg, store, cr.stdout, cr.stderr, cr.forceStopRequested)
+		if !asyncStartsDrained && cr.forceStopRequested() {
+			lateRunning, lateListErr := cr.sp.ListRunning("")
+			if lateListErr != nil {
+				if runtime.IsPartialListError(lateListErr) {
+					fmt.Fprintf(cr.stderr, "%s: force shutdown late async-start listing partially failed; stopping %d visible agent(s): %v\n", cr.logPrefix, len(lateRunning), lateListErr) //nolint:errcheck // best-effort stderr
+				} else {
+					fmt.Fprintf(cr.stderr, "%s: force shutdown late async-start listing failed: %v\n", cr.logPrefix, lateListErr) //nolint:errcheck // best-effort stderr
+				}
+			}
+			if len(lateRunning) > 0 {
+				markCityStopSessionSleepReason(store, cr.stderr)
+				gracefulStopAllWithForceSignal(lateRunning, cr.sp, 0, cr.rec, cr.cfg, store, cr.stdout, cr.stderr, cr.forceStopRequested)
+			}
+		}
 	})
 }
 
 func (cr *CityRuntime) preserveSessionsOnShutdown() {
 	cr.preserveSessionsShutdown.Store(true)
+}
+
+func (cr *CityRuntime) forceStopRequested() bool {
+	return cr != nil && cr.forceStopShutdown != nil && cr.forceStopShutdown.Load()
 }

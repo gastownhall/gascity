@@ -59,7 +59,6 @@ const (
 var inferenceDisabledOrders = []string{
 	"beads-health",
 	"cross-rig-deps",
-	"dolt-gc-nudge",
 	"dolt-health",
 	"dolt-remotes-patrol",
 	"gate-sweep",
@@ -468,12 +467,6 @@ func TestWorkerInferenceFreshResetIsolation(t *testing.T) {
 	readyRel := fmt.Sprintf("worker-inference-reset-ready-%s.txt", liveSetup.Provider)
 	readyText := "ready"
 	alias := fmt.Sprintf("probe-reset-%s", liveSetup.Provider)
-	firstPrompt := fmt.Sprintf(
-		"Create a file named %s containing exactly %q and nothing else. Also remember this exact summary phrase for a later message: %q. Do not write that remembered phrase to any file right now.",
-		readyRel,
-		readyText,
-		phase1Profile.Continuation.AnchorText,
-	)
 
 	run, client, cityScope, spawnEvidence, err := startManagedInferenceSession(
 		t,
@@ -486,8 +479,14 @@ func TestWorkerInferenceFreshResetIsolation(t *testing.T) {
 		t.FailNow()
 	}
 
-	sessionInfo, statusOut, err := sendSessionMessageWhenReady(run.CityDir, run.SessionID, run.SessionName, client, firstPrompt)
 	readyPath := filepath.Join(run.CityDir, readyRel)
+	firstPrompt := fmt.Sprintf(
+		"Create a file at exactly %s containing exactly %q and nothing else. Also remember this exact summary phrase for a later message: %q. Do not write that remembered phrase to any file right now.",
+		readyPath,
+		readyText,
+		phase1Profile.Continuation.AnchorText,
+	)
+	sessionInfo, statusOut, err := sendSessionMessageWhenReady(run.CityDir, run.SessionID, run.SessionName, client, firstPrompt)
 	taskEvidence := map[string]string{
 		"city_dir":         run.CityDir,
 		"provider":         liveSetup.Provider,
@@ -602,13 +601,13 @@ func TestWorkerInferenceFreshResetIsolation(t *testing.T) {
 
 	proofRel := fmt.Sprintf("worker-inference-reset-proof-%s.txt", liveSetup.Provider)
 	expectedProof := phase1Profile.Continuation.ResetResponseContains
+	proofPath := filepath.Join(run.CityDir, proofRel)
 	proofPrompt := fmt.Sprintf(
-		"Without reading files or manually searching history, create a file named %s containing exactly the summary phrase from our earlier turn if you still know it. If you cannot do that because this is a fresh session, write exactly %q and nothing else.",
-		proofRel,
+		"Without reading files or manually searching history, create a file at exactly %s containing exactly the summary phrase from our earlier turn if you still know it. If you cannot do that because this is a fresh session, write exactly %q and nothing else.",
+		proofPath,
 		expectedProof,
 	)
 	sessionInfo, statusOut, err = sendSessionMessageWhenReady(run.CityDir, run.SessionID, resetSession.SessionName, client, proofPrompt)
-	proofPath := filepath.Join(run.CityDir, proofRel)
 	proofEvidence := map[string]string{
 		"city_dir":         run.CityDir,
 		"provider":         liveSetup.Provider,
@@ -1338,6 +1337,10 @@ func newLiveCity(t *testing.T) *helpers.City {
 }
 
 func installLiveProviderCommandOverride(cityDir, provider, command string, processNames []string) error {
+	return installLiveProviderCommandOverrideWithArgs(cityDir, provider, command, processNames, nil)
+}
+
+func installLiveProviderCommandOverrideWithArgs(cityDir, provider, command string, processNames, argsAppend []string) error {
 	provider = strings.TrimSpace(provider)
 	command = strings.TrimSpace(command)
 	if provider == "" || command == "" {
@@ -1371,6 +1374,19 @@ func installLiveProviderCommandOverride(cityDir, provider, command string, proce
 		}
 		if len(quoted) > 0 {
 			fmt.Fprintf(&b, "process_names = [%s]\n", strings.Join(quoted, ", "))
+		}
+	}
+	if len(argsAppend) > 0 {
+		quoted := make([]string, 0, len(argsAppend))
+		for _, arg := range argsAppend {
+			arg = strings.TrimSpace(arg)
+			if arg == "" {
+				continue
+			}
+			quoted = append(quoted, strconv.Quote(arg))
+		}
+		if len(quoted) > 0 {
+			fmt.Fprintf(&b, "args_append = [%s]\n", strings.Join(quoted, ", "))
 		}
 	}
 	return os.WriteFile(cityPath, []byte(b.String()), 0o644)
@@ -1880,7 +1896,7 @@ func startManagedInferenceSession(
 			"stage":    "install_agent",
 		}, fmt.Errorf("installing worker inference probe agent: %w", err)
 	}
-	if err := installLiveProviderCommandOverride(c.Dir, liveSetup.Provider, liveSetup.BinaryPath, liveSetup.ProcessNames); err != nil {
+	if err := installLiveProviderCommandOverrideWithArgs(c.Dir, liveSetup.Provider, liveSetup.BinaryPath, liveSetup.ProcessNames, liveProviderArgsAppend()); err != nil {
 		return inferenceSessionRun{}, nil, "", map[string]string{
 			"city_dir":    c.Dir,
 			"binary_path": liveSetup.BinaryPath,
@@ -1901,9 +1917,6 @@ func startManagedInferenceSession(
 			"stage":    "suspend_mayor",
 		}, fmt.Errorf("suspending default mayor session: %w", err)
 	}
-	_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, "", "supervisor", "stop")
-	_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, c.Dir, "stop", c.Dir)
-	_, _ = waitForManagedDoltStopped(c.Dir, liveStopBarrierTimeout)
 	if err := closeLiveSessionsByTemplate(c.Dir, "mayor"); err != nil {
 		return inferenceSessionRun{}, nil, "", map[string]string{
 			"city_dir": c.Dir,
@@ -1924,6 +1937,9 @@ func startManagedInferenceSession(
 			"stage":    "close_template",
 		}, fmt.Errorf("closing stale %s sessions before managed session start: %w", templateName, err)
 	}
+	_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, "", "supervisor", "stop")
+	_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, c.Dir, "stop", c.Dir)
+	_, _ = waitForManagedDoltStopped(c.Dir, liveStopBarrierTimeout)
 
 	startOut, startErr := runGCWithTimeout(liveBootstrapTimeout, liveEnv, c.Dir, "start", c.Dir)
 	startTimedOut := isRunTimeout(startErr)
@@ -2087,7 +2103,7 @@ func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel st
 			"init_out":    strings.TrimSpace(initOut),
 		}, nil, "spawn", fmt.Errorf("installing worker inference probe agent: %w", err)
 	}
-	if err := installLiveProviderCommandOverride(c.Dir, liveSetup.Provider, liveSetup.BinaryPath, liveSetup.ProcessNames); err != nil {
+	if err := installLiveProviderCommandOverrideWithArgs(c.Dir, liveSetup.Provider, liveSetup.BinaryPath, liveSetup.ProcessNames, liveProviderArgsAppend()); err != nil {
 		return inferenceRun{}, map[string]string{
 			"city_dir":    c.Dir,
 			"binary_path": liveSetup.BinaryPath,
@@ -2116,9 +2132,6 @@ func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel st
 			"init_out":     strings.TrimSpace(initOut),
 		}, nil, "spawn", fmt.Errorf("suspending default mayor session: %w", err)
 	}
-	_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, "", "supervisor", "stop")
-	_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, c.Dir, "stop", c.Dir)
-	_, _ = waitForManagedDoltStopped(c.Dir, liveStopBarrierTimeout)
 	if err := closeLiveSessionsByTemplate(c.Dir, "mayor"); err != nil {
 		return inferenceRun{}, map[string]string{
 			"city_dir":     c.Dir,
@@ -2139,6 +2152,9 @@ func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel st
 			"init_out":     strings.TrimSpace(initOut),
 		}, nil, "spawn", fmt.Errorf("closing stale %s sessions before live start: %w", inferenceSlingTarget, err)
 	}
+	_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, "", "supervisor", "stop")
+	_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, c.Dir, "stop", c.Dir)
+	_, _ = waitForManagedDoltStopped(c.Dir, liveStopBarrierTimeout)
 
 	startOut, startErr := runGCWithTimeout(liveBootstrapTimeout, liveEnv, c.Dir, "start", c.Dir)
 	startTimedOut := isRunTimeout(startErr)
@@ -2388,6 +2404,21 @@ func freshWorkerNudgeDelivery(provider string) string {
 	return "wait-idle"
 }
 
+func liveProviderArgsAppend() []string {
+	if liveSetup.Profile != workerpkg.ProfileOpenCodeTmuxCLI {
+		return nil
+	}
+	return []string{"--model", liveOpenCodeModel()}
+}
+
+func liveOpenCodeModel() string {
+	model := strings.TrimSpace(os.Getenv("GC_WORKER_INFERENCE_OPENCODE_MODEL"))
+	if model == "" {
+		return defaultOpenCodeGeminiModel
+	}
+	return model
+}
+
 func runFreshManualSessionTurn(t *testing.T, provider, templateName, alias, prompt, outputRel string) (inferenceSessionRun, map[string]string, map[string]string, string, error) {
 	t.Helper()
 
@@ -2428,7 +2459,7 @@ func runFreshManualSessionTurn(t *testing.T, provider, templateName, alias, prom
 			"init_out":   strings.TrimSpace(initOut),
 		}, nil, "spawn", fmt.Errorf("installing worker inference probe agent: %w", err)
 	}
-	if err := installLiveProviderCommandOverride(c.Dir, liveSetup.Provider, liveSetup.BinaryPath, liveSetup.ProcessNames); err != nil {
+	if err := installLiveProviderCommandOverrideWithArgs(c.Dir, liveSetup.Provider, liveSetup.BinaryPath, liveSetup.ProcessNames, liveProviderArgsAppend()); err != nil {
 		return inferenceSessionRun{}, map[string]string{
 			"city_dir":    c.Dir,
 			"binary_path": liveSetup.BinaryPath,
@@ -2450,9 +2481,6 @@ func runFreshManualSessionTurn(t *testing.T, provider, templateName, alias, prom
 			"init_out":    strings.TrimSpace(initOut),
 		}, nil, "spawn", fmt.Errorf("suspending default mayor session: %w", err)
 	}
-	_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, "", "supervisor", "stop")
-	_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, c.Dir, "stop", c.Dir)
-	_, _ = waitForManagedDoltStopped(c.Dir, liveStopBarrierTimeout)
 	if err := closeLiveSessionsByTemplate(c.Dir, "mayor"); err != nil {
 		return inferenceSessionRun{}, map[string]string{
 			"city_dir":    c.Dir,
@@ -2475,6 +2503,9 @@ func runFreshManualSessionTurn(t *testing.T, provider, templateName, alias, prom
 			"init_out":    strings.TrimSpace(initOut),
 		}, nil, "spawn", fmt.Errorf("closing stale %s sessions before manual session start: %w", templateName, err)
 	}
+	_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, "", "supervisor", "stop")
+	_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, c.Dir, "stop", c.Dir)
+	_, _ = waitForManagedDoltStopped(c.Dir, liveStopBarrierTimeout)
 
 	newOut, newErr := runGCWithTimeout(90*time.Second, liveEnv, c.Dir, "session", "new", templateName, "--alias", alias, "--no-attach")
 	sessionID := parseCreatedSessionID(newOut)
@@ -2755,9 +2786,6 @@ func runFreshNamedSessionTurn(t *testing.T, provider, identity, prompt, outputRe
 			"init_out":   strings.TrimSpace(initOut),
 		}, nil, "spawn", fmt.Errorf("suspending default mayor session: %w", err)
 	}
-	_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, "", "supervisor", "stop")
-	_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, c.Dir, "stop", c.Dir)
-	_, _ = waitForManagedDoltStopped(c.Dir, liveStopBarrierTimeout)
 	if err := closeLiveSessionsByTemplate(c.Dir, "mayor"); err != nil {
 		return inferenceSessionRun{}, map[string]string{
 			"city_dir":   c.Dir,
@@ -2767,6 +2795,9 @@ func runFreshNamedSessionTurn(t *testing.T, provider, identity, prompt, outputRe
 			"init_out":   strings.TrimSpace(initOut),
 		}, nil, "spawn", fmt.Errorf("closing stale mayor sessions before live start: %w", err)
 	}
+	_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, "", "supervisor", "stop")
+	_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, c.Dir, "stop", c.Dir)
+	_, _ = waitForManagedDoltStopped(c.Dir, liveStopBarrierTimeout)
 
 	startOut, startErr := runGCWithTimeout(liveBootstrapTimeout, liveEnv, c.Dir, "start", c.Dir)
 	startTimedOut := isRunTimeout(startErr)
@@ -3086,13 +3117,17 @@ When a later message asks you to recall prior turn context, use conversation mem
 	}
 	var additions []string
 	if !strings.Contains(string(data), "\nname = \""+inferenceProbeTemplate+"\"") {
+		sessionLine, err := inferenceProbeSessionLine(data)
+		if err != nil {
+			return err
+		}
 		additions = append(additions, fmt.Sprintf(`
 
 [[agent]]
 name = %q
-prompt_template = %q
+%sprompt_template = %q
 max_active_sessions = %d
-`, inferenceProbeTemplate, inferenceProbePromptPath, maxActiveSessions))
+`, inferenceProbeTemplate, sessionLine, inferenceProbePromptPath, maxActiveSessions))
 	}
 	if includeNamedSession && !strings.Contains(string(data), "\n[[named_session]]\ntemplate = \""+inferenceProbeTemplate+"\"") {
 		additions = append(additions, fmt.Sprintf(`
@@ -3122,21 +3157,33 @@ skip = [%s]
 	return os.WriteFile(cityPath, append(data, []byte(strings.Join(additions, ""))...), 0o644)
 }
 
+func inferenceProbeSessionLine(data []byte) (string, error) {
+	cfg, err := config.Parse(data)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(cfg.Workspace.Provider) == "opencode" {
+		return `session = "tmux"` + "\n", nil
+	}
+	return "", nil
+}
+
 func ensureInferenceProbeProviderHooks(data []byte) ([]byte, bool, error) {
 	cfg, err := config.Parse(data)
 	if err != nil {
 		return nil, false, err
 	}
-	if strings.TrimSpace(cfg.Workspace.Provider) != "gemini" {
+	provider := strings.TrimSpace(cfg.Workspace.Provider)
+	if provider != "gemini" && provider != "opencode" {
 		return data, false, nil
 	}
-	if stringListContains(cfg.Workspace.InstallAgentHooks, "gemini") {
+	if stringListContains(cfg.Workspace.InstallAgentHooks, provider) {
 		return data, false, nil
 	}
 	if len(cfg.Workspace.InstallAgentHooks) > 0 {
-		return nil, false, fmt.Errorf("workspace install_agent_hooks must include gemini for live Gemini worker inference tests")
+		return nil, false, fmt.Errorf("workspace install_agent_hooks must include %s for live %s worker inference tests", provider, provider)
 	}
-	updated, err := insertWorkspaceSetting(data, `install_agent_hooks = ["gemini"]`)
+	updated, err := insertWorkspaceSetting(data, fmt.Sprintf(`install_agent_hooks = [%q]`, provider))
 	if err != nil {
 		return nil, false, err
 	}
@@ -4436,6 +4483,7 @@ func classifyLiveFailure(detail string, evidence map[string]string) workertest.R
 		"rate limited",
 		"rate_limit",
 		"too many requests",
+		"too hot",
 		"try again later",
 		"temporarily unavailable",
 		"service unavailable",
@@ -5195,6 +5243,7 @@ func classifyLivePaneBlocked(paneTail string) *liveBlockedInteraction {
 		"approaching rate limits",
 		"usage limit reached",
 		"rate limit",
+		"too hot",
 	):
 		return &liveBlockedInteraction{
 			Kind:     "rate_limit",

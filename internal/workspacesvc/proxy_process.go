@@ -198,7 +198,7 @@ func (p *proxyProcessInstance) start(now time.Time) error {
 
 	cmd := exec.Command(p.svc.Process.Command[0], p.svc.Process.Command[1:]...)
 	cmd.Dir = p.commandDir()
-	cmd.Env = append(os.Environ(), citylayout.CityRuntimeEnv(p.rt.CityPath())...)
+	cmd.Env = append(os.Environ(), citylayout.CityRuntimeEnvForRuntimeDir(p.rt.CityPath(), citylayout.TrustedAmbientCityRuntimeDir(p.rt.CityPath()))...)
 	cmd.Env = append(cmd.Env,
 		"GC_SERVICE_NAME="+p.svc.Name,
 		"GC_SERVICE_STATE_ROOT="+p.absStateRoot,

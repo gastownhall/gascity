@@ -13,7 +13,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/doltauth"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 )
@@ -99,6 +98,12 @@ func orderExecEnv(cityPath string, cfg *config.City, target execStoreTarget, a o
 	env["GC_STORE_ROOT"] = target.ScopeRoot
 	env["GC_STORE_SCOPE"] = target.ScopeKind
 	env["GC_BEADS_PREFIX"] = target.Prefix
+	// Tag every bd interaction this exec order produces with the order's
+	// name so audit logs and the dashboard can attribute housekeeping
+	// activity to the responsible order rather than an ambient identity.
+	if name := strings.TrimSpace(a.Name); name != "" {
+		env["BEADS_ACTOR"] = "order:" + name
+	}
 	if target.ScopeKind == "rig" {
 		env["GC_RIG"] = target.RigName
 		env["GC_RIG_ROOT"] = target.ScopeRoot
@@ -167,7 +172,7 @@ func applyOrderExecCanonicalDoltEnv(cityPath, scopeRoot string, env map[string]s
 		return
 	}
 	applyCanonicalDoltTargetEnv(env, target)
-	applyResolvedDoltAuthEnv(env, doltauth.AuthScopeRoot(cityPath, scopeRoot, target), strings.TrimSpace(target.User))
+	applyCanonicalDoltAuthEnv(env, cityPath, scopeRoot, target)
 	if target.External {
 		env["GC_DOLT_MANAGED_LOCAL"] = "0"
 		clearManagedDoltRuntimeLayoutEnv(env, cityPath)
@@ -206,8 +211,11 @@ func applyOrderExecManagedDoltFallback(cityPath, scopeRoot string, env map[strin
 	}
 	env["GC_DOLT_MANAGED_LOCAL"] = "1"
 	applyManagedDoltRuntimeLayoutEnv(env, cityPath)
-	target := contract.DoltConnectionTarget{EndpointOrigin: resolved.State.EndpointOrigin}
-	applyResolvedDoltAuthEnv(env, doltauth.AuthScopeRoot(cityPath, scopeRoot, target), strings.TrimSpace(resolved.State.DoltUser))
+	target := contract.DoltConnectionTarget{
+		User:           strings.TrimSpace(resolved.State.DoltUser),
+		EndpointOrigin: resolved.State.EndpointOrigin,
+	}
+	applyCanonicalDoltAuthEnv(env, cityPath, scopeRoot, target)
 	mirrorBeadsDoltEnv(env)
 	return true
 }
@@ -256,7 +264,7 @@ func resolveManagedDoltOrderRuntimeLayout(cityPath string, env map[string]string
 }
 
 func managedDoltOrderPackStateDir(cityPath string, env map[string]string) string {
-	if runtimeDir := trustedAmbientCityRuntimeDir(cityPath); runtimeDir != "" {
+	if runtimeDir := citylayout.TrustedAmbientCityRuntimeDir(cityPath); runtimeDir != "" {
 		return normalizePathForCompare(filepath.Join(runtimeDir, "packs", "dolt"))
 	}
 	if env != nil {

@@ -192,6 +192,15 @@ const (
 
 const supervisorPreserveSessionsOnSignalEnv = "GC_SUPERVISOR_PRESERVE_SESSIONS_ON_SIGNAL"
 
+// supervisorOmitProviderCredsEnv, when set to "1" at the time the supervisor
+// service file is generated, causes provider-credential env vars
+// (ANTHROPIC_*, GEMINI_*, GOOGLE_*, OPENAI_*) to be excluded from the
+// generated launchd plist or systemd unit. Default behavior is unchanged.
+// When opted out, the user is responsible for delivering provider creds to
+// the supervisor's environment via some other mechanism (e.g. a wrapper
+// around `gc supervisor run` that sources a credentials file).
+const supervisorOmitProviderCredsEnv = "GC_SUPERVISOR_OMIT_PROVIDER_CREDS"
+
 var supervisorShutdownSettleDelay = 50 * time.Millisecond
 
 var supervisorSignalNotify = signal.Notify
@@ -837,6 +846,9 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		return 1
 	}
 	apiMux := api.NewSupervisorMux(registry, cityInitSvc, readOnly, version, startedAt)
+	if len(supCfg.Supervisor.AllowedOrigins) > 0 {
+		apiMux.WithAllowedOrigins(supCfg.Supervisor.AllowedOrigins)
+	}
 
 	pprofSrv, pprofErr := api.StartPprof("")
 	if pprofErr != nil {
@@ -1436,6 +1448,7 @@ func reconcileCities(
 		configRev := config.Revision(fsys.OSFS{}, prov, cfg, path)
 		pokeCh := make(chan struct{}, 1)
 		configDirty := &atomic.Bool{}
+		forceShutdown := &atomic.Bool{}
 		reloadReqCh := make(chan reloadRequest)
 		cityCtx, cityCancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
@@ -1462,6 +1475,7 @@ func reconcileCities(
 				Rec:                     rec,
 				PoolSessions:            poolSessions,
 				PoolDeathHandlers:       poolDeathHandlers,
+				ForceStopShutdown:       forceShutdown,
 				ReloadReqCh:             reloadReqCh,
 				ConvergenceReqCh:        convergenceReqCh,
 				PokeCh:                  pokeCh,
@@ -1563,7 +1577,7 @@ func reconcileCities(
 		// Start controller socket AFTER the alreadyRunning check so we
 		// never destroy a live city's socket or leak a listener.
 		sockPath := filepath.Join(path, ".gc", "controller.sock")
-		lis, lisErr := startControllerSocket(path, cityCancel, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+		lis, lisErr := startControllerSocket(path, cityCancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
 		if lisErr != nil {
 			fmt.Fprintf(stderr, "gc supervisor: city '%s': controller socket: %v\n", cityName, lisErr) //nolint:errcheck
 			lock.Close()                                                                               //nolint:errcheck // no socket to race with
@@ -1842,10 +1856,10 @@ func publishManagedCity(cr *cityRegistry, path string, mc *managedCity) bool {
 			alreadyRunning = true
 			return
 		}
-		// The controller state and per-city API are fully wired at this point.
-		// Mark the city started before the first reconcile so slow bead scans
-		// don't keep supervisor startup and API availability blocked.
-		mc.started = true
+		// The controller state and per-city API are wired at this point, but
+		// initial reconciliation has not yet materialized startup session
+		// beads. Keep the city in startup status until CityRuntime.OnStarted
+		// runs after that reconciliation completes.
 		mc.status = "starting_agents"
 		cities[path] = mc
 		delete(initStatus, path)

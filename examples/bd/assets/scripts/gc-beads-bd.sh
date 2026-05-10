@@ -1022,7 +1022,13 @@ cleanup_stale_locks() {
 # Overwritten on each server start. Without read/write timeouts, CLOSE_WAIT connections
 # accumulate and the server enters unrecoverable read-only mode.
 write_config_yaml() {
-    local gc_bin
+    local archive_level gc_bin raw_wait_timeout wait_timeout_line
+    archive_level=${GC_DOLT_ARCHIVE_LEVEL:-0}
+    case "$archive_level" in
+        ''|*[!0-9]*)
+            archive_level=0
+            ;;
+    esac
     gc_bin=$(resolve_gc_helper_bin)
     if [ -n "$gc_bin" ]; then
         "$gc_bin" dolt-config write-managed \
@@ -1030,9 +1036,29 @@ write_config_yaml() {
             --host "$DOLT_HOST" \
             --port "$DOLT_PORT" \
             --data-dir "$DATA_DIR" \
-            --log-level "$DOLT_LOGLEVEL" || die "failed to write managed dolt config via gc helper $gc_bin"
+            --log-level "$DOLT_LOGLEVEL" \
+            --archive-level "$archive_level" || die "failed to write managed dolt config via gc helper $gc_bin"
         return 0
     fi
+    wait_timeout_line='  wait_timeout: "30"'
+    raw_wait_timeout=${GC_DOLT_WAIT_TIMEOUT:-}
+    case "$raw_wait_timeout" in
+        '' ) ;;
+        -*)
+            case "${raw_wait_timeout#-}" in
+                ''|*[!0-9]* ) ;;
+                * ) wait_timeout_line="" ;;
+            esac
+            ;;
+        *[!0-9]* ) ;;
+        * )
+            if [ "$raw_wait_timeout" -gt 0 ] 2>/dev/null; then
+                wait_timeout_line="  wait_timeout: \"$raw_wait_timeout\""
+            else
+                wait_timeout_line=""
+            fi
+            ;;
+    esac
     local tmp
     tmp=$(mktemp "$CONFIG_FILE.tmp.XXXXXX")
     cat > "$tmp" <<YAML
@@ -1056,8 +1082,21 @@ data_dir: "$DATA_DIR"
 
 behavior:
   auto_gc_behavior:
-    enable: true
-    archive_level: 1
+    enable: false
+    archive_level: $archive_level
+
+# Managed Gas City workloads generate short-lived probe and metadata queries.
+# Dolt's persistent stats worker can make those tiny databases grow large
+# stats stores and burn CPU, especially on macOS endpoint-managed machines.
+# Keep stats disabled for managed servers; use explicit gc dolt maintenance
+# commands for storage cleanup instead of background workers.
+system_variables:
+  dolt_auto_gc_enabled: "OFF"
+  dolt_stats_enabled: "OFF"
+  dolt_stats_gc_enabled: "OFF"
+  dolt_stats_memory_only: "ON"
+  dolt_stats_paused: "ON"
+$wait_timeout_line
 YAML
     mv "$tmp" "$CONFIG_FILE"
 }
@@ -1071,6 +1110,23 @@ get_connection_count() {
         sql -r csv -q "SELECT COUNT(*) AS cnt FROM information_schema.PROCESSLIST" 2>/dev/null) || return 1
     # Parse CSV: "cnt\n5\n" — take last non-empty line.
     echo "$output" | tail -1 | tr -d '[:space:]'
+}
+
+# drain_connections_before_stop waits briefly for in-flight SQL work to leave
+# before SIGTERM. It is best-effort: an unreachable or wedged server should not
+# block explicit stop/recover forever.
+drain_connections_before_stop() {
+    local count waited
+    waited=0
+    while [ "$waited" -lt 100 ]; do
+        count=$(get_connection_count 2>/dev/null) || return 0
+        case "$count" in
+            ''|*[!0-9]*) return 0 ;;
+        esac
+        [ "$count" -le 1 ] && return 0
+        sleep 0.1 2>/dev/null || sleep 1
+        waited=$((waited + 1))
+    done
 }
 
 # check_read_only tests if the dolt server is in read-only mode.
@@ -1406,6 +1462,7 @@ load_recover_managed_from_gc() {
     GC_RECOVER_PID=""
     GC_RECOVER_PORT="$DOLT_PORT"
     GC_RECOVER_HEALTHY="false"
+    GC_RECOVER_RESTARTED="false"
     [ -n "$gc_bin" ] || return 1
     GC_RECOVER_MANAGED_USED="true"
     output=$("$gc_bin" dolt-state recover-managed --city "$GC_CITY_PATH" --host "$DOLT_HOST" --port "$DOLT_PORT" --user "$DOLT_USER" --log-level "$DOLT_LOGLEVEL" --timeout-ms 30000 </dev/null 2>/dev/null)
@@ -1438,6 +1495,10 @@ load_recover_managed_from_gc() {
                 ;;
             healthy)
                 GC_RECOVER_HEALTHY="$value"
+                parsed=true
+                ;;
+            restarted)
+                GC_RECOVER_RESTARTED="$value"
                 parsed=true
                 ;;
         esac
@@ -1839,17 +1900,6 @@ op_start() {
         if [ -f "$LOG_FILE" ]; then
             log_offset=$(wc -c < "$LOG_FILE" 2>/dev/null || echo 0)
         fi
-
-        # Disable Dolt's load-average auto-GC scheduler. Dolt 1.86.0+
-        # ships a loadAvgGCScheduler whose threshold formula scales
-        # inversely with CPU count (10/CPUs), so on multi-core hosts the
-        # gate is essentially always tripped and CALL DOLT_GC() is
-        # queued but never executed; auto_gc_behavior.enable: true in
-        # config.yaml has no effect. See
-        # https://github.com/dolthub/dolt/issues/10944. Users who
-        # explicitly set DOLT_GC_SCHEDULER are respected.
-        : "${DOLT_GC_SCHEDULER=NONE}"
-        export DOLT_GC_SCHEDULER
 
         # Start dolt sql-server with config file. Close the startup lock fd in
         # the child so the flock is released when this starter exits.
@@ -2394,6 +2444,8 @@ op_stop_impl() {
         return 0
     fi
     GC_STOP_HAD_PID="true"
+
+    drain_connections_before_stop
 
     # SIGTERM and wait (10 × 500ms = 5s grace, matches upstream).
     kill "$pid" 2>/dev/null || true

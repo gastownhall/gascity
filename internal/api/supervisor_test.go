@@ -20,12 +20,13 @@ import (
 // fakeCityResolver implements CityResolver for testing.
 type fakeCityResolver struct {
 	cities             map[string]*fakeState // keyed by city name
+	listed             []CityInfo
 	pending            map[string]string
 	supervisorRecorder events.Recorder
 }
 
 func (f *fakeCityResolver) ListCities() []CityInfo {
-	var out []CityInfo
+	out := append([]CityInfo(nil), f.listed...)
 	for name := range f.cities {
 		s := f.cities[name]
 		out = append(out, CityInfo{
@@ -103,6 +104,22 @@ func TestSupervisorCitiesList(t *testing.T) {
 	// Sorted by name.
 	if resp.Items[0].Name != "alpha" || resp.Items[1].Name != "beta" {
 		t.Errorf("items = %v, want alpha then beta", resp.Items)
+	}
+}
+
+func TestSupervisorCityServiceProxy404sUntilCityRunning(t *testing.T) {
+	sm := newTestSupervisorMux(t, map[string]*fakeState{})
+	req := httptest.NewRequest(http.MethodGet, "/v0/city/starting/svc/review-intake/healthz", nil)
+	rec := httptest.NewRecorder()
+
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+	const want = `{"status":404,"title":"Not Found","detail":"not_found: city not found or not running"}`
+	if strings.TrimSpace(rec.Body.String()) != want {
+		t.Fatalf("body = %s, want %s", rec.Body.String(), want)
 	}
 }
 
@@ -219,6 +236,30 @@ func TestSupervisorCityNamespacedRoute(t *testing.T) {
 	}
 	if resp.Total != 1 {
 		t.Errorf("Total = %d, want 1 (one agent in fakeState)", resp.Total)
+	}
+}
+
+func TestSupervisorCityScopedRoute404sUntilCityRunning(t *testing.T) {
+	resolver := &fakeCityResolver{
+		cities: map[string]*fakeState{},
+		listed: []CityInfo{{
+			Name:    "bright-lights",
+			Path:    "/tmp/bright-lights",
+			Running: false,
+			Status:  "starting_agents",
+		}},
+	}
+	sm := NewSupervisorMux(resolver, nil, false, "test", time.Now())
+
+	req := httptest.NewRequest("GET", "/v0/city/bright-lights/agents", nil)
+	rec := httptest.NewRecorder()
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), CityNotFoundOrNotRunningDetail("bright-lights")) {
+		t.Fatalf("body missing not-running detail: %s", rec.Body.String())
 	}
 }
 
@@ -410,6 +451,46 @@ func TestSupervisorPerCityEventStream(t *testing.T) {
 	}
 }
 
+func TestSupervisorEventStreamsFlushHeadersBeforeFirstEvent(t *testing.T) {
+	s := newFakeState(t)
+	s.cityName = "gc-work"
+
+	sm := newTestSupervisorMux(t, map[string]*fakeState{
+		"gc-work": s,
+	})
+	srv := httptest.NewServer(sm)
+	t.Cleanup(srv.Close)
+
+	for _, path := range []string{
+		"/v0/events/stream",
+		"/v0/city/gc-work/events/stream",
+	} {
+		t.Run(path, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+path, nil)
+			if err != nil {
+				t.Fatalf("build request: %v", err)
+			}
+			req.Header.Set("Accept", "text/event-stream")
+
+			resp, err := srv.Client().Do(req)
+			if err != nil {
+				t.Fatalf("GET %s: %v", path, err)
+			}
+			defer resp.Body.Close() //nolint:errcheck
+
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+			}
+			if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
+				t.Fatalf("Content-Type = %q, want text/event-stream", ct)
+			}
+		})
+	}
+}
+
 func TestSupervisorPerCityEventStreamEmitsTypedEnvelopePayloadObject(t *testing.T) {
 	s := newFakeState(t)
 	s.cityName = "gc-work"
@@ -537,14 +618,18 @@ func TestSupervisorGlobalEventList(t *testing.T) {
 	}
 
 	var resp struct {
-		Items []events.TaggedEvent `json:"items"`
-		Total int                  `json:"total"`
+		EventCursor string               `json:"event_cursor"`
+		Items       []events.TaggedEvent `json:"items"`
+		Total       int                  `json:"total"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if resp.Total != 2 {
 		t.Errorf("total = %d, want 2", resp.Total)
+	}
+	if resp.EventCursor != "alpha:1,beta:1" {
+		t.Fatalf("event_cursor = %q, want alpha:1,beta:1", resp.EventCursor)
 	}
 
 	// Verify events are tagged with city names.

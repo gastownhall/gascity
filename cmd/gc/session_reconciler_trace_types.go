@@ -69,6 +69,7 @@ const (
 	TraceSitePoolWorkspaceCap        TraceSiteCode = "reconciler.pool.workspace_cap"
 	TraceSitePoolAccept              TraceSiteCode = "reconciler.pool.accept"
 	TraceSitePoolMinFill             TraceSiteCode = "reconciler.pool.min_fill"
+	TraceSitePoolInFlightReuse       TraceSiteCode = "reconciler.pool.inflight_reuse"
 	TraceSiteReconcilerUnknownState  TraceSiteCode = "reconciler.session.skip_unknown_state"
 	TraceSiteReconcilerOrphaned      TraceSiteCode = "reconciler.session.orphan_or_suspended"
 	TraceSiteReconcilerCloseOrphan   TraceSiteCode = "reconciler.session.close_orphan"
@@ -119,6 +120,7 @@ const (
 	TraceReasonWorkspaceCap           TraceReasonCode = "workspace_cap"
 	TraceReasonCap                    TraceReasonCode = "cap"
 	TraceReasonMinFill                TraceReasonCode = "min_fill"
+	TraceReasonInFlightReuse          TraceReasonCode = "inflight_reuse"
 	TraceReasonWake                   TraceReasonCode = "wake"
 	TraceReasonIdleTimeout            TraceReasonCode = "idle_timeout"
 	TraceReasonStaleGeneration        TraceReasonCode = "stale_generation"
@@ -533,6 +535,7 @@ func normalizeTraceSiteCode(raw string) (TraceSiteCode, string) {
 		TraceSitePoolWorkspaceCap,
 		TraceSitePoolAccept,
 		TraceSitePoolMinFill,
+		TraceSitePoolInFlightReuse,
 		TraceSiteReconcilerUnknownState,
 		TraceSiteReconcilerOrphaned,
 		TraceSiteReconcilerCloseOrphan,
@@ -595,6 +598,7 @@ func normalizeTraceReasonCode(raw string) (TraceReasonCode, string) {
 		TraceReasonWorkspaceCap,
 		TraceReasonCap,
 		TraceReasonMinFill,
+		TraceReasonInFlightReuse,
 		TraceReasonWake,
 		TraceReasonIdleTimeout,
 		TraceReasonStaleGeneration,

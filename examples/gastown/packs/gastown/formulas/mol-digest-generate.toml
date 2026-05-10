@@ -114,7 +114,7 @@ gc bd list --label=escalation --created-after=$SINCE --json
 
 c) **Warrants filed:**
 ```bash
-gc bd list --type=warrant --created-after=$SINCE --json
+gc bd list --label=warrant --created-after=$SINCE --json
 ```
 
 Close this step when all data is collected."""
@@ -161,7 +161,7 @@ gc mail send mayor/ -s "Gas Town Digest: $DATE" -m "$DIGEST"
 
 **3. Archive as bead:**
 ```bash
-gc bd create --type=digest \
+gc bd create --type=task \
   --title="Digest: $DATE" \
   --label=digest,{{period}}
 ```

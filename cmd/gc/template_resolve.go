@@ -252,8 +252,16 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		// Rig-scoped agents override the rig-specific keys below.
 		"GT_ROOT": p.cityPath,
 	}
-	for key, value := range citylayout.CityRuntimeEnvMap(p.cityPath) {
+	for key, value := range cityRuntimeEnvMapForCity(p.cityPath) {
 		agentEnv[key] = value
+	}
+	// Override the city-uniform GC_CONTROL_DISPATCHER_TRACE_DEFAULT with a
+	// per-dispatcher path so each control-dispatcher writes to its own
+	// trace file (closes #1650). Goes in agentEnv (last in mergeEnv) so it
+	// wins over both passthroughEnv and the uniform city default seeded by
+	// cityRuntimeEnvMapForCity above.
+	if cfgAgent.Name == config.ControlDispatcherAgentName {
+		agentEnv["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"] = citylayout.ControlDispatcherTraceDefaultPathFor(p.cityPath, qualifiedName)
 	}
 	agentEnv["GC_BEADS"] = rawBeadsProviderForScope(rigRoot, p.cityPath)
 	if exe, err := os.Executable(); err == nil && exe != "" {
@@ -291,7 +299,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		RigRoot:       rigRoot,
 		WorkDir:       workDir,
 		IssuePrefix:   findRigPrefix(rigName, p.rigs),
-		DefaultBranch: defaultBranchFor(workDir),
+		DefaultBranch: defaultBranchForRig(rigName, p.rigs, workDir),
 		WorkQuery:     expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "work_query", cfgAgent.EffectiveWorkQuery(), p.stderr),
 		SlingQuery:    expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "sling_query", cfgAgent.EffectiveSlingQuery(), p.stderr),
 		Env:           cfgAgent.Env,
@@ -506,6 +514,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		SessionSetupScript:     resolvedScript,
 		SessionLive:            expandedLive,
 		ProviderName:           resolvedProviderLaunchFamily(resolved),
+		ProviderOverlayName:    strings.TrimSpace(resolved.Name),
 		InstallAgentHooks:      config.ResolveInstallHooks(cfgAgent, p.workspace),
 		PackOverlayDirs:        effectiveOverlayDirs(p.packOverlayDirs, p.rigOverlayDirs, rigName),
 		OverlayDir:             overlayDir,
@@ -574,14 +583,14 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		// SessionStart hooks can enrich context, but the startup prompt still
 		// needs a first-turn delivery mechanism. Without argv/flag/nudge
 		// delivery, freshly spawned workers sit idle at the provider prompt.
-		if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none" {
-			if nudge != "" {
-				nudge = tp.Prompt + "\n\n---\n\n" + nudge
-			} else {
-				nudge = tp.Prompt
-			}
+		switch {
+		case tp.IsACP:
+			nudge = prependStartupPromptToNudge(tp.Prompt, nudge)
 			startupPromptDelivered = true
-		} else {
+		case tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none":
+			nudge = prependStartupPromptToNudge(tp.Prompt, nudge)
+			startupPromptDelivered = true
+		default:
 			promptSuffix = shellquote.Quote(tp.Prompt)
 			startupPromptDelivered = promptSuffix != ""
 			if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "flag" {
@@ -621,10 +630,18 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		SessionSetupScript:     tp.Hints.SessionSetupScript,
 		SessionLive:            tp.Hints.SessionLive,
 		ProviderName:           tp.Hints.ProviderName,
+		ProviderOverlayName:    tp.Hints.ProviderOverlayName,
 		InstallAgentHooks:      tp.Hints.InstallAgentHooks,
 		PackOverlayDirs:        tp.Hints.PackOverlayDirs,
 		OverlayDir:             tp.Hints.OverlayDir,
 		CopyFiles:              tp.Hints.CopyFiles,
 		FingerprintExtra:       tp.FPExtra,
 	}
+}
+
+func prependStartupPromptToNudge(prompt, nudge string) string {
+	if nudge != "" {
+		return prompt + "\n\n---\n\n" + nudge
+	}
+	return prompt
 }

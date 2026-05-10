@@ -130,10 +130,10 @@ A long tool call is different from an infinite loop.
 for the dog pool:
 
 ```bash
-gc bd create --type=warrant \
+gc bd create --type=task \
   --title="Stuck: <agent>" \
-  --metadata '{"target":"<session>","reason":"<reason>","requester":"witness"}' \
-  --label=pool:dog
+  --metadata '{"target":"<session>","reason":"<reason>","requester":"witness","gc.routed_to":"{{ .BindingPrefix }}dog"}' \
+  --label=warrant
 ```
 
 The dog pool runs `mol-shutdown-dance` — a multi-stage interrogation
@@ -160,7 +160,7 @@ gc bd list --assignee="$GC_ALIAS" --status=in_progress
 gc mail inbox
 
 # Step 3: Still nothing? Create patrol wisp (root-only — no child step beads)
-NEW_WISP=$(gc bd mol wisp mol-witness-patrol --root-only --json | jq -r '.new_epic_id')
+NEW_WISP=$(gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='{{ .BindingPrefix }}' --json | jq -r '.new_epic_id')
 gc bd update "$NEW_WISP" --assignee="$GC_ALIAS"
 
 # Step 4: Execute — read formula steps and work through them in order
@@ -185,7 +185,7 @@ re-reads formula steps and resumes from context.
 gc mail send mayor/ -s "Subject" -m "Message"              # Escalate to mayor
 gc mail send {{ .RigName }}/refinery -s "Subject" -m "..."  # Refinery questions
 gc session nudge {{ .RigName }}/<polecat-name> "Run gc hook; it checks assigned work before routed pool work"
-gc session peek {{ .RigName }}/<polecat-name> 50             # View polecat output
+gc session peek {{ .RigName }}/<polecat-name> --lines 50     # View polecat output
 ```
 
 Use the concrete polecat name from `gc status` or `gc session list`;
@@ -247,13 +247,13 @@ gc mail send mayor/ -s "ESCALATION: Brief description [HIGH]" -m "Details"
 
 | Want to... | Correct command |
 |------------|----------------|
-| Pour next wisp | `gc bd mol wisp mol-witness-patrol --root-only` |
+| Pour next wisp | `gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='{{ .BindingPrefix }}'` |
 | Context exhaustion | `gc runtime request-restart` |
 | Recover orphaned bead | `gc workflow delete-source <id> --apply && gc workflow reopen-source <id>` |
 | Salvage worktree work | `git add -A && git commit && git push origin HEAD` |
 | Delete worktree | `git worktree remove <path> --force` |
 | Set branch metadata | `gc bd update <id> --set-metadata branch=<name>` |
-| File stuck-agent warrant | `gc bd create --type=warrant --label=pool:dog --metadata '{...}'` |
+| File stuck-agent warrant | `gc bd create --type=task --label=warrant --metadata '{"target":"<session>","reason":"<reason>","requester":"witness","gc.routed_to":"{{ .BindingPrefix }}dog"}'` |
 
 Rig: {{ .RigName }}
 Working directory: {{ .WorkDir }}

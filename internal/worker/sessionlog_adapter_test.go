@@ -105,8 +105,8 @@ func TestSessionLogAdapterLoadHistoryCodex(t *testing.T) {
 	lines := []string{
 		fmt.Sprintf(`{"timestamp":"2026-01-02T00:00:00Z","type":"session_meta","payload":{"cwd":%q}}`, workDir),
 		`{"timestamp":"2026-01-02T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"hello codex"}]}}`,
-		`{"timestamp":"2026-01-02T00:00:02Z","type":"response_item","payload":{"type":"function_call","call_id":"call-1","name":"Read"}}`,
-		`{"timestamp":"2026-01-02T00:00:03Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"file"}}`,
+		`{"timestamp":"2026-01-02T00:00:02Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-1","name":"apply_patch","input":{"patch":"*** Begin Patch\n*** End Patch"}}}`,
+		`{"timestamp":"2026-01-02T00:00:03Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-1","output":{"output":"Success. Updated files."}}}`,
 		`{"timestamp":"2026-01-02T00:00:04Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"done"}]}}`,
 	}
 	writeLines(t, path, lines...)
@@ -138,11 +138,14 @@ func TestSessionLogAdapterLoadHistoryCodex(t *testing.T) {
 	if snapshot.Entries[1].Blocks[0].Kind != BlockKindToolUse {
 		t.Fatalf("function call block kind = %q, want %q", snapshot.Entries[1].Blocks[0].Kind, BlockKindToolUse)
 	}
+	if got := strings.TrimSpace(string(snapshot.Entries[1].Blocks[0].Input)); got != `{"patch":"*** Begin Patch\n*** End Patch"}` {
+		t.Fatalf("custom tool call input = %s, want patch payload", got)
+	}
 	if snapshot.Entries[2].Blocks[0].Kind != BlockKindToolResult {
 		t.Fatalf("function output block kind = %q, want %q", snapshot.Entries[2].Blocks[0].Kind, BlockKindToolResult)
 	}
-	if !snapshot.Entries[2].Blocks[0].Derived {
-		t.Fatalf("expected codex tool_result block to be derived")
+	if got := strings.TrimSpace(string(snapshot.Entries[2].Blocks[0].Content)); got != `{"output":"Success. Updated files."}` {
+		t.Fatalf("custom tool output content = %s, want output payload", got)
 	}
 }
 

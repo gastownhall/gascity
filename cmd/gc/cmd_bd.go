@@ -24,7 +24,11 @@ rig directory to find the correct .beads database. This command resolves
 the rig automatically from the --rig flag or by detecting the bead prefix
 in the arguments.
 
-All arguments after "gc bd" are forwarded to bd unchanged.`,
+All arguments after "gc bd" are forwarded to bd unchanged.
+
+gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
+from wedging the wrapper after printing command output. If you need
+auto-export behavior, invoke bd directly.`,
 		Example: `  gc bd --rig my-project list
   gc bd --rig my-project create "New task"
   gc bd show my-project-abc          # auto-detects rig from bead prefix
@@ -62,6 +66,7 @@ func bdCommandEnv(cityPath string, cfg *config.City, target execStoreTarget) []s
 	overrides["GC_STORE_ROOT"] = target.ScopeRoot
 	overrides["GC_STORE_SCOPE"] = target.ScopeKind
 	overrides["GC_BEADS_PREFIX"] = target.Prefix
+	applyControlBdEnv(overrides)
 	return mergeRuntimeEnv(os.Environ(), overrides)
 }
 

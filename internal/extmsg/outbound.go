@@ -37,12 +37,20 @@ type OutboundDeps struct {
 //
 // Pipeline:
 //  1. Resolve active binding for the conversation.
-//  2. Verify the binding session matches the caller.
+//  2. If a binding exists, verify the caller session owns it. If no binding
+//     exists but the caller passed a SessionID, fall back to group routing:
+//     the publish is authorized when the SessionID is a participant of the
+//     group bound to the conversation (mirrors the inbound group fallback).
 //  3. Look up adapter by conversation ref.
 //  4. Call adapter.Publish.
 //  5. Record delivery context.
 //  6. Append outbound entry to transcript.
 //  7. Emit event for the caller to fan out peer notifications.
+//
+// On the group-fallback path the publishing session is req.SessionID and
+// BindingGeneration is zero — the group authorization model has no
+// monotonic generation concept. Downstream consumers in the producer path
+// do not compare generations against zero today.
 func HandleOutbound(ctx context.Context, deps OutboundDeps, caller Caller, req OutboundRequest) (*OutboundResult, error) {
 	if deps.Registry == nil {
 		return nil, errors.New("adapter registry is nil")
@@ -53,15 +61,38 @@ func HandleOutbound(ctx context.Context, deps OutboundDeps, caller Caller, req O
 	if err != nil {
 		return nil, fmt.Errorf("resolving binding: %w", err)
 	}
-	if binding == nil {
+
+	// Step 2: Authorize the publish.
+	//
+	// publishingSession is the session we credit for the publish (delivery
+	// context owner + event subject). On the binding path this is the
+	// binding's session; on the group fallback path it is the caller's
+	// session. bindingGeneration is non-zero only on the binding path.
+	var publishingSession string
+	var bindingGeneration int64
+	switch {
+	case binding != nil:
+		if req.SessionID != "" && binding.SessionID != req.SessionID {
+			return nil, fmt.Errorf("session %q does not own binding for conversation %s/%s (bound to %s)",
+				req.SessionID, req.Conversation.Provider, req.Conversation.ConversationID, binding.SessionID)
+		}
+		publishingSession = binding.SessionID
+		bindingGeneration = binding.BindingGeneration
+	case req.SessionID == "":
+		// No binding and no caller session — preserve the historical error
+		// string so external callers that pattern-match it stay green.
 		return nil, fmt.Errorf("no active binding for conversation %s/%s",
 			req.Conversation.Provider, req.Conversation.ConversationID)
-	}
-
-	// Step 2: Verify the caller session owns the binding.
-	if req.SessionID != "" && binding.SessionID != req.SessionID {
-		return nil, fmt.Errorf("session %q does not own binding for conversation %s/%s (bound to %s)",
-			req.SessionID, req.Conversation.Provider, req.Conversation.ConversationID, binding.SessionID)
+	default:
+		decision, err := deps.Services.Groups.ResolveOutbound(ctx, req.Conversation, req.SessionID)
+		if err != nil {
+			return nil, fmt.Errorf("resolving group route: %w", err)
+		}
+		if decision == nil || decision.Match != GroupRouteParticipantMatch {
+			return nil, fmt.Errorf("no active binding for conversation %s/%s",
+				req.Conversation.Provider, req.Conversation.ConversationID)
+		}
+		publishingSession = req.SessionID
 	}
 
 	// Step 3: Look up adapter.
@@ -89,23 +120,31 @@ func HandleOutbound(ctx context.Context, deps OutboundDeps, caller Caller, req O
 		return result, nil
 	}
 
-	// Step 5: Record delivery context.
+	// Step 5: Record delivery context (binding path only).
+	//
+	// Delivery context tracks per-binding publish state and requires a
+	// non-zero BindingGeneration tied to an active binding — neither
+	// applies on the group fallback path. Recording is intentionally
+	// skipped there; transcript append below still runs and remains the
+	// authoritative outbound record for group flows.
 	now := time.Now()
-	dc := DeliveryContextRecord{
-		SessionID:         binding.SessionID,
-		Conversation:      req.Conversation,
-		BindingGeneration: binding.BindingGeneration,
-		LastPublishedAt:   now,
-		LastMessageID:     receipt.MessageID,
-		SourceSessionID:   req.SessionID,
-		Metadata:          req.Metadata,
-	}
-	if err := deps.Services.Delivery.Record(ctx, caller, dc); err != nil {
-		// Delivery context recording is important but not fatal.
-		// The message was already published.
-		result.DeliveryContext = nil
-	} else {
-		result.DeliveryContext = &dc
+	if binding != nil {
+		dc := DeliveryContextRecord{
+			SessionID:         publishingSession,
+			Conversation:      req.Conversation,
+			BindingGeneration: bindingGeneration,
+			LastPublishedAt:   now,
+			LastMessageID:     receipt.MessageID,
+			SourceSessionID:   req.SessionID,
+			Metadata:          req.Metadata,
+		}
+		if err := deps.Services.Delivery.Record(ctx, caller, dc); err != nil {
+			// Delivery context recording is important but not fatal.
+			// The message was already published.
+			result.DeliveryContext = nil
+		} else {
+			result.DeliveryContext = &dc
+		}
 	}
 
 	// Step 6: Append outbound transcript entry.
@@ -127,9 +166,12 @@ func HandleOutbound(ctx context.Context, deps OutboundDeps, caller Caller, req O
 	}
 
 	// Step 7: Emit event.
-	// Wake and peer fanout are handled by the caller.
+	// Wake and peer fanout are handled by the caller. The event subject is
+	// the publishing session — identical to binding.SessionID on the
+	// binding path (Step 2 enforces equality with req.SessionID), and the
+	// caller's session on the group fallback path.
 	if deps.EmitEvent != nil {
-		deps.EmitEvent(events.ExtMsgOutbound, binding.SessionID, OutboundEventPayload{
+		deps.EmitEvent(events.ExtMsgOutbound, publishingSession, OutboundEventPayload{
 			Provider:       req.Conversation.Provider,
 			ConversationID: req.Conversation.ConversationID,
 			Session:        req.SessionID,

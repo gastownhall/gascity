@@ -5293,6 +5293,10 @@
       "RigCreateInputBody": {
         "additionalProperties": false,
         "properties": {
+          "default_branch": {
+            "description": "Mainline branch (e.g. main, master). Auto-detected when omitted.",
+            "type": "string"
+          },
           "name": {
             "description": "Rig name.",
             "minLength": 1,
@@ -5338,6 +5342,12 @@
       "RigPatch": {
         "additionalProperties": false,
         "properties": {
+          "DefaultBranch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "Name": {
             "type": "string"
           },
@@ -5364,6 +5374,7 @@
           "Name",
           "Path",
           "Prefix",
+          "DefaultBranch",
           "Suspended"
         ],
         "type": "object"
@@ -5371,6 +5382,10 @@
       "RigPatchSetInputBody": {
         "additionalProperties": false,
         "properties": {
+          "default_branch": {
+            "description": "Override mainline branch.",
+            "type": "string"
+          },
           "name": {
             "description": "Rig name.",
             "type": "string"
@@ -5396,6 +5411,9 @@
           "agent_count": {
             "format": "int64",
             "type": "integer"
+          },
+          "default_branch": {
+            "type": "string"
           },
           "git": {
             "$ref": "#/components/schemas/GitStatus"
@@ -5433,6 +5451,10 @@
       "RigUpdateInputBody": {
         "additionalProperties": false,
         "properties": {
+          "default_branch": {
+            "description": "Mainline branch (e.g. main, master).",
+            "type": "string"
+          },
           "path": {
             "description": "Filesystem path.",
             "type": "string"
@@ -6491,6 +6513,10 @@
       "SupervisorEventListOutputBody": {
         "additionalProperties": false,
         "properties": {
+          "event_cursor": {
+            "description": "Supervisor event-stream cursor captured before the history snapshot was listed. Pass this value as after_cursor to /v0/events/stream to receive events emitted after the snapshot boundary without replaying unrelated historical backlog.",
+            "type": "string"
+          },
           "items": {
             "items": {
               "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelope"
@@ -6506,6 +6532,7 @@
           }
         },
         "required": [
+          "event_cursor",
           "items",
           "total"
         ],
@@ -11185,6 +11212,34 @@
       "WorkerOperationEventPayload": {
         "additionalProperties": false,
         "properties": {
+          "agent_name": {
+            "description": "Qualified agent identity (best-effort, absent if the session has no agent_name metadata or alias).",
+            "type": "string"
+          },
+          "bead_id": {
+            "description": "Work bead this operation is acting on (best-effort, may be absent for non-bead-scoped ops).",
+            "type": "string"
+          },
+          "cache_creation_tokens": {
+            "description": "Input tokens written into the prompt cache (best-effort, currently always absent).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "cache_read_tokens": {
+            "description": "Cached input tokens read (best-effort, currently always absent).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "completion_tokens": {
+            "description": "Output tokens (best-effort, currently always absent).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "cost_usd_estimate": {
+            "description": "Estimated invocation cost in USD (best-effort, currently always absent; see #1255 for pricing seam).",
+            "format": "double",
+            "type": "number"
+          },
           "delivered": {
             "type": "boolean"
           },
@@ -11199,10 +11254,32 @@
             "format": "date-time",
             "type": "string"
           },
+          "latency_ms": {
+            "description": "LLM invocation wall-clock latency (best-effort, currently always absent — no source).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "model": {
+            "description": "LLM model identifier (best-effort, may be absent until follow-up wiring lands).",
+            "type": "string"
+          },
           "op_id": {
             "type": "string"
           },
           "operation": {
+            "type": "string"
+          },
+          "prompt_sha": {
+            "description": "SHA-256 of the rendered prompt (best-effort, currently always absent; #1256 follow-up).",
+            "type": "string"
+          },
+          "prompt_tokens": {
+            "description": "Non-cached input tokens (best-effort, currently always absent; treat zero as 'not measured', not 'free').",
+            "format": "int64",
+            "type": "integer"
+          },
+          "prompt_version": {
+            "description": "Template version frontmatter (best-effort, currently always absent; #1256 follow-up).",
             "type": "string"
           },
           "provider": {
@@ -13076,6 +13153,7 @@
         "summary": "Get v0 city by city name agents"
       },
       "post": {
+        "description": "Creates an agent and waits until it is visible to immediate follow-up operations. If the agent is durably created but visibility confirmation is canceled or times out, the retryable 503/504 response includes a Retry-After header.",
         "operationId": "create-agent",
         "parameters": [
           {
@@ -17244,12 +17322,12 @@
             }
           },
           {
-            "description": "Thread ID.",
+            "description": "Thread ID, or any message ID in the thread.",
             "in": "path",
             "name": "id",
             "required": true,
             "schema": {
-              "description": "Thread ID.",
+              "description": "Thread ID, or any message ID in the thread.",
               "type": "string"
             }
           },

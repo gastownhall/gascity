@@ -136,8 +136,7 @@ if [ -d "$data_dir" ] && [ "$server_reachable" = true ]; then
     case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe) continue ;; esac
     # Reject names with anything outside [A-Za-z0-9_-] before interpolating
     # into the SQL identifier. The first byte must still be alnum/underscore
-    # so the command-side contract matches gc-nudge and avoids option-shaped
-    # names. Dolt permits directory names that shell
+    # to avoid option-shaped names. Dolt permits directory names that shell
     # basename happily returns (e.g. backticks, semicolons) but which
     # would break out of the identifier and execute attacker-chosen SQL
     # as the patrol user. Not an external-attack surface today — data
@@ -215,7 +214,8 @@ if [ -d "$data_dir" ]; then
     name="$(basename "$d")"
     case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe) continue ;; esac
     case "$referenced" in *" $name "*) continue ;; esac
-    size_bytes=$(du -sb "$d" 2>/dev/null | cut -f1 || echo 0)
+    size_kb=$(du -sk "$d" 2>/dev/null | cut -f1)
+    size_bytes=$(( ${size_kb:-0} * 1024 ))
     if [ "$size_bytes" -ge 1048576 ]; then
       size=$(awk "BEGIN {printf \"%.1f MB\", $size_bytes/1048576}")
     elif [ "$size_bytes" -ge 1024 ]; then

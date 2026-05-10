@@ -1,7 +1,7 @@
 description = """
 Witness patrol loop. Poured as a root-only wisp on startup:
 
-  gc bd mol wisp mol-witness-patrol --root-only
+  gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='{{binding_prefix}}'
   gc bd update $WISP --assignee=$GC_AGENT
 
 Each wisp is ONE iteration: check for work, patrol, pour the next
@@ -433,10 +433,10 @@ Do NOT kill the agent directly. File a warrant bead and let the dog pool
 handle the shutdown dance (multi-stage interrogation with due process):
 
 ```bash
-gc bd create --type=warrant \
+gc bd create --type=task \
   --title="Stuck: <agent>" \
-  --metadata '{"target":"<session-name>","reason":"No progress on <bead> for <duration>","requester":"witness"}' \
-  --label=pool:dog
+  --metadata '{"target":"<session-name>","reason":"No progress on <bead> for <duration>","requester":"witness","gc.routed_to":"{{binding_prefix}}dog"}' \
+  --label=warrant
 ```
 
 The dog pool picks up the warrant and runs `mol-shutdown-dance`, which
@@ -472,7 +472,7 @@ is already assigned — the new session resumes from context.
 
 **2. Pour next iteration BEFORE burning:**
 ```bash
-NEXT=$(gc bd mol wisp mol-witness-patrol --root-only --json | jq -r '.new_epic_id')
+NEXT=$(gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='{{binding_prefix}}' --json | jq -r '.new_epic_id')
 gc bd update "$NEXT" --assignee=$GC_AGENT
 ```
 
@@ -482,6 +482,8 @@ SEQ=$(gc events --seq)
 gc events --watch --type=bead.updated \
   --after=$SEQ --timeout {{event_timeout}}s
 ```
+
+`--timeout` makes this command self-terminating — it exits on its own when an event arrives or the timeout fires. Do not add `&`, pipe to another command, or wrap in a background process.
 
 On event: proceed immediately.
 On timeout: double the timeout (cap 300s) and proceed anyway.

@@ -361,6 +361,72 @@ func (s *Server) materializeNamedSession(store beads.Store, spec apiNamedSession
 	return s.materializeNamedSessionWithContext(context.Background(), store, spec)
 }
 
+// resolveLiveSessionByPathAlias matches identifier against the Title of an
+// active pool-session bead. Pool sessions surface their stable path-alias
+// under Title (the same string `gc session list` shows under TARGET /
+// TITLE) while their session_name is a synthetic internal id (s-gc-NNN),
+// so they are invisible to session.ResolveSessionID's session_name/alias
+// indexes.
+//
+// State filter accepts {active, awake, none}. Empty state (StateNone)
+// is treated as active for legacy/upgrade beads — matches the convention
+// in internal/session/manager.go:741,813 where reconciler paths normalize
+// `current == StateNone` to StateActive. Excluded states intentionally
+// fall through to apiSessionTargetNotFound:
+//   - asleep: not running, can't receive messages.
+//   - draining: on its way out, shouldn't get new external messages.
+//   - creating: runtime still booting; sendBackgroundMessageToSession
+//     would deliver against an incomplete provider, worse than not-found.
+//     Once the reconciler flips state=active, subsequent inbounds resolve.
+//
+// Configured named-session beads are skipped (apiIsNamedSessionBead) so
+// session.ResolveSessionID still owns those identifiers via its
+// orphan-rejection path. This step is wired AFTER session.ResolveSessionID
+// in the resolver chain so session_name/alias matches always win when both
+// could apply.
+//
+// Tiebreaker on duplicate active-pool Titles (rare misconfiguration):
+// most-recently-created bead wins; ties on CreatedAt resolve to the first
+// match in store iteration order.
+func resolveLiveSessionByPathAlias(store beads.Store, identifier string) (string, bool, error) {
+	if store == nil {
+		return "", false, nil
+	}
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return "", false, nil
+	}
+	all, err := store.List(beads.ListQuery{Label: session.LabelSession})
+	if err != nil {
+		return "", false, fmt.Errorf("resolveLiveSessionByPathAlias: listing sessions: %w", err)
+	}
+	var best beads.Bead
+	found := false
+	for _, b := range all {
+		if !session.IsSessionBeadOrRepairable(b) {
+			continue
+		}
+		if apiIsNamedSessionBead(b) {
+			continue
+		}
+		if strings.TrimSpace(b.Title) != identifier {
+			continue
+		}
+		state := session.State(b.Metadata["state"])
+		if state != session.StateActive && state != session.StateAwake && state != session.StateNone {
+			continue
+		}
+		if !found || b.CreatedAt.After(best.CreatedAt) {
+			best = b
+			found = true
+		}
+	}
+	if !found {
+		return "", false, nil
+	}
+	return best.ID, true, nil
+}
+
 func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store beads.Store, identifier string, opts apiSessionResolveOptions) (string, error) {
 	if store == nil {
 		return "", fmt.Errorf("session store unavailable")
@@ -390,6 +456,11 @@ func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store be
 		return id, nil
 	} else if !errors.Is(err, session.ErrSessionNotFound) {
 		return "", err
+	}
+	if id, ok, err := resolveLiveSessionByPathAlias(store, identifier); err != nil {
+		return "", err
+	} else if ok {
+		return id, nil
 	}
 	if opts.allowClosed {
 		if _, ok, err := s.findNamedSessionSpecForTarget(store, identifier); err != nil {

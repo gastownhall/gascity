@@ -300,6 +300,10 @@ func TestResolveBdScopeTargetErrorsOnForeignRedirect(t *testing.T) {
 }
 
 func TestBdCommandEnvUsesCanonicalRigTarget(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	_ = os.Unsetenv("BEADS_ACTOR")
+
 	cityDir := t.TempDir()
 	wantPort := strconv.Itoa(writeReachableManagedDoltState(t, cityDir))
 	rigDir := filepath.Join(t.TempDir(), "repo")
@@ -340,6 +344,39 @@ dolt.auto-start: false
 	}
 	if got := env["GC_BEADS_PREFIX"]; got != "repo" {
 		t.Fatalf("GC_BEADS_PREFIX = %q, want %q", got, "repo")
+	}
+	if _, present := env["BEADS_ACTOR"]; present {
+		t.Fatalf("BEADS_ACTOR = %q, want absent for direct gc bd env without explicit actor", env["BEADS_ACTOR"])
+	}
+}
+
+func TestBdCommandRunnerForCityDoesNotDefaultBeadsActorWhenUnset(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	_ = os.Unsetenv("BEADS_ACTOR")
+
+	origRunner := beadsExecCommandRunnerWithEnv
+	t.Cleanup(func() { beadsExecCommandRunnerWithEnv = origRunner })
+
+	var captured map[string]string
+	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
+		captured = map[string]string{}
+		for key, value := range env {
+			captured[key] = value
+		}
+		return func(_ string, _ string, _ ...string) ([]byte, error) {
+			return []byte("ok"), nil
+		}
+	}
+
+	cityPath := t.TempDir()
+	runner := bdCommandRunnerForCity(cityPath)
+	if _, err := runner(cityPath, "bd", "list", "--json"); err != nil {
+		t.Fatalf("bd runner error = %v, want nil", err)
+	}
+
+	if _, present := captured["BEADS_ACTOR"]; present {
+		t.Fatalf("BEADS_ACTOR = %q, want absent for normal bd runner without explicit actor", captured["BEADS_ACTOR"])
 	}
 }
 
@@ -465,6 +502,69 @@ set -eu
 	}
 	if !samePath(got["GC_RIG_ROOT"], rigDir) {
 		t.Fatalf("GC_RIG_ROOT = %q, want %q", got["GC_RIG_ROOT"], rigDir)
+	}
+}
+
+func TestGcBdSuppressesBdAutoExportInChildEnv(t *testing.T) {
+	origCityFlag := cityFlag
+	origRigFlag := rigFlag
+	defer func() {
+		cityFlag = origCityFlag
+		rigFlag = origRigFlag
+	}()
+	cityFlag = ""
+	rigFlag = ""
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	script := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(script, []byte(`#!/bin/sh
+set -eu
+if [ "${BD_EXPORT_AUTO:-}" != "false" ]; then
+  echo "BD_EXPORT_AUTO=${BD_EXPORT_AUTO:-}" >&2
+  exit 73
+fi
+case "${1:-}" in
+  show)
+    printf '[{"id":"gc-1","title":"ok"}]\n'
+    ;;
+  update)
+    printf '{"id":"gc-1","status":"in_progress"}\n'
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("BD_EXPORT_AUTO", "true")
+
+	for _, args := range [][]string{
+		{"show", "gc-1", "--json"},
+		{"update", "gc-1", "--claim", "--json"},
+	} {
+		var stdout, stderr bytes.Buffer
+		if got := doBd(args, &stdout, &stderr); got != 0 {
+			t.Fatalf("doBd(%v) = %d, want 0; stdout=%q stderr=%q", args, got, stdout.String(), stderr.String())
+		}
+		if strings.TrimSpace(stdout.String()) == "" {
+			t.Fatalf("doBd(%v) produced empty stdout", args)
+		}
+		if stderr.String() != "" {
+			t.Fatalf("doBd(%v) stderr = %q, want empty", args, stderr.String())
+		}
 	}
 }
 

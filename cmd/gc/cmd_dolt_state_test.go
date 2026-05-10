@@ -2768,6 +2768,9 @@ esac
 	if got["healthy"] != "true" {
 		t.Fatalf("healthy = %q, want true", got["healthy"])
 	}
+	if got["restarted"] != "true" {
+		t.Fatalf("restarted = %q, want true", got["restarted"])
+	}
 	invocation, err := os.ReadFile(invocationFile)
 	if err != nil {
 		t.Fatalf("ReadFile(invocation): %v", err)
@@ -3141,7 +3144,11 @@ INNERPY
     fi
     count=$((count + 1))
     printf '%s\n' "$count" > "$ACTIVE_BRANCH_COUNT"
-    if [ "$count" -le 4 ]; then
+    if [ "$count" -eq 1 ]; then
+      echo "pre-recovery probe failed" >&2
+      exit 1
+    fi
+    if [ "$count" -le 3 ]; then
       exit 0
     fi
     echo "final health probe failed" >&2

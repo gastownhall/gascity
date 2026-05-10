@@ -177,11 +177,6 @@ func processScopeCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	}
 
 	if isRetryAttemptSubject(subject) {
-		if err := tracePhaseErr(opts, bead.ID, "close-control", func() error {
-			return setOutcomeAndClose(store, bead.ID, "pass")
-		}); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: completing retry-attempt control bead: %w", bead.ID, err)
-		}
 		remainingOpen, err := tracePhase(opts, bead.ID, "check-open-members", func() (bool, error) {
 			return hasOpenScopeMembers(store, rootID, scopeRef, bead.ID)
 		})
@@ -220,7 +215,17 @@ func processScopeCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 					return ControlResult{}, fmt.Errorf("%s: completing scope body: %w", body.ID, err)
 				}
 			}
+			if err := tracePhaseErr(opts, bead.ID, "close-control", func() error {
+				return setOutcomeAndClose(store, bead.ID, "pass")
+			}); err != nil {
+				return ControlResult{}, fmt.Errorf("%s: completing retry-attempt control bead: %w", bead.ID, err)
+			}
 			return ControlResult{Processed: true, Action: "scope-pass"}, nil
+		}
+		if err := tracePhaseErr(opts, bead.ID, "close-control", func() error {
+			return setOutcomeAndClose(store, bead.ID, "pass")
+		}); err != nil {
+			return ControlResult{}, fmt.Errorf("%s: completing retry-attempt control bead: %w", bead.ID, err)
 		}
 		return ControlResult{Processed: true, Action: "continue"}, nil
 	}
@@ -245,11 +250,6 @@ func processScopeCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: aborting scope: %w", bead.ID, err)
 		}
-		if err := tracePhaseErr(opts, bead.ID, "close-control", func() error {
-			return setOutcomeAndClose(store, bead.ID, "pass")
-		}); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: completing control bead: %w", bead.ID, err)
-		}
 		if body.Status != "closed" {
 			if err := tracePhaseErr(opts, bead.ID, "close-body-fail", func() error {
 				return setOutcomeAndClose(store, body.ID, "fail")
@@ -257,13 +257,12 @@ func processScopeCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 				return ControlResult{}, fmt.Errorf("%s: completing scope body: %w", body.ID, err)
 			}
 		}
+		if err := tracePhaseErr(opts, bead.ID, "close-control", func() error {
+			return setOutcomeAndClose(store, bead.ID, "pass")
+		}); err != nil {
+			return ControlResult{}, fmt.Errorf("%s: completing control bead: %w", bead.ID, err)
+		}
 		return ControlResult{Processed: true, Action: "scope-fail", Skipped: skipped}, nil
-	}
-
-	if err := tracePhaseErr(opts, bead.ID, "close-control", func() error {
-		return setOutcomeAndClose(store, bead.ID, "pass")
-	}); err != nil {
-		return ControlResult{}, fmt.Errorf("%s: completing control bead: %w", bead.ID, err)
 	}
 
 	remainingOpen, err := tracePhase(opts, bead.ID, "check-open-members", func() (bool, error) {
@@ -312,7 +311,17 @@ func processScopeCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 				return ControlResult{}, fmt.Errorf("%s: completing scope body: %w", body.ID, err)
 			}
 		}
+		if err := tracePhaseErr(opts, bead.ID, "close-control", func() error {
+			return setOutcomeAndClose(store, bead.ID, "pass")
+		}); err != nil {
+			return ControlResult{}, fmt.Errorf("%s: completing control bead: %w", bead.ID, err)
+		}
 		return ControlResult{Processed: true, Action: "scope-pass"}, nil
+	}
+	if err := tracePhaseErr(opts, bead.ID, "close-control", func() error {
+		return setOutcomeAndClose(store, bead.ID, "pass")
+	}); err != nil {
+		return ControlResult{}, fmt.Errorf("%s: completing control bead: %w", bead.ID, err)
 	}
 
 	return ControlResult{Processed: true, Action: "continue"}, nil

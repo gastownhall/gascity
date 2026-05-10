@@ -20,10 +20,10 @@ type managedDoltStartReport struct {
 }
 
 func startManagedDoltProcess(cityPath, host, port, user, logLevel string, timeout time.Duration) (managedDoltStartReport, error) {
-	return startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel, timeout, true)
+	return startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel, -1, timeout, true)
 }
 
-func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel string, timeout time.Duration, publish bool) (managedDoltStartReport, error) {
+func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel string, archiveLevel int, timeout time.Duration, publish bool) (managedDoltStartReport, error) {
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
 		return managedDoltStartReport{}, err
@@ -44,6 +44,7 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
+	archiveLevel = resolveDoltArchiveLevel(archiveLevel)
 
 	report := managedDoltStartReport{}
 	currentPort := portNum
@@ -54,7 +55,7 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 		if err := managedDoltPreflightCleanupFn(cityPath); err != nil {
 			return report, err
 		}
-		if err := writeManagedDoltConfigFile(layout.ConfigFile, host, strconv.Itoa(currentPort), layout.DataDir, logLevel); err != nil {
+		if err := writeManagedDoltConfigFile(layout.ConfigFile, host, strconv.Itoa(currentPort), layout.DataDir, logLevel, archiveLevel); err != nil {
 			return report, err
 		}
 
@@ -189,6 +190,21 @@ func managedDoltLogSuffix(path string, offset int64) (string, error) {
 	return string(data[offset:]), nil
 }
 
+// resolveDoltArchiveLevel resolves the archive level for dolt auto_gc.
+// Explicit non-negative values are returned as-is. Negative values trigger
+// env-var fallback (GC_DOLT_ARCHIVE_LEVEL), defaulting to 0.
+func resolveDoltArchiveLevel(explicit int) int {
+	if explicit >= 0 {
+		return explicit
+	}
+	if v := os.Getenv("GC_DOLT_ARCHIVE_LEVEL"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			return parsed
+		}
+	}
+	return 0
+}
+
 func terminateManagedDoltPID(pid int) error {
 	if pid <= 0 {
 		return nil
@@ -210,19 +226,8 @@ func terminateManagedDoltPID(pid int) error {
 	return nil
 }
 
-// doltServerEnv augments the parent environment with overrides we need
-// applied to every managed dolt sql-server we launch. Currently it
-// disables Dolt's load-average auto-GC scheduler, which on multi-core
-// hosts (>~16 CPUs) silently prevents auto-GC from ever running. See
-// https://github.com/dolthub/dolt/issues/10944. Users who explicitly
-// set DOLT_GC_SCHEDULER are respected.
+// doltServerEnv returns the environment applied to every managed dolt
+// sql-server we launch.
 func doltServerEnv(parent []string) []string {
-	const key = "DOLT_GC_SCHEDULER"
-	prefix := key + "="
-	for _, kv := range parent {
-		if strings.HasPrefix(kv, prefix) {
-			return parent
-		}
-	}
-	return append(append([]string(nil), parent...), prefix+"NONE")
+	return append([]string(nil), parent...)
 }

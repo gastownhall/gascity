@@ -221,6 +221,23 @@ func TestApplyPatches_RigPath(t *testing.T) {
 	}
 }
 
+func TestApplyPatches_RigDefaultBranch(t *testing.T) {
+	cfg := &City{
+		Rigs: []Rig{{Name: "scamper", Path: "/scamper", DefaultBranch: "master"}},
+	}
+	err := ApplyPatches(cfg, Patches{
+		Rigs: []RigPatch{
+			{Name: "scamper", DefaultBranch: ptrStr("develop")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyPatches: %v", err)
+	}
+	if cfg.Rigs[0].DefaultBranch != "develop" {
+		t.Errorf("DefaultBranch = %q, want %q", cfg.Rigs[0].DefaultBranch, "develop")
+	}
+}
+
 func TestApplyPatches_RigSuspend(t *testing.T) {
 	cfg := &City{
 		Rigs: []Rig{{Name: "hw", Path: "/path"}},

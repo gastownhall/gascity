@@ -160,6 +160,8 @@ type RigPatch struct {
 	Path *string `toml:"path,omitempty"`
 	// Prefix overrides the bead ID prefix.
 	Prefix *string `toml:"prefix,omitempty"`
+	// DefaultBranch overrides the rig's recorded mainline branch.
+	DefaultBranch *string `toml:"default_branch,omitempty"`
 	// Suspended overrides the rig's suspended state.
 	Suspended *bool `toml:"suspended,omitempty"`
 }
@@ -423,6 +425,9 @@ func applyRigPatch(cfg *City, patch *RigPatch) error {
 			}
 			if patch.Prefix != nil {
 				r.Prefix = *patch.Prefix
+			}
+			if patch.DefaultBranch != nil {
+				r.DefaultBranch = *patch.DefaultBranch
 			}
 			if patch.Suspended != nil {
 				r.Suspended = *patch.Suspended

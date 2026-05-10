@@ -686,6 +686,73 @@ func TestArchiveNotFound(t *testing.T) {
 	}
 }
 
+// TestArchiveStampsCloseReason verifies that Archive stamps
+// close_reason=MailArchivedCloseReason on the closed message bead.
+// Without this, bd's validation.on-close=error rejects the close and
+// leaves the message open silently.
+func TestArchiveStampsCloseReason(t *testing.T) {
+	if got := len(MailArchivedCloseReason); got < 20 {
+		t.Fatalf("MailArchivedCloseReason = %q (%d chars), want >=20", MailArchivedCloseReason, got)
+	}
+
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("human", "mayor", "", "dismiss me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Archive(sent.ID); err != nil {
+		t.Fatalf("Archive: %v", err)
+	}
+
+	b, err := store.Get(sent.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := b.Metadata["close_reason"]; got != MailArchivedCloseReason {
+		t.Errorf("close_reason = %q, want %q", got, MailArchivedCloseReason)
+	}
+}
+
+// TestArchiveManyStampsCloseReason verifies the batch-archive path also
+// stamps close_reason on every closed bead.
+func TestArchiveManyStampsCloseReason(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	a, err := p.Send("human", "mayor", "", "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := p.Send("human", "mayor", "", "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := p.ArchiveMany([]string{a.ID, b.ID})
+	if err != nil {
+		t.Fatalf("ArchiveMany: %v", err)
+	}
+	for i, r := range results {
+		if r.Err != nil {
+			t.Errorf("ArchiveMany[%d].Err = %v", i, r.Err)
+		}
+	}
+	for _, id := range []string{a.ID, b.ID} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("store.Get(%s): %v", id, err)
+		}
+		if got.Status != "closed" {
+			t.Errorf("bead %s status = %q, want closed", id, got.Status)
+		}
+		if reason := got.Metadata["close_reason"]; reason != MailArchivedCloseReason {
+			t.Errorf("bead %s close_reason = %q, want %q", id, reason, MailArchivedCloseReason)
+		}
+	}
+}
+
 // --- Delete ---
 
 func TestDelete(t *testing.T) {
@@ -1394,6 +1461,110 @@ func TestThreadEmpty(t *testing.T) {
 	}
 }
 
+// TestThreadAcceptsMessageIDOfOriginal locks in the fix for #1526. Callers
+// (notably `gc mail thread <id>` from cmd/gc/cmd_mail.go) pass a *message*
+// bead-ID, not the underlying thread-ID. Provider.Thread must resolve the
+// message-ID to its thread label and return the thread.
+func TestThreadAcceptsMessageIDOfOriginal(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("alice", "bob", "Hello", "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Reply(sent.ID, "bob", "Re: Hello", "second"); err != nil {
+		t.Fatal(err)
+	}
+
+	msgs, err := p.Thread(sent.ID)
+	if err != nil {
+		t.Fatalf("Thread(%q): %v", sent.ID, err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("Thread(messageID) = %d messages, want 2", len(msgs))
+	}
+	if msgs[0].Body != "first" || msgs[1].Body != "second" {
+		t.Errorf("Thread(messageID) bodies = [%q, %q], want [first, second]", msgs[0].Body, msgs[1].Body)
+	}
+}
+
+// TestThreadSurfacesNonNotFoundStoreErrors verifies that a real store I/O
+// failure during message-id resolution propagates to the caller instead of
+// being silently swallowed as "treat input as thread-id".
+func TestThreadSurfacesNonNotFoundStoreErrors(t *testing.T) {
+	mem := beads.NewMemStore()
+	failing := &getErrorStore{MemStore: mem, getErr: errors.New("simulated I/O failure")}
+	p := New(failing)
+
+	_, err := p.Thread("anything")
+	if err == nil {
+		t.Fatal("Thread: expected error from underlying store, got nil")
+	}
+	if !strings.Contains(err.Error(), "simulated I/O failure") {
+		t.Errorf("Thread: error %q does not wrap underlying store error", err)
+	}
+}
+
+func TestThreadRejectsNonMessageBeadID(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+	task, err := store.Create(beads.Bead{
+		Title:  "not mail",
+		Type:   "task",
+		Labels: []string{"thread:looks-mail-like"},
+	})
+	if err != nil {
+		t.Fatalf("Create task: %v", err)
+	}
+
+	_, err = p.Thread(task.ID)
+	if err == nil {
+		t.Fatal("Thread(non-message bead ID): expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), `bead "`) || !strings.Contains(err.Error(), "want message") {
+		t.Fatalf("Thread(non-message bead ID) error = %q, want clear non-message diagnostic", err)
+	}
+}
+
+// getErrorStore returns a custom error from Get; List defers to MemStore.
+type getErrorStore struct {
+	*beads.MemStore
+	getErr error
+}
+
+func (s *getErrorStore) Get(_ string) (beads.Bead, error) {
+	return beads.Bead{}, s.getErr
+}
+
+// TestThreadAcceptsMessageIDOfReply ensures the resolution works regardless
+// of which message in the thread the caller hands us — the parent OR any
+// reply should both surface the full thread.
+func TestThreadAcceptsMessageIDOfReply(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("alice", "bob", "Hello", "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply, err := p.Reply(sent.ID, "bob", "Re: Hello", "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	msgs, err := p.Thread(reply.ID)
+	if err != nil {
+		t.Fatalf("Thread(%q): %v", reply.ID, err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("Thread(replyID) = %d messages, want 2", len(msgs))
+	}
+	if msgs[0].Body != "first" || msgs[1].Body != "second" {
+		t.Errorf("Thread(replyID) bodies = [%q, %q], want [first, second]", msgs[0].Body, msgs[1].Body)
+	}
+}
+
 // --- Count ---
 
 func TestCount(t *testing.T) {
@@ -1475,6 +1646,111 @@ func TestCheck(t *testing.T) {
 	}
 	if hasLabel(b.Labels, "read") {
 		t.Error("Check should not add read label")
+	}
+}
+
+// --- Provider session-list cache (ga-q6ct) ---
+
+// countingSessionListStore counts broad gc:session List calls and forwards
+// the rest. Used to pin that Provider memoizes the gc:session enumeration
+// across multiple Inbox calls in a single command invocation.
+type countingSessionListStore struct {
+	*beads.MemStore
+	sessionListCalls int
+}
+
+func (s *countingSessionListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == session.LabelSession && len(query.Metadata) == 0 {
+		s.sessionListCalls++
+	}
+	return s.MemStore.List(query)
+}
+
+func TestProvider_DefaultProviderSeesNewHistoricalAliasSessionAcrossCalls(t *testing.T) {
+	// Pin: the default Provider is safe for long-lived shared use. If a lookup
+	// runs before the matching session exists, later lookups must see newly
+	// created sessions instead of reusing a stale provider-lifetime snapshot.
+	store := &countingSessionListStore{MemStore: beads.NewMemStore()}
+	p := New(store)
+
+	if _, err := p.Inbox("old-route"); err != nil {
+		t.Fatalf("initial Inbox(old-route): %v", err)
+	}
+
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "worker-a",
+			"alias_history": "old-route",
+			"session_name":  "wf__a",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	if _, err := p.Send("human", sessionBead.Metadata["alias"], "", "for old route"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	msgs, err := p.Inbox("old-route")
+	if err != nil {
+		t.Fatalf("second Inbox(old-route): %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("Inbox(old-route) = %d messages, want 1", len(msgs))
+	}
+	if msgs[0].Body != "for old route" {
+		t.Fatalf("Inbox(old-route) body = %q, want %q", msgs[0].Body, "for old route")
+	}
+	if store.sessionListCalls != 2 {
+		t.Errorf("broad gc:session List calls = %d, want 2 (default provider must refetch per call to avoid stale shared state)", store.sessionListCalls)
+	}
+}
+
+func TestProviderCached_BroadSessionListCachedAcrossInboxCalls(t *testing.T) {
+	// Pin: the command-scoped cached Provider still dedupes the broad
+	// historical-alias session scan within one provider lifetime.
+	store := &countingSessionListStore{MemStore: beads.NewMemStore()}
+
+	// Two live sessions with alias_history that includes the route we'll
+	// search for. AliasHistory lookup is the path that does the broad scan.
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "worker-a",
+			"alias_history": "old-route",
+			"session_name":  "wf__a",
+		},
+	}); err != nil {
+		t.Fatalf("Create session A: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "worker-b",
+			"alias_history": "old-route-2",
+			"session_name":  "wf__b",
+		},
+	}); err != nil {
+		t.Fatalf("Create session B: %v", err)
+	}
+
+	p := NewCached(store)
+
+	// Exercise three independent Inbox calls that each force the
+	// alias-history fallback (no current alias matches "old-route" or
+	// "old-route-2"). Without the cache: 3 broad scans. With cache: 1.
+	for _, recipient := range []string{"old-route", "old-route-2", "old-route"} {
+		if _, err := p.Inbox(recipient); err != nil {
+			t.Fatalf("Inbox(%q): %v", recipient, err)
+		}
+	}
+
+	if store.sessionListCalls != 1 {
+		t.Errorf("broad gc:session List calls = %d, want 1 (Provider must cache the enumeration)", store.sessionListCalls)
 	}
 }
 

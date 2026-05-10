@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"strings"
 	"sync"
@@ -76,6 +77,10 @@ type CacheStats struct {
 	LastProblemAt           time.Time
 	LastProblem             string
 	State                   string
+	// StaggerOffsetMs is the one-shot startup delay applied between Prime
+	// and the first reconciler tick, in milliseconds. Set once when
+	// StartReconciler runs; zero if stagger is disabled.
+	StaggerOffsetMs int64
 }
 
 const (
@@ -85,6 +90,69 @@ const (
 	cacheReconcileIntervalMedium = 60 * time.Second
 	cacheReconcileIntervalLarge  = 120 * time.Second
 )
+
+// StaggerOption configures the deterministic startup stagger applied
+// between Prime and the first reconciler tick. N agents starting in
+// lockstep would otherwise hit the shared dolt server simultaneously;
+// the stagger spreads first-tick load across a 0–30 s window.
+//
+// Construct one via WithStaggerAuto, WithStaggerOff, or
+// WithStaggerFixed at the call site for self-documenting intent. The
+// zero value is equivalent to WithStaggerOff().
+type StaggerOption struct {
+	auto     bool
+	fixed    bool
+	explicit time.Duration
+}
+
+// WithStaggerAuto enables a deterministic per-agent stagger derived
+// from FNV-32a(agentID) mod cacheReconcileIntervalSmall. The stagger
+// is reproducible across runs given the same agent ID.
+func WithStaggerAuto() StaggerOption {
+	return StaggerOption{auto: true}
+}
+
+// WithStaggerOff disables stagger; the reconciler enters its loop with
+// no startup delay. This is the default for tests so existing behavior
+// is preserved.
+func WithStaggerOff() StaggerOption {
+	return StaggerOption{}
+}
+
+// WithStaggerFixed sets an explicit stagger duration regardless of
+// agentID. Negative durations clamp to zero.
+func WithStaggerFixed(d time.Duration) StaggerOption {
+	if d < 0 {
+		d = 0
+	}
+	return StaggerOption{fixed: true, explicit: d}
+}
+
+// resolve returns the concrete stagger duration for this option.
+// agentID is consulted only when the option is WithStaggerAuto.
+func (o StaggerOption) resolve(agentID string) time.Duration {
+	switch {
+	case o.fixed:
+		return o.explicit
+	case o.auto:
+		return computeAutoStagger(agentID)
+	}
+	return 0
+}
+
+// computeAutoStagger hashes agentID with FNV-32a and reduces it modulo
+// cacheReconcileIntervalSmall (in milliseconds). The result lies in
+// [0, cacheReconcileIntervalSmall) and is fully deterministic — no
+// time-seeding — so test runs reproduce.
+func computeAutoStagger(agentID string) time.Duration {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(agentID))
+	modMs := cacheReconcileIntervalSmall.Milliseconds()
+	if modMs <= 0 {
+		return 0
+	}
+	return time.Duration(int64(h.Sum32())%modMs) * time.Millisecond
+}
 
 // NewCachingStore wraps a BdStore with an in-memory read cache.
 // Call Prime() before serving reads, then StartReconciler() for
@@ -146,6 +214,16 @@ func (c *CachingStore) ownsBeadID(id string) bool {
 	return strings.HasPrefix(id, c.idPrefix+"-")
 }
 
+// WaitForParentProjection forwards the optional parent-projection wait
+// capability to the backing store when available.
+func (c *CachingStore) WaitForParentProjection(ctx context.Context, id, oldParentID, newParentID string) error {
+	waiter, ok := c.backing.(ParentProjectionWaiter)
+	if !ok {
+		return nil
+	}
+	return waiter.WaitForParentProjection(ctx, id, oldParentID, newParentID)
+}
+
 func (c *CachingStore) noteMutationLocked(ids ...string) uint64 {
 	c.mutationSeq++
 	seq := c.mutationSeq
@@ -194,6 +272,16 @@ func (c *CachingStore) PrimeActive() error {
 		all = append(all, beads...)
 	}
 
+	beadMap := make(map[string]Bead, len(all))
+	for _, b := range all {
+		beadMap[b.ID] = cloneBead(b)
+	}
+	depMap, depsComplete, depErr := c.fetchDepsForIDs(beadIDs(beadMap))
+	if depErr != nil {
+		partialErr = errors.Join(partialErr, depErr)
+		c.recordProblem("prime active dep cache", depErr)
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := time.Now()
@@ -210,6 +298,11 @@ func (c *CachingStore) PrimeActive() error {
 			continue
 		}
 		c.beads[b.ID] = cloneBead(b)
+		if depsComplete && depErr == nil {
+			c.deps[b.ID] = cloneDeps(depMap[b.ID])
+		} else {
+			c.deps[b.ID] = depsFromBeadFields(b)
+		}
 		delete(c.deletedSeq, b.ID)
 		if !recentLocalMutation(c.localBeadAt[b.ID], now) {
 			delete(c.beadSeq, b.ID)
@@ -271,7 +364,7 @@ func (c *CachingStore) Prime(_ context.Context) error {
 	defer c.mu.Unlock()
 	if c.mutationSeq == startSeq {
 		nextBeads := beadMap
-		nextDeps := depMap
+		nextDeps := depsFromBeads(beadMap, depMap, depsComplete && depErr == nil)
 		nextDirty := make(map[string]struct{})
 		nextBeadSeq := make(map[string]uint64)
 		nextLocalBeadAt := make(map[string]time.Time)
@@ -314,8 +407,10 @@ func (c *CachingStore) Prime(_ context.Context) error {
 			c.beads[id] = b
 			delete(c.deletedSeq, id)
 			delete(c.beadSeq, id)
-			if deps, ok := depMap[id]; ok {
-				c.deps[id] = deps
+			if depsComplete && depErr == nil {
+				c.deps[id] = cloneDeps(depMap[id])
+			} else {
+				c.deps[id] = depsFromBeadFields(b)
 			}
 		}
 		c.depsComplete = false
@@ -330,10 +425,24 @@ func (c *CachingStore) Prime(_ context.Context) error {
 }
 
 // StartReconciler launches watchdog reconciliation. Cancel ctx to stop.
-func (c *CachingStore) StartReconciler(ctx context.Context) {
+// The stagger applies a one-time delay between this call and the first
+// reconciler tick (see StaggerOption); agentID is consulted only when
+// stagger is WithStaggerAuto. A single "beads cache: stagger=Nms
+// agent=..." log line is emitted before the loop starts, even when the
+// resolved stagger is zero, so absence is unambiguous.
+func (c *CachingStore) StartReconciler(ctx context.Context, stagger StaggerOption, agentID string) {
 	ctx, cancel := context.WithCancel(ctx)
 	c.cancelFn = cancel
-	go c.reconcileLoop(ctx)
+
+	offset := stagger.resolve(agentID)
+
+	c.mu.Lock()
+	c.stats.StaggerOffsetMs = offset.Milliseconds()
+	c.mu.Unlock()
+
+	log.Printf("beads cache: stagger=%dms agent=%s", offset.Milliseconds(), agentID)
+
+	go c.reconcileLoop(ctx, offset)
 }
 
 // StopReconciler cancels the background reconciler.
@@ -435,6 +544,44 @@ func (c *CachingStore) fetchDepsForIDs(ids []string) (map[string][]Dep, bool, er
 		depMap[id] = cloneDeps(deps)
 	}
 	return depMap, true, nil
+}
+
+func depsFromBeads(beadMap map[string]Bead, depMap map[string][]Dep, useDepMap bool) map[string][]Dep {
+	deps := make(map[string][]Dep, len(beadMap))
+	for id, b := range beadMap {
+		if useDepMap {
+			deps[id] = cloneDeps(depMap[id])
+			continue
+		}
+		deps[id] = depsFromBeadFields(b)
+	}
+	return deps
+}
+
+func depsFromBeadFields(b Bead) []Dep {
+	// Structured dependencies are the authoritative bead representation when
+	// present; Needs is the legacy shorthand used when no dependency objects
+	// were carried on the bead payload.
+	if len(b.Dependencies) > 0 {
+		return cloneDeps(b.Dependencies)
+	}
+	if len(b.Needs) == 0 {
+		return nil
+	}
+	deps := make([]Dep, 0, len(b.Needs))
+	for _, need := range b.Needs {
+		depType := "blocks"
+		dependsOnID := need
+		if strings.Contains(need, ":") {
+			parts := strings.SplitN(need, ":", 2)
+			if parts[0] != "" && parts[1] != "" {
+				depType = parts[0]
+				dependsOnID = parts[1]
+			}
+		}
+		deps = append(deps, Dep{IssueID: b.ID, DependsOnID: dependsOnID, Type: depType})
+	}
+	return deps
 }
 
 func cloneDeps(deps []Dep) []Dep {

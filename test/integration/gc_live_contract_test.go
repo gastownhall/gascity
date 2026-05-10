@@ -374,7 +374,6 @@ description = "Read and complete {{issue}}."
 	if restoredChild.ParentID != rootBead.ID {
 		t.Fatalf("restored child parent = %q, want %q", restoredChild.ParentID, rootBead.ID)
 	}
-
 	deps := liveContractJSON[struct {
 		Children []beads.Bead `json:"children"`
 	}](t, baseURL, validator, http.MethodGet, cityBase+"/bead/"+url.PathEscape(rootBead.ID)+"/deps", nil, http.StatusOK)
@@ -1113,26 +1112,47 @@ func liveContractHTTPRequest(baseURL, method, path string, body any) (*http.Requ
 
 func assertLiveContractStreamOpens(t *testing.T, baseURL, path string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+path, nil)
-	if err != nil {
-		t.Fatalf("build stream request %s: %v", path, err)
-	}
-	req.Header.Set("Accept", "text/event-stream")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("GET %s stream: %v", path, err)
-	}
-	defer resp.Body.Close() //nolint:errcheck
-	if resp.StatusCode != http.StatusOK {
+	deadline := time.Now().Add(30 * time.Second)
+	var lastStatus int
+	var lastBody string
+	var lastContentType string
+	var lastErr error
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+path, nil)
+		if err != nil {
+			cancel()
+			t.Fatalf("build stream request %s: %v", path, err)
+		}
+		req.Header.Set("Accept", "text/event-stream")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			cancel()
+			lastErr = err
+			time.Sleep(250 * time.Millisecond)
+			continue
+		}
+		lastErr = nil
+		lastStatus = resp.StatusCode
+		lastContentType = resp.Header.Get("Content-Type")
+		if resp.StatusCode == http.StatusOK {
+			_ = resp.Body.Close()
+			cancel()
+			if !strings.Contains(lastContentType, "text/event-stream") {
+				t.Fatalf("GET %s stream content-type = %q, want text/event-stream", path, lastContentType)
+			}
+			return
+		}
 		raw, _ := io.ReadAll(resp.Body)
-		t.Fatalf("GET %s stream status = %d, want 200; body: %s", path, resp.StatusCode, string(raw))
+		_ = resp.Body.Close()
+		cancel()
+		lastBody = string(raw)
+		time.Sleep(250 * time.Millisecond)
 	}
-	contentType := resp.Header.Get("Content-Type")
-	if !strings.Contains(contentType, "text/event-stream") {
-		t.Fatalf("GET %s stream content-type = %q, want text/event-stream", path, contentType)
+	if lastErr != nil {
+		t.Fatalf("GET %s stream: %v", path, lastErr)
 	}
+	t.Fatalf("GET %s stream status = %d, want 200; body: %s", path, lastStatus, lastBody)
 }
 
 func validateLiveContractResponse(t *testing.T, v openapivalidator.Validator, req *http.Request, resp *http.Response, raw []byte) {

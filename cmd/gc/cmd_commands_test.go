@@ -388,6 +388,220 @@ func TestTryDiscoveredCommandFallback_PrefersLongestMatch(t *testing.T) {
 	}
 }
 
+func TestTryDiscoveredCommandFallback_HelpFlagShowsHelpWithoutRunning(t *testing.T) {
+	dir := t.TempDir()
+	sourceDir := filepath.Join(dir, "pack", "commands", "status")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scriptPath := filepath.Join(sourceDir, "run.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\necho should-not-run\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	helpPath := filepath.Join(sourceDir, "help.md")
+	if err := os.WriteFile(helpPath, []byte("Status help from pack.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "testcity"},
+		PackCommands: []config.DiscoveredCommand{{
+			BindingName: "gs",
+			PackName:    "mypack",
+			Command:     []string{"status"},
+			Description: "Show status",
+			RunScript:   scriptPath,
+			HelpFile:    helpPath,
+			SourceDir:   sourceDir,
+		}},
+	}
+
+	var stdout, stderr bytes.Buffer
+	ok := tryDiscoveredCommandFallback([]string{"gs", "status", "--help"}, cfg, dir, &stdout, &stderr)
+	if !ok {
+		t.Fatal("tryDiscoveredCommandFallback returned false, want true")
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Status help from pack.") {
+		t.Fatalf("stdout missing discovered help, got:\n%s", out)
+	}
+	if strings.Contains(out, "should-not-run") {
+		t.Fatalf("help should not execute the discovered command, got:\n%s", out)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestTryDiscoveredCommandFallback_HelpAfterTerminatorPassesThrough(t *testing.T) {
+	dir := t.TempDir()
+	sourceDir := filepath.Join(dir, "pack", "commands", "status")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scriptPath := filepath.Join(sourceDir, "run.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nprintf 'args=%s %s\\n' \"$1\" \"$2\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	helpPath := filepath.Join(sourceDir, "help.md")
+	if err := os.WriteFile(helpPath, []byte("Status help from pack.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "testcity"},
+		PackCommands: []config.DiscoveredCommand{{
+			BindingName: "gs",
+			PackName:    "mypack",
+			Command:     []string{"status"},
+			Description: "Show status",
+			RunScript:   scriptPath,
+			HelpFile:    helpPath,
+			SourceDir:   sourceDir,
+		}},
+	}
+
+	var stdout, stderr bytes.Buffer
+	ok := tryDiscoveredCommandFallback([]string{"gs", "status", "--", "--help"}, cfg, dir, &stdout, &stderr)
+	if !ok {
+		t.Fatal("tryDiscoveredCommandFallback returned false, want true")
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "args=-- --help") {
+		t.Fatalf("stdout missing script passthrough args, got:\n%s", out)
+	}
+	if strings.Contains(out, "Status help from pack.") {
+		t.Fatalf("terminator should pass --help through to the script, got:\n%s", out)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestTryDiscoveredCommandFallback_NamespaceHelpListsChildren(t *testing.T) {
+	dir := t.TempDir()
+	repoSyncDir := filepath.Join(dir, "pack", "commands", "repo", "sync")
+	repoCleanDir := filepath.Join(dir, "pack", "commands", "repo", "clean")
+	for _, p := range []string{repoSyncDir, repoCleanDir} {
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(p, "run.sh"), []byte("#!/bin/sh\necho should-not-run\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "testcity"},
+		PackCommands: []config.DiscoveredCommand{
+			{
+				BindingName: "gs",
+				PackName:    "mypack",
+				Command:     []string{"repo", "sync"},
+				Description: "Sync repo",
+				RunScript:   filepath.Join(repoSyncDir, "run.sh"),
+				SourceDir:   repoSyncDir,
+			},
+			{
+				BindingName: "gs",
+				PackName:    "mypack",
+				Command:     []string{"repo", "clean"},
+				Description: "Clean repo",
+				RunScript:   filepath.Join(repoCleanDir, "run.sh"),
+				SourceDir:   repoCleanDir,
+			},
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	ok := tryDiscoveredCommandFallback([]string{"gs", "repo", "--help"}, cfg, dir, &stdout, &stderr)
+	if !ok {
+		t.Fatal("tryDiscoveredCommandFallback returned false, want true")
+	}
+	out := stdout.String()
+	for _, want := range []string{"Available commands for gs repo:", "clean", "Clean repo", "sync", "Sync repo"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q, got:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "should-not-run") {
+		t.Fatalf("namespace help should not execute a discovered command, got:\n%s", out)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestPrintDiscoveredCommandHelpFallbacks(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		entry config.DiscoveredCommand
+		want  string
+	}{
+		{
+			name:  "description",
+			entry: config.DiscoveredCommand{Command: []string{"status"}, Description: "Show status"},
+			want:  "Show status\n",
+		},
+		{
+			name:  "generic",
+			entry: config.DiscoveredCommand{Command: []string{"repo", "sync"}},
+			want:  "Pack command: repo sync\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			printDiscoveredCommandHelp(&stdout, tc.entry)
+			if got := stdout.String(); got != tc.want {
+				t.Fatalf("stdout = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPrintDiscoveredCommandListFiltersPrefixAndSkipsExactNamespace(t *testing.T) {
+	entries := []config.DiscoveredCommand{
+		{Command: []string{"repo"}, Description: "Repo namespace"},
+		{Command: []string{"repo", "sync"}, Description: "Sync repo"},
+		{Command: []string{"repo", "clean"}, Description: "Clean repo"},
+		{Command: []string{"status"}, Description: "Show status"},
+	}
+
+	var stdout bytes.Buffer
+	printDiscoveredCommandList(&stdout, "gs", []string{"repo"}, entries)
+
+	out := stdout.String()
+	for _, want := range []string{
+		"Available commands for gs repo:",
+		"sync",
+		"Sync repo",
+		"clean",
+		"Clean repo",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q, got:\n%s", want, out)
+		}
+	}
+	for _, notWant := range []string{"Repo namespace", "status", "Show status"} {
+		if strings.Contains(out, notWant) {
+			t.Fatalf("stdout unexpectedly contained %q, got:\n%s", notWant, out)
+		}
+	}
+}
+
+func TestDiscoveredCommandPrefixHelpers(t *testing.T) {
+	entries := []config.DiscoveredCommand{{Command: []string{"repo", "sync"}}}
+	if !discoveredCommandPrefixExists(entries, []string{"repo"}) {
+		t.Fatal("expected repo prefix to exist")
+	}
+	if discoveredCommandPrefixExists(entries, []string{"missing"}) {
+		t.Fatal("missing prefix unexpectedly exists")
+	}
+	if commandHasPrefix([]string{"repo"}, []string{"repo", "sync"}) {
+		t.Fatal("short command unexpectedly matched longer prefix")
+	}
+}
+
 func TestAddDiscoveredCommandsToRoot_DedupsDuplicateLeaf(t *testing.T) {
 	root := &cobra.Command{Use: "gc"}
 	entries := []config.DiscoveredCommand{

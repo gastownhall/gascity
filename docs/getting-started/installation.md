@@ -62,7 +62,8 @@ gc version
 <Warning>
 If you use Oh My Zsh with the `git` plugin, `gc` may already be an alias for
 `git commit --verbose`. Run `command gc version` once to bypass the alias. For
-a persistent fix, add `unalias gc 2>/dev/null` after Oh My Zsh loads in
+a persistent fix, add `unalias gc 2>/dev/null` or
+`zstyle ':omz:plugins:git' aliases no 'gc'` after Oh My Zsh loads in
 `~/.zshrc`, or put that line in a file such as
 `~/.oh-my-zsh/custom/gascity.zsh`.
 </Warning>
@@ -108,7 +109,7 @@ Release tarballs are published for every tagged version. Supported platforms:
 
 ```bash
 # Set the version you want (check https://github.com/gastownhall/gascity/releases)
-VERSION=1.0.0
+VERSION=1.1.0
 
 # Detect platform
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -226,6 +227,11 @@ cd ~/my-city
 
 `gc init` registers the city with the supervisor and starts it automatically.
 See the [Quickstart](/getting-started/quickstart) for a complete walkthrough.
+
+Gas City ships a JSONL archive that snapshots every bead database for
+disaster recovery. By default it runs in local-only mode and keeps commits
+on this host. To enable off-box backup, see
+[JSONL archive push failures](/getting-started/troubleshooting#jsonl-archive-push-failures).
 
 ## Docs preview
 

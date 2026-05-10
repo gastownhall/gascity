@@ -2,7 +2,8 @@
 # gc dolt start — Start the Dolt server if not already running.
 #
 # Delegates to the gc-beads-bd exec: provider's start operation.
-# Used by the dolt-health order to restart after crashes.
+# Operator command for explicit lifecycle recovery; the dolt-health order is
+# diagnostic-only and does not restart the server automatically.
 #
 # Environment: GC_CITY_PATH
 set -e

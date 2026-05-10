@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -112,6 +113,38 @@ start_command = "claude --dangerously-skip-permissions"
 	}
 	if cfg.Agents[0].StartCommand != "claude --dangerously-skip-permissions" {
 		t.Errorf("Agents[0].StartCommand = %q, want %q", cfg.Agents[0].StartCommand, "claude --dangerously-skip-permissions")
+	}
+}
+
+func TestParseRigDefaultBranch(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "lights"
+
+[[rigs]]
+name = "scamper"
+path = "/scamper"
+default_branch = "master"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(cfg.Rigs) != 1 {
+		t.Fatalf("len(Rigs) = %d, want 1", len(cfg.Rigs))
+	}
+	if got := cfg.Rigs[0].DefaultBranch; got != "master" {
+		t.Errorf("DefaultBranch = %q, want %q", got, "master")
+	}
+	if got := cfg.Rigs[0].EffectiveDefaultBranch(); got != "master" {
+		t.Errorf("EffectiveDefaultBranch = %q, want %q", got, "master")
+	}
+}
+
+func TestEffectiveDefaultBranch_EmptyWhenUnset(t *testing.T) {
+	r := Rig{Name: "rig"}
+	if got := r.EffectiveDefaultBranch(); got != "" {
+		t.Errorf("EffectiveDefaultBranch() = %q, want empty", got)
 	}
 }
 
@@ -911,11 +944,22 @@ name = "bright-lights"
 provider = "claude"
 
 [providers.kiro]
-command = "kiro"
-args = ["--autonomous"]
+command = "kiro-cli"
+args = ["chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"]
 prompt_mode = "arg"
 ready_delay_ms = 5000
-process_names = ["kiro", "node"]
+process_names = ["kiro-cli", "kiro", "node"]
+supports_hooks = true
+instructions_file = "AGENTS.md"
+resume_flag = "--resume"
+resume_style = "flag"
+
+[providers.kiro.env]
+KIRO_AGENT_MODE = "headless"
+
+[providers.kiro.permission_modes]
+default = "--trust-mode default"
+unrestricted = "--trust-mode full"
 
 [[agent]]
 name = "mayor"
@@ -931,17 +975,104 @@ name = "mayor"
 	if !ok {
 		t.Fatal("Providers[kiro] not found")
 	}
-	if kiro.Command != "kiro" {
-		t.Errorf("Command = %q, want %q", kiro.Command, "kiro")
+	if kiro.Command != "kiro-cli" {
+		t.Errorf("Command = %q, want %q", kiro.Command, "kiro-cli")
 	}
-	if len(kiro.Args) != 1 || kiro.Args[0] != "--autonomous" {
-		t.Errorf("Args = %v, want [--autonomous]", kiro.Args)
+	if want := []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"}; !reflect.DeepEqual(kiro.Args, want) {
+		t.Errorf("Args = %v, want %v", kiro.Args, want)
 	}
 	if kiro.PromptMode != "arg" {
 		t.Errorf("PromptMode = %q, want %q", kiro.PromptMode, "arg")
 	}
 	if kiro.ReadyDelayMs != 5000 {
 		t.Errorf("ReadyDelayMs = %d, want 5000", kiro.ReadyDelayMs)
+	}
+	if len(kiro.ProcessNames) != 3 || kiro.ProcessNames[0] != "kiro-cli" || kiro.ProcessNames[1] != "kiro" || kiro.ProcessNames[2] != "node" {
+		t.Errorf("ProcessNames = %v, want [kiro-cli kiro node]", kiro.ProcessNames)
+	}
+	if !derefBool(kiro.SupportsHooks) {
+		t.Error("SupportsHooks = false, want true")
+	}
+	if kiro.InstructionsFile != "AGENTS.md" {
+		t.Errorf("InstructionsFile = %q, want %q", kiro.InstructionsFile, "AGENTS.md")
+	}
+	if kiro.ResumeFlag != "--resume" {
+		t.Errorf("ResumeFlag = %q, want %q", kiro.ResumeFlag, "--resume")
+	}
+	if kiro.ResumeStyle != "flag" {
+		t.Errorf("ResumeStyle = %q, want %q", kiro.ResumeStyle, "flag")
+	}
+	if kiro.Env["KIRO_AGENT_MODE"] != "headless" {
+		t.Errorf("Env[KIRO_AGENT_MODE] = %q, want %q", kiro.Env["KIRO_AGENT_MODE"], "headless")
+	}
+	if kiro.PermissionModes["unrestricted"] != "--trust-mode full" {
+		t.Errorf("PermissionModes[unrestricted] = %q, want %q", kiro.PermissionModes["unrestricted"], "--trust-mode full")
+	}
+	if kiro.PermissionModes["default"] != "--trust-mode default" {
+		t.Errorf("PermissionModes[default] = %q, want %q", kiro.PermissionModes["default"], "--trust-mode default")
+	}
+}
+
+func TestParseKiroProviderWithOptionsSchema(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test"
+
+[providers.kiro]
+command = "kiro-cli"
+args = ["chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"]
+prompt_mode = "arg"
+ready_delay_ms = 5000
+
+[[providers.kiro.options_schema]]
+key = "permission_mode"
+label = "Trust Mode"
+type = "select"
+default = "unrestricted"
+
+  [[providers.kiro.options_schema.choices]]
+  value = "default"
+  label = "Default trust"
+  flag_args = ["--trust-mode", "default"]
+
+  [[providers.kiro.options_schema.choices]]
+  value = "unrestricted"
+  label = "Full trust"
+  flag_args = ["--trust-mode", "full"]
+
+[providers.kiro.option_defaults]
+permission_mode = "unrestricted"
+
+[[agent]]
+name = "worker"
+provider = "kiro"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	kiro, ok := cfg.Providers["kiro"]
+	if !ok {
+		t.Fatal("Providers[kiro] not found")
+	}
+	if len(kiro.OptionsSchema) != 1 {
+		t.Fatalf("len(OptionsSchema) = %d, want 1", len(kiro.OptionsSchema))
+	}
+	opt := kiro.OptionsSchema[0]
+	if opt.Key != "permission_mode" {
+		t.Errorf("OptionsSchema[0].Key = %q, want %q", opt.Key, "permission_mode")
+	}
+	if len(opt.Choices) != 2 {
+		t.Fatalf("len(Choices) = %d, want 2", len(opt.Choices))
+	}
+	if opt.Choices[1].Value != "unrestricted" {
+		t.Errorf("Choices[1].Value = %q, want %q", opt.Choices[1].Value, "unrestricted")
+	}
+	if len(opt.Choices[1].FlagArgs) != 2 || opt.Choices[1].FlagArgs[1] != "full" {
+		t.Errorf("Choices[1].FlagArgs = %v, want [--trust-mode full]", opt.Choices[1].FlagArgs)
+	}
+	if kiro.OptionDefaults["permission_mode"] != "unrestricted" {
+		t.Errorf("OptionDefaults[permission_mode] = %q, want %q", kiro.OptionDefaults["permission_mode"], "unrestricted")
 	}
 }
 
@@ -1021,9 +1152,17 @@ func TestProvidersRoundTrip(t *testing.T) {
 		Workspace: Workspace{Name: "test"},
 		Providers: map[string]ProviderSpec{
 			"kiro": {
-				Command:    "kiro",
-				Args:       []string{"--autonomous"},
-				PromptMode: "arg",
+				Command:          "kiro-cli",
+				Args:             []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
+				PromptMode:       "arg",
+				ReadyDelayMs:     5000,
+				ProcessNames:     []string{"kiro-cli", "kiro", "node"},
+				SupportsHooks:    boolPtr(true),
+				InstructionsFile: "AGENTS.md",
+				ResumeFlag:       "--resume",
+				ResumeStyle:      "flag",
+				Env:              map[string]string{"KIRO_AGENT_MODE": "headless"},
+				PermissionModes:  map[string]string{"unrestricted": "--trust-mode full"},
 			},
 		},
 		Agents: []Agent{{Name: "mayor"}},
@@ -1043,14 +1182,38 @@ func TestProvidersRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatal("Providers[kiro] not found after round-trip")
 	}
-	if kiro.Command != "kiro" {
-		t.Errorf("Command = %q, want %q", kiro.Command, "kiro")
+	if kiro.Command != "kiro-cli" {
+		t.Errorf("Command = %q, want %q", kiro.Command, "kiro-cli")
 	}
-	if len(kiro.Args) != 1 || kiro.Args[0] != "--autonomous" {
-		t.Errorf("Args = %v, want [--autonomous]", kiro.Args)
+	if want := []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"}; !reflect.DeepEqual(kiro.Args, want) {
+		t.Errorf("Args = %v, want %v", kiro.Args, want)
 	}
 	if kiro.PromptMode != "arg" {
 		t.Errorf("PromptMode = %q, want %q", kiro.PromptMode, "arg")
+	}
+	if kiro.ReadyDelayMs != 5000 {
+		t.Errorf("ReadyDelayMs = %d, want 5000", kiro.ReadyDelayMs)
+	}
+	if len(kiro.ProcessNames) != 3 || kiro.ProcessNames[0] != "kiro-cli" || kiro.ProcessNames[1] != "kiro" || kiro.ProcessNames[2] != "node" {
+		t.Errorf("ProcessNames = %v, want [kiro-cli kiro node]", kiro.ProcessNames)
+	}
+	if !derefBool(kiro.SupportsHooks) {
+		t.Error("SupportsHooks = false after round-trip, want true")
+	}
+	if kiro.InstructionsFile != "AGENTS.md" {
+		t.Errorf("InstructionsFile = %q after round-trip, want %q", kiro.InstructionsFile, "AGENTS.md")
+	}
+	if kiro.ResumeFlag != "--resume" {
+		t.Errorf("ResumeFlag = %q after round-trip, want %q", kiro.ResumeFlag, "--resume")
+	}
+	if kiro.ResumeStyle != "flag" {
+		t.Errorf("ResumeStyle = %q after round-trip, want %q", kiro.ResumeStyle, "flag")
+	}
+	if kiro.Env["KIRO_AGENT_MODE"] != "headless" {
+		t.Errorf("Env[KIRO_AGENT_MODE] = %q after round-trip, want %q", kiro.Env["KIRO_AGENT_MODE"], "headless")
+	}
+	if kiro.PermissionModes["unrestricted"] != "--trust-mode full" {
+		t.Errorf("PermissionModes[unrestricted] = %q after round-trip, want %q", kiro.PermissionModes["unrestricted"], "--trust-mode full")
 	}
 }
 
@@ -1644,8 +1807,11 @@ func TestEffectiveScaleCheckUsesReadyOnly(t *testing.T) {
 		t.Errorf("EffectiveScaleCheck = %q, should not count in-progress work as new demand", check)
 	}
 
-	if !strings.Contains(check, "${ready:-0}") {
-		t.Errorf("missing ${ready:-0} in arithmetic sum")
+	if !strings.Contains(check, "--limit 0") {
+		t.Errorf("missing --limit 0 for complete ready count")
+	}
+	if strings.Contains(check, "2>/dev/null") || strings.Contains(check, "${ready:-0}") || strings.Contains(check, "|| echo 0") {
+		t.Errorf("default scale_check masks bd ready failures as zero: %q", check)
 	}
 	if strings.Contains(check, "${molecules:-0}") {
 		t.Errorf("unexpected ${molecules:-0} in arithmetic sum")
@@ -1982,6 +2148,43 @@ name = "mayor"
 	got := cfg.Daemon.PatrolIntervalDuration()
 	if got != 30*time.Second {
 		t.Errorf("PatrolIntervalDuration() = %v, want 30s", got)
+	}
+}
+
+func TestParseDaemonNudgeDispatcher(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test"
+
+[daemon]
+nudge_dispatcher = "supervisor"
+
+[[agent]]
+name = "mayor"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Daemon.NudgeDispatcher != "supervisor" {
+		t.Errorf("Daemon.NudgeDispatcher = %q, want %q", cfg.Daemon.NudgeDispatcher, "supervisor")
+	}
+	if got := cfg.Daemon.NudgeDispatcherMode(); got != "supervisor" {
+		t.Errorf("NudgeDispatcherMode() = %q, want %q", got, "supervisor")
+	}
+}
+
+func TestDaemonNudgeDispatcherDefault(t *testing.T) {
+	d := DaemonConfig{}
+	if got := d.NudgeDispatcherMode(); got != "legacy" {
+		t.Errorf("NudgeDispatcherMode() = %q, want %q", got, "legacy")
+	}
+}
+
+func TestDaemonNudgeDispatcherUnknownFallsBack(t *testing.T) {
+	d := DaemonConfig{NudgeDispatcher: "garbage"}
+	if got := d.NudgeDispatcherMode(); got != "legacy" {
+		t.Errorf("NudgeDispatcherMode() with unknown value = %q, want %q", got, "legacy")
 	}
 }
 
@@ -4813,4 +5016,183 @@ schedule = "0 3 * * *"
 	if cfg.Orders.Overrides[0].Trigger == nil || *cfg.Orders.Overrides[0].Trigger != "cron" {
 		t.Fatalf("Trigger = %#v, want cron", cfg.Orders.Overrides[0].Trigger)
 	}
+}
+
+// TestControlDispatcherStartCommandTracesUnderGCRuntime pins the trace-log
+// default location for the built-in control-dispatcher worker.
+//
+// The control-dispatcher writes to ${GC_WORKFLOW_TRACE} every few seconds
+// while serving workflow control beads. The default path must live under
+// .gc/runtime/ so that the controller's recursive fsnotify watcher
+// (cmd/gc/controller.go shouldIgnoreConfigWatchEvent) ignores writes to it
+// — that function excludes the .gc and .beads path segments. Placing the
+// default at city root caused every append to fire markDirty() through the
+// 200ms debouncer, keeping patrol cycles in continuous reconciliation and
+// driving cycle duration well past the configured patrol_interval.
+//
+// Regression guard: do not move the trace default out of .gc/runtime/
+// without a paired update to the controller's watcher exclusion list.
+func TestControlDispatcherStartCommandTracesUnderGCRuntime(t *testing.T) {
+	const (
+		wantTraceExport    = `export GC_WORKFLOW_TRACE="${GC_WORKFLOW_TRACE:-${GC_CONTROL_DISPATCHER_TRACE_DEFAULT:-${GC_CITY}/` + citylayout.RuntimeDataRoot + `/control-dispatcher-trace.log}}"`
+		wantTraceDirExpr   = `trace_dir="${GC_WORKFLOW_TRACE%/*}"`
+		wantRootTraceGuard = `elif [ -z "$trace_dir" ]; then trace_dir="/"; fi`
+		wantMkdirSnip      = `mkdir -p "$trace_dir"`
+		oldTracePath       = "${GC_CITY}/control-dispatcher-trace.log"
+		qualifiedName      = "qcore/control-dispatcher"
+	)
+
+	t.Run("city-level constant", func(t *testing.T) {
+		got := ControlDispatcherStartCommand
+		if !strings.Contains(got, "GC_CONTROL_DISPATCHER_TRACE_DEFAULT") {
+			t.Errorf("ControlDispatcherStartCommand must route through GC_CONTROL_DISPATCHER_TRACE_DEFAULT so runtime-root trust decisions happen in Go\n got: %s", got)
+		}
+		if !strings.Contains(got, wantTraceExport) {
+			t.Errorf("ControlDispatcherStartCommand missing %q\n got: %s", wantTraceExport, got)
+		}
+		if !strings.Contains(got, wantTraceDirExpr) {
+			t.Errorf("ControlDispatcherStartCommand missing %q so explicit GC_WORKFLOW_TRACE overrides create their own parent dir\n got: %s", wantTraceDirExpr, got)
+		}
+		if !strings.Contains(got, wantRootTraceGuard) {
+			t.Errorf("ControlDispatcherStartCommand missing %q so absolute root trace overrides normalize to /\n got: %s", wantRootTraceGuard, got)
+		}
+		if !strings.Contains(got, wantMkdirSnip) {
+			t.Errorf("ControlDispatcherStartCommand missing %q (needed so the resolved trace parent exists on first start)\n got: %s", wantMkdirSnip, got)
+		}
+		if strings.Contains(got, oldTracePath) {
+			t.Errorf("ControlDispatcherStartCommand still references the old city-root trace path %q\n got: %s", oldTracePath, got)
+		}
+	})
+
+	t.Run("qualified-name builder", func(t *testing.T) {
+		got := ControlDispatcherStartCommandFor(qualifiedName)
+		if !strings.Contains(got, "GC_CONTROL_DISPATCHER_TRACE_DEFAULT") {
+			t.Errorf("ControlDispatcherStartCommandFor must route through GC_CONTROL_DISPATCHER_TRACE_DEFAULT so runtime-root trust decisions happen in Go\n got: %s", got)
+		}
+		if !strings.Contains(got, wantTraceExport) {
+			t.Errorf("ControlDispatcherStartCommandFor missing %q\n got: %s", wantTraceExport, got)
+		}
+		if !strings.Contains(got, wantTraceDirExpr) {
+			t.Errorf("ControlDispatcherStartCommandFor missing %q so explicit GC_WORKFLOW_TRACE overrides create their own parent dir\n got: %s", wantTraceDirExpr, got)
+		}
+		if !strings.Contains(got, wantRootTraceGuard) {
+			t.Errorf("ControlDispatcherStartCommandFor missing %q so absolute root trace overrides normalize to /\n got: %s", wantRootTraceGuard, got)
+		}
+		if !strings.Contains(got, wantMkdirSnip) {
+			t.Errorf("ControlDispatcherStartCommandFor missing %q\n got: %s", wantMkdirSnip, got)
+		}
+		if !strings.Contains(got, "--follow "+qualifiedName) {
+			t.Errorf("ControlDispatcherStartCommandFor must --follow the qualified name %q\n got: %s", qualifiedName, got)
+		}
+	})
+}
+
+func TestControlDispatcherStartCommandExecResolvesRuntimeTracePath(t *testing.T) {
+	t.Run("default runtime root", func(t *testing.T) {
+		cityDir := t.TempDir()
+		tracePath, args := runControlDispatcherStartCommand(t, ControlDispatcherStartCommand, cityDir, nil)
+		wantTracePath := filepath.Join(cityDir, citylayout.RuntimeDataRoot, "control-dispatcher-trace.log")
+		if tracePath != wantTracePath {
+			t.Fatalf("trace path = %q, want %q", tracePath, wantTracePath)
+		}
+		if args != "convoy control --serve --follow "+ControlDispatcherAgentName {
+			t.Fatalf("args = %q, want follow command for %q", args, ControlDispatcherAgentName)
+		}
+		if _, err := os.Stat(wantTracePath); err != nil {
+			t.Fatalf("trace file %q not created: %v", wantTracePath, err)
+		}
+	})
+
+	t.Run("injected trusted default override", func(t *testing.T) {
+		cityDir := t.TempDir()
+		runtimeDir := filepath.Join(t.TempDir(), "runtime-root")
+		tracePath, args := runControlDispatcherStartCommand(t, ControlDispatcherStartCommandFor("qcore/control-dispatcher"), cityDir, map[string]string{
+			"GC_CONTROL_DISPATCHER_TRACE_DEFAULT": filepath.Join(runtimeDir, "control-dispatcher-trace.log"),
+		})
+		wantTracePath := filepath.Join(runtimeDir, "control-dispatcher-trace.log")
+		if tracePath != wantTracePath {
+			t.Fatalf("trace path = %q, want %q", tracePath, wantTracePath)
+		}
+		if args != "convoy control --serve --follow qcore/control-dispatcher" {
+			t.Fatalf("args = %q, want qualified follow command", args)
+		}
+		if _, err := os.Stat(wantTracePath); err != nil {
+			t.Fatalf("trace file %q not created: %v", wantTracePath, err)
+		}
+	})
+
+	t.Run("explicit trace override ignores injected default", func(t *testing.T) {
+		cityDir := t.TempDir()
+		injectedDefault := filepath.Join(t.TempDir(), "runtime-root", "control-dispatcher-trace.log")
+		overrideTrace := filepath.Join(t.TempDir(), "override-runtime", "dispatcher.log")
+		tracePath, args := runControlDispatcherStartCommand(t, ControlDispatcherStartCommand, cityDir, map[string]string{
+			"GC_CONTROL_DISPATCHER_TRACE_DEFAULT": injectedDefault,
+			"GC_WORKFLOW_TRACE":                   overrideTrace,
+		})
+		if tracePath != overrideTrace {
+			t.Fatalf("trace path = %q, want explicit override %q", tracePath, overrideTrace)
+		}
+		if args != "convoy control --serve --follow "+ControlDispatcherAgentName {
+			t.Fatalf("args = %q, want follow command for %q", args, ControlDispatcherAgentName)
+		}
+		if _, err := os.Stat(overrideTrace); err != nil {
+			t.Fatalf("override trace file %q not created: %v", overrideTrace, err)
+		}
+	})
+}
+
+func runControlDispatcherStartCommand(t *testing.T, command, cityDir string, extraEnv map[string]string) (tracePath, args string) {
+	t.Helper()
+
+	tmp := t.TempDir()
+	resultPath := filepath.Join(tmp, "gc-result")
+	gcPath := filepath.Join(tmp, "gc")
+	gcScript := fmt.Sprintf(`#!/bin/sh
+set -eu
+trace_parent=${GC_WORKFLOW_TRACE%%/*}
+if [ "$trace_parent" = "$GC_WORKFLOW_TRACE" ]; then
+  trace_parent=.
+elif [ -z "$trace_parent" ]; then
+  trace_parent=/
+fi
+[ -d "$trace_parent" ]
+: > "$GC_WORKFLOW_TRACE"
+printf 'TRACE=%%s\nARGS=%%s\n' "$GC_WORKFLOW_TRACE" "$*" > %q
+`, resultPath)
+	if err := os.WriteFile(gcPath, []byte(gcScript), 0o755); err != nil {
+		t.Fatalf("write fake gc: %v", err)
+	}
+
+	cmd := exec.Command("sh", "-c", command)
+	cmd.Env = []string{
+		"PATH=" + tmp + ":" + os.Getenv("PATH"),
+		"GC_BIN=" + gcPath,
+		"GC_CITY=" + cityDir,
+	}
+	for key, value := range extraEnv {
+		cmd.Env = append(cmd.Env, key+"="+value)
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("run control-dispatcher start command: %v\n%s", err, out)
+	}
+
+	data, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatalf("read fake gc result: %v", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		switch {
+		case strings.HasPrefix(line, "TRACE="):
+			tracePath = strings.TrimPrefix(line, "TRACE=")
+		case strings.HasPrefix(line, "ARGS="):
+			args = strings.TrimPrefix(line, "ARGS=")
+		}
+	}
+	if tracePath == "" {
+		t.Fatalf("fake gc result missing trace path:\n%s", data)
+	}
+	if args == "" {
+		t.Fatalf("fake gc result missing args:\n%s", data)
+	}
+	return tracePath, args
 }

@@ -59,6 +59,12 @@ func TestIsTestConfigPath_ProcessTempDirTestPrefix(t *testing.T) {
 	}
 }
 
+func TestIsTestConfigPath_KnownGCTestPrefix(t *testing.T) {
+	if !isTestConfigPath("/data/tmp/gc-state-mutation-builtin-123/.gc/runtime/packs/dolt/dolt-config.yaml", "/home/u", "/data/tmp") {
+		t.Error("expected known gc-* test prefix under os.TempDir() to be a test path")
+	}
+}
+
 func TestIsTestConfigPath_NotTest(t *testing.T) {
 	cases := []string{
 		"/tmp/be-s9d-bench-dolt/config.yaml", // benchmark
@@ -81,7 +87,7 @@ func TestClassifyDoltProcess_ProtectedByRigPort(t *testing.T) {
 		Argv:  []string{"dolt", "sql-server", "--config", "/tmp/TestFoo/config.yaml"},
 		Ports: []int{28231},
 	}
-	got := classifyDoltProcess(p, map[int]string{28231: "beads"}, "/home/u", "")
+	got := classifyDoltProcess(p, map[int]string{28231: "beads"}, "/home/u", "", nil)
 
 	if got.Action != "protect" {
 		t.Errorf("Action = %q, want protect", got.Action)
@@ -97,13 +103,29 @@ func TestClassifyDoltProcess_OrphanByTestPath(t *testing.T) {
 		Argv:  []string{"dolt", "sql-server", "--config", "/tmp/TestMailRouter9182/config.yaml"},
 		Ports: []int{},
 	}
-	got := classifyDoltProcess(p, nil, "/home/u", "")
+	got := classifyDoltProcess(p, nil, "/home/u", "", nil)
 
 	if got.Action != "reap" {
 		t.Errorf("Action = %q, want reap", got.Action)
 	}
 	if got.ConfigPath != "/tmp/TestMailRouter9182/config.yaml" {
 		t.Errorf("ConfigPath = %q", got.ConfigPath)
+	}
+}
+
+func TestClassifyDoltProcess_ProtectsActiveTestRoot(t *testing.T) {
+	p := DoltProcInfo{
+		PID:   2223,
+		Argv:  []string{"dolt", "sql-server", "--config", "/tmp/TestPersonalWorkFormulaCompileAndRun123/001/city/.gc/runtime/packs/dolt/dolt-config.yaml"},
+		Ports: []int{},
+	}
+	got := classifyDoltProcess(p, nil, "/home/u", "", []string{"/tmp/TestPersonalWorkFormulaCompileAndRun123"})
+
+	if got.Action != "protect" {
+		t.Errorf("Action = %q, want protect", got.Action)
+	}
+	if !strings.Contains(got.Reason, "active test root") {
+		t.Errorf("Reason = %q, want active-test-root reason", got.Reason)
 	}
 }
 
@@ -114,7 +136,7 @@ func TestClassifyDoltProcess_ProtectedByPathNotOnAllowlist(t *testing.T) {
 		Argv:  []string{"dolt", "sql-server", "--config", "/tmp/be-s9d-bench-dolt/config.yaml"},
 		Ports: []int{33400},
 	}
-	got := classifyDoltProcess(p, nil, "/home/u", "")
+	got := classifyDoltProcess(p, nil, "/home/u", "", nil)
 
 	if got.Action != "protect" {
 		t.Errorf("Action = %q, want protect", got.Action)
@@ -134,7 +156,7 @@ func TestClassifyDoltProcess_ProtectedWhenConfigMissing(t *testing.T) {
 		Argv:  []string{"dolt", "sql-server"},
 		Ports: []int{},
 	}
-	got := classifyDoltProcess(p, nil, "/home/u", "")
+	got := classifyDoltProcess(p, nil, "/home/u", "", nil)
 
 	if got.Action != "protect" {
 		t.Errorf("Action = %q, want protect", got.Action)
@@ -151,7 +173,7 @@ func TestClassifyDoltProcess_RigPortBeatsConfigPath(t *testing.T) {
 		Argv:  []string{"dolt", "sql-server", "--config", "/tmp/TestSomething/config.yaml"},
 		Ports: []int{28231},
 	}
-	got := classifyDoltProcess(p, map[int]string{28231: "beads"}, "/home/u", "")
+	got := classifyDoltProcess(p, map[int]string{28231: "beads"}, "/home/u", "", nil)
 
 	if got.Action != "protect" {
 		t.Errorf("Action = %q, want protect (rig port wins)", got.Action)
@@ -164,12 +186,14 @@ func TestPlanReap_BuildsOrphanAndProtectedLists(t *testing.T) {
 		{PID: 1281044, Argv: []string{"dolt", "sql-server", "--config", "/tmp/TestA/config.yaml"}},
 		{PID: 1319499, Ports: []int{33400}, Argv: []string{"dolt", "sql-server", "--config", "/tmp/be-s9d-bench-dolt/config.yaml"}},
 		{PID: 1281099, Argv: []string{"dolt", "sql-server", "--config", "/tmp/TestB/config.yaml"}},
+		{PID: 1281100, Argv: []string{"dolt", "sql-server", "--config", "/data/tmp/gc-state-runtime-builtin-1/.gc/runtime/packs/dolt/dolt-config.yaml"}},
+		{PID: 1281101, Argv: []string{"dolt", "sql-server", "--config", "/tmp/TestActive/001/city/.gc/runtime/packs/dolt/dolt-config.yaml"}},
 	}
 	rigPorts := map[int]string{28231: "beads"}
 
-	plan := planOrphanReap(procs, rigPorts, "/home/u", "")
+	plan := planOrphanReap(procs, rigPorts, "/home/u", "/data/tmp", []string{"/tmp/TestActive"})
 
-	wantReap := []int{1281044, 1281099}
+	wantReap := []int{1281044, 1281099, 1281100}
 	gotReap := make([]int, 0, len(plan.Reap))
 	for _, target := range plan.Reap {
 		gotReap = append(gotReap, target.PID)
@@ -178,7 +202,7 @@ func TestPlanReap_BuildsOrphanAndProtectedLists(t *testing.T) {
 		t.Errorf("Reap PIDs = %v, want %v", gotReap, wantReap)
 	}
 
-	wantProtected := []int{1138290, 1319499}
+	wantProtected := []int{1138290, 1319499, 1281101}
 	gotProtected := make([]int, 0, len(plan.Protected))
 	for _, e := range plan.Protected {
 		gotProtected = append(gotProtected, e.PID)

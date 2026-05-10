@@ -26,6 +26,20 @@ func TestSessionLifecycleChaos(t *testing.T) {
 	runSessionLifecycleChaos(t, sessionChaosOptions{})
 }
 
+func TestSessionLifecycleChaosInvariantsAllowFailedCreatePendingClaim(t *testing.T) {
+	h := newSessionChaosHarness(t, 20260510)
+	h.createSessionIntent()
+	b := h.mustBead()
+	if err := h.env.store.SetMetadataBatch(b.ID, map[string]string{
+		"state":                string(sessionpkg.StateFailedCreate),
+		"pending_create_claim": "true",
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch(failed-create): %v", err)
+	}
+
+	h.assertInvariants()
+}
+
 func TestSessionLifecycleChaosPendingInteractionDoesNotOverrideOrphanDrain(t *testing.T) {
 	h := newSessionChaosHarness(t, 20260415)
 	h.createSessionIntent()
@@ -1321,7 +1335,10 @@ func (h *sessionChaosHarness) assertInvariants() {
 	if state == string(sessionpkg.StateArchived) && b.Metadata["continuity_eligible"] != "true" && running {
 		h.failf("continuity-ineligible archive still running runtime %q", runtimeName)
 	}
-	if b.Status != "closed" && strings.TrimSpace(b.Metadata["pending_create_claim"]) == "true" && state != string(sessionpkg.StateCreating) {
+	if b.Status != "closed" &&
+		strings.TrimSpace(b.Metadata["pending_create_claim"]) == "true" &&
+		state != string(sessionpkg.StateCreating) &&
+		state != string(sessionpkg.StateFailedCreate) {
 		h.failf("pending_create_claim=true with state=%q", state)
 	}
 }
@@ -1358,6 +1375,7 @@ func knownChaosLifecycleState(state string) bool {
 		sessionpkg.BaseStateDraining,
 		sessionpkg.BaseStateDrained,
 		sessionpkg.BaseStateArchived,
+		sessionpkg.BaseStateFailedCreate,
 		sessionpkg.BaseStateOrphaned,
 		sessionpkg.BaseStateClosed,
 		sessionpkg.BaseStateClosing,

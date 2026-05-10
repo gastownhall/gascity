@@ -33,7 +33,7 @@ func loadRigDoltPorts(rigs []resolverRig, fs fsys.FS) map[int]string {
 			continue
 		}
 		port, err := strconv.Atoi(text)
-		if err != nil || port <= 0 {
+		if err != nil || !validDoltPort(port) {
 			continue
 		}
 		out[port] = rig.Name
@@ -85,8 +85,85 @@ func discoverDoltProcesses() ([]DoltProcInfo, error) {
 	return out, nil
 }
 
+func discoverActiveTestRoots(homeDir, tempDir string) []string {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	var roots []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		data, err := readWithTimeout(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
+		if err != nil || len(data) == 0 {
+			continue
+		}
+		argv := splitCmdline(data)
+		if looksLikeDoltSQLServer(argv) {
+			continue
+		}
+		for _, arg := range argv {
+			root, ok := activeTestRootFromPath(arg, homeDir, tempDir)
+			if !ok {
+				continue
+			}
+			if _, exists := seen[root]; exists {
+				continue
+			}
+			seen[root] = struct{}{}
+			roots = append(roots, root)
+		}
+	}
+	return roots
+}
+
+func activeTestRootFromPath(path, homeDir, tempDir string) (string, bool) {
+	clean := filepath.Clean(path)
+	for _, root := range []string{"/tmp", tempDir} {
+		if testRoot, ok := activeTestRootUnder(clean, root, testConfigPathPrefixes()); ok {
+			return testRoot, true
+		}
+	}
+	if homeDir == "" {
+		return "", false
+	}
+	return activeTestRootUnder(clean, filepath.Join(homeDir, ".gotmp"), []string{"Test"})
+}
+
+func activeTestRootUnder(cleanPath, root string, prefixes []string) (string, bool) {
+	if root == "" {
+		return "", false
+	}
+	cleanRoot := filepath.Clean(root)
+	if cleanRoot == "." || cleanRoot == string(filepath.Separator) {
+		return "", false
+	}
+	rootPrefix := cleanRoot + string(filepath.Separator)
+	if !strings.HasPrefix(cleanPath, rootPrefix) {
+		return "", false
+	}
+	child := strings.TrimPrefix(cleanPath, rootPrefix)
+	for _, prefix := range prefixes {
+		if !strings.HasPrefix(child, prefix) {
+			continue
+		}
+		nextSep := strings.IndexRune(child, filepath.Separator)
+		if nextSep < 0 {
+			return filepath.Join(cleanRoot, child), true
+		}
+		return filepath.Join(cleanRoot, child[:nextSep]), true
+	}
+	return "", false
+}
+
 func readProcStartTimeTicks(pid int) uint64 {
-	data, err := readWithTimeout(filepath.Join("/proc", strconv.Itoa(pid), "stat"), procEnumerationTimeout)
+	data, err := readWithTimeout(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
 	if err != nil {
 		return 0
 	}
@@ -111,7 +188,7 @@ func parseProcStartTimeTicks(data []byte) uint64 {
 }
 
 func readProcRSSBytes(pid int) int64 {
-	data, err := readWithTimeout(filepath.Join("/proc", strconv.Itoa(pid), "statm"), procEnumerationTimeout)
+	data, err := readWithTimeout(filepath.Join("/proc", strconv.Itoa(pid), "statm"))
 	if err != nil {
 		return 0
 	}
@@ -130,7 +207,7 @@ func readProcRSSBytes(pid int) int64 {
 // argv if and only if the process looks like `dolt sql-server`. The boolean
 // is false for any non-dolt process so callers can skip cheaply.
 func readDoltSQLServerArgv(pid int) ([]string, bool) {
-	data, err := readWithTimeout(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"), procEnumerationTimeout)
+	data, err := readWithTimeout(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
 	if err != nil || len(data) == 0 {
 		return nil, false
 	}
@@ -256,8 +333,8 @@ func appendUniqueInt(s []int, v int) []int {
 
 // readWithTimeout reads a file with a deadline so a stuck /proc entry (a
 // kernel thread that's blocked) can't hang the discovery walk.
-func readWithTimeout(path string, timeout time.Duration) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+func readWithTimeout(path string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), procEnumerationTimeout)
 	defer cancel()
 	type result struct {
 		data []byte

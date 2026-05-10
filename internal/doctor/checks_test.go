@@ -2949,9 +2949,17 @@ func writeDoctorManagedDoltConfig(t *testing.T, cityPath string, overrides map[s
 		"data_dir": filepath.Join(cityPath, ".beads", "dolt"),
 		"behavior": map[string]any{
 			"auto_gc_behavior": map[string]any{
-				"enable":        true,
-				"archive_level": 1,
+				"enable":        false,
+				"archive_level": 0,
 			},
+		},
+		"system_variables": map[string]any{
+			"dolt_auto_gc_enabled":   "OFF",
+			"dolt_stats_enabled":     "OFF",
+			"dolt_stats_gc_enabled":  "OFF",
+			"dolt_stats_memory_only": "ON",
+			"dolt_stats_paused":      "ON",
+			"wait_timeout":           "30",
 		},
 	}
 	for k, v := range overrides {
@@ -3075,6 +3083,44 @@ func TestDoltConfigCheck_OK(t *testing.T) {
 	}
 }
 
+func TestDoltConfigCheck_AcceptsConfiguredWaitTimeout(t *testing.T) {
+	t.Setenv("GC_DOLT_WAIT_TIMEOUT", "60")
+	dir := setupManagedDoltCity(t)
+	writeDoctorManagedDoltConfig(t, dir, map[string]any{
+		"system_variables.wait_timeout": "60",
+	})
+	c := NewDoltConfigCheck(dir, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK for configured wait_timeout; msg = %s", r.Status, r.Message)
+	}
+}
+
+func TestDoltConfigCheck_AcceptsDisabledWaitTimeout(t *testing.T) {
+	t.Setenv("GC_DOLT_WAIT_TIMEOUT", "-1")
+	dir := setupManagedDoltCity(t)
+	writeDoctorManagedDoltConfig(t, dir, map[string]any{
+		"system_variables.wait_timeout": "__missing__",
+	})
+	c := NewDoltConfigCheck(dir, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK for disabled wait_timeout; msg = %s", r.Status, r.Message)
+	}
+}
+
+func TestDoltConfigCheck_AcceptsLegacyArchiveLevelOne(t *testing.T) {
+	dir := setupManagedDoltCity(t)
+	writeDoctorManagedDoltConfig(t, dir, map[string]any{
+		"behavior.auto_gc_behavior.archive_level": 1,
+	})
+	c := NewDoltConfigCheck(dir, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK for one-release archive_level=1 compatibility; msg = %s", r.Status, r.Message)
+	}
+}
+
 func TestDoltConfigCheck_UsesTrustedCityRuntimeDir(t *testing.T) {
 	dir := setupManagedDoltCity(t)
 	customRuntimeDir := filepath.Join(t.TempDir(), "runtime-root")
@@ -3182,10 +3228,10 @@ func TestDoltConfigCheck_WrongDataDir(t *testing.T) {
 	}
 }
 
-func TestDoltConfigCheck_AutoGCDisabled(t *testing.T) {
+func TestDoltConfigCheck_AutoGCEnabled(t *testing.T) {
 	dir := setupManagedDoltCity(t)
 	writeDoctorManagedDoltConfig(t, dir, map[string]any{
-		"behavior.auto_gc_behavior.enable": false,
+		"behavior.auto_gc_behavior.enable": true,
 	})
 	c := NewDoltConfigCheck(dir, false)
 	r := c.Run(&CheckContext{})
@@ -3194,6 +3240,21 @@ func TestDoltConfigCheck_AutoGCDisabled(t *testing.T) {
 	}
 	if !strings.Contains(r.Message, "auto_gc_behavior.enable") {
 		t.Errorf("message = %q, want auto_gc_behavior.enable mention", r.Message)
+	}
+}
+
+func TestDoltConfigCheck_StatsEnabled(t *testing.T) {
+	dir := setupManagedDoltCity(t)
+	writeDoctorManagedDoltConfig(t, dir, map[string]any{
+		"system_variables.dolt_stats_enabled": "ON",
+	})
+	c := NewDoltConfigCheck(dir, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "dolt_stats_enabled") {
+		t.Errorf("message = %q, want dolt_stats_enabled mention", r.Message)
 	}
 }
 

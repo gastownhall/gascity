@@ -33,7 +33,7 @@ refinery. Resume the existing branch — don't redo all the work.
 | Unsure what to do | Mail Witness, don't guess |"""
 formula = "mol-polecat-work"
 extends = ["mol-polecat-base"]
-version = 8
+version = 9
 
 [[steps]]
 id = "workspace-setup"
@@ -133,10 +133,19 @@ if [ -n "$REJECTION" ]; then
 fi
 ```
 
-**If no branch** — create one and record it:
+**If no branch** — create one and record it. Always branch from the
+freshly-fetched `origin/{{base_branch}}`, never from local
+{{base_branch}} or whatever branch happens to be checked out.
+Polecat worktrees are reused across beads, so the local copy of
+{{base_branch}} may lag the remote — branching from a stale local ref
+inherits already-merged commits with stale hashes and causes the next
+refinery rebase to reject for spurious "duplicate" conflicts.
+
 ```bash
+git fetch origin {{base_branch}}                     # ensure origin ref is current
 BRANCH="polecat/{{issue}}"
-git checkout -b "$BRANCH" origin/{{base_branch}}
+git branch -D "$BRANCH" 2>/dev/null || true          # drop any stale local branch with the same name
+git checkout -B "$BRANCH" "origin/{{base_branch}}"   # force-create from the freshly-fetched remote tip
 gc bd update {{issue}} --set-metadata branch="$BRANCH"
 ```
 
@@ -204,8 +213,15 @@ the PR is open and matches the branch, base, and origin repository.
 
 **5. Reassign to refinery:**
 ```bash
-gc bd update {{issue}} --status=open --assignee={{rig_name}}/{{binding_prefix}}refinery --set-metadata gc.routed_to={{rig_name}}/{{binding_prefix}}refinery
+REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}refinery"
+gc bd update {{issue}} --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to="$REFINERY_TARGET"
 ```
+
+`${GC_RIG:+$GC_RIG/}{{binding_prefix}}refinery` resolves to
+`$GC_RIG/{{binding_prefix}}refinery` when running inside a rig session,
+or `{{binding_prefix}}refinery` when running in an HQ-only city where
+the workspace is the rig. Writing a rendered empty rig prefix produces
+`/{{binding_prefix}}refinery` and strands beads outside the refinery pool.
 
 Update both `assignee` AND `gc.routed_to` so the reconciler stops
 counting this bead for the polecat pool and starts counting it for

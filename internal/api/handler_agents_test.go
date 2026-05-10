@@ -253,6 +253,115 @@ func TestFindAgentUnlimitedPoolMember(t *testing.T) {
 	}
 }
 
+// TestFindAgentBoundedPoolMember covers bounded multi-session pools — both
+// V1 (no BindingName) and V2 (with BindingName), with and without
+// NamepoolNames. The V2 cases regressed silently because the bounded
+// path enumerated raw member names without applying the binding prefix
+// the listing endpoint adds via Agent.QualifiedInstanceName, so detail
+// lookups for those instances 404'd while the listing happily emitted
+// them. The unlimited path already handled this correctly.
+func TestFindAgentBoundedPoolMember(t *testing.T) {
+	tests := []struct {
+		name     string
+		agent    config.Agent
+		query    string
+		wantOK   bool
+		wantName string
+	}{
+		{
+			name: "v1 numeric in rig",
+			agent: config.Agent{
+				Name:              "polecat",
+				Dir:               "myrig",
+				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3),
+			},
+			query: "myrig/polecat-1", wantOK: true, wantName: "polecat",
+		},
+		{
+			name: "v1 namepool in rig",
+			agent: config.Agent{
+				Name:              "polecat",
+				Dir:               "myrig",
+				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3),
+				NamepoolNames: []string{"alpha", "bravo", "charlie"},
+			},
+			query: "myrig/bravo", wantOK: true, wantName: "polecat",
+		},
+		{
+			name: "v2 numeric city-scoped",
+			agent: config.Agent{
+				Name:              "dog",
+				BindingName:       "gastown",
+				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3),
+			},
+			query: "gastown.dog-1", wantOK: true, wantName: "dog",
+		},
+		{
+			name: "v2 numeric in rig",
+			agent: config.Agent{
+				Name:              "polecat",
+				Dir:               "myrig",
+				BindingName:       "gastown",
+				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3),
+			},
+			query: "myrig/gastown.polecat-2", wantOK: true, wantName: "polecat",
+		},
+		{
+			name: "v2 namepool in rig",
+			agent: config.Agent{
+				Name:              "polecat",
+				Dir:               "nextlex-legal-rag",
+				BindingName:       "gastown",
+				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5),
+				NamepoolNames: []string{"furiosa", "nux", "slit", "rictus", "capable"},
+			},
+			query: "nextlex-legal-rag/gastown.furiosa", wantOK: true, wantName: "polecat",
+		},
+		{
+			name: "v2 namepool city-scoped",
+			agent: config.Agent{
+				Name:              "polecat",
+				BindingName:       "gastown",
+				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2),
+				NamepoolNames: []string{"furiosa", "nux"},
+			},
+			query: "gastown.nux", wantOK: true, wantName: "polecat",
+		},
+		{
+			name: "v2 unknown instance does not match",
+			agent: config.Agent{
+				Name:              "dog",
+				BindingName:       "gastown",
+				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3),
+			},
+			query: "gastown.dog-99", wantOK: false,
+		},
+		{
+			name: "v2 namepool unknown member does not match",
+			agent: config.Agent{
+				Name:              "polecat",
+				BindingName:       "gastown",
+				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2),
+				NamepoolNames: []string{"furiosa", "nux"},
+			},
+			query: "gastown.unknown", wantOK: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.City{Agents: []config.Agent{tt.agent}}
+			a, ok := findAgent(cfg, tt.query)
+			if ok != tt.wantOK {
+				t.Fatalf("findAgent(%q) ok = %v, want %v", tt.query, ok, tt.wantOK)
+			}
+			if tt.wantOK && a.Name != tt.wantName {
+				t.Errorf("findAgent(%q).Name = %q, want %q", tt.query, a.Name, tt.wantName)
+			}
+		})
+	}
+}
+
 func TestAgentListFilterByRig(t *testing.T) {
 	state := newFakeState(t)
 	state.cfg.Agents = []config.Agent{
@@ -1021,5 +1130,70 @@ func TestProviderPathCheck_FallsBackToRawWhenNoCache(t *testing.T) {
 	}
 	if got := providerPathCheck("custom", cfg); got != "custom-cli" {
 		t.Errorf("providerPathCheck = %q, want custom-cli", got)
+	}
+}
+
+// TestWaitForAgentVisibilityIn_ReturnsImmediatelyOnHit covers the happy
+// path: the freshly created agent is already visible in the snapshot
+// and the wait returns without sleeping.
+func TestWaitForAgentVisibilityIn_ReturnsImmediatelyOnHit(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "worker", Dir: "alpha"}},
+	}
+	calls := 0
+	snapshot := func() *config.City {
+		calls++
+		return cfg
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := WaitForAgentVisibilityIn(ctx, snapshot, "alpha/worker"); err != nil {
+		t.Fatalf("WaitForAgentVisibilityIn: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("snapshot calls = %d, want 1 (no polling on hit)", calls)
+	}
+}
+
+// TestWaitForAgentVisibilityIn_PollsUntilVisible covers the race recovery
+// path: a stale runtime tick clobbers the snapshot after CreateAgent, the
+// next runtime tick restores it, and the wait succeeds once the agent
+// reappears.
+func TestWaitForAgentVisibilityIn_PollsUntilVisible(t *testing.T) {
+	stale := &config.City{}
+	fresh := &config.City{
+		Agents: []config.Agent{{Name: "worker", Dir: "alpha"}},
+	}
+	calls := 0
+	snapshot := func() *config.City {
+		calls++
+		if calls < 3 {
+			return stale
+		}
+		return fresh
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := waitForAgentVisibilityIn(ctx, snapshot, "alpha/worker", time.Millisecond); err != nil {
+		t.Fatalf("waitForAgentVisibilityIn: %v", err)
+	}
+	if calls < 3 {
+		t.Errorf("snapshot calls = %d, want >= 3 (polled past stale snapshots)", calls)
+	}
+}
+
+// TestWaitForAgentVisibilityIn_RespectsContext covers the bounded-failure
+// case: the agent never appears and the wait surfaces ctx.Err() instead of
+// blocking indefinitely.
+func TestWaitForAgentVisibilityIn_RespectsContext(t *testing.T) {
+	snapshot := func() *config.City { return &config.City{} }
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err := waitForAgentVisibilityIn(ctx, snapshot, "alpha/worker", time.Millisecond)
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("error = %v, want wrapped DeadlineExceeded", err)
 	}
 }

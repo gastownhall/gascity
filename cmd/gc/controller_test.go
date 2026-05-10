@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -243,7 +244,7 @@ func TestControllerSocketFallbackUsesShortPathForLongCityPath(t *testing.T) {
 	pokeCh := make(chan struct{}, 1)
 	controlDispatcherCh := make(chan struct{}, 1)
 	configDirty := &atomic.Bool{}
-	lis, err := startControllerSocket(cityPath, cancel, configDirty, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
+	lis, err := startControllerSocket(cityPath, cancel, nil, configDirty, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
 	}
@@ -403,6 +404,7 @@ func writeControllerNamedSessionCityTOML(t *testing.T, dir, cityName, mode, idle
 	var buf bytes.Buffer
 	buf.WriteString("[workspace]\nname = " + `"` + cityName + `"` + "\n\n")
 	buf.WriteString("[beads]\nprovider = \"file\"\n\n")
+	buf.WriteString("[daemon]\nshutdown_timeout = \"100ms\"\n\n")
 	buf.WriteString("[[agent]]\nname = \"mayor\"\nstart_command = \"echo hello\"\n")
 	if idleTimeout != "" {
 		buf.WriteString("idle_timeout = " + `"` + idleTimeout + `"` + "\n")
@@ -492,8 +494,6 @@ func TestControllerReloadsConfig(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
-
-	cancel()
 
 	deadline = time.After(1500 * time.Millisecond)
 	for {
@@ -832,6 +832,70 @@ func TestWatchConfigDirs_CityRootDoesNotWatchUnrelatedNestedSubdir(t *testing.T)
 	}
 	if dirty.Load() {
 		t.Fatalf("dirty flag set after unrelated nested city-root file changed; stderr=%q", stderr.String())
+	}
+}
+
+func TestWatchConfigDirs_CityRootIgnoresRuntimeTraceWrites(t *testing.T) {
+	old := debounceDelay
+	debounceDelay = 5 * time.Millisecond
+	t.Cleanup(func() { debounceDelay = old })
+
+	dir := t.TempDir()
+	traceDir := citylayout.RuntimeDataDir(dir)
+	if err := os.MkdirAll(traceDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll runtime dir: %v", err)
+	}
+	traceFile := filepath.Join(traceDir, "control-dispatcher-trace.log")
+	if err := os.WriteFile(traceFile, []byte("first\n"), 0o644); err != nil {
+		t.Fatalf("seed runtime trace: %v", err)
+	}
+	legacyTraceFile := filepath.Join(dir, "control-dispatcher-trace.log")
+
+	if !shouldIgnoreConfigWatchEvent(traceFile) {
+		t.Fatalf("shouldIgnoreConfigWatchEvent(%q) = false, want true", traceFile)
+	}
+	if shouldIgnoreConfigWatchEvent(legacyTraceFile) {
+		t.Fatalf("shouldIgnoreConfigWatchEvent(%q) = true, want false", legacyTraceFile)
+	}
+
+	var dirty atomic.Bool
+	pokeCh := make(chan struct{}, 1)
+	var stderr bytes.Buffer
+	cleanup := watchConfigTargets([]config.WatchTarget{{Path: dir, DiscoverConventions: true}}, &dirty, pokeCh, &stderr)
+	defer cleanup()
+
+	select {
+	case <-pokeCh:
+	default:
+	}
+	dirty.Store(false)
+
+	for i, body := range []string{"second\n", "third\n", "fourth\n"} {
+		if err := os.WriteFile(traceFile, []byte(body), 0o644); err != nil {
+			t.Fatalf("rewrite runtime trace #%d: %v", i+1, err)
+		}
+		select {
+		case <-pokeCh:
+			t.Fatalf("unexpected watcher poke after runtime trace write #%d; stderr=%q", i+1, stderr.String())
+		case <-time.After(250 * time.Millisecond):
+		}
+		if dirty.Load() {
+			t.Fatalf("dirty flag set after runtime trace write #%d; stderr=%q", i+1, stderr.String())
+		}
+	}
+
+	dirty.Store(false)
+	if err := os.WriteFile(legacyTraceFile, []byte("legacy\n"), 0o644); err != nil {
+		t.Fatalf("write legacy city-root trace: %v", err)
+	}
+
+	select {
+	case <-pokeCh:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for watcher poke after legacy city-root trace write; stderr=%q", stderr.String())
+	}
+	if !dirty.Load() {
+		t.Fatalf("dirty flag not set after legacy city-root trace write; stderr=%q", stderr.String())
 	}
 }
 
@@ -1222,7 +1286,7 @@ func TestHandleControllerConnControlDispatcher(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		handleControllerConn(server, cityPath, func() {}, nil, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
+		handleControllerConn(server, cityPath, func() {}, nil, nil, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
 		close(done)
 	}()
 
@@ -1727,7 +1791,8 @@ func TestControllerReloadInvalidConfig(t *testing.T) {
 	debounceDelay = 5 * time.Millisecond
 	t.Cleanup(func() { debounceDelay = old })
 
-	dir := shortSocketTempDir(t, "gc-invalid-")
+	dir := shortSocketTempDir(t, "gc-reload-invalid-")
+	cleanupManagedDoltTestCity(t, dir)
 	tomlPath := writeCityTOML(t, dir, "test", "mayor")
 
 	cfg, err := config.Load(osFS{}, tomlPath)
@@ -1795,6 +1860,7 @@ func TestControllerReloadCityNameChange(t *testing.T) {
 	t.Cleanup(func() { debounceDelay = old })
 
 	dir := shortSocketTempDir(t, "gc-rename-")
+	cleanupManagedDoltTestCity(t, dir)
 	tomlPath := writeCityTOML(t, dir, "test", "mayor")
 
 	cfg, err := config.Load(osFS{}, tomlPath)
@@ -2150,10 +2216,13 @@ func TestTryReloadConfig_IncludesBuiltinPackOrders(t *testing.T) {
 		}
 	}
 	// Dolt pack orders (included transitively via bd pack).
-	for _, want := range []string{"dolt-health", "dolt-gc-nudge", "dolt-remotes-patrol"} {
+	for _, want := range []string{"dolt-health", "dolt-remotes-patrol", "mol-dog-compactor"} {
 		if !names[want] {
 			t.Errorf("missing dolt order %q; got %v", want, names)
 		}
+	}
+	if names["dolt-gc-nudge"] {
+		t.Errorf("dolt-gc-nudge should not be registered as a recurring order; got %v", names)
 	}
 }
 

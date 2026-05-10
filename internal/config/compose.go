@@ -10,7 +10,61 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pricing"
 )
+
+// mergePricingByKey merges base and override pricing slices keyed by
+// (provider, model). When the same key appears in both, the override entry
+// wins. Duplicate keys within either input are collapsed to their last
+// occurrence. The returned slice preserves surviving base order followed by
+// surviving override-only entries in their original order. Used to compose
+// pack→city pricing layers during config load.
+func mergePricingByKey(base, override []pricing.ModelPricing) []pricing.ModelPricing {
+	base = dedupePricingByKey(base)
+	override = dedupePricingByKey(override)
+	if len(base) == 0 {
+		out := make([]pricing.ModelPricing, len(override))
+		copy(out, override)
+		return out
+	}
+	overrideIdx := make(map[string]int, len(override))
+	for i, p := range override {
+		overrideIdx[pricing.Key(p.Provider, p.Model)] = i
+	}
+	out := make([]pricing.ModelPricing, 0, len(base)+len(override))
+	usedOverride := make(map[int]bool, len(override))
+	for _, b := range base {
+		if i, ok := overrideIdx[pricing.Key(b.Provider, b.Model)]; ok {
+			out = append(out, override[i])
+			usedOverride[i] = true
+			continue
+		}
+		out = append(out, b)
+	}
+	for i, o := range override {
+		if !usedOverride[i] {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+func dedupePricingByKey(in []pricing.ModelPricing) []pricing.ModelPricing {
+	if len(in) == 0 {
+		return nil
+	}
+	lastIdx := make(map[string]int, len(in))
+	for i, p := range in {
+		lastIdx[pricing.Key(p.Provider, p.Model)] = i
+	}
+	out := make([]pricing.ModelPricing, 0, len(lastIdx))
+	for i, p := range in {
+		if lastIdx[pricing.Key(p.Provider, p.Model)] == i {
+			out = append(out, p)
+		}
+	}
+	return out
+}
 
 // Provenance tracks where each configuration element originated during
 // composition. Built into the merge API from the start — retrofitting
@@ -31,6 +85,9 @@ type Provenance struct {
 	Workspace map[string]string
 	// Warnings collects non-fatal collision warnings from composition.
 	Warnings []string
+
+	sourceContents   map[string][]byte
+	revisionSnapshot *revisionSnapshot
 }
 
 // LoadOptions controls optional config-loading behavior.
@@ -62,8 +119,11 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	}
 	cityRoot := filepath.Dir(path)
 	prov := newProvenance(path)
+	prov.recordSource(path, data)
 	prov.Warnings = append(prov.Warnings, rootWarnings...)
 	cityAgentsForProvenance := root.Agents
+	root.Pricing = dedupePricingByKey(root.Pricing)
+	root.CityPricing = append([]pricing.ModelPricing(nil), root.Pricing...)
 
 	// V2: if a pack.toml exists alongside city.toml, it is the city's
 	// definition layer. Parse it and merge its content (imports, agents,
@@ -137,6 +197,11 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 				}
 			}
 		}
+		// Merge pack.toml pricing (pack is base, city wins by (provider, model) key).
+		if len(pc.Pricing) > 0 {
+			root.PackPricing = mergePricingByKey(root.PackPricing, pc.Pricing)
+			root.Pricing = mergePricingByKey(pc.Pricing, root.Pricing)
+		}
 		// Merge named sessions.
 		root.NamedSessions = append(pc.NamedSessions, root.NamedSessions...)
 		// Merge root-pack services as the portable base layer. city.toml
@@ -176,6 +241,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		// Track pack.toml agents in provenance.
 		trackAgents(prov, pc.Agents, packPath)
 		prov.Sources = append(prov.Sources, packPath)
+		prov.recordSource(packPath, packData)
 
 		packCommands, err := DiscoverPackCommands(fs, cityRoot, pc.Pack.Name)
 		if err != nil {
@@ -294,6 +360,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		// Merge fragment into root.
 		mergeFragment(root, frag, fragMeta, fragPath, prov)
 		prov.Sources = append(prov.Sources, fragPath)
+		prov.recordSource(fragPath, fragData)
 	}
 
 	// Inject system pack includes into Workspace.Includes. These are
@@ -318,7 +385,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// Resolve named pack references to cache paths before any expansion.
 	resolveNamedPacks(root, cityRoot)
 
-	implicitImports, implicitPath, implicitErr := ReadImplicitImports()
+	implicitImports, implicitPath, implicitData, implicitErr := readImplicitImportsWithData()
 	if implicitErr != nil {
 		return nil, nil, implicitErr
 	}
@@ -370,6 +437,9 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		}
 		if addedImplicit && implicitPath != "" {
 			prov.Sources = append(prov.Sources, implicitPath)
+			if implicitData != nil {
+				prov.recordSource(implicitPath, implicitData)
+			}
 		}
 	}
 
@@ -495,6 +565,16 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		return nil, nil, fmt.Errorf("%s: provider cache build failed: %w", path, err)
 	}
 
+	// v0.15.1: enrich every agent with its convention-discovered
+	// agent-local asset paths (agents/<name>/skills/, agents/<name>/mcp/).
+	// DiscoverPackAgents only does this for agents it creates — it skips
+	// names already present in pack.toml [[agent]] or city.toml
+	// [[agent]] entries, so those agents leave the discovery pass with
+	// empty SkillsDir/MCPDir even when agents/<name>/skills/ exists on
+	// disk. The materializer and collision validator both key off
+	// SkillsDir, so that gap silently loses agent-local skills for every
+	// explicitly-declared agent. Populate the fields here so the
+	// convention works uniformly.
 	populateAgentLocalAssetDirs(fs, root, cityRoot)
 
 	// Load namepool files for pool agents.
@@ -513,16 +593,10 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		prov.Warnings = append(prov.Warnings, warning)
 	}
 
-	// v0.15.1: enrich every agent with its convention-discovered
-	// agent-local asset paths (agents/<name>/skills/, agents/<name>/mcp/).
-	// DiscoverPackAgents only does this for agents it creates — it skips
-	// names already present in pack.toml [[agent]] or city.toml
-	// [[agent]] entries, so those agents leave the discovery pass with
-	// empty SkillsDir/MCPDir even when agents/<name>/skills/ exists on
-	// disk. The materializer and collision validator both key off
-	// SkillsDir, so that gap silently loses agent-local skills for every
-	// explicitly-declared agent. Populate the fields here so the
-	// convention works uniformly.
+	// Capture revision inputs after all config and pack discovery so callers
+	// can compare the loaded snapshot to future reloads without re-reading
+	// mutable files from disk.
+	prov.captureRevisionSnapshot(fs, root, cityRoot)
 	return root, prov, nil
 }
 
@@ -732,6 +806,12 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 
 	// Packs: additive merge.
 	mergePacks(base, fragment, fragPath, prov)
+
+	// Pricing: city fragments are city-layer overrides.
+	if len(fragment.Pricing) > 0 {
+		base.CityPricing = mergePricingByKey(base.CityPricing, fragment.Pricing)
+		base.Pricing = mergePricingByKey(base.Pricing, fragment.Pricing)
+	}
 
 	// Patches: accumulate from fragments (applied after all merges).
 	base.Patches.Agents = append(base.Patches.Agents, fragment.Patches.Agents...)
@@ -1201,6 +1281,15 @@ func newProvenance(rootPath string) *Provenance {
 		Rigs:      make(map[string]string),
 		Workspace: make(map[string]string),
 	}
+}
+
+func (p *Provenance) recordSource(path string, data []byte) {
+	if p.sourceContents == nil {
+		p.sourceContents = make(map[string][]byte)
+	}
+	cp := make([]byte, len(data))
+	copy(cp, data)
+	p.sourceContents[path] = cp
 }
 
 func trackAgents(prov *Provenance, agents []Agent, source string) {

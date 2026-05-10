@@ -96,16 +96,18 @@ func withRecovery(next http.Handler) http.Handler {
 	})
 }
 
-// withCORS adds restricted CORS headers for localhost dashboard access.
-// Only allows localhost origins to prevent browser-origin attacks on mutation endpoints.
-func withCORS(next http.Handler) http.Handler {
+// withCORSAllowing adds CORS headers for localhost dashboard access plus any
+// explicitly allowed extra origins. Only allows localhost origins by default
+// to prevent browser-origin attacks on mutation endpoints.
+// extra is checked with exact string equality after the localhost check.
+func withCORSAllowing(extra []string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		if isLocalhostOrigin(origin) {
+		if isLocalhostOrigin(origin) || isAllowedExtraOrigin(origin, extra) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Last-Event-ID, X-GC-Request")
-			w.Header().Set("Access-Control-Expose-Headers", "X-GC-Index, X-GC-Request-Id")
+			w.Header().Set("Access-Control-Expose-Headers", "X-GC-Index, X-GC-Request-Id, Retry-After")
 		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -120,6 +122,17 @@ func isMutationMethod(method string) bool {
 	switch method {
 	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
 		return true
+	}
+	return false
+}
+
+// isAllowedExtraOrigin reports whether origin is in the explicit allowlist.
+// Comparison is exact (case-sensitive). An empty allowlist always returns false.
+func isAllowedExtraOrigin(origin string, extra []string) bool {
+	for _, o := range extra {
+		if o == origin {
+			return true
+		}
 	}
 	return false
 }

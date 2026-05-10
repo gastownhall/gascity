@@ -28,9 +28,13 @@ type StartupHints struct {
 	// ProviderName is the resolved provider name (e.g., "claude", "codex").
 	// Used for per-provider overlay filtering in V2.
 	ProviderName string
+	// ProviderOverlayName is the concrete provider whose per-provider overlay
+	// should be staged. It differs from ProviderName when a provider inherits
+	// launch behavior from another built-in family.
+	ProviderOverlayName string
 	// InstallAgentHooks lists additional provider slots whose
 	// per-provider/<slot>/ overlay content should be staged alongside
-	// ProviderName's. Populated from the agent's install_agent_hooks
+	// ProviderOverlayName's. Populated from the agent's install_agent_hooks
 	// config (or the workspace default).
 	InstallAgentHooks []string
 	// PackOverlayDirs lists overlay directories from packs. Copied to

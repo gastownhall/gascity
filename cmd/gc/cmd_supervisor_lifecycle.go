@@ -43,6 +43,21 @@ var (
 		out, err := exec.Command("launchctl", "print", supervisorLaunchdServiceTarget(label)).Output()
 		return err == nil && launchdPrintReportsRunning(out)
 	}
+	// supervisorLaunchctlGetenv reads a value from `launchctl getenv` on
+	// macOS so users can set per-domain env (e.g. GC_DOLT_LOGLEVEL) and
+	// have it flow into the supervisor's launchd plist. Returns "" on
+	// non-Darwin or when the key is unset / launchctl is unavailable.
+	supervisorLaunchctlGetenv = func(key string) string {
+		if supervisorRuntimeGOOS != "darwin" {
+			return ""
+		}
+		out, err := exec.Command("launchctl", "getenv", key).Output()
+		if err != nil {
+			return ""
+		}
+		val := strings.TrimSuffix(string(out), "\n")
+		return strings.TrimSuffix(val, "\r")
+	}
 	supervisorSystemctlRun = func(args ...string) error {
 		return exec.Command("systemctl", args...).Run()
 	}
@@ -644,11 +659,12 @@ type supervisorServiceEnvVar struct {
 }
 
 func buildSupervisorServiceData() (*supervisorServiceData, error) {
-	gcPath, err := os.Executable()
+	gcExe, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("finding executable: %w", err)
 	}
 	homeDir, _ := os.UserHomeDir()
+	gcPath := resolveStableSupervisorBinaryPath(homeDir, stableSupervisorBinaryGopath(homeDir), gcExe)
 	home := supervisor.DefaultHome()
 	xdgRuntimeDir := strings.TrimSpace(os.Getenv("XDG_RUNTIME_DIR"))
 	if supervisor.UsesIsolatedGCHomeOverride() {
@@ -664,6 +680,65 @@ func buildSupervisorServiceData() (*supervisorServiceData, error) {
 		Path:          searchpath.ExpandPath(homeDir, goruntime.GOOS, os.Getenv("PATH")),
 		ExtraEnv:      supervisorServiceExtraEnv(),
 	}, nil
+}
+
+const (
+	supervisorBinaryName       = "gc"
+	supervisorUserLocalBinPath = ".local/bin"
+	supervisorGopathBinPath    = "bin"
+)
+
+// resolveStableSupervisorBinaryPath picks a stable install path for the
+// supervisor service unit's ExecStart when one points at the same binary as
+// currentExe; otherwise it returns currentExe. This prevents `gc supervisor
+// install` from pinning the unit to a transient path (e.g. /tmp/gc) that
+// later install paths (`make install`, gcsync) never refresh.
+func resolveStableSupervisorBinaryPath(homeDir, gopath, currentExe string) string {
+	if currentExe == "" {
+		return currentExe
+	}
+	runningInfo, err := os.Stat(currentExe)
+	if err != nil {
+		return currentExe
+	}
+	for _, candidate := range stableSupervisorBinaryCandidates(homeDir, gopath) {
+		if supervisorBinaryCandidateMatches(candidate, runningInfo) {
+			return candidate
+		}
+	}
+	return currentExe
+}
+
+func stableSupervisorBinaryCandidates(homeDir, gopath string) []string {
+	var out []string
+	if homeDir != "" {
+		out = append(out, filepath.Join(homeDir, supervisorUserLocalBinPath, supervisorBinaryName))
+	}
+	if gopath != "" {
+		out = append(out, filepath.Join(gopath, supervisorGopathBinPath, supervisorBinaryName))
+	}
+	return out
+}
+
+func supervisorBinaryCandidateMatches(candidate string, runningInfo os.FileInfo) bool {
+	info, err := os.Stat(candidate)
+	if err != nil || info.IsDir() {
+		return false
+	}
+	if info.Mode()&0o111 == 0 {
+		return false
+	}
+	return os.SameFile(info, runningInfo)
+}
+
+func stableSupervisorBinaryGopath(homeDir string) string {
+	if v := strings.TrimSpace(os.Getenv("GOPATH")); v != "" {
+		return v
+	}
+	if homeDir == "" {
+		return ""
+	}
+	return filepath.Join(homeDir, "go")
 }
 
 func sanitizeServiceName(name string) string {
@@ -684,6 +759,9 @@ var supervisorServiceEnvKeys = map[string]bool{
 	"CLAUDE_CODE_OAUTH_TOKEN":                  true,
 	"CLAUDE_CODE_SUBAGENT_MODEL":               true,
 	"CLAUDE_CONFIG_DIR":                        true,
+	"GC_DOLT_LOGLEVEL":                         true,
+	"GC_DOLT_PASSWORD":                         true,
+	"GC_DOLT_USER":                             true,
 	"HOME":                                     true,
 	"LANG":                                     true,
 	"LC_ALL":                                   true,
@@ -711,6 +789,7 @@ var supervisorServiceFixedEnvKeys = map[string]bool{
 
 func supervisorServiceExtraEnv() []supervisorServiceEnvVar {
 	env := make(map[string]string)
+	explicitEnvKeys := supervisorServiceExplicitEnvKeys(os.Getenv("GC_SUPERVISOR_ENV"))
 	for _, entry := range os.Environ() {
 		key, val, ok := strings.Cut(entry, "=")
 		if !ok || val == "" || !shouldPersistSupervisorEnv(key) {
@@ -718,8 +797,36 @@ func supervisorServiceExtraEnv() []supervisorServiceEnvVar {
 		}
 		env[key] = val
 	}
-	for _, key := range supervisorServiceExplicitEnvKeys(os.Getenv("GC_SUPERVISOR_ENV")) {
+	for _, key := range explicitEnvKeys {
 		if val := os.Getenv(key); val != "" {
+			env[key] = val
+		}
+	}
+	// Fall back to `launchctl getenv` for known-allowlisted keys and
+	// for GC_SUPERVISOR_ENV opt-ins. Without this, launchctl-set
+	// documented Dolt credential/logging settings are silently dropped:
+	// the plist's EnvironmentVariables block scopes the spawned
+	// supervisor's env, and `os.Environ()` only sees what's exported in
+	// the calling shell.
+	launchctlKeys := make([]string, 0, len(supervisorServiceEnvKeys)+len(explicitEnvKeys))
+	launchctlSeen := make(map[string]bool, cap(launchctlKeys))
+	for key := range supervisorServiceEnvKeys {
+		launchctlSeen[key] = true
+		launchctlKeys = append(launchctlKeys, key)
+	}
+	for _, key := range explicitEnvKeys {
+		if launchctlSeen[key] {
+			continue
+		}
+		launchctlSeen[key] = true
+		launchctlKeys = append(launchctlKeys, key)
+	}
+	sort.Strings(launchctlKeys)
+	for _, key := range launchctlKeys {
+		if _, ok := env[key]; ok {
+			continue
+		}
+		if val := supervisorLaunchctlGetenv(key); val != "" {
 			env[key] = val
 		}
 	}
@@ -743,7 +850,10 @@ func shouldPersistSupervisorEnv(key string) bool {
 	if supervisorServiceEnvKeys[key] {
 		return true
 	}
-	return isProviderCredentialEnv(key)
+	if isProviderCredentialEnv(key) {
+		return os.Getenv(supervisorOmitProviderCredsEnv) != "1"
+	}
+	return false
 }
 
 func isProviderCredentialEnv(key string) bool {
@@ -860,7 +970,7 @@ Type=simple
 # 'gc supervisor run' that live in this cgroup, killing one-per-bead
 # session conversation history. The reconciler re-adopts tmux on start.
 KillMode=process
-ExecStart={{.GCPath}} supervisor run
+ExecStart={{systemdpath .GCPath}} supervisor run
 Restart=always
 RestartSec=5s
 StandardOutput=append:{{.LogPath}}
@@ -886,7 +996,7 @@ func systemdEnv(name, value string) string {
 }
 
 func renderSupervisorTemplate(tmplStr string, data *supervisorServiceData) (string, error) {
-	funcMap := template.FuncMap{"xmlesc": xmlEscape, "systemdenv": systemdEnv}
+	funcMap := template.FuncMap{"xmlesc": xmlEscape, "systemdenv": systemdEnv, "systemdpath": strconv.Quote}
 	tmpl, err := template.New("service").Funcs(funcMap).Parse(tmplStr)
 	if err != nil {
 		return "", err

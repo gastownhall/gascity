@@ -298,6 +298,35 @@ func TestRenderPromptDefaultBranch(t *testing.T) {
 	}
 }
 
+func TestDefaultBranchForRig_PrefersStoredValue(t *testing.T) {
+	rigs := []config.Rig{
+		{Name: "scamper", Path: "/scamper", DefaultBranch: "master"},
+		{Name: "other", Path: "/other"},
+	}
+	got := defaultBranchForRig("scamper", rigs, "/nonexistent/path")
+	if got != "master" {
+		t.Errorf("defaultBranchForRig(scamper) = %q, want %q (stored value)", got, "master")
+	}
+}
+
+func TestDefaultBranchForRig_FallsBackToProbeWhenUnset(t *testing.T) {
+	rigs := []config.Rig{
+		{Name: "other", Path: "/other"}, // no DefaultBranch
+	}
+	// No matching rig — fall back to defaultBranchFor("") which returns "main".
+	got := defaultBranchForRig("missing", rigs, "")
+	if got != "main" {
+		t.Errorf("defaultBranchForRig(missing) = %q, want %q (probe fallback)", got, "main")
+	}
+}
+
+func TestDefaultBranchForRig_EmptyRigName(t *testing.T) {
+	got := defaultBranchForRig("", nil, "")
+	if got != "main" {
+		t.Errorf("defaultBranchForRig() with empty rig = %q, want %q", got, "main")
+	}
+}
+
 func TestRenderPromptEnvOverridePriority(t *testing.T) {
 	f := fsys.NewFake()
 	f.Files["/city/prompts/test.md.tmpl"] = []byte("Root: {{ .CityRoot }}")

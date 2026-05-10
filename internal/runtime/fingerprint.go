@@ -14,8 +14,8 @@ import (
 // the agent should be restarted (via drain when drain ops are available).
 //
 // Included: Command, Env, FingerprintExtra (pool config, etc.),
-// PreStart, SessionSetup, SessionSetupScript, OverlayDir, CopyFiles,
-// SessionLive.
+// PreStart, SessionSetup, SessionSetupScript, OverlayDir, effective provider
+// overlay slots, CopyFiles, SessionLive.
 //
 // Excluded (observation-only hints): WorkDir, ReadyPromptPrefix,
 // ReadyDelayMs, ProcessNames, EmitsPermissionWarning.
@@ -155,6 +155,8 @@ func hashCoreFields(h hash.Hash, cfg Config) {
 	h.Write([]byte(cfg.OverlayDir)) //nolint:errcheck // hash.Write never errors
 	h.Write([]byte{0})              //nolint:errcheck // hash.Write never errors
 
+	hashOverlayProviders(h, OverlayProviderNames(cfg))
+
 	// CopyFiles — probed entries use ContentHash (stable when content
 	// unchanged, even if files are recreated). Config-derived entries
 	// use Src/RelDst paths. When a probed entry has an empty ContentHash
@@ -243,6 +245,25 @@ func hashMCPServers(h hash.Hash, servers []MCPServerConfig) {
 	}
 }
 
+func hashOverlayProviders(h hash.Hash, providers []string) {
+	HashOverlayProviderNames(h, providers)
+}
+
+// HashOverlayProviderNames writes the overlay-provider fingerprint component
+// using the same framing as CoreFingerprint.
+func HashOverlayProviderNames(h io.Writer, providers []string) {
+	if len(providers) == 0 {
+		return
+	}
+	h.Write([]byte("overlay-providers")) //nolint:errcheck
+	h.Write([]byte{0})                   //nolint:errcheck
+	for _, provider := range providers {
+		h.Write([]byte(provider)) //nolint:errcheck
+		h.Write([]byte{0})        //nolint:errcheck
+	}
+	h.Write([]byte{1}) //nolint:errcheck
+}
+
 // CoreFingerprintBreakdown returns per-field hash components of the core
 // fingerprint. Used to diagnose config-drift by comparing breakdowns
 // from session start vs reconcile time.
@@ -286,6 +307,9 @@ func CoreFingerprintBreakdown(cfg Config) map[string]string {
 		}),
 		"OverlayDir": fieldHash(func(h hash.Hash) {
 			h.Write([]byte(cfg.OverlayDir))
+		}),
+		"OverlayProviders": fieldHash(func(h hash.Hash) {
+			hashOverlayProviders(h, OverlayProviderNames(cfg))
 		}),
 		"CopyFiles": fieldHash(func(h hash.Hash) {
 			for _, cf := range cfg.CopyFiles {
@@ -362,6 +386,8 @@ func LogCoreFingerprintDrift(w io.Writer, name string, storedBreakdown map[strin
 			fmt.Fprintf(w, "    PreStart: %v\n", current.PreStart) //nolint:errcheck // best-effort diag
 		case "OverlayDir":
 			fmt.Fprintf(w, "    OverlayDir: %q\n", current.OverlayDir) //nolint:errcheck // best-effort diag
+		case "OverlayProviders":
+			fmt.Fprintf(w, "    OverlayProviders: %v\n", OverlayProviderNames(current)) //nolint:errcheck // best-effort diag
 		case "SessionSetup":
 			fmt.Fprintf(w, "    SessionSetup: %v\n", current.SessionSetup) //nolint:errcheck // best-effort diag
 		case "SessionSetupScript":

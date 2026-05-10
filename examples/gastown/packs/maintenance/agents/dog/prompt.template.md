@@ -32,6 +32,16 @@ queued formula.
 
 Additional formulas available from included packs (e.g. dolt).
 
+If your wisp names a formula not listed above (one that an included
+pack provides, or one the daemon assigned), read its recipe with
+`gc bd formula show <formula-name>`. **Never** locate formula files
+with whole-filesystem searches (`find /`, `find ~`) — they trigger
+macOS TCC permission prompts on protected directories (Documents,
+Desktop, Downloads, removable volumes, network mounts) and produce
+no useful signal a `gc` introspection command can't already provide.
+If `gc bd formula show` returns "formula not found", the wisp is
+mis-routed — close the bead with that reason and exit; do not hunt.
+
 ---
 
 ## The Shutdown Dance
@@ -76,7 +86,7 @@ and the pool can't recycle your slot.
 
 ```bash
 gc session nudge <target> "message"                # Nudge an agent
-gc session peek <target> 50                        # View agent output
+gc session peek <target> --lines 50                # View agent output
 gc session list                                    # Check agent status
 ```
 
@@ -109,6 +119,7 @@ gc session nudge {{"{{requester}}"}}/ "DOG_DONE: <target> — <outcome>"
 | Want to... | Correct command |
 |------------|----------------|
 | Read formula steps | `gc bd show <wisp-id>` (shows formula ref) |
+| Read formula recipe | `gc bd formula show <formula-name>` (NOT `find /`) |
 | Find pool work | `{{ .WorkQuery }}` |
 | Claim pool work | `gc bd update <id> --claim` |
 | View work details | `gc bd show <id> --json` |

@@ -2146,6 +2146,10 @@ export type RigActionBody = {
 
 export type RigCreateInputBody = {
     /**
+     * Mainline branch (e.g. main, master). Auto-detected when omitted.
+     */
+    default_branch?: string;
+    /**
      * Rig name.
      */
     name: string;
@@ -2171,6 +2175,7 @@ export type RigCreatedOutputBody = {
 };
 
 export type RigPatch = {
+    DefaultBranch: string | null;
     Name: string;
     Path: string | null;
     Prefix: string | null;
@@ -2178,6 +2183,10 @@ export type RigPatch = {
 };
 
 export type RigPatchSetInputBody = {
+    /**
+     * Override mainline branch.
+     */
+    default_branch?: string;
     /**
      * Rig name.
      */
@@ -2198,6 +2207,7 @@ export type RigPatchSetInputBody = {
 
 export type RigResponse = {
     agent_count: number;
+    default_branch?: string;
     git?: GitStatus;
     last_activity?: string;
     name: string;
@@ -2208,6 +2218,10 @@ export type RigResponse = {
 };
 
 export type RigUpdateInputBody = {
+    /**
+     * Mainline branch (e.g. main, master).
+     */
+    default_branch?: string;
     /**
      * Filesystem path.
      */
@@ -2740,6 +2754,10 @@ export type SupervisorCitiesOutputBody = {
 };
 
 export type SupervisorEventListOutputBody = {
+    /**
+     * Supervisor event-stream cursor captured before the history snapshot was listed. Pass this value as after_cursor to /v0/events/stream to receive events emitted after the snapshot boundary without replaying unrelated historical backlog.
+     */
+    event_cursor: string;
     items: Array<TypedTaggedEventStreamEnvelope> | null;
     total: number;
 };
@@ -4346,12 +4364,56 @@ export type UnboundEventPayload = {
 };
 
 export type WorkerOperationEventPayload = {
+    /**
+     * Qualified agent identity (best-effort, absent if the session has no agent_name metadata or alias).
+     */
+    agent_name?: string;
+    /**
+     * Work bead this operation is acting on (best-effort, may be absent for non-bead-scoped ops).
+     */
+    bead_id?: string;
+    /**
+     * Input tokens written into the prompt cache (best-effort, currently always absent).
+     */
+    cache_creation_tokens?: number;
+    /**
+     * Cached input tokens read (best-effort, currently always absent).
+     */
+    cache_read_tokens?: number;
+    /**
+     * Output tokens (best-effort, currently always absent).
+     */
+    completion_tokens?: number;
+    /**
+     * Estimated invocation cost in USD (best-effort, currently always absent; see #1255 for pricing seam).
+     */
+    cost_usd_estimate?: number;
     delivered?: boolean;
     duration_ms: number;
     error?: string;
     finished_at: string;
+    /**
+     * LLM invocation wall-clock latency (best-effort, currently always absent — no source).
+     */
+    latency_ms?: number;
+    /**
+     * LLM model identifier (best-effort, may be absent until follow-up wiring lands).
+     */
+    model?: string;
     op_id: string;
     operation: string;
+    /**
+     * SHA-256 of the rendered prompt (best-effort, currently always absent; #1256 follow-up).
+     */
+    prompt_sha?: string;
+    /**
+     * Non-cached input tokens (best-effort, currently always absent; treat zero as 'not measured', not 'free').
+     */
+    prompt_tokens?: number;
+    /**
+     * Template version frontmatter (best-effort, currently always absent; #1256 follow-up).
+     */
+    prompt_version?: string;
     provider?: string;
     queued?: boolean;
     result: string;
@@ -7278,7 +7340,7 @@ export type GetV0CityByCityNameMailThreadByIdData = {
          */
         cityName: string;
         /**
-         * Thread ID.
+         * Thread ID, or any message ID in the thread.
          */
         id: string;
     };

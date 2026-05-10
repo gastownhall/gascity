@@ -1,7 +1,10 @@
 #!/bin/sh
 # gc dolt sync — Push Dolt databases to their configured remotes.
 #
-# Stops the server for a clean push, syncs each database, then restarts.
+# Uses the live Dolt SQL server when reachable so sync does not restart
+# active databases. Falls back to CLI mode only when no server is running.
+# Pushes committed `main` branch state only; it does not auto-commit working
+# changes before pushing.
 # Use --gc to purge closed ephemeral beads before syncing.
 # Use --dry-run to preview without pushing.
 #
@@ -79,6 +82,120 @@ routes_files() {
   find "$GC_CITY_PATH/rigs" -path '*/.beads/routes.jsonl' 2>/dev/null || true
 }
 
+valid_database_name() {
+  case "$1" in
+    [A-Za-z0-9_]*)
+      case "$1" in *[!A-Za-z0-9_-]*) return 1 ;; *) return 0 ;; esac
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+valid_remote_name() {
+  case "$1" in
+    [A-Za-z0-9_.-]*)
+      case "$1" in *[!A-Za-z0-9_.-]*) return 1 ;; *) return 0 ;; esac
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+dolt_sql() {
+  query="$1"
+  host="${GC_DOLT_HOST:-127.0.0.1}"
+  export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
+  run_bounded 120 dolt --host "$host" --port "$GC_DOLT_PORT" --user "$GC_DOLT_USER" --no-tls \
+    sql --result-format csv -q "$query"
+}
+
+find_remote_sql() {
+  db="$1"
+  remote_csv=$(dolt_sql "USE \`$db\`; SELECT name, url FROM dolt_remotes LIMIT 1") || return 1
+  printf '%s\n' "$remote_csv" | awk -F, 'NR > 1 && $1 != "" {print $1 "|" $2; exit}'
+}
+
+sync_database_sql() {
+  name="$1"
+  if ! valid_database_name "$name"; then
+    echo "  $name: ERROR: invalid database name" >&2
+    return 1
+  fi
+
+  remote_pair=$(find_remote_sql "$name") || {
+    echo "  $name: ERROR: failed to query remotes" >&2
+    return 1
+  }
+  if [ -z "$remote_pair" ]; then
+    echo "  $name: skipped (no remote)"
+    return 0
+  fi
+  remote_name=${remote_pair%%|*}
+  remote_url=${remote_pair#*|}
+  if ! valid_remote_name "$remote_name"; then
+    echo "  $name: ERROR: invalid remote name: $remote_name" >&2
+    return 1
+  fi
+
+  if [ "$dry_run" = true ]; then
+    echo "  $name: would push to $remote_url"
+    return 0
+  fi
+
+  if [ "$force" = true ]; then
+    push_query="USE \`$name\`; CALL DOLT_PUSH('--force', '--set-upstream', '$remote_name', 'main')"
+  else
+    push_query="USE \`$name\`; CALL DOLT_PUSH('$remote_name', 'main')"
+  fi
+  if dolt_sql "$push_query" >/dev/null 2>&1; then
+    echo "  $name: pushed to $remote_url"
+    return 0
+  fi
+
+  echo "  $name: ERROR: push failed" >&2
+  return 1
+}
+
+sync_database_cli() {
+  d="$1"
+  name="$2"
+
+  # Check for remote.
+  remote_name=""
+  remote=""
+  if [ -f "$d/.dolt/remotes.json" ]; then
+    remote_name=$(grep -o '"name":"[^"]*"' "$d/.dolt/remotes.json" 2>/dev/null | head -1 | sed 's/"name":"//;s/"//' || true)
+    remote=$(grep -o '"url":"[^"]*"' "$d/.dolt/remotes.json" 2>/dev/null | head -1 | sed 's/"url":"//;s/"//' || true)
+  fi
+  [ -z "$remote_name" ] && remote_name="origin"
+
+  if [ -z "$remote" ]; then
+    echo "  $name: skipped (no remote)"
+    return 0
+  fi
+  if ! valid_remote_name "$remote_name"; then
+    echo "  $name: ERROR: invalid remote name: $remote_name" >&2
+    return 1
+  fi
+
+  if [ "$dry_run" = true ]; then
+    echo "  $name: would push to $remote"
+    return 0
+  fi
+
+  if [ "$force" = true ]; then
+    if (cd "$d" && dolt push --force --set-upstream "$remote_name" main 2>&1); then
+      echo "  $name: pushed to $remote"
+      return 0
+    fi
+  elif (cd "$d" && dolt push "$remote_name" main 2>&1); then
+    echo "  $name: pushed to $remote"
+    return 0
+  fi
+
+  echo "  $name: ERROR: push failed" >&2
+  return 1
+}
+
 # Optional GC phase: purge closed ephemerals while server is still up.
 if [ "$do_gc" = true ] && [ -d "$data_dir" ]; then
   for d in "$data_dir"/*/; do
@@ -106,57 +223,27 @@ ROUTES_LIST
   done
 fi
 
-# Stop server for clean push.
-was_running=false
-if is_running; then
-  was_running=true
-  if [ "$dry_run" = false ] && [ -x "$beads_bd" ]; then
-    "$beads_bd" stop 2>/dev/null || true
-    "$beads_bd" shutdown 2>/dev/null || true
-  fi
-fi
-
 # Sync each database.
 exit_code=0
+server_running=false
+is_running && server_running=true
 if [ -d "$data_dir" ]; then
   for d in "$data_dir"/*/; do
     [ ! -d "$d/.dolt" ] && continue
     name="$(basename "$d")"
     case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe) continue ;; esac
     [ -n "$db_filter" ] && [ "$name" != "$db_filter" ] && continue
-
-    # Check for remote.
-    remote=""
-    if [ -f "$d/.dolt/remotes.json" ]; then
-      remote=$(grep -o '"url":"[^"]*"' "$d/.dolt/remotes.json" 2>/dev/null | head -1 | sed 's/"url":"//;s/"//' || true)
-    fi
-
-    if [ -z "$remote" ]; then
-      echo "  $name: skipped (no remote)"
+    if [ -f "$d/.no-sync" ]; then
+      echo "  $name: skipped (.no-sync)"
       continue
     fi
 
-    if [ "$dry_run" = true ]; then
-      echo "  $name: would push to $remote"
-      continue
-    fi
-
-    push_args="push"
-    [ "$force" = true ] && push_args="push --force"
-
-    if (cd "$d" && dolt $push_args 2>&1); then
-      echo "  $name: pushed to $remote"
+    if [ "$server_running" = true ]; then
+      sync_database_sql "$name" || exit_code=1
     else
-      echo "  $name: ERROR: push failed" >&2
-      exit_code=1
+      sync_database_cli "$d" "$name" || exit_code=1
     fi
   done
-fi
-
-# Restart server if it was running.
-if [ "$was_running" = true ] && [ "$dry_run" = false ] && [ -x "$beads_bd" ]; then
-  "$beads_bd" start 2>/dev/null || true
-  "$beads_bd" ensure-ready 2>/dev/null || true
 fi
 
 exit $exit_code

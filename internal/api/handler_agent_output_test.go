@@ -530,11 +530,47 @@ func TestAgentOutputStreamStoppedAgent(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	if got := rec.Header().Get("GC-Agent-Status"); got != "stopped" {
-		t.Errorf("GC-Agent-Status = %q, want %q", got, "stopped")
+	if got := rec.Result().Header.Get("GC-Agent-Status"); got != "stopped" {
+		t.Errorf("committed GC-Agent-Status = %q, want %q", got, "stopped")
 	}
 	if !strings.Contains(rec.Body.String(), "hello") {
 		t.Errorf("body should contain session data, got: %s", rec.Body.String())
+	}
+}
+
+func TestAgentOutputStreamStoppedAgentCommitsStatusHeader(t *testing.T) {
+	state := newFakeState(t)
+	rigDir := t.TempDir()
+	state.cfg.Rigs = []config.Rig{{Name: "myrig", Path: rigDir}}
+
+	searchBase := t.TempDir()
+	writeSessionJSONL(t, searchBase, rigDir,
+		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+	)
+
+	srv := newServerWithSearchPaths(state, searchBase)
+	h := newTestCityHandlerWith(t, state, srv)
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+cityURL(state, "/agent/myrig/worker/output/stream"), nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	cancel()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if got := resp.Header.Get("GC-Agent-Status"); got != "stopped" {
+		t.Fatalf("committed GC-Agent-Status = %q, want %q", got, "stopped")
 	}
 }
 

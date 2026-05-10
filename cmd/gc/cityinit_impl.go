@@ -120,7 +120,7 @@ func cityInitDoInit(_ context.Context, req cityinit.InitRequest) error {
 		startCommand:     req.StartCommand,
 		bootstrapProfile: req.BootstrapProfile,
 	}
-	if code := doInit(fsys.OSFS{}, req.Dir, wiz, req.NameOverride, io.Discard, io.Discard); code != 0 {
+	if code := doInit(fsys.OSFS{}, req.Dir, wiz, req.NameOverride, io.Discard, io.Discard, false); code != 0 {
 		if code == initExitAlreadyInitialized {
 			return cityinit.ErrAlreadyInitialized
 		}

@@ -74,6 +74,7 @@ func TestCmdSessionReset_ClearsCircuitBreaker(t *testing.T) {
 		cityDir,
 		func() {},
 		nil,
+		nil,
 		make(chan reloadRequest),
 		make(chan convergenceRequest, 1),
 		make(chan struct{}, 1),
@@ -145,11 +146,11 @@ func TestCmdSessionReset_RequestsFreshRestartWithController(t *testing.T) {
 	}
 	defer lis.Close() //nolint:errcheck
 
-	commands := make(chan string, 4)
+	commands := make(chan string, 3)
 	errCh := make(chan error, 1)
 	go func() {
 		defer close(commands)
-		for i := 0; i < 4; i++ {
+		for i := 0; i < 3; i++ {
 			conn, err := lis.Accept()
 			if err != nil {
 				errCh <- err
@@ -167,8 +168,6 @@ func TestCmdSessionReset_RequestsFreshRestartWithController(t *testing.T) {
 			reply := "ok\n"
 			if cmd == "ping\n" {
 				reply = "123\n"
-			} else if strings.HasPrefix(cmd, "session-circuit-reset:") {
-				reply = `{"outcome":"ok"}` + "\n"
 			}
 			if _, err := conn.Write([]byte(reply)); err != nil {
 				conn.Close() //nolint:errcheck
@@ -184,9 +183,9 @@ func TestCmdSessionReset_RequestsFreshRestartWithController(t *testing.T) {
 		t.Fatalf("cmdSessionReset(controller) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
-	gotCommands := make([]string, 0, 4)
+	gotCommands := make([]string, 0, 3)
 	deadline := time.After(2 * time.Second)
-	for len(gotCommands) < 4 {
+	for len(gotCommands) < 3 {
 		select {
 		case err := <-errCh:
 			if err != nil {
@@ -194,8 +193,8 @@ func TestCmdSessionReset_RequestsFreshRestartWithController(t *testing.T) {
 			}
 		case cmd, ok := <-commands:
 			if !ok {
-				if len(gotCommands) != 4 {
-					t.Fatalf("controller commands = %v, want ping, poke, reset, poke", gotCommands)
+				if len(gotCommands) != 3 {
+					t.Fatalf("controller commands = %v, want ping, poke, poke", gotCommands)
 				}
 				break
 			}
@@ -204,23 +203,11 @@ func TestCmdSessionReset_RequestsFreshRestartWithController(t *testing.T) {
 			t.Fatalf("timed out waiting for controller pokes, got %v", gotCommands)
 		}
 	}
-	wantExact := []string{"ping\n", "poke\n"}
+	wantExact := []string{"ping\n", "poke\n", "poke\n"}
 	for i, want := range wantExact {
 		if gotCommands[i] != want {
 			t.Fatalf("controller command %d = %q, want %q", i, gotCommands[i], want)
 		}
-	}
-	if !strings.HasPrefix(gotCommands[2], "session-circuit-reset:") {
-		t.Fatalf("controller command 2 = %q, want session-circuit-reset", gotCommands[2])
-	}
-	if !strings.Contains(gotCommands[2], `"identity":"sky"`) {
-		t.Fatalf("controller command 2 = %q, want identity sky", gotCommands[2])
-	}
-	if !strings.Contains(gotCommands[2], `"session_id":"`+bead.ID+`"`) {
-		t.Fatalf("controller command 2 = %q, want session_id %s", gotCommands[2], bead.ID)
-	}
-	if gotCommands[3] != "poke\n" {
-		t.Fatalf("controller command 3 = %q, want poke", gotCommands[3])
 	}
 
 	reloaded, err := openCityStoreAt(cityDir)

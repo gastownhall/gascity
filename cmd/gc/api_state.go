@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -154,7 +155,7 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 		if ctx.Err() != nil {
 			return
 		}
-		cs.StartReconciler(ctx)
+		cs.StartReconciler(ctx, beads.WithStaggerAuto(), os.Getenv("GC_AGENT"))
 	}()
 	return cs
 }
@@ -201,12 +202,16 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 	scopeRoot := resolveStoreScopeRoot(cs.cityPath, rigPath)
 	if strings.HasPrefix(provider, "exec:") {
 		s := beadsexec.NewStore(strings.TrimPrefix(provider, "exec:"))
-		s.SetEnv(gcExecStoreEnv(cs.cityPath, execStoreTarget{
+		env := gcExecStoreEnv(cs.cityPath, execStoreTarget{
 			ScopeRoot: scopeRoot,
 			ScopeKind: "rig",
 			Prefix:    prefix,
 			RigName:   rigName,
-		}, provider))
+		}, provider)
+		if execProviderNeedsScopedDoltStoreEnv(provider) {
+			copyExecProjectedDoltEnv(env, bdRuntimeEnvForRig(cs.cityPath, cfg, scopeRoot))
+		}
+		s.SetEnv(env)
 		return s
 	}
 	switch provider {
@@ -780,6 +785,15 @@ func (cs *controllerState) CreateAgent(a config.Agent) error {
 	})
 }
 
+// WaitForAgentVisibility blocks until findAgent in the controller's hot-reloaded
+// config snapshot resolves the given qualified agent name. CreateAgent already
+// refreshes cs.cfg from disk, so the first check normally succeeds; the wait
+// preserves the HTTP contract that a successful POST /agents response can be
+// followed immediately by POST /sling against the same target.
+func (cs *controllerState) WaitForAgentVisibility(ctx context.Context, qualifiedName string) error {
+	return api.WaitForAgentVisibilityIn(ctx, cs.Config, qualifiedName)
+}
+
 // UpdateAgent partially updates an existing agent definition in city.toml.
 func (cs *controllerState) UpdateAgent(name string, patch api.AgentUpdate) error {
 	return cs.mutateAndPoke(func() error {
@@ -800,12 +814,30 @@ func (cs *controllerState) DeleteAgent(name string) error {
 
 // CreateRig adds a new rig to city.toml.
 func (cs *controllerState) CreateRig(r config.Rig) error {
+	r = detectRigDefaultBranch(cs.cityPath, r)
 	if err := cs.initializeRigStoreForCreate(r); err != nil {
 		return err
 	}
 	return cs.mutateAndPoke(func() error {
 		return cs.editor.CreateRig(r)
 	})
+}
+
+func detectRigDefaultBranch(cityPath string, r config.Rig) config.Rig {
+	r.DefaultBranch = strings.TrimSpace(r.DefaultBranch)
+	if r.DefaultBranch != "" {
+		return r
+	}
+	rigPath := strings.TrimSpace(r.Path)
+	if rigPath == "" {
+		return r
+	}
+	rigPath = resolveStoreScopeRoot(cityPath, rigPath)
+	if _, err := os.Stat(filepath.Join(rigPath, ".git")); err != nil {
+		return r
+	}
+	r.DefaultBranch = git.New(rigPath).ProbeDefaultBranch()
+	return r
 }
 
 func (cs *controllerState) initializeRigStoreForCreate(r config.Rig) error {
@@ -837,9 +869,10 @@ func (cs *controllerState) initializeRigStoreForCreate(r config.Rig) error {
 func (cs *controllerState) UpdateRig(name string, patch api.RigUpdate) error {
 	return cs.mutateAndPoke(func() error {
 		return cs.editor.UpdateRig(name, configedit.RigUpdate{
-			Path:      patch.Path,
-			Prefix:    patch.Prefix,
-			Suspended: patch.Suspended,
+			Path:          patch.Path,
+			Prefix:        patch.Prefix,
+			DefaultBranch: patch.DefaultBranch,
+			Suspended:     patch.Suspended,
 		})
 	})
 }

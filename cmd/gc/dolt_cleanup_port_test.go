@@ -180,6 +180,11 @@ func TestResolveDoltPort_BadRigPortFileStopsBeforeLegacyFallback(t *testing.T) {
 			wantDetail: "invalid port",
 		},
 		{
+			name:       "out of range",
+			setup:      func(fs *fsys.Fake) { fs.Files["/city/.beads/dolt-server.port"] = []byte("70000\n") },
+			wantDetail: "must be between 1 and 65535",
+		},
+		{
 			name:       "unreadable",
 			setup:      func(fs *fsys.Fake) { fs.Errors["/city/.beads/dolt-server.port"] = os.ErrPermission },
 			wantDetail: "permission",

@@ -838,6 +838,65 @@ session_id_flag = "--session-id"
 	}
 }
 
+// TestWorkerObserveSessionTargetWithConfigDoesNotFetchSessionBeadMoreThanTwice
+// guards the dedup invariant. The Observe path used to load the same session
+// bead five times per call (resolve, factory.Get, factory metadata Get,
+// LiveObservation Get, ObserveRuntime Get); this PR collapses that to two:
+// once for ResolveSessionBeadByExactID and once for LiveObservation's
+// freshness re-load. Each redundant fetch is a `bd show` CLI fork on real
+// (non-mem) stores, so the supervisor's nudge poll loop pays for every Get
+// directly in idle-city CPU.
+func TestWorkerObserveSessionTargetWithConfigDoesNotFetchSessionBeadMoreThanTwice(t *testing.T) {
+	cityDir := t.TempDir()
+	writePhase0InterfaceCity(t, cityDir, `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "worker"
+provider = "stub"
+
+[providers.stub]
+command = "/bin/echo"
+`)
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	backing, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	sp := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(cityDir, backing, sp, cfg)
+	info, err := mgr.Create(context.Background(), "worker", "Probe", "/bin/echo", t.TempDir(), "stub", nil, session.ProviderResume{}, runtime.Config{Command: "/bin/echo"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	store := &sessionGetSpyStore{Store: backing}
+	obs, err := workerObserveSessionTargetWithConfig(cityDir, store, sp, cfg, info.ID)
+	if err != nil {
+		t.Fatalf("workerObserveSessionTargetWithConfig: %v", err)
+	}
+	if !obs.Running {
+		t.Fatalf("obs.Running = false, want true after Create started runtime")
+	}
+
+	var hits int
+	for _, id := range store.getIDs {
+		if id == info.ID {
+			hits++
+		}
+	}
+	if hits > 2 {
+		t.Fatalf("store.Get(%q) called %d times, want at most 2; all Get IDs: %v", info.ID, hits, store.getIDs)
+	}
+}
+
 func TestWorkerObserveSessionTargetWithConfigFallsBackToRunningRuntimeHandle(t *testing.T) {
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "mayor", runtime.Config{Command: "echo"}); err != nil {

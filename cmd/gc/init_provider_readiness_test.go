@@ -54,6 +54,15 @@ func TestMaybePrintWizardProviderGuidanceNeedsAuth(t *testing.T) {
 	}
 }
 
+func TestProviderStatusFixHintIncludesClaudeOAuthToken(t *testing.T) {
+	got := providerStatusFixHint("claude", api.ProbeStatusInvalidConfiguration)
+	for _, want := range []string{"`claude.ai`", "`oauth_token`", "`firstParty`"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("providerStatusFixHint = %q, want %s", got, want)
+		}
+	}
+}
+
 func TestFinalizeInitBlocksProviderReadinessBeforeSupervisorRegistration(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
@@ -65,7 +74,7 @@ func TestFinalizeInitBlocksProviderReadinessBeforeSupervisorRegistration(t *test
 	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
 		configName: "minimal",
 		provider:   "claude",
-	}, "", &initStdout, &initStderr)
+	}, "", &initStdout, &initStderr, false)
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
 	}
@@ -243,7 +252,7 @@ func TestFinalizeInitDoesNotWriteImplicitImportState(t *testing.T) {
 
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	var initStdout, initStderr bytes.Buffer
-	code := doInit(fsys.OSFS{}, cityPath, defaultWizardConfig(), "", &initStdout, &initStderr)
+	code := doInit(fsys.OSFS{}, cityPath, defaultWizardConfig(), "", &initStdout, &initStderr, false)
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
 	}
@@ -316,7 +325,7 @@ func TestFinalizeInitWithoutProgressSkipsStepCounter(t *testing.T) {
 	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
 		configName: "minimal",
 		provider:   "claude",
-	}, "", &initStdout, &initStderr)
+	}, "", &initStdout, &initStderr, false)
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
 	}
@@ -376,7 +385,7 @@ func TestCmdInitResumesFinalizeForExistingCity(t *testing.T) {
 	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
 		configName: "gastown",
 		provider:   "claude",
-	}, "", &initStdout, &initStderr)
+	}, "", &initStdout, &initStderr, false)
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
 	}
@@ -438,7 +447,7 @@ func TestCmdInitSkipProviderReadinessBypassesBlockedProvider(t *testing.T) {
 	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
 		configName: "minimal",
 		provider:   "claude",
-	}, "", &initStdout, &initStderr)
+	}, "", &initStdout, &initStderr, false)
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
 	}
@@ -467,7 +476,7 @@ func TestCmdInitSkipProviderReadinessBypassesBlockedProvider(t *testing.T) {
 	t.Cleanup(func() { registerCityWithSupervisorTestHook = oldRegister })
 
 	var stdout, stderr bytes.Buffer
-	code = cmdInitWithOptions([]string{cityPath}, "", "", "", &stdout, &stderr, true)
+	code = cmdInitWithOptions([]string{cityPath}, "", "", "", &stdout, &stderr, true, false)
 	if code != 0 {
 		t.Fatalf("cmdInitWithOptions = %d, want 0: %s", code, stderr.String())
 	}
@@ -823,7 +832,7 @@ func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlock(t *testing
 	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
 		configName: "minimal",
 		provider:   "claude",
-	}, "", &initStdout, &initStderr)
+	}, "", &initStdout, &initStderr, false)
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
 	}
@@ -883,7 +892,7 @@ func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlockWithoutSkip
 	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
 		configName: "minimal",
 		provider:   "claude",
-	}, "", &initStdout, &initStderr)
+	}, "", &initStdout, &initStderr, false)
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
 	}
@@ -932,7 +941,7 @@ func TestFinalizeInitDoesNotRunBdProviderBeforeProviderReadinessBlock(t *testing
 	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
 		configName: "minimal",
 		provider:   "claude",
-	}, "", &initStdout, &initStderr)
+	}, "", &initStdout, &initStderr, false)
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
 	}

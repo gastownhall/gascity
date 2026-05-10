@@ -35,14 +35,14 @@ func (f *failingBeadStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 	return f.Store.List(q)
 }
 
-func (f *failingBeadStore) Ready() ([]beads.Bead, error) {
+func (f *failingBeadStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
 	if f.readyErr != nil {
 		if f.readyResult != nil {
 			return f.readyResult, f.readyErr
 		}
 		return nil, f.readyErr
 	}
-	return f.Store.Ready()
+	return f.Store.Ready(query...)
 }
 
 func (f *failingBeadStore) Update(id string, opts beads.UpdateOpts) error {

@@ -1,6 +1,12 @@
 package citylayout
 
-import "path/filepath"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/gastownhall/gascity/internal/pathutil"
+)
 
 const (
 	// RuntimeDataRoot is the canonical hidden runtime root for mutable city state.
@@ -16,6 +22,48 @@ const (
 // RuntimeDataDir returns the canonical hidden runtime directory for a city.
 func RuntimeDataDir(cityRoot string) string {
 	return RuntimePath(cityRoot, "runtime")
+}
+
+// ControlDispatcherTraceDefaultPath returns the default control-dispatcher
+// workflow trace file under the canonical runtime root.
+func ControlDispatcherTraceDefaultPath(cityRoot string) string {
+	return filepath.Join(RuntimeDataDir(cityRoot), "control-dispatcher-trace.log")
+}
+
+// ControlDispatcherTraceDefaultPathForRuntimeDir returns the default
+// control-dispatcher workflow trace file for the provided runtime root. Runtime
+// dirs inside the city but outside .gc/runtime are coerced back to the
+// canonical hidden runtime root to avoid watcher-visible trace writes. Runtime
+// dirs outside the city are preserved as explicit operator overrides.
+func ControlDispatcherTraceDefaultPathForRuntimeDir(cityRoot, runtimeDir string) string {
+	runtimeDir = normalizeRuntimeDir(cityRoot, runtimeDir)
+	return filepath.Join(runtimeDir, "control-dispatcher-trace.log")
+}
+
+// ControlDispatcherTraceLogFileName returns the per-dispatcher trace log
+// filename for a qualified agent name. The "/" → "--" mapping mirrors how
+// rig-qualified agent names are encoded in tmux session aliases (e.g., the
+// "app/control-dispatcher" dispatcher runs in the "app--control-dispatcher"
+// tmux session). Closes #1650 when used as a per-dispatcher TRACE_DEFAULT.
+func ControlDispatcherTraceLogFileName(qualifiedName string) string {
+	safe := strings.ReplaceAll(qualifiedName, "/", "--")
+	return safe + "-trace.log"
+}
+
+// ControlDispatcherTraceDefaultPathFor returns the per-dispatcher default
+// trace file under cityRoot's canonical runtime root. Each dispatcher
+// resolves to a distinct file so operators can attribute every trace line
+// without correlating against process titles or session lists.
+func ControlDispatcherTraceDefaultPathFor(cityRoot, qualifiedName string) string {
+	return filepath.Join(RuntimeDataDir(cityRoot), ControlDispatcherTraceLogFileName(qualifiedName))
+}
+
+// ControlDispatcherTraceDefaultPathForRuntimeDirAndName returns the
+// per-dispatcher default trace file for the provided runtime root. Same
+// runtime-dir normalization rules as ControlDispatcherTraceDefaultPathForRuntimeDir.
+func ControlDispatcherTraceDefaultPathForRuntimeDirAndName(cityRoot, runtimeDir, qualifiedName string) string {
+	runtimeDir = normalizeRuntimeDir(cityRoot, runtimeDir)
+	return filepath.Join(runtimeDir, ControlDispatcherTraceLogFileName(qualifiedName))
 }
 
 // RuntimePacksDir returns the canonical root for pack-owned runtime state.
@@ -54,23 +102,45 @@ func PackStateDir(cityRoot, packName string) string {
 	return filepath.Join(RuntimePacksDir(cityRoot), packName)
 }
 
-// CityRuntimeEnv returns canonical city runtime env vars.
+// CityRuntimeEnv returns city runtime env vars rooted at the canonical runtime
+// directory for cityRoot.
 func CityRuntimeEnv(cityRoot string) []string {
-	runtimeDir := RuntimeDataDir(cityRoot)
+	return CityRuntimeEnvForRuntimeDir(cityRoot, "")
+}
+
+// CityRuntimeEnvForRuntimeDir returns city runtime env vars for cityRoot using
+// runtimeDir when it is a trusted override.
+func CityRuntimeEnvForRuntimeDir(cityRoot, runtimeDir string) []string {
+	runtimeDir = strings.TrimSpace(runtimeDir)
+	if runtimeDir == "" {
+		runtimeDir = RuntimeDataDir(cityRoot)
+	}
 	return []string{
 		"GC_CITY=" + cityRoot,
 		"GC_CITY_PATH=" + cityRoot,
 		"GC_CITY_RUNTIME_DIR=" + runtimeDir,
+		"GC_CONTROL_DISPATCHER_TRACE_DEFAULT=" + ControlDispatcherTraceDefaultPathForRuntimeDir(cityRoot, runtimeDir),
 	}
 }
 
-// CityRuntimeEnvMap returns canonical city runtime env vars.
+// CityRuntimeEnvMap returns city runtime env vars rooted at the canonical
+// runtime directory for cityRoot.
 func CityRuntimeEnvMap(cityRoot string) map[string]string {
-	runtimeDir := RuntimeDataDir(cityRoot)
+	return CityRuntimeEnvMapForRuntimeDir(cityRoot, "")
+}
+
+// CityRuntimeEnvMapForRuntimeDir returns city runtime env vars for cityRoot
+// using runtimeDir when it is a trusted override.
+func CityRuntimeEnvMapForRuntimeDir(cityRoot, runtimeDir string) map[string]string {
+	runtimeDir = strings.TrimSpace(runtimeDir)
+	if runtimeDir == "" {
+		runtimeDir = RuntimeDataDir(cityRoot)
+	}
 	return map[string]string{
-		"GC_CITY":             cityRoot,
-		"GC_CITY_PATH":        cityRoot,
-		"GC_CITY_RUNTIME_DIR": runtimeDir,
+		"GC_CITY":                             cityRoot,
+		"GC_CITY_PATH":                        cityRoot,
+		"GC_CITY_RUNTIME_DIR":                 runtimeDir,
+		"GC_CONTROL_DISPATCHER_TRACE_DEFAULT": ControlDispatcherTraceDefaultPathForRuntimeDir(cityRoot, runtimeDir),
 	}
 }
 
@@ -90,6 +160,33 @@ func PackRuntimeEnvMap(cityRoot, packName string) map[string]string {
 		env["GC_PACK_STATE_DIR"] = PackStateDir(cityRoot, packName)
 	}
 	return env
+}
+
+// TrustedAmbientCityRuntimeDir returns GC_CITY_RUNTIME_DIR only when the
+// ambient process env is already anchored to cityRoot via GC_CITY,
+// GC_CITY_PATH, or GC_CITY_ROOT. Paths outside the city tree are preserved
+// intentionally: they cannot wake the city watcher and let operators relocate
+// runtime artifacts explicitly.
+func TrustedAmbientCityRuntimeDir(cityRoot string) string {
+	runtimeDir := strings.TrimSpace(os.Getenv("GC_CITY_RUNTIME_DIR"))
+	if runtimeDir == "" {
+		return ""
+	}
+	for _, key := range []string{"GC_CITY_PATH", "GC_CITY", "GC_CITY_ROOT"} {
+		if pathutil.SamePath(strings.TrimSpace(os.Getenv(key)), cityRoot) {
+			return pathutil.NormalizePathForCompare(runtimeDir)
+		}
+	}
+	return ""
+}
+
+func normalizeRuntimeDir(cityRoot, runtimeDir string) string {
+	canonicalRuntimeDir := RuntimeDataDir(cityRoot)
+	hiddenRoot := filepath.Join(cityRoot, ".gc")
+	if pathutil.PathWithin(cityRoot, runtimeDir) && !pathutil.PathWithin(hiddenRoot, runtimeDir) {
+		runtimeDir = canonicalRuntimeDir
+	}
+	return runtimeDir
 }
 
 // PublicServiceMountPath returns the supervisor-routable public path for a

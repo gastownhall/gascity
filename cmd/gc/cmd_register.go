@@ -120,7 +120,7 @@ func doUnregister(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc unregister: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	_, code := unregisterCityFromSupervisor(cityPath, stdout, stderr, "gc unregister")
+	_, code := unregisterCityFromSupervisor(cityPath, stdout, stderr)
 	return code
 }
 

@@ -29,7 +29,7 @@ closes the bead once the PR is verified.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-refinery-patrol"
-version = 2
+version = 3
 contract = "graph.v2"
 
 [vars]
@@ -166,8 +166,10 @@ gc workflow delete-source $WORK --apply && gc workflow reopen-source $WORK
 3. Put the work bead back in the pool with rejection metadata:
 ```bash
 gc bd update $WORK \
+  --status=open \
+  --assignee="" \
   --set-metadata rejection_reason="Conflicts with $TARGET at $(git rev-parse origin/$TARGET)" \
-  --set-metadata gc.routed_to={{rig_name}}/{{binding_prefix}}polecat
+  --set-metadata gc.routed_to="${GC_RIG:+$GC_RIG/}{{binding_prefix}}polecat"
 ```
 4. Do NOT delete the branch (new polecat needs it for conflict resolution).
 5. Clean up temp branch: `git checkout {{target_branch}} && git branch -D temp`
@@ -236,7 +238,10 @@ TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{target_bran
    - Put the work bead back in the pool with rejection metadata:
      ```bash
      gc bd update $WORK \
-       --set-metadata rejection_reason="<failure summary>"
+       --status=open \
+       --assignee="" \
+       --set-metadata rejection_reason="<failure summary>" \
+       --set-metadata gc.routed_to="${GC_RIG:+$GC_RIG/}{{binding_prefix}}polecat"
      ```
    - Delete branch: `git push origin --delete $BRANCH`
    - Clean up: `git checkout "$TARGET" && git branch -D temp`
@@ -388,12 +393,21 @@ REMOTE=$(git rev-parse origin/$TARGET)
 If SHAs differ: STOP. Debug and retry. Do NOT continue.
 
 **3. Record merge metadata and close work bead:**
+
+Run as a single chained command so the metadata write cannot be skipped
+when the close-reason already names the SHA. Both the `--set-metadata`
+write and the `gc bd close` are required — `merged_sha` and
+`merged_target` are the only forensic breadcrumbs tying a closed bead
+to its merge commit on `$TARGET`.
+
 ```bash
+MERGED_SHA=$(git rev-parse HEAD) && \
+MERGED_SHORT=$(git rev-parse --short HEAD) && \
 gc bd update $WORK \
   --set-metadata merge_result=merged \
-  --set-metadata merged_sha=$(git rev-parse HEAD) \
-  --set-metadata merged_target=$TARGET
-gc bd close $WORK --reason "Merged to $TARGET at $(git rev-parse --short HEAD)"
+  --set-metadata merged_sha=$MERGED_SHA \
+  --set-metadata merged_target=$TARGET && \
+gc bd close $WORK --reason "Merged to $TARGET at $MERGED_SHORT"
 ```
 
 **4. Cleanup:**
@@ -516,12 +530,19 @@ fi
 If this command fails or prints empty output: STOP. Debug and retry. Do NOT continue.
 
 **4. Record PR metadata and close the work bead:**
+
+Run as a single chained command so the metadata write cannot be skipped
+when the close-reason already names the PR. Both the `--set-metadata`
+write and the `gc bd close` are required — `pr_url` and `pr_number`
+are the only forensic breadcrumbs tying a closed bead to its pull
+request.
+
 ```bash
 gc bd update $WORK \
   --set-metadata merge_result=pull_request \
   --set-metadata pr_url="$PR_URL" \
   --set-metadata pr_number="$PR_NUMBER" \
-  --set-metadata merged_target="$TARGET"
+  --set-metadata merged_target="$TARGET" && \
 gc bd close $WORK --reason "Pull request ready: $PR_URL"
 ```
 

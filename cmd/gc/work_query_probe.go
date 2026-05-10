@@ -7,7 +7,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
@@ -49,7 +48,7 @@ func controllerWorkQueryEnv(cityPath string, cfg *config.City, agentCfg *config.
 	if strings.TrimSpace(cityPath) == "" || cfg == nil || agentCfg == nil {
 		return nil
 	}
-	env := citylayout.CityRuntimeEnvMap(cityPath)
+	env := cityRuntimeEnvMapForCity(cityPath)
 	env["GC_STORE_ROOT"] = cityPath
 	env["GC_STORE_SCOPE"] = "city"
 	env["GC_BEADS_PREFIX"] = config.EffectiveHQPrefix(cfg)

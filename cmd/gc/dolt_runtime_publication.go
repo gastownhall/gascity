@@ -108,7 +108,7 @@ func syncManagedDoltPortMirrors(cityPath string) error {
 		return nil
 	}
 	emitLoadCityConfigWarnings(io.Discard, prov)
-	return syncConfiguredDoltPortFiles(cityPath, cfg.Dolt, config.EffectiveHQPrefix(cfg), cfg.Rigs)
+	return syncConfiguredDoltPortFiles(cityPath, cfg.Dolt, config.EffectiveHQPrefix(cfg), cfg.Rigs, io.Discard)
 }
 
 func publishManagedDoltRuntimeState(cityPath string) error {

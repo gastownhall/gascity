@@ -309,6 +309,110 @@ func TestProcessRetryControlSoftFailOnExhaustion(t *testing.T) {
 	}
 }
 
+func TestProcessRetryControlRetriesInvalidWorkerResultContract(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		attemptMeta map[string]string
+		wantReason  string
+	}{
+		{
+			name: "pass with failure metadata",
+			attemptMeta: map[string]string{
+				"gc.outcome":        "pass",
+				"gc.failure_class":  "transient",
+				"gc.failure_reason": "rate_limited",
+			},
+			wantReason: "pass_with_failure_metadata",
+		},
+		{
+			name: "missing outcome",
+			attemptMeta: map[string]string{
+				"gc.failure_class":  "transient",
+				"gc.failure_reason": "rate_limited",
+			},
+			wantReason: "missing_outcome",
+		},
+		{
+			name: "unknown failure class",
+			attemptMeta: map[string]string{
+				"gc.outcome":       "fail",
+				"gc.failure_class": "mystery",
+			},
+			wantReason: "unknown_failure_class",
+		},
+		{
+			name: "invalid outcome value",
+			attemptMeta: map[string]string{
+				"gc.outcome":       "mystery",
+				"gc.failure_class": "transient",
+			},
+			wantReason: "invalid_outcome_value",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+
+			root := mustCreate(t, store, beads.Bead{
+				Title:    "workflow",
+				Metadata: map[string]string{"gc.kind": "workflow"},
+			})
+			control := mustCreate(t, store, beads.Bead{
+				Title: "review",
+				Metadata: map[string]string{
+					"gc.kind":             "retry",
+					"gc.root_bead_id":     root.ID,
+					"gc.step_ref":         "mol-test.review",
+					"gc.step_id":          "review",
+					"gc.max_attempts":     "2",
+					"gc.on_exhausted":     "hard_fail",
+					"gc.source_step_spec": `{"id":"review","title":"Review","type":"task","retry":{"max_attempts":2}}`,
+					"gc.control_epoch":    "1",
+				},
+			})
+			attemptMeta := map[string]string{
+				"gc.root_bead_id": root.ID,
+				"gc.step_ref":     "mol-test.review.attempt.1",
+				"gc.attempt":      "1",
+			}
+			for key, value := range tt.attemptMeta {
+				attemptMeta[key] = value
+			}
+			attempt1 := mustCreate(t, store, beads.Bead{
+				Title:    "review attempt 1",
+				Metadata: attemptMeta,
+			})
+			mustClose(t, store, attempt1.ID)
+			mustDep(t, store, control.ID, attempt1.ID, "blocks")
+
+			result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+			if err != nil {
+				t.Fatalf("processRetryControl: %v", err)
+			}
+			if result.Action != "retry" {
+				t.Fatalf("action = %q, want retry", result.Action)
+			}
+
+			after := mustGet(t, store, control.ID)
+			if after.Status != "open" {
+				t.Fatalf("control status = %q, want open", after.Status)
+			}
+			if after.Metadata["gc.failure_reason"] != "" {
+				t.Fatalf("control gc.failure_reason = %q, want unset before exhaustion", after.Metadata["gc.failure_reason"])
+			}
+			var log []map[string]string
+			if err := json.Unmarshal([]byte(after.Metadata["gc.attempt_log"]), &log); err != nil {
+				t.Fatalf("unmarshal attempt_log: %v", err)
+			}
+			if len(log) != 1 || log[0]["reason"] != tt.wantReason {
+				t.Fatalf("attempt_log = %v, want reason %q", log, tt.wantReason)
+			}
+		})
+	}
+}
+
 func TestProcessRetryControlClosesEnclosingScopeOnFailure(t *testing.T) {
 	t.Parallel()
 	store := beads.NewMemStore()
@@ -504,6 +608,58 @@ func TestProcessRetryControlInvariantViolation(t *testing.T) {
 	_, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
 	if !errors.Is(err, ErrControlPending) {
 		t.Fatalf("error = %v, want %v", err, ErrControlPending)
+	}
+}
+
+func TestProcessRetryControlPendingAttemptAddsBlockingDep(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review",
+		Metadata: map[string]string{
+			"gc.kind":             "retry",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-test.review",
+			"gc.step_id":          "review",
+			"gc.max_attempts":     "3",
+			"gc.source_step_spec": `{"id":"review","title":"Review","type":"task"}`,
+			"gc.control_epoch":    "1",
+		},
+	})
+	attempt := mustCreate(t, store, beads.Bead{
+		Title: "review attempt 1",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review.attempt.1",
+			"gc.attempt":      "1",
+		},
+	})
+
+	_, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("error = %v, want %v", err, ErrControlPending)
+	}
+
+	deps, err := store.DepList(control.ID, "down")
+	if err != nil {
+		t.Fatalf("DepList: %v", err)
+	}
+	if len(deps) != 1 || deps[0].DependsOnID != attempt.ID || deps[0].Type != "blocks" {
+		t.Fatalf("deps = %#v, want one blocks dep on pending attempt %s", deps, attempt.ID)
+	}
+	ready, err := store.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	for _, bead := range ready {
+		if bead.ID == control.ID {
+			t.Fatalf("control bead stayed ready while pending attempt %s is open", attempt.ID)
+		}
 	}
 }
 
@@ -940,6 +1096,58 @@ func TestProcessRalphControlReturnsPendingForOpenIteration(t *testing.T) {
 	_, err := processRalphControl(store, mustGet(t, store, control.ID), ProcessOptions{})
 	if !errors.Is(err, ErrControlPending) {
 		t.Fatalf("error = %v, want %v", err, ErrControlPending)
+	}
+}
+
+func TestProcessRalphControlPendingIterationAddsBlockingDep(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review loop",
+		Metadata: map[string]string{
+			"gc.kind":         "ralph",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review-loop",
+			"gc.step_id":      "review-loop",
+			"gc.max_attempts": "2",
+		},
+	})
+	iteration := mustCreate(t, store, beads.Bead{
+		Title: "review loop iteration 1",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review-loop.iteration.1",
+			"gc.scope_role":   "body",
+			"gc.attempt":      "1",
+		},
+	})
+
+	_, err := processRalphControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("error = %v, want %v", err, ErrControlPending)
+	}
+
+	deps, err := store.DepList(control.ID, "down")
+	if err != nil {
+		t.Fatalf("DepList: %v", err)
+	}
+	if len(deps) != 1 || deps[0].DependsOnID != iteration.ID || deps[0].Type != "blocks" {
+		t.Fatalf("deps = %#v, want one blocks dep on pending iteration %s", deps, iteration.ID)
+	}
+	ready, err := store.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	for _, bead := range ready {
+		if bead.ID == control.ID {
+			t.Fatalf("control bead stayed ready while pending iteration %s is open", iteration.ID)
+		}
 	}
 }
 

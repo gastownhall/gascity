@@ -135,8 +135,9 @@ type SupervisorEventListInput struct {
 // SupervisorEventListOutput is the response for GET /v0/events (supervisor scope).
 type SupervisorEventListOutput struct {
 	Body struct {
-		Items []WireTaggedEvent `json:"items"`
-		Total int               `json:"total"`
+		EventCursor string            `json:"event_cursor" doc:"Supervisor event-stream cursor captured before the history snapshot was listed. Pass this value as after_cursor to /v0/events/stream to receive events emitted after the snapshot boundary without replaying unrelated historical backlog."`
+		Items       []WireTaggedEvent `json:"items"`
+		Total       int               `json:"total"`
 	}
 }
 
@@ -602,6 +603,10 @@ func cityDirAlreadyInitialized(dir string) bool {
 
 func (sm *SupervisorMux) humaHandleEventList(_ context.Context, input *SupervisorEventListInput) (*SupervisorEventListOutput, error) {
 	mux := sm.buildMultiplexer()
+	eventCursor, cursorErr := supervisorEventCursorFromMux(mux)
+	if cursorErr != nil {
+		return nil, huma.Error500InternalServerError(cursorErr.Error())
+	}
 	filter := events.Filter{Type: input.Type, Actor: input.Actor}
 	if d, ok, err := parseEventSince(input.Since); err != nil {
 		return nil, err
@@ -628,6 +633,7 @@ func (sm *SupervisorMux) humaHandleEventList(_ context.Context, input *Superviso
 		wires = append(wires, w)
 	}
 	out := &SupervisorEventListOutput{}
+	out.Body.EventCursor = eventCursor
 	// Total is the full match count so clients can distinguish "limit
 	// truncated" from "the server only had N events."
 	out.Body.Total = len(wires)
@@ -670,13 +676,15 @@ func (sm *SupervisorMux) currentSupervisorEventTotal() int {
 }
 
 func (sm *SupervisorMux) currentSupervisorEventCursor() (string, error) {
-	mux := sm.buildMultiplexer()
+	return supervisorEventCursorFromMux(sm.buildMultiplexer())
+}
+
+func supervisorEventCursorFromMux(mux *events.Multiplexer) (string, error) {
 	cursors, err := mux.LatestCursor()
 	if err != nil {
-		// Async supervisor writes need a complete pre-acceptance cursor for all
-		// cities. List and stream paths may degrade with partial cursors, but
-		// this path fails before accepting the request so clients never wait from
-		// an ambiguous cursor.
+		// Async writes and history-to-SSE handoffs need a complete cursor for
+		// all cities. Fail before accepting the request or returning history so
+		// clients never wait from an ambiguous cursor.
 		return "", fmt.Errorf("capturing supervisor event cursor: %w", err)
 	}
 	if cursor := events.FormatCursor(cursors); cursor != "" {
@@ -718,11 +726,9 @@ func (sm *SupervisorMux) precheckGlobalEventStream(ctx context.Context, _ *Super
 	return nil
 }
 
-// streamGlobalEvents emits tagged events with composite per-city cursor
-// IDs. Called after headers commit; failures terminate the stream cleanly
-// (there's no way to return an HTTP error at this point). This is the
-// final wiring of Fix 3g — it replaces the raw writeSSEWithStringID loop
-// that previously lived in streamProjectedGlobalEvents.
+// streamGlobalEvents emits tagged events with composite per-city cursor IDs.
+// Once the stream is prepared and headers are committed, failures terminate
+// the stream cleanly because there is no way to return an HTTP error.
 func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *SupervisorEventStreamInput, send StringIDSender) {
 	cursor := strings.TrimSpace(input.LastEventID)
 	if cursor == "" {
@@ -749,6 +755,7 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 		return
 	}
 	defer mw.Close() //nolint:errcheck
+	flushSSEHeaders(hctx)
 
 	keepalive := time.NewTicker(sseKeepalive)
 	defer keepalive.Stop()

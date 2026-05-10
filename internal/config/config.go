@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/pricing"
 )
 
 // validAgentName matches names safe for use in session identifiers.
@@ -32,17 +33,50 @@ const (
 	// ControlDispatcherAgentName is the built-in deterministic control lane for
 	// graph.v2 workflow control beads.
 	ControlDispatcherAgentName = "control-dispatcher"
+	// controlDispatcherDefaultTracePathExpr is the watcher-safe default trace
+	// target for the control-dispatcher. The controller ignores the hidden .gc
+	// subtree recursively, so defaults must stay under it to avoid self-triggered
+	// config-watch churn. The trace intentionally stays a flat, well-known file
+	// under .gc/runtime because operators and tests tail a single canonical path.
+	//
+	// Per-dispatcher distinction (closes #1650) is layered on top in
+	// cmd/gc/template_resolve.go at session-spawn time: agentEnv there
+	// overrides GC_CONTROL_DISPATCHER_TRACE_DEFAULT with a per-name absolute
+	// path, which the ${GC_CONTROL_DISPATCHER_TRACE_DEFAULT:-...} expression
+	// below consumes. The shell template stays uniform so the trust decision
+	// lives in Go.
+	controlDispatcherDefaultTracePathExpr = `${GC_CONTROL_DISPATCHER_TRACE_DEFAULT:-${GC_CITY}/` + citylayout.RuntimeDataRoot + `/control-dispatcher-trace.log}`
+	// controlDispatcherTraceInit exports the resolved trace path. Explicit
+	// GC_WORKFLOW_TRACE overrides win first; otherwise the runtime injects a
+	// precomputed watcher-safe default trace path for the current city/session.
+	controlDispatcherTraceInit = `export GC_WORKFLOW_TRACE="${GC_WORKFLOW_TRACE:-` + controlDispatcherDefaultTracePathExpr + `}"`
+	// controlDispatcherTraceDirInit creates the parent directory for the
+	// resolved trace path. This preserves explicit GC_WORKFLOW_TRACE overrides
+	// instead of unconditionally depending on the default runtime root.
+	controlDispatcherTraceDirInit = `trace_dir="${GC_WORKFLOW_TRACE%/*}"; if [ "$trace_dir" = "$GC_WORKFLOW_TRACE" ]; then trace_dir="."; elif [ -z "$trace_dir" ]; then trace_dir="/"; fi; mkdir -p "$trace_dir"`
 	// ControlDispatcherStartCommand runs the built-in control-dispatcher worker.
 	// Wrapped in `sh -c` so any appended prompt suffix is ignored as $0.
 	// The control lane is kept resident and blocks on workflow-relevant city
 	// events instead of exiting after each one-shot drain.
-	ControlDispatcherStartCommand = `sh -c 'export GC_WORKFLOW_TRACE="${GC_WORKFLOW_TRACE:-${GC_CITY}/control-dispatcher-trace.log}"; exec "${GC_BIN:-gc}" convoy control --serve --follow ` + ControlDispatcherAgentName + `'`
+	//
+	// The trace log default is under .gc/runtime/ so it sits inside the
+	// controller's fsnotify exclusion (cmd/gc/controller.go shouldIgnoreConfigWatchEvent
+	// excludes the .gc and .beads path segments). Placing it at city root
+	// caused every append to fire markDirty() through the watcher debouncer,
+	// which kept the patrol loop in continuous reconciliation and blew patrol
+	// cycle duration well past the configured patrol_interval. See
+	// engdocs/design/session-reconciler-tracing.md for the canonical
+	// .gc/runtime/ convention for trace data.
+	ControlDispatcherStartCommand = `sh -c '` + controlDispatcherTraceInit + `; ` + controlDispatcherTraceDirInit + `; exec "${GC_BIN:-gc}" convoy control --serve --follow ` + ControlDispatcherAgentName + `'`
 )
 
 // ControlDispatcherStartCommandFor returns the start command for a
-// control-dispatcher agent with the given qualified name.
+// control-dispatcher agent with the given qualified name. The shell-level
+// trace default is uniform across dispatchers; per-dispatcher distinction
+// (closes #1650) is injected via agentEnv in cmd/gc/template_resolve.go at
+// session-spawn time so the trust decision happens in Go.
 func ControlDispatcherStartCommandFor(qualifiedName string) string {
-	return `sh -c 'export GC_WORKFLOW_TRACE="${GC_WORKFLOW_TRACE:-${GC_CITY}/control-dispatcher-trace.log}"; exec "${GC_BIN:-gc}" convoy control --serve --follow ` + qualifiedName + `'`
+	return `sh -c '` + controlDispatcherTraceInit + `; ` + controlDispatcherTraceDirInit + `; exec "${GC_BIN:-gc}" convoy control --serve --follow ` + qualifiedName + `'`
 }
 
 // BindingQualifiedName returns the binding-qualified agent identity without a
@@ -300,6 +334,17 @@ type City struct {
 	// ResolvedProviders is the eager-resolution cache populated by
 	// BuildResolvedProviderCache after compose + patch. Runtime-only.
 	ResolvedProviders map[string]ResolvedProvider `toml:"-" json:"-"`
+	// Pricing holds per-model cost rate overrides keyed by (provider, model).
+	// City-level entries override pack-level entries which override the
+	// defaults shipped with the pricing package. See internal/pricing for the
+	// estimation seam introduced by issue #1255 (1d).
+	Pricing []pricing.ModelPricing `toml:"pricing,omitempty"`
+	// PackPricing preserves the pack-level pricing layer before Pricing is
+	// flattened for legacy callers. Runtime-only.
+	PackPricing []pricing.ModelPricing `toml:"-" json:"-"`
+	// CityPricing preserves the city-level pricing layer before Pricing is
+	// flattened for legacy callers. Runtime-only.
+	CityPricing []pricing.ModelPricing `toml:"-" json:"-"`
 }
 
 // NamedSession defines a canonical persistent session backed by an agent
@@ -418,6 +463,12 @@ type Rig struct {
 	Path string `toml:"path,omitempty"`
 	// Prefix overrides the auto-derived bead ID prefix for this rig.
 	Prefix string `toml:"prefix,omitempty"`
+	// DefaultBranch is the rig repository's mainline branch (e.g. "main",
+	// "master", "develop"). When set, polecats and the refinery use this
+	// as the default merge target instead of probing origin/HEAD at sling
+	// time. Captured by `gc rig add` from the rig's git config; set
+	// manually for rigs whose mainline isn't reachable via origin/HEAD.
+	DefaultBranch string `toml:"default_branch,omitempty"`
 	// Suspended prevents the reconciler from spawning agents in this rig. Toggle with gc rig suspend/resume.
 	Suspended bool `toml:"suspended,omitempty"`
 	// FormulasDir is a rig-local formula directory (Layer 4). Overrides
@@ -714,6 +765,13 @@ func (r *Rig) EffectivePrefix() string {
 	return DeriveBeadsPrefix(r.Name)
 }
 
+// EffectiveDefaultBranch returns the rig's recorded default branch, or the
+// empty string if none is set. Callers should fall back to a runtime probe
+// (e.g., git symbolic-ref) when this returns "".
+func (r *Rig) EffectiveDefaultBranch() string {
+	return strings.TrimSpace(r.DefaultBranch)
+}
+
 // EffectiveHQPrefix returns the bead ID prefix for the city's HQ store.
 // Uses the effective site-bound prefix first, then the declared workspace
 // Prefix, then derives one from the effective city name.
@@ -821,7 +879,7 @@ type Workspace struct {
 	// InstallAgentHooks lists provider names whose hooks should be installed
 	// into agent working directories. Agent-level overrides workspace-level
 	// (replace, not additive). Supported: "claude", "codex", "gemini",
-	// "opencode", "copilot", "cursor", "pi", "omp".
+	// "opencode", "copilot", "cursor", "kiro", "pi", "omp".
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
 	// GlobalFragments lists named template fragments injected into every
 	// agent's rendered prompt. Applied before per-agent InjectFragments.
@@ -1063,6 +1121,11 @@ type DoltConfig struct {
 	Port int `toml:"port,omitempty" jsonschema:"default=0"`
 	// Host is the dolt server hostname. Defaults to localhost.
 	Host string `toml:"host,omitempty" jsonschema:"default=localhost"`
+	// ArchiveLevel controls Dolt's auto_gc archive aggressiveness.
+	// 0 disables archive compaction (lower CPU on startup).
+	// 1 enables archive compaction (higher CPU on startup).
+	// nil (omitted) defaults to 0.
+	ArchiveLevel *int `toml:"archive_level,omitempty" jsonschema:"default=0"`
 }
 
 // FormulasConfig holds formula directory settings.
@@ -1380,6 +1443,13 @@ type DaemonConfig struct {
 	// single tick. Nil (unset) defaults to 5. Values <= 0 are treated as the
 	// default — set a positive integer to override.
 	MaxWakesPerTick *int `toml:"max_wakes_per_tick,omitempty" jsonschema:"default=5"`
+	// NudgeDispatcher selects how queued nudges get delivered to running
+	// sessions. "legacy" (default) auto-spawns a per-session `gc nudge poll`
+	// process that polls the file-backed queue every 2s. "supervisor" runs
+	// the delivery loop inside the city runtime instead, with a unix-socket
+	// wake fast path triggered by enqueue, eliminating the per-session bd
+	// shellout storm.
+	NudgeDispatcher string `toml:"nudge_dispatcher,omitempty" jsonschema:"default=legacy,enum=legacy,enum=supervisor"`
 }
 
 // PatrolIntervalDuration returns the patrol interval as a time.Duration.
@@ -1393,6 +1463,18 @@ func (d *DaemonConfig) PatrolIntervalDuration() time.Duration {
 		return 30 * time.Second
 	}
 	return dur
+}
+
+// NudgeDispatcherMode returns the nudge dispatcher mode, defaulting to
+// "legacy". Unknown values are treated as "legacy" so a malformed config
+// does not silently disable the per-session pollers.
+func (d *DaemonConfig) NudgeDispatcherMode() string {
+	switch d.NudgeDispatcher {
+	case "supervisor":
+		return "supervisor"
+	default:
+		return "legacy"
+	}
 }
 
 // MaxRestartsOrDefault returns the max restarts threshold. Nil (unset) defaults
@@ -2080,9 +2162,8 @@ func (a *Agent) EffectiveScaleCheck() string {
 		return a.ScaleCheck
 	}
 	template := a.QualifiedName()
-	return `ready=$(bd ready --metadata-field gc.routed_to=` + template +
-		` --unassigned --json 2>/dev/null | jq 'length' 2>/dev/null); ` +
-		`echo "${ready:-0}" || echo 0`
+	return `ready_json=$(bd ready --metadata-field gc.routed_to=` + template +
+		` --unassigned --limit 0 --json) && printf '%s\n' "$ready_json" | jq 'length'`
 }
 
 // EffectiveMaxActiveSessions returns the agent's max active sessions.
@@ -2460,6 +2541,13 @@ func injectControlDispatcherAgents(cfg *City, existing map[agentKey]bool) {
 }
 
 // newControlDispatcherAgent creates a control-dispatcher agent for the given scope.
+//
+// Per-dispatcher GC_CONTROL_DISPATCHER_TRACE_DEFAULT injection (closes #1650)
+// happens in cmd/gc/template_resolve.go at session-spawn time, where
+// agentEnv has the right priority in mergeEnv to override the uniform
+// city-level default seeded by cityRuntimeEnvMapForCity. See
+// citylayout.ControlDispatcherTraceDefaultPathFor for the path computation.
+// Operators retain GC_WORKFLOW_TRACE as the topmost override.
 func newControlDispatcherAgent(dir string) Agent {
 	qualifiedName := ControlDispatcherAgentName
 	if dir != "" {
@@ -2808,8 +2896,8 @@ func DefaultCity(name string) City {
 
 func defaultInstallAgentHooksForProvider(provider string) []string {
 	switch strings.TrimSpace(provider) {
-	case "opencode":
-		return []string{"opencode"}
+	case "opencode", "kiro":
+		return []string{strings.TrimSpace(provider)}
 	default:
 		return nil
 	}
