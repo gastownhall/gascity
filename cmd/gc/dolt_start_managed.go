@@ -226,19 +226,8 @@ func terminateManagedDoltPID(pid int) error {
 	return nil
 }
 
-// doltServerEnv augments the parent environment with overrides we need
-// applied to every managed dolt sql-server we launch. Currently it
-// disables Dolt's load-average auto-GC scheduler, which on multi-core
-// hosts (>~16 CPUs) silently prevents auto-GC from ever running. See
-// https://github.com/dolthub/dolt/issues/10944. Users who explicitly
-// set DOLT_GC_SCHEDULER are respected.
+// doltServerEnv returns the environment applied to every managed dolt
+// sql-server we launch.
 func doltServerEnv(parent []string) []string {
-	const key = "DOLT_GC_SCHEDULER"
-	prefix := key + "="
-	for _, kv := range parent {
-		if strings.HasPrefix(kv, prefix) {
-			return parent
-		}
-	}
-	return append(append([]string(nil), parent...), prefix+"NONE")
+	return append([]string(nil), parent...)
 }

@@ -320,9 +320,7 @@ echo "$orphans" | while IFS='|' read -r db_name size path; do
   # Identifier safety: dolt_database flows from operator-controlled metadata.json
   # straight into a backtick-quoted SQL identifier. Reject anything outside the
   # safe charset before interpolating, so an embedded backtick or semicolon
-  # cannot break out of the quoted identifier into arbitrary SQL. Charset
-  # matches `valid_database_name` in commands/gc-nudge/run.sh so a name probed
-  # by `gc dolt health` or nudged by `gc dolt gc-nudge` is also reachable here.
+  # cannot break out of the quoted identifier into arbitrary SQL.
   case "$db_name" in
     [A-Za-z0-9_]*)
       case "$db_name" in

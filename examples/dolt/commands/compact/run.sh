@@ -11,8 +11,7 @@
 # This command replaces the formula-based mol-dog-compactor that was
 # routed to the dog pool. Per the formula's own ZFC-exemption notice,
 # compaction requires SQL access (database/sql) that agents don't have.
-# Running as an exec order (like dolt-gc-nudge) gives us direct SQL
-# access via the dolt CLI.
+# Running as an exec order gives us direct SQL access via the dolt CLI.
 #
 # Algorithm (flatten mode):
 #   1. Pre-flight: record row counts for all user tables.
@@ -37,9 +36,12 @@
 #   GC_DOLT_USER                          (default: root)
 #   GC_DOLT_PASSWORD                      (optional)
 #   GC_DOLT_COMPACT_THRESHOLD_COMMITS
-#     (default: 500) — skip databases with fewer commits than this.
+#     (default: 2000) — skip databases with fewer commits than this.
 #   GC_DOLT_COMPACT_CALL_TIMEOUT_SECS
 #     (default: 1800) — wall-clock bound for each SQL CALL.
+#   GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS
+#     (default: 120) — wall-clock bound for remote force-push after
+#                     local compaction. Push failures are non-fatal.
 #   GC_DOLT_COMPACT_DRY_RUN              (optional) — when set, prints
 #                                         what would happen but does not
 #                                         execute any DOLT_RESET / COMMIT.
@@ -111,8 +113,9 @@ fi
 : "${GC_DOLT_USER:=root}"
 
 host="${GC_DOLT_HOST:-127.0.0.1}"
-threshold_commits="${GC_DOLT_COMPACT_THRESHOLD_COMMITS:-500}"
+threshold_commits="${GC_DOLT_COMPACT_THRESHOLD_COMMITS:-2000}"
 call_timeout="${GC_DOLT_COMPACT_CALL_TIMEOUT_SECS:-1800}"
+push_timeout="${GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS:-120}"
 dry_run="${GC_DOLT_COMPACT_DRY_RUN:-}"
 only_dbs="${GC_DOLT_COMPACT_ONLY_DBS:-}"
 
@@ -128,6 +131,14 @@ case "$call_timeout" in
   ''|*[!0-9]*|0)
     printf 'compact: invalid GC_DOLT_COMPACT_CALL_TIMEOUT_SECS=%s (must be a positive integer)\n' \
       "$call_timeout" >&2
+    exit 2
+    ;;
+esac
+
+case "$push_timeout" in
+  ''|*[!0-9]*|0)
+    printf 'compact: invalid GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS=%s (must be a positive integer)\n' \
+      "$push_timeout" >&2
     exit 2
     ;;
 esac
@@ -216,10 +227,10 @@ metadata_db() {
 }
 
 valid_database_name() {
-  db="$1"
-  case "$db" in
+  name="$1"
+  case "$name" in
     [A-Za-z0-9_]*)
-      case "$db" in
+      case "$name" in
         *[!A-Za-z0-9_-]*) return 1 ;;
         *) return 0 ;;
       esac
@@ -228,9 +239,22 @@ valid_database_name() {
   esac
 }
 
+valid_remote_name() {
+  remote_candidate="$1"
+  case "$remote_candidate" in
+    [A-Za-z0-9_.-]*)
+      case "$remote_candidate" in
+        *[!A-Za-z0-9_.-]*) return 1 ;;
+        *) return 0 ;;
+      esac
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 is_system_database() {
-  name=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
-  case "$name" in
+  system_candidate=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  case "$system_candidate" in
     information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe) return 0 ;;
     *) return 1 ;;
   esac
@@ -335,7 +359,7 @@ user_tables() {
   out_tmp=$(mktemp)
   err_tmp=$(mktemp)
   if ! dolt_query "$db" \
-    "SELECT table_name FROM information_schema.tables WHERE table_schema = '$db' AND table_name NOT LIKE 'dolt\\_%' ESCAPE '\\\\' ORDER BY table_name" \
+    "SELECT table_name FROM information_schema.tables WHERE table_schema = '$db' AND table_type = 'BASE TABLE' AND table_name NOT LIKE 'dolt\\_%' ESCAPE '\\\\' ORDER BY table_name" \
     > "$out_tmp" 2>"$err_tmp"; then
     printf 'compact: db=%s table list probe failed\n' "$db" >&2
     emit_error_file "$db" "$err_tmp"
@@ -354,10 +378,41 @@ row_count() {
     "SELECT COUNT(*) FROM \`$table\`"
 }
 
-db_value_hash() {
+remote_name() {
   db="$1"
-  query_single_cell "$db" "database value hash probe failed" \
-    "SELECT DOLT_HASHOF_DB()"
+  query_single_cell "$db" "remote probe failed" \
+    "SELECT name FROM dolt_remotes LIMIT 1"
+}
+
+fetch_remote() {
+  db="$1"
+  remote="$2"
+  dolt_query "$db" "CALL DOLT_FETCH('$remote')"
+}
+
+remote_main_head() {
+  db="$1"
+  remote="$2"
+  query_single_cell "$db" "remote HEAD probe failed" \
+    "SELECT hash FROM dolt_remote_branches WHERE name = 'remotes/$remote/main'"
+}
+
+commit_exists_in_local_log() {
+  db="$1"
+  hash="$2"
+  query_single_cell "$db" "remote ancestry probe failed" \
+    "SELECT COUNT(*) FROM dolt_log WHERE commit_hash = '$hash'"
+}
+
+push_remote_main() {
+  db="$1"
+  remote="$2"
+  export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
+  run_bounded "$push_timeout" \
+    dolt --host "$host" --port "$GC_DOLT_PORT" \
+    --user "$GC_DOLT_USER" --no-tls \
+    --use-db "$db" \
+    sql -r tabular -q "CALL DOLT_PUSH('--force', '--set-upstream', '$remote', 'main')"
 }
 
 # preflight_counts — write "<table> <count>" lines for all user tables.
@@ -420,9 +475,14 @@ verify_counts() {
         ;;
     esac
     if [ "$actual" != "$expected" ]; then
-      printf 'compact: db=%s row count changed after flatten table=%s before=%s after=%s\n' \
-        "$db" "$t" "$expected" "$actual" >&2
-      fail=1
+      if [ "$actual" -lt "$expected" ]; then
+        printf 'compact: db=%s row count decreased after flatten table=%s before=%s after=%s\n' \
+          "$db" "$t" "$expected" "$actual" >&2
+        fail=1
+      else
+        printf 'compact: db=%s table=%s gained rows during flatten before=%s after=%s — concurrent write preserved\n' \
+          "$db" "$t" "$expected" "$actual"
+      fi
     fi
   done < "$preflight"
   return "$fail"
@@ -513,6 +573,26 @@ run_full_gc() {
 
   printf 'compact: db=%s %s duration=%ss — ok\n' \
     "$db" "$success_prefix" "$elapsed"
+  return 0
+}
+
+push_remote_after_compaction() {
+  db="$1"
+  remote="$2"
+  [ -n "$remote" ] || return 0
+
+  push_rc=0
+  push_err_tmp=$(mktemp)
+  push_remote_main "$db" "$remote" >/dev/null 2>"$push_err_tmp" || push_rc=$?
+  if [ "$push_rc" -ne 0 ]; then
+    printf 'compact: db=%s remote=%s push failed rc=%s after local compaction\n' \
+      "$db" "$remote" "$push_rc" >&2
+    emit_error_file "$db" "$push_err_tmp"
+    rm -f "$push_err_tmp"
+    return 0
+  fi
+  rm -f "$push_err_tmp"
+  printf 'compact: db=%s remote=%s pushed compacted main\n' "$db" "$remote"
   return 0
 }
 
@@ -632,31 +712,62 @@ flatten_database() {
     return 0
   fi
 
+  remote=""
+  if probed_remote=$(remote_name "$db" 2>/dev/null); then
+    remote="$probed_remote"
+  else
+    printf 'compact: db=%s remote probe failed — proceeding without remote sync\n' "$db" >&2
+  fi
+  if [ -n "$remote" ]; then
+    if ! valid_remote_name "$remote"; then
+      printf 'compact: db=%s invalid remote name=%s — fail\n' "$db" "$remote" >&2
+      return 1
+    fi
+
+    printf 'compact: db=%s remote=%s — fetching before flatten...\n' "$db" "$remote"
+    fetch_rc=0
+    fetch_err_tmp=$(mktemp)
+    fetch_remote "$db" "$remote" >/dev/null 2>"$fetch_err_tmp" || fetch_rc=$?
+    if [ "$fetch_rc" -ne 0 ]; then
+      printf 'compact: db=%s remote=%s fetch failed rc=%s — proceeding from local source of truth\n' \
+        "$db" "$remote" "$fetch_rc" >&2
+      emit_error_file "$db" "$fetch_err_tmp"
+    else
+      remote_head=$(remote_main_head "$db" "$remote" || true)
+      if [ -n "$remote_head" ] && [ "$remote_head" != "$head" ]; then
+        case "$remote_head" in
+          *[!A-Za-z0-9]*)
+            printf 'compact: db=%s remote=%s returned invalid HEAD=%s — fail\n' \
+              "$db" "$remote" "$remote_head" >&2
+            rm -f "$fetch_err_tmp"
+            return 1
+            ;;
+        esac
+        if ! in_local=$(commit_exists_in_local_log "$db" "$remote_head"); then
+          rm -f "$fetch_err_tmp"
+          return 1
+        fi
+        if [ "$in_local" != "1" ]; then
+          printf 'compact: db=%s remote=%s remote HEAD=%s is not in local history — proceeding from local source of truth\n' \
+            "$db" "$remote" "$remote_head" >&2
+        else
+          printf 'compact: db=%s remote=%s fetch ok\n' "$db" "$remote"
+        fi
+      else
+        printf 'compact: db=%s remote=%s fetch ok\n' "$db" "$remote"
+      fi
+    fi
+    rm -f "$fetch_err_tmp"
+  fi
+
   preflight_tmp=$(mktemp)
   if ! preflight_counts "$db" "$preflight_tmp"; then
-    rm -f "$preflight_tmp"
-    return 1
-  fi
-  if ! preflight_hash=$(db_value_hash "$db"); then
-    rm -f "$preflight_tmp"
-    return 1
-  fi
-  if [ -z "$preflight_hash" ]; then
-    printf 'compact: db=%s database value hash probe returned empty value — fail\n' "$db" >&2
     rm -f "$preflight_tmp"
     return 1
   fi
   table_count=$(wc -l < "$preflight_tmp")
   printf 'compact: db=%s commits=%s root=%s tables=%s — flattening...\n' \
     "$db" "$count" "$root" "$table_count"
-
-  current_head=$(head_commit "$db" || true)
-  if [ "$current_head" != "$head" ]; then
-    printf 'compact: db=%s HEAD changed before flatten want_HEAD=%s got_HEAD=%s — aborting before reset\n' \
-      "$db" "$head" "${current_head:-<empty>}" >&2
-    rm -f "$preflight_tmp"
-    return 1
-  fi
 
   start=$(date +%s)
 
@@ -681,26 +792,10 @@ flatten_database() {
   fi
   rm -f "$reset_err_tmp"
 
-  post_hash=$(db_value_hash "$db" || true)
-  if [ -z "$post_hash" ]; then
-    printf 'compact: db=%s post-flatten database value hash probe failed — quarantine and investigate before GC\n' \
-      "$db" >&2
-    write_compact_marker "$quarantine_dir" "$db" "post-flatten database value hash probe failed" || true
-    rm -f "$preflight_tmp"
-    return 1
-  fi
-  if [ "$post_hash" != "$preflight_hash" ]; then
-    printf 'compact: db=%s value hash changed after flatten before_hash=%s after_hash=%s — quarantine and investigate before GC\n' \
-      "$db" "$preflight_hash" "$post_hash" >&2
-    write_compact_marker "$quarantine_dir" "$db" "post-flatten value hash changed" || true
-    rm -f "$preflight_tmp"
-    return 1
-  fi
-
   if ! verify_counts "$db" "$preflight_tmp"; then
-    printf 'compact: db=%s post-flatten INTEGRITY check failed — escalate (row counts diverged; investigate before re-running)\n' \
+    printf 'compact: db=%s post-flatten INTEGRITY check failed — escalate (row counts decreased; investigate before re-running)\n' \
       "$db" >&2
-    write_compact_marker "$quarantine_dir" "$db" "post-flatten row count changed" || true
+    write_compact_marker "$quarantine_dir" "$db" "post-flatten row count decreased" || true
     rm -f "$preflight_tmp"
     return 1
   fi
@@ -716,7 +811,8 @@ flatten_database() {
   if run_full_gc "$db" "flatten ok commits=$count->${after_count:-?} but" \
     "commits=$count->${after_count:-?}" "$start"; then
     clear_compact_marker "$pending_gc_dir" "$db"
-    return 0
+    push_remote_after_compaction "$db" "$remote"
+    return $?
   fi
   write_compact_marker "$pending_gc_dir" "$db" "flatten succeeded but full GC failed" || true
   return 1

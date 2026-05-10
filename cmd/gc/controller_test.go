@@ -2216,10 +2216,13 @@ func TestTryReloadConfig_IncludesBuiltinPackOrders(t *testing.T) {
 		}
 	}
 	// Dolt pack orders (included transitively via bd pack).
-	for _, want := range []string{"dolt-health", "dolt-gc-nudge", "dolt-remotes-patrol"} {
+	for _, want := range []string{"dolt-health", "dolt-remotes-patrol", "mol-dog-compactor"} {
 		if !names[want] {
 			t.Errorf("missing dolt order %q; got %v", want, names)
 		}
+	}
+	if names["dolt-gc-nudge"] {
+		t.Errorf("dolt-gc-nudge should not be registered as a recurring order; got %v", names)
 	}
 }
 

@@ -152,6 +152,52 @@ func TestSyncUsesLiveSQLWhenManagedServerReachable(t *testing.T) {
 	}
 }
 
+func TestSyncForceUsesSetUpstreamWithLiveSQL(t *testing.T) {
+	root := repoRoot(t)
+	script := filepath.Join(root, syncScript)
+
+	port, cleanup := startReachableTCPListener(t)
+	defer cleanup()
+
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "app", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+
+	binDir := t.TempDir()
+	doltLog := writeSyncFakeDolt(t, binDir)
+	_ = writeSyncFakeBeadsBD(t, cityPath)
+
+	cmd := exec.Command("sh", script, "--db", "app", "--force")
+	cmd.Env = append(filteredEnv(
+		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
+		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
+	),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+dataDir,
+		fmt.Sprintf("GC_DOLT_PORT=%d", port),
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("gc dolt sync --force failed: %v\n%s", err, out)
+	}
+
+	data, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("read fake dolt log: %v", err)
+	}
+	log := string(data)
+	want := "CALL DOLT_PUSH('--force', '--set-upstream', 'origin', 'main')"
+	if !strings.Contains(log, want) {
+		t.Fatalf("force sync should set upstream\nwant %q\nlog:\n%s\noutput:\n%s", want, log, out)
+	}
+}
+
 func TestSyncSkipsDatabasesWithNoSyncMarker(t *testing.T) {
 	root := repoRoot(t)
 	script := filepath.Join(root, syncScript)

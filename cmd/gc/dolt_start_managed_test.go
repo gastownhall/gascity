@@ -10,20 +10,14 @@ import (
 	bdpack "github.com/gastownhall/gascity/examples/bd"
 )
 
-func TestDoltServerEnv_AppendsDefaultWhenMissing(t *testing.T) {
+func TestDoltServerEnv_DoesNotInjectGCSchedulerDefault(t *testing.T) {
 	parent := []string{"PATH=/usr/bin", "HOME=/home/test"}
 	out := doltServerEnv(parent)
 
-	want := "DOLT_GC_SCHEDULER=NONE"
-	found := false
 	for _, kv := range out {
-		if kv == want {
-			found = true
-			break
+		if strings.HasPrefix(kv, "DOLT_GC_SCHEDULER=") {
+			t.Fatalf("managed Dolt env should not inject GC scheduler default, got %v", out)
 		}
-	}
-	if !found {
-		t.Fatalf("expected %q in env, got %v", want, out)
 	}
 	// Original entries preserved.
 	for _, kv := range parent {
@@ -59,19 +53,15 @@ func TestDoltServerEnv_RespectsUserOverride(t *testing.T) {
 	}
 }
 
-func TestDoltServerEnv_RespectsEmptyUserValue(t *testing.T) {
-	// An explicit empty value (DOLT_GC_SCHEDULER=) is still a user
-	// override and we must not replace it.
+func TestDoltServerEnv_PreservesEmptyUserValue(t *testing.T) {
 	parent := []string{"DOLT_GC_SCHEDULER="}
 	out := doltServerEnv(parent)
-	for _, kv := range out {
-		if kv == "DOLT_GC_SCHEDULER=NONE" {
-			t.Fatalf("explicit empty-value override clobbered: %v", out)
-		}
+	if len(out) != 1 || out[0] != "DOLT_GC_SCHEDULER=" {
+		t.Fatalf("explicit empty-value env not preserved: %v", out)
 	}
 }
 
-func TestGCBeadsBDScript_RespectsEmptyUserValue(t *testing.T) {
+func TestGCBeadsBDScript_DoesNotDefaultDoltGCScheduler(t *testing.T) {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller(0) failed")
@@ -83,11 +73,10 @@ func TestGCBeadsBDScript_RespectsEmptyUserValue(t *testing.T) {
 	}
 	script := string(data)
 
-	if !strings.Contains(script, `${DOLT_GC_SCHEDULER=NONE}`) {
-		t.Fatalf("gc-beads-bd.sh must default DOLT_GC_SCHEDULER only when unset")
-	}
-	if strings.Contains(script, `${DOLT_GC_SCHEDULER:=NONE}`) {
-		t.Fatalf("gc-beads-bd.sh must not clobber an explicitly empty DOLT_GC_SCHEDULER")
+	for _, forbidden := range []string{`DOLT_GC_SCHEDULER=NONE`, `DOLT_GC_SCHEDULER:=NONE`} {
+		if strings.Contains(script, forbidden) {
+			t.Fatalf("gc-beads-bd.sh must not default DOLT_GC_SCHEDULER; found %q", forbidden)
+		}
 	}
 }
 
