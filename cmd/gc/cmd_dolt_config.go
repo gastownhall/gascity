@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/spf13/cobra"
@@ -118,6 +119,11 @@ func writeManagedDoltConfigFile(path, host, port, dataDir, logLevel string, arch
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
+	waitTimeout := managedDoltWaitTimeout()
+	waitTimeoutLine := ""
+	if waitTimeout > 0 {
+		waitTimeoutLine = fmt.Sprintf("  wait_timeout: %q\n", strconv.Itoa(waitTimeout))
+	}
 	content := fmt.Sprintf(`# Dolt SQL server configuration — managed by gc-beads-bd
 # Do not edit manually; changes are overwritten on each server start.
 # To customize, set environment variables:
@@ -152,9 +158,25 @@ system_variables:
   dolt_stats_gc_enabled: "OFF"
   dolt_stats_memory_only: "ON"
   dolt_stats_paused: "ON"
-`, logLevel, port, host, dataDir, archiveLevel)
+%s`, logLevel, port, host, dataDir, archiveLevel, waitTimeoutLine)
 	if err := fsys.WriteFileAtomic(fsys.OSFS{}, path, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("write config file: %w", err)
 	}
 	return nil
+}
+
+func managedDoltWaitTimeout() int {
+	const defaultWaitTimeout = 30
+	raw := os.Getenv("GC_DOLT_WAIT_TIMEOUT")
+	if raw == "" {
+		return defaultWaitTimeout
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return defaultWaitTimeout
+	}
+	if n < 0 {
+		return 0
+	}
+	return n
 }

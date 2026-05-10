@@ -1840,6 +1840,19 @@ func staleReapStartBoundary(b beads.Bead) (time.Time, bool) {
 // the bead is safe to retire (or the close reason is unrelated to work
 // ownership, such as failed-create cleanup).
 func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Writer) bool {
+	// Idempotence: closeBead is reached from three reconciler paths
+	// (closeSessionBeadIfUnassigned, closeSessionBeadIfRuntimeStoppedAndUnassigned,
+	// closeSessionBeadIfReachableStoreUnassigned). On an already-closed
+	// session bead each path can keep firing, with each call writing a
+	// different terminal state via session.ClosePatch (gc_swept vs.
+	// orphaned). The result is an unbounded metadata.state flap on the
+	// closed bead — every write fires bd's on_update hook and emits a
+	// bead.updated event. Skipping the write when status is already
+	// closed is safe because all three callers are reconciler tick logic
+	// that should be no-op on terminal beads.
+	if existing, err := store.Get(id); err == nil && existing.Status == "closed" {
+		return false
+	}
 	if setMetaBatch(store, id, session.ClosePatch(now, reason), stderr) != nil {
 		return false
 	}

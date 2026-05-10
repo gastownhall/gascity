@@ -7698,6 +7698,72 @@ func TestGcBeadsBdStopUsesGCBinStopManagedHelperWhenAvailable(t *testing.T) {
 	}
 }
 
+func TestGcBeadsBdStopDrainsConnectionsBeforeSignal(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
+	}
+	scriptData, err := os.ReadFile(gcBeadsBdScriptPath(cityPath))
+	if err != nil {
+		t.Fatalf("ReadFile(gc-beads-bd): %v", err)
+	}
+	prelude, _, ok := strings.Cut(string(scriptData), "# --- Main ---")
+	if !ok {
+		t.Fatal("gc-beads-bd script missing main marker")
+	}
+
+	logPath := filepath.Join(t.TempDir(), "stop.log")
+	harness := filepath.Join(t.TempDir(), "stop-drain.sh")
+	body := prelude + `
+GC_BIN=""
+GC_DOLT_HOST=""
+DOLT_PORT=3311
+DOLT_USER=root
+PID_FILE=/tmp/gc-test-pid
+load_stop_managed_from_gc() { return 1; }
+load_managed_process_inspection_from_gc() { return 1; }
+find_dolt_pid() { printf '424242\n'; }
+verify_our_server() { return 0; }
+get_connection_count() {
+  printf 'connection_count\n' >> "$GC_TEST_LOG"
+  if [ ! -f "$GC_TEST_LOG.counted" ]; then
+    : > "$GC_TEST_LOG.counted"
+    printf '2\n'
+  else
+    printf '1\n'
+  fi
+}
+kill() {
+  printf 'kill %s\n' "$*" >> "$GC_TEST_LOG"
+  if [ "$1" = "-0" ]; then return 1; fi
+  return 0
+}
+save_state() { printf 'save_state %s %s\n' "$1" "$2" >> "$GC_TEST_LOG"; }
+sleep() { :; }
+op_stop_impl
+`
+	if err := os.WriteFile(harness, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("sh", harness)
+	cmd.Env = sanitizedBaseEnv("GC_TEST_LOG=" + logPath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("op_stop_impl harness failed: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(log): %v", err)
+	}
+	log := string(data)
+	drainIndex := strings.Index(log, "connection_count")
+	killIndex := strings.Index(log, "kill 424242")
+	if drainIndex < 0 || killIndex < 0 || drainIndex > killIndex {
+		t.Fatalf("stop did not drain connections before SIGTERM; log:\n%s", log)
+	}
+}
+
 func TestGcBeadsBdRecoverUsesGCBinRecoverManagedHelperWhenAvailable(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {

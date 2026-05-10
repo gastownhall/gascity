@@ -5344,6 +5344,66 @@ func TestCloseBeadDoesNotDuplicateOwnershipGuard(t *testing.T) {
 	}
 }
 
+// TestCloseBeadIsNoopOnAlreadyClosedBead verifies the idempotence guard:
+// closeBead returns false and does not mutate metadata when called on a
+// bead whose status is already closed. Without this guard, the three
+// reconciler paths that funnel into closeBead
+// (closeSessionBeadIfUnassigned, closeSessionBeadIfRuntimeStoppedAndUnassigned,
+// closeSessionBeadIfReachableStoreUnassigned) can each re-stamp a different
+// terminal close_reason on the same bead every tick, producing an unbounded
+// metadata flap that fires bd's on_update hook on every write.
+func TestCloseBeadIsNoopOnAlreadyClosedBead(t *testing.T) {
+	store := beads.NewMemStore()
+
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker-1",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	now := time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)
+
+	// First close transitions the bead to closed and stamps close_reason.
+	if !closeBead(store, sessionBead.ID, "stale-session", now, &stderr) {
+		t.Fatalf("first closeBead returned false: stderr=%s", stderr.String())
+	}
+	afterFirst, err := store.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("get after first close: %v", err)
+	}
+	if afterFirst.Status != "closed" {
+		t.Fatalf("first close did not close bead: status=%q", afterFirst.Status)
+	}
+
+	// Second close on the already-closed bead must return false and must
+	// leave metadata identical to the post-first-close snapshot — no
+	// re-stamp of close_reason, closed_at, or state.
+	if closeBead(store, sessionBead.ID, "orphaned", now.Add(time.Minute), &stderr) {
+		t.Fatalf("closeBead on already-closed bead returned true; want false")
+	}
+	afterSecond, err := store.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("get after second close: %v", err)
+	}
+	if len(afterFirst.Metadata) != len(afterSecond.Metadata) {
+		t.Errorf("metadata size changed on no-op close: first=%d, second=%d",
+			len(afterFirst.Metadata), len(afterSecond.Metadata))
+	}
+	for k, v := range afterFirst.Metadata {
+		if got := afterSecond.Metadata[k]; got != v {
+			t.Errorf("metadata[%q] mutated on no-op close: first=%q, second=%q", k, v, got)
+		}
+	}
+}
+
 func TestCloseSessionBeadIfUnassignedRefusesWhenRigStoreWorkAssignedBySessionName(t *testing.T) {
 	store := beads.NewMemStore()
 	rigStore := beads.NewMemStore()

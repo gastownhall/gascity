@@ -104,12 +104,13 @@ type cachedCityServer struct {
 // to per-city Server.mux. Workspace services own their own HTTP
 // contracts and are explicitly excluded from the typed control plane.
 type SupervisorMux struct {
-	resolver    CityResolver
-	initializer cityInitializer
-	readOnly    bool
-	version     string
-	startedAt   time.Time
-	server      *http.Server
+	resolver       CityResolver
+	initializer    cityInitializer
+	readOnly       bool
+	version        string
+	startedAt      time.Time
+	allowedOrigins []string
+	server         *http.Server
 
 	// Single Huma API (Phase 3.5 — Topology 1). Owns every typed
 	// operation: supervisor-scope (/v0/cities, /health, /v0/readiness,
@@ -193,7 +194,15 @@ func (sm *SupervisorMux) serveCitySvcProxy(w http.ResponseWriter, r *http.Reques
 //     their own publication rules).
 func (sm *SupervisorMux) Handler() http.Handler {
 	root := http.HandlerFunc(sm.ServeHTTP)
-	return withLogging(withRecovery(withRequestID(withCORS(root))))
+	return withLogging(withRecovery(withRequestID(withCORSAllowing(sm.allowedOrigins, root))))
+}
+
+// WithAllowedOrigins sets extra CORS origins accepted beyond localhost and
+// rebuilds the internal http.Server handler. Must be called before Serve.
+func (sm *SupervisorMux) WithAllowedOrigins(origins []string) *SupervisorMux {
+	sm.allowedOrigins = origins
+	sm.server = &http.Server{Handler: sm.Handler()}
+	return sm
 }
 
 // StartPprof starts a pprof HTTP server on 127.0.0.1:<port> if GC_PPROF=1

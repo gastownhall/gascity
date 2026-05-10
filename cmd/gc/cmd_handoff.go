@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os/signal"
+	"syscall"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -34,6 +36,12 @@ For controller-restartable sessions, equivalent to:
 
   gc mail send $GC_ALIAS <subject> [message]
   gc runtime request-restart
+
+Under normal operation the controller stops controller-restartable
+self-handoff sessions before this command returns. If the controller does not
+act within a bounded timeout, gc handoff exits 1 with a diagnostic instead of
+blocking indefinitely. If interrupted, the restart request remains set for the
+controller to process on its next reconcile tick.
 
 Auto handoff (--auto): sends mail to self and returns without requesting a
 restart. This is for PreCompact hooks, where the provider is already managing
@@ -110,8 +118,10 @@ func cmdHandoff(args []string, target string, auto bool, hookFormat string, stdo
 		return 0
 	}
 
-	// Block forever. The controller will kill the entire process tree.
-	select {}
+	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return waitForControllerRestart(sigCtx, dops, current.sessionName, "gc handoff",
+		controllerRestartPollInterval, controllerRestartTimeout(cfg), stderr)
 }
 
 // cmdHandoffRemote sends handoff mail to a remote session and kills its runtime.

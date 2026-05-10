@@ -215,7 +215,8 @@ if [ -d "$data_dir" ]; then
     name="$(basename "$d")"
     case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe) continue ;; esac
     case "$referenced" in *" $name "*) continue ;; esac
-    size_bytes=$(du -sb "$d" 2>/dev/null | cut -f1 || echo 0)
+    size_kb=$(du -sk "$d" 2>/dev/null | cut -f1)
+    size_bytes=$(( ${size_kb:-0} * 1024 ))
     if [ "$size_bytes" -ge 1048576 ]; then
       size=$(awk "BEGIN {printf \"%.1f MB\", $size_bytes/1048576}")
     elif [ "$size_bytes" -ge 1024 ]; then

@@ -2458,6 +2458,51 @@ func TestBdTransportRetryableErrorDoesNotTreatCommandTimeoutAsTransportFailure(t
 	}
 }
 
+func TestBdTransportTransientDisconnectDoesNotTriggerManagedRecovery(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	origRunner := beadsExecCommandRunnerWithEnv
+	origRecover := recoverManagedBDCommand
+	t.Cleanup(func() {
+		beadsExecCommandRunnerWithEnv = origRunner
+		recoverManagedBDCommand = origRecover
+	})
+
+	attempts := 0
+	recoverCalls := 0
+	beadsExecCommandRunnerWithEnv = func(_ map[string]string) beads.CommandRunner {
+		return func(_ string, _ string, _ ...string) ([]byte, error) {
+			attempts++
+			if attempts == 1 {
+				return nil, fmt.Errorf("bad connection: use of closed network connection")
+			}
+			return []byte("ok"), nil
+		}
+	}
+	recoverManagedBDCommand = func(_ string) error {
+		recoverCalls++
+		return nil
+	}
+
+	runner := bdCommandRunnerWithManagedRetry(t.TempDir(), func(_ string) map[string]string {
+		return map[string]string{"GC_DOLT_PORT": "3307"}
+	})
+
+	out, err := runner(t.TempDir(), "bd", "list", "--json")
+	if err != nil {
+		t.Fatalf("runner error = %v, want nil", err)
+	}
+	if string(out) != "ok" {
+		t.Fatalf("runner output = %q, want %q", out, "ok")
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+	if recoverCalls != 0 {
+		t.Fatalf("recoverCalls = %d, want 0", recoverCalls)
+	}
+}
+
 func TestBdTransportRetryableErrorUsesScopeProviderForMixedRig(t *testing.T) {
 	cityPath := t.TempDir()
 	_ = writeReachableManagedDoltState(t, cityPath)

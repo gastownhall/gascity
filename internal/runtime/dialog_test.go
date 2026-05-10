@@ -126,6 +126,74 @@ func TestAcceptStartupDialogsAcceptsGeminiTrustDialog(t *testing.T) {
 	}
 }
 
+func TestAcceptStartupDialogsSelectsClaudeResumeAsIs(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = time.Second
+
+	var sent []string
+	err := AcceptStartupDialogs(
+		context.Background(),
+		func(_ int) (string, error) {
+			if len(sent) == 0 {
+				return strings.Join([]string{
+					"This session is 1h 55m old and 212.7k tokens.",
+					"",
+					"❯ 1. Resume from summary (recommended)",
+					"  2. Resume full session as-is",
+					"  3. Don't ask me again",
+					"",
+					"Enter to confirm · Esc to cancel",
+				}, "\n"), nil
+			}
+			return "❯ ", nil
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogs() error = %v", err)
+	}
+	if !reflect.DeepEqual(sent, []string{"Down", "Enter"}) {
+		t.Fatalf("sent keys = %v, want [Down Enter]", sent)
+	}
+}
+
+func TestAcceptStartupDialogsFromStreamSelectsClaudeResumeAsIs(t *testing.T) {
+	withZeroDialogTimings(t)
+
+	snapshots := make(chan string, 2)
+	snapshots <- strings.Join([]string{
+		"This session is 1h 55m old and 212.7k tokens.",
+		"",
+		"❯ 1. Resume from summary (recommended)",
+		"  2. Resume full session as-is",
+		"  3. Don't ask me again",
+		"",
+		"Enter to confirm · Esc to cancel",
+	}, "\n")
+	snapshots <- "❯ "
+	close(snapshots)
+
+	var sent []string
+	err := AcceptStartupDialogsFromStream(
+		context.Background(),
+		time.Second,
+		snapshots,
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogsFromStream() error = %v", err)
+	}
+	if !reflect.DeepEqual(sent, []string{"Down", "Enter"}) {
+		t.Fatalf("sent keys = %v, want [Down Enter]", sent)
+	}
+}
+
 func TestAcceptStartupDialogsPeeksDeepEnoughForLateTrustDialog(t *testing.T) {
 	withZeroDialogTimings(t)
 	dialogPollTimeout = time.Second

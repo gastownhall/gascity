@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/pricing"
 )
 
 // validAgentName matches names safe for use in session identifiers.
@@ -326,6 +327,17 @@ type City struct {
 	// ResolvedProviders is the eager-resolution cache populated by
 	// BuildResolvedProviderCache after compose + patch. Runtime-only.
 	ResolvedProviders map[string]ResolvedProvider `toml:"-" json:"-"`
+	// Pricing holds per-model cost rate overrides keyed by (provider, model).
+	// City-level entries override pack-level entries which override the
+	// defaults shipped with the pricing package. See internal/pricing for the
+	// estimation seam introduced by issue #1255 (1d).
+	Pricing []pricing.ModelPricing `toml:"pricing,omitempty"`
+	// PackPricing preserves the pack-level pricing layer before Pricing is
+	// flattened for legacy callers. Runtime-only.
+	PackPricing []pricing.ModelPricing `toml:"-" json:"-"`
+	// CityPricing preserves the city-level pricing layer before Pricing is
+	// flattened for legacy callers. Runtime-only.
+	CityPricing []pricing.ModelPricing `toml:"-" json:"-"`
 }
 
 // NamedSession defines a canonical persistent session backed by an agent

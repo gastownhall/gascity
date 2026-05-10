@@ -30,10 +30,11 @@ func StartupDialogTimeout() time.Duration {
 
 // AcceptStartupDialogs dismisses startup dialogs that can block automated
 // sessions. Handles (in order):
-//  1. Codex update dialog ("Update available") — requires Down+Enter to skip
-//  2. Workspace trust dialog (Claude "Quick safety check", Codex "Do you trust the contents of this directory?")
-//  3. Bypass permissions warning ("Bypass Permissions mode") — requires Down+Enter
-//  4. Claude custom API key confirmation — requires Up+Enter to select "Yes"
+//  1. Claude resume selector — requires Down+Enter to resume the full session
+//  2. Codex update dialog ("Update available") — requires Down+Enter to skip
+//  3. Workspace trust dialog (Claude "Quick safety check", Codex "Do you trust the contents of this directory?")
+//  4. Bypass permissions warning ("Bypass Permissions mode") — requires Down+Enter
+//  5. Claude custom API key confirmation — requires Up+Enter to select "Yes"
 //
 // The peek function should return the last N lines of the session's terminal output.
 // The sendKeys function should send bare tmux-style keystrokes (e.g., "Enter", "Down").
@@ -76,7 +77,18 @@ func AcceptStartupDialogsFromStreamWithStatus(
 		return sendKeys(keys...)
 	}
 
-	phaseObserved, err := acceptCodexUpdateDialogFromStream(ctx, timeout, stream, trackingSendKeys)
+	phaseObserved, err := acceptClaudeResumeDialogFromStream(ctx, timeout, stream, trackingSendKeys)
+	if err != nil {
+		return observed, fmt.Errorf("claude resume dialog: %w", err)
+	}
+	observed = observed || phaseObserved
+	if !phaseObserved && !observed {
+		return false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return observed, err
+	}
+	phaseObserved, err = acceptCodexUpdateDialogFromStream(ctx, timeout, stream, trackingSendKeys)
 	if err != nil {
 		return observed, fmt.Errorf("codex update dialog: %w", err)
 	}
@@ -148,6 +160,12 @@ func AcceptStartupDialogsWithTimeout(
 	peek func(lines int) (string, error),
 	sendKeys func(keys ...string) error,
 ) error {
+	if err := acceptClaudeResumeDialog(ctx, timeout, peek, sendKeys); err != nil {
+		return fmt.Errorf("claude resume dialog: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := acceptCodexUpdateDialog(ctx, timeout, peek, sendKeys); err != nil {
 		return fmt.Errorf("codex update dialog: %w", err)
 	}
@@ -176,6 +194,78 @@ func AcceptStartupDialogsWithTimeout(
 		return fmt.Errorf("rate limit dialog: %w", err)
 	}
 	return nil
+}
+
+// acceptClaudeResumeDialog dismisses Claude's high-token/old-session resume
+// selector. The menu cursor uses the same ❯ prefix as the normal input prompt,
+// so this must run before generic prompt detection. Choose "Resume full session
+// as-is" to preserve the in-flight workflow context instead of summarizing it.
+func acceptClaudeResumeDialog(
+	ctx context.Context,
+	timeout time.Duration,
+	peek func(lines int) (string, error),
+	sendKeys func(keys ...string) error,
+) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		content, err := peek(startupDialogPeekLines)
+		if err != nil {
+			return err
+		}
+
+		if containsClaudeResumeDialog(content) {
+			if err := sendKeys("Down"); err != nil {
+				return err
+			}
+			sleep(ctx, bypassDialogConfirmDelay)
+			return sendKeys("Enter")
+		}
+
+		if containsPromptIndicator(content) ||
+			containsCodexUpdateDialog(content) ||
+			containsWorkspaceTrustDialog(content) ||
+			strings.Contains(content, "Bypass Permissions mode") ||
+			containsCustomAPIKeyDialog(content) ||
+			ContainsRateLimitDialog(content) {
+			return nil
+		}
+
+		sleep(ctx, dialogPollInterval)
+	}
+	return nil
+}
+
+func containsClaudeResumeDialog(content string) bool {
+	return strings.Contains(content, "Resume from summary") &&
+		strings.Contains(content, "Resume full session as-is") &&
+		strings.Contains(content, "Enter to confirm")
+}
+
+func acceptClaudeResumeDialogFromStream(
+	ctx context.Context,
+	timeout time.Duration,
+	snapshots *replayableSnapshotCursor,
+	sendKeys func(keys ...string) error,
+) (bool, error) {
+	return acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
+		match:       containsClaudeResumeDialog,
+		matchKeys:   []string{"Down", "Enter"},
+		matchDelay:  bypassDialogConfirmDelay,
+		ready:       containsPromptIndicator,
+		readyOrNext: containsPostClaudeResumeStartupDialog,
+	})
+}
+
+func containsPostClaudeResumeStartupDialog(content string) bool {
+	return containsCodexUpdateDialog(content) ||
+		containsWorkspaceTrustDialog(content) ||
+		strings.Contains(content, "Bypass Permissions mode") ||
+		containsCustomAPIKeyDialog(content) ||
+		ContainsRateLimitDialog(content)
 }
 
 // acceptCodexUpdateDialog skips Codex's interactive update prompt. The default

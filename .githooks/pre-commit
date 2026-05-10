@@ -13,7 +13,7 @@ if [ -n "$staged_go_files" ]; then
   golangci-lint fmt ./... 2>/dev/null
   echo "$staged_go_files" | xargs git add
 
-  golangci-lint run --new-from-rev=HEAD --fix || exit 1
+  make lint-changed LINT_CHANGED_SCOPE=staged LINT_FLAGS="--new-from-rev=HEAD --whole-files --fix" || exit 1
   echo "$staged_go_files" | xargs git add
 
   # Regenerate the OpenAPI spec from the live Huma API and stage both
@@ -32,7 +32,6 @@ if [ -n "$staged_go_files" ]; then
   go run ./cmd/genschema
   git add docs/schema/city-schema.json docs/schema/city-schema.txt docs/reference/config.md docs/reference/cli.md
 
-  make lint
   make vet
   make test
 fi

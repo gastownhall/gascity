@@ -4,6 +4,7 @@ package overlay
 import (
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 )
@@ -253,16 +254,17 @@ func copyOrMergeFile(src, dst string, merge bool) error {
 	// Only merge if destination already exists.
 	dstInfo, dstErr := os.Stat(dst)
 	if dstErr != nil {
-		// Destination doesn't exist or can't be stat'd — plain copy.
-		return copyFile(src, dst)
+		// Destination doesn't exist or can't be stat'd — canonicalize the
+		// mergeable source JSON before creating it.
+		return copyCanonicalJSONFile(src, dst, 0)
 	}
 	dstData, err := os.ReadFile(dst)
 	if err != nil {
-		return copyFile(src, dst)
+		return copyCanonicalJSONFile(src, dst, 0)
 	}
 	srcData, err := os.ReadFile(src)
 	if err != nil {
-		return copyFile(src, dst)
+		return copyCanonicalJSONFile(src, dst, 0)
 	}
 	merged, err := MergeSettingsJSON(dstData, srcData)
 	if err != nil {
@@ -275,6 +277,28 @@ func copyOrMergeFile(src, dst string, merge bool) error {
 	}
 	// Preserve the destination file's permissions.
 	return os.WriteFile(dst, merged, dstInfo.Mode().Perm())
+}
+
+func copyCanonicalJSONFile(src, dst string, mode fs.FileMode) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return copyFile(src, dst)
+	}
+	canonical, err := CanonicalJSON(data)
+	if err != nil {
+		return copyFile(src, dst)
+	}
+	if mode == 0 {
+		info, err := os.Stat(src)
+		if err != nil {
+			return copyFile(src, dst)
+		}
+		mode = info.Mode()
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return fmt.Errorf("creating parent for %q: %w", dst, err)
+	}
+	return os.WriteFile(dst, canonical, mode.Perm())
 }
 
 // copyFile copies a single file preserving permissions.

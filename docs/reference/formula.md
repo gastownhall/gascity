@@ -65,6 +65,43 @@ molecule.
 | `check` | object | Runtime retry: `max_attempts` with a `check` script after each attempt |
 | `timeout` | duration string | Default timeout for this step's `check` script; `check.check.timeout` takes precedence |
 
+## Graph.v2 Review Quorum Formula
+
+The core pack includes `mol-review-quorum`, a Gas City-owned review quorum
+formula scaffold. It is a `graph.v2` formula that fans out exactly two reviewer
+lanes and then routes synthesis for their durable outputs:
+
+- lane one, with ID, provider, model, and dispatch target supplied by formula
+  variables
+- lane two, with ID, provider, model, and dispatch target supplied by formula
+  variables
+
+Lane IDs, providers, model targets, and dispatch targets are configured through
+the required formula variables `lane_one_id`, `lane_one_provider`,
+`lane_one_model`, `lane_one_target`, `lane_two_id`, `lane_two_provider`,
+`lane_two_model`, and `lane_two_target`. The synthesis dispatch target is
+configured through `synthesis_target`.
+Reviewer lanes use retry semantics with
+`on_exhausted = "soft_fail"` for transient provider failures so synthesis can
+continue with degraded coverage when one lane exhausts its retry budget.
+
+Reviewer and synthesis steps must persist structured JSON state for future
+automation. The lane output contract includes `verdict`, `summary`,
+`findings_count`, `findings`, `evidence`, `usage`,
+`read_only_enforcement`, `mutations_delta`, `failure_class`, and
+`failure_reason`.
+
+Read-only enforcement is baseline-relative: reviewers compare the after state
+against the mutation baseline they recorded before review with
+`git status --porcelain=v1 -z`. Pre-existing dirty state and pre-existing
+untracked files are not reviewer-created mutations.
+
+`internal/reviewquorum` defines the durable Go contract and finalizer, but the
+current formula synthesis step is still agent-executed and does not call
+`reviewquorum.Finalize` directly. `dx-review` is a future compatibility
+consumer for this durable output shape; it does not own the lifecycle of
+`mol-review-quorum`.
+
 ## Variable Substitution
 
 Formula descriptions can use `{{key}}` placeholders. Variables are supplied as

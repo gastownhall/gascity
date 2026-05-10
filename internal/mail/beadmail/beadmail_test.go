@@ -686,6 +686,73 @@ func TestArchiveNotFound(t *testing.T) {
 	}
 }
 
+// TestArchiveStampsCloseReason verifies that Archive stamps
+// close_reason=MailArchivedCloseReason on the closed message bead.
+// Without this, bd's validation.on-close=error rejects the close and
+// leaves the message open silently.
+func TestArchiveStampsCloseReason(t *testing.T) {
+	if got := len(MailArchivedCloseReason); got < 20 {
+		t.Fatalf("MailArchivedCloseReason = %q (%d chars), want >=20", MailArchivedCloseReason, got)
+	}
+
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("human", "mayor", "", "dismiss me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Archive(sent.ID); err != nil {
+		t.Fatalf("Archive: %v", err)
+	}
+
+	b, err := store.Get(sent.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := b.Metadata["close_reason"]; got != MailArchivedCloseReason {
+		t.Errorf("close_reason = %q, want %q", got, MailArchivedCloseReason)
+	}
+}
+
+// TestArchiveManyStampsCloseReason verifies the batch-archive path also
+// stamps close_reason on every closed bead.
+func TestArchiveManyStampsCloseReason(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	a, err := p.Send("human", "mayor", "", "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := p.Send("human", "mayor", "", "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := p.ArchiveMany([]string{a.ID, b.ID})
+	if err != nil {
+		t.Fatalf("ArchiveMany: %v", err)
+	}
+	for i, r := range results {
+		if r.Err != nil {
+			t.Errorf("ArchiveMany[%d].Err = %v", i, r.Err)
+		}
+	}
+	for _, id := range []string{a.ID, b.ID} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("store.Get(%s): %v", id, err)
+		}
+		if got.Status != "closed" {
+			t.Errorf("bead %s status = %q, want closed", id, got.Status)
+		}
+		if reason := got.Metadata["close_reason"]; reason != MailArchivedCloseReason {
+			t.Errorf("bead %s close_reason = %q, want %q", id, reason, MailArchivedCloseReason)
+		}
+	}
+}
+
 // --- Delete ---
 
 func TestDelete(t *testing.T) {

@@ -998,6 +998,13 @@
         "agent_defaults": {
           "$ref": "#/$defs/AgentDefaults",
           "description": "AgentDefaults provides city-level defaults for agents that don't\noverride them (canonical TOML key: agent_defaults). The runtime\ncurrently applies default_sling_formula and append_fragments; the\nattachment-list fields remain tombstones, and the other fields are\nparsed/composed but not yet inherited automatically."
+        },
+        "pricing": {
+          "items": {
+            "$ref": "#/$defs/ModelPricing"
+          },
+          "type": "array",
+          "description": "Pricing holds per-model cost rate overrides keyed by (provider, model).\nCity-level entries override pack-level entries which override the\ndefaults shipped with the pricing package. See internal/pricing for the\nestimation seam introduced by issue #1255 (1d)."
         }
       },
       "additionalProperties": false,
@@ -1272,6 +1279,35 @@
       "additionalProperties": false,
       "type": "object",
       "description": "MailConfig holds mail provider settings."
+    },
+    "ModelPricing": {
+      "properties": {
+        "provider": {
+          "type": "string",
+          "description": "Provider is the LLM provider label (e.g. \"claude\", \"codex\", \"gemini\")."
+        },
+        "model": {
+          "type": "string",
+          "description": "Model is the provider-specific model identifier (e.g. \"claude-opus-4-7\")."
+        },
+        "tier": {
+          "$ref": "#/$defs/Tier",
+          "description": "Tier holds the per-token-type rates."
+        },
+        "last_verified": {
+          "type": "string",
+          "description": "LastVerified is the date these rates were confirmed (YYYY-MM-DD)."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "provider",
+        "model",
+        "tier",
+        "last_verified"
+      ],
+      "description": "ModelPricing is a complete pricing entry for a (Provider, Model) pair."
     },
     "NamedSession": {
       "properties": {
@@ -2073,6 +2109,31 @@
       "additionalProperties": false,
       "type": "object",
       "description": "SessionSleepConfig configures default idle sleep policies by session class."
+    },
+    "Tier": {
+      "properties": {
+        "prompt_usd_per_1m": {
+          "type": "number"
+        },
+        "completion_usd_per_1m": {
+          "type": "number"
+        },
+        "cache_read_usd_per_1m": {
+          "type": "number"
+        },
+        "cache_creation_usd_per_1m": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "prompt_usd_per_1m",
+        "completion_usd_per_1m",
+        "cache_read_usd_per_1m",
+        "cache_creation_usd_per_1m"
+      ],
+      "description": "Tier defines per-token-type rates in USD per 1 million tokens."
     },
     "Workspace": {
       "properties": {

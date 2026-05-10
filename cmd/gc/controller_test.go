@@ -1791,7 +1791,8 @@ func TestControllerReloadInvalidConfig(t *testing.T) {
 	debounceDelay = 5 * time.Millisecond
 	t.Cleanup(func() { debounceDelay = old })
 
-	dir := shortSocketTempDir(t, "gc-invalid-")
+	dir := shortSocketTempDir(t, "gc-reload-invalid-")
+	cleanupManagedDoltTestCity(t, dir)
 	tomlPath := writeCityTOML(t, dir, "test", "mayor")
 
 	cfg, err := config.Load(osFS{}, tomlPath)

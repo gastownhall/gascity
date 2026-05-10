@@ -846,6 +846,9 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		return 1
 	}
 	apiMux := api.NewSupervisorMux(registry, cityInitSvc, readOnly, version, startedAt)
+	if len(supCfg.Supervisor.AllowedOrigins) > 0 {
+		apiMux.WithAllowedOrigins(supCfg.Supervisor.AllowedOrigins)
+	}
 
 	pprofSrv, pprofErr := api.StartPprof("")
 	if pprofErr != nil {

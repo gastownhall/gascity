@@ -189,10 +189,7 @@ func tryDiscoveredCommandFallback(args []string, cfg *config.City, cityPath stri
 	}
 
 	if len(args) == 1 {
-		fmt.Fprintf(stdout, "Available commands for %s:\n", binding) //nolint:errcheck
-		for _, entry := range matching {
-			fmt.Fprintf(stdout, "  %-20s %s\n", strings.Join(entry.Command, " "), entry.Description) //nolint:errcheck
-		}
+		printDiscoveredCommandList(stdout, binding, nil, matching)
 		return true
 	}
 
@@ -200,12 +197,29 @@ func tryDiscoveredCommandFallback(args []string, cfg *config.City, cityPath stri
 	sort.SliceStable(matching, func(i, j int) bool {
 		return len(matching[i].Command) > len(matching[j].Command)
 	})
+	if prefix, ok := discoveredHelpPrefix(args[1:]); ok {
+		for _, entry := range matching {
+			if slices.Equal(prefix, entry.Command) {
+				printDiscoveredCommandHelp(stdout, entry)
+				return true
+			}
+		}
+		if discoveredCommandPrefixExists(matching, prefix) {
+			printDiscoveredCommandList(stdout, binding, prefix, matching)
+			return true
+		}
+	}
 	for _, entry := range matching {
 		if len(args)-1 < len(entry.Command) {
 			continue
 		}
 		if slices.Equal(args[1:1+len(entry.Command)], entry.Command) {
-			code := runDiscoveredCommand(entry, cityPath, cityName, args[1+len(entry.Command):], stdin(), stdout, stderr)
+			commandArgs := args[1+len(entry.Command):]
+			if discoveredHelpRequested(commandArgs) {
+				printDiscoveredCommandHelp(stdout, entry)
+				return true
+			}
+			code := runDiscoveredCommand(entry, cityPath, cityName, commandArgs, stdin(), stdout, stderr)
 			if code != 0 {
 				os.Exit(code)
 			}
@@ -214,6 +228,67 @@ func tryDiscoveredCommandFallback(args []string, cfg *config.City, cityPath stri
 	}
 
 	return false
+}
+
+func discoveredHelpPrefix(args []string) ([]string, bool) {
+	for i, arg := range args {
+		if arg == "--" {
+			return nil, false
+		}
+		if arg == "--help" || arg == "-h" {
+			return args[:i], true
+		}
+	}
+	return nil, false
+}
+
+func printDiscoveredCommandHelp(stdout io.Writer, entry config.DiscoveredCommand) {
+	if long := readDiscoveredHelp(entry); long != "" {
+		fmt.Fprintln(stdout, long) //nolint:errcheck
+		return
+	}
+	if entry.Description != "" {
+		fmt.Fprintln(stdout, entry.Description) //nolint:errcheck
+		return
+	}
+	fmt.Fprintf(stdout, "Pack command: %s\n", strings.Join(entry.Command, " ")) //nolint:errcheck
+}
+
+func printDiscoveredCommandList(stdout io.Writer, binding string, prefix []string, entries []config.DiscoveredCommand) {
+	title := binding
+	if len(prefix) > 0 {
+		title += " " + strings.Join(prefix, " ")
+	}
+	fmt.Fprintf(stdout, "Available commands for %s:\n", title) //nolint:errcheck
+	for _, entry := range sortCommandsForTree(entries) {
+		if !commandHasPrefix(entry.Command, prefix) {
+			continue
+		}
+		name := strings.Join(entry.Command, " ")
+		if len(prefix) > 0 {
+			name = strings.Join(entry.Command[len(prefix):], " ")
+		}
+		if name == "" {
+			continue
+		}
+		fmt.Fprintf(stdout, "  %-20s %s\n", name, entry.Description) //nolint:errcheck
+	}
+}
+
+func discoveredCommandPrefixExists(entries []config.DiscoveredCommand, prefix []string) bool {
+	for _, entry := range entries {
+		if commandHasPrefix(entry.Command, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func commandHasPrefix(command, prefix []string) bool {
+	if len(prefix) > len(command) {
+		return false
+	}
+	return slices.Equal(command[:len(prefix)], prefix)
 }
 
 func sortCommandsForTree(entries []config.DiscoveredCommand) []config.DiscoveredCommand {

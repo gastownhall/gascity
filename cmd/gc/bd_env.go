@@ -341,24 +341,37 @@ func managedBDRecoveryAllowed(cityPath, scopeRoot string, env map[string]string)
 	return managedLocalDoltEnv(env)
 }
 
-func bdTransportRetryableError(cityPath, scopeRoot string, env map[string]string, err error) bool {
+func bdTransportErrorMatches(cityPath, scopeRoot string, env map[string]string, err error, markers []string) bool {
 	if err == nil || !providerUsesBdStoreContract(rawBeadsProviderForScope(scopeRoot, cityPath)) || !managedBDRecoveryAllowed(cityPath, scopeRoot, env) {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	for _, marker := range []string{
+	for _, marker := range markers {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func bdTransportRetryableError(cityPath, scopeRoot string, env map[string]string, err error) bool {
+	return bdTransportErrorMatches(cityPath, scopeRoot, env, err, []string{
 		"server unreachable",
 		"dial tcp",
 		"connection refused",
 		"broken pipe",
 		"unexpected eof",
 		"bad connection",
-	} {
-		if strings.Contains(msg, marker) {
-			return true
-		}
-	}
-	return false
+		"use of closed network connection",
+	})
+}
+
+func bdTransportRecoverableError(cityPath, scopeRoot string, env map[string]string, err error) bool {
+	return bdTransportErrorMatches(cityPath, scopeRoot, env, err, []string{
+		"server unreachable",
+		"dial tcp",
+		"connection refused",
+	})
 }
 
 func bdCommandRunnerWithManagedRetry(cityPath string, envFn func(dir string) map[string]string) beads.CommandRunner {
@@ -370,8 +383,10 @@ func bdCommandRunnerWithManagedRetry(cityPath string, envFn func(dir string) map
 		if name != "bd" || !bdTransportRetryableError(cityPath, dir, env, err) {
 			return out, err
 		}
-		if recErr := recoverManagedBDCommand(cityPath); recErr != nil {
-			return out, err
+		if bdTransportRecoverableError(cityPath, dir, env, err) {
+			if recErr := recoverManagedBDCommand(cityPath); recErr != nil {
+				return out, err
+			}
 		}
 		retryEnv := envFn(dir)
 		ensureProjectedDoltEnvExplicit(retryEnv)

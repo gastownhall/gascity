@@ -1,0 +1,184 @@
+description = """
+Gas City-owned review quorum formula scaffold.
+
+This graph.v2 workflow fans out two read-only reviewer lanes whose lane IDs,
+providers, models, and dispatch targets are supplied by formula variables, then
+routes a configured synthesis agent to synthesize their durable structured
+outputs. Lifecycle owners decide when to invoke it, and future dx-review
+compatibility can consume the durable output without owning the workflow. The
+internal reviewquorum Go package defines the generic durable contract and
+finalizer, but this formula's synthesis step is currently agent-executed rather
+than directly wired to that Go finalizer.
+"""
+formula = "mol-review-quorum"
+version = 2
+contract = "graph.v2"
+
+[vars]
+[vars.subject]
+description = "The bead, PR, commit range, or artifact being reviewed"
+required = true
+
+[vars.base_ref]
+description = "Optional baseline ref used by reviewer prompts when inspecting a diff"
+default = "origin/main"
+
+[vars.lane_one_id]
+description = "Durable ID for reviewer lane one"
+required = true
+
+[vars.lane_one_provider]
+description = "Provider identifier for reviewer lane one"
+required = true
+
+[vars.lane_one_model]
+description = "Model target for reviewer lane one"
+required = true
+
+[vars.lane_one_target]
+description = "Configured Gas City agent target for reviewer lane one"
+required = true
+
+[vars.lane_two_id]
+description = "Durable ID for reviewer lane two"
+required = true
+
+[vars.lane_two_provider]
+description = "Provider identifier for reviewer lane two"
+required = true
+
+[vars.lane_two_model]
+description = "Model target for reviewer lane two"
+required = true
+
+[vars.lane_two_target]
+description = "Configured Gas City agent target for reviewer lane two"
+required = true
+
+[vars.synthesis_target]
+description = "Configured Gas City agent target for the quorum synthesis step"
+required = true
+
+[[steps]]
+id = "review-lane-one"
+title = "Review lane one"
+description = """
+Run a read-only review of `{{subject}}` as durable lane `{{lane_one_id}}` using
+provider `{{lane_one_provider}}` and model target `{{lane_one_model}}`.
+Use `{{base_ref}}` as the diff baseline when inspecting changes for
+`{{subject}}`.
+
+You are one lane in a two-lane review quorum. Do not modify user files,
+branches, comments, external systems, or unrelated beads. Before reviewing,
+record a mutation baseline with `git status --porcelain=v1 -z`. After reviewing,
+run the same command and report only the delta introduced after your baseline.
+Pre-existing dirty state and pre-existing untracked files are not
+reviewer-created mutations.
+
+Persist durable structured output compatible with a future `dx-review
+summarize` consumer. The output must include these keys:
+
+- `verdict`: one of `pass`, `pass_with_findings`, `fail`, or `blocked`
+- `summary`: concise review summary
+- `findings_count`: integer count of findings
+- `findings`: array of findings with severity, title, body, file, line or range
+- `evidence`: commands, files, diffs, or artifacts inspected
+- `usage`: model/runtime usage if available, otherwise null
+- `read_only_enforcement`: `observed`, `enabled`, `passed`,
+  `baseline_command`, `after_command`, and optional notes
+- `mutations_delta`: files or state changes created after the baseline; empty if none
+- `failure_class`: `none`, `transient`, or `hard`
+- `failure_reason`: stable reason string or empty
+
+On success, close with `gc.outcome=pass` and write the durable JSON to
+`gc.output_json`. If the provider is unavailable, rate-limited, or another
+retryable infrastructure issue occurs, close with `gc.outcome=fail`,
+`gc.failure_class=transient`, and a stable `gc.failure_reason`. For
+non-retryable input or contract failures, use `gc.failure_class=hard`.
+"""
+metadata = { "gc.run_target" = "{{lane_one_target}}", "gc.provider" = "{{lane_one_provider}}", "gc.model" = "{{lane_one_model}}", "gc.review_quorum_lane" = "{{lane_one_id}}", "gc.reviewer_model" = "{{lane_one_model}}", "gc.output_json_schema" = "review-quorum.lane.v1", "gc.output_json_required" = "true" }
+
+[steps.retry]
+max_attempts = 3
+on_exhausted = "soft_fail"
+
+[[steps]]
+id = "review-lane-two"
+title = "Review lane two"
+description = """
+Run a read-only review of `{{subject}}` as durable lane `{{lane_two_id}}` using
+provider `{{lane_two_provider}}` and model target `{{lane_two_model}}`.
+Use `{{base_ref}}` as the diff baseline when inspecting changes for
+`{{subject}}`.
+
+You are one lane in a two-lane review quorum. Do not modify user files,
+branches, comments, external systems, or unrelated beads. Before reviewing,
+record a mutation baseline with `git status --porcelain=v1 -z`. After reviewing,
+run the same command and report only the delta introduced after your baseline.
+Pre-existing dirty state and pre-existing untracked files are not
+reviewer-created mutations.
+
+Persist durable structured output compatible with a future `dx-review
+summarize` consumer. The output must include these keys:
+
+- `verdict`: one of `pass`, `pass_with_findings`, `fail`, or `blocked`
+- `summary`: concise review summary
+- `findings_count`: integer count of findings
+- `findings`: array of findings with severity, title, body, file, line or range
+- `evidence`: commands, files, diffs, or artifacts inspected
+- `usage`: model/runtime usage if available, otherwise null
+- `read_only_enforcement`: `observed`, `enabled`, `passed`,
+  `baseline_command`, `after_command`, and optional notes
+- `mutations_delta`: files or state changes created after the baseline; empty if none
+- `failure_class`: `none`, `transient`, or `hard`
+- `failure_reason`: stable reason string or empty
+
+On success, close with `gc.outcome=pass` and write the durable JSON to
+`gc.output_json`. If the provider is unavailable, rate-limited, or another
+retryable infrastructure issue occurs, close with `gc.outcome=fail`,
+`gc.failure_class=transient`, and a stable `gc.failure_reason`. For
+non-retryable input or contract failures, use `gc.failure_class=hard`.
+"""
+metadata = { "gc.run_target" = "{{lane_two_target}}", "gc.provider" = "{{lane_two_provider}}", "gc.model" = "{{lane_two_model}}", "gc.review_quorum_lane" = "{{lane_two_id}}", "gc.reviewer_model" = "{{lane_two_model}}", "gc.output_json_schema" = "review-quorum.lane.v1", "gc.output_json_required" = "true" }
+
+[steps.retry]
+max_attempts = 3
+on_exhausted = "soft_fail"
+
+[[steps]]
+id = "synthesize-review-quorum"
+title = "Synthesize review quorum"
+needs = ["review-lane-one", "review-lane-two"]
+description = """
+Read the durable outputs from reviewer lanes `{{lane_one_id}}` and
+`{{lane_two_id}}` for `{{subject}}`, including any soft-failed retry controls,
+then write the quorum summary as durable structured output.
+
+The synthesis output must preserve lane provenance and include:
+
+- `subject`: `{{subject}}`
+- `base_ref`: `{{base_ref}}`
+- `lanes`: reviewer lane summaries, verdicts, findings counts, failure classes,
+  failure reasons, read-only enforcement, and mutation deltas
+- `verdict`: combined quorum verdict
+- `summary`: combined summary
+- `findings_count`: total actionable findings
+- `findings`: deduplicated findings with lane evidence
+- `evidence`: lane outputs and any synthesis-only checks
+- `usage`: aggregate usage if available
+- `read_only_enforcement`: synthesis baseline/after delta and lane deltas
+- `mutations_delta`: synthesis-created delta only; empty if none
+- `failure_class`: `none`, `transient`, or `hard`
+- `failure_reason`: stable reason string or empty
+
+Propagate this JSON through `gc.output_json` when available, or store it in the
+bead notes/metadata exactly enough for future `dx-review summarize` ingestion.
+Do not treat `dx-review` as the lifecycle owner; it is only a future
+compatibility consumer for this formula scaffold's durable state. The
+`internal/reviewquorum.Finalize` Go finalizer is not invoked by this step yet.
+"""
+metadata = { "gc.run_target" = "{{synthesis_target}}", "gc.review_quorum_role" = "synthesis", "gc.output_json_schema" = "review-quorum.summary.v1", "gc.output_json_required" = "true" }
+
+[steps.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"
