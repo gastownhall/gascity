@@ -162,6 +162,16 @@ from the workspace or an earlier overlay layer, Kiro preserves it and emits an
 overlay warning naming the skipped fallback. Other Kiro overlay files continue
 to follow the normal provider-aware layering rules.
 
+The built-in Kiro provider launches `kiro-cli` with `chat`,
+`--no-interactive`, `--agent gascity`, and `--trust-all-tools` by default. To
+remove or replace the unrestricted tool-trust flag, define the complete
+replacement argv in `city.toml`:
+
+```toml
+[providers.kiro]
+args = ["chat", "--no-interactive", "--agent", "gascity"]
+```
+
 ### Skills
 
 Skills use the [Agent Skills](https://agentskills.io) open standard, adopted by 30+ providers including Claude Code, Codex, Gemini, Cursor, GitHub Copilot, JetBrains Junie, Goose, Roo Code, and many more.

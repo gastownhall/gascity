@@ -138,8 +138,13 @@ extract_section_quoted_value() {
   local section="$1"
   local key="$2"
   awk -v section="$section" -v key="$key" '
-    $0 == "[" section "]" { in_section = 1; next }
-    /^\[/ && in_section { in_section = 0 }
+    {
+      section_line = $0
+      sub(/^[[:space:]]*/, "", section_line)
+      sub(/[[:space:]]*(#.*)?$/, "", section_line)
+    }
+    section_line == "[" section "]" { in_section = 1; next }
+    section_line ~ /^\[/ && in_section { in_section = 0 }
     in_section {
       line = $0
       sub(/^[[:space:]]*/, "", line)

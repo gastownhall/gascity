@@ -7,7 +7,18 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 )
+
+// PreserveExistingWarningPrefix prefixes nonfatal warnings for provider overlay
+// files that intentionally preserve an existing destination file.
+const PreserveExistingWarningPrefix = "overlay: preserving existing "
+
+// IsPreserveExistingWarning reports whether line is a nonfatal preservation
+// warning emitted by provider-aware overlay staging.
+func IsPreserveExistingWarning(line string) bool {
+	return strings.HasPrefix(strings.TrimSpace(line), PreserveExistingWarningPrefix)
+}
 
 // CopyFileOrDir copies src into dst. If src is a directory, it recursively
 // copies all files into dst (like CopyDir). If src is a single file, it
@@ -90,7 +101,7 @@ func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer, preserveEx
 		dst := filepath.Join(dstBase, entryRel)
 		if preserveExisting != nil && preserveExisting(entryRel) {
 			if _, err := os.Stat(dst); err == nil {
-				fmt.Fprintf(stderr, "overlay: preserving existing %q; skipped %q\n", dst, src) //nolint:errcheck
+				fmt.Fprintf(stderr, "%s%q; skipped %q\n", PreserveExistingWarningPrefix, dst, src) //nolint:errcheck
 				continue
 			} else if !os.IsNotExist(err) {
 				fmt.Fprintf(stderr, "overlay: stat %q: %v\n", dst, err) //nolint:errcheck
