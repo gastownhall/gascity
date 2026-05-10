@@ -246,16 +246,22 @@ func hashMCPServers(h hash.Hash, servers []MCPServerConfig) {
 }
 
 func hashOverlayProviders(h hash.Hash, providers []string) {
+	HashOverlayProviderNames(h, providers)
+}
+
+// HashOverlayProviderNames writes the overlay-provider fingerprint component
+// using the same framing as CoreFingerprint.
+func HashOverlayProviderNames(h io.Writer, providers []string) {
 	if len(providers) == 0 {
 		return
 	}
-	h.Write([]byte("overlay-providers")) //nolint:errcheck // hash.Write never errors
-	h.Write([]byte{0})                   //nolint:errcheck // hash.Write never errors
+	h.Write([]byte("overlay-providers")) //nolint:errcheck
+	h.Write([]byte{0})                   //nolint:errcheck
 	for _, provider := range providers {
-		h.Write([]byte(provider)) //nolint:errcheck // hash.Write never errors
-		h.Write([]byte{0})        //nolint:errcheck // hash.Write never errors
+		h.Write([]byte(provider)) //nolint:errcheck
+		h.Write([]byte{0})        //nolint:errcheck
 	}
-	h.Write([]byte{1}) //nolint:errcheck // sentinel
+	h.Write([]byte{1}) //nolint:errcheck
 }
 
 // CoreFingerprintBreakdown returns per-field hash components of the core

@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // canonicalConfigHash computes a SHA-256 hash over the behavioral fields of
@@ -101,7 +103,7 @@ func canonicalConfigHash(params TemplateParams, overlay map[string]string) strin
 	h.Write([]byte(params.Hints.OverlayDir)) //nolint:errcheck
 	h.Write([]byte{0})                       //nolint:errcheck
 
-	hashOverlayProviderNames(h, effectiveOverlayProviderNames(
+	runtime.HashOverlayProviderNames(h, runtime.OverlayProviderNamesFromParts(
 		params.Hints.ProviderName,
 		params.Hints.ProviderOverlayName,
 		params.Hints.InstallAgentHooks,
@@ -146,45 +148,6 @@ func stripBeaconPrefix(prompt string) string {
 		return prompt
 	}
 	return prompt[idx+2:]
-}
-
-func effectiveOverlayProviderNames(providerName, providerOverlayName string, installAgentHooks []string) []string {
-	primary := strings.TrimSpace(providerOverlayName)
-	if primary == "" {
-		primary = strings.TrimSpace(providerName)
-	}
-	providers := make([]string, 0, 1+len(installAgentHooks))
-	providers = appendOverlayProviderName(providers, primary)
-	for _, hook := range installAgentHooks {
-		providers = appendOverlayProviderName(providers, hook)
-	}
-	return providers
-}
-
-func appendOverlayProviderName(providers []string, name string) []string {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return providers
-	}
-	for _, existing := range providers {
-		if existing == name {
-			return providers
-		}
-	}
-	return append(providers, name)
-}
-
-func hashOverlayProviderNames(h interface{ Write([]byte) (int, error) }, providers []string) {
-	if len(providers) == 0 {
-		return
-	}
-	h.Write([]byte("overlay-providers")) //nolint:errcheck
-	h.Write([]byte{0})                   //nolint:errcheck
-	for _, provider := range providers {
-		h.Write([]byte(provider)) //nolint:errcheck
-		h.Write([]byte{0})        //nolint:errcheck
-	}
-	h.Write([]byte{1}) //nolint:errcheck
 }
 
 // hashSortedStringMap writes map entries to h in deterministic sorted order.

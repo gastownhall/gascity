@@ -78,9 +78,7 @@ func StageProviderOverlayDir(srcDir, dstDir string, providers []string, warnings
 	}
 	nonfatal, fatal := splitOverlayWarnings(stderr.String())
 	if nonfatal != "" && warnings != nil {
-		if _, err := fmt.Fprintln(warnings, nonfatal); err != nil {
-			return fmt.Errorf("writing overlay warnings: %w", err)
-		}
+		fmt.Fprintln(warnings, nonfatal) //nolint:errcheck // best-effort warning emission
 	}
 	if fatal != "" {
 		return fmt.Errorf("%s", fatal)

@@ -485,13 +485,19 @@ type Config struct {
 // OverlayProviderNames returns the effective provider overlay slots to stage for
 // cfg, preserving first-use order while skipping empty and duplicate names.
 func OverlayProviderNames(cfg Config) []string {
-	primary := strings.TrimSpace(cfg.ProviderOverlayName)
+	return OverlayProviderNamesFromParts(cfg.ProviderName, cfg.ProviderOverlayName, cfg.InstallAgentHooks)
+}
+
+// OverlayProviderNamesFromParts returns the effective provider overlay slots
+// for a launch provider, concrete overlay provider, and installed hooks.
+func OverlayProviderNamesFromParts(providerName, providerOverlayName string, installAgentHooks []string) []string {
+	primary := strings.TrimSpace(providerOverlayName)
 	if primary == "" {
-		primary = strings.TrimSpace(cfg.ProviderName)
+		primary = strings.TrimSpace(providerName)
 	}
-	providers := make([]string, 0, 1+len(cfg.InstallAgentHooks))
+	providers := make([]string, 0, 1+len(installAgentHooks))
 	providers = appendOverlayProviderName(providers, primary)
-	for _, hook := range cfg.InstallAgentHooks {
+	for _, hook := range installAgentHooks {
 		providers = appendOverlayProviderName(providers, hook)
 	}
 	return providers

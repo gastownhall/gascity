@@ -35,7 +35,9 @@ func stageFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Con
 		}
 	}
 
-	stageProviderOverlaysToPod(ctx, ops, podName, cfg, podWorkDir, warn)
+	if err := stageProviderOverlaysToPod(ctx, ops, podName, cfg, podWorkDir, warn); err != nil {
+		return err
+	}
 
 	// Copy each copy_files entry.
 	for _, entry := range cfg.CopyFiles {
@@ -60,9 +62,9 @@ func stageFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Con
 	return err
 }
 
-func stageProviderOverlaysToPod(ctx context.Context, ops k8sOps, podName string, cfg runtime.Config, podWorkDir string, warn io.Writer) {
+func stageProviderOverlaysToPod(ctx context.Context, ops k8sOps, podName string, cfg runtime.Config, podWorkDir string, warn io.Writer) error {
 	if len(cfg.PackOverlayDirs) == 0 && cfg.OverlayDir == "" {
-		return
+		return nil
 	}
 	if podWorkDir == "" {
 		podWorkDir = "/workspace"
@@ -70,22 +72,26 @@ func stageProviderOverlaysToPod(ctx context.Context, ops k8sOps, podName string,
 
 	stageDir, err := os.MkdirTemp("", "gc-k8s-overlays-")
 	if err != nil {
-		fmt.Fprintf(warn, "gc: warning: preparing provider overlays: %v\n", err) //nolint:errcheck
-		return
+		return fmt.Errorf("preparing provider overlays: %w", err)
 	}
 	defer os.RemoveAll(stageDir) //nolint:errcheck
 
 	seedExistingInstructions(cfg.WorkDir, stageDir, warn)
 	providers := runtime.OverlayProviderNames(cfg)
 	for _, od := range cfg.PackOverlayDirs {
-		stageProviderOverlay(od, stageDir, providers, "pack overlay", warn)
+		if err := stageProviderOverlay(od, stageDir, providers, "pack overlay", warn); err != nil {
+			return err
+		}
 	}
 	if cfg.OverlayDir != "" {
-		stageProviderOverlay(cfg.OverlayDir, stageDir, providers, "overlay", warn)
+		if err := stageProviderOverlay(cfg.OverlayDir, stageDir, providers, "overlay", warn); err != nil {
+			return err
+		}
 	}
 	if err := copyDirToPod(ctx, ops, podName, "stage", stageDir, podWorkDir); err != nil {
-		fmt.Fprintf(warn, "gc: warning: staging provider overlays: %v\n", err) //nolint:errcheck
+		return fmt.Errorf("staging provider overlays: %w", err)
 	}
+	return nil
 }
 
 func seedExistingInstructions(workDir, stageDir string, warn io.Writer) {
@@ -104,15 +110,15 @@ func seedExistingInstructions(workDir, stageDir string, warn io.Writer) {
 	}
 }
 
-func stageProviderOverlay(srcDir, dstDir string, providers []string, label string, warn io.Writer) {
+func stageProviderOverlay(srcDir, dstDir string, providers []string, label string, warn io.Writer) error {
 	var warnings bytes.Buffer
 	if err := runtime.StageProviderOverlayDir(srcDir, dstDir, providers, &warnings); err != nil {
-		fmt.Fprintf(warn, "gc: warning: staging %s %s: %v\n", label, srcDir, err) //nolint:errcheck
-		return
+		return fmt.Errorf("staging %s %s: %w", label, srcDir, err)
 	}
 	if warnings.Len() > 0 {
 		fmt.Fprintf(warn, "gc: warning: staging %s %s: %s\n", label, srcDir, strings.TrimSpace(warnings.String())) //nolint:errcheck
 	}
+	return nil
 }
 
 // waitForInitContainer waits for the init container to be running.

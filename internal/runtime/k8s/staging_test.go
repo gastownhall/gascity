@@ -244,6 +244,39 @@ func TestStageFilesSurfacesKiroPreservationWarning(t *testing.T) {
 	}
 }
 
+func TestStageFilesPropagatesFatalProviderOverlayError(t *testing.T) {
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "AGENTS.md"), []byte("project instructions"), 0o600); err != nil {
+		t.Fatalf("write project instructions: %v", err)
+	}
+
+	packOverlay := t.TempDir()
+	nestedInstructions := filepath.Join(packOverlay, "per-provider", "kiro", "AGENTS.md", "nested.md")
+	if err := os.MkdirAll(filepath.Dir(nestedInstructions), 0o755); err != nil {
+		t.Fatalf("mkdir Kiro nested instructions: %v", err)
+	}
+	if err := os.WriteFile(nestedInstructions, []byte("nested instructions"), 0o644); err != nil {
+		t.Fatalf("write Kiro nested instructions: %v", err)
+	}
+
+	var warnings bytes.Buffer
+	ops := newCapturingStageOps()
+	err := stageFiles(context.Background(), ops, "gc-kiro", runtime.Config{
+		WorkDir:         workDir,
+		ProviderName:    "kiro",
+		PackOverlayDirs: []string{packOverlay},
+	}, "", &warnings)
+	if err == nil {
+		t.Fatal("stageFiles succeeded, want fatal provider overlay error")
+	}
+	if got := err.Error(); !strings.Contains(got, "staging pack overlay") || !strings.Contains(got, "AGENTS.md") {
+		t.Fatalf("stageFiles error = %q, want pack overlay AGENTS.md context", got)
+	}
+	if strings.Contains(warnings.String(), "staging pack overlay") {
+		t.Fatalf("fatal provider overlay error was demoted to warning: %q", warnings.String())
+	}
+}
+
 type capturingStageOps struct {
 	files map[string]string
 }

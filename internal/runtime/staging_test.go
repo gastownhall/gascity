@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -171,4 +172,41 @@ func TestStageSessionWorkDirWithWarningsSurfacesKiroPreservationWarning(t *testi
 	if string(data) != "project instructions" {
 		t.Fatalf("AGENTS.md = %q, want project instructions preserved", string(data))
 	}
+}
+
+func TestStageProviderOverlayDirIgnoresWarningWriterFailure(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	packOverlay := t.TempDir()
+
+	fallbackInstructions := filepath.Join(packOverlay, "per-provider", "kiro", "AGENTS.md")
+	if err := os.MkdirAll(filepath.Dir(fallbackInstructions), 0o755); err != nil {
+		t.Fatalf("mkdir Kiro overlay: %v", err)
+	}
+	if err := os.WriteFile(fallbackInstructions, []byte("fallback instructions"), 0o644); err != nil {
+		t.Fatalf("write Kiro fallback instructions: %v", err)
+	}
+	projectInstructions := filepath.Join(workDir, "AGENTS.md")
+	if err := os.WriteFile(projectInstructions, []byte("project instructions"), 0o600); err != nil {
+		t.Fatalf("write project instructions: %v", err)
+	}
+
+	err := StageProviderOverlayDir(packOverlay, workDir, []string{"kiro"}, failingWriter{})
+	if err != nil {
+		t.Fatalf("StageProviderOverlayDir: %v", err)
+	}
+	data, err := os.ReadFile(projectInstructions)
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	if string(data) != "project instructions" {
+		t.Fatalf("AGENTS.md = %q, want project instructions preserved", string(data))
+	}
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) {
+	return 0, errors.New("writer unavailable")
 }
