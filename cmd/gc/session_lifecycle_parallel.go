@@ -185,24 +185,34 @@ type startPhaseTimings struct {
 }
 
 // formatLog returns the trailing segment to append to a lifecycle log
-// line, or "" when no phase ran. Zero phases are elided so a healthy
-// start without session_key remains a single phase=N field.
+// line — a single " phases=[...]" field — or "" when no phase ran or
+// every phase rounds to sub-millisecond. The lifecycle log's primary
+// duration field stays the top-level "duration=" already emitted by
+// logLifecycleOutcome; this helper only adds the per-phase breakdown
+// when there is something nonzero to report.
+//
+// Rounding happens BEFORE the include decision so a phase shorter than
+// 0.5ms doesn't print as "...=0s" (which would be misleading and
+// defeat the elision intent). Sub-ms durations are dropped entirely.
 func (p startPhaseTimings) formatLog() string {
 	if p.StartCall == 0 && p.StateSyncRecovery == 0 && p.PostStartObserve == 0 && p.CommitRefresh == 0 {
 		return ""
 	}
 	var parts []string
-	if p.StartCall > 0 {
-		parts = append(parts, fmt.Sprintf("start_call=%s", p.StartCall.Round(time.Millisecond)))
+	if r := p.StartCall.Round(time.Millisecond); r > 0 {
+		parts = append(parts, fmt.Sprintf("start_call=%s", r))
 	}
-	if p.StateSyncRecovery > 0 {
-		parts = append(parts, fmt.Sprintf("state_sync_recovery=%s", p.StateSyncRecovery.Round(time.Millisecond)))
+	if r := p.StateSyncRecovery.Round(time.Millisecond); r > 0 {
+		parts = append(parts, fmt.Sprintf("state_sync_recovery=%s", r))
 	}
-	if p.PostStartObserve > 0 {
-		parts = append(parts, fmt.Sprintf("post_start_observe=%s", p.PostStartObserve.Round(time.Millisecond)))
+	if r := p.PostStartObserve.Round(time.Millisecond); r > 0 {
+		parts = append(parts, fmt.Sprintf("post_start_observe=%s", r))
 	}
-	if p.CommitRefresh > 0 {
-		parts = append(parts, fmt.Sprintf("commit_refresh=%s", p.CommitRefresh.Round(time.Millisecond)))
+	if r := p.CommitRefresh.Round(time.Millisecond); r > 0 {
+		parts = append(parts, fmt.Sprintf("commit_refresh=%s", r))
+	}
+	if len(parts) == 0 {
+		return ""
 	}
 	return " phases=[" + strings.Join(parts, " ") + "]"
 }
@@ -1091,7 +1101,10 @@ func commitAsyncStartResultWithContext(
 			err := fmt.Errorf("panic during async start commit: %v\n%s", recovered, debug.Stack())
 			clearPendingStartInFlightLease(result.prepared.candidate.session, store, stderr)
 			fmt.Fprintf(stderr, "session reconciler: committing async start %s: %s\n", name, formatLifecycleError(err)) //nolint:errcheck
-			logLifecycleOutcome(stderr, "start", wave, name, template, "panic_recovered", result.started, time.Now(), err)
+			// Pass the pre-refresh phases so commit-time panic diagnostics
+			// still show start_call / post_start_observe timings; commit_refresh
+			// may be unset if the panic fired before refreshAsyncStartResult.
+			logLifecycleOutcome(stderr, "start", wave, name, template, "panic_recovered", result.started, time.Now(), err, result.phases)
 			committed = false
 		}
 	}()
@@ -1104,12 +1117,11 @@ func commitAsyncStartResultWithContext(
 	// runPreparedStartCandidate. Both flow into the lifecycle log.
 	refreshed.phases.CommitRefresh = commitRefreshElapsed
 	if !ok {
-		// refreshAsyncStartResult does not always carry the original
-		// phases through on the !ok path; restore them so a stale
-		// commit still reports start_call / post_start_observe along
-		// with the now-known commit_refresh.
-		refreshed.phases.StartCall = result.phases.StartCall
-		refreshed.phases.PostStartObserve = result.phases.PostStartObserve
+		// refreshAsyncStartResult returns result unchanged on every !ok
+		// branch (store.Get error, stale prepared command, stale runtime
+		// session), so refreshed.phases already carries the original
+		// start_call / post_start_observe; only commit_refresh was
+		// stamped above. No restore needed.
 		if cleanupRuntime {
 			stopStaleAsyncStartRuntime(result, sp, stderr)
 		}
@@ -1374,7 +1386,7 @@ func commitStartResultTraced(
 						"cause": err.Error(),
 					}, "")
 				}
-				logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err)
+				logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
 				return false
 			}
 			if trace != nil {
@@ -1382,7 +1394,7 @@ func commitStartResultTraced(
 					"error": formatLifecycleError(result.err),
 				}, "")
 			}
-			logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err)
+			logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
 			return false
 		}
 		if result.rollbackPending {

@@ -78,6 +78,38 @@ func TestStartPhaseTimingsFormatLog(t *testing.T) {
 			},
 			want: " phases=[commit_refresh=12ms]",
 		},
+		{
+			// Regression: sub-0.5ms durations previously rendered as
+			// "...=0s" because the >0 check ran on the unrounded value
+			// but the printf used the rounded value. After the fix, the
+			// rounded value drives the include decision and sub-ms is
+			// elided entirely.
+			name: "sub-millisecond phases elide (no =0s artifacts)",
+			phases: startPhaseTimings{
+				StartCall:        100 * time.Microsecond,
+				PostStartObserve: 200 * time.Microsecond,
+				CommitRefresh:    400 * time.Microsecond,
+			},
+			want: "",
+		},
+		{
+			// Mix of sub-ms and ms+ durations: sub-ms phase elides, ms+ stays.
+			name: "sub-ms phase elides while ms+ peer survives",
+			phases: startPhaseTimings{
+				StartCall:        300 * time.Microsecond, // <0.5ms → elide
+				PostStartObserve: 5 * time.Second,
+			},
+			want: " phases=[post_start_observe=5s]",
+		},
+		{
+			// Boundary: 500µs rounds to 1ms (Go's time.Duration.Round uses
+			// half-away-from-zero), so it survives.
+			name: "0.5ms boundary survives as 1ms",
+			phases: startPhaseTimings{
+				StartCall: 500 * time.Microsecond,
+			},
+			want: " phases=[start_call=1ms]",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
