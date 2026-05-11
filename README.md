@@ -18,17 +18,11 @@ declarative city configuration.
 
 ## Sponsors
 
-<table>
-  <tr>
-    <td align="center" width="100%">
-      <a href="https://blacksmith.sh/">
-        <picture>
-          <img src="docs/images/blacksmith-powered.png" alt="Powered by Blacksmith" height="28">
-        </picture>
-      </a>
-    </td>
-  </tr>
-</table>
+<p align="center">
+  <a href="https://blacksmith.sh/">
+    <img src="docs/images/blacksmith-powered.png" alt="Powered by Blacksmith" height="40">
+  </a>
+</p>
 
 ## Coming from Gas Town?
 
