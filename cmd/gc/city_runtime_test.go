@@ -466,6 +466,7 @@ func TestCityRuntimeRunStartupPreflightsManagedDoltBeforeSessionSnapshot(t *test
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	writeCityRuntimeConfig(t, tomlPath, "fake")
 	t.Setenv("GC_BEADS", "bd")
+	cleanupManagedDoltTestCity(t, cityPath)
 
 	cfg, err := config.Load(osFS{}, tomlPath)
 	if err != nil {
