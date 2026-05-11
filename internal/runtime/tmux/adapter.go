@@ -77,22 +77,36 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		p.mu.Unlock()
 	}
 
+	if err := stageStartFiles(cfg, os.Stderr); err != nil {
+		return err
+	}
+
+	err = doStartSession(ctx, &tmuxStartOps{tm: p.tm}, name, cfg, p.cfg.SetupTimeout)
+	if err == nil {
+		p.cache.Invalidate()
+		return nil
+	}
+	p.cleanupFailedStart(name, cfg)
+	return err
+}
+
+func stageStartFiles(cfg runtime.Config, warnings io.Writer) error {
 	// Copy overlays and CopyFiles before creating the tmux session.
 	// Local provider: files are on the same filesystem.
-	// V2 per-provider overlay support: CopyDirForProviders copies universal
-	// files then per-provider/<provider>/ slots for ProviderName plus any
-	// InstallAgentHooks entries (flattened).
-	overlayProviders := append([]string{cfg.ProviderName}, cfg.InstallAgentHooks...)
+	// V2 per-provider overlay support: StageProviderOverlayDir copies universal
+	// files then flattened per-provider/<provider>/ slots for ProviderOverlayName
+	// with ProviderName fallback, plus any InstallAgentHooks entries.
+	overlayProviders := runtime.OverlayProviderNames(cfg)
 	if cfg.WorkDir != "" {
 		for _, od := range cfg.PackOverlayDirs {
-			if err := overlay.CopyDirForProviders(od, cfg.WorkDir, overlayProviders, io.Discard); err != nil {
+			if err := runtime.StageProviderOverlayDir(od, cfg.WorkDir, overlayProviders, warnings); err != nil {
 				return fmt.Errorf("copying pack overlay %s: %w", od, err)
 			}
 		}
 	}
 	// Agent-level overlay (highest priority; merges known settings files, overwrites others).
 	if cfg.OverlayDir != "" && cfg.WorkDir != "" {
-		if err := overlay.CopyDirForProviders(cfg.OverlayDir, cfg.WorkDir, overlayProviders, io.Discard); err != nil {
+		if err := runtime.StageProviderOverlayDir(cfg.OverlayDir, cfg.WorkDir, overlayProviders, warnings); err != nil {
 			return fmt.Errorf("copying overlay %s: %w", cfg.OverlayDir, err)
 		}
 	}
@@ -109,14 +123,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		}
 		_ = overlay.CopyFileOrDir(cf.Src, dst, io.Discard)
 	}
-
-	err = doStartSession(ctx, &tmuxStartOps{tm: p.tm}, name, cfg, p.cfg.SetupTimeout)
-	if err == nil {
-		p.cache.Invalidate()
-		return nil
-	}
-	p.cleanupFailedStart(name, cfg)
-	return err
+	return nil
 }
 
 func ensureInstanceToken(env map[string]string) (map[string]string, error) {

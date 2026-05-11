@@ -127,20 +127,3 @@ func sortStatusEntries(entries []StatusEntry) {
 		return entries[i].Path < entries[j].Path
 	})
 }
-
-func mergeMutationDeltas(deltas ...MutationsDelta) MutationsDelta {
-	byPath := map[string]StatusEntry{}
-	for _, delta := range deltas {
-		for _, entry := range delta.Changed {
-			// Callers pass deltas in deterministic lane order; the last entry
-			// wins when lanes report the same path with different statuses.
-			byPath[entry.Path] = entry
-		}
-	}
-	merged := make([]StatusEntry, 0, len(byPath))
-	for _, entry := range byPath {
-		merged = append(merged, entry)
-	}
-	sortStatusEntries(merged)
-	return MutationsDelta{Changed: merged}
-}

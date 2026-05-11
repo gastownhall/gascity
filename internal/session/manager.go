@@ -32,6 +32,9 @@ const (
 	// StateCreating means the session bead has been written but the runtime
 	// process has not yet been confirmed alive. Counts against pool occupancy.
 	StateCreating State = "creating"
+	// StateFailedCreate means create rollback wrote terminal metadata but the
+	// bead status close did not complete. It is eligible for cleanup/replacement.
+	StateFailedCreate State = "failed-create"
 	// StateDraining means the session is being gracefully stopped (in-flight
 	// work completing). The pool routing label has been removed so no new
 	// work is routed to this session.

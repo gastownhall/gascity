@@ -526,9 +526,11 @@ in Gas City:
    formulas are resolved by Gas City but executed by the configured beads
    backend.
 5. Look at [examples/gastown/city.toml](https://github.com/gastownhall/gascity/blob/main/examples/gastown/city.toml)
-   first, then [examples/gastown/packs/gastown/pack.toml](https://github.com/gastownhall/gascity/blob/main/examples/gastown/packs/gastown/pack.toml).
-   The city file is the normal starting point; the pack defines the reusable
-   defaults behind it.
+   first, then [examples/gastown/pack.toml](https://github.com/gastownhall/gascity/blob/main/examples/gastown/pack.toml),
+   then [examples/gastown/packs/gastown/pack.toml](https://github.com/gastownhall/gascity/blob/main/examples/gastown/packs/gastown/pack.toml).
+   The city file is the normal starting point; the root pack wires the
+   copyable example and default rig binding; the nested pack defines the
+   reusable defaults behind it.
 
 If you keep those five points straight, most of the Gas Town to Gas City ramp
 goes quickly.

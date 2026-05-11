@@ -471,6 +471,9 @@ func needsStaging(cfg runtime.Config, ctrlCity string) bool {
 	if cfg.OverlayDir != "" {
 		return true
 	}
+	if len(cfg.PackOverlayDirs) > 0 {
+		return true
+	}
 	if len(cfg.CopyFiles) > 0 {
 		return true
 	}

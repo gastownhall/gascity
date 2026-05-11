@@ -110,6 +110,9 @@ func TestStartNudgeWakeListenerStopsOnContextCancel(t *testing.T) {
 }
 
 func TestDispatchAllQueuedNudgesNoOpInLegacyMode(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	dir := t.TempDir()
 	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "msg", "session", time.Now().Add(-time.Minute))); err != nil {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
@@ -125,6 +128,9 @@ func TestDispatchAllQueuedNudgesNoOpInLegacyMode(t *testing.T) {
 }
 
 func TestDispatchAllQueuedNudgesEmptyQueue(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	dir := t.TempDir()
 	delivered, err := dispatchAllQueuedNudges(dir, supervisorCfg(), nil, nil, newSessionBeadSnapshot(nil))
 	if err != nil {
@@ -136,6 +142,9 @@ func TestDispatchAllQueuedNudgesEmptyQueue(t *testing.T) {
 }
 
 func TestDispatchAllQueuedNudgesSkipsNotYetDue(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	dir := t.TempDir()
 	future := time.Now().Add(5 * time.Minute)
 	item := newQueuedNudge("worker", "later", "session", time.Now())
@@ -163,6 +172,8 @@ func TestDispatchAllQueuedNudgesSkipsNotYetDue(t *testing.T) {
 }
 
 func TestDispatchAllQueuedNudgesDeliversAndAcks(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
 
@@ -220,6 +231,9 @@ func TestDispatchAllQueuedNudgesDeliversAndAcks(t *testing.T) {
 }
 
 func TestDispatchAllQueuedNudgesSkipsACPSession(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	dir := t.TempDir()
 	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "msg", "session", time.Now().Add(-time.Minute))); err != nil {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
@@ -257,6 +271,9 @@ func TestNudgeDispatcherIsSupervisor(t *testing.T) {
 }
 
 func TestDispatchAllQueuedNudgesNilCfg(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	dir := t.TempDir()
 	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "msg", "session", time.Now().Add(-time.Minute))); err != nil {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
@@ -300,6 +317,9 @@ func TestMaybeStartNudgePollerSkipsInSupervisorMode(t *testing.T) {
 }
 
 func TestEnqueuePingsWakeSocket(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	dir := t.TempDir()

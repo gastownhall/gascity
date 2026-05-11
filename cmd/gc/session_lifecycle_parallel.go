@@ -1544,7 +1544,7 @@ func rollbackPendingCreate(session *beads.Bead, store beads.Store, now time.Time
 			session.Metadata["session_name"] = ""
 		}
 	}
-	closeBead(store, session.ID, "failed-create", now, stderr)
+	closeBead(store, session.ID, string(sessionpkg.StateFailedCreate), now, stderr)
 }
 
 func executePlannedStarts(

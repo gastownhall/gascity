@@ -18,6 +18,15 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
+func readFileString(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
 // --- gc order list ---
 
 func TestOrderListEmpty(t *testing.T) {
@@ -291,14 +300,21 @@ fetched = "2026-04-10T00:00:00Z"
 	if err != nil {
 		t.Fatalf("scanAllOrders: %v", err)
 	}
-	if len(aa) != 1 {
-		t.Fatalf("got %d orders, want 1", len(aa))
+	var imported *orders.Order
+	for i := range aa {
+		if aa[i].Name == "health-check" {
+			imported = &aa[i]
+			break
+		}
 	}
-	if aa[0].Name != "health-check" {
-		t.Fatalf("Name = %q, want %q", aa[0].Name, "health-check")
+	if imported == nil {
+		t.Fatalf("scanAllOrders() missing imported health-check order: %#v", aa)
 	}
-	if aa[0].Source != filepath.Join(cacheDir, "orders", "health-check.order.toml") {
-		t.Fatalf("Source = %q, want %q", aa[0].Source, filepath.Join(cacheDir, "orders", "health-check.order.toml"))
+	if imported.Name != "health-check" {
+		t.Fatalf("Name = %q, want %q", imported.Name, "health-check")
+	}
+	if imported.Source != filepath.Join(cacheDir, "orders", "health-check.order.toml") {
+		t.Fatalf("Source = %q, want %q", imported.Source, filepath.Join(cacheDir, "orders", "health-check.order.toml"))
 	}
 }
 
@@ -722,6 +738,9 @@ func TestOrderRun(t *testing.T) {
 }
 
 func TestOrderRunEventExecAdvancesCursor(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
 	cityDir := t.TempDir()
 	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
 name = "test-city"
@@ -1198,6 +1217,8 @@ func TestOrderRunNotFound(t *testing.T) {
 }
 
 func TestOrderRunExecRigUsesScopedWorkdirAndStoreEnv(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "frontend")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
@@ -1439,7 +1460,7 @@ prefix = "ct"
 
 	outPath := filepath.Join(cityDir, "exec-managed-marker.txt")
 	a := orders.Order{
-		Name:     "dolt-gc-nudge",
+		Name:     "dolt-test-cooldown",
 		Trigger:  "cooldown",
 		Interval: "1m",
 		Exec:     fmt.Sprintf(`printf 'managed=<%%s>\nhost=<%%s>\nport=<%%s>\npack_state=<%%s>\ndata=<%%s>\nconfig=<%%s>\nstate=<%%s>\n' "$GC_DOLT_MANAGED_LOCAL" "$GC_DOLT_HOST" "$GC_DOLT_PORT" "$GC_PACK_STATE_DIR" "$GC_DOLT_DATA_DIR" "$GC_DOLT_CONFIG_FILE" "$GC_DOLT_STATE_FILE" > %q`, outPath),
@@ -1467,6 +1488,8 @@ prefix = "ct"
 }
 
 func TestOrderRunExecPropagatesManagedDoltLayout(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv("GC_DOLT", "skip")
 	cityDir := t.TempDir()
 	dataDir := filepath.Join(t.TempDir(), "managed-dolt")
 	configFile := filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
@@ -1518,7 +1541,7 @@ prefix = "ct"
 	t.Setenv("GC_DOLT_STATE_FILE", filepath.Join(t.TempDir(), "poison-state.json"))
 	outPath := filepath.Join(cityDir, "exec-managed-layout.txt")
 	a := orders.Order{
-		Name:     "dolt-gc-nudge",
+		Name:     "dolt-test-cooldown",
 		Trigger:  "cooldown",
 		Interval: "1m",
 		Exec:     fmt.Sprintf(`printf 'managed=<%%s>\nport=<%%s>\ndata=<%%s>\nconfig=<%%s>\n' "$GC_DOLT_MANAGED_LOCAL" "$GC_DOLT_PORT" "$GC_DOLT_DATA_DIR" "$GC_DOLT_CONFIG_FILE" > %q`, outPath),

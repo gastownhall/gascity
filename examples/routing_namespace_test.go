@@ -18,6 +18,7 @@ func TestShippedExamplesDoNotHardcodeShortRoutedToPools(t *testing.T) {
 		"gc.routed_to=<rig>/polecat",
 		"gc.routed_to=<rig>/refinery",
 		"gc.routed_to={{ .RigName }}/refinery",
+		"pool:dog",
 	}
 
 	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {

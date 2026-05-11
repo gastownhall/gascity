@@ -386,7 +386,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 	var createdIDs []string
 	embeddedDeps := make(map[string]bool)
 	pendingAssignees := make(map[string]string)
-	graphWorkflow := len(recipe.Steps) > 0 && recipe.Steps[0].Metadata["gc.kind"] == "workflow"
+	graphWorkflow := preservesGraphActionTypes(recipe)
 
 	for i, step := range recipe.Steps {
 		// For RootOnly recipes, only create the root bead.
@@ -434,6 +434,13 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 				b.Metadata["idempotency_key"] = opts.IdempotencyKey
 			}
 		} else {
+			// graph.v2 workflows and their retry/Ralph attempt sub-recipes
+			// use step beads as independently routable actionable work, not
+			// scaffolding — skip the #1039 coercion so Ready() still surfaces
+			// them for worker claim.
+			if !graphWorkflow {
+				b.Type = nonRootStepBeadType(b.Type)
+			}
 			// Non-root beads: resolve ParentID from the parent-child deps.
 			for _, dep := range recipe.Deps {
 				if dep.StepID == step.ID && dep.Type == "parent-child" {
@@ -611,6 +618,10 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 
 	for _, step := range recipe.Steps {
 		b := stepToBead(step, vars, priorityOverride)
+		// Fragment entries stay "task" — unlike formula scaffolding steps,
+		// fanout-expanded fragment beads are actionable work that pool
+		// workers claim from `bd ready`. Do not apply nonRootStepBeadType
+		// here (#1039).
 		hasFutureBlocker := false
 		for _, dep := range recipe.Deps {
 			if dep.StepID != step.ID || dep.Type == "parent-child" {
@@ -787,6 +798,30 @@ func groupExternalDeps(deps []ExternalDep) (map[string][]ExternalDep, error) {
 		byStep[dep.StepID] = append(byStep[dep.StepID], dep)
 	}
 	return byStep, nil
+}
+
+// nonRootStepBeadType returns the type to stamp on a non-root formula step
+// bead. Beads typed "task" (the compiler's default — either from an explicit
+// TOML `type = "task"` or an unset type) become "step" so Ready() and
+// `bd ready` skip formula scaffolding (#1039). Other explicit types
+// ("bug", "epic", ...) and the "gate" type produced by deferBeadRouting
+// are preserved.
+func nonRootStepBeadType(currentType string) string {
+	if currentType == "task" {
+		return "step"
+	}
+	return currentType
+}
+
+func preservesGraphActionTypes(recipe *formula.Recipe) bool {
+	if recipe == nil || len(recipe.Steps) == 0 {
+		return false
+	}
+	root := recipe.Steps[0]
+	if root.Metadata["gc.kind"] == "workflow" {
+		return true
+	}
+	return root.Metadata["gc.attempt"] != "" && root.Metadata["gc.step_ref"] != ""
 }
 
 // stepToBead converts a RecipeStep to a Bead with variable substitution.

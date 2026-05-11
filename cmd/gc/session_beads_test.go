@@ -1955,8 +1955,8 @@ func TestSyncSessionBeads_RecreatesDriftedNamedSessionRuntimeName(t *testing.T) 
 	if closedOld.ID == "" {
 		t.Fatalf("did not find closed drifted bead among %+v", all)
 	}
-	if closedOld.Status != "closed" || closedOld.Metadata["close_reason"] != "reconfigured" {
-		t.Fatalf("drifted bead status=%q close_reason=%q, want closed/reconfigured", closedOld.Status, closedOld.Metadata["close_reason"])
+	if want := session.CanonicalCloseReason("reconfigured"); closedOld.Status != "closed" || closedOld.Metadata["close_reason"] != want {
+		t.Fatalf("drifted bead status=%q close_reason=%q, want closed/%q", closedOld.Status, closedOld.Metadata["close_reason"], want)
 	}
 	if openNew.ID == "" {
 		t.Fatalf("did not find recreated canonical bead with session_name %q", expectedName)
@@ -2847,8 +2847,8 @@ func TestSyncSessionBeads_DuplicatePoolSessionNameKeepsVisibleOwner(t *testing.T
 	if duplicateAfter.Status != "closed" {
 		t.Fatalf("duplicate bead %s status = %q, want closed", duplicate.ID, duplicateAfter.Status)
 	}
-	if got := duplicateAfter.Metadata["close_reason"]; got != "duplicate" {
-		t.Fatalf("duplicate close_reason = %q, want duplicate", got)
+	if want := session.CanonicalCloseReason("duplicate"); duplicateAfter.Metadata["close_reason"] != want {
+		t.Fatalf("duplicate close_reason = %q, want %q", duplicateAfter.Metadata["close_reason"], want)
 	}
 }
 
@@ -3472,8 +3472,8 @@ func TestSyncSessionBeads_PoolSessionNameFailureLeavesReachableFailedCreate(t *t
 	if got := strings.TrimSpace(failed.Metadata["session_name"]); got == "" {
 		t.Fatalf("failed-create bead session_name is empty: %+v", failed)
 	}
-	if got := failed.Metadata["close_reason"]; got != "failed-create" {
-		t.Fatalf("failed-create close_reason = %q, want failed-create", got)
+	if want := session.CanonicalCloseReason("failed-create"); failed.Metadata["close_reason"] != want {
+		t.Fatalf("failed-create close_reason = %q, want %q", failed.Metadata["close_reason"], want)
 	}
 	if got := failed.Metadata["pending_create_claim"]; got != "" {
 		t.Fatalf("failed-create pending_create_claim = %q, want cleared", got)
@@ -3620,8 +3620,8 @@ func TestSyncSessionBeads_OrphanDetection(t *testing.T) {
 	if oldBead.Metadata["state"] != "orphaned" {
 		t.Errorf("old-agent state = %q, want %q", oldBead.Metadata["state"], "orphaned")
 	}
-	if oldBead.Metadata["close_reason"] != "orphaned" {
-		t.Errorf("old-agent close_reason = %q, want %q", oldBead.Metadata["close_reason"], "orphaned")
+	if want := session.CanonicalCloseReason("orphaned"); oldBead.Metadata["close_reason"] != want {
+		t.Errorf("old-agent close_reason = %q, want %q", oldBead.Metadata["close_reason"], want)
 	}
 	if oldBead.Metadata["closed_at"] == "" {
 		t.Error("old-agent closed_at is empty")
@@ -3788,9 +3788,9 @@ func TestSyncSessionBeads_PoolInstanceOrphaned(t *testing.T) {
 			t.Errorf("pool instance %s state = %q, want %q",
 				b.Metadata["session_name"], b.Metadata["state"], "orphaned")
 		}
-		if b.Metadata["close_reason"] != "orphaned" {
+		if want := session.CanonicalCloseReason("orphaned"); b.Metadata["close_reason"] != want {
 			t.Errorf("pool instance %s close_reason = %q, want %q",
-				b.Metadata["session_name"], b.Metadata["close_reason"], "orphaned")
+				b.Metadata["session_name"], b.Metadata["close_reason"], want)
 		}
 	}
 }
@@ -3939,8 +3939,8 @@ func TestSyncSessionBeads_SuspendedAgentNotOrphaned(t *testing.T) {
 	if workerBead.Metadata["state"] != "suspended" {
 		t.Errorf("worker state = %q, want %q", workerBead.Metadata["state"], "suspended")
 	}
-	if workerBead.Metadata["close_reason"] != "suspended" {
-		t.Errorf("worker close_reason = %q, want %q", workerBead.Metadata["close_reason"], "suspended")
+	if want := session.CanonicalCloseReason("suspended"); workerBead.Metadata["close_reason"] != want {
+		t.Errorf("worker close_reason = %q, want %q", workerBead.Metadata["close_reason"], want)
 	}
 }
 
@@ -4425,8 +4425,8 @@ func TestSyncSessionBeads_OrphansLegacyPoolBaseSession(t *testing.T) {
 	if closedLegacy.Status != "closed" {
 		t.Fatalf("legacy bead status = %q, want closed", closedLegacy.Status)
 	}
-	if closedLegacy.Metadata["close_reason"] != "orphaned" {
-		t.Fatalf("legacy bead close_reason = %q, want orphaned", closedLegacy.Metadata["close_reason"])
+	if want := session.CanonicalCloseReason("orphaned"); closedLegacy.Metadata["close_reason"] != want {
+		t.Fatalf("legacy bead close_reason = %q, want %q", closedLegacy.Metadata["close_reason"], want)
 	}
 	if openPool.ID == "" {
 		t.Fatalf("did not find new pool session bead in %+v", all)
@@ -4989,9 +4989,9 @@ func TestReapStaleSessionBeads(t *testing.T) {
 			if tt.wantReaped > 0 {
 				all := allSessionBeads(t, store)
 				for _, b := range all {
-					if b.Status == "closed" && b.Metadata["close_reason"] != "stale-session" {
+					if want := session.CanonicalCloseReason("stale-session"); b.Status == "closed" && b.Metadata["close_reason"] != want {
 						t.Errorf("closed bead %s has close_reason=%q, want %q",
-							b.ID, b.Metadata["close_reason"], "stale-session")
+							b.ID, b.Metadata["close_reason"], want)
 					}
 				}
 				if !strings.Contains(stderr.String(), "WARN: reconciler: reaped stuck-creating session bead") {
@@ -5456,6 +5456,106 @@ func TestCloseBeadIsNoopOnAlreadyClosedBead(t *testing.T) {
 		if got := afterSecond.Metadata[k]; got != v {
 			t.Errorf("metadata[%q] mutated on no-op close: first=%q, second=%q", k, v, got)
 		}
+	}
+}
+
+// setupSessionWithExtmsgMembership creates a session bead and registers a
+// participant in a group, which also writes the matching membership via
+// ensureMembershipLocked. Returns the session bead, fabric, and caller so
+// the test can verify cleanup via TranscriptService.ListConversationsBySession.
+func setupSessionWithExtmsgMembership(t *testing.T, store beads.Store, state session.State) (beads.Bead, extmsg.Services, extmsg.Caller) {
+	t.Helper()
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker-1",
+			"state":        string(state),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	fabric := extmsg.NewServices(store)
+	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+	group, err := fabric.Groups.EnsureGroup(context.Background(), caller, extmsg.EnsureGroupInput{
+		RootConversation: extmsg.ConversationRef{
+			ScopeID:        "ds-research",
+			Provider:       "slack",
+			AccountID:      "T0WORKSPACE",
+			ConversationID: "C0CHANNEL",
+			Kind:           extmsg.ConversationRoom,
+		},
+		Mode: extmsg.GroupModeLauncher,
+	})
+	if err != nil {
+		t.Fatalf("EnsureGroup: %v", err)
+	}
+	if _, err := fabric.Groups.UpsertParticipant(context.Background(), caller, extmsg.UpsertParticipantInput{
+		GroupID:   group.ID,
+		Handle:    "worker",
+		SessionID: sessionBead.ID,
+	}); err != nil {
+		t.Fatalf("UpsertParticipant: %v", err)
+	}
+	return sessionBead, fabric, caller
+}
+
+func countOpenMembershipsForSession(t *testing.T, fabric extmsg.Services, caller extmsg.Caller, sessionID string) int {
+	t.Helper()
+	members, err := fabric.Transcript.ListConversationsBySession(context.Background(), caller, sessionID)
+	if err != nil {
+		t.Fatalf("ListConversationsBySession: %v", err)
+	}
+	return len(members)
+}
+
+// TestCloseBeadCascadesExtmsgState verifies the cascade fires from the pool
+// close path. Named-session retirement already calls
+// cancelStateAssignedToRetiredSessionBead at
+// retireRemovedConfiguredNamedSessionBead; pool retirement funnels through
+// closeBead, so the cascade must fire here too (regression for #1939,
+// follow-up to #1865).
+func TestCloseBeadCascadesExtmsgState(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionBead, fabric, caller := setupSessionWithExtmsgMembership(t, store, session.StateActive)
+
+	if got := countOpenMembershipsForSession(t, fabric, caller, sessionBead.ID); got != 1 {
+		t.Fatalf("open memberships before close = %d, want 1 (setup precondition)", got)
+	}
+
+	var stderr bytes.Buffer
+	now := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	if !closeBead(store, sessionBead.ID, "drained", now, &stderr) {
+		t.Fatalf("closeBead returned false; want true: stderr=%s", stderr.String())
+	}
+
+	if got := countOpenMembershipsForSession(t, fabric, caller, sessionBead.ID); got != 0 {
+		t.Errorf("open memberships after closeBead = %d, want 0 (cascade should have closed the membership bead)", got)
+	}
+}
+
+// TestCloseFailedCreateBeadCascadesExtmsgState mirrors the cascade check on
+// the failed-create path. A startup race between session-bead creation and
+// an early bind attempt could leave a participant referencing the bead, so
+// both pool-close entry points need the cleanup (B23 fix scope completeness).
+func TestCloseFailedCreateBeadCascadesExtmsgState(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionBead, fabric, caller := setupSessionWithExtmsgMembership(t, store, session.StateFailedCreate)
+
+	if got := countOpenMembershipsForSession(t, fabric, caller, sessionBead.ID); got != 1 {
+		t.Fatalf("open memberships before close = %d, want 1 (setup precondition)", got)
+	}
+
+	var stderr bytes.Buffer
+	now := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	if !closeFailedCreateBead(store, sessionBead.ID, now, &stderr) {
+		t.Fatalf("closeFailedCreateBead returned false; want true: stderr=%s", stderr.String())
+	}
+
+	if got := countOpenMembershipsForSession(t, fabric, caller, sessionBead.ID); got != 0 {
+		t.Errorf("open memberships after closeFailedCreateBead = %d, want 0 (cascade should have closed the membership bead)", got)
 	}
 }
 

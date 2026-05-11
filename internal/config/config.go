@@ -38,6 +38,13 @@ const (
 	// subtree recursively, so defaults must stay under it to avoid self-triggered
 	// config-watch churn. The trace intentionally stays a flat, well-known file
 	// under .gc/runtime because operators and tests tail a single canonical path.
+	//
+	// Per-dispatcher distinction (closes #1650) is layered on top in
+	// cmd/gc/template_resolve.go at session-spawn time: agentEnv there
+	// overrides GC_CONTROL_DISPATCHER_TRACE_DEFAULT with a per-name absolute
+	// path, which the ${GC_CONTROL_DISPATCHER_TRACE_DEFAULT:-...} expression
+	// below consumes. The shell template stays uniform so the trust decision
+	// lives in Go.
 	controlDispatcherDefaultTracePathExpr = `${GC_CONTROL_DISPATCHER_TRACE_DEFAULT:-${GC_CITY}/` + citylayout.RuntimeDataRoot + `/control-dispatcher-trace.log}`
 	// controlDispatcherTraceInit exports the resolved trace path. Explicit
 	// GC_WORKFLOW_TRACE overrides win first; otherwise the runtime injects a
@@ -64,10 +71,10 @@ const (
 )
 
 // ControlDispatcherStartCommandFor returns the start command for a
-// control-dispatcher agent with the given qualified name. The trace log
-// default lives under .gc/runtime/ to stay inside the controller's
-// fsnotify exclusion; see ControlDispatcherStartCommand for the full
-// rationale.
+// control-dispatcher agent with the given qualified name. The shell-level
+// trace default is uniform across dispatchers; per-dispatcher distinction
+// (closes #1650) is injected via agentEnv in cmd/gc/template_resolve.go at
+// session-spawn time so the trust decision happens in Go.
 func ControlDispatcherStartCommandFor(qualifiedName string) string {
 	return `sh -c '` + controlDispatcherTraceInit + `; ` + controlDispatcherTraceDirInit + `; exec "${GC_BIN:-gc}" convoy control --serve --follow ` + qualifiedName + `'`
 }
@@ -457,10 +464,10 @@ type Rig struct {
 	// Prefix overrides the auto-derived bead ID prefix for this rig.
 	Prefix string `toml:"prefix,omitempty"`
 	// DefaultBranch is the rig repository's mainline branch (e.g. "main",
-	// "master", "develop"). When set, polecats and the refinery use this
-	// as the default merge target instead of probing origin/HEAD at sling
-	// time. Captured by `gc rig add` from the rig's git config; set
-	// manually for rigs whose mainline isn't reachable via origin/HEAD.
+	// "master", "develop"). When set, routing formulas use this as the
+	// default merge target instead of probing origin/HEAD at sling time.
+	// Captured by `gc rig add` from the rig's git config; set manually for
+	// rigs whose mainline isn't reachable via origin/HEAD.
 	DefaultBranch string `toml:"default_branch,omitempty"`
 	// Suspended prevents the reconciler from spawning agents in this rig. Toggle with gc rig suspend/resume.
 	Suspended bool `toml:"suspended,omitempty"`
@@ -528,7 +535,7 @@ type AgentOverride struct {
 	// PromptTemplate overrides the prompt template path.
 	// Relative paths resolve against the city directory.
 	PromptTemplate *string `toml:"prompt_template,omitempty"`
-	// Session overrides the session transport ("acp" or "tmux").
+	// Session overrides the session transport ("acp").
 	Session *string `toml:"session,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
@@ -570,8 +577,11 @@ type AgentOverride struct {
 	OverlayDir *string `toml:"overlay_dir,omitempty"`
 	// DefaultSlingFormula overrides the default sling formula.
 	DefaultSlingFormula *string `toml:"default_sling_formula,omitempty"`
-	// InjectFragments overrides the agent's inject_fragments list.
-	InjectFragments []string `toml:"inject_fragments,omitempty"`
+	// InjectFragments overrides the agent's inject_fragments list. Leave this
+	// field unset to keep inherited fragments; JSON callers may send null for
+	// the same no-op. Set an empty list to clear fragments; set a populated
+	// list to replace fragments.
+	InjectFragments *[]string `toml:"inject_fragments,omitempty"`
 	// AppendFragments appends named template fragments to this agent's rendered
 	// prompt. It is the V2 spelling for per-agent fragment selection.
 	AppendFragments []string `toml:"append_fragments,omitempty"`
@@ -872,7 +882,7 @@ type Workspace struct {
 	// InstallAgentHooks lists provider names whose hooks should be installed
 	// into agent working directories. Agent-level overrides workspace-level
 	// (replace, not additive). Supported: "claude", "codex", "gemini",
-	// "opencode", "copilot", "cursor", "pi", "omp".
+	// "kiro", "opencode", "copilot", "cursor", "pi", "omp".
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
 	// GlobalFragments lists named template fragments injected into every
 	// agent's rendered prompt. Applied before per-agent InjectFragments.
@@ -1145,13 +1155,8 @@ type OrdersConfig struct {
 type OrderOverride struct {
 	// Name is the order name to target (required).
 	Name string `toml:"name" jsonschema:"required"`
-	// Rig scopes the override to a specific rig's order. Empty matches
-	// ONLY city-level orders (those with no rig); it does NOT match
-	// per-rig instances of the same name — those expand at scan time
-	// and require an explicit rig. Use rig = "*" as a wildcard to match
-	// every instance of the named order (city-level + every rig-scoped
-	// copy). The literal "*" is reserved and rejected as a real rig
-	// name by config validation.
+	// Rig scopes the override to a specific rig's order.
+	// Empty matches city-level orders.
 	Rig string `toml:"rig,omitempty"`
 	// Enabled overrides whether the order is active.
 	Enabled *bool `toml:"enabled,omitempty"`
@@ -1458,18 +1463,6 @@ func (d *DaemonConfig) PatrolIntervalDuration() time.Duration {
 	return dur
 }
 
-// NudgeDispatcherMode returns the nudge dispatcher mode, defaulting to
-// "legacy". Unknown values are treated as "legacy" so a malformed config
-// does not silently disable the per-session pollers.
-func (d *DaemonConfig) NudgeDispatcherMode() string {
-	switch d.NudgeDispatcher {
-	case "supervisor":
-		return "supervisor"
-	default:
-		return "legacy"
-	}
-}
-
 // MaxRestartsOrDefault returns the max restarts threshold. Nil (unset) defaults
 // to 5. Zero means unlimited (no crash loop detection).
 func (d *DaemonConfig) MaxRestartsOrDefault() int {
@@ -1526,6 +1519,18 @@ func (d *DaemonConfig) SessionCircuitBreakerResetAfterDuration() time.Duration {
 		return 2 * window
 	}
 	return dur
+}
+
+// NudgeDispatcherMode returns the nudge dispatcher mode, defaulting to
+// "legacy". Unknown values are treated as "legacy" so a malformed config
+// does not silently disable the per-session pollers.
+func (d *DaemonConfig) NudgeDispatcherMode() string {
+	switch d.NudgeDispatcher {
+	case "supervisor":
+		return "supervisor"
+	default:
+		return "legacy"
+	}
 }
 
 // ShutdownTimeoutDuration returns the shutdown timeout as a time.Duration.
@@ -1712,7 +1717,7 @@ func normalizeAgentDefaultsAlias(cfg *City, meta toml.MetaData) {
 type Agent struct {
 	// Name is the unique identifier for this agent.
 	Name string `toml:"name" jsonschema:"required"`
-	// Description is a human-readable description shown in a real-world app's session creation UI.
+	// Description is a human-readable description shown in MC's session creation UI.
 	Description string `toml:"description,omitempty"`
 	// Dir is the identity prefix for rig-scoped agents and the default
 	// working directory when WorkDir is not set.
@@ -1738,11 +1743,10 @@ type Agent struct {
 	// Used for CLI agents that don't accept command-line prompts.
 	Nudge string `toml:"nudge,omitempty"`
 	// Session overrides the session transport for this agent.
-	// "" (default) uses the provider default.
-	// "tmux" uses the tmux-backed CLI path even when the provider supports ACP.
-	// "acp" uses the Agent Client Protocol (JSON-RPC over stdio); the agent's
-	// resolved provider must have supports_acp = true.
-	Session string `toml:"session,omitempty" jsonschema:"enum=acp,enum=tmux"`
+	// "" (default) uses the city-level session provider (typically tmux).
+	// "acp" uses the Agent Client Protocol (JSON-RPC over stdio).
+	// The agent's resolved provider must have supports_acp = true.
+	Session string `toml:"session,omitempty" jsonschema:"enum=acp"`
 	// Provider names the provider preset to use for this agent.
 	Provider string `toml:"provider,omitempty"`
 	// StartCommand overrides the provider's command for this agent.
@@ -1971,6 +1975,75 @@ type Agent struct {
 	// Set during V2 import expansion.
 	// Runtime-only — not persisted to TOML or JSON.
 	PackName string `toml:"-" json:"-"`
+	// source records which configuration origin this agent came from
+	// (inline city.toml, an explicit pack import, or an auto-imported
+	// system pack). Stamped once at discovery; consumed by
+	// describeSource to render duplicate-name errors that never carry
+	// an empty quoted path. Unexported so the value is package-private
+	// runtime state and never appears on any wire. (See ga-tpfc.)
+	source agentSource
+	// layout records which pack layout (v1 inline [[agent]] block in
+	// pack.toml vs. v2 agents/<name>/agent.toml convention) produced
+	// this agent. Stamped once at discovery; consumed by
+	// formatDuplicateAgentError to specialize the (V1Inline,
+	// V2Convention) collision into a migration-guidance variant.
+	// Unexported, runtime-only, never on any wire. (See ga-9ogb.)
+	layout agentLayout
+}
+
+// agentSource enumerates the configuration origins recognized by
+// describeSource. Discovery sites stamp exactly one value per agent.
+type agentSource uint8
+
+const (
+	// sourceUnknown is the zero value; agents reach validation
+	// without a stamp when they came through a non-discovery code
+	// path (e.g., test fixtures that build Agents directly).
+	sourceUnknown agentSource = iota
+	// sourceInline marks agents declared as inline [[agent]] tables
+	// in the root city.toml.
+	sourceInline
+	// sourcePack marks agents that came from an explicit pack
+	// import or a workspace.includes entry.
+	sourcePack
+	// sourceAutoImport marks agents that came from a binding the
+	// city pack added via [defaults.rig.imports] (e.g., the
+	// gastown system pack). Even though the binding ends up in
+	// city.Imports after composition, the user did not write it.
+	sourceAutoImport
+)
+
+// agentLayout enumerates the pack-layout origin of an agent: which
+// on-disk shape produced it. Exactly one value is stamped at
+// discovery time. Used by formatDuplicateAgentError to detect a v1↔v2
+// migration collision and emit a migration-guidance error. Unexported
+// so the type is package-private runtime state and never appears on
+// any wire.
+type agentLayout uint8
+
+const (
+	// layoutUnknown is the zero value. Agents reach validation
+	// without a layout stamp when they came through a non-discovery
+	// path (test fixtures, city.toml inline [[agent]] blocks — those
+	// last are a third category, not v1).
+	layoutUnknown agentLayout = iota
+	// layoutV1Inline marks agents declared as inline [[agent]] blocks
+	// in a pack's pack.toml.
+	layoutV1Inline
+	// layoutV2Convention marks agents discovered from a pack's
+	// agents/<name>/agent.toml file.
+	layoutV2Convention
+)
+
+// String renders an agentLayout for debug logs only.
+func (l agentLayout) String() string {
+	switch l {
+	case layoutV1Inline:
+		return "v1-inline"
+	case layoutV2Convention:
+		return "v2-convention"
+	}
+	return "unknown"
 }
 
 // IdleTimeoutDuration returns the idle timeout as a time.Duration.
@@ -2605,8 +2678,7 @@ func configuredProviderOrder(providers map[string]ProviderSpec) []string {
 // invalid pool bounds. Uniqueness is keyed on (dir, name) — the same name
 // in different dirs is allowed.
 func ValidateAgents(agents []Agent) error {
-	seen := make(map[agentKey]bool, len(agents))
-	sourceOf := make(map[agentKey]string, len(agents))
+	seen := make(map[agentKey]int, len(agents))
 	for i, a := range agents {
 		if a.Name == "" {
 			return fmt.Errorf("agent[%d]: name is required", i)
@@ -2615,17 +2687,10 @@ func ValidateAgents(agents []Agent) error {
 			return fmt.Errorf("agent %q: name must match [a-zA-Z0-9][a-zA-Z0-9_-]* (no spaces, slashes, or dots)", a.Name)
 		}
 		key := agentKey{dir: a.Dir, name: a.Name}
-		if seen[key] {
-			prev := sourceOf[key]
-			curr := a.SourceDir
-			if prev != "" || curr != "" {
-				return fmt.Errorf("agent %q: duplicate name (from %q and %q)",
-					a.QualifiedName(), prev, curr)
-			}
-			return fmt.Errorf("agent %q: duplicate name", a.QualifiedName())
+		if priorIdx, dup := seen[key]; dup {
+			return formatDuplicateAgentError(agents[priorIdx], a)
 		}
-		seen[key] = true
-		sourceOf[key] = a.SourceDir
+		seen[key] = i
 		// Scope enum.
 		switch a.Scope {
 		case "", "city", "rig":
@@ -2882,8 +2947,8 @@ func DefaultCity(name string) City {
 
 func defaultInstallAgentHooksForProvider(provider string) []string {
 	switch strings.TrimSpace(provider) {
-	case "opencode":
-		return []string{"opencode"}
+	case "kiro", "opencode":
+		return []string{strings.TrimSpace(provider)}
 	default:
 		return nil
 	}
@@ -3007,6 +3072,14 @@ func Parse(data []byte) (*City, error) {
 	// Backwards compat: promote deprecated graph_workflows → formula_v2.
 	if cfg.Daemon.GraphWorkflows && !cfg.Daemon.FormulaV2 {
 		cfg.Daemon.FormulaV2 = true
+	}
+	// Stamp source=sourceInline on agents declared via [[agent]] in
+	// the parsed TOML. These are city.toml inline agents (or test
+	// fixtures using Parse directly); pack agents go through a
+	// different parser (parsePackConfigWithMetadata) which does not
+	// stamp source.
+	for i := range cfg.Agents {
+		cfg.Agents[i].source = sourceInline
 	}
 	return &cfg, nil
 }

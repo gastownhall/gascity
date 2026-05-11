@@ -1,9 +1,11 @@
 package config
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
+	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -167,6 +169,156 @@ func TestApplyPatches_AgentScalars(t *testing.T) {
 	if len(a.PreStart) != 1 || a.PreStart[0] != "echo setup" {
 		t.Errorf("PreStart = %v, want [echo setup]", a.PreStart)
 	}
+}
+
+func TestApplyPatches_AgentInjectFragmentsPresenceAware(t *testing.T) {
+	t.Run("nil pointer leaves baseline unchanged", func(t *testing.T) {
+		cfg := &City{
+			Agents: []Agent{{Name: "worker", InjectFragments: []string{"baseline"}}},
+		}
+		if err := ApplyPatches(cfg, Patches{
+			Agents: []AgentPatch{{Name: "worker", Provider: ptrStr("claude")}},
+		}); err != nil {
+			t.Fatalf("ApplyPatches: %v", err)
+		}
+		got := cfg.Agents[0].InjectFragments
+		if len(got) != 1 || got[0] != "baseline" {
+			t.Errorf("InjectFragments = %v, want [baseline] (unchanged)", got)
+		}
+	})
+
+	t.Run("empty slice clears the list", func(t *testing.T) {
+		cfg := &City{
+			Agents: []Agent{{Name: "worker", InjectFragments: []string{"baseline"}}},
+		}
+		if err := ApplyPatches(cfg, Patches{
+			Agents: []AgentPatch{{Name: "worker", InjectFragments: Fragments()}},
+		}); err != nil {
+			t.Fatalf("ApplyPatches: %v", err)
+		}
+		got := cfg.Agents[0].InjectFragments
+		if len(got) != 0 {
+			t.Errorf("InjectFragments = %v, want empty (cleared)", got)
+		}
+	})
+
+	t.Run("populated slice replaces the list", func(t *testing.T) {
+		cfg := &City{
+			Agents: []Agent{{Name: "worker", InjectFragments: []string{"baseline"}}},
+		}
+		if err := ApplyPatches(cfg, Patches{
+			Agents: []AgentPatch{{Name: "worker", InjectFragments: Fragments("frag-a", "frag-b")}},
+		}); err != nil {
+			t.Fatalf("ApplyPatches: %v", err)
+		}
+		got := cfg.Agents[0].InjectFragments
+		if len(got) != 2 || got[0] != "frag-a" || got[1] != "frag-b" {
+			t.Errorf("InjectFragments = %v, want [frag-a frag-b]", got)
+		}
+	})
+}
+
+// TestAgentPatchInjectFragmentsTOMLRoundtrip pins the encoding contract
+// that makes presence-aware clear actually work end-to-end. Without the
+// *[]string change, the empty-slice case below would round-trip as if
+// the key were absent (omitempty drops `inject_fragments = []` on
+// encode), and a downstream reader could not distinguish "leave
+// unchanged" from "clear".
+func TestAgentPatchInjectFragmentsTOMLRoundtrip(t *testing.T) {
+	t.Run("nil pointer is omitted on encode", func(t *testing.T) {
+		var buf bytes.Buffer
+		if err := toml.NewEncoder(&buf).Encode(AgentPatch{Name: "worker"}); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+		if strings.Contains(buf.String(), "inject_fragments") {
+			t.Errorf("encoded output should omit inject_fragments when nil; got:\n%s", buf.String())
+		}
+		var decoded AgentPatch
+		if _, err := toml.Decode(buf.String(), &decoded); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if decoded.InjectFragments != nil {
+			t.Errorf("decoded InjectFragments = %v, want nil", *decoded.InjectFragments)
+		}
+	})
+
+	t.Run("empty slice round-trips as inject_fragments = []", func(t *testing.T) {
+		var buf bytes.Buffer
+		if err := toml.NewEncoder(&buf).Encode(AgentPatch{Name: "worker", InjectFragments: Fragments()}); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+		if !strings.Contains(buf.String(), "inject_fragments = []") {
+			t.Errorf("encoded output should contain `inject_fragments = []`; got:\n%s", buf.String())
+		}
+		var decoded AgentPatch
+		if _, err := toml.Decode(buf.String(), &decoded); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if decoded.InjectFragments == nil {
+			t.Fatal("decoded InjectFragments is nil; want non-nil empty slice (clear signal)")
+		}
+		if len(*decoded.InjectFragments) != 0 {
+			t.Errorf("decoded InjectFragments = %v, want empty slice", *decoded.InjectFragments)
+		}
+	})
+
+	t.Run("populated slice round-trips intact", func(t *testing.T) {
+		var buf bytes.Buffer
+		if err := toml.NewEncoder(&buf).Encode(AgentPatch{Name: "worker", InjectFragments: Fragments("frag-a", "frag-b")}); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+		var decoded AgentPatch
+		if _, err := toml.Decode(buf.String(), &decoded); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if decoded.InjectFragments == nil {
+			t.Fatal("decoded InjectFragments is nil; want pointer to populated slice")
+		}
+		got := *decoded.InjectFragments
+		if len(got) != 2 || got[0] != "frag-a" || got[1] != "frag-b" {
+			t.Errorf("decoded InjectFragments = %v, want [frag-a frag-b]", got)
+		}
+	})
+}
+
+func TestAgentOverrideInjectFragmentsPresenceAware(t *testing.T) {
+	t.Run("absent key leaves baseline unchanged", func(t *testing.T) {
+		a := &Agent{Name: "worker", InjectFragments: []string{"baseline"}}
+		var override AgentOverride
+		if _, err := toml.Decode(`agent = "worker"`, &override); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		applyAgentOverride(a, &override)
+		got := a.InjectFragments
+		if len(got) != 1 || got[0] != "baseline" {
+			t.Errorf("InjectFragments = %v, want [baseline] (unchanged)", got)
+		}
+	})
+
+	t.Run("empty list clears the list", func(t *testing.T) {
+		a := &Agent{Name: "worker", InjectFragments: []string{"baseline"}}
+		var override AgentOverride
+		if _, err := toml.Decode("agent = \"worker\"\ninject_fragments = []", &override); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		applyAgentOverride(a, &override)
+		if len(a.InjectFragments) != 0 {
+			t.Errorf("InjectFragments = %v, want empty (cleared)", a.InjectFragments)
+		}
+	})
+
+	t.Run("populated list replaces the list", func(t *testing.T) {
+		a := &Agent{Name: "worker", InjectFragments: []string{"baseline"}}
+		var override AgentOverride
+		if _, err := toml.Decode("agent = \"worker\"\ninject_fragments = [\"frag-a\", \"frag-b\"]", &override); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		applyAgentOverride(a, &override)
+		got := a.InjectFragments
+		if len(got) != 2 || got[0] != "frag-a" || got[1] != "frag-b" {
+			t.Errorf("InjectFragments = %v, want [frag-a frag-b]", got)
+		}
+	})
 }
 
 func TestApplyPatches_AgentNotFound(t *testing.T) {

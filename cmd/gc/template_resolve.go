@@ -255,6 +255,18 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	for key, value := range cityRuntimeEnvMapForCity(p.cityPath) {
 		agentEnv[key] = value
 	}
+	// Override the city-uniform GC_CONTROL_DISPATCHER_TRACE_DEFAULT with a
+	// per-dispatcher path so each control-dispatcher writes to its own
+	// trace file (closes #1650). Goes in agentEnv (last in mergeEnv) so it
+	// wins over both passthroughEnv and the uniform city default seeded by
+	// cityRuntimeEnvMapForCity above.
+	if cfgAgent.Name == config.ControlDispatcherAgentName {
+		agentEnv["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"] = citylayout.ControlDispatcherTraceDefaultPathForRuntimeDirAndName(
+			p.cityPath,
+			agentEnv["GC_CITY_RUNTIME_DIR"],
+			qualifiedName,
+		)
+	}
 	agentEnv["GC_BEADS"] = rawBeadsProviderForScope(rigRoot, p.cityPath)
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		agentEnv["GC_BIN"] = exe
@@ -506,6 +518,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		SessionSetupScript:     resolvedScript,
 		SessionLive:            expandedLive,
 		ProviderName:           resolvedProviderLaunchFamily(resolved),
+		ProviderOverlayName:    strings.TrimSpace(resolved.Name),
 		InstallAgentHooks:      config.ResolveInstallHooks(cfgAgent, p.workspace),
 		PackOverlayDirs:        effectiveOverlayDirs(p.packOverlayDirs, p.rigOverlayDirs, rigName),
 		OverlayDir:             overlayDir,
@@ -621,6 +634,7 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		SessionSetupScript:     tp.Hints.SessionSetupScript,
 		SessionLive:            tp.Hints.SessionLive,
 		ProviderName:           tp.Hints.ProviderName,
+		ProviderOverlayName:    tp.Hints.ProviderOverlayName,
 		InstallAgentHooks:      tp.Hints.InstallAgentHooks,
 		PackOverlayDirs:        tp.Hints.PackOverlayDirs,
 		OverlayDir:             tp.Hints.OverlayDir,

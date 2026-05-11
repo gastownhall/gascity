@@ -66,28 +66,30 @@ func ValidateLaneConfigs(lanes []LaneConfig) error {
 // LaneOutput is the durable JSON payload produced by one reviewer lane.
 type LaneOutput struct {
 	LaneID              string              `json:"lane_id"`
-	Provider            string              `json:"provider,omitempty"`
-	Model               string              `json:"model,omitempty"`
+	Provider            string              `json:"provider"`
+	Model               string              `json:"model"`
 	Verdict             string              `json:"verdict"`
 	Summary             string              `json:"summary"`
 	FindingsCount       int                 `json:"findings_count"`
-	Findings            []Finding           `json:"findings,omitempty"`
-	Evidence            []Evidence          `json:"evidence,omitempty"`
-	Usage               Usage               `json:"usage,omitempty"`
+	Findings            []Finding           `json:"findings"`
+	Evidence            []Evidence          `json:"evidence"`
+	Usage               *Usage              `json:"usage"`
 	ReadOnlyEnforcement ReadOnlyEnforcement `json:"read_only_enforcement"`
 	MutationsDelta      MutationsDelta      `json:"mutations_delta"`
-	FailureClass        string              `json:"failure_class,omitempty"`
-	FailureReason       string              `json:"failure_reason,omitempty"`
+	FailureClass        string              `json:"failure_class"`
+	FailureReason       string              `json:"failure_reason"`
 }
 
 // Finding is a normalized reviewer finding.
 type Finding struct {
-	Title    string `json:"title,omitempty"`
-	Body     string `json:"body,omitempty"`
-	File     string `json:"file,omitempty"`
-	Start    int    `json:"start,omitempty"`
-	End      int    `json:"end,omitempty"`
-	Severity string `json:"severity,omitempty"`
+	Title    string     `json:"title,omitempty"`
+	Body     string     `json:"body,omitempty"`
+	File     string     `json:"file,omitempty"`
+	Start    int        `json:"start,omitempty"`
+	End      int        `json:"end,omitempty"`
+	Severity string     `json:"severity,omitempty"`
+	Lanes    []string   `json:"lanes,omitempty"`
+	Evidence []Evidence `json:"evidence,omitempty"`
 }
 
 // Evidence captures compact source material used by a lane or summary.
@@ -113,31 +115,29 @@ type ReadOnlyEnforcement struct {
 	Observed        bool     `json:"observed"`
 	Enabled         bool     `json:"enabled"`
 	Passed          bool     `json:"passed"`
-	BaselineCommand string   `json:"baseline_command,omitempty"`
-	AfterCommand    string   `json:"after_command,omitempty"`
+	BaselineCommand string   `json:"baseline_command"`
+	AfterCommand    string   `json:"after_command"`
 	Notes           []string `json:"notes,omitempty"`
 }
 
 // Summary is the durable synthesized review quorum result.
 type Summary struct {
-	Verdict             string              `json:"verdict"`
-	Summary             string              `json:"summary"`
+	Subject string `json:"subject"`
+	BaseRef string `json:"base_ref"`
+	Verdict string `json:"verdict"`
+	Summary string `json:"summary"`
+	// FindingsCount is the count of deduplicated synthesized findings.
 	FindingsCount       int                 `json:"findings_count"`
-	Findings            []Finding           `json:"findings,omitempty"`
-	Evidence            []Evidence          `json:"evidence,omitempty"`
-	Usage               Usage               `json:"usage,omitempty"`
+	Findings            []Finding           `json:"findings"`
+	Evidence            []Evidence          `json:"evidence"`
+	Usage               *Usage              `json:"usage"`
 	ReadOnlyEnforcement ReadOnlyEnforcement `json:"read_only_enforcement"`
-	MutationsDelta      MutationsDelta      `json:"mutations_delta"`
-	FailureClass        string              `json:"failure_class,omitempty"`
-	FailureReason       string              `json:"failure_reason,omitempty"`
-	Lanes               []LaneOutput        `json:"lanes"`
-}
-
-func normalizedFindingsCount(out LaneOutput) int {
-	if out.FindingsCount > 0 {
-		return out.FindingsCount
-	}
-	return len(out.Findings)
+	// MutationsDelta records synthesis-created mutations only; reviewer lane
+	// mutation deltas remain in Lanes.
+	MutationsDelta MutationsDelta `json:"mutations_delta"`
+	FailureClass   string         `json:"failure_class"`
+	FailureReason  string         `json:"failure_reason"`
+	Lanes          []LaneOutput   `json:"lanes"`
 }
 
 func sortLaneOutputs(outputs []LaneOutput) {

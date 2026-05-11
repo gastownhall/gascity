@@ -98,6 +98,12 @@ func orderExecEnv(cityPath string, cfg *config.City, target execStoreTarget, a o
 	env["GC_STORE_ROOT"] = target.ScopeRoot
 	env["GC_STORE_SCOPE"] = target.ScopeKind
 	env["GC_BEADS_PREFIX"] = target.Prefix
+	// Tag every bd interaction this exec order produces with the order's
+	// name so audit logs and the dashboard can attribute housekeeping
+	// activity to the responsible order rather than an ambient identity.
+	if name := strings.TrimSpace(a.Name); name != "" {
+		env["BEADS_ACTOR"] = "order:" + name
+	}
 	if target.ScopeKind == "rig" {
 		env["GC_RIG"] = target.RigName
 		env["GC_RIG_ROOT"] = target.ScopeRoot

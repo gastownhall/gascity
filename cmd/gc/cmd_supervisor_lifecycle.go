@@ -64,6 +64,17 @@ var (
 	supervisorSystemctlActive = func(service string) bool {
 		return exec.Command("systemctl", "--user", "is-active", "--quiet", service).Run() == nil
 	}
+	// supervisorSystemctlUserAvailable probes whether a per-user systemd
+	// instance is reachable. `systemctl --user show-environment` exits
+	// non-zero when there is no user manager (e.g. running as a service
+	// account without `loginctl enable-linger`, or inside a minimal
+	// container). The check goes through supervisorSystemctlRun so the
+	// existing test seam keeps working: tests that stub
+	// supervisorSystemctlRun automatically see the user manager as
+	// available.
+	supervisorSystemctlUserAvailable = func() bool {
+		return supervisorSystemctlRun("--user", "show-environment") == nil
+	}
 	supervisorRunningPreserveSignalReady                = runningSupervisorPreserveSignalReady
 	supervisorProcRoot                                  = "/proc"
 	supervisorProcReadDir                               = os.ReadDir
@@ -659,11 +670,12 @@ type supervisorServiceEnvVar struct {
 }
 
 func buildSupervisorServiceData() (*supervisorServiceData, error) {
-	gcPath, err := os.Executable()
+	gcExe, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("finding executable: %w", err)
 	}
 	homeDir, _ := os.UserHomeDir()
+	gcPath := resolveStableSupervisorBinaryPath(homeDir, stableSupervisorBinaryGopath(homeDir), gcExe)
 	home := supervisor.DefaultHome()
 	xdgRuntimeDir := strings.TrimSpace(os.Getenv("XDG_RUNTIME_DIR"))
 	if supervisor.UsesIsolatedGCHomeOverride() {
@@ -679,6 +691,65 @@ func buildSupervisorServiceData() (*supervisorServiceData, error) {
 		Path:          searchpath.ExpandPath(homeDir, goruntime.GOOS, os.Getenv("PATH")),
 		ExtraEnv:      supervisorServiceExtraEnv(),
 	}, nil
+}
+
+const (
+	supervisorBinaryName       = "gc"
+	supervisorUserLocalBinPath = ".local/bin"
+	supervisorGopathBinPath    = "bin"
+)
+
+// resolveStableSupervisorBinaryPath picks a stable install path for the
+// supervisor service unit's ExecStart when one points at the same binary as
+// currentExe; otherwise it returns currentExe. This prevents `gc supervisor
+// install` from pinning the unit to a transient path (e.g. /tmp/gc) that
+// later install paths (`make install`, gcsync) never refresh.
+func resolveStableSupervisorBinaryPath(homeDir, gopath, currentExe string) string {
+	if currentExe == "" {
+		return currentExe
+	}
+	runningInfo, err := os.Stat(currentExe)
+	if err != nil {
+		return currentExe
+	}
+	for _, candidate := range stableSupervisorBinaryCandidates(homeDir, gopath) {
+		if supervisorBinaryCandidateMatches(candidate, runningInfo) {
+			return candidate
+		}
+	}
+	return currentExe
+}
+
+func stableSupervisorBinaryCandidates(homeDir, gopath string) []string {
+	var out []string
+	if homeDir != "" {
+		out = append(out, filepath.Join(homeDir, supervisorUserLocalBinPath, supervisorBinaryName))
+	}
+	if gopath != "" {
+		out = append(out, filepath.Join(gopath, supervisorGopathBinPath, supervisorBinaryName))
+	}
+	return out
+}
+
+func supervisorBinaryCandidateMatches(candidate string, runningInfo os.FileInfo) bool {
+	info, err := os.Stat(candidate)
+	if err != nil || info.IsDir() {
+		return false
+	}
+	if info.Mode()&0o111 == 0 {
+		return false
+	}
+	return os.SameFile(info, runningInfo)
+}
+
+func stableSupervisorBinaryGopath(homeDir string) string {
+	if v := strings.TrimSpace(os.Getenv("GOPATH")); v != "" {
+		return v
+	}
+	if homeDir == "" {
+		return ""
+	}
+	return filepath.Join(homeDir, "go")
 }
 
 func sanitizeServiceName(name string) string {
@@ -910,7 +981,7 @@ Type=simple
 # 'gc supervisor run' that live in this cgroup, killing one-per-bead
 # session conversation history. The reconciler re-adopts tmux on start.
 KillMode=process
-ExecStart={{.GCPath}} supervisor run
+ExecStart={{systemdpath .GCPath}} supervisor run
 Restart=always
 RestartSec=5s
 StandardOutput=append:{{.LogPath}}
@@ -936,7 +1007,7 @@ func systemdEnv(name, value string) string {
 }
 
 func renderSupervisorTemplate(tmplStr string, data *supervisorServiceData) (string, error) {
-	funcMap := template.FuncMap{"xmlesc": xmlEscape, "systemdenv": systemdEnv}
+	funcMap := template.FuncMap{"xmlesc": xmlEscape, "systemdenv": systemdEnv, "systemdpath": strconv.Quote}
 	tmpl, err := template.New("service").Funcs(funcMap).Parse(tmplStr)
 	if err != nil {
 		return "", err
@@ -1399,6 +1470,24 @@ func stopSupervisorSystemdForWarmRefresh(service string) ([]string, error) {
 }
 
 func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Writer) int {
+	// Bail out before we touch the unit file when there is no per-user
+	// systemd manager to load it. Otherwise daemon-reload + enable both
+	// fail and the rollback path tries daemon-reload again, producing
+	// 2-3 cascading "systemctl --user" errors that obscure the real
+	// problem. Callers (notably ensureSupervisorRunning) already fall
+	// back to a detached supervisor when install returns non-zero, so a
+	// single clean error is the right shape here.
+	if !supervisorSystemctlUserAvailable() {
+		fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
+			"gc supervisor install: per-user systemd instance is not available "+
+				"(systemctl --user could not reach the user manager). "+
+				"Either enable lingering for this account ('sudo loginctl enable-linger %s'), "+
+				"log in via a PAM session that starts user-systemd, or run the supervisor "+
+				"detached (e.g. 'gc supervisor start' without service install).\n",
+			currentUsernameForSystemdHint())
+		return 1
+	}
+
 	content, err := renderSupervisorTemplate(supervisorSystemdTemplate, data)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor install: rendering unit: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1511,6 +1600,21 @@ func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Wri
 	fmt.Fprintf(stdout, "Installed systemd service: %s\n", path) //nolint:errcheck // best-effort stdout
 	return 0
 }
+
+// currentUsernameForSystemdHint returns the current username for use in the
+// "loginctl enable-linger <user>" hint, falling back to "<your-user>" if
+// the lookup fails so the message stays actionable. The osuser.Current
+// lookup is reached via a package var so tests can exercise both
+// branches.
+func currentUsernameForSystemdHint() string {
+	if u, err := currentUserForSystemdHint(); err == nil && strings.TrimSpace(u.Username) != "" {
+		return u.Username
+	}
+	return "<your-user>"
+}
+
+// currentUserForSystemdHint is overridable in tests.
+var currentUserForSystemdHint = osuser.Current
 
 func uninstallSupervisorSystemd(_ *supervisorServiceData, stdout, stderr io.Writer) int {
 	path := supervisorSystemdServicePath()

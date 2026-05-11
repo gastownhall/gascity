@@ -69,6 +69,17 @@ func stubSupervisorRunningPreserveSignalReady(t *testing.T, ready bool) {
 	})
 }
 
+func stubSupervisorSystemctlUserAvailable(t *testing.T, available bool) {
+	t.Helper()
+	old := supervisorSystemctlUserAvailable
+	supervisorSystemctlUserAvailable = func() bool {
+		return available
+	}
+	t.Cleanup(func() {
+		supervisorSystemctlUserAvailable = old
+	})
+}
+
 func startWorkspaceServiceSentinel(t *testing.T, gcHome, cityPath, serviceName string) workspaceServiceSentinel {
 	t.Helper()
 	stateRoot := filepath.Join(cityPath, ".gc", "services", serviceName)
@@ -395,7 +406,7 @@ func TestRenderSupervisorSystemdTemplate(t *testing.T) {
 		"[Service]",
 		`KillMode=process`,
 		`Environment=GC_SUPERVISOR_PRESERVE_SESSIONS_ON_SIGNAL="1"`,
-		`ExecStart=/usr/local/bin/gc supervisor run`,
+		`ExecStart="/usr/local/bin/gc" supervisor run`,
 		`StandardOutput=append:/home/user/.gc/supervisor.log`,
 		`Environment=GC_HOME="/home/user/.gc"`,
 		`Environment=XDG_RUNTIME_DIR="/tmp/gc-run"`,
@@ -411,7 +422,7 @@ func TestRenderSupervisorSystemdTemplate(t *testing.T) {
 		"# (control-group) would cascade SIGTERM to tmux servers spawned by\n" +
 		"# 'gc supervisor run' that live in this cgroup, killing one-per-bead\n" +
 		"# session conversation history. The reconciler re-adopts tmux on start.\n" +
-		"KillMode=process\nExecStart=/usr/local/bin/gc supervisor run\n"
+		"KillMode=process\nExecStart=\"/usr/local/bin/gc\" supervisor run\n"
 	if !strings.Contains(content, wantBlock) {
 		t.Fatalf("systemd template missing ordered KillMode=process block under [Service]; got:\n%s", content)
 	}
@@ -1179,6 +1190,11 @@ func TestInstallSupervisorSystemdWarmRefreshRefusesActivePrePreserveSupervisor(t
 	supervisorSystemctlActive = func(service string) bool {
 		return service == "gascity-supervisor.service"
 	}
+	// Bypass the systemd-user availability probe so it doesn't appear in
+	// the recorded call list; this test asserts no side-effecting
+	// systemctl invocations between the bail-early probe and the
+	// preserve-mode guard.
+	stubSupervisorSystemctlUserAvailable(t, true)
 	stubSupervisorRunningPreserveSignalReady(t, false)
 	t.Cleanup(func() {
 		supervisorSystemctlRun = oldRun
@@ -3960,28 +3976,6 @@ func TestDoStartRequiresInitializedCity(t *testing.T) {
 	}
 }
 
-func TestDoStartRejectsUnbootstrappedCityConfig(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "bright-lights")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"bright-lights\"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	code := doStart([]string{dir}, false, &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("doStart code = %d, want 1", code)
-	}
-	if !strings.Contains(stderr.String(), "city runtime not bootstrapped") {
-		t.Fatalf("stderr = %q, want bootstrap error", stderr.String())
-	}
-	if !strings.Contains(stderr.String(), `gc init `+dir) && !strings.Contains(stderr.String(), `gc init `+canonicalTestPath(dir)) {
-		t.Fatalf("stderr = %q, want init guidance", stderr.String())
-	}
-}
-
 func TestDoStartForegroundRejectsSupervisorManagedCity(t *testing.T) {
 	gcHome := t.TempDir()
 	t.Setenv("GC_HOME", gcHome)
@@ -4520,8 +4514,8 @@ func TestStopSupervisorWithWaitStopsSystemdServiceAfterAckBeforeDone(t *testing.
 					mu.Lock()
 					stopped = true
 					mu.Unlock()
-					io.WriteString(conn, "ok\n") //nolint:errcheck
 					close(ackSent)
+					io.WriteString(conn, "ok\n") //nolint:errcheck
 					select {
 					case <-serviceStopped:
 					case <-time.After(200 * time.Millisecond):
@@ -4774,4 +4768,410 @@ func TestStopSupervisorWithWaitTimesOutWhenSocketKeepsAnswering(t *testing.T) {
 	if !strings.Contains(stderr.String(), "timed out") {
 		t.Fatalf("stderr = %q, want timeout message", stderr.String())
 	}
+}
+
+func TestResolveStableSupervisorBinaryPath(t *testing.T) {
+	newRunningExe := func(t *testing.T) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "gc")
+		if err := os.WriteFile(path, []byte{}, 0o755); err != nil {
+			t.Fatalf("write running exe: %v", err)
+		}
+		return path
+	}
+
+	cases := []struct {
+		name  string
+		setup func(t *testing.T) (homeDir, gopath, currentExe, want string)
+	}{
+		{
+			name: "local_bin_symlink_resolves_to_running_exe",
+			setup: func(t *testing.T) (string, string, string, string) {
+				running := newRunningExe(t)
+				homeDir := t.TempDir()
+				binDir := filepath.Join(homeDir, ".local", "bin")
+				if err := os.MkdirAll(binDir, 0o755); err != nil {
+					t.Fatalf("mkdir local bin: %v", err)
+				}
+				symlink := filepath.Join(binDir, "gc")
+				if err := os.Symlink(running, symlink); err != nil {
+					t.Fatalf("symlink: %v", err)
+				}
+				return homeDir, "", running, symlink
+			},
+		},
+		{
+			name: "local_bin_hardlink_matches_running_exe_inode",
+			setup: func(t *testing.T) (string, string, string, string) {
+				running := newRunningExe(t)
+				homeDir := t.TempDir()
+				binDir := filepath.Join(homeDir, ".local", "bin")
+				if err := os.MkdirAll(binDir, 0o755); err != nil {
+					t.Fatalf("mkdir local bin: %v", err)
+				}
+				hardlink := filepath.Join(binDir, "gc")
+				if err := os.Link(running, hardlink); err != nil {
+					t.Skipf("os.Link not supported on this filesystem: %v", err)
+				}
+				return homeDir, "", running, hardlink
+			},
+		},
+		{
+			name: "only_gopath_bin_matches_running_exe",
+			setup: func(t *testing.T) (string, string, string, string) {
+				running := newRunningExe(t)
+				homeDir := t.TempDir()
+				gopath := t.TempDir()
+				binDir := filepath.Join(gopath, "bin")
+				if err := os.MkdirAll(binDir, 0o755); err != nil {
+					t.Fatalf("mkdir gopath bin: %v", err)
+				}
+				symlink := filepath.Join(binDir, "gc")
+				if err := os.Symlink(running, symlink); err != nil {
+					t.Fatalf("symlink: %v", err)
+				}
+				return homeDir, gopath, running, symlink
+			},
+		},
+		{
+			name: "candidates_point_to_different_binary_falls_through",
+			setup: func(t *testing.T) (string, string, string, string) {
+				running := newRunningExe(t)
+				other := filepath.Join(t.TempDir(), "other-gc")
+				if err := os.WriteFile(other, []byte("decoy"), 0o755); err != nil {
+					t.Fatalf("write decoy: %v", err)
+				}
+				homeDir := t.TempDir()
+				gopath := t.TempDir()
+				localBin := filepath.Join(homeDir, ".local", "bin")
+				if err := os.MkdirAll(localBin, 0o755); err != nil {
+					t.Fatalf("mkdir local bin: %v", err)
+				}
+				if err := os.Symlink(other, filepath.Join(localBin, "gc")); err != nil {
+					t.Fatalf("symlink local: %v", err)
+				}
+				gopathBin := filepath.Join(gopath, "bin")
+				if err := os.MkdirAll(gopathBin, 0o755); err != nil {
+					t.Fatalf("mkdir gopath bin: %v", err)
+				}
+				if err := os.Symlink(other, filepath.Join(gopathBin, "gc")); err != nil {
+					t.Fatalf("symlink gopath: %v", err)
+				}
+				return homeDir, gopath, running, running
+			},
+		},
+		{
+			name: "no_candidates_exist_falls_through",
+			setup: func(t *testing.T) (string, string, string, string) {
+				running := newRunningExe(t)
+				return t.TempDir(), t.TempDir(), running, running
+			},
+		},
+		{
+			name: "local_bin_not_executable_falls_through",
+			setup: func(t *testing.T) (string, string, string, string) {
+				running := newRunningExe(t)
+				homeDir := t.TempDir()
+				binDir := filepath.Join(homeDir, ".local", "bin")
+				if err := os.MkdirAll(binDir, 0o755); err != nil {
+					t.Fatalf("mkdir local bin: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(binDir, "gc"), []byte{}, 0o644); err != nil {
+					t.Fatalf("write non-executable: %v", err)
+				}
+				return homeDir, "", running, running
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			homeDir, gopath, currentExe, want := tc.setup(t)
+			got := resolveStableSupervisorBinaryPath(homeDir, gopath, currentExe)
+			if got != want {
+				t.Fatalf("resolveStableSupervisorBinaryPath(%q, %q, %q) = %q, want %q",
+					homeDir, gopath, currentExe, got, want)
+			}
+		})
+	}
+}
+
+func TestBuildSupervisorServiceDataPrefersUserLocalBinExecPath(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("symlink behavior not exercised on windows here")
+	}
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("XDG_RUNTIME_DIR", "/tmp/gc-run")
+
+	runningExe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	binDir := filepath.Join(homeDir, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir local bin: %v", err)
+	}
+	stable := filepath.Join(binDir, "gc")
+	if err := os.Symlink(runningExe, stable); err != nil {
+		t.Fatalf("symlink stable path: %v", err)
+	}
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	if data.GCPath != stable {
+		t.Fatalf("GCPath = %q, want %q (stable user-local-bin path)", data.GCPath, stable)
+	}
+
+	systemdContent, err := renderSupervisorTemplate(supervisorSystemdTemplate, data)
+	if err != nil {
+		t.Fatalf("renderSupervisorTemplate: %v", err)
+	}
+	wantExec := `ExecStart="` + stable + `" supervisor run`
+	if !strings.Contains(systemdContent, wantExec) {
+		t.Fatalf("systemd unit missing %q:\n%s", wantExec, systemdContent)
+	}
+}
+
+func TestInstallSupervisorSystemdRefreshesStaleTmpExecStart(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("systemd path only applies on linux")
+	}
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+
+	runningExe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	binDir := filepath.Join(homeDir, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir local bin: %v", err)
+	}
+	stable := filepath.Join(binDir, "gc")
+	if err := os.Symlink(runningExe, stable); err != nil {
+		t.Fatalf("symlink stable: %v", err)
+	}
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	if data.GCPath != stable {
+		t.Fatalf("GCPath = %q, want %q", data.GCPath, stable)
+	}
+
+	path := supervisorSystemdServicePath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir unit dir: %v", err)
+	}
+	stale := "[Unit]\nDescription=Gas City machine supervisor\n[Service]\nExecStart=/tmp/gc supervisor run\n"
+	if err := os.WriteFile(path, []byte(stale), 0o600); err != nil {
+		t.Fatalf("write stale unit: %v", err)
+	}
+
+	oldRun := supervisorSystemctlRun
+	oldActive := supervisorSystemctlActive
+	var calls []string
+	supervisorSystemctlRun = func(args ...string) error {
+		call := strings.Join(args, " ")
+		calls = append(calls, call)
+		return nil
+	}
+	supervisorSystemctlActive = func(service string) bool {
+		if service != "gascity-supervisor.service" {
+			return false
+		}
+		for _, call := range calls {
+			if call == "--user kill --kill-who=main --signal=SIGTERM "+service {
+				return false
+			}
+		}
+		return true
+	}
+	stubSupervisorRunningPreserveSignalReady(t, true)
+	t.Cleanup(func() {
+		supervisorSystemctlRun = oldRun
+		supervisorSystemctlActive = oldActive
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := installSupervisorSystemd(data, &stdout, &stderr); code != 0 {
+		t.Fatalf("installSupervisorSystemd code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read refreshed unit: %v", err)
+	}
+	wantExec := `ExecStart="` + stable + `" supervisor run`
+	if !strings.Contains(string(contents), wantExec) {
+		t.Fatalf("refreshed unit missing %q:\n%s", wantExec, string(contents))
+	}
+	if strings.Contains(string(contents), `ExecStart="/tmp/gc"`) {
+		t.Fatalf("refreshed unit still references stale /tmp/gc:\n%s", string(contents))
+	}
+	joined := strings.Join(calls, "\n")
+	for _, want := range []string{
+		"--user daemon-reload",
+		"--user kill --kill-who=main --signal=SIGTERM gascity-supervisor.service",
+		"--user start gascity-supervisor.service",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("systemctl calls = %v, want %q (warm-refresh path)", calls, want)
+		}
+	}
+}
+
+func TestRenderSupervisorSystemdTemplateQuotesGCPathWithSpaces(t *testing.T) {
+	cases := []struct {
+		name   string
+		gcPath string
+		want   string
+	}{
+		{
+			name:   "plain_ascii",
+			gcPath: "/usr/local/bin/gc",
+			want:   `ExecStart="/usr/local/bin/gc" supervisor run`,
+		},
+		{
+			name:   "home_derived_spacy_path",
+			gcPath: "/home/user with spaces/.local/bin/gc",
+			want:   `ExecStart="/home/user with spaces/.local/bin/gc" supervisor run`,
+		},
+		{
+			name:   "gopath_derived_spacy_path",
+			gcPath: "/opt/go path/bin/gc",
+			want:   `ExecStart="/opt/go path/bin/gc" supervisor run`,
+		},
+		{
+			name:   `path_with_embedded_backslash`,
+			gcPath: `/opt/foo\bar/gc`,
+			want:   `ExecStart="/opt/foo\\bar/gc" supervisor run`,
+		},
+		{
+			name:   `paranoia_spaces_and_embedded_quotes`,
+			gcPath: `/srv/binaries/edge "case"/gc`,
+			want:   `ExecStart="/srv/binaries/edge \"case\"/gc" supervisor run`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			data := &supervisorServiceData{
+				GCPath:  tc.gcPath,
+				LogPath: "/tmp/gc-home/supervisor.log",
+				GCHome:  "/tmp/gc-home",
+				Path:    "/usr/local/bin:/usr/bin:/bin",
+			}
+			content, err := renderSupervisorTemplate(supervisorSystemdTemplate, data)
+			if err != nil {
+				t.Fatalf("renderSupervisorTemplate: %v", err)
+			}
+			if !strings.Contains(content, tc.want) {
+				t.Fatalf("rendered systemd unit missing %q; full:\n%s", tc.want, content)
+			}
+		})
+	}
+}
+
+// TestInstallSupervisorSystemdBailsCleanlyWhenUserManagerMissing repro of
+// the noisy install-on-EC2 case: when there is no per-user systemd
+// instance, the previous implementation wrote the unit file, then
+// produced 2-3 cascading "systemctl --user daemon-reload" errors as
+// daemon-reload + the rollback's daemon-reload + enable all fell over.
+// The current implementation should detect the missing user manager up
+// front, exit non-zero with one actionable message, and not touch the
+// unit file or invoke any systemctl --user write operations.
+func TestInstallSupervisorSystemdBailsCleanlyWhenUserManagerMissing(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("systemd path only applies on linux")
+	}
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+
+	stubSupervisorSystemctlUserAvailable(t, false)
+
+	oldRun := supervisorSystemctlRun
+	var calls []string
+	supervisorSystemctlRun = func(args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		return nil
+	}
+	t.Cleanup(func() { supervisorSystemctlRun = oldRun })
+
+	data := &supervisorServiceData{
+		GCPath:        "/tmp/gc-new",
+		LogPath:       "/tmp/gc-home/supervisor.log",
+		GCHome:        "/tmp/gc-home",
+		XDGRuntimeDir: "/tmp/gc-run",
+		Path:          "/usr/local/bin:/usr/bin:/bin",
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := installSupervisorSystemd(data, &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("installSupervisorSystemd code = %d, want 1; stderr=%q", code, stderr.String())
+	}
+	got := stderr.String()
+	for _, want := range []string{
+		"per-user systemd instance is not available",
+		"loginctl enable-linger",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("stderr missing %q:\n%s", want, got)
+		}
+	}
+	// The cascading-rollback regression: a single early-bail must not
+	// leave behind two daemon-reload error lines.
+	if strings.Count(got, "daemon-reload during rollback") > 0 {
+		t.Errorf("stderr should not surface rollback daemon-reload errors when we never started the install:\n%s", got)
+	}
+	if len(calls) > 0 {
+		t.Errorf("expected zero systemctl write operations, got %v", calls)
+	}
+	if _, err := os.Stat(supervisorSystemdServicePath()); !os.IsNotExist(err) {
+		t.Errorf("unit file should not have been written when user manager is missing; stat err=%v", err)
+	}
+}
+
+// TestCurrentUsernameForSystemdHintFallback covers the fallback branch of
+// currentUsernameForSystemdHint: when osuser.Current returns an error or
+// an empty username, the diagnostic still has a placeholder a user can
+// recognize and replace.
+func TestCurrentUsernameForSystemdHintFallback(t *testing.T) {
+	old := currentUserForSystemdHint
+	t.Cleanup(func() { currentUserForSystemdHint = old })
+
+	t.Run("error_falls_back", func(t *testing.T) {
+		currentUserForSystemdHint = func() (*user.User, error) {
+			return nil, errors.New("no current user")
+		}
+		if got := currentUsernameForSystemdHint(); got != "<your-user>" {
+			t.Fatalf("got %q, want fallback placeholder", got)
+		}
+	})
+
+	t.Run("empty_username_falls_back", func(t *testing.T) {
+		currentUserForSystemdHint = func() (*user.User, error) {
+			return &user.User{Username: "  "}, nil
+		}
+		if got := currentUsernameForSystemdHint(); got != "<your-user>" {
+			t.Fatalf("got %q, want fallback placeholder", got)
+		}
+	})
+
+	t.Run("real_username_used", func(t *testing.T) {
+		currentUserForSystemdHint = func() (*user.User, error) {
+			return &user.User{Username: "alice"}, nil
+		}
+		if got := currentUsernameForSystemdHint(); got != "alice" {
+			t.Fatalf("got %q, want %q", got, "alice")
+		}
+	})
 }

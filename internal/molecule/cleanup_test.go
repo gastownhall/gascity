@@ -280,3 +280,46 @@ func TestCloseSubtreeHandlesParentCycles(t *testing.T) {
 		}
 	}
 }
+
+// TestCloseSubtree_StampsCloseReason verifies that CloseSubtree stamps
+// close_reason=SubtreeClosedReason on every bead in the closed subtree.
+// Without this, bd's validation.on-close=error rejects the close, the
+// subtree stays open, and sling.CloseAttachedSubtree (which delegates
+// here for non-workflow molecule attachments) silently leaves
+// descendants alive.
+func TestCloseSubtree_StampsCloseReason(t *testing.T) {
+	if got := len(SubtreeClosedReason); got < 20 {
+		t.Fatalf("SubtreeClosedReason = %q (%d chars), want >=20", SubtreeClosedReason, got)
+	}
+
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{Title: "root", Type: "molecule"})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	child, err := store.Create(beads.Bead{Title: "child", ParentID: root.ID})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+
+	closed, err := CloseSubtree(store, root.ID)
+	if err != nil {
+		t.Fatalf("CloseSubtree: %v", err)
+	}
+	if closed != 2 {
+		t.Fatalf("CloseSubtree closed %d beads, want 2", closed)
+	}
+
+	for _, id := range []string{root.ID, child.ID} {
+		bead, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if bead.Status != "closed" {
+			t.Fatalf("%s status = %q, want closed", id, bead.Status)
+		}
+		if got := bead.Metadata["close_reason"]; got != SubtreeClosedReason {
+			t.Errorf("%s close_reason = %q, want %q", id, got, SubtreeClosedReason)
+		}
+	}
+}

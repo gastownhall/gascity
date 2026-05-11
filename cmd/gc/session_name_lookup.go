@@ -402,6 +402,9 @@ func lookupPoolSessionNameCandidates(store beads.Store, template string, cfg *co
 		if b.Status == "closed" {
 			continue
 		}
+		if isFailedCreateSessionBead(b) {
+			continue
+		}
 		if isNamedSessionBead(b) || isManualSessionBeadForAgent(b, cfgAgent) {
 			continue
 		}

@@ -54,6 +54,15 @@ func TestMaybePrintWizardProviderGuidanceNeedsAuth(t *testing.T) {
 	}
 }
 
+func TestProviderStatusFixHintIncludesClaudeOAuthToken(t *testing.T) {
+	got := providerStatusFixHint("claude", api.ProbeStatusInvalidConfiguration)
+	for _, want := range []string{"`claude.ai`", "`oauth_token`", "`firstParty`"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("providerStatusFixHint = %q, want %s", got, want)
+		}
+	}
+}
+
 func TestFinalizeInitBlocksProviderReadinessBeforeSupervisorRegistration(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")

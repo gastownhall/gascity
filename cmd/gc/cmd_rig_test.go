@@ -1396,6 +1396,49 @@ source = "packs/a-pack"
 	}
 }
 
+func TestDoRigAdd_RealGastownExampleRootPackDefaultRigImport(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+
+	examplePath, err := filepath.Abs(filepath.Join("..", "..", "examples", "gastown"))
+	if err != nil {
+		t.Fatalf("resolving examples/gastown: %v", err)
+	}
+	cityPath := filepath.Join(t.TempDir(), "city")
+
+	var initStdout, initStderr bytes.Buffer
+	code := doInitFromDirWithOptions(examplePath, cityPath, "", &initStdout, &initStderr, true)
+	if code != 0 {
+		t.Fatalf("doInitFromDirWithOptions = %d, want 0; stderr: %s", code, initStderr.String())
+	}
+
+	rigPath := filepath.Join(t.TempDir(), "my-project")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code = doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
+	}
+
+	if !strings.Contains(stdout.String(), "Import: gastown=packs/gastown (default)") {
+		t.Fatalf("output missing gastown default import: %s", stdout.String())
+	}
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Rigs) != 1 {
+		t.Fatalf("len(Rigs) = %d, want 1", len(cfg.Rigs))
+	}
+	if got := cfg.Rigs[0].Imports["gastown"].Source; got != "packs/gastown" {
+		t.Fatalf("rig gastown import source = %q, want %q", got, "packs/gastown")
+	}
+}
+
 func TestDoRigAdd_ExplicitIncludeOverridesDefault(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {

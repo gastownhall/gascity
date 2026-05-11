@@ -366,6 +366,48 @@ func TestEnsureAliasAvailable_RejectsLiveSessionNameCollision(t *testing.T) {
 	}
 }
 
+func TestEnsureAliasAvailable_AllowsFailedCreateIdentity(t *testing.T) {
+	store := beads.NewMemStore()
+	_, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name": "worker-1",
+			"alias":        "worker-1",
+			"agent_name":   "worker-1",
+			"state":        string(StateFailedCreate),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := EnsureAliasAvailable(store, "worker-1", ""); err != nil {
+		t.Fatalf("EnsureAliasAvailable(failed-create identity) = %v, want nil", err)
+	}
+}
+
+func TestEnsureSessionNameAvailable_AllowsFailedCreateIdentity(t *testing.T) {
+	store := beads.NewMemStore()
+	_, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name": "worker-1",
+			"alias":        "worker-1",
+			"agent_name":   "worker-1",
+			"state":        string(StateFailedCreate),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := ensureSessionNameAvailable(store, "worker-1"); err != nil {
+		t.Fatalf("ensureSessionNameAvailable(failed-create identity) = %v, want nil", err)
+	}
+}
+
 func TestEnsureAliasAvailableWithConfig_RejectsConfiguredSingletonAlias(t *testing.T) {
 	store := beads.NewMemStore()
 	cfg := &config.City{

@@ -95,6 +95,9 @@ type CityRuntime struct {
 	activeReload        *reloadRequest
 	onStarted           func()
 	onStatus            func(string)
+	managedDoltHealth   func(string) error
+	managedDoltOwned    func(string) (bool, error)
+	managedDoltPort     func(string) string
 
 	shutdownOnce             sync.Once
 	preserveSessionsShutdown atomic.Bool
@@ -141,6 +144,9 @@ type CityRuntimeParams struct {
 	ControlDispatcherCh chan struct{}           // may be nil; triggers control-dispatcher-only reconcile
 	OnStarted           func()                  // called after initial reconciliation succeeds
 	OnStatus            func(string)            // called when init status changes
+	ManagedDoltHealth   func(string) error
+	ManagedDoltOwned    func(string) (bool, error)
+	ManagedDoltPort     func(string) string
 
 	LogPrefix      string // "gc start" or "gc supervisor"; defaults to "gc start"
 	Stdout, Stderr io.Writer
@@ -177,6 +183,26 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 			p.Cfg.Daemon.WispTTLDuration())
 	}
 
+	managedDoltHealth := p.ManagedDoltHealth
+	if managedDoltHealth == nil {
+		managedDoltHealth = healthBeadsProvider
+	}
+	managedDoltOwned := p.ManagedDoltOwned
+	if managedDoltOwned == nil {
+		managedDoltOwned = managedDoltLifecycleOwned
+	}
+	managedDoltPort := p.ManagedDoltPort
+	if managedDoltPort == nil {
+		managedDoltPort = currentManagedDoltPort
+	}
+
+	logPrefix := p.LogPrefix
+	if logPrefix == "" {
+		logPrefix = "gc start"
+	}
+
+	ensureManagedDoltPublishedForRuntime(p.CityPath, p.Stderr, logPrefix, managedDoltHealth, managedDoltOwned, managedDoltPort)
+
 	// Sweep orphaned order-tracking beads on startup only (not config reload).
 	// A previous controller instance may have left tracking beads open
 	// (goroutines killed on restart, or silent Close failures).
@@ -193,11 +219,6 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 	od := buildOrderDispatcher(p.CityPath, p.Cfg, p.Rec, p.Stderr)
 
 	suspendedNames := computeSuspendedNames(p.Cfg, p.CityName, p.CityPath)
-
-	logPrefix := p.LogPrefix
-	if logPrefix == "" {
-		logPrefix = "gc start"
-	}
 
 	cr := &CityRuntime{
 		cityPath:                p.CityPath,
@@ -243,12 +264,15 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 			}
 			return make(chan struct{}, 1)
 		}(),
-		nudgeWakeCh: make(chan struct{}, 1),
-		onStarted:   p.OnStarted,
-		onStatus:    p.OnStatus,
-		logPrefix:   logPrefix,
-		stdout:      p.Stdout,
-		stderr:      p.Stderr,
+		nudgeWakeCh:       make(chan struct{}, 1),
+		onStarted:         p.OnStarted,
+		onStatus:          p.OnStatus,
+		managedDoltHealth: managedDoltHealth,
+		managedDoltOwned:  managedDoltOwned,
+		managedDoltPort:   managedDoltPort,
+		logPrefix:         logPrefix,
+		stdout:            p.Stdout,
+		stderr:            p.Stderr,
 	}
 	cr.svc = workspacesvc.NewManager(&serviceRuntime{cr: cr})
 	if err := cr.svc.Reload(); err != nil {
@@ -422,6 +446,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// ctx cancellation, or normal completion alike.
 	startupComplete := false
 	if !retryStartupStep("startup", func() bool { return startupComplete }, func() {
+		cr.ensureManagedDoltPublishedForTick()
 		sessionBeads := cr.loadSessionBeadSnapshot()
 		startupTrace := cr.beginTraceCycle("startup", "initial_reconcile", sessionBeads)
 		completion := TraceCompletionAborted
@@ -642,6 +667,7 @@ func (cr *CityRuntime) tick(
 	if ctx.Err() != nil {
 		return
 	}
+	cr.ensureManagedDoltPublishedForTick()
 	sessionBeads := cr.loadSessionBeadSnapshot()
 	traceTrigger := trigger
 	traceDetail := "controller_tick"
@@ -1766,6 +1792,8 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		return
 	}
 
+	cr.ensureManagedDoltPublishedForTick()
+
 	sessionBeads := cr.loadSessionBeadSnapshot()
 	wfcResult := buildDesiredStateWithSessionBeads(
 		cr.cityName,
@@ -1834,6 +1862,49 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		cr.stderr,
 	)
 	cr.requestDeferredDrainFollowUpTick()
+}
+
+func (cr *CityRuntime) ensureManagedDoltPublishedForTick() {
+	healthFn := cr.managedDoltHealth
+	if healthFn == nil {
+		healthFn = healthBeadsProvider
+	}
+	ownedFn := cr.managedDoltOwned
+	if ownedFn == nil {
+		ownedFn = managedDoltLifecycleOwned
+	}
+	portFn := cr.managedDoltPort
+	if portFn == nil {
+		portFn = currentManagedDoltPort
+	}
+	ensureManagedDoltPublishedForRuntime(cr.cityPath, cr.stderr, cr.logPrefix, healthFn, ownedFn, portFn)
+}
+
+func ensureManagedDoltPublishedForRuntime(
+	cityPath string,
+	stderr io.Writer,
+	logPrefix string,
+	healthFn func(string) error,
+	ownedFn func(string) (bool, error),
+	portFn func(string) string,
+) {
+	if !cityUsesBdStoreContract(cityPath) {
+		return
+	}
+	owned, err := ownedFn(cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: managed dolt ownership preflight: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	if !owned {
+		return
+	}
+	if portFn(cityPath) != "" {
+		return
+	}
+	if err := healthFn(cityPath); err != nil {
+		fmt.Fprintf(stderr, "%s: managed dolt health preflight: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+	}
 }
 
 // syncBeadsAndUpdateIndex runs syncSessionBeads.

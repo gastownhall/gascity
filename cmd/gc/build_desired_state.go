@@ -1259,6 +1259,9 @@ func discoverSessionBeadsWithRoots(
 		if sn == "" {
 			continue
 		}
+		if isFailedCreateSessionBead(b) {
+			continue
+		}
 		// Skip beads already in desired state (from config iteration).
 		if _, exists := desired[sn]; exists {
 			continue
@@ -1920,7 +1923,7 @@ func selectOrCreatePoolSessionBead(
 		return beads.Bead{}, 0, fmt.Errorf("pool template %q has no configured agent", template)
 	}
 	// Resume tier: reuse the session that has in-progress work assigned.
-	if preferred != nil && preferred.ID != "" && !used[preferred.ID] {
+	if preferred != nil && preferred.ID != "" && !used[preferred.ID] && !isFailedCreateSessionBead(*preferred) {
 		slot := claimPoolSlot(cfgAgent, *preferred, usedSlots)
 		return *preferred, slot, nil
 	}
@@ -1932,6 +1935,9 @@ func selectOrCreatePoolSessionBead(
 			continue
 		}
 		if isDrainedSessionBead(bead) {
+			continue
+		}
+		if isFailedCreateSessionBead(bead) {
 			continue
 		}
 		if bead.Metadata["state"] == "asleep" {
@@ -2007,6 +2013,10 @@ func createPoolSessionBeadWithGuardedAlias(
 	return createPoolSessionBead(bp.beadStore, template, bp.sessionBeads, poolSessionCreateStartedAt(bp), identity)
 }
 
+func isFailedCreateSessionBead(bead beads.Bead) bool {
+	return strings.TrimSpace(bead.Metadata["state"]) == string(session.StateFailedCreate)
+}
+
 func sessionBeadHasAssignedWork(workBeads []beads.Bead, sessionBead beads.Bead) bool {
 	for _, wb := range workBeads {
 		assignee := strings.TrimSpace(wb.Assignee)
@@ -2033,6 +2043,9 @@ func selectOrCreateDependencyPoolSessionBead(
 			continue
 		}
 		if isDrainedSessionBead(bead) {
+			continue
+		}
+		if isFailedCreateSessionBead(bead) {
 			continue
 		}
 		if isNamedSessionBead(bead) {

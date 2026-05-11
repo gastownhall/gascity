@@ -1390,6 +1390,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 
 		if shouldWake && !target.alive {
 			// Session should be awake but isn't — wake it.
+			if isFailedCreateSessionBead(*target.session) {
+				if trace != nil {
+					trace.recordDecision("reconciler.session.wake", target.tp.TemplateName, name, "wake", "failed_create", traceRecordPayload{
+						"pending_create_claim": strings.TrimSpace(target.session.Metadata["pending_create_claim"]),
+					}, nil, "")
+				}
+				continue
+			}
 			if sessionIsQuarantined(*target.session, clk) {
 				continue // crash-loop protection
 			}
@@ -1839,6 +1847,21 @@ func recordSessionAttachedConfigDriftDeferral(session beads.Bead, store beads.St
 	now := time.Now().UTC()
 	if clk != nil {
 		now = clk.Now().UTC()
+	}
+	// Skip the write when the same drift key is already deferred and the
+	// existing stamp is comfortably within the false-negative TTL window.
+	// Without this guard the reconciler emits a bead.updated event on every
+	// tick (~1.4s) for every attached session with persistent drift.
+	// Refreshing at TTL/2 leaves enough headroom that a paused reconcile
+	// loop cannot accidentally let the deferral expire.
+	if driftKey != "" && session.Metadata[sessionAttachedConfigDriftDeferredKeyMetadata] == driftKey {
+		if raw := session.Metadata[sessionAttachedConfigDriftDeferredAtMetadata]; raw != "" {
+			if existing, err := time.Parse(time.RFC3339, raw); err == nil &&
+				!existing.After(now) &&
+				now.Sub(existing) < sessionAttachedConfigDriftFalseNegativeLimit/2 {
+				return nil
+			}
+		}
 	}
 	return store.SetMetadataBatch(session.ID, map[string]string{
 		sessionAttachedConfigDriftDeferredAtMetadata:  now.Format(time.RFC3339),

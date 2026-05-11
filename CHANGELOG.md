@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Kiro provider launch behavior is now explicit in release notes and provider
+  docs: the built-in Kiro provider starts `kiro-cli` with `chat`,
+  `--no-interactive`, `--agent gascity`, and `--trust-all-tools` by default.
+  Operators who do not want unrestricted tool trust can replace the full
+  default argv with an explicit `[providers.kiro].args` list in `city.toml`.
+- Tmux and runtime provider-overlay staging now surface nonfatal preservation
+  warnings on stderr, including the Kiro `AGENTS.md` preservation notice when
+  project instructions already exist.
+- `jsonl-export.sh` no longer mis-classifies a bead database with an empty
+  `issues` table as a failed export. `dolt sql -r json` returns `{}` (not
+  `{"rows":[]}`) when a queried table is empty; `validate_exported_issues` now
+  treats the bare-object form as zero rows so the database lands in the
+  success path with an `issues.jsonl` committed to the archive instead of
+  appearing in the `failed:` summary.
 - The built-in `control-dispatcher` trace now defaults to
   `${GC_CITY_RUNTIME_DIR}/control-dispatcher-trace.log` (falling back to
   `${GC_CITY}/.gc/runtime/control-dispatcher-trace.log`) instead of writing at
@@ -37,6 +51,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- ACP, subprocess, and Kubernetes session staging now apply pack and agent
+  overlays through the provider-aware `per-provider/<provider>/` contract.
+  Custom ACP overlays that previously expected a literal `per-provider/`
+  subtree in the session workdir should move provider-specific files under the
+  matching provider slot so they are flattened at launch.
+- The review-quorum durable contract now documents that synthesized
+  `findings_count` is deduplicated, top-level `mutations_delta` is reserved for
+  synthesis-created changes, lane mutation deltas remain under their lane
+  records, lane-scoped finalizer failures use
+  `lane=<lane_id> reason=<stable_reason>` entries, and unknown lane verdict
+  values are hard contract failures. Reviewer lane prompts now require durable
+  `lane_id`, `provider`, and `model` fields, and the finalizer rejects blank
+  lane IDs without merging contract-invalid lane findings, evidence, or usage
+  into the synthesized summary.
 - `[[orders.overrides]]` rig matching is stricter and clearer. A rigless
   override (`rig` unset) still matches **only** city-level orders; if the
   named order exists only as per-rig instances, the error now names every

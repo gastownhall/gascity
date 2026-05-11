@@ -16,10 +16,16 @@ import (
 // (internal/convergence/create.go) creates beads with type="convergence"
 // as the root of every convergence loop. Without it registered, every
 // `gc converge create` call fails with "invalid issue type: convergence".
+//
+// "step" is included because formula instantiation creates non-root
+// step beads with type="step" (internal/molecule/molecule.go Instantiate)
+// so Ready() and `bd ready` can exclude formula scaffolding from actionable
+// work queues. Without it registered, formula dispatch fails with
+// "invalid issue type: step" (#1039).
 var RequiredCustomTypes = []string{
 	"molecule", "convoy", "message", "event", "gate",
 	"merge-request", "agent", "role", "rig", "session", "spec",
-	"convergence",
+	"convergence", "step",
 }
 
 // CustomTypesCheck verifies that all required Gas City custom bead

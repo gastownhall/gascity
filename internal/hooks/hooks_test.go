@@ -43,7 +43,7 @@ func claudeHookEntries(t *testing.T, data []byte, event string) []claudeHookEntr
 func TestSupportedProviders(t *testing.T) {
 	got := SupportedProviders()
 	want := map[string]bool{
-		"claude": true, "codex": true, "gemini": true, "opencode": true,
+		"claude": true, "codex": true, "gemini": true, "kiro": true, "opencode": true,
 		"copilot": true, "cursor": true, "pi": true, "omp": true,
 	}
 	if len(got) != len(want) {
@@ -952,7 +952,7 @@ func TestInstallClaudeSurfacesMalformedOverride(t *testing.T) {
 // are materialized from the embedded core pack overlay into the workdir.
 func TestInstallOverlayManagedProviders(t *testing.T) {
 	fs := fsys.NewFake()
-	providers := []string{"codex", "gemini", "opencode", "copilot", "cursor", "pi", "omp"}
+	providers := []string{"codex", "gemini", "opencode", "copilot", "cursor", "kiro", "pi", "omp"}
 	if err := Install(fs, "/city", "/work", providers); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
@@ -963,6 +963,8 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 		"/work/.github/hooks/gascity.json",
 		"/work/.github/copilot-instructions.md",
 		"/work/.cursor/hooks.json",
+		"/work/.kiro/agents/gascity.json",
+		"/work/AGENTS.md",
 		"/work/.pi/extensions/gc-hooks.js",
 		"/work/.omp/hooks/gc-hook.ts",
 	} {
@@ -986,12 +988,57 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 		"/work/.opencode/plugins/gascity.js",
 		"/work/.github/hooks/gascity.json",
 		"/work/.cursor/hooks.json",
+		"/work/.kiro/agents/gascity.json",
+		"/work/AGENTS.md",
 		"/work/.pi/extensions/gc-hooks.js",
 		"/work/.omp/hooks/gc-hook.ts",
 	} {
 		if strings.Contains(string(fs.Files[rel]), "gc hook --inject") {
 			t.Errorf("fresh overlay-managed provider file %s should not install no-op gc hook --inject", rel)
 		}
+	}
+	var kiroAgent struct {
+		Name   string `json:"name"`
+		Prompt string `json:"prompt"`
+		Hooks  map[string][]struct {
+			Command string `json:"command"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(fs.Files["/work/.kiro/agents/gascity.json"], &kiroAgent); err != nil {
+		t.Fatalf("unmarshal Kiro agent config: %v", err)
+	}
+	if kiroAgent.Name != "gascity" {
+		t.Errorf("Kiro agent name = %q, want gascity", kiroAgent.Name)
+	}
+	switch {
+	case kiroAgent.Prompt == "":
+		t.Error("Kiro agent config missing prompt")
+	case !strings.HasPrefix(kiroAgent.Prompt, "file://"):
+		t.Errorf("Kiro prompt = %q, want file:// URI", kiroAgent.Prompt)
+	default:
+		promptRel := strings.TrimPrefix(kiroAgent.Prompt, "file://")
+		promptPath := filepath.Clean(filepath.Join(filepath.Dir("/work/.kiro/agents/gascity.json"), promptRel))
+		if promptPath != "/work/AGENTS.md" {
+			t.Errorf("Kiro prompt resolves to %q, want /work/AGENTS.md", promptPath)
+		}
+		if _, ok := fs.Files[promptPath]; !ok {
+			t.Errorf("Kiro prompt target %s was not installed", promptPath)
+		}
+	}
+	for _, trigger := range []string{"agentSpawn", "userPromptSubmit"} {
+		if len(kiroAgent.Hooks[trigger]) == 0 {
+			t.Errorf("Kiro agent config missing documented %s hook", trigger)
+		}
+	}
+	for trigger := range kiroAgent.Hooks {
+		switch trigger {
+		case "agentSpawn", "userPromptSubmit", "preToolUse", "postToolUse", "stop":
+		default:
+			t.Errorf("Kiro agent config uses undocumented hook trigger %q", trigger)
+		}
+	}
+	if strings.Contains(string(fs.Files["/work/.kiro/agents/gascity.json"]), "gc handoff") {
+		t.Error("Kiro agent config should not install unsupported compaction handoff hooks")
 	}
 }
 

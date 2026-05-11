@@ -1338,6 +1338,9 @@ func TestDecorateDynamicFragmentRecipeMarksRetryEvalAsScopedControl(t *testing.T
 }
 
 func TestRunWorkflowServeProcessesReadyControlBeadsThenExits(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
@@ -1418,6 +1421,9 @@ func TestRunWorkflowServeProcessesReadyControlBeadsThenExits(t *testing.T) {
 }
 
 func TestRunWorkflowServeDrainsReadyBatchBeforeRequery(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
@@ -1472,6 +1478,9 @@ func TestRunWorkflowServeDrainsReadyBatchBeforeRequery(t *testing.T) {
 }
 
 func TestRunWorkflowServeRoutesTraceOpenWarningsToCommandStderr(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
@@ -1514,6 +1523,9 @@ func TestRunWorkflowServeRoutesTraceOpenWarningsToCommandStderr(t *testing.T) {
 }
 
 func TestRunWorkflowServeWarnsOnLegacyTracePath(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
@@ -1557,6 +1569,9 @@ func TestRunWorkflowServeWarnsOnLegacyTracePath(t *testing.T) {
 }
 
 func TestRunWorkflowServeWarnsWhenLegacyTraceFileStillExists(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
@@ -1606,6 +1621,9 @@ func TestRunWorkflowServeWarnsWhenLegacyTraceFileStillExists(t *testing.T) {
 }
 
 func TestRunWorkflowServeWarnsWhenLegacyRigTraceFileStillExists(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n\n[[rigs]]\nname = \"alpha\"\npath = \"rigs/alpha\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
@@ -1654,6 +1672,9 @@ func TestRunWorkflowServeWarnsWhenLegacyRigTraceFileStillExists(t *testing.T) {
 }
 
 func TestRunWorkflowServeWarnsWhenLegacyEnvRigTraceFileStillExistsOutsideConfiguredRigs(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n\n[[rigs]]\nname = \"alpha\"\npath = \"rigs/alpha\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
@@ -1899,6 +1920,9 @@ func TestRunControlDispatcherWithStoreWarnsOnLegacyTracePath(t *testing.T) {
 }
 
 func TestRunWorkflowServeDedupsTraceWarningsAcrossNestedControlDispatch(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
@@ -2032,6 +2056,9 @@ func TestRunWorkflowServeDedupsTraceWarningsAcrossNestedControlDispatch(t *testi
 }
 
 func TestRunWorkflowServeDedupsLegacyTraceWarningsAcrossNestedControlDispatch(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
@@ -2427,6 +2454,7 @@ func assertJSONEqual(t *testing.T, got, want string) {
 // not inherit a city-scoped BEADS_DIR from the parent.
 func TestRunWorkflowServeOverridesInheritedCityBeadsDir(t *testing.T) {
 	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_TMUX_SESSION", "host-session")
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "myrig-repo")
@@ -2497,6 +2525,7 @@ func TestRunWorkflowServeOverridesInheritedCityBeadsDir(t *testing.T) {
 
 func TestRunWorkflowServeProcessesControlBeadsInAgentStoreScope(t *testing.T) {
 	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "myrig-repo")
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
@@ -2574,6 +2603,7 @@ path = %q
 
 func TestOpenControlStoreDisablesAutoExportWithoutSandboxingWrites(t *testing.T) {
 	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "myrig-repo")
 	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
@@ -2640,6 +2670,7 @@ func TestOpenControlStoreDisablesAutoExportWithoutSandboxingWrites(t *testing.T)
 
 func TestOpenControlStoreAtForCityPreservesFileAndExecProviderStores(t *testing.T) {
 	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "rigs", "frontend")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
@@ -2697,6 +2728,7 @@ func TestOpenControlStoreAtForCityPreservesFileAndExecProviderStores(t *testing.
 
 func TestOpenControlStoreAtForCityUsesControlRunnerForStaleBdScope(t *testing.T) {
 	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
 	cityDir := t.TempDir()
 	staleRigDir := filepath.Join(cityDir, "rigs", "removed")
 	if err := os.MkdirAll(filepath.Join(staleRigDir, ".beads"), 0o755); err != nil {
@@ -2760,6 +2792,7 @@ func TestOpenControlStoreAtForCityUsesControlRunnerForStaleBdScope(t *testing.T)
 
 func TestRunWorkflowServeUsesGCTemplateForSessionContext(t *testing.T) {
 	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "rigrepo")
 
@@ -2834,6 +2867,9 @@ max = 5
 }
 
 func TestRunWorkflowServeRetriesBrieflyAfterProcessingBeforeIdleExit(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
@@ -2886,6 +2922,9 @@ func TestRunWorkflowServeRetriesBrieflyAfterProcessingBeforeIdleExit(t *testing.
 }
 
 func TestRunWorkflowServeSkipsPendingControlBeadAndProcessesLaterReady(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
@@ -2945,6 +2984,9 @@ func TestRunWorkflowServeSkipsPendingControlBeadAndProcessesLaterReady(t *testin
 }
 
 func TestRunWorkflowServeSkipsLegacyOversizedControlAndProcessesLaterReady(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
@@ -3004,6 +3046,9 @@ func TestRunWorkflowServeSkipsLegacyOversizedControlAndProcessesLaterReady(t *te
 }
 
 func TestRunWorkflowServeReturnsQueryError(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
@@ -3038,6 +3083,9 @@ func TestRunWorkflowServeReturnsQueryError(t *testing.T) {
 }
 
 func TestRunWorkflowServeExpandsTemplateCommandsWithCityFallback(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	cityDir := filepath.Join(t.TempDir(), "demo-city")
 	rigDir := filepath.Join(cityDir, "frontend")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {

@@ -325,6 +325,8 @@ func TestCityStatusJSONWithAgents(t *testing.T) {
 }
 
 func TestCityStatusJSONReportsObservationErrors(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "mayor", runtime.Config{Command: "echo"}); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -372,9 +374,13 @@ func TestCityStatusJSONReportsStoreOpenError(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "city"},
 	}
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.beads): %v", err)
+	}
 
 	var stdout, stderr bytes.Buffer
-	code := doCityStatusJSON(sp, cfg, t.TempDir(), &stdout, &stderr)
+	code := doCityStatusJSON(sp, cfg, cityPath, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
@@ -393,14 +399,42 @@ func TestCityStatusJSONReportsCatalogListError(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "city"},
 	}
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.beads): %v", err)
+	}
 
 	var stdout, stderr bytes.Buffer
-	code := doCityStatusJSON(sp, cfg, t.TempDir(), &stdout, &stderr)
+	code := doCityStatusJSON(sp, cfg, cityPath, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
 	if !strings.Contains(stderr.String(), "gc status: building session catalog") || !strings.Contains(stderr.String(), "catalog unavailable") {
 		t.Fatalf("stderr = %q, want catalog list error", stderr.String())
+	}
+}
+
+func TestCityStatusSkipsStoreOpenWhenNoPersistedStoreExists(t *testing.T) {
+	sp := runtime.NewFake()
+	dops := newFakeDrainOps()
+	oldOpen := openCityStoreAtForStatus
+	called := false
+	openCityStoreAtForStatus = func(string) (beads.Store, error) {
+		called = true
+		return nil, errors.New("unexpected store open")
+	}
+	t.Cleanup(func() { openCityStoreAtForStatus = oldOpen })
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doCityStatus(sp, dops, cfg, t.TempDir(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if called {
+		t.Fatal("status opened bead store without any persisted store state")
 	}
 }
 

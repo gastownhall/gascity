@@ -526,6 +526,60 @@ func TestResolveTemplateHookEnabledOpencodeOmitsPrimeInstruction(t *testing.T) {
 	}
 }
 
+func TestResolveTemplateKeepsConcreteProviderForOverlays(t *testing.T) {
+	cityPath := t.TempDir()
+	fs := fsys.NewFake()
+	fs.Files[cityPath+"/prompts/worker.md"] = []byte("worker prompt body")
+
+	base := "builtin:claude"
+	providers := config.BuiltinProviders()
+	providers["kiro"] = config.ProviderSpec{
+		Base:             &base,
+		Command:          "kiro-cli",
+		Args:             []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
+		PromptMode:       "arg",
+		ReadyDelayMs:     5000,
+		ProcessNames:     []string{"kiro-cli", "kiro", "node"},
+		InstructionsFile: "AGENTS.md",
+	}
+	params := &agentBuildParams{
+		fs:              fs,
+		cityName:        "bright-lights",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Name: "bright-lights"},
+		providers:       providers,
+		lookPath:        func(string) (string, error) { return "/usr/bin/kiro-cli", nil },
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:           "worker",
+		PromptTemplate: "prompts/worker.md",
+		Provider:       "kiro",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if got, want := tp.Hints.ProviderName, "claude"; got != want {
+		t.Fatalf("ProviderName = %q, want launch family %q", got, want)
+	}
+	if got, want := tp.Hints.ProviderOverlayName, "kiro"; got != want {
+		t.Fatalf("ProviderOverlayName = %q, want concrete provider %q", got, want)
+	}
+
+	cfg := templateParamsToConfig(tp)
+	if got, want := cfg.ProviderName, "claude"; got != want {
+		t.Fatalf("runtime ProviderName = %q, want launch family %q", got, want)
+	}
+	if got, want := cfg.ProviderOverlayName, "kiro"; got != want {
+		t.Fatalf("runtime ProviderOverlayName = %q, want concrete provider %q", got, want)
+	}
+}
+
 func TestResolveTemplateExpandsPromptCommandTemplates(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "demo-city")
 	fs := fsys.NewFake()

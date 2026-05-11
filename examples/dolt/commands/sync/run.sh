@@ -142,7 +142,7 @@ sync_database_sql() {
   fi
 
   if [ "$force" = true ]; then
-    push_query="USE \`$name\`; CALL DOLT_PUSH('--force', '$remote_name', 'main')"
+    push_query="USE \`$name\`; CALL DOLT_PUSH('--force', '--set-upstream', '$remote_name', 'main')"
   else
     push_query="USE \`$name\`; CALL DOLT_PUSH('$remote_name', 'main')"
   fi
@@ -183,7 +183,7 @@ sync_database_cli() {
   fi
 
   if [ "$force" = true ]; then
-    if (cd "$d" && dolt push --force "$remote_name" main 2>&1); then
+    if (cd "$d" && dolt push --force --set-upstream "$remote_name" main 2>&1); then
       echo "  $name: pushed to $remote"
       return 0
     fi

@@ -201,6 +201,47 @@ func TestConfigFingerprintExtraDifferentValues(t *testing.T) {
 	}
 }
 
+func TestCoreFingerprintIncludesOverlayProviderIdentity(t *testing.T) {
+	claudeFallback := Config{Command: "agent", ProviderName: "claude"}
+	kiroOverlay := Config{Command: "agent", ProviderName: "claude", ProviderOverlayName: "kiro"}
+	if CoreFingerprint(claudeFallback) == CoreFingerprint(kiroOverlay) {
+		t.Fatal("ProviderOverlayName should affect the core fingerprint")
+	}
+	if got := CoreFingerprintDriftFields(CoreFingerprintBreakdown(claudeFallback), kiroOverlay); len(got) != 1 || got[0] != "OverlayProviders" {
+		t.Fatalf("drift fields = %v, want [OverlayProviders]", got)
+	}
+
+	withHooks := Config{
+		Command:             "agent",
+		ProviderName:        "claude",
+		ProviderOverlayName: "kiro",
+		InstallAgentHooks:   []string{"gemini"},
+		Env: map[string]string{
+			"GC_TEMPLATE": "gascity/worker",
+			"GC_AGENT":    "gascity/worker-1",
+			"GC_ALIAS":    "gascity/worker-1",
+		},
+	}
+	withoutHooks := withHooks
+	withoutHooks.InstallAgentHooks = nil
+	if CoreFingerprint(withHooks) == CoreFingerprint(withoutHooks) {
+		t.Fatal("InstallAgentHooks should affect the core fingerprint")
+	}
+
+	sameSessionNextTick := withHooks
+	sameSessionNextTick.Env = map[string]string{
+		"GC_TEMPLATE":           "gascity/worker",
+		"GC_AGENT":              "gascity/worker-1",
+		"GC_ALIAS":              "gascity/worker",
+		"GC_SESSION_NAME":       "gc-test-worker-1",
+		"GC_INSTANCE_TOKEN":     "next-tick",
+		"GC_CONTINUATION_EPOCH": "2",
+	}
+	if CoreFingerprint(withHooks) != CoreFingerprint(sameSessionNextTick) {
+		t.Fatal("overlay provider hashing should not reintroduce pool-instance env oscillation")
+	}
+}
+
 func TestConfigFingerprintIncludesMCPServers(t *testing.T) {
 	a := Config{Command: "claude"}
 	b := Config{

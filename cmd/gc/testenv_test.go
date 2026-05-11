@@ -31,6 +31,15 @@ func clearGCEnv(t *testing.T) {
 	}
 }
 
+func disableManagedDoltRecoveryForTest(t *testing.T) {
+	t.Helper()
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_DOLT_HOST", "")
+	t.Setenv("GC_DOLT_PORT", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+}
+
 var testProviderStubCommands = []string{
 	"claude",
 	"codex",

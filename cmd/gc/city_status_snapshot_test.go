@@ -20,12 +20,6 @@ func TestCityStatusNamedSessionsUseProvidedStore(t *testing.T) {
 	dops := newFakeDrainOps()
 	store := beads.NewMemStore()
 
-	oldOpen := openCityStoreAtForStatus
-	openCityStoreAtForStatus = func(string) (beads.Store, error) {
-		return store, nil
-	}
-	t.Cleanup(func() { openCityStoreAtForStatus = oldOpen })
-
 	if _, err := store.Create(beads.Bead{
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
@@ -54,7 +48,7 @@ func TestCityStatusNamedSessionsUseProvidedStore(t *testing.T) {
 	if snapshot.NamedSessions[0].Status != "materialized" {
 		t.Fatalf("named session status = %q, want materialized", snapshot.NamedSessions[0].Status)
 	}
-	code := doCityStatus(sp, dops, cfg, cityPath, &stdout, &stderr)
+	code := doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, loadStatusSessionSnapshot(store), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -346,18 +340,27 @@ func TestCityStatusNamedSessionLookupErrorsAreSurfaced(t *testing.T) {
 	dops := newFakeDrainOps()
 	store := &failingStatusStore{
 		MemStore: beads.NewMemStore(),
-		failID:   "refinery",
 		err:      errors.New("store offline"),
 	}
-
-	oldOpen := openCityStoreAtForStatus
-	openCityStoreAtForStatus = func(string) (beads.Store, error) {
-		return store, nil
+	created, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"configured_named_session":  "true",
+			"configured_named_identity": "refinery",
+			"configured_named_mode":     "on_demand",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
 	}
-	t.Cleanup(func() { openCityStoreAtForStatus = oldOpen })
+	store.failID = created.ID
 
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "city"},
+		Agents: []config.Agent{{
+			Name: "refinery",
+		}},
 		NamedSessions: []config.NamedSession{{
 			Template: "refinery",
 		}},
@@ -372,7 +375,7 @@ func TestCityStatusNamedSessionLookupErrorsAreSurfaced(t *testing.T) {
 		t.Fatalf("snapshot named session status = %q, want lookup error", got)
 	}
 
-	code := doCityStatus(sp, dops, cfg, "/home/user/city", &stdout, &stderr)
+	code := doCityStatusWithStoreAndSnapshot(sp, dops, cfg, "/home/user/city", store, loadStatusSessionSnapshot(store), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}

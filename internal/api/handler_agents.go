@@ -252,7 +252,14 @@ func findAgent(cfg *config.City, name string) (config.Agent, bool) {
 			}
 			for i := 1; i <= poolMax; i++ {
 				memberName := poolInstanceNameForAPI(a.Name, i, a)
+				// V2 agents address instances with the binding prefix
+				// (matching Agent.QualifiedInstanceName), so accept both
+				// the bare and binding-qualified forms — same shape the
+				// unlimited path applies above.
 				if memberName == baseName {
+					return a, true
+				}
+				if a.BindingName != "" && a.BindingName+"."+memberName == baseName {
 					return a, true
 				}
 			}

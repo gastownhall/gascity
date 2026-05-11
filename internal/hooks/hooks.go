@@ -26,7 +26,7 @@ import (
 var configFS embed.FS
 
 // supported lists provider names that have hook support.
-var supported = []string{"claude", "codex", "gemini", "opencode", "copilot", "cursor", "pi", "omp"}
+var supported = []string{"claude", "codex", "gemini", "kiro", "opencode", "copilot", "cursor", "pi", "omp"}
 
 // unsupported lists provider names that have no hook mechanism.
 var unsupported = []string{"amp", "auggie"}
@@ -118,7 +118,7 @@ func InstallWithResolver(fs fsys.FS, cityDir, workDir string, providers []string
 		switch family {
 		case "claude":
 			err = installClaude(fs, cityDir)
-		case "codex", "gemini", "opencode", "copilot", "cursor", "pi", "omp":
+		case "codex", "gemini", "kiro", "opencode", "copilot", "cursor", "pi", "omp":
 			err = installOverlayManaged(fs, workDir, family)
 		default:
 			return fmt.Errorf("unsupported hook provider %q", p)

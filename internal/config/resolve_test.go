@@ -271,25 +271,336 @@ func TestResolveProviderUserDefinedProvider(t *testing.T) {
 	agent := &Agent{Name: "scout", Provider: "kiro"}
 	cityProviders := map[string]ProviderSpec{
 		"kiro": {
-			Command:      "kiro",
-			Args:         []string{"--autonomous"},
-			PromptMode:   "arg",
-			ReadyDelayMs: 5000,
-			ProcessNames: []string{"kiro", "node"},
+			Command:          "kiro-cli",
+			Args:             []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
+			PromptMode:       "arg",
+			ReadyDelayMs:     5000,
+			ProcessNames:     []string{"kiro", "node"},
+			SupportsHooks:    boolPtr(true),
+			InstructionsFile: "AGENTS.md",
+			ResumeFlag:       "--resume",
+			ResumeStyle:      "flag",
+			Env:              map[string]string{"KIRO_AGENT_MODE": "headless"},
+			PermissionModes:  map[string]string{"unrestricted": "--trust-mode full"},
 		},
 	}
-	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro"))
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro-cli"))
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
 	if rp.Name != "kiro" {
 		t.Errorf("Name = %q, want %q", rp.Name, "kiro")
 	}
-	if rp.CommandString() != "kiro --autonomous" {
-		t.Errorf("CommandString() = %q, want %q", rp.CommandString(), "kiro --autonomous")
+	if rp.CommandString() != "kiro-cli chat --no-interactive --agent gascity --trust-all-tools" {
+		t.Errorf("CommandString() = %q, want %q", rp.CommandString(), "kiro-cli chat --no-interactive --agent gascity --trust-all-tools")
 	}
 	if rp.ReadyDelayMs != 5000 {
 		t.Errorf("ReadyDelayMs = %d, want 5000", rp.ReadyDelayMs)
+	}
+	if len(rp.ProcessNames) != 2 || rp.ProcessNames[0] != "kiro" || rp.ProcessNames[1] != "node" {
+		t.Errorf("ProcessNames = %v, want [kiro node]", rp.ProcessNames)
+	}
+	if !rp.SupportsHooks {
+		t.Error("SupportsHooks = false, want true")
+	}
+	if rp.InstructionsFile != "AGENTS.md" {
+		t.Errorf("InstructionsFile = %q, want %q", rp.InstructionsFile, "AGENTS.md")
+	}
+	if rp.ResumeFlag != "--resume" {
+		t.Errorf("ResumeFlag = %q, want %q", rp.ResumeFlag, "--resume")
+	}
+	if rp.ResumeStyle != "flag" {
+		t.Errorf("ResumeStyle = %q, want %q", rp.ResumeStyle, "flag")
+	}
+	if rp.Env["KIRO_AGENT_MODE"] != "headless" {
+		t.Errorf("Env[KIRO_AGENT_MODE] = %q, want %q", rp.Env["KIRO_AGENT_MODE"], "headless")
+	}
+	if rp.PermissionModes["unrestricted"] != "--trust-mode full" {
+		t.Errorf("PermissionModes[unrestricted] = %q, want %q", rp.PermissionModes["unrestricted"], "--trust-mode full")
+	}
+}
+
+func TestResolveProviderKiroAgentArgsOverride(t *testing.T) {
+	agent := &Agent{
+		Name:     "scout",
+		Provider: "kiro",
+		Args:     []string{"chat", "--no-interactive", "--agent", "gascity", "--verbose"},
+	}
+	cityProviders := map[string]ProviderSpec{
+		"kiro": {
+			Command:      "kiro-cli",
+			Args:         []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
+			PromptMode:   "arg",
+			ReadyDelayMs: 5000,
+			ProcessNames: []string{"kiro", "node"},
+		},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if len(rp.Args) != 5 || rp.Args[4] != "--verbose" {
+		t.Errorf("Args = %v, want [chat --no-interactive --agent gascity --verbose]", rp.Args)
+	}
+	if rp.ReadyDelayMs != 5000 {
+		t.Errorf("ReadyDelayMs = %d, want 5000 (provider default preserved)", rp.ReadyDelayMs)
+	}
+}
+
+func TestResolveProviderKiroProviderArgsOverrideOmitsTrustAllTools(t *testing.T) {
+	agent := &Agent{
+		Name:     "scout",
+		Provider: "kiro",
+	}
+	cityProviders := map[string]ProviderSpec{
+		"kiro": {
+			Command:    "kiro-cli",
+			Args:       []string{"chat", "--no-interactive", "--agent", "gascity"},
+			PromptMode: "arg",
+		},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	wantArgs := []string{"chat", "--no-interactive", "--agent", "gascity"}
+	if !reflect.DeepEqual(rp.Args, wantArgs) {
+		t.Fatalf("Args = %v, want %v", rp.Args, wantArgs)
+	}
+	if strings.Contains(rp.CommandString(), "--trust-all-tools") {
+		t.Fatalf("CommandString() = %q, want provider override without --trust-all-tools", rp.CommandString())
+	}
+	cmd, err := BuildProviderLaunchCommand("/city", rp, nil, SessionTransportTmux)
+	if err != nil {
+		t.Fatalf("BuildProviderLaunchCommand(tmux): %v", err)
+	}
+	if strings.Contains(cmd.Command, "--trust-all-tools") {
+		t.Fatalf("tmux launch command = %q, want provider override without --trust-all-tools", cmd.Command)
+	}
+}
+
+func TestResolveProviderBuiltinKiroACPCommand(t *testing.T) {
+	agent := &Agent{Name: "scout", Provider: "kiro"}
+	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if !rp.SupportsACP {
+		t.Fatal("SupportsACP = false, want true")
+	}
+	if got := rp.ACPCommandString(); got != "kiro-cli acp --agent gascity" {
+		t.Errorf("ACPCommandString() = %q, want %q", got, "kiro-cli acp --agent gascity")
+	}
+	if got := ResolveSessionCreateTransport("", rp); got != "" {
+		t.Errorf("ResolveSessionCreateTransport(empty) = %q, want empty default transport", got)
+	}
+	cmd, err := BuildProviderLaunchCommand("/city", rp, nil, SessionTransportTmux)
+	if err != nil {
+		t.Fatalf("BuildProviderLaunchCommand(tmux): %v", err)
+	}
+	if cmd.Command != "kiro-cli chat --no-interactive --agent gascity --trust-all-tools" {
+		t.Errorf("tmux launch command = %q, want kiro-cli chat --no-interactive --agent gascity --trust-all-tools", cmd.Command)
+	}
+	acp, err := BuildProviderLaunchCommand("/city", rp, nil, SessionTransportACP)
+	if err != nil {
+		t.Fatalf("BuildProviderLaunchCommand(acp): %v", err)
+	}
+	if acp.Command != "kiro-cli acp --agent gascity" {
+		t.Errorf("acp launch command = %q, want kiro-cli acp --agent gascity", acp.Command)
+	}
+}
+
+func TestResolveProviderKiroAgentEnvMerges(t *testing.T) {
+	agent := &Agent{
+		Name:     "scout",
+		Provider: "kiro",
+		Env:      map[string]string{"EXTRA": "yes"},
+	}
+	cityProviders := map[string]ProviderSpec{
+		"kiro": {
+			Command: "kiro-cli",
+			Env:     map[string]string{"KIRO_AGENT_MODE": "headless"},
+		},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.Env["KIRO_AGENT_MODE"] != "headless" {
+		t.Errorf("Env[KIRO_AGENT_MODE] = %q, want %q (provider env preserved)", rp.Env["KIRO_AGENT_MODE"], "headless")
+	}
+	if rp.Env["EXTRA"] != "yes" {
+		t.Errorf("Env[EXTRA] = %q, want %q (agent env merged)", rp.Env["EXTRA"], "yes")
+	}
+}
+
+func TestResolveProviderKiroDefaultPromptMode(t *testing.T) {
+	agent := &Agent{Name: "worker", Provider: "kiro"}
+	cityProviders := map[string]ProviderSpec{
+		"kiro": {Command: "kiro-cli"},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.PromptMode != "arg" {
+		t.Errorf("PromptMode = %q, want %q (default)", rp.PromptMode, "arg")
+	}
+}
+
+func TestResolveProviderKiroInstructionsFileDefault(t *testing.T) {
+	agent := &Agent{Name: "worker", Provider: "kiro"}
+	cityProviders := map[string]ProviderSpec{
+		"kiro": {Command: "kiro-cli"},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.InstructionsFile != "AGENTS.md" {
+		t.Errorf("InstructionsFile = %q, want %q (default)", rp.InstructionsFile, "AGENTS.md")
+	}
+}
+
+func TestResolveProviderKiroOptionsSchemaResolveDefaultArgs(t *testing.T) {
+	agent := &Agent{Name: "worker", Provider: "kiro"}
+	cityProviders := map[string]ProviderSpec{
+		"kiro": {
+			Command:    "kiro-cli",
+			Args:       []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
+			PromptMode: "arg",
+			OptionDefaults: map[string]string{
+				"permission_mode": "unrestricted",
+			},
+			OptionsSchema: []ProviderOption{
+				{
+					Key:     "permission_mode",
+					Label:   "Trust Mode",
+					Type:    "select",
+					Default: "default",
+					Choices: []OptionChoice{
+						{Value: "default", Label: "Default", FlagArgs: []string{"--trust-mode", "default"}},
+						{Value: "unrestricted", Label: "Full trust", FlagArgs: []string{"--trust-mode", "full"}},
+					},
+				},
+			},
+		},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	defaultArgs := rp.ResolveDefaultArgs()
+	wantArgs := []string{"--trust-mode", "full"}
+	if !reflect.DeepEqual(defaultArgs, wantArgs) {
+		t.Errorf("ResolveDefaultArgs() = %v, want %v", defaultArgs, wantArgs)
+	}
+}
+
+func TestResolveProviderKiroAgentOptionDefaultsOverride(t *testing.T) {
+	agent := &Agent{
+		Name:           "worker",
+		Provider:       "kiro",
+		OptionDefaults: map[string]string{"permission_mode": "default"},
+	}
+	cityProviders := map[string]ProviderSpec{
+		"kiro": {
+			Command:    "kiro-cli",
+			PromptMode: "arg",
+			OptionDefaults: map[string]string{
+				"permission_mode": "unrestricted",
+			},
+			OptionsSchema: []ProviderOption{
+				{
+					Key:     "permission_mode",
+					Label:   "Trust Mode",
+					Type:    "select",
+					Default: "unrestricted",
+					Choices: []OptionChoice{
+						{Value: "default", Label: "Default", FlagArgs: []string{"--trust-mode", "default"}},
+						{Value: "unrestricted", Label: "Full trust", FlagArgs: []string{"--trust-mode", "full"}},
+					},
+				},
+			},
+		},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.EffectiveDefaults["permission_mode"] != "default" {
+		t.Errorf("EffectiveDefaults[permission_mode] = %q, want %q (agent override)", rp.EffectiveDefaults["permission_mode"], "default")
+	}
+	defaultArgs := rp.ResolveDefaultArgs()
+	wantArgs := []string{"--trust-mode", "default"}
+	if !reflect.DeepEqual(defaultArgs, wantArgs) {
+		t.Errorf("ResolveDefaultArgs() = %v, want %v", defaultArgs, wantArgs)
+	}
+}
+
+func TestResolveProviderKiroPermissionModesDeepCopy(t *testing.T) {
+	agent := &Agent{Name: "worker", Provider: "kiro"}
+	cityProviders := map[string]ProviderSpec{
+		"kiro": {
+			Command: "kiro-cli",
+			PermissionModes: map[string]string{
+				"unrestricted": "--trust-mode full",
+				"default":      "--trust-mode default",
+			},
+		},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if len(rp.PermissionModes) != 2 {
+		t.Fatalf("got %d permission modes, want 2", len(rp.PermissionModes))
+	}
+	rp.PermissionModes["injected"] = "malicious"
+	if _, ok := cityProviders["kiro"].PermissionModes["injected"]; ok {
+		t.Error("mutating ResolvedProvider.PermissionModes leaked into city provider")
+	}
+}
+
+func TestAgentHasHooks_KiroViaInstallHooks(t *testing.T) {
+	agent := &Agent{Name: "worker"}
+	ws := &Workspace{InstallAgentHooks: []string{"kiro"}}
+	if !AgentHasHooks(agent, ws, "kiro", nil) {
+		t.Error("kiro in install_agent_hooks should have hooks")
+	}
+}
+
+func TestAgentHasHooks_KiroDefault(t *testing.T) {
+	agent := &Agent{Name: "worker"}
+	ws := &Workspace{Name: "test"}
+	if AgentHasHooks(agent, ws, "kiro", nil) {
+		t.Error("kiro without install_agent_hooks or explicit override should not have hooks by default")
+	}
+}
+
+func TestAgentHasHooks_KiroExplicitOverride(t *testing.T) {
+	yes := true
+	agent := &Agent{Name: "worker", HooksInstalled: &yes}
+	ws := &Workspace{Name: "test"}
+	if !AgentHasHooks(agent, ws, "kiro", nil) {
+		t.Error("kiro with hooks_installed=true should have hooks")
+	}
+}
+
+func TestBuiltinFamilyKiroIsKiro(t *testing.T) {
+	family := BuiltinFamily("kiro", nil)
+	if family != "kiro" {
+		t.Errorf("BuiltinFamily(kiro, nil) = %q, want \"kiro\"", family)
+	}
+}
+
+func TestBuiltinFamilyKiroWithCityProviders(t *testing.T) {
+	cityProviders := map[string]ProviderSpec{
+		"kiro": {Command: "kiro-cli"},
+	}
+	family := BuiltinFamily("kiro", cityProviders)
+	if family != "kiro" {
+		t.Errorf("BuiltinFamily(kiro, city) = %q, want \"kiro\"", family)
 	}
 }
 
@@ -1061,7 +1372,7 @@ func TestLookupProviderNotInPath(t *testing.T) {
 
 func TestLookupProviderCityNotInPath(t *testing.T) {
 	city := map[string]ProviderSpec{
-		"kiro": {Command: "kiro"},
+		"kiro": {Command: "kiro-cli"},
 	}
 	_, err := lookupProvider("kiro", city, lookPathNone)
 	if err == nil {

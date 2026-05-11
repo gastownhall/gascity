@@ -253,7 +253,7 @@ func preserveConfiguredNamedSessionBead(b beads.Bead, cfg *config.City, cityName
 			}
 		}
 		return false
-	case "failed-create":
+	case string(session.StateFailedCreate):
 		// rollbackPendingCreate sets state="failed-create" only with
 		// Status=closed atomically. A Status=open + state="failed-create"
 		// combination means a write failed mid-rollback — release the
@@ -768,10 +768,19 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 	// Index by session_name for O(1) lookup. Skip closed beads — a closed
 	// bead is a completed lifecycle record, not a live session. If an agent
 	// restarts after its bead was closed, we create a fresh bead.
+	now := clk.Now().UTC()
 	bySessionName := make(map[string]beads.Bead, len(existing))
 	indexBySessionName := make(map[string]int, len(existing))
 	openBeads := make([]beads.Bead, len(existing))
 	copy(openBeads, existing)
+	for i, b := range openBeads {
+		if b.Status == "closed" || !isNamedSessionBead(b) || !isFailedCreateSessionBead(b) {
+			continue
+		}
+		if closeFailedCreateBead(store, b.ID, now, stderr) {
+			openBeads[i].Status = "closed"
+		}
+	}
 	for i, b := range openBeads {
 		if b.Status == "closed" {
 			continue
@@ -817,7 +826,6 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		desiredNames[sn] = true
 	}
 
-	now := clk.Now().UTC()
 	cityName := config.EffectiveCityName(cfg, filepath.Base(cityPath))
 	var (
 		visibleBySessionName map[string]beads.Bead
@@ -1585,7 +1593,7 @@ func setMetaBatch(store beads.Store, id string, batch map[string]string, stderr 
 }
 
 func closeFailedCreateBead(store beads.Store, id string, now time.Time, stderr io.Writer) bool {
-	patch := session.ClosePatch(now.UTC(), "failed-create")
+	patch := session.ClosePatch(now.UTC(), string(session.StateFailedCreate))
 	patch["pending_create_claim"] = ""
 	patch["pending_create_started_at"] = ""
 	if setMetaBatch(store, id, patch, stderr) != nil {
@@ -1595,6 +1603,10 @@ func closeFailedCreateBead(store beads.Store, id string, now time.Time, stderr i
 		fmt.Fprintf(stderr, "session beads: closing failed-create bead %s: %v\n", id, err) //nolint:errcheck
 		return false
 	}
+	// Defense in depth: a startup race between bead creation and an early
+	// bind could leave participant records behind. Cleanup helpers no-op
+	// when the session has no labeled state.
+	cancelStateAssignedToRetiredSessionBead(store, id, now, stderr)
 	return true
 }
 
@@ -1785,6 +1797,9 @@ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 	if hasAssignedWork {
 		return false
 	}
+	if isFailedCreateSessionBead(b) {
+		return closeFailedCreateBead(store, b.ID, now, stderr)
+	}
 	return closeBead(store, b.ID, closeReason, now, stderr)
 }
 
@@ -1864,6 +1879,12 @@ func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Wr
 		fmt.Fprintf(stderr, "session beads: closing %s: %v\n", id, err) //nolint:errcheck
 		return false
 	}
+	// Cascade extmsg cleanup. Pool retirement funnels through closeBead;
+	// named-session retirement calls this directly at
+	// retireRemovedConfiguredNamedSessionBead. Without it, pool respawn
+	// leaves zombie memberships and the successor never re-binds to
+	// slack (#1939).
+	cancelStateAssignedToRetiredSessionBead(store, id, now, stderr)
 	return true
 }
 

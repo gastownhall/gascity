@@ -195,7 +195,7 @@ case "$op" in
         run_bd config set types.custom "$CUSTOM_TYPES" >/dev/null 2>&1 || true
       else
         # Must match the init-branch default below and doctor.RequiredCustomTypes.
-        custom_types="${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence}"
+        custom_types="${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step}"
         run_bd config set types.custom "$custom_types" >/dev/null 2>&1 || true
       fi
       exit 0
@@ -285,7 +285,7 @@ case "$op" in
     # and doctor.RequiredCustomTypes). Without this, bd rejects creates for
     # types like "session" that aren't in the default set. "convergence" is
     # required because gc's convergence handler creates beads with that type.
-    custom_types="${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence}"
+    custom_types="${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step}"
     GC_STORE_ROOT="$scope_root" run_bd config set types.custom "$custom_types" >/dev/null 2>&1 || true
     ;;
 

@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // fakeIdleTracker is a test double for idleTracker.
@@ -471,8 +472,11 @@ func TestReconcileSessionBeads_UndesiredDrainAckStopsAndCloses(t *testing.T) {
 	if got.Status != "closed" {
 		t.Fatalf("status = %q, want closed; metadata=%v", got.Status, got.Metadata)
 	}
-	if got.Metadata["close_reason"] != "drained" {
-		t.Fatalf("close_reason = %q, want drained", got.Metadata["close_reason"])
+	if want := sessionpkg.CanonicalCloseReason("drained"); got.Metadata["close_reason"] != want {
+		t.Fatalf("close_reason = %q, want %q", got.Metadata["close_reason"], want)
+	}
+	if got.Metadata["state"] != "drained" {
+		t.Fatalf("state = %q, want %q", got.Metadata["state"], "drained")
 	}
 }
 
@@ -1057,8 +1061,11 @@ func TestReconcileSessionBeads_CloseGatePreservesSleepReason(t *testing.T) {
 			if got.Status != "closed" {
 				t.Fatalf("status = %q, want closed", got.Status)
 			}
-			if got.Metadata["close_reason"] != tc.wantReason {
-				t.Fatalf("close_reason = %q, want %q — close gate must preserve the originating sleep_reason for forensic fidelity", got.Metadata["close_reason"], tc.wantReason)
+			if want := sessionpkg.CanonicalCloseReason(tc.wantReason); got.Metadata["close_reason"] != want {
+				t.Fatalf("close_reason = %q, want %q (canonical for %q) — close gate must preserve the originating sleep_reason for forensic fidelity", got.Metadata["close_reason"], want, tc.wantReason)
+			}
+			if got.Metadata["state"] != tc.wantReason {
+				t.Fatalf("state = %q, want %q — state preserves the short sleep_reason code", got.Metadata["state"], tc.wantReason)
 			}
 		})
 	}
@@ -2494,7 +2501,7 @@ func TestReconcileSessionBeads_PendingCreateLeasePreventsOrphanClose(t *testing.
 	if got.Status == "closed" {
 		t.Fatalf("pending-create session was closed as orphan: %+v", got)
 	}
-	if got.Metadata["state"] == "orphaned" || got.Metadata["close_reason"] == "orphaned" {
+	if got.Metadata["state"] == "orphaned" {
 		t.Fatalf("pending-create session was marked orphaned: %+v", got.Metadata)
 	}
 }
@@ -2518,7 +2525,7 @@ func TestReconcileSessionBeads_FreshPendingCreateSurvivesStaleConfigSnapshot(t *
 	if got.Status == "closed" {
 		t.Fatalf("fresh pending-create session was closed as orphan: %+v", got)
 	}
-	if got.Metadata["state"] == "orphaned" || got.Metadata["close_reason"] == "orphaned" {
+	if got.Metadata["state"] == "orphaned" {
 		t.Fatalf("fresh pending-create session was marked orphaned: %+v", got.Metadata)
 	}
 }
@@ -2547,7 +2554,7 @@ func TestReconcileSessionBeads_PendingCreateWithoutDesiredStateUsesNeverStartedL
 	if got.Status == "closed" {
 		t.Fatalf("pending-create session was closed before never-started lease expired: %+v", got)
 	}
-	if got.Metadata["state"] == "orphaned" || got.Metadata["close_reason"] == "orphaned" {
+	if got.Metadata["state"] == "orphaned" {
 		t.Fatalf("pending-create session was marked orphaned before never-started lease expired: %+v", got.Metadata)
 	}
 }
@@ -2980,8 +2987,11 @@ func TestReconcileSessionBeads_OrphanNotRunningClosed(t *testing.T) {
 	if b.Status != "closed" {
 		t.Errorf("orphan bead status = %q, want closed", b.Status)
 	}
-	if b.Metadata["close_reason"] != "orphaned" {
-		t.Errorf("close_reason = %q, want %q", b.Metadata["close_reason"], "orphaned")
+	if want := sessionpkg.CanonicalCloseReason("orphaned"); b.Metadata["close_reason"] != want {
+		t.Errorf("close_reason = %q, want %q", b.Metadata["close_reason"], want)
+	}
+	if b.Metadata["state"] != "orphaned" {
+		t.Errorf("state = %q, want %q", b.Metadata["state"], "orphaned")
 	}
 }
 
@@ -3020,8 +3030,11 @@ func TestReconcileSessionBeads_SuspendedNotRunningClosed(t *testing.T) {
 	if b.Status != "closed" {
 		t.Errorf("suspended bead status = %q, want closed", b.Status)
 	}
-	if b.Metadata["close_reason"] != "suspended" {
-		t.Errorf("close_reason = %q, want %q", b.Metadata["close_reason"], "suspended")
+	if want := sessionpkg.CanonicalCloseReason("suspended"); b.Metadata["close_reason"] != want {
+		t.Errorf("close_reason = %q, want %q", b.Metadata["close_reason"], want)
+	}
+	if b.Metadata["state"] != "suspended" {
+		t.Errorf("state = %q, want %q", b.Metadata["state"], "suspended")
 	}
 }
 
@@ -3312,8 +3325,11 @@ func TestReconcileSessionBeads_InvalidNamedSessionConfigDoesNotPreserveBead(t *t
 	if b.Status != "closed" {
 		t.Fatalf("status = %q, want closed", b.Status)
 	}
-	if b.Metadata["close_reason"] != "suspended" {
-		t.Fatalf("close_reason = %q, want suspended", b.Metadata["close_reason"])
+	if want := sessionpkg.CanonicalCloseReason("suspended"); b.Metadata["close_reason"] != want {
+		t.Fatalf("close_reason = %q, want %q", b.Metadata["close_reason"], want)
+	}
+	if b.Metadata["state"] != "suspended" {
+		t.Fatalf("state = %q, want %q", b.Metadata["state"], "suspended")
 	}
 }
 
@@ -3623,8 +3639,11 @@ func TestReconcileSessionBeads_RollsBackAdHocCreateOnRuntimeCollision(t *testing
 	if got.Metadata["session_name"] != "" {
 		t.Fatalf("session_name = %q, want empty after rollback", got.Metadata["session_name"])
 	}
-	if got.Metadata["close_reason"] != "failed-create" {
-		t.Fatalf("close_reason = %q, want failed-create", got.Metadata["close_reason"])
+	if want := sessionpkg.CanonicalCloseReason("failed-create"); got.Metadata["close_reason"] != want {
+		t.Fatalf("close_reason = %q, want %q", got.Metadata["close_reason"], want)
+	}
+	if got.Metadata["state"] != "failed-create" {
+		t.Fatalf("state = %q, want %q", got.Metadata["state"], "failed-create")
 	}
 	if got.Metadata["wake_attempts"] != "" {
 		t.Fatalf("wake_attempts = %q, want empty", got.Metadata["wake_attempts"])
@@ -3815,8 +3834,8 @@ func TestReconcileSessionBeads_RollsBackPendingCreateWhenLeaseExpiredAndNoRuntim
 	if got.Status != "closed" {
 		t.Fatalf("status = %q, want closed (stale lease + no runtime should rollback)", got.Status)
 	}
-	if got.Metadata["close_reason"] != "failed-create" {
-		t.Fatalf("close_reason = %q, want failed-create", got.Metadata["close_reason"])
+	if want := sessionpkg.CanonicalCloseReason(string(sessionpkg.StateFailedCreate)); got.Metadata["close_reason"] != want {
+		t.Fatalf("close_reason = %q, want %q", got.Metadata["close_reason"], want)
 	}
 }
 
@@ -4163,8 +4182,11 @@ func TestReconcileSessionBeads_RollsBackPendingCreateWhenConflictingRuntimeAlrea
 	if got.Metadata["session_name"] != "" {
 		t.Fatalf("session_name = %q, want empty after rollback", got.Metadata["session_name"])
 	}
-	if got.Metadata["close_reason"] != "failed-create" {
-		t.Fatalf("close_reason = %q, want failed-create", got.Metadata["close_reason"])
+	if want := sessionpkg.CanonicalCloseReason("failed-create"); got.Metadata["close_reason"] != want {
+		t.Fatalf("close_reason = %q, want %q", got.Metadata["close_reason"], want)
+	}
+	if got.Metadata["state"] != "failed-create" {
+		t.Fatalf("state = %q, want %q", got.Metadata["state"], "failed-create")
 	}
 }
 
@@ -4215,8 +4237,8 @@ func TestReconcileSessionBeads_RollbackBudgetDefersExcessMismatchesAndStillStart
 			t.Fatalf("Get(%s): %v", sessions[i].ID, err)
 		}
 		if got.Status == "closed" {
-			if got.Metadata["close_reason"] != "failed-create" {
-				t.Fatalf("%s close_reason = %q, want failed-create", name, got.Metadata["close_reason"])
+			if want := sessionpkg.CanonicalCloseReason(string(sessionpkg.StateFailedCreate)); got.Metadata["close_reason"] != want {
+				t.Fatalf("%s close_reason = %q, want %q", name, got.Metadata["close_reason"], want)
 			}
 			closedMismatches++
 			continue
@@ -4285,8 +4307,8 @@ func TestReconcileSessionBeads_RollbackBudgetDefersExcessStaleNoRuntimeCreatesAn
 			t.Fatalf("Get(%s): %v", sessions[i].ID, err)
 		}
 		if got.Status == "closed" {
-			if got.Metadata["close_reason"] != "failed-create" {
-				t.Fatalf("%s close_reason = %q, want failed-create", name, got.Metadata["close_reason"])
+			if want := sessionpkg.CanonicalCloseReason(string(sessionpkg.StateFailedCreate)); got.Metadata["close_reason"] != want {
+				t.Fatalf("%s close_reason = %q, want %q", name, got.Metadata["close_reason"], want)
 			}
 			closedCreates++
 			continue
@@ -4486,8 +4508,11 @@ func TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError(t *testing.
 	if got.Metadata["session_name"] != "" {
 		t.Fatalf("session_name = %q, want empty after rollback", got.Metadata["session_name"])
 	}
-	if got.Metadata["close_reason"] != "failed-create" {
-		t.Fatalf("close_reason = %q, want failed-create", got.Metadata["close_reason"])
+	if want := sessionpkg.CanonicalCloseReason("failed-create"); got.Metadata["close_reason"] != want {
+		t.Fatalf("close_reason = %q, want %q", got.Metadata["close_reason"], want)
+	}
+	if got.Metadata["state"] != "failed-create" {
+		t.Fatalf("state = %q, want %q", got.Metadata["state"], "failed-create")
 	}
 	if got.Metadata["wake_attempts"] != "" {
 		t.Fatalf("wake_attempts = %q, want empty", got.Metadata["wake_attempts"])
@@ -5991,6 +6016,345 @@ func TestResolveSessionCommand(t *testing.T) {
 func TestDrainedIsKnownState(t *testing.T) {
 	if !knownSessionStates["drained"] {
 		t.Fatal("drained must be a known session state")
+	}
+}
+
+func TestFailedCreateIsKnownState(t *testing.T) {
+	if !knownSessionStates[string(sessionpkg.StateFailedCreate)] {
+		t.Fatal("failed-create must be a known session state")
+	}
+}
+
+func TestReconcileSessionBeads_BuildDesiredStateSkipsFailedCreatePoolSession(t *testing.T) {
+	cases := []struct {
+		name             string
+		startedAt        time.Time
+		wantFailedStatus string
+	}{
+		{
+			name:             "fresh pending lease waits for expiry",
+			startedAt:        time.Date(2026, 4, 1, 11, 59, 0, 0, time.UTC),
+			wantFailedStatus: "open",
+		},
+		{
+			name:             "stale pending lease closes",
+			startedAt:        time.Date(2026, 4, 1, 11, 49, 59, 0, time.UTC),
+			wantFailedStatus: "closed",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			clk := &clock.Fake{Time: time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)}
+			sp := runtime.NewFake()
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents: []config.Agent{{
+					Name:              "worker",
+					StartCommand:      "true",
+					MaxActiveSessions: intPtr(3),
+					ScaleCheck:        "printf 1",
+				}},
+			}
+
+			failedBead, err := store.Create(beads.Bead{
+				Title:  "worker-1",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel, "agent:worker-1"},
+				Metadata: map[string]string{
+					"session_name":              "worker-1",
+					"agent_name":                "worker-1",
+					"template":                  "worker",
+					"state":                     string(sessionpkg.StateFailedCreate),
+					"pool_slot":                 "1",
+					"pending_create_claim":      boolMetadata(true),
+					"pending_create_started_at": pendingCreateStartedAtNow(tc.startedAt),
+					poolManagedMetadataKey:      boolMetadata(true),
+					"live_hash":                 runtime.LiveFingerprint(runtime.Config{Command: "true"}),
+					"generation":                "1",
+					"instance_token":            "failed-token",
+				},
+			})
+			if err != nil {
+				t.Fatalf("Create failed-create bead: %v", err)
+			}
+
+			var stdout, stderr bytes.Buffer
+			dsResult := buildDesiredState(cfg.EffectiveCityName(), t.TempDir(), clk.Now().UTC(), cfg, sp, store, &stderr)
+			if _, ok := dsResult.State[failedBead.Metadata["session_name"]]; ok {
+				t.Fatalf("desired state reused failed-create bead %s; state=%#v", failedBead.ID, dsResult.State)
+			}
+
+			var fresh TemplateParams
+			for _, tp := range dsResult.State {
+				if tp.TemplateName == "worker" {
+					fresh = tp
+					break
+				}
+			}
+			if fresh.SessionName == "" {
+				t.Fatalf("desired state did not allocate a fresh worker session; state=%#v stderr:\n%s", dsResult.State, stderr.String())
+			}
+			if fresh.SessionName == failedBead.Metadata["session_name"] {
+				t.Fatalf("fresh session name = %q, want different from failed-create bead", fresh.SessionName)
+			}
+
+			sessions, err := loadSessionBeads(store)
+			if err != nil {
+				t.Fatalf("loadSessionBeads: %v", err)
+			}
+			cfgNames := configuredSessionNames(cfg, cfg.EffectiveCityName(), store)
+			poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, sessions, dsResult.ScaleCheckCounts))
+			if poolDesired == nil {
+				poolDesired = make(map[string]int)
+			}
+			mergeNamedSessionDemand(poolDesired, dsResult.NamedSessionDemand, cfg)
+
+			woken := reconcileSessionBeads(
+				context.Background(), sessions, dsResult.State, cfgNames,
+				cfg, sp, store, nil, dsResult.AssignedWorkBeads, nil, newDrainTracker(), poolDesired,
+				dsResult.StoreQueryPartial, nil, cfg.EffectiveCityName(),
+				nil, clk, events.Discard, 0, 0, &stdout, &stderr,
+			)
+			if woken != 1 {
+				t.Fatalf("woken = %d, want 1 for fresh replacement session; stdout:\n%s\nstderr:\n%s", woken, stdout.String(), stderr.String())
+			}
+			if !sp.IsRunning(fresh.SessionName) {
+				t.Fatalf("fresh session %q is not running after reconcile; stdout:\n%s\nstderr:\n%s", fresh.SessionName, stdout.String(), stderr.String())
+			}
+
+			gotFailed, err := store.Get(failedBead.ID)
+			if err != nil {
+				t.Fatalf("Get failed-create bead: %v", err)
+			}
+			if gotFailed.Status != tc.wantFailedStatus {
+				t.Fatalf("failed-create bead status = %q, want %q", gotFailed.Status, tc.wantFailedStatus)
+			}
+			if gotFailed.Status == "open" && gotFailed.Metadata["state"] != string(sessionpkg.StateFailedCreate) {
+				t.Fatalf("open failed-create bead state = %q, want %q", gotFailed.Metadata["state"], sessionpkg.StateFailedCreate)
+			}
+			if gotFailed.Status == "open" {
+				var secondTickStderr bytes.Buffer
+				secondTick := buildDesiredState(cfg.EffectiveCityName(), t.TempDir(), clk.Now().UTC(), cfg, sp, store, &secondTickStderr)
+				if _, ok := secondTick.State[failedBead.Metadata["session_name"]]; ok {
+					t.Fatalf("second tick reused failed-create bead %s; state=%#v stderr:\n%s", failedBead.ID, secondTick.State, secondTickStderr.String())
+				}
+			}
+			if strings.Contains(stderr.String(), "unknown state") {
+				t.Errorf("reconciler logged unknown state for failed-create bead: %s", stderr.String())
+			}
+		})
+	}
+}
+
+func TestReconcileSessionBeads_SyncReplacesFailedCreateNamedSession(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+		}},
+		NamedSessions: []config.NamedSession{{
+			Name:     "primary",
+			Template: "worker",
+			Mode:     "always",
+		}},
+	}
+	identity := "primary"
+	sessionName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, identity)
+	failedBead, err := store.Create(beads.Bead{
+		Title:  sessionName,
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + identity},
+		Metadata: map[string]string{
+			"session_name":               sessionName,
+			"alias":                      identity,
+			"agent_name":                 identity,
+			"template":                   "worker",
+			"state":                      string(sessionpkg.StateFailedCreate),
+			"pending_create_claim":       boolMetadata(true),
+			"pending_create_started_at":  pendingCreateStartedAtNow(clk.Now()),
+			"live_hash":                  runtime.LiveFingerprint(runtime.Config{Command: "true"}),
+			"generation":                 "1",
+			"instance_token":             "failed-token",
+			namedSessionMetadataKey:      boolMetadata(true),
+			namedSessionIdentityMetadata: identity,
+			namedSessionModeMetadata:     "always",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create failed-create named bead: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	dsResult := buildDesiredState(cfg.EffectiveCityName(), cityPath, clk.Now().UTC(), cfg, sp, store, &stderr)
+	if _, ok := dsResult.State[sessionName]; !ok {
+		t.Fatalf("desired state missing configured named session %q; state=%#v stderr:\n%s", sessionName, dsResult.State, stderr.String())
+	}
+	cfgNames := configuredSessionNames(cfg, cfg.EffectiveCityName(), store)
+	syncSessionBeads(cityPath, store, dsResult.State, sp, cfgNames, cfg, clk, &stderr, true)
+
+	gotFailed, err := store.Get(failedBead.ID)
+	if err != nil {
+		t.Fatalf("Get failed-create named bead: %v", err)
+	}
+	if gotFailed.Status != "closed" {
+		t.Fatalf("failed-create named bead status = %q, want closed; stderr:\n%s", gotFailed.Status, stderr.String())
+	}
+	if want := sessionpkg.CanonicalCloseReason(string(sessionpkg.StateFailedCreate)); gotFailed.Metadata["close_reason"] != want {
+		t.Fatalf("failed-create named bead close_reason = %q, want %q", gotFailed.Metadata["close_reason"], want)
+	}
+	if gotFailed.Metadata["pending_create_claim"] != "" {
+		t.Fatalf("failed-create named bead pending_create_claim = %q, want cleared", gotFailed.Metadata["pending_create_claim"])
+	}
+
+	sessions, err := loadSessionBeads(store)
+	if err != nil {
+		t.Fatalf("loadSessionBeads: %v", err)
+	}
+	var fresh beads.Bead
+	for _, b := range sessions {
+		if b.ID != failedBead.ID && b.Metadata["session_name"] == sessionName {
+			fresh = b
+			break
+		}
+	}
+	if fresh.ID == "" {
+		t.Fatalf("sync did not create a fresh named-session bead; open sessions=%#v stderr:\n%s", sessions, stderr.String())
+	}
+	if fresh.Metadata["state"] != string(sessionpkg.StateCreating) {
+		t.Fatalf("fresh named-session state = %q, want creating", fresh.Metadata["state"])
+	}
+
+	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, sessions, dsResult.ScaleCheckCounts))
+	if poolDesired == nil {
+		poolDesired = make(map[string]int)
+	}
+	mergeNamedSessionDemand(poolDesired, dsResult.NamedSessionDemand, cfg)
+	woken := reconcileSessionBeads(
+		context.Background(), sessions, dsResult.State, cfgNames,
+		cfg, sp, store, nil, dsResult.AssignedWorkBeads, nil, newDrainTracker(), poolDesired,
+		dsResult.StoreQueryPartial, nil, cfg.EffectiveCityName(),
+		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
+	)
+	if woken != 1 {
+		t.Fatalf("woken = %d, want 1 for fresh named session; stdout:\n%s\nstderr:\n%s", woken, stdout.String(), stderr.String())
+	}
+	if !sp.IsRunning(sessionName) {
+		t.Fatalf("fresh named session %q is not running after reconcile; stdout:\n%s\nstderr:\n%s", sessionName, stdout.String(), stderr.String())
+	}
+}
+
+// TestReconcileSessionBeads_ClosesOrphanedFailedCreateAndFreesSlot verifies
+// the post-lease-expiry close path for a pool session bead whose close call
+// failed after failed-create metadata was written.
+func TestReconcileSessionBeads_ClosesOrphanedFailedCreateAndFreesSlot(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "worker", StartCommand: "true", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
+		},
+	}
+
+	// Simulate the close retry after a stale failed-create lease has expired.
+	failedBead, err := store.Create(beads.Bead{
+		Title:  "worker-1",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker-1"},
+		Metadata: map[string]string{
+			"session_name":              "worker-1",
+			"agent_name":                "worker-1",
+			"template":                  "worker",
+			"state":                     string(sessionpkg.StateFailedCreate),
+			"pool_slot":                 "1",
+			"pending_create_claim":      boolMetadata(true),
+			"pending_create_started_at": pendingCreateStartedAtNow(clk.Now().Add(-(pendingCreateNeverStartedTimeout + time.Second))),
+			poolManagedMetadataKey:      boolMetadata(true),
+			"live_hash":                 runtime.LiveFingerprint(runtime.Config{Command: "true"}),
+			"generation":                "1",
+			"instance_token":            "failed-token",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create failed-create bead: %v", err)
+	}
+
+	// Fresh pool session bead: what buildDesiredState allocates for the pending demand.
+	freshBead, err := store.Create(beads.Bead{
+		Title:  "worker-2",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker-2"},
+		Metadata: map[string]string{
+			"session_name":         "worker-2",
+			"agent_name":           "worker-2",
+			"template":             "worker",
+			"state":                "creating",
+			"pool_slot":            "2",
+			"pending_create_claim": boolMetadata(true),
+			poolManagedMetadataKey: boolMetadata(true),
+			"live_hash":            runtime.LiveFingerprint(runtime.Config{Command: "true"}),
+			"generation":           "1",
+			"instance_token":       "new-token",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create fresh bead: %v", err)
+	}
+
+	// desired: only the fresh bead; the failed-create bead is not desired.
+	ds := map[string]TemplateParams{
+		"worker-2": {
+			TemplateName: "worker",
+			InstanceName: "worker-2",
+			Command:      "true",
+			PoolSlot:     2,
+		},
+	}
+
+	sessions, _ := loadSessionBeads(store)
+	cfgNames := configuredSessionNames(cfg, "", store)
+	poolDesired := map[string]int{"worker": 1}
+	var stdout, stderr bytes.Buffer
+	woken := reconcileSessionBeads(
+		context.Background(), sessions, ds, cfgNames,
+		cfg, sp, store, nil, nil, nil, newDrainTracker(), poolDesired, false, nil, "test-city",
+		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
+	)
+
+	// The failed-create bead must be closed, not silently skipped as unknown state.
+	got, err := store.Get(failedBead.ID)
+	if err != nil {
+		t.Fatalf("Get failed-create bead: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("failed-create bead status = %q, want closed", got.Status)
+	}
+	if want := sessionpkg.CanonicalCloseReason(string(sessionpkg.StateFailedCreate)); got.Metadata["close_reason"] != want {
+		t.Fatalf("failed-create bead close_reason = %q, want %q", got.Metadata["close_reason"], want)
+	}
+	if got.Metadata["pending_create_claim"] != "" || got.Metadata["pending_create_started_at"] != "" {
+		t.Fatalf("failed-create pending metadata = claim %q started_at %q, want cleared",
+			got.Metadata["pending_create_claim"], got.Metadata["pending_create_started_at"])
+	}
+	if strings.Contains(stderr.String(), "unknown state") {
+		t.Errorf("reconciler logged unknown state for failed-create bead: %s", stderr.String())
+	}
+
+	// A fresh session must be started in the freed slot.
+	if woken != 1 {
+		t.Fatalf("woken = %d, want 1 (fresh pool session should be started)", woken)
+	}
+	if !sp.IsRunning(freshBead.Metadata["session_name"]) {
+		t.Fatalf("fresh session %q is not running after stale failed-create cleanup", freshBead.Metadata["session_name"])
 	}
 }
 

@@ -228,6 +228,11 @@ cd ~/my-city
 `gc init` registers the city with the supervisor and starts it automatically.
 See the [Quickstart](/getting-started/quickstart) for a complete walkthrough.
 
+Gas City ships a JSONL archive that snapshots every bead database for
+disaster recovery. By default it runs in local-only mode and keeps commits
+on this host. To enable off-box backup, see
+[JSONL archive push failures](/getting-started/troubleshooting#jsonl-archive-push-failures).
+
 ## Docs preview
 
 The docs site uses [Mintlify](https://mintlify.com). Preview locally from the

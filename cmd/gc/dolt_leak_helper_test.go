@@ -250,6 +250,49 @@ func TestRequireNoLeakedDoltAfter_NewNonTestPIDIgnored(t *testing.T) {
 	}
 }
 
+func TestRequireNoLeakedDoltAfterWithFilterIgnoresUnownedTempPID(t *testing.T) {
+	ownedRoot := filepath.Join("/tmp", "TestDoltLeakHelper", "owned-city")
+	unownedRoot := filepath.Join("/tmp", "TestDoltLeakHelper", "other-city")
+	owned := DoltProcInfo{
+		PID: 1001,
+		Argv: []string{
+			"dolt",
+			"sql-server",
+			"--config",
+			filepath.Join(ownedRoot, ".gc", "runtime", "packs", "dolt", "dolt-config.yaml"),
+		},
+	}
+	unowned := DoltProcInfo{
+		PID: 1002,
+		Argv: []string{
+			"dolt",
+			"sql-server",
+			"--config",
+			filepath.Join(unownedRoot, ".gc", "runtime", "packs", "dolt", "dolt-config.yaml"),
+		},
+	}
+	enumerate := scriptedDoltEnumerator(t,
+		nil,
+		[]DoltProcInfo{owned, unowned},
+	)
+	inner := &recordingTB{}
+	requireNoLeakedDoltAfterWithFilter(inner, enumerate, func(configPath string) bool {
+		return samePath(configPath, ownedRoot) || strings.HasPrefix(configPath, ownedRoot+string(filepath.Separator))
+	})
+	inner.runCleanups()
+
+	if !inner.failed() {
+		t.Fatalf("expected scoped leak Errorf for owned PID; nothing recorded")
+	}
+	msg := strings.Join(inner.errors, "\n")
+	if !strings.Contains(msg, "1001") {
+		t.Fatalf("error missing owned leaked PID 1001; got %q", msg)
+	}
+	if strings.Contains(msg, "1002") {
+		t.Fatalf("error included unowned leaked PID 1002; got %q", msg)
+	}
+}
+
 // TestSnapshotDoltProcessPIDs_EnumeratorErrorIsFatal pins that a
 // discovery error is reported via Fatalf so test runs surface
 // enumeration failures directly rather than silently treating them

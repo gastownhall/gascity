@@ -1,3 +1,9 @@
 # PyPI is still at 0.1.0; pin the v0.3.2 release commit until upstream
 # publishes current wheel/sdist assets.
 mcp-agent-mail @ https://github.com/Dicklesworthstone/mcp_agent_mail/archive/32783f6848bd63c425c4b5004cee3350016635fb.tar.gz
+
+# Security floor: GitPython 3.1.49 has GHSA-mv93-w799-cj2w (HIGH).
+# Pinning floor at 3.1.50 to ensure the resolver picks the patched version
+# even if mcp-agent-mail's transitive constraint allows older. Drop this
+# line once mcp-agent-mail upstream pins GitPython>=3.1.50 itself.
+gitpython>=3.1.50

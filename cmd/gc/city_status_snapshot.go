@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -47,12 +48,27 @@ func openCityStatusStore(cityPath string, stderr io.Writer) (beads.Store, int) {
 	if cityPath == "" {
 		return nil, 0
 	}
+	if !cityStatusStorePresent(cityPath) {
+		return nil, 0
+	}
 	opened, err := openCityStoreAtForStatus(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc status: opening bead store: %v\n", err) //nolint:errcheck // best-effort stderr
 		return nil, 1
 	}
 	return opened, 0
+}
+
+func cityStatusStorePresent(cityPath string) bool {
+	for _, candidate := range []string{
+		filepath.Join(cityPath, ".beads"),
+		filepath.Join(cityPath, ".gc", "beads.json"),
+	} {
+		if _, err := os.Stat(candidate); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func collectCityStatusSnapshot(sp runtime.Provider, cfg *config.City, cityPath string, store beads.Store, stderr io.Writer) cityStatusSnapshot {

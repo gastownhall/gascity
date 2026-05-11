@@ -52,6 +52,7 @@ func TestIsReadyExcludedType(t *testing.T) {
 		{"merge-request", true},
 		{"gate", true},
 		{"molecule", true},
+		{"step", true},
 		{"message", true},
 		{"session", true},
 		{"agent", true},

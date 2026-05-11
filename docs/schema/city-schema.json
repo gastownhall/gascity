@@ -52,7 +52,7 @@
         },
         "description": {
           "type": "string",
-          "description": "Description is a human-readable description shown in a real-world app's session creation UI."
+          "description": "Description is a human-readable description shown in MC's session creation UI."
         },
         "dir": {
           "type": "string",
@@ -92,10 +92,9 @@
         "session": {
           "type": "string",
           "enum": [
-            "acp",
-            "tmux"
+            "acp"
           ],
-          "description": "Session overrides the session transport for this agent.\n\"\" (default) uses the provider default.\n\"tmux\" uses the tmux-backed CLI path even when the provider supports ACP.\n\"acp\" uses the Agent Client Protocol (JSON-RPC over stdio); the agent's\nresolved provider must have supports_acp = true."
+          "description": "Session overrides the session transport for this agent.\n\"\" (default) uses the city-level session provider (typically tmux).\n\"acp\" uses the Agent Client Protocol (JSON-RPC over stdio).\nThe agent's resolved provider must have supports_acp = true."
         },
         "provider": {
           "type": "string",
@@ -420,7 +419,7 @@
         },
         "session": {
           "type": "string",
-          "description": "Session overrides the session transport (\"acp\" or \"tmux\")."
+          "description": "Session overrides the session transport (\"acp\")."
         },
         "provider": {
           "type": "string",
@@ -502,7 +501,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "InjectFragments overrides the agent's inject_fragments list."
+          "description": "InjectFragments overrides the agent's inject_fragments list. Leave this\nfield unset to keep inherited fragments; JSON callers may send null for\nthe same no-op. Set an empty list to clear fragments; set a populated\nlist to replace fragments."
         },
         "append_fragments": {
           "items": {
@@ -759,7 +758,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "InjectFragments overrides the agent's inject_fragments list."
+          "description": "InjectFragments overrides the agent's inject_fragments list. Leave this\nfield unset to keep inherited fragments; JSON callers may send null for\nthe same no-op. Set an empty list to clear fragments; set a populated\nlist to replace fragments."
         },
         "append_fragments": {
           "items": {
@@ -1390,7 +1389,7 @@
         },
         "rig": {
           "type": "string",
-          "description": "Rig scopes the override to a specific rig's order. Empty matches\nONLY city-level orders (those with no rig); it does NOT match\nper-rig instances of the same name — those expand at scan time\nand require an explicit rig. Use rig = \"*\" as a wildcard to match\nevery instance of the named order (city-level + every rig-scoped\ncopy). The literal \"*\" is reserved and rejected as a real rig\nname by config validation."
+          "description": "Rig scopes the override to a specific rig's order.\nEmpty matches city-level orders."
         },
         "enabled": {
           "type": "boolean",
@@ -1703,7 +1702,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "Args are default command-line arguments passed to the provider."
+          "description": "Args are default command-line arguments passed to the provider. The\nbuilt-in Kiro provider defaults to\n[\"chat\", \"--no-interactive\", \"--agent\", \"gascity\", \"--trust-all-tools\"];\nremove or replace \"--trust-all-tools\" by defining [providers.kiro].args\nexplicitly in city.toml."
         },
         "prompt_mode": {
           "type": "string",
@@ -1846,7 +1845,7 @@
         },
         "default_branch": {
           "type": "string",
-          "description": "DefaultBranch is the rig repository's mainline branch (e.g. \"main\",\n\"master\", \"develop\"). When set, polecats and the refinery use this\nas the default merge target instead of probing origin/HEAD at sling\ntime. Captured by `gc rig add` from the rig's git config; set\nmanually for rigs whose mainline isn't reachable via origin/HEAD."
+          "description": "DefaultBranch is the rig repository's mainline branch (e.g. \"main\",\n\"master\", \"develop\"). When set, routing formulas use this as the\ndefault merge target instead of probing origin/HEAD at sling time.\nCaptured by `gc rig add` from the rig's git config; set manually for\nrigs whose mainline isn't reachable via origin/HEAD."
         },
         "suspended": {
           "type": "boolean",
@@ -2182,7 +2181,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "InstallAgentHooks lists provider names whose hooks should be installed\ninto agent working directories. Agent-level overrides workspace-level\n(replace, not additive). Supported: \"claude\", \"codex\", \"gemini\",\n\"opencode\", \"copilot\", \"cursor\", \"pi\", \"omp\"."
+          "description": "InstallAgentHooks lists provider names whose hooks should be installed\ninto agent working directories. Agent-level overrides workspace-level\n(replace, not additive). Supported: \"claude\", \"codex\", \"gemini\",\n\"kiro\", \"opencode\", \"copilot\", \"cursor\", \"pi\", \"omp\"."
         },
         "global_fragments": {
           "items": {

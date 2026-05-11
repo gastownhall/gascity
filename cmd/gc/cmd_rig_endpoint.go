@@ -389,10 +389,15 @@ func readManagedRuntimePublishedPort(cityPath string) (string, error) {
 	if err := json.Unmarshal(data, &state); err != nil {
 		return "", err
 	}
-	if !state.Running || state.Port == 0 {
+	if !state.Running || state.Port <= 0 {
 		return "", fmt.Errorf("dolt runtime state unavailable")
 	}
-	if state.PID > 0 && !pidAlive(state.PID) {
+	if state.PID > 0 || strings.TrimSpace(state.DataDir) != "" {
+		if !validDoltRuntimeState(state, cityPath) {
+			return "", fmt.Errorf("dolt runtime state unavailable")
+		}
+	}
+	if state.PID < 0 {
 		return "", fmt.Errorf("dolt runtime state unavailable")
 	}
 	return strconv.Itoa(state.Port), nil

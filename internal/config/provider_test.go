@@ -9,12 +9,12 @@ func TestBuiltinProviders(t *testing.T) {
 	providers := BuiltinProviders()
 	order := BuiltinProviderOrder()
 
-	// Must have exactly 10 built-in providers.
-	if len(providers) != 10 {
-		t.Fatalf("len(BuiltinProviders()) = %d, want 10", len(providers))
+	// Must have exactly 11 built-in providers.
+	if len(providers) != 11 {
+		t.Fatalf("len(BuiltinProviders()) = %d, want 11", len(providers))
 	}
-	if len(order) != 10 {
-		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 10", len(order))
+	if len(order) != 11 {
+		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 11", len(order))
 	}
 
 	// Every entry in order must exist in providers.
@@ -240,6 +240,25 @@ func TestBuiltinProvidersOpenCode(t *testing.T) {
 	}
 }
 
+func TestBuiltinProvidersKiro(t *testing.T) {
+	p := BuiltinProviders()["kiro"]
+	if p.Command != "kiro-cli" {
+		t.Errorf("Command = %q, want %q", p.Command, "kiro-cli")
+	}
+	if !reflect.DeepEqual(p.Args, []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"}) {
+		t.Errorf("Args = %v, want [chat --no-interactive --agent gascity --trust-all-tools]", p.Args)
+	}
+	if !reflect.DeepEqual(p.ACPArgs, []string{"acp", "--agent", "gascity"}) {
+		t.Errorf("ACPArgs = %v, want [acp --agent gascity]", p.ACPArgs)
+	}
+	if !derefBool(p.SupportsACP) {
+		t.Error("SupportsACP = false, want true")
+	}
+	if !derefBool(p.SupportsHooks) {
+		t.Error("SupportsHooks = false, want true")
+	}
+}
+
 // TestBuiltinProvidersOpenCodePromptModeRegression guards against switching
 // OpenCode back to argv-based prompt delivery. Gas City renders the startup
 // prompt as startup material, so OpenCode must not receive it as a bare
@@ -462,6 +481,28 @@ func TestProviderSessionCreateTransportUsesExplicitACPOverrides(t *testing.T) {
 				t.Fatalf("ProviderSessionCreateTransport() = %q, want %q", got, "acp")
 			}
 		})
+	}
+}
+
+func TestProviderSessionCreateTransportBuiltinKiroStaysOnCLIByDefault(t *testing.T) {
+	rp := &ResolvedProvider{
+		Name:        "kiro",
+		Command:     "kiro-cli",
+		Args:        []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
+		SupportsACP: true,
+		ACPArgs:     []string{"acp", "--agent", "gascity"},
+	}
+	if got := rp.ProviderSessionCreateTransport(); got != "" {
+		t.Fatalf("ProviderSessionCreateTransport() = %q, want empty default transport", got)
+	}
+	if got := ResolveSessionCreateTransport("", rp); got != "" {
+		t.Fatalf("ResolveSessionCreateTransport(empty) = %q, want empty default transport", got)
+	}
+	if got := ResolveSessionCreateTransport("acp", rp); got != "acp" {
+		t.Fatalf("ResolveSessionCreateTransport(acp) = %q, want acp", got)
+	}
+	if got := rp.ACPCommandString(); got != "kiro-cli acp --agent gascity" {
+		t.Fatalf("ACPCommandString() = %q, want explicit Kiro ACP command", got)
 	}
 }
 

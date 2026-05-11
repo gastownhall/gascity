@@ -342,7 +342,7 @@ func providerStatusFixHint(probeName, status string) string {
 		case api.ProbeStatusNotInstalled:
 			return "install Claude Code"
 		case api.ProbeStatusInvalidConfiguration:
-			return "use first-party Claude Code login (`claude.ai` / `firstParty`)"
+			return "use first-party Claude Code login (`claude.ai` or `oauth_token` / `firstParty`)"
 		case api.ProbeStatusProbeError:
 			return "run `claude auth status --json` and fix the local Claude setup"
 		}

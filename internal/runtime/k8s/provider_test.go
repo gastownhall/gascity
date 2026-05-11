@@ -1252,6 +1252,12 @@ func TestNeedsStaging(t *testing.T) {
 			want: true,
 		},
 		{
+			name:     "pack overlay dir",
+			cfg:      runtime.Config{WorkDir: "/city", PackOverlayDirs: []string{"/some/pack"}},
+			ctrlCity: "/city",
+			want:     true,
+		},
+		{
 			name: "copy files",
 			cfg:  runtime.Config{CopyFiles: []runtime.CopyEntry{{Src: "/a"}}},
 			want: true,
@@ -1276,6 +1282,33 @@ func TestNeedsStaging(t *testing.T) {
 				t.Errorf("needsStaging = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestPodManifestAddsInitContainerForPackOverlayCityAgent(t *testing.T) {
+	p := newProviderWithOps(newFakeK8sOps())
+
+	cfg := runtime.Config{
+		Command:         "kiro-cli chat --no-interactive --agent gascity",
+		WorkDir:         "/city",
+		ProviderName:    "kiro",
+		PackOverlayDirs: []string{"/packs/core/overlay"},
+		Env: map[string]string{
+			"GC_AGENT": "mayor",
+			"GC_CITY":  "/city",
+		},
+	}
+
+	pod, err := buildPod("gc-city-mayor", cfg, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(pod.Spec.InitContainers) == 0 {
+		t.Fatal("expected init container for city agent with pack overlay")
+	}
+	if pod.Spec.InitContainers[0].Name != "stage" {
+		t.Errorf("init container name = %q, want %q", pod.Spec.InitContainers[0].Name, "stage")
 	}
 }
 

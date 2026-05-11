@@ -1170,6 +1170,9 @@ func TestCompileReviewQuorumCoreFormula(t *testing.T) {
 				t.Fatalf("%s retry on_exhausted = %q, want soft_fail", step.ID, step.Retry.OnExhausted)
 			}
 			for _, required := range []string{
+				"lane_id",
+				"provider",
+				"model",
 				"verdict",
 				"findings_count",
 				"evidence",
@@ -1190,6 +1193,36 @@ func TestCompileReviewQuorumCoreFormula(t *testing.T) {
 	}
 	if got, want := strings.Join(reviewerLanes, ","), "{{lane_one_id}},{{lane_two_id}}"; got != want {
 		t.Fatalf("reviewer lanes = %q, want %q", got, want)
+	}
+	var synthesisPrompts int
+	for _, step := range parsed.Steps {
+		if step.Metadata["gc.review_quorum_role"] != "synthesis" {
+			continue
+		}
+		synthesisPrompts++
+		for _, required := range []string{
+			"subject",
+			"base_ref",
+			"lanes",
+			"verdict",
+			"summary",
+			"findings_count",
+			"findings",
+			"evidence",
+			"usage",
+			"read_only_enforcement",
+			"mutations_delta",
+			"failure_class",
+			"failure_reason",
+			"lane=<lane_id> reason=<stable_reason>",
+		} {
+			if !strings.Contains(step.Description, required) {
+				t.Fatalf("%s description missing synthesis contract key %q", step.ID, required)
+			}
+		}
+	}
+	if synthesisPrompts != 1 {
+		t.Fatalf("synthesis prompt count = %d, want 1", synthesisPrompts)
 	}
 	for _, name := range []string{
 		"lane_one_id",

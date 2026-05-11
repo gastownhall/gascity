@@ -261,6 +261,9 @@ max = 5
 }
 
 func TestDoPrimeWithHook_UsesGCTemplateForNamepoolSessionContext(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	cityDir := t.TempDir()
 	promptDir := filepath.Join(cityDir, "prompts")
 	if err := os.MkdirAll(promptDir, 0o755); err != nil {
@@ -306,6 +309,9 @@ prompt_template = "prompts/polecat.template.md"
 }
 
 func TestDoPrimeWithHook_StartupPromptDeliveryEnvControlsPromptSuppression(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	cityDir := t.TempDir()
 	promptDir := filepath.Join(cityDir, "prompts")
 	if err := os.MkdirAll(promptDir, 0o755); err != nil {
@@ -411,6 +417,9 @@ prompt_template = "prompts/worker.md"
 }
 
 func TestDoPrimeWithHook_DeliveredStartupPromptJSONHookFormat(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	cityDir := t.TempDir()
 	promptDir := filepath.Join(cityDir, "prompts")
 	if err := os.MkdirAll(promptDir, 0o755); err != nil {

@@ -37,6 +37,15 @@ func TestProjectLifecycleNormalizesCompatibilityStates(t *testing.T) {
 			wantState: StateAsleep,
 		},
 		{
+			name: "failed-create projects as typed cleanup state",
+			metadata: map[string]string{
+				"state":        string(StateFailedCreate),
+				"session_name": "s-worker",
+			},
+			wantBase:  BaseStateFailedCreate,
+			wantState: StateFailedCreate,
+		},
+		{
 			name: "asleep with drained sleep reason projects as drained",
 			metadata: map[string]string{
 				"state":        "asleep",
@@ -461,6 +470,23 @@ func TestProjectLifecycleRuntimeLivenessProjection(t *testing.T) {
 			},
 			wantRuntime:         RuntimeProjectionStartRequested,
 			wantReconciledState: StateCreating,
+		},
+		{
+			name: "failed-create with pending_create_claim stays failed-create",
+			input: LifecycleInput{
+				Status: "open",
+				Metadata: map[string]string{
+					"state":                string(StateFailedCreate),
+					"session_name":         "s-worker",
+					"pending_create_claim": "true",
+				},
+				Runtime:            RuntimeFacts{Observed: true, Alive: false},
+				CreatedAt:          now.Add(-30 * time.Second),
+				StaleCreatingAfter: time.Minute,
+				Now:                now,
+			},
+			wantRuntime:         RuntimeProjectionMissing,
+			wantReconciledState: StateFailedCreate,
 		},
 		{
 			name: "non-creating pending_create_claim remains start requested",
