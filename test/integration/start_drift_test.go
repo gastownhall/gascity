@@ -459,6 +459,18 @@ func setupDriftSystemdScenario(t *testing.T) *driftScenario {
 	t.Helper()
 
 	gcHome, runtimeDir, env := newIsolatedEnvRoot(t, false)
+	// The gc subprocess needs the real XDG_RUNTIME_DIR to reach user
+	// systemd via `systemctl --user`. Isolation is unnecessary here:
+	// supervisor.RuntimeDir() short-circuits to gcHome under
+	// UsesIsolatedGCHomeOverride, so XDG_RUNTIME_DIR is unused by the
+	// supervisor itself. Without this swap, supervisorSystemctlActive
+	// reads /<runtimeDir>/systemd/private (which doesn't exist) and
+	// returns false, dropping the restart through the 'direct' branch.
+	realXDG := strings.TrimSpace(os.Getenv("XDG_RUNTIME_DIR"))
+	if realXDG != "" {
+		env = filterEnv(env, "XDG_RUNTIME_DIR")
+		env = append(env, "XDG_RUNTIME_DIR="+realXDG)
+	}
 	port := readSupervisorPortFromConfig(t, gcHome)
 
 	binaryDir := filepath.Join(filepath.Dir(gcHome), "bin")
