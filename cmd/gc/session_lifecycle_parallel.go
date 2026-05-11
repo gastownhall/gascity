@@ -1326,8 +1326,6 @@ func startPreparedStartCandidate(
 ) (bool, error) {
 	if store == nil || item.candidate.session == nil || strings.TrimSpace(item.candidate.session.ID) == "" {
 		handle, err := runtimeWorkerHandleWithConfig(
-			cityPath,
-			store,
 			sp,
 			cfg,
 			item.candidate.name(),

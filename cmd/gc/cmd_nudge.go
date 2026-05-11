@@ -523,8 +523,6 @@ func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtim
 		return workerHandleForSessionWithConfig(target.cityPath, store, sp, target.cfg, target.sessionID)
 	}
 	return runtimeWorkerHandleWithConfig(
-		target.cityPath,
-		store,
 		sp,
 		target.cfg,
 		target.sessionName,

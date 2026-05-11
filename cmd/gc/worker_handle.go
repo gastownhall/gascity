@@ -343,8 +343,6 @@ func workerHandleForSessionTargetWithRuntimeHintsWithConfig(cityPath string, sto
 }
 
 func runtimeWorkerHandleWithConfig(
-	cityPath string,
-	store beads.Store,
 	sp runtime.Provider,
 	cfg *config.City,
 	sessionName string,
