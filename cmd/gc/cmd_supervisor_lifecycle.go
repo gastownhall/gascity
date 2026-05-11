@@ -381,9 +381,15 @@ API server.`,
 	}
 }
 
+// runSupervisorFunc is the run-loop entry point invoked by
+// doSupervisorRun. Indirection enables tests to substitute a no-op
+// loop so pre-loop setup (defaultSupervisorBeadsActor) is observable
+// without launching the real long-running supervisor.
+var runSupervisorFunc = runSupervisor
+
 func doSupervisorRun(stdout, stderr io.Writer) int {
 	defaultSupervisorBeadsActor()
-	return runSupervisor(stdout, stderr)
+	return runSupervisorFunc(stdout, stderr)
 }
 
 // defaultSupervisorBeadsActor sets BEADS_ACTOR=controller in this
