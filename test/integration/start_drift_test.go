@@ -15,6 +15,8 @@ package integration
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,10 +25,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 const (
@@ -927,6 +932,60 @@ func secondaryUID(t *testing.T) uint32 {
 	return 65534
 }
 
+// expectedSupervisorSystemdUnit returns the systemd unit name the gc
+// binary will derive for a supervisor running under the supplied
+// GC_HOME. It mirrors supervisorSystemdServiceName() +
+// supervisorServiceSuffix() in cmd/gc/cmd_supervisor_lifecycle.go so
+// the test installs the unit at the name the binary's
+// `systemctl --user is-active` probe will look for.
+//
+// Algorithm: normalize gcHome (symlink-resolve + abs), sanitize its
+// basename to [a-z0-9-], hash the normalized path with sha1[:8], and
+// concatenate as `gascity-supervisor-<base>-<hash>.service`. Empty
+// basename falls back to `isolated-<hash>` per the binary.
+//
+// The two algorithms must stay in lockstep — when the binary changes
+// its naming, this helper must change with it or
+// TestStartDrift_SystemdManaged_RestartsToNewBuildID will revert to
+// the 'direct' branch silently.
+func expectedSupervisorSystemdUnit(gcHome string) string {
+	suffix := expectedSupervisorServiceSuffix(gcHome)
+	if suffix == "" {
+		return "gascity-supervisor.service"
+	}
+	return "gascity-supervisor-" + suffix + ".service"
+}
+
+// expectedSupervisorServiceSuffix replicates supervisorServiceSuffix()
+// from cmd/gc/cmd_supervisor_lifecycle.go. Returns "" for the
+// non-isolated (empty / default-home) case — the test never hits that
+// branch because newIsolatedEnvRoot always sets an isolated GC_HOME,
+// but the empty arm is preserved so the helper stays a faithful
+// mirror of the production function.
+func expectedSupervisorServiceSuffix(gcHome string) string {
+	gcHome = pathutil.NormalizePathForCompare(strings.TrimSpace(gcHome))
+	if gcHome == "" {
+		return ""
+	}
+	base := sanitizeSupervisorServiceName(filepath.Base(gcHome))
+	sum := sha1.Sum([]byte(gcHome))
+	hash := hex.EncodeToString(sum[:])[:8]
+	if base == "" {
+		return "isolated-" + hash
+	}
+	return base + "-" + hash
+}
+
+// sanitizeSupervisorServiceName mirrors sanitizeServiceName() from
+// cmd/gc/cmd_supervisor_lifecycle.go: lowercase, collapse non-alnum
+// runs to '-', trim leading/trailing '-'.
+func sanitizeSupervisorServiceName(name string) string {
+	name = strings.ToLower(name)
+	re := regexp.MustCompile(`[^a-z0-9]+`)
+	name = re.ReplaceAllString(name, "-")
+	return strings.Trim(name, "-")
+}
+
 // systemdUserUnitDir returns the directory where user-level systemd
 // units live for the current user. Tests write the supervisor unit
 // here directly rather than going through `gc supervisor install` so
@@ -942,13 +1001,21 @@ func systemdUserUnitDir() string {
 // writeSystemdUserUnit writes a minimal [Service]/[Install] unit file
 // for the supervisor at binaryPath, using gcHome / runtimeDir as its
 // environment. Returns the unit name (with .service suffix).
+//
+// The unit name is computed via expectedSupervisorSystemdUnit so it
+// matches what the gc binary's supervisorSystemdServiceName() will
+// resolve when invoked with the same GC_HOME. If the names diverge,
+// the binary's `systemctl --user is-active <derived>` check returns
+// false even when this unit file is loaded under a different name,
+// and the restart path falls through to the 'direct' branch instead
+// of 'systemd-managed' (the original bug this helper is fixing).
 func writeSystemdUserUnit(t *testing.T, binaryPath, gcHome, runtimeDir string) string {
 	t.Helper()
 	dir := systemdUserUnitDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("creating systemd user dir: %v", err)
 	}
-	unitName := "gascity-supervisor-drift-" + filepath.Base(filepath.Dir(gcHome)) + ".service"
+	unitName := expectedSupervisorSystemdUnit(gcHome)
 	unit := fmt.Sprintf(`[Unit]
 Description=Gas City drift integration test supervisor
 
