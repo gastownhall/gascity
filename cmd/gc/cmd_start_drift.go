@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -176,10 +177,15 @@ func printDriftReport(w io.Writer, r driftReport) {
 // architect's brief.
 var driftReadyTimeout = 5 * time.Second
 
-// driftRestartLoopGuard rate-limits supervisor auto-restarts so a
-// misbehaving start path can't thrash the system. Three restarts in a
-// 60-second window is the architect's threshold.
-var driftRestartLoopGuard = newRestartLoopGuard(3, 60*time.Second)
+// driftRestartLoopMax / driftRestartLoopWindow define the loop-guard
+// budget: at most 3 supervisor auto-restarts may occur within any
+// 60-second window. Persistence is via driftRestartHistoryPath so the
+// budget survives across `gc start` invocations — an in-memory guard
+// would reset each cycle and never refuse a runaway loop.
+const (
+	driftRestartLoopMax    = 3
+	driftRestartLoopWindow = 60 * time.Second
+)
 
 // runStartDriftCheck performs supervisor binary-drift detection and
 // optionally auto-restarts the supervisor. It is called from
@@ -272,7 +278,21 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 			SupervisorID: status.BuildID,
 			PackDrifted:  res.PackDrift,
 		})
-		if !driftRestartLoopGuard.allowAt(now) {
+		if exeErr != nil {
+			// We can't safely auto-restart a supervisor whose
+			// /proc/<pid>/exe we can't read — the kernel readlink is
+			// the only reliable way to learn which binary to spawn,
+			// and falling back to os.Executable() would launch the
+			// caller's gc, not necessarily the supervisor's. The
+			// usual cause is a uid mismatch between the operator
+			// running gc start and the supervisor itself. Surface a
+			// descriptive error rather than the silent
+			// `(unreadable)` fallback so the operator can fix the
+			// uid or opt out via --no-auto-restart.
+			fmt.Fprintf(stderr, "error: cannot auto-restart supervisor: /proc/%d/exe is owned by a different user (permission denied: %v). Either rerun gc start as the supervisor's uid, or pass --no-auto-restart to skip the restart and surface the drift as an error.\n", pid, exeErr) //nolint:errcheck // best-effort stderr
+			return 1, false
+		}
+		if !recordDriftRestartAttempt(driftRestartHistoryPath(), driftRestartLoopMax, driftRestartLoopWindow, now) {
 			fmt.Fprintln(stderr, "error: supervisor restart loop detected (3 restarts in 60s); refusing further restarts. Investigate the stale state with 'gc trace' and consider 'gc stop --force'.") //nolint:errcheck // best-effort stderr
 			return 1, false
 		}
@@ -328,15 +348,21 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 }
 
 // readSupervisorExePath returns the resolved path of the supervisor's
-// executable via /proc/<pid>/exe (Linux) or os.Executable() as a
-// best-effort fallback. The kernel readlink resolves symlinks for us
-// — no extra realpath layer needed.
+// executable via /proc/<pid>/exe. The kernel readlink resolves
+// symlinks for us — no extra realpath layer needed.
+//
+// When the binary on disk has been replaced (the typical drift case:
+// `go install` writes a new file at the same path, unlinking the
+// original inode the supervisor still has open), the kernel decorates
+// the link target with a literal " (deleted)" suffix. We strip that
+// suffix because the on-disk path is what the auto-restart needs to
+// spawn — the new bytes already live at the un-suffixed path.
 func readSupervisorExePath(pid int) (string, error) {
 	target, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "exe"))
-	if err == nil {
-		return target, nil
+	if err != nil {
+		return "", err
 	}
-	return "", err
+	return strings.TrimSuffix(target, " (deleted)"), nil
 }
 
 // readDaemonAutoRestart loads city.toml's [daemon].auto_restart_on_drift
@@ -361,8 +387,87 @@ func defaultRestartHelpers() restartHelpers {
 		Kill: func(pid int) error {
 			return syscall.Kill(pid, syscall.SIGTERM)
 		},
+		WaitExit: func(pid int) error {
+			return waitForPIDExit(pid, driftKillTimeout, driftKillEscalateTimeout)
+		},
 		Spawn: spawnDetachedSupervisor,
 	}
+}
+
+// driftKillTimeout caps how long the direct-restart path waits for the
+// SIGTERM'd supervisor to actually exit before escalating to SIGKILL.
+// Five seconds matches the supervisor's own graceful-shutdown budget.
+//
+// driftKillEscalateTimeout caps the post-SIGKILL wait. The kernel
+// reaps almost immediately; one second is a generous upper bound.
+var (
+	driftKillTimeout         = 5 * time.Second
+	driftKillEscalateTimeout = 1 * time.Second
+)
+
+// waitForPIDExit blocks until the process at pid is gone, escalating
+// to SIGKILL if SIGTERM did not take effect within timeout. Returns
+// nil once the kernel reports ESRCH on a signal-zero probe.
+//
+// PID-recycling races are not addressed here — the window between
+// SIGTERM and SIGKILL is short enough (seconds) that a recycled PID
+// reaching the same value is vanishingly unlikely under normal load.
+func waitForPIDExit(pid int, timeout, escalate time.Duration) error {
+	if pidGone(pid) {
+		return nil
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+		if pidGone(pid) {
+			return nil
+		}
+	}
+	// Escalate to SIGKILL. We deliberately ignore the SIGKILL error —
+	// the only failure mode here is that the process already exited
+	// between our last probe and the signal call, which is not a real
+	// error from the caller's perspective.
+	_ = syscall.Kill(pid, syscall.SIGKILL)
+	deadline = time.Now().Add(escalate)
+	for time.Now().Before(deadline) {
+		if pidGone(pid) {
+			return nil
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return fmt.Errorf("pid %d still alive after SIGKILL", pid)
+}
+
+// pidGone reports whether the given pid no longer represents a live
+// process — either the entry has been reaped (ESRCH on signal-zero)
+// or it has exited and is awaiting wait() from its parent (zombie).
+// Both cases mean the process can no longer hold ports or files, so
+// the supervisor restart can safely proceed.
+//
+// We probe via signal-zero first because it covers both "PID never
+// existed" and "PID was reaped" without an extra /proc syscall. The
+// /proc/<pid>/status fallback handles the zombie case that signal
+// zero reports as alive.
+func pidGone(pid int) bool {
+	if err := syscall.Kill(pid, syscall.Signal(0)); err == syscall.ESRCH {
+		return true
+	}
+	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "status"))
+	if err != nil {
+		// If /proc/<pid>/status is missing, the kernel has already
+		// torn down the entry — ESRCH-equivalent.
+		return os.IsNotExist(err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "State:") {
+			continue
+		}
+		// State lines look like "State:\tZ (zombie)" or "State:\tR
+		// (running)" — a zombie has already released its ports and
+		// FDs even though the parent has not reaped it.
+		return strings.Contains(line, "Z")
+	}
+	return false
 }
 
 // humanizeReadyDuration formats a sub-minute duration as `0.7s`-style

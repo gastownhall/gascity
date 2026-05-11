@@ -182,6 +182,12 @@ type restartHelpers struct {
 	// Kill sends SIGTERM to pid. Production uses syscall.Kill.
 	Kill func(pid int) error
 
+	// WaitExit blocks until pid has exited (or the helper escalates
+	// and gives up). Production polls syscall.Kill(pid, 0) until it
+	// returns ESRCH, then SIGKILLs as a fallback. Tests set this to
+	// nil or a no-op when they don't model process lifetimes.
+	WaitExit func(pid int) error
+
 	// Spawn launches a detached process executing exe with argv.
 	// Production starts a backgrounded child via os/exec with
 	// backgroundSysProcAttr.
@@ -217,6 +223,16 @@ func restartSupervisor(spec restartSpec, h restartHelpers) error {
 	}
 	if err := h.Kill(spec.PID); err != nil {
 		return fmt.Errorf("killing supervisor pid %d: %w", spec.PID, err)
+	}
+	// Wait for the old supervisor to actually exit before spawning the
+	// replacement. Without this gap, the old process still owns the
+	// /health port and the new one fails to bind — PollReady then sees
+	// the OLD supervisor still serving and returns "ready" without the
+	// build_id ever flipping.
+	if h.WaitExit != nil {
+		if err := h.WaitExit(spec.PID); err != nil {
+			return fmt.Errorf("waiting for supervisor pid %d to exit: %w", spec.PID, err)
+		}
 	}
 	if err := h.Spawn(spec.ExePath, spec.Argv...); err != nil {
 		return fmt.Errorf("spawning supervisor %s: %w", spec.ExePath, err)
