@@ -17,6 +17,7 @@ CITY_BEADS_DIR="$CITY_ABS/.beads"
 # Configurable thresholds.
 MAX_AGE="${GC_REAPER_MAX_AGE:-24h}"
 PURGE_AGE="${GC_REAPER_PURGE_AGE:-168h}"
+MAIL_DELETE_AGE="${GC_REAPER_MAIL_DELETE_AGE:-168h}"
 STALE_ISSUE_AGE="${GC_REAPER_STALE_ISSUE_AGE:-720h}"
 ALERT_THRESHOLD="${GC_REAPER_ALERT_THRESHOLD:-500}"
 DRY_RUN="${GC_REAPER_DRY_RUN:-}"
@@ -30,6 +31,7 @@ duration_to_hours() {
 
 MAX_AGE_H=$(duration_to_hours "$MAX_AGE")
 PURGE_AGE_H=$(duration_to_hours "$PURGE_AGE")
+MAIL_AGE_H=$(duration_to_hours "$MAIL_DELETE_AGE")
 STALE_AGE_H=$(duration_to_hours "$STALE_ISSUE_AGE")
 
 CITY_DB_METADATA_RESULT=""
@@ -111,6 +113,7 @@ fi
 TOTAL_STALE_WISPS=0
 TOTAL_CLOSED_WISPS=0
 TOTAL_PURGED=0
+TOTAL_MAIL_PURGED=0
 TOTAL_ISSUES_CLOSED=0
 TOTAL_STALE_ISSUES_SKIPPED=0
 ANOMALIES=""
@@ -301,9 +304,12 @@ while IFS= read -r DB; do
         continue
     fi
     if ! has_wisps_table "$DB"; then
-        # Not a bd-managed bead store. Skip silently; recording an
-        # anomaly here would just turn every schemaless DB on the
-        # server into noise. See gastownhall/gascity#1816.
+        # Not a bd-managed bead store; skip wisp queries for this scope.
+        # Schemaless DBs on the server (older rigs, partial migrations) do
+        # not have a wisps table — querying them just produces spurious
+        # errors. Log at info level so operators can distinguish "scope not
+        # applicable" from "reaper broken". See gastownhall/gascity#1816.
+        printf 'reaper: scope %s: wisps table absent, skipping (schema migration not applied)\n' "$DB" >&2
         continue
     fi
 
@@ -415,6 +421,31 @@ while IFS= read -r DB; do
         fi
     fi
 
+    # Step 3: Purge closed mail messages past mail_delete_age. Mail entries
+    # live in the issues table with issue_type='message', not in a separate
+    # mail table. Fix for gastownhall/gascity#1297 Bug 2.
+    DB_MAIL_PURGED=0
+    get_sql_count "$DB" "closed mail" "
+        SELECT COUNT(*) FROM \`$DB\`.issues
+        WHERE issue_type = 'message'
+        AND status = 'closed'
+        AND closed_at < DATE_SUB(NOW(), INTERVAL $MAIL_AGE_H HOUR)
+    "
+    MAIL_PURGE_COUNT=$SQL_COUNT_RESULT
+
+    if [ "$MAIL_PURGE_COUNT" -gt 0 ] && [ -z "$DRY_RUN" ]; then
+        if run_sql_change "$DB" "purging closed mail" "
+            DELETE FROM \`$DB\`.issues
+            WHERE issue_type = 'message'
+            AND status = 'closed'
+            AND closed_at < DATE_SUB(NOW(), INTERVAL $MAIL_AGE_H HOUR)
+        "; then
+            DB_MAIL_PURGED=$((DB_MAIL_PURGED + SQL_CHANGE_ROWS_RESULT))
+            TOTAL_MAIL_PURGED=$((TOTAL_MAIL_PURGED + SQL_CHANGE_ROWS_RESULT))
+            DB_MUTATIONS=$((DB_MUTATIONS + SQL_CHANGE_ROWS_RESULT))
+        fi
+    fi
+
     # Step 4: Auto-close stale issues (exclude P0/P1, epics, active deps).
     DB_ISSUES_CLOSED=0
     get_sql_rows "$DB" "stale issue" "
@@ -478,7 +509,7 @@ while IFS= read -r DB; do
     if [ -z "$DRY_RUN" ] && [ "$DB_MUTATIONS" -gt 0 ]; then
         if ! COMMIT_OUTPUT=$(dolt_sql -q "
             USE \`$DB\`;
-            CALL DOLT_COMMIT('-Am', 'reaper: stale_wisps=$STALE_WISP_COUNT closed_wisps=$DB_CLOSED_WISPS purged=$DB_PURGED stale_issues=$DB_ISSUES_CLOSED', '--author', 'reaper <reaper@gastown.local>')
+            CALL DOLT_COMMIT('-Am', 'reaper: stale_wisps=$STALE_WISP_COUNT closed_wisps=$DB_CLOSED_WISPS purged=$DB_PURGED mail=$DB_MAIL_PURGED stale_issues=$DB_ISSUES_CLOSED', '--author', 'reaper <reaper@gastown.local>')
         " 2>&1); then
             case "$COMMIT_OUTPUT" in
                 *"nothing to commit"*|*"Nothing to commit"*)
@@ -500,7 +531,7 @@ if [ -n "$ANOMALIES" ]; then
         -m "$ANOMALIES" 2>/dev/null || true
 fi
 
-SUMMARY="reaper — stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, purged:$TOTAL_PURGED, closed:$TOTAL_ISSUES_CLOSED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED"
+SUMMARY="reaper — stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, purged:$TOTAL_PURGED, mail:$TOTAL_MAIL_PURGED, closed:$TOTAL_ISSUES_CLOSED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED"
 if [ -n "$DRY_RUN" ]; then
     SUMMARY="$SUMMARY (dry run)"
 fi
