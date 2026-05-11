@@ -387,11 +387,17 @@ printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstPar
 	t.Setenv("HOME", homeDir)
 	originalPathEnv := providerProbePathEnv
 	originalCommandContext := providerProbeCommandContext
+	originalCache := providerProbeCache
+	originalCacheTTL := providerProbeCacheTTL
 	providerProbePathEnv = binDir
 	providerProbeCommandContext = exec.CommandContext
+	providerProbeCache = newCachedProviderProbeStore()
+	providerProbeCacheTTL = time.Hour
 	defer func() {
 		providerProbePathEnv = originalPathEnv
 		providerProbeCommandContext = originalCommandContext
+		providerProbeCache = originalCache
+		providerProbeCacheTTL = originalCacheTTL
 	}()
 
 	state := newFakeState(t)
