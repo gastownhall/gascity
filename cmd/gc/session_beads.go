@@ -1599,6 +1599,10 @@ func closeFailedCreateBead(store beads.Store, id string, now time.Time, stderr i
 		fmt.Fprintf(stderr, "session beads: closing failed-create bead %s: %v\n", id, err) //nolint:errcheck
 		return false
 	}
+	// Defense in depth: a startup race between bead creation and an early
+	// bind could leave participant records behind. Cleanup helpers no-op
+	// when the session has no labeled state.
+	cancelStateAssignedToRetiredSessionBead(store, id, now, stderr)
 	return true
 }
 
@@ -1871,6 +1875,11 @@ func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Wr
 		fmt.Fprintf(stderr, "session beads: closing %s: %v\n", id, err) //nolint:errcheck
 		return false
 	}
+	// Cascade extmsg cleanup. Pool retirement funnels through closeBead;
+	// named-session retirement calls this directly at retireNamedSession.
+	// Without it, pool respawn leaves zombie memberships and the successor
+	// never re-binds to slack (#1939).
+	cancelStateAssignedToRetiredSessionBead(store, id, now, stderr)
 	return true
 }
 

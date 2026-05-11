@@ -5404,6 +5404,105 @@ func TestCloseBeadIsNoopOnAlreadyClosedBead(t *testing.T) {
 	}
 }
 
+// setupSessionWithExtmsgMembership creates a session bead and registers a
+// participant in a group, which also writes the matching membership via
+// ensureMembershipLocked. Returns the session bead, fabric, and caller so
+// the test can verify cleanup via TranscriptService.ListConversationsBySession.
+func setupSessionWithExtmsgMembership(t *testing.T, store beads.Store, state string) (beads.Bead, extmsg.Services, extmsg.Caller) {
+	t.Helper()
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker-1",
+			"state":        state,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	fabric := extmsg.NewServices(store)
+	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+	group, err := fabric.Groups.EnsureGroup(context.Background(), caller, extmsg.EnsureGroupInput{
+		RootConversation: extmsg.ConversationRef{
+			ScopeID:        "ds-research",
+			Provider:       "slack",
+			AccountID:      "T0WORKSPACE",
+			ConversationID: "C0CHANNEL",
+			Kind:           extmsg.ConversationRoom,
+		},
+		Mode: extmsg.GroupModeLauncher,
+	})
+	if err != nil {
+		t.Fatalf("EnsureGroup: %v", err)
+	}
+	if _, err := fabric.Groups.UpsertParticipant(context.Background(), caller, extmsg.UpsertParticipantInput{
+		GroupID:   group.ID,
+		Handle:    "worker",
+		SessionID: sessionBead.ID,
+	}); err != nil {
+		t.Fatalf("UpsertParticipant: %v", err)
+	}
+	return sessionBead, fabric, caller
+}
+
+func openMembershipsForSession(t *testing.T, fabric extmsg.Services, caller extmsg.Caller, sessionID string) int {
+	t.Helper()
+	members, err := fabric.Transcript.ListConversationsBySession(context.Background(), caller, sessionID)
+	if err != nil {
+		t.Fatalf("ListConversationsBySession: %v", err)
+	}
+	return len(members)
+}
+
+// TestCloseBeadCascadesExtmsgState verifies the cascade fires from the pool
+// close path. Named-session retirement already calls
+// cancelStateAssignedToRetiredSessionBead at retireNamedSession; pool
+// retirement funnels through closeBead, so the cascade must fire here too
+// (regression for #1939, follow-up to #1865).
+func TestCloseBeadCascadesExtmsgState(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionBead, fabric, caller := setupSessionWithExtmsgMembership(t, store, "active")
+
+	if got := openMembershipsForSession(t, fabric, caller, sessionBead.ID); got != 1 {
+		t.Fatalf("open memberships before close = %d, want 1 (setup precondition)", got)
+	}
+
+	var stderr bytes.Buffer
+	now := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	if !closeBead(store, sessionBead.ID, "drained", now, &stderr) {
+		t.Fatalf("closeBead returned false; want true: stderr=%s", stderr.String())
+	}
+
+	if got := openMembershipsForSession(t, fabric, caller, sessionBead.ID); got != 0 {
+		t.Errorf("open memberships after closeBead = %d, want 0 (cascade should have closed the membership bead)", got)
+	}
+}
+
+// TestCloseFailedCreateBeadCascadesExtmsgState mirrors the cascade check on
+// the failed-create path. A startup race between session-bead creation and
+// an early bind attempt could leave a participant referencing the bead, so
+// both pool-close entry points need the cleanup (B23 fix scope completeness).
+func TestCloseFailedCreateBeadCascadesExtmsgState(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionBead, fabric, caller := setupSessionWithExtmsgMembership(t, store, string(session.StateFailedCreate))
+
+	if got := openMembershipsForSession(t, fabric, caller, sessionBead.ID); got != 1 {
+		t.Fatalf("open memberships before close = %d, want 1 (setup precondition)", got)
+	}
+
+	var stderr bytes.Buffer
+	now := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	if !closeFailedCreateBead(store, sessionBead.ID, now, &stderr) {
+		t.Fatalf("closeFailedCreateBead returned false; want true: stderr=%s", stderr.String())
+	}
+
+	if got := openMembershipsForSession(t, fabric, caller, sessionBead.ID); got != 0 {
+		t.Errorf("open memberships after closeFailedCreateBead = %d, want 0 (cascade should have closed the membership bead)", got)
+	}
+}
+
 func TestCloseSessionBeadIfUnassignedRefusesWhenRigStoreWorkAssignedBySessionName(t *testing.T) {
 	store := beads.NewMemStore()
 	rigStore := beads.NewMemStore()
