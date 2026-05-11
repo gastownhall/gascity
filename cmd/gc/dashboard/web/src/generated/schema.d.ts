@@ -3544,6 +3544,9 @@ export interface components {
         };
         RigPatch: {
             DefaultBranch: string | null;
+            FormulaVars: {
+                [key: string]: string;
+            };
             Name: string;
             Path: string | null;
             Prefix: string | null;
