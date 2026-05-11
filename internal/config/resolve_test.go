@@ -1600,6 +1600,7 @@ func TestMergeProviderOverBuiltinFieldSync(t *testing.T) {
 		PathCheck:              "custom-bin",
 		SupportsACP:            boolPtr(true),
 		SupportsHooks:          boolPtr(true),
+		SupportsWaitIdleNudge:  boolPtr(true),
 		InstructionsFile:       "CUSTOM.md",
 		ResumeFlag:             "--resume",
 		ResumeStyle:            "flag",

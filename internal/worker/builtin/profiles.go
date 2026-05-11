@@ -46,6 +46,7 @@ type BuiltinProviderSpec struct {
 	PathCheck              string
 	SupportsACP            bool
 	SupportsHooks          bool
+	SupportsWaitIdleNudge  bool
 	InstructionsFile       string
 	ResumeFlag             string
 	ResumeStyle            string
@@ -97,6 +98,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		EmitsPermissionWarning: true,
 		SupportsACP:            true,
 		SupportsHooks:          true,
+		SupportsWaitIdleNudge:  true,
 		InstructionsFile:       "CLAUDE.md",
 		ResumeFlag:             "--resume",
 		ResumeStyle:            "flag",

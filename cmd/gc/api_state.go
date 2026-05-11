@@ -895,19 +895,20 @@ func (cs *controllerState) CreateProvider(name string, spec config.ProviderSpec)
 func (cs *controllerState) UpdateProvider(name string, patch api.ProviderUpdate) error {
 	return cs.mutateAndPoke(func() error {
 		return cs.editor.UpdateProvider(name, configedit.ProviderUpdate{
-			DisplayName:        patch.DisplayName,
-			Base:               patch.Base,
-			Command:            patch.Command,
-			ACPCommand:         patch.ACPCommand,
-			Args:               patch.Args,
-			ACPArgs:            patch.ACPArgs,
-			ArgsAppend:         patch.ArgsAppend,
-			PromptMode:         patch.PromptMode,
-			PromptFlag:         patch.PromptFlag,
-			ReadyDelayMs:       patch.ReadyDelayMs,
-			Env:                patch.Env,
-			OptionsSchemaMerge: patch.OptionsSchemaMerge,
-			OptionsSchema:      patch.OptionsSchema,
+			DisplayName:           patch.DisplayName,
+			Base:                  patch.Base,
+			Command:               patch.Command,
+			ACPCommand:            patch.ACPCommand,
+			Args:                  patch.Args,
+			ACPArgs:               patch.ACPArgs,
+			ArgsAppend:            patch.ArgsAppend,
+			PromptMode:            patch.PromptMode,
+			PromptFlag:            patch.PromptFlag,
+			ReadyDelayMs:          patch.ReadyDelayMs,
+			Env:                   patch.Env,
+			SupportsWaitIdleNudge: patch.SupportsWaitIdleNudge,
+			OptionsSchemaMerge:    patch.OptionsSchemaMerge,
+			OptionsSchema:         patch.OptionsSchema,
 		})
 	})
 }

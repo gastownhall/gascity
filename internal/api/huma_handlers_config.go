@@ -139,6 +139,8 @@ func (s *Server) humaHandleConfigExplain(_ context.Context, _ *ConfigExplainInpu
 			ReadyDelayMs: spec.ReadyDelayMs,
 			Env:          spec.Env,
 			Origin:       origin,
+
+			SupportsWaitIdleNudge: spec.SupportsWaitIdleNudge,
 		}
 	}
 	// Builtins not overridden.
@@ -155,6 +157,8 @@ func (s *Server) humaHandleConfigExplain(_ context.Context, _ *ConfigExplainInpu
 				ReadyDelayMs: spec.ReadyDelayMs,
 				Env:          spec.Env,
 				Origin:       "builtin",
+
+				SupportsWaitIdleNudge: spec.SupportsWaitIdleNudge,
 			}
 		}
 	}
@@ -234,6 +238,8 @@ type annotatedProviderResponse struct {
 	ReadyDelayMs int               `json:"ready_delay_ms,omitempty"`
 	Env          map[string]string `json:"env,omitempty"`
 	Origin       string            `json:"origin" doc:"Provider origin: builtin, city, or builtin+city."`
+
+	SupportsWaitIdleNudge *bool `json:"supports_wait_idle_nudge,omitempty"`
 }
 
 // configExplainResponse is the full response for GET /v0/config/explain.

@@ -70,6 +70,91 @@ func TestProviderKind_PreferenceOrder(t *testing.T) {
 	}
 }
 
+func TestSupportsWaitIdleNudgeMetadataWinsOverFamilyFallback(t *testing.T) {
+	cases := []struct {
+		name string
+		meta map[string]string
+		want bool
+	}{
+		{
+			name: "explicit false keeps codex disabled",
+			meta: map[string]string{
+				"provider":               "codex",
+				WaitIdleNudgeMetadataKey: "false",
+			},
+			want: false,
+		},
+		{
+			name: "explicit true enables custom provider",
+			meta: map[string]string{
+				"provider":               "custom",
+				WaitIdleNudgeMetadataKey: "true",
+			},
+			want: true,
+		},
+		{
+			name: "missing metadata leaves codex disabled by default",
+			meta: map[string]string{
+				"builtin_ancestor": "codex",
+				"provider":         "codex-mini",
+			},
+			want: false,
+		},
+		{
+			name: "missing metadata leaves unsupported provider disabled",
+			meta: map[string]string{
+				"provider": "opencode",
+			},
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := supportsWaitIdleNudge(beads.Bead{Metadata: tc.meta}); got != tc.want {
+				t.Fatalf("supportsWaitIdleNudge(%v) = %v, want %v", tc.meta, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTryWaitIdleNudgeCodexOptInWaitsAndNudges(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "codex", t.TempDir(), "codex", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, WaitIdleNudgeMetadataKey, "true"); err != nil {
+		t.Fatalf("SetMetadata(%s): %v", WaitIdleNudgeMetadataKey, err)
+	}
+	sp.WaitForIdleErrors[info.SessionName] = nil
+
+	delivered, err := mgr.TryWaitIdleNudge(context.Background(), info.ID, "operator", "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+	if err != nil {
+		t.Fatalf("TryWaitIdleNudge: %v", err)
+	}
+	if !delivered {
+		t.Fatal("TryWaitIdleNudge delivered = false, want true")
+	}
+
+	methods := make([]string, 0, len(sp.Calls))
+	var sawWrappedNudge bool
+	for _, call := range sp.Calls {
+		methods = append(methods, call.Method)
+		if call.Method == "NudgeNow" && call.Name == info.SessionName && strings.Contains(call.Message, "[operator] hello") {
+			sawWrappedNudge = true
+		}
+	}
+	if !containsSubsequence(methods, []string{"WaitForIdle", "NudgeNow"}) {
+		t.Fatalf("methods = %v, want WaitForIdle before NudgeNow", methods)
+	}
+	if !sawWrappedNudge {
+		t.Fatalf("calls = %#v, want wrapped NudgeNow reminder", sp.Calls)
+	}
+}
+
 // TestWaitsForIdleAfterInterrupt_WrappedClaude verifies that a session
 // bead whose builtin_ancestor = "claude" (e.g. claude-max wrapping the
 // built-in) triggers the same wait-for-idle-after-interrupt branch that

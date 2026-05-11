@@ -450,6 +450,7 @@ func TestProviderFieldSync(t *testing.T) {
 		"EmitsPermissionWarning": "tri-state *bool; merged via MergeProviderOverBuiltin, not ProviderPatch",
 		"SupportsACP":            "tri-state *bool; merged via MergeProviderOverBuiltin, not ProviderPatch",
 		"SupportsHooks":          "tri-state *bool; merged via MergeProviderOverBuiltin, not ProviderPatch",
+		"SupportsWaitIdleNudge":  "tri-state *bool; merged via MergeProviderOverBuiltin, not ProviderPatch",
 		"InstructionsFile":       "internal config path, not patched",
 		"ResumeFlag":             "internal resume config, not patched directly (use ResumeCommand)",
 		"ResumeStyle":            "internal resume config, not patched directly (use ResumeCommand)",

@@ -725,6 +725,8 @@ type ProviderUpdate struct {
 	Env                map[string]string // nil = not set, non-nil = additive merge
 	OptionsSchemaMerge *string
 	OptionsSchema      []config.ProviderOption // nil = not set, non-nil = replace
+
+	SupportsWaitIdleNudge *bool
 }
 
 // CreateProvider adds a new city-level provider to the config.
@@ -797,6 +799,10 @@ func (e *Editor) UpdateProvider(name string, patch ProviderUpdate) error {
 			for k, v := range patch.Env {
 				spec.Env[k] = v
 			}
+		}
+		if patch.SupportsWaitIdleNudge != nil {
+			v := *patch.SupportsWaitIdleNudge
+			spec.SupportsWaitIdleNudge = &v
 		}
 		if patch.OptionsSchemaMerge != nil {
 			spec.OptionsSchemaMerge = *patch.OptionsSchemaMerge

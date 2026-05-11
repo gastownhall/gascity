@@ -68,6 +68,9 @@ func TestBuiltinProvidersClaude(t *testing.T) {
 	if !derefBool(p.EmitsPermissionWarning) {
 		t.Error("EmitsPermissionWarning = false, want true")
 	}
+	if !derefBool(p.SupportsWaitIdleNudge) {
+		t.Error("SupportsWaitIdleNudge = false, want true")
+	}
 }
 
 func TestBuiltinClaudeCommandString(t *testing.T) {
@@ -111,6 +114,26 @@ func TestBuiltinProvidersCodex(t *testing.T) {
 	}
 	if derefBool(p.EmitsPermissionWarning) {
 		t.Error("EmitsPermissionWarning = true, want false")
+	}
+	if derefBool(p.SupportsWaitIdleNudge) {
+		t.Error("SupportsWaitIdleNudge = true, want false by default")
+	}
+}
+
+func TestResolveProviderSupportsWaitIdleNudgeOverride(t *testing.T) {
+	enabled := true
+	resolved, err := ResolveProviderChain("nudgy-codex", ProviderSpec{
+		Base:                  basePtr("builtin:codex"),
+		SupportsWaitIdleNudge: &enabled,
+	}, nil)
+	if err != nil {
+		t.Fatalf("ResolveProviderChain: %v", err)
+	}
+	if !resolved.SupportsWaitIdleNudge {
+		t.Fatal("SupportsWaitIdleNudge = false, want true override")
+	}
+	if got := resolved.Provenance.FieldLayer["supports_wait_idle_nudge"]; got != "providers.nudgy-codex" {
+		t.Fatalf("supports_wait_idle_nudge provenance = %q, want providers.nudgy-codex", got)
 	}
 }
 

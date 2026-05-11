@@ -22,6 +22,8 @@ type providerResponse struct {
 	Env          map[string]string `json:"env,omitempty"`
 	Builtin      bool              `json:"builtin"`
 	CityLevel    bool              `json:"city_level"`
+
+	SupportsWaitIdleNudge *bool `json:"supports_wait_idle_nudge,omitempty"`
 }
 
 type providerOptionDTO struct {
@@ -38,7 +40,7 @@ type optionChoiceDTO struct {
 }
 
 func providerFromSpec(name string, spec config.ProviderSpec, builtin, cityLevel bool) providerResponse {
-	return providerResponse{
+	resp := providerResponse{
 		Name:         name,
 		DisplayName:  spec.DisplayName,
 		Command:      spec.Command,
@@ -52,6 +54,8 @@ func providerFromSpec(name string, spec config.ProviderSpec, builtin, cityLevel 
 		Builtin:      builtin,
 		CityLevel:    cityLevel,
 	}
+	resp.SupportsWaitIdleNudge = spec.SupportsWaitIdleNudge
+	return resp
 }
 
 func optionalStringSlice(values []string) *[]string {

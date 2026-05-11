@@ -717,6 +717,9 @@
           "ready_delay_ms": {
             "format": "int64",
             "type": "integer"
+          },
+          "supports_wait_idle_nudge": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -4615,6 +4618,10 @@
             "description": "Milliseconds to wait before probing readiness.",
             "format": "int64",
             "type": "integer"
+          },
+          "supports_wait_idle_nudge": {
+            "description": "Whether this provider supports wait-idle nudge delivery.",
+            "type": "boolean"
           }
         },
         "required": [
@@ -5000,6 +5007,9 @@
           "ready_delay_ms": {
             "format": "int64",
             "type": "integer"
+          },
+          "supports_wait_idle_nudge": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -5127,6 +5137,10 @@
             "description": "Milliseconds to wait before probing readiness.",
             "format": "int64",
             "type": "integer"
+          },
+          "supports_wait_idle_nudge": {
+            "description": "Whether this provider supports wait-idle nudge delivery.",
+            "type": "boolean"
           }
         },
         "type": "object"

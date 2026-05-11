@@ -172,6 +172,7 @@ func stampResolvedProviderSessionMetadata(meta map[string]string, resolved *conf
 	if ancestor := strings.TrimSpace(resolved.BuiltinAncestor); ancestor != "" && ancestor != name {
 		meta["builtin_ancestor"] = ancestor
 	}
+	meta[session.WaitIdleNudgeMetadataKey] = strconv.FormatBool(resolved.SupportsWaitIdleNudge)
 }
 
 func queueMissingResolvedProviderSessionMetadata(existing map[string]string, queue func(string, string), resolved *config.ResolvedProvider) {
@@ -187,6 +188,9 @@ func queueMissingResolvedProviderSessionMetadata(existing map[string]string, que
 	}
 	if ancestor := strings.TrimSpace(resolved.BuiltinAncestor); existing["builtin_ancestor"] == "" && ancestor != "" && ancestor != name {
 		queue("builtin_ancestor", ancestor)
+	}
+	if desired := strconv.FormatBool(resolved.SupportsWaitIdleNudge); existing[session.WaitIdleNudgeMetadataKey] != desired {
+		queue(session.WaitIdleNudgeMetadataKey, desired)
 	}
 }
 

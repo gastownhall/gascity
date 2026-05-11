@@ -407,10 +407,11 @@ type AnnotatedProviderResponse struct {
 	Env         *map[string]string `json:"env,omitempty"`
 
 	// Origin Provider origin: builtin, city, or builtin+city.
-	Origin       string  `json:"origin"`
-	PromptFlag   *string `json:"prompt_flag,omitempty"`
-	PromptMode   *string `json:"prompt_mode,omitempty"`
-	ReadyDelayMs *int64  `json:"ready_delay_ms,omitempty"`
+	Origin                string  `json:"origin"`
+	PromptFlag            *string `json:"prompt_flag,omitempty"`
+	PromptMode            *string `json:"prompt_mode,omitempty"`
+	ReadyDelayMs          *int64  `json:"ready_delay_ms,omitempty"`
+	SupportsWaitIdleNudge *bool   `json:"supports_wait_idle_nudge,omitempty"`
 }
 
 // AsyncAcceptedBody defines model for AsyncAcceptedBody.
@@ -1851,6 +1852,9 @@ type ProviderCreateInputBody struct {
 
 	// ReadyDelayMs Milliseconds to wait before probing readiness.
 	ReadyDelayMs *int64 `json:"ready_delay_ms,omitempty"`
+
+	// SupportsWaitIdleNudge Whether this provider supports wait-idle nudge delivery.
+	SupportsWaitIdleNudge *bool `json:"supports_wait_idle_nudge,omitempty"`
 }
 
 // ProviderCreatedOutputBody defines model for ProviderCreatedOutputBody.
@@ -1955,18 +1959,19 @@ type ProviderReadinessResponse struct {
 
 // ProviderResponse defines model for ProviderResponse.
 type ProviderResponse struct {
-	AcpArgs      *[]string          `json:"acp_args,omitempty"`
-	AcpCommand   *string            `json:"acp_command,omitempty"`
-	Args         *[]string          `json:"args,omitempty"`
-	Builtin      bool               `json:"builtin"`
-	CityLevel    bool               `json:"city_level"`
-	Command      *string            `json:"command,omitempty"`
-	DisplayName  *string            `json:"display_name,omitempty"`
-	Env          *map[string]string `json:"env,omitempty"`
-	Name         string             `json:"name"`
-	PromptFlag   *string            `json:"prompt_flag,omitempty"`
-	PromptMode   *string            `json:"prompt_mode,omitempty"`
-	ReadyDelayMs *int64             `json:"ready_delay_ms,omitempty"`
+	AcpArgs               *[]string          `json:"acp_args,omitempty"`
+	AcpCommand            *string            `json:"acp_command,omitempty"`
+	Args                  *[]string          `json:"args,omitempty"`
+	Builtin               bool               `json:"builtin"`
+	CityLevel             bool               `json:"city_level"`
+	Command               *string            `json:"command,omitempty"`
+	DisplayName           *string            `json:"display_name,omitempty"`
+	Env                   *map[string]string `json:"env,omitempty"`
+	Name                  string             `json:"name"`
+	PromptFlag            *string            `json:"prompt_flag,omitempty"`
+	PromptMode            *string            `json:"prompt_mode,omitempty"`
+	ReadyDelayMs          *int64             `json:"ready_delay_ms,omitempty"`
+	SupportsWaitIdleNudge *bool              `json:"supports_wait_idle_nudge,omitempty"`
 }
 
 // ProviderSpecJSON defines model for ProviderSpecJSON.
@@ -2019,6 +2024,9 @@ type ProviderUpdateInputBody struct {
 
 	// ReadyDelayMs Milliseconds to wait before probing readiness.
 	ReadyDelayMs *int64 `json:"ready_delay_ms,omitempty"`
+
+	// SupportsWaitIdleNudge Whether this provider supports wait-idle nudge delivery.
+	SupportsWaitIdleNudge *bool `json:"supports_wait_idle_nudge,omitempty"`
 }
 
 // PublishReceipt defines model for PublishReceipt.

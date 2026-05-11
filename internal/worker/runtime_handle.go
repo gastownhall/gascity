@@ -24,19 +24,24 @@ type RuntimeHandleConfig struct {
 	ProviderName string
 	Transport    string
 	ProcessNames []string
-	Recorder     events.Recorder
+	// ProviderSupportsWaitIdleNudge overrides provider-family fallback when the
+	// resolved provider config is available to the caller.
+	ProviderSupportsWaitIdleNudge *bool
+	Recorder                      events.Recorder
 }
 
 // RuntimeHandle adapts a legacy runtime session name to the canonical worker
 // interface so higher layers do not bypass internal/worker for lifecycle or
 // pending interaction operations.
 type RuntimeHandle struct {
-	provider     runtime.Provider
-	sessionName  string
-	providerName string
-	transport    string
-	processNames []string
-	recorder     events.Recorder
+	provider                 runtime.Provider
+	sessionName              string
+	providerName             string
+	transport                string
+	processNames             []string
+	supportsWaitIdleNudge    bool
+	hasWaitIdleNudgeOverride bool
+	recorder                 events.Recorder
 }
 
 var _ Handle = (*RuntimeHandle)(nil)
@@ -53,14 +58,19 @@ func NewRuntimeHandle(cfg RuntimeHandleConfig) (*RuntimeHandle, error) {
 	if recorder == nil {
 		recorder = events.Discard
 	}
-	return &RuntimeHandle{
+	handle := &RuntimeHandle{
 		provider:     cfg.Provider,
 		sessionName:  strings.TrimSpace(cfg.SessionName),
 		providerName: strings.TrimSpace(cfg.ProviderName),
 		transport:    strings.TrimSpace(cfg.Transport),
 		processNames: append([]string(nil), cfg.ProcessNames...),
 		recorder:     recorder,
-	}, nil
+	}
+	if cfg.ProviderSupportsWaitIdleNudge != nil {
+		handle.supportsWaitIdleNudge = *cfg.ProviderSupportsWaitIdleNudge
+		handle.hasWaitIdleNudgeOverride = true
+	}
+	return handle, nil
 }
 
 // Start reports unsupported for runtime-only handles that lack bead-backed state.
@@ -387,7 +397,11 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 		}
 		return NudgeResult{Delivered: true}, nil
 	}
-	if h.providerName != "claude" {
+	if h.hasWaitIdleNudgeOverride {
+		if !h.supportsWaitIdleNudge {
+			return NudgeResult{Delivered: false}, nil
+		}
+	} else if h.providerName != "claude" {
 		return NudgeResult{Delivered: false}, nil
 	}
 	waiter, ok := h.provider.(runtime.IdleWaitProvider)

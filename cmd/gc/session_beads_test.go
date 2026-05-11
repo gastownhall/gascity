@@ -392,9 +392,10 @@ func TestSyncSessionBeads_StampsProviderFamilyMetadata(t *testing.T) {
 			TemplateName: "mayor",
 			Command:      "claude",
 			ResolvedProvider: &config.ResolvedProvider{
-				Name:            "claude-max",
-				Kind:            "claude",
-				BuiltinAncestor: "claude",
+				Name:                  "claude-max",
+				Kind:                  "claude",
+				BuiltinAncestor:       "claude",
+				SupportsWaitIdleNudge: true,
 			},
 		},
 	}
@@ -417,6 +418,9 @@ func TestSyncSessionBeads_StampsProviderFamilyMetadata(t *testing.T) {
 	}
 	if got := all[0].Metadata["builtin_ancestor"]; got != "claude" {
 		t.Fatalf("builtin_ancestor = %q, want claude", got)
+	}
+	if got := all[0].Metadata[session.WaitIdleNudgeMetadataKey]; got != "true" {
+		t.Fatalf("%s = %q, want true", session.WaitIdleNudgeMetadataKey, got)
 	}
 }
 
@@ -444,9 +448,10 @@ func TestSyncSessionBeads_BackfillsProviderFamilyMetadata(t *testing.T) {
 			TemplateName: "mayor",
 			Command:      "claude",
 			ResolvedProvider: &config.ResolvedProvider{
-				Name:            "claude-max",
-				Kind:            "claude",
-				BuiltinAncestor: "claude",
+				Name:                  "claude-max",
+				Kind:                  "claude",
+				BuiltinAncestor:       "claude",
+				SupportsWaitIdleNudge: true,
 			},
 		},
 	}
@@ -469,6 +474,56 @@ func TestSyncSessionBeads_BackfillsProviderFamilyMetadata(t *testing.T) {
 	}
 	if got := updated.Metadata["builtin_ancestor"]; got != "claude" {
 		t.Fatalf("builtin_ancestor = %q, want claude", got)
+	}
+	if got := updated.Metadata[session.WaitIdleNudgeMetadataKey]; got != "true" {
+		t.Fatalf("%s = %q, want true", session.WaitIdleNudgeMetadataKey, got)
+	}
+}
+
+func TestSyncSessionBeads_RefreshesWaitIdleNudgeMetadata(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	_ = sp.Start(context.TODO(), "mayor", runtime.Config{Command: "codex"})
+	existing, err := store.Create(beads.Bead{
+		Title:  "mayor",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:mayor"},
+		Metadata: map[string]string{
+			"session_name":                   "mayor",
+			"state":                          "active",
+			"template":                       "mayor",
+			session.WaitIdleNudgeMetadataKey: "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("creating existing bead: %v", err)
+	}
+
+	ds := map[string]TemplateParams{
+		"mayor": {
+			TemplateName: "mayor",
+			Command:      "codex",
+			ResolvedProvider: &config.ResolvedProvider{
+				Name:                  "codex",
+				BuiltinAncestor:       "codex",
+				SupportsWaitIdleNudge: false,
+			},
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+	updated, err := store.Get(existing.ID)
+	if err != nil {
+		t.Fatalf("getting existing bead: %v", err)
+	}
+	if got := updated.Metadata[session.WaitIdleNudgeMetadataKey]; got != "false" {
+		t.Fatalf("%s = %q, want false", session.WaitIdleNudgeMetadataKey, got)
 	}
 }
 

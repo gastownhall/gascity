@@ -30,6 +30,7 @@ var bannedOverlayKeys = map[string]bool{
 	"sleep_intent":               true,
 	"resume_flag":                true,
 	"resume_style":               true,
+	WaitIdleNudgeMetadataKey:     true,
 }
 
 // ValidateOverlay checks that all keys in overrides are permitted by the

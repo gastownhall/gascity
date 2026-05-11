@@ -1200,11 +1200,13 @@ func TestUpdateProvider(t *testing.T) {
 	newCmd := "updated-cli"
 	newACPCmd := "updated-cli-acp"
 	newName := "Updated Agent"
+	supportsWaitIdleNudge := true
 	err := ed.UpdateProvider("custom", configedit.ProviderUpdate{
-		Command:     &newCmd,
-		ACPCommand:  &newACPCmd,
-		ACPArgs:     []string{"rpc", "--stdio"},
-		DisplayName: &newName,
+		Command:               &newCmd,
+		ACPCommand:            &newACPCmd,
+		ACPArgs:               []string{"rpc", "--stdio"},
+		DisplayName:           &newName,
+		SupportsWaitIdleNudge: &supportsWaitIdleNudge,
 	})
 	if err != nil {
 		t.Fatalf("UpdateProvider: %v", err)
@@ -1223,6 +1225,9 @@ func TestUpdateProvider(t *testing.T) {
 	}
 	if got.DisplayName != "Updated Agent" {
 		t.Errorf("display_name = %q, want %q", got.DisplayName, "Updated Agent")
+	}
+	if got.SupportsWaitIdleNudge == nil || !*got.SupportsWaitIdleNudge {
+		t.Errorf("supports_wait_idle_nudge = %#v, want true", got.SupportsWaitIdleNudge)
 	}
 }
 

@@ -1686,13 +1686,20 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 		{
 			name: "create provider",
 			mutate: func(cs *controllerState) error {
-				return cs.CreateProvider("codex-local", config.ProviderSpec{Command: "codex", PromptMode: "arg"})
+				return cs.CreateProvider("codex-local", config.ProviderSpec{
+					Command:               "codex",
+					PromptMode:            "arg",
+					SupportsWaitIdleNudge: boolPtr(true),
+				})
 			},
 			verify: func(t *testing.T, cfg *config.City) {
 				t.Helper()
 				spec, ok := cfg.Providers["codex-local"]
 				if !ok || spec.Command != "codex" || spec.PromptMode != "arg" {
 					t.Fatalf("providers = %+v, want codex-local provider", cfg.Providers)
+				}
+				if spec.SupportsWaitIdleNudge == nil || !*spec.SupportsWaitIdleNudge {
+					t.Fatalf("supports_wait_idle_nudge = %#v, want true", spec.SupportsWaitIdleNudge)
 				}
 			},
 		},
@@ -1703,13 +1710,14 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 			},
 			mutate: func(cs *controllerState) error {
 				return cs.UpdateProvider("codex-local", api.ProviderUpdate{
-					DisplayName:  stringPtr("Codex Local"),
-					Command:      stringPtr("codex-wrapper"),
-					Args:         []string{"--quiet"},
-					PromptMode:   stringPtr("flag"),
-					PromptFlag:   stringPtr("--prompt"),
-					ReadyDelayMs: intPtr(25),
-					Env:          map[string]string{"GC_TEST": "1"},
+					DisplayName:           stringPtr("Codex Local"),
+					Command:               stringPtr("codex-wrapper"),
+					Args:                  []string{"--quiet"},
+					PromptMode:            stringPtr("flag"),
+					PromptFlag:            stringPtr("--prompt"),
+					ReadyDelayMs:          intPtr(25),
+					Env:                   map[string]string{"GC_TEST": "1"},
+					SupportsWaitIdleNudge: boolPtr(true),
 				})
 			},
 			verify: func(t *testing.T, cfg *config.City) {
@@ -1720,6 +1728,9 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 				}
 				if len(spec.Args) != 1 || spec.Args[0] != "--quiet" || spec.Env["GC_TEST"] != "1" {
 					t.Fatalf("updated provider args/env = args:%+v env:%+v, want replacement args and merged env", spec.Args, spec.Env)
+				}
+				if spec.SupportsWaitIdleNudge == nil || !*spec.SupportsWaitIdleNudge {
+					t.Fatalf("supports_wait_idle_nudge = %#v, want true", spec.SupportsWaitIdleNudge)
 				}
 			},
 		},

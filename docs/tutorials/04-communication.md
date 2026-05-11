@@ -95,6 +95,21 @@ That nudge does not deliver the mail by itself — it just wakes the mayor so a
 new turn starts. When the mayor wakes up or starts a new turn, hooks deliver
 any pending mail, and the nudge tells it to act on what it finds.
 
+By default, `gc session nudge` uses wait-idle delivery: Gas City waits for a
+safe prompt boundary before injecting the nudge text. That mode is a provider
+capability. Built-in Claude providers support it by default for compatibility;
+other providers must declare support explicitly:
+
+```toml
+[providers.codex]
+base = "builtin:codex"
+supports_wait_idle_nudge = true
+```
+
+Only set `supports_wait_idle_nudge` for providers that can reliably wait for an
+idle prompt and accept wrapped reminder text. Otherwise, use queued delivery for
+messages that should wait until the next safe turn boundary.
+
 ## Slinging beads to coordinate agents
 
 Here's what coordination looks like in practice. Once the mayor takes a turn, it

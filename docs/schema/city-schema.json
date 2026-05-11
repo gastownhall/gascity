@@ -1758,6 +1758,10 @@
           "type": "boolean",
           "description": "SupportsHooks indicates the provider has an executable hook mechanism\n(settings.json, plugins, etc.) for lifecycle events."
         },
+        "supports_wait_idle_nudge": {
+          "type": "boolean",
+          "description": "SupportsWaitIdleNudge indicates wait-idle nudges may be delivered by\nwaiting for a prompt boundary and then injecting a wrapped reminder."
+        },
         "instructions_file": {
           "type": "string",
           "description": "InstructionsFile is the filename the provider reads for project instructions\n(e.g., \"CLAUDE.md\", \"AGENTS.md\"). Empty defaults to \"AGENTS.md\"."

@@ -70,6 +70,8 @@ type ProviderCreateInput struct {
 		ReadyDelayMs       int               `json:"ready_delay_ms,omitempty" doc:"Milliseconds to wait before probing readiness."`
 		Env                map[string]string `json:"env,omitempty" doc:"Environment variables."`
 		OptionsSchemaMerge *string           `json:"options_schema_merge,omitempty" doc:"Options schema merge mode across inheritance chain."`
+
+		SupportsWaitIdleNudge *bool `json:"supports_wait_idle_nudge,omitempty" doc:"Whether this provider supports wait-idle nudge delivery."`
 	}
 }
 
@@ -90,6 +92,8 @@ type ProviderUpdateInput struct {
 		ReadyDelayMs       *int              `json:"ready_delay_ms,omitempty" doc:"Milliseconds to wait before probing readiness."`
 		Env                map[string]string `json:"env,omitempty" doc:"Environment variables."`
 		OptionsSchemaMerge *string           `json:"options_schema_merge,omitempty" doc:"Options schema merge mode across inheritance chain."`
+
+		SupportsWaitIdleNudge *bool `json:"supports_wait_idle_nudge,omitempty" doc:"Whether this provider supports wait-idle nudge delivery."`
 	}
 }
 

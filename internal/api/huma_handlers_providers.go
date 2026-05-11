@@ -148,6 +148,7 @@ func (s *Server) humaHandleProviderCreate(_ context.Context, input *ProviderCrea
 		PromptFlag:  input.Body.PromptFlag,
 		Env:         input.Body.Env,
 	}
+	spec.SupportsWaitIdleNudge = input.Body.SupportsWaitIdleNudge
 	if input.Body.ReadyDelayMs != 0 {
 		spec.ReadyDelayMs = input.Body.ReadyDelayMs
 	}
@@ -184,6 +185,7 @@ func (s *Server) humaHandleProviderUpdate(_ context.Context, input *ProviderUpda
 		Env:                input.Body.Env,
 		OptionsSchemaMerge: input.Body.OptionsSchemaMerge,
 	}
+	patch.SupportsWaitIdleNudge = input.Body.SupportsWaitIdleNudge
 	if input.Body.Base != nil {
 		patch.Base = &input.Body.Base
 	}

@@ -61,6 +61,29 @@ func TestHandleProviderCreate_PersistsACPTransportOverrides(t *testing.T) {
 	}
 }
 
+func TestHandleProviderCreate_PersistsWaitIdleNudgeSupport(t *testing.T) {
+	fs := newFakeMutatorState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	req := newPostRequest(cityURL(fs, "/providers"), strings.NewReader(
+		`{"name":"nudgy-codex","command":"codex","supports_wait_idle_nudge":true}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	spec, ok := fs.cfg.Providers["nudgy-codex"]
+	if !ok {
+		t.Fatal("provider nudgy-codex not created")
+	}
+	if spec.SupportsWaitIdleNudge == nil || !*spec.SupportsWaitIdleNudge {
+		t.Fatalf("SupportsWaitIdleNudge = %#v, want true", spec.SupportsWaitIdleNudge)
+	}
+}
+
 func TestHandleProviderUpdate_UpdatesInheritanceFields(t *testing.T) {
 	fs := newFakeMutatorState(t)
 	fs.cfg.Providers["custom"] = fs.cfg.Providers["test-agent"]
@@ -113,6 +136,32 @@ func TestHandleProviderUpdate_UpdatesACPTransportOverrides(t *testing.T) {
 	}
 }
 
+func TestHandleProviderUpdate_UpdatesWaitIdleNudgeSupport(t *testing.T) {
+	fs := newFakeMutatorState(t)
+	enabled := true
+	fs.cfg.Providers["custom"] = config.ProviderSpec{
+		Command:               "custom",
+		SupportsWaitIdleNudge: &enabled,
+	}
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	req := httptest.NewRequest(http.MethodPatch, cityURL(fs, "/provider/custom"), strings.NewReader(
+		`{"supports_wait_idle_nudge":false}`))
+	req.Header.Set("X-GC-Request", "true")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	spec := fs.cfg.Providers["custom"]
+	if spec.SupportsWaitIdleNudge == nil || *spec.SupportsWaitIdleNudge {
+		t.Fatalf("SupportsWaitIdleNudge = %#v, want false", spec.SupportsWaitIdleNudge)
+	}
+}
+
 func TestHandleProviderGet_IncludesACPTransportOverrides(t *testing.T) {
 	fs := newFakeState(t)
 	fs.cfg.Providers["custom"] = config.ProviderSpec{
@@ -139,6 +188,32 @@ func TestHandleProviderGet_IncludesACPTransportOverrides(t *testing.T) {
 	}
 	if resp.ACPArgs == nil || len(*resp.ACPArgs) != 2 || (*resp.ACPArgs)[0] != "rpc" || (*resp.ACPArgs)[1] != "--stdio" {
 		t.Fatalf("ACPArgs = %#v, want [rpc --stdio]", resp.ACPArgs)
+	}
+}
+
+func TestHandleProviderGet_IncludesWaitIdleNudgeSupport(t *testing.T) {
+	fs := newFakeState(t)
+	enabled := true
+	fs.cfg.Providers["custom"] = config.ProviderSpec{
+		Command:               "custom",
+		SupportsWaitIdleNudge: &enabled,
+	}
+	h := newTestCityHandler(t, fs)
+
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/provider/custom"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp providerResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.SupportsWaitIdleNudge == nil || !*resp.SupportsWaitIdleNudge {
+		t.Fatalf("SupportsWaitIdleNudge = %#v, want true", resp.SupportsWaitIdleNudge)
 	}
 }
 

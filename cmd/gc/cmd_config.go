@@ -650,6 +650,7 @@ func renderProviderExplainText(w io.Writer, r config.ResolvedProvider, name stri
 
 	explainResolvedBool(w, "supports_hooks", r.SupportsHooks, r.Provenance.FieldLayer["supports_hooks"])
 	explainResolvedBool(w, "supports_acp", r.SupportsACP, r.Provenance.FieldLayer["supports_acp"])
+	explainResolvedBool(w, "supports_wait_idle_nudge", r.SupportsWaitIdleNudge, r.Provenance.FieldLayer["supports_wait_idle_nudge"])
 	explainResolvedBool(w, "emits_permission_warning", r.EmitsPermissionWarning, r.Provenance.FieldLayer["emits_permission_warning"])
 
 	explainProviderMap(w, "env", r.Env, r.Provenance.MapKeyLayer["env"])
@@ -744,6 +745,7 @@ func renderProviderExplainJSON(r config.ResolvedProvider, name string, stdout, s
 			"title_model":              r.TitleModel,
 			"supports_hooks":           triStateFromProvenance("supports_hooks", r.SupportsHooks),
 			"supports_acp":             triStateFromProvenance("supports_acp", r.SupportsACP),
+			"supports_wait_idle_nudge": triStateFromProvenance("supports_wait_idle_nudge", r.SupportsWaitIdleNudge),
 			"emits_permission_warning": triStateFromProvenance("emits_permission_warning", r.EmitsPermissionWarning),
 			"env":                      r.Env,
 			"permission_modes":         r.PermissionModes,

@@ -352,11 +352,21 @@ func runtimeWorkerHandleWithConfig(
 	transport string,
 	processNames []string,
 ) (worker.Handle, error) {
-	factory, err := workerFactoryWithConfig(cityPath, store, sp, cfg)
-	if err != nil {
-		return nil, err
+	if sp == nil {
+		return nil, session.ErrSessionNotFound
 	}
-	return factory.RuntimeHandle(sessionName, providerName, transport, processNames)
+	handleCfg := worker.RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  sessionName,
+		ProviderName: providerName,
+		Transport:    transport,
+		ProcessNames: processNames,
+	}
+	if resolved, ok := config.ResolvedProviderCached(cfg, providerName); ok {
+		v := resolved.SupportsWaitIdleNudge
+		handleCfg.ProviderSupportsWaitIdleNudge = &v
+	}
+	return worker.NewRuntimeHandle(handleCfg)
 }
 
 func workerKillSessionTargetWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) error {

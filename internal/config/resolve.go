@@ -240,6 +240,9 @@ func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	if city.SupportsHooks != nil {
 		result.SupportsHooks = city.SupportsHooks
 	}
+	if city.SupportsWaitIdleNudge != nil {
+		result.SupportsWaitIdleNudge = city.SupportsWaitIdleNudge
+	}
 	if city.InstructionsFile != "" {
 		result.InstructionsFile = city.InstructionsFile
 	}
@@ -530,6 +533,7 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 		EmitsPermissionWarning: derefBool(spec.EmitsPermissionWarning),
 		SupportsACP:            derefBool(spec.SupportsACP),
 		SupportsHooks:          derefBool(spec.SupportsHooks),
+		SupportsWaitIdleNudge:  derefBool(spec.SupportsWaitIdleNudge),
 		InstructionsFile:       spec.InstructionsFile,
 		ResumeFlag:             spec.ResumeFlag,
 		ResumeStyle:            spec.ResumeStyle,
@@ -743,6 +747,10 @@ func resolvedChainToSpec(r ResolvedProvider, leaf ProviderSpec) ProviderSpec {
 	if leaf.SupportsHooks == nil && providerBoolFieldSet(r, "supports_hooks") {
 		v := r.SupportsHooks
 		out.SupportsHooks = &v
+	}
+	if leaf.SupportsWaitIdleNudge == nil && providerBoolFieldSet(r, "supports_wait_idle_nudge") {
+		v := r.SupportsWaitIdleNudge
+		out.SupportsWaitIdleNudge = &v
 	}
 	if r.InstructionsFile != "" {
 		out.InstructionsFile = r.InstructionsFile

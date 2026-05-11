@@ -85,6 +85,9 @@ type ProviderSpec struct {
 	// SupportsHooks indicates the provider has an executable hook mechanism
 	// (settings.json, plugins, etc.) for lifecycle events.
 	SupportsHooks *bool `toml:"supports_hooks,omitempty"`
+	// SupportsWaitIdleNudge indicates wait-idle nudges may be delivered by
+	// waiting for a prompt boundary and then injecting a wrapped reminder.
+	SupportsWaitIdleNudge *bool `toml:"supports_wait_idle_nudge,omitempty"`
 	// InstructionsFile is the filename the provider reads for project instructions
 	// (e.g., "CLAUDE.md", "AGENTS.md"). Empty defaults to "AGENTS.md".
 	InstructionsFile string `toml:"instructions_file,omitempty"`
@@ -193,6 +196,7 @@ type ResolvedProvider struct {
 	Env                    map[string]string
 	SupportsACP            bool
 	SupportsHooks          bool
+	SupportsWaitIdleNudge  bool
 	InstructionsFile       string
 	ResumeFlag             string
 	ResumeStyle            string
@@ -403,6 +407,7 @@ func providerSpecFromWorker(spec workerbuiltin.BuiltinProviderSpec) ProviderSpec
 		PathCheck:              spec.PathCheck,
 		SupportsACP:            boolPtr(spec.SupportsACP),
 		SupportsHooks:          boolPtr(spec.SupportsHooks),
+		SupportsWaitIdleNudge:  boolPtr(spec.SupportsWaitIdleNudge),
 		InstructionsFile:       spec.InstructionsFile,
 		ResumeFlag:             spec.ResumeFlag,
 		ResumeStyle:            spec.ResumeStyle,

@@ -981,6 +981,11 @@ func deepMergeProvider(base, frag ProviderSpec, name string, fragMeta toml.MetaD
 			func() bool { return base.EmitsPermissionWarning != nil },
 			func() { result.EmitsPermissionWarning = frag.EmitsPermissionWarning },
 		},
+		{
+			"supports_wait_idle_nudge",
+			func() bool { return base.SupportsWaitIdleNudge != nil },
+			func() { result.SupportsWaitIdleNudge = frag.SupportsWaitIdleNudge },
+		},
 	}
 	for _, sf := range scalars {
 		if fragMeta.IsDefined("providers", name, sf.key) {

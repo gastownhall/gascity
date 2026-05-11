@@ -337,6 +337,10 @@ func (f *fakeMutatorState) UpdateProvider(name string, patch ProviderUpdate) err
 			spec.Env[k] = v
 		}
 	}
+	if patch.SupportsWaitIdleNudge != nil {
+		v := *patch.SupportsWaitIdleNudge
+		spec.SupportsWaitIdleNudge = &v
+	}
 	if patch.OptionsSchemaMerge != nil {
 		spec.OptionsSchemaMerge = *patch.OptionsSchemaMerge
 	}

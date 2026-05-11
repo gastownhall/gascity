@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -288,6 +289,20 @@ func providerKindFromMetadata(meta map[string]string, fallback string) string {
 
 func providerKind(b beads.Bead) string {
 	return providerKindFromMetadata(b.Metadata, "")
+}
+
+func supportsWaitIdleNudge(b beads.Bead) bool {
+	if raw, ok := b.Metadata[WaitIdleNudgeMetadataKey]; ok {
+		if supported, err := strconv.ParseBool(strings.TrimSpace(raw)); err == nil {
+			return supported
+		}
+	}
+	switch providerKind(b) {
+	case "claude":
+		return true
+	default:
+		return false
+	}
 }
 
 func wrappedProviderFamily(b beads.Bead, family string) bool {
