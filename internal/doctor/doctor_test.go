@@ -221,6 +221,41 @@ func TestPrintSummary(t *testing.T) {
 	}
 }
 
+func TestDoctor_ReportResultsInOrder(t *testing.T) {
+	d := &Doctor{}
+	d.Register(&mockCheck{name: "first", status: StatusOK, msg: "fine"})
+	d.Register(&mockCheck{name: "second", status: StatusWarning, msg: "hmm"})
+	d.Register(&mockCheck{name: "third", status: StatusError, msg: "bad"})
+
+	var buf bytes.Buffer
+	r := d.Run(&CheckContext{CityPath: "/tmp"}, &buf, false)
+
+	if len(r.Results) != 3 {
+		t.Fatalf("Results length = %d, want 3", len(r.Results))
+	}
+	names := []string{r.Results[0].Name, r.Results[1].Name, r.Results[2].Name}
+	want := []string{"first", "second", "third"}
+	for i := range want {
+		if names[i] != want[i] {
+			t.Errorf("Results[%d].Name = %q, want %q", i, names[i], want[i])
+		}
+	}
+}
+
+func TestDoctor_RunCollectSuppressesStreaming(t *testing.T) {
+	d := &Doctor{}
+	d.Register(&mockCheck{name: "silent", status: StatusError, msg: "bad"})
+
+	r := d.RunCollect(&CheckContext{CityPath: "/tmp"}, false)
+
+	if len(r.Results) != 1 || r.Results[0].Name != "silent" {
+		t.Fatalf("Results = %#v, want one result named 'silent'", r.Results)
+	}
+	if r.Failed != 1 {
+		t.Errorf("Failed = %d, want 1", r.Failed)
+	}
+}
+
 func TestDoctor_FixHint(t *testing.T) {
 	d := &Doctor{}
 	d.Register(&hintCheck{})

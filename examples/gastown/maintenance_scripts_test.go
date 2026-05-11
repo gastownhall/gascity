@@ -3489,7 +3489,8 @@ func initEmptyArchiveRemote(t *testing.T, archiveRepo string, prevCount int) str
 // that points at a nonexistent path, so any `git fetch`/`git push` fails.
 // Used by tests that specifically exercise the push-failure recovery paths:
 // push mode is active (so `should_attempt_push` returns true) but the remote
-// cannot be reached.
+// cannot be reached. Seed count is fixed because push-failure tests care only
+// about whether a commit exists, not about its row count.
 func initSeedArchiveWithUnreachableRemote(t *testing.T, archiveRepo string) {
 	t.Helper()
 	initSeedArchive(t, archiveRepo, 3)
@@ -4673,6 +4674,120 @@ func TestJsonlExportPushFailureRecoversFromWrongShapeState(t *testing.T) {
 	}
 	if got := state["consecutive_push_failures"]; got != float64(1) {
 		t.Fatalf("consecutive_push_failures = %v, want 1\nstate: %s", got, stateData)
+	}
+}
+
+func TestJsonlExportPushSuccessWritesLastPushAt(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+
+	initSeedArchiveWithRemote(t, archiveRepo)
+	writeMultiRecordDoltStub(t, binDir, 100)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+
+	stateData, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("ReadFile(state file): %v", err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("Unmarshal(state file): %v\n%s", err, stateData)
+	}
+	ts, ok := state["last_push_at"].(string)
+	if !ok || ts == "" {
+		t.Fatalf("last_push_at missing from state:\n%s", stateData)
+	}
+	if _, err := time.Parse(time.RFC3339, ts); err != nil {
+		t.Fatalf("last_push_at = %q is not RFC3339: %v", ts, err)
+	}
+	if _, has := state["last_push_stderr"]; has {
+		t.Fatalf("last_push_stderr should not be present after a successful push:\n%s", stateData)
+	}
+}
+
+func TestJsonlExportPushFailureWritesLastPushStderr(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+
+	// Must have an origin remote — auto-detect mode skips push (and therefore
+	// the failure path) when origin is unset. An unreachable remote triggers
+	// the real push failure in push_archive_main.
+	initSeedArchiveWithUnreachableRemote(t, archiveRepo)
+	writeMultiRecordDoltStub(t, binDir, 5)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+
+	stateData, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("ReadFile(state file): %v", err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("Unmarshal(state file): %v\n%s", err, stateData)
+	}
+	if got := state["consecutive_push_failures"]; got != float64(1) {
+		t.Fatalf("consecutive_push_failures = %v, want 1\nstate: %s", got, stateData)
+	}
+	stderrVal, ok := state["last_push_stderr"].(string)
+	if !ok || stderrVal == "" {
+		t.Fatalf("last_push_stderr missing from state after push failure:\n%s", stateData)
+	}
+}
+
+func TestJsonlExportPushSuccessAfterFailureClearsLastPushStderr(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+
+	initSeedArchiveWithRemote(t, archiveRepo)
+	writeMultiRecordDoltStub(t, binDir, 100)
+	writeJsonlExportGCStub(t, binDir)
+
+	if err := os.WriteFile(stateFile, []byte(`{"consecutive_push_failures":2,"last_push_stderr":"old boom","pending_archive_push":true}`+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(seed state): %v", err)
+	}
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+
+	stateData, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("ReadFile(state file): %v", err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("Unmarshal(state file): %v\n%s", err, stateData)
+	}
+	if _, has := state["last_push_stderr"]; has {
+		t.Fatalf("last_push_stderr should be cleared after a successful push:\n%s", stateData)
+	}
+	if got := state["consecutive_push_failures"]; got != float64(0) {
+		t.Fatalf("consecutive_push_failures = %v, want 0\nstate: %s", got, stateData)
+	}
+	if _, ok := state["last_push_at"].(string); !ok {
+		t.Fatalf("last_push_at should be set after a successful push:\n%s", stateData)
 	}
 }
 
