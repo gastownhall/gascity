@@ -5458,9 +5458,10 @@ func countOpenMembershipsForSession(t *testing.T, fabric extmsg.Services, caller
 
 // TestCloseBeadCascadesExtmsgState verifies the cascade fires from the pool
 // close path. Named-session retirement already calls
-// cancelStateAssignedToRetiredSessionBead at retireNamedSession; pool
-// retirement funnels through closeBead, so the cascade must fire here too
-// (regression for #1939, follow-up to #1865).
+// cancelStateAssignedToRetiredSessionBead at
+// retireRemovedConfiguredNamedSessionBead; pool retirement funnels through
+// closeBead, so the cascade must fire here too (regression for #1939,
+// follow-up to #1865).
 func TestCloseBeadCascadesExtmsgState(t *testing.T) {
 	store := beads.NewMemStore()
 	sessionBead, fabric, caller := setupSessionWithExtmsgMembership(t, store, session.StateActive)

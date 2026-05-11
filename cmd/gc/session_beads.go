@@ -1876,9 +1876,10 @@ func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Wr
 		return false
 	}
 	// Cascade extmsg cleanup. Pool retirement funnels through closeBead;
-	// named-session retirement calls this directly at retireNamedSession.
-	// Without it, pool respawn leaves zombie memberships and the successor
-	// never re-binds to slack (#1939).
+	// named-session retirement calls this directly at
+	// retireRemovedConfiguredNamedSessionBead. Without it, pool respawn
+	// leaves zombie memberships and the successor never re-binds to
+	// slack (#1939).
 	cancelStateAssignedToRetiredSessionBead(store, id, now, stderr)
 	return true
 }
