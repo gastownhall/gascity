@@ -1666,3 +1666,42 @@ func TestDoltHealthFormulasExist(t *testing.T) {
 		t.Error("no formula files found")
 	}
 }
+
+// TestDeaconPatrolDetectsQueueStarvation verifies the deacon formula
+// cross-checks assigned open beads against visible work signal, so a
+// stuck self-polling refinery is flagged even when its patrol wisp is
+// cycling fresh. See upstream #1833.
+func TestDeaconPatrolDetectsQueueStarvation(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-deacon-patrol.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading deacon formula: %v", err)
+	}
+	body := string(data)
+
+	for _, want := range []string{
+		`id = "queue-starvation-check"`,
+		`needs = ["health-scan"]`,
+		"Cross-check assigned work against visible work signal",
+		"gc bd list --status=open --assignee=",
+		"bead.updated_at",
+		"30min",
+		`"gc.routed_to":"{{binding_prefix}}dog"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("deacon formula missing queue-starvation guidance %q", want)
+		}
+	}
+
+	// The new step must chain into the next one.
+	if !strings.Contains(body, `needs = ["queue-starvation-check"]`) {
+		t.Errorf("deacon formula step after queue-starvation-check must depend on it")
+	}
+
+	assertContainsInOrder(t, body,
+		`id = "health-scan"`,
+		`id = "queue-starvation-check"`,
+		`id = "utility-agent-health"`,
+	)
+}

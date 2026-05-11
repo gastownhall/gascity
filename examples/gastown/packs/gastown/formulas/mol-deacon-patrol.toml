@@ -46,7 +46,7 @@ between patrol cycles.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-deacon-patrol"
-version = 12
+version = 13
 
 [vars]
 [vars.event_timeout]
@@ -172,9 +172,79 @@ patterns of failure).
 Close this step after assessment."""
 
 [[steps]]
+id = "queue-starvation-check"
+title = "Cross-check assigned work against visible work signal"
+needs = ["health-scan"]
+description = """
+Cross-check assigned work against visible work signal. A session can
+look healthy-idle in a patrol wisp view while its queue is silently
+starving — the refinery (upstream #1833) self-polled for 13h42m with
+seven beads in its queue and no visible work signal, because its poll
+filter resolved to an identity that didn't match its own.
+
+The deacon's wisp-freshness check catches "no patrol activity" but not
+"active polling, wrong filter, queue silently piling up." This step
+closes that gap.
+
+**Step 1: For each active coordination/merge session, compute the pair:**
+- `A` = count of open beads assigned to the session's agent identity
+- `B` = the most recent bead.updated_at across those beads (work signal)
+
+```bash
+gc agents list --json --active | jq -r '.[] | .agent_id' | while read -r AGENT; do
+    ASSIGNED=$(gc bd list --status=open --assignee="$AGENT" --json --limit=0 | jq 'length')
+    LATEST=$(gc bd list --status=open --assignee="$AGENT" --json --limit=0 \\
+        | jq -r '[.[].updated_at] | max // ""')
+    printf '%s\\t%s\\t%s\\n' "$AGENT" "$ASSIGNED" "$LATEST"
+done
+```
+
+The latest bead.updated_at is the cheapest proxy for "did this session
+move work recently?" — every claim, status transition, metadata update,
+or note bumps it.
+
+**Step 2: Flag when queue > 0 and signal is stale (judgment call,
+guideline ~30min):**
+
+If `A > 0` AND `now - B` has grown well past the patrol's natural
+cadence (default guideline: 30min — roughly 6x the 300s max patrol
+backoff), the session is holding work without making progress. This
+is exactly why an LLM does it, not Go code. Consider:
+- Coordination agents (refinery, witness) naturally cycle in seconds
+  when work is present; 30min is an eternity, not a lull.
+- Polecats may take longer per step; be more lenient before flagging.
+- A freshly-assigned bead with no prior activity gets `updated_at` at
+  assignment time; if it's hours old, the session picked it up but
+  never acted.
+
+**Step 3: For flagged sessions, nudge first, then warrant:**
+
+```bash
+gc session nudge "$STUCK_SESSION" "Queue has $ASSIGNED open beads, no bead activity for <duration>. Run gc hook."
+```
+
+If the nudge doesn't unstick within the next patrol cycle, escalate
+by filing a warrant for the dog pool:
+
+```bash
+gc bd create --type=task --label=warrant \\
+    --title="Stuck queue: <session> — $ASSIGNED beads, no activity $duration" \\
+    --metadata '{"target":"<session>","reason":"queue starvation: N beads, no bead.updated_at progress","requester":"deacon","gc.routed_to":"{{binding_prefix}}dog"}'
+```
+
+The dog runs `mol-shutdown-dance` and the controller respawns a fresh
+session that re-reads the queue with a correct filter.
+
+**Step 4: A genuinely-idle session (no assigned beads) is NOT flagged.**
+If `A == 0`, this step is a no-op for that session. Idle-but-ready
+refineries and witnesses are healthy.
+
+Close this step after the cross-check runs for every active session."""
+
+[[steps]]
 id = "utility-agent-health"
 title = "Check utility agent (dog) health"
-needs = ["health-scan"]
+needs = ["queue-starvation-check"]
 description = """
 Detect utility agents (dogs) that are alive but stuck on their work.
 
