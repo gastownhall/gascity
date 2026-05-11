@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"testing"
 )
@@ -70,5 +71,36 @@ func TestEventActorAfterSupervisorDefault(t *testing.T) {
 
 	if got := eventActor(); got != "controller" {
 		t.Fatalf("eventActor() = %q after supervisor default, want %q", got, "controller")
+	}
+}
+
+// TestDoSupervisorRunInvokesDefaultBeadsActor verifies that
+// doSupervisorRun runs defaultSupervisorBeadsActor before delegating to
+// the run-loop, covering the call site that unit tests cannot exercise
+// directly (runSupervisor blocks until shutdown). The runSupervisorFunc
+// indirection lets the test substitute a no-op loop, observe the
+// pre-loop env state, and confirm the helper executed.
+func TestDoSupervisorRunInvokesDefaultBeadsActor(t *testing.T) {
+	for _, key := range []string{"GC_ALIAS", "GC_AGENT", "GC_SESSION_ID", "BEADS_ACTOR"} {
+		t.Setenv(key, "")
+		_ = os.Unsetenv(key)
+	}
+
+	origRun := runSupervisorFunc
+	called := false
+	runSupervisorFunc = func(io.Writer, io.Writer) int {
+		called = true
+		return 0
+	}
+	t.Cleanup(func() { runSupervisorFunc = origRun })
+
+	if rc := doSupervisorRun(io.Discard, io.Discard); rc != 0 {
+		t.Fatalf("doSupervisorRun = %d, want 0", rc)
+	}
+	if !called {
+		t.Fatal("runSupervisorFunc was not invoked")
+	}
+	if got := os.Getenv("BEADS_ACTOR"); got != "controller" {
+		t.Fatalf("BEADS_ACTOR after doSupervisorRun = %q, want %q", got, "controller")
 	}
 }
