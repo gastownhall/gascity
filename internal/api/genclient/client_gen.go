@@ -2259,6 +2259,18 @@ type SessionInfo struct {
 	Name         string     `json:"name"`
 }
 
+// SessionLifecyclePayload defines model for SessionLifecyclePayload.
+type SessionLifecyclePayload struct {
+	// Reason Short human-readable reason.
+	Reason *string `json:"reason,omitempty"`
+
+	// SessionId Canonical session bead ID. Always present.
+	SessionId string `json:"session_id"`
+
+	// Template Session template name when known at the emission site.
+	Template *string `json:"template,omitempty"`
+}
+
 // SessionMessageInputBody defines model for SessionMessageInputBody.
 type SessionMessageInputBody struct {
 	// Message Message text to send.
@@ -3089,7 +3101,7 @@ type TypedEventStreamEnvelopeRequestResultSessionSubmit struct {
 type TypedEventStreamEnvelopeSessionCrashed struct {
 	Actor    string                   `json:"actor"`
 	Message  *string                  `json:"message,omitempty"`
-	Payload  NoPayload                `json:"payload"`
+	Payload  SessionLifecyclePayload  `json:"payload"`
 	Seq      int64                    `json:"seq"`
 	Subject  *string                  `json:"subject,omitempty"`
 	Ts       time.Time                `json:"ts"`
@@ -3137,7 +3149,7 @@ type TypedEventStreamEnvelopeSessionQuarantined struct {
 type TypedEventStreamEnvelopeSessionStopped struct {
 	Actor    string                   `json:"actor"`
 	Message  *string                  `json:"message,omitempty"`
-	Payload  NoPayload                `json:"payload"`
+	Payload  SessionLifecyclePayload  `json:"payload"`
 	Seq      int64                    `json:"seq"`
 	Subject  *string                  `json:"subject,omitempty"`
 	Ts       time.Time                `json:"ts"`
@@ -3683,7 +3695,7 @@ type TypedTaggedEventStreamEnvelopeSessionCrashed struct {
 	Actor    string                   `json:"actor"`
 	City     string                   `json:"city"`
 	Message  *string                  `json:"message,omitempty"`
-	Payload  NoPayload                `json:"payload"`
+	Payload  SessionLifecyclePayload  `json:"payload"`
 	Seq      int64                    `json:"seq"`
 	Subject  *string                  `json:"subject,omitempty"`
 	Ts       time.Time                `json:"ts"`
@@ -3735,7 +3747,7 @@ type TypedTaggedEventStreamEnvelopeSessionStopped struct {
 	Actor    string                   `json:"actor"`
 	City     string                   `json:"city"`
 	Message  *string                  `json:"message,omitempty"`
-	Payload  NoPayload                `json:"payload"`
+	Payload  SessionLifecyclePayload  `json:"payload"`
 	Seq      int64                    `json:"seq"`
 	Subject  *string                  `json:"subject,omitempty"`
 	Ts       time.Time                `json:"ts"`
@@ -5320,6 +5332,32 @@ func (t *EventPayload) FromSessionCreateSucceededPayload(v SessionCreateSucceede
 
 // MergeSessionCreateSucceededPayload performs a merge with any union data inside the EventPayload, using the provided SessionCreateSucceededPayload
 func (t *EventPayload) MergeSessionCreateSucceededPayload(v SessionCreateSucceededPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionLifecyclePayload returns the union data inside the EventPayload as a SessionLifecyclePayload
+func (t EventPayload) AsSessionLifecyclePayload() (SessionLifecyclePayload, error) {
+	var body SessionLifecyclePayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionLifecyclePayload overwrites any union data inside the EventPayload as the provided SessionLifecyclePayload
+func (t *EventPayload) FromSessionLifecyclePayload(v SessionLifecyclePayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionLifecyclePayload performs a merge with any union data inside the EventPayload, using the provided SessionLifecyclePayload
+func (t *EventPayload) MergeSessionLifecyclePayload(v SessionLifecyclePayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err

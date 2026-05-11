@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -710,6 +711,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								Actor:   "gc",
 								Subject: template,
 								Message: "drain acknowledged by agent",
+								Payload: api.SessionLifecyclePayloadJSON(session.ID, template, "drain acknowledged"),
 							})
 							if hasAssignedWork {
 								batch := sessionpkg.CompleteDrainPatch(clk.Now().UTC(), "idle", session.Metadata["wake_mode"] == "fresh")
@@ -829,6 +831,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						Actor:   "gc",
 						Subject: tp.DisplayName(),
 						Message: output,
+						Payload: api.SessionLifecyclePayloadJSON(session.ID, tp.TemplateName, "zombie process"),
 					})
 					telemetry.RecordAgentCrash(context.Background(), tp.DisplayName(), output)
 				}
@@ -940,6 +943,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							Actor:   "gc",
 							Subject: tp.DisplayName(),
 							Message: "drain acknowledged by agent",
+							Payload: api.SessionLifecyclePayloadJSON(session.ID, tp.TemplateName, "drain acknowledged"),
 						})
 						// Drain-ack lands here right after the agent ran
 						// `bd close` on its last unit of work. The cached

@@ -1047,14 +1047,28 @@ func gracefulStopAllWithForceSignal(
 			}
 			fmt.Fprintf(stdout, "Agent '%s' exited gracefully\n", name) //nolint:errcheck // best-effort stdout
 			subject := name
-			if target, ok := targetByName[name]; ok && target.subject != "" {
-				subject = target.subject
-			}
-			if target, ok := targetByName[name]; ok && cityStopSessionMarked(store, target.sessionID) {
-				markCityStopSessionAsAsleep(store, target.sessionID, stderr)
+			// SessionLifecyclePayload.SessionID is contractually "always
+			// present" — when the targetByName lookup misses (or the
+			// bead's ID couldn't be filled) we fall back to the loop
+			// variable, which is the session_name. ResolveSessionID
+			// canonicalizes session_name → bead ID for any consumer.
+			sessionID := name
+			var template string
+			if target, ok := targetByName[name]; ok {
+				if target.subject != "" {
+					subject = target.subject
+				}
+				if target.sessionID != "" {
+					sessionID = target.sessionID
+				}
+				template = target.template
+				if cityStopSessionMarked(store, target.sessionID) {
+					markCityStopSessionAsAsleep(store, target.sessionID, stderr)
+				}
 			}
 			rec.Record(events.Event{
 				Type: events.SessionStopped, Actor: "gc", Subject: subject,
+				Payload: api.SessionLifecyclePayloadJSON(sessionID, template, "exited gracefully"),
 			})
 			continue
 		}

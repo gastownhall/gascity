@@ -1535,6 +1535,7 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer) int {
 		Actor:   eventActor(),
 		Subject: sessionID,
 		Message: "killed",
+		Payload: api.SessionLifecyclePayloadJSON(sessionID, "", "killed"),
 	})
 
 	fmt.Fprintf(stdout, "Session %s killed.\n", sessionID) //nolint:errcheck // best-effort stdout

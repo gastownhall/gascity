@@ -200,6 +200,34 @@ func decodeBeadEventPayloadBead(data []byte) (beads.Bead, error) {
 	return bead, nil
 }
 
+// SessionLifecyclePayload is the typed payload for terminal session
+// lifecycle events (session.stopped, session.crashed). Subscribers rely
+// on SessionID to correlate the event with the session bead regardless
+// of how the existing Subject envelope field is populated (sometimes a
+// session ID, sometimes a template/display name — kept stable for
+// backward compatibility). Template and Reason are diagnostic and may
+// be empty when the emission site lacks the corresponding context.
+type SessionLifecyclePayload struct {
+	SessionID string `json:"session_id" doc:"Canonical session bead ID. Always present."`
+	Template  string `json:"template,omitempty" doc:"Session template name when known at the emission site."`
+	Reason    string `json:"reason,omitempty" doc:"Short human-readable reason."`
+}
+
+// IsEventPayload marks SessionLifecyclePayload as an events.Payload variant.
+func (SessionLifecyclePayload) IsEventPayload() {}
+
+// SessionLifecyclePayloadJSON builds the JSON wire form of a
+// SessionLifecyclePayload for attachment to an events.Event.Payload
+// field. Template and Reason are emitted only when non-empty.
+func SessionLifecyclePayloadJSON(sessionID, template, reason string) json.RawMessage {
+	b, _ := json.Marshal(SessionLifecyclePayload{
+		SessionID: sessionID,
+		Template:  template,
+		Reason:    reason,
+	})
+	return b
+}
+
 // WorkerOperationEventPayload is the typed payload projected for
 // worker.operation events on the supervisor event stream.
 //
@@ -349,8 +377,8 @@ func init() {
 	// shape so the spec still emits a discriminated-union variant
 	// for the event type and the registry-coverage test passes.
 	events.RegisterPayload(events.SessionWoke, events.NoPayload{})
-	events.RegisterPayload(events.SessionStopped, events.NoPayload{})
-	events.RegisterPayload(events.SessionCrashed, events.NoPayload{})
+	events.RegisterPayload(events.SessionStopped, SessionLifecyclePayload{})
+	events.RegisterPayload(events.SessionCrashed, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionDraining, events.NoPayload{})
 	events.RegisterPayload(events.SessionUndrained, events.NoPayload{})
 	events.RegisterPayload(events.SessionQuarantined, events.NoPayload{})

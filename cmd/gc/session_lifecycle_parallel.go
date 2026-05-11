@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -167,6 +168,54 @@ type startResult struct {
 	finished        time.Time
 	rollbackPending bool
 	rateLimitScreen bool
+	// phases captures sub-phase wall-clock so the lifecycle log can pinpoint
+	// where a slow start spent its time. See gc-67o for context.
+	phases startPhaseTimings
+}
+
+// startPhaseTimings breaks down a start operation into the discrete
+// sub-phases visible from runPreparedStartCandidate +
+// commitAsyncStartResultWithContext. Each duration is wall-clock; zero
+// means the phase did not execute (e.g. PostStartObserve only runs when
+// session_key is set, CommitRefresh only on the async path).
+type startPhaseTimings struct {
+	StartCall         time.Duration // startPreparedStartCandidate total (provider Start + any ErrStateSync recovery)
+	StateSyncRecovery time.Duration // workerSessionTargetRunningWithConfig branch when provider Start returned ErrStateSync (subset of StartCall; gc-9ha)
+	PostStartObserve  time.Duration // staleKeyDetectDelay + workerObserveSessionTarget when session_key present
+	CommitRefresh     time.Duration // refreshAsyncStartResult bead reload (async path only)
+}
+
+// formatLog returns the trailing segment to append to a lifecycle log
+// line — a single " phases=[...]" field — or "" when no phase ran or
+// every phase rounds to sub-millisecond. The lifecycle log's primary
+// duration field stays the top-level "duration=" already emitted by
+// logLifecycleOutcome; this helper only adds the per-phase breakdown
+// when there is something nonzero to report.
+//
+// Rounding happens BEFORE the include decision so a phase shorter than
+// 0.5ms doesn't print as "...=0s" (which would be misleading and
+// defeat the elision intent). Sub-ms durations are dropped entirely.
+func (p startPhaseTimings) formatLog() string {
+	if p.StartCall == 0 && p.StateSyncRecovery == 0 && p.PostStartObserve == 0 && p.CommitRefresh == 0 {
+		return ""
+	}
+	var parts []string
+	if r := p.StartCall.Round(time.Millisecond); r > 0 {
+		parts = append(parts, fmt.Sprintf("start_call=%s", r))
+	}
+	if r := p.StateSyncRecovery.Round(time.Millisecond); r > 0 {
+		parts = append(parts, fmt.Sprintf("state_sync_recovery=%s", r))
+	}
+	if r := p.PostStartObserve.Round(time.Millisecond); r > 0 {
+		parts = append(parts, fmt.Sprintf("post_start_observe=%s", r))
+	}
+	if r := p.CommitRefresh.Round(time.Millisecond); r > 0 {
+		parts = append(parts, fmt.Sprintf("commit_refresh=%s", r))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " phases=[" + strings.Join(parts, " ") + "]"
 }
 
 type startExecutionOptions struct {
@@ -306,6 +355,22 @@ type stopTarget struct {
 	poolManaged bool
 }
 
+// lifecycleCorrelationID returns the identifier subscribers use to
+// correlate a SessionLifecyclePayload back to a session bead. Targets
+// constructed without a store (or whose session bead was already
+// retired before stop) can have an empty sessionID; the session_name
+// (stored in name) is always populated by the caller and is itself a
+// stable identifier that ResolveSessionID can resolve to a bead via
+// metadata.session_name. Returning the empty string here would violate
+// the SessionLifecyclePayload.SessionID "always present" contract — see
+// internal/api/event_payloads.go's docstring.
+func (t stopTarget) lifecycleCorrelationID() string {
+	if t.sessionID != "" {
+		return t.sessionID
+	}
+	return t.name
+}
+
 type stopResult struct {
 	target   stopTarget
 	err      error
@@ -314,6 +379,11 @@ type stopResult struct {
 	finished time.Time
 }
 
+// logLifecycleOutcome writes one structured "session lifecycle" line.
+// The trailing variadic phases parameter is honored when exactly one
+// startPhaseTimings is passed (more than one is a programmer error and
+// is silently ignored). Existing callers that don't care about phases
+// pass none.
 func logLifecycleOutcome(
 	w io.Writer,
 	op string,
@@ -321,6 +391,7 @@ func logLifecycleOutcome(
 	name, template, outcome string,
 	started, finished time.Time,
 	err error,
+	phases ...startPhaseTimings,
 ) {
 	if w == nil {
 		return
@@ -328,6 +399,9 @@ func logLifecycleOutcome(
 	msg := fmt.Sprintf("session lifecycle: op=%s wave=%d session=%s template=%s outcome=%s", op, wave, name, template, outcome)
 	if !started.IsZero() && !finished.IsZero() {
 		msg += fmt.Sprintf(" duration=%s", finished.Sub(started).Round(time.Millisecond))
+	}
+	if len(phases) == 1 {
+		msg += phases[0].formatLog()
 	}
 	if err != nil {
 		msg += fmt.Sprintf(" err=%s", formatLifecycleError(err))
@@ -835,20 +909,31 @@ func runPreparedStartCandidate(
 		startCtx, cancel = context.WithTimeout(ctx, startupTimeout)
 	}
 	defer cancel()
+	var phases startPhaseTimings
+	startCallBegin := time.Now()
 	_, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg)
 	startCtxErr := startCtx.Err()
+	// Split start_call into provider.Start and the ErrStateSync recovery
+	// branch (gc-9ha). The recovery branch hits the worker observation
+	// API which can dominate start_call when the runtime is wedged.
+	// state_sync_recovery only fires when err==ErrStateSync, so it stays
+	// zero on the happy path.
 	if err != nil && errors.Is(err, sessionpkg.ErrStateSync) {
+		recoveryBegin := time.Now()
 		running, runningErr := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, item.candidate.name())
+		phases.StateSyncRecovery = time.Since(recoveryBegin)
 		if runningErr == nil && running {
 			err = nil
 		}
 	}
+	phases.StartCall = time.Since(startCallBegin)
 	// Stale session key detection: if the session was started
 	// with a resume flag but dies immediately, the session key
 	// likely references a conversation that no longer exists
 	// (e.g., "No conversation found"). Report as a failure so
 	// recordWakeFailure clears the key for the next attempt.
 	if err == nil && item.candidate.session != nil && item.candidate.session.Metadata["session_key"] != "" {
+		postStartBegin := time.Now()
 		time.Sleep(staleKeyDetectDelay)
 		running := false
 		alive := false
@@ -864,6 +949,7 @@ func runPreparedStartCandidate(
 		if err != nil || !running || !alive {
 			err = fmt.Errorf("session %q died during startup", item.candidate.name())
 		}
+		phases.PostStartObserve = time.Since(postStartBegin)
 	}
 	finished := time.Now()
 	rollbackPending := err != nil && shouldRollbackPendingCreate(item.candidate.session)
@@ -876,6 +962,7 @@ func runPreparedStartCandidate(
 			started:         started,
 			finished:        finished,
 			rollbackPending: false,
+			phases:          phases,
 		}
 	}
 	var outcome string
@@ -921,6 +1008,7 @@ func runPreparedStartCandidate(
 		finished:        finished,
 		rollbackPending: rollbackPending,
 		rateLimitScreen: rateLimitScreen,
+		phases:          phases,
 	}
 }
 
@@ -1030,13 +1118,27 @@ func commitAsyncStartResultWithContext(
 			err := fmt.Errorf("panic during async start commit: %v\n%s", recovered, debug.Stack())
 			clearPendingStartInFlightLease(result.prepared.candidate.session, store, stderr)
 			fmt.Fprintf(stderr, "session reconciler: committing async start %s: %s\n", name, formatLifecycleError(err)) //nolint:errcheck
-			logLifecycleOutcome(stderr, "start", wave, name, template, "panic_recovered", result.started, time.Now(), err)
+			// Pass the pre-refresh phases so commit-time panic diagnostics
+			// still show start_call / post_start_observe timings; commit_refresh
+			// may be unset if the panic fired before refreshAsyncStartResult.
+			logLifecycleOutcome(stderr, "start", wave, name, template, "panic_recovered", result.started, time.Now(), err, result.phases)
 			committed = false
 		}
 	}()
 
+	refreshBegin := time.Now()
 	refreshed, ok, cleanupRuntime, releaseInFlight := refreshAsyncStartResult(result, store, stderr)
+	commitRefreshElapsed := time.Since(refreshBegin)
+	// Carry the per-phase timings forward: refresh's elapsed time is
+	// commit-side, distinct from the start phases captured in
+	// runPreparedStartCandidate. Both flow into the lifecycle log.
+	refreshed.phases.CommitRefresh = commitRefreshElapsed
 	if !ok {
+		// refreshAsyncStartResult returns result unchanged on every !ok
+		// branch (store.Get error, stale prepared command, stale runtime
+		// session), so refreshed.phases already carries the original
+		// start_call / post_start_observe; only commit_refresh was
+		// stamped above. No restore needed.
 		if cleanupRuntime {
 			stopStaleAsyncStartRuntime(result, sp, stderr)
 		}
@@ -1045,7 +1147,7 @@ func commitAsyncStartResultWithContext(
 			clearPendingStartInFlightLease(result.prepared.candidate.session, store, stderr)
 			outcome = "async_start_refresh_failed"
 		}
-		logLifecycleOutcome(stderr, "start", wave, name, template, outcome, result.started, time.Now(), nil)
+		logLifecycleOutcome(stderr, "start", wave, name, template, outcome, result.started, time.Now(), nil, refreshed.phases)
 		return false
 	}
 	if refreshed.err != nil && refreshed.rollbackPending && runningSessionMatchesPendingCreate(refreshed.prepared.candidate.session, refreshed.prepared.candidate.name(), sp) {
@@ -1061,7 +1163,7 @@ func commitAsyncStartResultWithContext(
 			stopStaleAsyncStartRuntime(refreshed, sp, stderr)
 			rollbackPendingCreate(refreshed.prepared.candidate.session, store, clk.Now().UTC(), stderr)
 		}
-		logLifecycleOutcome(stderr, "start", wave, name, template, "context_canceled", refreshed.started, time.Now(), ctx.Err())
+		logLifecycleOutcome(stderr, "start", wave, name, template, "context_canceled", refreshed.started, time.Now(), ctx.Err(), refreshed.phases)
 		return false
 	}
 	if sp != nil && refreshed.err == nil && refreshed.outcome != "session_initializing" {
@@ -1287,7 +1389,7 @@ func commitStartResultTraced(
 	// The reconciler will retry on the next patrol tick.
 	if result.outcome == "session_initializing" {
 		clearPendingStartInFlightLease(session, store, stderr)
-		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, nil)
+		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, nil, result.phases)
 		return false
 	}
 	if result.err != nil {
@@ -1301,7 +1403,7 @@ func commitStartResultTraced(
 						"cause": err.Error(),
 					}, "")
 				}
-				logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err)
+				logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
 				return false
 			}
 			if trace != nil {
@@ -1309,7 +1411,7 @@ func commitStartResultTraced(
 					"error": formatLifecycleError(result.err),
 				}, "")
 			}
-			logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err)
+			logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
 			return false
 		}
 		if result.rollbackPending {
@@ -1319,7 +1421,7 @@ func commitStartResultTraced(
 				}, "")
 			}
 			rollbackPendingCreate(session, store, clk.Now().UTC(), stderr)
-			logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err)
+			logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
 			return false
 		}
 		if err := store.SetMetadata(session.ID, "last_woke_at", ""); err != nil {
@@ -1333,7 +1435,7 @@ func commitStartResultTraced(
 				"error": formatLifecycleError(result.err),
 			}, "")
 		}
-		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err)
+		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
 		return false
 	}
 	fmt.Fprintf(stdout, "Woke session '%s'\n", tp.DisplayName()) //nolint:errcheck
@@ -1366,7 +1468,7 @@ func commitStartResultTraced(
 	if err != nil {
 		clearPendingStartInFlightLease(session, store, stderr)
 		fmt.Fprintf(stderr, "session reconciler: encoding MCP snapshot for %s: %v\n", name, err) //nolint:errcheck
-		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "metadata_encode_failed", result.started, result.finished, err)
+		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "metadata_encode_failed", result.started, result.finished, err, result.phases)
 		return false
 	}
 	if storedMCPSnapshot != "" || session.Metadata[sessionpkg.MCPServersSnapshotMetadataKey] != "" {
@@ -1375,7 +1477,7 @@ func commitStartResultTraced(
 	if err := sessionpkg.PersistRuntimeMCPServersSnapshot(result.prepared.cfg.Env["GC_CITY_PATH"], session.ID, result.prepared.cfg.MCPServers); err != nil {
 		clearPendingStartInFlightLease(session, store, stderr)
 		fmt.Fprintf(stderr, "session reconciler: storing runtime MCP snapshot for %s: %v\n", name, err) //nolint:errcheck
-		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "runtime_mcp_snapshot_failed", result.started, result.finished, err)
+		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "runtime_mcp_snapshot_failed", result.started, result.finished, err, result.phases)
 		return false
 	}
 	if result.prepared.candidate.tp.IsACP ||
@@ -1403,7 +1505,7 @@ func commitStartResultTraced(
 		// (including the state transition to active). Report failure so
 		// the reconciler retries on the next tick rather than leaving
 		// the session stuck in "creating" where it gets orphan-drained.
-		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "metadata_batch_failed", result.started, result.finished, err)
+		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "metadata_batch_failed", result.started, result.finished, err, result.phases)
 		return false
 	}
 	if session.Metadata == nil {
@@ -1417,7 +1519,7 @@ func commitStartResultTraced(
 			"wave": wave,
 		}, "")
 	}
-	logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, nil)
+	logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, nil, result.phases)
 	return true
 }
 
@@ -2343,6 +2445,7 @@ func stopTargetsBounded(
 					stopped++
 					rec.Record(events.Event{
 						Type: events.SessionStopped, Actor: actor, Subject: result.target.subject,
+						Payload: api.SessionLifecyclePayloadJSON(result.target.lifecycleCorrelationID(), result.target.template, "stopped"),
 					})
 				}
 				logLifecycleWave(stderr, "stop", wave, waveStarted, 1)
@@ -2385,6 +2488,7 @@ func stopTargetsBounded(
 			stopped++
 			rec.Record(events.Event{
 				Type: events.SessionStopped, Actor: actor, Subject: result.target.subject,
+				Payload: api.SessionLifecyclePayloadJSON(result.target.lifecycleCorrelationID(), result.target.template, "stopped"),
 			})
 		}
 		logLifecycleWave(stderr, "stop", wave, waveStarted, len(waveTargets))

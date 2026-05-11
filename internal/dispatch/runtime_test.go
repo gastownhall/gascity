@@ -6696,3 +6696,129 @@ func TestProcessControlEmitsSkipReasonWhenNotOpen(t *testing.T) {
 		t.Fatalf("trace missing the actual status; got:\n%s", traced)
 	}
 }
+
+// TestProcessWorkflowFinalize_PurgesMoleculeArtifactDir verifies that
+// when a workflow finalizes, the molecule-scoped artifact directory is
+// removed so disk does not leak and a successor run with the same root
+// ID gets a clean slate.
+func TestProcessWorkflowFinalize_PurgesMoleculeArtifactDir(t *testing.T) {
+	t.Parallel()
+
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	finalizer := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "finalize",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
+
+	// Simulate a polecat writing artifacts during the workflow.
+	artifactDir := filepath.Join(cityPath, ".gc", "molecules", workflow.ID, "artifacts", "step-1")
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(artifactDir, "iteration-1.json"), []byte(`{"round":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := ProcessControl(store, finalizer, ProcessOptions{CityPath: cityPath})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+	}
+	if !result.Processed {
+		t.Fatalf("result = %+v, want processed", result)
+	}
+
+	// The molecule root directory should no longer exist.
+	moleculeDir := molecule.Dir(cityPath, workflow.ID)
+	if _, err := os.Stat(moleculeDir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("molecule dir %q still exists after finalize (stat err = %v)", moleculeDir, err)
+	}
+}
+
+// TestProcessWorkflowFinalize_NoCityPath verifies the purge is a no-op
+// when CityPath is not provided (tests, legacy call sites). The finalize
+// should succeed without touching any filesystem.
+func TestProcessWorkflowFinalize_NoCityPath(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	finalizer := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "finalize",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
+
+	// CityPath omitted → purge is skipped.
+	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+	}
+	if !result.Processed {
+		t.Fatalf("result = %+v, want processed", result)
+	}
+}
+
+// TestProcessWorkflowFinalize_PurgeOnMissingDir verifies that finalize
+// succeeds even when the molecule artifact directory was never created
+// (e.g., a workflow that ran but wrote no artifacts). molecule.RemoveDir
+// returns nil on missing dirs, so the best-effort purge is a no-op.
+// This exercises the crash-recovery precondition: RemoveDir must never
+// surface a fatal error just because the tree it's trying to remove is
+// already gone.
+func TestProcessWorkflowFinalize_PurgeOnMissingDir(t *testing.T) {
+	t.Parallel()
+
+	cityPath := t.TempDir()
+	// Molecule dir never existed. Finalize must not surface an error.
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	finalizer := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "finalize",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
+
+	result, err := ProcessControl(store, finalizer, ProcessOptions{CityPath: cityPath})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+	}
+	if !result.Processed {
+		t.Fatalf("result = %+v, want processed", result)
+	}
+}

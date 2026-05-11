@@ -2026,6 +2026,9 @@
             "$ref": "#/components/schemas/SessionCreateSucceededPayload"
           },
           {
+            "$ref": "#/components/schemas/SessionLifecyclePayload"
+          },
+          {
             "$ref": "#/components/schemas/SessionMessageSucceededPayload"
           },
           {
@@ -5707,6 +5710,27 @@
         ],
         "type": "object"
       },
+      "SessionLifecyclePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "description": "Short human-readable reason.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Canonical session bead ID. Always present.",
+            "type": "string"
+          },
+          "template": {
+            "description": "Session template name when known at the emission site.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "type": "object"
+      },
       "SessionMessageInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -8440,7 +8464,7 @@
             "type": "string"
           },
           "payload": {
-            "$ref": "#/components/schemas/NoPayload"
+            "$ref": "#/components/schemas/SessionLifecyclePayload"
           },
           "seq": {
             "format": "int64",
@@ -8608,7 +8632,7 @@
             "type": "string"
           },
           "payload": {
-            "$ref": "#/components/schemas/NoPayload"
+            "$ref": "#/components/schemas/SessionLifecyclePayload"
           },
           "seq": {
             "format": "int64",
@@ -10759,7 +10783,7 @@
             "type": "string"
           },
           "payload": {
-            "$ref": "#/components/schemas/NoPayload"
+            "$ref": "#/components/schemas/SessionLifecyclePayload"
           },
           "seq": {
             "format": "int64",
@@ -10943,7 +10967,7 @@
             "type": "string"
           },
           "payload": {
-            "$ref": "#/components/schemas/NoPayload"
+            "$ref": "#/components/schemas/SessionLifecyclePayload"
           },
           "seq": {
             "format": "int64",

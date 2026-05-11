@@ -85,7 +85,11 @@ var resolveProviderLifecycleGCBinary = func() string {
 	return ""
 }
 
-var providerProbeTimeout = 10 * time.Second
+var (
+	providerProbeTimeout = 10 * time.Second
+	// Override only in tests that do not call t.Parallel while the hook is changed.
+	providerLifecycleContext = context.WithTimeout
+)
 
 var (
 	initDirIfReadyEnsureBeadsProvider = ensureBeadsProvider
@@ -1428,7 +1432,7 @@ func normalizeScopeDoltConfig(dir string, state contract.ConfigState) error {
 // available (exit 2) or on any error. Unlike runProviderOp, exit 2 means
 // "not running" rather than "not needed."
 func runProviderProbe(script, cityPath, provider string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), providerProbeTimeout)
+	ctx, cancel := providerLifecycleContext(context.Background(), providerProbeTimeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, script, "probe")
@@ -1534,7 +1538,7 @@ func acquireProviderSemaphore(ctx context.Context, cityPath string) (func(), err
 }
 
 func acquireProviderSemaphoreForOp(cityPath, op string) (func(), error) {
-	ctx, cancel := context.WithTimeout(context.Background(), providerOpTimeout(op))
+	ctx, cancel := providerLifecycleContext(context.Background(), providerOpTimeout(op))
 	release, err := acquireProviderSemaphore(ctx, cityPath)
 	if err != nil {
 		cancel()
@@ -1576,7 +1580,7 @@ func runProviderOpWithEnv(script string, environ []string, args ...string) error
 	if len(args) > 0 {
 		op = args[0]
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), providerOpTimeout(op))
+	ctx, cancel := providerLifecycleContext(context.Background(), providerOpTimeout(op))
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, script, args...)

@@ -3298,13 +3298,7 @@ func TestRunProviderOpSanitizesInheritedRuntimeEnv(t *testing.T) {
 }
 
 func TestRunProviderOpKillsProcessGroupOnTimeout(t *testing.T) {
-	oldProviderOpTimeout := providerOpTimeout
-	providerOpTimeout = func(string) time.Duration {
-		return 300 * time.Millisecond
-	}
-	t.Cleanup(func() {
-		providerOpTimeout = oldProviderOpTimeout
-	})
+	cancelCh := useCancelableProviderLifecycleContext(t)
 
 	dir := t.TempDir()
 	childPIDFile := filepath.Join(dir, "child.pid")
@@ -3317,39 +3311,37 @@ wait
 		t.Fatal(err)
 	}
 
-	err := runProviderOpWithEnv(script, append(os.Environ(), "GC_TEST_CHILD_PID="+childPIDFile), "health")
-	if err == nil {
-		t.Fatal("expected timeout error")
-	}
+	// Timeouts and explicit cancellation both drive exec.Cmd.Cancel; cancel only
+	// after the child PID is observable so the cleanup assertion cannot race setup.
+	resultCh := make(chan error, 1)
+	go func() {
+		resultCh <- runProviderOpWithEnv(script, append(os.Environ(), "GC_TEST_CHILD_PID="+childPIDFile), "health")
+	}()
 
-	pidBytes, readErr := os.ReadFile(childPIDFile)
-	if readErr != nil {
-		t.Fatalf("read child pid: %v", readErr)
-	}
-	pid, convErr := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
-	if convErr != nil {
-		t.Fatalf("parse child pid: %v", convErr)
-	}
+	cancel := waitForProviderLifecycleCancel(t, cancelCh)
+	t.Cleanup(cancel)
+	pid := waitForProviderTestChildPID(t, childPIDFile)
 	t.Cleanup(func() {
 		_ = syscall.Kill(pid, syscall.SIGKILL)
 	})
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
-			return
-		}
-		time.Sleep(25 * time.Millisecond)
+	cancel()
+
+	var err error
+	select {
+	case err = <-resultCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("provider op did not return after cancellation")
 	}
-	t.Fatalf("provider child pid %d survived provider op timeout", pid)
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+
+	waitForProviderTestPIDExit(t, pid, "provider op")
 }
 
 func TestRunProviderProbeKillsProcessGroupOnTimeout(t *testing.T) {
-	oldProviderProbeTimeout := providerProbeTimeout
-	providerProbeTimeout = 300 * time.Millisecond
-	t.Cleanup(func() {
-		providerProbeTimeout = oldProviderProbeTimeout
-	})
+	cancelCh := useCancelableProviderLifecycleContext(t)
 
 	dir := t.TempDir()
 	childPIDFile := filepath.Join(dir, "child.pid")
@@ -3363,22 +3355,95 @@ wait
 	}
 	t.Setenv("GC_TEST_CHILD_PID", childPIDFile)
 
-	if ok := runProviderProbe(script, "", ""); ok {
-		t.Fatal("expected timeout probe to return false")
-	}
+	// Timeouts and explicit cancellation both drive exec.Cmd.Cancel; cancel only
+	// after the child PID is observable so the cleanup assertion cannot race setup.
+	resultCh := make(chan bool, 1)
+	go func() {
+		resultCh <- runProviderProbe(script, "", "")
+	}()
 
-	pidBytes, readErr := os.ReadFile(childPIDFile)
-	if readErr != nil {
-		t.Fatalf("read child pid: %v", readErr)
-	}
-	pid, convErr := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
-	if convErr != nil {
-		t.Fatalf("parse child pid: %v", convErr)
-	}
+	cancel := waitForProviderLifecycleCancel(t, cancelCh)
+	t.Cleanup(cancel)
+	pid := waitForProviderTestChildPID(t, childPIDFile)
 	t.Cleanup(func() {
 		_ = syscall.Kill(pid, syscall.SIGKILL)
 	})
 
+	cancel()
+
+	var ok bool
+	select {
+	case ok = <-resultCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("provider probe did not return after cancellation")
+	}
+	if ok {
+		t.Fatal("expected timeout probe to return false")
+	}
+
+	waitForProviderTestPIDExit(t, pid, "provider probe")
+}
+
+func useCancelableProviderLifecycleContext(t *testing.T) <-chan context.CancelFunc {
+	t.Helper()
+	oldProviderLifecycleContext := providerLifecycleContext
+	cancelCh := make(chan context.CancelFunc, 1)
+	providerLifecycleContext = func(parent context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+		ctx, cancel := context.WithCancel(parent)
+		select {
+		case cancelCh <- cancel:
+		default:
+		}
+		return ctx, cancel
+	}
+	t.Cleanup(func() {
+		providerLifecycleContext = oldProviderLifecycleContext
+	})
+	return cancelCh
+}
+
+func waitForProviderLifecycleCancel(t *testing.T, cancelCh <-chan context.CancelFunc) context.CancelFunc {
+	t.Helper()
+	select {
+	case cancel := <-cancelCh:
+		return cancel
+	case <-time.After(2 * time.Second):
+		t.Fatal("provider lifecycle context was not created")
+		return nil
+	}
+}
+
+func waitForProviderTestChildPID(t *testing.T, path string) int {
+	t.Helper()
+	pidText := waitForProviderTestNonEmptyFile(t, path, 5*time.Second)
+	pid, err := strconv.Atoi(pidText)
+	if err != nil {
+		t.Fatalf("parse child pid: %v", err)
+	}
+	return pid
+}
+
+func waitForProviderTestNonEmptyFile(t *testing.T, path string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		pidBytes, err := os.ReadFile(path)
+		if err == nil {
+			pid := strings.TrimSpace(string(pidBytes))
+			if pid != "" {
+				return pid
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("read child pid: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("child pid was not written within %s", timeout)
+	return ""
+}
+
+func waitForProviderTestPIDExit(t *testing.T, pid int, label string) {
+	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
@@ -3386,7 +3451,7 @@ wait
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	t.Fatalf("provider child pid %d survived provider probe timeout", pid)
+	t.Fatalf("provider child pid %d survived %s cancellation", pid, label)
 }
 
 func TestStartBeadsLifecycleDoesNotMutateProcessDoltEnv(t *testing.T) {
