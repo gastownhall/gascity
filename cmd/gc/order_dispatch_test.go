@@ -825,20 +825,43 @@ func TestOrderDispatchResolvesImportedPackPoolAgainstCityShadow(t *testing.T) {
 	writeImportedDogOrderFixture(t, cityDir, true)
 	cfg, aa := loadImportedDogOrders(t, cityDir)
 	store := beads.NewMemStore()
+	digest := orders.Order{}
+	for _, order := range aa {
+		if order.Name == "digest" {
+			digest = order
+			break
+		}
+	}
+	if digest.Name == "" {
+		t.Fatal("missing digest order")
+	}
+	dispatchCtx, dispatchCancel := context.WithCancel(context.Background())
 
 	m := &memoryOrderDispatcher{
-		aa: aa,
+		aa: []orders.Order{digest},
 		storeFn: func(_ execStoreTarget) (beads.Store, error) {
 			return store, nil
 		},
-		execRun: shellExecRunner,
-		rec:     events.Discard,
-		stderr:  &bytes.Buffer{},
-		cfg:     cfg,
+		execRun:        successfulExec,
+		rec:            events.Discard,
+		stderr:         &bytes.Buffer{},
+		cfg:            cfg,
+		dispatchCtx:    dispatchCtx,
+		dispatchCancel: dispatchCancel,
 	}
+	t.Cleanup(func() {
+		m.cancel()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		m.drain(ctx)
+	})
 
 	m.dispatch(context.Background(), cityDir, time.Now())
-	time.Sleep(50 * time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if !m.drain(ctx) {
+		t.Fatal("drain timed out waiting for imported-pack dispatch to finish")
+	}
 
 	work := workBeadByOrderLabel(t, store, "order-run:digest")
 	if got := work.Metadata["gc.routed_to"]; got != "maintenance.dog" {
@@ -851,20 +874,43 @@ func TestOrderDispatchResolvesImportedPackPoolAgainstSiblingImportCollision(t *t
 	writeImportedDogOrderFixture(t, cityDir, false, "gastown")
 	cfg, aa := loadImportedDogOrders(t, cityDir)
 	store := beads.NewMemStore()
+	digest := orders.Order{}
+	for _, order := range aa {
+		if order.Name == "digest" {
+			digest = order
+			break
+		}
+	}
+	if digest.Name == "" {
+		t.Fatal("missing digest order")
+	}
+	dispatchCtx, dispatchCancel := context.WithCancel(context.Background())
 
 	m := &memoryOrderDispatcher{
-		aa: aa,
+		aa: []orders.Order{digest},
 		storeFn: func(_ execStoreTarget) (beads.Store, error) {
 			return store, nil
 		},
-		execRun: shellExecRunner,
-		rec:     events.Discard,
-		stderr:  &bytes.Buffer{},
-		cfg:     cfg,
+		execRun:        successfulExec,
+		rec:            events.Discard,
+		stderr:         &bytes.Buffer{},
+		cfg:            cfg,
+		dispatchCtx:    dispatchCtx,
+		dispatchCancel: dispatchCancel,
 	}
+	t.Cleanup(func() {
+		m.cancel()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		m.drain(ctx)
+	})
 
 	m.dispatch(context.Background(), cityDir, time.Now())
-	time.Sleep(50 * time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if !m.drain(ctx) {
+		t.Fatal("drain timed out waiting for imported-pack dispatch to finish")
+	}
 
 	work := workBeadByOrderLabel(t, store, "order-run:digest")
 	if got := work.Metadata["gc.routed_to"]; got != "maintenance.dog" {
