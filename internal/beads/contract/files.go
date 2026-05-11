@@ -219,6 +219,11 @@ func EnsureCanonicalConfig(fs fsys.FS, path string, state ConfigState) (bool, er
 		changed = setString(root, "issue-prefix", prefix) || changed
 	}
 	changed = setBool(root, "dolt.auto-start", false) || changed
+	// Managed beads are Dolt-backed; issues.jsonl auto-export is redundant and
+	// triggers a re-import cycle that stalls bd writes for minutes on large
+	// datasets. BD_EXPORT_AUTO env-var suppression only covers gc's own calls,
+	// so bake it into the on-disk config too.
+	changed = setBool(root, "export.auto", false) || changed
 	if state.EndpointOrigin != "" {
 		changed = setString(root, "gc.endpoint_origin", string(state.EndpointOrigin)) || changed
 	}
@@ -320,6 +325,7 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 
 	replacements := map[string]string{
 		"dolt.auto-start": "dolt.auto-start: false",
+		"export.auto":     "export.auto: false",
 	}
 	if prefix != "" {
 		replacements["issue_prefix"] = "issue_prefix: " + prefix
@@ -393,6 +399,7 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 		"issue_prefix",
 		"issue-prefix",
 		"dolt.auto-start",
+		"export.auto",
 		"gc.endpoint_origin",
 		"gc.endpoint_status",
 		"dolt.host",

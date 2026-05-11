@@ -110,6 +110,7 @@ func TestEnsureCanonicalConfigCreatesManagedShape(t *testing.T) {
 		"issue_prefix: gc",
 		"issue-prefix: gc",
 		"dolt.auto-start: false",
+		"export.auto: false",
 		"gc.endpoint_origin: managed_city",
 		"gc.endpoint_status: verified",
 	} {
@@ -231,6 +232,77 @@ func TestEnsureCanonicalConfigCollapsesDuplicateManagedKeys(t *testing.T) {
 			t.Fatalf("config should scrub stale duplicate %q:%c%s", forbidden, 10, text)
 		}
 	}
+}
+
+func TestEnsureCanonicalConfigForcesAutoExportOff(t *testing.T) {
+	// bd's export.auto defaults to true and triggers a full-file import-then-export
+	// cycle on every write. Managed cities never consume issues.jsonl (Dolt is the
+	// source of truth), so this must be forced off at config time — not just via
+	// BD_EXPORT_AUTO env-var suppression, which leaks when bd is invoked outside
+	// the gc wrapper (agents, humans, bd setup).
+	t.Run("sets false when key is absent", func(t *testing.T) {
+		fs := fsys.OSFS{}
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.yaml")
+		input := strings.Join([]string{
+			"issue-prefix: gc",
+			"dolt.auto-start: false",
+			"",
+		}, "\n")
+		if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := EnsureCanonicalConfig(fs, path, ConfigState{
+			IssuePrefix:    "gc",
+			EndpointOrigin: EndpointOriginManagedCity,
+			EndpointStatus: EndpointStatusVerified,
+		}); err != nil {
+			t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+		}
+
+		data, err := fs.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(data), "export.auto: false") {
+			t.Fatalf("config should force export.auto: false:\n%s", data)
+		}
+	})
+
+	t.Run("overrides explicit true", func(t *testing.T) {
+		fs := fsys.OSFS{}
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.yaml")
+		input := strings.Join([]string{
+			"issue-prefix: gc",
+			"export.auto: true",
+			"",
+		}, "\n")
+		if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := EnsureCanonicalConfig(fs, path, ConfigState{
+			IssuePrefix:    "gc",
+			EndpointOrigin: EndpointOriginManagedCity,
+			EndpointStatus: EndpointStatusVerified,
+		}); err != nil {
+			t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+		}
+
+		data, err := fs.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(data)
+		if strings.Contains(text, "export.auto: true") {
+			t.Fatalf("config should scrub export.auto: true:\n%s", text)
+		}
+		if !strings.Contains(text, "export.auto: false") {
+			t.Fatalf("config should force export.auto: false:\n%s", text)
+		}
+	})
 }
 
 func TestEnsureCanonicalConfigWritesExternalFields(t *testing.T) {
