@@ -671,6 +671,13 @@ func TestGcBdRejectsGCBeadsFileOverride(t *testing.T) {
 	cityFlag = ""
 	rigFlag = ""
 
+	// Scrub inherited beads env (notably GC_BEADS_SCOPE_ROOT from a
+	// gc agent's outer city) so the explicit GC_BEADS override below
+	// is honored by configuredBeadsProviderValue. Without this, a leaked
+	// GC_BEADS_SCOPE_ROOT disqualifies the override and the provider
+	// resolution falls back to city.toml peek (which has no [beads]
+	// section here) → defaults to "bd" → rejection never fires.
+	clearInheritedBeadsEnv(t)
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
 name = "demo"
