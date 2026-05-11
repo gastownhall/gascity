@@ -13,9 +13,9 @@ import (
 // without session_key still produces a single duration field.
 func TestStartPhaseTimingsFormatLog(t *testing.T) {
 	cases := []struct {
-		name    string
-		phases  startPhaseTimings
-		want    string
+		name   string
+		phases startPhaseTimings
+		want   string
 	}{
 		{
 			name:   "all zero elides",
@@ -49,10 +49,10 @@ func TestStartPhaseTimingsFormatLog(t *testing.T) {
 		{
 			name: "state_sync_recovery emits when nonzero (gc-9ha)",
 			phases: startPhaseTimings{
-				StartCall:          82 * time.Second,
-				StateSyncRecovery:  2 * time.Second,
-				PostStartObserve:   2 * time.Second,
-				CommitRefresh:      1 * time.Millisecond,
+				StartCall:         82 * time.Second,
+				StateSyncRecovery: 2 * time.Second,
+				PostStartObserve:  2 * time.Second,
+				CommitRefresh:     1 * time.Millisecond,
 			},
 			want: " phases=[start_call=1m22s state_sync_recovery=2s post_start_observe=2s commit_refresh=1ms]",
 		},
