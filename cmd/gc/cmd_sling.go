@@ -951,73 +951,15 @@ func collectConflictErrors(err error, visit func(*sourceworkflow.ConflictError))
 }
 
 // buildSlingFormulaVars merges caller-provided vars with the runtime context
-// needed by common work formulas. Explicit --var entries always win.
+// needed by common work formulas. Delegates to the canonical implementation
+// in internal/sling so CLI dry-run previews match production routing, but
+// injects cliBranchResolver so live `git symbolic-ref origin/HEAD` probes
+// fire when neither bead metadata nor rig.DefaultBranch supply a branch.
 func buildSlingFormulaVars(formulaName, beadID string, userVars []string, a config.Agent, deps slingDeps) map[string]string {
-	vars := make(map[string]string, len(userVars)+6)
-	for _, v := range userVars {
-		key, value, ok := strings.Cut(v, "=")
-		if ok && key != "" {
-			vars[key] = value
-		}
-	}
-	addVar := func(key, value string) {
-		if value == "" {
-			return
-		}
-		if _, explicit := vars[key]; explicit {
-			return
-		}
-		vars[key] = value
-	}
-	addRoutingVar := func(key, value string) {
-		if _, explicit := vars[key]; explicit {
-			return
-		}
-		vars[key] = value
-	}
-
-	if beadID != "" {
-		// Attached work formulas conventionally expect issue=<bead-id>.
-		addVar("issue", beadID)
-	}
-	addRoutingVar("rig_name", a.Dir)
-	addRoutingVar("binding_name", a.BindingName)
-	addRoutingVar("binding_prefix", a.BindingPrefix())
-
-	autoBranch := slingFormulaTargetBranch(beadID, deps, a)
-	if slingFormulaUsesBaseBranch(formulaName) {
-		addVar("base_branch", autoBranch)
-	}
-	if slingFormulaUsesTargetBranch(formulaName) {
-		addVar("target_branch", autoBranch)
-	}
-
-	return vars
-}
-
-// slingFormulaSearchPaths returns the formula search paths for the current
-// sling context. Uses the target agent's rig to select rig-specific layers,
-// falling back to city-level layers via FormulaLayers.SearchPaths.
-//
-// slingFormulaTargetBranch resolves the branch used as base_branch /
-// target_branch in formula vars. Resolution order:
-//  1. metadata.target on the work bead (or convoy ancestor)
-//  2. DefaultBranch recorded on the bead's rig in city.toml
-//  3. DefaultBranch recorded on the agent's rig in city.toml
-//  4. Live probe of the rig repo (git symbolic-ref origin/HEAD)
-func slingFormulaTargetBranch(beadID string, deps slingDeps, a config.Agent) string {
 	if deps.Branches == nil {
 		deps.Branches = cliBranchResolver{}
 	}
-	return sling.SlingFormulaTargetBranch(beadID, deps, a)
-}
-
-func slingFormulaUsesBaseBranch(formula string) bool {
-	return strings.HasPrefix(formula, "mol-polecat-") || formula == "mol-scoped-work"
-}
-
-func slingFormulaUsesTargetBranch(formula string) bool {
-	return formula == "mol-refinery-patrol"
+	return sling.BuildSlingFormulaVars(formulaName, beadID, userVars, a, deps)
 }
 
 // resolveSlingEnv returns extra env vars for the sling command.

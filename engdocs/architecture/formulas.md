@@ -204,6 +204,31 @@ Formula layers are assembled from:
 - rig packs
 - `[[rigs]].formulas_dir`
 
+Rig-scoped formula var defaults live on the rig entry itself:
+
+```toml
+[[rigs]]
+name = "mo"
+path = "/home/me/projects/mo"
+
+[rigs.formula_vars]
+test_command = "make test-fast"
+lint_command = "golangci-lint run"
+```
+
+When a formula runs with an agent bound to a rig (via `dir = "mo"` or an
+absolute filesystem path), `BuildSlingFormulaVars` folds these entries into
+the final var map. Precedence (highest wins):
+
+1. Explicit `--var key=value` on the CLI
+2. `rigs.<name>.formula_vars[key]`
+3. Routing-injected defaults (`issue`, `rig_name`, `base_branch`, `target_branch`, ...)
+4. Formula-declared `[vars.<name>].default`
+
+`gc formula show --rig <name>` surfaces active rig defaults as
+`(rig default="...")` next to the var description so operators can verify
+what will actually substitute before dispatch.
+
 Wisp cleanup is configured in `city.toml`:
 
 ```toml

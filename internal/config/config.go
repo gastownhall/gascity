@@ -508,6 +508,12 @@ type Rig struct {
 	// shell invocations with BEADS_DOLT_SERVER_PORT=<port> so bd connects to the
 	// correct server instead of the city-level default.
 	DoltPort string `toml:"dolt_port,omitempty"`
+	// FormulaVars provides rig-scoped defaults for formula vars. Keys match
+	// var names declared in formula `[vars.<name>]` blocks. Values are used
+	// when a formula runs in this rig and the caller did not pass an
+	// explicit --var override. Takes precedence over formula-level defaults
+	// but loses to --var flags.
+	FormulaVars map[string]string `toml:"formula_vars,omitempty"`
 }
 
 // AgentOverride modifies a pack-stamped agent for a specific rig.

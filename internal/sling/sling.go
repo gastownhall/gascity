@@ -912,6 +912,8 @@ func rigStoredDefaultBranch(cfg *config.City, beadID string, a config.Agent) str
 }
 
 // BuildSlingFormulaVars builds the variable map for formula instantiation.
+// Precedence (highest wins): explicit --var > rig.formula_vars > routing-injected
+// defaults (issue/rig_name/base_branch/...) > formula-level [vars.*].default.
 func BuildSlingFormulaVars(formulaName, beadID string, userVars []string, a config.Agent, deps SlingDeps) map[string]string {
 	vars := make(map[string]string, len(userVars)+6)
 	for _, v := range userVars {
@@ -920,6 +922,7 @@ func BuildSlingFormulaVars(formulaName, beadID string, userVars []string, a conf
 			vars[key] = value
 		}
 	}
+	mergeRigFormulaVars(vars, deps.Cfg, a)
 	addVar := func(key, value string) {
 		if value == "" {
 			return
@@ -952,6 +955,32 @@ func BuildSlingFormulaVars(formulaName, beadID string, userVars []string, a conf
 	}
 
 	return vars
+}
+
+// mergeRigFormulaVars folds rig-scoped formula_vars defaults into vars.
+// Explicit --var entries already in vars are preserved. The lookup uses
+// rigNameForAgent so agents whose Dir is a filesystem path still resolve
+// to the correct rig.
+func mergeRigFormulaVars(vars map[string]string, cfg *config.City, a config.Agent) {
+	if cfg == nil {
+		return
+	}
+	rigName := rigNameForAgent(cfg, a)
+	if rigName == "" {
+		return
+	}
+	for i := range cfg.Rigs {
+		if cfg.Rigs[i].Name != rigName {
+			continue
+		}
+		for k, v := range cfg.Rigs[i].FormulaVars {
+			if _, explicit := vars[k]; explicit {
+				continue
+			}
+			vars[k] = v
+		}
+		return
+	}
 }
 
 // ResolveSlingEnv returns extra env vars for the sling command.

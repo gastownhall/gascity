@@ -5365,6 +5365,12 @@
               "null"
             ]
           },
+          "FormulaVars": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
           "Name": {
             "type": "string"
           },
@@ -5392,7 +5398,8 @@
           "Path",
           "Prefix",
           "DefaultBranch",
-          "Suspended"
+          "Suspended",
+          "FormulaVars"
         ],
         "type": "object"
       },

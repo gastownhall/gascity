@@ -7048,6 +7048,100 @@ func TestBuildSlingFormulaVarsInjectsIssueAndBaseBranch(t *testing.T) {
 	}
 }
 
+// TestBuildSlingFormulaVarsRigDefaults covers rig-scoped formula var defaults
+// flowing into the final vars map, plus precedence:
+//
+//	--var > rig.formula_vars > routing-injected > formula default
+func TestBuildSlingFormulaVarsRigDefaults(t *testing.T) {
+	t.Run("rig defaults flow in when caller omits --var", func(t *testing.T) {
+		cfg := &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Rigs: []config.Rig{
+				{
+					Name: "mo",
+					Path: "/mo",
+					FormulaVars: map[string]string{
+						"test_command": "make test-fast",
+						"lint_command": "golangci-lint run",
+					},
+				},
+			},
+		}
+		deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+		vars := buildSlingFormulaVars("mol-polecat-work", "MO-1", nil,
+			config.Agent{Name: "polecat", Dir: "mo"}, deps)
+
+		if got, ok := findVarValue(vars, "test_command"); !ok || got != "make test-fast" {
+			t.Fatalf("test_command = %q, %v; want make test-fast (from rig defaults)", got, ok)
+		}
+		if got, ok := findVarValue(vars, "lint_command"); !ok || got != "golangci-lint run" {
+			t.Fatalf("lint_command = %q, %v; want golangci-lint run (from rig defaults)", got, ok)
+		}
+	})
+
+	t.Run("--var wins over rig defaults", func(t *testing.T) {
+		cfg := &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Rigs: []config.Rig{
+				{
+					Name:        "mo",
+					Path:        "/mo",
+					FormulaVars: map[string]string{"test_command": "make test-fast"},
+				},
+			},
+		}
+		deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+		vars := buildSlingFormulaVars("mol-polecat-work", "MO-1",
+			[]string{"test_command=go test -short ./..."},
+			config.Agent{Name: "polecat", Dir: "mo"}, deps)
+
+		if got, ok := findVarValue(vars, "test_command"); !ok || got != "go test -short ./..." {
+			t.Fatalf("test_command = %q, %v; want 'go test -short ./...' (--var override)", got, ok)
+		}
+	})
+
+	t.Run("no rig match is a no-op", func(t *testing.T) {
+		cfg := &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Rigs: []config.Rig{
+				{
+					Name:        "mo",
+					Path:        "/mo",
+					FormulaVars: map[string]string{"test_command": "make test-fast"},
+				},
+			},
+		}
+		deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+		vars := buildSlingFormulaVars("mol-polecat-work", "UNK-1", nil,
+			config.Agent{Name: "polecat", Dir: "other-rig"}, deps)
+
+		if _, ok := findVarValue(vars, "test_command"); ok {
+			t.Fatalf("test_command should not be set when agent rig does not match any rig with formula_vars")
+		}
+	})
+
+	t.Run("rig match by filesystem path resolves like Dir=rigName", func(t *testing.T) {
+		rigPath := "/abs/mo-path"
+		cfg := &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Rigs: []config.Rig{
+				{
+					Name:        "mo",
+					Path:        rigPath,
+					FormulaVars: map[string]string{"test_command": "make test-fast"},
+				},
+			},
+		}
+		deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+		vars := buildSlingFormulaVars("mol-polecat-work", "MO-1", nil,
+			config.Agent{Name: "polecat", Dir: rigPath}, deps)
+
+		if got, ok := findVarValue(vars, "test_command"); !ok || got != "make test-fast" {
+			t.Fatalf("test_command = %q, %v; want make test-fast (path-resolved rig lookup)", got, ok)
+		}
+	})
+}
+
 // --- 1-arg sling tests (via doSling, not cmdSling which needs a real city) ---
 
 func TestFindRigByPrefix(t *testing.T) {

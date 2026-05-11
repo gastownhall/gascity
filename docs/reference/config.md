@@ -538,6 +538,7 @@ Rig defines an external project registered in the city.
 | `session_sleep` | SessionSleepConfig |  |  | SessionSleep overrides workspace-level idle sleep defaults for agents in this rig. |
 | `dolt_host` | string |  |  | DoltHost overrides the city-level Dolt host for this rig's beads. Use when the rig's database lives on a different Dolt server (e.g., shared from another city). |
 | `dolt_port` | string |  |  | DoltPort overrides the city-level Dolt port for this rig's beads. When set, controller commands (scale_check, work_query) prefix their shell invocations with BEADS_DOLT_SERVER_PORT=&lt;port&gt; so bd connects to the correct server instead of the city-level default. |
+| `formula_vars` | map[string]string |  |  | FormulaVars provides rig-scoped defaults for formula vars. Keys match var names declared in formula `[vars.&lt;name&gt;]` blocks. Values are used when a formula runs in this rig and the caller did not pass an explicit --var override. Takes precedence over formula-level defaults but loses to --var flags. |
 
 ## RigPatch
 
@@ -550,6 +551,7 @@ RigPatch modifies an existing rig identified by Name.
 | `prefix` | string |  |  | Prefix overrides the bead ID prefix. |
 | `default_branch` | string |  |  | DefaultBranch overrides the rig's recorded mainline branch. |
 | `suspended` | boolean |  |  | Suspended overrides the rig's suspended state. |
+| `formula_vars` | map[string]string |  |  | FormulaVars adds or overrides rig-scoped formula var defaults. Additive merge: patch keys win over existing rig keys, unspecified keys are preserved. |
 
 ## Service
 

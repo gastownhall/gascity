@@ -1922,6 +1922,13 @@
         "dolt_port": {
           "type": "string",
           "description": "DoltPort overrides the city-level Dolt port for this rig's beads.\nWhen set, controller commands (scale_check, work_query) prefix their\nshell invocations with BEADS_DOLT_SERVER_PORT=\u003cport\u003e so bd connects to the\ncorrect server instead of the city-level default."
+        },
+        "formula_vars": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "FormulaVars provides rig-scoped defaults for formula vars. Keys match\nvar names declared in formula `[vars.\u003cname\u003e]` blocks. Values are used\nwhen a formula runs in this rig and the caller did not pass an\nexplicit --var override. Takes precedence over formula-level defaults\nbut loses to --var flags."
         }
       },
       "additionalProperties": false,
@@ -1952,6 +1959,13 @@
         "suspended": {
           "type": "boolean",
           "description": "Suspended overrides the rig's suspended state."
+        },
+        "formula_vars": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "FormulaVars adds or overrides rig-scoped formula var defaults.\nAdditive merge: patch keys win over existing rig keys, unspecified\nkeys are preserved."
         }
       },
       "additionalProperties": false,

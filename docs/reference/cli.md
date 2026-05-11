@@ -1092,9 +1092,13 @@ Compile and display a formula recipe.
 By default, shows the recipe with &#123;&#123;variable&#125;&#125; placeholders intact.
 Use --var to substitute variables and preview the resolved output.
 
+When --rig is set (or cwd is inside a rig), rig-scoped formula_vars from
+city.toml are shown as "(rig default=...)" alongside each applicable var.
+
 Examples:
   gc formula show mol-feature
   gc formula show mol-feature --var title="Auth system" --var branch=main
+  gc formula show mol-polecat-work --rig mo
 
 ```
 gc formula show <formula-name> [flags]

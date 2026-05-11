@@ -2109,11 +2109,12 @@ type RigCreatedOutputBody struct {
 
 // RigPatch defines model for RigPatch.
 type RigPatch struct {
-	DefaultBranch *string `json:"DefaultBranch"`
-	Name          string  `json:"Name"`
-	Path          *string `json:"Path"`
-	Prefix        *string `json:"Prefix"`
-	Suspended     *bool   `json:"Suspended"`
+	DefaultBranch *string           `json:"DefaultBranch"`
+	FormulaVars   map[string]string `json:"FormulaVars"`
+	Name          string            `json:"Name"`
+	Path          *string           `json:"Path"`
+	Prefix        *string           `json:"Prefix"`
+	Suspended     *bool             `json:"Suspended"`
 }
 
 // RigPatchSetInputBody defines model for RigPatchSetInputBody.

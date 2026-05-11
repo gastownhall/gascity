@@ -2766,6 +2766,76 @@ func TestRigsRoundTrip(t *testing.T) {
 	}
 }
 
+// TestRigFormulaVarsRoundTrip verifies that rigs.<name>.formula_vars survives
+// TOML marshal/unmarshal so city.toml can declare rig-scoped formula defaults.
+func TestRigFormulaVarsRoundTrip(t *testing.T) {
+	c := City{
+		Workspace: Workspace{Name: "test"},
+		Agents:    []Agent{{Name: "mayor"}},
+		Rigs: []Rig{
+			{
+				Name: "mo",
+				Path: "/home/user/mo",
+				FormulaVars: map[string]string{
+					"test_command": "make test-fast",
+					"lint_command": "golangci-lint run",
+				},
+			},
+		},
+	}
+	data, err := c.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	got, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse(Marshal output): %v", err)
+	}
+	if len(got.Rigs) != 1 {
+		t.Fatalf("len(Rigs) after round-trip = %d, want 1", len(got.Rigs))
+	}
+	if v := got.Rigs[0].FormulaVars["test_command"]; v != "make test-fast" {
+		t.Errorf("FormulaVars[test_command] = %q, want %q", v, "make test-fast")
+	}
+	if v := got.Rigs[0].FormulaVars["lint_command"]; v != "golangci-lint run" {
+		t.Errorf("FormulaVars[lint_command] = %q, want %q", v, "golangci-lint run")
+	}
+}
+
+// TestRigFormulaVarsParsing verifies the expected TOML surface — a
+// [rigs.formula_vars] table inside a [[rigs]] entry — decodes into the
+// FormulaVars map on the rig.
+func TestRigFormulaVarsParsing(t *testing.T) {
+	input := `
+[workspace]
+name = "my-city"
+
+[[agent]]
+name = "mayor"
+
+[[rigs]]
+name = "mo"
+path = "/home/user/mo"
+
+[rigs.formula_vars]
+test_command = "make test-fast"
+build_command = "make build"
+`
+	cfg, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(cfg.Rigs) != 1 {
+		t.Fatalf("len(Rigs) = %d, want 1", len(cfg.Rigs))
+	}
+	if got := cfg.Rigs[0].FormulaVars["test_command"]; got != "make test-fast" {
+		t.Errorf("FormulaVars[test_command] = %q, want %q", got, "make test-fast")
+	}
+	if got := cfg.Rigs[0].FormulaVars["build_command"]; got != "make build" {
+		t.Errorf("FormulaVars[build_command] = %q, want %q", got, "make build")
+	}
+}
+
 // --- DeriveBeadsPrefix tests ---
 
 func TestDeriveBeadsPrefix(t *testing.T) {

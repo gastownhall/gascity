@@ -171,6 +171,10 @@ type RigPatch struct {
 	DefaultBranch *string `toml:"default_branch,omitempty"`
 	// Suspended overrides the rig's suspended state.
 	Suspended *bool `toml:"suspended,omitempty"`
+	// FormulaVars adds or overrides rig-scoped formula var defaults.
+	// Additive merge: patch keys win over existing rig keys, unspecified
+	// keys are preserved.
+	FormulaVars map[string]string `toml:"formula_vars,omitempty"`
 }
 
 // ProviderPatch modifies an existing provider identified by Name.
@@ -482,6 +486,14 @@ func applyRigPatch(cfg *City, patch *RigPatch) error {
 			}
 			if patch.Suspended != nil {
 				r.Suspended = *patch.Suspended
+			}
+			if len(patch.FormulaVars) > 0 {
+				if r.FormulaVars == nil {
+					r.FormulaVars = make(map[string]string, len(patch.FormulaVars))
+				}
+				for k, v := range patch.FormulaVars {
+					r.FormulaVars[k] = v
+				}
 			}
 			return nil
 		}
