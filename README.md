@@ -23,7 +23,7 @@ declarative city configuration.
     <td align="center" width="100%">
       <a href="https://blacksmith.sh/">
         <picture>
-          <img src="docs/images/blacksmith.svg" alt="Blacksmith" height="28">
+          <img src="docs/images/blacksmith-powered.png" alt="Powered by Blacksmith" height="28">
         </picture>
       </a>
     </td>
