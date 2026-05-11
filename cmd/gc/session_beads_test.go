@@ -5408,7 +5408,7 @@ func TestCloseBeadIsNoopOnAlreadyClosedBead(t *testing.T) {
 // participant in a group, which also writes the matching membership via
 // ensureMembershipLocked. Returns the session bead, fabric, and caller so
 // the test can verify cleanup via TranscriptService.ListConversationsBySession.
-func setupSessionWithExtmsgMembership(t *testing.T, store beads.Store, state string) (beads.Bead, extmsg.Services, extmsg.Caller) {
+func setupSessionWithExtmsgMembership(t *testing.T, store beads.Store, state session.State) (beads.Bead, extmsg.Services, extmsg.Caller) {
 	t.Helper()
 	sessionBead, err := store.Create(beads.Bead{
 		Title:  "worker",
@@ -5416,7 +5416,7 @@ func setupSessionWithExtmsgMembership(t *testing.T, store beads.Store, state str
 		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
 			"session_name": "worker-1",
-			"state":        state,
+			"state":        string(state),
 		},
 	})
 	if err != nil {
@@ -5447,7 +5447,7 @@ func setupSessionWithExtmsgMembership(t *testing.T, store beads.Store, state str
 	return sessionBead, fabric, caller
 }
 
-func openMembershipsForSession(t *testing.T, fabric extmsg.Services, caller extmsg.Caller, sessionID string) int {
+func countOpenMembershipsForSession(t *testing.T, fabric extmsg.Services, caller extmsg.Caller, sessionID string) int {
 	t.Helper()
 	members, err := fabric.Transcript.ListConversationsBySession(context.Background(), caller, sessionID)
 	if err != nil {
@@ -5463,9 +5463,9 @@ func openMembershipsForSession(t *testing.T, fabric extmsg.Services, caller extm
 // (regression for #1939, follow-up to #1865).
 func TestCloseBeadCascadesExtmsgState(t *testing.T) {
 	store := beads.NewMemStore()
-	sessionBead, fabric, caller := setupSessionWithExtmsgMembership(t, store, "active")
+	sessionBead, fabric, caller := setupSessionWithExtmsgMembership(t, store, session.StateActive)
 
-	if got := openMembershipsForSession(t, fabric, caller, sessionBead.ID); got != 1 {
+	if got := countOpenMembershipsForSession(t, fabric, caller, sessionBead.ID); got != 1 {
 		t.Fatalf("open memberships before close = %d, want 1 (setup precondition)", got)
 	}
 
@@ -5475,7 +5475,7 @@ func TestCloseBeadCascadesExtmsgState(t *testing.T) {
 		t.Fatalf("closeBead returned false; want true: stderr=%s", stderr.String())
 	}
 
-	if got := openMembershipsForSession(t, fabric, caller, sessionBead.ID); got != 0 {
+	if got := countOpenMembershipsForSession(t, fabric, caller, sessionBead.ID); got != 0 {
 		t.Errorf("open memberships after closeBead = %d, want 0 (cascade should have closed the membership bead)", got)
 	}
 }
@@ -5486,9 +5486,9 @@ func TestCloseBeadCascadesExtmsgState(t *testing.T) {
 // both pool-close entry points need the cleanup (B23 fix scope completeness).
 func TestCloseFailedCreateBeadCascadesExtmsgState(t *testing.T) {
 	store := beads.NewMemStore()
-	sessionBead, fabric, caller := setupSessionWithExtmsgMembership(t, store, string(session.StateFailedCreate))
+	sessionBead, fabric, caller := setupSessionWithExtmsgMembership(t, store, session.StateFailedCreate)
 
-	if got := openMembershipsForSession(t, fabric, caller, sessionBead.ID); got != 1 {
+	if got := countOpenMembershipsForSession(t, fabric, caller, sessionBead.ID); got != 1 {
 		t.Fatalf("open memberships before close = %d, want 1 (setup precondition)", got)
 	}
 
@@ -5498,7 +5498,7 @@ func TestCloseFailedCreateBeadCascadesExtmsgState(t *testing.T) {
 		t.Fatalf("closeFailedCreateBead returned false; want true: stderr=%s", stderr.String())
 	}
 
-	if got := openMembershipsForSession(t, fabric, caller, sessionBead.ID); got != 0 {
+	if got := countOpenMembershipsForSession(t, fabric, caller, sessionBead.ID); got != 0 {
 		t.Errorf("open memberships after closeFailedCreateBead = %d, want 0 (cascade should have closed the membership bead)", got)
 	}
 }
