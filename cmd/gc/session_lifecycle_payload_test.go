@@ -79,6 +79,45 @@ func TestHandoffRemoteEmitsTypedSessionStoppedPayload(t *testing.T) {
 	}
 }
 
+// TestStopTargetLifecycleCorrelationID verifies the fallback chain
+// for the SessionLifecyclePayload.SessionID correlation key: a populated
+// sessionID wins, an empty sessionID falls back to the stable session_name
+// (which ResolveSessionID can canonicalize to a bead ID for consumers).
+// Targets constructed without a store (e.g. legacy/manual invocations,
+// or beads retired before stop) hit the fallback path; without it,
+// the typed payload would emit `session_id:""` and violate the
+// "always present" contract documented on SessionLifecyclePayload.
+func TestStopTargetLifecycleCorrelationID(t *testing.T) {
+	cases := []struct {
+		name   string
+		target stopTarget
+		want   string
+	}{
+		{
+			name:   "populated sessionID wins",
+			target: stopTarget{sessionID: "sess-abc", name: "worker-1"},
+			want:   "sess-abc",
+		},
+		{
+			name:   "empty sessionID falls back to session_name",
+			target: stopTarget{sessionID: "", name: "worker-1"},
+			want:   "worker-1",
+		},
+		{
+			name:   "whitespace sessionID is treated as populated",
+			target: stopTarget{sessionID: " ", name: "worker-1"},
+			want:   " ",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.target.lifecycleCorrelationID(); got != tc.want {
+				t.Errorf("lifecycleCorrelationID() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestStopTargetsBoundedEmitsTypedSessionStoppedPayload exercises the
 // graceful-stop wave path used by `gc stop` to confirm each emitted
 // SessionStopped event carries the correlated session ID and template.
@@ -114,5 +153,43 @@ func TestStopTargetsBoundedEmitsTypedSessionStoppedPayload(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Stopped agent 'worker-1'") {
 		t.Errorf("stdout = %q, want 'Stopped agent worker-1'", stdout.String())
+	}
+}
+
+// TestStopTargetsBoundedEmitsNonEmptySessionIDWhenBeadAbsent verifies
+// the empty-sessionID fallback fires from the stopTargetsBounded wave
+// path: when a target was constructed without a corresponding session
+// bead (sessionID==""), the emitted SessionLifecyclePayload.SessionID
+// falls back to the session_name rather than violating the "always
+// present" contract.
+func TestStopTargetsBoundedEmitsNonEmptySessionIDWhenBeadAbsent(t *testing.T) {
+	store := beads.NewMemStore()
+	rec := events.NewFake()
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "orphan-worker", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatal(err)
+	}
+
+	targets := []stopTarget{{
+		sessionID: "", // simulate target built without store hydration
+		name:      "orphan-worker",
+		template:  "worker",
+		subject:   "orphan-worker",
+		resolved:  true,
+	}}
+
+	var stdout, stderr bytes.Buffer
+	stopped := stopTargetsBounded(targets, nil, store, sp, rec, "gc", &stdout, &stderr)
+	if stopped != 1 {
+		t.Fatalf("stopped = %d, want 1", stopped)
+	}
+
+	e := findEvent(t, rec, events.SessionStopped)
+	payload := decodeSessionLifecyclePayload(t, e)
+	if payload.SessionID == "" {
+		t.Fatalf("SessionID is empty; want fallback to session_name (orphan-worker). payload=%+v", payload)
+	}
+	if payload.SessionID != "orphan-worker" {
+		t.Errorf("SessionID = %q, want fallback to session_name %q", payload.SessionID, "orphan-worker")
 	}
 }
