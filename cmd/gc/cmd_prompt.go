@@ -105,7 +105,7 @@ func newPromptSynthCmd(stdout, stderr io.Writer, runner promptSynthRunner) *cobr
 		Long: `Renders a meta-prompt with the given parameters, invokes the configured
 provider in one-shot mode, and emits the generated prompt template.
 
-The default behaviour prints the generated prompt to stdout. Pass --write
+The default behavior prints the generated prompt to stdout. Pass --write
 to save it directly to <city>/agents/<role>/prompt.template.md (use --force
 to overwrite an existing file).
 

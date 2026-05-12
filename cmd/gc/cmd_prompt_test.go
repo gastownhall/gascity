@@ -26,7 +26,7 @@ type fakeSynthRunner struct {
 	gotCalled   bool
 }
 
-func (r *fakeSynthRunner) run(ctx context.Context, provider *config.ResolvedProvider, prompt, workDir string) (string, error) {
+func (r *fakeSynthRunner) run(_ context.Context, provider *config.ResolvedProvider, prompt, workDir string) (string, error) {
 	r.gotCalled = true
 	r.gotProvider = provider
 	r.gotPrompt = prompt
@@ -591,8 +591,11 @@ func (s *fakeSlinger) call(_ context.Context, args []string) error {
 }
 
 // writeCityWithAgent extends writeMinimalCity with a single configured
-// agent the slingued-mode validation can find.
-func writeCityWithAgent(t *testing.T, providerKey, agentName string) string {
+// agent the slingued-mode validation can find. providerKey is forwarded
+// to writeMinimalCity (callers always pass "claude" today, but the
+// parameter stays explicit so the helper can serve other providers
+// without a signature break).
+func writeCityWithAgent(t *testing.T, providerKey, agentName string) string { //nolint:unparam // providerKey kept explicit for future callers
 	t.Helper()
 	cityDir := writeMinimalCity(t, providerKey)
 	tomlAdd := "\n[[agent]]\nname = \"" + agentName + "\"\n"
@@ -600,7 +603,7 @@ func writeCityWithAgent(t *testing.T, providerKey, agentName string) string {
 	if err != nil {
 		t.Fatalf("open city.toml: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	if _, err := f.WriteString(tomlAdd); err != nil {
 		t.Fatalf("append agent: %v", err)
 	}
@@ -765,7 +768,7 @@ func TestRunSlinguedSynthWaitReturnsWhenBeadCloses(t *testing.T) {
 		// it ourselves right after sling is called.
 	}
 	closeAfterSling := func(s beads.Store) func(context.Context, []string) error {
-		return func(ctx context.Context, args []string) error {
+		return func(_ context.Context, args []string) error {
 			beadID := args[1]
 			go func() {
 				time.Sleep(20 * time.Millisecond)
