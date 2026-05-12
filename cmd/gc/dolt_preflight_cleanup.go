@@ -120,10 +120,25 @@ func quarantinePhantomManagedDoltDatabases(dataDir string, now time.Time) error 
 		if !retiredManagedDoltDatabaseName(entry.Name()) {
 			reason = "missing noms/manifest"
 			manifest := filepath.Join(doltDir, "noms", "manifest")
-			if _, err := os.Stat(manifest); err == nil {
-				continue
-			} else if !os.IsNotExist(err) {
-				return err
+			if _, err := os.Stat(manifest); err != nil {
+				if !os.IsNotExist(err) {
+					return err
+				}
+			} else {
+				// A noms/manifest alone is not enough to deem a managed-dolt
+				// directory servable: dolt sql-server's data_dir scan aborts
+				// with bare "EOF" on the first directory whose .dolt/ is
+				// missing repo_state.json, killing every other database on
+				// the same server. Require repo_state.json as well.
+				reason = "missing repo_state.json"
+				repoState := filepath.Join(doltDir, "repo_state.json")
+				if _, err := os.Stat(repoState); err != nil {
+					if !os.IsNotExist(err) {
+						return err
+					}
+				} else {
+					continue
+				}
 			}
 		}
 		if err := os.MkdirAll(quarantineRoot, 0o755); err != nil {
