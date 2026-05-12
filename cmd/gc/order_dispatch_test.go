@@ -4280,6 +4280,106 @@ func TestOrderDispatchFiresAfterWorkClosed(t *testing.T) {
 	}
 }
 
+// TestOrderDispatchOpenWispRootDoesNotBlockRedispatch reproduces the
+// formula+pool auto-dispatch failure tracked by ga-lo8c (continuation of
+// closed ga-jra). After a city restart, the wisp root bead from a previous
+// formula+pool dispatch persists in the store with status="open" and the
+// "order-run:<scoped>" label (stamped by dispatchWisp at order_dispatch.go:706).
+// Molecule roots are never auto-closed when their step beads complete, so
+// the leftover open root permanently tripped hasOpenWorkStrict and starved
+// the order's cooldown gate.
+//
+// In-flight dispatch is signaled by the tracking bead (carries both
+// "order-run:<scoped>" AND labelOrderTracking). Wisp roots carry only the
+// former — distinguishing the two is the fix.
+func TestOrderDispatchOpenWispRootDoesNotBlockRedispatch(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// Simulate post-restart state: an open wisp root from the prior
+	// formula+pool dispatch. The tracking bead from that dispatch was
+	// already closed by dispatchOne's deferred Close, but the molecule
+	// root remains open because nothing in the dispatch path closes it.
+	wispRoot, err := store.Create(beads.Bead{
+		Title:  "mol-formula-pool-work",
+		Labels: []string{"order-run:my-pool-order"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wispRoot.Status == "closed" {
+		t.Fatalf("seed wisp root should be open, got status=%q", wispRoot.Status)
+	}
+
+	ran := false
+	fakeExec := func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
+		ran = true
+		return nil, nil
+	}
+
+	aa := []orders.Order{{
+		Name:     "my-pool-order",
+		Trigger:  "cooldown",
+		Interval: "1s",
+		Exec:     "scripts/run.sh",
+	}}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
+
+	// Future "now" so cooldown evaluates Due=true (LastRun = wispRoot.CreatedAt).
+	ad.dispatch(context.Background(), t.TempDir(), time.Now().Add(5*time.Second))
+	ad.drain(context.Background())
+
+	if !ran {
+		t.Fatal("exec should have run — an open wisp root (no labelOrderTracking) " +
+			"is leftover state, not in-flight work, and must not block re-dispatch")
+	}
+}
+
+// listIncludingClosedStore forces List to include closed beads regardless of
+// the caller's IncludeClosed setting. Production stores honor IncludeClosed:
+// false, but hasOpenWorkStrict's defensive status check must still skip closed
+// beads if a store implementation (or a stale cache) returns them.
+type listIncludingClosedStore struct {
+	beads.Store
+}
+
+func (s listIncludingClosedStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	q.IncludeClosed = true
+	return s.Store.List(q)
+}
+
+// TestHasOpenWorkStrictSkipsClosedTrackingBead covers the defensive
+// status-closed branch in hasOpenWorkStrict (cmd/gc/order_dispatch.go:802-803).
+// The standard query passes IncludeClosed: false, so closed beads normally
+// don't reach the loop — but a misbehaving store (or a stale CachingStore
+// view) could leak one through. If hasOpenWorkStrict didn't skip closed
+// beads, a completed tracking bead would permanently block re-dispatch — the
+// same failure shape ga-lo8c hit with leftover wisp roots.
+func TestHasOpenWorkStrictSkipsClosedTrackingBead(t *testing.T) {
+	base := beads.NewMemStore()
+	store := listIncludingClosedStore{Store: base}
+
+	b, err := store.Create(beads.Bead{
+		Title:  "order:my-order",
+		Labels: []string{"order-run:my-order", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("seed bead: %v", err)
+	}
+	if err := store.Close(b.ID); err != nil {
+		t.Fatalf("close seed bead: %v", err)
+	}
+
+	ad := &memoryOrderDispatcher{}
+	has, err := ad.hasOpenWorkStrict(store, "my-order")
+	if err != nil {
+		t.Fatalf("hasOpenWorkStrict: %v", err)
+	}
+	if has {
+		t.Fatal("closed tracking bead must not count as in-flight work; " +
+			"the defensive status filter at order_dispatch.go:802 should skip it")
+	}
+}
+
 // Unused but keep for future event assertion tests.
 var (
 	_ = (*memRecorder).hasSubject
