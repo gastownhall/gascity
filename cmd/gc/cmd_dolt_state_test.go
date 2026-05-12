@@ -1364,6 +1364,13 @@ func TestDoltStatePreflightCleanCmdRemovesStaleArtifacts(t *testing.T) {
 	if err := os.WriteFile(healthyManifest, []byte("ok\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// repo_state.json sits alongside noms/manifest in every real managed-dolt
+	// database (see e.g. gascity's own hq dir). Preflight now requires both
+	// files; absence of repo_state.json is itself a quarantine reason.
+	healthyRepoState := filepath.Join(layout.DataDir, "healthy", ".dolt", "repo_state.json")
+	if err := os.WriteFile(healthyRepoState, []byte(`{"head":"refs/heads/main","remotes":{},"backups":{},"branches":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	socketPath := filepath.Join("/tmp", "dolt-gc-preflight-"+strconv.FormatInt(time.Now().UnixNano(), 10)+".sock")
 	staleSocket := startUnixSocketProcess(t, socketPath)
@@ -1396,6 +1403,48 @@ func TestDoltStatePreflightCleanCmdRemovesStaleArtifacts(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(layout.DataDir, "healthy", ".dolt", "noms", "manifest")); err != nil {
 		t.Fatalf("healthy manifest removed unexpectedly: %v", err)
+	}
+}
+
+// TestDoltStatePreflightCleanQuarantinesManifestOnlyDatabase verifies that a
+// managed-dolt directory containing only .dolt/noms/manifest (no
+// repo_state.json) is quarantined. This is the exact shape of the malformed
+// "healthy" fixture deposited into a live city on 2026-05-12 when the
+// existing TestDoltStatePreflightCleanCmdRemovesStaleArtifacts test ran with
+// GC_DOLT_DATA_DIR inherited from the developer's shell (see
+// dolt_runtime_layout.go:37). Dolt sql-server's data_dir scan then aborts on
+// the first such directory with bare "EOF", killing the entire server and
+// every other database on it.
+func TestDoltStatePreflightCleanQuarantinesManifestOnlyDatabase(t *testing.T) {
+	if _, err := exec.LookPath("lsof"); err != nil {
+		t.Skip("lsof not installed")
+	}
+	cityPath := t.TempDir()
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+
+	manifestOnly := filepath.Join(layout.DataDir, "manifest_only", ".dolt", "noms", "manifest")
+	if err := os.MkdirAll(filepath.Dir(manifestOnly), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestOnly, []byte("ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "preflight-clean", "--city", cityPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+	}
+
+	quarantined, err := filepath.Glob(filepath.Join(layout.DataDir, ".quarantine", "*-manifest_only*"))
+	if err != nil {
+		t.Fatalf("Glob(quarantine): %v", err)
+	}
+	if len(quarantined) != 1 {
+		t.Fatalf("quarantined manifest-only databases = %d, want 1 (%v)", len(quarantined), quarantined)
 	}
 }
 

@@ -108,11 +108,17 @@ func TestRemoveStaleManagedDoltLocksWithoutLsofUsesAvailableState(t *testing.T) 
 
 func TestQuarantinePhantomManagedDoltDatabasesQuarantinesRetiredReplacementDB(t *testing.T) {
 	dataDir := t.TempDir()
+	// healthy fixtures need both noms/manifest and repo_state.json — preflight
+	// now requires both to deem a non-retired managed-dolt directory servable.
+	healthyRepoState := []byte(`{"head":"refs/heads/main","remotes":{},"backups":{},"branches":{}}`)
 	activeManifest := filepath.Join(dataDir, "ga", ".dolt", "noms", "manifest")
 	if err := os.MkdirAll(filepath.Dir(activeManifest), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(activeManifest, []byte("active\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "ga", ".dolt", "repo_state.json"), healthyRepoState, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	retiredManifest := filepath.Join(dataDir, "ga.replaced-20260428T100722Z", ".dolt", "noms", "manifest")
@@ -127,6 +133,9 @@ func TestQuarantinePhantomManagedDoltDatabasesQuarantinesRetiredReplacementDB(t 
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(replacementLikeManifest, []byte("active\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "ga.replaced-pending", ".dolt", "repo_state.json"), healthyRepoState, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
