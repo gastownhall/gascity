@@ -2462,6 +2462,51 @@ func TestReconcileSessionBeads_ConfigDriftInitiatesDrain(t *testing.T) {
 	}
 }
 
+// TestReconcileSessionBeads_ConfigDriftDeferredOnLiveAssignedWork verifies
+// that a pool session with live in-progress work assigned to it is NOT
+// drained when its config_hash drifts. Draining mid-work would orphan the
+// assigned bead (assignee still pointing at the dead session, status stuck
+// at in_progress) and kill the agent mid-task. The drain must wait until
+// the assigned work completes — the next reconcile tick will see no
+// assigned work and drain naturally.
+//
+// Regression for the 2026-05-12 live-edit drain cascade incident: editing
+// a city's .gc/settings.json on a running city flips the config hash and
+// triggers config-drift drains across the pool. The orphan/suspended
+// branch (line 754) already skips drain when sessionHasOpenAssignedWork
+// returns true; the config-drift branch did not. Pool sessions actively
+// processing work could be drained, orphaning their assignments. Named
+// sessions are protected separately via shouldDeferNamedSessionConfigDrift
+// (line 1161) so this case is specifically about pool-routed sessions
+// reaching the !restartedInPlace branch at line 1186.
+func TestReconcileSessionBeads_ConfigDriftDeferredOnLiveAssignedWork(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addRunningWorkerDesiredWithNewConfig()
+	session := env.createSessionBead("worker", "worker")
+	startedHash := runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"})
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": startedHash,
+	})
+
+	// Assign live in-progress work to this session.
+	if _, err := env.store.Create(beads.Bead{
+		Title:    "in-flight work",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.ID,
+	}); err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+
+	env.reconcile([]beads.Bead{session})
+
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("expected config-drift drain to be deferred for live assigned work, got drain=%+v stderr=%s",
+			ds, env.stderr.String())
+	}
+}
+
 func TestReconcileSessionBeads_NoDriftWhenHashMatches(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}

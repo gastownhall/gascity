@@ -1206,6 +1206,32 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								}
 								continue
 							}
+							// Pool-routed sessions reach this branch when their
+							// config_hash drifts but they're not configured as
+							// named sessions (so restart-in-place at line 1173
+							// did not fire). If such a session is actively
+							// processing assigned work, draining mid-task would
+							// orphan the work bead (assignee still pointing at
+							// the dead session, status stuck at in_progress) and
+							// kill the agent before it can complete. Defer drain
+							// until the work completes; the next tick will see no
+							// assigned work and drain naturally. The same shape
+							// of protection is already applied to the
+							// orphan/suspended drain at line 754.
+							hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, *session)
+							if assignedErr != nil {
+								fmt.Fprintf(stderr, "session reconciler: checking assigned work before config-drift drain for %s: %v\n", name, assignedErr) //nolint:errcheck
+								continue
+							}
+							if hasAssignedWork {
+								if trace != nil {
+									trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", string(TraceOutcomeDeferredActive), configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
+										"active_reason": "live_assigned_work",
+									}), nil, "")
+								}
+								fmt.Fprintf(stdout, "Skipping config-drift drain for '%s': live assigned work found\n", name) //nolint:errcheck
+								continue
+							}
 							ddt := driftDrainTimeout
 							if ddt <= 0 {
 								ddt = defaultDrainTimeout
