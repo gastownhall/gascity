@@ -137,6 +137,9 @@ func TestInstallClaude(t *testing.T) {
 	if !strings.Contains(s, `"editorMode": "normal"`) {
 		t.Error("claude settings should contain editorMode")
 	}
+	if !strings.Contains(s, `"awaySummaryEnabled": false`) {
+		t.Error("claude settings should disable awaySummaryEnabled to prevent idle stalls (gh-1962)")
+	}
 	if !strings.Contains(s, `$HOME/go/bin`) {
 		t.Error("claude hook commands should include PATH export")
 	}
