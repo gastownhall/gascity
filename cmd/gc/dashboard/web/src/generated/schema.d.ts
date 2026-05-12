@@ -2088,6 +2088,7 @@ export interface components {
             prompt_mode?: string;
             /** Format: int64 */
             ready_delay_ms?: number;
+            supports_wait_idle_nudge?: boolean;
         };
         AsyncAcceptedBody: {
             /** @description City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or the event log is empty. */
@@ -3316,6 +3317,8 @@ export interface components {
              * @description Milliseconds to wait before probing readiness.
              */
             ready_delay_ms?: number;
+            /** @description Whether this provider supports wait-idle nudge delivery. */
+            supports_wait_idle_nudge?: boolean;
         };
         ProviderCreatedOutputBody: {
             /** @description Created provider name. */
@@ -3424,6 +3427,7 @@ export interface components {
             prompt_mode?: string;
             /** Format: int64 */
             ready_delay_ms?: number;
+            supports_wait_idle_nudge?: boolean;
         };
         ProviderSpecJSON: {
             acp_args?: string[];
@@ -3469,6 +3473,8 @@ export interface components {
              * @description Milliseconds to wait before probing readiness.
              */
             ready_delay_ms?: number;
+            /** @description Whether this provider supports wait-idle nudge delivery. */
+            supports_wait_idle_nudge?: boolean;
         };
         PublishReceipt: {
             Conversation: components["schemas"]["ConversationRef"];
