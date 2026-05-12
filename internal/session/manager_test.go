@@ -3440,11 +3440,15 @@ func TestEnsureRunning_StartupDeathWithoutStrippableResumeClearsMetadata(t *test
 	}
 }
 
-// Issue #1655 — a named-always session whose start command carries no
-// resume flag (ProviderResume{} on Create) must still be able to recover
-// from a stale session_key. Previously retryFreshStartAfterStaleKey
-// refused the retry because stripResumeFlag is a no-op when resume_flag
-// is empty, and the function misclassified that as a strip failure.
+// Issue #1655 — a session created without resume capability
+// (ProviderResume{} on Create → empty resume_flag in bead metadata)
+// must still be able to recover from a stale session_key. The
+// named-always case in the issue body is one instance of this shape;
+// the invariant is general — any session whose start command was
+// never resume-capable should clear a stale key and start fresh
+// rather than bail. Previously retryFreshStartAfterStaleKey refused
+// the retry because stripResumeFlag is a no-op when resume_flag is
+// empty, and the function misclassified that as a strip failure.
 func TestEnsureRunning_RetriesWhenResumeFlagIsEmpty(t *testing.T) {
 	store := beads.NewMemStore()
 	base := runtime.NewFake()
@@ -3452,7 +3456,10 @@ func TestEnsureRunning_RetriesWhenResumeFlagIsEmpty(t *testing.T) {
 	sp := &startupDeathProvider{Fake: base}
 	mgr := NewManager(store, sp)
 
-	// Named-always-style Create: no resume capability declared.
+	// Create a session without resume capability — ProviderResume{}
+	// yields an empty resume_flag in bead metadata. The same shape
+	// arises for any configured-named-always session whose start
+	// command lacks a --resume-style flag.
 	info, err := mgr.Create(context.Background(), "worker", "", "fakecmd --follow worker", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -3482,8 +3489,9 @@ func TestEnsureRunning_RetriesWhenResumeFlagIsEmpty(t *testing.T) {
 
 	sp.armed = true
 
-	// The "resume command" for a named-always session is its original
-	// start command — there is no --resume flag to add or strip.
+	// For a session without resume capability the "resume command"
+	// passed to Send is just the original start command — there is no
+	// --resume flag to add or strip.
 	err = mgr.Send(context.Background(), info.ID, "hello", "fakecmd --follow worker", runtime.Config{WorkDir: "/tmp"})
 	if err != nil {
 		t.Fatalf("Send should retry fresh when resume_flag is empty but failed: %v", err)

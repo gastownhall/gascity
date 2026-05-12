@@ -28,7 +28,13 @@ const waitIdleNudgeTimeout = 30 * time.Second
 var ErrStateSync = errors.New("session state sync failed")
 
 // stripResumeFlag removes the resume flag and session key from a command
-// string, returning a command suitable for a fresh start.
+// string, returning a command suitable for a fresh start. When the strip
+// is a no-op (the flag/key isn't in cmd, or either argument is empty),
+// the original cmd is returned exactly — TrimSpace only runs when a
+// replacement actually happened. Callers rely on exact equality with
+// the input to detect the no-op case; trimming on a non-replacement
+// path would corrupt that signal when cmd has leading/trailing
+// whitespace.
 func stripResumeFlag(cmd, resumeFlag, sessionKey string) string {
 	if resumeFlag == "" || sessionKey == "" {
 		return cmd
@@ -39,6 +45,9 @@ func stripResumeFlag(cmd, resumeFlag, sessionKey string) string {
 	if result == cmd {
 		// Try without the leading space (flag at start of args).
 		result = strings.Replace(cmd, target+" ", "", 1)
+	}
+	if result == cmd {
+		return cmd
 	}
 	return strings.TrimSpace(result)
 }
