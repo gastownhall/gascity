@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -111,6 +114,142 @@ func maxParallelStartsPerTick(cfg *config.City) int {
 func startCandidateHasTemplateDependencies(candidate startCandidate, cfg *config.City) bool {
 	cfgAgent := findAgentByTemplate(cfg, candidate.logicalTemplate(cfg))
 	return cfgAgent != nil && len(cfgAgent.DependsOn) > 0
+}
+
+// minWakeIntervalDefersCandidate reports whether the candidate's agent has
+// a positive min_wake_interval and the candidate's previous successful
+// wake completed too recently for a new wake. Returns false (do not defer)
+// when no throttle is configured, when creation_complete_at is missing or
+// unparseable, or when the candidate has no backing agent in cfg. Uses
+// creation_complete_at rather than last_woke_at because last_woke_at is
+// cleared by the death/churn tracking path during the gap between drain
+// and the next wake attempt; creation_complete_at survives that gap and
+// represents the previous successful wake.
+func minWakeIntervalDefersCandidate(candidate startCandidate, cfg *config.City, clk clock.Clock) bool {
+	if candidate.session == nil {
+		return false
+	}
+	cfgAgent := findAgentByTemplate(cfg, candidate.logicalTemplate(cfg))
+	if cfgAgent == nil {
+		return false
+	}
+	mwi := cfgAgent.MinWakeIntervalDuration()
+	if mwi <= 0 {
+		return false
+	}
+	completedStr := strings.TrimSpace(candidate.session.Metadata["creation_complete_at"])
+	if completedStr == "" {
+		return false
+	}
+	completed, err := time.Parse(time.RFC3339, completedStr)
+	if err != nil {
+		return false
+	}
+	return clk.Now().Sub(completed) < mwi
+}
+
+// watchdogTailBytes bounds how far back from the end of events.jsonl the
+// watchdog gate scans for a fresh actor=target event. The tail is large
+// enough to span many minutes of normal activity but small enough that
+// a stuck target does not force a multi-MB read on every reconciler tick.
+const watchdogTailBytes = 64 * 1024
+
+// watchdogScanBufferBytes sizes the bufio.Scanner line buffer used by the
+// gate. Payload-heavy bead.updated events embed full bead descriptions and
+// metadata, so individual JSONL lines can exceed 1 MiB. Anything smaller
+// risks bufio.ErrTooLong on a normal events file.
+const watchdogScanBufferBytes = 4 * 1024 * 1024
+
+// watchdogTargetActiveDefersCandidate reports whether the candidate's agent
+// is configured as a watchdog for another agent template, and that target
+// has been making progress recently enough that the watchdog has nothing
+// new to verify. Progress is measured by the most-recent ts across recent
+// events.jsonl entries whose actor field matches the target template name.
+// Every bead.created / bead.updated / bead.closed event tags the actor that
+// performed it, so the signal advances on every bead touch by the target
+// (not just on new wisp creation as the previous CreatedAt-based signal
+// did). Returns false (do not defer) when no watchdog is configured, when
+// the events file is missing or unreadable, or when no actor=target events
+// appear in the scanned tail - those cases yield no signal, so the
+// watchdog should fire.
+func watchdogTargetActiveDefersCandidate(candidate startCandidate, cfg *config.City, cityPath string, clk clock.Clock) bool {
+	if candidate.session == nil {
+		return false
+	}
+	cfgAgent := findAgentByTemplate(cfg, candidate.logicalTemplate(cfg))
+	if cfgAgent == nil {
+		return false
+	}
+	target := strings.TrimSpace(cfgAgent.WatchdogTargetTemplate)
+	if target == "" {
+		return false
+	}
+	threshold := cfgAgent.WatchdogStaleThresholdDuration()
+	if threshold <= 0 {
+		return false
+	}
+	if cityPath == "" {
+		return false
+	}
+	maxTs, ok := latestActorEventTs(citylayout.RuntimePath(cityPath, "events.jsonl"), target)
+	if !ok {
+		return false
+	}
+	return clk.Now().Sub(maxTs) < threshold
+}
+
+// latestActorEventTs scans the tail of an events.jsonl file and returns the
+// most recent ts across entries whose actor matches target. The second
+// return is false when the file is missing, unreadable, or contains no
+// matching events in the scanned tail. Malformed lines are skipped so a
+// single corrupt line does not blind the gate.
+func latestActorEventTs(eventsPath, target string) (time.Time, bool) {
+	f, err := os.Open(eventsPath)
+	if err != nil {
+		return time.Time{}, false
+	}
+	defer f.Close() //nolint:errcheck // read-only file
+	info, err := f.Stat()
+	if err != nil {
+		return time.Time{}, false
+	}
+	var offset int64
+	skipFirst := false
+	if info.Size() > watchdogTailBytes {
+		offset = info.Size() - watchdogTailBytes
+		skipFirst = true
+	}
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return time.Time{}, false
+	}
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), watchdogScanBufferBytes)
+	var maxTs time.Time
+	first := true
+	for scanner.Scan() {
+		if first && skipFirst {
+			first = false
+			continue
+		}
+		first = false
+		var rec struct {
+			Actor string    `json:"actor"`
+			Ts    time.Time `json:"ts"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
+			continue
+		}
+		if rec.Actor != target {
+			continue
+		}
+		if rec.Ts.After(maxTs) {
+			maxTs = rec.Ts
+		}
+	}
+	if maxTs.IsZero() {
+		return time.Time{}, false
+	}
+	return maxTs, true
 }
 
 func asyncStartBatchNeedsFollowUp(candidates []startCandidate, cfg *config.City) bool {
@@ -1743,6 +1882,14 @@ func executePlannedStartsTraced(
 			}
 			if !allDependenciesAliveForTemplateWithClock(candidate.logicalTemplate(cfg), cfg, desiredState, sp, cityName, store, clk) {
 				logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "blocked_on_dependencies", time.Time{}, time.Time{}, nil)
+				continue
+			}
+			if minWakeIntervalDefersCandidate(candidate, cfg, clk) {
+				logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "deferred_by_min_wake_interval", time.Time{}, time.Time{}, nil)
+				continue
+			}
+			if watchdogTargetActiveDefersCandidate(candidate, cfg, cityPath, clk) {
+				logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "deferred_by_watchdog_target_active", time.Time{}, time.Time{}, nil)
 				continue
 			}
 			ready = append(ready, candidate)

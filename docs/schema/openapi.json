@@ -284,6 +284,12 @@
               "null"
             ]
           },
+          "MinWakeInterval": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "Name": {
             "type": "string"
           },
@@ -446,6 +452,18 @@
               "null"
             ]
           },
+          "WatchdogStaleThreshold": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "WatchdogTargetTemplate": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "WorkDir": {
             "type": [
               "string",
@@ -469,6 +487,9 @@
           "StartCommand",
           "Nudge",
           "IdleTimeout",
+          "MinWakeInterval",
+          "WatchdogTargetTemplate",
+          "WatchdogStaleThreshold",
           "SleepAfterIdle",
           "InstallAgentHooks",
           "Skills",

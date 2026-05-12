@@ -5685,3 +5685,299 @@ func TestStopTargetThroughWorkerBoundary_CityStopLeavesSessionAsleep(t *testing.
 		t.Fatalf("suspended_at = %q, want empty", got.Metadata["suspended_at"])
 	}
 }
+
+// writeWatchdogEventsFile writes a fake events.jsonl under cityPath/.gc/
+// for use by the watchdog gate tests. Each entry is rendered as a single
+// JSONL line capturing the actor and ts fields the gate keys off of.
+func writeWatchdogEventsFile(t *testing.T, cityPath string, entries []struct {
+	Actor string
+	Ts    time.Time
+},
+) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	var buf bytes.Buffer
+	for i, e := range entries {
+		line := struct {
+			Seq     int       `json:"seq"`
+			Type    string    `json:"type"`
+			Ts      time.Time `json:"ts"`
+			Actor   string    `json:"actor"`
+			Subject string    `json:"subject"`
+		}{Seq: i + 1, Type: "bead.updated", Ts: e.Ts, Actor: e.Actor, Subject: fmt.Sprintf("b-%d", i)}
+		raw, err := json.Marshal(line)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		buf.Write(raw)
+		buf.WriteByte('\n')
+	}
+	path := filepath.Join(cityPath, ".gc", "events.jsonl")
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatalf("write events.jsonl: %v", err)
+	}
+}
+
+func TestWatchdogTargetActiveDefersCandidate_DefersWhenTargetEventIsFresh(t *testing.T) {
+	now := time.Date(2026, 5, 5, 19, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{
+				Name:                   "boot",
+				WatchdogTargetTemplate: "gastown.deacon",
+				WatchdogStaleThreshold: "10m",
+			},
+		},
+	}
+	cityPath := t.TempDir()
+	writeWatchdogEventsFile(t, cityPath, []struct {
+		Actor string
+		Ts    time.Time
+	}{
+		{Actor: "controller", Ts: now.Add(-2 * time.Minute)},
+		{Actor: "gastown.deacon", Ts: now.Add(-1 * time.Minute)},
+		{Actor: "human", Ts: now.Add(-30 * time.Second)},
+	})
+	candidate := startCandidate{
+		session: &beads.Bead{ID: "boot-session", Metadata: map[string]string{"template": "boot"}},
+		tp:      TemplateParams{TemplateName: "boot"},
+	}
+
+	if !watchdogTargetActiveDefersCandidate(candidate, cfg, cityPath, clk) {
+		t.Fatal("expected defer (target acted 1m ago, threshold 10m)")
+	}
+}
+
+func TestWatchdogTargetActiveDefersCandidate_FiresWhenTargetEventIsStale(t *testing.T) {
+	now := time.Date(2026, 5, 5, 19, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{
+				Name:                   "boot",
+				WatchdogTargetTemplate: "gastown.deacon",
+				WatchdogStaleThreshold: "10m",
+			},
+		},
+	}
+	cityPath := t.TempDir()
+	writeWatchdogEventsFile(t, cityPath, []struct {
+		Actor string
+		Ts    time.Time
+	}{
+		{Actor: "gastown.deacon", Ts: now.Add(-1 * time.Hour)},
+		{Actor: "controller", Ts: now.Add(-30 * time.Second)},
+	})
+	candidate := startCandidate{
+		session: &beads.Bead{ID: "boot-session", Metadata: map[string]string{"template": "boot"}},
+		tp:      TemplateParams{TemplateName: "boot"},
+	}
+
+	if watchdogTargetActiveDefersCandidate(candidate, cfg, cityPath, clk) {
+		t.Fatal("expected do-not-defer (target's last event 1h ago, threshold 10m)")
+	}
+}
+
+func TestWatchdogTargetActiveDefersCandidate_FiresWhenEventsFileMissing(t *testing.T) {
+	now := time.Date(2026, 5, 5, 19, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{
+				Name:                   "boot",
+				WatchdogTargetTemplate: "gastown.deacon",
+				WatchdogStaleThreshold: "10m",
+			},
+		},
+	}
+	cityPath := t.TempDir()
+	candidate := startCandidate{
+		session: &beads.Bead{ID: "boot-session", Metadata: map[string]string{"template": "boot"}},
+		tp:      TemplateParams{TemplateName: "boot"},
+	}
+
+	if watchdogTargetActiveDefersCandidate(candidate, cfg, cityPath, clk) {
+		t.Fatal("expected fail-open do-not-defer when events.jsonl is missing")
+	}
+}
+
+func TestWatchdogTargetActiveDefersCandidate_FiresWhenNoTargetEvents(t *testing.T) {
+	now := time.Date(2026, 5, 5, 19, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{
+				Name:                   "boot",
+				WatchdogTargetTemplate: "gastown.deacon",
+				WatchdogStaleThreshold: "10m",
+			},
+		},
+	}
+	cityPath := t.TempDir()
+	writeWatchdogEventsFile(t, cityPath, []struct {
+		Actor string
+		Ts    time.Time
+	}{
+		{Actor: "controller", Ts: now.Add(-1 * time.Minute)},
+		{Actor: "human", Ts: now.Add(-30 * time.Second)},
+	})
+	candidate := startCandidate{
+		session: &beads.Bead{ID: "boot-session", Metadata: map[string]string{"template": "boot"}},
+		tp:      TemplateParams{TemplateName: "boot"},
+	}
+
+	if watchdogTargetActiveDefersCandidate(candidate, cfg, cityPath, clk) {
+		t.Fatal("expected do-not-defer when no actor=target events appear in tail")
+	}
+}
+
+func TestWatchdogTargetActiveDefersCandidate_UsesNewestAcrossMultipleEvents(t *testing.T) {
+	now := time.Date(2026, 5, 5, 19, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{
+				Name:                   "boot",
+				WatchdogTargetTemplate: "gastown.deacon",
+				WatchdogStaleThreshold: "10m",
+			},
+		},
+	}
+	cityPath := t.TempDir()
+	writeWatchdogEventsFile(t, cityPath, []struct {
+		Actor string
+		Ts    time.Time
+	}{
+		{Actor: "gastown.deacon", Ts: now.Add(-2 * time.Hour)},
+		{Actor: "gastown.deacon", Ts: now.Add(-1 * time.Minute)},
+		{Actor: "gastown.deacon", Ts: now.Add(-30 * time.Minute)},
+	})
+	candidate := startCandidate{
+		session: &beads.Bead{ID: "boot-session", Metadata: map[string]string{"template": "boot"}},
+		tp:      TemplateParams{TemplateName: "boot"},
+	}
+
+	if !watchdogTargetActiveDefersCandidate(candidate, cfg, cityPath, clk) {
+		t.Fatal("expected defer based on newest event (1m ago), not oldest")
+	}
+}
+
+func TestWatchdogTargetActiveDefersCandidate_NoWatchdogConfigured(t *testing.T) {
+	now := time.Date(2026, 5, 5, 19, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	cfg := &config.City{Agents: []config.Agent{{Name: "boot"}}}
+	cityPath := t.TempDir()
+	writeWatchdogEventsFile(t, cityPath, []struct {
+		Actor string
+		Ts    time.Time
+	}{
+		{Actor: "gastown.deacon", Ts: now},
+	})
+	candidate := startCandidate{
+		session: &beads.Bead{ID: "boot-session", Metadata: map[string]string{"template": "boot"}},
+		tp:      TemplateParams{TemplateName: "boot"},
+	}
+
+	if watchdogTargetActiveDefersCandidate(candidate, cfg, cityPath, clk) {
+		t.Fatal("expected do-not-defer when no watchdog target is configured")
+	}
+}
+
+func TestWatchdogTargetActiveDefersCandidate_NilSessionReturnsFalse(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{
+				Name:                   "boot",
+				WatchdogTargetTemplate: "gastown.deacon",
+				WatchdogStaleThreshold: "10m",
+			},
+		},
+	}
+	clk := &clock.Fake{Time: time.Date(2026, 5, 5, 19, 0, 0, 0, time.UTC)}
+	candidate := startCandidate{session: nil, tp: TemplateParams{TemplateName: "boot"}}
+
+	if watchdogTargetActiveDefersCandidate(candidate, cfg, t.TempDir(), clk) {
+		t.Fatal("expected do-not-defer for nil session")
+	}
+}
+
+func TestWatchdogTargetActiveDefersCandidate_SkipsMalformedLines(t *testing.T) {
+	now := time.Date(2026, 5, 5, 19, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{
+				Name:                   "boot",
+				WatchdogTargetTemplate: "gastown.deacon",
+				WatchdogStaleThreshold: "10m",
+			},
+		},
+	}
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	contents := "{not valid json\n" +
+		`{"seq":2,"type":"bead.updated","ts":"` + now.Add(-1*time.Minute).Format(time.RFC3339Nano) + `","actor":"gastown.deacon","subject":"b-2"}` + "\n" +
+		"another garbage line\n"
+	if err := os.WriteFile(filepath.Join(cityPath, ".gc", "events.jsonl"), []byte(contents), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	candidate := startCandidate{
+		session: &beads.Bead{ID: "boot-session", Metadata: map[string]string{"template": "boot"}},
+		tp:      TemplateParams{TemplateName: "boot"},
+	}
+
+	if !watchdogTargetActiveDefersCandidate(candidate, cfg, cityPath, clk) {
+		t.Fatal("expected defer despite surrounding malformed lines")
+	}
+}
+
+func TestWatchdogTargetActiveDefersCandidate_HandlesLargeFileTail(t *testing.T) {
+	// Write enough leading filler that the gate must seek into the tail to
+	// find the recent target event - exercises the offset path and the
+	// "skip first (potentially partial) line" guard.
+	now := time.Date(2026, 5, 5, 19, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{
+				Name:                   "boot",
+				WatchdogTargetTemplate: "gastown.deacon",
+				WatchdogStaleThreshold: "10m",
+			},
+		},
+	}
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	var buf bytes.Buffer
+	// Write ~200 KiB of older events from a different actor first.
+	filler := strings.Repeat("x", 800)
+	for i := 0; i < 250; i++ {
+		line := fmt.Sprintf(`{"seq":%d,"type":"bead.updated","ts":"%s","actor":"controller","subject":"b","filler":"%s"}`,
+			i+1, now.Add(-2*time.Hour).Format(time.RFC3339Nano), filler)
+		buf.WriteString(line)
+		buf.WriteByte('\n')
+	}
+	// Recent target event at the very tail.
+	tail := fmt.Sprintf(`{"seq":9999,"type":"bead.updated","ts":"%s","actor":"gastown.deacon","subject":"b-z"}`,
+		now.Add(-2*time.Minute).Format(time.RFC3339Nano))
+	buf.WriteString(tail)
+	buf.WriteByte('\n')
+	if err := os.WriteFile(filepath.Join(cityPath, ".gc", "events.jsonl"), buf.Bytes(), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	candidate := startCandidate{
+		session: &beads.Bead{ID: "boot-session", Metadata: map[string]string{"template": "boot"}},
+		tp:      TemplateParams{TemplateName: "boot"},
+	}
+
+	if !watchdogTargetActiveDefersCandidate(candidate, cfg, cityPath, clk) {
+		t.Fatal("expected defer (target event at tail of large file)")
+	}
+}

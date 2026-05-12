@@ -49,6 +49,14 @@ type AgentPatch struct {
 	Nudge *string `toml:"nudge,omitempty"`
 	// IdleTimeout overrides the idle timeout. Duration string (e.g., "30s", "5m", "1h").
 	IdleTimeout *string `toml:"idle_timeout,omitempty"`
+	// MinWakeInterval overrides the per-agent minimum wake interval.
+	// Duration string (e.g., "5m"). Empty pointer leaves the agent's value
+	// untouched.
+	MinWakeInterval *string `toml:"min_wake_interval,omitempty"`
+	// WatchdogTargetTemplate overrides the watchdog target template name.
+	WatchdogTargetTemplate *string `toml:"watchdog_target_template,omitempty"`
+	// WatchdogStaleThreshold overrides the watchdog staleness threshold.
+	WatchdogStaleThreshold *string `toml:"watchdog_stale_threshold,omitempty"`
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string or "off".
 	SleepAfterIdle *string `toml:"sleep_after_idle,omitempty"`
@@ -318,6 +326,15 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	}
 	if p.IdleTimeout != nil {
 		a.IdleTimeout = *p.IdleTimeout
+	}
+	if p.MinWakeInterval != nil {
+		a.MinWakeInterval = *p.MinWakeInterval
+	}
+	if p.WatchdogTargetTemplate != nil {
+		a.WatchdogTargetTemplate = *p.WatchdogTargetTemplate
+	}
+	if p.WatchdogStaleThreshold != nil {
+		a.WatchdogStaleThreshold = *p.WatchdogStaleThreshold
 	}
 	if p.SleepAfterIdle != nil {
 		a.SleepAfterIdle = NormalizeSleepAfterIdle(*p.SleepAfterIdle)

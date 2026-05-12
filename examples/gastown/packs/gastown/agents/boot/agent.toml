@@ -2,3 +2,17 @@ scope = "city"
 wake_mode = "fresh"
 work_dir = ".gc/agents/boot"
 max_active_sessions = 1
+# Watchdog gate: defer waking boot while the deacon is making progress.
+# Signal source is .gc/events.jsonl - the controller scans the tail for
+# entries whose actor field matches watchdog_target_template. Every
+# bead.created / bead.updated / bead.closed event tags the actor that
+# performed it, so the gate advances on every bead touch by deacon, not
+# only when deacon creates a new wisp. If the latest matching event is
+# older than watchdog_stale_threshold, boot fires to investigate.
+watchdog_target_template = "gastown.deacon"
+watchdog_stale_threshold = "1h"
+# Floor: even when the watchdog gate falls through (deacon's bead events
+# fall outside the events.jsonl tail window), bound the wake cadence
+# from the bead's last_woke_at so boot cannot respawn every ~70s on the
+# drain-followup poke.
+min_wake_interval = "5m"

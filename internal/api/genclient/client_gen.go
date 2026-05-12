@@ -290,6 +290,7 @@ type AgentPatch struct {
 	MCPAppend               *[]string         `json:"MCPAppend"`
 	MaxActiveSessions       *int64            `json:"MaxActiveSessions"`
 	MinActiveSessions       *int64            `json:"MinActiveSessions"`
+	MinWakeInterval         *string           `json:"MinWakeInterval"`
 	Name                    string            `json:"Name"`
 	Nudge                   *string           `json:"Nudge"`
 	OptionDefaults          map[string]string `json:"OptionDefaults"`
@@ -314,6 +315,8 @@ type AgentPatch struct {
 	StartCommand            *string           `json:"StartCommand"`
 	Suspended               *bool             `json:"Suspended"`
 	WakeMode                *string           `json:"WakeMode"`
+	WatchdogStaleThreshold  *string           `json:"WatchdogStaleThreshold"`
+	WatchdogTargetTemplate  *string           `json:"WatchdogTargetTemplate"`
 	WorkDir                 *string           `json:"WorkDir"`
 }
 
