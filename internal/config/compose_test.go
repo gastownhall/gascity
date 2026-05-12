@@ -768,10 +768,12 @@ name = "test"
 command = "my-agent"
 prompt_mode = "arg"
 ready_delay_ms = 5000
+supports_wait_idle_nudge = false
 `)
 	fs.Files["/city/override.toml"] = []byte(`
 [providers.custom]
 ready_delay_ms = 10000
+supports_wait_idle_nudge = true
 `)
 	cfg, prov, err := LoadWithIncludes(fs, "/city/city.toml")
 	if err != nil {
@@ -789,12 +791,20 @@ ready_delay_ms = 10000
 	if p.ReadyDelayMs != 10000 {
 		t.Errorf("ReadyDelayMs = %d, want 10000", p.ReadyDelayMs)
 	}
-	// Collision warning for ready_delay_ms.
-	if len(prov.Warnings) != 1 {
-		t.Fatalf("len(Warnings) = %d, want 1: %v", len(prov.Warnings), prov.Warnings)
+	if p.SupportsWaitIdleNudge == nil || !*p.SupportsWaitIdleNudge {
+		t.Errorf("SupportsWaitIdleNudge = %#v, want true", p.SupportsWaitIdleNudge)
 	}
-	if !strings.Contains(prov.Warnings[0], "ready_delay_ms") {
-		t.Errorf("warning = %q, want mention of ready_delay_ms", prov.Warnings[0])
+	// Collision warnings for explicitly redefined scalar fields.
+	if len(prov.Warnings) != 2 {
+		t.Fatalf("len(Warnings) = %d, want 2: %v", len(prov.Warnings), prov.Warnings)
+	}
+	var sawReadyDelay, sawWaitIdle bool
+	for _, warning := range prov.Warnings {
+		sawReadyDelay = sawReadyDelay || strings.Contains(warning, "ready_delay_ms")
+		sawWaitIdle = sawWaitIdle || strings.Contains(warning, "supports_wait_idle_nudge")
+	}
+	if !sawReadyDelay || !sawWaitIdle {
+		t.Errorf("warnings = %v, want ready_delay_ms and supports_wait_idle_nudge warnings", prov.Warnings)
 	}
 }
 

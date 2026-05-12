@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1028,6 +1029,76 @@ func TestWorkerNudgeDeliveryForMode(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRuntimeWorkerHandleWithConfigRequiresProvider(t *testing.T) {
+	_, err := runtimeWorkerHandleWithConfig(nil, nil, "legacy-worker", "codex", "", nil)
+	if !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("runtimeWorkerHandleWithConfig err = %v, want %v", err, session.ErrSessionNotFound)
+	}
+}
+
+func TestRuntimeWorkerHandleWithConfigPassesResolvedWaitIdleCapability(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	sp.WaitForIdleErrors["legacy-worker"] = nil
+	cfg := &config.City{
+		ResolvedProviders: map[string]config.ResolvedProvider{
+			"codex": {
+				Name:                  "codex",
+				SupportsWaitIdleNudge: true,
+			},
+		},
+	}
+
+	handle, err := runtimeWorkerHandleWithConfig(sp, cfg, "legacy-worker", "codex", "", nil)
+	if err != nil {
+		t.Fatalf("runtimeWorkerHandleWithConfig: %v", err)
+	}
+	result, err := handle.Nudge(context.Background(), worker.NudgeRequest{
+		Text:     "check deploy status",
+		Delivery: worker.NudgeDeliveryWaitIdle,
+		Source:   "mail",
+	})
+	if err != nil {
+		t.Fatalf("Nudge(wait_idle): %v", err)
+	}
+	if !result.Delivered {
+		t.Fatal("Nudge(wait_idle) Delivered = false, want true")
+	}
+
+	methods := make([]string, 0, len(sp.Calls))
+	var sawWrappedNudge bool
+	for _, call := range sp.Calls {
+		methods = append(methods, call.Method)
+		if call.Method == "NudgeNow" && call.Name == "legacy-worker" && strings.Contains(call.Message, "[mail] check deploy status") {
+			sawWrappedNudge = true
+		}
+	}
+	if !hasMethodSubsequence(methods, []string{"WaitForIdle", "NudgeNow"}) {
+		t.Fatalf("methods = %v, want WaitForIdle before NudgeNow", methods)
+	}
+	if !sawWrappedNudge {
+		t.Fatalf("calls = %#v, want mail-tagged wait-idle nudge", sp.Calls)
+	}
+}
+
+func hasMethodSubsequence(have, want []string) bool {
+	if len(want) == 0 {
+		return true
+	}
+	next := 0
+	for _, item := range have {
+		if item == want[next] {
+			next++
+			if next == len(want) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func TestResolvedWorkerSessionConfigWithConfigFallsBackToResolvedProviderNameForCommand(t *testing.T) {

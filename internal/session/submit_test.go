@@ -107,6 +107,29 @@ func TestSupportsWaitIdleNudgeMetadataWinsOverFamilyFallback(t *testing.T) {
 			},
 			want: false,
 		},
+		{
+			name: "missing metadata keeps claude compatibility fallback enabled",
+			meta: map[string]string{
+				"provider": "claude",
+			},
+			want: true,
+		},
+		{
+			name: "invalid metadata falls back to claude family",
+			meta: map[string]string{
+				"provider":               "claude",
+				WaitIdleNudgeMetadataKey: "not-a-bool",
+			},
+			want: true,
+		},
+		{
+			name: "invalid metadata falls back to unsupported family",
+			meta: map[string]string{
+				"provider":               "codex",
+				WaitIdleNudgeMetadataKey: "not-a-bool",
+			},
+			want: false,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -152,6 +175,94 @@ func TestTryWaitIdleNudgeCodexOptInWaitsAndNudges(t *testing.T) {
 	}
 	if !sawWrappedNudge {
 		t.Fatalf("calls = %#v, want wrapped NudgeNow reminder", sp.Calls)
+	}
+}
+
+func TestTryWaitIdleNudgeUnsupportedProviderDoesNotWait(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "codex", t.TempDir(), "codex", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.WaitForIdleErrors[info.SessionName] = nil
+
+	delivered, err := mgr.TryWaitIdleNudge(context.Background(), info.ID, "operator", "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+	if err != nil {
+		t.Fatalf("TryWaitIdleNudge: %v", err)
+	}
+	if delivered {
+		t.Fatal("TryWaitIdleNudge delivered = true, want false for unsupported provider")
+	}
+	for _, call := range sp.Calls {
+		if call.Method == "WaitForIdle" || call.Method == "NudgeNow" {
+			t.Fatalf("calls = %#v, want no wait-idle delivery", sp.Calls)
+		}
+	}
+}
+
+func TestTryWaitIdleNudgeLiveOnlyCodexOptInWaitsAndNudges(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "codex", t.TempDir(), "codex", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, WaitIdleNudgeMetadataKey, "true"); err != nil {
+		t.Fatalf("SetMetadata(%s): %v", WaitIdleNudgeMetadataKey, err)
+	}
+	sp.WaitForIdleErrors[info.SessionName] = nil
+
+	delivered, err := mgr.TryWaitIdleNudgeLiveOnly(context.Background(), info.ID, "operator", "hello")
+	if err != nil {
+		t.Fatalf("TryWaitIdleNudgeLiveOnly: %v", err)
+	}
+	if !delivered {
+		t.Fatal("TryWaitIdleNudgeLiveOnly delivered = false, want true")
+	}
+
+	methods := make([]string, 0, len(sp.Calls))
+	var sawWrappedNudge bool
+	for _, call := range sp.Calls {
+		methods = append(methods, call.Method)
+		if call.Method == "NudgeNow" && call.Name == info.SessionName && strings.Contains(call.Message, "[operator] hello") {
+			sawWrappedNudge = true
+		}
+	}
+	if !containsSubsequence(methods, []string{"WaitForIdle", "NudgeNow"}) {
+		t.Fatalf("methods = %v, want WaitForIdle before NudgeNow", methods)
+	}
+	if !sawWrappedNudge {
+		t.Fatalf("calls = %#v, want wrapped NudgeNow reminder", sp.Calls)
+	}
+}
+
+func TestTryWaitIdleNudgeLiveOnlyUnsupportedProviderDoesNotWait(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "codex", t.TempDir(), "codex", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.WaitForIdleErrors[info.SessionName] = nil
+
+	delivered, err := mgr.TryWaitIdleNudgeLiveOnly(context.Background(), info.ID, "operator", "hello")
+	if err != nil {
+		t.Fatalf("TryWaitIdleNudgeLiveOnly: %v", err)
+	}
+	if delivered {
+		t.Fatal("TryWaitIdleNudgeLiveOnly delivered = true, want false for unsupported provider")
+	}
+	for _, call := range sp.Calls {
+		if call.Method == "WaitForIdle" || call.Method == "NudgeNow" {
+			t.Fatalf("calls = %#v, want no wait-idle delivery", sp.Calls)
+		}
 	}
 }
 

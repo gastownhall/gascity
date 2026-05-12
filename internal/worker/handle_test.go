@@ -1505,6 +1505,42 @@ func TestRuntimeHandleNudgeWaitIdleCodexOptInWrapsReminder(t *testing.T) {
 	}
 }
 
+func TestRuntimeHandleNudgeWaitIdleOverrideFalseDisablesClaudeFallback(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	sp.WaitForIdleErrors["legacy-worker"] = nil
+	supportsWaitIdleNudge := false
+
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:                      sp,
+		SessionName:                   "legacy-worker",
+		ProviderName:                  "claude",
+		ProviderSupportsWaitIdleNudge: &supportsWaitIdleNudge,
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	result, err := handle.Nudge(context.Background(), NudgeRequest{
+		Text:     "check deploy status",
+		Delivery: NudgeDeliveryWaitIdle,
+		Source:   "mail",
+	})
+	if err != nil {
+		t.Fatalf("Nudge(wait_idle): %v", err)
+	}
+	if result.Delivered {
+		t.Fatal("Nudge(wait_idle) Delivered = true, want false")
+	}
+	for _, call := range sp.Calls {
+		if call.Method == "WaitForIdle" || call.Method == "NudgeNow" {
+			t.Fatalf("calls = %#v, want no wait-idle delivery", sp.Calls)
+		}
+	}
+}
+
 func TestRuntimeHandleNudgeWaitIdleHonorsCallerContext(t *testing.T) {
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
