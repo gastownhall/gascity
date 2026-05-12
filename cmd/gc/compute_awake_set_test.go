@@ -165,6 +165,43 @@ func TestNamedAlways_MissingConfiguredIdentityIgnoredForUnrelatedTemplate(t *tes
 	assertAsleep(t, result, "hello-world--refinery")
 }
 
+// TestConfiguredNamedSessionExcludedFromPoolCandidatesEvenWhenIdentityMissing
+// guards the defensive fix from copilot review on PR #2034: a bead with
+// ConfiguredNamedSession=true but NamedIdentity="" must NOT be treated as a
+// generic pool candidate. The runtime-name fallback in namedSessionMatches
+// already recognizes such beads as named, so the pool-candidate collectors
+// (collectActiveBeads / collectCreatingBeads) must also exclude them — else
+// a configured named session could be woken by template scale_check demand,
+// re-introducing the #1493 failure shape from a different direction.
+func TestConfiguredNamedSessionExcludedFromPoolCandidatesEvenWhenIdentityMissing(t *testing.T) {
+	// Setup: an on_demand named session with a configured-but-identity-missing
+	// bead in state=active. No work demand is signaled. The bead should not
+	// be kept awake by template scale_check pressure.
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
+		NamedSessions: []AwakeNamedSession{{
+			Identity:    "hello-world/refinery",
+			Template:    "hello-world/refinery",
+			Mode:        "on_demand",
+			RuntimeName: "hello-world--refinery",
+		}},
+		SessionBeads: []AwakeSessionBead{{
+			ID:                     "mc-1",
+			SessionName:            "hello-world--refinery",
+			Template:               "hello-world/refinery",
+			State:                  "active",
+			ConfiguredNamedSession: true,
+			// NamedIdentity intentionally empty — the fallback case.
+		}},
+		// Template demand is set, but the bead should NOT satisfy it because
+		// it's a configured named session, not a pool candidate.
+		ScaleCheckCounts: map[string]int{"hello-world/refinery": 1},
+		Now:              now,
+	})
+	// On-demand named session with no work demand should stay asleep.
+	assertAsleep(t, result, "hello-world--refinery")
+}
+
 func TestNamedAlways_TemplateRemoved(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents:        []AwakeAgent{},

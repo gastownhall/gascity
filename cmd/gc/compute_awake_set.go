@@ -371,9 +371,12 @@ func findNamedSessionName(beads []AwakeSessionBead, identity string) string {
 // identity's deterministic runtime name AND its template matches.
 //
 // The fallback recovers a configured named session whose NamedIdentity is
-// missing or stale on its bead — for example, a bead minted before
-// configured_named_identity was added, or one whose identity metadata was
-// not migrated after a config change. Without this fallback, ComputeAwakeSet
+// MISSING on its bead — for example, a bead minted before
+// configured_named_identity was added. Beads with a non-empty NamedIdentity
+// that doesn't match any [[named_session]] identity are NOT recovered by
+// this fallback (those return "" at the bead.NamedIdentity != ns.Identity
+// check below); a config-change migration that leaves a stale NamedIdentity
+// must be handled separately. Without this fallback, ComputeAwakeSet
 // silently drops the bead from `desired` and the session stays asleep
 // forever even though the config says mode=always. See #1493.
 func resolveNamedSessionBeadName(beads []AwakeSessionBead, ns AwakeNamedSession) string {
@@ -417,7 +420,16 @@ func isNamedSessionTemplate(named []AwakeNamedSession, template string) bool {
 func collectActiveBeads(beads []AwakeSessionBead, template string) []AwakeSessionBead {
 	var result []AwakeSessionBead
 	for _, b := range beads {
-		if b.Template == template && b.State == "active" && b.NamedIdentity == "" && !b.ManualSession && !b.Drained && !b.DependencyOnly {
+		// Exclude both NamedIdentity-tagged beads AND ConfiguredNamedSession
+		// beads whose NamedIdentity happens to be missing — the latter are
+		// still configured named sessions (recovered via the runtime-name
+		// fallback in namedSessionMatches / resolveNamedSessionBeadName).
+		// Treating them as generic pool candidates would re-introduce the
+		// #1493 failure mode in a different shape: a configured named
+		// session getting woken by generic template scale_check demand.
+		if b.Template == template && b.State == "active" &&
+			b.NamedIdentity == "" && !b.ConfiguredNamedSession &&
+			!b.ManualSession && !b.Drained && !b.DependencyOnly {
 			result = append(result, b)
 		}
 	}
@@ -471,7 +483,11 @@ func namedSessionMatches(named []AwakeNamedSession, bead AwakeSessionBead, mode 
 func collectCreatingBeads(beads []AwakeSessionBead, template string) []AwakeSessionBead {
 	var result []AwakeSessionBead
 	for _, b := range beads {
-		if b.Template == template && b.State == "creating" && b.NamedIdentity == "" && !b.ManualSession && !b.Drained && !b.DependencyOnly {
+		// See collectActiveBeads above for why ConfiguredNamedSession beads
+		// must be excluded even when NamedIdentity is empty.
+		if b.Template == template && b.State == "creating" &&
+			b.NamedIdentity == "" && !b.ConfiguredNamedSession &&
+			!b.ManualSession && !b.Drained && !b.DependencyOnly {
 			result = append(result, b)
 		}
 	}
