@@ -293,20 +293,23 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		cfgAgent.InheritedAppendFragments,
 		p.appendFragments,
 	)
+	providerKey, providerDisplayName := providerInfoForAgent(cfgAgent, p.workspace, p.providers)
 	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
-		CityRoot:      p.cityPath,
-		AgentName:     qualifiedName,
-		TemplateName:  cfgAgent.Name,
-		BindingName:   cfgAgent.BindingName,
-		BindingPrefix: cfgAgent.BindingPrefix(),
-		RigName:       rigName,
-		RigRoot:       rigRoot,
-		WorkDir:       workDir,
-		IssuePrefix:   findRigPrefix(rigName, p.rigs),
-		DefaultBranch: defaultBranchForRig(rigName, p.rigs, workDir),
-		WorkQuery:     expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "work_query", cfgAgent.EffectiveWorkQuery(), p.stderr),
-		SlingQuery:    expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "sling_query", cfgAgent.EffectiveSlingQuery(), p.stderr),
-		Env:           cfgAgent.Env,
+		CityRoot:            p.cityPath,
+		AgentName:           qualifiedName,
+		TemplateName:        cfgAgent.Name,
+		BindingName:         cfgAgent.BindingName,
+		BindingPrefix:       cfgAgent.BindingPrefix(),
+		RigName:             rigName,
+		RigRoot:             rigRoot,
+		WorkDir:             workDir,
+		IssuePrefix:         findRigPrefix(rigName, p.rigs),
+		DefaultBranch:       defaultBranchForRig(rigName, p.rigs, workDir),
+		WorkQuery:           expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "work_query", cfgAgent.EffectiveWorkQuery(), p.stderr),
+		SlingQuery:          expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "sling_query", cfgAgent.EffectiveSlingQuery(), p.stderr),
+		ProviderKey:         providerKey,
+		ProviderDisplayName: providerDisplayName,
+		Env:                 cfgAgent.Env,
 	}, p.sessionTemplate, p.stderr, p.packDirs, fragments, p.beadStore)
 	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name, p.providers)
 	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, !hasHooks, p.beaconTime)
