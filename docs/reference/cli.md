@@ -1812,8 +1812,19 @@ Force the current city controller to re-read effective config and
 process one reload tick without restarting the city/controller.
 
 Reload may fetch configured remote packs before recomputing effective
-config. Existing per-session restarts may still happen if normal config
-drift rules require them.
+config. By default, per-session restarts may still happen if normal
+config drift rules require them.
+
+With `--soft`, the controller accepts any detected per-session config
+drift instead of draining the drifted sessions: each open session's
+recorded config hash is updated to the hash the freshly reloaded config
+produces for it, so the immediately-following reconcile tick sees no
+drift and no config-drift drains fire. Useful when editing a running
+city's `.gc/settings.json` without disrupting in-flight work. Sessions
+whose template no longer maps to a configured agent are NOT updated;
+normal orphan/suspended drain handles them on the next tick. See
+[Soft Reload](../guides/gc-reload-design.md#soft-reload) for the full
+semantics and when to use it.
 
 ```
 gc reload [path] [flags]
@@ -1822,6 +1833,7 @@ gc reload [path] [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--async` | bool |  | Return after the controller accepts the reload request |
+| `--soft` | bool |  | Accept config drift on open sessions instead of draining them |
 | `--timeout` | string | `5m` | How long to wait for reload completion |
 
 ## gc restart

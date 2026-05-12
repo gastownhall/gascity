@@ -51,7 +51,7 @@ func TestCmdReloadApplied(t *testing.T) {
 	reloadUnavailableMessageHook = func(string) string { return "" }
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdReload([]string{dir}, false, "30s", true, &stdout, &stderr); code != 0 {
+	if code := cmdReload([]string{dir}, false, false, "30s", true, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdReload = %d; stderr=%s", code, stderr.String())
 	}
 	if got := strings.TrimSpace(stdout.String()); got != "Config reloaded: 1 agents, 0 rigs (rev abc123def456)" {
@@ -67,7 +67,7 @@ func TestCmdReloadAsyncExplicitTimeoutInvalid(t *testing.T) {
 	writeCityTOML(t, dir, "test", "mayor")
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdReload([]string{dir}, true, "30s", true, &stdout, &stderr); code != 1 {
+	if code := cmdReload([]string{dir}, true, false, "30s", true, &stdout, &stderr); code != 1 {
 		t.Fatalf("cmdReload = %d, want 1", code)
 	}
 	if !strings.Contains(stderr.String(), "--async and --timeout cannot be used together") {
@@ -99,7 +99,7 @@ func TestCmdReloadControllerUnavailableUsesRicherMessage(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdReload([]string{dir}, false, "5s", true, &stdout, &stderr); code != 1 {
+	if code := cmdReload([]string{dir}, false, false, "5s", true, &stdout, &stderr); code != 1 {
 		t.Fatalf("cmdReload = %d, want 1", code)
 	}
 	if got := strings.TrimSpace(stderr.String()); got != "gc reload: city failed to start under supervisor: fetching packs: auth denied: connecting to controller: dial failed" {
@@ -130,7 +130,7 @@ func TestCmdReloadControllerUnresponsiveUsesRicherMessage(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdReload([]string{dir}, false, "5s", true, &stdout, &stderr); code != 1 {
+	if code := cmdReload([]string{dir}, false, false, "5s", true, &stdout, &stderr); code != 1 {
 		t.Fatalf("cmdReload = %d, want 1", code)
 	}
 	if got := strings.TrimSpace(stderr.String()); got != "gc reload: controller is running but not responding: reading response: i/o timeout" {
@@ -157,7 +157,7 @@ func TestCmdReloadPreservesProtocolErrors(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdReload([]string{dir}, false, "5s", true, &stdout, &stderr); code != 1 {
+	if code := cmdReload([]string{dir}, false, false, "5s", true, &stdout, &stderr); code != 1 {
 		t.Fatalf("cmdReload = %d, want 1", code)
 	}
 	if got := strings.TrimSpace(stderr.String()); got != "gc reload: parsing response: invalid character 'o' in literal null" {
@@ -188,7 +188,7 @@ func TestCmdReloadFailedReplyPrintsWarnings(t *testing.T) {
 	reloadUnavailableMessageHook = func(string) string { return "" }
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdReload([]string{dir}, false, "5s", true, &stdout, &stderr); code != 1 {
+	if code := cmdReload([]string{dir}, false, false, "5s", true, &stdout, &stderr); code != 1 {
 		t.Fatalf("cmdReload = %d, want 1", code)
 	}
 	got := stderr.String()

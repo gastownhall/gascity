@@ -36,12 +36,14 @@ work.
 ### Command
 
 ```text
-gc reload [path] [--async] [--timeout <duration>]
+gc reload [path] [--async] [--soft] [--timeout <duration>]
 ```
 
 - `[path]` is optional and follows existing city-command resolution.
 - `--async` returns after the current city controller accepts the reload
   request.
+- `--soft` accepts per-session config drift instead of draining the
+  drifted sessions — see [Soft Reload](#soft-reload) below.
 - `--timeout` applies only to synchronous mode, must be strictly
   positive, and defaults to `5m`.
 - `--async --timeout ...` is invalid when `--timeout` is explicitly set.
@@ -124,10 +126,70 @@ CLI projection.
 
 - does not restart the city/controller
 - may still cause normal per-session restarts if the reconciler detects
-  config drift under the existing rules
+  config drift under the existing rules — unless `--soft` is passed, in
+  which case the detected drift is accepted in place (see [Soft Reload](#soft-reload))
 - preserves existing service-manager reload behavior
 - works while the city is suspended, as long as the controller is still
   running
+
+### Soft Reload
+
+Editing a running city's effective config — most often via
+`.gc/settings.json` or one of the materialized overlay files — changes
+each affected agent's `runtime.Config` and therefore its
+`runtime.CoreFingerprint`. The reconciler sees the stored
+`started_config_hash` no longer match what it would now produce and
+treats the session as drifted, normally triggering a
+`config-drift` drain. For idle pool slots this is fine; for sessions
+holding live in-flight work it can be disruptive even with the
+existing in-flight-work guards in place.
+
+`gc reload --soft` accepts the drift in place instead of draining:
+
+1. The CLI sends `{soft: true}` in the reload control request.
+2. The controller runs the normal config reload (remote pack fetch,
+   parse, validation, apply). If that fails, `--soft` is a no-op —
+   reload returns `failed` exactly as it would without `--soft`.
+3. Once the new config is live, the controller rebuilds desired state
+   and walks every open session bead. For each session whose
+   `session_name` has a desired-state entry and whose recorded
+   `started_config_hash` differs from the value the new config would
+   produce, the controller writes the new hash into
+   `started_config_hash`. Sessions that have not yet stamped a
+   `started_config_hash` (still in the startup window) are skipped —
+   they will record the right value once they finish starting.
+   Sessions whose `session_name` has no desired-state entry are
+   skipped — the orphan/suspended drain handles them on the next tick.
+4. The immediately-following reconcile tick sees no drift on the
+   updated sessions and does not fire `config-drift` drains for them.
+5. The CLI prints `soft reload: accepted config drift on N session(s)`
+   on stdout when one or more sessions were updated, alongside the
+   normal `Config reloaded: ...` line.
+
+Soft reload is **not** a substitute for restarting sessions when a
+config change requires a process restart to take effect (e.g.
+changing the binary path or command-line). It updates only the
+recorded hash so the reconciler stops trying to drain the session;
+the live session continues running with the *old* command for the
+rest of its life. Use `--soft` for changes that are cosmetic to a
+running session — hook commands, matchers, environment variables that
+the session reads via lookup rather than once-at-launch — or any time
+you want to absorb a config edit without disrupting in-flight work
+and intend to restart sessions naturally on the next idle moment.
+
+Recommended live-edit workflow:
+
+```bash
+# 1. Edit your city's .gc/settings.json (or any other configured file)
+$EDITOR ~/path/to/city/.gc/settings.json
+
+# 2. Apply the change without draining live sessions
+gc reload --soft
+
+# 3. (Optional) Force-cycle individual sessions later if their
+#    in-process state needs to pick up the new config
+gc session reset <name>
+```
 
 ### Remote Pack Behavior
 
