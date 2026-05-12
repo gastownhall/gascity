@@ -422,7 +422,15 @@ func IsPartialResult(err error) bool {
 // This prevents a single bad bead from breaking all list operations.
 func parseIssuesTolerant(data []byte) ([]bdIssue, error) {
 	if len(bytes.TrimSpace(data)) == 0 {
-		return nil, nil
+		// Empty / whitespace-only stdout from `bd list --json` is not a
+		// valid empty list — bd is expected to emit at minimum "[]".
+		// Treating the empty case as success silently hid real bd
+		// failures (gascity #1726/#2040 family). Return the same
+		// diagnostic-context shape as the json.Unmarshal failure path
+		// so callers' raw-output assertions cover all four input
+		// shapes uniformly (literal None, plain text, truncated JSON,
+		// empty/whitespace).
+		return nil, fmt.Errorf("parsing JSON: raw=%q: bd stdout was empty or whitespace-only", truncateRawOutput(data, 200))
 	}
 	var raw []json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {

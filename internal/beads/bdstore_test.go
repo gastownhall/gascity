@@ -1108,23 +1108,6 @@ func TestBdStoreListEmpty(t *testing.T) {
 	}
 }
 
-func TestBdStoreListEmptyOutputMeansNoBeads(t *testing.T) {
-	runner := fakeRunner(map[string]struct {
-		out []byte
-		err error
-	}{
-		`bd list --json --include-infra --include-gates --limit 0`: {out: []byte(" \n\t")},
-	})
-	s := beads.NewBdStore("/city", runner)
-	got, err := s.ListOpen()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 0 {
-		t.Errorf("List() returned %d beads, want 0", len(got))
-	}
-}
-
 func TestBdStoreListError(t *testing.T) {
 	runner := func(_, _ string, _ ...string) ([]byte, error) {
 		return nil, fmt.Errorf("exit status 1")
@@ -1241,6 +1224,24 @@ func TestBdStoreListErrorIncludesRawBdOutput(t *testing.T) {
 			name:        "truncated JSON",
 			out:         []byte(`[{"id":"bd-aaa","title":"first"`),
 			wantInError: `bd-aaa`,
+		},
+		{
+			// PR #2042 review (copilot): bd list returning empty stdout
+			// should surface as a parse error with raw=%q context, not
+			// silently as an empty list — bd is expected to emit at
+			// minimum "[]". Without this, real bd failures (process
+			// died after partial write, stdout closed prematurely) are
+			// indistinguishable from a legitimately-empty work queue.
+			name:        "empty stdout",
+			out:         []byte(""),
+			wantInError: "empty or whitespace-only",
+		},
+		{
+			// PR #2042 review (copilot): all-whitespace stdout shares
+			// the empty-stdout failure shape after bytes.TrimSpace.
+			name:        "whitespace only",
+			out:         []byte("   \n\n  \n"),
+			wantInError: "empty or whitespace-only",
 		},
 	}
 
