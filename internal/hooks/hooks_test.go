@@ -601,6 +601,83 @@ func TestInstallClaudeUpgradesGeneratedFileWithAllKnownDrift(t *testing.T) {
 	}
 }
 
+// TestInstallClaudeUpgradesPreCompactPreservingCustomHookEvent verifies that
+// a settings.json containing a stale managed PreCompact command (no --auto)
+// AND a custom user-added hook event (e.g. Stop) gets the managed command
+// upgraded while the custom hook event is preserved verbatim.
+//
+// Regression for the byte-enumerated claudeFileNeedsUpgrade brittleness
+// observed in pipex-city: the prior implementation matched files byte-exact
+// against 16 transforms of the embedded template; any custom addition
+// defeated every variant match, so the file fell through to "user override"
+// and never received upstream fixes (notably commit 7b3b913a's --auto patch).
+// The JSON-aware upgradeClaudeFile rewrite handles this case correctly.
+func TestInstallClaudeUpgradesPreCompactPreservingCustomHookEvent(t *testing.T) {
+	fs := fsys.NewFake()
+	current, err := readEmbedded("config/claude.json")
+	if err != nil {
+		t.Fatalf("readEmbedded: %v", err)
+	}
+	// Start from the canonical embedded shape, downgrade PreCompact to the
+	// bare-handoff legacy form, and inject a custom Stop hook event that
+	// is not part of the managed set.
+	stale := strings.Replace(string(current), `gc handoff --auto \"context cycle\"`, `gc handoff \"context cycle\"`, 1)
+	if stale == string(current) {
+		t.Fatal("PreCompact downgrade did not modify the fixture — check the legacy form pattern")
+	}
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(stale), &doc); err != nil {
+		t.Fatalf("parsing stale fixture: %v", err)
+	}
+	hooks, ok := doc["hooks"].(map[string]any)
+	if !ok {
+		t.Fatalf("stale fixture has no hooks map")
+	}
+	hooks["Stop"] = []any{
+		map[string]any{
+			"matcher": "",
+			"hooks": []any{
+				map[string]any{
+					"type":    "command",
+					"command": `export PATH="$HOME/go/bin:$HOME/.local/bin:$PATH" && gc hook --inject`,
+				},
+			},
+		},
+	}
+	staleWithCustom, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		t.Fatalf("re-marshalling stale fixture: %v", err)
+	}
+	fs.Files["/city/.gc/settings.json"] = staleWithCustom
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	runtime := fs.Files["/city/.gc/settings.json"]
+
+	// The managed PreCompact command must be upgraded to include --auto.
+	preCompactCmd := claudeHookCommand(t, runtime, "PreCompact")
+	if !strings.Contains(preCompactCmd, `gc handoff --auto "context cycle"`) {
+		t.Fatalf("PreCompact command not upgraded to include --auto:\n%s", preCompactCmd)
+	}
+
+	// The custom Stop hook must survive the upgrade verbatim.
+	stopCmd := claudeHookCommand(t, runtime, "Stop")
+	if !strings.Contains(stopCmd, `gc hook --inject`) {
+		t.Fatalf("custom Stop hook lost during upgrade — expected gc hook --inject in:\n%s", string(runtime))
+	}
+
+	// Sanity: the canonical SessionStart and UserPromptSubmit managed hooks
+	// must still be present (merged from base).
+	if !strings.Contains(string(runtime), "SessionStart") {
+		t.Fatalf("runtime lost SessionStart after upgrade:\n%s", string(runtime))
+	}
+	if !strings.Contains(string(runtime), "UserPromptSubmit") {
+		t.Fatalf("runtime lost UserPromptSubmit after upgrade:\n%s", string(runtime))
+	}
+}
+
 func TestInstallClaudeMergesCityDotClaudeSettings(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/.claude/settings.json"] = []byte(`{
