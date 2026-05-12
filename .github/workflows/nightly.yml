@@ -56,7 +56,7 @@ jobs:
 
   mac-inference:
     name: Mac / Tier B+C inference tests
-    runs-on: macos-15
+    runs-on: blacksmith-12vcpu-macos-15
     timeout-minutes: 180
     env:
       ANTHROPIC_BASE_URL: https://ollama.com
