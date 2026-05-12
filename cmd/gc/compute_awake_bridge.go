@@ -53,12 +53,15 @@ func buildAwakeInputFromReconciler(
 	}
 
 	// Named sessions
+	cityName := config.EffectiveCityName(cfg, "")
 	for i := range cfg.NamedSessions {
 		ns := &cfg.NamedSessions[i]
+		identity := ns.QualifiedName()
 		input.NamedSessions = append(input.NamedSessions, AwakeNamedSession{
-			Identity: ns.QualifiedName(),
-			Template: ns.TemplateQualifiedName(),
-			Mode:     ns.Mode,
+			Identity:    identity,
+			Template:    ns.TemplateQualifiedName(),
+			Mode:        ns.Mode,
+			RuntimeName: config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity),
 		})
 	}
 
@@ -88,18 +91,19 @@ func buildAwakeInputFromReconciler(
 			Now:      clk,
 		})
 		bead := AwakeSessionBead{
-			ID:             b.ID,
-			SessionName:    name,
-			Template:       b.Metadata["template"],
-			State:          string(lifecycle.CompatState),
-			SleepReason:    b.Metadata["sleep_reason"],
-			ManualSession:  isManualSessionBead(*b),
-			PendingCreate:  lifecycle.HasWakeCause(session.WakeCausePendingCreate),
-			DependencyOnly: b.Metadata["dependency_only"] == "true",
-			NamedIdentity:  lifecycle.NamedIdentity,
-			Pinned:         lifecycle.HasWakeCause(session.WakeCausePinned),
-			Drained:        lifecycle.BaseState == session.BaseStateDrained,
-			WaitHold:       b.Metadata["wait_hold"] == "true",
+			ID:                     b.ID,
+			SessionName:            name,
+			Template:               b.Metadata["template"],
+			State:                  string(lifecycle.CompatState),
+			SleepReason:            b.Metadata["sleep_reason"],
+			ManualSession:          isManualSessionBead(*b),
+			PendingCreate:          lifecycle.HasWakeCause(session.WakeCausePendingCreate),
+			DependencyOnly:         b.Metadata["dependency_only"] == "true",
+			NamedIdentity:          lifecycle.NamedIdentity,
+			ConfiguredNamedSession: isNamedSessionBead(*b),
+			Pinned:                 lifecycle.HasWakeCause(session.WakeCausePinned),
+			Drained:                lifecycle.BaseState == session.BaseStateDrained,
+			WaitHold:               b.Metadata["wait_hold"] == "true",
 		}
 		bead.HeldUntil = lifecycle.HeldUntil
 		bead.QuarantinedUntil = lifecycle.QuarantinedUntil

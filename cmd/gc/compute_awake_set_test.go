@@ -113,6 +113,58 @@ func TestNamedAlways_Quarantined(t *testing.T) {
 	assertAsleep(t, result, "deacon")
 }
 
+// TestNamedAlways_MissingConfiguredIdentityWakesViaRuntimeNameFallback pins
+// the #1493 fallback: a configured_named_session bead whose NamedIdentity is
+// missing must still wake when its SessionName matches the deterministic
+// runtime name AND its Template matches the configured ns.Template.
+func TestNamedAlways_MissingConfiguredIdentityWakesViaRuntimeNameFallback(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
+		NamedSessions: []AwakeNamedSession{{
+			Identity:    "hello-world/refinery",
+			Template:    "hello-world/refinery",
+			Mode:        "always",
+			RuntimeName: "hello-world--refinery",
+		}},
+		SessionBeads: []AwakeSessionBead{{
+			ID:                     "mc-1",
+			SessionName:            "hello-world--refinery",
+			Template:               "hello-world/refinery",
+			State:                  "asleep",
+			ConfiguredNamedSession: true,
+			// NamedIdentity intentionally empty — exercises the fallback path.
+		}},
+		Now: now,
+	})
+	assertAwake(t, result, "hello-world--refinery")
+	assertReason(t, result, "hello-world--refinery", "named-always")
+}
+
+// TestNamedAlways_MissingConfiguredIdentityIgnoredForUnrelatedTemplate pins
+// the guard rail on the #1493 fallback: it must NOT match a bead whose
+// template diverges from the configured ns.Template (avoids surfacing
+// unrelated beads as the named-session owner).
+func TestNamedAlways_MissingConfiguredIdentityIgnoredForUnrelatedTemplate(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
+		NamedSessions: []AwakeNamedSession{{
+			Identity:    "hello-world/refinery",
+			Template:    "hello-world/refinery",
+			Mode:        "always",
+			RuntimeName: "hello-world--refinery",
+		}},
+		SessionBeads: []AwakeSessionBead{{
+			ID:                     "mc-1",
+			SessionName:            "hello-world--refinery",
+			Template:               "hello-world/something-else", // mismatched template
+			State:                  "asleep",
+			ConfiguredNamedSession: true,
+		}},
+		Now: now,
+	})
+	assertAsleep(t, result, "hello-world--refinery")
+}
+
 func TestNamedAlways_TemplateRemoved(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents:        []AwakeAgent{},
