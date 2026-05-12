@@ -3440,6 +3440,79 @@ func TestEnsureRunning_StartupDeathWithoutStrippableResumeClearsMetadata(t *test
 	}
 }
 
+// Issue #1655 — a session created without resume capability
+// (ProviderResume{} on Create → empty resume_flag in bead metadata)
+// must still be able to recover from a stale session_key. The
+// named-always case in the issue body is one instance of this shape;
+// the invariant is general — any session whose start command was
+// never resume-capable should clear a stale key and start fresh
+// rather than bail. Previously retryFreshStartAfterStaleKey refused
+// the retry because stripResumeFlag is a no-op when resume_flag is
+// empty, and the function misclassified that as a strip failure.
+func TestEnsureRunning_RetriesWhenResumeFlagIsEmpty(t *testing.T) {
+	store := beads.NewMemStore()
+	base := runtime.NewFake()
+
+	sp := &startupDeathProvider{Fake: base}
+	mgr := NewManager(store, sp)
+
+	// Create a session without resume capability — ProviderResume{}
+	// yields an empty resume_flag in bead metadata. The same shape
+	// arises for any configured-named-always session whose start
+	// command lacks a --resume-style flag.
+	info, err := mgr.Create(context.Background(), "worker", "", "fakecmd --follow worker", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get bead: %v", err)
+	}
+	if b.Metadata["resume_flag"] != "" {
+		t.Fatalf("expected empty resume_flag for ProviderResume{}, got %q", b.Metadata["resume_flag"])
+	}
+
+	// Simulate the post-run state described in #1655: the session ran
+	// once and a session_key landed in bead metadata even though the
+	// start command never accepted a resume flag.
+	if err := store.SetMetadata(info.ID, "session_key", "stale-key-1"); err != nil {
+		t.Fatalf("SetMetadata session_key: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, "started_config_hash", "hash-before"); err != nil {
+		t.Fatalf("SetMetadata started_config_hash: %v", err)
+	}
+
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	sp.armed = true
+
+	// For a session without resume capability the "resume command"
+	// passed to Send is just the original start command — there is no
+	// --resume flag to add or strip.
+	err = mgr.Send(context.Background(), info.ID, "hello", "fakecmd --follow worker", runtime.Config{WorkDir: "/tmp"})
+	if err != nil {
+		t.Fatalf("Send should retry fresh when resume_flag is empty but failed: %v", err)
+	}
+
+	if !base.IsRunning(info.SessionName) {
+		t.Fatal("session should be running after empty-resume_flag fresh retry")
+	}
+
+	b, _ = store.Get(info.ID)
+	if b.Metadata["session_key"] != "" {
+		t.Errorf("session_key should be cleared after empty-resume_flag retry, got %q", b.Metadata["session_key"])
+	}
+	if b.Metadata["started_config_hash"] != "" {
+		t.Errorf("started_config_hash should be cleared after empty-resume_flag retry, got %q", b.Metadata["started_config_hash"])
+	}
+	if b.Metadata["continuation_reset_pending"] != "true" {
+		t.Errorf("continuation_reset_pending should be set after empty-resume_flag retry, got %q", b.Metadata["continuation_reset_pending"])
+	}
+}
+
 func TestEnsureRunning_StartupDeathClearMetadataFailurePropagates(t *testing.T) {
 	store := failMetadataKeyStore{MemStore: beads.NewMemStore(), key: "session_key"}
 	base := runtime.NewFake()

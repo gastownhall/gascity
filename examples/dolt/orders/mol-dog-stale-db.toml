@@ -6,4 +6,4 @@ description = "Detect and clean stale Dolt databases and orphan dolt sql-server 
 formula = "mol-dog-stale-db"
 trigger = "cron"
 schedule = "0 */4 * * *"
-pool = "dog"
+pool = "gastown.dog"

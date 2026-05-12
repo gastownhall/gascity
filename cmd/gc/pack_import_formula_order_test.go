@@ -178,15 +178,15 @@ source = "`+gastownPackDir+`"
 	if digest.Formula != "mol-digest-generate" {
 		t.Fatalf("digest Formula = %q, want mol-digest-generate", digest.Formula)
 	}
-	if digest.Pool != "dog" {
-		t.Fatalf("digest Pool = %q, want portable bare dog", digest.Pool)
+	if digest.Pool != "gastown.dog" {
+		t.Fatalf("digest Pool = %q, want gastown.dog", digest.Pool)
 	}
 	resolvedPool, err := qualifyOrderPool(digest, cfg)
 	if err != nil {
 		t.Fatalf("qualifyOrderPool(digest-generate): %v", err)
 	}
-	if resolvedPool != "wrapper.dog" {
-		t.Fatalf("qualifyOrderPool(digest-generate) = %q, want wrapper.dog", resolvedPool)
+	if resolvedPool != "gastown.dog" {
+		t.Fatalf("qualifyOrderPool(digest-generate) = %q, want gastown.dog passthrough", resolvedPool)
 	}
 
 	if err := ResolveFormulas(cityDir, cfg.FormulaLayers.City); err != nil {
@@ -208,8 +208,8 @@ source = "`+gastownPackDir+`"
 	if len(runs) != 1 {
 		t.Fatalf("order run count = %d, want 1 (%#v)", len(runs), runs)
 	}
-	if got := runs[0].Metadata["gc.routed_to"]; got != "wrapper.dog" {
-		t.Fatalf("gc.routed_to = %q, want wrapper.dog", got)
+	if got := runs[0].Metadata["gc.routed_to"]; got != "gastown.dog" {
+		t.Fatalf("gc.routed_to = %q, want gastown.dog", got)
 	}
 }
 

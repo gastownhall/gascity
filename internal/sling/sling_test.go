@@ -2970,6 +2970,87 @@ func TestDoSlingForceSkipsCrossRig(t *testing.T) {
 	}
 }
 
+// reassignTestSetup builds a sling deps + store + a bead with the given
+// assignee, configured for an in-rig agent so cross-rig guard does not
+// fire and the reassign path can be exercised in isolation.
+func reassignTestSetup(t *testing.T, assignee string) (SlingOpts, SlingDeps, beads.Store, beads.Bead) {
+	t.Helper()
+	runner := newFakeRunner()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs: []config.Rig{
+			{Name: "myrig", Path: "/myrig", Prefix: "gc"},
+		},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(2)}
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	bead, err := deps.Store.Create(beads.Bead{Title: "task", Type: "task", Assignee: assignee})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	opts := SlingOpts{Target: a, BeadOrFormula: bead.ID, NoFormula: true}
+	return opts, deps, deps.Store, bead
+}
+
+// TestDoSling_Reassign_ClearsHumanAssignee: --reassign clears an existing
+// human assignee on the bead before routing. Without this flag the bead
+// stays assigned to the human and `gc hook` filters it out from pool
+// claims, leaving the bead routed-but-unclaimable. See #1007.
+func TestDoSling_Reassign_ClearsHumanAssignee(t *testing.T) {
+	opts, deps, store, bead := reassignTestSetup(t, "stephanie")
+	opts.Reassign = true
+	if _, err := DoSling(opts, deps, nil); err != nil {
+		t.Fatalf("DoSling with --reassign: %v", err)
+	}
+	got, _ := store.Get(bead.ID)
+	if got.Assignee != "" {
+		t.Fatalf("Assignee = %q, want empty after --reassign", got.Assignee)
+	}
+}
+
+// TestDoSling_Reassign_PreservesAssigneeWithoutFlag: without --reassign
+// the existing human assignee is preserved (current warn-only behavior).
+// Locks in backward compatibility for the existing two-step flow.
+func TestDoSling_Reassign_PreservesAssigneeWithoutFlag(t *testing.T) {
+	opts, deps, store, bead := reassignTestSetup(t, "stephanie")
+	if _, err := DoSling(opts, deps, nil); err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	got, _ := store.Get(bead.ID)
+	if got.Assignee != "stephanie" {
+		t.Fatalf("Assignee = %q, want %q (preserved without --reassign)", got.Assignee, "stephanie")
+	}
+}
+
+// TestDoSling_Reassign_NoOpWhenAlreadyEmpty: --reassign on a bead with no
+// existing assignee is a no-op (no spurious store write, no error).
+func TestDoSling_Reassign_NoOpWhenAlreadyEmpty(t *testing.T) {
+	opts, deps, store, bead := reassignTestSetup(t, "")
+	opts.Reassign = true
+	if _, err := DoSling(opts, deps, nil); err != nil {
+		t.Fatalf("DoSling with --reassign on unassigned bead: %v", err)
+	}
+	got, _ := store.Get(bead.ID)
+	if got.Assignee != "" {
+		t.Fatalf("Assignee = %q, want empty", got.Assignee)
+	}
+}
+
+// TestDoSling_Reassign_DryRunSkipsClear: --reassign is suppressed under
+// --dry-run so previewing the operation does not mutate state.
+func TestDoSling_Reassign_DryRunSkipsClear(t *testing.T) {
+	opts, deps, store, bead := reassignTestSetup(t, "stephanie")
+	opts.Reassign = true
+	opts.DryRun = true
+	if _, err := DoSling(opts, deps, nil); err != nil {
+		t.Fatalf("DoSling --dry-run --reassign: %v", err)
+	}
+	got, _ := store.Get(bead.ID)
+	if got.Assignee != "stephanie" {
+		t.Fatalf("Assignee = %q, want %q (dry-run must not mutate)", got.Assignee, "stephanie")
+	}
+}
+
 // TestSlingFormulaSearchPaths_RigNameKey: agent.Dir = rig name should
 // resolve to the rig-specific FormulaLayers entry. This is the legacy
 // shape and was already working pre-#1801.

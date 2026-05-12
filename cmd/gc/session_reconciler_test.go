@@ -1751,6 +1751,72 @@ func TestReconcileSessionBeads_AlwaysNamedSessionWakesAfterLiveChurnSequence(t *
 	}
 }
 
+// TestReconcileSessionBeads_AlwaysNamedSessionWakesPostChurnWithMissingConfiguredIdentity
+// pins the production-shaped failure described in #1493: a qualified
+// named-always session bead whose configured_named_identity metadata is
+// missing (legacy bead, unmigrated config change, or any path that lost
+// the identity tag) must still wake when its session_name matches the
+// deterministic runtime name for the configured identity.
+//
+// Without the fallback in ComputeAwakeSet, findNamedSessionName returns
+// "" because no bead has bead.NamedIdentity == ns.Identity, so the
+// awake-set pass keys `desired` by ns.Identity (the qualified name) while
+// the wake loop looks it up by bead.SessionName (the deterministic
+// runtime name). The two never match, ShouldWake stays false, no Start
+// is issued, and the session is stuck asleep forever even though
+// `gc session pin` (which keys off pin_awake, not identity) unsticks it.
+func TestReconcileSessionBeads_AlwaysNamedSessionWakesPostChurnWithMissingConfiguredIdentity(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", Dir: "hello-world", StartCommand: "true"}},
+		NamedSessions: []config.NamedSession{{Dir: "hello-world", Template: "worker", Mode: "always"}},
+	}
+	identity := env.cfg.NamedSessions[0].QualifiedName()
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, identity)
+	if identity == sessionName {
+		t.Fatalf("test setup invalid: identity and sessionName both %q; the regression requires them to differ", identity)
+	}
+	env.desiredState[sessionName] = TemplateParams{
+		Command:                 "true",
+		SessionName:             sessionName,
+		TemplateName:            "hello-world/worker",
+		ConfiguredNamedIdentity: identity,
+		ConfiguredNamedMode:     "always",
+	}
+	session := env.createSessionBead(sessionName, "hello-world/worker")
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey: "true",
+		// configured_named_identity intentionally NOT set — this is the
+		// production-shaped failure mode the reporter hypothesized.
+		namedSessionModeMetadata:     "always",
+		"state":                      "asleep",
+		"sleep_reason":               "",
+		"state_reason":               "creation_complete",
+		"last_woke_at":               "",
+		"wake_attempts":              "0",
+		"churn_count":                "1",
+		"session_key":                "",
+		"continuation_reset_pending": "",
+		"pending_create_claim":       "",
+		"pin_awake":                  "",
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	if !env.sp.IsRunning(sessionName) {
+		final, _ := env.store.Get(session.ID)
+		t.Fatalf(
+			"named-always with missing configured_named_identity must wake (#1493); identity=%q sessionName=%q state=%q sleep_reason=%q churn_count=%q wake_attempts=%q",
+			identity, sessionName,
+			final.Metadata["state"],
+			final.Metadata["sleep_reason"],
+			final.Metadata["churn_count"],
+			final.Metadata["wake_attempts"],
+		)
+	}
+}
+
 // TestReconcileSessionBeads_QuarantinedNamedSessionStaysAsleepAfterChurn pins
 // the negative half of the post-churn invariant: when churn pushes the
 // session into quarantine, the session must stay asleep until the
@@ -5639,7 +5705,8 @@ func testHasRunningPoolSessionForTemplate(sessions []beads.Bead, sp *runtime.Fak
 func sessionBeadDebug(sessions []beads.Bead) []string {
 	out := make([]string, 0, len(sessions))
 	for _, sessionBead := range sessions {
-		out = append(out, fmt.Sprintf("%s:name=%s template=%s named=%t pool=%t state=%s status=%s",
+		out = append(out, fmt.Sprintf(
+			"%s:name=%s template=%s named=%t pool=%t state=%s status=%s",
 			sessionBead.ID,
 			sessionBead.Metadata["session_name"],
 			sessionBead.Metadata["template"],

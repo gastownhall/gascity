@@ -51,6 +51,12 @@ type SlingOpts struct {
 	Nudge         bool
 	Force         bool
 	DryRun        bool
+	// Reassign clears any existing human assignee on the bead before
+	// routing so the target pool/agent can claim it. Without this, a
+	// bead claimed by a human (`bd update --claim`) stays invisible
+	// to the pool's claim filter even after sling sets gc.routed_to.
+	// See gastownhall/gascity#1007.
+	Reassign bool
 	// InlineText is set only by the CLI path for ad-hoc task text. API
 	// callers always provide explicit bead or formula references.
 	InlineText bool
