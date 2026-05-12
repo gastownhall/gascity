@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -129,13 +130,19 @@ func quarantinePhantomManagedDoltDatabases(dataDir string, now time.Time) error 
 				// directory servable: dolt sql-server's data_dir scan aborts
 				// with bare "EOF" on the first directory whose .dolt/ is
 				// missing repo_state.json, killing every other database on
-				// the same server. Require repo_state.json as well.
+				// the same server. Require repo_state.json as well, and
+				// require it to parse as JSON — a partially-written or
+				// otherwise corrupted repo_state.json fails dolt-server load
+				// the same way a missing one does.
 				reason = "missing repo_state.json"
 				repoState := filepath.Join(doltDir, "repo_state.json")
-				if _, err := os.Stat(repoState); err != nil {
+				repoStateData, err := os.ReadFile(repoState)
+				if err != nil {
 					if !os.IsNotExist(err) {
 						return err
 					}
+				} else if !json.Valid(repoStateData) {
+					reason = "malformed repo_state.json"
 				} else {
 					continue
 				}

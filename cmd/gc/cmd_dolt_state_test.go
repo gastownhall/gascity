@@ -1448,6 +1448,49 @@ func TestDoltStatePreflightCleanQuarantinesManifestOnlyDatabase(t *testing.T) {
 	}
 }
 
+// TestDoltStatePreflightCleanQuarantinesMalformedRepoStateDatabase verifies
+// that a managed-dolt directory with both .dolt/noms/manifest AND
+// .dolt/repo_state.json present is still quarantined when repo_state.json
+// fails to parse as JSON. Partial or corrupted repo_state.json writes (e.g.
+// from a crashed dolt commit operation) fail dolt-server load the same way
+// a missing repo_state.json does, so the file-existence check is not enough
+// on its own.
+func TestDoltStatePreflightCleanQuarantinesMalformedRepoStateDatabase(t *testing.T) {
+	if _, err := exec.LookPath("lsof"); err != nil {
+		t.Skip("lsof not installed")
+	}
+	cityPath := t.TempDir()
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+
+	doltDir := filepath.Join(layout.DataDir, "malformed_repo_state", ".dolt")
+	if err := os.MkdirAll(filepath.Join(doltDir, "noms"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(doltDir, "noms", "manifest"), []byte("ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(doltDir, "repo_state.json"), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "preflight-clean", "--city", cityPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+	}
+
+	quarantined, err := filepath.Glob(filepath.Join(layout.DataDir, ".quarantine", "*-malformed_repo_state*"))
+	if err != nil {
+		t.Fatalf("Glob(quarantine): %v", err)
+	}
+	if len(quarantined) != 1 {
+		t.Fatalf("quarantined malformed-repo-state databases = %d, want 1 (%v)", len(quarantined), quarantined)
+	}
+}
+
 func TestDoltStatePreflightCleanCmdPreservesLiveArtifacts(t *testing.T) {
 	skipSlowCmdGCTest(t, "spawns managed dolt holder processes; run make test-cmd-gc-process for full coverage")
 	if _, err := exec.LookPath("lsof"); err != nil {
