@@ -832,3 +832,315 @@ func slicesEqual(a, b []string) bool {
 	}
 	return true
 }
+
+// --- additional slingued-mode coverage (commit e68ff9ff hardening) ---
+
+// errorOnCreateStore wraps MemStore and surfaces a configurable error
+// from Create — used to verify CLI surfaces store failures cleanly
+// without ever calling sling.
+type errorOnCreateStore struct {
+	beads.Store
+	createErr error
+}
+
+func (s *errorOnCreateStore) Create(b beads.Bead) (beads.Bead, error) {
+	if s.createErr != nil {
+		return beads.Bead{}, s.createErr
+	}
+	return s.Store.Create(b)
+}
+
+// errorOnGetStore wraps MemStore and lets a test trigger a Get failure
+// after N successful calls — used to test the polling loop in
+// waitForSynthBeadClose.
+type errorOnGetStore struct {
+	beads.Store
+	failAfter int
+	getErr    error
+	calls     int
+}
+
+func (s *errorOnGetStore) Get(id string) (beads.Bead, error) {
+	s.calls++
+	if s.getErr != nil && s.calls > s.failAfter {
+		return beads.Bead{}, s.getErr
+	}
+	return s.Store.Get(id)
+}
+
+func TestRunSlinguedSynthRigContextPropagatesIntoBeadMetadata(t *testing.T) {
+	rigPath := t.TempDir()
+	cityDir := writeMinimalCity(t, "claude", config.Rig{Name: "myproj", Path: rigPath, DefaultBranch: "main"})
+	// Add the writer-agent.
+	if f, err := os.OpenFile(filepath.Join(cityDir, "city.toml"), os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
+		_, _ = f.WriteString("\n[[agent]]\nname = \"mayor\"\n")
+		_ = f.Close()
+	}
+
+	store := beads.NewMemStore()
+	slinger := &fakeSlinger{}
+	deps := slinguedSynthDeps{
+		storeOpener: func(string) (beads.Store, error) { return store, nil },
+		slingCaller: slinger.call,
+		now:         time.Now,
+		waitTick:    10 * time.Millisecond,
+	}
+	cfg, _ := loadCityConfig(cityDir, io.Discard)
+	mctx := metaPromptCtx{
+		Role: "polecat", ProviderKey: "claude", ProviderDisplayName: "Claude Code",
+		ContextType: "rig", CityName: "test-city", CityPath: cityDir,
+		RigName: "myproj", RigPath: rigPath, RigDefaultBranch: "main",
+	}
+
+	var stdout, stderr bytes.Buffer
+	err := runSlinguedSynthWithDeps(context.Background(),
+		promptSynthOpts{role: "polecat", rig: "myproj", writerAgent: "mayor", city: cityDir},
+		cfg, cityDir, "polecat", "rendered", mctx, deps, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("runSlinguedSynth: %v\nstderr=%s", err, stderr.String())
+	}
+	beadsList, _ := store.ListOpen()
+	if len(beadsList) != 1 {
+		t.Fatalf("expected 1 bead, got %d", len(beadsList))
+	}
+	b := beadsList[0]
+	if b.Metadata["synth_context"] != "rig" {
+		t.Errorf("synth_context = %q, want rig", b.Metadata["synth_context"])
+	}
+	if !strings.Contains(b.Description, "rig \"myproj\"") {
+		t.Errorf("bead description should mention rig name and path, got:\n%s", b.Description)
+	}
+	if !strings.Contains(b.Description, rigPath) {
+		t.Errorf("bead description should mention rig path %q, got:\n%s", rigPath, b.Description)
+	}
+}
+
+func TestRunSlinguedSynthForceAllowsClobber(t *testing.T) {
+	cityDir := writeCityWithAgent(t, "claude", "mayor")
+	dest := filepath.Join(cityDir, "agents", "polecat", "prompt.template.md")
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(dest, []byte("ORIGINAL"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	slinger := &fakeSlinger{}
+	deps := slinguedSynthDeps{
+		storeOpener: func(string) (beads.Store, error) { return store, nil },
+		slingCaller: slinger.call,
+		now:         time.Now,
+		waitTick:    10 * time.Millisecond,
+	}
+	cfg, _ := loadCityConfig(cityDir, io.Discard)
+	mctx := metaPromptCtx{Role: "polecat", ContextType: "city", CityName: "test", CityPath: cityDir}
+
+	var stdout, stderr bytes.Buffer
+	err := runSlinguedSynthWithDeps(context.Background(),
+		promptSynthOpts{role: "polecat", writerAgent: "mayor", force: true, city: cityDir},
+		cfg, cityDir, "polecat", "rendered", mctx, deps, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("--force should allow clobber: %v", err)
+	}
+	if len(slinger.gotArgs) != 1 {
+		t.Errorf("expected sling to be called with --force; got %d calls", len(slinger.gotArgs))
+	}
+	// The destination file is left to the writer-agent to write — this
+	// CLI doesn't touch it directly. We only verified preflight passed.
+	got, _ := os.ReadFile(dest)
+	if string(got) != "ORIGINAL" {
+		t.Errorf("CLI must not touch the destination — that's the agent's job; got %q", got)
+	}
+}
+
+func TestRunSlinguedSynthSurfacesSlingCallerError(t *testing.T) {
+	cityDir := writeCityWithAgent(t, "claude", "mayor")
+	store := beads.NewMemStore()
+	slinger := &fakeSlinger{err: errors.New("sling refused: boom")}
+	deps := slinguedSynthDeps{
+		storeOpener: func(string) (beads.Store, error) { return store, nil },
+		slingCaller: slinger.call,
+		now:         time.Now,
+		waitTick:    10 * time.Millisecond,
+	}
+	cfg, _ := loadCityConfig(cityDir, io.Discard)
+	mctx := metaPromptCtx{Role: "polecat", ContextType: "city", CityName: "test", CityPath: cityDir}
+
+	var stdout, stderr bytes.Buffer
+	err := runSlinguedSynthWithDeps(context.Background(),
+		promptSynthOpts{role: "polecat", writerAgent: "mayor", city: cityDir},
+		cfg, cityDir, "polecat", "rendered", mctx, deps, &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Errorf("expected sling error to surface, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "mayor") {
+		t.Errorf("error should mention writer-agent for diagnosability, got %v", err)
+	}
+	// Bead was created before sling failed — that's fine, it sits open
+	// for retry/inspection. We just verify that's the actual sequence.
+	beadsList, _ := store.ListOpen()
+	if len(beadsList) != 1 {
+		t.Errorf("expected the synth bead to remain open for inspection after sling failure, got %d open beads", len(beadsList))
+	}
+}
+
+func TestRunSlinguedSynthSurfacesStoreCreateError(t *testing.T) {
+	cityDir := writeCityWithAgent(t, "claude", "mayor")
+	wrapped := &errorOnCreateStore{Store: beads.NewMemStore(), createErr: errors.New("disk full")}
+	slinger := &fakeSlinger{}
+	deps := slinguedSynthDeps{
+		storeOpener: func(string) (beads.Store, error) { return wrapped, nil },
+		slingCaller: slinger.call,
+		now:         time.Now,
+		waitTick:    10 * time.Millisecond,
+	}
+	cfg, _ := loadCityConfig(cityDir, io.Discard)
+	mctx := metaPromptCtx{Role: "polecat", ContextType: "city", CityName: "test", CityPath: cityDir}
+
+	var stdout, stderr bytes.Buffer
+	err := runSlinguedSynthWithDeps(context.Background(),
+		promptSynthOpts{role: "polecat", writerAgent: "mayor", city: cityDir},
+		cfg, cityDir, "polecat", "rendered", mctx, deps, &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "disk full") {
+		t.Errorf("expected create-error to surface, got %v", err)
+	}
+	if len(slinger.gotArgs) > 0 {
+		t.Errorf("sling must not be called when bead creation fails")
+	}
+}
+
+func TestRunSlinguedSynthSurfacesStoreOpenError(t *testing.T) {
+	cityDir := writeCityWithAgent(t, "claude", "mayor")
+	slinger := &fakeSlinger{}
+	deps := slinguedSynthDeps{
+		storeOpener: func(string) (beads.Store, error) { return nil, errors.New("store init failed") },
+		slingCaller: slinger.call,
+		now:         time.Now,
+		waitTick:    10 * time.Millisecond,
+	}
+	cfg, _ := loadCityConfig(cityDir, io.Discard)
+	mctx := metaPromptCtx{Role: "polecat", ContextType: "city", CityName: "test", CityPath: cityDir}
+
+	var stdout, stderr bytes.Buffer
+	err := runSlinguedSynthWithDeps(context.Background(),
+		promptSynthOpts{role: "polecat", writerAgent: "mayor", city: cityDir},
+		cfg, cityDir, "polecat", "rendered", mctx, deps, &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "store init failed") {
+		t.Errorf("expected store-open error to surface, got %v", err)
+	}
+	if len(slinger.gotArgs) > 0 {
+		t.Errorf("sling must not be called when store open fails")
+	}
+}
+
+func TestWaitForSynthBeadCloseReturnsCtxErrWhenAlreadyCanceled(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{Title: "test", Type: "task"})
+	if err != nil {
+		t.Fatalf("seed bead: %v", err)
+	}
+	deps := slinguedSynthDeps{now: time.Now, waitTick: 10 * time.Millisecond}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel
+
+	var stdout, stderr bytes.Buffer
+	err = waitForSynthBeadClose(ctx, store, bead.ID, "/dev/null", time.Second, deps, &stdout, &stderr)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestWaitForSynthBeadCloseSurfacesGetError(t *testing.T) {
+	wrapped := &errorOnGetStore{Store: beads.NewMemStore(), failAfter: 0, getErr: errors.New("transient store glitch")}
+	// Seed via the embedded MemStore directly (Create is promoted but we
+	// avoid the indirection to keep the lint-suggested form).
+	bead, err := wrapped.Create(beads.Bead{Title: "test", Type: "task"})
+	if err != nil {
+		t.Fatalf("seed bead: %v", err)
+	}
+	deps := slinguedSynthDeps{now: time.Now, waitTick: 10 * time.Millisecond}
+
+	var stdout, stderr bytes.Buffer
+	err = waitForSynthBeadClose(context.Background(), wrapped, bead.ID, "/dev/null", time.Second, deps, &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "transient store glitch") {
+		t.Errorf("expected store-get error to surface, got %v", err)
+	}
+}
+
+func TestWaitForSynthBeadCloseNormalizesNonPositiveTimeout(t *testing.T) {
+	// timeout <= 0 should be normalized to a sane default (10m). With
+	// a tiny waitTick we'd loop forever otherwise; here we cancel via
+	// ctx after one tick to verify the function does not immediately
+	// time out on a 0 deadline.
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{Title: "test", Type: "task"})
+	if err != nil {
+		t.Fatalf("seed bead: %v", err)
+	}
+	deps := slinguedSynthDeps{now: time.Now, waitTick: 5 * time.Millisecond}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+
+	var stdout, stderr bytes.Buffer
+	err = waitForSynthBeadClose(ctx, store, bead.ID, "/dev/null", 0, deps, &stdout, &stderr)
+	// Either ctx.DeadlineExceeded (normalized to 10m, never reached) or
+	// context.Canceled is fine. What we must NOT see is the function's
+	// own "timed out after 0s" message — that would mean timeout=0 was
+	// taken literally.
+	if err == nil {
+		t.Fatalf("expected an error from canceled ctx, got nil")
+	}
+	if strings.Contains(err.Error(), "timed out after 0") {
+		t.Errorf("non-positive timeout should be normalized, got %v", err)
+	}
+}
+
+func TestAgentExistsInCityMatchesNameQualifiedAndBindingForms(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "mayor"},
+			{Name: "polecat", Dir: "myrig"},
+			{Name: "scout", BindingName: "extras"},
+		},
+	}
+	cases := []struct {
+		query string
+		want  bool
+	}{
+		{"mayor", true},
+		{"polecat", true},
+		{"myrig/polecat", true}, // qualified
+		{"scout", true},
+		{"extras.scout", true}, // binding-qualified
+		{"ghost", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := agentExistsInCity(tc.query, cfg); got != tc.want {
+			t.Errorf("agentExistsInCity(%q) = %v, want %v", tc.query, got, tc.want)
+		}
+	}
+}
+
+func TestAgentExistsInCityHandlesNilCfg(t *testing.T) {
+	if agentExistsInCity("anything", nil) {
+		t.Errorf("nil cfg must always return false")
+	}
+}
+
+func TestKnownAgentNamesEmptyAndPopulated(t *testing.T) {
+	if got := knownAgentNames(nil); got != "(none configured)" {
+		t.Errorf("empty input: got %q, want '(none configured)'", got)
+	}
+	if got := knownAgentNames([]config.Agent{}); got != "(none configured)" {
+		t.Errorf("empty slice: got %q, want '(none configured)'", got)
+	}
+	got := knownAgentNames([]config.Agent{
+		{Name: "mayor"},
+		{Name: "polecat", Dir: "rig1"},
+	})
+	if !strings.Contains(got, "mayor") || !strings.Contains(got, "rig1/polecat") {
+		t.Errorf("populated: got %q, want both names listed", got)
+	}
+}
