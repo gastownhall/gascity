@@ -6,33 +6,43 @@ vulnerabilities:
   - id: CVE-2026-33811
     paths:
       - "usr/bin/gh"
+      - "usr/local/bin/bd"
+      - "usr/local/bin/br"
       - "usr/local/bin/dolt"
     expired_at: 2026-06-12
-    statement: Upstream gh and dolt embed Go 1.26.2 stdlib; remove once both rebuild against 1.26.3+ (or 1.25.10+).
+    statement: Upstream gh, bd, br, and dolt embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+).
   - id: CVE-2026-33814
     paths:
       - "usr/bin/gh"
+      - "usr/local/bin/bd"
+      - "usr/local/bin/br"
       - "usr/local/bin/dolt"
     expired_at: 2026-06-12
-    statement: Upstream gh and dolt embed Go 1.26.2 stdlib; remove once both rebuild against 1.26.3+ (or 1.25.10+).
+    statement: Upstream gh, bd, br, and dolt embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+).
   - id: CVE-2026-39820
     paths:
       - "usr/bin/gh"
+      - "usr/local/bin/bd"
+      - "usr/local/bin/br"
       - "usr/local/bin/dolt"
     expired_at: 2026-06-12
-    statement: Upstream gh and dolt embed Go 1.26.2 stdlib; remove once both rebuild against 1.26.3+ (or 1.25.10+).
+    statement: Upstream gh, bd, br, and dolt embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+).
   - id: CVE-2026-39836
     paths:
       - "usr/bin/gh"
+      - "usr/local/bin/bd"
+      - "usr/local/bin/br"
       - "usr/local/bin/dolt"
     expired_at: 2026-06-12
-    statement: Upstream gh and dolt embed Go 1.26.2 stdlib; remove once both rebuild against 1.26.3+ (or 1.25.10+).
+    statement: Upstream gh, bd, br, and dolt embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+).
   - id: CVE-2026-42499
     paths:
       - "usr/bin/gh"
+      - "usr/local/bin/bd"
+      - "usr/local/bin/br"
       - "usr/local/bin/dolt"
     expired_at: 2026-06-12
-    statement: Upstream gh and dolt embed Go 1.26.2 stdlib; remove once both rebuild against 1.26.3+ (or 1.25.10+).
+    statement: Upstream gh, bd, br, and dolt embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+).
   - id: CVE-2026-41602
     paths:
       - "usr/local/bin/dolt"
