@@ -179,6 +179,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newConvoyCmd(stdout, stderr),
 		newWispCmd(stdout, stderr),
 		newPrimeCmd(stdout, stderr),
+		newPromptCmd(stdout, stderr),
 		newHandoffCmd(stdout, stderr),
 		newBeadsCmd(stdout, stderr),
 		newBuildImageCmd(stdout, stderr),
