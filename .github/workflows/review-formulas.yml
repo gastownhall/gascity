@@ -107,6 +107,12 @@ jobs:
           run_shard=false
           reason="skipped"
 
+          # Review-formulas shards each run for ~10-15 min and exercise
+          # full agent workflows end-to-end. Keep them as a pre-merge
+          # opt-in (via the `needs-review-formulas` label) plus a
+          # post-merge safety net on pushes to main. Path-based opt-in
+          # on every Go-touching PR pushes the PR wall-clock past the
+          # Blacksmith 5-minute budget.
           if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
             run_shard=true
             reason="manual dispatch"
@@ -114,11 +120,11 @@ jobs:
             run_shard=true
             reason="push to main safety net"
           elif [[ "$PR_DRAFT" != "true" ]]; then
-            if [[ "$PATH_HIT" == "true" || "$NEEDS_LABEL" == "true" ]]; then
+            if [[ "$NEEDS_LABEL" == "true" ]]; then
               run_shard=true
-              reason="pull request path/label match"
+              reason="pull request needs-review-formulas label"
             else
-              reason="pull request path/label miss"
+              reason="pull request without needs-review-formulas label (path hit: ${PATH_HIT})"
             fi
           else
             reason="draft pull request"
