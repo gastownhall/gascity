@@ -286,6 +286,17 @@ func extractJSON(data []byte) []byte {
 	}
 }
 
+// truncateRawOutput returns a trimmed slice of bd CLI output suitable for
+// embedding in error messages. Limits to maxBytes to keep error strings
+// bounded, marking truncation explicitly so the reader knows there's more.
+func truncateRawOutput(data []byte, maxBytes int) string {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) <= maxBytes {
+		return string(trimmed)
+	}
+	return string(trimmed[:maxBytes]) + "...(truncated)"
+}
+
 // envWithout returns a copy of environ with all entries for the given key removed.
 func envWithout(environ []string, key string) []string {
 	prefix := key + "="
@@ -415,7 +426,12 @@ func parseIssuesTolerant(data []byte) ([]bdIssue, error) {
 	}
 	var raw []json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("parsing JSON: %w", err)
+		// Include a snippet of the raw bd output so the failure surface is
+		// diagnosable. Historical case (gascity #1726): bd returned the
+		// literal string "None" and the unwrapped error was the opaque
+		// "invalid character 'N' looking for beginning of value" with no
+		// hint that the offending byte was a Python None text.
+		return nil, fmt.Errorf("parsing JSON: raw=%q: %w", truncateRawOutput(data, 200), err)
 	}
 	result := make([]bdIssue, 0, len(raw))
 	var parseErr error

@@ -1214,6 +1214,64 @@ func TestBdStoreListReturnsHardErrorWithoutUsableSurvivors(t *testing.T) {
 	}
 }
 
+// TestBdStoreListErrorIncludesRawBdOutput is a regression net for the
+// gascity #1726 / #2040 failure mode: when `bd list --json` returns non-JSON
+// output, the resulting error must include the raw bd stdout so the failure
+// surface is diagnosable rather than the opaque json.Unmarshal message
+// (e.g. "invalid character 'N' looking for beginning of value" with no clue
+// what 'N' was). Historical example: bd shipped with Gas City v1.0.0
+// returned the literal string "None\n" instead of a JSON array.
+func TestBdStoreListErrorIncludesRawBdOutput(t *testing.T) {
+	tests := []struct {
+		name        string
+		out         []byte
+		wantInError string
+	}{
+		{
+			name:        "literal None (historical #1726 shape)",
+			out:         []byte("None\n"),
+			wantInError: "None",
+		},
+		{
+			name:        "plain text error accidentally on stdout",
+			out:         []byte("error: connection refused\n"),
+			wantInError: "connection refused",
+		},
+		{
+			name:        "truncated JSON",
+			out:         []byte(`[{"id":"bd-aaa","title":"first"`),
+			wantInError: `bd-aaa`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := fakeRunner(map[string]struct {
+				out []byte
+				err error
+			}{
+				`bd list --json --include-infra --include-gates --limit 0`: {out: tc.out},
+			})
+
+			s := beads.NewBdStore("/city", runner)
+			got, err := s.ListOpen()
+			if err == nil {
+				t.Fatalf("ListOpen() error = nil, want diagnostic parse error")
+			}
+			if len(got) != 0 {
+				t.Fatalf("ListOpen() returned %v, want no usable survivors", got)
+			}
+			if !strings.Contains(err.Error(), tc.wantInError) {
+				t.Errorf("ListOpen() error = %q; want substring %q so callers can see the raw bd output",
+					err.Error(), tc.wantInError)
+			}
+			if !strings.Contains(err.Error(), "bd list") {
+				t.Errorf("ListOpen() error = %q; want 'bd list' context prefix", err.Error())
+			}
+		})
+	}
+}
+
 func TestBdStoreReadyReturnsPartialResultErrorOnCorruptEntries(t *testing.T) {
 	runner := fakeRunner(map[string]struct {
 		out []byte
