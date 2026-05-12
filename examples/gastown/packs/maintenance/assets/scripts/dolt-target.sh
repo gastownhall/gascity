@@ -143,7 +143,18 @@ managed_runtime_port() (
 )
 
 if [ -z "${GC_DOLT_PORT:-}" ]; then
-    DOLT_STATE_FILE="${GC_DOLT_STATE_FILE:-${GC_CITY_RUNTIME_DIR:-$GC_CITY_PATH/.gc/runtime}/packs/dolt/dolt-state.json}"
+    if [ -n "${GC_DOLT_STATE_FILE:-}" ]; then
+        DOLT_STATE_FILE="$GC_DOLT_STATE_FILE"
+    else
+        DOLT_PACK_DIR="${GC_CITY_RUNTIME_DIR:-$GC_CITY_PATH/.gc/runtime}/packs/dolt"
+        if [ -f "$DOLT_PACK_DIR/dolt-state.json" ]; then
+            DOLT_STATE_FILE="$DOLT_PACK_DIR/dolt-state.json"
+        elif [ -f "$DOLT_PACK_DIR/dolt-provider-state.json" ]; then
+            DOLT_STATE_FILE="$DOLT_PACK_DIR/dolt-provider-state.json"
+        else
+            DOLT_STATE_FILE="$DOLT_PACK_DIR/dolt-state.json"
+        fi
+    fi
     GC_DOLT_PORT="$(managed_runtime_port "$DOLT_STATE_FILE" "$GC_CITY_PATH/.beads/dolt")"
 fi
 
