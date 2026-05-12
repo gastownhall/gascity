@@ -11,7 +11,7 @@ import (
 // transcript identifier that should be preferred over workdir-only discovery.
 func SupportsIDLookup(provider string) bool {
 	switch providerFamily(provider) {
-	case "codex", "gemini", "opencode":
+	case "codex", "gemini", "opencode", "pi":
 		return false
 	default:
 		return true
@@ -55,6 +55,8 @@ func providerFamily(provider string) string {
 		return "gemini"
 	case strings.Contains(lower, "opencode"):
 		return "opencode"
+	case lower == "pi" || strings.HasPrefix(lower, "pi/") || strings.HasSuffix(lower, "/pi") || strings.Contains(lower, "-pi"):
+		return "pi"
 	default:
 		return "claude"
 	}

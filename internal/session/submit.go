@@ -1,7 +1,9 @@
 package session
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -16,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
 const (
@@ -136,6 +139,15 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b bea
 	if !running {
 		return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
 	}
+	if requiresHardRestartInterrupt(b) {
+		if err := m.sp.Stop(sessName); err != nil {
+			return fmt.Errorf("stopping session for interrupt replacement: %w", err)
+		}
+		if err := discardPiPendingTurn(b, hints); err != nil {
+			return err
+		}
+		return m.restartAndSendLocked(ctx, id, b, sessName, message, resumeCommand, hints)
+	}
 	interruptStartedAt := time.Now()
 	if err := m.stopTurnLocked(b, sessName); err != nil {
 		return err
@@ -172,7 +184,7 @@ func (m *Manager) restartAndSendLocked(ctx context.Context, id string, b beads.B
 	if err := m.waitUntilRunningLocked(ctx, id, sessName, 2*time.Second); err != nil {
 		return err
 	}
-	if waiter, ok := m.sp.(runtime.IdleWaitProvider); ok {
+	if waiter, ok := m.sp.(runtime.IdleWaitProvider); ok && waitsForIdleAfterHardRestart(b) {
 		if err := waiter.WaitForIdle(ctx, sessName, 15*time.Second); err != nil && !errors.Is(err, runtime.ErrInteractionUnsupported) {
 			return fmt.Errorf("waiting for restarted session to become idle: %w", err)
 		}
@@ -386,6 +398,78 @@ func requiresInterruptBoundaryWait(b beads.Bead) bool {
 		return false
 	}
 	return providerKind(b) == "codex"
+}
+
+func requiresHardRestartInterrupt(b beads.Bead) bool {
+	if transportFromMetadata(b) == "acp" {
+		return false
+	}
+	return providerKind(b) == "pi"
+}
+
+func waitsForIdleAfterHardRestart(b beads.Bead) bool {
+	if transportFromMetadata(b) == "acp" {
+		return false
+	}
+	return providerKind(b) != "pi"
+}
+
+func discardPiPendingTurn(b beads.Bead, hints runtime.Config) error {
+	path := sessionlog.FindPiSessionFile(piSessionSearchPaths(hints), b.Metadata["work_dir"])
+	if strings.TrimSpace(path) == "" {
+		return fmt.Errorf("discarding pi interrupted turn: session file not found for work dir %q", b.Metadata["work_dir"])
+	}
+	if err := truncatePiSessionBeforeLastUserMessage(path); err != nil {
+		return fmt.Errorf("discarding pi interrupted turn: %w", err)
+	}
+	return nil
+}
+
+func piSessionSearchPaths(hints runtime.Config) []string {
+	var paths []string
+	if dir := strings.TrimSpace(hints.Env["PI_CODING_AGENT_SESSION_DIR"]); dir != "" {
+		paths = append(paths, dir)
+	}
+	if dir := strings.TrimSpace(hints.Env["PI_CODING_AGENT_DIR"]); dir != "" {
+		paths = append(paths, filepath.Join(dir, "sessions"))
+	}
+	return paths
+}
+
+func truncatePiSessionBeforeLastUserMessage(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	cutOffset := -1
+	offset := 0
+	for _, line := range bytes.SplitAfter(data, []byte("\n")) {
+		trimmed := bytes.TrimSpace(line)
+		if len(trimmed) > 0 {
+			var entry struct {
+				Type    string `json:"type"`
+				Message struct {
+					Role string `json:"role"`
+				} `json:"message"`
+			}
+			if err := json.Unmarshal(trimmed, &entry); err == nil &&
+				entry.Type == "message" &&
+				strings.EqualFold(strings.TrimSpace(entry.Message.Role), "user") {
+				cutOffset = offset
+			}
+		}
+		offset += len(line)
+	}
+	if cutOffset < 0 {
+		return nil
+	}
+
+	perm := os.FileMode(0o600)
+	if info, err := os.Stat(path); err == nil {
+		perm = info.Mode().Perm()
+	}
+	return fsys.WriteFileAtomic(fsys.OSFS{}, path, data[:cutOffset], perm)
 }
 
 func usesImmediateDefaultSubmit(b beads.Bead, resuming ...bool) bool {

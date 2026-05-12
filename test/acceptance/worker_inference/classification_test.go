@@ -522,6 +522,45 @@ func TestStageOpenCodeGeminiAuthMapsGoogleAPIKey(t *testing.T) {
 	require.Equal(t, "google-key", env.Get("GEMINI_API_KEY"))
 }
 
+func TestStagePiOllamaCloudAuthFromEnv(t *testing.T) {
+	gcHome := t.TempDir()
+	env := helpers.NewEnv("", gcHome, t.TempDir())
+	t.Setenv("OLLAMA_API_KEY", "ollama-key")
+
+	source, err := stagePiOllamaCloudAuth(gcHome, env)
+	require.NoError(t, err)
+	require.Equal(t, "env:OLLAMA_API_KEY", source)
+	require.Empty(t, env.Get("OLLAMA_API_KEY"))
+	require.Equal(t, filepath.Join(gcHome, ".pi", "agent"), env.Get("PI_CODING_AGENT_DIR"))
+	require.Equal(t, filepath.Join(gcHome, ".pi", "agent", "sessions"), env.Get("PI_CODING_AGENT_SESSION_DIR"))
+	require.Equal(t, filepath.Join(gcHome, ".local", "share", "gascity", "pi-transcripts"), env.Get("GC_PI_TRANSCRIPT_DIR"))
+
+	authPath := filepath.Join(gcHome, ".pi", "agent", "auth.json")
+	authBytes, err := os.ReadFile(authPath)
+	require.NoError(t, err)
+	var auth map[string]map[string]string
+	require.NoError(t, json.Unmarshal(authBytes, &auth))
+	require.Equal(t, map[string]string{"type": "api_key", "key": "ollama-key"}, auth["ollama-cloud"])
+	info, err := os.Stat(authPath)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+}
+
+func TestWaitForBusyTurnStartPiUsesAcceptedPromptBoundary(t *testing.T) {
+	harness := &liveWorkerHandleHarness{
+		profile:    workerpkg.ProfilePiTmuxCLI,
+		provider:   "pi",
+		workDir:    t.TempDir(),
+		gcHome:     t.TempDir(),
+		authSource: "test",
+	}
+
+	evidence, err := harness.waitForBusyTurnStart("missing-session", "interrupt-pi line 1")
+	require.NoError(t, err)
+	require.Equal(t, "pi-transcript-accepted", evidence["busy_detection"])
+	require.Equal(t, "interrupt-pi line 1", evidence["busy_output_needle"])
+}
+
 func TestSeedLiveProviderStateCodexMarksTrustedProject(t *testing.T) {
 	gcHome := t.TempDir()
 	prevEnv := liveEnv
@@ -878,6 +917,35 @@ install_agent_hooks = ["opencode"]`)
 name = "probe"
 session = "tmux"`)
 	require.Equal(t, 1, strings.Count(text, `install_agent_hooks = ["opencode"]`))
+}
+
+func TestInstallInferenceProbeAgentEnablesPiHooks(t *testing.T) {
+	cityDir := t.TempDir()
+	cityToml := filepath.Join(cityDir, "city.toml")
+	require.NoError(t, os.WriteFile(cityToml, []byte(`
+[workspace]
+name = "worker-inference-test"
+provider = "pi"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+`), 0o644))
+
+	require.NoError(t, installInferenceProbeAgent(cityDir, true))
+	require.NoError(t, installInferenceProbeAgent(cityDir, true))
+
+	data, err := os.ReadFile(cityToml)
+	require.NoError(t, err)
+	text := string(data)
+	require.Contains(t, text, `[workspace]
+name = "worker-inference-test"
+provider = "pi"
+install_agent_hooks = ["pi"]`)
+	require.Contains(t, text, `[[agent]]
+name = "probe"
+session = "tmux"`)
+	require.Equal(t, 1, strings.Count(text, `install_agent_hooks = ["pi"]`))
 }
 
 func TestInstallLiveProviderCommandOverride(t *testing.T) {

@@ -933,6 +933,94 @@ func TestSubmitInterruptNowFallsBackToRestartOnInterruptBoundaryTimeoutForCodex(
 	}
 }
 
+func TestSubmitInterruptNowHardRestartsAndTruncatesPiPendingTurn(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "pi --session abc123", t.TempDir(), "pi", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sessionDir := t.TempDir()
+	piSessionPath := filepath.Join(sessionDir, "2026-05-11T00-00-00-000Z_abc123.jsonl")
+	piSession := strings.Join([]string{
+		fmt.Sprintf(`{"type":"session","id":"abc123","cwd":%q}`, info.WorkDir),
+		`{"type":"message","id":"u1","message":{"role":"user","content":[{"type":"text","text":"stable prompt"}]}}`,
+		`{"type":"message","id":"a1","parentId":"u1","message":{"role":"assistant","content":[{"type":"text","text":"stable response"}]}}`,
+		`{"type":"message","id":"u2","parentId":"a1","message":{"role":"user","content":[{"type":"text","text":"busy prompt to discard"}]}}`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(piSessionPath, []byte(piSession), 0o600); err != nil {
+		t.Fatalf("WriteFile pi session: %v", err)
+	}
+
+	hints := runtime.Config{
+		WorkDir: info.WorkDir,
+		Env: map[string]string{
+			"PI_CODING_AGENT_SESSION_DIR": sessionDir,
+		},
+	}
+	outcome, err := mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), hints, SubmitIntentInterruptNow)
+	if err != nil {
+		t.Fatalf("Submit(interrupt_now): %v", err)
+	}
+	if outcome.Queued {
+		t.Fatal("Submit(interrupt_now) unexpectedly queued")
+	}
+
+	var sawStop, sawStart, sawWaitForIdle, sawNudge, sawInterrupt, sawEscape bool
+	stopIdx := -1
+	startIdx := -1
+	nudgeIdx := -1
+	for i, call := range sp.Calls {
+		if call.Method == "Stop" && call.Name == info.SessionName {
+			sawStop = true
+			stopIdx = i
+		}
+		if call.Method == "Start" && call.Name == info.SessionName {
+			sawStart = true
+			startIdx = i
+		}
+		if call.Method == "WaitForIdle" && call.Name == info.SessionName {
+			sawWaitForIdle = true
+		}
+		if call.Method == "NudgeNow" && call.Name == info.SessionName && call.Message == "replace the current turn" {
+			sawNudge = true
+			nudgeIdx = i
+		}
+		if call.Method == "Interrupt" && call.Name == info.SessionName {
+			sawInterrupt = true
+		}
+		if call.Method == "SendKeys" && call.Name == info.SessionName && call.Message == "Escape" {
+			sawEscape = true
+		}
+	}
+	if !sawStop || !sawStart || !sawNudge {
+		t.Fatalf("calls = %#v, want Stop + Start + NudgeNow", sp.Calls)
+	}
+	if stopIdx < 0 || startIdx < 0 || nudgeIdx < 0 || stopIdx >= startIdx || startIdx >= nudgeIdx {
+		t.Fatalf("calls = %#v, want Stop -> Start -> NudgeNow", sp.Calls)
+	}
+	if sawWaitForIdle {
+		t.Fatalf("calls = %#v, did not want idle wait for pi hard-restart interrupt", sp.Calls)
+	}
+	if sawInterrupt || sawEscape {
+		t.Fatalf("calls = %#v, did not want in-process interrupt for pi interrupt_now", sp.Calls)
+	}
+
+	truncated, err := os.ReadFile(piSessionPath)
+	if err != nil {
+		t.Fatalf("ReadFile pi session: %v", err)
+	}
+	if strings.Contains(string(truncated), "busy prompt to discard") {
+		t.Fatalf("pi session still contains interrupted prompt:\n%s", truncated)
+	}
+	if !strings.Contains(string(truncated), "stable response") {
+		t.Fatalf("pi session lost stable history:\n%s", truncated)
+	}
+}
+
 func TestStopTurnUsesSoftEscapeAndIdleWaitForCodex(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

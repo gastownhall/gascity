@@ -157,6 +157,8 @@ func ReadProviderFile(provider, path string, tailCompactions int) (*Session, err
 		return ReadGeminiFile(path, tailCompactions)
 	case "opencode":
 		return ReadOpenCodeFile(path, tailCompactions)
+	case "pi":
+		return ReadPiFile(path, tailCompactions)
 	default:
 		return ReadFile(path, tailCompactions)
 	}
@@ -206,6 +208,8 @@ func ReadProviderFileRaw(provider, path string, tailCompactions int) (*Session, 
 		return ReadGeminiFile(path, tailCompactions)
 	case "opencode":
 		return ReadOpenCodeFile(path, tailCompactions)
+	case "pi":
+		return ReadPiFile(path, tailCompactions)
 	default:
 		return ReadFileRaw(path, tailCompactions)
 	}
@@ -279,6 +283,8 @@ func ReadProviderFileOlder(provider, path string, tailCompactions int, beforeMes
 		return ReadGeminiFile(path, tailCompactions)
 	case "opencode":
 		return ReadOpenCodeFile(path, tailCompactions)
+	case "pi":
+		return ReadPiFile(path, tailCompactions)
 	default:
 		return ReadFileOlder(path, tailCompactions, beforeMessageID)
 	}
@@ -295,6 +301,8 @@ func ReadProviderFileRawOlder(provider, path string, tailCompactions int, before
 		return ReadGeminiFile(path, tailCompactions)
 	case "opencode":
 		return ReadOpenCodeFile(path, tailCompactions)
+	case "pi":
+		return ReadPiFile(path, tailCompactions)
 	default:
 		return ReadFileRawOlder(path, tailCompactions, beforeMessageID)
 	}
@@ -367,6 +375,8 @@ func ReadProviderFileNewer(provider, path string, tailCompactions int, afterMess
 		return ReadGeminiFile(path, tailCompactions)
 	case "opencode":
 		return ReadOpenCodeFile(path, tailCompactions)
+	case "pi":
+		return ReadPiFile(path, tailCompactions)
 	default:
 		return ReadFileNewer(path, tailCompactions, afterMessageID)
 	}
@@ -383,6 +393,8 @@ func ReadProviderFileRawNewer(provider, path string, tailCompactions int, afterM
 		return ReadGeminiFile(path, tailCompactions)
 	case "opencode":
 		return ReadOpenCodeFile(path, tailCompactions)
+	case "pi":
+		return ReadPiFile(path, tailCompactions)
 	default:
 		return ReadFileRawNewer(path, tailCompactions, afterMessageID)
 	}
@@ -535,6 +547,8 @@ func FindSessionFileForProvider(searchPaths []string, provider, workDir string) 
 		return FindGeminiSessionFile(searchPaths, workDir)
 	case "opencode":
 		return FindOpenCodeSessionFile(searchPaths, workDir)
+	case "pi":
+		return FindPiSessionFile(searchPaths, workDir)
 	case "", "auto":
 		return FindSessionFile(searchPaths, workDir)
 	default:
@@ -554,6 +568,8 @@ func FindProviderFallbackSessionFile(searchPaths []string, provider, workDir str
 		return FindGeminiSessionFile(searchPaths, workDir)
 	case "opencode":
 		return FindOpenCodeSessionFile(searchPaths, workDir)
+	case "pi":
+		return FindPiSessionFile(searchPaths, workDir)
 	default:
 		return findClaudeLatestSessionFile(searchPaths, workDir)
 	}
@@ -896,6 +912,10 @@ func mergeGeminiSearchPaths(extraPaths []string) []string {
 	return mergePaths(DefaultGeminiSearchPaths(), extraPaths)
 }
 
+func mergePiSearchPaths(extraPaths []string) []string {
+	return mergePaths(DefaultPiSearchPaths(), extraPaths)
+}
+
 func mergePaths(defaults, extras []string) []string {
 	seen := make(map[string]bool)
 	var result []string
@@ -929,6 +949,8 @@ func providerFamily(provider string) string {
 		return "gemini"
 	case strings.Contains(p, "opencode"):
 		return "opencode"
+	case p == "pi" || strings.HasPrefix(p, "pi/") || strings.HasSuffix(p, "/pi") || strings.Contains(p, "-pi"):
+		return "pi"
 	default:
 		return p
 	}

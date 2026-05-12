@@ -1335,7 +1335,6 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 		"/work/.cursor/hooks.json",
 		"/work/.kiro/agents/gascity.json",
 		"/work/AGENTS.md",
-		"/work/.pi/extensions/gc-hooks.js",
 		"/work/.omp/hooks/gc-hook.ts",
 	} {
 		if strings.Contains(string(fs.Files[rel]), "gc hook --inject") {
@@ -1399,6 +1398,8 @@ func TestInstallPiHookUsesCurrentExtensionAPI(t *testing.T) {
 		`pi.on("session_start"`,
 		`pi.on("session_compact"`,
 		`pi.on("before_agent_start"`,
+		"GC_PI_HOOK_VERSION",
+		"gc hook --inject",
 	} {
 		if !strings.Contains(data, want) {
 			t.Errorf("Pi hook missing current extension API marker %q:\n%s", want, data)

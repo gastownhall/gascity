@@ -167,6 +167,7 @@ func TestSupportsIDLookup(t *testing.T) {
 		{provider: "codex/tmux-cli", want: false},
 		{provider: "gemini/tmux-cli", want: false},
 		{provider: "opencode/tmux-cli", want: false},
+		{provider: "pi/tmux-cli", want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.provider, func(t *testing.T) {

@@ -1492,7 +1492,7 @@ func (t *Tmux) shouldSendEscapeBeforeEnter(target string) bool {
 	provider, err := t.GetEnvironment(target, "GC_PROVIDER")
 	if err == nil {
 		switch strings.TrimSpace(provider) {
-		case "claude", "codex", "gemini", "opencode":
+		case "claude", "codex", "gemini", "opencode", "pi":
 			return false
 		default:
 			// Unrecognized provider (custom alias) — fall through to
@@ -1506,7 +1506,7 @@ func (t *Tmux) shouldSendEscapeBeforeEnter(target string) bool {
 }
 
 func (t *Tmux) targetLooksLikeNoEscapeProvider(target string) bool {
-	noEscapeProviders := []string{"claude", "codex", "gemini", "opencode"}
+	noEscapeProviders := []string{"claude", "codex", "gemini", "opencode", "pi"}
 	return t.targetLooksLikeAnyProvider(target, noEscapeProviders...)
 }
 

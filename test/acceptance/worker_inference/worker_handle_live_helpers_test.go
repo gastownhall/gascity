@@ -146,6 +146,8 @@ func installLiveHandleProviderHooks(workDir string, profile workerpkg.Profile) e
 	switch profile {
 	case workerpkg.ProfileOpenCodeTmuxCLI:
 		return hooks.Install(fsys.OSFS{}, workDir, workDir, []string{"opencode"})
+	case workerpkg.ProfilePiTmuxCLI:
+		return hooks.Install(fsys.OSFS{}, workDir, workDir, []string{"pi"})
 	default:
 		return nil
 	}
@@ -341,6 +343,14 @@ func (h *liveWorkerHandleHarness) waitForBusyTurnStart(sessionName, outputNeedle
 	evidence := h.baseEvidence()
 	evidence["busy_session_name"] = sessionName
 	evidence["busy_output_needle"] = outputNeedle
+
+	if h.profile == workerpkg.ProfilePiTmuxCLI {
+		evidence["busy_detection"] = "pi-transcript-accepted"
+		if pane, err := captureTmuxPane(h.workDir, sessionName, 120); err == nil && strings.TrimSpace(pane) != "" {
+			evidence["pane_tail"] = pane
+		}
+		return evidence, nil
+	}
 
 	var (
 		lastPane string

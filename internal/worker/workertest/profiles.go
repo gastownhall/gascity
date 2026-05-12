@@ -10,6 +10,7 @@ const ( //nolint:revive // exported profile IDs are documented by the enclosing 
 	ProfileCodexTmuxCLI    ProfileID = "codex/tmux-cli"
 	ProfileGeminiTmuxCLI   ProfileID = "gemini/tmux-cli"
 	ProfileOpenCodeTmuxCLI ProfileID = "opencode/tmux-cli"
+	ProfilePiTmuxCLI       ProfileID = "pi/tmux-cli"
 )
 
 // revive:enable:exported
@@ -103,6 +104,22 @@ func Phase1Profiles() []Profile {
 				RecallPromptContains:   "Repeat the exact OpenCode phase-1 summary from earlier before answering.",
 				RecallResponseContains: "OpenCode phase 1 validates the tmux CLI transcript contract.",
 				ResetResponseContains:  "I cannot repeat the earlier OpenCode summary because this session started fresh.",
+			},
+		},
+		{
+			ID:       ProfilePiTmuxCLI,
+			Provider: "pi/tmux-cli",
+			WorkDir:  "/tmp/gascity/phase1/pi",
+			Fixtures: ProfileFixtureSet{
+				FreshRoot:        "testdata/fixtures/pi/fresh",
+				ContinuationRoot: "testdata/fixtures/pi/continuation",
+				ResetRoot:        "testdata/fixtures/pi/reset",
+			},
+			Continuation: ContinuationOracle{
+				AnchorText:             "Pi phase 1 validates the tmux CLI transcript contract.",
+				RecallPromptContains:   "Repeat the exact Pi phase-1 summary from earlier before answering.",
+				RecallResponseContains: "Pi phase 1 validates the tmux CLI transcript contract.",
+				ResetResponseContains:  "I cannot repeat the earlier Pi summary because this session started fresh.",
 			},
 		},
 	}

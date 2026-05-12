@@ -198,6 +198,9 @@ func piHookNeedsUpgrade(existing []byte) bool {
 	if !strings.Contains(content, "Gas City hooks for Pi Coding Agent") {
 		return false
 	}
+	if !strings.Contains(content, "GC_PI_HOOK_VERSION = 2") || !strings.Contains(content, "gc hook --inject") {
+		return true
+	}
 	for _, marker := range []string{
 		"module.exports = {",
 		`"session.created"`,
