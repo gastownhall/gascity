@@ -4,6 +4,7 @@ package workdir
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"text/template"
@@ -190,4 +191,59 @@ func ResolveWorkDirPath(cityPath, cityName, qualifiedName string, a config.Agent
 
 func samePath(a, b string) bool {
 	return pathutil.SamePath(a, b)
+}
+
+// ValidateAncestorWorktreesNotStale walks path's ancestor chain and returns
+// an error when any ancestor has a regular-file ".git" worktree pointer
+// whose "gitdir:" target does not exist on disk. The walk stops as soon as
+// it encounters a valid ".git" marker (regular file with an existing target,
+// or a real ".git" directory) — anything further up is the main repo and is
+// not our concern. Reaching the filesystem root without finding a marker is
+// not an error.
+//
+// This is the spawn-time guard for gascity#1556: a stale worktree pointer
+// on an ancestor lets "git -C <rig-root> worktree add <child>" register a
+// structurally orphaned child that can't be reached from the ancestor
+// itself. Failing closed before invoking "git worktree add" surfaces the
+// stale ancestor to the operator instead of producing dangling content.
+func ValidateAncestorWorktreesNotStale(path string) error {
+	// Walk from path's parent upward. The spawn target itself may not yet
+	// exist (we are typically about to MkdirAll it); only ancestors are
+	// inspected.
+	cur := filepath.Dir(filepath.Clean(path))
+	for {
+		gitPath := filepath.Join(cur, ".git")
+		info, err := os.Lstat(gitPath)
+		if err == nil {
+			if info.Mode().IsRegular() {
+				data, rerr := os.ReadFile(gitPath)
+				if rerr == nil {
+					content := strings.TrimSpace(string(data))
+					if strings.HasPrefix(content, "gitdir:") {
+						target := strings.TrimSpace(strings.TrimPrefix(content, "gitdir:"))
+						if _, terr := os.Stat(target); terr != nil {
+							return fmt.Errorf(
+								"worktree spawn rejected: ancestor %q has stale .git pointer (gitdir target %q does not exist): %w",
+								cur, target, terr)
+						}
+					}
+				}
+				// Either a valid worktree pointer or an unreadable/unrecognized
+				// .git file. In both cases we stop the walk — anything further
+				// up belongs to the surrounding repository and is git's
+				// responsibility, not ours.
+				return nil
+			}
+			if info.IsDir() {
+				// Reached a real .git directory (main repo root). Stop.
+				return nil
+			}
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			// Reached the filesystem root without finding a marker.
+			return nil
+		}
+		cur = parent
+	}
 }
