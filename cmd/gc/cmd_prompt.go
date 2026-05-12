@@ -32,6 +32,7 @@ type promptSynthOpts struct {
 	provider           string
 	project            string
 	projectName        string
+	writerAgent        string
 	write              bool
 	force              bool
 	city               string
@@ -89,6 +90,18 @@ Auto-detection:
   --project      defaults to current working directory
   --project-name defaults to basename(--project)
 
+Two execution modes are planned:
+
+  --writer-agent ""        Direct mode (default). Spawns a one-shot
+                           subprocess of the configured provider; no
+                           Gas City agent is involved. Useful for
+                           bootstrap and offline-friendly invocations.
+
+  --writer-agent <name>    Slingued mode (NOT YET IMPLEMENTED, returns
+                           an error). Will sling the synth as work to
+                           the named agent via mol-prompt-synth, with
+                           the result written by the agent's session.
+
 The output is LLM-generated. Review it carefully before relying on it.
 When --write is used, a comment header records the inputs and generation
 date for traceability.`,
@@ -108,6 +121,7 @@ date for traceability.`,
 	cmd.Flags().StringVar(&opts.provider, "provider", "", "target AI provider key (default: city.toml workspace.provider)")
 	cmd.Flags().StringVar(&opts.project, "project", "", "project root path (default: cwd)")
 	cmd.Flags().StringVar(&opts.projectName, "project-name", "", "project display name (default: basename of --project)")
+	cmd.Flags().StringVar(&opts.writerAgent, "writer-agent", "", "Gas City agent to delegate the synth to (default: empty = direct mode, no agent). NOTE: slingued mode not yet implemented")
 	cmd.Flags().BoolVar(&opts.write, "write", false, "write to <city>/agents/<role>/prompt.template.md instead of stdout")
 	cmd.Flags().BoolVar(&opts.force, "force", false, "with --write, overwrite the destination if it exists")
 	cmd.Flags().StringVar(&opts.city, "city", "", "city path (default: auto-resolve)")
@@ -117,6 +131,15 @@ date for traceability.`,
 }
 
 func runPromptSynth(ctx context.Context, opts promptSynthOpts, runner promptSynthRunner, stdout, stderr io.Writer) error {
+	if strings.TrimSpace(opts.writerAgent) != "" {
+		// Slingued mode lives in step 3 (mol-prompt-synth formula +
+		// auto-trigger from `gc agent add --synth`). The flag is wired
+		// up here so the CLI surface stays stable across releases —
+		// scripts and users can target the final form without having
+		// to update later. Until step 3 lands, fail loudly rather than
+		// silently fall back to direct mode (would mask user intent).
+		return fmt.Errorf("--writer-agent=%q: slingued mode not yet implemented (planned for the next PR); use --writer-agent='' for direct mode", opts.writerAgent)
+	}
 	cityPath, err := resolveCityForSynth(opts.city)
 	if err != nil {
 		return fmt.Errorf("resolve city: %w", err)

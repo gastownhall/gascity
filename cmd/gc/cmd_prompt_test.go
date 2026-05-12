@@ -338,6 +338,46 @@ func TestRunPromptSynthMetaPromptOverrideUsesExternalFile(t *testing.T) {
 	}
 }
 
+func TestRunPromptSynthRejectsSlinguedModeUntilImplemented(t *testing.T) {
+	// --writer-agent=<name> is the slingued-mode flag (planned for the
+	// next PR). Until that lands, it must fail loudly rather than
+	// silently fall back to direct mode — silent fallback would mask
+	// user intent and surprise scripts that explicitly target an agent.
+	cityDir := writeMinimalCity(t, "claude")
+	runner := &fakeSynthRunner{body: "should not be called"}
+	var stdout, stderr bytes.Buffer
+	err := runPromptSynth(context.Background(), promptSynthOpts{
+		role:        "polecat",
+		writerAgent: "mayor",
+		city:        cityDir,
+	}, runner.run, &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "not yet implemented") {
+		t.Errorf("expected slingued-mode-not-implemented error, got %v", err)
+	}
+	if runner.gotCalled {
+		t.Errorf("runner must not be called in slingued mode")
+	}
+}
+
+func TestRunPromptSynthEmptyWriterAgentTakesDirectPath(t *testing.T) {
+	// --writer-agent="" (the default and only currently-supported value)
+	// must still trigger the direct-mode happy path.
+	cityDir := writeMinimalCity(t, "claude")
+	runner := &fakeSynthRunner{body: "ok"}
+	var stdout, stderr bytes.Buffer
+	err := runPromptSynth(context.Background(), promptSynthOpts{
+		role:        "mayor",
+		writerAgent: "", // explicit empty
+		city:        cityDir,
+	}, runner.run, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("direct mode (writer-agent='') should succeed: %v", err)
+	}
+	if !runner.gotCalled {
+		t.Errorf("direct-mode runner should be called")
+	}
+}
+
 func TestRunPromptSynthRejectsProviderWithoutPrintArgs(t *testing.T) {
 	cityDir := t.TempDir()
 	// Custom provider without print_args — one-shot mode unsupported.
