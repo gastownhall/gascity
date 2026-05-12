@@ -74,14 +74,22 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	if b.Metadata["session_key"] == "" {
 		return false, nil
 	}
-	freshCmd := stripResumeFlag(resumeCommand, b.Metadata["resume_flag"], b.Metadata["session_key"])
+	resumeFlag := b.Metadata["resume_flag"]
+	freshCmd := stripResumeFlag(resumeCommand, resumeFlag, b.Metadata["session_key"])
 	if err := m.clearStaleResumeMetadata(id, b); err != nil {
 		if unroute != nil {
 			unroute()
 		}
 		return false, err
 	}
-	if freshCmd == resumeCommand {
+	// An empty resume_flag means the command was never resume-capable
+	// (e.g. a named-always session whose start command carries no
+	// --resume-style flag). stripResumeFlag is intentionally a no-op in
+	// that case, so refusing to retry would leave the session stuck.
+	// Only treat the no-op as an error when resume_flag was non-empty
+	// but the strip still found nothing — that signals an inconsistency
+	// between the bead metadata and the actual resume command.
+	if resumeFlag != "" && freshCmd == resumeCommand {
 		if unroute != nil {
 			unroute()
 		}
