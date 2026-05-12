@@ -14,6 +14,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/spf13/cobra"
 )
@@ -35,6 +36,8 @@ type promptSynthOpts struct {
 	writerAgent        string
 	write              bool
 	force              bool
+	wait               bool
+	waitTimeout        time.Duration
 	city               string
 	metaPromptOverride string
 }
@@ -131,17 +134,24 @@ Baseline:
                                                      role-specific source
                                                      exists)
 
-Two execution modes are planned:
+Two execution modes:
 
   --writer-agent ""        Direct mode (default). Spawns a one-shot
                            subprocess of the configured provider; no
                            Gas City agent is involved. Useful for
                            bootstrap and offline-friendly invocations.
 
-  --writer-agent <name>    Slingued mode (NOT YET IMPLEMENTED, returns
-                           an error). Will sling the synth as work to
-                           the named agent via mol-prompt-synth, with
-                           the result written by the agent's session.
+  --writer-agent <name>    Slingued mode. Creates a bead and slings the
+                           synth as work to the named agent via the
+                           mol-prompt-synth formula; the agent's
+                           session reads the meta-prompt, generates the
+                           prompt, and writes it to the destination.
+
+                           Async by default — the CLI prints the bead
+                           ID + destination and returns immediately;
+                           use 'gc bd show <id>' to track progress.
+                           Pass --wait to block until the agent closes
+                           the bead (or --wait-timeout fires).
 
 The output is LLM-generated. Review it carefully before relying on it.
 When --write is used, a comment header records the inputs and generation
@@ -161,8 +171,10 @@ date for traceability.`,
 	cmd.Flags().StringVar(&opts.role, "role", "", "agent role to design (required, e.g. mayor, polecat, witness)")
 	cmd.Flags().StringVar(&opts.provider, "provider", "", "target AI provider key (default: city.toml workspace.provider)")
 	cmd.Flags().StringVar(&opts.rig, "rig", "", "rig name from city.toml (default: empty = city/HQ context, no rig)")
-	cmd.Flags().StringVar(&opts.writerAgent, "writer-agent", "", "Gas City agent to delegate the synth to (default: empty = direct mode, no agent). NOTE: slingued mode not yet implemented")
-	cmd.Flags().BoolVar(&opts.write, "write", false, "write to <city>/agents/<role>/prompt.template.md instead of stdout")
+	cmd.Flags().StringVar(&opts.writerAgent, "writer-agent", "", "Gas City agent to delegate the synth to via mol-prompt-synth (default: empty = direct mode, no agent)")
+	cmd.Flags().BoolVar(&opts.wait, "wait", false, "in slingued mode, block until the agent closes the bead")
+	cmd.Flags().DurationVar(&opts.waitTimeout, "wait-timeout", 10*time.Minute, "in slingued mode with --wait, abort after this duration")
+	cmd.Flags().BoolVar(&opts.write, "write", false, "write to <city>/agents/<role>/prompt.template.md instead of stdout (direct mode only; slingued mode always writes)")
 	cmd.Flags().BoolVar(&opts.force, "force", false, "with --write, overwrite the destination if it exists")
 	cmd.Flags().StringVar(&opts.city, "city", "", "city path (default: auto-resolve)")
 	cmd.Flags().StringVar(&opts.metaPromptOverride, "meta-prompt", "", "override the embedded meta-prompt with a file path")
@@ -171,15 +183,6 @@ date for traceability.`,
 }
 
 func runPromptSynth(ctx context.Context, opts promptSynthOpts, runner promptSynthRunner, stdout, stderr io.Writer) error {
-	if strings.TrimSpace(opts.writerAgent) != "" {
-		// Slingued mode lives in step 3 (mol-prompt-synth formula +
-		// auto-trigger from `gc agent add --synth`). The flag is wired
-		// up here so the CLI surface stays stable across releases —
-		// scripts and users can target the final form without having
-		// to update later. Until step 3 lands, fail loudly rather than
-		// silently fall back to direct mode (would mask user intent).
-		return fmt.Errorf("--writer-agent=%q: slingued mode not yet implemented (planned for the next PR); use --writer-agent='' for direct mode", opts.writerAgent)
-	}
 	cityPath, err := resolveCityForSynth(opts.city)
 	if err != nil {
 		return fmt.Errorf("resolve city: %w", err)
@@ -189,6 +192,7 @@ func runPromptSynth(ctx context.Context, opts promptSynthOpts, runner promptSynt
 		return fmt.Errorf("load city config: %w", err)
 	}
 
+	role := strings.TrimSpace(opts.role)
 	providerKey := strings.TrimSpace(opts.provider)
 	if providerKey == "" {
 		providerKey = strings.TrimSpace(cfg.Workspace.Provider)
@@ -196,6 +200,22 @@ func runPromptSynth(ctx context.Context, opts promptSynthOpts, runner promptSynt
 	if providerKey == "" {
 		return errors.New("no provider specified and city.toml has no workspace.provider; pass --provider")
 	}
+
+	mctx, err := buildMetaPromptCtx(opts, cfg, cityPath, role, providerKey)
+	if err != nil {
+		return err
+	}
+	rendered, err := renderConfiguredMetaPrompt(opts, mctx)
+	if err != nil {
+		return err
+	}
+
+	if strings.TrimSpace(opts.writerAgent) != "" {
+		return runSlinguedSynth(ctx, opts, cfg, cityPath, role, rendered, mctx, stdout, stderr)
+	}
+
+	// Direct mode: resolve provider fully (need PrintArgs) and invoke
+	// the subprocess ourselves.
 	resolved, err := config.ResolveProvider(&config.Agent{Provider: providerKey}, &cfg.Workspace, cfg.Providers, exec.LookPath)
 	if err != nil {
 		return fmt.Errorf("resolve provider %q: %w", providerKey, err)
@@ -203,23 +223,28 @@ func runPromptSynth(ctx context.Context, opts promptSynthOpts, runner promptSynt
 	if len(resolved.PrintArgs) == 0 {
 		return fmt.Errorf("provider %q does not support one-shot mode (no print_args configured)", resolved.Name)
 	}
+	return runDirectSynth(ctx, opts, cityPath, role, rendered, mctx, resolved, runner, stdout, stderr)
+}
 
-	role := strings.TrimSpace(opts.role)
+// buildMetaPromptCtx assembles the metaPromptCtx (provider info, context
+// type, baseline) shared by both direct and slingued modes. Provider
+// resolution here is name-only — full ResolveProvider is direct-mode-
+// specific (it requires PATH lookup for invocation).
+func buildMetaPromptCtx(opts promptSynthOpts, cfg *config.City, cityPath, role, providerKey string) (metaPromptCtx, error) {
 	mctx := metaPromptCtx{
 		Role:                role,
-		ProviderKey:         resolved.Name,
-		ProviderDisplayName: providerDisplayNameFor(resolved.Name, cfg.Providers),
+		ProviderKey:         providerKey,
+		ProviderDisplayName: providerDisplayNameFor(providerKey, cfg.Providers),
 		CityName:            strings.TrimSpace(cfg.Workspace.Name),
 		CityPath:            cityPath,
 	}
 	if mctx.CityName == "" {
 		mctx.CityName = filepath.Base(cityPath)
 	}
-
 	if rigName := strings.TrimSpace(opts.rig); rigName != "" {
 		rig := findRigByName(rigName, cfg.Rigs)
 		if rig == nil {
-			return fmt.Errorf("rig %q not found in city.toml; known: %s", rigName, knownRigNames(cfg.Rigs))
+			return metaPromptCtx{}, fmt.Errorf("rig %q not found in city.toml; known: %s", rigName, knownRigNames(cfg.Rigs))
 		}
 		mctx.ContextType = "rig"
 		mctx.RigName = rig.Name
@@ -228,24 +253,31 @@ func runPromptSynth(ctx context.Context, opts promptSynthOpts, runner promptSynt
 	} else {
 		mctx.ContextType = "city"
 	}
-
 	mctx.Baseline, mctx.BaselineSource, mctx.HasOwnBaseline = loadBaselinePrompt(cityPath, role)
+	return mctx, nil
+}
 
+// renderConfiguredMetaPrompt loads the meta-prompt source (embedded or
+// override path from --meta-prompt) and renders it against mctx.
+func renderConfiguredMetaPrompt(opts promptSynthOpts, mctx metaPromptCtx) (string, error) {
 	metaSource := metaAgentAuthorPrompt
 	if opts.metaPromptOverride != "" {
-		metaSource, err = os.ReadFile(opts.metaPromptOverride)
+		data, err := os.ReadFile(opts.metaPromptOverride)
 		if err != nil {
-			return fmt.Errorf("read meta-prompt override: %w", err)
+			return "", fmt.Errorf("read meta-prompt override: %w", err)
 		}
+		metaSource = data
 	}
 	rendered, err := renderMetaPrompt(string(metaSource), mctx)
 	if err != nil {
-		return fmt.Errorf("render meta-prompt: %w", err)
+		return "", fmt.Errorf("render meta-prompt: %w", err)
 	}
+	return rendered, nil
+}
 
-	// Working directory for the subprocess: rig path when targeting a
-	// rig (so the LLM has CWD context for any tools it might invoke),
-	// otherwise the city path.
+// runDirectSynth is the no-agent path: spawn a one-shot subprocess of
+// the resolved provider, capture stdout, and either print or --write.
+func runDirectSynth(ctx context.Context, opts promptSynthOpts, cityPath, role, rendered string, mctx metaPromptCtx, resolved *config.ResolvedProvider, runner promptSynthRunner, stdout, stderr io.Writer) error {
 	workDir := mctx.CityPath
 	if mctx.ContextType == "rig" && mctx.RigPath != "" {
 		workDir = mctx.RigPath
@@ -260,7 +292,6 @@ func runPromptSynth(ctx context.Context, opts promptSynthOpts, runner promptSynt
 	if out == "" {
 		return errors.New("provider returned empty output")
 	}
-
 	if opts.write {
 		dst, err := writePromptOutput(cityPath, role, opts.force, mctx, out)
 		if err != nil {
@@ -269,10 +300,8 @@ func runPromptSynth(ctx context.Context, opts promptSynthOpts, runner promptSynt
 		fmt.Fprintf(stderr, "gc prompt synth: wrote %s — review before use\n", dst) //nolint:errcheck // best-effort stderr
 		return nil
 	}
-	if _, err := fmt.Fprintln(stdout, out); err != nil {
-		return err
-	}
-	return nil
+	_, err = fmt.Fprintln(stdout, out)
+	return err
 }
 
 func resolveCityForSynth(override string) (string, error) {
@@ -284,6 +313,189 @@ func resolveCityForSynth(override string) (string, error) {
 		return abs, nil
 	}
 	return resolveCity()
+}
+
+// slinguedSynthDeps groups the pluggable side-effects of slingued mode
+// so tests can swap real bead-store / sling-subprocess interactions for
+// fakes without spinning up a city.
+type slinguedSynthDeps struct {
+	storeOpener func(cityPath string) (beads.Store, error)
+	slingCaller func(ctx context.Context, args []string) error
+	now         func() time.Time
+	waitTick    time.Duration
+}
+
+// defaultSlinguedSynthDeps is the production wiring: real city bead
+// store, exec-based sling delegation, real clock, 2-second poll cadence.
+var defaultSlinguedSynthDeps = slinguedSynthDeps{
+	storeOpener: openCityStoreAt,
+	slingCaller: defaultSlingCaller,
+	now:         time.Now,
+	waitTick:    2 * time.Second,
+}
+
+// defaultSlingCaller invokes `gc sling <args...>` as a subprocess of the
+// running binary. The sling logic itself stays in cmd_sling.go — we
+// re-enter via subprocess to avoid duplicating the routing/convoy/event
+// machinery in this file.
+func defaultSlingCaller(ctx context.Context, args []string) error {
+	bin, err := os.Executable()
+	if err != nil {
+		bin = os.Args[0]
+	}
+	cmd := exec.CommandContext(ctx, bin, append([]string{"sling"}, args...)...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if out, err := cmd.Output(); err != nil {
+		stderrText := strings.TrimSpace(stderr.String())
+		if stderrText != "" {
+			return fmt.Errorf("%w (stderr: %s)", err, stderrText)
+		}
+		_ = out
+		return err
+	}
+	return nil
+}
+
+// runSlinguedSynth is the writer-agent path: write the rendered
+// meta-prompt to a staging file, create a bead, sling it to the
+// writer-agent via mol-prompt-synth, and (optionally with --wait)
+// poll the bead until the agent closes it.
+func runSlinguedSynth(ctx context.Context, opts promptSynthOpts, cfg *config.City, cityPath, role, rendered string, mctx metaPromptCtx, stdout, stderr io.Writer) error {
+	return runSlinguedSynthWithDeps(ctx, opts, cfg, cityPath, role, rendered, mctx, defaultSlinguedSynthDeps, stdout, stderr)
+}
+
+func runSlinguedSynthWithDeps(ctx context.Context, opts promptSynthOpts, cfg *config.City, cityPath, role, rendered string, mctx metaPromptCtx, deps slinguedSynthDeps, stdout, stderr io.Writer) error {
+	writerAgent := strings.TrimSpace(opts.writerAgent)
+	if !agentExistsInCity(writerAgent, cfg) {
+		return fmt.Errorf("writer-agent %q not found in city.toml; known: %s", writerAgent, knownAgentNames(cfg.Agents))
+	}
+
+	destPath := filepath.Join(cityPath, "agents", role, "prompt.template.md")
+	if !opts.force {
+		if _, err := os.Stat(destPath); err == nil {
+			return fmt.Errorf("destination %s exists; pass --force to overwrite (slingued mode always writes)", destPath)
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+		return fmt.Errorf("prepare dest dir: %w", err)
+	}
+
+	stagingDir := filepath.Join(cityPath, ".gc", "synth")
+	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
+		return fmt.Errorf("prepare synth staging dir: %w", err)
+	}
+	stamp := deps.now().UTC().Format("20060102-150405")
+	metaPath := filepath.Join(stagingDir, fmt.Sprintf("%s-%s.meta.md", role, stamp))
+	if err := os.WriteFile(metaPath, []byte(rendered), 0o644); err != nil {
+		return fmt.Errorf("write staged meta-prompt: %w", err)
+	}
+
+	store, err := deps.storeOpener(cityPath)
+	if err != nil {
+		return fmt.Errorf("open city bead store: %w", err)
+	}
+
+	contextDescription := fmt.Sprintf("city %q", mctx.CityName)
+	if mctx.ContextType == "rig" {
+		contextDescription = fmt.Sprintf("rig %q at %s", mctx.RigName, mctx.RigPath)
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:       fmt.Sprintf("Synth prompt for %s", role),
+		Description: fmt.Sprintf("Generate the %s prompt template via mol-prompt-synth.\n\nContext: %s\nDestination: %s\nMeta-prompt: %s\nWriter agent: %s\n", role, contextDescription, destPath, metaPath, writerAgent),
+		Type:        "task",
+		Metadata: map[string]string{
+			"synth_role":      role,
+			"synth_dest":      destPath,
+			"synth_meta_path": metaPath,
+			"synth_writer":    writerAgent,
+			"synth_context":   mctx.ContextType,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("create synth bead: %w", err)
+	}
+
+	slingArgs := []string{
+		writerAgent, bead.ID,
+		"--on", "mol-prompt-synth",
+		"--var", "meta_prompt_path=" + metaPath,
+		"--var", "dest_path=" + destPath,
+		"--var", "synth_role=" + role,
+	}
+	if err := deps.slingCaller(ctx, slingArgs); err != nil {
+		return fmt.Errorf("sling %s to %s: %w", bead.ID, writerAgent, err)
+	}
+
+	fmt.Fprintf(stdout, "Slung mol-prompt-synth to %s. Bead %s created.\n", writerAgent, bead.ID) //nolint:errcheck
+	fmt.Fprintf(stdout, "Watch progress:  gc bd show %s\n", bead.ID)                              //nolint:errcheck
+	fmt.Fprintf(stdout, "On completion:   %s\n", destPath)                                        //nolint:errcheck
+
+	if !opts.wait {
+		return nil
+	}
+	return waitForSynthBeadClose(ctx, store, bead.ID, destPath, opts.waitTimeout, deps, stdout, stderr)
+}
+
+// waitForSynthBeadClose polls the bead store until the bead is closed,
+// the context is canceled, or the timeout fires. Cadence comes from
+// deps.waitTick (2s in production, smaller in tests).
+func waitForSynthBeadClose(ctx context.Context, store beads.Store, beadID, destPath string, timeout time.Duration, deps slinguedSynthDeps, stdout, stderr io.Writer) error {
+	if timeout <= 0 {
+		timeout = 10 * time.Minute
+	}
+	deadline := deps.now().Add(timeout)
+	fmt.Fprintf(stderr, "gc prompt synth: waiting for %s to close (timeout %s)...\n", beadID, timeout) //nolint:errcheck
+
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		b, err := store.Get(beadID)
+		if err != nil {
+			return fmt.Errorf("poll bead %s: %w", beadID, err)
+		}
+		if b.Status == "closed" {
+			fmt.Fprintf(stdout, "Bead %s closed. Result at %s\n", beadID, destPath) //nolint:errcheck
+			return nil
+		}
+		if deps.now().After(deadline) {
+			return fmt.Errorf("timed out after %s waiting for bead %s; check `gc bd show %s`", timeout, beadID, beadID)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(deps.waitTick):
+		}
+	}
+}
+
+// agentExistsInCity reports whether name matches a configured agent's
+// short name or qualified name.
+func agentExistsInCity(name string, cfg *config.City) bool {
+	if name == "" || cfg == nil {
+		return false
+	}
+	for i := range cfg.Agents {
+		a := cfg.Agents[i]
+		if a.Name == name || a.QualifiedName() == name || a.BindingQualifiedName() == name {
+			return true
+		}
+	}
+	return false
+}
+
+// knownAgentNames returns a comma-separated list of qualified agent
+// names for use in error messages.
+func knownAgentNames(agents []config.Agent) string {
+	names := make([]string, 0, len(agents))
+	for i := range agents {
+		names = append(names, agents[i].QualifiedName())
+	}
+	if len(names) == 0 {
+		return "(none configured)"
+	}
+	return strings.Join(names, ", ")
 }
 
 // renderMetaPrompt parses source as a Go text/template with [[ ]]
