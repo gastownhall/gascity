@@ -79,7 +79,7 @@ github_release_asset_sha() {
   if [[ -n "${GITHUB_TOKEN:-}" ]]; then
     auth_header=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
   fi
-  curl -fsSL "${auth_header[@]}" \
+  curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --retry-connrefused "${auth_header[@]}" \
     -H "Accept: application/vnd.github+json" \
     "https://api.github.com/repos/${owner_repo}/releases/tags/${tag}" \
     | jq -r --arg asset "$asset" '.assets[] | select(.name == $asset) | .digest // empty' \
@@ -139,7 +139,7 @@ if [[ -x "$target" ]]; then
 else
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
-  curl -fsSL -o "${tmp}/${archive}" \
+  curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --retry-connrefused -o "${tmp}/${archive}" \
     "https://github.com/gastownhall/beads/releases/download/${version}/${archive}"
   actual_sha="$(sha256_file "${tmp}/${archive}")"
   if [[ "$actual_sha" != "$expected_sha" ]]; then
