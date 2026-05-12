@@ -528,7 +528,6 @@ func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtim
 		target.sessionName,
 		strings.TrimSpace(target.providerName()),
 		strings.TrimSpace(target.sessionTransport()),
-		nil,
 	)
 }
 

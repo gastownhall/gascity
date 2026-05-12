@@ -1032,7 +1032,7 @@ func TestWorkerNudgeDeliveryForMode(t *testing.T) {
 }
 
 func TestRuntimeWorkerHandleWithConfigRequiresProvider(t *testing.T) {
-	_, err := runtimeWorkerHandleWithConfig(nil, nil, "legacy-worker", "codex", "", nil)
+	_, err := runtimeWorkerHandleWithConfig(nil, nil, "legacy-worker", "codex", "")
 	if !errors.Is(err, session.ErrSessionNotFound) {
 		t.Fatalf("runtimeWorkerHandleWithConfig err = %v, want %v", err, session.ErrSessionNotFound)
 	}
@@ -1053,7 +1053,7 @@ func TestRuntimeWorkerHandleWithConfigPassesResolvedWaitIdleCapability(t *testin
 		},
 	}
 
-	handle, err := runtimeWorkerHandleWithConfig(sp, cfg, "legacy-worker", "codex", "", nil)
+	handle, err := runtimeWorkerHandleWithConfig(sp, cfg, "legacy-worker", "codex", "")
 	if err != nil {
 		t.Fatalf("runtimeWorkerHandleWithConfig: %v", err)
 	}

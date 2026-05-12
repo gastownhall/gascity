@@ -1331,7 +1331,6 @@ func startPreparedStartCandidate(
 			item.candidate.name(),
 			item.candidate.name(),
 			"",
-			nil,
 		)
 		if err != nil {
 			return false, err

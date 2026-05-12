@@ -348,7 +348,6 @@ func runtimeWorkerHandleWithConfig(
 	sessionName string,
 	providerName string,
 	transport string,
-	processNames []string,
 ) (worker.Handle, error) {
 	if sp == nil {
 		return nil, session.ErrSessionNotFound
@@ -358,7 +357,6 @@ func runtimeWorkerHandleWithConfig(
 		SessionName:  sessionName,
 		ProviderName: providerName,
 		Transport:    transport,
-		ProcessNames: processNames,
 	}
 	if resolved, ok := config.ResolvedProviderCached(cfg, providerName); ok {
 		v := resolved.SupportsWaitIdleNudge
