@@ -12,24 +12,78 @@ text/template engine.
 [[ .ProviderDisplayName ]] (key: `[[ .ProviderKey ]]`)
 
 When you reference provider-specific UX (slash commands, command palette,
-extension points, etc.), tailor the wording to this provider. If you find
-yourself wanting to phrase the same idea differently for different
-providers, use the provider-aware fragment pattern documented below.
+extension points, etc.), tailor the wording to this provider. If the same
+idea would be phrased differently for different providers, use the
+provider-aware fragment pattern documented at the end of this brief.
 
-# Project context
+# Context type: [[ .ContextType ]]
 
-- Name: [[ .ProjectName ]]
-- Path: [[ .ProjectPath ]]
-- City root: [[ .CityRoot ]]
+[[ if eq .ContextType "rig" -]]
+This agent is attached to a registered rig (project repository):
 
-When project-specific guidance helps the agent (e.g. mentioning the
-project name in the identity section), use these values directly.
+- Rig name:        [[ .RigName ]]
+- Rig path:        [[ .RigPath ]]
+- Default branch:  [[ if .RigDefaultBranch ]][[ .RigDefaultBranch ]][[ else ]](unknown — probe at runtime)[[ end ]]
+- City name:       [[ .CityName ]]
+- City path:       [[ .CityPath ]]
+
+The agent works **inside the rig's repository**. Its prompt should:
+- Mention the rig name and project context where it helps the agent
+  orient itself.
+- Cover git operations relevant to its role (branch management,
+  commits, push targets) — `{{ .DefaultBranch }}` is the merge base.
+- Reference `{{ .WorkDir }}` and `{{ .RigRoot }}` for path-anchored
+  instructions.
+[[ else -]]
+This agent is **HQ-only** — it operates at the city level, not inside
+any rig:
+
+- City name:  [[ .CityName ]]
+- City path:  [[ .CityPath ]]
+
+The agent does not work inside a project repository. Its prompt should:
+- Focus on coordination, dispatch, monitoring, and city-wide concerns.
+- **Avoid** git operations, branch management, or project-specific
+  guidance (no `{{ .DefaultBranch }}`, no `{{ .RigName }}`).
+- Reference `{{ .CityRoot }}` as the working anchor.
+[[ end ]]
+
+# Baseline to refine
+
+[[ if .Baseline -]]
+[[ if .HasOwnBaseline -]]
+The text below is the **current prompt template for [[ .Role ]]** (source:
+[[ .BaselineSource ]]). Refine it for the context above:
+
+- Keep the structure that already works.
+- Preserve every Gas City template placeholder (`{{ ... }}`) — these
+  get substituted at session-render time, **not** by you.
+- Adjust prose to match the target provider and context type.
+- Where prose would differ between providers, refactor to the
+  templateFirst pattern documented below (don't hardcode provider names
+  in prose).
+- Trim sections that don't apply; expand sections that do.
+[[ else -]]
+**No prompt currently exists for [[ .Role ]].** As a structural
+reference, here is the prompt for another role (source:
+[[ .BaselineSource ]]). Use it to understand the expected shape,
+section conventions, and template-syntax usage — but **adapt the
+content** for [[ .Role ]]. The reference is for shape, not for content.
+[[ end ]]
+```
+[[ .Baseline ]]
+```
+[[ else -]]
+No baseline exists. Design from scratch following the Gas City
+conventions documented below.
+[[ end ]]
 
 # Output format
 
-Output ONLY the markdown body of the prompt template. No code fences, no
-preamble, no commentary, no surrounding explanation. Start directly with
-the prompt content (typically a top-level heading like `# [[ .Role ]] Context`).
+Output ONLY the markdown body of the prompt template. No code fences
+around the whole output, no preamble, no commentary, no surrounding
+explanation. Start directly with the prompt content (typically a
+top-level heading like `# [[ .Role ]] Context`).
 
 # Template variables you may reference in the output
 
@@ -39,7 +93,7 @@ verbatim — they get substituted at session-start time, not by you:
 - `{{ .CityRoot }}`              absolute path to the city directory
 - `{{ .ProviderKey }}`           "claude", "codex", etc.
 - `{{ .ProviderDisplayName }}`   "Claude Code", "Codex CLI", etc.
-- `{{ .RigName }}`               current rig name (may be empty for HQ-only agents)
+- `{{ .RigName }}`               current rig name (empty for HQ agents)
 - `{{ .RigRoot }}`               absolute path to the current rig
 - `{{ .WorkDir }}`               agent's working directory
 - `{{ .DefaultBranch }}`         git default branch (e.g. "main")
@@ -82,7 +136,5 @@ matches, the `note-default` fallback is used. Always include a
 - **No invented commands**: every `gc …` command you mention must
   correspond to a real subcommand. When in doubt, reference
   `gc <cmd> --help` rather than guessing the exact subcommand shape.
-- **Reference [[ .ProjectName ]]** specifically when project-specific
-  guidance helps (e.g. in the identity section).
 
 Output the prompt template now.

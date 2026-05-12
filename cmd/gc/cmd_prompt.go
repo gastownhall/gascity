@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"text/template"
 	"time"
@@ -30,8 +31,7 @@ type promptSynthRunner func(ctx context.Context, provider *config.ResolvedProvid
 type promptSynthOpts struct {
 	role               string
 	provider           string
-	project            string
-	projectName        string
+	rig                string
 	writerAgent        string
 	write              bool
 	force              bool
@@ -46,9 +46,30 @@ type metaPromptCtx struct {
 	Role                string
 	ProviderKey         string
 	ProviderDisplayName string
-	ProjectPath         string
-	ProjectName         string
-	CityRoot            string
+
+	// ContextType discriminates the agent's runtime scope: "rig" when
+	// the agent is attached to a registered project repository,
+	// "city" when the agent is HQ-only (mayor, deacon, etc.).
+	ContextType string
+
+	// City* fields are populated regardless of ContextType — every
+	// agent runs inside a city.
+	CityName string
+	CityPath string
+
+	// Rig* fields are populated only when ContextType == "rig".
+	RigName          string
+	RigPath          string
+	RigDefaultBranch string
+
+	// Baseline carries the existing prompt content (if any) for the
+	// LLM to refine rather than design from scratch. BaselineSource
+	// records where it came from so the meta-prompt can be honest about
+	// whether this is "the current template" or "a structural reference
+	// from another role".
+	Baseline       string
+	BaselineSource string
+	HasOwnBaseline bool
 }
 
 func newPromptCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -85,10 +106,30 @@ The default behaviour prints the generated prompt to stdout. Pass --write
 to save it directly to <city>/agents/<role>/prompt.template.md (use --force
 to overwrite an existing file).
 
+Context type is determined by --rig:
+
+  (no --rig)     City context. The agent is HQ-only and operates at
+                 the city level (e.g. mayor, deacon). The meta-prompt
+                 emphasizes coordination, dispatch, monitoring.
+  --rig <name>   Rig context. The agent is attached to the named rig
+                 (looked up in city.toml). The meta-prompt includes
+                 the rig path, default branch, and project-aware
+                 guidance (git operations, branch management, etc.).
+
 Auto-detection:
   --provider     defaults to workspace.provider in city.toml
-  --project      defaults to current working directory
-  --project-name defaults to basename(--project)
+
+Baseline:
+  The synth pulls in an existing prompt template as a refinement
+  baseline so the LLM iterates on a known-good shape rather than
+  designing from scratch. Resolution priority:
+    1. <city>/agents/<role>/prompt.template.md     (user customization)
+    2. <city>/.gc/system/packs/*/agents/<role>/    (pack default)
+    3. embedded prompts/<role>.md                  (built-in fallback)
+    4. embedded prompts/mayor.md                   (structural reference,
+                                                     used only when no
+                                                     role-specific source
+                                                     exists)
 
 Two execution modes are planned:
 
@@ -119,8 +160,7 @@ date for traceability.`,
 	}
 	cmd.Flags().StringVar(&opts.role, "role", "", "agent role to design (required, e.g. mayor, polecat, witness)")
 	cmd.Flags().StringVar(&opts.provider, "provider", "", "target AI provider key (default: city.toml workspace.provider)")
-	cmd.Flags().StringVar(&opts.project, "project", "", "project root path (default: cwd)")
-	cmd.Flags().StringVar(&opts.projectName, "project-name", "", "project display name (default: basename of --project)")
+	cmd.Flags().StringVar(&opts.rig, "rig", "", "rig name from city.toml (default: empty = city/HQ context, no rig)")
 	cmd.Flags().StringVar(&opts.writerAgent, "writer-agent", "", "Gas City agent to delegate the synth to (default: empty = direct mode, no agent). NOTE: slingued mode not yet implemented")
 	cmd.Flags().BoolVar(&opts.write, "write", false, "write to <city>/agents/<role>/prompt.template.md instead of stdout")
 	cmd.Flags().BoolVar(&opts.force, "force", false, "with --write, overwrite the destination if it exists")
@@ -164,21 +204,32 @@ func runPromptSynth(ctx context.Context, opts promptSynthOpts, runner promptSynt
 		return fmt.Errorf("provider %q does not support one-shot mode (no print_args configured)", resolved.Name)
 	}
 
-	projectPath := strings.TrimSpace(opts.project)
-	if projectPath == "" {
-		projectPath, err = os.Getwd()
-		if err != nil {
-			return fmt.Errorf("get cwd: %w", err)
+	role := strings.TrimSpace(opts.role)
+	mctx := metaPromptCtx{
+		Role:                role,
+		ProviderKey:         resolved.Name,
+		ProviderDisplayName: providerDisplayNameFor(resolved.Name, cfg.Providers),
+		CityName:            strings.TrimSpace(cfg.Workspace.Name),
+		CityPath:            cityPath,
+	}
+	if mctx.CityName == "" {
+		mctx.CityName = filepath.Base(cityPath)
+	}
+
+	if rigName := strings.TrimSpace(opts.rig); rigName != "" {
+		rig := findRigByName(rigName, cfg.Rigs)
+		if rig == nil {
+			return fmt.Errorf("rig %q not found in city.toml; known: %s", rigName, knownRigNames(cfg.Rigs))
 		}
+		mctx.ContextType = "rig"
+		mctx.RigName = rig.Name
+		mctx.RigPath = rig.Path
+		mctx.RigDefaultBranch = rig.EffectiveDefaultBranch()
+	} else {
+		mctx.ContextType = "city"
 	}
-	projectPath, err = filepath.Abs(projectPath)
-	if err != nil {
-		return fmt.Errorf("abs project path: %w", err)
-	}
-	projectName := strings.TrimSpace(opts.projectName)
-	if projectName == "" {
-		projectName = filepath.Base(projectPath)
-	}
+
+	mctx.Baseline, mctx.BaselineSource, mctx.HasOwnBaseline = loadBaselinePrompt(cityPath, role)
 
 	metaSource := metaAgentAuthorPrompt
 	if opts.metaPromptOverride != "" {
@@ -187,22 +238,21 @@ func runPromptSynth(ctx context.Context, opts promptSynthOpts, runner promptSynt
 			return fmt.Errorf("read meta-prompt override: %w", err)
 		}
 	}
-	displayName := providerDisplayNameFor(resolved.Name, cfg.Providers)
-	rendered, err := renderMetaPrompt(string(metaSource), metaPromptCtx{
-		Role:                strings.TrimSpace(opts.role),
-		ProviderKey:         resolved.Name,
-		ProviderDisplayName: displayName,
-		ProjectPath:         projectPath,
-		ProjectName:         projectName,
-		CityRoot:            cityPath,
-	})
+	rendered, err := renderMetaPrompt(string(metaSource), mctx)
 	if err != nil {
 		return fmt.Errorf("render meta-prompt: %w", err)
 	}
 
+	// Working directory for the subprocess: rig path when targeting a
+	// rig (so the LLM has CWD context for any tools it might invoke),
+	// otherwise the city path.
+	workDir := mctx.CityPath
+	if mctx.ContextType == "rig" && mctx.RigPath != "" {
+		workDir = mctx.RigPath
+	}
 	callCtx, cancel := context.WithTimeout(ctx, synthTimeout)
 	defer cancel()
-	out, err := runner(callCtx, resolved, rendered, projectPath)
+	out, err := runner(callCtx, resolved, rendered, workDir)
 	if err != nil {
 		return fmt.Errorf("synth via %s: %w", resolved.Command, err)
 	}
@@ -212,7 +262,7 @@ func runPromptSynth(ctx context.Context, opts promptSynthOpts, runner promptSynt
 	}
 
 	if opts.write {
-		dst, err := writePromptOutput(cityPath, opts.role, opts.force, projectPath, projectName, resolved.Name, displayName, out)
+		dst, err := writePromptOutput(cityPath, role, opts.force, mctx, out)
 		if err != nil {
 			return err
 		}
@@ -254,8 +304,9 @@ func renderMetaPrompt(source string, ctx metaPromptCtx) (string, error) {
 
 // writePromptOutput writes body to <cityPath>/agents/<role>/prompt.template.md.
 // When force is false and the destination exists, returns an error rather
-// than clobbering. Prepends a comment header recording the synth inputs.
-func writePromptOutput(cityPath, role string, force bool, projectPath, projectName, providerKey, providerDisplayName, body string) (string, error) {
+// than clobbering. Prepends a comment header recording the synth inputs
+// (role, provider, context type, baseline source) for traceability.
+func writePromptOutput(cityPath, role string, force bool, mctx metaPromptCtx, body string) (string, error) {
 	dst := filepath.Join(cityPath, "agents", role, "prompt.template.md")
 	if !force {
 		if _, err := os.Stat(dst); err == nil {
@@ -265,19 +316,102 @@ func writePromptOutput(cityPath, role string, force bool, projectPath, projectNa
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return "", err
 	}
+	contextLine := fmt.Sprintf("city %q (%s)", mctx.CityName, mctx.CityPath)
+	if mctx.ContextType == "rig" {
+		contextLine = fmt.Sprintf("rig %q at %s (city %q)", mctx.RigName, mctx.RigPath, mctx.CityName)
+	}
+	baselineLine := "none"
+	if mctx.BaselineSource != "" {
+		baselineLine = mctx.BaselineSource
+	}
 	header := fmt.Sprintf(`<!--
 Generated by `+"`"+`gc prompt synth`+"`"+` on %s.
   role:     %s
   provider: %s (%s)
-  project:  %s (%s)
+  context:  %s
+  baseline: %s
 LLM-generated content. Review carefully before relying on it.
 -->
 
-`, time.Now().UTC().Format("2006-01-02"), role, providerKey, providerDisplayName, projectName, projectPath)
+`, time.Now().UTC().Format("2006-01-02"), role, mctx.ProviderKey, mctx.ProviderDisplayName, contextLine, baselineLine)
 	if err := os.WriteFile(dst, []byte(header+body+"\n"), 0o644); err != nil {
 		return "", err
 	}
 	return dst, nil
+}
+
+// findRigByName returns the matching rig (by Name) from the configured
+// list, or nil when none matches.
+func findRigByName(name string, rigs []config.Rig) *config.Rig {
+	for i := range rigs {
+		if rigs[i].Name == name {
+			return &rigs[i]
+		}
+	}
+	return nil
+}
+
+// knownRigNames returns a comma-separated list of configured rig names
+// for use in error messages.
+func knownRigNames(rigs []config.Rig) string {
+	names := make([]string, 0, len(rigs))
+	for i := range rigs {
+		names = append(names, rigs[i].Name)
+	}
+	if len(names) == 0 {
+		return "(none configured)"
+	}
+	return strings.Join(names, ", ")
+}
+
+// loadBaselinePrompt finds an existing prompt template to feed the LLM
+// as a refinement baseline. Returns the content, a human-readable
+// source descriptor (for the meta-prompt and the file header), and a
+// flag indicating whether the baseline is role-specific (vs a
+// structural reference borrowed from another role).
+//
+// Resolution priority:
+//  1. <cityPath>/agents/<role>/prompt.template.md (user customization)
+//  2. <cityPath>/.gc/system/packs/<any>/agents/<role>/prompt.template.md (pack default)
+//  3. embedded prompts/<role>.md (built-in fallback, only mayor today)
+//  4. embedded prompts/mayor.md (structural reference, last resort)
+func loadBaselinePrompt(cityPath, role string) (content, source string, ownToRole bool) {
+	if role == "" {
+		return "", "", false
+	}
+
+	// 1. User customization in the city.
+	userFile := filepath.Join(cityPath, "agents", role, "prompt.template.md")
+	if data, err := os.ReadFile(userFile); err == nil {
+		return string(data), fmt.Sprintf("city customization at agents/%s/prompt.template.md", role), true
+	}
+
+	// 2. Pack defaults — scan all materialized packs.
+	packGlob := filepath.Join(cityPath, ".gc", "system", "packs", "*", "agents", role, "prompt.template.md")
+	if matches, err := filepath.Glob(packGlob); err == nil {
+		sort.Strings(matches)
+		for _, m := range matches {
+			if data, err := os.ReadFile(m); err == nil {
+				rel, _ := filepath.Rel(cityPath, m)
+				return string(data), "pack default at " + rel, true
+			}
+		}
+	}
+
+	// 3. Embedded role-specific default.
+	if data, err := defaultPrompts.ReadFile("prompts/" + role + ".md"); err == nil {
+		return string(data), "embedded prompts/" + role + ".md", true
+	}
+
+	// 4. Embedded mayor as structural reference (only if role != "mayor"
+	// — otherwise we'd have returned at step 3).
+	if role != "mayor" {
+		if data, err := defaultPrompts.ReadFile("prompts/mayor.md"); err == nil {
+			return string(data), "embedded prompts/mayor.md (structural reference; no default exists for " + role + ")", false
+		}
+	}
+
+	return "", "", false
 }
 
 // defaultPromptSynthRunner runs the configured provider one-shot via
