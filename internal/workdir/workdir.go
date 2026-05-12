@@ -195,11 +195,20 @@ func samePath(a, b string) bool {
 
 // ValidateAncestorWorktreesNotStale walks path's ancestor chain and returns
 // an error when any ancestor has a regular-file ".git" worktree pointer
-// whose "gitdir:" target does not exist on disk. The walk stops as soon as
-// it encounters a valid ".git" marker (regular file with an existing target,
-// or a real ".git" directory) — anything further up is the main repo and is
-// not our concern. Reaching the filesystem root without finding a marker is
-// not an error.
+// whose "gitdir:" target is unusable. The walk stops as soon as it
+// encounters a ".git" marker — a regular file (with or without a gitdir
+// pointer) or a real ".git" directory. Reaching the filesystem root
+// without finding a marker is not an error.
+//
+// Failure modes that fail closed rather than silently allowing the spawn:
+//   - the regular-file ".git" exists but can't be read (I/O error)
+//   - the gitdir target doesn't exist on disk
+//   - the gitdir target exists but is not a directory (non-worktree-
+//     capable, e.g. a regular file at the expected admin-dir path)
+//
+// Relative gitdir targets are resolved against the directory holding
+// the ".git" file (Git's gitfile format), matching Git's own
+// interpretation rather than the process working directory.
 //
 // This is the spawn-time guard for gascity#1556: a stale worktree pointer
 // on an ancestor lets "git -C <rig-root> worktree add <child>" register a
@@ -217,21 +226,37 @@ func ValidateAncestorWorktreesNotStale(path string) error {
 		if err == nil {
 			if info.Mode().IsRegular() {
 				data, rerr := os.ReadFile(gitPath)
-				if rerr == nil {
-					content := strings.TrimSpace(string(data))
-					if strings.HasPrefix(content, "gitdir:") {
-						target := strings.TrimSpace(strings.TrimPrefix(content, "gitdir:"))
-						if _, terr := os.Stat(target); terr != nil {
-							return fmt.Errorf(
-								"worktree spawn rejected: ancestor %q has stale .git pointer (gitdir target %q does not exist): %w",
-								cur, target, terr)
-						}
+				if rerr != nil {
+					return fmt.Errorf(
+						"worktree spawn rejected: cannot read ancestor .git pointer at %q: %w",
+						gitPath, rerr)
+				}
+				content := strings.TrimSpace(string(data))
+				if strings.HasPrefix(content, "gitdir:") {
+					target := strings.TrimSpace(strings.TrimPrefix(content, "gitdir:"))
+					// Git's gitfile format: a relative gitdir target is
+					// resolved against the directory containing the .git
+					// file, not the process working directory.
+					if !filepath.IsAbs(target) {
+						target = filepath.Join(cur, target)
+					}
+					target = filepath.Clean(target)
+					targetInfo, terr := os.Stat(target)
+					if terr != nil {
+						return fmt.Errorf(
+							"worktree spawn rejected: ancestor %q has stale .git pointer (gitdir target %q does not exist): %w",
+							cur, target, terr)
+					}
+					if !targetInfo.IsDir() {
+						return fmt.Errorf(
+							"worktree spawn rejected: ancestor %q has stale .git pointer (gitdir target %q is not a directory)",
+							cur, target)
 					}
 				}
-				// Either a valid worktree pointer or an unreadable/unrecognized
-				// .git file. In both cases we stop the walk — anything further
-				// up belongs to the surrounding repository and is git's
-				// responsibility, not ours.
+				// Either a valid worktree pointer or a .git file without a
+				// gitdir prefix. Either way we stop the walk — anything
+				// further up belongs to the surrounding repository and is
+				// git's responsibility, not ours.
 				return nil
 			}
 			if info.IsDir() {

@@ -335,3 +335,66 @@ func TestValidateAncestorWorktreesNotStale_WalkTerminatesAtFilesystemRoot(t *tes
 		t.Fatalf("ValidateAncestorWorktreesNotStale() = %v, want nil (no markers up to FS root)", err)
 	}
 }
+
+// PR #2033 review: a gitdir: target written as a relative path must be
+// resolved against the directory containing the .git file (Git's gitfile
+// format), not against the process working directory.
+func TestValidateAncestorWorktreesNotStale_RelativeGitdirTarget(t *testing.T) {
+	root := t.TempDir()
+	wtParent := filepath.Join(root, "repo", ".gc", "worktrees", "demo", "polecats", "furiosa")
+	// Absolute target on disk lives alongside the pointer parent, so a
+	// relative pointer "../../../.git/worktrees/furiosa" resolves to it.
+	absTarget := filepath.Join(root, "repo", ".git", "worktrees", "furiosa")
+	if err := os.MkdirAll(absTarget, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(wtParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	relTarget, err := filepath.Rel(wtParent, absTarget)
+	if err != nil {
+		t.Fatalf("filepath.Rel: %v", err)
+	}
+	gitFile := filepath.Join(wtParent, ".git")
+	if err := os.WriteFile(gitFile, []byte("gitdir: "+relTarget+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(wtParent, "child-spawn")
+	if err := ValidateAncestorWorktreesNotStale(target); err != nil {
+		t.Fatalf("ValidateAncestorWorktreesNotStale() = %v, want nil (relative gitdir should resolve against .git parent)", err)
+	}
+}
+
+// PR #2033 review: a gitdir target that exists on disk but is not a
+// directory (regular file, broken symlink, etc.) must be rejected with
+// the same shape as a missing target — the pointer is non-worktree-
+// capable and spawning into a descendant produces dangling content.
+func TestValidateAncestorWorktreesNotStale_GitdirTargetNotDirectory(t *testing.T) {
+	root := t.TempDir()
+	staleParent := filepath.Join(root, "repo", ".gc", "worktrees", "demo", "polecats", "furiosa")
+	if err := os.MkdirAll(staleParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Target exists but is a regular file rather than a worktree admin dir.
+	fileTarget := filepath.Join(root, "repo", ".git", "worktrees", "furiosa-file")
+	if err := os.MkdirAll(filepath.Dir(fileTarget), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fileTarget, []byte("not a directory\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitFile := filepath.Join(staleParent, ".git")
+	if err := os.WriteFile(gitFile, []byte("gitdir: "+fileTarget+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(staleParent, "child-spawn")
+	err := ValidateAncestorWorktreesNotStale(target)
+	if err == nil {
+		t.Fatal("ValidateAncestorWorktreesNotStale() = nil, want error (gitdir target is a file, not a directory)")
+	}
+	for _, want := range []string{staleParent, fileTarget, "not a directory"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing reference %q", err.Error(), want)
+		}
+	}
+}

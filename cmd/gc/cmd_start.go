@@ -918,8 +918,9 @@ func resolveConfiguredWorkDir(cityPath, cityName, qualifiedName string, a *confi
 	// Guard against spawning into a path whose ancestor has a stale
 	// worktree pointer — see gascity#1556. Fails closed before MkdirAll
 	// so the operator sees the broken ancestor instead of a structurally
-	// orphaned spawn.
-	if err := workdirutil.ValidateAncestorWorktreesNotStale(workdirutil.ResolveDirPath(cityPath, workDir)); err != nil {
+	// orphaned spawn. workDir is already absolute (ResolveWorkDirPathStrict
+	// returns through ResolveDirPath), so no further resolution is needed.
+	if err := workdirutil.ValidateAncestorWorktreesNotStale(workDir); err != nil {
 		return "", err
 	}
 	return resolveAgentDir(cityPath, workDir)
