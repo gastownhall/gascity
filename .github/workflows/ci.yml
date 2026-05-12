@@ -166,7 +166,6 @@ jobs:
     name: Preflight / unit cover
     needs:
       - runner-policy
-      - preflight-static
     # Coverage reporting only matters on the main branch — codecov regression
     # info doesn't need to gate every PR, and the full ./... unit suite is
     # already covered by integration-shards, cmd-gc-process, and acceptance A.
@@ -197,7 +196,6 @@ jobs:
     name: Preflight / acceptance A
     needs:
       - runner-policy
-      - preflight-static
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
       DOLT_VERSION: "1.86.6"
@@ -216,7 +214,6 @@ jobs:
     name: Preflight / generated artifacts
     needs:
       - runner-policy
-      - preflight-static
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
       # Make TestGeneratedClientInSync fatal on missing oapi-codegen so the
@@ -292,7 +289,6 @@ jobs:
     needs:
       - runner-policy
       - changes
-      - preflight-static
     if: needs.changes.outputs.cmd_gc_process == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     timeout-minutes: 15
@@ -320,7 +316,6 @@ jobs:
     needs:
       - runner-policy
       - changes
-      - preflight-static
     if: needs.changes.outputs.integration == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     timeout-minutes: ${{ matrix.timeout_minutes }}
@@ -420,7 +415,6 @@ jobs:
     needs:
       - runner-policy
       - changes
-      - preflight-static
     if: needs.changes.outputs.worker == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
@@ -455,7 +449,6 @@ jobs:
     needs:
       - runner-policy
       - changes
-      - preflight-static
     if: needs.changes.outputs.worker == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
@@ -490,7 +483,6 @@ jobs:
     needs:
       - runner-policy
       - changes
-      - preflight-static
     if: needs.changes.outputs.worker == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
@@ -525,7 +517,6 @@ jobs:
     needs:
       - runner-policy
       - changes
-      - preflight-static
       - worker-core-claude
       - worker-core-codex
       - worker-core-gemini
@@ -635,7 +626,6 @@ jobs:
     needs:
       - runner-policy
       - changes
-      - preflight-static
     if: needs.changes.outputs.worker_phase2 == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
@@ -674,7 +664,6 @@ jobs:
     needs:
       - runner-policy
       - changes
-      - preflight-static
     if: needs.changes.outputs.worker_phase2 == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
@@ -713,7 +702,6 @@ jobs:
     needs:
       - runner-policy
       - changes
-      - preflight-static
     if: needs.changes.outputs.worker_phase2 == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
@@ -890,7 +878,6 @@ jobs:
     name: Dashboard SPA
     needs:
       - runner-policy
-      - preflight-static
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -927,7 +914,6 @@ jobs:
     needs:
       - runner-policy
       - changes
-      - preflight-static
     if: needs.changes.outputs.mail == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_8vcpu }}
     continue-on-error: true  # upstream mcp_agent_mail API may drift
@@ -957,7 +943,6 @@ jobs:
     needs:
       - runner-policy
       - changes
-      - preflight-static
     if: needs.changes.outputs.docker == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     steps:
@@ -986,7 +971,6 @@ jobs:
     needs:
       - runner-policy
       - changes
-      - preflight-static
     if: needs.changes.outputs.k8s == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_8vcpu }}
     steps:
