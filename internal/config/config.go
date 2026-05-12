@@ -545,6 +545,12 @@ type AgentOverride struct {
 	Nudge *string `toml:"nudge,omitempty"`
 	// IdleTimeout overrides the idle timeout duration string (e.g., "30s", "5m", "1h").
 	IdleTimeout *string `toml:"idle_timeout,omitempty"`
+	// MaxSessionAge overrides the max session age. Duration string (e.g., "5h").
+	// Empty disables preemptive restart.
+	MaxSessionAge *string `toml:"max_session_age,omitempty"`
+	// MaxSessionAgeJitter overrides the jitter added on top of MaxSessionAge.
+	// Duration string (e.g., "15m"). Empty disables jitter.
+	MaxSessionAgeJitter *string `toml:"max_session_age_jitter,omitempty"`
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string (e.g., "30s") or "off".
 	SleepAfterIdle *string `toml:"sleep_after_idle,omitempty"`
@@ -1839,6 +1845,24 @@ type Agent struct {
 	// the controller kills and restarts it. Duration string (e.g., "15m", "1h").
 	// Empty (default) disables idle checking.
 	IdleTimeout string `toml:"idle_timeout,omitempty"`
+	// MaxSessionAge is the maximum wall-clock lifetime of a single runtime
+	// session before the controller preemptively restarts it. Duration string
+	// (e.g., "5h"). Empty (default) disables preemptive restarts. The restart
+	// is idle-gated: sessions with a pending interaction or an in-progress
+	// assigned work bead are left alone until they settle.
+	//
+	// Motivation: provider SDKs that cache credentials at session start (e.g.,
+	// Claude Code via Bedrock) can wedge when the underlying token expires if
+	// the SDK doesn't re-chain providers. Cycling long-running sessions before
+	// the token-expiry window prevents that failure mode without requiring
+	// upstream provider fixes.
+	MaxSessionAge string `toml:"max_session_age,omitempty"`
+	// MaxSessionAgeJitter bounds random jitter added to MaxSessionAge on a
+	// per-session basis so a fleet of identically-configured agents doesn't
+	// synchronize restarts. Duration string (e.g., "15m"). Empty or 0
+	// disables jitter (every session restarts at exactly MaxSessionAge).
+	// Ignored when MaxSessionAge is unset.
+	MaxSessionAgeJitter string `toml:"max_session_age_jitter,omitempty"`
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string (e.g., "30s") or "off".
 	SleepAfterIdle string `toml:"sleep_after_idle,omitempty"`
@@ -2054,6 +2078,36 @@ func (a *Agent) IdleTimeoutDuration() time.Duration {
 	}
 	d, err := time.ParseDuration(a.IdleTimeout)
 	if err != nil {
+		return 0
+	}
+	return d
+}
+
+// MaxSessionAgeDuration returns the maximum session age as a time.Duration.
+// Returns 0 if empty or unparseable (disabled: no preemptive restart).
+func (a *Agent) MaxSessionAgeDuration() time.Duration {
+	if a.MaxSessionAge == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(a.MaxSessionAge)
+	if err != nil {
+		return 0
+	}
+	return d
+}
+
+// MaxSessionAgeJitterDuration returns the jitter bound for max session age
+// as a time.Duration. Returns 0 when the jitter field is empty, unparseable,
+// or when MaxSessionAge itself is disabled.
+func (a *Agent) MaxSessionAgeJitterDuration() time.Duration {
+	if a.MaxSessionAgeDuration() == 0 {
+		return 0
+	}
+	if a.MaxSessionAgeJitter == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(a.MaxSessionAgeJitter)
+	if err != nil || d < 0 {
 		return 0
 	}
 	return d

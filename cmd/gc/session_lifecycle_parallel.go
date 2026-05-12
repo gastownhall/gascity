@@ -219,10 +219,11 @@ func (p startPhaseTimings) formatLog() string {
 }
 
 type startExecutionOptions struct {
-	async         bool
-	asyncFollowUp func()
-	asyncLimiter  *asyncStartLimiter
-	asyncTracker  *asyncStartTracker
+	async           bool
+	asyncFollowUp   func()
+	asyncLimiter    *asyncStartLimiter
+	asyncTracker    *asyncStartTracker
+	maxSessionAgeTr maxSessionAgeTracker
 }
 
 type startExecutionOption func(*startExecutionOptions)
@@ -248,6 +249,14 @@ func withAsyncStartLimiter(limiter *asyncStartLimiter) startExecutionOption {
 func withAsyncStartTracker(tracker *asyncStartTracker) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.asyncTracker = tracker
+	}
+}
+
+// withMaxSessionAgeTracker installs the preemptive-restart tracker for
+// this reconcile pass. Nil leaves preemptive restarts disabled.
+func withMaxSessionAgeTracker(tr maxSessionAgeTracker) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.maxSessionAgeTr = tr
 	}
 }
 

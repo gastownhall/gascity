@@ -383,6 +383,7 @@ func init() {
 	events.RegisterPayload(events.SessionUndrained, events.NoPayload{})
 	events.RegisterPayload(events.SessionQuarantined, events.NoPayload{})
 	events.RegisterPayload(events.SessionIdleKilled, events.NoPayload{})
+	events.RegisterPayload(events.SessionMaxAgeKilled, events.NoPayload{})
 	events.RegisterPayload(events.SessionSuspended, events.NoPayload{})
 	events.RegisterPayload(events.SessionUpdated, events.NoPayload{})
 	events.RegisterPayload(events.ConvoyCreated, events.NoPayload{})

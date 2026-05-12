@@ -61,6 +61,7 @@ type CityRuntime struct {
 	dops                    drainOps
 	ct                      crashTracker
 	it                      idleTracker
+	mat                     maxSessionAgeTracker
 	wg                      wispGC
 	od                      orderDispatcher
 	retiredOrderDispatchers []orderDispatcher
@@ -176,6 +177,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 	}
 
 	it := buildIdleTracker(p.Cfg, p.CityName, p.CityPath, p.SP)
+	mat := buildMaxSessionAgeTracker(p.Cfg, p.CityName, p.SP)
 
 	var wg wispGC
 	if p.Cfg.Daemon.WispGCEnabled() {
@@ -236,6 +238,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		dops:                    p.Dops,
 		ct:                      ct,
 		it:                      it,
+		mat:                     mat,
 		wg:                      wg,
 		od:                      od,
 		trace:                   newSessionReconcilerTraceManager(p.CityPath, p.CityName, p.Stderr),
@@ -1160,6 +1163,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	}
 
 	cr.it = buildIdleTracker(nextCfg, cr.cityName, cr.cityPath, nextSp)
+	cr.mat = buildMaxSessionAgeTracker(nextCfg, cr.cityName, nextSp)
 
 	if nextCfg.Daemon.WispGCEnabled() {
 		cr.wg = newWispGC(nextCfg.Daemon.WispGCIntervalDuration(),
@@ -1478,6 +1482,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		withAsyncStartFollowUp(cr.requestAsyncStartFollowUpTick),
 		withAsyncStartLimiter(cr.ensureAsyncStartLimiter()),
 		withAsyncStartTracker(&cr.asyncStarts),
+		withMaxSessionAgeTracker(cr.mat),
 	)
 	cr.requestDeferredDrainFollowUpTick()
 	if trace != nil {

@@ -34,14 +34,19 @@ const (
 	SessionUndrained   = "session.undrained"
 	SessionQuarantined = "session.quarantined"
 	SessionIdleKilled  = "session.idle_killed"
-	SessionSuspended   = "session.suspended"
-	SessionUpdated     = "session.updated"
-	ConvoyCreated      = "convoy.created"
-	ConvoyClosed       = "convoy.closed"
-	ControllerStarted  = "controller.started"
-	ControllerStopped  = "controller.stopped"
-	CitySuspended      = "city.suspended"
-	CityResumed        = "city.resumed"
+	// SessionMaxAgeKilled fires when the controller preemptively restarts a
+	// long-running session because its wall-clock age exceeded the agent's
+	// max_session_age threshold. Motivating case: provider SDKs that cache
+	// credentials at session start and wedge when the cached token expires.
+	SessionMaxAgeKilled = "session.max_age_killed"
+	SessionSuspended    = "session.suspended"
+	SessionUpdated      = "session.updated"
+	ConvoyCreated       = "convoy.created"
+	ConvoyClosed        = "convoy.closed"
+	ControllerStarted   = "controller.started"
+	ControllerStopped   = "controller.stopped"
+	CitySuspended       = "city.suspended"
+	CityResumed         = "city.resumed"
 	// Typed async request result events. 5 success types (one per
 	// operation, fully typed payload) + 1 shared failure type.
 	RequestResultCityCreate     = "request.result.city.create"
@@ -78,7 +83,7 @@ const (
 var KnownEventTypes = []string{
 	SessionWoke, SessionStopped, SessionCrashed,
 	SessionDraining, SessionUndrained, SessionQuarantined,
-	SessionIdleKilled, SessionSuspended, SessionUpdated,
+	SessionIdleKilled, SessionMaxAgeKilled, SessionSuspended, SessionUpdated,
 	BeadCreated, BeadClosed, BeadUpdated,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 	MailReplied, MailDeleted,

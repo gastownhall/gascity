@@ -2368,6 +2368,12 @@ func applyAgentOverride(a *Agent, ov *AgentOverride) {
 	if ov.IdleTimeout != nil {
 		a.IdleTimeout = *ov.IdleTimeout
 	}
+	if ov.MaxSessionAge != nil {
+		a.MaxSessionAge = *ov.MaxSessionAge
+	}
+	if ov.MaxSessionAgeJitter != nil {
+		a.MaxSessionAgeJitter = *ov.MaxSessionAgeJitter
+	}
 	if ov.SleepAfterIdle != nil {
 		a.SleepAfterIdle = NormalizeSleepAfterIdle(*ov.SleepAfterIdle)
 		a.SleepAfterIdleSource = "rig_override"

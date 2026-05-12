@@ -453,6 +453,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	if ctx != nil && ctx.Err() != nil {
 		return 0
 	}
+	reconcileOpts := startExecutionOptions{}
+	for _, apply := range startOptions {
+		if apply != nil {
+			apply(&reconcileOpts)
+		}
+	}
+	maxAgeTr := reconcileOpts.maxSessionAgeTr
 	deps := buildDepsMap(cfg)
 	if cityName == "" {
 		cityName = config.EffectiveCityName(cfg, "")
@@ -1279,6 +1286,54 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "repair_in_place", configDriftTracePayload(storedHash, currentHash, driftedFields, nil), nil, "")
 						}
 						continue
+					}
+				}
+			}
+		}
+
+		// Preemptive max session age: restart sessions whose wall-clock age
+		// exceeds the agent's max_session_age threshold. Motivation: provider
+		// SDKs that cache credentials at session start (e.g., Claude Code via
+		// Bedrock) can wedge silently when the underlying token expires. This
+		// is session age, not idle time — a busy session is still subject to
+		// the threshold — but the restart is skipped while the agent is
+		// mid-turn (pending interaction) or holds an open assigned work bead,
+		// so no work is lost mid-flight. The next tick retries.
+		if maxAgeTr != nil && alive {
+			creationCompleteAt, hasAnchor := parseRFC3339Metadata(session.Metadata["creation_complete_at"])
+			if hasAnchor && maxAgeTr.shouldRestart(name, creationCompleteAt, clk.Now()) {
+				if pendingInteractionKeepsAwake(*session, sp, name, clk) {
+					if trace != nil {
+						trace.recordDecision("reconciler.session.max_session_age", tp.TemplateName, name, "pending", "deferred_pending", nil, nil, "")
+					}
+				} else if hasWork, _ := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, *session); hasWork {
+					if trace != nil {
+						trace.recordDecision("reconciler.session.max_session_age", tp.TemplateName, name, "assigned_work", "deferred_busy", nil, nil, "")
+					}
+				} else {
+					fmt.Fprintf(stderr, "session reconciler: preemptive max-age restart for %s (age=%s)\n", tp.DisplayName(), clk.Now().Sub(creationCompleteAt).Round(time.Second)) //nolint:errcheck // best-effort stderr
+					if trace != nil {
+						trace.recordDecision("reconciler.session.max_session_age", tp.TemplateName, name, "max_session_age", "stop", nil, nil, "")
+					}
+					if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
+						fmt.Fprintf(stderr, "session reconciler: stopping aged %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
+					} else {
+						_ = sp.ClearScrollback(name)
+						rec.Record(events.Event{
+							Type:    events.SessionMaxAgeKilled,
+							Actor:   "gc",
+							Subject: tp.DisplayName(),
+						})
+						telemetry.RecordAgentMaxAgeKill(context.Background(), tp.DisplayName())
+						batch := sessionpkg.SleepPatch(clk.Now(), "max-session-age")
+						_ = store.SetMetadataBatch(session.ID, batch)
+						if session.Metadata == nil {
+							session.Metadata = make(map[string]string, len(batch))
+						}
+						for key, value := range batch {
+							session.Metadata[key] = value
+						}
+						alive = false
 					}
 				}
 			}

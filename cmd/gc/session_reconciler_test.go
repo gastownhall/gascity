@@ -5166,6 +5166,185 @@ func TestReconcileSessionBeads_IdleTimeoutNilTrackerSkipped(t *testing.T) {
 	}
 }
 
+// --- max session age tests ---
+
+// maxAgeReconcile runs the reconciler with the given max-age tracker
+// installed via withMaxSessionAgeTracker. Mirrors env.reconcile but routes
+// through reconcileSessionBeadsTraced so the option wiring is exercised.
+func (e *reconcilerTestEnv) maxAgeReconcile(sessions []beads.Bead, tr maxSessionAgeTracker) {
+	poolDesired := make(map[string]int)
+	for _, tp := range e.desiredState {
+		if tp.TemplateName != "" {
+			poolDesired[tp.TemplateName]++
+		}
+	}
+	cfgNames := configuredSessionNames(e.cfg, "", e.store)
+	reconcileSessionBeadsTraced(
+		context.Background(), "", sessions, e.desiredState, cfgNames, e.cfg, e.sp,
+		e.store, nil, nil, nil, nil, e.dt, poolDesired, false, nil, "",
+		nil, e.clk, e.rec, 0, 0, &e.stdout, &e.stderr, nil,
+		withMaxSessionAgeTracker(tr),
+	)
+}
+
+func TestReconcileSessionBeads_MaxSessionAgeKillsAgedSession(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "witness", MaxSessionAge: "5h"}}}
+	env.addDesired("witness", "witness", true)
+	session := env.createSessionBead("witness", "witness")
+	env.markSessionActive(&session)
+	// creation_complete_at well past the configured 5h threshold.
+	env.setSessionMetadata(&session, map[string]string{
+		"creation_complete_at": env.clk.Now().Add(-6 * time.Hour).UTC().Format(time.RFC3339),
+	})
+
+	tr := newMaxSessionAgeTracker()
+	tr.setConfig("witness", 5*time.Hour, 0)
+	rec := events.NewFake()
+	env.rec = rec
+
+	env.maxAgeReconcile([]beads.Bead{session}, tr)
+
+	if env.sp.IsRunning("witness") {
+		t.Error("aged witness should have been stopped")
+	}
+	b, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Metadata["sleep_reason"] != "max-session-age" {
+		t.Errorf("sleep_reason = %q, want max-session-age", b.Metadata["sleep_reason"])
+	}
+	fired := false
+	for _, e := range rec.Events {
+		if e.Type == events.SessionMaxAgeKilled {
+			fired = true
+			break
+		}
+	}
+	if !fired {
+		t.Error("expected SessionMaxAgeKilled event")
+	}
+}
+
+func TestReconcileSessionBeads_MaxSessionAgeSkippedWhenYoung(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "witness", MaxSessionAge: "5h"}}}
+	env.addDesired("witness", "witness", true)
+	session := env.createSessionBead("witness", "witness")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"creation_complete_at": env.clk.Now().Add(-30 * time.Minute).UTC().Format(time.RFC3339),
+	})
+
+	tr := newMaxSessionAgeTracker()
+	tr.setConfig("witness", 5*time.Hour, 0)
+	env.maxAgeReconcile([]beads.Bead{session}, tr)
+
+	if !env.sp.IsRunning("witness") {
+		t.Error("young witness should still be running")
+	}
+}
+
+func TestReconcileSessionBeads_MaxSessionAgeSkippedWithoutAnchor(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "witness", MaxSessionAge: "5h"}}}
+	env.addDesired("witness", "witness", true)
+	session := env.createSessionBead("witness", "witness")
+	env.markSessionActive(&session)
+	// No creation_complete_at — predates the feature or was cleared. The
+	// tracker must tolerate this and skip the restart rather than treating
+	// a missing anchor as age=0 or age=infinity.
+
+	tr := newMaxSessionAgeTracker()
+	tr.setConfig("witness", 5*time.Hour, 0)
+	env.maxAgeReconcile([]beads.Bead{session}, tr)
+
+	if !env.sp.IsRunning("witness") {
+		t.Error("witness without creation_complete_at must not be killed")
+	}
+}
+
+func TestReconcileSessionBeads_MaxSessionAgeNilTrackerSkipped(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"creation_complete_at": env.clk.Now().Add(-10 * time.Hour).UTC().Format(time.RFC3339),
+	})
+
+	env.maxAgeReconcile([]beads.Bead{session}, nil) // disabled globally
+
+	if !env.sp.IsRunning("worker") {
+		t.Error("worker should still be running when max-age feature is disabled")
+	}
+}
+
+func TestReconcileSessionBeads_MaxSessionAgeSkippedWhenPending(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "witness", MaxSessionAge: "5h"}}}
+	env.addDesired("witness", "witness", true)
+	session := env.createSessionBead("witness", "witness")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"creation_complete_at": env.clk.Now().Add(-6 * time.Hour).UTC().Format(time.RFC3339),
+	})
+	// Simulate a pending interaction — the reconciler must defer restart
+	// until the session settles so we don't interrupt mid-turn work.
+	env.sp.SetPendingInteraction("witness", &runtime.PendingInteraction{Kind: "approval", RequestID: "req-1"})
+
+	tr := newMaxSessionAgeTracker()
+	tr.setConfig("witness", 5*time.Hour, 0)
+	rec := events.NewFake()
+	env.rec = rec
+	env.maxAgeReconcile([]beads.Bead{session}, tr)
+
+	if !env.sp.IsRunning("witness") {
+		t.Error("pending-interaction witness should not be max-age killed")
+	}
+	for _, e := range rec.Events {
+		if e.Type == events.SessionMaxAgeKilled {
+			t.Error("SessionMaxAgeKilled must not fire while a pending interaction keeps the session awake")
+		}
+	}
+}
+
+func TestReconcileSessionBeads_MaxSessionAgeSkippedWhenBusyWithAssignedWork(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "witness", MaxSessionAge: "5h"}}}
+	env.addDesired("witness", "witness", true)
+	session := env.createSessionBead("witness", "witness")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"creation_complete_at": env.clk.Now().Add(-6 * time.Hour).UTC().Format(time.RFC3339),
+	})
+	if _, err := env.store.Create(beads.Bead{
+		Title:    "in-flight work",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.ID,
+	}); err != nil {
+		t.Fatalf("Create(in-flight work): %v", err)
+	}
+
+	tr := newMaxSessionAgeTracker()
+	tr.setConfig("witness", 5*time.Hour, 0)
+	rec := events.NewFake()
+	env.rec = rec
+	env.maxAgeReconcile([]beads.Bead{session}, tr)
+
+	if !env.sp.IsRunning("witness") {
+		t.Error("witness with open assigned work should not be max-age killed")
+	}
+	for _, e := range rec.Events {
+		if e.Type == events.SessionMaxAgeKilled {
+			t.Error("SessionMaxAgeKilled must not fire while an in-progress assigned bead is held")
+		}
+	}
+}
+
 // --- zombie scrollback capture tests ---
 
 func TestReconcileSessionBeads_ZombieCapturesScrollback(t *testing.T) {

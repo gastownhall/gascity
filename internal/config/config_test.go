@@ -3279,6 +3279,85 @@ func TestIdleTimeoutOmittedWhenEmpty(t *testing.T) {
 	}
 }
 
+// --- MaxSessionAge tests ---
+
+func TestMaxSessionAgeDurationEmpty(t *testing.T) {
+	a := Agent{Name: "witness"}
+	if got := a.MaxSessionAgeDuration(); got != 0 {
+		t.Errorf("MaxSessionAgeDuration() = %v, want 0", got)
+	}
+}
+
+func TestMaxSessionAgeDurationValid(t *testing.T) {
+	a := Agent{Name: "witness", MaxSessionAge: "5h"}
+	if got := a.MaxSessionAgeDuration(); got != 5*time.Hour {
+		t.Errorf("MaxSessionAgeDuration() = %v, want 5h", got)
+	}
+}
+
+func TestMaxSessionAgeDurationInvalid(t *testing.T) {
+	a := Agent{Name: "witness", MaxSessionAge: "bogus"}
+	if got := a.MaxSessionAgeDuration(); got != 0 {
+		t.Errorf("MaxSessionAgeDuration() = %v, want 0 for invalid", got)
+	}
+}
+
+func TestMaxSessionAgeJitterDurationIgnoredWhenAgeUnset(t *testing.T) {
+	a := Agent{Name: "witness", MaxSessionAgeJitter: "15m"}
+	if got := a.MaxSessionAgeJitterDuration(); got != 0 {
+		t.Errorf("MaxSessionAgeJitterDuration() = %v, want 0 when MaxSessionAge unset", got)
+	}
+}
+
+func TestMaxSessionAgeJitterDurationValid(t *testing.T) {
+	a := Agent{Name: "witness", MaxSessionAge: "5h", MaxSessionAgeJitter: "15m"}
+	if got := a.MaxSessionAgeJitterDuration(); got != 15*time.Minute {
+		t.Errorf("MaxSessionAgeJitterDuration() = %v, want 15m", got)
+	}
+}
+
+func TestMaxSessionAgeJitterDurationNegativeRejected(t *testing.T) {
+	a := Agent{Name: "witness", MaxSessionAge: "5h", MaxSessionAgeJitter: "-5m"}
+	if got := a.MaxSessionAgeJitterDuration(); got != 0 {
+		t.Errorf("MaxSessionAgeJitterDuration() = %v, want 0 for negative value", got)
+	}
+}
+
+func TestMaxSessionAgeRoundTrip(t *testing.T) {
+	c := City{
+		Workspace: Workspace{Name: "test"},
+		Agents:    []Agent{{Name: "witness", MaxSessionAge: "5h", MaxSessionAgeJitter: "15m"}},
+	}
+	data, err := c.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	got, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got.Agents[0].MaxSessionAge != "5h" {
+		t.Errorf("MaxSessionAge after round-trip = %q, want %q", got.Agents[0].MaxSessionAge, "5h")
+	}
+	if got.Agents[0].MaxSessionAgeJitter != "15m" {
+		t.Errorf("MaxSessionAgeJitter after round-trip = %q, want %q", got.Agents[0].MaxSessionAgeJitter, "15m")
+	}
+}
+
+func TestMaxSessionAgeOmittedWhenEmpty(t *testing.T) {
+	c := City{
+		Workspace: Workspace{Name: "test"},
+		Agents:    []Agent{{Name: "witness"}},
+	}
+	data, err := c.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(data), "max_session_age") {
+		t.Errorf("TOML output should omit max_session_age when empty, got:\n%s", data)
+	}
+}
+
 // --- install_agent_hooks ---
 
 func TestParseInstallAgentHooksWorkspace(t *testing.T) {

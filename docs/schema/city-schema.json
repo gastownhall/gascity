@@ -200,6 +200,14 @@
           "type": "string",
           "description": "IdleTimeout is the maximum time an agent session can be inactive before\nthe controller kills and restarts it. Duration string (e.g., \"15m\", \"1h\").\nEmpty (default) disables idle checking."
         },
+        "max_session_age": {
+          "type": "string",
+          "description": "MaxSessionAge is the maximum wall-clock lifetime of a single runtime\nsession before the controller preemptively restarts it. Duration string\n(e.g., \"5h\"). Empty (default) disables preemptive restarts. The restart\nis idle-gated: sessions with a pending interaction or an in-progress\nassigned work bead are left alone until they settle.\n\nMotivation: provider SDKs that cache credentials at session start (e.g.,\nClaude Code via Bedrock) can wedge when the underlying token expires if\nthe SDK doesn't re-chain providers. Cycling long-running sessions before\nthe token-expiry window prevents that failure mode without requiring\nupstream provider fixes."
+        },
+        "max_session_age_jitter": {
+          "type": "string",
+          "description": "MaxSessionAgeJitter bounds random jitter added to MaxSessionAge on a\nper-session basis so a fleet of identically-configured agents doesn't\nsynchronize restarts. Duration string (e.g., \"15m\"). Empty or 0\ndisables jitter (every session restarts at exactly MaxSessionAge).\nIgnored when MaxSessionAge is unset."
+        },
         "sleep_after_idle": {
           "type": "string",
           "description": "SleepAfterIdle overrides idle sleep policy for this agent. Accepts a\nduration string (e.g., \"30s\") or \"off\"."
@@ -436,6 +444,14 @@
         "idle_timeout": {
           "type": "string",
           "description": "IdleTimeout overrides the idle timeout duration string (e.g., \"30s\", \"5m\", \"1h\")."
+        },
+        "max_session_age": {
+          "type": "string",
+          "description": "MaxSessionAge overrides the max session age. Duration string (e.g., \"5h\").\nEmpty disables preemptive restart."
+        },
+        "max_session_age_jitter": {
+          "type": "string",
+          "description": "MaxSessionAgeJitter overrides the jitter added on top of MaxSessionAge.\nDuration string (e.g., \"15m\"). Empty disables jitter."
         },
         "sleep_after_idle": {
           "type": "string",
@@ -679,6 +695,14 @@
         "idle_timeout": {
           "type": "string",
           "description": "IdleTimeout overrides the idle timeout. Duration string (e.g., \"30s\", \"5m\", \"1h\")."
+        },
+        "max_session_age": {
+          "type": "string",
+          "description": "MaxSessionAge overrides the max session age. Duration string (e.g., \"5h\")."
+        },
+        "max_session_age_jitter": {
+          "type": "string",
+          "description": "MaxSessionAgeJitter overrides the max session age jitter. Duration string (e.g., \"15m\")."
         },
         "sleep_after_idle": {
           "type": "string",

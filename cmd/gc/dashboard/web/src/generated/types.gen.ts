@@ -77,6 +77,8 @@ export type AgentPatch = {
     MCP: Array<string> | null;
     MCPAppend: Array<string> | null;
     MaxActiveSessions: number | null;
+    MaxSessionAge: string | null;
+    MaxSessionAgeJitter: string | null;
     MinActiveSessions: number | null;
     Name: string;
     Nudge: string | null;
@@ -2923,6 +2925,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionDraining) | ({
     type: 'session.idle_killed';
 } & TypedEventStreamEnvelopeSessionIdleKilled) | ({
+    type: 'session.max_age_killed';
+} & TypedEventStreamEnvelopeSessionMaxAgeKilled) | ({
     type: 'session.quarantined';
 } & TypedEventStreamEnvelopeSessionQuarantined) | ({
     type: 'session.stopped';
@@ -3487,6 +3491,20 @@ export type TypedEventStreamEnvelopeSessionIdleKilled = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.max_age_killed
+ */
+export type TypedEventStreamEnvelopeSessionMaxAgeKilled = {
+    actor: string;
+    message?: string;
+    payload: NoPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'session.max_age_killed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.quarantined
  */
 export type TypedEventStreamEnvelopeSessionQuarantined = {
@@ -3666,6 +3684,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionDraining) | ({
     type: 'session.idle_killed';
 } & TypedTaggedEventStreamEnvelopeSessionIdleKilled) | ({
+    type: 'session.max_age_killed';
+} & TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled) | ({
     type: 'session.quarantined';
 } & TypedTaggedEventStreamEnvelopeSessionQuarantined) | ({
     type: 'session.stopped';
@@ -4265,6 +4285,21 @@ export type TypedTaggedEventStreamEnvelopeSessionIdleKilled = {
     subject?: string;
     ts: string;
     type: 'session.idle_killed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.max_age_killed
+ */
+export type TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: NoPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'session.max_age_killed';
     workflow?: WorkflowEventProjection;
 };
 
