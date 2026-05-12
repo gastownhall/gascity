@@ -1009,15 +1009,15 @@ source = "`+doltDir+`"
 			continue
 		}
 		gotFormulaDogOrders++
-		if a.Pool != "dog" {
-			t.Fatalf("%s pool = %q, want portable bare dog", a.Name, a.Pool)
+		if a.Pool != "gastown.dog" {
+			t.Fatalf("%s pool = %q, want qualified gastown.dog", a.Name, a.Pool)
 		}
 		got, err := qualifyOrderPool(a, cfg)
 		if err != nil {
 			t.Fatalf("qualifyOrderPool(%s): %v", a.Name, err)
 		}
-		if got != "dog" {
-			t.Fatalf("qualifyOrderPool(%s) = %q, want local maintenance dog", a.Name, got)
+		if got != "gastown.dog" {
+			t.Fatalf("qualifyOrderPool(%s) = %q, want gastown.dog passthrough", a.Name, got)
 		}
 	}
 	if gotFormulaDogOrders != wantFormulaDogOrders {
