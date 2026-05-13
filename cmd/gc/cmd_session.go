@@ -648,9 +648,16 @@ func newSessionListCmd(stdout, stderr io.Writer) *cobra.Command {
 
 // cmdSessionList is the CLI entry point for "gc session list".
 func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
-	store, code := openCityStore(stderr, "gc session list")
-	if store == nil {
-		return code
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session list: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session list: %v\n", err)               //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
+		return 1
 	}
 
 	providerCtx := loadSessionProviderContext()
@@ -721,6 +728,9 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 
 	if len(sessions) == 0 {
 		fmt.Fprintln(stdout, "No sessions found.") //nolint:errcheck // best-effort stdout
+		if err := writeSessionListSnapshot(cityPath, nil); err != nil {
+			fmt.Fprintf(stderr, "gc session list: writing ordinal snapshot: %v\n", err) //nolint:errcheck // best-effort stderr
+		}
 		return 0
 	}
 
@@ -729,8 +739,9 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 	cachedSP := &attachmentCachingProvider{Provider: sp, cache: attachedSet}
 
 	w := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tTEMPLATE\tSTATE\tREASON\tTARGET\tTITLE\tAGE\tLAST ACTIVE") //nolint:errcheck // best-effort stdout
-	for _, s := range sessions {
+	fmt.Fprintln(w, "#\tID\tTEMPLATE\tSTATE\tREASON\tTARGET\tTITLE\tAGE\tLAST ACTIVE") //nolint:errcheck // best-effort stdout
+	displayedIDs := make([]string, 0, len(sessions))
+	for i, s := range sessions {
 		state := string(s.State)
 		if s.State == "" {
 			state = "closed"
@@ -743,9 +754,13 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 		if !s.LastActive.IsZero() {
 			lastActive = formatDuration(time.Since(s.LastActive)) + " ago"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Template, state, reason, target, title, age, lastActive) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", i, s.ID, s.Template, state, reason, target, title, age, lastActive) //nolint:errcheck // best-effort stdout
+		displayedIDs = append(displayedIDs, s.ID)
 	}
 	_ = w.Flush() //nolint:errcheck // best-effort stdout
+	if err := writeSessionListSnapshot(cityPath, displayedIDs); err != nil {
+		fmt.Fprintf(stderr, "gc session list: writing ordinal snapshot: %v\n", err) //nolint:errcheck // best-effort stderr
+	}
 	return 0
 }
 

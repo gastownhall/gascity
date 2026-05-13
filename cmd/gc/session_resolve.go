@@ -160,6 +160,13 @@ func resolveSessionIDWithOptions(
 	} else if !errors.Is(err, session.ErrSessionNotFound) {
 		return "", err
 	}
+	if id, err := resolveOrdinalFromSnapshot(cityPath, identifier); err == nil {
+		if _, getErr := store.Get(id); getErr == nil {
+			return id, nil
+		}
+	} else if !errors.Is(err, session.ErrSessionNotFound) {
+		return "", err
+	}
 	if opts.allowClosed {
 		if cfg != nil {
 			cityName := config.EffectiveCityName(cfg, filepath.Base(cityPath))

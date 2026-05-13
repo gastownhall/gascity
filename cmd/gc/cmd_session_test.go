@@ -1120,6 +1120,66 @@ func TestSessionNewAliasOwner_UsesConfiguredNamedIdentity(t *testing.T) {
 	}
 }
 
+// TestCmdSessionList_OrdinalColumnAndSnapshot verifies that `gc session list`
+// prints a leading `#` ordinal column and writes a snapshot of the displayed
+// bead IDs (in display order) to .gc/last-session-list.json. Issue #2031.
+func TestCmdSessionList_OrdinalColumnAndSnapshot(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeNamedSessionCityTOML(t, cityDir)
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	// Create three sessions. CreatedDesc list orders newest first.
+	mk := func(name string) string {
+		b, err := store.Create(beads.Bead{
+			Type:   session.BeadType,
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"session_name": name,
+				"template":     "mayor",
+			},
+		})
+		if err != nil {
+			t.Fatalf("Create(%s): %v", name, err)
+		}
+		return b.ID
+	}
+	id1 := mk("alpha")
+	id2 := mk("beta")
+	id3 := mk("gamma")
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionList("", "", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionList() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "#") {
+		t.Fatalf("stdout missing `#` header column:\n%s", out)
+	}
+
+	snapshot, err := readSessionListSnapshot(cityDir)
+	if err != nil {
+		t.Fatalf("readSessionListSnapshot: %v", err)
+	}
+	// CreatedDesc — newest first.
+	want := []string{id3, id2, id1}
+	if len(snapshot) != len(want) {
+		t.Fatalf("snapshot ids = %v, want %v", snapshot, want)
+	}
+	for i, id := range want {
+		if snapshot[i] != id {
+			t.Errorf("snapshot[%d] = %q, want %q", i, snapshot[i], id)
+		}
+	}
+}
+
 func TestCmdSessionListJSONNoSessionsReturnsEmptyArray(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
