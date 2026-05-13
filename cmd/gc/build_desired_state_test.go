@@ -1643,6 +1643,67 @@ func TestBuildDesiredState_NewPoolSessionBeadCreatedWithConcreteIdentity(t *test
 	}
 }
 
+func TestBuildDesiredState_MaxOneAgentDemandUsesCanonicalIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "refinery",
+			Dir:               "cashmaster",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			ScaleCheck:        "printf 1",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	if len(dsResult.State) != 1 {
+		t.Fatalf("desired sessions = %d, want 1", len(dsResult.State))
+	}
+	var tp TemplateParams
+	for _, candidate := range dsResult.State {
+		tp = candidate
+	}
+	if tp.InstanceName != "cashmaster/refinery" {
+		t.Fatalf("InstanceName = %q, want canonical non-pool identity", tp.InstanceName)
+	}
+	if tp.Alias != "cashmaster/refinery" {
+		t.Fatalf("Alias = %q, want canonical non-pool identity", tp.Alias)
+	}
+	if tp.PoolSlot != 0 {
+		t.Fatalf("PoolSlot = %d, want 0 for max_active_sessions=1", tp.PoolSlot)
+	}
+
+	sessionBeads, err := loadSessionBeads(store)
+	if err != nil {
+		t.Fatalf("load session beads: %v", err)
+	}
+	if len(sessionBeads) != 1 {
+		t.Fatalf("session beads = %d, want 1", len(sessionBeads))
+	}
+	got := sessionBeads[0]
+	if got.Metadata["agent_name"] != "cashmaster/refinery" {
+		t.Fatalf("agent_name = %q, want canonical non-pool identity", got.Metadata["agent_name"])
+	}
+	if got.Metadata["alias"] != "cashmaster/refinery" {
+		t.Fatalf("alias = %q, want canonical non-pool identity", got.Metadata["alias"])
+	}
+	if got.Metadata["pool_slot"] != "" {
+		t.Fatalf("pool_slot = %q, want empty for max_active_sessions=1", got.Metadata["pool_slot"])
+	}
+	if got.Title != "cashmaster/refinery" {
+		t.Fatalf("title = %q, want canonical non-pool identity", got.Title)
+	}
+	if containsString(got.Labels, "agent:cashmaster/refinery-1") {
+		t.Fatalf("labels = %#v, must not include phantom pool identity", got.Labels)
+	}
+	if !containsString(got.Labels, "agent:cashmaster/refinery") {
+		t.Fatalf("labels = %#v, want canonical agent label", got.Labels)
+	}
+}
+
 func TestBuildDesiredState_NewPoolSessionBeadDefersAliasWhenConcreteAliasTaken(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
