@@ -287,7 +287,6 @@ func TestSweepUndesiredPoolSessionBeads_SkipsProtectedCreateBeforeRuntimeProbe(t
 		t.Fatalf("IsRunning calls = %d, want 0; fresh pending create is protected by metadata", got)
 	}
 }
-
 // stubManagedDoltStoreOpeners replaces the two package-level store openers
 // used during newCityRuntime + newControllerState startup with in-memory
 // stubs. This prevents tests from spawning real managed dolt servers (~12s
@@ -699,9 +698,6 @@ func TestCityRuntimeTickPreflightsManagedDoltBeforeSessionSnapshot(t *testing.T)
 	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_BEADS", "bd")
 	stubManagedDoltStoreOpeners(t)
-
-	cityPath := t.TempDir()
-	cleanupManagedDoltTestCity(t, cityPath)
 
 	cityPath := t.TempDir()
 	cleanupManagedDoltTestCity(t, cityPath)
