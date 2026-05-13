@@ -137,6 +137,12 @@ func computePoolDesiredStates(
 					routedTo = cfg.Agents[0].QualifiedName()
 				}
 			}
+			if sessionBeadID != "" {
+				sessionTemplate := strings.TrimSpace(sessionBeadTemplate[sessionBeadID])
+				if sessionTemplate != "" && routedTo != "" && routedTo != sessionTemplate {
+					continue
+				}
+			}
 			if routedTo != template {
 				continue
 			}
