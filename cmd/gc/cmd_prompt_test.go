@@ -171,6 +171,72 @@ func TestRunPromptSynthRequiresProviderEither_FromFlagOrWorkspace(t *testing.T) 
 	}
 }
 
+// TestRunPromptSynthRejectsRoleWithPathTraversal guards the validRoleName
+// regex against attempts to escape the agents/<role>/ subdirectory via
+// path-traversal sequences, hidden directories, or upper-case wildcards.
+// Each rejected role must surface a clear "invalid --role" error and
+// must NOT invoke the runner (provider resolution should not even be
+// attempted on invalid input).
+func TestRunPromptSynthRejectsRoleWithPathTraversal(t *testing.T) {
+	cityDir := writeMinimalCity(t, "claude")
+	for _, role := range []string{
+		"../escape",
+		"..",
+		"foo/bar",
+		"foo/../bar",
+		".hidden",
+		"-leading-dash",
+		"7-leading-digit",
+		"UPPERCASE",
+		"foo bar",
+		"",
+	} {
+		t.Run(role, func(t *testing.T) {
+			runner := &fakeSynthRunner{body: "ignored"}
+			var stdout, stderr bytes.Buffer
+			err := runPromptSynth(context.Background(), promptSynthOpts{
+				role:     role,
+				provider: "claude",
+				city:     cityDir,
+			}, runner.run, &stdout, &stderr)
+			if err == nil || !strings.Contains(err.Error(), "invalid --role") {
+				t.Errorf("role=%q: expected invalid-role error, got %v", role, err)
+			}
+			if runner.gotCalled {
+				t.Errorf("role=%q: runner should not be called for invalid role", role)
+			}
+		})
+	}
+}
+
+// TestRunPromptSynthAcceptsValidRoleNames ensures the validRoleName regex
+// admits the names we actually use (mayor, polecat, codeprobe-worker, etc.)
+// without false-positive rejections.
+func TestRunPromptSynthAcceptsValidRoleNames(t *testing.T) {
+	cityDir := writeMinimalCity(t, "claude")
+	for _, role := range []string{
+		"mayor",
+		"polecat",
+		"codeprobe-worker",
+		"a",
+		"a1",
+		"agent-with-dashes-and-1-digit",
+	} {
+		t.Run(role, func(t *testing.T) {
+			runner := &fakeSynthRunner{body: "# generated"}
+			var stdout, stderr bytes.Buffer
+			err := runPromptSynth(context.Background(), promptSynthOpts{
+				role:     role,
+				provider: "claude",
+				city:     cityDir,
+			}, runner.run, &stdout, &stderr)
+			if err != nil {
+				t.Errorf("role=%q: expected accept, got error %v", role, err)
+			}
+		})
+	}
+}
+
 func TestRunPromptSynthHonorsExplicitProviderFlag(t *testing.T) {
 	cityDir := writeMinimalCity(t, "claude")
 	runner := &fakeSynthRunner{body: "# Codex Mayor\n\nbody."}

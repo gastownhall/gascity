@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"text/template"
@@ -18,6 +19,12 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/spf13/cobra"
 )
+
+// validRoleName is the path-safe naming policy for `--role`: lowercase
+// alphanumeric + dashes, must start with a letter. Refuses anything that
+// could escape the agents/<role>/ subdirectory via traversal sequences,
+// hidden directories, or path separators.
+var validRoleName = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 
 // synthTimeout caps the LLM subprocess for `gc prompt synth`. Generation
 // can be slow (large outputs, slow models) but should never block forever.
@@ -193,6 +200,9 @@ func runPromptSynth(ctx context.Context, opts promptSynthOpts, runner promptSynt
 	}
 
 	role := strings.TrimSpace(opts.role)
+	if !validRoleName.MatchString(role) {
+		return fmt.Errorf("invalid --role %q: must match %s (lowercase alphanumeric + dashes, starts with a letter)", role, validRoleName.String())
+	}
 	providerKey := strings.TrimSpace(opts.provider)
 	if providerKey == "" {
 		providerKey = strings.TrimSpace(cfg.Workspace.Provider)
@@ -385,8 +395,9 @@ func runSlinguedSynthWithDeps(ctx context.Context, opts promptSynthOpts, cfg *co
 	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
 		return fmt.Errorf("prepare synth staging dir: %w", err)
 	}
-	stamp := deps.now().UTC().Format("20060102-150405")
-	metaPath := filepath.Join(stagingDir, fmt.Sprintf("%s-%s.meta.md", role, stamp))
+	// Stable filename per role so retries overwrite rather than accumulate
+	// stale staged meta-prompts on sling-call failure.
+	metaPath := filepath.Join(stagingDir, fmt.Sprintf("%s.meta.md", role))
 	if err := os.WriteFile(metaPath, []byte(rendered), 0o644); err != nil {
 		return fmt.Errorf("write staged meta-prompt: %w", err)
 	}
@@ -428,8 +439,8 @@ func runSlinguedSynthWithDeps(ctx context.Context, opts promptSynthOpts, cfg *co
 	}
 
 	fmt.Fprintf(stdout, "Slung mol-prompt-synth to %s. Bead %s created.\n", writerAgent, bead.ID) //nolint:errcheck
+	fmt.Fprintf(stdout, "Output will be written to: %s\n", destPath)                              //nolint:errcheck
 	fmt.Fprintf(stdout, "Watch progress:  gc bd show %s\n", bead.ID)                              //nolint:errcheck
-	fmt.Fprintf(stdout, "On completion:   %s\n", destPath)                                        //nolint:errcheck
 
 	if !opts.wait {
 		return nil
