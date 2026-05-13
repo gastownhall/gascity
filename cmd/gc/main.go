@@ -445,10 +445,11 @@ func resolveCommandCity(args []string) (string, error) {
 //  4. Explicit city env (GC_CITY / GC_CITY_PATH / GC_CITY_ROOT) + GC_RIG
 //  5. Explicit city env only (city set, rig from GC_DIR/cwd if applicable)
 //  6. GC_RIG only (rig from registered city site bindings)
-//  7. GC_DIR-derived city path
-//  8. Registered rig binding lookup (cwd prefix match)
-//  9. Walk up from cwd looking for city.toml
-//  10. Fail
+//  7. Registered rig binding lookup using GC_DIR (rig with leftover .gc/)
+//  8. GC_DIR-derived city path (walk-up)
+//  9. Registered rig binding lookup (cwd prefix match)
+//  10. Walk up from cwd looking for city.toml
+//  11. Fail
 func resolveContext() (resolvedContext, error) {
 	city := cityFlag
 	rig := rigFlag
@@ -502,13 +503,27 @@ func resolveContext() (resolvedContext, error) {
 		return ctx, nil
 	}
 
-	// Step 7: GC_DIR-derived city path.
+	// Step 7: Registered rig binding lookup using GC_DIR. Must run before
+	// the GC_DIR walkup (step 8) so that a rig dir with a leftover ".gc/"
+	// runtime artifact does not get mistaken for a legacy city via
+	// findCity's HasRuntimeRoot fallback. Spawned rig agents have GC_DIR
+	// set to the rig path; when that path is a sibling of the city
+	// (e.g. rig at /Code/rigname and city at /Code/cityname), the walkup
+	// never reaches the real city and the stale ".gc/" inside the rig
+	// would otherwise win.
+	if gcDir := strings.TrimSpace(os.Getenv("GC_DIR")); gcDir != "" {
+		if ctx, ok := lookupRigFromCwd(gcDir); ok {
+			return ctx, nil
+		}
+	}
+
+	// Step 8: GC_DIR-derived city path.
 	if gcDirCity, ok := resolveCityPathFromGCDir(); ok {
 		rn := rigFromCwdDir(gcDirCity, strings.TrimSpace(os.Getenv("GC_DIR")))
 		return resolvedContext{CityPath: gcDirCity, RigName: rn}, nil
 	}
 
-	// Step 8: Registered rig binding lookup (cwd prefix match).
+	// Step 9: Registered rig binding lookup (cwd prefix match).
 	cwd, err := os.Getwd()
 	if err != nil {
 		return resolvedContext{}, err
@@ -517,7 +532,7 @@ func resolveContext() (resolvedContext, error) {
 		return ctx, nil
 	}
 
-	// Step 9: Walk up from cwd looking for city.toml.
+	// Step 10: Walk up from cwd looking for city.toml.
 	cityPath, err := findCity(cwd)
 	if err != nil {
 		return resolvedContext{}, err
