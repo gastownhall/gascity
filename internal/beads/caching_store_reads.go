@@ -323,7 +323,7 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 
 // Ready returns open beads whose blocking deps are all closed.
 func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
-	if readyQueryFromArgs(query) != (ReadyQuery{}) {
+	if !readyQueryFromArgs(query).IsZero() {
 		return c.backing.Ready(query...)
 	}
 	c.mu.RLock()

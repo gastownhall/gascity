@@ -165,7 +165,15 @@ func (s *controllerDemandPartialStore) Ready(query ...beads.ReadyQuery) ([]beads
 	if err != nil {
 		return nil, err
 	}
-	if len(query) == 0 {
+	q := beads.ReadyQuery{}
+	if len(query) > 0 {
+		q = query[0]
+	}
+	// Surface the partial only on spawn-demand reads (Metadata or Unassigned),
+	// matching the controller-demand path in defaultScaleCheckCounts /
+	// defaultNamedSessionDemand. Assignee-keyed reads (collectAssignedWorkBeads)
+	// stay clean so the partial is correctly scoped to scale_check failures.
+	if len(q.Metadata) > 0 || q.Unassigned {
 		return rows, &beads.PartialResultError{Op: "bd ready", Err: errors.New("skipped corrupt controller demand bead")}
 	}
 	return rows, nil
@@ -351,8 +359,8 @@ func TestCollectAssignedWorkBeads_ExcludesBlockedOpenAssignedHandoff(t *testing.
 	}
 }
 
-func TestDefaultScaleCheckCountsUsesCachedReadyReadModel(t *testing.T) {
-	backing := &readyFailStore{Store: beads.NewMemStore()}
+func TestDefaultScaleCheckCountsCountsReadyRoutedWork(t *testing.T) {
+	backing := beads.NewMemStore()
 	if _, err := backing.Create(beads.Bead{
 		Title:  "queued routed work",
 		Type:   "task",
@@ -378,9 +386,6 @@ func TestDefaultScaleCheckCountsUsesCachedReadyReadModel(t *testing.T) {
 	}
 	if got := counts["gascity/workflows.codex-min"]; got != 1 {
 		t.Fatalf("defaultScaleCheckCounts = %d, want 1", got)
-	}
-	if backing.readyCalls != 0 {
-		t.Fatalf("backing Ready calls = %d, want cached demand read", backing.readyCalls)
 	}
 }
 
@@ -417,8 +422,8 @@ func TestDefaultScaleCheckCountsIgnoresOpenMoleculeContainers(t *testing.T) {
 	}
 }
 
-func TestDefaultScaleCheckCountsHonorsCachedWriteThroughDependencies(t *testing.T) {
-	backing := &readyFailStore{Store: beads.NewMemStore()}
+func TestDefaultScaleCheckCountsExcludesBlockedWork(t *testing.T) {
+	backing := beads.NewMemStore()
 	blocker, err := backing.Create(beads.Bead{
 		Title:  "blocked earlier step",
 		Type:   "task",
@@ -457,8 +462,209 @@ func TestDefaultScaleCheckCountsHonorsCachedWriteThroughDependencies(t *testing.
 	if got := counts["gascity/workflows.codex-max"]; got != 0 {
 		t.Fatalf("defaultScaleCheckCounts = %d, want blocked future work excluded", got)
 	}
-	if backing.readyCalls != 0 {
-		t.Fatalf("backing Ready calls = %d, want cached demand read", backing.readyCalls)
+}
+
+// TestDefaultScaleCheckCountsIssuesSymmetricReadyQuery locks in the
+// structural defense against spawn storms (fo-spawn-storm-mitigate):
+// defaultScaleCheckCounts queries store.Ready with the same filters as
+// the worker's pool-demand shell predicate
+// (bd ready --metadata-field gc.routed_to=T --unassigned). The reconciler
+// cannot disagree with the worker about what counts as claimable demand
+// because both sides resolve it through the same query.
+func TestDefaultScaleCheckCountsIssuesSymmetricReadyQuery(t *testing.T) {
+	store := &readyQueryRecordingStore{MemStore: beads.NewMemStore()}
+	if _, err := store.Create(beads.Bead{
+		Title:  "queued routed work",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": "foundations/worker",
+		},
+	}); err != nil {
+		t.Fatalf("create routed bead: %v", err)
+	}
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: "foundations/worker",
+		storeKey: "rig:foundations",
+		store:    store,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("errs = %v", errs)
+	}
+	if got := counts["foundations/worker"]; got != 1 {
+		t.Fatalf("count = %d, want 1", got)
+	}
+	if len(store.readyQueries) != 1 {
+		t.Fatalf("Ready calls = %d, want 1", len(store.readyQueries))
+	}
+	q := store.readyQueries[0]
+	if !q.Unassigned {
+		t.Errorf("query.Unassigned = false, want true (matches worker shell predicate)")
+	}
+	if v := q.Metadata["gc.routed_to"]; v != "foundations/worker" {
+		t.Errorf("query.Metadata[gc.routed_to] = %q, want foundations/worker", v)
+	}
+}
+
+// readyDemandSimStore models a backing store whose Ready applies the same
+// filters as bd CLI's `bd ready` (defer_until, dep-blocking, --unassigned,
+// --metadata-field). The real BdStore inherits these by shelling out;
+// this fixture lets us assert spawn-decision behavior without a bd binary.
+type readyDemandSimStore struct {
+	*beads.MemStore
+	deferred map[string]bool // bead IDs that bd would hide as future-deferred
+}
+
+func (s *readyDemandSimStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	rows, err := s.MemStore.Ready(query...)
+	if err != nil {
+		return nil, err
+	}
+	if len(s.deferred) == 0 {
+		return rows, nil
+	}
+	out := make([]beads.Bead, 0, len(rows))
+	for _, b := range rows {
+		if s.deferred[b.ID] {
+			continue
+		}
+		out = append(out, b)
+	}
+	return out, nil
+}
+
+// TestClaimRateInvariant_StormResilience is the load-bearing acceptance test
+// for fo-spawn-storm-mitigate: regardless of bead-store state, the reconciler
+// must not see phantom demand that the worker won't claim. Each subtest seeds
+// a class of bead that is open + routed but not actually claimable, and
+// asserts that defaultScaleCheckCounts reports zero demand for the template.
+//
+// CRITICAL: each subtest must pass without operator-side cleanup (no clearing
+// assignees, closing stale session beads, removing routed_to metadata,
+// deferring beads). Bead-store state is INPUT, not config.
+func TestClaimRateInvariant_StormResilience(t *testing.T) {
+	const template = "foundations/worker"
+	cases := []struct {
+		name string
+		seed func(t *testing.T, store *readyDemandSimStore)
+	}{
+		{
+			name: "deferred_by_date",
+			seed: func(t *testing.T, store *readyDemandSimStore) {
+				b, err := store.Create(beads.Bead{
+					Title:  "future routed work",
+					Type:   "task",
+					Status: "open",
+					Metadata: map[string]string{
+						"gc.routed_to": template,
+					},
+				})
+				if err != nil {
+					t.Fatalf("create: %v", err)
+				}
+				store.deferred[b.ID] = true
+			},
+		},
+		{
+			name: "blocked_by_deps",
+			seed: func(t *testing.T, store *readyDemandSimStore) {
+				blocker, err := store.Create(beads.Bead{
+					Title: "earlier step", Type: "task", Status: "open",
+				})
+				if err != nil {
+					t.Fatalf("create blocker: %v", err)
+				}
+				blocked, err := store.Create(beads.Bead{
+					Title: "blocked routed work", Type: "task", Status: "open",
+					Metadata: map[string]string{"gc.routed_to": template},
+				})
+				if err != nil {
+					t.Fatalf("create blocked: %v", err)
+				}
+				if err := store.DepAdd(blocked.ID, blocker.ID, "blocks"); err != nil {
+					t.Fatalf("DepAdd: %v", err)
+				}
+			},
+		},
+		{
+			name: "stale_assignee",
+			seed: func(t *testing.T, store *readyDemandSimStore) {
+				if _, err := store.Create(beads.Bead{
+					Title: "claimed by ghost", Type: "task", Status: "open",
+					Assignee: "worker-ghost-session",
+					Metadata: map[string]string{"gc.routed_to": template},
+				}); err != nil {
+					t.Fatalf("create stale: %v", err)
+				}
+			},
+		},
+		{
+			name: "mixed",
+			seed: func(t *testing.T, store *readyDemandSimStore) {
+				deferred, err := store.Create(beads.Bead{
+					Title: "future", Type: "task", Status: "open",
+					Metadata: map[string]string{"gc.routed_to": template},
+				})
+				if err != nil {
+					t.Fatalf("create deferred: %v", err)
+				}
+				store.deferred[deferred.ID] = true
+				if _, err := store.Create(beads.Bead{
+					Title: "claimed by ghost", Type: "task", Status: "open",
+					Assignee: "worker-ghost-session",
+					Metadata: map[string]string{"gc.routed_to": template},
+				}); err != nil {
+					t.Fatalf("create stale: %v", err)
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &readyDemandSimStore{
+				MemStore: beads.NewMemStore(),
+				deferred: map[string]bool{},
+			}
+			tc.seed(t, store)
+			counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+				template: template,
+				storeKey: "rig:foundations",
+				store:    store,
+			}})
+			if len(errs) != 0 {
+				t.Fatalf("errs = %v", errs)
+			}
+			if got := counts[template]; got != 0 {
+				t.Fatalf("count = %d, want 0 (would induce phantom demand → spawn storm)", got)
+			}
+		})
+	}
+}
+
+// TestClaimRateInvariant_ClaimableWorkStillCounted is the positive control
+// for TestClaimRateInvariant_StormResilience: a genuinely claimable bead
+// must produce demand of 1 through the same query path. Without this, a
+// regression that returned 0 for everything would silently pass the
+// resilience test.
+func TestClaimRateInvariant_ClaimableWorkStillCounted(t *testing.T) {
+	const template = "foundations/worker"
+	store := &readyDemandSimStore{MemStore: beads.NewMemStore(), deferred: map[string]bool{}}
+	if _, err := store.Create(beads.Bead{
+		Title: "ready routed work", Type: "task", Status: "open",
+		Metadata: map[string]string{"gc.routed_to": template},
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:foundations",
+		store:    store,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("errs = %v", errs)
+	}
+	if got := counts[template]; got != 1 {
+		t.Fatalf("count = %d, want 1", got)
 	}
 }
 
@@ -533,13 +739,16 @@ func TestDefaultScaleCheckCountsReadyErrorNamesAffectedTemplates(t *testing.T) {
 		{template: "gascity/workflows.codex-min", storeKey: "rig:gascity", store: store},
 		{template: "gascity/workflows.codex-max", storeKey: "rig:gascity", store: store},
 	})
-	if len(errs) != 1 {
-		t.Fatalf("defaultScaleCheckCounts errs = %v, want one grouped Ready diagnostic", errs)
+	if len(errs) != 2 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v, want one diagnostic per template", errs)
 	}
-	msg := errs[0].Error()
-	for _, want := range []string{"rig:gascity", "gascity/workflows.codex-min", "gascity/workflows.codex-max"} {
-		if !strings.Contains(msg, want) {
-			t.Fatalf("defaultScaleCheckCounts err = %q, want affected template %q", msg, want)
+	for _, e := range errs {
+		msg := e.Error()
+		if !strings.Contains(msg, "rig:gascity") {
+			t.Fatalf("defaultScaleCheckCounts err = %q, want store key", msg)
+		}
+		if !strings.Contains(msg, "gascity/workflows.codex-min") && !strings.Contains(msg, "gascity/workflows.codex-max") {
+			t.Fatalf("defaultScaleCheckCounts err = %q, want affected template", msg)
 		}
 	}
 	for _, want := range []string{"gascity/workflows.codex-min", "gascity/workflows.codex-max"} {

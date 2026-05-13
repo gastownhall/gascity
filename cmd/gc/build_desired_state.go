@@ -830,11 +830,6 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 		return counts, nil, nil
 	}
 
-	type scaleStoreGroup struct {
-		store     beads.Store
-		templates map[string]struct{}
-	}
-	groups := make(map[string]*scaleStoreGroup)
 	var errs []error
 	var partialTemplates map[string]bool
 	for _, target := range targets {
@@ -854,35 +849,38 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 			partialTemplates = markScaleCheckPartialTemplate(partialTemplates, template)
 			continue
 		}
-		key := strings.TrimSpace(target.storeKey)
-		if key == "" {
-			key = fmt.Sprintf("%p", target.store)
+		// Symmetric query: same predicate as the worker's pool-demand shell
+		// (`bd ready --metadata-field gc.routed_to=T --unassigned`). Routing
+		// through ReadyQuery (rather than scanning a cached set and filtering
+		// in Go) ensures defer_until and dep-blocking filtering match exactly
+		// — the reconciler cannot disagree with the worker about what counts
+		// as claimable demand. See fo-spawn-storm-mitigate.
+		query := beads.ReadyQuery{
+			Metadata:   map[string]string{"gc.routed_to": template},
+			Unassigned: true,
 		}
-		group := groups[key]
-		if group == nil {
-			group = &scaleStoreGroup{store: target.store, templates: make(map[string]struct{})}
-			groups[key] = group
-		}
-		group.templates[template] = struct{}{}
-	}
-
-	for key, group := range groups {
-		ready, err := readyForControllerDemand(group.store)
+		ready, err := readyForControllerDemandQuery(target.store, query)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("default scale_check %s templates=%s: Ready(): %w", key, strings.Join(sortedStringSet(group.templates), ","), err))
-			partialTemplates = markScaleCheckPartialSet(partialTemplates, group.templates)
+			storeKey := strings.TrimSpace(target.storeKey)
+			if storeKey == "" {
+				storeKey = fmt.Sprintf("%p", target.store)
+			}
+			errs = append(errs, fmt.Errorf("default scale_check %s template=%s: Ready(): %w", storeKey, template, err))
+			partialTemplates = markScaleCheckPartialTemplate(partialTemplates, template)
 			if !beads.IsPartialResult(err) || len(ready) == 0 {
 				continue
 			}
 		}
 		for _, b := range ready {
+			// Defensive: store-side filters should already have applied these,
+			// but a partial-result fallback may have skipped some.
 			if strings.TrimSpace(b.Assignee) != "" {
 				continue
 			}
-			template := strings.TrimSpace(b.Metadata["gc.routed_to"])
-			if _, ok := group.templates[template]; ok {
-				counts[template]++
+			if strings.TrimSpace(b.Metadata["gc.routed_to"]) != template {
+				continue
 			}
+			counts[template]++
 		}
 	}
 	return counts, partialTemplates, errs
@@ -946,7 +944,14 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, cfg *config.Ci
 	}
 
 	for key, group := range groups {
-		ready, err := readyForControllerDemand(group.store)
+		// Named-session demand uses a routed_to value that may be either a
+		// template (identitiesByTemplate path) or an identity (namedByIdentity
+		// path), so we cannot scope the query by exact metadata match. We
+		// still set Unassigned so the query bypasses the defer_until-blind
+		// cache (see readyForControllerDemandQuery comment) and inherits
+		// bd ready's defer/dep filtering. The match remains in Go.
+		query := beads.ReadyQuery{Unassigned: true}
+		ready, err := readyForControllerDemandQuery(group.store, query)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("default scale_check %s templates=%s: Ready(): %w", key, strings.Join(sortedStringSet(group.templates), ","), err))
 			partialTemplates = markScaleCheckPartialSet(partialTemplates, group.templates)
@@ -1103,6 +1108,17 @@ func readyForControllerDemand(store beads.Store) ([]beads.Bead, error) {
 }
 
 func readyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery) ([]beads.Bead, error) {
+	// Spawn-demand queries (Metadata or Unassigned) must bypass CachedReady
+	// because the in-memory cache is defer_until-blind: it would return
+	// beads bd would have hidden for being scheduled in the future,
+	// producing phantom demand and spawn storms (fo-spawn-storm-mitigate).
+	// Such queries are the authoritative spawn-decision predicate and must
+	// be answered by the backing store, which routes through bd ready and
+	// gets defer/dep filtering by construction. Assignee/Limit-only queries
+	// do not depend on defer_until correctness, so they keep the cache path.
+	if len(query.Metadata) > 0 || query.Unassigned {
+		return store.Ready(query)
+	}
 	if cached, ok := store.(interface {
 		CachedReady() ([]beads.Bead, bool)
 	}); ok {
@@ -1114,13 +1130,28 @@ func readyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery) ([
 }
 
 func filterReadyForControllerDemand(ready []beads.Bead, query beads.ReadyQuery) []beads.Bead {
-	if query == (beads.ReadyQuery{}) {
+	if query.IsZero() {
 		return ready
 	}
 	result := make([]beads.Bead, 0, len(ready))
 	for _, bead := range ready {
 		if query.Assignee != "" && bead.Assignee != query.Assignee {
 			continue
+		}
+		if query.Unassigned && strings.TrimSpace(bead.Assignee) != "" {
+			continue
+		}
+		if len(query.Metadata) > 0 {
+			ok := true
+			for k, v := range query.Metadata {
+				if bead.Metadata[k] != v {
+					ok = false
+					break
+				}
+			}
+			if !ok {
+				continue
+			}
 		}
 		result = append(result, bead)
 		if query.Limit > 0 && len(result) >= query.Limit {

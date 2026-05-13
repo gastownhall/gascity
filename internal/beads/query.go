@@ -46,9 +46,25 @@ type ListQuery struct {
 // ReadyQuery describes optional filters for ready-work lookup. A zero-value
 // query preserves Ready's historical behavior: all open, unblocked actionable
 // work.
+//
+// Metadata and Unassigned exist so the in-process spawn-decision path can
+// issue the *same* query as the worker's pool-demand shell predicate
+// (`bd ready --metadata-field gc.routed_to=T --unassigned`). Without that
+// symmetry the reconciler can spawn against beads the worker won't claim
+// (deferred-by-date, dep-blocked, stale-assignee), producing a spawn storm.
+// See bead fo-spawn-storm-mitigate.
 type ReadyQuery struct {
-	Assignee string
-	Limit    int
+	Assignee   string
+	Metadata   map[string]string
+	Unassigned bool
+	Limit      int
+}
+
+// IsZero reports whether q would request the historical default Ready set
+// (no filters). Maps with non-zero len count as a filter even if all values
+// are empty strings.
+func (q ReadyQuery) IsZero() bool {
+	return q.Assignee == "" && !q.Unassigned && len(q.Metadata) == 0 && q.Limit == 0
 }
 
 func readyQueryFromArgs(queries []ReadyQuery) ReadyQuery {

@@ -1094,6 +1094,19 @@ func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	if q.Assignee != "" {
 		args = append(args, "--assignee", q.Assignee)
 	}
+	if q.Unassigned {
+		args = append(args, "--unassigned")
+	}
+	if len(q.Metadata) > 0 {
+		keys := make([]string, 0, len(q.Metadata))
+		for k := range q.Metadata {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			args = append(args, "--metadata-field", k+"="+q.Metadata[k])
+		}
+	}
 	if q.Limit > 0 {
 		args = append(args, "--limit", strconv.Itoa(q.Limit))
 	} else {
@@ -1111,6 +1124,12 @@ func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 			continue
 		}
 		if q.Assignee != "" && bead.Assignee != q.Assignee {
+			continue
+		}
+		if q.Unassigned && strings.TrimSpace(bead.Assignee) != "" {
+			continue
+		}
+		if len(q.Metadata) > 0 && !matchesMetadata(bead, q.Metadata) {
 			continue
 		}
 		result = append(result, bead)

@@ -1392,6 +1392,43 @@ func TestBdStoreReadyWithAssigneeAndLimit(t *testing.T) {
 	}
 }
 
+func TestBdStoreReadyForwardsMetadataAndUnassigned(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd ready --json --unassigned --metadata-field gc.routed_to=foundations/worker --limit 0`: {
+			out: []byte(`[
+				{"id":"bd-route","title":"routed work","status":"open","issue_type":"task","metadata":{"gc.routed_to":"foundations/worker"},"created_at":"2025-01-15T10:30:00Z"},
+				{"id":"bd-claimed","title":"already claimed","status":"open","issue_type":"task","assignee":"someone","metadata":{"gc.routed_to":"foundations/worker"},"created_at":"2025-01-15T10:31:00Z"},
+				{"id":"bd-other-pool","title":"different route","status":"open","issue_type":"task","metadata":{"gc.routed_to":"foundations/refinery"},"created_at":"2025-01-15T10:32:00Z"}
+			]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.Ready(beads.ReadyQuery{
+		Metadata:   map[string]string{"gc.routed_to": "foundations/worker"},
+		Unassigned: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("Ready returned %d beads, want 1; ids=%v", len(got), beadIDs(got))
+	}
+	if got[0].ID != "bd-route" {
+		t.Fatalf("Ready[0].ID = %q, want bd-route", got[0].ID)
+	}
+}
+
+func beadIDs(beads []beads.Bead) []string {
+	ids := make([]string, len(beads))
+	for i, b := range beads {
+		ids[i] = b.ID
+	}
+	return ids
+}
+
 func TestBdStoreReadyFiltersInfraTypes(t *testing.T) {
 	runner := fakeRunner(map[string]struct {
 		out []byte
