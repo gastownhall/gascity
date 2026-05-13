@@ -860,10 +860,9 @@ func claudeSettingsSource(cityPath string) (src, rel string) {
 // (bind-mount), but the extra entries are harmless.
 //
 // Claude's city-level .gc/settings.json is staged here because settingsArgs
-// points --settings at the city-root path. All other provider hook files
-// ship via the core pack overlay and flow through PackOverlayDirs staging,
-// so they are not handled here.
-func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []runtime.CopyEntry {
+// points --settings at the city-root path. Workdir hook files are included
+// only when they match the resolved provider or requested install-hook slots.
+func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string, hookProviders []string) []runtime.CopyEntry {
 	// Compute the relative path from cityPath to workDir so that
 	// container-side RelDst places files under the agent's WorkingDir
 	// (/workspace/<relWorkDir>/), not always at /workspace/.
@@ -875,23 +874,20 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []r
 		}
 	}
 
+	providerSet := hookProviderSet(hookProviders)
 	// workDir-based hooks: gemini, codex, opencode, copilot, cursor, pi, omp.
-	for _, rel := range []string{
-		path.Join(".gemini", "settings.json"),
-		path.Join(".codex", "hooks.json"),
-		path.Join(".opencode", "plugins", "gascity.js"),
-		path.Join(".github", "hooks", "gascity.json"),
-		path.Join(".github", "copilot-instructions.md"),
-		path.Join(".cursor", "hooks.json"),
-		path.Join(".pi", "extensions", "gc-hooks.js"),
-		path.Join(".omp", "hooks", "gc-hook.ts"),
-	} {
-		abs := filepath.Join(workDir, rel)
-		if _, err := os.Stat(abs); err == nil {
-			copyFiles = append(copyFiles, runtime.CopyEntry{
-				Src: abs, RelDst: path.Join(relWorkDir, rel),
-				Probed: true, ContentHash: runtime.HashPathContent(abs),
-			})
+	for _, provider := range orderedWorkDirHookProviders {
+		if !providerSet[provider.name] {
+			continue
+		}
+		for _, rel := range provider.relPaths {
+			abs := filepath.Join(workDir, rel)
+			if _, err := os.Stat(abs); err == nil {
+				copyFiles = append(copyFiles, runtime.CopyEntry{
+					Src: abs, RelDst: path.Join(relWorkDir, rel),
+					Probed: true, ContentHash: runtime.HashPathContent(abs),
+				})
+			}
 		}
 	}
 
@@ -920,6 +916,60 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []r
 		}
 	}
 	return copyFiles
+}
+
+type workDirHookProvider struct {
+	name     string
+	relPaths []string
+}
+
+var orderedWorkDirHookProviders = []workDirHookProvider{
+	{name: "gemini", relPaths: []string{path.Join(".gemini", "settings.json")}},
+	{name: "codex", relPaths: []string{path.Join(".codex", "hooks.json")}},
+	{name: "opencode", relPaths: []string{path.Join(".opencode", "plugins", "gascity.js")}},
+	{name: "copilot", relPaths: []string{
+		path.Join(".github", "hooks", "gascity.json"),
+		path.Join(".github", "copilot-instructions.md"),
+	}},
+	{name: "cursor", relPaths: []string{path.Join(".cursor", "hooks.json")}},
+	{name: "pi", relPaths: []string{path.Join(".pi", "extensions", "gc-hooks.js")}},
+	{name: "omp", relPaths: []string{path.Join(".omp", "hooks", "gc-hook.ts")}},
+}
+
+func hookFileProvidersForResolved(resolved *config.ResolvedProvider, installHooks []string, providers map[string]config.ProviderSpec) []string {
+	var out []string
+	appendProvider := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return
+		}
+		for _, existing := range out {
+			if existing == name {
+				return
+			}
+		}
+		out = append(out, name)
+	}
+	if resolved != nil {
+		appendProvider(resolvedProviderLaunchFamily(resolved))
+		appendProvider(resolved.Name)
+	}
+	for _, hook := range installHooks {
+		appendProvider(hook)
+		appendProvider(config.BuiltinFamily(hook, providers))
+	}
+	return out
+}
+
+func hookProviderSet(providers []string) map[string]bool {
+	out := make(map[string]bool, len(providers))
+	for _, provider := range providers {
+		provider = strings.TrimSpace(provider)
+		if provider != "" {
+			out[provider] = true
+		}
+	}
+	return out
 }
 
 // resolveAgentDirPath returns the absolute filesystem path for an agent dir

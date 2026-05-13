@@ -1319,6 +1319,90 @@ func TestBuildDesiredState_InstallsGeminiHooksBeforeFingerprinting(t *testing.T)
 	}
 }
 
+func TestBuildDesiredState_MaterializesHookOverlaysBeforeFingerprinting(t *testing.T) {
+	cityPath := t.TempDir()
+	packOverlay := filepath.Join(cityPath, "packs", "core", "overlay")
+	overlayHook := filepath.Join(packOverlay, "per-provider", "gemini", ".gemini", "settings.json")
+	workHook := filepath.Join(cityPath, "worker", ".gemini", "settings.json")
+	for _, dir := range []string{filepath.Dir(overlayHook), filepath.Dir(workHook)} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q): %v", dir, err)
+		}
+	}
+	// Same semantic hook document as overlayHook, but intentionally not in the
+	// canonical JSON shape that runtime overlay staging writes.
+	nonCanonicalHook := []byte(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"gc prime --hook --hook-format gemini"}],"matcher":""}]},"tools":{"shell":{"enableInteractiveShell":false}}}` + "\n")
+	canonicalOverlayHook := []byte(`{
+  "tools": {
+    "shell": {
+      "enableInteractiveShell": false
+    }
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "gc prime --hook --hook-format gemini"
+          }
+        ]
+      }
+    ]
+  }
+}
+`)
+	if err := os.WriteFile(workHook, nonCanonicalHook, 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", workHook, err)
+	}
+	if err := os.WriteFile(overlayHook, canonicalOverlayHook, 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", overlayHook, err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city", Provider: "test"},
+		Providers: map[string]config.ProviderSpec{
+			"test": {Command: "echo", PromptMode: "none"},
+		},
+		PackOverlayDirs: []string{packOverlay},
+		Agents: []config.Agent{{
+			Name:              "probe",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			ScaleCheck:        "echo 1",
+			WorkDir:           "worker",
+			InstallAgentHooks: []string{"gemini"},
+		}},
+	}
+
+	first := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), nil, io.Discard)
+	var firstTP TemplateParams
+	for _, tp := range first.State {
+		firstTP = tp
+	}
+	firstCfg := templateParamsToConfig(firstTP)
+	if firstCfg.WorkDir == "" {
+		t.Fatalf("first desired state missing runtime config: %#v", first.State)
+	}
+	firstHash := runtime.CoreFingerprint(firstCfg)
+
+	if err := runtime.StageSessionWorkDir(firstCfg); err != nil {
+		t.Fatalf("StageSessionWorkDir: %v", err)
+	}
+
+	second := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), nil, io.Discard)
+	var secondTP TemplateParams
+	for _, tp := range second.State {
+		secondTP = tp
+	}
+	secondCfg := templateParamsToConfig(secondTP)
+	if got := runtime.CoreFingerprint(secondCfg); got != firstHash {
+		t.Fatalf("core fingerprint changed after runtime overlay materialization: first=%s second=%s firstCopyFiles=%#v secondCopyFiles=%#v",
+			firstHash, got, firstCfg.CopyFiles, secondCfg.CopyFiles)
+	}
+}
+
 func TestBuildDesiredState_IncludesImportedAlwaysNamedSessions(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "repo")

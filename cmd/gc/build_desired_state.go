@@ -2108,19 +2108,56 @@ func prepareTemplateResolution(bp *agentBuildParams, cfgAgent *config.Agent, qua
 	if bp == nil || cfgAgent == nil {
 		return
 	}
-	if ih := config.ResolveInstallHooks(cfgAgent, bp.workspace); len(ih) > 0 {
-		workDir, err := workdirutil.ResolveWorkDirPathStrict(bp.cityPath, bp.cityName, qualifiedName, *cfgAgent, bp.rigs)
-		if err != nil {
-			return
-		}
-		workDir, err = resolveAgentDir(bp.cityPath, workDir)
-		if err != nil {
+	resolved, err := config.ResolveProvider(cfgAgent, bp.workspace, bp.providers, bp.lookPath)
+	if err != nil {
+		return
+	}
+	workDir, err := resolveConfiguredWorkDir(bp.cityPath, bp.cityName, qualifiedName, cfgAgent, bp.rigs)
+	if err != nil {
+		if stderr != nil {
 			fmt.Fprintf(stderr, "agent %q: workdir: %v\n", qualifiedName, err) //nolint:errcheck
-			return
 		}
+		return
+	}
+	rigName := sessionSetupContextForAgent(bp.cityPath, bp.cityName, qualifiedName, cfgAgent, bp.rigs).Rig
+	materializeProviderOverlaysBeforeFingerprint(bp, cfgAgent, resolved, qualifiedName, rigName, workDir, stderr)
+	if ih := config.ResolveInstallHooks(cfgAgent, bp.workspace); len(ih) > 0 {
 		resolver := func(name string) string { return config.BuiltinFamily(name, bp.providers) }
 		if hErr := hooks.InstallWithResolver(bp.fs, bp.cityPath, workDir, ih, resolver); hErr != nil {
 			fmt.Fprintf(stderr, "agent %q: hooks: %v\n", qualifiedName, hErr) //nolint:errcheck
+		}
+	}
+}
+
+func materializeProviderOverlaysBeforeFingerprint(
+	bp *agentBuildParams,
+	cfgAgent *config.Agent,
+	resolved *config.ResolvedProvider,
+	qualifiedName string,
+	rigName string,
+	workDir string,
+	stderr io.Writer,
+) {
+	if bp == nil || cfgAgent == nil || resolved == nil || workDir == "" {
+		return
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	installHooks := config.ResolveInstallHooks(cfgAgent, bp.workspace)
+	overlayProviders := runtime.OverlayProviderNamesFromParts(
+		resolvedProviderLaunchFamily(resolved),
+		strings.TrimSpace(resolved.Name),
+		installHooks,
+	)
+	for _, overlayDir := range effectiveOverlayDirs(bp.packOverlayDirs, bp.rigOverlayDirs, rigName) {
+		if err := runtime.StageProviderOverlayDir(overlayDir, workDir, overlayProviders, stderr); err != nil {
+			fmt.Fprintf(stderr, "agent %q: pack overlay %q: %v\n", qualifiedName, overlayDir, err) //nolint:errcheck
+		}
+	}
+	if overlayDir := resolveOverlayDir(cfgAgent.OverlayDir, bp.cityPath); overlayDir != "" {
+		if err := runtime.StageProviderOverlayDir(overlayDir, workDir, overlayProviders, stderr); err != nil {
+			fmt.Fprintf(stderr, "agent %q: overlay %q: %v\n", qualifiedName, overlayDir, err) //nolint:errcheck
 		}
 	}
 }
