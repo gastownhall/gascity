@@ -1096,6 +1096,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 		}
 
+		// driftRestartedInPlace tracks whether the alive-restart branch ran
+		// the named-session in-place restart on this tick. Hoisted out of
+		// the inner block so the downstream asleep-named-session drift
+		// repair block can skip when we just restarted, preventing the
+		// preserved resume metadata from being undone before the new
+		// process commits.
+		driftRestartedInPlace := false
 		// Config drift: if alive and config changed, drain for restart.
 		// Live-only drift: re-apply session_live without restart.
 		if alive {
@@ -1189,6 +1196,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							})
 							alive = false
 							restartedInPlace = true
+							driftRestartedInPlace = true
 						}
 						if !restartedInPlace {
 							// Defer ordinary-session config-drift drain while a
@@ -1291,7 +1299,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 		}
 
-		if !alive && isNamedSessionBead(*session) {
+		// Asleep-named-session drift repair. Skipped on the same tick when
+		// the alive-restart branch above already rotated this session into
+		// creating: the preserved started_config_hash from the resume-
+		// continuity path is intentionally still pointing at the previous-
+		// runtime hash until the new process commits. Without this guard,
+		// the asleep-repair would clear the preserved hash and rotate the
+		// session_key, undoing the resume in the same tick.
+		if !alive && isNamedSessionBead(*session) && !driftRestartedInPlace {
 			template := tp.TemplateName
 			if template == "" {
 				template = normalizedSessionTemplate(*session, cfg)
@@ -2121,11 +2136,38 @@ func resetConfiguredNamedSessionForConfigDrift(
 			fmt.Fprintf(stderr, "session reconciler: stopping config-drift named session %s: %v\n", sessionName, err) //nolint:errcheck
 		}
 	}
-	newSessionKey := ""
-	if newKey, err := sessionpkg.GenerateSessionKey(); err == nil {
-		newSessionKey = newKey
+	// Preserve resume-eligible prior conversation metadata (session_key +
+	// started_config_hash) when transitioning straight back into creating,
+	// so the next wake builds `--resume <prior-key>` instead of
+	// `--session-id <new-uuid>`. Gated on StateCreating because the asleep
+	// repair path (called from the asleep-named-session drift block) must
+	// still clear started_config_hash — an asleep-bound reset that
+	// preserved the stale hash would re-trigger drift every tick.
+	// Conversation health is validated post-start: a stale resume that
+	// Claude rejects is recovered by recordWakeFailure clearing both
+	// fields, and the next reconcile tick mints a fresh session_key.
+	// This intentionally reads the current per-session snapshot at this
+	// call site and does not provide CAS protection — external store
+	// implementations may apply SetMetadataBatch sequentially with partial
+	// application possible. If preservation is extended to additional
+	// reset sites, reload via store.Get or add conditional-write support
+	// before deciding what to preserve.
+	nextSessionState := sessionpkg.State(nextState)
+	priorSessionKey := strings.TrimSpace(session.Metadata["session_key"])
+	priorStartedConfigHash := strings.TrimSpace(session.Metadata["started_config_hash"])
+	preserveResume := nextSessionState == sessionpkg.StateCreating &&
+		priorSessionKey != "" && priorStartedConfigHash != ""
+
+	rotatedSessionKey := ""
+	if preserveResume {
+		rotatedSessionKey = priorSessionKey
+	} else if newKey, err := sessionpkg.GenerateSessionKey(); err == nil {
+		rotatedSessionKey = newKey
 	}
-	batch := sessionpkg.ConfigDriftResetPatch(sessionpkg.State(nextState), newSessionKey, now)
+	batch := sessionpkg.ConfigDriftResetPatch(nextSessionState, rotatedSessionKey, now)
+	if preserveResume {
+		batch["started_config_hash"] = priorStartedConfigHash
+	}
 	batch[namedSessionConfigDriftDeferredAtMetadata] = ""
 	batch[namedSessionConfigDriftDeferredKeyMetadata] = ""
 	batch[sessionAttachedConfigDriftDeferredAtMetadata] = ""
