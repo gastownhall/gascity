@@ -11,7 +11,25 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
+
+// shortenStaleKeyDetectDelayForTest zeroes both the cmd/gc and internal/session
+// stale-key detection delays for the duration of t. Tests that loop through
+// the reconciler start path many times (the circuit-breaker tests below) would
+// otherwise pay 2s per iteration on each layer, dominating test wall time.
+// The Fake runtime is synchronous so the post-start IsRunning check always
+// succeeds — no real wait is needed.
+func shortenStaleKeyDetectDelayForTest(t *testing.T) {
+	t.Helper()
+	prevLocal := staleKeyDetectDelay
+	staleKeyDetectDelay = 0
+	restoreSession := sessionpkg.SetStaleKeyDetectDelayForTest(0)
+	t.Cleanup(func() {
+		staleKeyDetectDelay = prevLocal
+		restoreSession()
+	})
+}
 
 // breakerAt is a tiny helper that returns a breaker with explicit config
 // for tests so we can use fake clocks freely.
@@ -827,6 +845,7 @@ func createCircuitTestNamedSessionWithIdentity(
 }
 
 func TestReconciler_CircuitDisabledByDefaultAllowsRepeatedWakeAttempts(t *testing.T) {
+	shortenStaleKeyDetectDelayForTest(t)
 	env := newReconcilerTestEnv()
 	configureAlwaysNamedSessionWithoutCircuit(env)
 	env.addDesired("session-a", "template-a", false)
@@ -851,6 +870,7 @@ func TestReconciler_CircuitDisabledByDefaultAllowsRepeatedWakeAttempts(t *testin
 }
 
 func TestReconciler_CircuitUsesConfiguredDaemonThresholds(t *testing.T) {
+	shortenStaleKeyDetectDelayForTest(t)
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
 		Daemon: config.DaemonConfig{
@@ -896,6 +916,7 @@ func TestReconciler_CircuitUsesConfiguredDaemonThresholds(t *testing.T) {
 }
 
 func TestReconciler_CircuitOpenStatePersistsAcrossControllerRestart(t *testing.T) {
+	shortenStaleKeyDetectDelayForTest(t)
 	env := newReconcilerTestEnv()
 	configureAlwaysNamedSession(env)
 	env.addDesired("session-a", "template-a", false)
@@ -1100,6 +1121,7 @@ func TestReconciler_CircuitDoesNotRecordRestartForWakeBudgetDeferredNamedSession
 }
 
 func TestReconciler_CircuitTripsThroughRepeatedWakeAttempts(t *testing.T) {
+	shortenStaleKeyDetectDelayForTest(t)
 	env := newReconcilerTestEnv()
 	configureAlwaysNamedSession(env)
 	env.addDesired("session-a", "template-a", false)
@@ -1148,6 +1170,7 @@ func TestReconciler_CircuitTripsThroughRepeatedWakeAttempts(t *testing.T) {
 }
 
 func TestReconciler_CircuitStaysClosedWhenAssignedWorkStatusProgresses(t *testing.T) {
+	shortenStaleKeyDetectDelayForTest(t)
 	env := newReconcilerTestEnv()
 	configureAlwaysNamedSession(env)
 	env.addDesired("session-a", "template-a", false)
