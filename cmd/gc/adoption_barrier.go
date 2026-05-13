@@ -51,6 +51,7 @@ var poolSlotPattern = regexp.MustCompile(`-(\d+)$`)
 // Returns the adoption result and whether the barrier passed (all running
 // sessions have beads).
 func runAdoptionBarrier(
+	cityPath string,
 	store beads.Store,
 	sp runtime.Provider,
 	cfg *config.City,
@@ -215,12 +216,30 @@ func runAdoptionBarrier(
 			continue
 		}
 
-		_, createErr := store.Create(beads.Bead{
-			Title:    detail.AgentName,
-			Type:     sessionBeadType,
-			Labels:   []string{sessionBeadLabel, "agent:" + detail.AgentName},
-			Metadata: meta,
+		alreadyHadBead := false
+		createErr := sessionpkg.WithCitySessionIdentifierLocks(cityPath, []string{sessionName, detail.AgentName}, func() error {
+			hasBead, err := openSessionBeadExists(store, sessionName)
+			if err != nil {
+				return err
+			}
+			if hasBead {
+				alreadyHadBead = true
+				return nil
+			}
+			_, err = store.Create(beads.Bead{
+				Title:    detail.AgentName,
+				Type:     sessionBeadType,
+				Labels:   []string{sessionBeadLabel, "agent:" + detail.AgentName},
+				Metadata: meta,
+			})
+			return err
 		})
+		if alreadyHadBead {
+			result.AlreadyHadBead++
+			detail.HasBead = true
+			result.Details = append(result.Details, detail)
+			continue
+		}
 		if createErr != nil {
 			fmt.Fprintf(stderr, "adoption barrier: creating bead for %s: %v\n", sessionName, createErr) //nolint:errcheck
 			result.Skipped++
@@ -233,6 +252,26 @@ func runAdoptionBarrier(
 	// Step 4: Barrier gate — all running sessions must have beads.
 	passed := result.Skipped == 0 && !partialList
 	return result, passed
+}
+
+func openSessionBeadExists(store beads.Store, sessionName string) (bool, error) {
+	existing, err := store.List(beads.ListQuery{
+		Label:    sessionBeadLabel,
+		Metadata: map[string]string{"session_name": sessionName},
+		Live:     true,
+	})
+	if err != nil {
+		return false, fmt.Errorf("listing session beads for %q: %w", sessionName, err)
+	}
+	for _, b := range existing {
+		if b.Status == "closed" {
+			continue
+		}
+		if sessionpkg.IsSessionBeadOrRepairable(b) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // resolvePoolBase attempts to match a pool instance session name back to its

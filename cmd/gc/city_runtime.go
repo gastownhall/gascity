@@ -395,7 +395,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			cr.onStatus("adopting_sessions")
 		}
 		if cr.cityBeadStore() != nil {
-			result, passed := runAdoptionBarrier(cr.cityBeadStore(), cr.sp, cr.cfg, cr.cityName, clock.Real{}, cr.stderr, false)
+			result, passed := runAdoptionBarrier(cr.cityPath, cr.cityBeadStore(), cr.sp, cr.cfg, cr.cityName, clock.Real{}, cr.stderr, false)
 			if result.Adopted > 0 {
 				fmt.Fprintf(cr.stdout, "Adopted %d running session(s) into bead store.\n", result.Adopted) //nolint:errcheck
 			}

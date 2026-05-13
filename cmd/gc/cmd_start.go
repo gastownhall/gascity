@@ -625,7 +625,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		oneShotStore = store
 
 		// Run adoption barrier before sync.
-		result, passed := runAdoptionBarrier(store, sp, cfg, cityName, clock.Real{}, stderr, false)
+		result, passed := runAdoptionBarrier(cityPath, store, sp, cfg, cityName, clock.Real{}, stderr, false)
 		if result.Adopted > 0 {
 			fmt.Fprintf(stdout, "Adopted %d running session(s) into bead store.\n", result.Adopted) //nolint:errcheck
 		}
