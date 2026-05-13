@@ -457,6 +457,9 @@ func TestCityRuntimeTickPreflightsManagedDoltBeforeSessionSnapshot(t *testing.T)
 	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_BEADS", "bd")
 
+	cityPath := t.TempDir()
+	cleanupManagedDoltTestCity(t, cityPath)
+
 	orderEvents := &orderedRuntimeEvents{}
 	store := &managedDoltPreflightOrderStore{
 		Store:  beads.NewMemStore(),
@@ -693,7 +696,7 @@ func TestNewCityRuntimePreflightsManagedDoltPublicationBeforeStartupStoreWork(t 
 
 	healthCalls := 0
 	cityPath := t.TempDir()
-	requireNoLeakedDoltAfterForPaths(t, cityPath)
+	cleanupManagedDoltTestCity(t, cityPath)
 	sp := runtime.NewFake()
 	_ = newCityRuntime(CityRuntimeParams{
 		CityPath: cityPath,
