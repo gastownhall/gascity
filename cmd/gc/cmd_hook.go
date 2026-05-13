@@ -142,7 +142,11 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 	} else {
 		sessionForQuery = cliSessionName(cityPath, cityName, resolvedAgentName, cfg.Workspace.SessionTemplate)
 	}
-	overrides := hookQueryEnv(cityPath, cfg, &a)
+	overrides, err := hookQueryEnv(cityPath, cfg, &a)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc hook: building work query env: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	overrides["GC_AGENT"] = agentForQuery
 	overrides["GC_SESSION_NAME"] = sessionForQuery
 	if sessionTemplateContext {
@@ -162,12 +166,15 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 // It includes scope metadata (store root/scope/prefix) plus any rig-scoped
 // runtime overrides so hook queries observe the same routing contract as the
 // controller probes.
-func hookQueryEnv(cityPath string, cfg *config.City, a *config.Agent) map[string]string {
-	env := controllerWorkQueryEnv(cityPath, cfg, a)
+func hookQueryEnv(cityPath string, cfg *config.City, a *config.Agent) (map[string]string, error) {
+	env, err := controllerWorkQueryEnv(cityPath, cfg, a)
+	if err != nil {
+		return nil, err
+	}
 	if env == nil {
 		env = map[string]string{}
 	}
-	return env
+	return env, nil
 }
 
 // WorkQueryRunner runs a work query command and returns its stdout.

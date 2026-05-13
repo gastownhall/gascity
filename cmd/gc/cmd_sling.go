@@ -296,7 +296,11 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 		}
 	}
 	storeRef := workflowStoreRefForDir(storeDir, cityPath, cityName, cfg)
-	storeEnv := slingStoreEnv(cfg, cityPath, storeDir)
+	storeEnv, err := slingStoreEnvWithError(cfg, cityPath, storeDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc sling: building store env: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if sourceBead.exists && looksLikeInlineText(cfg, beadOrFormula) {
 		fmt.Fprintf(stderr, "gc sling: found existing bead %q in %s; routing it instead of creating inline text\n", beadOrFormula, storeRef) //nolint:errcheck // best-effort stderr
 	}
@@ -396,6 +400,11 @@ func loadSlingCityConfig(cityPath string) (*config.City, *config.Provenance, err
 }
 
 func slingStoreEnv(cfg *config.City, cityPath, storeDir string) map[string]string {
+	env, _ := slingStoreEnvWithError(cfg, cityPath, storeDir)
+	return env
+}
+
+func slingStoreEnvWithError(cfg *config.City, cityPath, storeDir string) (map[string]string, error) {
 	storeEnv := map[string]string{}
 	switch provider := rawBeadsProviderForScope(storeDir, cityPath); {
 	case provider == "file":
@@ -404,12 +413,20 @@ func slingStoreEnv(cfg *config.City, cityPath, storeDir string) map[string]strin
 	case strings.HasPrefix(provider, "exec:"):
 		// Explicit custom sling_query commands own their env for exec providers.
 	default:
-		storeEnv = bdRuntimeEnv(cityPath)
+		var err error
 		if !samePath(storeDir, cityPath) {
-			storeEnv = bdRuntimeEnvForRig(cityPath, cfg, storeDir)
+			storeEnv, err = bdRuntimeEnvForRigWithError(cityPath, cfg, storeDir)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			storeEnv, err = bdRuntimeEnvWithError(cityPath)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
-	return storeEnv
+	return storeEnv, nil
 }
 
 // findRigByPrefix returns the rig whose effective prefix matches (case-insensitive).

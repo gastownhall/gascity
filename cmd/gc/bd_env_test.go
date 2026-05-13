@@ -2829,6 +2829,44 @@ func TestBdCommandRunnerWithManagedRetryRecoversAndRerunsWithFreshEnv(t *testing
 	}
 }
 
+func TestBdCommandRunnerWithManagedRetryReturnsNilOutputOnRetryEnvError(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	origRunner := beadsExecCommandRunnerWithEnv
+	origRecover := recoverManagedBDCommand
+	t.Cleanup(func() {
+		beadsExecCommandRunnerWithEnv = origRunner
+		recoverManagedBDCommand = origRecover
+	})
+
+	beadsExecCommandRunnerWithEnv = func(_ map[string]string) beads.CommandRunner {
+		return func(_ string, _ string, _ ...string) ([]byte, error) {
+			return []byte("stale first-attempt output"), fmt.Errorf("bad connection: use of closed network connection")
+		}
+	}
+	recoverManagedBDCommand = func(_ string) error {
+		return nil
+	}
+
+	retryEnvErr := fmt.Errorf("retry env failed")
+	calls := 0
+	runner := bdCommandRunnerWithManagedRetryErr(t.TempDir(), func(_ string) (map[string]string, error) {
+		calls++
+		if calls == 2 {
+			return nil, retryEnvErr
+		}
+		return map[string]string{"GC_DOLT_PORT": "3307"}, nil
+	})
+
+	out, err := runner(t.TempDir(), "bd", "list", "--json")
+	if !errors.Is(err, retryEnvErr) {
+		t.Fatalf("runner error = %v, want retry env error", err)
+	}
+	if out != nil {
+		t.Fatalf("runner output = %q, want nil after retry env error", out)
+	}
+}
+
 func TestBdCommandRunnerWithManagedRetrySkipsRecoveryForLoopbackExternalEndpoint(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 
@@ -3252,6 +3290,29 @@ dolt.auto-start: false
 	}
 }
 
+func TestCityRuntimeProcessEnvWithError_SurfacesPostgresProjectionError(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+
+	cityPath := t.TempDir()
+	writePGScopeFixture(t, cityPath, "")
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: city
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := cityRuntimeProcessEnvWithError(cityPath)
+	if err == nil {
+		t.Fatal("cityRuntimeProcessEnvWithError() error = nil, want postgres projection error")
+	}
+	if !errors.Is(err, pgauth.ErrNoPasswordResolvable) {
+		t.Fatalf("errors.Is(err, ErrNoPasswordResolvable) = false, want true; err=%v", err)
+	}
+}
+
 func TestBdRuntimeEnvForRig_PostgresBackendClearsCityDoltProjection(t *testing.T) {
 	clearAmbientPostgresEnv(t)
 	t.Setenv("GC_BEADS", "bd")
@@ -3587,9 +3648,18 @@ func TestProjectedKeysCoverage(t *testing.T) {
 			t.Errorf("projectedPostgresEnvKeys[%q] is not in mergeRuntimeEnv strip list - symmetry broken", key)
 		}
 	}
+	for _, key := range projectedDoltEnvKeys {
+		if !projectedKeyStripped(key) {
+			t.Errorf("projectedDoltEnvKeys[%q] is not in mergeRuntimeEnv strip list - symmetry broken", key)
+		}
+	}
 }
 
 func pgKeyStripped(key string) bool {
+	return projectedKeyStripped(key)
+}
+
+func projectedKeyStripped(key string) bool {
 	out := mergeRuntimeEnv([]string{key + "=PARENT"}, nil)
 	for _, entry := range out {
 		if strings.HasPrefix(entry, key+"=") {

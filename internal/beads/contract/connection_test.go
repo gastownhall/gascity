@@ -376,6 +376,8 @@ func TestResolveDoltConnectionTargetRequiresRuntimeForManagedScopes(t *testing.T
 
 	if _, err := ResolveDoltConnectionTarget(fs, city, city); err == nil {
 		t.Fatal("ResolveDoltConnectionTarget() should fail without runtime state")
+	} else if !IsManagedRuntimeUnavailable(err) {
+		t.Fatalf("IsManagedRuntimeUnavailable(err) = false, want true; err=%v", err)
 	}
 }
 

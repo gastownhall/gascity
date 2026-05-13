@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -200,6 +201,27 @@ func TestResolveFromEnv_Tier5_ProcessEnvBeads(t *testing.T) {
 	}
 }
 
+func TestResolveFromEnv_ScopeFileScanErrorStopsFallback(t *testing.T) {
+	clearProcessEnv(t)
+	scopeRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(scopeRoot, ".beads"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.beads): %v", err)
+	}
+	envPath := filepath.Join(scopeRoot, ".beads", ".env")
+	if err := os.WriteFile(envPath, []byte(strings.Repeat("x", 70*1024)+"\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(.env): %v", err)
+	}
+	t.Setenv("BEADS_POSTGRES_PASSWORD", "tier5-must-not-win")
+
+	_, err := ResolveFromEnv(nil, scopeRoot, endpoint())
+	if err == nil {
+		t.Fatal("ResolveFromEnv error = nil, want scope file scan error")
+	}
+	if !strings.Contains(err.Error(), envPath) {
+		t.Fatalf("error = %q, want scope env path %q", err.Error(), envPath)
+	}
+}
+
 func TestResolveFromEnv_Tier6_CredentialsFileEnv(t *testing.T) {
 	clearProcessEnv(t)
 	credPath := writeCredentialsFile(t, "127.0.0.1", "5433", "tier6")
@@ -214,6 +236,21 @@ func TestResolveFromEnv_Tier6_CredentialsFileEnv(t *testing.T) {
 	}
 	if got.Source != SourceCredentialsFileEnv {
 		t.Fatalf("Source = %v, want SourceCredentialsFileEnv", got.Source)
+	}
+}
+
+func TestResolveFromEnv_CredentialsFileScanErrorStopsFallback(t *testing.T) {
+	clearProcessEnv(t)
+	credPath := writeCredentialsFileRaw(t, "[127.0.0.1:5433]\n"+strings.Repeat("x", 70*1024)+"\n")
+	t.Setenv("BEADS_CREDENTIALS_FILE", credPath)
+	pinHome(t, "[127.0.0.1:5433]\npassword = home-must-not-win\n")
+
+	_, err := ResolveFromEnv(nil, t.TempDir(), endpoint())
+	if err == nil {
+		t.Fatal("ResolveFromEnv error = nil, want credentials file scan error")
+	}
+	if !strings.Contains(err.Error(), credPath) {
+		t.Fatalf("error = %q, want credentials path %q", err.Error(), credPath)
 	}
 }
 
@@ -451,6 +488,34 @@ func TestResolveFromEnv_QuotedPasswordInCredentialsFile(t *testing.T) {
 	}
 	if got.Password != "p&ssword!" {
 		t.Fatalf("Password = %q, want p&ssword!", got.Password)
+	}
+}
+
+func TestResolveFromEnv_CredentialsFilePreservesHashInPassword(t *testing.T) {
+	clearProcessEnv(t)
+	credPath := writeCredentialsFileRaw(t, "[127.0.0.1:5433]\npassword = s3cr3t#1\n")
+	t.Setenv("BEADS_CREDENTIALS_FILE", credPath)
+
+	got, err := ResolveFromEnv(nil, t.TempDir(), endpoint())
+	if err != nil {
+		t.Fatalf("ResolveFromEnv error: %v", err)
+	}
+	if got.Password != "s3cr3t#1" {
+		t.Fatalf("Password = %q, want s3cr3t#1", got.Password)
+	}
+}
+
+func TestResolveFromEnv_CredentialsFilePreservesHashInQuotedPassword(t *testing.T) {
+	clearProcessEnv(t)
+	credPath := writeCredentialsFileRaw(t, "[127.0.0.1:5433]\npassword = \"p#ss\"\n")
+	t.Setenv("BEADS_CREDENTIALS_FILE", credPath)
+
+	got, err := ResolveFromEnv(nil, t.TempDir(), endpoint())
+	if err != nil {
+		t.Fatalf("ResolveFromEnv error: %v", err)
+	}
+	if got.Password != "p#ss" {
+		t.Fatalf("Password = %q, want p#ss", got.Password)
 	}
 }
 

@@ -271,7 +271,11 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		agentEnv["GC_BIN"] = exe
 	}
-	for key, value := range sessionDoltEnv(p.cityPath, rigRoot, p.rigs) {
+	sessionBackendEnv, err := sessionBackendEnvWithError(p.cityPath, rigRoot, p.rigs)
+	if err != nil {
+		return TemplateParams{}, fmt.Errorf("agent %q: building session backend env: %w", qualifiedName, err)
+	}
+	for key, value := range sessionBackendEnv {
 		agentEnv[key] = value
 	}
 	if rigName != "" {
@@ -550,6 +554,11 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 }
 
 func sessionDoltEnv(cityPath, rigRoot string, rigs []config.Rig) map[string]string {
+	env, _ := sessionBackendEnvWithError(cityPath, rigRoot, rigs)
+	return env
+}
+
+func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (map[string]string, error) {
 	env := map[string]string{
 		// Suppress bd's built-in Dolt auto-start. The gc controller manages
 		// the server; bd's CLI auto-start launches rogue servers from the
@@ -559,21 +568,45 @@ func sessionDoltEnv(cityPath, rigRoot string, rigs []config.Rig) map[string]stri
 	// Explicit empty values let tmux unset stale Dolt vars inherited from
 	// the server environment when the current city/rig does not use them.
 	setProjectedDoltEnvEmpty(env)
+	ensureProjectedPostgresEnvExplicit(env)
 
 	// Session env projection must not trigger provider recovery. Session setup
 	// only publishes the currently resolved target; store operations use the
 	// bd runtime env when recovery is allowed.
 	if rigRoot == "" {
+		if cityUsesBdStoreContract(cityPath) {
+			if usedPostgres, err := applyCityPostgresBackendEnv(env, cityPath); err != nil {
+				clearProjectedDoltEnv(env)
+				clearProjectedPostgresEnv(env)
+				mirrorBeadsDoltEnv(env)
+				ensureProjectedDoltEnvExplicit(env)
+				ensureProjectedPostgresEnvExplicit(env)
+				return env, err
+			} else if usedPostgres {
+				ensureProjectedDoltEnvExplicit(env)
+				return env, nil
+			}
+		}
 		if err := applyResolvedCityDoltEnv(env, cityPath, false); err != nil {
 			mirrorBeadsDoltEnv(env)
+			ensureProjectedPostgresEnvExplicit(env)
+			if !isRecoverableManagedDoltEnvError(err) {
+				return env, err
+			}
 		}
-		return env
+		ensureProjectedPostgresEnvExplicit(env)
+		return env, nil
 	}
 
 	if err := applyResolvedRigDoltEnv(env, cityPath, rigRoot, rigConfigForScopeRoot(cityPath, rigRoot, rigs), false); err != nil {
 		mirrorBeadsDoltEnv(env)
+		ensureProjectedPostgresEnvExplicit(env)
+		if !isRecoverableManagedDoltEnvError(err) {
+			return env, err
+		}
 	}
-	return env
+	ensureProjectedPostgresEnvExplicit(env)
+	return env, nil
 }
 
 // templateParamsToConfig converts TemplateParams to the runtime.Config

@@ -479,12 +479,16 @@ func ensureBeadsProvider(cityPath string) error {
 
 		script := strings.TrimPrefix(provider, "exec:")
 		managedBDProvider := samePath(script, gcBeadsBdScriptPath(cityPath))
-		if err := runProviderOpWithEnv(script, providerLifecycleProcessEnv(cityPath, provider), "start"); err != nil {
+		providerEnv, envErr := providerLifecycleProcessEnvWithError(cityPath, provider)
+		if envErr != nil {
+			return envErr
+		}
+		if err := runProviderOpWithEnv(script, providerEnv, "start"); err != nil {
 			// Managed bd startup occasionally reports a start error even though
 			// the Dolt server is already live. If the follow-up health probe
 			// succeeds, prefer the actual server state over the start error.
 			if managedBDProvider {
-				if healthErr := runProviderOpWithEnv(script, providerLifecycleProcessEnv(cityPath, provider), "health"); healthErr == nil {
+				if healthErr := runProviderOpWithEnv(script, providerEnv, "health"); healthErr == nil {
 					if err := publishManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
 						return err
 					}
@@ -513,7 +517,11 @@ func shutdownBeadsProvider(cityPath string) error {
 			return clearManagedDoltRuntimeStateIfOwned(cityPath)
 		}
 		script := strings.TrimPrefix(provider, "exec:")
-		if err := runProviderOpWithEnv(script, providerLifecycleProcessEnv(cityPath, provider), "stop"); err != nil {
+		providerEnv, err := providerLifecycleProcessEnvWithError(cityPath, provider)
+		if err != nil {
+			return err
+		}
+		if err := runProviderOpWithEnv(script, providerEnv, "stop"); err != nil {
 			return err
 		}
 		if err := clearManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
@@ -551,7 +559,10 @@ func initBeadsForDir(cityPath, dir, prefix, doltDatabase string) error {
 		}
 		script := strings.TrimPrefix(provider, "exec:")
 		if execProviderUsesCanonicalBdScopeFiles(provider) && !execProviderNeedsScopedDoltInit(provider) {
-			baseEnv := providerLifecycleProcessEnv(cityPath, provider)
+			baseEnv, err := providerLifecycleProcessEnvWithError(cityPath, provider)
+			if err != nil {
+				return err
+			}
 			overrides := map[string]string{
 				"BEADS_DIR": filepath.Join(dir, ".beads"),
 			}
@@ -588,7 +599,10 @@ func initBeadsForDir(cityPath, dir, prefix, doltDatabase string) error {
 			return finalizeCanonicalBdScopeInit(cityPath, dir, prefix, canonicalDoltDatabase)
 		}
 		if !execProviderNeedsScopedDoltInit(provider) {
-			baseEnv := cityRuntimeProcessEnv(cityPath)
+			baseEnv, err := cityRuntimeProcessEnvWithError(cityPath)
+			if err != nil {
+				return err
+			}
 			if strings.TrimSpace(cityPath) == "" {
 				baseEnv = os.Environ()
 			}
@@ -729,7 +743,10 @@ func healthBeadsProvider(cityPath string) error {
 		defer release()
 
 		script := strings.TrimPrefix(provider, "exec:")
-		providerEnv := providerLifecycleProcessEnv(cityPath, provider)
+		providerEnv, err := providerLifecycleProcessEnvWithError(cityPath, provider)
+		if err != nil {
+			return err
+		}
 		if err := runProviderOpWithEnv(script, providerEnv, "health"); err != nil {
 			if providerUsesBdStoreContract(provider) && isExternalDolt(cityPath) {
 				return err
@@ -1439,7 +1456,11 @@ func runProviderProbe(script, cityPath, provider string) bool {
 	cmd.WaitDelay = 2 * time.Second
 	prepareProviderOpCommand(cmd)
 	if cityPath != "" {
-		cmd.Env = providerLifecycleProcessEnv(cityPath, provider)
+		env, err := providerLifecycleProcessEnvWithError(cityPath, provider)
+		if err != nil {
+			return false
+		}
+		cmd.Env = env
 	}
 	return cmd.Run() == nil
 }
@@ -1460,13 +1481,21 @@ func providerLifecycleDoltPathEnv(cityPath string) []string {
 }
 
 func providerLifecycleProcessEnv(cityPath, provider string) []string {
+	env, _ := providerLifecycleProcessEnvWithError(cityPath, provider)
+	return env
+}
+
+func providerLifecycleProcessEnvWithError(cityPath, provider string) ([]string, error) {
 	if strings.TrimSpace(cityPath) == "" {
-		return nil
+		return nil, nil
 	}
 	cityPath = normalizePathForCompare(cityPath)
-	env := cityRuntimeProcessEnv(cityPath)
+	env, err := cityRuntimeProcessEnvWithError(cityPath)
+	if err != nil {
+		return nil, err
+	}
 	if !providerUsesBdStoreContract(provider) {
-		return env
+		return env, nil
 	}
 	for _, key := range []string{
 		"GC_PACK_STATE_DIR",
@@ -1512,7 +1541,7 @@ func providerLifecycleProcessEnv(cityPath, provider string) []string {
 			env = append(env, loglevelPrefix+val)
 		}
 	}
-	return env
+	return env, nil
 }
 
 // acquireProviderSemaphore returns a per-city semaphore channel and waits
@@ -1572,7 +1601,11 @@ func runProviderOp(script, cityPath string, args ...string) error {
 	if cityPath == "" {
 		return runProviderOpWithEnv(script, nil, args...)
 	}
-	return runProviderOpWithEnv(script, cityRuntimeProcessEnv(cityPath), args...)
+	env, err := cityRuntimeProcessEnvWithError(cityPath)
+	if err != nil {
+		return err
+	}
+	return runProviderOpWithEnv(script, env, args...)
 }
 
 func runProviderOpWithEnv(script string, environ []string, args ...string) error {

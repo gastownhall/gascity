@@ -279,7 +279,11 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 				return cursor
 			}
 		}
-		triggerOpts := orderTriggerOptionsForTarget(cityPath, m.cfg, target, a)
+		triggerOpts, err := orderTriggerOptionsForTarget(cityPath, m.cfg, target, a)
+		if err != nil {
+			logDispatchError(m.stderr, "gc: order dispatch: building trigger env for %s: %v", a.ScopedName(), err)
+			continue
+		}
 		result := orders.CheckTriggerWithOptions(a, now, lastRunFn, m.ep, cursorFn, triggerOpts)
 		if lastRunErr != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: reading last run for %s: %v", a.ScopedName(), lastRunErr)
@@ -554,8 +558,8 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.St
 		}
 	}
 
-	env := orderExecEnv(cityPath, m.cfg, target, a)
-	output, err := m.execRun(ctx, a.Exec, target.ScopeRoot, env)
+	env, err := orderExecEnvWithError(cityPath, m.cfg, target, a)
+	var output []byte
 	var execErrMsg string
 	if err != nil {
 		redactionEnv := append(os.Environ(), env...)
@@ -564,6 +568,17 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.St
 		logDispatchError(m.stderr, "gc: order exec %s failed: %s", scoped, execErrMsg)
 		if len(output) > 0 {
 			logDispatchError(m.stderr, "gc: order exec %s output: %s", scoped, execenv.RedactText(string(output), redactionEnv))
+		}
+	} else {
+		output, err = m.execRun(ctx, a.Exec, target.ScopeRoot, env)
+		if err != nil {
+			redactionEnv := append(os.Environ(), env...)
+			execErrMsg = execenv.RedactText(err.Error(), redactionEnv)
+			labels = []string{"exec-failed"}
+			logDispatchError(m.stderr, "gc: order exec %s failed: %s", scoped, execErrMsg)
+			if len(output) > 0 {
+				logDispatchError(m.stderr, "gc: order exec %s output: %s", scoped, execenv.RedactText(string(output), redactionEnv))
+			}
 		}
 	}
 

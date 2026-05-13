@@ -501,26 +501,30 @@ func managedLocalDoltHost(host string) bool {
 }
 
 func resolvedRuntimeCityDoltTarget(cityPath string, allowRecovery bool) (contract.DoltConnectionTarget, bool, error) {
+	var managedRuntimeErr error
 	if target, ok, err := canonicalScopeDoltTarget(cityPath, cityPath); err != nil {
 		if !allowRecovery || !contract.IsManagedRuntimeUnavailable(err) {
 			return contract.DoltConnectionTarget{}, false, err
 		}
+		managedRuntimeErr = err
 	} else if ok {
 		return target, true, nil
 	}
-	if host, port, ok, invalid := resolveConfiguredCityDoltTarget(cityPath); invalid {
-		return contract.DoltConnectionTarget{}, false, fmt.Errorf("invalid canonical city endpoint state")
-	} else if ok {
-		return contract.DoltConnectionTarget{Host: host, Port: port, External: true}, true, nil
-	}
+	if managedRuntimeErr == nil {
+		if host, port, ok, invalid := resolveConfiguredCityDoltTarget(cityPath); invalid {
+			return contract.DoltConnectionTarget{}, false, fmt.Errorf("invalid canonical city endpoint state")
+		} else if ok {
+			return contract.DoltConnectionTarget{Host: host, Port: port, External: true}, true, nil
+		}
 
-	hostOverride := strings.TrimSpace(os.Getenv("GC_DOLT_HOST"))
-	if hostOverride != "" && !managedLocalDoltHost(hostOverride) {
-		return contract.DoltConnectionTarget{
-			Host:     hostOverride,
-			Port:     strings.TrimSpace(os.Getenv("GC_DOLT_PORT")),
-			External: true,
-		}, true, nil
+		hostOverride := strings.TrimSpace(os.Getenv("GC_DOLT_HOST"))
+		if hostOverride != "" && !managedLocalDoltHost(hostOverride) {
+			return contract.DoltConnectionTarget{
+				Host:     hostOverride,
+				Port:     strings.TrimSpace(os.Getenv("GC_DOLT_PORT")),
+				External: true,
+			}, true, nil
+		}
 	}
 
 	if port := currentManagedDoltPort(cityPath); port != "" {
@@ -532,6 +536,9 @@ func resolvedRuntimeCityDoltTarget(cityPath string, allowRecovery bool) (contrac
 				return contract.DoltConnectionTarget{Host: defaultManagedDoltHost, Port: port}, true, nil
 			}
 		}
+	}
+	if managedRuntimeErr != nil {
+		return contract.DoltConnectionTarget{}, false, managedRuntimeErr
 	}
 	return contract.DoltConnectionTarget{}, false, nil
 }
@@ -610,7 +617,7 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 		ensureProjectedDoltEnvExplicit(env)
 		ensureProjectedPostgresEnvExplicit(env)
 		runner := beadsExecCommandRunnerWithEnv(env)
-		if name == "bd" && envErr != nil {
+		if envErr != nil {
 			return nil, envErr
 		}
 		out, err := runner(dir, name, args...)
@@ -637,7 +644,7 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 		}
 		retryEnv, retryEnvErr := envFn(dir)
 		if retryEnvErr != nil {
-			return out, retryEnvErr
+			return nil, retryEnvErr
 		}
 		ensureProjectedDoltEnvExplicit(retryEnv)
 		ensureProjectedPostgresEnvExplicit(retryEnv)
@@ -816,10 +823,7 @@ func isRecoverableManagedDoltEnvError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if contract.IsManagedRuntimeUnavailable(err) {
-		return true
-	}
-	return errors.Is(err, os.ErrNotExist) && strings.Contains(err.Error(), "read dolt runtime state")
+	return contract.IsManagedRuntimeUnavailable(err)
 }
 
 func cityRuntimeEnvMapForCity(cityPath string) map[string]string {
@@ -827,14 +831,21 @@ func cityRuntimeEnvMapForCity(cityPath string) map[string]string {
 }
 
 func cityRuntimeProcessEnv(cityPath string) []string {
+	env, _ := cityRuntimeProcessEnvWithError(cityPath)
+	return env
+}
+
+func cityRuntimeProcessEnvWithError(cityPath string) ([]string, error) {
 	cityPath = normalizePathForCompare(cityPath)
 	overrides := cityRuntimeEnvMapForCity(cityPath)
+	var projectionErr error
 	if cityUsesBdStoreContract(cityPath) {
 		source := map[string]string{"BEADS_DOLT_AUTO_START": "0"}
 		if usedPostgres, err := applyCityPostgresBackendEnv(source, cityPath); err != nil {
 			clearProjectedDoltEnv(source)
 			clearProjectedPostgresEnv(source)
 			mirrorBeadsDoltEnv(source)
+			projectionErr = err
 		} else if !usedPostgres {
 			err := applyResolvedCityDoltEnv(source, cityPath, false)
 			if err != nil {
@@ -849,7 +860,7 @@ func cityRuntimeProcessEnv(cityPath string) []string {
 			}
 		}
 	}
-	return mergeRuntimeEnv(os.Environ(), overrides)
+	return mergeRuntimeEnv(os.Environ(), overrides), projectionErr
 }
 
 func mirrorBeadsDoltEnv(env map[string]string) {

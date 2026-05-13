@@ -11,6 +11,16 @@
   is 13 commits further; merge tested clean — see Validation)
 - Diff: 6 commits ahead, 22 files, +2436 / -17
 
+## Review-attempt addendum
+
+This gate was originally written for `93eec8b9`. The PR branch later moved
+through `04b3f3262` (`fix(pg-auth): complete backend env projection`) to address
+adopt-review findings. Review attempts 2 and 3 covered that later head; attempt
+3 requested the maintainer fixup that propagates remaining Postgres projection
+errors, preserves `#` in credentials-file passwords, and tightens the managed
+Dolt runtime-unavailable sentinel. The maintainer fixup is validated by the
+focused commands recorded in the adopt-review attempt artifacts.
+
 ## Commits in this PR
 
 | # | SHA | Subject | Slice |
@@ -76,6 +86,14 @@ ships in this PR alongside slice 1 + slice 3 because the chain only
 makes sense end-to-end. The slice-3 reviewer (ga-6zqpw) reviewed the
 full stack at HEAD `ea9af929` (which contained all three slices) and
 confirmed the chain is functional end-to-end.
+
+## Deferred scope decisions
+
+- Dolt-auth file-error, permission, parse-error, and typed-error parity is
+  explicitly deferred from this PG-auth PR. The PR hardens new Postgres
+  credential projection behavior without changing legacy `internal/doltauth`
+  resolver contracts; track Dolt parity separately before treating the Dolt
+  resolver as having the same defensive guarantees.
 
 ## Push target
 

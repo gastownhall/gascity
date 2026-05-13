@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/pgauth"
 )
 
 func trackingBeads(t *testing.T, store beads.Store, label string) []beads.Bead {
@@ -4694,6 +4696,31 @@ func TestOrderExecEnvSkipsBeadsActorForUnnamedOrder(t *testing.T) {
 		if entry == "BEADS_ACTOR=order:" {
 			t.Fatalf("orderExecEnv emitted bare order: prefix for unnamed order; env=%v", envSlice)
 		}
+	}
+}
+
+func TestOrderExecEnvWithError_SurfacesPostgresProjectionError(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	writePGScopeFixture(t, cityDir, "")
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: city
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
+	a := orders.Order{Name: "pg-order", Trigger: "cooldown", Interval: "1m", Exec: "true"}
+
+	_, err := orderExecEnvWithError(cityDir, nil, target, a)
+	if err == nil {
+		t.Fatal("orderExecEnvWithError() error = nil, want postgres projection error")
+	}
+	if !errors.Is(err, pgauth.ErrNoPasswordResolvable) {
+		t.Fatalf("errors.Is(err, ErrNoPasswordResolvable) = false, want true; err=%v", err)
 	}
 }
 

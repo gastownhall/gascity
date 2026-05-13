@@ -296,7 +296,12 @@ func buildDesiredStateWithSessionBeads(
 			defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTargetForAgent(cityPath, cfg, &cfg.Agents[i], store, rigStores))
 			continue
 		}
-		pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, env: controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[i]), newDemand: store != nil})
+		env, err := controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[i])
+		if err != nil {
+			fmt.Fprintf(stderr, "scaleCheck: building env for %s: %v\n", cfg.Agents[i].QualifiedName(), err) //nolint:errcheck
+			continue
+		}
+		pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, env: env, newDemand: store != nil})
 	}
 
 	// Collect work beads with assignees — used for both pool demand and

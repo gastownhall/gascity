@@ -638,7 +638,11 @@ func doOrderRunExec(a orders.Order, cityPath string, cfg *config.City, stdout, s
 		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	env := orderExecEnv(cityPath, cfg, target, a)
+	env, err := orderExecEnvWithError(cityPath, cfg, target, a)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck
+		return 1
+	}
 
 	output, err := shellExecRunner(ctx, a.Exec, target.ScopeRoot, env)
 	if err != nil {

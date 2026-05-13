@@ -136,7 +136,11 @@ func computePoolDeathHandlers(cfg *config.City, cityName, cityPath string, sp ru
 		if !a.SupportsInstanceExpansion() {
 			continue
 		}
-		agentEnv := controllerQueryRuntimeEnv(cityPath, cfg, &a)
+		agentEnv, err := controllerQueryRuntimeEnv(cityPath, cfg, &a)
+		if err != nil {
+			fmt.Fprintf(stderr, "on_death %s env: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort stderr
+			continue
+		}
 		for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
 			_, instanceName := config.ParseQualifiedName(qualifiedInstance)
 			instance := deepCopyAgent(&a, instanceName, a.Dir)

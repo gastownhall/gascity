@@ -265,6 +265,9 @@ func readEnvValueChecked(path, key string) (string, error) {
 			}
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("scan %s: %w", path, err)
+	}
 	return strings.TrimSpace(value), nil
 }
 
@@ -298,13 +301,8 @@ func readCredentialsFilePassword(path, host, port string) (string, error) {
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		lineNum++
-		raw := scanner.Text()
-		// Strip mid-line # comments.
-		if idx := strings.Index(raw, "#"); idx >= 0 {
-			raw = raw[:idx]
-		}
-		line := strings.TrimSpace(raw)
-		if line == "" {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		if strings.HasPrefix(line, "[") {
@@ -346,6 +344,9 @@ func readCredentialsFilePassword(path, host, port string) (string, error) {
 		}
 		matchedPassword = value
 		matched = true
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("scan %s: %w", path, err)
 	}
 	if matched {
 		return strings.TrimSpace(matchedPassword), nil
