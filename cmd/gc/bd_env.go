@@ -26,10 +26,10 @@ const defaultManagedDoltHost = "127.0.0.1"
 // Env is rebuilt on each call so GC_DOLT_PORT reflects the current managed
 // dolt port (which can change across city restarts).
 func bdCommandRunnerForCity(cityPath string) beads.CommandRunner {
-	return bdCommandRunnerWithManagedRetry(cityPath, func(dir string) map[string]string {
-		env := bdRuntimeEnv(cityPath)
+	return bdCommandRunnerWithManagedRetryErr(cityPath, func(dir string) (map[string]string, error) {
+		env, err := bdRuntimeEnvWithError(cityPath)
 		env["BEADS_DIR"] = filepath.Join(dir, ".beads")
-		return env
+		return env, err
 	})
 }
 
@@ -75,19 +75,19 @@ func controlBdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix
 }
 
 func controlBdCommandRunnerForCity(cityPath string) beads.CommandRunner {
-	return bdCommandRunnerWithManagedRetry(cityPath, func(dir string) map[string]string {
-		env := bdRuntimeEnv(cityPath)
+	return bdCommandRunnerWithManagedRetryErr(cityPath, func(dir string) (map[string]string, error) {
+		env, err := bdRuntimeEnvWithError(cityPath)
 		env["BEADS_DIR"] = filepath.Join(dir, ".beads")
 		applyControllerBdEnv(env)
-		return env
+		return env, err
 	})
 }
 
 func controlBdCommandRunnerForRig(cityPath string, cfg *config.City, rigDir string) beads.CommandRunner {
-	return bdCommandRunnerWithManagedRetry(cityPath, func(_ string) map[string]string {
-		env := bdRuntimeEnvForRig(cityPath, cfg, rigDir)
+	return bdCommandRunnerWithManagedRetryErr(cityPath, func(_ string) (map[string]string, error) {
+		env, err := bdRuntimeEnvForRigWithError(cityPath, cfg, rigDir)
 		applyControllerBdEnv(env)
-		return env
+		return env, err
 	})
 }
 
@@ -131,8 +131,8 @@ func readScopeIssuePrefix(scopeRoot string) string {
 }
 
 func bdCommandRunnerForRig(cityPath string, cfg *config.City, rigDir string) beads.CommandRunner {
-	return bdCommandRunnerWithManagedRetry(cityPath, func(_ string) map[string]string {
-		return bdRuntimeEnvForRig(cityPath, cfg, rigDir)
+	return bdCommandRunnerWithManagedRetryErr(cityPath, func(_ string) (map[string]string, error) {
+		return bdRuntimeEnvForRigWithError(cityPath, cfg, rigDir)
 	})
 }
 
@@ -214,6 +214,7 @@ func applyCanonicalScopeBackendEnv(env map[string]string, cityPath, scopeRoot st
 	}
 	switch meta.Backend {
 	case "", "dolt":
+		clearProjectedPostgresEnv(env)
 		target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, cityPath, scopeRoot)
 		if err != nil {
 			return true, err
@@ -229,6 +230,31 @@ func applyCanonicalScopeBackendEnv(env map[string]string, cityPath, scopeRoot st
 		return true, nil
 	default:
 		return true, fmt.Errorf("unsupported backend %q for scope %s", meta.Backend, scopeRoot)
+	}
+}
+
+func applyCityPostgresBackendEnv(env map[string]string, cityPath string) (bool, error) {
+	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, cityPath, "")
+	if err != nil {
+		return false, err
+	}
+	if resolved.Kind != contract.ScopeConfigAuthoritative {
+		return false, nil
+	}
+	meta, _, metaErr := contract.LoadMetadataState(fsys.OSFS{}, scopeMetadataJSONPath(cityPath))
+	if metaErr != nil {
+		return true, metaErr
+	}
+	switch meta.Backend {
+	case "postgres":
+		if err := applyResolvedScopePostgresEnv(env, cityPath, meta); err != nil {
+			return true, err
+		}
+		return true, nil
+	case "", "dolt":
+		return false, nil
+	default:
+		return true, fmt.Errorf("unsupported backend %q for scope %s", meta.Backend, cityPath)
 	}
 }
 
@@ -250,6 +276,9 @@ func applyResolvedScopePostgresEnv(env map[string]string, scopeRoot string, meta
 	if env == nil {
 		return nil
 	}
+	clearProjectedDoltEnv(env)
+	mirrorBeadsDoltEnv(env)
+	clearProjectedPostgresEnv(env)
 	endpoint := pgauth.Endpoint{
 		Host: meta.PostgresHost,
 		Port: meta.PostgresPort,
@@ -334,11 +363,10 @@ func scopePostgresEndpoint(cityPath, scopeRoot string) (string, string) {
 	return meta.PostgresHost, meta.PostgresPort
 }
 
-// pgTransportError returns true when the wrapped error matches a
-// known Postgres transport-layer failure marker. Used by the bd
-// command runner to wrap the error with an operator-facing hint
-// instead of attempting recovery — gc does not manage external PG
-// endpoints.
+// pgTransportError returns true when the wrapped error matches a known
+// Postgres failure marker. Used by the bd command runner to skip managed
+// Dolt recovery and wrap the error with an operator-facing hint — gc does
+// not manage external PG endpoints.
 func pgTransportError(err error) bool {
 	if err == nil {
 		return false
@@ -446,6 +474,20 @@ func ensureProjectedDoltEnvExplicit(env map[string]string) {
 func clearProjectedDoltEnv(env map[string]string) {
 	for _, key := range projectedDoltEnvKeys {
 		delete(env, key)
+	}
+}
+
+func clearProjectedPostgresEnv(env map[string]string) {
+	for _, key := range projectedPostgresEnvKeys {
+		delete(env, key)
+	}
+}
+
+func ensureProjectedPostgresEnvExplicit(env map[string]string) {
+	for _, key := range projectedPostgresEnvKeys {
+		if _, ok := env[key]; !ok {
+			env[key] = ""
+		}
 	}
 }
 
@@ -557,10 +599,20 @@ func bdTransportRecoverableError(cityPath, scopeRoot string, env map[string]stri
 }
 
 func bdCommandRunnerWithManagedRetry(cityPath string, envFn func(dir string) map[string]string) beads.CommandRunner {
+	return bdCommandRunnerWithManagedRetryErr(cityPath, func(dir string) (map[string]string, error) {
+		return envFn(dir), nil
+	})
+}
+
+func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) (map[string]string, error)) beads.CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
-		env := envFn(dir)
+		env, envErr := envFn(dir)
 		ensureProjectedDoltEnvExplicit(env)
+		ensureProjectedPostgresEnvExplicit(env)
 		runner := beadsExecCommandRunnerWithEnv(env)
+		if name == "bd" && envErr != nil {
+			return nil, envErr
+		}
 		out, err := runner(dir, name, args...)
 		if name != "bd" {
 			return out, err
@@ -571,7 +623,7 @@ func bdCommandRunnerWithManagedRetry(cityPath string, envFn func(dir string) map
 		if scopeBackendIsPostgres(cityPath, dir) {
 			if err != nil && pgTransportError(err) {
 				host, port := scopePostgresEndpoint(cityPath, dir)
-				return out, fmt.Errorf("postgres at %s:%s is unreachable; gc does not manage external PG endpoints: %w", host, port, err)
+				return out, fmt.Errorf("postgres at %s:%s: gc does not manage external PG endpoints (no managed recovery attempted): %w", host, port, err)
 			}
 			return out, err
 		}
@@ -583,8 +635,12 @@ func bdCommandRunnerWithManagedRetry(cityPath string, envFn func(dir string) map
 				return out, err
 			}
 		}
-		retryEnv := envFn(dir)
+		retryEnv, retryEnvErr := envFn(dir)
+		if retryEnvErr != nil {
+			return out, retryEnvErr
+		}
 		ensureProjectedDoltEnvExplicit(retryEnv)
+		ensureProjectedPostgresEnvExplicit(retryEnv)
 		retryRunner := beadsExecCommandRunnerWithEnv(retryEnv)
 		return retryRunner(dir, name, args...)
 	}
@@ -688,7 +744,12 @@ func applyLegacyRigExternalTarget(env map[string]string, rig config.Rig) {
 // If the rig has custom DoltHost/DoltPort in city.toml, those override the
 // city-level Dolt config. Otherwise falls back to bdRuntimeEnv(cityPath).
 func bdRuntimeEnvForRig(cityPath string, cfg *config.City, rigPath string) map[string]string {
-	env := bdRuntimeEnv(cityPath)
+	env, _ := bdRuntimeEnvForRigWithError(cityPath, cfg, rigPath)
+	return env
+}
+
+func bdRuntimeEnvForRigWithError(cityPath string, cfg *config.City, rigPath string) (map[string]string, error) {
+	env, _ := bdRuntimeEnvWithError(cityPath)
 	rigPath = filepath.Clean(rigPath)
 	// Pin the rig store explicitly. The gc-beads-bd provider derives its Dolt
 	// data root from GC_CITY_PATH unless BEADS_DIR is set, so cwd-based
@@ -704,12 +765,22 @@ func bdRuntimeEnvForRig(cityPath string, cfg *config.City, rigPath string) map[s
 	}
 	if err := applyResolvedRigDoltEnv(env, cityPath, rigPath, explicitRig, true); err != nil {
 		clearProjectedDoltEnv(env)
+		clearProjectedPostgresEnv(env)
 		mirrorBeadsDoltEnv(env)
+		if isRecoverableManagedDoltEnvError(err) {
+			return env, nil
+		}
+		return env, err
 	}
-	return env
+	return env, nil
 }
 
 func bdRuntimeEnv(cityPath string) map[string]string {
+	env, _ := bdRuntimeEnvWithError(cityPath)
+	return env
+}
+
+func bdRuntimeEnvWithError(cityPath string) (map[string]string, error) {
 	env := cityRuntimeEnvMapForCity(cityPath)
 	env["BEADS_DIR"] = filepath.Join(cityPath, ".beads")
 	env["GC_RIG"] = ""
@@ -720,13 +791,35 @@ func bdRuntimeEnv(cityPath string) map[string]string {
 	// starts rogue servers from the agent's cwd with the wrong data_dir.
 	env["BEADS_DOLT_AUTO_START"] = "0"
 	if !cityUsesBdStoreContract(cityPath) {
-		return env
+		return env, nil
+	}
+	if usedPostgres, err := applyCityPostgresBackendEnv(env, cityPath); err != nil {
+		clearProjectedDoltEnv(env)
+		clearProjectedPostgresEnv(env)
+		mirrorBeadsDoltEnv(env)
+		return env, err
+	} else if usedPostgres {
+		return env, nil
 	}
 	if err := applyResolvedCityDoltEnv(env, cityPath, true); err != nil {
 		clearProjectedDoltEnv(env)
 		mirrorBeadsDoltEnv(env)
+		if isRecoverableManagedDoltEnvError(err) {
+			return env, nil
+		}
+		return env, err
 	}
-	return env
+	return env, nil
+}
+
+func isRecoverableManagedDoltEnvError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if contract.IsManagedRuntimeUnavailable(err) {
+		return true
+	}
+	return errors.Is(err, os.ErrNotExist) && strings.Contains(err.Error(), "read dolt runtime state")
 }
 
 func cityRuntimeEnvMapForCity(cityPath string) map[string]string {
@@ -738,21 +831,19 @@ func cityRuntimeProcessEnv(cityPath string) []string {
 	overrides := cityRuntimeEnvMapForCity(cityPath)
 	if cityUsesBdStoreContract(cityPath) {
 		source := map[string]string{"BEADS_DOLT_AUTO_START": "0"}
-		if err := applyResolvedCityDoltEnv(source, cityPath, false); err != nil {
+		if usedPostgres, err := applyCityPostgresBackendEnv(source, cityPath); err != nil {
 			clearProjectedDoltEnv(source)
+			clearProjectedPostgresEnv(source)
+			mirrorBeadsDoltEnv(source)
+		} else if !usedPostgres {
+			err := applyResolvedCityDoltEnv(source, cityPath, false)
+			if err != nil {
+				clearProjectedDoltEnv(source)
+			}
 		}
-		for _, key := range []string{
-			"GC_DOLT_HOST",
-			"GC_DOLT_PORT",
-			"GC_DOLT_USER",
-			"GC_DOLT_PASSWORD",
-			"BEADS_CREDENTIALS_FILE",
-			"BEADS_DOLT_SERVER_HOST",
-			"BEADS_DOLT_SERVER_PORT",
-			"BEADS_DOLT_SERVER_USER",
-			"BEADS_DOLT_PASSWORD",
-			"BEADS_DOLT_AUTO_START",
-		} {
+		keys := execProjectedBackendEnvKeys()
+		keys = append(keys, "BEADS_DOLT_AUTO_START")
+		for _, key := range keys {
 			if value, ok := source[key]; ok {
 				overrides[key] = value
 			}

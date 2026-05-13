@@ -209,7 +209,11 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 			RigName:   rigName,
 		}, provider)
 		if execProviderNeedsScopedDoltStoreEnv(provider) {
-			copyExecProjectedDoltEnv(env, bdRuntimeEnvForRig(cs.cityPath, cfg, scopeRoot))
+			projected, err := bdRuntimeEnvForRigWithError(cs.cityPath, cfg, scopeRoot)
+			if err != nil {
+				return unavailableStore{err: fmt.Errorf("project rig store env %s: %w", scopeRoot, err)}
+			}
+			copyExecProjectedBackendEnv(env, projected)
 		}
 		s.SetEnv(env)
 		return s
