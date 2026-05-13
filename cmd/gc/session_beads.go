@@ -1319,7 +1319,8 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				}
 				if err != nil {
 					recordAliasConflict()
-					if needsManagedPoolAliasValidation {
+					if needsManagedPoolAliasValidation ||
+						(isManagedPool && strings.TrimSpace(b.Metadata["alias"]) != "" && strings.TrimSpace(b.Metadata["alias"]) != managedAlias) {
 						queueMeta("alias", "")
 					}
 					fmt.Fprintf(stderr, "session beads: alias %q for %s unavailable: %v\n", managedAlias, agentName, err) //nolint:errcheck

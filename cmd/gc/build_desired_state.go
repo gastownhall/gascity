@@ -1869,7 +1869,7 @@ func existingPoolSlotWithConfig(cfg *config.City, cfgAgent *config.Agent, sessio
 	}
 	if sessionBead.Metadata["pool_slot"] != "" {
 		if slot, err := strconv.Atoi(strings.TrimSpace(sessionBead.Metadata["pool_slot"])); err == nil && slot > 0 {
-			if agentSlot > 0 && agentSlot == aliasSlot && agentSlot != slot {
+			if agentSlot > 0 && agentSlot != slot {
 				return agentSlot
 			}
 			if !storedTemplateMatches && agentSlot == 0 && aliasSlot == 0 {
