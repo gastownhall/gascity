@@ -1629,6 +1629,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v0/city/{cityName}/session/{id}/permission-mode": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Post v0 city by city name session by ID permission mode */
+        post: operations["post-v0-city-by-city-name-session-by-id-permission-mode"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v0/city/{cityName}/session/{id}/rename": {
         parameters: {
             query?: never;
@@ -3788,6 +3805,10 @@ export interface components {
         SessionPendingResponse: {
             pending?: components["schemas"]["PendingInteraction"];
             supported: boolean;
+        };
+        SessionPermissionModeBody: {
+            /** @description Provider schema value for the permission_mode option. */
+            permission_mode: string;
         };
         /**
          * Session raw transcript frame
@@ -11196,6 +11217,50 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SessionPendingResponse"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "post-v0-city-by-city-name-session-by-id-permission-mode": {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks. */
+                "X-GC-Request": string;
+            };
+            path: {
+                /** @description City name. */
+                cityName: string;
+                /** @description Session ID, alias, or runtime session_name. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SessionPermissionModeBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    "X-GC-Index"?: number;
+                    "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionResponse"];
                 };
             };
             /** @description Error */

@@ -493,7 +493,7 @@ args = ["{{.AgentName}}"]
 	if err != nil {
 		t.Fatalf("resolveBareProvider: %v", err)
 	}
-	mcpServers, err := srv.sessionMCPServers("custom-acp", "custom-acp", "custom-acp", fs.cityPath, "acp", "provider")
+	mcpServers, err := srv.sessionMCPServers("custom-acp", "custom-acp", "custom-acp", fs.cityPath, "acp", "provider", nil)
 	if err != nil {
 		t.Fatalf("sessionMCPServers: %v", err)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -616,6 +617,115 @@ func TestResolveWorkerSessionRuntimeFallsBackToPersistedProviderWhenCommandMissi
 	}
 	if got, want := runtimeCfg.Provider, info.Provider; got != want {
 		t.Fatalf("Provider = %q, want %q", got, want)
+	}
+}
+
+func TestResolveWorkerSessionRuntimeProviderCollisionUsesPersistedProvider(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg.Agents = []config.Agent{{
+		Name:     "test-agent",
+		Provider: "agent-provider",
+	}}
+	fs.cfg.Providers["test-agent"] = config.ProviderSpec{
+		Command:   "/bin/echo",
+		Args:      []string{"provider-session"},
+		PathCheck: "true",
+	}
+	fs.cfg.Providers["agent-provider"] = config.ProviderSpec{
+		Command:   "/bin/echo",
+		Args:      []string{"agent-template"},
+		PathCheck: "true",
+	}
+
+	srv := New(fs)
+	runtimeCfg, err := srv.resolveWorkerSessionRuntimeWithMetadata(session.Info{
+		Template: "test-agent",
+		Provider: "test-agent",
+		WorkDir:  t.TempDir(),
+	}, "", map[string]string{
+		"session_origin": "manual",
+	})
+	if err != nil {
+		t.Fatalf("resolveWorkerSessionRuntimeWithMetadata: %v", err)
+	}
+	if runtimeCfg == nil {
+		t.Fatal("resolveWorkerSessionRuntimeWithMetadata() = nil")
+	}
+	if got, wantPrefix := runtimeCfg.Command, "/bin/echo provider-session"; !strings.HasPrefix(got, wantPrefix) {
+		t.Fatalf("Command = %q, want prefix %q", got, wantPrefix)
+	}
+}
+
+func TestResolveWorkerSessionRuntimeProviderNameCollisionUsesPersistedProvider(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg.Agents = []config.Agent{{
+		Name:     "codex",
+		Provider: "codex",
+		WorkDir:  ".gc/worktrees/agent-codex",
+	}}
+	fs.cfg.Providers["codex"] = config.ProviderSpec{
+		Command:   "/bin/echo",
+		Args:      []string{"provider-session"},
+		PathCheck: "true",
+	}
+
+	srv := New(fs)
+	providerWorkDir := t.TempDir()
+	runtimeCfg, err := srv.resolveWorkerSessionRuntimeWithMetadata(session.Info{
+		Template: "codex",
+		Provider: "codex",
+		WorkDir:  providerWorkDir,
+	}, "", map[string]string{
+		"session_origin": "manual",
+	})
+	if err != nil {
+		t.Fatalf("resolveWorkerSessionRuntimeWithMetadata: %v", err)
+	}
+	if runtimeCfg == nil {
+		t.Fatal("resolveWorkerSessionRuntimeWithMetadata() = nil")
+	}
+	if got, wantPrefix := runtimeCfg.Command, "/bin/echo provider-session"; !strings.HasPrefix(got, wantPrefix) {
+		t.Fatalf("Command = %q, want prefix %q", got, wantPrefix)
+	}
+	if got, want := runtimeCfg.WorkDir, providerWorkDir; got != want {
+		t.Fatalf("WorkDir = %q, want %q", got, want)
+	}
+}
+
+func TestResolveWorkerSessionRuntimeLegacyManualAgentUsesTemplateWhenProviderMatches(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg.Agents = []config.Agent{{
+		Name:     "worker",
+		Dir:      "myrig",
+		Provider: "test-agent",
+	}}
+	fs.cfg.Providers["test-agent"] = config.ProviderSpec{
+		Command:           "/bin/echo",
+		Args:              []string{"agent-template"},
+		PathCheck:         "true",
+		ReadyPromptPrefix: "agent-ready>",
+	}
+
+	srv := New(fs)
+	runtimeCfg, err := srv.resolveWorkerSessionRuntimeWithMetadata(session.Info{
+		Template: "myrig/worker",
+		Provider: "test-agent",
+		WorkDir:  t.TempDir(),
+	}, "", map[string]string{
+		"agent_name":     "myrig/worker",
+		"session_origin": "manual",
+	})
+	if err != nil {
+		t.Fatalf("resolveWorkerSessionRuntimeWithMetadata: %v", err)
+	}
+	if runtimeCfg == nil {
+		t.Fatal("resolveWorkerSessionRuntimeWithMetadata() = nil")
+	}
+	if got, want := runtimeCfg.Command, "/bin/echo agent-template"; got != want {
+		t.Fatalf("Command = %q, want %q", got, want)
+	}
+	if got, want := runtimeCfg.Hints.ReadyPromptPrefix, "agent-ready>"; got != want {
+		t.Fatalf("Hints.ReadyPromptPrefix = %q, want %q", got, want)
 	}
 }
 

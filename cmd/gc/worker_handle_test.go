@@ -434,6 +434,92 @@ args = ["{{.AgentName}}"]
 	}
 }
 
+func TestResolveWorkerRuntimeProviderWithConfigProviderKindPrefersPersistedProvider(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Providers: map[string]config.ProviderSpec{
+			"stored-provider": {
+				Command: "true",
+				Args:    []string{"stored"},
+			},
+			"template-provider": {
+				Command: "true",
+				Args:    []string{"template"},
+			},
+		},
+	}
+	info := session.Info{
+		Template: "template-provider",
+		Provider: "stored-provider",
+	}
+
+	resolved, _ := resolveWorkerRuntimeProviderWithConfig(cfg, info, "provider")
+	if resolved == nil {
+		t.Fatal("resolveWorkerRuntimeProviderWithConfig() = nil")
+	}
+	if got := resolved.Name; got != "stored-provider" {
+		t.Fatalf("resolved.Name = %q, want stored-provider", got)
+	}
+}
+
+func TestResolveWorkerRuntimeProviderWithConfigMetadataIdentifiesProviderSession(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "myrig", Provider: "agent-provider"},
+		},
+		Providers: map[string]config.ProviderSpec{
+			"stored-provider": {
+				Command: "true",
+				Args:    []string{"stored"},
+			},
+			"agent-provider": {
+				Command: "true",
+				Args:    []string{"agent"},
+			},
+		},
+	}
+	info := session.Info{
+		Template: "myrig/worker",
+		Provider: "stored-provider",
+	}
+
+	resolved, _ := resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg, info, "", map[string]string{
+		"session_origin": "manual",
+	})
+	if resolved == nil {
+		t.Fatal("resolveWorkerRuntimeProviderWithConfigAndMetadata() = nil")
+	}
+	if got := resolved.Name; got != "stored-provider" {
+		t.Fatalf("resolved.Name = %q, want stored-provider", got)
+	}
+
+	legacyAgentInfo := session.Info{
+		Template: "myrig/worker",
+		Provider: "agent-provider",
+	}
+	resolved, _ = resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg, legacyAgentInfo, "", map[string]string{
+		"session_origin": "manual",
+	})
+	if resolved == nil {
+		t.Fatal("resolveWorkerRuntimeProviderWithConfigAndMetadata(legacy agent) = nil")
+	}
+	if got := resolved.Name; got != "agent-provider" {
+		t.Fatalf("legacy agent resolved.Name = %q, want agent-provider", got)
+	}
+
+	resolved, _ = resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg, info, "", map[string]string{
+		"session_origin": "manual",
+		"agent_name":     "myrig/worker",
+	})
+	if resolved == nil {
+		t.Fatal("resolveWorkerRuntimeProviderWithConfigAndMetadata(agent) = nil")
+	}
+	if got := resolved.Name; got != "agent-provider" {
+		t.Fatalf("agent resolved.Name = %q, want agent-provider", got)
+	}
+}
+
 func TestResolvedWorkerRuntimeWithConfigKeepsDefaultTransportWithoutExplicitACPTemplate(t *testing.T) {
 	cityDir := t.TempDir()
 	writePhase0InterfaceCity(t, cityDir, `[workspace]

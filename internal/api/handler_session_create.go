@@ -141,7 +141,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	alias = createCtx.Alias
 	workDir = createCtx.WorkDir
 
-	mcpServers, err := s.sessionMCPServers(template, resolved.Name, createCtx.Identity, workDir, transport, kind)
+	mcpServers, err := s.sessionMCPServers(template, resolved.Name, createCtx.Identity, workDir, transport, kind, nil)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
@@ -224,7 +224,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	// extraMeta in CreateAliasedBeadOnlyNamedWithMetadata above. Do NOT
 	// overwrite it here — the old code clobbered initial_message by writing
 	// only the options portion.
-	s.persistSessionMeta(store, info.ID, "agent", body.ProjectID, optMeta)
+	s.persistSessionMeta(store, info.ID, body.ProjectID, optMeta)
 	s.state.Poke() // wake reconciler to start the agent
 
 	// Auto-generate a title from the user's message if no explicit title was provided.
@@ -392,7 +392,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 	}
 
 	// Persist kind, option metadata, and project_id on the bead.
-	s.persistSessionMeta(store, info.ID, "provider", body.ProjectID, optMeta)
+	s.persistSessionMeta(store, info.ID, body.ProjectID, optMeta)
 	if body.Async {
 		s.state.Poke()
 	}
@@ -467,13 +467,10 @@ func (s *Server) rollbackCreatedSession(store beads.Store, sessionID string) err
 }
 
 // persistSessionMeta writes option metadata and project_id to the session bead.
-func (s *Server) persistSessionMeta(store beads.Store, sessionID, kind, projectID string, optMeta map[string]string) {
+func (s *Server) persistSessionMeta(store beads.Store, sessionID, projectID string, optMeta map[string]string) {
 	batch := make(map[string]string)
 	for k, v := range optMeta {
 		batch[k] = v
-	}
-	if kind != "" && kind != "provider" {
-		batch["real_world_app_session_kind"] = kind
 	}
 	if projectID != "" {
 		batch["real_world_app_project_id"] = projectID

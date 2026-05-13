@@ -645,7 +645,19 @@ func prepareStartCandidateForCity(
 	stderr io.Writer,
 ) (*preparedStart, error) {
 	session := candidate.session
-	if _, _, err := preWakeCommit(session, store, clk); err != nil {
+	if session != nil && strings.TrimSpace(session.ID) != "" && store != nil {
+		if err := sessionpkg.WithSessionMutationLock(session.ID, func() error {
+			current, err := store.Get(session.ID)
+			if err != nil {
+				return err
+			}
+			candidate.session = &current
+			_, _, err = preWakeCommit(candidate.session, store, clk)
+			return err
+		}); err != nil {
+			return nil, err
+		}
+	} else if _, _, err := preWakeCommit(session, store, clk); err != nil {
 		return nil, err
 	}
 	candidate = refreshConfiguredNamedStartCandidate(candidate, cityPath, cityName, cfg, sp, store, clk, stderr)

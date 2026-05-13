@@ -117,7 +117,7 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 	}
 	extraMeta["agent_name"] = workDirQualifiedName
 	extraMeta["session_origin"] = "manual"
-	mcpServers, err := s.sessionMCPServers(template, resolved.Name, workDirQualifiedName, workDir, transport, kind)
+	mcpServers, err := s.sessionMCPServers(template, resolved.Name, workDirQualifiedName, workDir, transport, kind, nil)
 	if err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
@@ -207,7 +207,7 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 		resp := sessionToResponse(info, s.state.Config())
 		resp.Kind = "agent"
 		s.emitSessionCreateSucceeded(reqID, resp)
-		s.persistSessionMeta(store, info.ID, "agent", body.ProjectID, nil)
+		s.persistSessionMeta(store, info.ID, body.ProjectID, nil)
 		if !waitForCommandable {
 			s.state.Poke()
 		}
@@ -356,7 +356,7 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Store,
 		resp := sessionToResponse(info, s.state.Config())
 		resp.Kind = "provider"
 		s.emitSessionCreateSucceeded(reqID, resp)
-		s.persistSessionMeta(store, info.ID, "provider", body.ProjectID, optMeta)
+		s.persistSessionMeta(store, info.ID, body.ProjectID, optMeta)
 		titleProvider := s.resolveTitleProvider()
 		MaybeGenerateTitleAsync(store, info.ID, body.Title, body.Message, titleProvider, info.WorkDir, func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "session %s: "+format+"\n", append([]any{info.ID}, args...)...)
@@ -452,6 +452,98 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 		Index: s.latestIndex(),
 		Body:  presp,
 	}, nil
+}
+
+const sessionPermissionModeOptionKey = "permission_mode"
+
+func (s *Server) humaHandleSessionPermissionMode(_ context.Context, input *SessionPermissionModeInput) (*IndexOutput[sessionResponse], error) {
+	return s.updateSessionPermissionMode(input.ID, input.Body)
+}
+
+func (s *Server) updateSessionPermissionMode(idRef string, body SessionPermissionModeBody) (*IndexOutput[sessionResponse], error) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		return nil, huma.Error503ServiceUnavailable("no bead store configured")
+	}
+
+	id, err := s.resolveSessionIDAllowClosedWithConfig(store, idRef)
+	if err != nil {
+		return nil, humaResolveError(err)
+	}
+	b, err := store.Get(id)
+	if err != nil {
+		return nil, humaStoreError(err)
+	}
+	if !session.IsSessionBeadOrRepairable(b) {
+		return nil, huma.Error400BadRequest(id + " is not a session")
+	}
+	session.RepairEmptyType(store, &b)
+
+	mgr := s.sessionManager(store)
+	info, err := mgr.Get(id)
+	if err != nil {
+		return nil, humaSessionManagerError(err)
+	}
+	if info.Closed {
+		return nil, huma.Error409Conflict("conflict: session is closed")
+	}
+	if session.IsTemplateOverrideRuntimeActive(info.State) {
+		return nil, huma.Error409Conflict("conflict: session is running; permission_mode changes use schema options and apply only before the next launch")
+	}
+	cfg := s.state.Config()
+	if cfg == nil {
+		return nil, huma.Error503ServiceUnavailable("city config not loaded yet")
+	}
+	agent, agentFound := findAgent(cfg, info.Template)
+	if session.UseAgentTemplateForProviderResolution("", b.Metadata, info.Provider, agent.Provider, agentFound) {
+		if !agentFound {
+			return nil, huma.Error409Conflict("conflict: session agent template no longer resolves; restore the template or recreate the session before changing schema options")
+		}
+	}
+
+	resolved, resolveErr := resolveProviderForSessionOptions(info, b.Metadata, cfg)
+	if resolved == nil {
+		if resolveErr != nil {
+			return nil, huma.Error409Conflict("conflict: session provider no longer resolves: " + resolveErr.Error())
+		}
+		return nil, huma.Error501NotImplemented("unsupported: session provider does not accept schema options")
+	}
+	if !providerHasOption(resolved.OptionsSchema, sessionPermissionModeOptionKey) {
+		return nil, huma.Error501NotImplemented("unsupported: session provider does not define permission_mode in options_schema")
+	}
+
+	mode := strings.TrimSpace(body.PermissionMode)
+	if _, optErr := config.ResolveExplicitOptions(resolved.OptionsSchema, map[string]string{sessionPermissionModeOptionKey: mode}); optErr != nil {
+		return nil, huma.Error400BadRequest(optErr.Error())
+	}
+
+	if _, err := mgr.UpdateTemplateOverrides(id, map[string]string{sessionPermissionModeOptionKey: mode}); err != nil {
+		return nil, humaSessionManagerError(err)
+	}
+	s.state.Poke()
+
+	info, err = mgr.Get(id)
+	if err != nil {
+		return nil, humaSessionManagerError(err)
+	}
+	updated, err := store.Get(id)
+	if err != nil {
+		return nil, humaStoreError(err)
+	}
+	resp := sessionResponseWithReason(info, &updated, s.state.Config(), strings.TrimSpace(s.state.CityPath()) != "")
+	return &IndexOutput[sessionResponse]{
+		Index: s.latestIndex(),
+		Body:  resp,
+	}, nil
+}
+
+func providerHasOption(schema []config.ProviderOption, key string) bool {
+	for _, opt := range schema {
+		if opt.Key == key {
+			return true
+		}
+	}
+	return false
 }
 
 // --- Session Submit ---

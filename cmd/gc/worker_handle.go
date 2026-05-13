@@ -463,7 +463,7 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	if cfg == nil {
 		return nil, nil
 	}
-	resolved, configuredTransport := resolveWorkerRuntimeProviderWithConfig(cfg, info, sessionKind)
+	resolved, configuredTransport := resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg, info, sessionKind, metadata)
 	if resolved == nil {
 		return nil, nil
 	}
@@ -695,21 +695,32 @@ func resolvedWorkerRuntimeTransport(info session.Info, resolved *config.Resolved
 }
 
 func resolveWorkerRuntimeProviderWithConfig(cfg *config.City, info session.Info, sessionKind string) (*config.ResolvedProvider, string) {
+	return resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg, info, sessionKind, nil)
+}
+
+func resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg *config.City, info session.Info, sessionKind string, metadata map[string]string) (*config.ResolvedProvider, string) {
 	if cfg == nil {
 		return nil, ""
 	}
-	if sessionKind != "provider" {
-		if found, ok := resolveAgentIdentity(cfg, info.Template, ""); ok {
+	found, foundAgent := resolveAgentIdentity(cfg, info.Template, "")
+	if session.UseAgentTemplateForProviderResolution(sessionKind, metadata, info.Provider, found.Provider, foundAgent) {
+		if foundAgent {
 			if resolved, err := config.ResolveProvider(&found, &cfg.Workspace, cfg.Providers, exec.LookPath); err == nil {
 				return resolved, config.ResolveSessionCreateTransport(found.Session, resolved)
 			}
 		}
 	}
-	resolved, err := config.ResolveProvider(&config.Agent{Provider: info.Template}, &cfg.Workspace, cfg.Providers, exec.LookPath)
-	if err != nil {
-		return nil, ""
+	for _, providerName := range []string{info.Provider, info.Template} {
+		providerName = strings.TrimSpace(providerName)
+		if providerName == "" {
+			continue
+		}
+		resolved, err := config.ResolveProvider(&config.Agent{Provider: providerName}, &cfg.Workspace, cfg.Providers, exec.LookPath)
+		if err == nil {
+			return resolved, strings.TrimSpace(resolved.ProviderSessionCreateTransport())
+		}
 	}
-	return resolved, strings.TrimSpace(resolved.ProviderSessionCreateTransport())
+	return nil, ""
 }
 
 func workerDeliveryIntentForSubmitIntent(intent session.SubmitIntent) worker.DeliveryIntent {

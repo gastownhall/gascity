@@ -779,7 +779,7 @@ func TestBuildResumeCommandUsesResolvedProviderCommand(t *testing.T) {
 		WorkDir:  "/tmp/workdir",
 	}
 
-	cmd, hints := buildResumeCommand(t.TempDir(), cfg, info, "", io.Discard)
+	cmd, hints := buildResumeCommand(t.TempDir(), cfg, info, "", nil, io.Discard)
 	if got, want := cmd, "aimux run gemini -- --approval-mode yolo"; got != want {
 		t.Fatalf("resume command = %q, want %q", got, want)
 	}
@@ -820,7 +820,7 @@ func TestBuildResumeCommandIncludesSettingsAndDefaultArgs(t *testing.T) {
 		ResumeFlag: "--resume",
 	}
 
-	cmd, _ := buildResumeCommand(cityDir, cfg, info, "", io.Discard)
+	cmd, _ := buildResumeCommand(cityDir, cfg, info, "", nil, io.Discard)
 
 	// Must include --settings pointing to .gc/settings.json.
 	wantSettings := fmt.Sprintf("--settings %q", filepath.Join(gcDir, "settings.json"))
@@ -829,6 +829,9 @@ func TestBuildResumeCommandIncludesSettingsAndDefaultArgs(t *testing.T) {
 	}
 	if !strings.Contains(cmd, wantSettings) {
 		t.Fatalf("resume command has wrong --settings path:\n  got:  %s\n  want: ...%s...", cmd, wantSettings)
+	}
+	if got := strings.Count(cmd, "--settings"); got != 1 {
+		t.Fatalf("resume command has %d --settings flags, want 1:\n  got: %s", got, cmd)
 	}
 
 	// Must include --resume flag.
@@ -861,11 +864,14 @@ func TestBuildResumeCommandUsesBuiltinAncestorForClaudeSettings(t *testing.T) {
 		WorkDir:  "/tmp/workdir",
 	}
 
-	cmd, _ := buildResumeCommand(cityDir, cfg, info, "", io.Discard)
+	cmd, _ := buildResumeCommand(cityDir, cfg, info, "", nil, io.Discard)
 
 	wantSettings := fmt.Sprintf("--settings %q", filepath.Join(cityDir, ".gc", "settings.json"))
 	if !strings.Contains(cmd, wantSettings) {
 		t.Fatalf("wrapped Claude resume command missing settings:\n  got:  %s\n  want: ...%s...", cmd, wantSettings)
+	}
+	if got := strings.Count(cmd, "--settings"); got != 1 {
+		t.Fatalf("wrapped Claude resume command has %d --settings flags, want 1:\n  got: %s", got, cmd)
 	}
 }
 
@@ -900,8 +906,87 @@ func TestBuildResumeCommandIncludesWrappedCodexResumeDefaults(t *testing.T) {
 		SessionKey: "abc-123",
 	}
 
-	cmd, _ := buildResumeCommand(cityDir, cfg, info, "", io.Discard)
+	cmd, _ := buildResumeCommand(cityDir, cfg, info, "", nil, io.Discard)
 	want := "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex-spark resume -c model_reasoning_effort=medium abc-123"
+	if cmd != want {
+		t.Fatalf("resume command = %q, want %q", cmd, want)
+	}
+}
+
+func TestBuildResumeCommandAppliesTemplateOverrides(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "worker", Provider: "codex-provider"},
+		},
+		Providers: map[string]config.ProviderSpec{
+			"codex-provider": {
+				Command:    "codex",
+				ResumeFlag: "--resume",
+				OptionsSchema: []config.ProviderOption{
+					{
+						Key: "permission_mode",
+						Choices: []config.OptionChoice{
+							{Value: "default", FlagArgs: []string{"--ask-for-approval", "on-request"}},
+							{Value: "plan", FlagArgs: []string{"--ask-for-approval", "never"}},
+						},
+					},
+				},
+			},
+		},
+	}
+	info := session.Info{
+		Template:   "worker",
+		Command:    "codex --ask-for-approval on-request",
+		Provider:   "codex-provider",
+		WorkDir:    "/tmp/workdir",
+		SessionKey: "abc-123",
+	}
+
+	cmd, _ := buildResumeCommand(t.TempDir(), cfg, info, "", map[string]string{
+		"template_overrides": `{"permission_mode":"plan"}`,
+	}, io.Discard)
+	want := "codex --resume abc-123 --ask-for-approval never"
+	if cmd != want {
+		t.Fatalf("resume command = %q, want %q", cmd, want)
+	}
+}
+
+func TestBuildResumeCommandFallsBackToDefaultArgsWhenOverridesInvalid(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "worker", Provider: "codex-provider"},
+		},
+		Providers: map[string]config.ProviderSpec{
+			"codex-provider": {
+				Command:    "codex",
+				Args:       []string{"--ask-for-approval", "on-request"},
+				ResumeFlag: "--resume",
+				OptionsSchema: []config.ProviderOption{
+					{
+						Key: "permission_mode",
+						Choices: []config.OptionChoice{
+							{Value: "default", FlagArgs: []string{"--ask-for-approval", "on-request"}},
+							{Value: "plan", FlagArgs: []string{"--ask-for-approval", "never"}},
+						},
+					},
+				},
+			},
+		},
+	}
+	info := session.Info{
+		Template:   "worker",
+		Command:    "codex",
+		Provider:   "codex-provider",
+		WorkDir:    "/tmp/workdir",
+		SessionKey: "abc-123",
+	}
+
+	cmd, _ := buildResumeCommand(t.TempDir(), cfg, info, "", map[string]string{
+		"template_overrides": `{"permission_mode":"invalid"}`,
+	}, io.Discard)
+	want := "codex --resume abc-123 --ask-for-approval on-request"
 	if cmd != want {
 		t.Fatalf("resume command = %q, want %q", cmd, want)
 	}
@@ -933,8 +1018,75 @@ func TestBuildResumeCommandProviderKindSkipsTemplateCollision(t *testing.T) {
 		SessionKey: "abc-123",
 	}
 
-	cmd, _ := buildResumeCommand(t.TempDir(), cfg, info, "provider", io.Discard)
+	cmd, _ := buildResumeCommand(t.TempDir(), cfg, info, "provider", nil, io.Discard)
 	want := "true provider --resume abc-123"
+	if cmd != want {
+		t.Fatalf("resume command = %q, want %q", cmd, want)
+	}
+}
+
+func TestBuildResumeCommandManualProviderMetadataSkipsTemplateCollision(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "runner", Provider: "agent-provider"},
+		},
+		Providers: map[string]config.ProviderSpec{
+			"runner": {
+				Command:    "true",
+				Args:       []string{"provider"},
+				ResumeFlag: "--resume",
+			},
+			"agent-provider": {
+				Command:    "true",
+				Args:       []string{"agent"},
+				ResumeFlag: "--resume",
+			},
+		},
+	}
+	info := session.Info{
+		Template:   "runner",
+		Provider:   "runner",
+		Command:    "stale",
+		WorkDir:    "/tmp/workdir",
+		SessionKey: "abc-123",
+	}
+
+	cmd, _ := buildResumeCommand(t.TempDir(), cfg, info, "", map[string]string{
+		"session_origin": "manual",
+	}, io.Discard)
+	want := "true provider --resume abc-123"
+	if cmd != want {
+		t.Fatalf("resume command = %q, want %q", cmd, want)
+	}
+}
+
+func TestBuildResumeCommandProviderKindPrefersPersistedProvider(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Providers: map[string]config.ProviderSpec{
+			"stored-provider": {
+				Command:    "true",
+				Args:       []string{"stored"},
+				ResumeFlag: "--resume",
+			},
+			"template-provider": {
+				Command:    "true",
+				Args:       []string{"template"},
+				ResumeFlag: "--resume",
+			},
+		},
+	}
+	info := session.Info{
+		Template:   "template-provider",
+		Provider:   "stored-provider",
+		Command:    "stale",
+		WorkDir:    "/tmp/workdir",
+		SessionKey: "abc-123",
+	}
+
+	cmd, _ := buildResumeCommand(t.TempDir(), cfg, info, "provider", nil, io.Discard)
+	want := "true stored --resume abc-123"
 	if cmd != want {
 		t.Fatalf("resume command = %q, want %q", cmd, want)
 	}
