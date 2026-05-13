@@ -4965,6 +4965,50 @@ func TestSelectOrCreatePoolSessionBead_SkipsDrained(t *testing.T) {
 	}
 }
 
+func TestSelectOrCreatePoolSessionBead_PrefersConcreteAgentSlotOverStalePoolMetadata(t *testing.T) {
+	store := beads.NewMemStore()
+	poisoned, err := store.Create(beads.Bead{
+		Title:  "frontend/worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":       "frontend/worker",
+			"agent_name":     "frontend/worker-3",
+			"alias":          "backend/worker-4",
+			"pool_slot":      "4",
+			"session_name":   "s-poisoned",
+			"pool_managed":   "true",
+			"session_origin": "ephemeral",
+			"state":          "asleep",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Agents: []config.Agent{
+		{Dir: "frontend", Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(10)},
+		{Dir: "backend", Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(10)},
+	}}
+	cfgAgent := &cfg.Agents[0]
+	bp := &agentBuildParams{
+		city:         cfg,
+		beadStore:    store,
+		sessionBeads: newSessionBeadSnapshot([]beads.Bead{poisoned}),
+		agents:       cfg.Agents,
+	}
+
+	result, slot, err := selectOrCreatePoolSessionBead(bp, cfgAgent, "frontend/worker", &poisoned, map[string]bool{}, map[int]bool{})
+	if err != nil {
+		t.Fatalf("selectOrCreatePoolSessionBead: %v", err)
+	}
+	if result.ID != poisoned.ID {
+		t.Fatalf("selected bead %q, want poisoned preferred bead %q", result.ID, poisoned.ID)
+	}
+	if slot != 3 {
+		t.Fatalf("slot = %d, want concrete agent_name slot 3 over stale pool_slot/alias", slot)
+	}
+}
+
 func TestSelectOrCreatePoolSessionBead_DoesNotReserveFreshSlotOnCreateError(t *testing.T) {
 	store := &failingPoolSessionNameStore{MemStore: beads.NewMemStore()}
 	snapshot := &sessionBeadSnapshot{}
