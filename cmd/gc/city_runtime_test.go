@@ -703,6 +703,9 @@ func TestCityRuntimeTickPreflightsManagedDoltBeforeSessionSnapshot(t *testing.T)
 	cityPath := t.TempDir()
 	cleanupManagedDoltTestCity(t, cityPath)
 
+	cityPath := t.TempDir()
+	cleanupManagedDoltTestCity(t, cityPath)
+
 	orderEvents := &orderedRuntimeEvents{}
 	store := &managedDoltPreflightOrderStore{
 		Store:  beads.NewMemStore(),
