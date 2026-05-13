@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -13,6 +14,31 @@ import (
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
 )
+
+// cityAnchoredSessionEnv returns the provider env merged with the
+// city-anchored env vars (GC_CITY, GC_CITY_PATH, GC_CITY_RUNTIME_DIR).
+// City anchors win on conflicts to mirror the canonical create-time
+// layering in cmd/gc/template_resolve.go where the per-agent env (which
+// carries the same anchors) is applied after the resolved provider env.
+//
+// Without these anchors, sessions spawned or restarted via the API code
+// paths cannot locate their city — bd, mailboxes, and other
+// city-relative tooling fail inside the spawned shell. Regression for
+// upstream gastownhall/gascity#101 (re-opened).
+func cityAnchoredSessionEnv(cityPath string, providerEnv map[string]string) map[string]string {
+	anchors := citylayout.CityRuntimeEnvMapForRuntimeDir(cityPath, citylayout.TrustedAmbientCityRuntimeDir(cityPath))
+	if len(providerEnv) == 0 && len(anchors) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(providerEnv)+len(anchors))
+	for k, v := range providerEnv {
+		out[k] = v
+	}
+	for k, v := range anchors {
+		out[k] = v
+	}
+	return out
+}
 
 var errAmbiguousLegacyACPTransport = errors.New("legacy session transport is ambiguous")
 
@@ -393,7 +419,7 @@ func (s *Server) resolveWorkerSessionRuntimeWithMetadata(info session.Info, _ st
 		Command:    command,
 		WorkDir:    firstNonEmptyString(info.WorkDir, workDir),
 		Provider:   firstNonEmptyString(info.Provider, resolved.Name),
-		SessionEnv: resolved.Env,
+		SessionEnv: cityAnchoredSessionEnv(s.state.CityPath(), resolved.Env),
 		Hints:      sessionResumeHints(resolved, firstNonEmptyString(workDir, info.WorkDir), mcpServers),
 		Resume: session.ProviderResume{
 			ResumeFlag:    firstNonEmptyString(resolved.ResumeFlag, info.ResumeFlag),

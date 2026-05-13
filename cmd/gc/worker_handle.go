@@ -494,11 +494,17 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 			resumeCommand = command
 		}
 	}
+	// Reseed the city-anchored env vars (GC_CITY, GC_CITY_PATH,
+	// GC_CITY_RUNTIME_DIR) on top of the provider env. Without this,
+	// session restart paths drop the city anchor — bd, mailboxes, and
+	// other city-relative tooling then fail inside the spawned session.
+	// Regression for upstream gastownhall/gascity#101 (re-opened).
+	sessionEnv := mergeEnv(resolved.Env, cityRuntimeEnvMapForCity(cityPath))
 	return &worker.ResolvedRuntime{
 		Command:    command,
 		WorkDir:    workDir,
 		Provider:   firstNonEmptyGCString(info.Provider, resolved.Name),
-		SessionEnv: resolved.Env,
+		SessionEnv: sessionEnv,
 		Hints: runtime.Config{
 			WorkDir:                workDir,
 			Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),

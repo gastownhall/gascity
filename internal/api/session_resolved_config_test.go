@@ -1,6 +1,7 @@
 package api
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -34,6 +35,7 @@ func TestResolvedSessionConfigForProviderBuildsNormalizedConfig(t *testing.T) {
 	}
 
 	cfg, err := resolvedSessionConfigForProvider(
+		"/tmp/test-city",
 		"worker",
 		"worker-named",
 		"myrig/worker",
@@ -92,6 +94,7 @@ func TestResolvedSessionConfigForProviderBuildsNormalizedConfig(t *testing.T) {
 
 func TestResolvedSessionConfigForProviderRejectsNilProvider(t *testing.T) {
 	if _, err := resolvedSessionConfigForProvider(
+		"/tmp/test-city",
 		"worker",
 		"",
 		"myrig/worker",
@@ -107,8 +110,54 @@ func TestResolvedSessionConfigForProviderRejectsNilProvider(t *testing.T) {
 	}
 }
 
+// TestResolvedSessionConfigForProviderSeedsCityRuntimeEnv is a
+// regression test for upstream gastownhall/gascity#101 (re-opened):
+// session-create paths through the API resolver dropped the
+// city-anchored env vars (GC_CITY, GC_CITY_PATH, GC_CITY_RUNTIME_DIR)
+// because they only forwarded resolved.Env (provider-only). The
+// spawned shell then could not locate the city, so bd, mailboxes, and
+// related tooling failed. Non-conflicting provider env vars are
+// preserved; this test documents the merge contract.
+func TestResolvedSessionConfigForProviderSeedsCityRuntimeEnv(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg, err := resolvedSessionConfigForProvider(
+		cityPath,
+		"worker",
+		"",
+		"myrig/worker",
+		"Worker",
+		"",
+		nil,
+		&config.ResolvedProvider{
+			Name:    "stub",
+			Command: "/bin/echo",
+			Env:     map[string]string{"PROVIDER_TOKEN": "ok"},
+		},
+		"",
+		cityPath,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("resolvedSessionConfigForProvider: %v", err)
+	}
+	if got := cfg.Runtime.SessionEnv["GC_CITY"]; got != cityPath {
+		t.Errorf("SessionEnv[GC_CITY] = %q, want %q", got, cityPath)
+	}
+	if got := cfg.Runtime.SessionEnv["GC_CITY_PATH"]; got != cityPath {
+		t.Errorf("SessionEnv[GC_CITY_PATH] = %q, want %q", got, cityPath)
+	}
+	wantRuntimeDir := filepath.Join(cityPath, ".gc", "runtime")
+	if got := cfg.Runtime.SessionEnv["GC_CITY_RUNTIME_DIR"]; got != wantRuntimeDir {
+		t.Errorf("SessionEnv[GC_CITY_RUNTIME_DIR] = %q, want %q", got, wantRuntimeDir)
+	}
+	if got := cfg.Runtime.SessionEnv["PROVIDER_TOKEN"]; got != "ok" {
+		t.Errorf("SessionEnv[PROVIDER_TOKEN] = %q, want %q (provider env preserved)", got, "ok")
+	}
+}
+
 func TestResolvedSessionConfigForProviderSkipsStoredMCPMetadataForTmuxTransport(t *testing.T) {
 	cfg, err := resolvedSessionConfigForProvider(
+		"/tmp/test-city",
 		"worker",
 		"",
 		"myrig/worker",

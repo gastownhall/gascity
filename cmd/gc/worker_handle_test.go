@@ -205,6 +205,61 @@ func TestResolvedWorkerRuntimeResumesPoolSessionPreservesLaunchFlags(t *testing.
 	}
 }
 
+// TestResolvedWorkerRuntimeWithConfigSeedsCityRuntimeEnv is a regression
+// test for upstream gastownhall/gascity#101 (re-opened): on session
+// restart, the worker resolver reseeded the session env from
+// resolved.Env (provider-only). That dropped the city-anchored env vars
+// (GC_CITY, GC_CITY_PATH, GC_CITY_RUNTIME_DIR), so spawned/restarted
+// agent sessions could not locate their city — bd commands failed,
+// mailboxes resolved against the wrong path, and downstream tooling
+// behaved as if no city was configured. The CLI-side defense in
+// cmd/gc/main.go resolveContext (#2062) masked the symptom; this
+// resolver-level fix is the root cause: the resolved runtime must
+// always carry the city anchor vars so any restart path is sound.
+func TestResolvedWorkerRuntimeWithConfigSeedsCityRuntimeEnv(t *testing.T) {
+	cityDir := t.TempDir()
+	gcDir := filepath.Join(cityDir, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gcDir, "settings.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	claude := config.BuiltinProviders()["claude"]
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:     "worker",
+			Provider: "claude",
+		}},
+		Providers: map[string]config.ProviderSpec{
+			"claude": claude,
+		},
+	}
+
+	resolved, err := resolvedWorkerRuntimeWithConfig(cityDir, cfg, session.Info{
+		Template: "worker",
+		WorkDir:  cityDir,
+	}, "")
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfig: %v", err)
+	}
+	if resolved == nil {
+		t.Fatal("resolvedWorkerRuntimeWithConfig() = nil")
+	}
+
+	if got := resolved.SessionEnv["GC_CITY"]; got != cityDir {
+		t.Errorf("SessionEnv[GC_CITY] = %q, want %q", got, cityDir)
+	}
+	if got := resolved.SessionEnv["GC_CITY_PATH"]; got != cityDir {
+		t.Errorf("SessionEnv[GC_CITY_PATH] = %q, want %q", got, cityDir)
+	}
+	wantRuntimeDir := filepath.Join(cityDir, ".gc", "runtime")
+	if got := resolved.SessionEnv["GC_CITY_RUNTIME_DIR"]; got != wantRuntimeDir {
+		t.Errorf("SessionEnv[GC_CITY_RUNTIME_DIR] = %q, want %q", got, wantRuntimeDir)
+	}
+}
+
 func TestShouldPreserveStoredRuntimeCommandForTransportRejectsExecutableOnlyMatch(t *testing.T) {
 	if shouldPreserveStoredRuntimeCommandForTransport(
 		"claude",

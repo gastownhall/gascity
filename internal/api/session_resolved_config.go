@@ -10,7 +10,7 @@ import (
 )
 
 func resolvedSessionConfigForProvider(
-	alias, explicitName, template, title, transport string,
+	cityPath, alias, explicitName, template, title, transport string,
 	metadata map[string]string,
 	resolved *config.ResolvedProvider,
 	command, workDir string,
@@ -47,7 +47,7 @@ func resolvedSessionConfigForProvider(
 			Command:    firstNonEmptyString(command, resolvedCommand, resolved.Name),
 			WorkDir:    workDir,
 			Provider:   resolved.Name,
-			SessionEnv: resolved.Env,
+			SessionEnv: cityAnchoredSessionEnv(cityPath, resolved.Env),
 			Resume: session.ProviderResume{
 				ResumeFlag:    resolved.ResumeFlag,
 				ResumeStyle:   resolved.ResumeStyle,
