@@ -5345,6 +5345,57 @@ func TestReconcileSessionBeads_MaxSessionAgeSkippedWhenBusyWithAssignedWork(t *t
 	}
 }
 
+// TestReconcileSessionBeads_MaxSessionAgeFailsClosedOnStoreError verifies
+// that a transient store error during the assigned-work check defers the
+// max-age restart rather than killing the session. This guards the fix at
+// session_reconciler.go where the error from
+// sessionHasOpenAssignedWorkForReachableStore was previously discarded
+// with `_`, which could drop in-flight work on a transient blip.
+func TestReconcileSessionBeads_MaxSessionAgeFailsClosedOnStoreError(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "witness", MaxSessionAge: "5h"}}}
+	env.addDesired("witness", "witness", true)
+	session := env.createSessionBead("witness", "witness")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"creation_complete_at": env.clk.Now().Add(-6 * time.Hour).UTC().Format(time.RFC3339),
+	})
+
+	// Wrap the city store so the assigned-work check sees an error.
+	failingStore := &listErrStore{Store: env.store, err: fmt.Errorf("simulated transient store failure")}
+
+	tr := newMaxSessionAgeTracker()
+	tr.setConfig("witness", 5*time.Hour, 0)
+	rec := events.NewFake()
+	env.rec = rec
+
+	poolDesired := make(map[string]int)
+	for _, tp := range env.desiredState {
+		if tp.TemplateName != "" {
+			poolDesired[tp.TemplateName]++
+		}
+	}
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+	reconcileSessionBeadsTraced(
+		context.Background(), "", []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
+		failingStore, nil, nil, nil, nil, env.dt, poolDesired, false, nil, "",
+		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr, nil,
+		withMaxSessionAgeTracker(tr),
+	)
+
+	if !env.sp.IsRunning("witness") {
+		t.Error("witness should remain running when assigned-work check errored (fail-closed)")
+	}
+	for _, e := range rec.Events {
+		if e.Type == events.SessionMaxAgeKilled {
+			t.Error("SessionMaxAgeKilled must not fire when assigned-work check returned an error")
+		}
+	}
+	if !strings.Contains(env.stderr.String(), "simulated transient store failure") {
+		t.Errorf("expected stderr to log the store error; got %q", env.stderr.String())
+	}
+}
+
 // --- zombie scrollback capture tests ---
 
 func TestReconcileSessionBeads_ZombieCapturesScrollback(t *testing.T) {

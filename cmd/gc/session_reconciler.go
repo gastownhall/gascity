@@ -1306,34 +1306,44 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					if trace != nil {
 						trace.recordDecision("reconciler.session.max_session_age", tp.TemplateName, name, "pending", "deferred_pending", nil, nil, "")
 					}
-				} else if hasWork, _ := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, *session); hasWork {
-					if trace != nil {
-						trace.recordDecision("reconciler.session.max_session_age", tp.TemplateName, name, "assigned_work", "deferred_busy", nil, nil, "")
-					}
 				} else {
-					fmt.Fprintf(stderr, "session reconciler: preemptive max-age restart for %s (age=%s)\n", tp.DisplayName(), clk.Now().Sub(creationCompleteAt).Round(time.Second)) //nolint:errcheck // best-effort stderr
-					if trace != nil {
-						trace.recordDecision("reconciler.session.max_session_age", tp.TemplateName, name, "max_session_age", "stop", nil, nil, "")
+					hasWork, assignedErr := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, *session)
+					if assignedErr != nil {
+						// Fail closed: treat error as "has work" so a transient
+						// store blip doesn't kill a session that may still hold
+						// in-flight work. Mirrors the drain-ack path above.
+						fmt.Fprintf(stderr, "session reconciler: checking assigned work for max-age %s: %v\n", name, assignedErr) //nolint:errcheck // best-effort stderr
+						hasWork = true
 					}
-					if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
-						fmt.Fprintf(stderr, "session reconciler: stopping aged %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
+					if hasWork {
+						if trace != nil {
+							trace.recordDecision("reconciler.session.max_session_age", tp.TemplateName, name, "assigned_work", "deferred_busy", nil, nil, "")
+						}
 					} else {
-						_ = sp.ClearScrollback(name)
-						rec.Record(events.Event{
-							Type:    events.SessionMaxAgeKilled,
-							Actor:   "gc",
-							Subject: tp.DisplayName(),
-						})
-						telemetry.RecordAgentMaxAgeKill(context.Background(), tp.DisplayName())
-						batch := sessionpkg.SleepPatch(clk.Now(), "max-session-age")
-						_ = store.SetMetadataBatch(session.ID, batch)
-						if session.Metadata == nil {
-							session.Metadata = make(map[string]string, len(batch))
+						fmt.Fprintf(stderr, "session reconciler: preemptive max-age restart for %s (age=%s)\n", tp.DisplayName(), clk.Now().Sub(creationCompleteAt).Round(time.Second)) //nolint:errcheck // best-effort stderr
+						if trace != nil {
+							trace.recordDecision("reconciler.session.max_session_age", tp.TemplateName, name, "max_session_age", "stop", nil, nil, "")
 						}
-						for key, value := range batch {
-							session.Metadata[key] = value
+						if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
+							fmt.Fprintf(stderr, "session reconciler: stopping aged %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
+						} else {
+							_ = sp.ClearScrollback(name)
+							rec.Record(events.Event{
+								Type:    events.SessionMaxAgeKilled,
+								Actor:   "gc",
+								Subject: tp.DisplayName(),
+							})
+							telemetry.RecordAgentMaxAgeKill(context.Background(), tp.DisplayName())
+							batch := sessionpkg.SleepPatch(clk.Now(), "max-session-age")
+							_ = store.SetMetadataBatch(session.ID, batch)
+							if session.Metadata == nil {
+								session.Metadata = make(map[string]string, len(batch))
+							}
+							for key, value := range batch {
+								session.Metadata[key] = value
+							}
+							alive = false
 						}
-						alive = false
 					}
 				}
 			}
