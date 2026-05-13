@@ -100,6 +100,13 @@ type CityRuntime struct {
 	managedDoltOwned    func(string) (bool, error)
 	managedDoltPort     func(string) string
 
+	// spawnStormSafetyNet is the defense-in-depth detector for pool
+	// spawn storms. Registered process-wide at the top of run() so the
+	// build_desired_state gate and the session-stop observation can
+	// consult the same instance. nil disables both — used by tests and
+	// non-controller code paths. See fo-wmfem.
+	spawnStormSafetyNet *SpawnStormSafetyNet
+
 	shutdownOnce             sync.Once
 	preserveSessionsShutdown atomic.Bool
 	forceStopShutdown        *atomic.Bool
@@ -151,6 +158,14 @@ type CityRuntimeParams struct {
 
 	LogPrefix      string // "gc start" or "gc supervisor"; defaults to "gc start"
 	Stdout, Stderr io.Writer
+
+	// SpawnStormSafetyNet is the optional storm detector this runtime
+	// owns. When nil, newCityRuntime constructs a default-config net
+	// (so production controllers always have one); pass a pre-built
+	// instance from tests that want to assert on detector state. The
+	// detector is registered process-wide during run() and unregistered
+	// on shutdown.
+	SpawnStormSafetyNet *SpawnStormSafetyNet
 }
 
 var (
@@ -267,15 +282,16 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 			}
 			return make(chan struct{}, 1)
 		}(),
-		nudgeWakeCh:       make(chan struct{}, 1),
-		onStarted:         p.OnStarted,
-		onStatus:          p.OnStatus,
-		managedDoltHealth: managedDoltHealth,
-		managedDoltOwned:  managedDoltOwned,
-		managedDoltPort:   managedDoltPort,
-		logPrefix:         logPrefix,
-		stdout:            p.Stdout,
-		stderr:            p.Stderr,
+		nudgeWakeCh:         make(chan struct{}, 1),
+		onStarted:           p.OnStarted,
+		onStatus:            p.OnStatus,
+		managedDoltHealth:   managedDoltHealth,
+		managedDoltOwned:    managedDoltOwned,
+		managedDoltPort:     managedDoltPort,
+		logPrefix:           logPrefix,
+		stdout:              p.Stdout,
+		stderr:              p.Stderr,
+		spawnStormSafetyNet: resolveSpawnStormSafetyNet(p.SpawnStormSafetyNet),
 	}
 	cr.svc = workspacesvc.NewManager(&serviceRuntime{cr: cr})
 	if err := cr.svc.Reload(); err != nil {
@@ -301,6 +317,14 @@ func (cr *CityRuntime) crashTrack() crashTracker {
 // wisp GC, and dispatches orders.
 func (cr *CityRuntime) run(ctx context.Context) {
 	defer cr.shutdown()
+
+	// Register the spawn-storm safety net so buildDesiredState can gate
+	// new spawns for any pool template the detector has flagged. Scoped
+	// to this run() invocation; restore runs on shutdown so subsequent
+	// city instances start clean. See fo-wmfem.
+	if cr.spawnStormSafetyNet != nil {
+		defer RegisterSpawnStormSafetyNetForCurrentController(cr.spawnStormSafetyNet)()
+	}
 
 	dirty := cr.configDirty
 	if dirty == nil {

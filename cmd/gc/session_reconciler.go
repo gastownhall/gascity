@@ -720,6 +720,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								Message: "drain acknowledged by agent",
 								Payload: api.SessionLifecyclePayloadJSON(session.ID, template, "drain acknowledged"),
 							})
+							// Spawn-storm safety net: contribute this
+							// drain outcome (claimed / unclaimed) so a
+							// sustained drain-without-claim pattern
+							// triggers the throttle. See fo-wmfem.
+							observeSessionStoppedForSafetyNet(cityPath, *session, name, template, store, rigStores, clk.Now().UTC(), stderr)
 							if hasAssignedWork {
 								batch := sessionpkg.CompleteDrainPatch(clk.Now().UTC(), "idle", session.Metadata["wake_mode"] == "fresh")
 								_ = store.SetMetadataBatch(session.ID, batch)

@@ -349,6 +349,12 @@ func buildDesiredStateWithSessionBeads(
 		if len(scaleCheckPartialTemplates) > 0 {
 			fmt.Fprintf(stderr, "scaleCheck: PARTIAL — scale_check failed for %s, retaining affected sessions\n", strings.Join(sortedBoolMapKeys(scaleCheckPartialTemplates), ",")) //nolint:errcheck
 		}
+		// Spawn-storm safety net: suppress new spawns for any template
+		// currently in a detected storm. Affects pool sizing only; this
+		// gate has no path to in-flight workers. See fo-wmfem.
+		if throttled := applyThrottleToScaleCheckCounts(safetyNetForGating(), scaleCheckCounts, time.Now()); len(throttled) > 0 {
+			fmt.Fprintf(stderr, "spawn-storm safety net: throttling new spawns for %s (drain-without-claim threshold crossed)\n", strings.Join(sortedBoolMapKeys(throttled), ",")) //nolint:errcheck
+		}
 		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, sessionBeads.Open(), assignedWorkBeads, assignedWorkStoreRefs)
 		bp.assignedWorkBeads = poolWorkBeads
 		poolDesiredStates := ComputePoolDesiredStatesTraced(cfg, poolWorkBeads, sessionBeads.Open(), scaleCheckCounts, trace)
