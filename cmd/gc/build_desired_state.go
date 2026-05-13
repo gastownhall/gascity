@@ -349,6 +349,12 @@ func buildDesiredStateWithSessionBeads(
 		if len(scaleCheckPartialTemplates) > 0 {
 			fmt.Fprintf(stderr, "scaleCheck: PARTIAL — scale_check failed for %s, retaining affected sessions\n", strings.Join(sortedBoolMapKeys(scaleCheckPartialTemplates), ",")) //nolint:errcheck
 		}
+		// Spawn-storm safety net: suppress new spawns for any template
+		// currently in a detected storm. Affects pool sizing only; this
+		// gate has no path to in-flight workers.
+		if throttled := applyThrottleToScaleCheckCounts(safetyNetForGating(), scaleCheckCounts, time.Now()); len(throttled) > 0 {
+			fmt.Fprintf(stderr, "spawn-storm safety net: throttling new spawns for %s (drain-without-claim threshold crossed)\n", strings.Join(sortedBoolMapKeys(throttled), ",")) //nolint:errcheck
+		}
 		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, sessionBeads.Open(), assignedWorkBeads, assignedWorkStoreRefs)
 		bp.assignedWorkBeads = poolWorkBeads
 		poolDesiredStates := ComputePoolDesiredStatesTraced(cfg, poolWorkBeads, sessionBeads.Open(), scaleCheckCounts, trace)
@@ -1091,20 +1097,6 @@ func listForControllerDemand(store beads.Store, query beads.ListQuery) ([]beads.
 	liveQuery := query
 	liveQuery.Live = true
 	return store.List(liveQuery)
-}
-
-func readyForControllerDemand(store beads.Store) ([]beads.Bead, error) {
-	// Controller demand reads are intentionally cache-tolerant, not
-	// authoritative lifecycle gates; CachedReady falls back whenever the cache
-	// has dirty or unknown dependency coverage.
-	if cached, ok := store.(interface {
-		CachedReady() ([]beads.Bead, bool)
-	}); ok {
-		if ready, ok := cached.CachedReady(); ok {
-			return ready, nil
-		}
-	}
-	return beads.ReadyLive(store)
 }
 
 func readyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery) ([]beads.Bead, error) {

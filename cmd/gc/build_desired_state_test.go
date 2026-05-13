@@ -4244,6 +4244,7 @@ func TestBuildDesiredState_PendingCreatePoolSessionCountsTowardScaleDemand(t *te
 	}
 	if anonymousNew == nil {
 		t.Fatalf("desired state missing anonymous new pool session: keys=%v", mapKeys(dsResult.State))
+		return
 	}
 	if existing.InstanceName != "worker-1" {
 		t.Fatalf("existing InstanceName = %q, want worker-1", existing.InstanceName)
