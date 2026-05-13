@@ -266,6 +266,12 @@ func (m *MemStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		if q.Assignee != "" && b.Assignee != q.Assignee {
 			continue
 		}
+		if q.Unassigned && strings.TrimSpace(b.Assignee) != "" {
+			continue
+		}
+		if len(q.Metadata) > 0 && !matchesMetadata(b, q.Metadata) {
+			continue
+		}
 		blocked := false
 		for _, dep := range m.deps {
 			if dep.IssueID != b.ID {
