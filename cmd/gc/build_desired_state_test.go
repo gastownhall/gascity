@@ -5009,6 +5009,45 @@ func TestSelectOrCreatePoolSessionBead_PrefersConcreteAgentSlotOverStalePoolMeta
 	}
 }
 
+func TestSelectOrCreatePoolSessionBead_DoesNotRetagDuplicateConcreteSlot(t *testing.T) {
+	store := beads.NewMemStore()
+	duplicate, err := store.Create(beads.Bead{
+		Title:  "kimi",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":       "kimi",
+			"agent_name":     "kimi-9",
+			"alias":          "kimi-15",
+			"pool_slot":      "9",
+			"session_name":   "workflows__kimi-mc-duplicate",
+			"pool_managed":   "true",
+			"session_origin": "ephemeral",
+			"state":          "creating",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Agents: []config.Agent{
+		{Name: "kimi", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(20)},
+	}}
+	bp := &agentBuildParams{
+		city:         cfg,
+		beadStore:    store,
+		sessionBeads: newSessionBeadSnapshot([]beads.Bead{duplicate}),
+		agents:       cfg.Agents,
+	}
+
+	_, _, err = selectOrCreatePoolSessionBead(bp, &cfg.Agents[0], "kimi", &duplicate, map[string]bool{}, map[int]bool{9: true})
+	if err == nil {
+		t.Fatal("selectOrCreatePoolSessionBead returned nil error, want duplicate slot rejection")
+	}
+	if !strings.Contains(err.Error(), "concrete slot already claimed") {
+		t.Fatalf("error = %v, want concrete slot already claimed", err)
+	}
+}
+
 func TestSelectOrCreatePoolSessionBead_DoesNotReserveFreshSlotOnCreateError(t *testing.T) {
 	store := &failingPoolSessionNameStore{MemStore: beads.NewMemStore()}
 	snapshot := &sessionBeadSnapshot{}

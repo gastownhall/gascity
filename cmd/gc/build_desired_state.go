@@ -1773,7 +1773,10 @@ func claimPoolSlot(cfgAgent *config.Agent, sessionBead beads.Bead, used map[int]
 }
 
 func claimPoolSlotWithConfig(cfg *config.City, cfgAgent *config.Agent, sessionBead beads.Bead, used map[int]bool) int {
-	if slot := existingPoolSlotWithConfig(cfg, cfgAgent, sessionBead); slot > 0 && !used[slot] {
+	if slot := existingPoolSlotWithConfig(cfg, cfgAgent, sessionBead); slot > 0 {
+		if used[slot] {
+			return 0
+		}
 		used[slot] = true
 		return slot
 	}
@@ -1958,6 +1961,9 @@ func selectOrCreatePoolSessionBead(
 	// Resume tier: reuse the session that has in-progress work assigned.
 	if preferred != nil && preferred.ID != "" && !used[preferred.ID] && !isFailedCreateSessionBead(*preferred) {
 		slot := claimPoolSlotWithConfig(bp.city, cfgAgent, *preferred, usedSlots)
+		if slot == 0 {
+			return beads.Bead{}, 0, fmt.Errorf("pool session %s concrete slot already claimed", preferred.ID)
+		}
 		return *preferred, slot, nil
 	}
 	// Reuse an existing active/creating session bead. Skip drained, closed,
@@ -1993,6 +1999,9 @@ func selectOrCreatePoolSessionBead(
 		}
 		if desiredName := strings.TrimSpace(bead.Metadata["session_name"]); desiredName != "" {
 			slot := claimPoolSlotWithConfig(bp.city, cfgAgent, bead, usedSlots)
+			if slot == 0 {
+				continue
+			}
 			return bead, slot, nil
 		}
 	}
