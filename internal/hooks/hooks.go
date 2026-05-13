@@ -678,7 +678,7 @@ func claudeFileNeedsUpgrade(existing []byte) bool {
 // (e.g. SessionStart matcher upgrade, PreCompact command upgrade); custom
 // hook events and custom commands are preserved verbatim.
 //
-// Returns the (possibly re-marshalled) JSON bytes and whether any patch
+// Returns the (possibly re-marshaled) JSON bytes and whether any patch
 // was applied.
 func upgradeClaudeFile(existing []byte) ([]byte, bool, error) {
 	var root any

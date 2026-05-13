@@ -657,7 +657,7 @@ func TestInstallClaudeUpgradesPreCompactPreservingCustomHookEvent(t *testing.T) 
 	}
 	staleWithCustom, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
-		t.Fatalf("re-marshalling stale fixture: %v", err)
+		t.Fatalf("re-marshaling stale fixture: %v", err)
 	}
 	fs.Files["/city/.gc/settings.json"] = staleWithCustom
 
