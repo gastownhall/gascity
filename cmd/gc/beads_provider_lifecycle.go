@@ -1554,7 +1554,27 @@ func acquireProviderSemaphoreForOp(cityPath, op string) (func(), error) {
 // operation. The "start" and "recover" operations get a longer timeout
 // because dolt server startup can take 30+ seconds for large data dirs.
 // All other operations use 30s.
+//
+// Under GC_FAST_UNIT (set by `make test` and the cmd/gc unit shards),
+// caps are tightened. The cmd/gc package suite reaches this path via
+// newCityRuntime → sweepOrphanedOrderTrackingRetry → bdRuntimeEnv →
+// resolvedRuntimeCityDoltTarget → healthBeadsProvider for tests that
+// don't opt out via GC_DOLT=skip; on macOS each retry × subprocess
+// stacks 30s+ of wall time and pushes the package past the configured
+// `go test -timeout`, which then renames the failure after whichever
+// test happens to be in its body. Production binaries never set
+// GC_FAST_UNIT, so the production path keeps the full timeouts.
 var providerOpTimeout = func(op string) time.Duration {
+	if strings.TrimSpace(os.Getenv("GC_FAST_UNIT")) != "" {
+		// Fast-unit mode runs in tempdirs that never have a real dolt
+		// server to start or recover. Treat every op as a "should
+		// finish quickly or be killed" subprocess — the alternative
+		// (waiting on the 30s/120s production budget) makes the
+		// cmd/gc package stack 11s+ per test and blow the test
+		// timeout, with go test then renaming the failure after
+		// whichever test is in its body at kill time.
+		return 2 * time.Second
+	}
 	switch op {
 	case "start", "recover":
 		return 120 * time.Second
