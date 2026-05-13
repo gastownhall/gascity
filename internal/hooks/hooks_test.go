@@ -689,6 +689,110 @@ func TestInstallClaudeUpgradesPreCompactPreservingCustomHookEvent(t *testing.T) 
 	}
 }
 
+// TestInstallClaudeDoesNotClobberUserWrappedCommand is the regression test
+// for the heuristic-tightening fixup applied after PR #2072's adversarial
+// review surfaced two majors via Codex. The pre-fixup upgrade used bare
+// strings.Contains on "gc prime --hook", which would rewrite user-authored
+// wrapper variants like "my-wrapper gc prime --hook --foo" on every gc run.
+// The token-anchored fixup blocks this.
+func TestInstallClaudeDoesNotClobberUserWrappedCommand(t *testing.T) {
+	fs := fsys.NewFake()
+	userOwned := `{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "my-wrapper gc prime --hook --foo"
+          }
+        ]
+      }
+    ]
+  }
+}`
+	fs.Files["/city/hooks/claude.json"] = []byte(userOwned)
+	fs.Files["/city/.gc/settings.json"] = []byte(userOwned)
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	hookData := fs.Files["/city/hooks/claude.json"]
+	if !strings.Contains(string(hookData), `my-wrapper gc prime --hook --foo`) {
+		t.Fatalf("user-wrapped SessionStart command was rewritten — gc must not touch wrapped variants:\n%s", string(hookData))
+	}
+}
+
+// TestInstallClaudeDoesNotNormalizeUserAuthoredEmptyMatcher is the second
+// regression for the heuristic-tightening fixup. Codex's major finding #2
+// flagged that upgradeClaudeHookEntry would rewrite ANY SessionStart entry
+// with matcher:"" to matcher:"startup", regardless of whether the entry's
+// commands were GC-managed. A user-authored entry with matcher:"" and a
+// non-managed command must survive untouched.
+func TestInstallClaudeDoesNotNormalizeUserAuthoredEmptyMatcher(t *testing.T) {
+	fs := fsys.NewFake()
+	userOwned := `{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo user-wrote-this"
+          }
+        ]
+      }
+    ]
+  }
+}`
+	fs.Files["/city/.gc/settings.json"] = []byte(userOwned)
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	runtime := fs.Files["/city/.gc/settings.json"]
+	entries := claudeHookEntries(t, runtime, "SessionStart")
+	// The user-authored SessionStart entry should survive with matcher
+	// unchanged; merge may add the managed entry separately but the
+	// user-authored matcher:"" must not be normalized away.
+	foundUserOwned := false
+	for _, e := range entries {
+		if e.Matcher == "" {
+			foundUserOwned = true
+			break
+		}
+	}
+	if !foundUserOwned {
+		t.Fatalf("user-authored SessionStart entry with matcher:\"\" was rewritten — gc must not normalize matcher unless entry is identifiably GC-managed:\n%s", string(runtime))
+	}
+}
+
+// TestInstallClaudeIdempotent verifies that a second Install call on an
+// already-upgraded file is byte-stable. Matches the
+// TestInstallCodexIsByteStableAcrossRepeatedInstalls pattern in the Codex
+// path; was missing for the Claude path and surfaced by code-reviewer in
+// the #2072 adversarial review.
+func TestInstallClaudeIdempotent(t *testing.T) {
+	fs := fsys.NewFake()
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("first Install: %v", err)
+	}
+	first := append([]byte(nil), fs.Files["/city/.gc/settings.json"]...)
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("second Install: %v", err)
+	}
+	second := fs.Files["/city/.gc/settings.json"]
+
+	if string(first) != string(second) {
+		t.Fatalf("second Install produced different bytes — upgrade is not idempotent:\nfirst:\n%s\n\nsecond:\n%s", string(first), string(second))
+	}
+}
+
 func TestInstallClaudeMergesCityDotClaudeSettings(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/.claude/settings.json"] = []byte(`{
