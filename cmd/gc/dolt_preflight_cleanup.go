@@ -137,14 +137,14 @@ func quarantinePhantomManagedDoltDatabases(dataDir string, now time.Time) error 
 				reason = "missing repo_state.json"
 				repoState := filepath.Join(doltDir, "repo_state.json")
 				repoStateData, err := os.ReadFile(repoState)
-				if err != nil {
-					if !os.IsNotExist(err) {
-						return err
-					}
-				} else if !json.Valid(repoStateData) {
-					reason = "malformed repo_state.json"
-				} else {
+				switch {
+				case err != nil && !os.IsNotExist(err):
+					return err
+				case err == nil && json.Valid(repoStateData):
 					continue
+				case err == nil && !json.Valid(repoStateData):
+					reason = "malformed repo_state.json"
+					// default: file missing — keep reason = "missing repo_state.json"
 				}
 			}
 		}
