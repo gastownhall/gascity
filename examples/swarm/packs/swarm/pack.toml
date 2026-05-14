@@ -1,6 +1,7 @@
 # Swarm — flat peer pack.
 #
-# City agents (mayor, deacon, dog) provide the same infrastructure as Gas Town.
+# City agents (mayor, deacon) provide the same orchestration surface as Gas Town,
+# with maintenance contributing the shared dog utility pool.
 # Rig agents replace polecat/refinery/witness with a simpler combo: N coders
 # self-organize via beads and mail, a dedicated committer handles git.
 # No worktree isolation, no formulas, no witness — peers coordinate directly.
@@ -12,6 +13,9 @@
 [pack]
 name = "swarm"
 schema = 2
+
+[imports.maintenance]
+source = "../maintenance"
 
 [[named_session]]
 template = "mayor"

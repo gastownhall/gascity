@@ -1,0 +1,10 @@
+# Maintenance — generic multi-agent infrastructure pack.
+#
+# Reusable infrastructure layer: dog workers for mechanical cleanup and
+# shutdown-dance style supervision. Swarm imports this explicitly so its
+# public surface matches what an initialized city sees after builtin pack
+# materialization.
+
+[pack]
+name = "maintenance"
+schema = 2

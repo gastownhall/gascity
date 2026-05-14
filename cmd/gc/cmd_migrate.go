@@ -2,8 +2,9 @@ package main
 
 import (
 	"fmt"
-	"github.com/spf13/cobra"
 	"io"
+
+	"github.com/spf13/cobra"
 )
 
 func newImportMigrateCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -30,11 +31,11 @@ automatic rewrites.`,
 	return cmd
 }
 
-func doImportMigrate(dryRun bool, stdout, stderr io.Writer) int {
+func doImportMigrate(dryRun bool, _ io.Writer, stderr io.Writer) int {
 	_ = dryRun
 	fmt.Fprintln(stderr, "gc import migrate has been deprecated.")                                                                                 //nolint:errcheck // best-effort stderr
 	fmt.Fprintln(stderr, `Use "gc doctor" to inspect legacy PackV1 surfaces.`)                                                                     //nolint:errcheck // best-effort stderr
-	fmt.Fprintln(stderr, `Use "gc doctor --fix" for the safe mechanical cases that currently have automatic rewrites, then rerun "gc doctor".`)   //nolint:errcheck // best-effort stderr
+	fmt.Fprintln(stderr, `Use "gc doctor --fix" for the safe mechanical cases that currently have automatic rewrites, then rerun "gc doctor".`)    //nolint:errcheck // best-effort stderr
 	fmt.Fprintln(stderr, `This shim no longer performs in-place PackV1-to-PackV2 rewrites.`)                                                       //nolint:errcheck // best-effort stderr
 	fmt.Fprintln(stderr, `See docs/guides/migrating-to-pack-vnext.md for the remaining manual migration steps and repo-content cleanup guidance.`) //nolint:errcheck // best-effort stderr
 	return 1
