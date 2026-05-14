@@ -386,6 +386,25 @@ metadata_has_project_id() {
     grep -q '"project_id"[[:space:]]*:' "$meta_file" 2>/dev/null
 }
 
+# write_bd_dolt_ok_marker ensures the .bd-dolt-ok marker exists in the
+# Dolt data directory for the given scope. bd 0.56+ writes this marker
+# itself when running its standalone (non-server) init path; in the
+# server-mode path used by gc, bd doesn't touch the on-disk data
+# directory directly (the SQL server owns it), so the marker never
+# gets written and bd doctor reports a permanent "Dolt Format: pre-0.56"
+# warning even on freshly initialized scopes. Touch it here once we've
+# confirmed the canonical Dolt database is reachable, so the format
+# declaration matches reality. Best-effort — failure is non-fatal because
+# the warning it suppresses is itself non-fatal.
+write_bd_dolt_ok_marker() {
+    local dir="$1"
+    local data_dir="$dir/.beads/dolt"
+    [ -d "$data_dir" ] || return 0
+    local marker="$data_dir/.bd-dolt-ok"
+    [ -f "$marker" ] && return 0
+    : > "$marker" 2>/dev/null || true
+}
+
 backfill_project_id_if_missing() {
     local dir="$1" meta_file gc_bin dolt_database host
     meta_file="$dir/.beads/metadata.json"
@@ -2150,6 +2169,7 @@ op_init() {
                 ensure_bd_runtime_custom_types "$dolt_database" "$custom_types"
                 ensure_bd_runtime_issue_prefix "$dolt_database" "$prefix"
                 backfill_project_id_if_missing "$dir"
+                write_bd_dolt_ok_marker "$dir"
                 exit 0
             fi
             echo "warning: database '$dolt_database' missing bd schema; re-initializing" >&2
@@ -2223,6 +2243,7 @@ op_init() {
     fi
 
     normalize_scope_after_init "$dir" "$prefix" "$dolt_database"
+    write_bd_dolt_ok_marker "$dir"
 }
 
 
