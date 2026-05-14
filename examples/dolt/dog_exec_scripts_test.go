@@ -2193,8 +2193,10 @@ func TestDoctorScriptChecksBackupArtifactFreshnessPerDatabase(t *testing.T) {
 	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
 		t.Fatalf("mkdir artifact dir: %v", err)
 	}
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		t.Fatalf("mkdir data dir: %v", err)
+	for _, db := range []string{"prod", "archive"} {
+		if err := os.MkdirAll(filepath.Join(dataDir, db, ".dolt"), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", db, err)
+		}
 	}
 	freshBackup := filepath.Join(artifactDir, "prod.backup")
 	writeTestFile(t, freshBackup, "backup")
@@ -2213,6 +2215,15 @@ func TestDoctorScriptChecksBackupArtifactFreshnessPerDatabase(t *testing.T) {
 	gcLogPath := writeDogFakeGC(t, binDir)
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/usr/bin/env bash
 set -euo pipefail
+case "$1" in
+  backup)
+    case "$(basename "$PWD")" in
+      prod) printf 'prod-backup\n' ;;
+      archive) printf 'archive-backup\n' ;;
+    esac
+    exit 0
+    ;;
+esac
 case "$*" in
   *"COUNT(*) FROM information_schema.PROCESSLIST"*)
     printf 'COUNT(*)\n1\n'
@@ -2402,8 +2413,10 @@ func TestDoctorScriptDoesNotCreditSharedPrefixBackupToDatabase(t *testing.T) {
 	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
 		t.Fatalf("mkdir artifact dir: %v", err)
 	}
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		t.Fatalf("mkdir data dir: %v", err)
+	for _, db := range []string{"prod", "prod_dev"} {
+		if err := os.MkdirAll(filepath.Join(dataDir, db, ".dolt"), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", db, err)
+		}
 	}
 	freshSiblingBackup := filepath.Join(artifactDir, "prod_dev.backup")
 	writeTestFile(t, freshSiblingBackup, "backup")
@@ -2416,6 +2429,15 @@ func TestDoctorScriptDoesNotCreditSharedPrefixBackupToDatabase(t *testing.T) {
 	gcLogPath := writeDogFakeGC(t, binDir)
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/usr/bin/env bash
 set -euo pipefail
+case "$1" in
+  backup)
+    case "$(basename "$PWD")" in
+      prod) printf 'prod-backup\n' ;;
+      prod_dev) printf 'prod_dev-backup\n' ;;
+    esac
+    exit 0
+    ;;
+esac
 case "$*" in
   *"COUNT(*) FROM information_schema.PROCESSLIST"*)
     printf 'COUNT(*)\n1\n'
