@@ -2820,6 +2820,23 @@ func TestValidateAgentsSameNameSameDir(t *testing.T) {
 	}
 }
 
+func TestValidateAgentsSameNameDifferentBinding(t *testing.T) {
+	// Regression for ga-4i15: when the same upstream pack is imported under
+	// two different bindings (e.g., directly as "chat" and transitively
+	// re-bound to "idea-to-beads"), each binding produces a distinct
+	// qualified identity. Validation must NOT flag them as duplicates —
+	// the controller's config_reload path treats this as fatal and rejects
+	// the entire new config, which in turn orphan-closes the named
+	// sessions that depended on it.
+	agents := []Agent{
+		{Name: "chat-claude", Dir: "service-inventory", BindingName: "chat", SourceDir: "/cache/chat"},
+		{Name: "chat-claude", Dir: "service-inventory", BindingName: "idea-to-beads", SourceDir: "/cache/chat"},
+	}
+	if err := ValidateAgents(agents); err != nil {
+		t.Errorf("ValidateAgents: unexpected error for same name under different bindings: %v", err)
+	}
+}
+
 func TestValidateAgentsSameNameCityWide(t *testing.T) {
 	// Two city-wide agents with the same name should still be rejected.
 	agents := []Agent{

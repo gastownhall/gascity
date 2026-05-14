@@ -2382,11 +2382,15 @@ func configuredProviderOrder(providers map[string]ProviderSpec) []string {
 
 // ValidateAgents checks agent configurations for errors. It returns an error
 // if any agent is missing required fields, has duplicate identities, or has
-// invalid pool bounds. Uniqueness is keyed on (dir, name) — the same name
-// in different dirs is allowed.
+// invalid pool bounds. Uniqueness is keyed on (dir, binding, name) — the
+// same bare name in different dirs or under different import bindings is
+// allowed, because V2 imports can re-bind the same upstream pack under
+// different names (e.g., a chat pack imported directly AND transitively via
+// another pack produces two distinct qualified identities).
 func ValidateAgents(agents []Agent) error {
-	seen := make(map[agentKey]bool, len(agents))
-	sourceOf := make(map[agentKey]string, len(agents))
+	type validateKey struct{ dir, binding, name string }
+	seen := make(map[validateKey]bool, len(agents))
+	sourceOf := make(map[validateKey]string, len(agents))
 	for i, a := range agents {
 		if a.Name == "" {
 			return fmt.Errorf("agent[%d]: name is required", i)
@@ -2394,7 +2398,7 @@ func ValidateAgents(agents []Agent) error {
 		if !validAgentName.MatchString(a.Name) {
 			return fmt.Errorf("agent %q: name must match [a-zA-Z0-9][a-zA-Z0-9_-]* (no spaces, slashes, or dots)", a.Name)
 		}
-		key := agentKey{dir: a.Dir, name: a.Name}
+		key := validateKey{dir: a.Dir, binding: a.BindingName, name: a.Name}
 		if seen[key] {
 			prev := sourceOf[key]
 			curr := a.SourceDir

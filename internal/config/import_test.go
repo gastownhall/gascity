@@ -1892,6 +1892,111 @@ scope = "city"
 	}
 }
 
+// TestImport_RigImportOfPackWithPackLevelImportResolvesOwnNamedSession
+// reproduces ga-4i15. A rig imports Pack B; Pack B declares a pack-level
+// `[imports.chat]` AND its own `[[named_session]]` backed by an agent
+// discovered under `agents/orchestrator/`. The named session's backing
+// agent must resolve via FindAgent so the controller can materialize the
+// session — otherwise the session bead orphan-closes on first wake.
+func TestImport_RigImportOfPackWithPackLevelImportResolvesOwnNamedSession(t *testing.T) {
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	chatDir := filepath.Join(dir, "chat")
+	ideaDir := filepath.Join(dir, "idea")
+	chatAgent := filepath.Join(chatDir, "agents", "chat-claude")
+	ideaAgent := filepath.Join(ideaDir, "agents", "orchestrator")
+
+	for _, d := range []string{cityDir, chatDir, ideaDir, chatAgent, ideaAgent} {
+		mustMkdirAll(t, d, 0o755)
+	}
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "service-inventory"
+path = "/tmp/service-inventory"
+
+[rigs.imports.chat]
+source = "../chat"
+
+[rigs.imports.idea-to-beads]
+source = "../idea"
+`)
+
+	writeTestFile(t, chatDir, "pack.toml", `
+[pack]
+name = "chat"
+schema = 2
+
+[[named_session]]
+template = "chat-claude"
+scope = "rig"
+mode = "on_demand"
+`)
+	writeTestFile(t, chatAgent, "agent.toml", `
+scope = "rig"
+provider = "claude"
+`)
+	writeTestFile(t, chatAgent, "prompt.md", `chat-claude`)
+
+	writeTestFile(t, ideaDir, "pack.toml", `
+[pack]
+name = "idea-to-beads"
+schema = 2
+
+[imports.chat]
+source = "../chat"
+
+[[named_session]]
+template = "orchestrator"
+scope = "rig"
+mode = "on_demand"
+`)
+	writeTestFile(t, ideaAgent, "agent.toml", `
+scope = "rig"
+provider = "claude"
+`)
+	writeTestFile(t, ideaAgent, "prompt.md", `orchestrator`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	// The controller calls ValidateAgents during config reload. If that
+	// fails, the new config is rejected and the named session cannot
+	// materialize, leading to immediate orphan-close.
+	if err := ValidateAgents(cfg.Agents); err != nil {
+		var ids []string
+		for _, a := range cfg.Agents {
+			ids = append(ids, fmt.Sprintf("%s (BindingName=%q SourceDir=%q)", a.QualifiedName(), a.BindingName, a.SourceDir))
+		}
+		t.Fatalf("ValidateAgents: %v\nAgents:\n  %s", err, strings.Join(ids, "\n  "))
+	}
+
+	identity := "service-inventory/idea-to-beads.orchestrator"
+	named := FindNamedSession(cfg, identity)
+	if named == nil {
+		var ids []string
+		for _, ns := range cfg.NamedSessions {
+			ids = append(ids, ns.QualifiedName())
+		}
+		t.Fatalf("FindNamedSession(%q) = nil; got NamedSessions=%v", identity, ids)
+	}
+	if got := named.TemplateQualifiedName(); got != identity {
+		t.Fatalf("TemplateQualifiedName() = %q, want %q", got, identity)
+	}
+	if got := FindAgent(cfg, named.TemplateQualifiedName()); got == nil {
+		var ids []string
+		for _, a := range cfg.Agents {
+			ids = append(ids, a.QualifiedName())
+		}
+		t.Fatalf("FindAgent(%q) = nil; got Agents=%v", named.TemplateQualifiedName(), ids)
+	}
+}
+
 func TestImport_ReExportNestedPreservesInnerBinding(t *testing.T) {
 	// outer exports inner, inner imports util (not exported).
 	// Agents from inner should be flattened to outer's binding.
