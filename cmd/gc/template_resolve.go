@@ -571,6 +571,8 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 	if rigRoot == "" {
 		if cityUsesBdStoreContract(cityPath) {
 			if usedPostgres, err := applyCityPostgresBackendEnv(env, cityPath); err != nil {
+				// On PG projection errors, keep explicit empty keys so tmux
+				// clears stale inherited backend variables for the session.
 				clearProjectedDoltEnv(env)
 				clearProjectedPostgresEnv(env)
 				mirrorBeadsDoltEnv(env)

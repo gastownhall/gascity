@@ -7,7 +7,7 @@ before merge.
 - Workflow review root: `ga-st3pu8g`
 - PR: `gastownhall/gascity#1792`
 - Branch: `quad341:builder/ga-wvka-1`
-- Rebase base: `origin/main` `fbc06f8d8`
+- Rebase base: `origin/main` `3d2636b7`
 - Stack: 10 commits ahead of `origin/main`
 
 ## Current stack
@@ -54,10 +54,23 @@ controller iterations instead of silently building a partial bd environment.
 Operators should fix rejected metadata before expecting pool, session, order,
 or controller probe work for that scope to continue.
 
+## Attempt-8 maintainer fixups
+
+The attempt-8 review found that `origin/main` had advanced again and that two
+backend-exclusivity gaps remained. This local fixup:
+
+- rebases the PR stack onto `origin/main` `3d2636b7`, removing the stale-base
+  test-deletion artifacts from the current review diff;
+- treats inherited-city Postgres rigs as Postgres-backed during lifecycle init,
+  so `initAndHookDir` skips provider Dolt init and does not pin inherited rigs
+  with local Dolt metadata; and
+- clears inherited Postgres projection before applying explicit legacy rig Dolt
+  host/port config, keeping child bd/order subprocess env backend-exclusive.
+
 ## Validation
 
-- `git diff --check origin/main..HEAD` - PASS
-- `go test ./internal/pgauth ./internal/beads/contract` - PASS
+- `git diff --check` - PASS
+- `go test ./internal/pgauth ./internal/beads/contract ./internal/doctor` - PASS
 - Focused cmd/gc regression suite for PG projection, inherited city PG,
   env-override fallback, order env, and Beads override rejection - PASS
 - `GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=10m ./scripts/test-go-test-shard ./cmd/gc <shard> 6` for shards 1-6 - PASS
@@ -67,7 +80,7 @@ or controller probe work for that scope to continue.
 
 ## Review status
 
-The stale-base blocker has been addressed locally, and the required maintainer
-fixups have targeted regression tests. Because attempt 5 blocked before these
-fixes, the workflow verdict remains `iterate` so the next review pass can
-verify the amended stack.
+The stale-base blocker and attempt-8 backend-exclusivity findings have been
+addressed locally with targeted regression tests. Because attempt 8 blocked
+before these fixes, the workflow verdict remains `iterate` so the next review
+pass can verify the amended stack.

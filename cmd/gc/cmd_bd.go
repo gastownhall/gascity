@@ -60,12 +60,14 @@ func bdCommandEnv(cityPath string, cfg *config.City, target execStoreTarget) ([]
 		overrides, err = bdRuntimeEnvForRigWithError(cityPath, cfg, target.ScopeRoot)
 	} else {
 		overrides, err = bdRuntimeEnvWithError(cityPath)
-		overrides["GC_RIG"] = ""
-		overrides["GC_RIG_ROOT"] = ""
-		overrides["BEADS_DIR"] = filepath.Join(target.ScopeRoot, ".beads")
 	}
 	if err != nil {
 		return nil, err
+	}
+	if target.ScopeKind != "rig" {
+		overrides["GC_RIG"] = ""
+		overrides["GC_RIG_ROOT"] = ""
+		overrides["BEADS_DIR"] = filepath.Join(target.ScopeRoot, ".beads")
 	}
 	overrides["GC_STORE_ROOT"] = target.ScopeRoot
 	overrides["GC_STORE_SCOPE"] = target.ScopeKind

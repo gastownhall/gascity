@@ -461,7 +461,16 @@ func scopeUsesPostgresBackendForInit(cityPath, dir string) (bool, error) {
 		}
 		return false, err
 	}
-	return ok && state.Backend == "postgres", nil
+	if ok {
+		switch state.Backend {
+		case "postgres":
+			return true, nil
+		case "dolt":
+			return false, nil
+		}
+	}
+	_, usesPostgres, err := postgresMetadataForScope(cityPath, dir)
+	return usesPostgres, err
 }
 
 func allowLegacyDoltMetadataRepair(fs fsys.FS, path string, err error) bool {
@@ -1190,16 +1199,24 @@ func normalizeCanonicalBdScopeFiles(cityPath string, cfg *config.City, warns ...
 	}
 	resolveRigPaths(cityPath, cfg.Rigs)
 	if scopeUsesManagedBdStoreContract(cityPath, cityPath) {
-		if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, cityPath, defaultScopeDoltDatabase(cityPath, cityPath, config.EffectiveHQPrefix(cfg))); err != nil {
-			return fmt.Errorf("canonicalizing city metadata: %w", err)
+		if usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, cityPath); err != nil {
+			return fmt.Errorf("classifying city backend: %w", err)
+		} else if !usesPostgres {
+			if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, cityPath, defaultScopeDoltDatabase(cityPath, cityPath, config.EffectiveHQPrefix(cfg))); err != nil {
+				return fmt.Errorf("canonicalizing city metadata: %w", err)
+			}
 		}
 	}
 	for i := range cfg.Rigs {
 		if !rigUsesManagedBdStoreContract(cityPath, cfg.Rigs[i]) {
 			continue
 		}
-		if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, cfg.Rigs[i].Path, defaultScopeDoltDatabase(cityPath, cfg.Rigs[i].Path, cfg.Rigs[i].EffectivePrefix())); err != nil {
-			return fmt.Errorf("canonicalizing rig %q metadata: %w", cfg.Rigs[i].Name, err)
+		if usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, cfg.Rigs[i].Path); err != nil {
+			return fmt.Errorf("classifying rig %q backend: %w", cfg.Rigs[i].Name, err)
+		} else if !usesPostgres {
+			if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, cfg.Rigs[i].Path, defaultScopeDoltDatabase(cityPath, cfg.Rigs[i].Path, cfg.Rigs[i].EffectivePrefix())); err != nil {
+				return fmt.Errorf("canonicalizing rig %q metadata: %w", cfg.Rigs[i].Name, err)
+			}
 		}
 	}
 	if err := syncConfiguredDoltPortFiles(cityPath, cfg.Dolt, config.EffectiveHQPrefix(cfg), cfg.Rigs, warn); err != nil {
@@ -1546,11 +1563,6 @@ func providerLifecycleDoltPathEnv(cityPath string) []string {
 		"GC_DOLT_LOCK_FILE=" + filepath.Join(packStateDir, "dolt.lock"),
 		"GC_DOLT_CONFIG_FILE=" + filepath.Join(packStateDir, "dolt-config.yaml"),
 	}
-}
-
-func providerLifecycleProcessEnv(cityPath, provider string) []string {
-	env, _ := providerLifecycleProcessEnvWithError(cityPath, provider)
-	return env
 }
 
 func providerLifecycleProcessEnvWithError(cityPath, provider string) ([]string, error) {

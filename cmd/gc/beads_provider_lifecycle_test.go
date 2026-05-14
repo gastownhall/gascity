@@ -48,6 +48,15 @@ func setScopedBeadsProviderForTest(t *testing.T, scopeRoot, provider string) {
 	t.Setenv("GC_BEADS_SCOPE_ROOT", scopeRoot)
 }
 
+func mustProviderLifecycleProcessEnv(t *testing.T, cityPath, provider string) []string {
+	t.Helper()
+	env, err := providerLifecycleProcessEnvWithError(cityPath, provider)
+	if err != nil {
+		t.Fatalf("providerLifecycleProcessEnvWithError: %v", err)
+	}
+	return env
+}
+
 // TestEnsureBeadsProvider_file verifies that file provider is a no-op.
 func TestEnsureBeadsProvider_file(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
@@ -78,7 +87,7 @@ func TestProviderLifecycleProcessEnvProjectsCanonicalDoltPaths(t *testing.T) {
 	t.Setenv("GC_DOLT_LOCK_FILE", "/tmp/wrong-lock")
 	t.Setenv("GC_DOLT_CONFIG_FILE", "/tmp/wrong-config")
 
-	envEntries := providerLifecycleProcessEnv(cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
+	envEntries := mustProviderLifecycleProcessEnv(t, cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
 	env := map[string]string{}
 	for _, entry := range envEntries {
 		key, value, ok := strings.Cut(entry, "=")
@@ -121,7 +130,7 @@ func TestProviderLifecycleProcessEnvCanonicalizesSymlinkedCityPath(t *testing.T)
 	}
 	wantCityPath := normalizePathForCompare(realCity)
 
-	envEntries := providerLifecycleProcessEnv(aliasCity, "exec:"+gcBeadsBdScriptPath(aliasCity))
+	envEntries := mustProviderLifecycleProcessEnv(t, aliasCity, "exec:"+gcBeadsBdScriptPath(aliasCity))
 	env := map[string]string{}
 	for _, entry := range envEntries {
 		key, value, ok := strings.Cut(entry, "=")
@@ -154,7 +163,7 @@ func TestProviderLifecycleProcessEnvProjectsResolvedGCBin(t *testing.T) {
 	resolveProviderLifecycleGCBinary = func() string { return "/opt/gc/bin/gc" }
 	t.Cleanup(func() { resolveProviderLifecycleGCBinary = oldResolve })
 
-	envEntries := providerLifecycleProcessEnv(cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
+	envEntries := mustProviderLifecycleProcessEnv(t, cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
 	env := map[string]string{}
 	for _, entry := range envEntries {
 		key, value, ok := strings.Cut(entry, "=")
@@ -175,7 +184,7 @@ func TestProviderLifecycleProcessEnvPropagatesArchiveLevel(t *testing.T) {
 	cityDoltConfigs.Store(normPath, config.DoltConfig{ArchiveLevel: &level})
 	t.Cleanup(func() { cityDoltConfigs.Delete(normPath) })
 
-	envEntries := providerLifecycleProcessEnv(cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
+	envEntries := mustProviderLifecycleProcessEnv(t, cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
 	env := map[string]string{}
 	for _, entry := range envEntries {
 		key, value, ok := strings.Cut(entry, "=")
@@ -195,7 +204,7 @@ func TestProviderLifecycleProcessEnvOmitsArchiveLevelWhenNil(t *testing.T) {
 	cityDoltConfigs.Store(normPath, config.DoltConfig{})
 	t.Cleanup(func() { cityDoltConfigs.Delete(normPath) })
 
-	envEntries := providerLifecycleProcessEnv(cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
+	envEntries := mustProviderLifecycleProcessEnv(t, cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
 	for _, entry := range envEntries {
 		if strings.HasPrefix(entry, "GC_DOLT_ARCHIVE_LEVEL=") {
 			t.Fatalf("GC_DOLT_ARCHIVE_LEVEL should not be set when ArchiveLevel is nil, got %q", entry)
@@ -221,7 +230,7 @@ func TestProviderLifecycleProcessEnvFallsBackToLaunchctlGetenvForLoglevel(t *tes
 	t.Cleanup(func() { providerLifecycleLaunchctlGetenv = prev })
 
 	cityPath := t.TempDir()
-	envEntries := providerLifecycleProcessEnv(cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
+	envEntries := mustProviderLifecycleProcessEnv(t, cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
 	got := ""
 	for _, entry := range envEntries {
 		if strings.HasPrefix(entry, "GC_DOLT_LOGLEVEL=") {
@@ -249,7 +258,7 @@ func TestProviderLifecycleProcessEnvPrefersOSEnvOverLaunchctlForLoglevel(t *test
 	t.Cleanup(func() { providerLifecycleLaunchctlGetenv = prev })
 
 	cityPath := t.TempDir()
-	envEntries := providerLifecycleProcessEnv(cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
+	envEntries := mustProviderLifecycleProcessEnv(t, cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
 	got := ""
 	for _, entry := range envEntries {
 		if strings.HasPrefix(entry, "GC_DOLT_LOGLEVEL=") {
@@ -274,7 +283,7 @@ func TestProviderLifecycleProcessEnvOmitsLoglevelWhenLaunchctlEmpty(t *testing.T
 	t.Cleanup(func() { providerLifecycleLaunchctlGetenv = prev })
 
 	cityPath := t.TempDir()
-	envEntries := providerLifecycleProcessEnv(cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
+	envEntries := mustProviderLifecycleProcessEnv(t, cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
 	for _, entry := range envEntries {
 		if strings.HasPrefix(entry, "GC_DOLT_LOGLEVEL=") {
 			t.Fatalf("GC_DOLT_LOGLEVEL should be absent when neither os.Environ nor launchctl has it, got %q", entry)
@@ -4347,6 +4356,174 @@ exit 99
 	}
 	if _, err := os.Stat(filepath.Join(cityPath, ".beads", "hooks", "on_create")); err != nil {
 		t.Fatalf("expected hooks installed for postgres scope: %v", err)
+	}
+}
+
+func writeInheritedCityPostgresRigFixture(t *testing.T, rigMetadata string) (string, string, string) {
+	t.Helper()
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "rigs", "pg")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte("issue_prefix: gc\ngc.endpoint_origin: managed_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"beads","backend":"postgres","postgres_host":"db.example.test","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pg"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", ".env"), []byte("BEADS_POSTGRES_PASSWORD=citypw\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte("issue_prefix: pg\ngc.endpoint_origin: inherited_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	metadataPath := filepath.Join(rigPath, ".beads", "metadata.json")
+	if rigMetadata != "" {
+		if err := os.WriteFile(metadataPath, []byte(rigMetadata), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return cityPath, rigPath, metadataPath
+}
+
+func TestInitAndHookDirSkipsDoltInitForInheritedCityPostgresRig(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "rigs", "pg")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte("issue_prefix: gc\ngc.endpoint_origin: managed_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"beads","backend":"postgres","postgres_host":"db.example.test","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pg"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", ".env"), []byte("BEADS_POSTGRES_PASSWORD=citypw\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte("issue_prefix: pg\ngc.endpoint_origin: inherited_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	callsFile := filepath.Join(t.TempDir(), "provider-calls.log")
+	script := filepath.Join(t.TempDir(), "gc-beads-bd")
+	scriptBody := fmt.Sprintf(`#!/bin/sh
+set -eu
+printf '%%s
+' "$*" >> %q
+exit 99
+`, callsFile)
+	if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
+
+	if err := initAndHookDir(cityPath, rigPath, "pg"); err != nil {
+		t.Fatalf("initAndHookDir: %v", err)
+	}
+	if data, err := os.ReadFile(callsFile); err == nil {
+		t.Fatalf("provider init should not run for inherited postgres rig; calls:\n%s", data)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("read provider calls: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(rigPath, ".beads", "metadata.json")); !os.IsNotExist(err) {
+		t.Fatalf("inherited postgres rig should not be pinned with local metadata, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(rigPath, ".beads", "hooks", "on_create")); err != nil {
+		t.Fatalf("expected hooks installed for inherited postgres rig: %v", err)
+	}
+}
+
+func TestInitAndHookDirSkipsDoltInitForInheritedCityPostgresRigWithEmptyMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		metadata string
+	}{
+		{name: "empty_object", metadata: `{}`},
+		{name: "database_only", metadata: `{"database":"beads"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath, rigPath, metadataPath := writeInheritedCityPostgresRigFixture(t, tc.metadata)
+			callsFile := filepath.Join(t.TempDir(), "provider-calls.log")
+			script := filepath.Join(t.TempDir(), "gc-beads-bd")
+			scriptBody := fmt.Sprintf(`#!/bin/sh
+set -eu
+printf '%%s
+' "$*" >> %q
+exit 99
+`, callsFile)
+			if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("GC_BEADS", "exec:"+script)
+			t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
+
+			if err := initAndHookDir(cityPath, rigPath, "pg"); err != nil {
+				t.Fatalf("initAndHookDir: %v", err)
+			}
+			if data, err := os.ReadFile(callsFile); err == nil {
+				t.Fatalf("provider init should not run for inherited postgres rig; calls:\n%s", data)
+			} else if !os.IsNotExist(err) {
+				t.Fatalf("read provider calls: %v", err)
+			}
+			data, err := os.ReadFile(metadataPath)
+			if err != nil {
+				t.Fatalf("read metadata: %v", err)
+			}
+			if string(data) != tc.metadata {
+				t.Fatalf("metadata = %s, want preserved %s", data, tc.metadata)
+			}
+			if _, err := os.Stat(filepath.Join(rigPath, ".beads", "hooks", "on_create")); err != nil {
+				t.Fatalf("expected hooks installed for inherited postgres rig: %v", err)
+			}
+		})
+	}
+}
+
+func TestSeedDeferredManagedBeadsSkipsDoltMetadataForInheritedCityPostgresRigWithEmptyMetadata(t *testing.T) {
+	cityPath, rigPath, metadataPath := writeInheritedCityPostgresRigFixture(t, `{"database":"beads"}`)
+
+	if err := seedDeferredManagedBeadsErr(cityPath, rigPath, "pg", ""); err != nil {
+		t.Fatalf("seedDeferredManagedBeadsErr: %v", err)
+	}
+	data, err := os.ReadFile(metadataPath)
+	if err != nil {
+		t.Fatalf("read metadata: %v", err)
+	}
+	if got, want := string(data), `{"database":"beads"}`; got != want {
+		t.Fatalf("metadata = %s, want preserved %s", got, want)
+	}
+}
+
+func TestNormalizeCanonicalBdScopeFilesSkipsInheritedCityPostgresRigWithEmptyMetadata(t *testing.T) {
+	cityPath, _, metadataPath := writeInheritedCityPostgresRigFixture(t, `{}`)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Rigs:      []config.Rig{{Name: "pg", Path: "rigs/pg", Prefix: "pg"}},
+	}
+
+	if err := normalizeCanonicalBdScopeFiles(cityPath, cfg); err != nil {
+		t.Fatalf("normalizeCanonicalBdScopeFiles: %v", err)
+	}
+	data, err := os.ReadFile(metadataPath)
+	if err != nil {
+		t.Fatalf("read metadata: %v", err)
+	}
+	if got, want := string(data), `{}`; got != want {
+		t.Fatalf("metadata = %s, want preserved %s", got, want)
 	}
 }
 
@@ -9050,7 +9227,7 @@ func TestStartBeadsLifecycleRegistersArchiveLevelOnlyDoltConfig(t *testing.T) {
 	}
 	t.Cleanup(func() { cityDoltConfigs.Delete(normalizePathForCompare(realCity)) })
 
-	envEntries := providerLifecycleProcessEnv(realCity, "exec:"+gcBeadsBdScriptPath(realCity))
+	envEntries := mustProviderLifecycleProcessEnv(t, realCity, "exec:"+gcBeadsBdScriptPath(realCity))
 	env := map[string]string{}
 	for _, entry := range envEntries {
 		key, value, ok := strings.Cut(entry, "=")

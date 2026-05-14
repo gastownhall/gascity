@@ -291,7 +291,9 @@ func applyResolvedScopePostgresEnv(env map[string]string, scopeRoot string, meta
 		Port: meta.PostgresPort,
 		User: meta.PostgresUser,
 	}
-	resolved, err := pgauth.ResolveFromEnv(env, scopeRoot, endpoint)
+	// Scope projection clears inherited PG keys first, so credential
+	// resolution intentionally starts at process and file-backed sources.
+	resolved, err := pgauth.ResolveFromEnv(nil, scopeRoot, endpoint)
 	if err != nil {
 		return fmt.Errorf("resolving postgres credentials for %s: %w", scopeRoot, err)
 	}
@@ -642,7 +644,7 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 		if err != nil {
 			meta, ok, classifyErr := postgresMetadataForScope(cityPath, dir)
 			if classifyErr != nil {
-				return out, fmt.Errorf("classifying scope backend after bd error %w: %w", err, classifyErr)
+				return out, fmt.Errorf("classifying scope backend (bd error: %w): %w", err, classifyErr)
 			}
 			if ok {
 				return out, fmt.Errorf("postgres at %s:%s: gc does not manage external PG endpoints (no managed recovery attempted): %w", meta.PostgresHost, meta.PostgresPort, err)
@@ -743,6 +745,7 @@ func applyResolvedRigDoltEnv(env map[string]string, cityPath, rigPath string, ex
 		return nil
 	}
 	if explicitRig != nil && (explicitRig.DoltHost != "" || explicitRig.DoltPort != "") {
+		clearProjectedPostgresEnv(env)
 		applyLegacyRigExternalTarget(env, *explicitRig)
 		clearProjectedDoltPasswordEnv(env)
 		applyResolvedDoltAuthEnv(env, rigPath, "")
