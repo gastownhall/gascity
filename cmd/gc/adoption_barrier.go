@@ -188,7 +188,8 @@ func runAdoptionBarrier(
 		// Only set pool_slot metadata when the agent actually supports
 		// instance expansion, to avoid false positives on direct session
 		// names that end in numbers.
-		if slot := parsePoolSlot(sessionName); slot > 0 && isConfigAgent && cfgAgent.SupportsInstanceExpansion() {
+		slot := parsePoolSlot(sessionName)
+		if slot > 0 && isConfigAgent && cfgAgent.SupportsInstanceExpansion() {
 			detail.PoolSlot = slot
 			meta["pool_slot"] = strconv.Itoa(slot)
 			if maxSess := cfgAgent.EffectiveMaxActiveSessions(); maxSess != nil && *maxSess >= 0 && slot > *maxSess {
@@ -196,6 +197,16 @@ func runAdoptionBarrier(
 				fmt.Fprintf(stderr, "adoption barrier: %s pool slot %d exceeds max %d (adopt-then-drain)\n", //nolint:errcheck
 					sessionName, slot, *maxSess)
 			}
+		} else if slot > 0 && !isConfigAgent {
+			// Defensive log (ga-fiw): a session ending in "-N" did not match
+			// any configured agent — either by exact session name or by pool
+			// base resolution. This is the orphan shape that produced the
+			// "cashmaster/gastown.refinery-1" phantom: the canonical refinery
+			// agent has max_active_sessions=1, so resolvePoolBase rejected the
+			// "-1" suffix, and adoption fell through to creating a bead with
+			// agent_name=session_name. The log makes that leak visible.
+			fmt.Fprintf(stderr, "adoption barrier: %s ends in -%d but no configured agent (after pool-base resolution) claims it; adopting under sessionName=agent_name (orphan?)\n", //nolint:errcheck
+				sessionName, slot)
 		}
 
 		if dryRun {

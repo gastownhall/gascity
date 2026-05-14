@@ -504,6 +504,196 @@ prompt_template = "prompts/mayor.md"
 	}
 }
 
+// TestV2DeprecationFixSurfacesMigrateWarnings guards the codex review
+// finding on PR #1880: when migrate.Apply emits warnings about
+// behavior-affecting fields it had to drop (e.g. legacy [[agent]] entries
+// with fallback = true), doctor --fix must surface them. Without this,
+// the next gc doctor run sees a green check and the manual follow-up is
+// lost forever.
+func TestV2DeprecationFixSurfacesMigrateWarnings(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeDoctorFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+fallback = true
+`)
+	writeDoctorFile(t, cityDir, "prompts/mayor.md", "Hello {{.Agent}}\n")
+
+	var sink bytes.Buffer
+	if err := runV2PackMigration(&doctor.CheckContext{CityPath: cityDir}, &sink); err != nil {
+		t.Fatalf("runV2PackMigration: %v", err)
+	}
+
+	got := sink.String()
+	if !strings.Contains(got, "fallback") {
+		t.Fatalf("expected migrate warnings about dropped fallback field to be surfaced; got:\n%s", got)
+	}
+	if !strings.Contains(got, "mayor") {
+		t.Fatalf("expected the agent name to appear in the warning; got:\n%s", got)
+	}
+}
+
+func TestV2DeprecationDoctorFixSurfacesMigrateWarningsInOutput(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeDoctorFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+fallback = true
+`)
+	writeDoctorFile(t, cityDir, "prompts/mayor.md", "Hello {{.Agent}}\n")
+
+	var buf bytes.Buffer
+	d := &doctor.Doctor{}
+	d.Register(v2AgentFormatCheck{})
+	d.Run(&doctor.CheckContext{CityPath: cityDir, Verbose: true}, &buf, true)
+
+	got := buf.String()
+	if !strings.Contains(got, "fallback") {
+		t.Fatalf("expected doctor --fix output to include migrate warning; got:\n%s", got)
+	}
+	if !strings.Contains(got, "✓ v2-agent-format") {
+		t.Fatalf("expected doctor --fix output to include fixed check result; got:\n%s", got)
+	}
+}
+
+// TestV2ImportFormatCheckFixMigratesIncludes runs v2ImportFormatCheck.Fix
+// in isolation against a city whose only legacy artifact is
+// workspace.includes — guards the per-Check Fix entry point that the
+// bundled migration test does not exercise (the chained doctor.Run already
+// migrates everything via the first Fix call).
+func TestV2ImportFormatCheckFixMigratesIncludes(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeDoctorFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+includes = ["../packs/gastown"]
+`)
+
+	check := v2ImportFormatCheck{}
+	if !check.CanFix() {
+		t.Fatal("v2ImportFormatCheck should advertise CanFix()=true")
+	}
+	if got := check.Run(&doctor.CheckContext{CityPath: cityDir}); got.Status != doctor.StatusWarning {
+		t.Fatalf("pre-fix status = %v, want warning", got.Status)
+	}
+	if err := check.Fix(&doctor.CheckContext{CityPath: cityDir}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	if got := check.Run(&doctor.CheckContext{CityPath: cityDir}); got.Status != doctor.StatusOK {
+		t.Fatalf("post-fix status = %v want OK; message=%q", got.Status, got.Message)
+	}
+}
+
+// TestV2DefaultRigImportFormatCheckFixMigratesDefaults runs
+// v2DefaultRigImportFormatCheck.Fix in isolation, mirroring the
+// import-only test above for the default-rig-includes path.
+func TestV2DefaultRigImportFormatCheckFixMigratesDefaults(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeDoctorFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+default_rig_includes = ["../packs/default-rig"]
+`)
+
+	check := v2DefaultRigImportFormatCheck{}
+	if !check.CanFix() {
+		t.Fatal("v2DefaultRigImportFormatCheck should advertise CanFix()=true")
+	}
+	got := check.Run(&doctor.CheckContext{CityPath: cityDir})
+	if got.Status != doctor.StatusWarning {
+		t.Fatalf("pre-fix status = %v, want warning", got.Status)
+	}
+	if !strings.Contains(got.FixHint, "gc doctor --fix") {
+		t.Fatalf("FixHint = %q, want gc doctor --fix hint", got.FixHint)
+	}
+	if err := check.Fix(&doctor.CheckContext{CityPath: cityDir}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	if got := check.Run(&doctor.CheckContext{CityPath: cityDir}); got.Status != doctor.StatusOK {
+		t.Fatalf("post-fix status = %v want OK; message=%q", got.Status, got.Message)
+	}
+}
+
+// TestV2DeprecationChecksFixMigratesPackShape exercises the doctor --fix
+// path for the v2 pack-shape checks (legacy [[agent]] tables,
+// workspace.includes, default_rig_includes). The hint shown in warning
+// states points users at "gc doctor --fix"; this test guards against the
+// regression where those checks declared CanFix()=false and the hint led
+// nowhere.
+func TestV2DeprecationChecksFixMigratesPackShape(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeDoctorFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+includes = ["../packs/gastown"]
+default_rig_includes = ["../packs/default rig"]
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+`)
+	writeDoctorFile(t, cityDir, "pack.toml", `
+[pack]
+name = "legacy-city"
+schema = 1
+
+[[agent]]
+name = "helper"
+scope = "city"
+`)
+	writeDoctorFile(t, cityDir, "prompts/mayor.md", "Hello {{.Agent}}\n")
+
+	var buf bytes.Buffer
+	d := &doctor.Doctor{}
+	d.Register(v2AgentFormatCheck{})
+	d.Register(v2ImportFormatCheck{})
+	d.Register(v2DefaultRigImportFormatCheck{})
+	report := d.Run(&doctor.CheckContext{CityPath: cityDir, Verbose: true}, &buf, true)
+
+	if report.Fixed == 0 {
+		t.Fatalf("expected at least one v2 pack check to be auto-fixed, got Fixed=0; output:\n%s", buf.String())
+	}
+	if report.Warned > 0 {
+		t.Fatalf("expected v2 pack warnings to clear after --fix, got Warned=%d; output:\n%s", report.Warned, buf.String())
+	}
+
+	// Re-run without fix and confirm the city is now clean.
+	var verify bytes.Buffer
+	verifyDoctor := &doctor.Doctor{}
+	verifyDoctor.Register(v2AgentFormatCheck{})
+	verifyDoctor.Register(v2ImportFormatCheck{})
+	verifyDoctor.Register(v2DefaultRigImportFormatCheck{})
+	verifyDoctor.Run(&doctor.CheckContext{CityPath: cityDir, Verbose: true}, &verify, false)
+	out := verify.String()
+	for _, line := range []string{
+		"✓ v2-agent-format",
+		"✓ v2-import-format",
+		"✓ v2-default-rig-import-format",
+	} {
+		if !strings.Contains(out, line) {
+			t.Fatalf("post-fix doctor output missing %q:\n%s", line, out)
+		}
+	}
+}
+
 func writeDoctorFile(t *testing.T, root, rel, contents string) {
 	t.Helper()
 	path := filepath.Join(root, rel)

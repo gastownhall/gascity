@@ -450,12 +450,14 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 		processedThisCycle := false
 		pendingCount := 0
 		legacyOversizedCount := 0
+		unexpectedKindCount := 0
 		for _, candidate := range queue {
 			beadID := candidate.ID
 			kind := strings.TrimSpace(candidate.Metadata["gc.kind"])
 			if !isControlDispatcherKind(kind) {
-				workflowTracef("serve unexpected-kind bead=%s kind=%s", beadID, kind)
-				return result, fmt.Errorf("bead %s has unexpected non-control kind %q", beadID, kind)
+				unexpectedKindCount++
+				workflowTracef("serve unexpected-kind-skip bead=%s kind=%s", beadID, kind)
+				continue
 			}
 			workflowTracef("serve process bead=%s kind=%s store=%s", beadID, kind, storePath)
 			// controlDispatcherServe currently returns nil both when it
@@ -494,6 +496,10 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 		}
 		if legacyOversizedCount > 0 {
 			workflowTracef("serve legacy-oversized-queue agent=%s count=%d", agentCfg.QualifiedName(), legacyOversizedCount)
+			return result, nil
+		}
+		if unexpectedKindCount > 0 {
+			workflowTracef("serve unexpected-kind-queue agent=%s count=%d", agentCfg.QualifiedName(), unexpectedKindCount)
 			return result, nil
 		}
 	}
