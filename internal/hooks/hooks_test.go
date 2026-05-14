@@ -864,6 +864,55 @@ func TestInstallClaudeDoesNotClobberUserChainedCommand(t *testing.T) {
 	}
 }
 
+// TestInstallClaudeDoesNotClobberUserSuffixAppendedCurrentForm covers the
+// current-form variant of the suffix-append class. A user-authored command
+// that begins with the canonical current-form env-var preamble but appends
+// extra arguments (e.g. a custom flag the user added on top of the
+// managed body) must not be classified as managed by isLegacyGCManagedCommand,
+// which would otherwise drive matcher normalization on the user-authored
+// entry. The fix tightens the current-form recognition path to exact-body
+// match.
+func TestInstallClaudeDoesNotClobberUserSuffixAppendedCurrentForm(t *testing.T) {
+	fs := fsys.NewFake()
+	userOwned := `{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --my-flag"
+          }
+        ]
+      }
+    ]
+  }
+}`
+	fs.Files["/city/.gc/settings.json"] = []byte(userOwned)
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	runtime := fs.Files["/city/.gc/settings.json"]
+	entries := claudeHookEntries(t, runtime, "SessionStart")
+	foundUserOwned := false
+	for _, e := range entries {
+		if e.Matcher != "" {
+			continue
+		}
+		for _, h := range e.Hooks {
+			if h.Command == "GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --my-flag" {
+				foundUserOwned = true
+			}
+		}
+	}
+	if !foundUserOwned {
+		t.Fatalf("user-authored current-form SessionStart command with trailing arg was rewritten or had its matcher normalized — gc must require exact-body match for current-form recognition:\n%s", string(runtime))
+	}
+}
+
 // TestInstallClaudeIdempotent verifies that a second Install call on an
 // already-upgraded file is byte-stable. Matches the
 // TestInstallCodexIsByteStableAcrossRepeatedInstalls pattern in the Codex

@@ -787,14 +787,16 @@ func commandBodyAfterCanonicalPrefix(command string) string {
 }
 
 // isLegacyGCManagedCommand reports whether a hook command body matches a
-// known legacy form that gc previously generated. Used to gate matcher
-// normalization in upgradeClaudeHookEntry — user-authored commands that
-// wrap, suffix-append, or otherwise extend the legacy form (e.g.
-// "my-wrapper gc prime --hook --foo", "gc prime --hook --foo", or
-// `gc prime --hook && my-extra-step`) return false and are left alone.
-// Matches against the canonical PATH-prefixed body OR the bare body, and
-// requires the legacy form to be the entire body — gc has only ever
-// emitted these tokens as the full command, never with trailing args.
+// known legacy form (or the already-upgraded current SessionStart form)
+// that gc previously generated. Used to gate matcher normalization in
+// upgradeClaudeHookEntry — user-authored commands that wrap,
+// suffix-append, or otherwise extend the legacy form (e.g.
+// "my-wrapper gc prime --hook --foo", "gc prime --hook --foo",
+// `gc prime --hook && my-extra-step`, or the current-form preamble
+// with extra trailing args appended) return false and are left alone.
+// All recognition paths require exact-body match — gc has only ever
+// emitted these tokens as the complete command body, never with
+// trailing args.
 func isLegacyGCManagedCommand(event, command string) bool {
 	body := commandBodyAfterCanonicalPrefix(command)
 	switch event {
@@ -803,24 +805,20 @@ func isLegacyGCManagedCommand(event, command string) bool {
 			equalsLegacyCommandBody(body, `gc handoff "context cycle"`) ||
 			equalsLegacyCommandBody(body, `gc handoff --auto "context cycle"`)
 	case "SessionStart":
-		// Env-var prefix anchors on the full current-form preamble so a
-		// user command that happens to start with "GC_MANAGED_SESSION_HOOK="
-		// with different values or extra commands does not get classified
-		// as managed. The check still tolerates trailing args on the gc
-		// invocation because gc may extend its own current-form command
-		// in the future; user-authored content past the canonical body
-		// will not match this prefix verbatim.
 		return equalsLegacyCommandBody(body, "gc prime --hook") ||
-			strings.HasPrefix(body, sessionStartCurrentFormBody)
+			equalsLegacyCommandBody(body, sessionStartCurrentFormBody)
 	}
 	return false
 }
 
 // sessionStartCurrentFormBody is the canonical current-form managed
-// SessionStart command body (post-canonical-PATH-prefix). Used in
-// isLegacyGCManagedCommand to recognize an already-upgraded entry whose
-// matcher may still need normalization, without matching user commands
-// that merely begin with the GC_MANAGED_SESSION_HOOK= env-var token.
+// SessionStart command body (post-canonical-PATH-prefix). Recognized
+// via exact-body match in isLegacyGCManagedCommand so an already-upgraded
+// entry still gates matcher normalization, without matching user
+// commands that prefix-collide with the GC_MANAGED_SESSION_HOOK= or
+// full env-var preamble. If gc ever extends the current-form command
+// with additional arguments, update this constant alongside the
+// emission site so legacy detection remains tight.
 const sessionStartCurrentFormBody = `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook`
 
 // equalsLegacyCommandBody reports whether the command body is exactly the
