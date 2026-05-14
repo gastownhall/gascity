@@ -771,6 +771,99 @@ func TestInstallClaudeDoesNotNormalizeUserAuthoredEmptyMatcher(t *testing.T) {
 	}
 }
 
+// TestInstallClaudeDoesNotClobberUserSuffixAppendedCommand is the regression
+// test for the suffix-append class of silent rewrites surfaced by Codex's
+// pass-2 review of PR #2072. The pass-1 fixup blocked wrapper prefixes
+// via token-anchored prefix matching, but accepted any whitespace-bounded
+// suffix after the legacy token — so user-authored commands like
+// "gc prime --hook --my-flag" still matched as managed and were rewritten
+// to "GC_MANAGED_SESSION_HOOK=1 ... gc prime --hook --my-flag" plus an
+// unconditional matcher:"" → "startup" normalization. The exact-body
+// match fixup blocks the suffix-append class entirely.
+func TestInstallClaudeDoesNotClobberUserSuffixAppendedCommand(t *testing.T) {
+	fs := fsys.NewFake()
+	userOwned := `{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "gc prime --hook --my-flag"
+          }
+        ]
+      }
+    ]
+  }
+}`
+	fs.Files["/city/.gc/settings.json"] = []byte(userOwned)
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	runtime := fs.Files["/city/.gc/settings.json"]
+	entries := claudeHookEntries(t, runtime, "SessionStart")
+	foundUserOwned := false
+	for _, e := range entries {
+		if e.Matcher != "" {
+			continue
+		}
+		for _, h := range e.Hooks {
+			if h.Command == "gc prime --hook --my-flag" {
+				foundUserOwned = true
+			}
+		}
+	}
+	if !foundUserOwned {
+		t.Fatalf("user-authored SessionStart command 'gc prime --hook --my-flag' was rewritten — gc must not mutate suffix-appended commands:\n%s", string(runtime))
+	}
+}
+
+// TestInstallClaudeDoesNotClobberUserChainedCommand is the second regression
+// for the suffix-append class. A user who chained their own step after the
+// legacy command body via "&&" must survive the upgrade verbatim. The
+// pass-1 token-anchored prefix accepted whitespace as a token boundary
+// and would have rewritten this; the exact-body match blocks it.
+func TestInstallClaudeDoesNotClobberUserChainedCommand(t *testing.T) {
+	fs := fsys.NewFake()
+	userOwned := `{
+  "hooks": {
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "gc prime --hook && echo user-chained-step"
+          }
+        ]
+      }
+    ]
+  }
+}`
+	fs.Files["/city/.gc/settings.json"] = []byte(userOwned)
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	runtime := fs.Files["/city/.gc/settings.json"]
+	entries := claudeHookEntries(t, runtime, "PreCompact")
+	foundUserOwned := false
+	for _, e := range entries {
+		for _, h := range e.Hooks {
+			if h.Command == "gc prime --hook && echo user-chained-step" {
+				foundUserOwned = true
+			}
+		}
+	}
+	if !foundUserOwned {
+		t.Fatalf("user-authored PreCompact chained command was rewritten — gc must not mutate &&-chained commands:\n%s", string(runtime))
+	}
+}
+
 // TestInstallClaudeIdempotent verifies that a second Install call on an
 // already-upgraded file is byte-stable. Matches the
 // TestInstallCodexIsByteStableAcrossRepeatedInstalls pattern in the Codex
