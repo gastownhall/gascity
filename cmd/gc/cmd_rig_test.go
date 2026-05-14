@@ -1352,6 +1352,17 @@ source = "packs/a-pack"
 	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"), []byte(packToml), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// Stub the referenced packs so LoadWithIncludes can resolve them.
+	for _, name := range []string{"z-pack", "a-pack"} {
+		dir := filepath.Join(cityPath, "packs", name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		stub := fmt.Sprintf("[pack]\nname = %q\nschema = 2\n", name)
+		if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte(stub), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	rigPath := filepath.Join(t.TempDir(), "my-project")
 	if err := os.MkdirAll(rigPath, 0o755); err != nil {
@@ -1371,8 +1382,10 @@ source = "packs/a-pack"
 	if !strings.Contains(output, "Import: z-pack=packs/z-pack, a-pack=packs/a-pack (default)") {
 		t.Errorf("output missing root pack default imports in declaration order: %s", output)
 	}
-	if !strings.Contains(output, "Include: packs/city-pack (default)") {
-		t.Errorf("output missing legacy default include fallback: %s", output)
+	// pack.toml's [defaults.rig.imports] suppresses the legacy
+	// default_rig_includes fallback so we don't write redundant entries.
+	if strings.Contains(output, "Include: packs/city-pack (default)") {
+		t.Errorf("output should not show legacy include fallback when defaults.rig.imports is set: %s", output)
 	}
 
 	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
@@ -1382,17 +1395,29 @@ source = "packs/a-pack"
 	if len(cfg.Rigs) != 1 {
 		t.Fatalf("expected 1 rig, got %d", len(cfg.Rigs))
 	}
-	if want := []string{"packs/city-pack"}; !reflect.DeepEqual(cfg.Rigs[0].Includes, want) {
-		t.Errorf("rig includes = %v, want %v", cfg.Rigs[0].Includes, want)
+	// gc rig add no longer writes [rigs.imports.*] for entries already
+	// covered by pack.toml's [defaults.rig.imports]; defaults are applied
+	// to rigs at config-resolution time instead.
+	if got := cfg.Rigs[0].Imports; len(got) != 0 {
+		t.Errorf("rig imports = %#v, want empty (covered by defaults.rig.imports)", got)
 	}
-	if len(cfg.Rigs[0].Imports) != 2 {
-		t.Fatalf("len(rig imports) = %d, want 2", len(cfg.Rigs[0].Imports))
+	if got := cfg.Rigs[0].Includes; len(got) != 0 {
+		t.Errorf("rig includes = %v, want empty (defaults.rig.imports replaces legacy default_rig_includes)", got)
 	}
-	if got := cfg.Rigs[0].Imports["z-pack"].Source; got != "packs/z-pack" {
-		t.Errorf("rig imports[z-pack] = %q, want packs/z-pack", got)
+
+	// Defaults must be applied at runtime via LoadWithIncludes.
+	resolved, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	if got := cfg.Rigs[0].Imports["a-pack"].Source; got != "packs/a-pack" {
-		t.Errorf("rig imports[a-pack] = %q, want packs/a-pack", got)
+	if got := resolved.Rigs[0].Imports; len(got) != 2 {
+		t.Fatalf("resolved rig imports = %#v, want 2 entries from defaults", got)
+	}
+	if got := resolved.Rigs[0].Imports["z-pack"].Source; got != "packs/z-pack" {
+		t.Errorf("resolved rig imports[z-pack] = %q, want packs/z-pack", got)
+	}
+	if got := resolved.Rigs[0].Imports["a-pack"].Source; got != "packs/a-pack" {
+		t.Errorf("resolved rig imports[a-pack] = %q, want packs/a-pack", got)
 	}
 }
 
@@ -1427,7 +1452,10 @@ func TestDoRigAdd_RealGastownExampleRootPackDefaultRigImport(t *testing.T) {
 	if !strings.Contains(stdout.String(), "Import: gastown=packs/gastown (default)") {
 		t.Fatalf("output missing gastown default import: %s", stdout.String())
 	}
-	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	// gc rig add no longer writes the default to city.toml's rig
+	// imports; the canonical source is pack.toml's [defaults.rig.imports],
+	// applied at config-resolution time via applyDefaultRigImports.
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		t.Fatal(err)
 	}

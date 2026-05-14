@@ -2096,23 +2096,79 @@ func legacyPackDoctors(fs fsys.FS, entries []PackDoctorEntry, packDir, packName 
 // applyPackGlobals appends [global].session_live commands from packs
 // to matching agents. City-level globals affect ALL agents. Rig-level
 // globals affect only agents in that rig.
+//
+// Packs declared at both city and rig scope (typical for packs with
+// agents on both sides) are deduped per-agent by pack name: each pack's
+// SessionLive applies at most once per agent, regardless of how many
+// scopes pull it in.
 func applyPackGlobals(cfg *City) {
+	// Track which packs have already applied their globals to each agent,
+	// keyed by agent index. Without this, a pack present at both city
+	// scope (PackGlobals) and rig scope (RigPackGlobals) would double-
+	// append its SessionLive to that rig's agents.
+	applied := make(map[int]map[string]bool, len(cfg.Agents))
+	for i := range cfg.Agents {
+		applied[i] = make(map[string]bool)
+	}
 	// City-level globals → all agents.
 	for _, g := range cfg.PackGlobals {
 		for i := range cfg.Agents {
+			if applied[i][g.PackName] {
+				continue
+			}
 			cfg.Agents[i].SessionLive = append(
 				cfg.Agents[i].SessionLive, g.SessionLive...)
+			applied[i][g.PackName] = true
 		}
 	}
 	// Rig-level globals → only that rig's agents.
 	for rigName, globals := range cfg.RigPackGlobals {
 		for _, g := range globals {
 			for i := range cfg.Agents {
-				if cfg.Agents[i].Dir == rigName {
-					cfg.Agents[i].SessionLive = append(
-						cfg.Agents[i].SessionLive, g.SessionLive...)
+				if cfg.Agents[i].Dir != rigName {
+					continue
 				}
+				if applied[i][g.PackName] {
+					continue
+				}
+				cfg.Agents[i].SessionLive = append(
+					cfg.Agents[i].SessionLive, g.SessionLive...)
+				applied[i][g.PackName] = true
 			}
+		}
+	}
+}
+
+// applyDefaultRigImports merges [defaults.rig.imports] entries into each
+// rig's Imports map for binding names the rig hasn't already declared
+// itself. The pack.toml [defaults.rig.imports] section is the single
+// source of truth for which packs apply to every rig — gc rig add no
+// longer needs to copy them into city.toml's [rigs.imports.*].
+//
+// A binding the rig already sets (with any source) wins, allowing per-rig
+// overrides.
+func applyDefaultRigImports(cfg *City) {
+	if len(cfg.DefaultRigImports) == 0 {
+		return
+	}
+	order := cfg.DefaultRigImportOrder
+	if len(order) == 0 {
+		order = make([]string, 0, len(cfg.DefaultRigImports))
+		for name := range cfg.DefaultRigImports {
+			order = append(order, name)
+		}
+		sort.Strings(order)
+	}
+	for i := range cfg.Rigs {
+		rig := &cfg.Rigs[i]
+		for _, name := range order {
+			if _, ok := rig.Imports[name]; ok {
+				continue
+			}
+			if rig.Imports == nil {
+				rig.Imports = make(map[string]Import)
+			}
+			rig.Imports[name] = cfg.DefaultRigImports[name]
 		}
 	}
 }

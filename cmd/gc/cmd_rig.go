@@ -319,13 +319,15 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		case len(includes) > 0:
 			rig.Includes = slices.Clone(includes)
 		default:
-			if len(rootDefaultRigImports) > 0 {
-				rig.Imports = make(map[string]config.Import, len(rootDefaultRigImports))
-				for _, bound := range rootDefaultRigImports {
-					rig.Imports[bound.Binding] = bound.Import
-				}
-			}
-			if len(defaultRigIncludes) > 0 {
+			// pack.toml's [defaults.rig.imports] is the single source of
+			// truth — applied to rigs at config-resolution time via
+			// applyDefaultRigImports. Avoid duplicating those entries into
+			// city.toml's [rigs.imports.*], which would cause the pack to
+			// be loaded twice (once via DefaultRigImports, once via the
+			// rig's explicit imports) and double-append session_live and
+			// other [global] arrays. The legacy default_rig_includes is
+			// only used as a fallback when no defaults.rig.imports exists.
+			if len(rootDefaultRigImports) == 0 && len(defaultRigIncludes) > 0 {
 				rig.Includes = slices.Clone(defaultRigIncludes)
 			}
 		}
@@ -438,8 +440,7 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		default:
 			if len(rootDefaultRigImports) > 0 {
 				w(fmt.Sprintf("  Import: %s (default)", formatBoundImports(rootDefaultRigImports)))
-			}
-			if len(defaultRigIncludes) > 0 {
+			} else if len(defaultRigIncludes) > 0 {
 				w(fmt.Sprintf("  Include: %s (default)", strings.Join(defaultRigIncludes, ", ")))
 			}
 		}

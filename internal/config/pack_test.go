@@ -4010,6 +4010,73 @@ session_live = ["echo global"]
 	}
 }
 
+// TestPackGlobal_DedupedAcrossScopes covers the case where a pack is loaded
+// at both city and rig scope (typical for packs with both city-scoped and
+// rig-scoped agents). Without dedup, applyPackGlobals would append the pack's
+// session_live twice to each rig agent — once for the city-level
+// PackGlobals entry, once for the rig-level RigPackGlobals entry.
+func TestPackGlobal_DedupedAcrossScopes(t *testing.T) {
+	cfg := &City{
+		PackGlobals: []ResolvedPackGlobal{
+			{PackName: "gastown", SessionLive: []string{"theme.sh", "keys.sh"}},
+		},
+		RigPackGlobals: map[string][]ResolvedPackGlobal{
+			"my-rig": {{PackName: "gastown", SessionLive: []string{"theme.sh", "keys.sh"}}},
+		},
+		Agents: []Agent{
+			{Name: "city-agent", Dir: ""},
+			{Name: "rig-agent", Dir: "my-rig"},
+		},
+	}
+	applyPackGlobals(cfg)
+	for _, a := range cfg.Agents {
+		if len(a.SessionLive) != 2 {
+			t.Errorf("agent %q: SessionLive = %v, want 2 entries (no dedup means double-application)", a.Name, a.SessionLive)
+		}
+	}
+}
+
+// TestApplyDefaultRigImports_AppliedToBareRigs verifies that
+// [defaults.rig.imports] entries get merged onto rigs that don't declare
+// the binding themselves.
+func TestApplyDefaultRigImports_AppliedToBareRigs(t *testing.T) {
+	cfg := &City{
+		DefaultRigImports: map[string]Import{
+			"gastown": {Source: "packs/gastown"},
+		},
+		DefaultRigImportOrder: []string{"gastown"},
+		Rigs: []Rig{
+			{Name: "alpha"},
+			{Name: "beta"},
+		},
+	}
+	applyDefaultRigImports(cfg)
+	for _, r := range cfg.Rigs {
+		if r.Imports["gastown"].Source != "packs/gastown" {
+			t.Errorf("rig %q: imports[gastown].Source = %q, want packs/gastown", r.Name, r.Imports["gastown"].Source)
+		}
+	}
+}
+
+// TestApplyDefaultRigImports_ExplicitWins verifies that an explicit
+// rig-level import overrides the default for the same binding name,
+// allowing per-rig overrides while preserving the dedup invariant.
+func TestApplyDefaultRigImports_ExplicitWins(t *testing.T) {
+	cfg := &City{
+		DefaultRigImports: map[string]Import{
+			"gastown": {Source: "packs/gastown-default"},
+		},
+		DefaultRigImportOrder: []string{"gastown"},
+		Rigs: []Rig{
+			{Name: "alpha", Imports: map[string]Import{"gastown": {Source: "packs/gastown-fork"}}},
+		},
+	}
+	applyDefaultRigImports(cfg)
+	if got := cfg.Rigs[0].Imports["gastown"].Source; got != "packs/gastown-fork" {
+		t.Errorf("explicit rig import overridden by default: got %q, want packs/gastown-fork", got)
+	}
+}
+
 func TestPackDefinesAgent_Found(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "packs/gastown/pack.toml", `
