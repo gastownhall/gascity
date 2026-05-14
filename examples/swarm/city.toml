@@ -1,6 +1,7 @@
 # Swarm — flat peer pack with shared-directory rigs.
 #
-# A mayor coordinates, a deacon patrols health, dogs handle infrastructure.
+# A mayor coordinates, a deacon patrols health, and the initialized city
+# picks up dog-based infrastructure from the system maintenance pack.
 # Per-rig: N coders self-organize via beads and mail, a dedicated committer
 # handles git. No worktree isolation — all rig agents share one directory.
 #

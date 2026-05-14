@@ -57,17 +57,6 @@ func TestRootPackOwnsSwarmImport(t *testing.T) {
 	}
 }
 
-func TestSwarmPackImportsMaintenance(t *testing.T) {
-	dir := exampleDir()
-	packCfg, err := config.Load(fsys.OSFS{}, filepath.Join(dir, "packs", "swarm", "pack.toml"))
-	if err != nil {
-		t.Fatalf("config.Load(swarm pack.toml): %v", err)
-	}
-	if got := packCfg.Imports["maintenance"].Source; got != "../maintenance" {
-		t.Fatalf("swarm pack import maintenance = %q, want %q", got, "../maintenance")
-	}
-}
-
 func TestCityTomlValidates(t *testing.T) {
 	cfg := loadExpanded(t)
 	if err := config.ValidateAgents(cfg.Agents); err != nil {
@@ -149,7 +138,7 @@ func TestCombinedPackParses(t *testing.T) {
 	}
 
 	// Expect 4 locally-defined agents: mayor, deacon (city), coder, committer (rig).
-	// The city-scoped dog comes from the imported maintenance pack.
+	// The initialized city picks up dog from the system-provided maintenance pack.
 	agents := discoverPackAgents(t, filepath.Join("packs", "swarm"))
 	want := map[string]bool{
 		"mayor": false, "deacon": false,
@@ -181,10 +170,11 @@ func TestCombinedPackParses(t *testing.T) {
 }
 
 func TestCityAgentsFilter(t *testing.T) {
-	// Without rigs, only city-scoped agents appear.
+	// In the raw source-tree config, only Swarm's own city-scoped agents appear.
+	// The initialized city later gains a maintenance dog from system packs.
 	cfg := loadExpanded(t)
 
-	cityAgents := map[string]bool{"mayor": true, "deacon": true, "dog": true}
+	cityAgents := map[string]bool{"mayor": true, "deacon": true}
 	var explicit int
 	for _, a := range cfg.Agents {
 		if a.Implicit {
@@ -198,8 +188,8 @@ func TestCityAgentsFilter(t *testing.T) {
 			t.Errorf("city agent %q: dir = %q, want empty", a.Name, a.Dir)
 		}
 	}
-	if explicit != 3 {
-		t.Errorf("got %d explicit agents, want 3 city-scoped agents", explicit)
+	if explicit != 2 {
+		t.Errorf("got %d explicit agents, want 2 source-tree city-scoped agents", explicit)
 	}
 }
 
@@ -266,25 +256,5 @@ func TestPackPromptFilesExist(t *testing.T) {
 		if _, err := os.Stat(a.PromptTemplate); err != nil {
 			t.Errorf("agent %q: prompt_template %q: %v", a.Name, a.PromptTemplate, err)
 		}
-	}
-}
-
-func TestMaintenanceDogShape(t *testing.T) {
-	agents := discoverPackAgents(t, filepath.Join("packs", "maintenance"))
-	if len(agents) != 1 {
-		t.Fatalf("maintenance pack has %d agents, want 1", len(agents))
-	}
-	dog := agents[0]
-	if dog.Name != "dog" {
-		t.Fatalf("maintenance pack agent = %q, want %q", dog.Name, "dog")
-	}
-	if dog.Scope != "city" {
-		t.Errorf("maintenance dog scope = %q, want %q", dog.Scope, "city")
-	}
-	if dog.PromptTemplate == "" {
-		t.Fatal("maintenance dog prompt_template is empty")
-	}
-	if _, err := os.Stat(dog.PromptTemplate); err != nil {
-		t.Errorf("maintenance dog prompt_template %q: %v", dog.PromptTemplate, err)
 	}
 }
