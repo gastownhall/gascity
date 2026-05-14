@@ -9241,6 +9241,16 @@ func TestStartBeadsLifecycleRegistersArchiveLevelOnlyDoltConfig(t *testing.T) {
 }
 
 func TestStartBeadsLifecycleManagedDeferredDoesNotRequireRuntimeState(t *testing.T) {
+	// The post-init Dolt catalog verifier needs a real MySQL-speaking
+	// server. This test wires only a bare TCP listener as the "managed
+	// Dolt port", which is enough for the rest of the lifecycle but not
+	// for SHOW DATABASES. Stub the verifier — coverage for the verifier
+	// itself lives in TestVerifyManagedDoltDatabaseExistsAfterInitNoOps
+	// (unit-level guards) and the integration suite (full path).
+	originalVerifier := verifyManagedDoltDatabaseExistsAfterInit
+	verifyManagedDoltDatabaseExistsAfterInit = func(_, _, _ string) error { return nil }
+	t.Cleanup(func() { verifyManagedDoltDatabaseExistsAfterInit = originalVerifier })
+
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "rig")
 	if err := os.MkdirAll(rigPath, 0o755); err != nil {
