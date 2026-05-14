@@ -180,12 +180,19 @@ func TestLegacySiteBindingSurfaceErrorAggregatesViolations(t *testing.T) {
 	}
 	for _, want := range []string{
 		"pre-1.0 site-binding fields are no longer supported",
-		"city.toml: unsupported pre-1.0 workspace identity fields (workspace.name, workspace.prefix)",
 		`city.toml: unsupported pre-1.0 rig.path for rig "frontend"`,
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error = %v, want substring %q", err, want)
 		}
+	}
+
+	warnings := legacyWorkspaceIdentitySurfaceWarnings(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %v, want one workspace identity warning", warnings)
+	}
+	if !strings.Contains(warnings[0], "workspace identity fields are deprecated in v2; move them to .gc/site.toml (workspace.name, workspace.prefix)") {
+		t.Fatalf("warning = %q, want workspace identity guidance", warnings[0])
 	}
 }
 
@@ -211,7 +218,7 @@ schema = 2
 	}
 }
 
-func TestLoadWithIncludes_RejectsLegacyWorkspaceIdentityInSchema2City(t *testing.T) {
+func TestLoadWithIncludes_WarnsOnLegacyWorkspaceIdentityInSchema2City(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
 [workspace]
@@ -224,12 +231,19 @@ name = "city"
 schema = 2
 `)
 
-	_, _, err := LoadWithIncludes(fs, "/city/city.toml")
-	if err == nil {
-		t.Fatal("LoadWithIncludes succeeded, want hard error for legacy workspace identity")
+	_, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	if !strings.Contains(err.Error(), "unsupported pre-1.0 workspace identity fields (workspace.name, workspace.prefix)") {
-		t.Fatalf("error = %v, want legacy workspace identity guidance", err)
+	var found bool
+	for _, warning := range prov.Warnings {
+		if strings.Contains(warning, "workspace identity fields are deprecated in v2; move them to .gc/site.toml (workspace.name, workspace.prefix)") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("warnings = %v, want legacy workspace identity guidance", prov.Warnings)
 	}
 }
 

@@ -171,6 +171,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 			if err := LegacyV1SurfaceError(root, path); err != nil {
 				return nil, nil, err
 			}
+			prov.Warnings = append(prov.Warnings, legacyWorkspaceIdentitySurfaceWarnings(root, path)...)
 			if err := LegacySiteBindingSurfaceError(root, path); err != nil {
 				return nil, nil, err
 			}

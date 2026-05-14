@@ -54,6 +54,16 @@ func DetectLegacySiteBindingSurfaces(cfg *City, source string) []string {
 		return nil
 	}
 
+	warnings := legacyWorkspaceIdentitySurfaceWarnings(cfg, source)
+	warnings = append(warnings, legacyRigPathSurfaceWarnings(cfg, source)...)
+	return warnings
+}
+
+func legacyWorkspaceIdentitySurfaceWarnings(cfg *City, source string) []string {
+	if cfg == nil {
+		return nil
+	}
+
 	var warnings []string
 	var workspaceFields []string
 	if strings.TrimSpace(cfg.Workspace.Name) != "" {
@@ -71,6 +81,15 @@ func DetectLegacySiteBindingSurfaces(cfg *City, source string) []string {
 		))
 	}
 
+	return warnings
+}
+
+func legacyRigPathSurfaceWarnings(cfg *City, source string) []string {
+	if cfg == nil {
+		return nil
+	}
+
+	var warnings []string
 	for _, rig := range cfg.Rigs {
 		if strings.TrimSpace(rig.Path) == "" {
 			continue
@@ -99,21 +118,6 @@ func LegacySiteBindingSurfaceErrors(cfg *City, source string) []string {
 	}
 
 	var errors []string
-	var workspaceFields []string
-	if strings.TrimSpace(cfg.Workspace.Name) != "" {
-		workspaceFields = append(workspaceFields, "workspace.name")
-	}
-	if strings.TrimSpace(cfg.Workspace.Prefix) != "" {
-		workspaceFields = append(workspaceFields, "workspace.prefix")
-	}
-	if len(workspaceFields) > 0 {
-		errors = append(errors, fmt.Sprintf(
-			"%s: unsupported pre-1.0 workspace identity fields (%s); move them to .gc/site.toml (run `gc doctor --fix` if this is the root city.toml; fragments must be updated by hand)",
-			source,
-			strings.Join(workspaceFields, ", "),
-		))
-	}
-
 	for _, rig := range cfg.Rigs {
 		if strings.TrimSpace(rig.Path) == "" {
 			continue
