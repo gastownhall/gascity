@@ -301,10 +301,15 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 	}
 
 	// Guard: on a fresh add (not a re-add) without --adopt, refuse to run
-	// if .beads/ is already present. Without this, doRigAdd falls through
-	// to bd init against an existing Dolt store and typically dies with
-	// "bd init: signal: killed" after the probe times out — an unhelpful
-	// failure mode for the common "register existing store" workflow.
+	// if .beads/ already holds a beads store. Without this, doRigAdd falls
+	// through to bd init against an existing Dolt store and typically dies
+	// with "bd init: signal: killed" after the probe times out.
+	//
+	// We treat .beads/ as a store only when metadata.json or config.yaml is
+	// present. A directory that happens to be named .beads/ but contains
+	// only unrelated content (e.g. the beads project's own .beads/formulas/
+	// convention for formula source files) is not a store; bd init will
+	// add the missing files alongside without disturbing the existing ones.
 	if !reAdd && !adopt {
 		beadsPath := filepath.Join(rigPath, ".beads")
 		fi, err := fs.Stat(beadsPath)
@@ -312,9 +317,9 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 			fmt.Fprintf(stderr, "gc rig add: checking %s: %v\n", beadsPath, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		if err == nil && fi.IsDir() {
-			fmt.Fprintf(stderr, "gc rig add: %s/.beads already exists; "+ //nolint:errcheck // best-effort stderr
-				"use --adopt to register the existing store, or remove %s/.beads to reinitialize\n",
+		if err == nil && fi.IsDir() && beadsDirContainsStore(fs, beadsPath) {
+			fmt.Fprintf(stderr, "gc rig add: %s/.beads already contains a beads store; "+ //nolint:errcheck // best-effort stderr
+				"use --adopt to register it, or remove %s/.beads to reinitialize\n",
 				rigPath, rigPath)
 			return 1
 		}
@@ -1018,6 +1023,21 @@ func writeBeadsEnvGTRoot(fs fsys.FS, rigPath, cityPath string) error {
 		return fmt.Errorf("creating .beads dir: %w", err)
 	}
 	return fs.WriteFile(envPath, []byte(content), 0o644)
+}
+
+// beadsDirContainsStore reports whether beadsPath looks like an existing
+// beads store. A directory is treated as a store when it contains either
+// metadata.json or config.yaml — the two files bd init always writes.
+// Other contents (e.g. the beads project's own .beads/formulas/ convention
+// for formula source files) are not treated as a store, so gc rig add can
+// safely initialize alongside them.
+func beadsDirContainsStore(fs fsys.FS, beadsPath string) bool {
+	for _, name := range [...]string{"metadata.json", "config.yaml"} {
+		if _, err := fs.Stat(filepath.Join(beadsPath, name)); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // readBeadsPrefix reads the issue_prefix from an existing .beads/config.yaml
