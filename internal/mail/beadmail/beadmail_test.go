@@ -58,6 +58,18 @@ func TestCheckDoesNotUseMessageLabelSupplement(t *testing.T) {
 		if strings.Contains(cmd, "--label=gc:message") {
 			t.Fatalf("mail check used gc:message label supplement: %s", cmd)
 		}
+		if strings.Contains(cmd, "bd show --json mayor") {
+			return nil, errors.New("not found")
+		}
+		if strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--metadata-field") {
+			return []byte(`[]`), nil
+		}
+		if strings.Contains(cmd, "bd query --json") {
+			if !strings.Contains(cmd, "ephemeral=true") || !strings.Contains(cmd, "type=message") {
+				t.Fatalf("mail check used unexpected wisp query: %s", cmd)
+			}
+			return []byte(`[]`), nil
+		}
 		if strings.Contains(cmd, "--assignee=mayor") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=open") {
 			return []byte(`[{"id":"msg-1","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"mayor","from":"human","created_at":"2026-01-02T03:04:05Z","labels":["gc:message"]}]`), nil
 		}
@@ -71,6 +83,56 @@ func TestCheckDoesNotUseMessageLabelSupplement(t *testing.T) {
 	}
 	if len(msgs) != 1 || msgs[0].ID != "msg-1" {
 		t.Fatalf("Check = %#v, want msg-1", msgs)
+	}
+}
+
+func TestMessageQueriesIncludeWispTier(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	msg, err := store.Create(beads.Bead{
+		Title:       "wisp status",
+		Type:        "message",
+		Assignee:    "mayor",
+		From:        "human",
+		Description: "wisp body",
+		Labels:      []string{"thread:t1"},
+		Ephemeral:   true,
+	})
+	if err != nil {
+		t.Fatalf("Create ephemeral message: %v", err)
+	}
+
+	inbox, err := p.Check("mayor")
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(inbox) != 1 || inbox[0].ID != msg.ID {
+		t.Fatalf("Check = %#v, want ephemeral message %s", inbox, msg.ID)
+	}
+
+	all, err := p.All("")
+	if err != nil {
+		t.Fatalf("All: %v", err)
+	}
+	if len(all) != 1 || all[0].ID != msg.ID {
+		t.Fatalf("All = %#v, want ephemeral message %s", all, msg.ID)
+	}
+
+	total, unread, err := p.Count("mayor")
+	if err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	if total != 1 || unread != 1 {
+		t.Fatalf("Count = (%d, %d), want (1, 1)", total, unread)
+	}
+
+	thread, err := p.Thread("t1")
+	if err != nil {
+		t.Fatalf("Thread: %v", err)
+	}
+	if len(thread) != 1 || thread[0].ID != msg.ID {
+		t.Fatalf("Thread = %#v, want ephemeral message %s", thread, msg.ID)
 	}
 }
 
