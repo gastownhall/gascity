@@ -2060,10 +2060,10 @@ func TestDoRigAdd_DerivedPrefixConflictsWithExistingBeads(t *testing.T) {
 	}
 }
 
-// A fresh "gc rig add" against a pre-existing .beads/ directory must fail
-// fast and point the user at --adopt — even when the existing prefix would
-// have matched the derived one. Falling through to bd init on a populated
-// Dolt store produces confusing "signal: killed" failures (see fo-5zeij).
+// A fresh "gc rig add" against a pre-existing .beads/ store must fail fast
+// and point the user at --adopt — even when the existing prefix would have
+// matched the derived one. Falling through to bd init on a populated Dolt
+// store produces confusing "signal: killed" failures (see fo-5zeij).
 func TestDoRigAdd_ExistingBeadsRequiresAdopt(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
@@ -2075,8 +2075,8 @@ func TestDoRigAdd_ExistingBeadsRequiresAdopt(t *testing.T) {
 	}
 
 	// Rig "alpha-beta" derives prefix "ab", and .beads already has "ab"
-	// — so the prefix-conflict guard does not trip and we reach the new
-	// "exists without --adopt" guard.
+	// — so the prefix-conflict guard does not trip and we reach the
+	// "store already exists without --adopt" guard.
 	rigPath := filepath.Join(t.TempDir(), "alpha-beta")
 	beadsDir := filepath.Join(rigPath, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
@@ -2093,14 +2093,103 @@ func TestDoRigAdd_ExistingBeadsRequiresAdopt(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, false, &stdout, &stderr)
 	if code != 1 {
-		t.Fatalf("expected failure for pre-existing .beads/ without --adopt, got code %d; stdout: %s", code, stdout.String())
+		t.Fatalf("expected failure for pre-existing .beads/ store without --adopt, got code %d; stdout: %s", code, stdout.String())
 	}
 	errMsg := stderr.String()
-	if !strings.Contains(errMsg, ".beads already exists") {
-		t.Errorf("stderr should mention pre-existing .beads/: %s", errMsg)
+	if !strings.Contains(errMsg, "already contains a beads store") {
+		t.Errorf("stderr should identify existing store: %s", errMsg)
 	}
 	if !strings.Contains(errMsg, "--adopt") {
 		t.Errorf("stderr should hint at --adopt: %s", errMsg)
+	}
+}
+
+// A .beads/ directory containing only metadata.json (no config.yaml) is
+// still recognized as an existing store — bd init creates both files,
+// and either one is sufficient evidence that a real store is present.
+func TestDoRigAdd_ExistingBeadsMetadataOnlyRequiresAdopt(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := "[workspace]\nname = \"my-city\"\n\n[[agent]]\nname = \"mayor\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigPath := filepath.Join(t.TempDir(), "alpha-beta")
+	beadsDir := filepath.Join(rigPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"),
+		[]byte(`{"name":"alpha-beta","issue_prefix":"ab"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", false, false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected failure for pre-existing .beads/ store without --adopt, got code %d; stdout: %s", code, stdout.String())
+	}
+	errMsg := stderr.String()
+	if !strings.Contains(errMsg, "already contains a beads store") {
+		t.Errorf("stderr should identify existing store: %s", errMsg)
+	}
+	if !strings.Contains(errMsg, "--adopt") {
+		t.Errorf("stderr should hint at --adopt: %s", errMsg)
+	}
+}
+
+// A target directory whose .beads/ subdir contains only unrelated content
+// (no metadata.json or config.yaml) is NOT a beads store. Common in the
+// wild: the beads project itself uses .beads/formulas/ for unrelated
+// formula source files. gc rig add must proceed in this case, initializing
+// the store alongside the existing content without disturbing it.
+func TestDoRigAdd_BeadsDirWithUnrelatedContentSucceeds(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigPath := filepath.Join(t.TempDir(), "beads-project")
+	formulasDir := filepath.Join(rigPath, ".beads", "formulas")
+	if err := os.MkdirAll(formulasDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	formulaPath := filepath.Join(formulasDir, "example.toml")
+	if err := os.WriteFile(formulaPath, []byte("# unrelated formula source\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", false, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigAdd should succeed when .beads/ has only unrelated content, got code %d; stderr: %s", code, stderr.String())
+	}
+
+	// Pre-existing unrelated content must be left untouched.
+	if _, err := os.Stat(formulaPath); err != nil {
+		t.Errorf(".beads/formulas/example.toml should be preserved: %v", err)
+	}
+
+	// city.toml must list the new rig.
+	cityTomlBytes, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(cityTomlBytes), "beads-project") {
+		t.Errorf("city.toml should contain rig name: %s", cityTomlBytes)
 	}
 }
 
