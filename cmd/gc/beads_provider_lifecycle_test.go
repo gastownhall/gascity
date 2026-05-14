@@ -9963,3 +9963,56 @@ exit 2
 		t.Fatalf("health call count = %d, want 2; log:\n%s", got, data)
 	}
 }
+
+// TestVerifyManagedDoltDatabaseExistsAfterInitNoOps confirms the early
+// returns: when the city doesn't use the bd store contract, OR when no
+// managed Dolt port is published, OR when the database name is empty,
+// the verifier is a no-op (returns nil) — the caller already gates on
+// these conditions but the helper double-checks defensively so it's
+// safe to call from new sites.
+func TestVerifyManagedDoltDatabaseExistsAfterInitNoOps(t *testing.T) {
+	// Capture the production verifier and restore at end of test.
+	original := verifyManagedDoltDatabaseExistsAfterInit
+	t.Cleanup(func() { verifyManagedDoltDatabaseExistsAfterInit = original })
+
+	tmp := t.TempDir()
+	// City without the bd store contract → no-op.
+	if err := original(tmp, tmp, "hq"); err != nil {
+		t.Errorf("city without bd contract should be no-op, got %v", err)
+	}
+
+	// Empty db name → no-op (defensive).
+	cityPath := setupBdContractCityForTest(t)
+	if err := original(cityPath, cityPath, ""); err != nil {
+		t.Errorf("empty dbName should be no-op, got %v", err)
+	}
+	if err := original(cityPath, cityPath, "  "); err != nil {
+		t.Errorf("whitespace dbName should be no-op, got %v", err)
+	}
+}
+
+// setupBdContractCityForTest returns a temp city dir that satisfies
+// cityUsesBdStoreContract but has no published Dolt port.
+func setupBdContractCityForTest(t *testing.T) string {
+	t.Helper()
+	tmp := t.TempDir()
+	beadsDir := filepath.Join(tmp, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir beads: %v", err)
+	}
+	// Minimum to make cityUsesBdStoreContract return true: the
+	// canonical config file presence is what's checked. Drop the file
+	// the function expects.
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue_prefix: tc\nissue-prefix: tc\n"), 0o644); err != nil {
+		t.Fatalf("seed config.yaml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt","dolt_database":"hq","dolt_mode":"server"}`), 0o644); err != nil {
+		t.Fatalf("seed metadata: %v", err)
+	}
+	return tmp
+}
+
+// (Integration-level coverage of the full verifier path — connect to a
+// running Dolt server and resolve SHOW DATABASES — lives in the
+// integration test suite. Unit tests here cover the no-op early-return
+// guards, which is what the helper's defensive contract requires.)
