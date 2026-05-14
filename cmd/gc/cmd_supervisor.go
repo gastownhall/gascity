@@ -128,6 +128,37 @@ func newSupervisorStatusCmd(stdout, stderr io.Writer) *cobra.Command {
 	return cmd
 }
 
+// openSupervisorLogForTee opens the supervisor log file in append mode for
+// runSupervisor to tee output into. Returns nil on any error (we never
+// fail supervisor startup just because the log file can't be opened —
+// operators still get journald/launchd-captured stdout/stderr).
+func openSupervisorLogForTee() *os.File {
+	f, err := os.OpenFile(supervisorLogPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil
+	}
+	return f
+}
+
+// shouldTeeSupervisorLog reports whether `w` is distinct from the
+// supervisor log file. When `gc supervisor start` spawns a backgrounded
+// `gc supervisor run` child, it pre-opens the log and points
+// child.Stdout/child.Stderr at it — the child's stdout/stderr are then
+// already the log file, so adding a MultiWriter would double-log every
+// line. By comparing the underlying file (Name() match), we avoid that
+// while still teeing for the systemd/launchd/container path where
+// stdout/stderr arrive as a journal/pipe and need explicit routing.
+func shouldTeeSupervisorLog(w io.Writer, logFile *os.File) bool {
+	if w == nil || logFile == nil {
+		return false
+	}
+	wf, ok := w.(*os.File)
+	if !ok {
+		return true
+	}
+	return wf.Name() != logFile.Name()
+}
+
 // acquireSupervisorLock takes an exclusive flock on the supervisor lock file.
 func acquireSupervisorLock() (*os.File, error) {
 	dir := supervisor.RuntimeDir()
@@ -937,6 +968,29 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	if pid := supervisorAlive(); pid != 0 {
 		fmt.Fprintf(stderr, "gc supervisor: supervisor already running (PID %d)\n", pid) //nolint:errcheck
 		return 1
+	}
+
+	// Ensure ~/.gc/ exists. doSupervisorStart does this when invoked
+	// manually (mkdir + open log file before spawning the child), but the
+	// systemd/launchd/container paths jump straight to `gc supervisor run`
+	// without that prep — which leaves operators with `gc supervisor logs`
+	// reporting "log file not found" and no way to see startup errors.
+	if err := os.MkdirAll(supervisor.DefaultHome(), 0o700); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: ensuring home dir %s: %v\n", supervisor.DefaultHome(), err) //nolint:errcheck
+		return 1
+	}
+	// Always tee to ~/.gc/supervisor.log so `gc supervisor logs` works
+	// regardless of how the supervisor was invoked. We skip the tee when
+	// stdout/stderr already point at the same file (manual `gc supervisor
+	// start` path) to avoid double-logging.
+	if logFile := openSupervisorLogForTee(); logFile != nil {
+		defer logFile.Close() //nolint:errcheck // best-effort cleanup
+		if shouldTeeSupervisorLog(stdout, logFile) {
+			stdout = io.MultiWriter(stdout, logFile)
+		}
+		if shouldTeeSupervisorLog(stderr, logFile) {
+			stderr = io.MultiWriter(stderr, logFile)
+		}
 	}
 
 	lock, err := acquireSupervisorLock()

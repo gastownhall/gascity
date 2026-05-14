@@ -5734,3 +5734,104 @@ func TestCurrentUsernameForSystemdHintFallback(t *testing.T) {
 		}
 	})
 }
+
+// TestRunSupervisorEnsuresHomeDirAndWritesLog confirms the fix for the
+// "Supervisor logs: log file not found" symptom seen on first start under
+// systemd/launchd/container — where the original `gc supervisor start`
+// mkdir+open codepath is bypassed. runSupervisor now creates ~/.gc/ and
+// opens the log file itself before doing any work.
+func TestRunSupervisorEnsuresHomeDirAndWritesLog(t *testing.T) {
+	gcHome := filepath.Join(t.TempDir(), "fresh-home")
+	t.Setenv("GC_HOME", gcHome)
+
+	// Sanity: the home dir does NOT exist yet — this is the systemd/launchd
+	// fresh-install scenario.
+	if _, err := os.Stat(gcHome); !os.IsNotExist(err) {
+		t.Fatalf("precondition: %s must not exist yet, got err=%v", gcHome, err)
+	}
+
+	// Stub the long-running loop so the test exits as soon as the early
+	// setup (MkdirAll + log open + lock acquire) is exercised. We use
+	// runSupervisorFunc to substitute, but since runSupervisor itself does
+	// the setup BEFORE calling any loop, just invoking it and letting the
+	// lock-acquire fail is enough to test the early path.
+	//
+	// Force lock acquisition to fail fast by pre-creating a held lock.
+	if err := os.MkdirAll(gcHome, 0o700); err != nil {
+		t.Fatalf("seed home dir: %v", err)
+	}
+	preheld, err := os.OpenFile(filepath.Join(gcHome, "supervisor.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatalf("seed lock file: %v", err)
+	}
+	defer preheld.Close() //nolint:errcheck
+	if err := syscall.Flock(int(preheld.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatalf("hold lock: %v", err)
+	}
+	// Now blow away the home dir to truly simulate the fresh-install state.
+	if err := os.RemoveAll(gcHome); err != nil {
+		t.Fatalf("reset home dir: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	_ = runSupervisor(&stdout, &stderr) // exits with 1 because no lock; that's fine
+
+	// The home dir must now exist (created by runSupervisor's MkdirAll).
+	if info, err := os.Stat(gcHome); err != nil || !info.IsDir() {
+		t.Fatalf("after runSupervisor, %s should exist as a directory; err=%v", gcHome, err)
+	}
+
+	// The log file must exist (created by runSupervisor's openSupervisorLogForTee).
+	logPath := filepath.Join(gcHome, "supervisor.log")
+	if _, err := os.Stat(logPath); err != nil {
+		t.Fatalf("after runSupervisor, %s should exist; err=%v", logPath, err)
+	}
+}
+
+// TestShouldTeeSupervisorLogAvoidsDoubleLoggingOnManualStart confirms the
+// guard that prevents double-writes when stdout/stderr are already the
+// supervisor log file (the manual `gc supervisor start` path opens the
+// file in the parent and points the child's stdout/stderr at it).
+func TestShouldTeeSupervisorLogAvoidsDoubleLoggingOnManualStart(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "supervisor.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatalf("open log: %v", err)
+	}
+	defer logFile.Close() //nolint:errcheck
+
+	// Same path = the manual-start case. Must not tee.
+	sameFile, err := os.OpenFile(logPath, os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatalf("reopen log: %v", err)
+	}
+	defer sameFile.Close() //nolint:errcheck
+	if shouldTeeSupervisorLog(sameFile, logFile) {
+		t.Errorf("manual-start case (same file path): shouldTeeSupervisorLog should return false")
+	}
+
+	// Different file = systemd/launchd case. Must tee.
+	otherPath := filepath.Join(dir, "other.log")
+	otherFile, err := os.Create(otherPath)
+	if err != nil {
+		t.Fatalf("create other: %v", err)
+	}
+	defer otherFile.Close() //nolint:errcheck
+	if !shouldTeeSupervisorLog(otherFile, logFile) {
+		t.Errorf("systemd/launchd case (different file): shouldTeeSupervisorLog should return true")
+	}
+
+	// Non-file writer (a buffer simulating a journal pipe). Must tee.
+	if !shouldTeeSupervisorLog(&bytes.Buffer{}, logFile) {
+		t.Errorf("non-file writer (pipe/journal): shouldTeeSupervisorLog should return true")
+	}
+
+	// Nil safety.
+	if shouldTeeSupervisorLog(nil, logFile) {
+		t.Errorf("nil writer: shouldTeeSupervisorLog should return false")
+	}
+	if shouldTeeSupervisorLog(otherFile, nil) {
+		t.Errorf("nil logFile: shouldTeeSupervisorLog should return false")
+	}
+}
