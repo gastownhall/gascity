@@ -1111,7 +1111,7 @@ func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
 	if query.IncludeClosed || query.Status == "closed" {
 		args = append(args, "--all")
 	}
-	if query.Limit > 0 {
+	if query.Limit > 0 && canApplyWispsServerLimit(query) {
 		args = append(args, "--limit", strconv.Itoa(query.Limit))
 	}
 
@@ -1137,6 +1137,10 @@ func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
 		return filtered, fmt.Errorf("bd query: %w", parseErr)
 	}
 	return filtered, nil
+}
+
+func canApplyWispsServerLimit(query ListQuery) bool {
+	return query.Sort == SortDefault && query.CreatedBefore.IsZero() && len(query.Metadata) == 0
 }
 
 // assertBareBdQueryValue rejects values containing whitespace, quotes, or

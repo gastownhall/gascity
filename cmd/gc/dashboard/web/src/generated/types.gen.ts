@@ -251,6 +251,7 @@ export type Bead = {
     created_at: string;
     dependencies?: Array<Dep> | null;
     description?: string;
+    ephemeral?: boolean;
     from?: string;
     id: string;
     issue_type: string;

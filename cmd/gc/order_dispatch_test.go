@@ -2709,6 +2709,14 @@ func TestSweepStaleOrderTracking_ClosesOnlyOldOpenTrackingBeads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create(old): %v", err)
 	}
+	oldEphemeral, err := store.Create(beads.Bead{
+		Title:     "order:old-sweep-wisp-tier",
+		Labels:    []string{"order-run:old-sweep-wisp-tier", labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(old ephemeral): %v", err)
+	}
 	oldWork, err := store.Create(beads.Bead{
 		Title:  "real work",
 		Labels: []string{"order-run:old-sweep"},
@@ -2727,12 +2735,13 @@ func TestSweepStaleOrderTracking_ClosesOnlyOldOpenTrackingBeads(t *testing.T) {
 		t.Fatalf("Create(fresh): %v", err)
 	}
 
+	const expectedClosedTrackingBeads = 2 // issues-tier legacy bead + wisps-tier tracking bead
 	closed, err := sweepStaleOrderTracking(store, time.Now(), 100*time.Millisecond, nil, orderTrackingSweepMetadataInitiator)
 	if err != nil {
 		t.Fatalf("sweepStaleOrderTracking: %v", err)
 	}
-	if closed != 1 {
-		t.Fatalf("closed = %d, want 1", closed)
+	if closed != expectedClosedTrackingBeads {
+		t.Fatalf("closed = %d, want %d", closed, expectedClosedTrackingBeads)
 	}
 
 	gotOld, err := store.Get(old.ID)
@@ -2741,6 +2750,13 @@ func TestSweepStaleOrderTracking_ClosesOnlyOldOpenTrackingBeads(t *testing.T) {
 	}
 	if gotOld.Status != "closed" {
 		t.Fatalf("old tracking status = %s, want closed", gotOld.Status)
+	}
+	gotOldEphemeral, err := store.Get(oldEphemeral.ID)
+	if err != nil {
+		t.Fatalf("Get(old ephemeral): %v", err)
+	}
+	if gotOldEphemeral.Status != "closed" {
+		t.Fatalf("old ephemeral tracking status = %s, want closed", gotOldEphemeral.Status)
 	}
 	gotFresh, err := store.Get(fresh.ID)
 	if err != nil {

@@ -109,6 +109,9 @@ func liveListQuery(query ListQuery) ListQuery {
 // snapshot; callers must treat this as a read model that may lag writes or
 // reconciliation by one tick.
 func (c *CachingStore) CachedList(query ListQuery) ([]Bead, bool) {
+	if query.TierMode != TierIssues {
+		return nil, false
+	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if c.state != cacheLive && c.state != cachePartial {

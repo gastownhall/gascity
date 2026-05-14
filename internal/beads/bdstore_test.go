@@ -2594,6 +2594,46 @@ func TestBdStoreListBothTiersMergesAndDedupes(t *testing.T) {
 	}
 }
 
+func TestBdStoreListBothTiersAppliesCreatedBeforeBeforeMergedLimit(t *testing.T) {
+	before := time.Date(2026, 5, 2, 0, 0, 0, 0, time.UTC)
+	var queryCmd string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		full := name + " " + strings.Join(args, " ")
+		switch {
+		case strings.HasPrefix(full, "bd list "):
+			return []byte(`[]`), nil
+		case strings.HasPrefix(full, "bd query "):
+			queryCmd = full
+			if strings.Contains(full, "--limit") {
+				return []byte(`[{"id":"bd-new","title":"newer","status":"closed","issue_type":"task","created_at":"2026-05-03T00:00:00Z","ephemeral":true,"labels":["order-run:o"]}]`), nil
+			}
+			return []byte(`[
+				{"id":"bd-new","title":"newer","status":"closed","issue_type":"task","created_at":"2026-05-03T00:00:00Z","ephemeral":true,"labels":["order-run:o"]},
+				{"id":"bd-old","title":"older","status":"closed","issue_type":"task","created_at":"2026-05-01T00:00:00Z","ephemeral":true,"labels":["order-run:o"]}
+			]`), nil
+		}
+		return nil, fmt.Errorf("unexpected: %s", full)
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{
+		Label:         "order-run:o",
+		CreatedBefore: before,
+		Limit:         1,
+		IncludeClosed: true,
+		Sort:          beads.SortCreatedDesc,
+		TierMode:      beads.TierBoth,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(queryCmd, "--limit") {
+		t.Fatalf("wisps query = %q, must not apply server-side --limit before CreatedBefore", queryCmd)
+	}
+	if len(got) != 1 || got[0].ID != "bd-old" {
+		t.Fatalf("got = %+v, want only older wisp after CreatedBefore then Limit", got)
+	}
+}
+
 func TestBdStoreListIssuesTierDoesNotIssueQuery(t *testing.T) {
 	var calls []string
 	runner := func(_, name string, args ...string) ([]byte, error) {

@@ -58,14 +58,14 @@ func LastRunAcrossStores(stores ...beads.Store) LastRunFunc {
 func CursorFuncForStore(store beads.Store) CursorFunc {
 	return func(name string) uint64 {
 		label := "order-run:" + name
-		results, err := store.List(beads.ListQuery{
+		results, _ := store.List(beads.ListQuery{
 			Label:         label,
 			Limit:         10,
 			IncludeClosed: true,
 			Sort:          beads.SortCreatedDesc,
 			TierMode:      beads.TierBoth,
 		})
-		if err != nil || len(results) == 0 {
+		if len(results) == 0 {
 			return 0
 		}
 		labelSets := make([][]string, 0, len(results))

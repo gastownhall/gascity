@@ -884,10 +884,12 @@ func doOrderHistoryWithStoresResolver(name, rig string, aa []orders.Order, resol
 			})
 			if err != nil {
 				fmt.Fprintf(stderr, "gc order history: %v\n", err) //nolint:errcheck // best-effort stderr
-				if i == 0 {
+				if i == 0 && len(results) == 0 {
 					return 1
 				}
-				continue
+				if len(results) == 0 {
+					continue
+				}
 			}
 			for _, b := range results {
 				key := a.ScopedName() + "\x00" + b.ID + "\x00" + b.CreatedAt.Format(time.RFC3339Nano) + "\x00" + b.Title

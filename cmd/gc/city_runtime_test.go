@@ -4607,10 +4607,7 @@ func TestCityRuntimeShutdownBlockedDispatchPersistsOutcomeBeforeGracefulStop(t *
 	}
 
 	// Tracking bead outcome must be persisted before shutdown returned.
-	all, err := store.ListByLabel("order-run:blocked", 0, beads.IncludeClosed)
-	if err != nil {
-		t.Fatalf("ListByLabel: %v", err)
-	}
+	all := trackingBeads(t, store, "order-run:blocked")
 	foundExecLabel := false
 	for _, b := range all {
 		for _, l := range b.Labels {

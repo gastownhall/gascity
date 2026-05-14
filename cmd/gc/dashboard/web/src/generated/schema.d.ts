@@ -2114,6 +2114,7 @@ export interface components {
             created_at: string;
             dependencies?: components["schemas"]["Dep"][] | null;
             description?: string;
+            ephemeral?: boolean;
             from?: string;
             id: string;
             issue_type: string;

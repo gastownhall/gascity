@@ -1478,6 +1478,28 @@ func TestCachingStoreCachedListReturnsSnapshotWithDirtyEntries(t *testing.T) {
 	}
 }
 
+func TestCachingStoreCachedListRefusesNonIssuesTierQueries(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	if _, err := backing.Create(Bead{Title: "plain", Labels: []string{"k"}}); err != nil {
+		t.Fatalf("Create plain: %v", err)
+	}
+	if _, err := backing.Create(Bead{Title: "wisp", Labels: []string{"k"}, Ephemeral: true}); err != nil {
+		t.Fatalf("Create wisp: %v", err)
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	for _, tier := range []TierMode{TierWisps, TierBoth} {
+		if rows, ok := cache.CachedList(ListQuery{Label: "k", TierMode: tier}); ok {
+			t.Fatalf("CachedList tier %v ok=true rows=%#v, want ok=false", tier, rows)
+		}
+	}
+}
+
 type refreshFailingStore struct {
 	Store
 	failNextGet bool

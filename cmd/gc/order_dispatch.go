@@ -846,8 +846,9 @@ func (m *memoryOrderDispatcher) hasOpenWorkInStoresStrict(stores []beads.Store, 
 // closed. This is non-fatal: dispatch proceeds even if the sweep fails.
 func sweepOrphanedOrderTracking(store beads.Store) (int, error) {
 	// ListByLabel without IncludeClosed returns only open beads.
-	// Tracking beads now live in the wisps tier (ephemeral); query there.
-	all, err := store.ListByLabel(labelOrderTracking, 0, beads.WithEphemeral)
+	// New tracking beads live in the wisps tier, but legacy issues-tier
+	// tracking beads may still exist after upgrade; sweep both.
+	all, err := store.ListByLabel(labelOrderTracking, 0, beads.WithBothTiers)
 	if err != nil {
 		return 0, fmt.Errorf("listing order-tracking beads: %w", err)
 	}
@@ -874,7 +875,7 @@ func sweepStaleOrderTracking(store beads.Store, now time.Time, staleAfter time.D
 	if staleAfter <= 0 {
 		return 0, fmt.Errorf("stale-after must be positive")
 	}
-	all, err := store.ListByLabel(labelOrderTracking, 0)
+	all, err := store.ListByLabel(labelOrderTracking, 0, beads.WithBothTiers)
 	if err != nil {
 		return 0, fmt.Errorf("listing order-tracking beads: %w", err)
 	}
