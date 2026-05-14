@@ -52,7 +52,7 @@ func openCityStatusStore(cityPath string, stderr io.Writer) (beads.Store, int) {
 		fmt.Fprintf(stderr, "gc status: opening bead store: %v\n", err) //nolint:errcheck // best-effort stderr
 		return nil, 1
 	}
-	return opened, 0
+	return wrapSessionListCache(opened), 0
 }
 
 func collectCityStatusSnapshot(sp runtime.Provider, cfg *config.City, cityPath string, store beads.Store, stderr io.Writer) cityStatusSnapshot {

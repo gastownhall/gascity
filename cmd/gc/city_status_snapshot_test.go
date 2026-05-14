@@ -5,7 +5,9 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -92,6 +94,61 @@ func (s *failingStatusStore) Get(id string) (beads.Bead, error) {
 		return beads.Bead{}, s.err
 	}
 	return s.MemStore.Get(id)
+}
+
+func TestCityStatusCoalescesSessionLabelListCalls(t *testing.T) {
+	sp := runtime.NewFake()
+	dops := newFakeDrainOps()
+
+	mem := beads.NewMemStore()
+	counter := &sessionLabelListCounter{Store: mem}
+
+	oldOpen := openCityStoreAtForStatus
+	openCityStoreAtForStatus = func(string) (beads.Store, error) { return counter, nil }
+	t.Cleanup(func() { openCityStoreAtForStatus = oldOpen })
+
+	// Many agents -> each one would otherwise resolve via store.List(Label=gc:session).
+	agents := make([]config.Agent, 0, 25)
+	for i := 0; i < 25; i++ {
+		name := "agent" + strconv.Itoa(i)
+		agents = append(agents, config.Agent{Name: name, MaxActiveSessions: intPtr(1)})
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Agents:    agents,
+	}
+
+	cityPath := filepath.Join(t.TempDir(), "city")
+	var stdout, stderr bytes.Buffer
+	if code := doCityStatus(sp, dops, cfg, cityPath, &stdout, &stderr); code != 0 {
+		t.Fatalf("doCityStatus code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+
+	if got := counter.sessionLabelCalls(); got != 1 {
+		t.Fatalf("session-label List calls = %d, want 1 (caching collapses redundant scans)", got)
+	}
+}
+
+type sessionLabelListCounter struct {
+	beads.Store
+	mu    sync.Mutex
+	count int
+}
+
+func (s *sessionLabelListCounter) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if isCanonicalSessionListQuery(q) || (q.Label == session.LabelSession && q.IncludeClosed) {
+		s.mu.Lock()
+		s.count++
+		s.mu.Unlock()
+	}
+	return s.Store.List(q)
+}
+
+func (s *sessionLabelListCounter) sessionLabelCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.count
 }
 
 func TestCityStatusNamedSessionLookupErrorsAreSurfaced(t *testing.T) {
