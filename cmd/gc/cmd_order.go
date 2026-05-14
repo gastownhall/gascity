@@ -685,6 +685,7 @@ func orderLastRunFn(store beads.Store) orders.LastRunFunc {
 			Limit:         1,
 			IncludeClosed: true,
 			Sort:          beads.SortCreatedDesc,
+			TierMode:      beads.TierBoth,
 		})
 		if err != nil {
 			return time.Time{}, err
@@ -879,6 +880,7 @@ func doOrderHistoryWithStoresResolver(name, rig string, aa []orders.Order, resol
 				Label:         label,
 				IncludeClosed: true,
 				Sort:          beads.SortCreatedDesc,
+				TierMode:      beads.TierBoth,
 			})
 			if err != nil {
 				fmt.Fprintf(stderr, "gc order history: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -987,6 +989,7 @@ func bdCursor(store beads.Store, orderName string) (uint64, error) {
 		Label:         "order:" + orderName,
 		IncludeClosed: true,
 		Sort:          beads.SortCreatedDesc,
+		TierMode:      beads.TierBoth,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("listing event cursor beads for order %q: %w", orderName, err)

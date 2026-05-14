@@ -474,12 +474,22 @@ func makeGCBead(id string, createdAt time.Time, status, beadType string) beads.B
 }
 
 func makeGCBeadWithLabels(id string, createdAt time.Time, status, beadType string, labels ...string) beads.Bead {
+	// Order-tracking beads live in the ephemeral (wisps) tier in production;
+	// mirror that here so wisp_gc's tier-aware queries see them.
+	ephemeral := false
+	for _, l := range labels {
+		if l == labelOrderTracking {
+			ephemeral = true
+			break
+		}
+	}
 	return beads.Bead{
 		ID:        id,
 		Status:    status,
 		Type:      beadType,
 		CreatedAt: createdAt,
 		Labels:    labels,
+		Ephemeral: ephemeral,
 	}
 }
 

@@ -442,6 +442,7 @@ type Bead struct {
 	CreatedAt    time.Time          `json:"created_at"`
 	Dependencies *[]Dep             `json:"dependencies,omitempty"`
 	Description  *string            `json:"description,omitempty"`
+	Ephemeral    *bool              `json:"ephemeral,omitempty"`
 	From         *string            `json:"from,omitempty"`
 	Id           string             `json:"id"`
 	IssueType    string             `json:"issue_type"`

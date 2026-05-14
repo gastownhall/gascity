@@ -324,8 +324,9 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		// Create tracking bead synchronously BEFORE dispatch goroutine.
 		// This prevents the cooldown trigger from re-firing on the next tick.
 		trackingBead, err := store.Create(beads.Bead{
-			Title:  "order:" + scoped,
-			Labels: []string{"order-run:" + scoped, labelOrderTracking},
+			Title:     "order:" + scoped,
+			Labels:    []string{"order-run:" + scoped, labelOrderTracking},
+			Ephemeral: true,
 		})
 		if err != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: creating tracking bead for %s: %v", scoped, err)
@@ -804,8 +805,9 @@ func (m *memoryOrderDispatcher) rigSuspendedByName(rigName string) bool {
 // tripped this check.
 func (m *memoryOrderDispatcher) hasOpenWorkStrict(store beads.Store, scopedName string) (bool, error) {
 	results, err := store.List(beads.ListQuery{
-		Label: "order-run:" + scopedName,
-		Sort:  beads.SortCreatedDesc,
+		Label:    "order-run:" + scopedName,
+		Sort:     beads.SortCreatedDesc,
+		TierMode: beads.TierBoth,
 	})
 	if err != nil {
 		return false, fmt.Errorf("listing order work beads: %w", err)
@@ -844,7 +846,8 @@ func (m *memoryOrderDispatcher) hasOpenWorkInStoresStrict(stores []beads.Store, 
 // closed. This is non-fatal: dispatch proceeds even if the sweep fails.
 func sweepOrphanedOrderTracking(store beads.Store) (int, error) {
 	// ListByLabel without IncludeClosed returns only open beads.
-	all, err := store.ListByLabel(labelOrderTracking, 0)
+	// Tracking beads now live in the wisps tier (ephemeral); query there.
+	all, err := store.ListByLabel(labelOrderTracking, 0, beads.WithEphemeral)
 	if err != nil {
 		return 0, fmt.Errorf("listing order-tracking beads: %w", err)
 	}

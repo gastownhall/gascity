@@ -306,9 +306,10 @@ func TestHandleOrdersFeedReturnsWorkflowAndScheduledOrderRuns(t *testing.T) {
 	}
 
 	_, err = fs.cityBeadStore.Create(beads.Bead{
-		Title:  "order:nightly-review:rig:myrig",
-		Status: "closed",
-		Labels: []string{"order-tracking", "order-run:nightly-review:rig:myrig", "wisp"},
+		Title:     "order:nightly-review:rig:myrig",
+		Status:    "closed",
+		Labels:    []string{"order-tracking", "order-run:nightly-review:rig:myrig", "wisp"},
+		Ephemeral: true,
 	})
 	if err != nil {
 		t.Fatalf("create tracking bead: %v", err)
@@ -627,9 +628,10 @@ func TestHandleOrdersFeedIncludesRigStoreTrackingBeads(t *testing.T) {
 	}
 
 	tracking, err := rigStore.Create(beads.Bead{
-		Title:  "order:nightly-review:rig:myrig",
-		Status: "closed",
-		Labels: []string{"order-tracking", "order-run:nightly-review:rig:myrig", "wisp"},
+		Title:     "order:nightly-review:rig:myrig",
+		Status:    "closed",
+		Labels:    []string{"order-tracking", "order-run:nightly-review:rig:myrig", "wisp"},
+		Ephemeral: true,
 	})
 	if err != nil {
 		t.Fatalf("create tracking bead: %v", err)

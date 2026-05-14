@@ -307,8 +307,9 @@ func buildOrderRunFeedItems(state State, requestedScopeKind, requestedScopeRef s
 			continue
 		}
 		results, err := info.store.List(beads.ListQuery{
-			Label: "order-tracking",
-			Sort:  beads.SortCreatedDesc,
+			Label:    "order-tracking",
+			Sort:     beads.SortCreatedDesc,
+			TierMode: beads.TierWisps,
 		})
 		if err != nil {
 			if requestedScopeErr == nil && info.scopeKind == requestedScopeKind && info.scopeRef == requestedScopeRef {
@@ -374,9 +375,10 @@ func orderTrackingUpdatedAt(store beads.Store, tracking beads.Bead, scopedName s
 	}
 
 	runs, err := store.List(beads.ListQuery{
-		Label: "order-run:" + scopedName,
-		Limit: 1,
-		Sort:  beads.SortCreatedDesc,
+		Label:    "order-run:" + scopedName,
+		Limit:    1,
+		Sort:     beads.SortCreatedDesc,
+		TierMode: beads.TierBoth,
 	})
 	if err != nil {
 		orderFeedLogf("api: order feed update lookup failed for %s bead %s: %v", scopedName, tracking.ID, err)

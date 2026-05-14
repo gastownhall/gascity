@@ -391,6 +391,7 @@ type bdIssue struct {
 	Labels       []string     `json:"labels"`
 	Metadata     StringMap    `json:"metadata,omitempty"`
 	Dependencies []bdIssueDep `json:"dependencies,omitempty"`
+	Ephemeral    bool         `json:"ephemeral,omitempty"`
 }
 
 type bdIssueDep struct {
@@ -515,6 +516,7 @@ func (b *bdIssue) toBead() Bead {
 		Labels:       b.Labels,
 		Metadata:     b.Metadata,
 		Dependencies: deps,
+		Ephemeral:    b.Ephemeral,
 	}
 }
 
@@ -599,6 +601,9 @@ func (s *BdStore) Create(b Bead) (Bead, error) {
 	}
 	if b.ParentID != "" {
 		args = append(args, "--parent", b.ParentID)
+	}
+	if b.Ephemeral {
+		args = append(args, "--ephemeral")
 	}
 	metadata := maps.Clone(b.Metadata)
 	if b.From != "" {
@@ -991,6 +996,13 @@ func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 		return nil, fmt.Errorf("bd list: %w", ErrQueryRequiresScan)
 	}
 
+	switch query.TierMode {
+	case TierWisps:
+		return s.listEphemeral(query)
+	case TierBoth:
+		return s.listBothTiers(query)
+	}
+
 	limit := query.Limit
 	if query.Sort == SortCreatedAsc {
 		limit = 0
@@ -1053,6 +1065,99 @@ func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 	return filtered, nil
 }
 
+// listEphemeral reads only the wisps tier using `bd query "ephemeral=true AND
+// <filters>"`. bd list only scans the issues table; bd query is the canonical
+// way to reach the wisps table (mirrors gastown's internal/beads/beads.go
+// listEphemeral path).
+func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
+	clauses := []string{"ephemeral=true"}
+	if query.Label != "" {
+		clauses = append(clauses, "label="+query.Label)
+	}
+	if query.Status != "" {
+		clauses = append(clauses, "status="+query.Status)
+	}
+	if query.Type != "" {
+		clauses = append(clauses, "type="+query.Type)
+	}
+	if query.Assignee != "" {
+		clauses = append(clauses, "assignee="+query.Assignee)
+	}
+	if query.ParentID != "" {
+		clauses = append(clauses, "parent="+query.ParentID)
+	}
+	args := []string{"query", "--json", strings.Join(clauses, " AND ")}
+	if query.IncludeClosed || query.Status == "closed" {
+		args = append(args, "--all")
+	}
+	if query.Limit > 0 {
+		args = append(args, "--limit", fmt.Sprintf("%d", query.Limit))
+	}
+
+	out, err := s.runner(s.dir, "bd", args...)
+	if err != nil {
+		return nil, fmt.Errorf("bd query (wisps): %w", err)
+	}
+	issues, parseErr := parseIssuesTolerant(extractJSON(out))
+	result := make([]Bead, len(issues))
+	for i := range issues {
+		result[i] = issues[i].toBead()
+		// bd query against wisps returns ephemeral beads; tolerate older bd
+		// versions that omit the ephemeral field in JSON.
+		if !result[i].Ephemeral {
+			result[i].Ephemeral = true
+		}
+	}
+	filtered := applyListQuery(result, query)
+	if parseErr != nil {
+		if len(filtered) > 0 {
+			return filtered, nil
+		}
+		return filtered, fmt.Errorf("bd query: %w", parseErr)
+	}
+	return filtered, nil
+}
+
+// listBothTiers unions the issues and wisps tiers in a single logical query.
+// Each tier is queried with its own TierMode; results are deduped by ID and
+// re-sorted under the caller-supplied Sort.
+func (s *BdStore) listBothTiers(query ListQuery) ([]Bead, error) {
+	issuesQ := query
+	issuesQ.TierMode = TierIssues
+	issuesResult, issuesErr := s.List(issuesQ)
+
+	wispsQ := query
+	wispsQ.TierMode = TierWisps
+	wispsResult, wispsErr := s.List(wispsQ)
+
+	// If both tiers fail, surface the first error.
+	if issuesErr != nil && wispsErr != nil {
+		return nil, errors.Join(issuesErr, wispsErr)
+	}
+
+	merged := make([]Bead, 0, len(issuesResult)+len(wispsResult))
+	seen := make(map[string]struct{}, len(issuesResult)+len(wispsResult))
+	for _, b := range issuesResult {
+		if _, ok := seen[b.ID]; ok {
+			continue
+		}
+		seen[b.ID] = struct{}{}
+		merged = append(merged, b)
+	}
+	for _, b := range wispsResult {
+		if _, ok := seen[b.ID]; ok {
+			continue
+		}
+		seen[b.ID] = struct{}{}
+		merged = append(merged, b)
+	}
+	sortBeadsForQuery(merged, query.Sort)
+	if query.Limit > 0 && len(merged) > query.Limit {
+		merged = merged[:query.Limit]
+	}
+	return merged, nil
+}
+
 // ListOpen returns non-closed beads via bd list. Pass a status to filter further.
 func (s *BdStore) ListOpen(status ...string) ([]Bead, error) {
 	query := ListQuery{AllowScan: true}
@@ -1071,6 +1176,7 @@ func (s *BdStore) ListByLabel(label string, limit int, opts ...QueryOpt) ([]Bead
 		Limit:         limit,
 		IncludeClosed: HasOpt(opts, IncludeClosed),
 		Sort:          SortCreatedDesc,
+		TierMode:      TierModeFromOpts(opts),
 	})
 }
 
@@ -1094,6 +1200,7 @@ func (s *BdStore) ListByMetadata(filters map[string]string, limit int, opts ...Q
 		Limit:         limit,
 		IncludeClosed: HasOpt(opts, IncludeClosed),
 		Sort:          SortCreatedDesc,
+		TierMode:      TierModeFromOpts(opts),
 	})
 }
 

@@ -2502,3 +2502,112 @@ func TestBdStoreApplyGraphPlanRejectsMissingIDs(t *testing.T) {
 		t.Fatalf("error = %q, want missing key detail", err)
 	}
 }
+
+// --- Ephemeral / wisps tier ---
+
+func TestBdStoreCreatePassesEphemeralFlag(t *testing.T) {
+	var gotArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"id":"bd-w","title":"wisp","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","ephemeral":true}`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	created, err := s.Create(beads.Bead{Title: "wisp", Ephemeral: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(gotArgs, " ")
+	if !strings.Contains(args, "--ephemeral") {
+		t.Fatalf("args = %q, want --ephemeral flag", args)
+	}
+	if !created.Ephemeral {
+		t.Fatalf("created.Ephemeral = false, want true")
+	}
+}
+
+func TestBdStoreCreateOmitsEphemeralFlagByDefault(t *testing.T) {
+	var gotArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"id":"bd-x","title":"plain","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z"}`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	if _, err := s.Create(beads.Bead{Title: "plain"}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(gotArgs, " "), "--ephemeral") {
+		t.Fatalf("args = %q, must not contain --ephemeral", gotArgs)
+	}
+}
+
+func TestBdStoreListWispsUsesQueryWithEphemeralPredicate(t *testing.T) {
+	var gotCmd string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		gotCmd = name + " " + strings.Join(args, " ")
+		return []byte(`[{"id":"bd-w","title":"wisp","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","ephemeral":true,"labels":["order-tracking"]}]`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{Label: "order-tracking", TierMode: beads.TierWisps})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(gotCmd, "bd query --json ") {
+		t.Fatalf("cmd = %q, want bd query prefix", gotCmd)
+	}
+	if !strings.Contains(gotCmd, "ephemeral=true") {
+		t.Fatalf("cmd = %q, want ephemeral=true clause", gotCmd)
+	}
+	if !strings.Contains(gotCmd, "label=order-tracking") {
+		t.Fatalf("cmd = %q, want label clause", gotCmd)
+	}
+	if len(got) != 1 || got[0].ID != "bd-w" || !got[0].Ephemeral {
+		t.Fatalf("got = %+v, want one ephemeral bead bd-w", got)
+	}
+}
+
+func TestBdStoreListBothTiersMergesAndDedupes(t *testing.T) {
+	var calls []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		full := name + " " + strings.Join(args, " ")
+		calls = append(calls, full)
+		switch {
+		case strings.HasPrefix(full, "bd list "):
+			return []byte(`[{"id":"bd-i","title":"issue","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","labels":["order-run:o"]}]`), nil
+		case strings.HasPrefix(full, "bd query "):
+			return []byte(`[{"id":"bd-w","title":"wisp","status":"open","issue_type":"task","created_at":"2026-05-02T00:00:00Z","ephemeral":true,"labels":["order-run:o"]}]`), nil
+		}
+		return nil, fmt.Errorf("unexpected: %s", full)
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{Label: "order-run:o", TierMode: beads.TierBoth, Sort: beads.SortCreatedDesc})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("got %d runner calls, want 2: %v", len(calls), calls)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d beads, want 2: %+v", len(got), got)
+	}
+	if got[0].ID != "bd-w" || got[1].ID != "bd-i" {
+		t.Fatalf("merge order = [%s,%s], want [bd-w, bd-i] (desc by CreatedAt)", got[0].ID, got[1].ID)
+	}
+}
+
+func TestBdStoreListIssuesTierDoesNotIssueQuery(t *testing.T) {
+	var calls []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		full := name + " " + strings.Join(args, " ")
+		calls = append(calls, full)
+		return []byte(`[]`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	if _, err := s.List(beads.ListQuery{Label: "order-tracking"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range calls {
+		if strings.HasPrefix(c, "bd query ") {
+			t.Fatalf("default tier issued bd query: %v", calls)
+		}
+	}
+}

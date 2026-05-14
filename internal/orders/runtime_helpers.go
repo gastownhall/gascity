@@ -13,11 +13,15 @@ func LastRunFuncForStore(store beads.Store) LastRunFunc {
 			return time.Time{}, nil
 		}
 		label := "order-run:" + name
+		// Order-run beads land in either tier: the ephemeral tracking bead
+		// (wisps) created by the dispatcher and the molecule root (issues)
+		// labeled after instantiation. Both carry the order-run label.
 		results, err := store.List(beads.ListQuery{
 			Label:         label,
 			Limit:         1,
 			IncludeClosed: true,
 			Sort:          beads.SortCreatedDesc,
+			TierMode:      beads.TierBoth,
 		})
 		if err != nil {
 			return time.Time{}, err
@@ -59,6 +63,7 @@ func CursorFuncForStore(store beads.Store) CursorFunc {
 			Limit:         10,
 			IncludeClosed: true,
 			Sort:          beads.SortCreatedDesc,
+			TierMode:      beads.TierBoth,
 		})
 		if err != nil || len(results) == 0 {
 			return 0

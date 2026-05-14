@@ -804,6 +804,9 @@
           "description": {
             "type": "string"
           },
+          "ephemeral": {
+            "type": "boolean"
+          },
           "from": {
             "type": "string"
           },

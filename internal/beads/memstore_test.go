@@ -535,3 +535,48 @@ func TestMemStoreDepListDefaultDirection(t *testing.T) {
 		t.Errorf("DepList(a, '') = %d deps, want 1", len(deps))
 	}
 }
+
+func TestMemStoreEphemeralTierPartitioning(t *testing.T) {
+	m := beads.NewMemStore()
+	plain, err := m.Create(beads.Bead{Title: "plain", Labels: []string{"k"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wisp, err := m.Create(beads.Bead{Title: "wisp", Labels: []string{"k"}, Ephemeral: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !wisp.Ephemeral {
+		t.Fatalf("wisp.Ephemeral = false, want true")
+	}
+
+	cases := []struct {
+		name    string
+		tier    beads.TierMode
+		wantIDs []string
+	}{
+		{"issues only (default)", beads.TierIssues, []string{plain.ID}},
+		{"wisps only", beads.TierWisps, []string{wisp.ID}},
+		{"both tiers", beads.TierBoth, []string{plain.ID, wisp.ID}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := m.List(beads.ListQuery{Label: "k", TierMode: tc.tier})
+			if err != nil {
+				t.Fatal(err)
+			}
+			gotIDs := make(map[string]bool, len(got))
+			for _, b := range got {
+				gotIDs[b.ID] = true
+			}
+			if len(gotIDs) != len(tc.wantIDs) {
+				t.Fatalf("got %d beads (%v), want %v", len(gotIDs), gotIDs, tc.wantIDs)
+			}
+			for _, id := range tc.wantIDs {
+				if !gotIDs[id] {
+					t.Errorf("missing %s in result", id)
+				}
+			}
+		})
+	}
+}

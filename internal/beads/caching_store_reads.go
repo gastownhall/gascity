@@ -15,6 +15,13 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
+	// The cache only holds the issues tier (PrimeActive/Prime call the
+	// backing store without a TierMode). Wisps and union queries must
+	// reach the backing store directly so we do not return a stale or
+	// incomplete snapshot of the wisps table.
+	if query.TierMode != TierIssues {
+		return c.backing.List(query)
+	}
 	if query.Live || query.ParentID != "" {
 		c.mu.RLock()
 		startSeq := c.mutationSeq
@@ -447,6 +454,7 @@ func (c *CachingStore) ListByLabel(label string, limit int, opts ...QueryOpt) ([
 		Limit:         limit,
 		IncludeClosed: HasOpt(opts, IncludeClosed),
 		Sort:          SortCreatedDesc,
+		TierMode:      TierModeFromOpts(opts),
 	})
 }
 
@@ -469,6 +477,7 @@ func (c *CachingStore) ListByMetadata(filters map[string]string, limit int, opts
 		Limit:         limit,
 		IncludeClosed: HasOpt(opts, IncludeClosed),
 		Sort:          SortCreatedDesc,
+		TierMode:      TierModeFromOpts(opts),
 	})
 }
 
