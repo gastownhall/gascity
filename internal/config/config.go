@@ -901,13 +901,17 @@ type Workspace struct {
 	// Each name must match a {{ define "name" }} block from a pack's
 	// prompts/shared/ directory.
 	GlobalFragments []string `toml:"global_fragments,omitempty"`
-	// Includes lists pack directories or URLs to compose into this
-	// workspace. Replaces the older pack/packs fields. Each entry
-	// is a local path, a git source//sub#ref URL, or a GitHub tree URL.
+	// Includes is the legacy city.toml pack-composition list.
+	// Deprecated in V2: use root pack.toml [imports.*] instead. Run
+	// gc doctor to inspect; gc doctor --fix handles the safe mechanical
+	// rewrites available in this release wave. Each entry is a local
+	// path, a git source//sub#ref URL, or a GitHub tree URL.
 	Includes []string `toml:"includes,omitempty"`
-	// DefaultRigIncludes lists pack directories applied to new rigs when
-	// "gc rig add" is called without --include. Allows cities to define
-	// a default pack for all rigs.
+	// DefaultRigIncludes is the legacy city.toml default-rig pack list.
+	// Deprecated in V2: use root pack.toml
+	// [defaults.rig.imports.<binding>] instead. Run gc doctor to
+	// inspect; gc doctor --fix handles the safe mechanical rewrites
+	// available in this release wave.
 	DefaultRigIncludes []string `toml:"default_rig_includes,omitempty"`
 }
 

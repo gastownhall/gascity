@@ -588,11 +588,6 @@ schema, plus the qualified rows that matter most during migration.
 | `workspace.name` | Workspace identity | Move to `.gc/site.toml` as `workspace_name`. Runtime identity resolves from registered alias (supervisor-managed flows), then site binding / legacy config, then directory basename. `pack.name` remains the portable definition identity and init-time default only. |
 | `workspace.prefix` | Workspace bead prefix | Move to `.gc/site.toml` as `workspace_prefix`. Runtime/API surfaces use the effective site-bound prefix when present and otherwise derive from the effective city name. |
 | `workspace.includes` | City-level pack composition | Move to `[imports.*]` in the root city `pack.toml`. |
-
-This rollout also changes the generated schema contract: checked-in
-`city.toml` files and downstream validators must no longer require
-`[workspace].name` once workspace identity has moved to `.gc/site.toml`.
-
 | `workspace.default_rig_includes` | Default pack composition for newly added rigs | Move each default include to `[defaults.rig.imports.<binding>]` entries in the root city `pack.toml`. |
 | `[providers.*]` | Named provider presets | Usually move to `[providers.*]` in the root city `pack.toml`, unless the setting is truly deployment-only. |
 | `[packs.*]` | Named remote pack sources used by includes | Collapse into `[imports.*]` entries. There should no longer be a separate `[packs.*]` registry in `city.toml`. |
@@ -608,6 +603,10 @@ This rollout also changes the generated schema contract: checked-in
 | `rigs.suspended` | Operational toggle | Keep in `city.toml` in the current release wave. It remains deployment/runtime state rather than portable pack definition. |
 | `rigs.includes` | Rig-scoped pack composition | Move to rig-scoped imports in `city.toml`. |
 | `rigs.overrides` | Rig-specific customization of imported agents | Keep as rig-level deployment customization in `city.toml`. |
+
+This rollout also changes the generated schema contract: checked-in
+`city.toml` files and downstream validators must no longer require
+`[workspace].name` once workspace identity has moved to `.gc/site.toml`.
 | `[patches]` | Post-merge modifications | Move pack-definition patches to `pack.toml`. Keep rig-specific patches with the rig in `city.toml`. |
 | `[beads]` | Bead store backend choice | Keep in `city.toml`. |
 | `[session]` | Session substrate config | Keep in `city.toml`, except site-local bindings. |
