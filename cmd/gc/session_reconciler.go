@@ -1485,6 +1485,41 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 
 		if shouldWake && !target.alive {
 			// Session should be awake but isn't — wake it.
+
+			// Dead-session fresh-start fixup: when a session was previously
+			// active (has started_config_hash) but its runtime died without an
+			// explicit restart request, force a fresh conversation start so
+			// that the provider fires SessionStart hooks (e.g. Claude's
+			// matcher:"startup" hook that runs gc prime). Without this, the
+			// reconciler would resume the old conversation via --resume, and
+			// the SessionStart hook wouldn't fire, leaving dispatchers as
+			// zombies. This mirrors the explicit restart path (lines 1074-1088
+			// above) which already applies RestartRequestPatch.
+			//
+			// Only apply to sessions whose state is still "active" — these
+			// died unexpectedly (crash, idle-timeout, supervisor restart).
+			// Sessions in "asleep" state (rate-limit hold, deliberate sleep)
+			// should resume their existing conversation when woken.
+			if target.session.Metadata["started_config_hash"] != "" &&
+				target.session.Metadata["restart_requested"] == "" &&
+				target.session.Metadata["state"] == "active" {
+				newSessionKey, hasCapability := freshRestartSessionKey(target.tp, target.session.Metadata)
+				batch := sessionpkg.RestartRequestPatch(newSessionKey)
+				if hasCapability && newSessionKey == "" {
+					batch["session_key"] = ""
+				}
+				if err := store.SetMetadataBatch(target.session.ID, batch); err != nil {
+					fmt.Fprintf(stderr, "session reconciler: marking dead session %s for fresh restart: %v\n", name, err) //nolint:errcheck // best-effort stderr
+				} else {
+					if target.session.Metadata == nil {
+						target.session.Metadata = make(map[string]string, len(batch))
+					}
+					for key, value := range batch {
+						target.session.Metadata[key] = value
+					}
+				}
+			}
+
 			if isFailedCreateSessionBead(*target.session) {
 				if trace != nil {
 					trace.recordDecision("reconciler.session.wake", target.tp.TemplateName, name, "wake", "failed_create", traceRecordPayload{
