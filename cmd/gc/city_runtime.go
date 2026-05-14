@@ -809,6 +809,12 @@ func (cr *CityRuntime) tick(
 		cr.stderr,
 	)
 
+	if manualReload != nil && manualReload.soft && manualReloadCompleted &&
+		(manualReply.Outcome == reloadOutcomeApplied || manualReply.Outcome == reloadOutcomeNoChange) {
+		cr.applySoftReloadAcceptance(&manualReply, result.State, sessionBeads)
+		sessionBeads = cr.loadSessionBeadSnapshot()
+	}
+
 	// Bead-driven reconciliation (requires bead store / drain tracker).
 	if cr.sessionDrains != nil {
 		cr.beadReconcileTick(ctx, result, sessionBeads, trace)
@@ -1229,18 +1235,6 @@ func (cr *CityRuntime) reloadConfigTraced(
 		trace.syncArms(time.Now().UTC(), nextCfg)
 	}
 
-	if cr.activeReload != nil && cr.activeReload.soft {
-		cityName := cr.cityName
-		if cityName == "" {
-			cityName = config.EffectiveCityName(nextCfg, "")
-		}
-		desired := buildDesiredState(cityName, cr.cityPath, time.Now().UTC(), nextCfg, cr.sp, cr.cityBeadStore(), cr.stderr)
-		accepted := acceptConfigDriftAcrossSessions(cr.cityBeadStore(), desired.State, cr.stderr)
-		if accepted > 0 {
-			fmt.Fprintf(cr.stdout, "%s: soft reload: accepted config drift on %d session(s)\n", cr.logPrefix, accepted) //nolint:errcheck // best-effort stdout
-		}
-	}
-
 	message := fmt.Sprintf("Config reloaded: %s (rev %s)",
 		configReloadSummary(oldAgentCount, oldRigCount, len(nextCfg.Agents), len(nextCfg.Rigs)),
 		shortRev(result.Revision))
@@ -1255,6 +1249,24 @@ func (cr *CityRuntime) reloadConfigTraced(
 		Revision: result.Revision,
 		Warnings: warnings,
 	}
+}
+
+func (cr *CityRuntime) applySoftReloadAcceptance(
+	reply *reloadControlReply,
+	desired map[string]TemplateParams,
+	sessionBeads *sessionBeadSnapshot,
+) {
+	if reply == nil {
+		return
+	}
+	result := acceptConfigDriftAcrossSessions(cr.cityBeadStore(), desired, sessionBeads, cr.sp, cr.sessionDrains, cr.stderr)
+	accepted := result.Updated
+	reply.AcceptedDriftCount = &accepted
+	for _, warning := range result.warnings() {
+		reply.Warnings = append(reply.Warnings, warning)
+		fmt.Fprintf(cr.stderr, "%s: warning: %s\n", cr.logPrefix, warning) //nolint:errcheck // best-effort stderr
+	}
+	fmt.Fprintf(cr.stdout, "%s: soft reload: accepted config drift on %d session(s)\n", cr.logPrefix, result.Updated) //nolint:errcheck // best-effort stdout
 }
 
 func lockedConfigName(cfg *config.City, cityPath string) string {

@@ -1176,7 +1176,7 @@ func commitAsyncStartResultWithContext(
 		return false
 	}
 	if sp != nil && refreshed.err == nil && refreshed.outcome != "session_initializing" {
-		clearReconcilerDrainAckMetadata(sp, refreshed.prepared.candidate.name())
+		_ = clearReconcilerDrainAckMetadata(sp, refreshed.prepared.candidate.name())
 	}
 	return commitStartResultTraced(refreshed, store, clk, rec, wave, stdout, stderr, trace)
 }
@@ -1893,7 +1893,7 @@ func executePlannedStartsTraced(
 					continue
 				}
 				if result.err == nil && result.outcome != "session_initializing" {
-					clearReconcilerDrainAckMetadata(sp, result.prepared.candidate.name())
+					_ = clearReconcilerDrainAckMetadata(sp, result.prepared.candidate.name())
 				}
 				if commitStartResultTraced(result, store, clk, rec, wave, stdout, stderr, trace) {
 					wakeCount++

@@ -3656,6 +3656,129 @@ func TestCityRuntimeManualReloadReplyWaitsForTickCompletion(t *testing.T) {
 	}
 }
 
+func TestCityRuntimeSoftReloadAcceptsDriftForAppliedAndNoChange(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		mutateConfig   bool
+		storedCommand  string
+		desiredCommand string
+		wantOutcome    reloadOutcome
+		wantAccepted   int
+	}{
+		{
+			name:           "applied",
+			mutateConfig:   true,
+			storedCommand:  "old-cmd",
+			desiredCommand: "new-cmd",
+			wantOutcome:    reloadOutcomeApplied,
+			wantAccepted:   1,
+		},
+		{
+			name:           "no-change-drift",
+			storedCommand:  "old-cmd",
+			desiredCommand: "new-cmd",
+			wantOutcome:    reloadOutcomeNoChange,
+			wantAccepted:   1,
+		},
+		{
+			name:           "no-change-clean",
+			storedCommand:  "old-cmd",
+			desiredCommand: "old-cmd",
+			wantOutcome:    reloadOutcomeNoChange,
+			wantAccepted:   0,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			tomlPath := filepath.Join(cityPath, "city.toml")
+			writeCityRuntimeSoftReloadConfig(t, tomlPath, "")
+
+			cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
+			if tc.mutateConfig {
+				writeCityRuntimeSoftReloadConfig(t, tomlPath, "1s")
+			}
+
+			store := beads.NewMemStore()
+			oldHash := runtime.CoreFingerprint(runtime.Config{Command: tc.storedCommand})
+			sessionBead, err := store.Create(beads.Bead{
+				Title:  "worker",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name":        "worker",
+					"template":            "worker",
+					"started_config_hash": oldHash,
+					"generation":          "1",
+					"state":               "active",
+				},
+			})
+			if err != nil {
+				t.Fatalf("Create(session): %v", err)
+			}
+
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), "worker", runtime.Config{Command: tc.storedCommand}); err != nil {
+				t.Fatalf("Start(worker): %v", err)
+			}
+			doneCh := make(chan reloadControlReply, 1)
+			dirty := &atomic.Bool{}
+			dirty.Store(true)
+			var stdout, stderr bytes.Buffer
+			cr := newTestCityRuntime(t, CityRuntimeParams{
+				CityPath:    cityPath,
+				CityName:    "test-city",
+				TomlPath:    tomlPath,
+				ConfigRev:   configRev,
+				ConfigDirty: dirty,
+				Cfg:         cfg,
+				SP:          sp,
+				BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+					return DesiredStateResult{State: map[string]TemplateParams{
+						"worker": {Command: tc.desiredCommand, SessionName: "worker", TemplateName: "worker"},
+					}}
+				},
+				Dops:   newDrainOps(sp),
+				Rec:    events.Discard,
+				Stdout: &stdout,
+				Stderr: &stderr,
+			})
+			cr.od = nil
+			cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+			cs.cityBeadStore = store
+			cr.setControllerState(cs)
+			cr.sessionDrains = newDrainTracker()
+			cr.activeReload = &reloadRequest{soft: true, doneCh: doneCh}
+			lastProviderName := "fake"
+			var prevPoolRunning map[string]bool
+
+			cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "reload")
+
+			select {
+			case reply := <-doneCh:
+				if reply.Outcome != tc.wantOutcome {
+					t.Fatalf("reply.Outcome = %q, want %q; stderr=%s stdout=%s", reply.Outcome, tc.wantOutcome, stderr.String(), stdout.String())
+				}
+				if reply.AcceptedDriftCount == nil || *reply.AcceptedDriftCount != tc.wantAccepted {
+					t.Fatalf("AcceptedDriftCount = %v, want %d", reply.AcceptedDriftCount, tc.wantAccepted)
+				}
+			default:
+				t.Fatal("manual soft reload did not reply")
+			}
+			updated, err := store.Get(sessionBead.ID)
+			if err != nil {
+				t.Fatalf("Get(session): %v", err)
+			}
+			wantHash := runtime.CoreFingerprint(runtime.Config{Command: tc.desiredCommand})
+			if updated.Metadata["started_config_hash"] != wantHash {
+				t.Fatalf("started_config_hash = %q, want %q", updated.Metadata["started_config_hash"], wantHash)
+			}
+			if cr.activeReload != nil {
+				t.Fatal("activeReload was not cleared")
+			}
+		})
+	}
+}
+
 func TestCityRuntimeReloadRestartsConfigWatcherWithNewPackTargets(t *testing.T) {
 	old := debounceDelay
 	debounceDelay = 5 * time.Millisecond
@@ -4606,6 +4729,44 @@ func writeCityRuntimeConfig(t *testing.T, tomlPath, provider string) {
 	t.Helper()
 	clearInheritedBeadsEnv(t)
 	writeCityRuntimeConfigNamed(t, tomlPath, "test-city", provider)
+}
+
+func writeCityRuntimeSoftReloadConfig(t *testing.T, tomlPath, shutdownTimeout string) {
+	t.Helper()
+	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfterForPaths(t, filepath.Dir(tomlPath))
+	skippedOrders := []string{
+		"beads-health",
+		"cross-rig-deps",
+		"gate-sweep",
+		"mol-dog-jsonl",
+		"mol-dog-reaper",
+		"order-tracking-sweep",
+		"orphan-sweep",
+		"prune-branches",
+		"spawn-storm-detect",
+		"wisp-compact",
+	}
+	var buf strings.Builder
+	buf.WriteString("[workspace]\nname = \"test-city\"\n\n")
+	buf.WriteString("[beads]\nprovider = \"file\"\n\n")
+	buf.WriteString("[session]\nprovider = \"fake\"\n\n")
+	buf.WriteString("[orders]\nskip = [")
+	for i, name := range skippedOrders {
+		if i > 0 {
+			buf.WriteString(", ")
+		}
+		fmt.Fprintf(&buf, "%q", name)
+	}
+	buf.WriteString("]\n")
+	if shutdownTimeout != "" {
+		buf.WriteString("\n[daemon]\nshutdown_timeout = \"")
+		buf.WriteString(shutdownTimeout)
+		buf.WriteString("\"\n")
+	}
+	if err := os.WriteFile(tomlPath, []byte(buf.String()), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
 }
 
 func loadCityRuntimeControllerConfig(t *testing.T, cityPath string) (*config.City, string) {
