@@ -902,13 +902,13 @@ type Workspace struct {
 	// prompts/shared/ directory.
 	GlobalFragments []string `toml:"global_fragments,omitempty"`
 	// Includes is the legacy city.toml pack-composition list.
-	// Deprecated in V2: use root pack.toml [imports.*] instead. Run
+	// Deprecated: use root pack.toml [imports.*] instead. Run
 	// gc doctor to inspect; gc doctor --fix handles the safe mechanical
 	// rewrites available in this release wave. Each entry is a local
 	// path, a git source//sub#ref URL, or a GitHub tree URL.
 	Includes []string `toml:"includes,omitempty"`
 	// DefaultRigIncludes is the legacy city.toml default-rig pack list.
-	// Deprecated in V2: use root pack.toml
+	// Deprecated: use root pack.toml
 	// [defaults.rig.imports.<binding>] instead. Run gc doctor to
 	// inspect; gc doctor --fix handles the safe mechanical rewrites
 	// available in this release wave.
