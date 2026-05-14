@@ -36,11 +36,10 @@ type ScanOptions struct {
 	VerboseDeprecatedPathWarnings bool
 }
 
-// Scan discovers orders across formula layers. It prefers top-level
-// orders/<name>.toml files, with backward-compatible fallback to older flat
-// and directory layouts. Higher-priority layers (later in the slice) override
-// lower ones by order name. Disabled orders and those in the skip list are
-// excluded.
+// Scan discovers orders across formula layers. Wave 2 requires top-level
+// orders/<name>.toml files; older PackV1 flat and directory layouts now
+// hard-error. Higher-priority layers (later in the slice) override lower ones
+// by order name. Disabled orders and those in the skip list are excluded.
 func Scan(fs fsys.FS, formulaLayers []string, skip []string) ([]Order, error) {
 	return ScanWithOptions(fs, formulaLayers, skip, ScanOptions{})
 }

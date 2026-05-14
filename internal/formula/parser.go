@@ -12,7 +12,9 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-// Formula file extensions. TOML is preferred, JSON is legacy fallback.
+// Formula file extensions. Canonical TOML is preferred, JSON is a legacy
+// fallback, and infixed TOML remains named here only so Wave 2 can emit clear
+// migration errors.
 const (
 	FormulaExtTOML = CanonicalTOMLExt
 	// PACKV2-CUTOVER: remove legacy formula filename support after the infix migration window closes.
@@ -79,8 +81,14 @@ func defaultSearchPaths() []string {
 }
 
 // ParseFile parses a formula from a file path.
-// Detects format from extension: .toml, .formula.toml, or .formula.json.
+// Supported extensions are .toml and .formula.json. Legacy .formula.toml
+// paths hard-error with a migration hint.
 func (p *Parser) ParseFile(path string) (*Formula, error) {
+	if strings.HasSuffix(path, FormulaLegacyExtTOML) {
+		base := strings.TrimSuffix(filepath.Base(path), FormulaLegacyExtTOML)
+		return nil, fmt.Errorf("unsupported PackV1 formula path %s; rename to %s%s", path, base, FormulaExtTOML)
+	}
+
 	// Check cache first
 	absPath, err := filepath.Abs(path)
 	if err != nil {
@@ -280,7 +288,7 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 // loadFormula loads a formula by name from search paths. Search paths are
 // ordered lowest→highest priority (matching ComputeFormulaLayers); the
 // highest-priority path containing the formula wins. Within a single path,
-// canonical .toml beats legacy .formula.toml beats legacy .formula.json.
+// plain .toml beats infixed .formula.toml beats legacy .formula.json.
 func (p *Parser) loadFormula(name string) (*Formula, error) {
 	if cached, ok := p.cache[name]; ok {
 		return cached, nil

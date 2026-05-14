@@ -326,6 +326,40 @@ path = "`+rigPath+`"
 	}
 }
 
+func TestV2DeprecationChecksWarnOnDeferredPackAgentFormat(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeDoctorFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+`)
+	writeDoctorFile(t, cityDir, "pack.toml", `
+[pack]
+name = "legacy-city"
+schema = 2
+
+[[agent]]
+name = "helper"
+`)
+
+	var buf bytes.Buffer
+	d := &doctor.Doctor{}
+	registerV2DeprecationChecks(d)
+	d.Run(&doctor.CheckContext{CityPath: cityDir, Verbose: true}, &buf, false)
+
+	out := buf.String()
+	if !strings.Contains(out, "⚠ v2-agent-format") {
+		t.Fatalf("doctor output missing deferred pack agent warning:\n%s", out)
+	}
+	if !strings.Contains(out, "pack.toml") {
+		t.Fatalf("doctor output missing pack.toml detail:\n%s", out)
+	}
+	if !strings.Contains(out, "enforcement is deferred") {
+		t.Fatalf("doctor output missing deferral guidance:\n%s", out)
+	}
+}
+
 func TestV2DeprecationChecksWarnOnStaleSiteBindingName(t *testing.T) {
 	t.Parallel()
 

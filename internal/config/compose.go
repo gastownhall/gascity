@@ -163,11 +163,17 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		}
 		legacyV1SurfaceWarningsEnabled = pc.Pack.Schema >= 2
 		if legacyV1SurfaceWarningsEnabled {
-			// Detect v1 surfaces on the freshly-parsed city.toml, before
-			// pack.toml merging or fragment processing can inject
-			// pack-discovered agents or pack-default rig includes into the
-			// same fields.
-			prov.Warnings = append(prov.Warnings, DetectLegacyV1Surfaces(root, path)...)
+			// Wave 2 hard-stop: schema=2 city packs no longer tolerate PackV1
+			// city.toml authoring surfaces. Check the freshly-parsed city.toml
+			// before pack merging or fragment processing can inject
+			// pack-discovered agents or pack-default rig includes into the same
+			// fields.
+			if err := LegacyV1SurfaceError(root, path); err != nil {
+				return nil, nil, err
+			}
+			if err := LegacySiteBindingSurfaceError(root, path); err != nil {
+				return nil, nil, err
+			}
 		}
 		// Preserve the city.toml agents so they can override pack-defined
 		// and convention-discovered agents.
@@ -385,6 +391,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		prov.Warnings = append(prov.Warnings, fragWarnings...)
 		if legacyV1SurfaceWarningsEnabled {
 			prov.Warnings = append(prov.Warnings, DetectLegacyV1Surfaces(frag, fragPath)...)
+			prov.Warnings = append(prov.Warnings, DetectLegacySiteBindingSurfaces(frag, fragPath)...)
 		}
 
 		// Fragments cannot include other fragments.

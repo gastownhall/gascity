@@ -19,13 +19,6 @@ formula = "health-check"
 trigger = "cron"
 schedule = "*/5 * * * *"
 `)
-	fs.Dirs["/pack/orders/health-check"] = true
-	fs.Files["/pack/orders/health-check/order.toml"] = []byte(`
-[order]
-formula = "legacy-health-check"
-trigger = "cron"
-schedule = "0 * * * *"
-`)
 
 	orders, err := discoverRoot(fs, ScanRoot{
 		Dir:          "/pack/orders",
@@ -48,7 +41,7 @@ schedule = "0 * * * *"
 	}
 }
 
-func TestDiscoverRootFallsBackToSubdirectoryFormatWithWarning(t *testing.T) {
+func TestDiscoverRootRejectsSubdirectoryFormat(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Dirs["/pack/orders/health-check"] = true
 	fs.Files["/pack/orders/health-check/order.toml"] = []byte(`
@@ -58,28 +51,19 @@ trigger = "cron"
 schedule = "*/5 * * * *"
 `)
 
-	logs := captureOrderLogs(t, func() {
-		orders, err := discoverRoot(fs, ScanRoot{
-			Dir:          "/pack/orders",
-			FormulaLayer: "/pack/formulas",
-		})
-		if err != nil {
-			t.Fatalf("discoverRoot: %v", err)
-		}
-		if len(orders) != 1 {
-			t.Fatalf("got %d orders, want 1", len(orders))
-		}
-		if orders[0].Source != "/pack/orders/health-check/order.toml" {
-			t.Fatalf("Source = %q, want %q", orders[0].Source, "/pack/orders/health-check/order.toml")
-		}
+	_, err := discoverRoot(fs, ScanRoot{
+		Dir:          "/pack/orders",
+		FormulaLayer: "/pack/formulas",
 	})
-
-	if !strings.Contains(logs, "rename to orders/health-check.toml") {
-		t.Fatalf("logs = %q, want rename warning", logs)
+	if err == nil {
+		t.Fatal("discoverRoot succeeded, want hard error for legacy subdirectory layout")
+	}
+	if !strings.Contains(err.Error(), "rename to orders/health-check.toml") {
+		t.Fatalf("error = %v, want rename guidance", err)
 	}
 }
 
-func TestDiscoverRootFallsBackToLegacyFormulaOrdersWithWarning(t *testing.T) {
+func TestDiscoverRootRejectsLegacyFormulaOrders(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Dirs["/pack/formulas/orders/health-check"] = true
 	fs.Files["/pack/formulas/orders/health-check/order.toml"] = []byte(`
@@ -89,24 +73,36 @@ trigger = "cron"
 schedule = "*/5 * * * *"
 `)
 
-	logs := captureOrderLogs(t, func() {
-		orders, err := discoverRoot(fs, ScanRoot{
-			Dir:          "/pack/orders",
-			FormulaLayer: "/pack/formulas",
-		})
-		if err != nil {
-			t.Fatalf("discoverRoot: %v", err)
-		}
-		if len(orders) != 1 {
-			t.Fatalf("got %d orders, want 1", len(orders))
-		}
-		if orders[0].Source != "/pack/formulas/orders/health-check/order.toml" {
-			t.Fatalf("Source = %q, want %q", orders[0].Source, "/pack/formulas/orders/health-check/order.toml")
-		}
+	_, err := discoverRoot(fs, ScanRoot{
+		Dir:          "/pack/orders",
+		FormulaLayer: "/pack/formulas",
 	})
+	if err == nil {
+		t.Fatal("discoverRoot succeeded, want hard error for legacy formulas/orders path")
+	}
+	if !strings.Contains(err.Error(), "move to orders/health-check.toml") {
+		t.Fatalf("error = %v, want move guidance", err)
+	}
+}
 
-	if !strings.Contains(logs, "move to orders/health-check.toml") {
-		t.Fatalf("logs = %q, want move warning", logs)
+func TestDiscoverRootRejectsLegacyFlatOrderFilename(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/pack/orders/health-check.order.toml"] = []byte(`
+[order]
+formula = "health-check"
+trigger = "cron"
+schedule = "*/5 * * * *"
+`)
+
+	_, err := discoverRoot(fs, ScanRoot{
+		Dir:          "/pack/orders",
+		FormulaLayer: "/pack/formulas",
+	})
+	if err == nil {
+		t.Fatal("discoverRoot succeeded, want hard error for legacy flat order filename")
+	}
+	if !strings.Contains(err.Error(), "rename to orders/health-check.toml") {
+		t.Fatalf("error = %v, want rename guidance", err)
 	}
 }
 

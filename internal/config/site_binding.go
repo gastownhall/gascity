@@ -16,12 +16,16 @@ import (
 const (
 	legacyRigPathSiteBindingWarningFragment = "still declares path in city.toml; move it to .gc/site.toml"
 	unknownRigSiteBindingWarningPrefix      = ".gc/site.toml declares a binding for unknown rig "
+	legacyWorkspaceIdentityWarningFragment  = "workspace identity fields are deprecated in v2; move them to .gc/site.toml"
+	legacyRigPathSurfaceWarningFragment     = "rig.path is deprecated in v2; move it to .gc/site.toml"
 )
 
 // IsNonFatalSiteBindingWarning reports whether warning is migration guidance
 // that should stay non-fatal in strict mode.
 func IsNonFatalSiteBindingWarning(warning string) bool {
 	return strings.Contains(warning, legacyRigPathSiteBindingWarningFragment) ||
+		strings.Contains(warning, legacyWorkspaceIdentityWarningFragment) ||
+		strings.Contains(warning, legacyRigPathSurfaceWarningFragment) ||
 		strings.HasPrefix(warning, unknownRigSiteBindingWarningPrefix)
 }
 
@@ -39,6 +43,104 @@ func missingRigSiteBindingWarning(name string) string {
 
 func unknownRigSiteBindingWarning(name string) string {
 	return fmt.Sprintf("%s%q", unknownRigSiteBindingWarningPrefix, name)
+}
+
+// DetectLegacySiteBindingSurfaces returns migration warnings for pre-1.0
+// workspace identity and rig-path declarations that still appear in city
+// fragments. Wave 2 defers hard-errors for fragments until the remediation
+// story is real, but we still want the loader to surface what needs work.
+func DetectLegacySiteBindingSurfaces(cfg *City, source string) []string {
+	if cfg == nil {
+		return nil
+	}
+
+	var warnings []string
+	var workspaceFields []string
+	if strings.TrimSpace(cfg.Workspace.Name) != "" {
+		workspaceFields = append(workspaceFields, "workspace.name")
+	}
+	if strings.TrimSpace(cfg.Workspace.Prefix) != "" {
+		workspaceFields = append(workspaceFields, "workspace.prefix")
+	}
+	if len(workspaceFields) > 0 {
+		warnings = append(warnings, fmt.Sprintf(
+			"%s: %s (%s); move them to .gc/site.toml (run `gc doctor --fix` if this is the root city.toml; fragments must be updated by hand)",
+			source,
+			legacyWorkspaceIdentityWarningFragment,
+			strings.Join(workspaceFields, ", "),
+		))
+	}
+
+	for _, rig := range cfg.Rigs {
+		if strings.TrimSpace(rig.Path) == "" {
+			continue
+		}
+		rigName := strings.TrimSpace(rig.Name)
+		if rigName == "" {
+			rigName = "<unnamed>"
+		}
+		warnings = append(warnings, fmt.Sprintf(
+			"%s: %s for rig %q; move it to .gc/site.toml (run `gc doctor --fix` if this is the root city.toml; otherwise add the binding manually and remove rig.path from the fragment)",
+			source,
+			legacyRigPathSurfaceWarningFragment,
+			rigName,
+		))
+	}
+
+	return warnings
+}
+
+// LegacySiteBindingSurfaceErrors returns hard-error diagnostics for pre-1.0
+// workspace identity and rig-path declarations that should now live in
+// .gc/site.toml instead of city config.
+func LegacySiteBindingSurfaceErrors(cfg *City, source string) []string {
+	if cfg == nil {
+		return nil
+	}
+
+	var errors []string
+	var workspaceFields []string
+	if strings.TrimSpace(cfg.Workspace.Name) != "" {
+		workspaceFields = append(workspaceFields, "workspace.name")
+	}
+	if strings.TrimSpace(cfg.Workspace.Prefix) != "" {
+		workspaceFields = append(workspaceFields, "workspace.prefix")
+	}
+	if len(workspaceFields) > 0 {
+		errors = append(errors, fmt.Sprintf(
+			"%s: unsupported pre-1.0 workspace identity fields (%s); move them to .gc/site.toml (run `gc doctor --fix` if this is the root city.toml; fragments must be updated by hand)",
+			source,
+			strings.Join(workspaceFields, ", "),
+		))
+	}
+
+	for _, rig := range cfg.Rigs {
+		if strings.TrimSpace(rig.Path) == "" {
+			continue
+		}
+		rigName := strings.TrimSpace(rig.Name)
+		if rigName == "" {
+			rigName = "<unnamed>"
+		}
+		errors = append(errors, fmt.Sprintf(
+			"%s: unsupported pre-1.0 rig.path for rig %q; move it to .gc/site.toml (run `gc doctor --fix` if this is the root city.toml; otherwise add the binding manually and remove rig.path from the fragment)",
+			source,
+			rigName,
+		))
+	}
+
+	return errors
+}
+
+// LegacySiteBindingSurfaceError aggregates unsupported pre-1.0 site-binding
+// surfaces into one load-time error for schema=2 enforcement paths.
+func LegacySiteBindingSurfaceError(cfg *City, source string) error {
+	violations := LegacySiteBindingSurfaceErrors(cfg, source)
+	if len(violations) == 0 {
+		return nil
+	}
+	return fmt.Errorf("pre-1.0 site-binding fields are no longer supported:\n  - %s",
+		strings.Join(violations, "\n  - "))
 }
 
 // SiteBindingPath returns the machine-local site binding file for a city.
