@@ -2611,3 +2611,99 @@ func TestBdStoreListIssuesTierDoesNotIssueQuery(t *testing.T) {
 		}
 	}
 }
+
+// TestBdStoreListBothTiersReturnsPartialRowsWithErrorOnTierFailure pins the
+// contract that listBothTiers returns rows from the surviving tier together
+// with a non-nil error. Silent partial-success would let safety-critical
+// callers (e.g. order dispatch's hasOpenWorkStrict) see "no in-flight work"
+// when the wisps tier is actually unreachable, leading to double-fire.
+func TestBdStoreListBothTiersReturnsPartialRowsWithErrorOnTierFailure(t *testing.T) {
+	t.Run("wisps tier fails", func(t *testing.T) {
+		runner := func(_, name string, args ...string) ([]byte, error) {
+			full := name + " " + strings.Join(args, " ")
+			switch {
+			case strings.HasPrefix(full, "bd list "):
+				return []byte(`[{"id":"bd-i","title":"issue","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","labels":["order-run:o"]}]`), nil
+			case strings.HasPrefix(full, "bd query "):
+				return nil, fmt.Errorf("simulated wisps tier outage")
+			}
+			return nil, fmt.Errorf("unexpected: %s", full)
+		}
+		s := beads.NewBdStore("/city", runner)
+		got, err := s.List(beads.ListQuery{Label: "order-run:o", TierMode: beads.TierBoth})
+		if err == nil {
+			t.Fatalf("err = nil, want non-nil partial-failure error")
+		}
+		if !strings.Contains(err.Error(), "wisps tier") {
+			t.Fatalf("err = %v, want wisps tier in message", err)
+		}
+		if len(got) != 1 || got[0].ID != "bd-i" {
+			t.Fatalf("got = %+v, want surviving issues row bd-i", got)
+		}
+	})
+
+	t.Run("issues tier fails", func(t *testing.T) {
+		runner := func(_, name string, args ...string) ([]byte, error) {
+			full := name + " " + strings.Join(args, " ")
+			switch {
+			case strings.HasPrefix(full, "bd list "):
+				return nil, fmt.Errorf("simulated issues tier outage")
+			case strings.HasPrefix(full, "bd query "):
+				return []byte(`[{"id":"bd-w","title":"wisp","status":"open","issue_type":"task","created_at":"2026-05-02T00:00:00Z","ephemeral":true,"labels":["order-run:o"]}]`), nil
+			}
+			return nil, fmt.Errorf("unexpected: %s", full)
+		}
+		s := beads.NewBdStore("/city", runner)
+		got, err := s.List(beads.ListQuery{Label: "order-run:o", TierMode: beads.TierBoth})
+		if err == nil {
+			t.Fatalf("err = nil, want non-nil partial-failure error")
+		}
+		if !strings.Contains(err.Error(), "issues tier") {
+			t.Fatalf("err = %v, want issues tier in message", err)
+		}
+		if len(got) != 1 || got[0].ID != "bd-w" {
+			t.Fatalf("got = %+v, want surviving wisps row bd-w", got)
+		}
+	})
+
+	t.Run("both tiers fail", func(t *testing.T) {
+		runner := func(_, _ string, _ ...string) ([]byte, error) {
+			return nil, fmt.Errorf("simulated total outage")
+		}
+		s := beads.NewBdStore("/city", runner)
+		got, err := s.List(beads.ListQuery{Label: "order-run:o", TierMode: beads.TierBoth})
+		if err == nil {
+			t.Fatalf("err = nil, want joined error from both tiers")
+		}
+		if got != nil {
+			t.Fatalf("got = %+v, want nil rows on total failure", got)
+		}
+	})
+}
+
+// TestBdStoreListWispsRejectsUnsafeQueryValues pins the bd-query DSL safety
+// guard: values containing whitespace, quotes, or reserved boolean tokens
+// are rejected before they can mis-parse server-side.
+func TestBdStoreListWispsRejectsUnsafeQueryValues(t *testing.T) {
+	cases := []struct {
+		name  string
+		query beads.ListQuery
+	}{
+		{"label with space", beads.ListQuery{Label: "order tracking", TierMode: beads.TierWisps}},
+		{"label with quote", beads.ListQuery{Label: `order"tracking`, TierMode: beads.TierWisps}},
+		{"status reserved AND", beads.ListQuery{Status: "AND", TierMode: beads.TierWisps}},
+		{"type reserved or", beads.ListQuery{Type: "or", TierMode: beads.TierWisps}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := func(_, _ string, _ ...string) ([]byte, error) {
+				t.Fatalf("runner must not be called for unsafe value")
+				return nil, nil
+			}
+			s := beads.NewBdStore("/city", runner)
+			if _, err := s.List(tc.query); err == nil {
+				t.Fatalf("err = nil, want rejection of unsafe value")
+			}
+		})
+	}
+}

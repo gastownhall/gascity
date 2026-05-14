@@ -1070,6 +1070,27 @@ func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 // way to reach the wisps table (mirrors gastown's internal/beads/beads.go
 // listEphemeral path).
 func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
+	// All bd-query field values used here are bare identifiers (labels,
+	// statuses, types, assignees, parent IDs). The bd query DSL has no
+	// quoting syntax, so values containing whitespace, quotes, or the
+	// reserved `AND`/`OR` tokens would silently mis-parse. Reject those
+	// up front rather than emit a malformed query.
+	if err := assertBareBdQueryValue("label", query.Label); err != nil {
+		return nil, err
+	}
+	if err := assertBareBdQueryValue("status", query.Status); err != nil {
+		return nil, err
+	}
+	if err := assertBareBdQueryValue("type", query.Type); err != nil {
+		return nil, err
+	}
+	if err := assertBareBdQueryValue("assignee", query.Assignee); err != nil {
+		return nil, err
+	}
+	if err := assertBareBdQueryValue("parent", query.ParentID); err != nil {
+		return nil, err
+	}
+
 	clauses := []string{"ephemeral=true"}
 	if query.Label != "" {
 		clauses = append(clauses, "label="+query.Label)
@@ -1091,7 +1112,7 @@ func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
 		args = append(args, "--all")
 	}
 	if query.Limit > 0 {
-		args = append(args, "--limit", fmt.Sprintf("%d", query.Limit))
+		args = append(args, "--limit", strconv.Itoa(query.Limit))
 	}
 
 	out, err := s.runner(s.dir, "bd", args...)
@@ -1104,10 +1125,10 @@ func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
 		result[i] = issues[i].toBead()
 		// bd query against wisps returns ephemeral beads; tolerate older bd
 		// versions that omit the ephemeral field in JSON.
-		if !result[i].Ephemeral {
-			result[i].Ephemeral = true
-		}
+		result[i].Ephemeral = true
 	}
+	// Re-apply filters client-side (defense in depth against bd-query DSL
+	// drift) and re-cap Limit (already applied server-side via --limit).
 	filtered := applyListQuery(result, query)
 	if parseErr != nil {
 		if len(filtered) > 0 {
@@ -1118,9 +1139,30 @@ func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
 	return filtered, nil
 }
 
+// assertBareBdQueryValue rejects values containing whitespace, quotes, or
+// reserved boolean tokens that would mis-parse in the bd query DSL.
+func assertBareBdQueryValue(field, value string) error {
+	if value == "" {
+		return nil
+	}
+	if strings.ContainsAny(value, " \t\n\r\"'\\") {
+		return fmt.Errorf("bd query: %s value %q contains unsupported whitespace or quote", field, value)
+	}
+	upper := strings.ToUpper(value)
+	if upper == "AND" || upper == "OR" || upper == "NOT" {
+		return fmt.Errorf("bd query: %s value %q is a reserved bd-query token", field, value)
+	}
+	return nil
+}
+
 // listBothTiers unions the issues and wisps tiers in a single logical query.
 // Each tier is queried with its own TierMode; results are deduped by ID and
 // re-sorted under the caller-supplied Sort.
+//
+// Partial failure: if exactly one tier errors, the other tier's rows are
+// returned along with a non-nil error so callers can decide whether to
+// degrade or fail. Silently swallowing the failure would let dispatch paths
+// see "no in-flight work" and double-fire.
 func (s *BdStore) listBothTiers(query ListQuery) ([]Bead, error) {
 	issuesQ := query
 	issuesQ.TierMode = TierIssues
@@ -1130,7 +1172,6 @@ func (s *BdStore) listBothTiers(query ListQuery) ([]Bead, error) {
 	wispsQ.TierMode = TierWisps
 	wispsResult, wispsErr := s.List(wispsQ)
 
-	// If both tiers fail, surface the first error.
 	if issuesErr != nil && wispsErr != nil {
 		return nil, errors.Join(issuesErr, wispsErr)
 	}
@@ -1154,6 +1195,15 @@ func (s *BdStore) listBothTiers(query ListQuery) ([]Bead, error) {
 	sortBeadsForQuery(merged, query.Sort)
 	if query.Limit > 0 && len(merged) > query.Limit {
 		merged = merged[:query.Limit]
+	}
+
+	// Surface single-tier failure so callers don't mistake a partial
+	// result for a complete one.
+	switch {
+	case issuesErr != nil:
+		return merged, fmt.Errorf("bd list both tiers: issues tier: %w", issuesErr)
+	case wispsErr != nil:
+		return merged, fmt.Errorf("bd list both tiers: wisps tier: %w", wispsErr)
 	}
 	return merged, nil
 }

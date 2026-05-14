@@ -22,8 +22,15 @@ const (
 )
 
 // TierMode selects which storage tier(s) a List query reads from.
-// The zero value, TierIssues, preserves backward-compatible behavior:
-// queries hit only the permanent issues table.
+// The zero value is TierIssues.
+//
+// For BdStore, where issues and wisps live in physically separate Dolt
+// tables, TierIssues is naturally tier-restricted by the underlying
+// `bd list` call. For in-memory stores (MemStore, ApplyListQuery) where
+// both tiers may share a single backing slice, Matches now filters out
+// any bead with Ephemeral=true under TierIssues. Pre-PR, such a query
+// would have returned ephemeral rows mixed in; callers that relied on
+// that behavior must opt into TierBoth explicitly.
 type TierMode int
 
 const (
