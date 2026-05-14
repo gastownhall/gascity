@@ -134,17 +134,41 @@ func quarantinePhantomManagedDoltDatabases(dataDir string, now time.Time) error 
 				// require it to parse as JSON — a partially-written or
 				// otherwise corrupted repo_state.json fails dolt-server load
 				// the same way a missing one does.
+				//
+				// Size-cap the read at 512 KB so an attacker-influenced
+				// file cannot OOM the preflight sweep. Treat permission
+				// errors like missing files (quarantine with explicit
+				// reason) rather than aborting the whole sweep — an
+				// unreadable repo_state.json is at least as broken as a
+				// missing one from dolt-server's perspective.
 				reason = "missing repo_state.json"
 				repoState := filepath.Join(doltDir, "repo_state.json")
-				repoStateData, err := os.ReadFile(repoState)
+				const maxRepoStateSize int64 = 512 * 1024
+				info, statErr := os.Stat(repoState)
 				switch {
-				case err != nil && !os.IsNotExist(err):
-					return err
-				case err == nil && json.Valid(repoStateData):
-					continue
-				case err == nil && !json.Valid(repoStateData):
-					reason = "malformed repo_state.json"
-					// default: file missing — keep reason = "missing repo_state.json"
+				case statErr != nil && os.IsNotExist(statErr):
+					// file missing — reason already set; fall through to quarantine
+				case statErr != nil && os.IsPermission(statErr):
+					reason = "unreadable repo_state.json (permission denied)"
+				case statErr != nil:
+					return statErr
+				case info.Size() > maxRepoStateSize:
+					reason = "oversized repo_state.json"
+				default:
+					repoStateData, readErr := os.ReadFile(repoState)
+					switch {
+					case readErr != nil && os.IsNotExist(readErr):
+						// race: file vanished between Stat and ReadFile;
+						// keep reason = "missing repo_state.json"
+					case readErr != nil && os.IsPermission(readErr):
+						reason = "unreadable repo_state.json (permission denied)"
+					case readErr != nil:
+						return readErr
+					case json.Valid(repoStateData):
+						continue
+					default:
+						reason = "malformed repo_state.json"
+					}
 				}
 			}
 		}

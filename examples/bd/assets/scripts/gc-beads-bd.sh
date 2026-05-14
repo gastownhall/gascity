@@ -963,9 +963,30 @@ retired_replacement_db_name() {
     esac
 }
 
+# repo_state_is_valid_json checks that a file parses as valid JSON.
+# Prefers jq if available; falls back to python3 -m json.tool. If neither
+# tool is on PATH, returns success — the Go preflight path is authoritative
+# and a worse-fit shell mirror should not falsely quarantine healthy DBs.
+repo_state_is_valid_json() {
+    local file="$1"
+    if command -v jq >/dev/null 2>&1; then
+        jq -e . "$file" >/dev/null 2>&1
+        return $?
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$file" >/dev/null 2>&1
+        return $?
+    fi
+    return 0
+}
+
 # quarantine_phantom_dbs moves unservable database dirs to quarantine.
-# This includes missing-manifest phantom dirs and Dolt-retired replacement
-# dirs that still have manifests but are no longer the active database.
+# Mirrors the Go preflight check in cmd/gc/dolt_preflight_cleanup.go:
+# quarantine dirs that are retired replacements, missing noms/manifest,
+# missing repo_state.json, or have malformed repo_state.json. Without
+# both the manifest AND a valid repo_state.json, dolt sql-server's
+# data_dir scan aborts with bare "EOF" on the first unservable
+# directory, killing every other database on the same server.
 quarantine_phantom_dbs() {
     [ -d "$DATA_DIR" ] || return 0
     local dir
@@ -979,6 +1000,10 @@ quarantine_phantom_dbs() {
             reason="retired replacement"
         elif [ ! -f "$dir/.dolt/noms/manifest" ]; then
             reason="missing noms/manifest"
+        elif [ ! -f "$dir/.dolt/repo_state.json" ]; then
+            reason="missing repo_state.json"
+        elif ! repo_state_is_valid_json "$dir/.dolt/repo_state.json"; then
+            reason="malformed repo_state.json"
         else
             continue
         fi

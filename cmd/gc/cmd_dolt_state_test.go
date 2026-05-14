@@ -1419,6 +1419,7 @@ func TestDoltStatePreflightCleanQuarantinesManifestOnlyDatabase(t *testing.T) {
 	if _, err := exec.LookPath("lsof"); err != nil {
 		t.Skip("lsof not installed")
 	}
+	clearManagedDoltEnv(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -1459,6 +1460,7 @@ func TestDoltStatePreflightCleanQuarantinesMalformedRepoStateDatabase(t *testing
 	if _, err := exec.LookPath("lsof"); err != nil {
 		t.Skip("lsof not installed")
 	}
+	clearManagedDoltEnv(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -1496,6 +1498,7 @@ func TestDoltStatePreflightCleanCmdPreservesLiveArtifacts(t *testing.T) {
 	if _, err := exec.LookPath("lsof"); err != nil {
 		t.Skip("lsof not installed")
 	}
+	clearManagedDoltEnv(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -1507,6 +1510,15 @@ func TestDoltStatePreflightCleanCmdPreservesLiveArtifacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(liveManifest, []byte("ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// repo_state.json must accompany the manifest so the tightened
+	// quarantine check (require valid repo_state.json) treats this
+	// fixture as a healthy database. Without this, preflight quarantines
+	// the live dir and the assertions below (LOCK + socket preserved)
+	// fail under process-shard tests.
+	liveRepoState := filepath.Join(layout.DataDir, "live", ".dolt", "repo_state.json")
+	if err := os.WriteFile(liveRepoState, []byte(`{"head":"refs/heads/main","remotes":{},"backups":{},"branches":{}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	liveLock := filepath.Join(layout.DataDir, "live", ".dolt", "noms", "LOCK")
@@ -3320,5 +3332,26 @@ func writeFakeDoltSQLBinary(t *testing.T, binDir, invocationFile, body string) {
 	path := filepath.Join(binDir, "dolt")
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("WriteFile(fake dolt): %v", err)
+	}
+}
+
+// clearManagedDoltEnv pins resolveManagedDoltRuntimeLayout to the
+// city-relative default by clearing every GC_DOLT_* override that the
+// developer's shell may have set. Tests that build fixtures under
+// layout.DataDir MUST call this — otherwise a dev with GC_DOLT_DATA_DIR
+// exported drops fixtures into their live dolt data dir and corrupts
+// the running server (the 2026-05-12 incident this whole regression
+// suite is meant to prevent).
+func clearManagedDoltEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"GC_DOLT_DATA_DIR",
+		"GC_DOLT_LOG_FILE",
+		"GC_DOLT_STATE_FILE",
+		"GC_DOLT_PID_FILE",
+		"GC_DOLT_LOCK_FILE",
+		"GC_DOLT_CONFIG_FILE",
+	} {
+		t.Setenv(key, "")
 	}
 }
