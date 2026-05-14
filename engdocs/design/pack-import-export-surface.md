@@ -290,6 +290,5 @@ The recommended next step is:
 
 Short version:
 
-- the current `transitive` / `export` surface is too clever
 - explicit imports plus explicit exports is the cleaner model
 - we believe we are on the right track with `[[exports]]`
