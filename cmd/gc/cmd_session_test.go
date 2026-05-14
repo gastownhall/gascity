@@ -952,6 +952,45 @@ func TestBuildResumeCommandAppliesTemplateOverrides(t *testing.T) {
 	}
 }
 
+func TestBuildResumeCommandAppliesTemplateOverridesToExplicitResumeCommand(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "worker", Provider: "codex-provider"},
+		},
+		Providers: map[string]config.ProviderSpec{
+			"codex-provider": {
+				Command:       "codex",
+				ResumeCommand: "codex resume {{.SessionKey}} --ask-for-approval on-request",
+				OptionsSchema: []config.ProviderOption{
+					{
+						Key: "permission_mode",
+						Choices: []config.OptionChoice{
+							{Value: "default", FlagArgs: []string{"--ask-for-approval", "on-request"}},
+							{Value: "plan", FlagArgs: []string{"--ask-for-approval", "never"}},
+						},
+					},
+				},
+			},
+		},
+	}
+	info := session.Info{
+		Template:   "worker",
+		Command:    "codex --ask-for-approval on-request",
+		Provider:   "codex-provider",
+		WorkDir:    "/tmp/workdir",
+		SessionKey: "abc-123",
+	}
+
+	cmd, _ := buildResumeCommand(t.TempDir(), cfg, info, "", map[string]string{
+		"template_overrides": `{"permission_mode":"plan"}`,
+	}, io.Discard)
+	want := "codex resume --ask-for-approval never abc-123"
+	if cmd != want {
+		t.Fatalf("resume command = %q, want %q", cmd, want)
+	}
+}
+
 func TestBuildResumeCommandFallsBackToDefaultArgsWhenOverridesInvalid(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},

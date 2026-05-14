@@ -3851,6 +3851,95 @@ func TestHandleSessionPermissionModeUpdatesProviderSessionOptions(t *testing.T) 
 	}
 }
 
+func TestHandleSessionPermissionModePreservesProviderCreateOptions(t *testing.T) {
+	fs := newSessionFakeStateWithOptions(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"provider","name":"test-agent","options":{"permission_mode":"plan","effort":"high"}}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("create status = %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+	accepted := decodeAsyncAccepted(t, w.Body)
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
+	}
+	suspendSessionForPermissionModeTest(t, fs, success.Session.ID)
+
+	req = newPostRequest(cityURL(fs, "/session/"+success.Session.ID+"/permission-mode"), strings.NewReader(`{"permission_mode":"auto-edit"}`))
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("permission-mode status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var resp sessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got := resp.Options["permission_mode"]; got != "auto-edit" {
+		t.Fatalf("response options.permission_mode = %q, want auto-edit", got)
+	}
+	if got := resp.Options["effort"]; got != "high" {
+		t.Fatalf("response options.effort = %q, want high from create-time provider option", got)
+	}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	info, err := mgr.Get(success.Session.ID)
+	if err != nil {
+		t.Fatalf("Get session: %v", err)
+	}
+	bead, err := fs.cityBeadStore.Get(success.Session.ID)
+	if err != nil {
+		t.Fatalf("Get bead: %v", err)
+	}
+	runtimeCfg, err := srv.resolveWorkerSessionRuntimeWithMetadata(info, "", bead.Metadata)
+	if err != nil {
+		t.Fatalf("resolveWorkerSessionRuntimeWithMetadata: %v", err)
+	}
+	if runtimeCfg == nil {
+		t.Fatal("resolveWorkerSessionRuntimeWithMetadata() = nil")
+	}
+	if !strings.Contains(runtimeCfg.Command, "--permission-mode auto-edit") {
+		t.Fatalf("runtime command %q missing updated permission_mode", runtimeCfg.Command)
+	}
+	if !strings.Contains(runtimeCfg.Command, "--effort high") {
+		t.Fatalf("runtime command %q missing preserved effort", runtimeCfg.Command)
+	}
+}
+
+func TestLegacyHandleProviderSessionCreatePersistsOptionsInTemplateOverrides(t *testing.T) {
+	fs := newSessionFakeStateWithOptions(t)
+	srv := New(fs)
+
+	req := newPostRequest("/v0/sessions", strings.NewReader(`{"kind":"provider","name":"test-agent","options":{"permission_mode":"plan","effort":"high"}}`))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want %d; body: %s", w.Code, http.StatusCreated, w.Body.String())
+	}
+	var resp sessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	bead, err := fs.cityBeadStore.Get(resp.ID)
+	if err != nil {
+		t.Fatalf("Get bead: %v", err)
+	}
+	overrides, err := session.ParseTemplateOverrides(bead.Metadata)
+	if err != nil {
+		t.Fatalf("ParseTemplateOverrides: %v", err)
+	}
+	if got := overrides["permission_mode"]; got != "plan" {
+		t.Fatalf("template_overrides.permission_mode = %q, want plan", got)
+	}
+	if got := overrides["effort"]; got != "high" {
+		t.Fatalf("template_overrides.effort = %q, want high", got)
+	}
+}
+
 func TestHandleSessionPermissionModePrefersPersistedProviderOverTemplateProvider(t *testing.T) {
 	fs := newSessionFakeStateWithOptions(t)
 	fs.cfg.Providers["template-provider"] = config.ProviderSpec{
@@ -3980,6 +4069,62 @@ func TestHandleSessionGetUsesAgentDefaultsForConfiguredNamedSession(t *testing.T
 	}
 	if got := resp.Options["permission_mode"]; got != "plan" {
 		t.Fatalf("get options.permission_mode = %q, want plan from configured agent defaults", got)
+	}
+	if got := resp.Kind; got != "agent" {
+		t.Fatalf("get kind = %q, want agent", got)
+	}
+}
+
+func TestHandleSessionGetUsesLegacyProviderKindForNameCollision(t *testing.T) {
+	fs := newSessionFakeStateWithOptions(t)
+	fs.cfg.Agents = []config.Agent{{
+		Name:     "codex",
+		Provider: "codex",
+		OptionDefaults: map[string]string{
+			"permission_mode": "plan",
+			"effort":          "low",
+		},
+	}}
+	fs.cfg.Providers["codex"] = config.ProviderSpec{
+		DisplayName: "Codex",
+		Command:     "echo",
+		OptionDefaults: map[string]string{
+			"permission_mode": "auto-edit",
+			"effort":          "max",
+		},
+		OptionsSchema: fs.cfg.Providers["test-agent"].OptionsSchema,
+	}
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	info, err := mgr.Create(context.Background(), "codex", "codex", "echo", "/tmp/provider", "codex", nil, session.ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	suspendSessionForPermissionModeTest(t, fs, info.ID)
+	if err := fs.cityBeadStore.SetMetadata(info.ID, "real_world_app_session_kind", "provider"); err != nil {
+		t.Fatalf("SetMetadata(real_world_app_session_kind): %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/session/"+info.ID), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("get status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var resp sessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got := resp.Options["permission_mode"]; got != "auto-edit" {
+		t.Fatalf("get options.permission_mode = %q, want provider default auto-edit", got)
+	}
+	if got := resp.Options["effort"]; got != "max" {
+		t.Fatalf("get options.effort = %q, want provider default max", got)
+	}
+	if got := resp.Kind; got != "provider" {
+		t.Fatalf("get kind = %q, want provider", got)
 	}
 }
 

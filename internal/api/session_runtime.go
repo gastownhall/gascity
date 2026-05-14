@@ -38,6 +38,13 @@ func sessionCreateHints(resolved *config.ResolvedProvider, mcpServers []runtime.
 	}
 }
 
+func legacySessionKind(metadata map[string]string) string {
+	if metadata == nil {
+		return ""
+	}
+	return strings.TrimSpace(metadata["real_world_app_session_kind"])
+}
+
 func sessionResumeHints(resolved *config.ResolvedProvider, workDir string, mcpServers []runtime.MCPServerConfig) runtime.Config {
 	return runtime.Config{
 		WorkDir:                workDir,
@@ -252,11 +259,17 @@ func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config, 
 	} else {
 		resolvedInfo.Command = fallbackSessionRuntimeCommand(resolved, transport, info.Command, info.Provider)
 	}
+	resumeCommand := resolved.ResumeCommand
+	if overrides, err := session.ParseTemplateOverrides(metadata); err == nil {
+		if command, err := config.BuildProviderResumeCommand(resolved, overrides); err == nil && strings.TrimSpace(command) != "" {
+			resumeCommand = command
+		}
+	}
 	resolvedInfo.Provider = resolved.Name
 	resolvedInfo.Transport = transport
 	resolvedInfo.ResumeFlag = resolved.ResumeFlag
 	resolvedInfo.ResumeStyle = resolved.ResumeStyle
-	resolvedInfo.ResumeCommand = resolved.ResumeCommand
+	resolvedInfo.ResumeCommand = resumeCommand
 	return session.BuildResumeCommand(resolvedInfo), sessionResumeHints(resolved, workDir, mcpServers), nil
 }
 
@@ -368,6 +381,12 @@ func (s *Server) resolveWorkerSessionRuntimeWithMetadata(info session.Info, _ st
 	if err != nil {
 		command = fallbackSessionRuntimeCommand(resolved, transport, info.Command, info.Provider)
 	}
+	resumeCommand := firstNonEmptyString(resolved.ResumeCommand, info.ResumeCommand)
+	if overrides, err := session.ParseTemplateOverrides(metadata); err == nil {
+		if command, err := config.BuildProviderResumeCommand(resolved, overrides); err == nil && strings.TrimSpace(command) != "" {
+			resumeCommand = command
+		}
+	}
 	runtimeCfg, err := worker.NormalizeResolvedRuntime(worker.ResolvedRuntime{
 		Command:    command,
 		WorkDir:    firstNonEmptyString(info.WorkDir, workDir),
@@ -377,7 +396,7 @@ func (s *Server) resolveWorkerSessionRuntimeWithMetadata(info session.Info, _ st
 		Resume: session.ProviderResume{
 			ResumeFlag:    firstNonEmptyString(resolved.ResumeFlag, info.ResumeFlag),
 			ResumeStyle:   firstNonEmptyString(resolved.ResumeStyle, info.ResumeStyle),
-			ResumeCommand: firstNonEmptyString(resolved.ResumeCommand, info.ResumeCommand),
+			ResumeCommand: resumeCommand,
 			SessionIDFlag: resolved.SessionIDFlag,
 		},
 	})
@@ -511,7 +530,8 @@ func (s *Server) resolveSessionRuntimeWithMetadata(info session.Info, metadata m
 	)
 	if cfg != nil {
 		agentCfg, agentFound := resolveSessionTemplateAgent(cfg, info.Template)
-		if session.UseAgentTemplateForProviderResolution("", metadata, info.Provider, agentCfg.Provider, agentFound) {
+		sessionKind := legacySessionKind(metadata)
+		if session.UseAgentTemplateForProviderResolution(sessionKind, metadata, info.Provider, agentCfg.Provider, agentFound) {
 			if agentFound {
 				candidate, err := config.ResolveProvider(&agentCfg, &cfg.Workspace, cfg.Providers, exec.LookPath)
 				if err == nil {
@@ -545,7 +565,7 @@ func (s *Server) resolveSessionRuntimeWithMetadata(info session.Info, metadata m
 		configuredTransport = resolved.ProviderSessionCreateTransport()
 	}
 	transport := resolvedSessionTransport(info, resolved, configuredTransport, metadata, false)
-	if transport == "" && s.startedConfigHashProvesACPTransport(info, metadata, resolved, workDir, configuredTransport, "") {
+	if transport == "" && s.startedConfigHashProvesACPTransport(info, metadata, resolved, workDir, configuredTransport, legacySessionKind(metadata)) {
 		transport = "acp"
 	}
 	return resolved, workDir, transport, transport == "" && legacyACPTransportAmbiguous(resolved, configuredTransport, info.Command, metadata)

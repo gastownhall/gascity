@@ -485,6 +485,14 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	if err != nil {
 		return nil, err
 	}
+	resumeCommand := firstNonEmptyGCString(resolved.ResumeCommand, info.ResumeCommand)
+	if overrides, err := session.ParseTemplateOverrides(metadata); err == nil && strings.TrimSpace(resumeCommand) != "" {
+		resumeProvider := *resolved
+		resumeProvider.ResumeCommand = resumeCommand
+		if command, err := config.BuildProviderResumeCommand(&resumeProvider, overrides); err == nil && strings.TrimSpace(command) != "" {
+			resumeCommand = command
+		}
+	}
 	return &worker.ResolvedRuntime{
 		Command:    command,
 		WorkDir:    workDir,
@@ -502,7 +510,7 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 		Resume: session.ProviderResume{
 			ResumeFlag:    firstNonEmptyGCString(resolved.ResumeFlag, info.ResumeFlag),
 			ResumeStyle:   firstNonEmptyGCString(resolved.ResumeStyle, info.ResumeStyle),
-			ResumeCommand: firstNonEmptyGCString(resolved.ResumeCommand, info.ResumeCommand),
+			ResumeCommand: resumeCommand,
 			SessionIDFlag: resolved.SessionIDFlag,
 		},
 	}, nil

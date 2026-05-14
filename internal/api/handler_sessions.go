@@ -138,8 +138,11 @@ func sessionResponseWithReason(info session.Info, b *beads.Bead, cfg *config.Cit
 	if b != nil && cfg != nil {
 		agentTemplateOK := true
 		agent, agentFound := findAgent(cfg, info.Template)
-		if session.UseAgentTemplateForProviderResolution("", b.Metadata, info.Provider, agent.Provider, agentFound) {
+		if session.UseAgentTemplateForProviderResolution(legacySessionKind(b.Metadata), b.Metadata, info.Provider, agent.Provider, agentFound) {
+			r.Kind = "agent"
 			agentTemplateOK = agentFound
+		} else {
+			r.Kind = "provider"
 		}
 		if agentTemplateOK {
 			rp, _ := resolveProviderForSessionOptions(info, b.Metadata, cfg)
@@ -746,7 +749,7 @@ func resolveProviderForSessionOptions(info session.Info, metadata map[string]str
 		return nil, fmt.Errorf("no config")
 	}
 	agent, agentFound := findAgent(cfg, info.Template)
-	if session.UseAgentTemplateForProviderResolution("", metadata, info.Provider, agent.Provider, agentFound) {
+	if session.UseAgentTemplateForProviderResolution(legacySessionKind(metadata), metadata, info.Provider, agent.Provider, agentFound) {
 		if !agentFound {
 			return nil, fmt.Errorf("agent template %q not found", info.Template)
 		}

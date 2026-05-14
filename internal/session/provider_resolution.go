@@ -4,8 +4,10 @@ import "strings"
 
 // UseAgentTemplateForProviderResolution reports whether a session should
 // resolve provider options through its agent template instead of treating the
-// persisted Template/Provider fields as raw provider names.
-func UseAgentTemplateForProviderResolution(sessionKind string, metadata map[string]string, persistedProvider, templateProvider string, templateFound bool) bool {
+// persisted Template field as a raw provider name. The provider-name arguments
+// are accepted for call-site symmetry but do not disqualify non-manual legacy
+// sessions when the agent template still exists.
+func UseAgentTemplateForProviderResolution(sessionKind string, metadata map[string]string, _, _ string, templateFound bool) bool {
 	sessionKind = strings.TrimSpace(sessionKind)
 	switch sessionKind {
 	case "provider":
@@ -23,13 +25,5 @@ func UseAgentTemplateForProviderResolution(sessionKind string, metadata map[stri
 	if strings.TrimSpace(metadata["session_origin"]) == "manual" {
 		return false
 	}
-	if !templateFound {
-		return false
-	}
-	persistedProvider = strings.TrimSpace(persistedProvider)
-	templateProvider = strings.TrimSpace(templateProvider)
-	if persistedProvider != "" && templateProvider != "" && persistedProvider != templateProvider {
-		return false
-	}
-	return true
+	return templateFound
 }

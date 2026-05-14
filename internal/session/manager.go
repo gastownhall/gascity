@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -136,6 +137,7 @@ type Manager struct {
 	sp                runtime.Provider
 	cityPath          string
 	transportResolver func(template, provider string) transportResolution
+	clk               clock.Clock
 }
 
 // PruneResult reports which sessions were pruned and which queued wait nudges
@@ -221,6 +223,13 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 		return
 	}
 	_ = m.store.SetMetadata(id, "transport", transport)
+}
+
+func (m *Manager) now() time.Time {
+	if m != nil && m.clk != nil {
+		return m.clk.Now()
+	}
+	return time.Now()
 }
 
 func (m *Manager) routeACPIfNeeded(provider, transport, sessName string) func() {
@@ -1124,7 +1133,8 @@ func (m *Manager) UpdateTemplateOverrides(id string, updates map[string]string) 
 		if err != nil {
 			return err
 		}
-		if IsTemplateOverrideRuntimeActive(State(b.Metadata["state"])) || templateOverrideWakeInFlight(b.Metadata) || (strings.TrimSpace(sessName) != "" && m.sp != nil && m.sp.IsRunning(sessName)) {
+		state := State(b.Metadata["state"])
+		if IsTemplateOverrideRuntimeActive(state) || templateOverrideWakeInFlight(b.Metadata, state, m.now()) || (strings.TrimSpace(sessName) != "" && m.sp != nil && m.sp.IsRunning(sessName)) {
 			return fmt.Errorf("%w: template overrides apply only before the next launch", ErrSessionActive)
 		}
 		overrides, err := ParseTemplateOverrides(b.Metadata)
@@ -1175,8 +1185,16 @@ func IsTemplateOverrideRuntimeActive(state State) bool {
 	}
 }
 
-func templateOverrideWakeInFlight(metadata map[string]string) bool {
+func templateOverrideWakeInFlightGrace() time.Duration {
+	return time.Minute + staleKeyDetectDelay + 5*time.Second
+}
+
+func templateOverrideWakeInFlight(metadata map[string]string, state State, now time.Time) bool {
 	if metadata == nil {
+		return false
+	}
+	switch state {
+	case StateFailedCreate, StateDrained, StateArchived:
 		return false
 	}
 	if strings.TrimSpace(metadata["pending_create_claim"]) == "true" {
@@ -1190,7 +1208,9 @@ func templateOverrideWakeInFlight(metadata map[string]string) bool {
 	if err != nil {
 		return false
 	}
-	return time.Now().UTC().Before(started.UTC().Add(time.Minute + staleKeyDetectDelay + 5*time.Second))
+	// PreWakePatch records last_woke_at before the reconciler can observe
+	// runtime liveness; keep overrides locked out through that startup window.
+	return now.UTC().Before(started.UTC().Add(templateOverrideWakeInFlightGrace()))
 }
 
 // Prune closes suspended sessions whose suspension time is before the given

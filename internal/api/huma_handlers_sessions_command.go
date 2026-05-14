@@ -299,9 +299,11 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Store,
 	if err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
-	extraMeta := map[string]string{
-		"session_origin": "manual",
+	extraMeta := sessionTemplateOverridesMetadata(body.Options, body.Message)
+	if extraMeta == nil {
+		extraMeta = make(map[string]string)
 	}
+	extraMeta["session_origin"] = "manual"
 	if transport == "acp" {
 		extraMeta, err = session.WithStoredMCPMetadata(extraMeta, mcpIdentity, mcpServers)
 		if err != nil {
@@ -495,7 +497,7 @@ func (s *Server) updateSessionPermissionMode(idRef string, body SessionPermissio
 		return nil, huma.Error503ServiceUnavailable("city config not loaded yet")
 	}
 	agent, agentFound := findAgent(cfg, info.Template)
-	if session.UseAgentTemplateForProviderResolution("", b.Metadata, info.Provider, agent.Provider, agentFound) {
+	if session.UseAgentTemplateForProviderResolution(legacySessionKind(b.Metadata), b.Metadata, info.Provider, agent.Provider, agentFound) {
 		if !agentFound {
 			return nil, huma.Error409Conflict("conflict: session agent template no longer resolves; restore the template or recreate the session before changing schema options")
 		}

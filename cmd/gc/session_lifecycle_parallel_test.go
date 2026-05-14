@@ -742,9 +742,11 @@ func TestPrepareStartCandidateReloadsOverridesBeforeWake(t *testing.T) {
 		Type:   sessionBeadType,
 		Labels: []string{sessionBeadLabel, "agent:worker"},
 		Metadata: map[string]string{
-			"template":     "worker",
-			"session_name": "worker",
-			"state":        "asleep",
+			"template":            "worker",
+			"session_name":        "worker",
+			"state":               "asleep",
+			"session_key":         "abc-123",
+			"started_config_hash": "previous-start",
 		},
 	})
 	if err != nil {
@@ -761,7 +763,10 @@ func TestPrepareStartCandidateReloadsOverridesBeforeWake(t *testing.T) {
 			SessionName:  "worker",
 			Command:      "codex --ask-for-approval on-request",
 			ResolvedProvider: &config.ResolvedProvider{
-				Name: "codex",
+				Name:          "codex",
+				ResumeFlag:    "resume",
+				ResumeStyle:   "subcommand",
+				ResumeCommand: "codex resume {{.SessionKey}} --ask-for-approval on-request",
 				OptionsSchema: []config.ProviderOption{{
 					Key: "permission_mode",
 					Choices: []config.OptionChoice{
@@ -778,6 +783,10 @@ func TestPrepareStartCandidateReloadsOverridesBeforeWake(t *testing.T) {
 	}
 	if !strings.Contains(prepared.cfg.Command, "--ask-for-approval never") {
 		t.Fatalf("prepared.cfg.Command = %q, want reloaded permission override", prepared.cfg.Command)
+	}
+	want := "codex resume --ask-for-approval never abc-123"
+	if prepared.cfg.Command != want {
+		t.Fatalf("prepared.cfg.Command = %q, want %q", prepared.cfg.Command, want)
 	}
 }
 

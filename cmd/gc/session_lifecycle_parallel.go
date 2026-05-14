@@ -720,6 +720,7 @@ func buildPreparedStart(
 				log.Printf("session %s: invalid template_overrides JSON: %v", session.ID, err)
 			} else if len(overrides) > 0 {
 				fullOptions := make(map[string]string)
+				hasSchemaOverride := false
 				for k, v := range tp.ResolvedProvider.EffectiveDefaults {
 					fullOptions[k] = v
 				}
@@ -728,12 +729,20 @@ func buildPreparedStart(
 						continue // handled separately below, not a schema option
 					}
 					fullOptions[k] = v
+					hasSchemaOverride = true
 				}
 				args, resolveErr := config.ResolveExplicitOptions(tp.ResolvedProvider.OptionsSchema, fullOptions)
 				if resolveErr != nil {
 					log.Printf("session %s: template_overrides resolution error: %v", session.ID, resolveErr)
 				} else if len(args) > 0 {
 					agentCfg.Command = replaceSchemaFlags(agentCfg.Command, tp.ResolvedProvider.OptionsSchema, args)
+				}
+				if hasSchemaOverride {
+					if command, err := config.BuildProviderResumeCommand(tp.ResolvedProvider, overrides); err == nil && strings.TrimSpace(command) != "" {
+						resolved := *tp.ResolvedProvider
+						resolved.ResumeCommand = command
+						tp.ResolvedProvider = &resolved
+					}
 				}
 			}
 		}

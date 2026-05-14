@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -150,5 +151,67 @@ func TestBuildProviderLaunchCommandWithoutOptionsSkipsDefaultsButKeepsSettings(t
 	}
 	if got.SettingsRel != filepath.Join(".gc", "settings.json") {
 		t.Fatalf("SettingsRel = %q, want %q", got.SettingsRel, filepath.Join(".gc", "settings.json"))
+	}
+}
+
+func TestBuildProviderLaunchCommandWithoutOptionsUsesBuiltinAncestorForSettings(t *testing.T) {
+	dir := t.TempDir()
+	runtimeDir := filepath.Join(dir, ".gc")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(runtimeDir, "settings.json")
+	if err := os.WriteFile(settingsPath, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rp := &ResolvedProvider{
+		Name:            "claude-max",
+		BuiltinAncestor: "claude",
+		Command:         "aimux",
+		Args:            []string{"run", "claude", "--"},
+	}
+
+	got, err := BuildProviderLaunchCommandWithoutOptions(dir, rp, "")
+	if err != nil {
+		t.Fatalf("BuildProviderLaunchCommandWithoutOptions: %v", err)
+	}
+
+	if want := fmt.Sprintf("--settings %q", settingsPath); !strings.Contains(got.Command, want) {
+		t.Fatalf("Command = %q, want settings arg %q", got.Command, want)
+	}
+	if count := strings.Count(got.Command, "--settings"); count != 1 {
+		t.Fatalf("Command has %d --settings flags, want 1: %q", count, got.Command)
+	}
+	if got.SettingsPath != settingsPath {
+		t.Fatalf("SettingsPath = %q, want %q", got.SettingsPath, settingsPath)
+	}
+}
+
+func TestBuildProviderLaunchCommandWithoutOptionsIgnoresDeprecatedKindForSettings(t *testing.T) {
+	dir := t.TempDir()
+	runtimeDir := filepath.Join(dir, ".gc")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runtimeDir, "settings.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rp := &ResolvedProvider{
+		Name:    "custom-provider",
+		Kind:    "claude",
+		Command: "custom-provider",
+	}
+
+	got, err := BuildProviderLaunchCommandWithoutOptions(dir, rp, "")
+	if err != nil {
+		t.Fatalf("BuildProviderLaunchCommandWithoutOptions: %v", err)
+	}
+	if strings.Contains(got.Command, "--settings") {
+		t.Fatalf("Command = %q, want no settings from deprecated Kind fallback", got.Command)
+	}
+	if got.SettingsPath != "" || got.SettingsRel != "" {
+		t.Fatalf("unexpected settings source from deprecated Kind fallback: %#v", got)
 	}
 }

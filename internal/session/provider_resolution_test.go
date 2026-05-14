@@ -85,6 +85,16 @@ func TestUseAgentTemplateForProviderResolution(t *testing.T) {
 			templateFound:     true,
 			want:              true,
 		},
+		{
+			name: "non-manual legacy metadata with provider mismatch preserves agent template behavior",
+			metadata: map[string]string{
+				"session_origin": "ephemeral",
+			},
+			persistedProvider: "stored-provider",
+			templateProvider:  "agent-provider",
+			templateFound:     true,
+			want:              true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

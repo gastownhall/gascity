@@ -724,14 +724,20 @@ func TestResolvedWorkerRuntimeWithConfigReplaysTemplateOverridesOnResume(t *test
 		}},
 		Providers: map[string]config.ProviderSpec{
 			"custom": {
-				Command:   "/bin/echo",
-				PathCheck: "true",
+				Command:       "/bin/echo",
+				ResumeCommand: "/bin/echo --resume {{.SessionKey}} --effort low",
+				ResumeFlag:    "--resume",
+				ResumeStyle:   "flag",
+				PathCheck:     "true",
 				OptionsSchema: []config.ProviderOption{{
 					Key:  "effort",
 					Type: "select",
 					Choices: []config.OptionChoice{{
 						Value:    "high",
 						FlagArgs: []string{"--effort", "high"},
+					}, {
+						Value:    "low",
+						FlagArgs: []string{"--effort", "low"},
 					}},
 				}},
 			},
@@ -739,9 +745,10 @@ func TestResolvedWorkerRuntimeWithConfigReplaysTemplateOverridesOnResume(t *test
 	}
 
 	resolved, err := resolvedWorkerRuntimeWithConfigAndMetadata(cityDir, cfg, session.Info{
-		Template: "myrig/worker",
-		Command:  "/bin/echo",
-		WorkDir:  cityDir,
+		Template:   "myrig/worker",
+		Command:    "/bin/echo",
+		WorkDir:    cityDir,
+		SessionKey: "abc-123",
 	}, "", map[string]string{
 		"template_overrides": `{"effort":"high","initial_message":"hello"}`,
 	})
@@ -753,6 +760,9 @@ func TestResolvedWorkerRuntimeWithConfigReplaysTemplateOverridesOnResume(t *test
 	}
 	if got, want := resolved.Command, "/bin/echo --effort high"; got != want {
 		t.Fatalf("Command = %q, want %q", got, want)
+	}
+	if got, want := resolved.Resume.ResumeCommand, "/bin/echo --resume {{.SessionKey}} --effort high"; got != want {
+		t.Fatalf("Resume.ResumeCommand = %q, want %q", got, want)
 	}
 }
 

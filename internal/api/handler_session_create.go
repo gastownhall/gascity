@@ -352,9 +352,11 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	extraMeta := map[string]string{
-		"session_origin": "manual",
+	extraMeta := sessionTemplateOverridesMetadata(body.Options, body.Message)
+	if extraMeta == nil {
+		extraMeta = make(map[string]string)
 	}
+	extraMeta["session_origin"] = "manual"
 	if transport == "acp" {
 		extraMeta, err = session.WithStoredMCPMetadata(extraMeta, mcpIdentity, mcpServers)
 		if err != nil {
