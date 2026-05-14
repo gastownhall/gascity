@@ -17,6 +17,35 @@ import (
 	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
+const validManagedDoltRepoStateJSON = `{"head":"refs/heads/main","remotes":{},"backups":{},"branches":{}}`
+
+var managedDoltRuntimeLayoutEnvKeys = []string{
+	"GC_CITY_RUNTIME_DIR",
+	"GC_PACK_STATE_DIR",
+	"GC_DOLT_DATA_DIR",
+	"GC_DOLT_LOG_FILE",
+	"GC_DOLT_STATE_FILE",
+	"GC_DOLT_PID_FILE",
+	"GC_DOLT_LOCK_FILE",
+	"GC_DOLT_CONFIG_FILE",
+}
+
+func clearManagedDoltRuntimeLayoutTestEnv() error {
+	for _, key := range managedDoltRuntimeLayoutEnvKeys {
+		if err := os.Unsetenv(key); err != nil {
+			return fmt.Errorf("unsetting %s: %w", key, err)
+		}
+	}
+	return nil
+}
+
+func isolateManagedDoltRuntimeLayoutEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range managedDoltRuntimeLayoutEnvKeys {
+		t.Setenv(key, "")
+	}
+}
+
 func parseDoltStateOutput(t *testing.T, out string) map[string]string {
 	t.Helper()
 	values := map[string]string{}
@@ -1340,6 +1369,7 @@ func TestDoltStatePreflightCleanCmdRemovesStaleArtifacts(t *testing.T) {
 	if _, err := exec.LookPath("lsof"); err != nil {
 		t.Skip("lsof not installed")
 	}
+	isolateManagedDoltRuntimeLayoutEnv(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -1368,7 +1398,7 @@ func TestDoltStatePreflightCleanCmdRemovesStaleArtifacts(t *testing.T) {
 	// database (see e.g. gascity's own hq dir). Preflight now requires both
 	// files; absence of repo_state.json is itself a quarantine reason.
 	healthyRepoState := filepath.Join(layout.DataDir, "healthy", ".dolt", "repo_state.json")
-	if err := os.WriteFile(healthyRepoState, []byte(`{"head":"refs/heads/main","remotes":{},"backups":{},"branches":{}}`), 0o644); err != nil {
+	if err := os.WriteFile(healthyRepoState, []byte(validManagedDoltRepoStateJSON), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1419,6 +1449,7 @@ func TestDoltStatePreflightCleanQuarantinesManifestOnlyDatabase(t *testing.T) {
 	if _, err := exec.LookPath("lsof"); err != nil {
 		t.Skip("lsof not installed")
 	}
+	isolateManagedDoltRuntimeLayoutEnv(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -1459,6 +1490,7 @@ func TestDoltStatePreflightCleanQuarantinesMalformedRepoStateDatabase(t *testing
 	if _, err := exec.LookPath("lsof"); err != nil {
 		t.Skip("lsof not installed")
 	}
+	isolateManagedDoltRuntimeLayoutEnv(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -1496,6 +1528,7 @@ func TestDoltStatePreflightCleanCmdPreservesLiveArtifacts(t *testing.T) {
 	if _, err := exec.LookPath("lsof"); err != nil {
 		t.Skip("lsof not installed")
 	}
+	isolateManagedDoltRuntimeLayoutEnv(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -1507,6 +1540,10 @@ func TestDoltStatePreflightCleanCmdPreservesLiveArtifacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(liveManifest, []byte("ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	liveRepoState := filepath.Join(layout.DataDir, "live", ".dolt", "repo_state.json")
+	if err := os.WriteFile(liveRepoState, []byte(validManagedDoltRepoStateJSON), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	liveLock := filepath.Join(layout.DataDir, "live", ".dolt", "noms", "LOCK")

@@ -110,7 +110,7 @@ func TestQuarantinePhantomManagedDoltDatabasesQuarantinesRetiredReplacementDB(t 
 	dataDir := t.TempDir()
 	// healthy fixtures need both noms/manifest and repo_state.json — preflight
 	// now requires both to deem a non-retired managed-dolt directory servable.
-	healthyRepoState := []byte(`{"head":"refs/heads/main","remotes":{},"backups":{},"branches":{}}`)
+	healthyRepoState := []byte(validManagedDoltRepoStateJSON)
 	activeManifest := filepath.Join(dataDir, "ga", ".dolt", "noms", "manifest")
 	if err := os.MkdirAll(filepath.Dir(activeManifest), 0o755); err != nil {
 		t.Fatal(err)
@@ -156,6 +156,33 @@ func TestQuarantinePhantomManagedDoltDatabasesQuarantinesRetiredReplacementDB(t 
 	quarantined := filepath.Join(dataDir, ".quarantine", "20260429T162000-ga.replaced-20260428T100722Z", ".dolt", "noms", "manifest")
 	if _, err := os.Stat(quarantined); err != nil {
 		t.Fatalf("quarantined manifest stat: %v", err)
+	}
+}
+
+func TestQuarantinePhantomManagedDoltDatabasesQuarantinesUnreadableRepoState(t *testing.T) {
+	dataDir := t.TempDir()
+	doltDir := filepath.Join(dataDir, "unreadable_repo_state", ".dolt")
+	if err := os.MkdirAll(filepath.Join(doltDir, "noms"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(doltDir, "noms", "manifest"), []byte("ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(doltDir, "repo_state.json"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Date(2026, 4, 29, 16, 20, 0, 0, time.UTC)
+	if err := quarantinePhantomManagedDoltDatabases(dataDir, now); err != nil {
+		t.Fatalf("quarantinePhantomManagedDoltDatabases: %v", err)
+	}
+
+	if _, err := os.Stat(doltDir); !os.IsNotExist(err) {
+		t.Fatalf("unreadable repo_state database stat err = %v, want moved out of data dir", err)
+	}
+	quarantined := filepath.Join(dataDir, ".quarantine", "20260429T162000-unreadable_repo_state", ".dolt", "repo_state.json")
+	if _, err := os.Stat(quarantined); err != nil {
+		t.Fatalf("quarantined repo_state stat: %v", err)
 	}
 }
 

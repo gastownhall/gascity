@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -157,6 +158,9 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv("XDG_RUNTIME_DIR", runtimeDir); err != nil {
 		panic(err)
 	}
+	if err := clearManagedDoltRuntimeLayoutTestEnv(); err != nil {
+		panic(err)
+	}
 	providerStubDir, err := installTestProviderStubs()
 	if err != nil {
 		panic(err)
@@ -177,6 +181,27 @@ func TestMain(m *testing.M) {
 		},
 		"bd": bdTestCmd,
 	})
+}
+
+func TestTestMainClearsManagedDoltRuntimeLayoutEnv(t *testing.T) {
+	if os.Getenv("GC_MANAGED_DOLT_ENV_CHILD") == "1" {
+		for _, key := range managedDoltRuntimeLayoutEnvKeys {
+			if got := os.Getenv(key); got != "" {
+				t.Fatalf("%s = %q, want TestMain to clear it", key, got)
+			}
+		}
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestTestMainClearsManagedDoltRuntimeLayoutEnv$")
+	cmd.Env = append(os.Environ(), "GC_MANAGED_DOLT_ENV_CHILD=1")
+	for _, key := range managedDoltRuntimeLayoutEnvKeys {
+		cmd.Env = append(cmd.Env, key+"="+filepath.Join(t.TempDir(), key))
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("child test failed: %v\n%s", err, out)
+	}
 }
 
 func TestTutorial01(t *testing.T) {
