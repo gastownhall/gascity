@@ -1998,6 +1998,12 @@ Use --adopt to register a directory that already has a fully initialized
 .beads/ directory (must include both metadata.json and config.yaml).
 Skips beads init; the git repo check remains informational.
 
+A rig directory that ships a gc-flavored .beads/config.yaml but no store
+(no metadata.json, no dolt/) is auto-detected: gc rig add will honor the
+shipped config and initialize the store in place, without requiring
+--adopt. This matches the common shape of a team-shared rig that commits
+its gc config but gitignores the Dolt data.
+
 ```
 gc rig add <path> [flags]
 ```
