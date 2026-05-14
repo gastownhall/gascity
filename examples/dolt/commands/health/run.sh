@@ -268,6 +268,28 @@ if [ "${GC_HEALTH_SKIP_ZOMBIE_SCAN:-0}" != "1" ]; then
       *sql-server*) ;;
       *) continue ;;
     esac
+    # Skip dolt servers whose --config path resolves outside this city's
+    # directory: they belong to a sibling workspace (another Gas City,
+    # Gas Town, or a standalone service like faultline) and are not
+    # zombies of ours. Servers with no explicit --config remain
+    # ambiguous and fall through to be evaluated as zombies.
+    #
+    # Without this guard, on a host running more than one Gas City /
+    # Gas Town / dolt-backed service, every workspace's zombie scan
+    # would flag every sibling's legitimately-running dolt — and the
+    # Gastown Deacon patrol formula instructs killing zombie PIDs.
+    config_arg=$(printf '%s\n' "$cmd" | awk '{
+      for (i=1; i<=NF; i++) {
+        if ($i == "--config" && i+1 <= NF) { print $(i+1); exit }
+        if (index($i, "--config=") == 1) { print substr($i, 10); exit }
+      }
+    }')
+    if [ -n "$config_arg" ]; then
+      case "$config_arg" in
+        "$GC_CITY_PATH"/*) ;;
+        *) continue ;;
+      esac
+    fi
     zombie_count=$((zombie_count + 1))
     zombie_pids="$zombie_pids $p"
   done
