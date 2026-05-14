@@ -474,6 +474,8 @@ push_archive_main() {
     local fetch_err
     local rebase_err
     local push_err
+    local push_attempt
+    local push_succeeded
 
     # Retain only the last ~20 lines of stderr so an extremely chatty failure
     # doesn't drown the escalation body.
@@ -569,9 +571,43 @@ ESCALATION
         fi
     fi
 
-    if ! push_err=$(git push origin main -q 2>&1 >/dev/null); then
+    # Retry-with-backoff for transient push failures. Concurrent rigs pushing
+    # to the same local bare archive can race on the ref-update lock or produce
+    # non-fast-forward (a sibling rig commits between our fetch and our push).
+    # Retry up to 3 times with 1-5s jitter; re-fetch and rebase before each
+    # retry to absorb any new commits.
+    push_succeeded=false
+    for push_attempt in 1 2 3; do
+        if push_err=$(git push origin main -q 2>&1 >/dev/null); then
+            push_succeeded=true
+            break
+        fi
+
+        if [ "$push_attempt" -lt 3 ]; then
+            sleep "$(awk 'BEGIN{srand(); printf "%.2f", 1 + rand() * 4}')"
+
+            # Refresh origin tracking before retry — a sibling rig may have
+            # moved the ref while we slept.
+            if fetch_err=$(git fetch origin main -q 2>&1 >/dev/null); then
+                if git rev-parse --verify refs/remotes/origin/main >/dev/null 2>&1 \
+                    && ! git merge-base --is-ancestor refs/remotes/origin/main HEAD >/dev/null 2>&1; then
+                    if ! rebase_err=$(git rebase refs/remotes/origin/main 2>&1 >/dev/null); then
+                        git rebase --abort >/dev/null 2>&1 || true
+                        record_archive_push_failure \
+                            "jsonl-export: rebase onto origin/main failed during retry $push_attempt" \
+                            "$rebase_err"
+                        return 1
+                    fi
+                fi
+            fi
+            # If fetch failed, fall through and retry the push anyway —
+            # origin may just be momentarily unavailable.
+        fi
+    done
+
+    if [ "$push_succeeded" != "true" ]; then
         record_archive_push_failure \
-            "jsonl-export: pushing archive main failed" \
+            "jsonl-export: pushing archive main failed after 3 attempts" \
             "$push_err"
         return 1
     fi
