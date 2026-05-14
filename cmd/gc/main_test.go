@@ -140,7 +140,36 @@ func explicitAgents(agents []config.Agent) []config.Agent {
 	return out
 }
 
+// scrubAmbientGCBeadsEnv unsets every GC_*/BEADS_* env var inherited from
+// the host shell before tests run. A polecat session that exec's `go test`
+// in this package exports GC_BEADS=bd, BEADS_DIR=…, GC_CITY_PATH=…, etc.;
+// any in-process test that opens a city bead store (openCityStoreAt, the
+// caching reconciler in newControllerState, MaterializeBuiltinPacks +
+// ensureBeadsProvider) would otherwise read those via os.Getenv, switch to
+// the "bd" provider, and trigger the gc-beads-bd lifecycle script to spawn
+// a managed dolt sql-server pointed at the test's t.TempDir(). The dolt
+// child is detached via nohup, so when the test exits without a matching
+// stop the server reparents to systemd --user and lingers; sustained test
+// runs have accumulated 100+ orphans (~18 GB RSS) before manual cleanup.
+// The corresponding exec.Cmd path is already protected by
+// sanitizedBaseEnv; this closes the in-process leak. Tests that need a
+// specific value set it with t.Setenv (which restores after the test).
+// Regression for gastownhall/gascity#ga-7w42.
+func scrubAmbientGCBeadsEnv() {
+	for _, kv := range os.Environ() {
+		eq := strings.IndexByte(kv, '=')
+		if eq <= 0 {
+			continue
+		}
+		name := kv[:eq]
+		if strings.HasPrefix(name, "GC_") || strings.HasPrefix(name, "BEADS_") {
+			_ = os.Unsetenv(name)
+		}
+	}
+}
+
 func TestMain(m *testing.M) {
+	scrubAmbientGCBeadsEnv()
 	gcHome, err := os.MkdirTemp("", "gascity-gc-home-*")
 	if err != nil {
 		panic(err)
@@ -213,6 +242,46 @@ func newTestscriptParams(t *testing.T, files ...string) testscript.Params {
 		params.Files = append([]string(nil), files...)
 	}
 	return params
+}
+
+// TestMainScrubsAmbientGCBeadsEnv pins the TestMain invariant that all
+// GC_*/BEADS_* env vars inherited from the host shell are unset before any
+// test runs. Polecat sessions export GC_BEADS=bd, BEADS_DIR=…, etc., and
+// in-process callers of openCityStoreAt / ensureBeadsProvider read those via
+// os.Getenv. Without the scrub the bd provider wins over a test's explicit
+// city.toml provider="file", which spawns a dolt sql-server for the test's
+// t.TempDir() that nothing kills on test exit. Regression for ga-7w42.
+func TestMainScrubsAmbientGCBeadsEnv(t *testing.T) {
+	// GC_HOME is intentionally re-set by TestMain to an isolated temp dir,
+	// so exclude it from the scrubbed-set check.
+	for _, name := range []string{
+		"GC_BEADS",
+		"GC_BEADS_SCOPE_ROOT",
+		"GC_CITY",
+		"GC_CITY_PATH",
+		"GC_CITY_RUNTIME_DIR",
+		"GC_DIR",
+		"GC_DOLT_HOST",
+		"GC_DOLT_PORT",
+		"GC_DOLT_USER",
+		"GC_PACK_DIR",
+		"GC_PACK_NAME",
+		"GC_PACK_STATE_DIR",
+		"GC_RIG",
+		"GC_RIG_ROOT",
+		"GC_SESSION_ID",
+		"GC_SESSION_NAME",
+		"BEADS_DIR",
+		"BEADS_ACTOR",
+		"BEADS_DOLT_AUTO_START",
+		"BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_SERVER_USER",
+	} {
+		if v := os.Getenv(name); v != "" {
+			t.Errorf("%s = %q after TestMain scrub, want empty (ambient env leak)", name, v)
+		}
+	}
 }
 
 // --- gc version ---
