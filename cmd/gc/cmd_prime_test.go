@@ -20,7 +20,7 @@ func TestBuildPrimeContextFallsBackToConfiguredRigRoot(t *testing.T) {
 
 	ctx := buildPrimeContext("/city", "test-city", &config.Agent{Name: "polecat", Dir: "demo"}, []config.Rig{
 		{Name: "demo", Path: "/repos/demo", Prefix: "dm"},
-	}, nil)
+	}, nil, nil, nil)
 
 	if ctx.RigName != "demo" {
 		t.Fatalf("RigName = %q, want demo", ctx.RigName)
@@ -39,7 +39,7 @@ func TestBuildPrimeContextExpandsTemplateCommands(t *testing.T) {
 		Dir:        "demo",
 		WorkQuery:  "echo {{.CityName}} {{.Rig}} {{.AgentBase}}",
 		SlingQuery: "dispatch {} --route={{.Rig}}/{{.AgentBase}} --city={{.CityName}}",
-	}, rigs, nil)
+	}, rigs, nil, nil, nil)
 
 	if ctx.WorkQuery != "echo demo-city demo worker" {
 		t.Fatalf("WorkQuery = %q, want %q", ctx.WorkQuery, "echo demo-city demo worker")
@@ -56,7 +56,7 @@ func TestBuildPrimeContextLogsTemplateExpansionWarning(t *testing.T) {
 	ctx := buildPrimeContext(cityPath, "", &config.Agent{
 		Name:      "worker",
 		WorkQuery: "echo {{.Rig",
-	}, nil, &stderr)
+	}, nil, nil, nil, &stderr)
 
 	if ctx.WorkQuery != "echo {{.Rig" {
 		t.Fatalf("WorkQuery = %q, want raw command fallback", ctx.WorkQuery)
@@ -90,7 +90,7 @@ func TestBuildPrimeContextRendersBindingQualifiedRoute(t *testing.T) {
 		Name:        "polecat",
 		Dir:         "demo",
 		BindingName: "gastown",
-	}, []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}}, nil)
+	}, []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}}, nil, nil, nil)
 
 	if ctx.BindingName != "gastown" {
 		t.Fatalf("BindingName = %q, want gastown", ctx.BindingName)
@@ -151,7 +151,7 @@ func TestBuildPrimeContextPrefersGCAliasOverGCAgent(t *testing.T) {
 	t.Setenv("GC_DIR", "")
 	t.Setenv("GC_BRANCH", "")
 
-	ctx := buildPrimeContext("/city", "test-city", &config.Agent{Name: "mayor"}, nil, nil)
+	ctx := buildPrimeContext("/city", "test-city", &config.Agent{Name: "mayor"}, nil, nil, nil, nil)
 
 	if ctx.AgentName != "mayor" {
 		t.Errorf("AgentName = %q, want %q (should prefer GC_ALIAS over GC_AGENT)", ctx.AgentName, "mayor")
@@ -168,7 +168,7 @@ func TestBuildPrimeContextUsesAliasEvenWhenDifferentFromConfigName(t *testing.T)
 	t.Setenv("GC_DIR", "")
 	t.Setenv("GC_BRANCH", "")
 
-	ctx := buildPrimeContext("/city", "test-city", &config.Agent{Name: "mayor"}, nil, nil)
+	ctx := buildPrimeContext("/city", "test-city", &config.Agent{Name: "mayor"}, nil, nil, nil, nil)
 
 	if ctx.AgentName != "custom-alias" {
 		t.Errorf("AgentName = %q, want %q (should use GC_ALIAS even when it differs from config name)", ctx.AgentName, "custom-alias")
@@ -183,7 +183,7 @@ func TestBuildPrimeContextFallsBackToGCAgentWhenNoAlias(t *testing.T) {
 	t.Setenv("GC_DIR", "")
 	t.Setenv("GC_BRANCH", "")
 
-	ctx := buildPrimeContext("/city", "test-city", &config.Agent{Name: "mayor"}, nil, nil)
+	ctx := buildPrimeContext("/city", "test-city", &config.Agent{Name: "mayor"}, nil, nil, nil, nil)
 
 	if ctx.AgentName != "mayor" {
 		t.Errorf("AgentName = %q, want %q", ctx.AgentName, "mayor")

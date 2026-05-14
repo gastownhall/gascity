@@ -23,20 +23,22 @@ const (
 
 // PromptContext holds template data for prompt rendering.
 type PromptContext struct {
-	CityRoot      string
-	AgentName     string // qualified: "rig/polecat-1" or "mayor"
-	TemplateName  string // config name: "polecat" (template) or "mayor" (named backing template)
-	BindingName   string
-	BindingPrefix string
-	RigName       string
-	RigRoot       string
-	WorkDir       string
-	IssuePrefix   string
-	Branch        string
-	DefaultBranch string            // e.g. "main" — from git symbolic-ref origin/HEAD
-	WorkQuery     string            // command to find available work (from Agent.EffectiveWorkQuery)
-	SlingQuery    string            // command template to route work to this agent (from Agent.EffectiveSlingQuery)
-	Env           map[string]string // from Agent.Env — custom vars
+	CityRoot            string
+	AgentName           string // qualified: "rig/polecat-1" or "mayor"
+	TemplateName        string // config name: "polecat" (template) or "mayor" (named backing template)
+	BindingName         string
+	BindingPrefix       string
+	RigName             string
+	RigRoot             string
+	WorkDir             string
+	IssuePrefix         string
+	Branch              string
+	DefaultBranch       string // e.g. "main" — from git symbolic-ref origin/HEAD
+	ProviderKey         string // canonical provider family: "claude", "codex", "gemini", ...
+	ProviderDisplayName string // human-readable provider name: "Claude Code", "Codex CLI", ...
+	WorkQuery           string // command to find available work (from Agent.EffectiveWorkQuery)
+	SlingQuery          string // command template to route work to this agent (from Agent.EffectiveSlingQuery)
+	Env                 map[string]string
 }
 
 // renderPrompt reads a prompt template file and renders it with the given
@@ -67,8 +69,30 @@ func renderPrompt(fs fsys.FS, cityPath, cityName, templatePath string, ctx Promp
 		return raw
 	}
 
-	tmpl := template.New("prompt").
-		Funcs(promptFuncMap(cityName, sessionTemplate, store)).
+	// tmpl is captured by the templateFirst closure so it can look up
+	// sub-templates registered by {{ define }} blocks after Parse completes.
+	// Parse is single-receiver, so tmpl never moves once assigned below.
+	var tmpl *template.Template
+	funcs := promptFuncMap(cityName, sessionTemplate, store)
+	funcs["templateFirst"] = func(data any, names ...string) (string, error) {
+		if tmpl == nil {
+			return "", nil
+		}
+		for _, name := range names {
+			sub := tmpl.Lookup(name)
+			if sub == nil {
+				continue
+			}
+			var fb bytes.Buffer
+			if err := sub.Execute(&fb, data); err != nil {
+				return "", err
+			}
+			return fb.String(), nil
+		}
+		return "", nil
+	}
+	tmpl = template.New("prompt").
+		Funcs(funcs).
 		Option("missingkey=zero")
 
 	// Load shared templates from pack dirs (lower priority).
@@ -229,6 +253,8 @@ func buildTemplateData(ctx PromptContext) map[string]string {
 	m["IssuePrefix"] = ctx.IssuePrefix
 	m["Branch"] = ctx.Branch
 	m["DefaultBranch"] = ctx.DefaultBranch
+	m["ProviderKey"] = ctx.ProviderKey
+	m["ProviderDisplayName"] = ctx.ProviderDisplayName
 	m["WorkQuery"] = ctx.WorkQuery
 	m["SlingQuery"] = ctx.SlingQuery
 	return m

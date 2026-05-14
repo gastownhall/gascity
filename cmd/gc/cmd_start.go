@@ -734,6 +734,32 @@ func resolvedProviderLaunchFamily(resolved *config.ResolvedProvider) string {
 	return strings.TrimSpace(resolved.Name)
 }
 
+// resolvedProviderDisplayName returns the human-readable name for a resolved
+// provider. Lookup order: the provider's own ProviderSpec.DisplayName (custom
+// providers declared in city.toml), then the builtin spec for the family,
+// then the launch family key itself. Empty resolved → empty string.
+func resolvedProviderDisplayName(resolved *config.ResolvedProvider, cityProviders map[string]config.ProviderSpec) string {
+	if resolved == nil {
+		return ""
+	}
+	if name := strings.TrimSpace(resolved.Name); name != "" {
+		if spec, ok := cityProviders[name]; ok {
+			if dn := strings.TrimSpace(spec.DisplayName); dn != "" {
+				return dn
+			}
+		}
+	}
+	family := resolvedProviderLaunchFamily(resolved)
+	if family != "" {
+		if spec, ok := config.BuiltinProviders()[family]; ok {
+			if dn := strings.TrimSpace(spec.DisplayName); dn != "" {
+				return dn
+			}
+		}
+	}
+	return family
+}
+
 func resolvedProviderFamilyMetadata(resolved *config.ResolvedProvider) string {
 	if resolved == nil {
 		return ""

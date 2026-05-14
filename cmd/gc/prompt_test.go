@@ -726,3 +726,80 @@ func TestEffectivePromptFragmentsDedupsAcrossLayers(t *testing.T) {
 		}
 	}
 }
+
+// Regression for ga-la9y: synthesized chat-agent prompts reference
+// `templateFirst`, `.ProviderKey`, and `.ProviderDisplayName`. Before this
+// fix, `templateFirst` was undefined, so the whole template failed to parse
+// and renderPrompt silently fell back to raw text — agents saw literal
+// `{{ .WorkDir }}` etc. in their system prompt.
+func TestRenderPromptTemplateFirstSelectsDefinedTemplate(t *testing.T) {
+	f := fsys.NewFake()
+	body := `{{ define "ux-claude" -}}claude branch{{- end }}
+{{ define "ux-codex" -}}codex branch{{- end }}
+{{ define "ux-default" -}}default branch{{- end }}
+[{{ templateFirst . (printf "ux-%s" .ProviderKey) "ux-default" }}]`
+	f.Files["/city/agents/chat/prompt.template.md"] = []byte(body)
+
+	ctx := PromptContext{ProviderKey: "claude"}
+	got := renderPrompt(f, "/city", "", "agents/chat/prompt.template.md", ctx, "", io.Discard, nil, nil, nil)
+	if !strings.Contains(got, "[claude branch]") {
+		t.Errorf("renderPrompt(templateFirst claude) = %q, want output containing %q", got, "[claude branch]")
+	}
+}
+
+func TestRenderPromptTemplateFirstFallsThroughToDefault(t *testing.T) {
+	f := fsys.NewFake()
+	body := `{{ define "ux-claude" -}}claude branch{{- end }}
+{{ define "ux-default" -}}default branch{{- end }}
+[{{ templateFirst . (printf "ux-%s" .ProviderKey) "ux-default" }}]`
+	f.Files["/city/agents/chat/prompt.template.md"] = []byte(body)
+
+	// ProviderKey = "gemini" — no ux-gemini define → falls through to ux-default.
+	ctx := PromptContext{ProviderKey: "gemini"}
+	got := renderPrompt(f, "/city", "", "agents/chat/prompt.template.md", ctx, "", io.Discard, nil, nil, nil)
+	if !strings.Contains(got, "[default branch]") {
+		t.Errorf("renderPrompt(templateFirst fallthrough) = %q, want output containing %q", got, "[default branch]")
+	}
+}
+
+func TestRenderPromptTemplateFirstNoMatchReturnsEmpty(t *testing.T) {
+	f := fsys.NewFake()
+	body := `[{{ templateFirst . "missing-a" "missing-b" }}]`
+	f.Files["/city/agents/chat/prompt.template.md"] = []byte(body)
+	var stderr strings.Builder
+	got := renderPrompt(f, "/city", "", "agents/chat/prompt.template.md", PromptContext{}, "", &stderr, nil, nil, nil)
+	// Both named templates are missing → templateFirst returns empty without error.
+	if got != "[]" {
+		t.Errorf("renderPrompt(templateFirst no match) = %q, want %q", got, "[]")
+	}
+	if strings.Contains(stderr.String(), "prompt template") {
+		t.Errorf("stderr emitted parse warning when templates were merely missing: %q", stderr.String())
+	}
+}
+
+func TestRenderPromptProviderKeyAndDisplayName(t *testing.T) {
+	f := fsys.NewFake()
+	body := "Provider: {{ .ProviderDisplayName }} (key={{ .ProviderKey }})"
+	f.Files["/city/agents/chat/prompt.template.md"] = []byte(body)
+	ctx := PromptContext{ProviderKey: "claude", ProviderDisplayName: "Claude Code"}
+	got := renderPrompt(f, "/city", "", "agents/chat/prompt.template.md", ctx, "", io.Discard, nil, nil, nil)
+	want := "Provider: Claude Code (key=claude)"
+	if got != want {
+		t.Errorf("renderPrompt(provider fields) = %q, want %q", got, want)
+	}
+}
+
+func TestBuildTemplateDataProviderFields(t *testing.T) {
+	ctx := PromptContext{
+		ProviderKey:         "claude",
+		ProviderDisplayName: "Claude Code",
+		Env:                 map[string]string{"ProviderKey": "env-override", "ProviderDisplayName": "env-override"},
+	}
+	data := buildTemplateData(ctx)
+	if data["ProviderKey"] != "claude" {
+		t.Errorf("ProviderKey = %q, want %q (SDK overrides Env)", data["ProviderKey"], "claude")
+	}
+	if data["ProviderDisplayName"] != "Claude Code" {
+		t.Errorf("ProviderDisplayName = %q, want %q (SDK overrides Env)", data["ProviderDisplayName"], "Claude Code")
+	}
+}

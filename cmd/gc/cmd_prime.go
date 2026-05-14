@@ -254,7 +254,8 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 		if isAgentEffectivelySuspended(cfg, &a) {
 			return 0
 		}
-		if resolved, rErr := config.ResolveProvider(&a, &cfg.Workspace, cfg.Providers, exec.LookPath); rErr == nil && hookMode {
+		resolved, rErr := config.ResolveProvider(&a, &cfg.Workspace, cfg.Providers, exec.LookPath)
+		if rErr == nil && hookMode {
 			sessionName := os.Getenv("GC_SESSION_NAME")
 			if sessionName == "" {
 				sessionName = cliSessionName(cityPath, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
@@ -272,7 +273,7 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 		}
 		var ctx PromptContext
 		if a.PromptTemplate != "" || hookMode || sessionTemplateContext {
-			ctx = buildPrimeContext(cityPath, cityName, &a, cfg.Rigs, stderr)
+			ctx = buildPrimeContext(cityPath, cityName, &a, cfg.Rigs, resolved, cfg.Providers, stderr)
 		}
 		if a.PromptTemplate != "" {
 			fragments := effectivePromptFragments(
@@ -559,13 +560,15 @@ func findAgentByName(cfg *config.City, name string) (config.Agent, bool) {
 // buildPrimeContext constructs a PromptContext for gc prime. Uses GC_*
 // environment variables when running inside a managed session, falls back
 // to currentRigContext when run manually.
-func buildPrimeContext(cityPath, cityName string, a *config.Agent, rigs []config.Rig, stderr io.Writer) PromptContext {
+func buildPrimeContext(cityPath, cityName string, a *config.Agent, rigs []config.Rig, resolved *config.ResolvedProvider, cityProviders map[string]config.ProviderSpec, stderr io.Writer) PromptContext {
 	ctx := PromptContext{
-		CityRoot:      cityPath,
-		TemplateName:  a.Name,
-		BindingName:   a.BindingName,
-		BindingPrefix: a.BindingPrefix(),
-		Env:           a.Env,
+		CityRoot:            cityPath,
+		TemplateName:        a.Name,
+		BindingName:         a.BindingName,
+		BindingPrefix:       a.BindingPrefix(),
+		ProviderKey:         resolvedProviderLaunchFamily(resolved),
+		ProviderDisplayName: resolvedProviderDisplayName(resolved, cityProviders),
+		Env:                 a.Env,
 	}
 
 	// Agent identity: prefer GC_ALIAS, then GC_AGENT, else config.

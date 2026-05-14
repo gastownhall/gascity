@@ -855,6 +855,120 @@ prompt_template = "agents/mayor/prompt.template.md"
 	}
 }
 
+// TestResolveTemplateChatAgentPromptRendersProviderVarsAndTemplateFirst is
+// the end-to-end regression for ga-la9y. Chat-agent prompts synthesized by
+// `gc prompt synth` reference `{{ .ProviderKey }}`, `{{ .ProviderDisplayName }}`,
+// and the `templateFirst` template function. Before the fix, `templateFirst`
+// was undefined so the whole template failed to parse and renderPrompt fell
+// back to raw text — agents saw literal `{{ }}` in their system prompt.
+func TestResolveTemplateChatAgentPromptRendersProviderVarsAndTemplateFirst(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+
+	agentDir := filepath.Join(cityPath, "agents", "chat-claude")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	promptBody := `# {{ .AgentName }}
+Provider: {{ .ProviderDisplayName }} (key={{ .ProviderKey }})
+
+{{ define "ux-claude" -}}claude-branch{{- end }}
+{{ define "ux-codex" -}}codex-branch{{- end }}
+{{ define "ux-default" -}}default-branch{{- end }}
+
+UX: [{{ templateFirst . (printf "ux-%s" .ProviderKey) "ux-default" }}]
+`
+	if err := os.WriteFile(filepath.Join(agentDir, "prompt.template.md"), []byte(promptBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	params := &agentBuildParams{
+		cityName:  "city",
+		cityPath:  cityPath,
+		workspace: &config.Workspace{Provider: "claude"},
+		providers: map[string]config.ProviderSpec{
+			"claude": {Command: "echo", PromptMode: "none", DisplayName: "Claude Code"},
+		},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		beaconTime: testBeaconTime,
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+
+	cfgAgent := &config.Agent{
+		Name:           "chat-claude",
+		Provider:       "claude",
+		PromptTemplate: filepath.Join(agentDir, "prompt.template.md"),
+	}
+	tp, err := resolveTemplate(params, cfgAgent, cfgAgent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+
+	if !strings.Contains(tp.Prompt, "Provider: Claude Code (key=claude)") {
+		t.Errorf("prompt missing rendered provider fields:\n%s", tp.Prompt)
+	}
+	// Beacon contains its own template-style markers, so check the body
+	// for raw {{ that the renderer should have substituted.
+	if strings.Contains(tp.Prompt, "{{ .ProviderKey }}") || strings.Contains(tp.Prompt, "{{ .ProviderDisplayName }}") {
+		t.Errorf("prompt contains unrendered template expressions:\n%s", tp.Prompt)
+	}
+	if !strings.Contains(tp.Prompt, "UX: [claude-branch]") {
+		t.Errorf("prompt missing templateFirst output:\n%s", tp.Prompt)
+	}
+}
+
+// TestResolveTemplateChatAgentPromptFallsThroughTemplateFirstDefault verifies
+// the fallthrough leg of templateFirst when no provider-specific subtemplate
+// is defined, and that DisplayName falls back to the builtin spec.
+func TestResolveTemplateChatAgentPromptFallsThroughTemplateFirstDefault(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+
+	agentDir := filepath.Join(cityPath, "agents", "chat-gemini")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	promptBody := `Provider: {{ .ProviderDisplayName }}
+{{ define "ux-claude" -}}claude-branch{{- end }}
+{{ define "ux-default" -}}default-branch{{- end }}
+UX: [{{ templateFirst . (printf "ux-%s" .ProviderKey) "ux-default" }}]
+`
+	if err := os.WriteFile(filepath.Join(agentDir, "prompt.template.md"), []byte(promptBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	params := &agentBuildParams{
+		cityName:   "city",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Provider: "gemini"},
+		providers:  config.BuiltinProviders(),
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		beaconTime: testBeaconTime,
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+
+	cfgAgent := &config.Agent{
+		Name:           "chat-gemini",
+		Provider:       "gemini",
+		PromptTemplate: filepath.Join(agentDir, "prompt.template.md"),
+	}
+	tp, err := resolveTemplate(params, cfgAgent, cfgAgent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+
+	if !strings.Contains(tp.Prompt, "Provider: Gemini CLI") {
+		t.Errorf("prompt missing builtin display name fallback:\n%s", tp.Prompt)
+	}
+	if !strings.Contains(tp.Prompt, "UX: [default-branch]") {
+		t.Errorf("prompt missing templateFirst fallthrough output:\n%s", tp.Prompt)
+	}
+}
+
 func TestResolveTemplateIncludingPackDefaultsDoNotBleedAcrossNestedImportBoundaries(t *testing.T) {
 	cityPath := t.TempDir()
 	write := func(rel, data string) {
