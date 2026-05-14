@@ -128,6 +128,48 @@ func TestEmbeddedMetaAgentAuthorPromptRendersCityContext(t *testing.T) {
 }
 
 func TestEmbeddedMetaAgentAuthorPromptRendersRigContext(t *testing.T) {
+	// Use a distinctive default-branch value ("trunk-99x") that won't
+	// collide with the example "main" mentioned in the meta-prompt's
+	// runtime-variables reference list.
+	got, err := renderMetaPrompt(string(metaAgentAuthorPrompt), metaPromptCtx{
+		Role:                "polecat",
+		ProviderKey:         "codex",
+		ProviderDisplayName: "Codex CLI",
+		ContextType:         "rig",
+		CityName:            "city-x",
+		CityPath:            "/tmp/city-x",
+		RigName:             "myrepo",
+		RigPath:             "/Users/test/myrepo",
+		RigDefaultBranch:    "trunk-99x",
+	})
+	if err != nil {
+		t.Fatalf("embedded meta-prompt failed to render (rig context): %v", err)
+	}
+	if !strings.Contains(got, "myrepo") {
+		t.Errorf("rig-context render should mention rig name 'myrepo'")
+	}
+	if !strings.Contains(got, "/Users/test/myrepo") {
+		t.Errorf("rig-context render should mention rig path")
+	}
+	if !strings.Contains(got, "trunk-99x") {
+		t.Errorf("rig-context render should resolve RigDefaultBranch into the rendered text")
+	}
+	if strings.Contains(got, "HQ-only") {
+		t.Errorf("rig-context render should NOT include city-branch HQ-only content")
+	}
+}
+
+// TestEmbeddedMetaAgentAuthorPromptDirectsLLMToUseRuntimePlaceholdersForRig
+// verifies the portability fix for ga-99x: the rendered rig-context
+// meta-prompt must show the LLM the literal `{{ .RigName }}`,
+// `{{ .RigRoot }}`, `{{ .DefaultBranch }}` runtime placeholders it should
+// use in the output template (instead of baking the resolved values like
+// "myrepo" / "/Users/test/myrepo" / "main" into the generated body).
+//
+// Without these literals visible in the LLM's brief, it sees only the
+// resolved values and produces a non-portable template that hard-codes
+// the rig it was synthesized for.
+func TestEmbeddedMetaAgentAuthorPromptDirectsLLMToUseRuntimePlaceholdersForRig(t *testing.T) {
 	got, err := renderMetaPrompt(string(metaAgentAuthorPrompt), metaPromptCtx{
 		Role:                "polecat",
 		ProviderKey:         "codex",
@@ -142,17 +184,72 @@ func TestEmbeddedMetaAgentAuthorPromptRendersRigContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("embedded meta-prompt failed to render (rig context): %v", err)
 	}
-	if !strings.Contains(got, "myrepo") {
-		t.Errorf("rig-context render should mention rig name 'myrepo'")
+	// Literal runtime placeholders the LLM should embed in its output.
+	wantLiterals := []string{
+		"{{ .RigName }}",
+		"{{ .RigRoot }}",
+		"{{ .DefaultBranch }}",
+		"{{ .CityRoot }}",
+		"{{ .WorkDir }}",
 	}
-	if !strings.Contains(got, "/Users/test/myrepo") {
-		t.Errorf("rig-context render should mention rig path")
+	for _, want := range wantLiterals {
+		if !strings.Contains(got, want) {
+			t.Errorf("rig-context meta-prompt must surface literal %q as a runtime placeholder for the LLM to use\n--- got ---\n%s", want, got)
+		}
 	}
-	if !strings.Contains(got, "Default branch:  main") {
-		t.Errorf("rig-context render should mention default branch")
+}
+
+// TestEmbeddedMetaAgentAuthorPromptHasPortabilityRuleForRig verifies that
+// the rendered rig-context meta-prompt contains an explicit instruction
+// telling the LLM not to bake resolved rig-specific values into the
+// generated template body. The exact wording is allowed to drift, but the
+// "portability" framing must be present.
+func TestEmbeddedMetaAgentAuthorPromptHasPortabilityRuleForRig(t *testing.T) {
+	got, err := renderMetaPrompt(string(metaAgentAuthorPrompt), metaPromptCtx{
+		Role:                "polecat",
+		ProviderKey:         "codex",
+		ProviderDisplayName: "Codex CLI",
+		ContextType:         "rig",
+		CityName:            "city-x",
+		CityPath:            "/tmp/city-x",
+		RigName:             "myrepo",
+		RigPath:             "/Users/test/myrepo",
+		RigDefaultBranch:    "main",
+	})
+	if err != nil {
+		t.Fatalf("embedded meta-prompt failed to render (rig context): %v", err)
 	}
-	if strings.Contains(got, "HQ-only") {
-		t.Errorf("rig-context render should NOT include city-branch HQ-only content")
+	lowered := strings.ToLower(got)
+	if !strings.Contains(lowered, "portab") {
+		t.Errorf("rig-context meta-prompt must include a portability rule explicitly\n--- got ---\n%s", got)
+	}
+}
+
+// TestEmbeddedMetaAgentAuthorPromptDirectsLLMToUseRuntimePlaceholdersForCity
+// is the city-context counterpart: the rendered HQ-only meta-prompt must
+// still surface `{{ .CityRoot }}` and `{{ .WorkDir }}` literally so the
+// LLM uses them as runtime placeholders rather than baking in the
+// resolved city path.
+func TestEmbeddedMetaAgentAuthorPromptDirectsLLMToUseRuntimePlaceholdersForCity(t *testing.T) {
+	got, err := renderMetaPrompt(string(metaAgentAuthorPrompt), metaPromptCtx{
+		Role:                "mayor",
+		ProviderKey:         "claude",
+		ProviderDisplayName: "Claude Code",
+		ContextType:         "city",
+		CityName:            "test-city",
+		CityPath:            "/tmp/city",
+	})
+	if err != nil {
+		t.Fatalf("embedded meta-prompt failed to render (city context): %v", err)
+	}
+	wantLiterals := []string{
+		"{{ .CityRoot }}",
+		"{{ .WorkDir }}",
+	}
+	for _, want := range wantLiterals {
+		if !strings.Contains(got, want) {
+			t.Errorf("city-context meta-prompt must surface literal %q as a runtime placeholder for the LLM to use\n--- got ---\n%s", want, got)
+		}
 	}
 }
 
@@ -326,7 +423,8 @@ func TestRunPromptSynthRigContextLooksUpRigInCityToml(t *testing.T) {
 		"Context type: rig",
 		"myproj",
 		rigPath,
-		"Default branch:  develop",
+		"Default branch",
+		"develop",
 	}
 	for _, want := range wantSubs {
 		if !strings.Contains(runner.gotPrompt, want) {
