@@ -283,7 +283,7 @@ Most importantly, it aligns with the mental model people tend to expect:
 
 The recommended next step is:
 
-1. socialize this note with Chris and Julian
+1. socialize this note and gather product feedback
 2. confirm the explicit `[[exports]]` direction
 3. queue the implementation work behind the current PackV2 deprecation,
    `gc pack`, and pack registry waves
