@@ -2082,13 +2082,27 @@ func legacyPackDoctors(fs fsys.FS, entries []PackDoctorEntry, packDir, packName 
 
 // applyPackGlobals appends [global].session_live commands from packs
 // to matching agents. City-level globals affect ALL agents. Rig-level
-// globals affect only agents in that rig.
+// globals affect only agents in that rig. Each named pack contributes
+// at most once per agent: if the same pack is loaded at both city and
+// rig scope, its globals are not double-applied.
 func applyPackGlobals(cfg *City) {
+	applied := make([]map[string]bool, len(cfg.Agents))
+	apply := func(idx int, g ResolvedPackGlobal) {
+		if g.PackName != "" {
+			if applied[idx] == nil {
+				applied[idx] = make(map[string]bool)
+			}
+			if applied[idx][g.PackName] {
+				return
+			}
+			applied[idx][g.PackName] = true
+		}
+		cfg.Agents[idx].SessionLive = append(cfg.Agents[idx].SessionLive, g.SessionLive...)
+	}
 	// City-level globals → all agents.
 	for _, g := range cfg.PackGlobals {
 		for i := range cfg.Agents {
-			cfg.Agents[i].SessionLive = append(
-				cfg.Agents[i].SessionLive, g.SessionLive...)
+			apply(i, g)
 		}
 	}
 	// Rig-level globals → only that rig's agents.
@@ -2096,10 +2110,45 @@ func applyPackGlobals(cfg *City) {
 		for _, g := range globals {
 			for i := range cfg.Agents {
 				if cfg.Agents[i].Dir == rigName {
-					cfg.Agents[i].SessionLive = append(
-						cfg.Agents[i].SessionLive, g.SessionLive...)
+					apply(i, g)
 				}
 			}
+		}
+	}
+}
+
+// applyDefaultRigImports merges [defaults.rig.imports] entries into each
+// rig's Imports map for binding names the rig hasn't already declared
+// itself. The pack.toml [defaults.rig.imports] section is the single
+// source of truth for which packs apply to every rig — gc rig add no
+// longer needs to copy them into city.toml's [rigs.imports.*].
+//
+// A binding the rig already sets (with any source) wins, allowing per-rig
+// overrides. A binding that points at the same source path as the default
+// is treated as redundant declaration: the explicit entry stays, the
+// default is skipped, and downstream pack loading sees a single import.
+func applyDefaultRigImports(cfg *City) {
+	if len(cfg.DefaultRigImports) == 0 {
+		return
+	}
+	order := cfg.DefaultRigImportOrder
+	if len(order) == 0 {
+		order = make([]string, 0, len(cfg.DefaultRigImports))
+		for name := range cfg.DefaultRigImports {
+			order = append(order, name)
+		}
+		sort.Strings(order)
+	}
+	for i := range cfg.Rigs {
+		rig := &cfg.Rigs[i]
+		for _, name := range order {
+			if _, ok := rig.Imports[name]; ok {
+				continue
+			}
+			if rig.Imports == nil {
+				rig.Imports = make(map[string]Import)
+			}
+			rig.Imports[name] = cfg.DefaultRigImports[name]
 		}
 	}
 }
