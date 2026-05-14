@@ -1,102 +1,73 @@
-# Release gate — PG-auth slices 1+2+3 (ga-6zqpw, ga-pnqg.1)
+# Release gate - PG-auth slices 1+2+3 (ga-6zqpw, ga-pnqg.1)
 
-**Verdict:** PASS
+**Verdict:** PASS after local maintainer fixups; requires a fresh review pass
+before merge.
 
-- Primary review bead: `ga-6zqpw` (slice 3 review re-created after fix+rebase)
-- Closes: `ga-pnqg.1` (slice 1 review, original SHA b7015a05 → rebased
-  to 31fa03c1, content-identical)
+- Primary review bead: `ga-6zqpw`
+- Workflow review root: `ga-st3pu8g`
+- PR: `gastownhall/gascity#1792`
 - Branch: `quad341:builder/ga-wvka-1`
-- HEAD: `93eec8b9`
-- Rebase base: `origin/main` 8a761423 (current `origin/main` 5f1a686d
-  is 13 commits further; merge tested clean — see Validation)
-- Diff: 6 commits ahead, 22 files, +2436 / -17
+- Rebase base: `origin/main` `fbc06f8d8`
+- Stack: 10 commits ahead of `origin/main`
 
-## Review-attempt addendum
+## Current stack
 
-This gate was originally written for `93eec8b9`. The PR branch later moved
-through `04b3f3262` (`fix(pg-auth): complete backend env projection`) to address
-adopt-review findings. Review attempts 2 and 3 covered that later head; attempt
-3 requested the maintainer fixup that propagates remaining Postgres projection
-errors, preserves `#` in credentials-file passwords, and tightens the managed
-Dolt runtime-unavailable sentinel. The maintainer fixup is validated by the
-focused commands recorded in the adopt-review attempt artifacts.
+| # | Subject |
+|---|---------|
+| 1 | `feat(pgauth): add Postgres credential resolver mirroring internal/doltauth` |
+| 2 | `feat(contract): add Postgres MetadataState fields with parse validation` |
+| 3 | `fix(contract): correct misspell 'behaviour' -> 'behavior'` |
+| 4 | `feat(bd_env): wire pgauth into gc bd subprocess env` |
+| 5 | `docs(bd_env): drop historical rename comment from godoc` |
+| 6 | `fix(lint): resolve four golangci findings on PG-auth slice 2/3 stack` |
+| 7 | `chore: release gate PASS for ga-6zqpw + ga-pnqg.1 (PG-auth slices 1+2+3)` |
+| 8 | `fix(pg-auth): complete backend env projection` |
+| 9 | `fix(pg-auth): surface remaining projection errors` |
+| 10 | `fix(pg-auth): keep order env postgres-only` |
 
-## Commits in this PR
+## Attempt-5 maintainer fixups
 
-| # | SHA | Subject | Slice |
-|---|-----|---------|-------|
-| 1 | `871313ef` | feat(pgauth): add Postgres credential resolver | 2 (resolver) |
-| 2 | `31fa03c1` | feat(contract): add Postgres MetadataState fields | 1 (parse validation) |
-| 3 | `4e21a4fe` | fix(contract): correct misspell 'behaviour' → 'behavior' | 2 cleanup |
-| 4 | `6055f8c5` | feat(bd_env): wire pgauth into gc bd subprocess env | 3 (main) |
-| 5 | `0a6c087e` | docs(bd_env): drop historical rename comment from godoc | 3 cleanup |
-| 6 | `93eec8b9` | fix(lint): resolve four golangci findings | 3 lint cleanup |
+The attempt-5 review blocked on stale base and backend-projection regressions.
+This local fixup:
 
-## Criteria
+- rebases the PR stack onto `origin/main` `fbc06f8d8`, preserving current-main
+  behavior from the API/hook/session/order work that landed after the previous
+  base;
+- projects city-level Postgres metadata for inherited rig scopes instead of
+  falling back to Dolt;
+- treats inherited city Postgres scopes as external PG endpoints in transport
+  errors, so managed Dolt recovery is not attempted;
+- restores Dolt env-override fallback when the managed city runtime is
+  unavailable, while keeping `.invalid` ambient sentinel hosts scrubbed;
+- keeps `TestGcBdRejectsGCBeadsFileOverride` isolated from inherited Beads
+  environment variables;
+- deprecates silent env-wrapper call sites in favor of the `*WithError`
+  variants where Postgres projection can fail; and
+- removes the unreachable order-dispatch output log from the env-build error
+  path.
 
-| # | Criterion | Verdict | Evidence |
-|---|-----------|---------|----------|
-| 1 | Reviewer PASS verdict in bead notes | PASS | `gascity/reviewer` PASS at HEAD `ea9af929` (pre-lint-fix); fix-up commit 93eec8b9 is mechanical (4 lint findings: misspell, unused param, exported-const doc, gofumpt). |
-| 2 | Acceptance criteria met | PASS | All 3 slices' AC verified by reviewer; chain functional end-to-end per builder + reviewer notes. |
-| 3 | Tests pass on final branch | PASS | `go test ./internal/pgauth ./internal/beads -count=1` — PASS on as-is HEAD AND on test merge into `origin/main`. |
-| 4 | No high-severity review findings open | PASS | All HIGH lint findings addressed in commit 93eec8b9; reviewer findings list empty after re-review. |
-| 5 | Working tree clean | PASS | `git status` clean before gate-file commit. |
-| 6 | Branch diverges cleanly from main | PASS | Test merge into `origin/main` 5f1a686d succeeded with **no conflicts** (auto-merge clean across 13 main-side commits since rebase base). |
+## Operator note
 
-## Slice 1 review re-application
+PG-auth slices 1+2+3 deliberately make canonical `metadata.json` validation
+strict. E1-E5 parse failures now surface as command errors or skipped
+controller iterations instead of silently building a partial bd environment.
+Operators should fix rejected metadata before expecting pool, session, order,
+or controller probe work for that scope to continue.
 
-The original ga-pnqg.1 (slice 1) review was at commit b7015a05 on
-branch `builder/ga-pnqg-1`. The rebased branch `builder/ga-wvka-1`
-carries the same slice-1 work as commit `31fa03c1`. Verified
-**content-identical** by comparing patches:
+## Validation
 
-```
-git show 31fa03c1 --pretty=format: > A
-git show b7015a05 --pretty=format: > B
-diff A B  # 0 lines of difference
-```
+- `git diff --check origin/main..HEAD` - PASS
+- `go test ./internal/pgauth ./internal/beads/contract` - PASS
+- Focused cmd/gc regression suite for PG projection, inherited city PG,
+  env-override fallback, order env, and Beads override rejection - PASS
+- `GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=10m ./scripts/test-go-test-shard ./cmd/gc <shard> 6` for shards 1-6 - PASS
+- `timeout 300s go test ./cmd/gc ./internal/pgauth ./internal/beads/contract`
+  - TIMED OUT with no diagnostics; replaced by the passing package-specific
+  and sharded cmd/gc validation above.
 
-The slice-1 reviewer verdict (in `ga-pnqg.1` notes) therefore applies
-unchanged.
+## Review status
 
-## Validation (deployer re-run on `deploy/ga-6zqpw` at HEAD `93eec8b9`)
-
-**On the as-is deploy branch:**
-- `go build ./...` — clean
-- `go vet ./...` — clean
-- `golangci-lint run` — 0 issues (full repo)
-- `go test ./internal/pgauth ./internal/beads -count=1` — PASS
-
-**On a test merge into `origin/main` 5f1a686d:**
-- Auto-merge succeeded with no conflicts (50 files, +6838 / -755 vs old
-  base — almost all from main-side movement, expected)
-- `go build ./...` — clean
-- `go vet ./...` — clean
-- `go test ./internal/pgauth ./internal/beads -count=1` — PASS
-
-The branch is safe to merge into current `origin/main`; the maintainer's
-GitHub merge will resolve the same way.
-
-## Why slice 2 doesn't have its own review bead
-
-The slice-2 work (Postgres credential resolver, `internal/pgauth`) was
-originally tracked under `ga-cwq1` (closed when PR #1727 was withdrawn
-in favor of local-only iteration). The resolver commit (`871313ef`)
-ships in this PR alongside slice 1 + slice 3 because the chain only
-makes sense end-to-end. The slice-3 reviewer (ga-6zqpw) reviewed the
-full stack at HEAD `ea9af929` (which contained all three slices) and
-confirmed the chain is functional end-to-end.
-
-## Deferred scope decisions
-
-- Dolt-auth file-error, permission, parse-error, and typed-error parity is
-  explicitly deferred from this PG-auth PR. The PR hardens new Postgres
-  credential projection behavior without changing legacy `internal/doltauth`
-  resolver contracts; track Dolt parity separately before treating the Dolt
-  resolver as having the same defensive guarantees.
-
-## Push target
-
-Pushing to fork (`quad341/gascity`); PR cross-repo. Slice 4
-(`ga-j65i3c` / `ga-yih2`) is stacked on this branch and will deploy
-separately after this PR merges.
+The stale-base blocker has been addressed locally, and the required maintainer
+fixups have targeted regression tests. Because attempt 5 blocked before these
+fixes, the workflow verdict remains `iterate` so the next review pass can
+verify the amended stack.

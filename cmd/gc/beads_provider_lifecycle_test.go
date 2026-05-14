@@ -420,6 +420,39 @@ func TestNormalizeCanonicalBdScopeFilesPreservesExistingManagedProbeDatabase(t *
 	}
 }
 
+func TestNormalizeCanonicalBdScopeFilesPreservesExistingPostgresMetadata(t *testing.T) {
+	cityPath := t.TempDir()
+	metadataPath := filepath.Join(cityPath, ".beads", "metadata.json")
+	if err := os.MkdirAll(filepath.Dir(metadataPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(metadataPath, []byte(`{"database":"beads","backend":"postgres","postgres_host":"db.example.test","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pg"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte("issue_prefix: hq\ngc.endpoint_origin: managed_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{Workspace: config.Workspace{Name: "dogfood-city"}}
+	if err := normalizeCanonicalBdScopeFiles(cityPath, cfg, io.Discard); err != nil {
+		t.Fatalf("normalizeCanonicalBdScopeFiles: %v", err)
+	}
+
+	state, ok, err := contract.LoadMetadataState(fsys.OSFS{}, metadataPath)
+	if err != nil {
+		t.Fatalf("LoadMetadataState: %v", err)
+	}
+	if !ok {
+		t.Fatal("metadata.json missing after normalization")
+	}
+	if state.Backend != "postgres" || state.PostgresHost != "db.example.test" || state.PostgresDatabase != "beads_pg" {
+		t.Fatalf("metadata state = %+v, want existing postgres metadata preserved", state)
+	}
+	if state.DoltDatabase != "" || state.DoltMode != "" {
+		t.Fatalf("metadata state = %+v, want dolt fields absent on postgres metadata", state)
+	}
+}
+
 func TestNormalizeCanonicalBdScopeFilesRejectsExistingManagedSystemDatabase(t *testing.T) {
 	cityPath := t.TempDir()
 	metadataPath := filepath.Join(cityPath, ".beads", "metadata.json")
@@ -4265,6 +4298,55 @@ esac
 		if strings.Contains(metaText, forbidden) {
 			t.Fatalf("metadata should scrub %s: %s", forbidden, metaText)
 		}
+	}
+}
+
+func TestInitAndHookDirPreservesPostgresMetadataAndSkipsDoltInit(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte("issue_prefix: gc\ngc.endpoint_origin: managed_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	metadataPath := filepath.Join(cityPath, ".beads", "metadata.json")
+	if err := os.WriteFile(metadataPath, []byte(`{"database":"beads","backend":"postgres","postgres_host":"db.example.test","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pg"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	callsFile := filepath.Join(t.TempDir(), "provider-calls.log")
+	script := filepath.Join(t.TempDir(), "gc-beads-bd")
+	scriptBody := fmt.Sprintf(`#!/bin/sh
+set -eu
+printf '%%s
+' "$*" >> %q
+exit 99
+`, callsFile)
+	if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
+
+	if err := initAndHookDir(cityPath, cityPath, "gc"); err != nil {
+		t.Fatalf("initAndHookDir: %v", err)
+	}
+	if data, err := os.ReadFile(callsFile); err == nil {
+		t.Fatalf("provider init should not run for postgres metadata; calls:\n%s", data)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("read provider calls: %v", err)
+	}
+	state, ok, err := contract.LoadMetadataState(fsys.OSFS{}, metadataPath)
+	if err != nil {
+		t.Fatalf("LoadMetadataState: %v", err)
+	}
+	if !ok || state.Backend != "postgres" || state.PostgresDatabase != "beads_pg" {
+		t.Fatalf("metadata state = %+v, ok=%v; want postgres metadata preserved", state, ok)
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".beads", "hooks", "on_create")); err != nil {
+		t.Fatalf("expected hooks installed for postgres scope: %v", err)
 	}
 }
 

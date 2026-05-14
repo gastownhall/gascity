@@ -553,11 +553,6 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}, nil
 }
 
-func sessionDoltEnv(cityPath, rigRoot string, rigs []config.Rig) map[string]string {
-	env, _ := sessionBackendEnvWithError(cityPath, rigRoot, rigs)
-	return env
-}
-
 func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (map[string]string, error) {
 	env := map[string]string{
 		// Suppress bd's built-in Dolt auto-start. The gc controller manages

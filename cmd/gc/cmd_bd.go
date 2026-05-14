@@ -70,7 +70,7 @@ func bdCommandEnv(cityPath string, cfg *config.City, target execStoreTarget) ([]
 	overrides["GC_STORE_ROOT"] = target.ScopeRoot
 	overrides["GC_STORE_SCOPE"] = target.ScopeKind
 	overrides["GC_BEADS_PREFIX"] = target.Prefix
-	applyControlBdEnv(overrides)
+	applyExportSuppressionEnv(overrides)
 	return mergeRuntimeEnv(os.Environ(), overrides), nil
 }
 

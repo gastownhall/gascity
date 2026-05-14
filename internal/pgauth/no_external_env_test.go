@@ -10,17 +10,17 @@ import (
 	"testing"
 )
 
-// TestNoOsGetenvOutsidePgauth enforces the architectural invariant that
-// every read of BEADS_POSTGRES_* and GC_POSTGRES_* via os.Getenv lives
-// inside internal/pgauth/. Slice 4's observability guarantees and slice
-// 3's projection contract both depend on a single resolution point.
+// TestNoDirectPostgresEnvReadsOutsidePgauth enforces the architectural
+// invariant that every direct read of BEADS_POSTGRES_* and GC_POSTGRES_*
+// lives inside internal/pgauth/. Slice 4's observability guarantees and
+// slice 3's projection contract both depend on a single resolution point.
 //
 // Allowed locations:
 //   - internal/pgauth/ — the resolver itself.
 //   - scripts/ — build-time scripts may freely read env (not part of the
 //     production binary).
 //   - vendor/ — third-party code is out of scope.
-func TestNoOsGetenvOutsidePgauth(t *testing.T) {
+func TestNoDirectPostgresEnvReadsOutsidePgauth(t *testing.T) {
 	root := repoRoot(t)
 
 	allowedPrefixes := []string{
@@ -29,10 +29,7 @@ func TestNoOsGetenvOutsidePgauth(t *testing.T) {
 		"vendor" + string(filepath.Separator),
 	}
 
-	forbiddenSubstrings := []string{
-		`os.Getenv("BEADS_POSTGRES_`,
-		`os.Getenv("GC_POSTGRES_`,
-	}
+	forbiddenSubstrings := forbiddenPostgresEnvReadSubstrings()
 
 	var violations []string
 	walkErr := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
@@ -68,10 +65,8 @@ func TestNoOsGetenvOutsidePgauth(t *testing.T) {
 		for scanner.Scan() {
 			lineNum++
 			line := scanner.Text()
-			for _, sub := range forbiddenSubstrings {
-				if strings.Contains(line, sub) {
-					violations = append(violations, rel+":"+itoa(lineNum)+": "+strings.TrimSpace(line))
-				}
+			if containsForbiddenPostgresEnvRead(line, forbiddenSubstrings) {
+				violations = append(violations, rel+":"+itoa(lineNum)+": "+strings.TrimSpace(line))
 			}
 		}
 		return nil
@@ -82,8 +77,45 @@ func TestNoOsGetenvOutsidePgauth(t *testing.T) {
 
 	if len(violations) > 0 {
 		sort.Strings(violations)
-		t.Fatalf("os.Getenv(\"BEADS_POSTGRES_*\") / os.Getenv(\"GC_POSTGRES_*\") may only appear under internal/pgauth/. Found:\n  %s", strings.Join(violations, "\n  "))
+		t.Fatalf("direct BEADS_POSTGRES_* / GC_POSTGRES_* env reads may only appear under internal/pgauth/. Found:\n  %s", strings.Join(violations, "\n  "))
 	}
+}
+
+func TestForbiddenPostgresEnvReadSubstringsCoverCommonAccessors(t *testing.T) {
+	forbiddenSubstrings := forbiddenPostgresEnvReadSubstrings()
+	cases := []string{
+		`os.Getenv("BEADS_POSTGRES_`,
+		`os.Getenv("GC_POSTGRES_`,
+		`os.LookupEnv("BEADS_POSTGRES_`,
+		`os.LookupEnv("GC_POSTGRES_`,
+		`syscall.Getenv("BEADS_POSTGRES_`,
+		`syscall.Getenv("GC_POSTGRES_`,
+	}
+	for _, line := range cases {
+		if !containsForbiddenPostgresEnvRead(line, forbiddenSubstrings) {
+			t.Fatalf("containsForbiddenPostgresEnvRead(%q) = false, want true", line)
+		}
+	}
+}
+
+func forbiddenPostgresEnvReadSubstrings() []string {
+	return []string{
+		`os.Getenv("BEADS_POSTGRES_`,
+		`os.Getenv("GC_POSTGRES_`,
+		`os.LookupEnv("BEADS_POSTGRES_`,
+		`os.LookupEnv("GC_POSTGRES_`,
+		`syscall.Getenv("BEADS_POSTGRES_`,
+		`syscall.Getenv("GC_POSTGRES_`,
+	}
+}
+
+func containsForbiddenPostgresEnvRead(line string, forbiddenSubstrings []string) bool {
+	for _, sub := range forbiddenSubstrings {
+		if strings.Contains(line, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 // repoRoot returns the repository root by navigating from this file's

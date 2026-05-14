@@ -566,9 +566,6 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.St
 		execErrMsg = execenv.RedactText(err.Error(), redactionEnv)
 		labels = []string{"exec-failed"}
 		logDispatchError(m.stderr, "gc: order exec %s failed: %s", scoped, execErrMsg)
-		if len(output) > 0 {
-			logDispatchError(m.stderr, "gc: order exec %s output: %s", scoped, execenv.RedactText(string(output), redactionEnv))
-		}
 	} else {
 		output, err = m.execRun(ctx, a.Exec, target.ScopeRoot, env)
 		if err != nil {

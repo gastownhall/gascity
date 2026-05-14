@@ -329,9 +329,30 @@ func TestResolveFromEnv_PermissiveScopeFileStopsChain(t *testing.T) {
 	if perm.Mode.Perm() != 0o644 {
 		t.Fatalf("Mode = %o, want 0644", perm.Mode.Perm())
 	}
-	want := fmt.Sprintf("credentials file %s has mode 0644; refuse to read (require 0600 or 0400)", envPath)
+	want := fmt.Sprintf("credentials file %s has mode 0644; refuse to read (require 0600 or 0400; owner-executable modes such as 0700 are rejected)", envPath)
 	if err.Error() != want {
 		t.Fatalf("err = %q, want %q", err.Error(), want)
+	}
+}
+
+func TestResolveFromEnv_OwnerExecutableScopeFileExplainsRejection(t *testing.T) {
+	clearProcessEnv(t)
+	scopeRoot := t.TempDir()
+	writeStorePasswordWithMode(t, scopeRoot, "tier4-blocked", 0o700)
+
+	_, err := ResolveFromEnv(nil, scopeRoot, endpoint())
+	if err == nil {
+		t.Fatalf("expected *PermissivePermissionError, got nil")
+	}
+	var perm *PermissivePermissionError
+	if !errors.As(err, &perm) {
+		t.Fatalf("err = %v, want *PermissivePermissionError", err)
+	}
+	if perm.Mode.Perm() != 0o700 {
+		t.Fatalf("Mode = %o, want 0700", perm.Mode.Perm())
+	}
+	if !strings.Contains(err.Error(), "owner-executable modes such as 0700 are rejected") {
+		t.Fatalf("err = %q, want owner-executable rejection detail", err.Error())
 	}
 }
 
@@ -422,6 +443,48 @@ func TestResolveFromEnv_MalformedCredentialsFile_MissingEquals(t *testing.T) {
 	}
 	if pe.Reason != "missing '=' in key/value line" {
 		t.Fatalf("Reason = %q, want missing '=' in key/value line", pe.Reason)
+	}
+}
+
+func TestResolveFromEnv_CredentialsFileRejectsDuplicateMatchingSection(t *testing.T) {
+	clearProcessEnv(t)
+	credPath := writeCredentialsFileRaw(t, "[127.0.0.1:5433]\npassword = first\n[other.example.com:5432]\npassword = ignored\n[127.0.0.1:5433]\npassword = second\n")
+	t.Setenv("BEADS_CREDENTIALS_FILE", credPath)
+
+	_, err := ResolveFromEnv(nil, t.TempDir(), endpoint())
+	if err == nil {
+		t.Fatal("ResolveFromEnv error = nil, want duplicate section parse error")
+	}
+	var pe *CredentialsParseError
+	if !errors.As(err, &pe) {
+		t.Fatalf("err = %v, want *CredentialsParseError", err)
+	}
+	if pe.Line != 5 {
+		t.Fatalf("Line = %d, want 5", pe.Line)
+	}
+	if pe.Reason != "duplicate credentials section for 127.0.0.1:5433" {
+		t.Fatalf("Reason = %q, want duplicate section reason", pe.Reason)
+	}
+}
+
+func TestResolveFromEnv_CredentialsFileRejectsDuplicatePasswordKey(t *testing.T) {
+	clearProcessEnv(t)
+	credPath := writeCredentialsFileRaw(t, "[127.0.0.1:5433]\npassword = first\npassword = second\n")
+	t.Setenv("BEADS_CREDENTIALS_FILE", credPath)
+
+	_, err := ResolveFromEnv(nil, t.TempDir(), endpoint())
+	if err == nil {
+		t.Fatal("ResolveFromEnv error = nil, want duplicate password key parse error")
+	}
+	var pe *CredentialsParseError
+	if !errors.As(err, &pe) {
+		t.Fatalf("err = %v, want *CredentialsParseError", err)
+	}
+	if pe.Line != 3 {
+		t.Fatalf("Line = %d, want 3", pe.Line)
+	}
+	if pe.Reason != "duplicate password key in credentials section for 127.0.0.1:5433" {
+		t.Fatalf("Reason = %q, want duplicate password reason", pe.Reason)
 	}
 }
 

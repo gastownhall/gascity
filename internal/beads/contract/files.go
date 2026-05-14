@@ -319,14 +319,15 @@ func LoadMetadataState(fs fsys.FS, path string) (MetadataState, bool, error) {
 }
 
 // mixedBackendField reports the first populated "other-backend" field name
-// (relative to state.Backend) when both Dolt-shaped and Postgres-shaped
-// fields are populated. Returns ("", false) when the state is not mixed.
+// (relative to state.Backend). For explicit backends, any populated field from
+// the opposite backend is mixed. For empty or unknown backends, mixed still
+// means both Dolt-shaped and Postgres-shaped fields are populated.
 //
 // Field-iteration order is the JSON-key declaration order on MetadataState
 // (dolt_mode, dolt_database, postgres_host, postgres_port, postgres_user,
-// postgres_database). When state.Backend is empty or unknown, the first
-// populated field across both backends wins (with dolt fields preferred per
-// declaration order).
+// postgres_database). When state.Backend is empty or unknown and both backend
+// families appear, the first populated field across both backends wins (with
+// Dolt fields preferred per declaration order).
 func mixedBackendField(state MetadataState) (string, bool) {
 	type entry struct {
 		name    string
@@ -353,17 +354,21 @@ func mixedBackendField(state MetadataState) (string, bool) {
 			firstPostgres = f.name
 		}
 	}
-	if firstDolt == "" || firstPostgres == "" {
-		return "", false
-	}
 	switch state.Backend {
 	case "postgres":
-		return firstDolt, true
+		if firstDolt != "" {
+			return firstDolt, true
+		}
 	case "dolt":
-		return firstPostgres, true
+		if firstPostgres != "" {
+			return firstPostgres, true
+		}
 	default:
-		return firstDolt, true
+		if firstDolt != "" && firstPostgres != "" {
+			return firstDolt, true
+		}
 	}
+	return "", false
 }
 
 // EnsureCanonicalConfig rewrites config.yaml into canonical GC-managed form.

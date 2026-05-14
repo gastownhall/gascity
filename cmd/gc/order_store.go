@@ -87,11 +87,6 @@ func orderStoreTargetKey(target execStoreTarget) string {
 	return target.ScopeKind + "\x00" + filepath.Clean(target.ScopeRoot)
 }
 
-func orderExecEnv(cityPath string, cfg *config.City, target execStoreTarget, a orders.Order) []string {
-	env, _ := orderExecEnvWithError(cityPath, cfg, target, a)
-	return env
-}
-
 func orderExecEnvWithError(cityPath string, cfg *config.City, target execStoreTarget, a orders.Order) ([]string, error) {
 	var env map[string]string
 	var err error
@@ -175,6 +170,9 @@ func applyOrderExecCanonicalDoltEnv(cityPath, scopeRoot string, env map[string]s
 	if strings.TrimSpace(scopeRoot) == "" {
 		scopeRoot = cityPath
 	}
+	if scopeBackendIsPostgres(cityPath, scopeRoot) {
+		return
+	}
 	target, ok, err := canonicalScopeDoltTarget(cityPath, scopeRoot)
 	if err != nil {
 		if applyOrderExecManagedDoltFallback(cityPath, scopeRoot, env, err) {
@@ -198,6 +196,9 @@ func applyOrderExecCanonicalDoltEnv(cityPath, scopeRoot string, env map[string]s
 }
 
 func applyOrderExecManagedDoltFallback(cityPath, scopeRoot string, env map[string]string, _ error) bool {
+	if scopeBackendIsPostgres(cityPath, scopeRoot) {
+		return false
+	}
 	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")
 	if err != nil || resolved.Kind != contract.ScopeConfigAuthoritative {
 		return false

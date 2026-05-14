@@ -828,8 +828,18 @@ func TestLoadMetadataStateRejectFixtures(t *testing.T) {
 			wantErrContains: "cannot mix dolt and postgres fields in a single scope (backend=dolt but postgres_database is also set)",
 		},
 		{
+			name:            "E3 rejects explicit dolt with postgres fields",
+			fixture:         "reject_dolt_with_postgres_field.json",
+			wantErrContains: "cannot mix dolt and postgres fields in a single scope (backend=dolt but postgres_host is also set)",
+		},
+		{
 			name:            "E3 surfaces dolt field when backend=postgres",
 			fixture:         "reject_mixed_pg_backend_with_dolt.json",
+			wantErrContains: "cannot mix dolt and postgres fields in a single scope (backend=postgres but dolt_database is also set)",
+		},
+		{
+			name:            "E3 rejects explicit postgres with dolt fields",
+			fixture:         "reject_postgres_with_dolt_field.json",
 			wantErrContains: "cannot mix dolt and postgres fields in a single scope (backend=postgres but dolt_database is also set)",
 		},
 		{

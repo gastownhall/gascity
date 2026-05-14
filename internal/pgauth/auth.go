@@ -77,15 +77,16 @@ func (s Source) String() string {
 var ErrNoPasswordResolvable = errors.New("no postgres password resolvable")
 
 // PermissivePermissionError reports a credentials-bearing file whose mode
-// permits group or other read/write/execute. The resolver refuses to read
-// it and stops the chain at that tier rather than falling through.
+// permits group/other read/write/execute or owner execute. The resolver
+// refuses to read it and stops the chain at that tier rather than falling
+// through.
 type PermissivePermissionError struct {
 	Path string
 	Mode os.FileMode
 }
 
 func (e *PermissivePermissionError) Error() string {
-	return fmt.Sprintf("credentials file %s has mode %#o; refuse to read (require 0600 or 0400)", e.Path, e.Mode.Perm())
+	return fmt.Sprintf("credentials file %s has mode %#o; refuse to read (require 0600 or 0400; owner-executable modes such as 0700 are rejected)", e.Path, e.Mode.Perm())
 }
 
 // CredentialsParseError reports a malformed credentials file with the path
@@ -212,7 +213,8 @@ func storeLocalEnvPath(scopeRoot string) string {
 	return filepath.Join(scopeRoot, ".beads", ".env")
 }
 
-// isPermissive returns true when mode permits group or other read/write/execute.
+// isPermissive returns true when mode permits group/other read/write/execute
+// or owner execute.
 func isPermissive(mode os.FileMode) bool {
 	return mode.Perm()&0o177 != 0
 }
@@ -296,6 +298,8 @@ func readCredentialsFilePassword(path, host, port string) (string, error) {
 	sectionKey := host + ":" + port
 	inSection := false
 	matchedPassword := ""
+	matchedSectionSeen := false
+	passwordSeenInSection := false
 	matched := false
 	lineNum := 0
 	scanner := bufio.NewScanner(f)
@@ -314,7 +318,12 @@ func readCredentialsFilePassword(path, host, port string) (string, error) {
 				return "", &CredentialsParseError{Path: path, Line: lineNum, Reason: "empty section header"}
 			}
 			if section == sectionKey {
+				if matchedSectionSeen {
+					return "", &CredentialsParseError{Path: path, Line: lineNum, Reason: "duplicate credentials section for " + sectionKey}
+				}
 				inSection = true
+				matchedSectionSeen = true
+				passwordSeenInSection = false
 			} else if inSection {
 				// Past our section; we already finished scanning it.
 				inSection = false
@@ -332,6 +341,9 @@ func readCredentialsFilePassword(path, host, port string) (string, error) {
 			// Unknown keys inside a matching section are silently ignored.
 			continue
 		}
+		if passwordSeenInSection {
+			return "", &CredentialsParseError{Path: path, Line: lineNum, Reason: "duplicate password key in credentials section for " + sectionKey}
+		}
 		value = strings.TrimSpace(value)
 		if len(value) >= 2 {
 			if (value[0] == '\'' && value[len(value)-1] == '\'') || (value[0] == '"' && value[len(value)-1] == '"') {
@@ -343,6 +355,7 @@ func readCredentialsFilePassword(path, host, port string) (string, error) {
 			}
 		}
 		matchedPassword = value
+		passwordSeenInSection = true
 		matched = true
 	}
 	if err := scanner.Err(); err != nil {

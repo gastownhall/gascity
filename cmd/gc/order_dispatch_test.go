@@ -4662,7 +4662,10 @@ func TestOrderExecEnvSetsBeadsActorToOrderName(t *testing.T) {
 	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
 	a := orders.Order{Name: "order-tracking-sweep", Trigger: "cooldown", Interval: "1m", Exec: "true"}
 
-	envSlice := orderExecEnv(cityDir, nil, target, a)
+	envSlice, err := orderExecEnvWithError(cityDir, nil, target, a)
+	if err != nil {
+		t.Fatalf("orderExecEnvWithError() error = %v", err)
+	}
 
 	want := "BEADS_ACTOR=order:order-tracking-sweep"
 	found := false
@@ -4690,7 +4693,10 @@ func TestOrderExecEnvSkipsBeadsActorForUnnamedOrder(t *testing.T) {
 	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
 	a := orders.Order{Trigger: "cooldown", Interval: "1m", Exec: "true"} // no Name
 
-	envSlice := orderExecEnv(cityDir, nil, target, a)
+	envSlice, err := orderExecEnvWithError(cityDir, nil, target, a)
+	if err != nil {
+		t.Fatalf("orderExecEnvWithError() error = %v", err)
+	}
 
 	for _, entry := range envSlice {
 		if entry == "BEADS_ACTOR=order:" {
@@ -4721,6 +4727,119 @@ dolt.auto-start: false
 	}
 	if !errors.Is(err, pgauth.ErrNoPasswordResolvable) {
 		t.Fatalf("errors.Is(err, ErrNoPasswordResolvable) = false, want true; err=%v", err)
+	}
+}
+
+func TestOrderExecEnvWithError_PostgresCityClearsDoltOverlay(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityDir := t.TempDir()
+	writePGScopeFixture(t, cityDir, "citypw")
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: city
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = writeReachableManagedDoltState(t, cityDir)
+
+	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "ct"}
+	a := orders.Order{Name: "pg-city-order", Trigger: "cooldown", Interval: "1m", Exec: "true"}
+
+	env, err := orderExecEnvWithError(cityDir, nil, target, a)
+	if err != nil {
+		t.Fatalf("orderExecEnvWithError() error = %v", err)
+	}
+	got := listToMap(env)
+
+	assertPostgresOrderEnv(t, got, "citypw")
+	assertNoDoltOrderEnv(t, got)
+}
+
+func TestOrderTriggerOptionsForTarget_PostgresRigClearsDoltOverlay(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: city
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = writeReachableManagedDoltState(t, cityDir)
+
+	rigDir := filepath.Join(cityDir, "rigs", "pg")
+	writePGScopeFixture(t, rigDir, "rigpw")
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: pg
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "pg", Path: "rigs/pg", Prefix: "pg"}}}
+	resolveRigPaths(cityDir, cfg.Rigs)
+	target := execStoreTarget{ScopeRoot: rigDir, ScopeKind: "rig", Prefix: "pg", RigName: "pg"}
+	a := orders.Order{Name: "pg-rig-order", Rig: "pg", Trigger: "condition", Check: "bd ready --json", Exec: "true"}
+
+	opts, err := orderTriggerOptionsForTarget(cityDir, cfg, target, a)
+	if err != nil {
+		t.Fatalf("orderTriggerOptionsForTarget() error = %v", err)
+	}
+	got := listToMap(opts.ConditionEnv)
+
+	if opts.ConditionDir != rigDir {
+		t.Fatalf("ConditionDir = %q, want %q", opts.ConditionDir, rigDir)
+	}
+	assertPostgresOrderEnv(t, got, "rigpw")
+	assertNoDoltOrderEnv(t, got)
+}
+
+func assertPostgresOrderEnv(t *testing.T, env map[string]string, wantPassword string) {
+	t.Helper()
+	want := map[string]string{
+		"GC_POSTGRES_PASSWORD":    wantPassword,
+		"BEADS_POSTGRES_PASSWORD": wantPassword,
+		"BEADS_POSTGRES_HOST":     "db.example.test",
+		"BEADS_POSTGRES_PORT":     "5432",
+		"BEADS_POSTGRES_USER":     "bd",
+		"BEADS_POSTGRES_DATABASE": "beads",
+	}
+	for key, value := range want {
+		if got := env[key]; got != value {
+			t.Errorf("env[%q] = %q, want %q", key, got, value)
+		}
+	}
+}
+
+func assertNoDoltOrderEnv(t *testing.T, env map[string]string) {
+	t.Helper()
+	for _, key := range projectedDoltEnvKeys {
+		if value, ok := env[key]; ok && value != "" {
+			t.Errorf("env[%q] = %q, want empty/absent for PG-backed order", key, value)
+		}
+	}
+	for _, key := range []string{
+		"GC_DOLT_MANAGED_LOCAL",
+		"GC_DOLT_DATA_DIR",
+		"GC_DOLT_LOG_FILE",
+		"GC_DOLT_STATE_FILE",
+		"GC_DOLT_PID_FILE",
+		"GC_DOLT_LOCK_FILE",
+		"GC_DOLT_CONFIG_FILE",
+	} {
+		if value, ok := env[key]; ok && value != "" {
+			t.Errorf("env[%q] = %q, want empty/absent for PG-backed order", key, value)
+		}
 	}
 }
 
