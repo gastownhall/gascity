@@ -30,8 +30,9 @@ func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
 Checks city structure, config validity, binary dependencies (tmux, git,
 bd, dolt), controller status, agent sessions, zombie/orphan sessions,
 bead stores, Dolt server health, event log integrity, and per-rig
-health. Use --fix for the canonical remediation path, including safe
-mechanical PackV1-to-PackV2 rewrites.`,
+health. Use --fix for the canonical remediation path, including any
+safe mechanical PackV1-to-PackV2 rewrites that are available on this
+branch.`,
 		Example: `  gc doctor
   gc doctor --fix
   gc doctor --verbose`,

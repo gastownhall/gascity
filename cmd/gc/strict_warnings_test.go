@@ -19,10 +19,10 @@ func TestSplitStrictConfigWarnings_SiteBindingWarningsAreNonFatal(t *testing.T) 
 
 func TestSplitStrictConfigWarnings_LegacyV1SurfaceWarningsAreNonFatal(t *testing.T) {
 	fatal, nonFatal := splitStrictConfigWarnings([]string{
-		"city.toml: [[agent]] tables are deprecated in v2; use directory-based agents under agents/<name>/. Run `gc doctor` to inspect and `gc doctor --fix` for safe mechanical rewrites.",
-		"city.toml: [packs] is deprecated in v2; use [imports] + packs.lock. Run `gc doctor` to inspect and `gc doctor --fix` for safe mechanical rewrites.",
-		"city.toml: workspace.includes is deprecated in v2; use [imports]. Run `gc doctor` to inspect and `gc doctor --fix` for safe mechanical rewrites.",
-		"city.toml: workspace.default_rig_includes is deprecated in v2; use root pack.toml [defaults.rig.imports.<binding>]. Run `gc doctor` to inspect and `gc doctor --fix` for safe mechanical rewrites.",
+		"city.toml: [[agent]] tables are deprecated in v2; use directory-based agents under agents/<name>/. Run `gc doctor` to inspect; `gc doctor --fix` handles the safe mechanical rewrites available in this wave.",
+		"city.toml: [packs] is deprecated in v2; use [imports] + packs.lock. Run `gc doctor` to inspect; `gc doctor --fix` handles the safe mechanical rewrites available in this wave.",
+		"city.toml: workspace.includes is deprecated in v2; use [imports]. Run `gc doctor` to inspect; `gc doctor --fix` handles the safe mechanical rewrites available in this wave.",
+		"city.toml: workspace.default_rig_includes is deprecated in v2; use root pack.toml [defaults.rig.imports.<binding>]. Run `gc doctor` to inspect; `gc doctor --fix` handles the safe mechanical rewrites available in this wave.",
 		`city agent "mayor" shadows agent of the same name from import "gs"`,
 	})
 

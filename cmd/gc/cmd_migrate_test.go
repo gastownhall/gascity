@@ -17,7 +17,7 @@ func TestDoImportMigrateIsDeprecatedShim(t *testing.T) {
 	for _, want := range []string{
 		"gc import migrate has been deprecated",
 		`Use "gc doctor" to inspect legacy PackV1 surfaces.`,
-		`Use "gc doctor --fix" to rewrite the safe mechanical cases`,
+		`Use "gc doctor --fix" for the safe mechanical cases that currently have automatic rewrites`,
 		"in-place PackV1-to-PackV2 rewrites",
 		"docs/guides/migrating-to-pack-vnext.md",
 	} {

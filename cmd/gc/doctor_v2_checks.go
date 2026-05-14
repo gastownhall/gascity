@@ -450,7 +450,7 @@ func warnCheck(name, message, hint string, details []string) *doctor.CheckResult
 }
 
 func v2MigrationHint() string {
-	return `run "gc doctor --fix" to rewrite safe mechanical cases, then rerun "gc doctor"`
+	return `run "gc doctor" to inspect; use "gc doctor --fix" for the safe mechanical cases that currently have automatic rewrites, then rerun "gc doctor"`
 }
 
 // runV2PackMigration applies the pack-shape migration (legacy [[agent]]

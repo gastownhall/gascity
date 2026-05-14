@@ -2485,10 +2485,14 @@ func TestDoInitSuccess(t *testing.T) {
 	if !strings.Contains(packToml, "schema = 2") {
 		t.Errorf("pack.toml missing schema 2:\n%s", packToml)
 	}
+	if strings.Contains(packToml, "[[agent]]") {
+		t.Errorf("fresh init should not emit inline [[agent]] entries into pack.toml:\n%s", packToml)
+	}
 
 	// Verify the composed config loads correctly from pack.toml + city.toml.
-	// agents + named_session live in pack.toml (pack-first); workspace name
-	// lives in .gc/site.toml as the machine-local binding.
+	// The mayor comes from the scaffolded agents/<name>/ tree, while the
+	// named session still lives in pack.toml. workspace name lives in
+	// .gc/site.toml as the machine-local binding.
 	cfg, err := loadCityConfigFS(f, filepath.Join("/bright-lights", "city.toml"))
 	if err != nil {
 		t.Fatalf("loading written config: %v", err)
@@ -2529,16 +2533,12 @@ func TestDoInitWritesExpectedTOML(t *testing.T) {
 		t.Errorf("city.toml content:\ngot:\n%s\nwant:\n%s", got, want)
 	}
 
-	// pack.toml owns the portable definition: [pack] + [[agent]] mayor +
-	// [[named_session]] mayor (pack-first scaffold from tutorial 01).
+	// pack.toml keeps the portable pack metadata and named session; the
+	// fresh mayor scaffold now comes from agents/<name>/ discovery.
 	packGot := string(f.Files[filepath.Join("/bright-lights", "pack.toml")])
 	packWant := `[pack]
 name = "bright-lights"
 schema = 2
-
-[[agent]]
-name = "mayor"
-prompt_template = "agents/mayor/prompt.template.md"
 
 [[named_session]]
 template = "mayor"
@@ -3070,8 +3070,8 @@ func TestDoInitWithWizardConfig(t *testing.T) {
 	}
 
 	// Verify written raw city.toml keeps the provider (runtime-local) and
-	// the composed config (city.toml + pack.toml) surfaces the mayor agent
-	// from the pack-first scaffold.
+	// the composed config (city.toml + pack.toml) still surfaces the mayor
+	// agent from the scaffolded agents/<name>/ tree.
 	data := f.Files[filepath.Join("/bright-lights", "city.toml")]
 	raw, err := config.Parse(data)
 	if err != nil {
@@ -3115,7 +3115,8 @@ func TestDoInitWithCustomCommand(t *testing.T) {
 	}
 
 	// Verify raw city.toml carries start_command and no provider; the
-	// composed config then surfaces the mayor agent from pack.toml.
+	// composed config then surfaces the mayor agent from convention
+	// discovery.
 	data := f.Files[filepath.Join("/bright-lights", "city.toml")]
 	raw, err := config.Parse(data)
 	if err != nil {
@@ -3199,7 +3200,8 @@ func TestDoInitWithCustomTemplate(t *testing.T) {
 	}
 
 	// Custom template → DefaultCity (one mayor, no provider). The mayor
-	// agent lives in pack.toml after the pack-first scaffold split.
+	// now comes from the scaffolded agents/<name>/ tree rather than an
+	// inline pack.toml [[agent]].
 	data := f.Files[filepath.Join("/my-city", "city.toml")]
 	raw, err := config.Parse(data)
 	if err != nil {

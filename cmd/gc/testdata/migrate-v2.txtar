@@ -9,7 +9,7 @@ cd $WORK/legacy-city
 ! exec gc import migrate --dry-run
 stderr 'gc import migrate has been deprecated\.'
 stderr 'Use "gc doctor" to inspect legacy PackV1 surfaces\.'
-stderr 'Use "gc doctor --fix" to rewrite the safe mechanical cases'
+stderr 'Use "gc doctor --fix" for the safe mechanical cases that currently have automatic rewrites'
 stderr 'no longer performs in-place PackV1-to-PackV2 rewrites'
 stderr 'docs/guides/migrating-to-pack-vnext.md'
 ! exists $WORK/legacy-city/pack.toml

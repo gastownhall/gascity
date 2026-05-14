@@ -535,9 +535,9 @@ func newInitPackConfig(cityName string) initPackConfig {
 // splitInitConfig separates a composed init template City into its
 // portable pack-first shape and the machine-local city runtime shape:
 //
-//   - pack.toml owns the portable definition: [pack], [[agent]],
-//     [[named_session]], [imports.*], [providers.*], agent/service
-//     patches, formulas, and agent_defaults.
+//   - pack.toml owns the portable definition: [pack], explicit [[agent]]
+//     entries when the caller keeps them, [[named_session]], [imports.*],
+//     [providers.*], agent/service patches, formulas, and agent_defaults.
 //   - city.toml keeps only runtime-local deployment settings (e.g.
 //     workspace.provider, workspace.start_command, api, daemon, beads).
 //   - workspace.name and workspace.prefix migrate to .gc/site.toml via
@@ -881,10 +881,15 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	// --provider path gets the same city shape non-interactively;
 	// custom path gets one mayor + no provider (user configures manually).
 	// Rewrite legacy prompt paths on the composed config before splitting so
-	// the pack-owned [[agent]] entries pick up the V2 agents/<name>/
+	// any explicit template agents point at the V2 agents/<name>/
 	// prompt.template.md paths we actually scaffold.
 	rewriteInitPromptTemplates(&cfg)
 	packCfg, cityCfg := splitInitConfig(cityName, &cfg)
+	// Fresh built-in init scaffolds its default agents by convention under
+	// agents/<name>/ instead of re-emitting inline [[agent]] entries into
+	// pack.toml. The built-in templates currently only need the prompt
+	// scaffold plus the pack-owned named session.
+	packCfg.Agents = nil
 	content, err := cityCfg.Marshal()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr

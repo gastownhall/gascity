@@ -33,7 +33,7 @@ pack directory tree.
 The public migration flow is:
 
 1. run `gc doctor`
-2. run `gc doctor --fix` for the safe mechanical rewrites
+2. run `gc doctor --fix` for the safe mechanical rewrites that are available
 3. run `gc doctor` again to confirm the result
 
 Some old cities may hard-break until migrated. That is intentional in
@@ -46,8 +46,9 @@ this last-call-before-deprecation wave.
 
 > **Compatibility note:** This wave is the last call before deprecation,
 > not a promise of seamless in-place PackV1 preservation. `gc doctor
-> --fix` handles the safe mechanical rewrites. Older cities and packs
-> may still require manual restructuring into PackV2 shape.
+> --fix` handles the safe mechanical rewrites that are currently
+> available. Older cities and packs may still require manual
+> restructuring into PackV2 shape.
 
 > **Command ownership note:** In the current product, `gc import` is a
 > built-in Go CLI surface. Older bootstrap-pack experiments are legacy

@@ -55,26 +55,26 @@ func DetectLegacyV1Surfaces(cfg *City, source string) []string {
 	if len(cfg.Agents) > 0 {
 		warnings = append(warnings, fmt.Sprintf(
 			"%s: [[agent]] tables are deprecated in v2; use directory-based "+
-				"agents under agents/<name>/. Run `gc doctor` to inspect and `gc doctor --fix` for safe mechanical rewrites.",
+				"agents under agents/<name>/. Run `gc doctor` to inspect; `gc doctor --fix` handles the safe mechanical rewrites available in this wave.",
 			source))
 	}
 	if len(cfg.Packs) > 0 {
 		warnings = append(warnings, fmt.Sprintf(
 			"%s: [packs] is deprecated in v2; use [imports] + packs.lock. "+
-				"Run `gc doctor` to inspect and `gc doctor --fix` for safe mechanical rewrites.",
+				"Run `gc doctor` to inspect; `gc doctor --fix` handles the safe mechanical rewrites available in this wave.",
 			source))
 	}
 	if len(cfg.Workspace.Includes) > 0 {
 		warnings = append(warnings, fmt.Sprintf(
 			"%s: workspace.includes is deprecated in v2; use [imports]. "+
-				"Run `gc doctor` to inspect and `gc doctor --fix` for safe mechanical rewrites.",
+				"Run `gc doctor` to inspect; `gc doctor --fix` handles the safe mechanical rewrites available in this wave.",
 			source))
 	}
 	if len(cfg.Workspace.DefaultRigIncludes) > 0 {
 		warnings = append(warnings, fmt.Sprintf(
 			"%s: workspace.default_rig_includes is deprecated in v2; use "+
 				"root pack.toml [defaults.rig.imports.<binding>]. Run "+
-				"`gc doctor` to inspect and `gc doctor --fix` for safe mechanical rewrites.",
+				"`gc doctor` to inspect; `gc doctor --fix` handles the safe mechanical rewrites available in this wave.",
 			source))
 	}
 	return warnings
