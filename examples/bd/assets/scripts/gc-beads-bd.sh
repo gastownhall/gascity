@@ -2100,7 +2100,15 @@ op_init() {
     # IF NOT EXISTS both creates the on-disk directory and registers it in
     # the server's catalog. This is the upstream gastown pattern — when the
     # server is running, always go through SQL rather than dolt init on disk.
-    ensure_database_registered "$dolt_database" || true
+    #
+    # Failure here is a hard stop: bd init in server mode requires the
+    # database to exist on the server. The previous `|| true` swallowed
+    # CREATE DATABASE failures and let bd init fail later with a cryptic
+    # "database not found" error — root cause of the gascity-3 reproducer
+    # where the city's hq database was never created on first start.
+    if ! ensure_database_registered "$dolt_database"; then
+        die "failed to register Dolt database '$dolt_database' on running server (CREATE DATABASE failed); see warnings above. cannot proceed with bd init."
+    fi
 
     # Run bd init in server mode through the pinned wrapper so the fallback
     # path uses the same authenticated Dolt target as the rest of init.
@@ -2112,7 +2120,14 @@ op_init() {
     # and leave the pinned database schema-less.
     run_bd_init_pinned "$dir" "$prefix" "$dolt_database" "$host" "${bd_init_force:+true}"
 
-    ensure_database_registered "$dolt_database" || true
+    # Re-register post-init: if bd init didn't catalog-register the DB
+    # (server-mode quirk), do it now. After a successful bd init this is a
+    # no-op via the USE check inside ensure_database_registered. Failure
+    # here means bd init claimed success but the server can't see the DB —
+    # equally a hard stop, equally previously swallowed by `|| true`.
+    if ! ensure_database_registered "$dolt_database"; then
+        die "Dolt database '$dolt_database' is unreachable on the server after bd init reported success; see warnings above. probable causes: server crashed mid-init, port collision, or stale catalog state."
+    fi
 
     # GC owns canonical metadata/config normalization after this backend
     # bridge returns. Keep bd-specific config/migration here only.
