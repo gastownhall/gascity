@@ -45,8 +45,8 @@ func IsLegacyV1SurfaceWarning(warning string) bool {
 //
 // Stable ordering: agent → packs → workspace.includes →
 // workspace.default_rig_includes. Each warning is prefixed with the
-// provided source (typically the city.toml path) and names a concrete
-// migration command.
+// provided source (typically the city.toml path) and points operators at
+// gc doctor as the canonical migration surface.
 func DetectLegacyV1Surfaces(cfg *City, source string) []string {
 	if cfg == nil {
 		return nil
@@ -55,26 +55,26 @@ func DetectLegacyV1Surfaces(cfg *City, source string) []string {
 	if len(cfg.Agents) > 0 {
 		warnings = append(warnings, fmt.Sprintf(
 			"%s: [[agent]] tables are deprecated in v2; use directory-based "+
-				"agents under agents/<name>/. Run `gc import migrate` to migrate.",
+				"agents under agents/<name>/. Run `gc doctor` to inspect and `gc doctor --fix` for safe mechanical rewrites.",
 			source))
 	}
 	if len(cfg.Packs) > 0 {
 		warnings = append(warnings, fmt.Sprintf(
 			"%s: [packs] is deprecated in v2; use [imports] + packs.lock. "+
-				"Run `gc import migrate` to migrate.",
+				"Run `gc doctor` to inspect and `gc doctor --fix` for safe mechanical rewrites.",
 			source))
 	}
 	if len(cfg.Workspace.Includes) > 0 {
 		warnings = append(warnings, fmt.Sprintf(
 			"%s: workspace.includes is deprecated in v2; use [imports]. "+
-				"Run `gc import migrate` to migrate.",
+				"Run `gc doctor` to inspect and `gc doctor --fix` for safe mechanical rewrites.",
 			source))
 	}
 	if len(cfg.Workspace.DefaultRigIncludes) > 0 {
 		warnings = append(warnings, fmt.Sprintf(
 			"%s: workspace.default_rig_includes is deprecated in v2; use "+
 				"root pack.toml [defaults.rig.imports.<binding>]. Run "+
-				"`gc import migrate` to migrate.",
+				"`gc doctor` to inspect and `gc doctor --fix` for safe mechanical rewrites.",
 			source))
 	}
 	return warnings

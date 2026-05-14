@@ -2,22 +2,21 @@ package main
 
 import (
 	"fmt"
-	"io"
-
-	"github.com/gastownhall/gascity/internal/migrate"
 	"github.com/spf13/cobra"
+	"io"
 )
 
 func newImportMigrateCmd(stdout, stderr io.Writer) *cobra.Command {
 	var dryRun bool
 	cmd := &cobra.Command{
-		Use:   "migrate",
-		Short: "Migrate a V1 city layout to the V2 pack shape",
-		Long: `Rewrite a legacy city into the V2 migration shape.
+		Use:        "migrate",
+		Short:      "Deprecated compatibility shim for legacy migration",
+		Hidden:     true,
+		Deprecated: `use "gc doctor" and "gc doctor --fix"`,
+		Long: `Deprecated compatibility shim.
 
-Moves workspace.includes into pack imports, converts [[agent]] tables
-into agents/<name>/ directories, and stages prompt/overlay/namepool
-assets into their V2 locations.`,
+Use "gc doctor" to inspect legacy PackV1 surfaces and
+"gc doctor --fix" to rewrite the safe mechanical cases.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if doImportMigrate(dryRun, stdout, stderr) != 0 {
@@ -26,43 +25,16 @@ assets into their V2 locations.`,
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print what would change without writing")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "deprecated no-op compatibility flag")
 	return cmd
 }
 
 func doImportMigrate(dryRun bool, stdout, stderr io.Writer) int {
-	cityPath, err := resolveCity()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc import migrate: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-
-	report, err := migrate.Apply(cityPath, migrate.Options{DryRun: dryRun})
-	if err != nil {
-		fmt.Fprintf(stderr, "gc import migrate: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-
-	if len(report.Changes) == 0 {
-		fmt.Fprintln(stdout, "No migration changes needed.") //nolint:errcheck // best-effort stdout
-	} else {
-		header := "Applied changes"
-		if dryRun {
-			header = "Planned changes"
-		}
-		fmt.Fprintf(stdout, "%s for %s:\n", header, cityPath) //nolint:errcheck // best-effort stdout
-		for _, change := range report.Changes {
-			fmt.Fprintf(stdout, "  - %s\n", change) //nolint:errcheck // best-effort stdout
-		}
-	}
-
-	for _, warning := range report.Warnings {
-		fmt.Fprintf(stdout, "warning: %s\n", warning) //nolint:errcheck // best-effort stdout
-	}
-
-	if dryRun {
-		fmt.Fprintln(stdout, "No side effects executed (--dry-run).") //nolint:errcheck // best-effort stdout
-	}
-
-	return 0
+	_ = dryRun
+	fmt.Fprintln(stderr, "gc import migrate has been deprecated.")                                                                                 //nolint:errcheck // best-effort stderr
+	fmt.Fprintln(stderr, `Use "gc doctor" to inspect legacy PackV1 surfaces.`)                                                                     //nolint:errcheck // best-effort stderr
+	fmt.Fprintln(stderr, `Use "gc doctor --fix" to rewrite the safe mechanical cases, then rerun "gc doctor".`)                                    //nolint:errcheck // best-effort stderr
+	fmt.Fprintln(stderr, `This shim no longer performs in-place PackV1-to-PackV2 rewrites.`)                                                       //nolint:errcheck // best-effort stderr
+	fmt.Fprintln(stderr, `See docs/guides/migrating-to-pack-vnext.md for the remaining manual migration steps and repo-content cleanup guidance.`) //nolint:errcheck // best-effort stderr
+	return 1
 }

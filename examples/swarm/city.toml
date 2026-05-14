@@ -10,11 +10,12 @@
 #
 # To use: gc start examples/swarm/
 # Requires rigs to be registered: gc rig add <path>
+#
+# The sibling pack.toml owns the Swarm import.
 
 [workspace]
 name = "swarm"
 provider = "claude"
-includes = ["packs/swarm"]
 
 [daemon]
 patrol_interval = "30s"

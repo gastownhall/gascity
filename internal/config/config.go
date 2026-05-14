@@ -3066,9 +3066,10 @@ func WizardCity(name, provider, startCommand string) City {
 }
 
 // GastownCity returns a City configured for the gastown orchestration pack.
-// Agents come from the pack (packs/gastown); no inline agents are defined.
-// Sets workspace.includes, default_rig_includes, global_fragments, and daemon
-// config. If startCommand is set, it takes precedence over provider.
+// Agents come from the pack (.gc/system/packs/gastown); no inline agents are
+// defined. The root city pack imports gastown and sets canonical
+// DefaultRigImports so newly added rigs inherit the same pack by default. If
+// startCommand is set, it takes precedence over provider.
 func GastownCity(name, provider, startCommand string) City {
 	ws := Workspace{
 		Name:            name,

@@ -777,8 +777,8 @@ read-only.
 
 Cities running on V1 must be converted before V2 can load them. Hard
 cutover: `gc doctor` detects V1 patterns and `gc doctor --fix` handles
-the safe mechanical conversion. `gc import migrate` is no longer the
-primary public path.
+the safe mechanical conversion. `gc import migrate` is deprecated shim
+territory and no longer performs in-place rewrites.
 
 The migration is sequenced in two steps matching the implementation order:
 

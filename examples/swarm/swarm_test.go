@@ -41,8 +41,19 @@ func TestCityTomlParses(t *testing.T) {
 	if cfg.Workspace.Name != "swarm" {
 		t.Errorf("Workspace.Name = %q, want %q", cfg.Workspace.Name, "swarm")
 	}
-	if len(cfg.Workspace.Includes) != 1 || cfg.Workspace.Includes[0] != "packs/swarm" {
-		t.Errorf("Workspace.Includes = %v, want [packs/swarm]", cfg.Workspace.Includes)
+	if len(cfg.Workspace.Includes) != 0 {
+		t.Errorf("Workspace.Includes = %v, want empty", cfg.Workspace.Includes)
+	}
+}
+
+func TestRootPackOwnsSwarmImport(t *testing.T) {
+	dir := exampleDir()
+	packCfg, err := config.Load(fsys.OSFS{}, filepath.Join(dir, "pack.toml"))
+	if err != nil {
+		t.Fatalf("config.Load(pack.toml): %v", err)
+	}
+	if got := packCfg.Imports["swarm"].Source; got != "packs/swarm" {
+		t.Fatalf("pack import swarm = %q, want %q", got, "packs/swarm")
 	}
 }
 

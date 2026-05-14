@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1161,11 +1160,11 @@ func TestDoRigAdd_WithPack(t *testing.T) {
 	}
 
 	output := stdout.String()
-	if !strings.Contains(output, "Include: packs/gastown") {
-		t.Errorf("output missing include: %s", output)
+	if !strings.Contains(output, "Import: gastown=packs/gastown") {
+		t.Errorf("output missing import: %s", output)
 	}
 
-	// Verify city.toml has includes field.
+	// Verify city.toml stores canonical rig imports instead of legacy includes.
 	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		t.Fatal(err)
@@ -1177,8 +1176,11 @@ func TestDoRigAdd_WithPack(t *testing.T) {
 	if len(cfg.Rigs) != 1 {
 		t.Fatalf("expected 1 rig, got %d", len(cfg.Rigs))
 	}
-	if len(cfg.Rigs[0].Includes) != 1 || cfg.Rigs[0].Includes[0] != "packs/gastown" {
-		t.Errorf("rig includes = %v, want [packs/gastown]; city.toml:\n%s", cfg.Rigs[0].Includes, data)
+	if len(cfg.Rigs[0].Includes) != 0 {
+		t.Errorf("rig includes should stay empty, got %v; city.toml:\n%s", cfg.Rigs[0].Includes, data)
+	}
+	if got := cfg.Rigs[0].Imports["gastown"].Source; got != "packs/gastown" {
+		t.Errorf("rig imports[gastown] = %q, want packs/gastown; city.toml:\n%s", got, data)
 	}
 }
 
@@ -1207,17 +1209,25 @@ func TestDoRigAdd_WithMultiplePacks(t *testing.T) {
 	}
 
 	output := stdout.String()
-	if !strings.Contains(output, "Include: packs/planner, packs/architect") {
-		t.Errorf("output missing combined includes: %s", output)
+	if !strings.Contains(output, "Import: architect=packs/architect, planner=packs/planner") {
+		t.Errorf("output missing combined imports: %s", output)
 	}
 
 	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"packs/planner", "packs/architect"}
-	if !reflect.DeepEqual(cfg.Rigs[0].Includes, want) {
-		t.Errorf("rig includes = %v, want %v", cfg.Rigs[0].Includes, want)
+	if len(cfg.Rigs[0].Includes) != 0 {
+		t.Errorf("rig includes should stay empty, got %v", cfg.Rigs[0].Includes)
+	}
+	want := map[string]string{"planner": "packs/planner", "architect": "packs/architect"}
+	if len(cfg.Rigs[0].Imports) != len(want) {
+		t.Fatalf("rig imports = %#v, want %d entries", cfg.Rigs[0].Imports, len(want))
+	}
+	for binding, source := range want {
+		if got := cfg.Rigs[0].Imports[binding].Source; got != source {
+			t.Errorf("rig imports[%s] = %q, want %q", binding, got, source)
+		}
 	}
 }
 
@@ -1307,15 +1317,16 @@ func TestDoRigAdd_DefaultRigIncludes(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 
 	var stdout, stderr bytes.Buffer
-	// No --include flag → should fall back to default_rig_includes.
+	// No --include flag → should convert legacy default_rig_includes into
+	// canonical rig imports for this compatibility wave.
 	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
 	}
 
 	output := stdout.String()
-	if !strings.Contains(output, "Include: packs/gastown (default)") {
-		t.Errorf("output missing default include: %s", output)
+	if !strings.Contains(output, "Import: gastown=packs/gastown (default)") {
+		t.Errorf("output missing default import: %s", output)
 	}
 
 	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
@@ -1325,8 +1336,11 @@ func TestDoRigAdd_DefaultRigIncludes(t *testing.T) {
 	if len(cfg.Rigs) != 1 {
 		t.Fatalf("expected 1 rig, got %d", len(cfg.Rigs))
 	}
-	if len(cfg.Rigs[0].Includes) != 1 || cfg.Rigs[0].Includes[0] != "packs/gastown" {
-		t.Errorf("rig includes = %v, want [packs/gastown]", cfg.Rigs[0].Includes)
+	if len(cfg.Rigs[0].Includes) != 0 {
+		t.Errorf("rig includes should stay empty, got %v", cfg.Rigs[0].Includes)
+	}
+	if got := cfg.Rigs[0].Imports["gastown"].Source; got != "packs/gastown" {
+		t.Errorf("rig imports[gastown] = %q, want packs/gastown", got)
 	}
 }
 
@@ -1368,11 +1382,8 @@ source = "packs/a-pack"
 	}
 
 	output := stdout.String()
-	if !strings.Contains(output, "Import: z-pack=packs/z-pack, a-pack=packs/a-pack (default)") {
-		t.Errorf("output missing root pack default imports in declaration order: %s", output)
-	}
-	if !strings.Contains(output, "Include: packs/city-pack (default)") {
-		t.Errorf("output missing legacy default include fallback: %s", output)
+	if !strings.Contains(output, "Import: a-pack=packs/a-pack, city-pack=packs/city-pack, z-pack=packs/z-pack (default)") {
+		t.Errorf("output missing merged default imports: %s", output)
 	}
 
 	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
@@ -1382,17 +1393,20 @@ source = "packs/a-pack"
 	if len(cfg.Rigs) != 1 {
 		t.Fatalf("expected 1 rig, got %d", len(cfg.Rigs))
 	}
-	if want := []string{"packs/city-pack"}; !reflect.DeepEqual(cfg.Rigs[0].Includes, want) {
-		t.Errorf("rig includes = %v, want %v", cfg.Rigs[0].Includes, want)
+	if len(cfg.Rigs[0].Includes) != 0 {
+		t.Errorf("rig includes should stay empty, got %v", cfg.Rigs[0].Includes)
 	}
-	if len(cfg.Rigs[0].Imports) != 2 {
-		t.Fatalf("len(rig imports) = %d, want 2", len(cfg.Rigs[0].Imports))
+	if len(cfg.Rigs[0].Imports) != 3 {
+		t.Fatalf("len(rig imports) = %d, want 3", len(cfg.Rigs[0].Imports))
 	}
 	if got := cfg.Rigs[0].Imports["z-pack"].Source; got != "packs/z-pack" {
 		t.Errorf("rig imports[z-pack] = %q, want packs/z-pack", got)
 	}
 	if got := cfg.Rigs[0].Imports["a-pack"].Source; got != "packs/a-pack" {
 		t.Errorf("rig imports[a-pack] = %q, want packs/a-pack", got)
+	}
+	if got := cfg.Rigs[0].Imports["city-pack"].Source; got != "packs/city-pack" {
+		t.Errorf("rig imports[city-pack] = %q, want packs/city-pack", got)
 	}
 }
 
@@ -1459,18 +1473,19 @@ func TestDoRigAdd_ExplicitIncludeOverridesDefault(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 
 	var stdout, stderr bytes.Buffer
-	// Explicit --include should override default_rig_includes.
+	// Explicit --include should override default_rig_includes while still
+	// writing canonical rig imports.
 	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, []string{"packs/custom"}, "", "", "", false, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
 	}
 
 	output := stdout.String()
-	if !strings.Contains(output, "Include: packs/custom") {
-		t.Errorf("output missing explicit include: %s", output)
+	if !strings.Contains(output, "Import: custom=packs/custom") {
+		t.Errorf("output missing explicit import: %s", output)
 	}
 	if strings.Contains(output, "(default)") {
-		t.Errorf("output should not show (default) for explicit include: %s", output)
+		t.Errorf("output should not show (default) for explicit import: %s", output)
 	}
 
 	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
@@ -1480,8 +1495,11 @@ func TestDoRigAdd_ExplicitIncludeOverridesDefault(t *testing.T) {
 	if len(cfg.Rigs) != 1 {
 		t.Fatalf("expected 1 rig, got %d", len(cfg.Rigs))
 	}
-	if len(cfg.Rigs[0].Includes) != 1 || cfg.Rigs[0].Includes[0] != "packs/custom" {
-		t.Errorf("rig includes = %v, want [packs/custom]", cfg.Rigs[0].Includes)
+	if len(cfg.Rigs[0].Includes) != 0 {
+		t.Errorf("rig includes should stay empty, got %v", cfg.Rigs[0].Includes)
+	}
+	if got := cfg.Rigs[0].Imports["custom"].Source; got != "packs/custom" {
+		t.Errorf("rig imports[custom] = %q, want packs/custom", got)
 	}
 }
 

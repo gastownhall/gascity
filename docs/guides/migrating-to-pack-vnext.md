@@ -3,14 +3,8 @@ title: "PackV2: The New Package System for Gas City"
 description: How to move an existing Gas City 0.14.0 city or pack to the PackV2 schema and directory conventions.
 ---
 
-> [!IMPORTANT]
-> This document describes the pre-release Gas City v0.15.0 rollout.
-> Some PackV2 surfaces are still under active development; release-gated
-> caveats below use the form "As of release v0.15.0, ...".
-
 This guide is the practical migration companion for moving from the
-0.14.0 PackV1 world into the PackV2 model that first landed in 0.14.1
-and is being finished in the 0.15.0 wave.
+0.14.x PackV1 world into the PackV2 model.
 
 PackV2 was an initiative to address multiple problems in the way we
 write down how a city or a package works. There was a lot of
@@ -36,34 +30,38 @@ state. It matters to the model, but it is mostly not user migration
 work, so this guide keeps the focus on `pack.toml`, `city.toml`, and the
 pack directory tree.
 
-The target public migration flow is `gc doctor`, then
-`gc doctor --fix` for the safe mechanical rewrites, then `gc doctor`
-again to confirm the result. Some old cities may hard-break until
-migrated; that is intentional as of release v0.15.0.
+The public migration flow is:
 
-> **Current rollout note:** The doctor-first remediation slice lands
-> separately from the Skills/MCP, infix, and rig-path slices. Until that
-> remediation work is present on your branch, `gc import migrate` may
-> still exist as a transitional command surface even though the target
-> model is `gc doctor` followed by `gc doctor --fix`.
+1. run `gc doctor`
+2. run `gc doctor --fix` for the safe mechanical rewrites
+3. run `gc doctor` again to confirm the result
+
+Some old cities may hard-break until migrated. That is intentional in
+this last-call-before-deprecation wave.
+
+> **Deprecation note:** `gc import migrate` is now a deprecated
+> compatibility shim. It no longer owns migration. Use `gc doctor` to
+> inspect legacy PackV1 surfaces and `gc doctor --fix` for the safe
+> mechanical rewrites.
+
+> **Compatibility note:** This wave is the last call before deprecation,
+> not a promise of seamless in-place PackV1 preservation. `gc doctor
+> --fix` handles the safe mechanical rewrites. Older cities and packs
+> may still require manual restructuring into PackV2 shape.
 
 > **Command ownership note:** In the current product, `gc import` is a
 > built-in Go CLI surface. Older bootstrap-pack experiments are legacy
 > compatibility material, not the target implementation model for PackV2.
 
-> **Scope note:** This guide describes the target PackV2 migration
-> shape. Some sections below point at surfaces that are only in the first
-> slice of the current rollout. When that is true, the guide calls it out
-> inline and links the tracking issue. For release-gated behavior, also
-> consult `docs/packv2/skew-analysis.md` and
-> `docs/packv2/doc-conformance-matrix.md`.
->
-> **First-slice note:** skills and MCP are current-city-pack only in this
-> wave. Imported-pack catalogs and provider projection are later slices.
-> The `.gc/site.toml` rig-path split from
-> [#588](https://github.com/gastownhall/gascity/issues/588) is now part of
-> the migration flow: `rig.path` leaves `city.toml`, while `rig.prefix` and
-> `rig.suspended` stay in `city.toml` for the current Phase A rollout.
+This guide stays focused on the high-probability migration work:
+
+- split portable pack definition from city deployment
+- move include-era composition to imports
+- move PackV1 file layouts into PackV2 directories
+- use `gc doctor` for the safe mechanical rewrites
+
+It does not try to be a rollout ledger. When a surface is still
+release-gated, this guide calls that out inline.
 
 ## Before you start
 
@@ -175,9 +173,12 @@ imports in `city.toml` when a pack should compose only into one rig.
 
 For remote imports, run `gc import install` after the import declarations
 are in place. That writes or repairs `packs.lock` and materializes the
-cache. Use `gc import check` when you want a read-only validation pass:
-it reports missing or stale lock/cache state and points back to
+local cache. Use `gc import check` when you want a read-only validation
+pass: it reports missing or stale lock/cache state and points back to
 `gc import install` for repair.
+
+Those commands are about pack acquisition and cache state, not PackV1 to
+PackV2 migration. Use `gc doctor` for migration work.
 
 Rigs are the main thing that remain in `city.toml`. As you migrate, the
 usual pattern is:
@@ -245,13 +246,12 @@ formulas/
 
 ## Orders
 
-Orders are being refactored to look more like formulas.
+Orders belong in top-level `orders/` and use flat files
+`orders/<name>.toml`.
 
-The current direction, also captured in the consistency audit, is:
-
-- move orders out of `formulas/orders/`
-- standardize on top-level `orders/`
-- use flat files `orders/<name>.toml`
+If your city still uses nested PackV1 order layouts such as
+`formulas/orders/.../order.toml`, migrate them now. Those shapes only
+load for compatibility and are headed toward hard deprecation.
 
 ### Old shape
 
@@ -333,9 +333,8 @@ commands/repo-sync/
 ```
 
 The default `commands/<name>/run.sh` discovery path is part of the
-current release surface. `command.toml` remains optional for metadata or
-explicit overrides. The remaining command manifest symmetry work is
-tracked in [#668](https://github.com/gastownhall/gascity/issues/668).
+current release surface. `command.toml` remains optional when you need
+metadata or explicit overrides.
 
 ## Doctor checks
 
@@ -365,9 +364,8 @@ The migration rule is the same as commands:
 - use local TOML only when the default mapping is not enough
 
 The default `doctor/<name>/run.sh` discovery path is part of the
-current release surface. `doctor.toml` remains optional for metadata or
-explicit overrides. The remaining command/doctor manifest symmetry work
-is tracked in [#668](https://github.com/gastownhall/gascity/issues/668).
+current release surface. `doctor.toml` remains optional when you need
+metadata or explicit overrides.
 
 ## Overlays
 
@@ -389,12 +387,12 @@ to `overlay/`.
 
 ## Skills, MCP, and template fragments
 
-These mostly follow the new directory structure directly.
+These follow the PackV2 directory structure directly.
 
 Use:
 
-- `skills/` for the current city pack's shared skills
-- `mcp/` for the current city pack's shared MCP assets
+- `skills/` for the city pack's shared skills
+- `mcp/` for the city pack's shared MCP assets
 - `template-fragments/` for pack-wide prompt fragments
 
 and:
@@ -405,59 +403,22 @@ and:
 
 when the asset belongs to one specific agent.
 
-### Skill materialization (new in v0.15.1)
+As of **Gas City 0.15.1**, skills are materialized automatically for
+supported providers from the shared pack catalog plus any agent-local
+skill directories. You do not need to keep per-agent attachment lists
+to opt into them.
 
-As of **Gas City 0.15.1**, skills are no longer list-only. Every
-supported-provider agent (`claude`, `codex`, `gemini`, `opencode`) sees
-every city-pack skill **and** every bootstrap implicit-import pack
-skill (e.g. `core`) materialized as symlinks into its provider-specific
-sink before session spawn. No attachment filtering — an agent does not
-declare which skills it wants; it gets the whole catalog plus its own
-`agents/<name>/skills/` directory on top.
+The old attachment-list fields — `skills`, `mcp`, `skills_append`,
+`mcp_append`, and the runtime-only `shared_skills` — are deprecated
+tombstones in v0.15.1. They still parse for compatibility, but they
+are ignored by the materializer. Migrate by deleting them from
+`city.toml` or `pack.toml`, or run `gc doctor --fix` to strip them
+automatically.
 
-**Sink paths** land at the agent's scope root (city-scoped) or rig
-path (rig-scoped):
-
-- Claude agents: `<scope-root>/.claude/skills/<name>`
-- Codex agents: `<scope-root>/.codex/skills/<name>`
-- Gemini agents: `<scope-root>/.gemini/skills/<name>`
-- OpenCode agents: `<scope-root>/.opencode/skills/<name>`
-
-Mixed-provider cities produce sibling sink directories at the same
-scope root. `copilot`, `cursor`, `pi`, and `omp` agents have no sink
-in v0.15.1 and get no materialization.
-
-**Precedence** on name collision:
-
-1. Agent-local (`agents/<name>/skills/<foo>`) wins over shared.
-2. City pack (`skills/<foo>`) wins over bootstrap implicit imports.
-3. Two agents at the same `(scope-root, vendor)` cannot both provide
-   the same agent-local name — `gc start` fails with a
-   skill-collision error; fix by renaming one.
-
-**Lifecycle:** adds, edits, renames, and removals all drain the
-affected agents via content-hash fingerprints. Every supervisor tick
-runs a cleanup + re-materialise pass, so in-place skill edits take
-effect without a full restart cycle. User-placed content at sink
-paths (a regular file or directory you put there yourself) is
-preserved — cleanup only removes symlinks whose targets live under
-known gc-managed catalog roots.
-
-### Removed in v0.15.1 — attachment-list tombstones
-
-The v0.15.0 attachment-list fields — `skills`, `mcp`, `skills_append`,
-`mcp_append`, and the runtime-only `shared_skills` — are **deprecated
-tombstones in v0.15.1**. They still parse so upgrading cities don't
-break, but they are ignored by the materializer (every agent gets
-everything). A one-time warning fires on config load when any of
-these fields is present.
-
-Migrate by deleting them from your `city.toml` / `pack.toml`. Run
-`gc doctor --fix` to strip them automatically. The fields become a
-hard parse error in **v0.16**.
-
-MCP activation (projecting MCP definitions into the agent's provider
-config) is tracked as a follow-up and lands on `main` after v0.15.1.
+MCP activation follows the same directory migration but remains on a
+separate implementation track. For migration purposes, the important
+step is still to move shared MCP assets into `mcp/` and
+agent-specific ones into `agents/<name>/mcp/`.
 
 ## Fragment injection migration
 
@@ -481,14 +442,12 @@ each prompt file:
 append_fragments = ["operational-awareness", "command-glossary"]
 ```
 
-Per-agent `append_fragments` is also supported, declared on an
-`[[agent]]` block or in `agents/<name>/agent.toml`, and layers in front
-of the `[agent_defaults]` list:
+Per-agent `append_fragments` is also supported in
+`agents/<name>/agent.toml`, and layers in front of the
+`[agent_defaults]` list:
 
 ```toml
-[[agent]]
-name = "mayor"
-prompt_template = "agents/mayor/prompt.template.md"
+# agents/mayor/agent.toml
 append_fragments = ["mayor-footer"]
 ```
 
