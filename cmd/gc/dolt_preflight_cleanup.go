@@ -74,14 +74,17 @@ func staleManagedDoltSocketPaths() []string {
 }
 
 func fileOpenedByAnyProcess(path string) (bool, error) {
-	if open, checked := fileOpenedByAnyProcessFromProc(path); checked {
+	ctx, cancel := context.WithTimeout(context.Background(), managedDoltLsofTimeout)
+	defer cancel()
+	if open, checked := fileOpenedByAnyProcessFromProc(ctx, path); checked {
 		return open, nil
+	}
+	if ctx.Err() != nil {
+		return false, errManagedDoltOpenStateUnknown
 	}
 	if _, err := exec.LookPath("lsof"); err != nil {
 		return false, errManagedDoltOpenStateUnknown
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), managedDoltLsofTimeout)
-	defer cancel()
 	cmd := exec.CommandContext(ctx, "lsof", path)
 	cmd.WaitDelay = 100 * time.Millisecond
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -108,13 +111,16 @@ func fileOpenedByAnyProcess(path string) (bool, error) {
 	return false, fmt.Errorf("lsof %s: %w: %s", path, err, strings.TrimSpace(string(out)))
 }
 
-func fileOpenedByAnyProcessFromProc(path string) (bool, bool) {
+func fileOpenedByAnyProcessFromProc(ctx context.Context, path string) (bool, bool) {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return false, false
 	}
 	socketInodes, _ := unixSocketInodesForPath(path)
 	for _, entry := range entries {
+		if ctx.Err() != nil {
+			return false, false
+		}
 		if !entry.IsDir() {
 			continue
 		}
@@ -127,6 +133,9 @@ func fileOpenedByAnyProcessFromProc(path string) (bool, bool) {
 			continue
 		}
 		for _, fd := range fds {
+			if ctx.Err() != nil {
+				return false, false
+			}
 			target, err := os.Readlink(filepath.Join(fdDir, fd.Name()))
 			if err != nil {
 				continue
