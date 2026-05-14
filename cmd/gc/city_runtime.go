@@ -29,6 +29,11 @@ import (
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
+// newCityRuntimeOpenSweepStore opens the city store used for the orphaned
+// order-tracking sweep in newCityRuntime. Test code can swap this to return
+// an in-memory store and skip spawning managed dolt.
+var newCityRuntimeOpenSweepStore = openStoreAtForCity
+
 // reloadOrderDrainTimeout bounds how long config reload will wait for
 // the outgoing order dispatcher's in-flight goroutines before replacing
 // it. Reload runs on the tick loop, so a larger budget would stall all
@@ -228,7 +233,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 	// (goroutines killed on restart, or silent Close failures).
 	// Retry with backoff as defense-in-depth against transient store
 	// errors immediately after ensureBeadsProvider returns (#753).
-	if sweepStore, err := openStoreAtForCity(p.CityPath, p.CityPath); err != nil {
+	if sweepStore, err := newCityRuntimeOpenSweepStore(p.CityPath, p.CityPath); err != nil {
 		fmt.Fprintf(p.Stderr, "gc start: order tracking sweep: %v\n", err) //nolint:errcheck // best-effort stderr
 	} else if n, err := sweepOrphanedOrderTrackingRetry(sweepStore, 3, time.Second); err != nil {
 		fmt.Fprintf(p.Stderr, "gc start: order tracking sweep (closed %d): %v\n", n, err) //nolint:errcheck // best-effort stderr
