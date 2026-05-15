@@ -42,7 +42,8 @@ this last-call-before-deprecation wave.
 > **Deprecation note:** `gc import migrate` is now a deprecated
 > compatibility shim. It no longer owns migration. Use `gc doctor` to
 > inspect legacy PackV1 surfaces and `gc doctor --fix` for the safe
-> mechanical rewrites.
+> mechanical rewrites. The shim exits with a non-zero status after printing
+> this guidance so scripts stop depending on the retired migration entry point.
 
 > **Compatibility note:** This wave is the last call before deprecation,
 > not a promise of seamless in-place PackV1 preservation. `gc doctor
@@ -603,10 +604,6 @@ schema, plus the qualified rows that matter most during migration.
 | `rigs.suspended` | Operational toggle | Keep in `city.toml` in the current release wave. It remains deployment/runtime state rather than portable pack definition. |
 | `rigs.includes` | Rig-scoped pack composition | Move to rig-scoped imports in `city.toml`. |
 | `rigs.overrides` | Rig-specific customization of imported agents | Keep as rig-level deployment customization in `city.toml`. |
-
-This rollout also changes the generated schema contract: checked-in
-`city.toml` files and downstream validators must no longer require
-`[workspace].name` once workspace identity has moved to `.gc/site.toml`.
 | `[patches]` | Post-merge modifications | Move pack-definition patches to `pack.toml`. Keep rig-specific patches with the rig in `city.toml`. |
 | `[beads]` | Bead store backend choice | Keep in `city.toml`. |
 | `[session]` | Session substrate config | Keep in `city.toml`, except site-local bindings. |
@@ -623,6 +620,11 @@ This rollout also changes the generated schema contract: checked-in
 | `[convergence]` | Convergence limits | Keep in `city.toml`. |
 | `[[service]]` | Workspace-owned service declarations | Keep in `city.toml` if they are deployment-owned services. |
 | `[agent_defaults]` | Defaults applied to agents in this city | Lives in both `pack.toml` (pack-wide portable defaults) and `city.toml` (city-level deployment overrides). City layers on top of pack. As of release v0.15.0, the actively-applied defaults are still narrow: `default_sling_formula` plus `[agent_defaults].append_fragments`. |
+
+> **Schema contract note:** This rollout also changes the generated schema
+> contract: checked-in `city.toml` files and downstream validators must no
+> longer require `[workspace].name` once workspace identity has moved to
+> `.gc/site.toml`.
 
 ## Reference: Gas City 0.14.0 `pack.toml` elements to PackV2
 

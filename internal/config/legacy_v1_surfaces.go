@@ -61,9 +61,11 @@ func DetectLegacyV1Surfaces(cfg *City, source string) []string {
 	if len(cfg.Packs) > 0 {
 		warnings = append(warnings, fmt.Sprintf(
 			"%s: [packs] is deprecated in v2; use [imports] + packs.lock. "+
-				"Run `gc doctor` to inspect; `gc doctor --fix` handles the safe mechanical rewrites available in this wave.",
+				"Run `gc doctor` to inspect; `gc doctor --fix` migrates entries referenced by legacy workspace include lists, then migrate or remove any remaining [packs] entries manually.",
 			source))
 	}
+	// Direct raw-field access is intentional here: detection runs before pack
+	// expansion, and the accessors are used by post-parse migration paths.
 	if len(cfg.Workspace.Includes) > 0 {
 		warnings = append(warnings, fmt.Sprintf(
 			"%s: workspace.includes is deprecated in v2; use [imports]. "+

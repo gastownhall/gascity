@@ -204,7 +204,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 			return nil, nil, fmt.Errorf("city pack.toml: %w", err)
 		}
 		if len(defaultRigIncludes) > 0 {
-			root.Workspace.DefaultRigIncludes = append(defaultRigIncludes, root.Workspace.DefaultRigIncludes...)
+			root.Workspace.SetLegacyDefaultRigIncludes(append(defaultRigIncludes, root.Workspace.LegacyDefaultRigIncludes()...))
 		}
 		if len(pc.Defaults.Rig.Imports) > 0 {
 			defaultBindings = make(map[string]bool, len(pc.Defaults.Rig.Imports))
@@ -398,14 +398,17 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// Skip packs already reachable from user includes or top-level imports
 	// (avoids duplicate agent errors when a user pack transitively includes
 	// a system pack).
-	root.Workspace.Includes = append(rootPackIncludes, root.Workspace.Includes...)
-	existingPacks := resolvedPackNames(root.Workspace.Includes, root.Imports, fs, cityRoot)
+	rootIncludes := append([]string{}, rootPackIncludes...)
+	rootIncludes = append(rootIncludes, root.Workspace.LegacyIncludes()...)
+	root.Workspace.SetLegacyIncludes(rootIncludes)
+	existingPacks := resolvedPackNames(root.Workspace.LegacyIncludes(), root.Imports, fs, cityRoot)
 	for _, inc := range packIncludes {
 		name := readPackNameFromDir(inc)
 		if name != "" && existingPacks[name] {
 			continue
 		}
-		root.Workspace.Includes = append(root.Workspace.Includes, inc)
+		rootIncludes = append(rootIncludes, inc)
+		root.Workspace.SetLegacyIncludes(rootIncludes)
 	}
 
 	adjustPatchPaths(&root.Patches, cityRoot, cityRoot)
@@ -483,7 +486,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		prov.Warnings = appendUnique(prov.Warnings, root.LoadWarnings...)
 	}
 	// Track city pack agents in provenance.
-	for _, ref := range root.Workspace.Includes {
+	for _, ref := range root.Workspace.LegacyIncludes() {
 		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
 		topoPath := filepath.Join(topoDir, packFile)
 		for _, a := range root.Agents {
@@ -1156,14 +1159,14 @@ func mergeWorkspace(base, fragment *City, fragMeta toml.MetaData, fragPath strin
 	}
 	// includes is a []string — additive merge (append, not replace).
 	if fragMeta.IsDefined("workspace", "includes") {
-		base.Workspace.Includes = append(
-			base.Workspace.Includes, fragment.Workspace.Includes...)
+		base.Workspace.SetLegacyIncludes(append(
+			base.Workspace.LegacyIncludes(), fragment.Workspace.LegacyIncludes()...))
 		prov.Workspace["includes"] = fragPath
 	}
 	// default_rig_includes is a []string — additive merge (append, not replace).
 	if fragMeta.IsDefined("workspace", "default_rig_includes") {
-		base.Workspace.DefaultRigIncludes = append(
-			base.Workspace.DefaultRigIncludes, fragment.Workspace.DefaultRigIncludes...)
+		base.Workspace.SetLegacyDefaultRigIncludes(append(
+			base.Workspace.LegacyDefaultRigIncludes(), fragment.Workspace.LegacyDefaultRigIncludes()...))
 		prov.Workspace["default_rig_includes"] = fragPath
 	}
 	// global_fragments is a []string — additive merge (append, not replace).

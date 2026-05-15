@@ -190,11 +190,6 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		}
 	}
 	includes = cleaned
-	explicitRigImports, err := boundImportsFromLegacySources(includes)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
 
 	rigPathExists := false
 	if fi, err := fs.Stat(rigPath); err != nil {
@@ -232,6 +227,7 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		fmt.Fprintf(stderr, "gc rig add: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	explicitRigImports := boundImportsFromLegacySources(includes, cfg.Packs)
 	if cityUsesBdStoreContract(cityPath) && cityDoltConfigHasLifecycleFields(cfg.Dolt) {
 		registerCityDoltConfig(cityPath, cfg.Dolt)
 		defer clearCityDoltConfig(cityPath)
@@ -290,23 +286,8 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		reAddNeedsConfigWrite = true
 	}
 
-	rootDefaultRigImports, err := config.LoadRootPackDefaultRigImports(fs, cityPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc rig add: loading root pack defaults: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	legacyDefaultRigImports, err := boundImportsFromLegacySources(cfg.Workspace.LegacyDefaultRigIncludes())
-	if err != nil {
-		fmt.Fprintf(stderr, "gc rig add: converting legacy default_rig_includes: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	defaultRigImports, err := mergeBoundImports(rootDefaultRigImports, legacyDefaultRigImports)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc rig add: merging default rig imports: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-
 	nextCfg := cfg
+	var defaultRigImports []config.BoundImport
 	needsValidation := !reAdd || reAddNeedsConfigWrite
 	if reAddNeedsConfigWrite {
 		next := *cfg
@@ -334,6 +315,12 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		case len(explicitRigImports) > 0:
 			rig.Imports = boundImportsMap(explicitRigImports)
 		default:
+			rootDefaultRigImports, err := config.LoadRootPackDefaultRigImports(fs, cityPath)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc rig add: loading root pack defaults: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			defaultRigImports = composeDefaultRigImports(rootDefaultRigImports, cfg.Workspace.LegacyDefaultRigIncludes(), cfg.Packs)
 			if len(defaultRigImports) > 0 {
 				rig.Imports = boundImportsMap(defaultRigImports)
 			}
@@ -420,10 +407,10 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 			fmt.Fprintf(stderr, "gc rig add: warning: --start-suspended ignored (existing: suspended=%v); edit city.toml to change\n", existingRig.Suspended) //nolint:errcheck // best-effort stderr
 		}
 		if len(explicitRigImports) > 0 {
-			existingRigImports, err := effectiveRigBoundImports(existingRig)
+			existingRigImports, err := effectiveRigBoundImports(existingRig, cfg.Packs)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc rig add: warning: --include flags %v ignored; existing rig imports could not be normalized (%v). Edit city.toml to change\n", includes, err) //nolint:errcheck // best-effort stderr
-			} else if !slices.Equal(sortedBoundImports(existingRigImports), sortedBoundImports(explicitRigImports)) {
+			} else if !slices.Equal(existingRigImports, explicitRigImports) {
 				fmt.Fprintf(stderr, "gc rig add: warning: --include flags %v ignored (existing imports: %s); edit city.toml to change\n", includes, formatBoundImports(existingRigImports)) //nolint:errcheck // best-effort stderr
 			}
 		}
@@ -571,33 +558,8 @@ func formatBoundImports(imports []config.BoundImport) string {
 	return strings.Join(parts, ", ")
 }
 
-func boundImportsFromLegacySources(sources []string) ([]config.BoundImport, error) {
-	if len(sources) == 0 {
-		return nil, nil
-	}
-	seenByBinding := make(map[string]string, len(sources))
-	seenBySource := make(map[string]bool, len(sources))
-	imports := make([]config.BoundImport, 0, len(sources))
-	for _, raw := range sources {
-		source := strings.TrimSpace(raw)
-		if source == "" || seenBySource[source] {
-			continue
-		}
-		binding := deriveImportName(source)
-		if binding == "" {
-			return nil, fmt.Errorf("could not derive an import binding from %q; migrate this source to an explicit [imports.<binding>] declaration first", source)
-		}
-		if prior, exists := seenByBinding[binding]; exists && prior != source {
-			return nil, fmt.Errorf("legacy source %q collides with %q at binding %q; migrate to explicit imports before using gc rig add", source, prior, binding)
-		}
-		seenByBinding[binding] = source
-		seenBySource[source] = true
-		imports = append(imports, config.BoundImport{
-			Binding: binding,
-			Import:  config.Import{Source: source},
-		})
-	}
-	return imports, nil
+func boundImportsFromLegacySources(sources []string, packs map[string]config.PackSource) []config.BoundImport {
+	return config.BoundImportsFromLegacySources(sources, packs)
 }
 
 func boundImportsFromImportMap(imports map[string]config.Import) []config.BoundImport {
@@ -619,15 +581,36 @@ func boundImportsFromImportMap(imports map[string]config.Import) []config.BoundI
 	return bound
 }
 
-func effectiveRigBoundImports(rig *config.Rig) ([]config.BoundImport, error) {
+func effectiveRigBoundImports(rig *config.Rig, packs map[string]config.PackSource) ([]config.BoundImport, error) {
 	if rig == nil {
 		return nil, nil
 	}
-	legacy, err := boundImportsFromLegacySources(rig.Includes)
-	if err != nil {
-		return nil, err
-	}
+	legacy := boundImportsFromLegacySources(rig.Includes, packs)
 	return mergeBoundImports(boundImportsFromImportMap(rig.Imports), legacy)
+}
+
+func composeDefaultRigImports(root []config.BoundImport, legacyIncludes []string, packs map[string]config.PackSource) []config.BoundImport {
+	if len(root) == 0 {
+		return boundImportsFromLegacySources(legacyIncludes, packs)
+	}
+	target := make(map[string]config.Import, len(root)+len(legacyIncludes))
+	order := make([]string, 0, len(root)+len(legacyIncludes))
+	for _, bound := range root {
+		if _, exists := target[bound.Binding]; !exists {
+			order = append(order, bound.Binding)
+		}
+		target[bound.Binding] = bound.Import
+	}
+	order, _ = config.AddOrderedLegacyImports(target, order, legacyIncludes, packs)
+	out := make([]config.BoundImport, 0, len(order))
+	for _, binding := range order {
+		imp, ok := target[binding]
+		if !ok {
+			continue
+		}
+		out = append(out, config.BoundImport{Binding: binding, Import: imp})
+	}
+	return out
 }
 
 func sortedBoundImports(imports []config.BoundImport) []config.BoundImport {
@@ -644,6 +627,9 @@ func sortedBoundImports(imports []config.BoundImport) []config.BoundImport {
 	return sorted
 }
 
+// mergeBoundImports is for already-bound import sets. Legacy default-rig
+// includes use composeDefaultRigImports so binding collisions can be
+// uniquified with the migration policy.
 func mergeBoundImports(primary, secondary []config.BoundImport) ([]config.BoundImport, error) {
 	if len(primary) == 0 && len(secondary) == 0 {
 		return nil, nil
@@ -652,7 +638,7 @@ func mergeBoundImports(primary, secondary []config.BoundImport) ([]config.BoundI
 	seenByBinding := make(map[string]config.Import, len(primary)+len(secondary))
 	appendImport := func(bound config.BoundImport) error {
 		if prior, exists := seenByBinding[bound.Binding]; exists {
-			if prior == bound.Import {
+			if prior.Source == bound.Import.Source {
 				return nil
 			}
 			return fmt.Errorf("binding %q maps to both %q and %q", bound.Binding, prior.Source, bound.Import.Source)
@@ -671,7 +657,7 @@ func mergeBoundImports(primary, secondary []config.BoundImport) ([]config.BoundI
 			return nil, err
 		}
 	}
-	return merged, nil
+	return sortedBoundImports(merged), nil
 }
 
 func boundImportsMap(imports []config.BoundImport) map[string]config.Import {

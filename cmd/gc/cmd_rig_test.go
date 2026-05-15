@@ -772,6 +772,45 @@ func TestDoRigAdd_RootPackDefaultRigImportsErrorDoesNotMutateRig(t *testing.T) {
 	}
 }
 
+func TestDoRigAdd_ExplicitIncludeSkipsUnusedDefaultRigImportErrors(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := "[workspace]\nname = \"test-city\"\ndefault_rig_includes = [\"packs/one/shared\", \"packs/two/shared\"]\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"), []byte("not = [valid\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigPath := filepath.Join(t.TempDir(), "my-project")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, []string{"packs/custom"}, "", "", "", false, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "default rig imports") || strings.Contains(stderr.String(), "pack.toml") {
+		t.Fatalf("explicit include should not load unused defaults; stderr: %s", stderr.String())
+	}
+
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Rigs[0].Imports["custom"].Source; got != "./packs/custom" {
+		t.Fatalf("rig imports[custom] = %q, want ./packs/custom", got)
+	}
+}
+
 func TestDoRigAdd_CandidateValidationErrorDoesNotCreateMissingRig(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
@@ -1160,7 +1199,7 @@ func TestDoRigAdd_WithPack(t *testing.T) {
 	}
 
 	output := stdout.String()
-	if !strings.Contains(output, "Import: gastown=packs/gastown") {
+	if !strings.Contains(output, "Import: gastown=./packs/gastown") {
 		t.Errorf("output missing import: %s", output)
 	}
 
@@ -1179,8 +1218,56 @@ func TestDoRigAdd_WithPack(t *testing.T) {
 	if len(cfg.Rigs[0].Includes) != 0 {
 		t.Errorf("rig includes should stay empty, got %v; city.toml:\n%s", cfg.Rigs[0].Includes, data)
 	}
-	if got := cfg.Rigs[0].Imports["gastown"].Source; got != "packs/gastown" {
-		t.Errorf("rig imports[gastown] = %q, want packs/gastown; city.toml:\n%s", got, data)
+	if got := cfg.Rigs[0].Imports["gastown"].Source; got != "./packs/gastown" {
+		t.Errorf("rig imports[gastown] = %q, want ./packs/gastown; city.toml:\n%s", got, data)
+	}
+}
+
+func TestDoRigAdd_ExplicitIncludeResolvesPackAlias(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+
+[packs.ops]
+source = "https://github.com/acme/ops-pack.git"
+path = "roles"
+ref = "v1.2.3"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigPath := filepath.Join(t.TempDir(), "my-project")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, []string{"ops"}, "", "", "", false, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
+	}
+
+	wantSource := "https://github.com/acme/ops-pack.git//roles#v1.2.3"
+	if !strings.Contains(stdout.String(), "Import: ops="+wantSource) {
+		t.Fatalf("output missing resolved import: %s", stdout.String())
+	}
+
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Rigs[0].Imports["ops"].Source; got != wantSource {
+		t.Fatalf("rig imports[ops] = %q, want %q", got, wantSource)
 	}
 }
 
@@ -1209,7 +1296,7 @@ func TestDoRigAdd_WithMultiplePacks(t *testing.T) {
 	}
 
 	output := stdout.String()
-	if !strings.Contains(output, "Import: architect=packs/architect, planner=packs/planner") {
+	if !strings.Contains(output, "Import: architect=./packs/architect, planner=./packs/planner") {
 		t.Errorf("output missing combined imports: %s", output)
 	}
 
@@ -1220,7 +1307,7 @@ func TestDoRigAdd_WithMultiplePacks(t *testing.T) {
 	if len(cfg.Rigs[0].Includes) != 0 {
 		t.Errorf("rig includes should stay empty, got %v", cfg.Rigs[0].Includes)
 	}
-	want := map[string]string{"planner": "packs/planner", "architect": "packs/architect"}
+	want := map[string]string{"planner": "./packs/planner", "architect": "./packs/architect"}
 	if len(cfg.Rigs[0].Imports) != len(want) {
 		t.Fatalf("rig imports = %#v, want %d entries", cfg.Rigs[0].Imports, len(want))
 	}
@@ -1228,6 +1315,55 @@ func TestDoRigAdd_WithMultiplePacks(t *testing.T) {
 		if got := cfg.Rigs[0].Imports[binding].Source; got != source {
 			t.Errorf("rig imports[%s] = %q, want %q", binding, got, source)
 		}
+	}
+}
+
+func TestDoRigAdd_DefaultRigIncludesResolvePackAlias(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+default_rig_includes = ["ops"]
+
+[[agent]]
+name = "mayor"
+
+[packs.ops]
+source = "https://github.com/acme/ops-pack.git"
+path = "roles"
+ref = "v1.2.3"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigPath := filepath.Join(t.TempDir(), "my-project")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
+	}
+
+	wantSource := "https://github.com/acme/ops-pack.git//roles#v1.2.3"
+	if !strings.Contains(stdout.String(), "Import: ops="+wantSource+" (default)") {
+		t.Fatalf("output missing resolved default import: %s", stdout.String())
+	}
+
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Rigs[0].Imports["ops"].Source; got != wantSource {
+		t.Fatalf("rig imports[ops] = %q, want %q", got, wantSource)
 	}
 }
 
@@ -1325,7 +1461,7 @@ func TestDoRigAdd_DefaultRigIncludes(t *testing.T) {
 	}
 
 	output := stdout.String()
-	if !strings.Contains(output, "Import: gastown=packs/gastown (default)") {
+	if !strings.Contains(output, "Import: gastown=./packs/gastown (default)") {
 		t.Errorf("output missing default import: %s", output)
 	}
 
@@ -1339,8 +1475,8 @@ func TestDoRigAdd_DefaultRigIncludes(t *testing.T) {
 	if len(cfg.Rigs[0].Includes) != 0 {
 		t.Errorf("rig includes should stay empty, got %v", cfg.Rigs[0].Includes)
 	}
-	if got := cfg.Rigs[0].Imports["gastown"].Source; got != "packs/gastown" {
-		t.Errorf("rig imports[gastown] = %q, want packs/gastown", got)
+	if got := cfg.Rigs[0].Imports["gastown"].Source; got != "./packs/gastown" {
+		t.Errorf("rig imports[gastown] = %q, want ./packs/gastown", got)
 	}
 }
 
@@ -1382,7 +1518,7 @@ source = "packs/a-pack"
 	}
 
 	output := stdout.String()
-	if !strings.Contains(output, "Import: a-pack=packs/a-pack, city-pack=packs/city-pack, z-pack=packs/z-pack (default)") {
+	if !strings.Contains(output, "Import: a-pack=packs/a-pack, city-pack=./packs/city-pack, z-pack=packs/z-pack (default)") {
 		t.Errorf("output missing merged default imports: %s", output)
 	}
 
@@ -1405,8 +1541,119 @@ source = "packs/a-pack"
 	if got := cfg.Rigs[0].Imports["a-pack"].Source; got != "packs/a-pack" {
 		t.Errorf("rig imports[a-pack] = %q, want packs/a-pack", got)
 	}
-	if got := cfg.Rigs[0].Imports["city-pack"].Source; got != "packs/city-pack" {
-		t.Errorf("rig imports[city-pack] = %q, want packs/city-pack", got)
+	if got := cfg.Rigs[0].Imports["city-pack"].Source; got != "./packs/city-pack" {
+		t.Errorf("rig imports[city-pack] = %q, want ./packs/city-pack", got)
+	}
+}
+
+func TestDoRigAdd_RootPackDefaultRigImportPackAliasCollisionUniquifiesLegacy(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+default_rig_includes = ["shared"]
+
+[[agent]]
+name = "mayor"
+
+[packs.shared]
+source = "github.com/bar/B"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	packToml := `[pack]
+name = "test-city"
+schema = 2
+
+[defaults.rig.imports.shared]
+source = "github.com/foo/A"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"), []byte(packToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigPath := filepath.Join(t.TempDir(), "my-project")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
+	}
+
+	if !strings.Contains(stdout.String(), "Import: shared=github.com/foo/A, shared-2=github.com/bar/B (default)") {
+		t.Fatalf("output missing uniquified default imports: %s", stdout.String())
+	}
+
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Rigs) != 1 {
+		t.Fatalf("expected 1 rig, got %d", len(cfg.Rigs))
+	}
+	if got := cfg.Rigs[0].Imports["shared"].Source; got != "github.com/foo/A" {
+		t.Fatalf("rig imports[shared] = %q, want github.com/foo/A", got)
+	}
+	if got := cfg.Rigs[0].Imports["shared-2"].Source; got != "github.com/bar/B" {
+		t.Fatalf("rig imports[shared-2] = %q, want github.com/bar/B", got)
+	}
+}
+
+func TestDoRigAdd_DefaultRigIncludesUniquifyDuplicateDerivedBindings(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+default_rig_includes = ["github.com/acme/shared", "github.com/other/shared"]
+
+[[agent]]
+name = "mayor"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigPath := filepath.Join(t.TempDir(), "my-project")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
+	}
+
+	if !strings.Contains(stdout.String(), "Import: shared=github.com/acme/shared, shared-2=github.com/other/shared (default)") {
+		t.Fatalf("output missing uniquified default imports: %s", stdout.String())
+	}
+
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Rigs) != 1 {
+		t.Fatalf("expected 1 rig, got %d", len(cfg.Rigs))
+	}
+	if got := cfg.Rigs[0].Imports["shared"].Source; got != "github.com/acme/shared" {
+		t.Fatalf("rig imports[shared] = %q, want github.com/acme/shared", got)
+	}
+	if got := cfg.Rigs[0].Imports["shared-2"].Source; got != "github.com/other/shared" {
+		t.Fatalf("rig imports[shared-2] = %q, want github.com/other/shared", got)
 	}
 }
 
@@ -1481,7 +1728,7 @@ func TestDoRigAdd_ExplicitIncludeOverridesDefault(t *testing.T) {
 	}
 
 	output := stdout.String()
-	if !strings.Contains(output, "Import: custom=packs/custom") {
+	if !strings.Contains(output, "Import: custom=./packs/custom") {
 		t.Errorf("output missing explicit import: %s", output)
 	}
 	if strings.Contains(output, "(default)") {
@@ -1498,9 +1745,119 @@ func TestDoRigAdd_ExplicitIncludeOverridesDefault(t *testing.T) {
 	if len(cfg.Rigs[0].Includes) != 0 {
 		t.Errorf("rig includes should stay empty, got %v", cfg.Rigs[0].Includes)
 	}
-	if got := cfg.Rigs[0].Imports["custom"].Source; got != "packs/custom" {
-		t.Errorf("rig imports[custom] = %q, want packs/custom", got)
+	if got := cfg.Rigs[0].Imports["custom"].Source; got != "./packs/custom" {
+		t.Errorf("rig imports[custom] = %q, want ./packs/custom", got)
 	}
+}
+
+func TestBoundImportsFromLegacySources(t *testing.T) {
+	tests := []struct {
+		name        string
+		sources     []string
+		wantSources []string
+	}{
+		{
+			name:        "stable ordering",
+			sources:     []string{"packs/zeta", "packs/alpha"},
+			wantSources: []string{"alpha=./packs/alpha", "zeta=./packs/zeta"},
+		},
+		{
+			name:        "deduplicates duplicate source",
+			sources:     []string{" packs/alpha ", "packs/alpha", "packs/beta"},
+			wantSources: []string{"alpha=./packs/alpha", "beta=./packs/beta"},
+		},
+		{
+			name:        "uniquifies binding collision",
+			sources:     []string{"packs/one/shared", "packs/two/shared"},
+			wantSources: []string{"shared=./packs/one/shared", "shared-2=./packs/two/shared"},
+		},
+		{
+			name:        "uses fallback binding for empty derived binding",
+			sources:     []string{"/"},
+			wantSources: []string{"import=/"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := boundImportsFromLegacySources(tt.sources, nil)
+			if got := renderBoundImportsInOrder(got); got != strings.Join(tt.wantSources, ", ") {
+				t.Fatalf("boundImportsFromLegacySources() = %q, want %q", got, strings.Join(tt.wantSources, ", "))
+			}
+		})
+	}
+}
+
+func TestMergeBoundImports(t *testing.T) {
+	tests := []struct {
+		name        string
+		primary     []config.BoundImport
+		secondary   []config.BoundImport
+		wantSources []string
+		wantErr     string
+	}{
+		{
+			name: "stable ordering and identical deduplication",
+			primary: []config.BoundImport{
+				{Binding: "zeta", Import: config.Import{Source: "packs/zeta"}},
+				{Binding: "alpha", Import: config.Import{Source: "packs/alpha"}},
+			},
+			secondary: []config.BoundImport{
+				{Binding: "alpha", Import: config.Import{Source: "packs/alpha"}},
+				{Binding: "beta", Import: config.Import{Source: "packs/beta"}},
+			},
+			wantSources: []string{"alpha=packs/alpha", "beta=packs/beta", "zeta=packs/zeta"},
+		},
+		{
+			name: "rejects binding source disagreement for already-bound imports",
+			primary: []config.BoundImport{
+				{Binding: "shared", Import: config.Import{Source: "packs/one"}},
+			},
+			secondary: []config.BoundImport{
+				{Binding: "shared", Import: config.Import{Source: "packs/two"}},
+			},
+			wantErr: "maps to both",
+		},
+		{
+			name: "same source keeps typed import options",
+			primary: []config.BoundImport{
+				{Binding: "shared", Import: config.Import{Source: "packs/shared", Transitive: boolPtr(false)}},
+			},
+			secondary: []config.BoundImport{
+				{Binding: "shared", Import: config.Import{Source: "packs/shared"}},
+			},
+			wantSources: []string{"shared=packs/shared"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := mergeBoundImports(tt.primary, tt.secondary)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("mergeBoundImports() error = %v, want substring %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("mergeBoundImports() error = %v", err)
+			}
+			if got := renderBoundImportsInOrder(got); got != strings.Join(tt.wantSources, ", ") {
+				t.Fatalf("mergeBoundImports() = %q, want %q", got, strings.Join(tt.wantSources, ", "))
+			}
+			if tt.name == "same source keeps typed import options" && got[0].Import.Transitive == nil {
+				t.Fatalf("mergeBoundImports() dropped typed import options: %#v", got[0].Import)
+			}
+		})
+	}
+}
+
+func renderBoundImportsInOrder(imports []config.BoundImport) string {
+	parts := make([]string, 0, len(imports))
+	for _, bound := range imports {
+		parts = append(parts, bound.Binding+"="+bound.Import.Source)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // Regression: doRigAdd must reject rigs with colliding prefixes.

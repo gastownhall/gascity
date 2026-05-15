@@ -436,7 +436,7 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 }
 
 func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) ([]string, []PackRequirement, []string, error) {
-	topos := cfg.Workspace.Includes
+	topos := cfg.Workspace.LegacyIncludes()
 	hasImports := len(cfg.Imports) > 0
 	if len(topos) == 0 && !hasImports {
 		return nil, nil, nil, nil
@@ -2580,11 +2580,13 @@ func resolveNamedPacks(cfg *City, cityRoot string) {
 		return
 	}
 	// City includes.
-	for i, ref := range cfg.Workspace.Includes {
+	includes := cfg.Workspace.LegacyIncludes()
+	for i, ref := range includes {
 		if src, ok := cfg.Packs[ref]; ok {
-			cfg.Workspace.Includes[i] = PackCachePath(cityRoot, ref, src)
+			includes[i] = PackCachePath(cityRoot, ref, src)
 		}
 	}
+	cfg.Workspace.SetLegacyIncludes(includes)
 	// Rig includes.
 	for i := range cfg.Rigs {
 		for j, ref := range cfg.Rigs[i].Includes {

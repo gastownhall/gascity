@@ -273,7 +273,11 @@ func TestDetectLegacyV1Surfaces_MentionsActionableMigrationCommand(t *testing.T)
 		if !strings.Contains(w, wantSurfaces[i]) {
 			t.Errorf("warning %d = %q, want surface %q", i, w, wantSurfaces[i])
 		}
-		if !strings.Contains(w, "Run `gc doctor` to inspect; `gc doctor --fix` handles the safe mechanical rewrites available in this wave.") {
+		if strings.Contains(w, "[packs] is deprecated") {
+			if !strings.Contains(w, "Run `gc doctor` to inspect; `gc doctor --fix` migrates entries referenced by legacy workspace include lists, then migrate or remove any remaining [packs] entries manually.") {
+				t.Errorf("warning %d = %q, expected [packs] cleanup guidance", i, w)
+			}
+		} else if !strings.Contains(w, "Run `gc doctor` to inspect; `gc doctor --fix` handles the safe mechanical rewrites available in this wave.") {
 			t.Errorf("warning %d = %q, expected gc doctor guidance", i, w)
 		}
 		if strings.Contains(w, "gc import migrate") {
