@@ -14,6 +14,15 @@ import (
 
 var runRepoCacheGit = defaultRunRepoCacheGit
 
+const bundledPackCacheMarker = ".gc-bundled-pack-cache.toml"
+
+type bundledPackCacheState struct {
+	Schema      int    `toml:"schema"`
+	Repository  string `toml:"repository"`
+	Commit      string `toml:"commit"`
+	ContentHash string `toml:"content_hash"`
+}
+
 // includeCacheDir is the subdirectory under .gc/cache/includes/ where
 // remote pack includes are cached.
 const includeCacheDir = citylayout.CacheIncludesRoot
@@ -214,6 +223,9 @@ func resolveLockedRemoteImport(source, cityRoot string) (string, bool, error) {
 	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, entry.Commit))
 	if err := WithRepoCacheReadLock(cacheRoot, func() error {
 		if _, err := os.Stat(filepath.Join(cacheDir, ".git")); err != nil {
+			if validateBundledPackCache(source, cacheDir, entry.Commit) == nil {
+				return nil
+			}
 			if os.IsNotExist(err) {
 				return fmt.Errorf("remote import %s is locked but not cached at %s; run \"gc import install\"", source, cacheDir)
 			}
@@ -257,6 +269,9 @@ func resolveInstalledRemoteImport(source, cityRoot string) (string, error) {
 	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, entry.Commit))
 	if err := WithRepoCacheReadLock(cacheRoot, func() error {
 		if _, err := os.Stat(filepath.Join(cacheDir, ".git")); err != nil {
+			if validateBundledPackCache(source, cacheDir, entry.Commit) == nil {
+				return nil
+			}
 			if os.IsNotExist(err) {
 				return fmt.Errorf("remote import %s is locked but not cached at %s; run \"gc import install\"", source, cacheDir)
 			}
@@ -270,6 +285,27 @@ func resolveInstalledRemoteImport(source, cityRoot string) (string, error) {
 		return "", err
 	}
 	return cacheDir, nil
+}
+
+func validateBundledPackCache(source, cacheDir, commit string) error {
+	data, err := os.ReadFile(filepath.Join(cacheDir, bundledPackCacheMarker))
+	if err != nil {
+		return err
+	}
+	var state bundledPackCacheState
+	if _, err := toml.Decode(string(data), &state); err != nil {
+		return err
+	}
+	if state.Schema != 1 {
+		return fmt.Errorf("unsupported bundled pack cache schema %d", state.Schema)
+	}
+	if !sameRepoCacheCommit(state.Commit, commit) {
+		return fmt.Errorf("bundled pack cache is at %s, expected %s", state.Commit, commit)
+	}
+	if NormalizeRemoteSource(source) != NormalizeRemoteSource(state.Repository) {
+		return fmt.Errorf("bundled pack cache repository is %s, expected %s", state.Repository, source)
+	}
+	return nil
 }
 
 func validateLockedRemoteCache(source, cacheDir, commit string) error {
