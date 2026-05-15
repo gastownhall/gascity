@@ -49,6 +49,13 @@ func removeDoltRuntimeStateFile(path string) error {
 }
 
 func readPublishedDoltRuntimeStateHint(cityPath string) (doltRuntimeState, bool, error) {
+	owned, err := managedDoltLifecycleOwned(cityPath)
+	if err != nil {
+		return doltRuntimeState{}, false, fmt.Errorf("determine managed dolt ownership for published hint: %w", err)
+	}
+	if !owned {
+		return doltRuntimeState{}, false, nil
+	}
 	hint, err := readDoltRuntimeStateFile(managedDoltStatePath(cityPath))
 	if err == nil {
 		return hint, true, nil
@@ -119,6 +126,13 @@ func syncManagedDoltPortMirrors(cityPath string) error {
 }
 
 func publishManagedDoltRuntimeState(cityPath string) error {
+	owned, err := managedDoltLifecycleOwned(cityPath)
+	if err != nil {
+		return err
+	}
+	if !owned {
+		return nil
+	}
 	providerStatePath := providerManagedDoltStatePath(cityPath)
 	state, readErr := readDoltRuntimeStateFile(providerStatePath)
 	if readErr != nil && !os.IsNotExist(readErr) {

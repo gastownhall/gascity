@@ -635,7 +635,7 @@ func initBeadsForDir(cityPath, dir, prefix, doltDatabase string) error {
 		}
 		script := strings.TrimPrefix(provider, "exec:")
 		if execProviderUsesCanonicalBdScopeFiles(provider) && !execProviderNeedsScopedDoltInit(provider) {
-			baseEnv, err := providerLifecycleProcessEnvWithError(cityPath, provider)
+			baseEnv, err := providerLifecycleProcessEnvForScopeInitWithError(cityPath, dir, provider)
 			if err != nil {
 				return err
 			}
@@ -1012,6 +1012,10 @@ func managedDoltStatePath(cityPath string) string {
 }
 
 func currentManagedDoltPort(cityPath string) string {
+	owned, err := managedDoltLifecycleOwned(cityPath)
+	if err != nil || !owned {
+		return ""
+	}
 	data, err := os.ReadFile(managedDoltStatePath(cityPath))
 	if err != nil {
 		return ""
@@ -1593,8 +1597,36 @@ func providerLifecycleProcessEnvWithError(cityPath, provider string) ([]string, 
 	if err != nil {
 		return nil, err
 	}
-	if !providerUsesBdStoreContract(provider) {
+	return providerLifecycleProcessEnvFromBase(cityPath, provider, env), nil
+}
+
+func providerLifecycleProcessEnvForScopeInitWithError(cityPath, scopeRoot, provider string) ([]string, error) {
+	env, err := providerLifecycleProcessEnvWithError(cityPath, provider)
+	if err == nil {
 		return env, nil
+	}
+	if !providerUsesBdStoreContract(provider) || !cityPostgresProjectionErrorCanBeBypassed(cityPath, err) || !scopeRuntimeEnvIndependentOfCityProjection(cityPath, scopeRoot) {
+		return nil, err
+	}
+	cityPath = normalizePathForCompare(cityPath)
+	baseEnv := mergeRuntimeEnv(os.Environ(), cityRuntimeEnvMapForCity(cityPath))
+	return providerLifecycleProcessEnvFromBase(cityPath, provider, baseEnv), nil
+}
+
+func scopeRuntimeEnvIndependentOfCityProjection(cityPath, scopeRoot string) bool {
+	if strings.TrimSpace(cityPath) == "" || samePath(cityPath, scopeRoot) {
+		return false
+	}
+	var explicitRig *config.Rig
+	if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil && cfg != nil {
+		explicitRig = rigConfigForScopeRoot(cityPath, scopeRoot, cfg.Rigs)
+	}
+	return rigRuntimeEnvIndependentOfCityProjection(cityPath, scopeRoot, explicitRig)
+}
+
+func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string) []string {
+	if !providerUsesBdStoreContract(provider) {
+		return env
 	}
 	for _, key := range []string{
 		"GC_PACK_STATE_DIR",
@@ -1640,7 +1672,7 @@ func providerLifecycleProcessEnvWithError(cityPath, provider string) ([]string, 
 			env = append(env, loglevelPrefix+val)
 		}
 	}
-	return env, nil
+	return env
 }
 
 // acquireProviderSemaphore returns a per-city semaphore channel and waits

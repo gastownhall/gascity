@@ -1300,6 +1300,32 @@ func TestCurrentManagedDoltPortUsesCanonicalPackStateOnly(t *testing.T) {
 	}
 }
 
+func TestCurrentManagedDoltPortIgnoresStateWhenManagedDoltNotOwned(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "metadata.json"), []byte(`{"database":"beads","backend":"postgres","postgres_host":"db.example.test","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pg"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ln := listenOnRandomPort(t)
+	t.Cleanup(func() { _ = ln.Close() })
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := writeDoltState(cityDir, doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      port,
+		DataDir:   filepath.Join(cityDir, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := currentManagedDoltPort(cityDir); got != "" {
+		t.Fatalf("currentManagedDoltPort() = %q, want empty for postgres city", got)
+	}
+}
+
 //nolint:unparam // test helper keeps signature aligned with call sites under comparison
 func requireSyncConfiguredDoltPortFiles(t *testing.T, cityPath, provider string, cityDolt config.DoltConfig, cityPrefix string, rigs []config.Rig) {
 	t.Helper()
@@ -2656,6 +2682,82 @@ func TestInitBeadsForDirExecSetsBEADSDIR(t *testing.T) {
 				t.Fatalf("BEADS_DIR = %q, want %q (bd init without BEADS_DIR creates .git as a side effect)", got, want)
 			}
 		})
+	}
+}
+
+func TestInitBeadsForDirCanonicalRigIgnoresUnresolvableCityPostgres(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rigs", "canonical-dolt")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[[rigs]]
+name = "canonical-dolt"
+path = "rigs/canonical-dolt"
+prefix = "cd"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: city
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "metadata.json"), []byte(`{"database":"beads","backend":"postgres","postgres_host":"db.example.test","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pg"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: cd
+gc.endpoint_origin: explicit
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: rig-db.example.test
+dolt.port: 4407
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	logFile := filepath.Join(t.TempDir(), "env.log")
+	script := filepath.Join(t.TempDir(), "gc-beads-bd")
+	content := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = init ]; then printf '%%s|%%s|%%s|%%s\\n' \"${BEADS_DIR:-}\" \"${GC_DOLT_HOST:-}\" \"${GC_DOLT_PORT:-}\" \"${BEADS_POSTGRES_HOST:-}\" > %q; fi\nexit 0\n", logFile)
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityDir)
+
+	if err := initBeadsForDir(cityDir, rigDir, "cd", "cd"); err != nil {
+		t.Fatalf("initBeadsForDir: %v", err)
+	}
+
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read env log: %v", err)
+	}
+	parts := strings.Split(strings.TrimSpace(string(data)), "|")
+	if len(parts) != 4 {
+		t.Fatalf("env log = %q, want beads_dir|host|port|postgres_host", string(data))
+	}
+	if got, want := parts[0], filepath.Join(rigDir, ".beads"); got != want {
+		t.Fatalf("BEADS_DIR = %q, want %q", got, want)
+	}
+	if got := parts[1]; got != "rig-db.example.test" {
+		t.Fatalf("GC_DOLT_HOST = %q, want rig-db.example.test", got)
+	}
+	if got := parts[2]; got != "4407" {
+		t.Fatalf("GC_DOLT_PORT = %q, want 4407", got)
+	}
+	if got := parts[3]; got != "" {
+		t.Fatalf("BEADS_POSTGRES_HOST = %q, want empty for independent Dolt rig init", got)
 	}
 }
 
