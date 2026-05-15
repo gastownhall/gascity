@@ -656,21 +656,42 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		<-acceptDone
 		cr.failActiveReload("Reload canceled because the controller is shutting down.")
 	}()
+	// Debounce event-driven ticks so a burst of pokes / control-dispatcher
+	// signals collapses into a single fire. Each channel gets its own
+	// debouncer so trace-tag identity ("poke" vs "control-dispatcher") is
+	// preserved when the deferred tick eventually runs. With debounce=0
+	// (the default), arm() falls back to non-blocking send and the loop
+	// behaves identically to the pre-debounce implementation.
+	pokeDB := newTickDebouncer()
+	ctrlDB := newTickDebouncer()
+	defer pokeDB.cancelPending()
+	defer ctrlDB.cancelPending()
 
 	for {
+		// Re-read on every iteration so a hot reload of city.toml takes
+		// effect on the next event without disturbing in-flight timers.
+		debounce := cr.cfg.Daemon.TickDebounceDuration()
 		select {
 		case <-ticker.C:
+			// Patrol scans every reconciler state authoritatively, so any
+			// pending event-driven fires are redundant — drop them.
+			pokeDB.cancelPending()
+			ctrlDB.cancelPending()
 			runTick("patrol")
 		case <-cr.pokeCh:
 			// Event-driven wake path: sling or API assigned work to a sleeping
-			// session. Trigger an immediate tick so the reconciler sees the new
-			// work via workSet/poolDesired and wakes the target promptly.
+			// session. Arm the debouncer; the deferred fire runs runTick("poke")
+			// once the burst settles.
+			pokeDB.arm(debounce)
+		case <-pokeDB.fired():
 			runTick("poke")
 		case <-cr.nudgeWakeCh:
 			cr.safeTick(func() {
 				cr.nudgeDispatchTick(ctx)
 			}, "nudge-wake")
 		case <-cr.controlDispatcherCh:
+			ctrlDB.arm(debounce)
+		case <-ctrlDB.fired():
 			cr.safeTick(func() {
 				cr.controlDispatcherTick(ctx)
 			}, "control-dispatcher")
@@ -750,6 +771,77 @@ func (cr *CityRuntime) startupReadinessWatchdog(ctx context.Context, ready <-cha
 	fmt.Fprintf(cr.stderr, //nolint:errcheck // best-effort stderr
 		"%s: startup watchdog: city %q not ready after %s (half of [daemon].start_ready_timeout=%s); goroutine dump follows:\n%s\n",
 		cr.logPrefix, cr.cityName, delay, total, buf[:n])
+
+// tickDebouncer coalesces bursty event-driven tick signals into a
+// single delayed fire. The first arm() call in a quiet period schedules
+// a timer; subsequent arm() calls while the timer is pending are
+// dropped (the eventual single fire re-reads authoritative state
+// covering all collapsed events). When delay <= 0 it falls back to
+// non-blocking send on fired(), preserving the cap=1 channel-level
+// coalesce semantics the runtime had before debouncing was added.
+//
+// Methods are safe to call from multiple goroutines (time.AfterFunc
+// callbacks run on their own goroutine).
+type tickDebouncer struct {
+	mu     sync.Mutex
+	timer  *time.Timer
+	fireCh chan struct{}
+}
+
+// newTickDebouncer allocates a tickDebouncer with a cap=1 fire channel.
+// The channel buffer matches the existing pokeCh/controlDispatcherCh
+// non-blocking-send pattern so a pending fire collapses with any new
+// arm() call that completes before the receiver drains.
+func newTickDebouncer() *tickDebouncer {
+	return &tickDebouncer{fireCh: make(chan struct{}, 1)}
+}
+
+// arm schedules a fire after delay if no fire is already pending. If
+// delay <= 0 the fire is enqueued immediately (non-blocking) to keep
+// debounce-disabled runtime cost identical to the prior implementation.
+func (d *tickDebouncer) arm(delay time.Duration) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if delay <= 0 {
+		select {
+		case d.fireCh <- struct{}{}:
+		default:
+		}
+		return
+	}
+	if d.timer != nil {
+		return // already pending — burst collapse
+	}
+	d.timer = time.AfterFunc(delay, func() {
+		d.mu.Lock()
+		d.timer = nil
+		d.mu.Unlock()
+		select {
+		case d.fireCh <- struct{}{}:
+		default:
+		}
+	})
+}
+
+// cancelPending stops an armed timer and discards a queued fire, if
+// any. Used when a higher-priority tick (e.g. the periodic patrol)
+// supersedes whatever caused the pending fire.
+func (d *tickDebouncer) cancelPending() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.timer != nil {
+		d.timer.Stop()
+		d.timer = nil
+	}
+	select {
+	case <-d.fireCh:
+	default:
+	}
+}
+
+// fired returns the channel that emits when a debounced fire is due.
+func (d *tickDebouncer) fired() <-chan struct{} {
+	return d.fireCh
 }
 
 func convergenceStartupComplete(cr *CityRuntime) bool {

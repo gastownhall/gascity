@@ -504,6 +504,112 @@ func TestCityRuntimeRequestDeferredDrainFollowUpTick_PokesOnce(t *testing.T) {
 	}
 }
 
+func TestTickDebouncer_ZeroFiresImmediately(t *testing.T) {
+	d := newTickDebouncer()
+	d.arm(0)
+	select {
+	case <-d.fired():
+	default:
+		t.Fatal("debounce=0 should enqueue an immediate fire")
+	}
+}
+
+func TestTickDebouncer_ZeroPreservesCapOneCoalesce(t *testing.T) {
+	d := newTickDebouncer()
+	d.arm(0)
+	d.arm(0)
+	d.arm(0)
+	// Three arms should still produce exactly one queued fire — the
+	// cap=1 channel collapses the rest, matching the pre-debounce
+	// pokeCh non-blocking-send semantics.
+	if got := drainFiredCount(d, 5*time.Millisecond); got != 1 {
+		t.Fatalf("fired count = %d, want 1 (cap=1 coalesce)", got)
+	}
+}
+
+func TestTickDebouncer_CoalescesBurstyArms(t *testing.T) {
+	d := newTickDebouncer()
+	debounce := 200 * time.Millisecond
+	// Burst of arms with no inter-arm sleep so the entire burst fits well
+	// inside the debounce window even on a slow CI runner.
+	for i := 0; i < 5; i++ {
+		d.arm(debounce)
+	}
+	// Burst should produce exactly one fire after the window. The total
+	// observation window includes a generous tail to absorb GC pauses
+	// and CI scheduler jitter.
+	if got := drainFiredCount(d, debounce+200*time.Millisecond); got != 1 {
+		t.Fatalf("fired count = %d, want 1 after burst", got)
+	}
+}
+
+func TestTickDebouncer_CancelPendingDropsTimer(t *testing.T) {
+	d := newTickDebouncer()
+	d.arm(30 * time.Millisecond)
+	d.cancelPending()
+	// Wait past the original window — nothing should fire.
+	if got := drainFiredCount(d, 60*time.Millisecond); got != 0 {
+		t.Fatalf("fired count = %d, want 0 after cancelPending", got)
+	}
+}
+
+func TestTickDebouncer_CancelPendingDrainsQueuedFire(t *testing.T) {
+	d := newTickDebouncer()
+	d.arm(0) // queue a fire on fireCh
+	d.cancelPending()
+	// cancelPending should drain the already-queued fire, not just stop
+	// the timer — otherwise a debounce=0 "ticker absorbs poke" path would
+	// still receive on fired() in the next select iteration.
+	if got := drainFiredCount(d, 5*time.Millisecond); got != 0 {
+		t.Fatalf("fired count = %d, want 0 after cancelPending drains queued fire", got)
+	}
+}
+
+func TestTickDebouncer_RearmsAfterFire(t *testing.T) {
+	d := newTickDebouncer()
+	debounce := 20 * time.Millisecond
+	d.arm(debounce)
+	if got := drainFiredCount(d, debounce+50*time.Millisecond); got != 1 {
+		t.Fatalf("first burst fired count = %d, want 1", got)
+	}
+	// Second burst should arm a fresh timer — the AfterFunc callback must
+	// have cleared the internal timer pointer.
+	d.arm(debounce)
+	if got := drainFiredCount(d, debounce+50*time.Millisecond); got != 1 {
+		t.Fatalf("second burst fired count = %d, want 1", got)
+	}
+}
+
+func TestTickDebouncer_IndependentInstances(t *testing.T) {
+	a := newTickDebouncer()
+	b := newTickDebouncer()
+	debounce := 20 * time.Millisecond
+	a.arm(debounce)
+	b.arm(debounce)
+	if got := drainFiredCount(a, debounce+50*time.Millisecond); got != 1 {
+		t.Fatalf("a fired count = %d, want 1", got)
+	}
+	if got := drainFiredCount(b, 5*time.Millisecond); got != 1 {
+		t.Fatalf("b fired count = %d, want 1 (independent timer state)", got)
+	}
+}
+
+// drainFiredCount counts how many fires are available on the debouncer's
+// channel within window. It returns once window elapses with no further
+// fires for at least a short tail, so the count is stable.
+func drainFiredCount(d *tickDebouncer, window time.Duration) int {
+	deadline := time.After(window)
+	count := 0
+	for {
+		select {
+		case <-d.fired():
+			count++
+		case <-deadline:
+			return count
+		}
+	}
+}
+
 func TestCityRuntimeShutdownMarksCityStopSleepReason(t *testing.T) {
 	store := beads.NewMemStore()
 	session, err := store.Create(beads.Bead{
