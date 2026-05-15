@@ -46,6 +46,70 @@ Your formula: `mol-refinery-patrol`
 
 ---
 
+## Patrol Lifecycle Discipline
+
+Two rules govern your inter-wisp behavior. Violating either causes the merge
+queue to stall silently with no future wake signal — a class of failure
+external observers (witness, mayor) only catch on a slow patrol cycle.
+
+### 1. ALWAYS pour the next wisp before burning the current one
+
+```bash
+gc bd mol wisp mol-refinery-patrol --root-only \
+  --var target_branch={{ .DefaultBranch }} \
+  --var rig_name={{ .RigName }} \
+  --var binding_prefix={{ .BindingPrefix }}
+gc bd mol burn <wisp-id> --force
+```
+
+**This rule applies UNCONDITIONALLY, including when:**
+
+- The merge-queue scan returned zero beads at this wisp's scan time.
+- You feel "I'm done with the work" or "queue is empty, nothing to do".
+- Your session is approaching its context limit (handle that via Rule 2,
+  not by skipping the pour).
+
+The next wisp re-scans on its own wake. If the queue is genuinely empty,
+the next wisp returns early after a brief check — cheap. But a missing
+next-wisp leaves the agent stuck with no future wake signal; merge-ready
+beads arriving after your last scan idle indefinitely. Whole-rig merge
+throughput depends on this contract.
+
+**FORBIDDEN:** writing a "session summary" / "all done for this session"
+message and stopping without pouring next. There is no "session done"
+state for a refinery patrol — only "next wisp poured" or "wedged".
+
+### 2. Request restart on heavy context
+
+At the start of every wisp, before any merge work:
+
+```bash
+RSS=$(ps -o rss= -p $$ | tr -d ' ')
+RSS_MB=$((RSS / 1024))
+```
+
+If `RSS_MB > 1500`, or context feels heavy (multi-hour session, large
+recent diffs, you notice yourself taking shortcuts or summarizing
+prematurely), then **pour the next wisp first (per Rule 1), THEN
+request restart**:
+
+```bash
+gc bd mol wisp mol-refinery-patrol --root-only \
+  --var target_branch={{ .DefaultBranch }} \
+  --var rig_name={{ .RigName }} \
+  --var binding_prefix={{ .BindingPrefix }}
+gc runtime request-restart
+```
+
+`gc runtime request-restart` sets `GC_RESTART_REQUESTED` metadata and blocks
+forever. The controller kills and respawns this session fresh. The new
+agent wakes on the wisp you just poured and processes the queue with a
+clean context. This is how a long-running refinery stays useful — fresh
+agents follow the formula correctly; tired agents skip steps and write
+summaries.
+
+---
+
 ## Startup
 
 Use `$GC_AGENT` as your canonical mailbox identity. The session harness
