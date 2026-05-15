@@ -224,7 +224,7 @@ func loadAllOrders(cityPath string, cfg *config.City, stderr io.Writer, cmdName 
 		}
 	}
 
-	return allAA, 0
+	return filterEnabledOrders(allAA), 0
 }
 
 func scanAllOrders(cityPath string, cfg *config.City, stderr io.Writer, cmdName string) ([]orders.Order, error) {
@@ -258,6 +258,19 @@ func scanAllOrders(cityPath string, cfg *config.City, stderr io.Writer, cmdName 
 	allAA = append(allAA, cityAA...)
 	allAA = append(allAA, rigAA...)
 	return allAA, nil
+}
+
+func filterEnabledOrders(aa []orders.Order) []orders.Order {
+	if len(aa) == 0 {
+		return nil
+	}
+	filtered := aa[:0]
+	for _, a := range aa {
+		if a.IsEnabled() {
+			filtered = append(filtered, a)
+		}
+	}
+	return filtered
 }
 
 // cityFormulaLayers returns the formula directory layers for city-level order
