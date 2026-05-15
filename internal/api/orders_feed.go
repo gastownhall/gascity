@@ -309,7 +309,7 @@ func buildOrderRunFeedItems(state State, requestedScopeKind, requestedScopeRef s
 		results, err := info.store.List(beads.ListQuery{
 			Label:    "order-tracking",
 			Sort:     beads.SortCreatedDesc,
-			TierMode: beads.TierWisps,
+			TierMode: beads.TierBoth,
 		})
 		if err != nil {
 			if requestedScopeErr == nil && info.scopeKind == requestedScopeKind && info.scopeRef == requestedScopeRef {

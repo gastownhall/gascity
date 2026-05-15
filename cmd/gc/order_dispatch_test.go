@@ -4958,3 +4958,25 @@ func TestOrderDispatchSingleFlightLockSeesEphemeralTracker(t *testing.T) {
 		t.Fatal("single-flight lock missed ephemeral tracking bead — would dispatch again")
 	}
 }
+
+func TestOrderDispatchSingleFlightLockFailsClosedOnPartialTierError(t *testing.T) {
+	store := &partialListStore{
+		Store: beads.NewMemStore(),
+		rows: []beads.Bead{{
+			ID:     "tracker-1",
+			Title:  "order:double-fire",
+			Status: "open",
+			Labels: []string{"order-run:double-fire", labelOrderTracking},
+		}},
+		err: fmt.Errorf("wisps tier unavailable"),
+	}
+
+	m := &memoryOrderDispatcher{}
+	hasOpen, err := m.hasOpenWorkStrict(store, "double-fire")
+	if err == nil {
+		t.Fatal("hasOpenWorkStrict err = nil, want conservative failure on partial tier error")
+	}
+	if hasOpen {
+		t.Fatal("hasOpenWorkStrict returned true with partial tier error; caller must fail closed instead")
+	}
+}

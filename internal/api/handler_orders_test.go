@@ -687,6 +687,49 @@ func TestHandleOrdersFeedIncludesRigStoreTrackingBeads(t *testing.T) {
 	}
 }
 
+func TestHandleOrdersFeedIncludesLegacyIssuesTierTrackingBeads(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
+	rigStore := fs.stores["myrig"]
+	if rigStore == nil {
+		t.Fatal("expected rig store")
+	}
+	fs.autos = []orders.Order{
+		{Name: "nightly-review", Formula: "mol-adopt-pr-v2", Trigger: "cron", Interval: "24h", Pool: "reviewers", Rig: "myrig"},
+	}
+
+	tracking, err := rigStore.Create(beads.Bead{
+		Title:  "order:nightly-review:rig:myrig",
+		Status: "open",
+		Labels: []string{"order-tracking", "order-run:nightly-review:rig:myrig", "wisp"},
+	})
+	if err != nil {
+		t.Fatalf("create legacy tracking bead: %v", err)
+	}
+
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/feed?scope_kind=rig&scope_ref=myrig"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp struct {
+		Items []monitorFeedItemResponse `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("len(items) = %d, want legacy tracking item: %+v", len(resp.Items), resp.Items)
+	}
+	if resp.Items[0].BeadID != tracking.ID {
+		t.Fatalf("bead_id = %q, want legacy issues-tier tracking bead %q", resp.Items[0].BeadID, tracking.ID)
+	}
+}
+
 func TestHandleOrdersFeedRigScopeReturnsRequestedStoreFailure(t *testing.T) {
 	fs := newFakeState(t)
 	fs.cityBeadStore = beads.NewMemStore()

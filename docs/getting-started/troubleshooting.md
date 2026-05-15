@@ -133,7 +133,10 @@ Upgrade via Homebrew (`brew upgrade dolt`) or download a newer release from
 
 ## `bd` Version Too Old
 
-Gas City requires `bd` 1.0.0 or newer. Check your version:
+Gas City requires `bd` 1.0.0 or newer. The bd-backed store relies on wisps
+support, including `bd create --ephemeral` and `bd query ephemeral=true`, so
+older binaries can fail order-tracking and wisp cleanup paths. Check your
+version:
 
 ```bash
 bd version

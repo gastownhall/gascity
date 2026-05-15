@@ -1070,50 +1070,23 @@ func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 // way to reach the wisps table (mirrors gastown's internal/beads/beads.go
 // listEphemeral path).
 func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
-	// All bd-query field values used here are bare identifiers (labels,
-	// statuses, types, assignees, parent IDs). The bd query DSL has no
-	// quoting syntax, so values containing whitespace, quotes, or the
-	// reserved `AND`/`OR` tokens would silently mis-parse. Reject those
-	// up front rather than emit a malformed query.
-	if err := assertBareBdQueryValue("label", query.Label); err != nil {
-		return nil, err
-	}
-	if err := assertBareBdQueryValue("status", query.Status); err != nil {
-		return nil, err
-	}
-	if err := assertBareBdQueryValue("type", query.Type); err != nil {
-		return nil, err
-	}
-	if err := assertBareBdQueryValue("assignee", query.Assignee); err != nil {
-		return nil, err
-	}
-	if err := assertBareBdQueryValue("parent", query.ParentID); err != nil {
-		return nil, err
-	}
-
 	clauses := []string{"ephemeral=true"}
-	if query.Label != "" {
-		clauses = append(clauses, "label="+query.Label)
-	}
-	if query.Status != "" {
-		clauses = append(clauses, "status="+query.Status)
-	}
-	if query.Type != "" {
-		clauses = append(clauses, "type="+query.Type)
-	}
-	if query.Assignee != "" {
-		clauses = append(clauses, "assignee="+query.Assignee)
-	}
-	if query.ParentID != "" {
-		clauses = append(clauses, "parent="+query.ParentID)
-	}
+	serverFilteredOnly := true
+	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "label", query.Label)
+	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "status", query.Status)
+	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "type", query.Type)
+	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "assignee", query.Assignee)
+	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "parent", query.ParentID)
+
 	args := []string{"query", "--json", strings.Join(clauses, " AND ")}
 	if query.IncludeClosed || query.Status == "closed" {
 		args = append(args, "--all")
 	}
-	if query.Limit > 0 && canApplyWispsServerLimit(query) {
-		args = append(args, "--limit", strconv.Itoa(query.Limit))
+	wispsLimit := 0
+	if query.Limit > 0 && serverFilteredOnly && canApplyWispsServerLimit(query) {
+		wispsLimit = query.Limit
 	}
+	args = append(args, "--limit", strconv.Itoa(wispsLimit))
 
 	out, err := s.runner(s.dir, "bd", args...)
 	if err != nil {
@@ -1128,11 +1101,11 @@ func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
 		result[i].Ephemeral = true
 	}
 	// Re-apply filters client-side (defense in depth against bd-query DSL
-	// drift) and re-cap Limit (already applied server-side via --limit).
+	// drift) and re-cap Limit after client-only filters/sorts.
 	filtered := applyListQuery(result, query)
 	if parseErr != nil {
 		if len(filtered) > 0 {
-			return filtered, nil
+			return filtered, &PartialResultError{Op: "bd query", Err: parseErr}
 		}
 		return filtered, fmt.Errorf("bd query: %w", parseErr)
 	}
@@ -1143,20 +1116,34 @@ func canApplyWispsServerLimit(query ListQuery) bool {
 	return query.Sort == SortDefault && query.CreatedBefore.IsZero() && len(query.Metadata) == 0
 }
 
-// assertBareBdQueryValue rejects values containing whitespace, quotes, or
-// reserved boolean tokens that would mis-parse in the bd query DSL.
-func assertBareBdQueryValue(field, value string) error {
+func appendBdQueryClause(clauses []string, serverFilteredOnly bool, field, value string) ([]string, bool) {
 	if value == "" {
-		return nil
+		return clauses, serverFilteredOnly
 	}
-	if strings.ContainsAny(value, " \t\n\r\"'\\") {
-		return fmt.Errorf("bd query: %s value %q contains unsupported whitespace or quote", field, value)
+	if !isBareBdQueryValue(value) {
+		return clauses, false
 	}
+	return append(clauses, field+"="+value), serverFilteredOnly
+}
+
+// isBareBdQueryValue reports whether value can be emitted unquoted into the bd
+// query DSL. Values outside this narrow token set are filtered client-side.
+func isBareBdQueryValue(value string) bool {
 	upper := strings.ToUpper(value)
 	if upper == "AND" || upper == "OR" || upper == "NOT" {
-		return fmt.Errorf("bd query: %s value %q is a reserved bd-query token", field, value)
+		return false
 	}
-	return nil
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '_' || r == '-' || r == ':' || r == '.':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // listBothTiers unions the issues and wisps tiers in a single logical query.
@@ -1289,6 +1276,9 @@ func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	for i := range issues {
 		bead := issues[i].toBead()
 		if IsReadyExcludedType(bead.Type) {
+			continue
+		}
+		if bead.Ephemeral {
 			continue
 		}
 		if q.Assignee != "" && bead.Assignee != q.Assignee {

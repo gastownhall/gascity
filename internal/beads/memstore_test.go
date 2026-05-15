@@ -522,6 +522,32 @@ func TestMemStoreReadyPreservesBlocksWhenParentChildSharesPair(t *testing.T) {
 	}
 }
 
+func TestMemStoreReadySkipsEphemeralOpenTasks(t *testing.T) {
+	s := beads.NewMemStore()
+
+	ready, err := s.Create(beads.Bead{Title: "ready", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ephemeral, err := s.Create(beads.Bead{Title: "tracking", Type: "task", Ephemeral: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Ready()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != ready.ID {
+		t.Fatalf("Ready() = %+v, want only non-ephemeral task %s", got, ready.ID)
+	}
+	for _, bead := range got {
+		if bead.ID == ephemeral.ID {
+			t.Fatalf("ephemeral bead %s leaked into Ready(): %+v", ephemeral.ID, got)
+		}
+	}
+}
+
 func TestMemStoreDepListDefaultDirection(t *testing.T) {
 	s := beads.NewMemStore()
 	_ = s.DepAdd("a", "b", "blocks")

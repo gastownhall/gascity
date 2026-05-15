@@ -1792,6 +1792,45 @@ func TestCachingStoreBdPrimeActiveUsesListDependenciesForCachedReady(t *testing.
 	}
 }
 
+func TestCachingStoreReadySkipsEphemeralOpenTasks(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	ready, err := cache.Create(Bead{Title: "ready", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create ready: %v", err)
+	}
+	ephemeral, err := cache.Create(Bead{Title: "tracking", Type: "task", Ephemeral: true})
+	if err != nil {
+		t.Fatalf("Create ephemeral: %v", err)
+	}
+
+	got, err := cache.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != ready.ID {
+		t.Fatalf("Ready() = %+v, want only non-ephemeral task %s", got, ready.ID)
+	}
+	cached, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable")
+	}
+	if len(cached) != 1 || cached[0].ID != ready.ID {
+		t.Fatalf("CachedReady() = %+v, want only non-ephemeral task %s", cached, ready.ID)
+	}
+	for _, bead := range append(got, cached...) {
+		if bead.ID == ephemeral.ID {
+			t.Fatalf("ephemeral bead %s leaked into cached ready paths", ephemeral.ID)
+		}
+	}
+}
+
 func TestCachingStoreBdReconcileRefreshesListDependenciesForCachedReady(t *testing.T) {
 	t.Parallel()
 

@@ -2565,6 +2565,91 @@ func TestBdStoreListWispsUsesQueryWithEphemeralPredicate(t *testing.T) {
 	}
 }
 
+func TestBdStoreListWispsRequestsUnlimitedResultsByDefault(t *testing.T) {
+	var gotCmd string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		gotCmd = name + " " + strings.Join(args, " ")
+		var b strings.Builder
+		b.WriteByte('[')
+		for i := 0; i < 55; i++ {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			fmt.Fprintf(&b, `{"id":"bd-w-%02d","title":"wisp","status":"open","issue_type":"task","created_at":"2026-05-01T00:%02d:00Z","ephemeral":true,"labels":["order-tracking"]}`, i, i)
+		}
+		b.WriteByte(']')
+		return []byte(b.String()), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{Label: "order-tracking", TierMode: beads.TierWisps})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotCmd, "--limit 0") {
+		t.Fatalf("cmd = %q, want explicit --limit 0 so bd query does not apply its default page size", gotCmd)
+	}
+	if len(got) != 55 {
+		t.Fatalf("got %d wisps, want all 55 rows", len(got))
+	}
+}
+
+func TestBdStoreListWispsAppliesMetadataBeforeClientLimit(t *testing.T) {
+	var gotCmd string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		gotCmd = name + " " + strings.Join(args, " ")
+		if !strings.Contains(gotCmd, "--limit 0") {
+			return []byte(`[{"id":"bd-new","title":"wrong first page","status":"closed","issue_type":"task","created_at":"2026-05-03T00:00:00Z","ephemeral":true,"labels":["order-run:o"],"metadata":{"phase":"skip"}}]`), nil
+		}
+		return []byte(`[
+			{"id":"bd-new","title":"wrong metadata","status":"closed","issue_type":"task","created_at":"2026-05-03T00:00:00Z","ephemeral":true,"labels":["order-run:o"],"metadata":{"phase":"skip"}},
+			{"id":"bd-old","title":"matching metadata","status":"closed","issue_type":"task","created_at":"2026-05-01T00:00:00Z","ephemeral":true,"labels":["order-run:o"],"metadata":{"phase":"keep"}}
+		]`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{
+		Label:         "order-run:o",
+		Metadata:      map[string]string{"phase": "keep"},
+		Limit:         1,
+		IncludeClosed: true,
+		TierMode:      beads.TierWisps,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotCmd, "--limit 0") {
+		t.Fatalf("wisps query = %q, want --limit 0 before client-side metadata filtering", gotCmd)
+	}
+	if len(got) != 1 || got[0].ID != "bd-old" {
+		t.Fatalf("got = %+v, want metadata-matching wisp after client filter then Limit", got)
+	}
+}
+
+func TestBdStoreListWispsReturnsPartialRowsWithErrorOnCorruptEntries(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd query --json ephemeral=true --limit 0`: {
+			out: []byte(`[
+				{"id":"bd-good","title":"good","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","ephemeral":true},
+				{"id":"bd-bad","title":"bad","status":"open","issue_type":"task","created_at":"not-a-time","ephemeral":true}
+			]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{AllowScan: true, TierMode: beads.TierWisps})
+	if len(got) != 1 || got[0].ID != "bd-good" {
+		t.Fatalf("List(wisps) = %v, want surviving row bd-good", got)
+	}
+	var partial *beads.PartialResultError
+	if !errors.As(err, &partial) {
+		t.Fatalf("List(wisps) error = %v, want *beads.PartialResultError", err)
+	}
+	if partial.Op != "bd query" {
+		t.Errorf("PartialResultError.Op = %q, want %q", partial.Op, "bd query")
+	}
+}
+
 func TestBdStoreListBothTiersMergesAndDedupes(t *testing.T) {
 	var calls []string
 	runner := func(_, name string, args ...string) ([]byte, error) {
@@ -2604,7 +2689,7 @@ func TestBdStoreListBothTiersAppliesCreatedBeforeBeforeMergedLimit(t *testing.T)
 			return []byte(`[]`), nil
 		case strings.HasPrefix(full, "bd query "):
 			queryCmd = full
-			if strings.Contains(full, "--limit") {
+			if !strings.Contains(full, "--limit 0") {
 				return []byte(`[{"id":"bd-new","title":"newer","status":"closed","issue_type":"task","created_at":"2026-05-03T00:00:00Z","ephemeral":true,"labels":["order-run:o"]}]`), nil
 			}
 			return []byte(`[
@@ -2626,8 +2711,8 @@ func TestBdStoreListBothTiersAppliesCreatedBeforeBeforeMergedLimit(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(queryCmd, "--limit") {
-		t.Fatalf("wisps query = %q, must not apply server-side --limit before CreatedBefore", queryCmd)
+	if !strings.Contains(queryCmd, "--limit 0") {
+		t.Fatalf("wisps query = %q, want unlimited --limit 0 before CreatedBefore client filtering", queryCmd)
 	}
 	if len(got) != 1 || got[0].ID != "bd-old" {
 		t.Fatalf("got = %+v, want only older wisp after CreatedBefore then Limit", got)
@@ -2721,28 +2806,58 @@ func TestBdStoreListBothTiersReturnsPartialRowsWithErrorOnTierFailure(t *testing
 	})
 }
 
-// TestBdStoreListWispsRejectsUnsafeQueryValues pins the bd-query DSL safety
-// guard: values containing whitespace, quotes, or reserved boolean tokens
-// are rejected before they can mis-parse server-side.
-func TestBdStoreListWispsRejectsUnsafeQueryValues(t *testing.T) {
+// TestBdStoreListWispsFallsBackToClientFilteringForUnsafeQueryValues pins the
+// bd-query DSL safety guard: values outside the supported bare-token subset
+// are filtered client-side instead of being emitted into a malformed query.
+func TestBdStoreListWispsFallsBackToClientFilteringForUnsafeQueryValues(t *testing.T) {
 	cases := []struct {
 		name  string
 		query beads.ListQuery
+		want  string
 	}{
-		{"label with space", beads.ListQuery{Label: "order tracking", TierMode: beads.TierWisps}},
-		{"label with quote", beads.ListQuery{Label: `order"tracking`, TierMode: beads.TierWisps}},
-		{"status reserved AND", beads.ListQuery{Status: "AND", TierMode: beads.TierWisps}},
-		{"type reserved or", beads.ListQuery{Type: "or", TierMode: beads.TierWisps}},
+		{
+			name:  "slash assignee",
+			query: beads.ListQuery{Assignee: "gascity/workflows.codex-max", Type: "message", Status: "open", TierMode: beads.TierWisps},
+			want:  "bd-match-assignee",
+		},
+		{
+			name:  "label with space",
+			query: beads.ListQuery{Label: "order tracking", TierMode: beads.TierWisps},
+			want:  "bd-match-label",
+		},
+		{
+			name:  "type reserved token",
+			query: beads.ListQuery{Type: "or", TierMode: beads.TierWisps},
+			want:  "bd-match-type",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			runner := func(_, _ string, _ ...string) ([]byte, error) {
-				t.Fatalf("runner must not be called for unsafe value")
-				return nil, nil
+			var gotCmd string
+			runner := func(_, name string, args ...string) ([]byte, error) {
+				gotCmd = name + " " + strings.Join(args, " ")
+				if strings.Contains(gotCmd, "assignee=gascity/workflows.codex-max") ||
+					strings.Contains(gotCmd, "label=order tracking") ||
+					strings.Contains(gotCmd, "type=or") {
+					t.Fatalf("unsafe value leaked into bd query: %s", gotCmd)
+				}
+				return []byte(`[
+					{"id":"bd-match-assignee","title":"message","status":"open","issue_type":"message","assignee":"gascity/workflows.codex-max","created_at":"2026-05-01T00:00:00Z","ephemeral":true},
+					{"id":"bd-match-label","title":"label","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","ephemeral":true,"labels":["order tracking"]},
+					{"id":"bd-match-type","title":"reserved","status":"open","issue_type":"or","created_at":"2026-05-01T00:00:00Z","ephemeral":true},
+					{"id":"bd-other","title":"other","status":"open","issue_type":"task","assignee":"someone-else","created_at":"2026-05-01T00:00:00Z","ephemeral":true}
+				]`), nil
 			}
 			s := beads.NewBdStore("/city", runner)
-			if _, err := s.List(tc.query); err == nil {
-				t.Fatalf("err = nil, want rejection of unsafe value")
+			got, err := s.List(tc.query)
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			if !strings.Contains(gotCmd, "bd query --json ephemeral=true") {
+				t.Fatalf("cmd = %q, want wisps query", gotCmd)
+			}
+			if len(got) != 1 || got[0].ID != tc.want {
+				t.Fatalf("List() = %+v, want only %s after client filtering", got, tc.want)
 			}
 		})
 	}

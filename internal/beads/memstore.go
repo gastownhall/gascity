@@ -260,6 +260,9 @@ func (m *MemStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		if b.Status != "open" {
 			continue
 		}
+		if b.Ephemeral {
+			continue
+		}
 		if IsReadyExcludedType(b.Type) {
 			continue
 		}

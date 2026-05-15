@@ -365,6 +365,29 @@ func TestWispGC_PurgesExpiredTrackingBeads(t *testing.T) {
 	assertDeletedIDs(t, store.deletedIDs, "mol-1", "track-old")
 }
 
+func TestWispGC_PurgesLegacyIssuesTierTrackingBeads(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		{
+			ID:        "track-legacy",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-3 * time.Hour),
+			Labels:    []string{labelOrderTracking},
+		},
+	})
+
+	wg := newWispGC(5*time.Minute, time.Hour)
+	purged, err := wg.runGC(store, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1", purged)
+	}
+	assertDeletedIDs(t, store.deletedIDs, "track-legacy")
+}
+
 func TestWispGC_TrackingListErrorIsSurfacedAndMoleculePurgeContinues(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{
