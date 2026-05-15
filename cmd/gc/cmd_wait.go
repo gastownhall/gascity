@@ -413,8 +413,10 @@ func waitNudgeIDsForSession(store beads.Store, sessionID string) ([]string, erro
 	return sessionpkg.WaitNudgeIDs(store, sessionID)
 }
 
+const waitLookupLimit = 1000
+
 func loadWaitBeadsByLabel(store beads.Store, label string) ([]beads.Bead, error) {
-	all, err := store.List(beads.ListQuery{Label: label})
+	all, err := store.List(beads.ListQuery{Label: label, Limit: waitLookupLimit})
 	if err != nil {
 		return nil, err
 	}

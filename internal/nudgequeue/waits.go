@@ -7,6 +7,8 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
+const nudgeLookupLimit = 20
+
 // WithdrawWaitNudges removes queued wait nudges that are still pending or
 // in-flight, then marks their live nudge beads as terminal wait-canceled.
 func WithdrawWaitNudges(store beads.Store, cityPath string, ids []string) error {
@@ -82,7 +84,7 @@ func markTerminal(store beads.Store, nudgeID, now string) error {
 	if nudgeID == "" {
 		return nil
 	}
-	items, err := store.List(beads.ListQuery{Label: "nudge:" + nudgeID})
+	items, err := store.List(beads.ListQuery{Label: "nudge:" + nudgeID, Limit: nudgeLookupLimit})
 	if err != nil {
 		return err
 	}

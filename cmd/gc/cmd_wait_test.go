@@ -34,6 +34,11 @@ type waitGetSpyStore struct {
 	getIDs []string
 }
 
+type waitListQueryCaptureStore struct {
+	beads.Store
+	queries []beads.ListQuery
+}
+
 func (s waitNudgeMetadataFailStore) SetMetadata(id, key, value string) error {
 	if key == "nudge_id" {
 		return errors.New("set nudge id failed")
@@ -44,6 +49,11 @@ func (s waitNudgeMetadataFailStore) SetMetadata(id, key, value string) error {
 func (s *waitGetSpyStore) Get(id string) (beads.Bead, error) {
 	s.getIDs = append(s.getIDs, id)
 	return s.Store.Get(id)
+}
+
+func (s *waitListQueryCaptureStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.queries = append(s.queries, query)
+	return s.Store.List(query)
 }
 
 var (
@@ -101,6 +111,32 @@ func waitTestRealBDPath(t *testing.T) string {
 		t.Skip(waitTestRealBDErr.Error())
 	}
 	return waitTestRealBDCached
+}
+
+func TestLoadWaitBeadsByLabelUsesBoundedLookup(t *testing.T) {
+	mem := beads.NewMemStore()
+	if _, err := mem.Create(beads.Bead{
+		Title:  "wait",
+		Type:   sessionpkg.LegacyWaitBeadType,
+		Labels: []string{waitBeadLabel},
+	}); err != nil {
+		t.Fatalf("create wait bead: %v", err)
+	}
+	store := &waitListQueryCaptureStore{Store: mem}
+
+	waits, err := loadWaitBeadsByLabel(store, waitBeadLabel)
+	if err != nil {
+		t.Fatalf("loadWaitBeadsByLabel: %v", err)
+	}
+	if len(waits) != 1 {
+		t.Fatalf("wait count = %d, want 1", len(waits))
+	}
+	if len(store.queries) != 1 {
+		t.Fatalf("List calls = %d, want 1", len(store.queries))
+	}
+	if got := store.queries[0].Limit; got != waitLookupLimit {
+		t.Fatalf("List limit = %d, want %d", got, waitLookupLimit)
+	}
 }
 
 func writeWaitTestDoltIdentity(homeDir string) error {
