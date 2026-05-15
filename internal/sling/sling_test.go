@@ -1404,7 +1404,7 @@ func TestSlingRouteBeadWithTypedRouter(t *testing.T) {
 	}
 }
 
-func TestSlingAttachFormulaRoutesMoleculeRootWithTypedRouter(t *testing.T) {
+func TestSlingAttachFormulaRoutesSourceBeadWithTypedRouter(t *testing.T) {
 	router := &fakeBeadRouter{}
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
@@ -1422,18 +1422,25 @@ func TestSlingAttachFormulaRoutesMoleculeRootWithTypedRouter(t *testing.T) {
 		t.Fatalf("AttachFormula: %v", err)
 	}
 
-	if len(router.routed) != 2 {
-		t.Fatalf("got %d route calls, want 2", len(router.routed))
+	if result.WispRootID == "" {
+		t.Fatal("WispRootID is empty")
+	}
+	if len(router.routed) != 1 {
+		t.Fatalf("got %d route calls, want 1", len(router.routed))
 	}
 	if router.routed[0].BeadID != b.ID {
-		t.Fatalf("first routed BeadID = %q, want %q", router.routed[0].BeadID, b.ID)
+		t.Fatalf("routed BeadID = %q, want source bead %q", router.routed[0].BeadID, b.ID)
 	}
-	if router.routed[1].BeadID != result.WispRootID {
-		t.Fatalf("second routed BeadID = %q, want molecule root %q", router.routed[1].BeadID, result.WispRootID)
+	got, err := deps.Store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", b.ID, err)
+	}
+	if got.Metadata["molecule_id"] != result.WispRootID {
+		t.Fatalf("molecule_id metadata = %q, want %q", got.Metadata["molecule_id"], result.WispRootID)
 	}
 }
 
-func TestSlingRouteBeadDefaultFormulaRoutesMoleculeRootWithTypedRouter(t *testing.T) {
+func TestSlingRouteBeadDefaultFormulaRoutesSourceBeadWithTypedRouter(t *testing.T) {
 	router := &fakeBeadRouter{}
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
@@ -1451,14 +1458,21 @@ func TestSlingRouteBeadDefaultFormulaRoutesMoleculeRootWithTypedRouter(t *testin
 		t.Fatalf("RouteBead: %v", err)
 	}
 
-	if len(router.routed) != 2 {
-		t.Fatalf("got %d route calls, want 2", len(router.routed))
+	if result.WispRootID == "" {
+		t.Fatal("WispRootID is empty")
+	}
+	if len(router.routed) != 1 {
+		t.Fatalf("got %d route calls, want 1", len(router.routed))
 	}
 	if router.routed[0].BeadID != "BL-42" {
-		t.Fatalf("first routed BeadID = %q, want BL-42", router.routed[0].BeadID)
+		t.Fatalf("routed BeadID = %q, want source bead BL-42", router.routed[0].BeadID)
 	}
-	if router.routed[1].BeadID != result.WispRootID {
-		t.Fatalf("second routed BeadID = %q, want molecule root %q", router.routed[1].BeadID, result.WispRootID)
+	got, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("Get(BL-42): %v", err)
+	}
+	if got.Metadata["molecule_id"] != result.WispRootID {
+		t.Fatalf("molecule_id metadata = %q, want %q", got.Metadata["molecule_id"], result.WispRootID)
 	}
 }
 
