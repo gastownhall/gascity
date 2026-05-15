@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -1008,7 +1009,13 @@ func formatNudgeInjectOutput(items []queuedNudge) string {
 		fmt.Fprintf(&sb, "You have %d deferred reminders that were queued until a safe boundary:\n\n", len(items))
 	}
 	for _, item := range items {
-		fmt.Fprintf(&sb, "- [%s] %s\n", item.Source, item.Message)
+		// Sanitize attacker-controllable fields before interpolating into
+		// the <system-reminder> block — without this, a sender can inject
+		// </system-reminder> sequences and break out of the reminder.
+		// See gastownhall/gascity#2195.
+		source := extmsg.SanitizeForSystemReminder(item.Source)
+		message := extmsg.SanitizeForSystemReminder(item.Message)
+		fmt.Fprintf(&sb, "- [%s] %s\n", source, message)
 	}
 	sb.WriteString("\nHandle them after this turn.\n")
 	sb.WriteString("</system-reminder>\n")
