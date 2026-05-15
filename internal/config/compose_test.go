@@ -306,8 +306,12 @@ name = "test"
 
 [[rigs]]
 name = "hw"
-path = "/tmp/hw"
 includes = ["packs/rigpack"]
+`)
+	fs.Files["/city/.gc/site.toml"] = []byte(`
+[[rig]]
+name = "hw"
+path = "/tmp/hw"
 `)
 	fs.Files["/city/pack.toml"] = []byte(`
 [pack]
@@ -324,9 +328,8 @@ schema = 2
 
 [agent_defaults]
 provider = "claude"
-
-[[agent]]
-name = "worker"
+`)
+	fs.Files["/city/packs/rigpack/agents/worker/agent.toml"] = []byte(`
 scope = "rig"
 `)
 

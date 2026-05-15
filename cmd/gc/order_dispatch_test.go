@@ -1347,7 +1347,7 @@ func TestOrderDispatchExecDue(t *testing.T) {
 		Trigger:  "cooldown",
 		Interval: "2m",
 		Exec:     "$ORDER_DIR/scripts/poll.sh",
-		Source:   "/city/formulas/orders/wasteland-poll/order.toml",
+		Source:   "/city/orders/wasteland-poll.toml",
 	}}
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, &rec)
 	if ad == nil {
@@ -1588,7 +1588,7 @@ func TestOrderDispatchReportsAllMissingRequiredVarsAtOnce(t *testing.T) {
 	var rec memRecorder
 
 	formulaDir := t.TempDir()
-	writeFile(t, filepath.Join(formulaDir, "order-required-vars.formula.toml"), `
+	writeFile(t, filepath.Join(formulaDir, "order-required-vars.toml"), `
 formula = "order-required-vars"
 version = 1
 
@@ -1909,7 +1909,7 @@ func TestOrderDispatchExecOrderDir(t *testing.T) {
 		Trigger:  "cooldown",
 		Interval: "1m",
 		Exec:     "$ORDER_DIR/scripts/poll.sh",
-		Source:   "/city/formulas/orders/poll/order.toml",
+		Source:   "/city/orders/poll.toml",
 	}}
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
 
@@ -1921,7 +1921,7 @@ func TestOrderDispatchExecOrderDir(t *testing.T) {
 	foundCityPath := false
 	foundRuntime := false
 	for _, e := range gotEnv {
-		if e == "ORDER_DIR=/city/formulas/orders/poll" {
+		if e == "ORDER_DIR=/city/orders" {
 			foundDir = true
 		}
 		if e == "GC_CITY=/city-root" {
@@ -1962,7 +1962,7 @@ func TestOrderDispatchExecPackDir(t *testing.T) {
 		Trigger:      "cooldown",
 		Interval:     "1m",
 		Exec:         "$PACK_DIR/scripts/gate-sweep.sh",
-		Source:       "/city/packs/maintenance/formulas/orders/gate-sweep/order.toml",
+		Source:       "/city/packs/maintenance/orders/gate-sweep.toml",
 		FormulaLayer: "/city/packs/maintenance/formulas",
 	}}
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
@@ -1978,7 +1978,7 @@ func TestOrderDispatchExecPackDir(t *testing.T) {
 		if e == "PACK_DIR=/city/packs/maintenance" {
 			foundPackDir = true
 		}
-		if e == "ORDER_DIR=/city/packs/maintenance/formulas/orders/gate-sweep" {
+		if e == "ORDER_DIR=/city/packs/maintenance/orders" {
 			foundAutoDir = true
 		}
 		if e == "GC_PACK_NAME=maintenance" {
@@ -2051,7 +2051,7 @@ prefix = "ct"
 		Trigger:      "cooldown",
 		Interval:     "1m",
 		Exec:         "$PACK_DIR/scripts/gate-sweep.sh",
-		Source:       filepath.Join(cityDir, "packs", "maintenance", "formulas", "orders", "gate-sweep", "order.toml"),
+		Source:       filepath.Join(cityDir, "packs", "maintenance", "orders", "gate-sweep.toml"),
 		FormulaLayer: filepath.Join(cityDir, "packs", "maintenance", "formulas"),
 	}}
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
@@ -2223,7 +2223,7 @@ func TestOrderDispatchExecPackDirEmpty(t *testing.T) {
 		Trigger:  "cooldown",
 		Interval: "1m",
 		Exec:     "scripts/test.sh",
-		Source:   "/city/formulas/orders/no-layer/order.toml",
+		Source:   "/city/orders/no-layer.toml",
 		// FormulaLayer intentionally empty.
 	}}
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
@@ -2263,7 +2263,7 @@ func TestOrderDispatchExecRigUsesScopedWorkdirAndStoreEnv(t *testing.T) {
 		Trigger:  "cooldown",
 		Interval: "1m",
 		Exec:     "$ORDER_DIR/scripts/poll.sh",
-		Source:   "/city/formulas/orders/poll/order.toml",
+		Source:   "/city/orders/poll.toml",
 	}}
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
 	mad := ad.(*memoryOrderDispatcher)
@@ -2291,7 +2291,7 @@ func TestOrderDispatchExecRigUsesScopedWorkdirAndStoreEnv(t *testing.T) {
 		"GC_BEADS_PREFIX": "fe",
 		"GC_RIG":          "frontend",
 		"GC_RIG_ROOT":     rigDir,
-		"ORDER_DIR":       "/city/formulas/orders/poll",
+		"ORDER_DIR":       "/city/orders",
 	}
 	for key, want := range checks {
 		entry := key + "=" + want
@@ -4296,12 +4296,15 @@ func orderDispatchTestEnv(t *testing.T, envCh <-chan []string) map[string]string
 func TestBuildOrderDispatcherWithRigs(t *testing.T) {
 	// Build a config with rig formula layers that include orders.
 	rigDir := t.TempDir()
+	rigLayer := filepath.Join(rigDir, "formulas")
 	// Create an order in the rig-exclusive layer.
-	orderDir := rigDir + "/orders/rig-health"
-	if err := mkdirAll(orderDir); err != nil {
-		t.Fatal(err)
+	orderDir := filepath.Join(rigDir, "orders")
+	for _, dir := range []string{rigLayer, orderDir} {
+		if err := mkdirAll(dir); err != nil {
+			t.Fatal(err)
+		}
 	}
-	writeFile(t, orderDir+"/order.toml", `[order]
+	writeFile(t, filepath.Join(orderDir, "rig-health.toml"), `[order]
 formula = "mol-rig-health"
 trigger = "cooldown"
 interval = "5m"
@@ -4312,7 +4315,7 @@ pool = "polecat"
 		FormulaLayers: config.FormulaLayers{
 			City: []string{"/nonexistent/city-layer"}, // no city orders
 			Rigs: map[string][]string{
-				"demo": {"/nonexistent/city-layer", rigDir},
+				"demo": {"/nonexistent/city-layer", rigLayer},
 			},
 		},
 	}
@@ -4542,21 +4545,23 @@ func TestBuildOrderDispatcherUsesProviderAwareFileStore(t *testing.T) {
 
 	cityDir := t.TempDir()
 	layerDir := filepath.Join(cityDir, "formulas")
-	orderDir := filepath.Join(layerDir, "orders", "file-order")
-	if err := mkdirAll(orderDir); err != nil {
-		t.Fatal(err)
+	orderDir := filepath.Join(cityDir, "orders")
+	for _, dir := range []string{layerDir, orderDir} {
+		if err := mkdirAll(dir); err != nil {
+			t.Fatal(err)
+		}
 	}
-	writeFile(t, filepath.Join(orderDir, "order.toml"), `[order]
+	writeFile(t, filepath.Join(orderDir, "file-order.toml"), `[order]
 formula = "test-formula"
 trigger = "cooldown"
 interval = "1m"
 pool = "worker"
 `)
-	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "test-formula.formula.toml"))
+	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "test-formula.toml"))
 	if err != nil {
 		t.Fatalf("ReadFile(test-formula): %v", err)
 	}
-	writeFile(t, filepath.Join(layerDir, "test-formula.formula.toml"), string(formulaText))
+	writeFile(t, filepath.Join(layerDir, "test-formula.toml"), string(formulaText))
 
 	cfg := &config.City{
 		FormulaLayers: config.FormulaLayers{
@@ -4591,23 +4596,23 @@ func TestBuildOrderDispatcherRigOrderUsesRigFileStore(t *testing.T) {
 	rigDir := filepath.Join(cityDir, "frontend")
 	cityLayer := filepath.Join(cityDir, "formulas")
 	rigLayer := filepath.Join(rigDir, "formulas")
-	orderDir := filepath.Join(rigDir, "orders", "rig-digest")
+	orderDir := filepath.Join(rigDir, "orders")
 	for _, dir := range []string{cityLayer, rigLayer, orderDir} {
 		if err := mkdirAll(dir); err != nil {
 			t.Fatal(err)
 		}
 	}
-	writeFile(t, filepath.Join(orderDir, "order.toml"), `[order]
+	writeFile(t, filepath.Join(orderDir, "rig-digest.toml"), `[order]
 formula = "test-formula"
 trigger = "cooldown"
 interval = "1m"
 pool = "worker"
 `)
-	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "test-formula.formula.toml"))
+	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "test-formula.toml"))
 	if err != nil {
 		t.Fatalf("ReadFile(test-formula): %v", err)
 	}
-	writeFile(t, filepath.Join(rigLayer, "test-formula.formula.toml"), string(formulaText))
+	writeFile(t, filepath.Join(rigLayer, "test-formula.toml"), string(formulaText))
 	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
 		t.Fatal(err)
 	}
@@ -4669,23 +4674,23 @@ func TestBuildOrderDispatcherRigOrderHonorsLegacyCityRunHistory(t *testing.T) {
 	rigDir := filepath.Join(cityDir, "frontend")
 	cityLayer := filepath.Join(cityDir, "formulas")
 	rigLayer := filepath.Join(rigDir, "formulas")
-	orderDir := filepath.Join(rigDir, "orders", "rig-digest")
+	orderDir := filepath.Join(rigDir, "orders")
 	for _, dir := range []string{cityLayer, rigLayer, orderDir} {
 		if err := mkdirAll(dir); err != nil {
 			t.Fatal(err)
 		}
 	}
-	writeFile(t, filepath.Join(orderDir, "order.toml"), `[order]
+	writeFile(t, filepath.Join(orderDir, "rig-digest.toml"), `[order]
 formula = "test-formula"
 trigger = "cooldown"
 interval = "24h"
 pool = "worker"
 `)
-	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "test-formula.formula.toml"))
+	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "test-formula.toml"))
 	if err != nil {
 		t.Fatalf("ReadFile(test-formula): %v", err)
 	}
-	writeFile(t, filepath.Join(rigLayer, "test-formula.formula.toml"), string(formulaText))
+	writeFile(t, filepath.Join(rigLayer, "test-formula.toml"), string(formulaText))
 	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
 		t.Fatal(err)
 	}
@@ -4974,21 +4979,23 @@ func TestBuildOrderDispatcherReopensStoreForScopedFileReads(t *testing.T) {
 
 	cityDir := t.TempDir()
 	layerDir := filepath.Join(cityDir, "formulas")
-	orderDir := filepath.Join(layerDir, "orders", "file-order")
-	if err := mkdirAll(orderDir); err != nil {
-		t.Fatal(err)
+	orderDir := filepath.Join(cityDir, "orders")
+	for _, dir := range []string{layerDir, orderDir} {
+		if err := mkdirAll(dir); err != nil {
+			t.Fatal(err)
+		}
 	}
-	writeFile(t, filepath.Join(orderDir, "order.toml"), `[order]
+	writeFile(t, filepath.Join(orderDir, "file-order.toml"), `[order]
 formula = "test-formula"
 trigger = "cooldown"
 interval = "1m"
 pool = "worker"
 `)
-	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "test-formula.formula.toml"))
+	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "test-formula.toml"))
 	if err != nil {
 		t.Fatalf("ReadFile(test-formula): %v", err)
 	}
-	writeFile(t, filepath.Join(layerDir, "test-formula.formula.toml"), string(formulaText))
+	writeFile(t, filepath.Join(layerDir, "test-formula.toml"), string(formulaText))
 
 	cfg := &config.City{
 		FormulaLayers: config.FormulaLayers{
@@ -5031,24 +5038,31 @@ func TestBuildOrderDispatcherCityPackLayers(t *testing.T) {
 	// Simulate system formulas + pack formulas as two city layers.
 	sysDir := t.TempDir()
 	topoDir := t.TempDir()
+	sysLayer := filepath.Join(sysDir, "formulas")
+	topoLayer := filepath.Join(topoDir, "formulas")
+	for _, dir := range []string{sysLayer, topoLayer} {
+		if err := mkdirAll(dir); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	// System dir: beads-health order.
-	sysAutoDir := sysDir + "/orders/beads-health"
-	if err := mkdirAll(sysAutoDir); err != nil {
+	sysOrderDir := filepath.Join(sysDir, "orders")
+	if err := mkdirAll(sysOrderDir); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, sysAutoDir+"/order.toml", `[order]
+	writeFile(t, filepath.Join(sysOrderDir, "beads-health.toml"), `[order]
 exec = "scripts/beads-health.sh"
 trigger = "cooldown"
 interval = "30s"
 `)
 
 	// Pack dir: wasteland-poll order.
-	topoAutoDir := topoDir + "/orders/wasteland-poll"
-	if err := mkdirAll(topoAutoDir); err != nil {
+	topoOrderDir := filepath.Join(topoDir, "orders")
+	if err := mkdirAll(topoOrderDir); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, topoAutoDir+"/order.toml", `[order]
+	writeFile(t, filepath.Join(topoOrderDir, "wasteland-poll.toml"), `[order]
 exec = "scripts/wasteland-poll.sh"
 trigger = "cooldown"
 interval = "2m"
@@ -5056,7 +5070,7 @@ interval = "2m"
 
 	cfg := &config.City{
 		FormulaLayers: config.FormulaLayers{
-			City: []string{sysDir, topoDir},
+			City: []string{sysLayer, topoLayer},
 		},
 	}
 
@@ -5087,22 +5101,29 @@ func TestBuildOrderDispatcherCityPackWithOverride(t *testing.T) {
 	// Same two-layer setup, plus a config override on wasteland-poll interval.
 	sysDir := t.TempDir()
 	topoDir := t.TempDir()
+	sysLayer := filepath.Join(sysDir, "formulas")
+	topoLayer := filepath.Join(topoDir, "formulas")
+	for _, dir := range []string{sysLayer, topoLayer} {
+		if err := mkdirAll(dir); err != nil {
+			t.Fatal(err)
+		}
+	}
 
-	sysAutoDir := sysDir + "/orders/beads-health"
-	if err := mkdirAll(sysAutoDir); err != nil {
+	sysOrderDir := filepath.Join(sysDir, "orders")
+	if err := mkdirAll(sysOrderDir); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, sysAutoDir+"/order.toml", `[order]
+	writeFile(t, filepath.Join(sysOrderDir, "beads-health.toml"), `[order]
 exec = "scripts/beads-health.sh"
 trigger = "cooldown"
 interval = "30s"
 `)
 
-	topoAutoDir := topoDir + "/orders/wasteland-poll"
-	if err := mkdirAll(topoAutoDir); err != nil {
+	topoOrderDir := filepath.Join(topoDir, "orders")
+	if err := mkdirAll(topoOrderDir); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, topoAutoDir+"/order.toml", `[order]
+	writeFile(t, filepath.Join(topoOrderDir, "wasteland-poll.toml"), `[order]
 exec = "scripts/wasteland-poll.sh"
 trigger = "cooldown"
 interval = "2m"
@@ -5111,7 +5132,7 @@ interval = "2m"
 	tenSec := "10s"
 	cfg := &config.City{
 		FormulaLayers: config.FormulaLayers{
-			City: []string{sysDir, topoDir},
+			City: []string{sysLayer, topoLayer},
 		},
 		Orders: config.OrdersConfig{
 			Overrides: []config.OrderOverride{
@@ -5217,12 +5238,14 @@ func TestBuildOrderDispatcherOverrideNotFoundNonFatal(t *testing.T) {
 	// Override targets wasteland-poll (nonexistent).
 	// Verify beads-health is still dispatched and stderr contains warning.
 	sysDir := t.TempDir()
-
-	sysAutoDir := sysDir + "/orders/beads-health"
-	if err := mkdirAll(sysAutoDir); err != nil {
-		t.Fatal(err)
+	sysLayer := filepath.Join(sysDir, "formulas")
+	sysOrderDir := filepath.Join(sysDir, "orders")
+	for _, dir := range []string{sysLayer, sysOrderDir} {
+		if err := mkdirAll(dir); err != nil {
+			t.Fatal(err)
+		}
 	}
-	writeFile(t, sysAutoDir+"/order.toml", `[order]
+	writeFile(t, filepath.Join(sysOrderDir, "beads-health.toml"), `[order]
 exec = "scripts/beads-health.sh"
 trigger = "cooldown"
 interval = "30s"
@@ -5231,7 +5254,7 @@ interval = "30s"
 	tenSec := "10s"
 	cfg := &config.City{
 		FormulaLayers: config.FormulaLayers{
-			City: []string{sysDir},
+			City: []string{sysLayer},
 		},
 		Orders: config.OrdersConfig{
 			Overrides: []config.OrderOverride{
@@ -5296,7 +5319,7 @@ scope = "city"
 	}
 	writeFile(t, filepath.Join(cityDir, "city.toml"), cityToml)
 
-	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "test-formula.formula.toml"))
+	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "test-formula.toml"))
 	if err != nil {
 		t.Fatalf("ReadFile(test-formula): %v", err)
 	}
@@ -5334,7 +5357,7 @@ trigger = "cooldown"
 interval = "24h"
 pool = "dog"
 `)
-			writeFile(t, filepath.Join(packDir, "formulas", "test-formula.formula.toml"), string(formulaText))
+			writeFile(t, filepath.Join(packDir, "formulas", "test-formula.toml"), string(formulaText))
 		}
 		packToml.WriteString(`
 [imports.` + binding + `]

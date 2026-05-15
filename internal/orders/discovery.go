@@ -10,9 +10,9 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
-// discoverRoot discovers orders for one logical root. Wave 2 requires the
-// canonical flat orders/<name>.toml layout and hard-errors when older PackV1
-// order paths are still present.
+// discoverRoot discovers orders for one logical root. Wave 2 requires flat
+// order files and hard-errors when older PackV1 subdirectory order paths are
+// still present.
 func discoverRoot(fs fsys.FS, root ScanRoot) ([]Order, error) {
 	return discoverRootWithOptions(fs, root, ScanOptions{})
 }
@@ -57,22 +57,7 @@ func discoverRootWithOptions(fs fsys.FS, root ScanRoot, opts ScanOptions) ([]Ord
 	return result, nil
 }
 
-func warnDeprecatedPath(opts ScanOptions, format string, args ...any) {
-	if opts.SuppressDeprecatedPathWarnings {
-		return
-	}
-	msg := fmt.Sprintf(format, args...)
-	if opts.DeprecatedPathWarningDedup != nil && !opts.VerboseDeprecatedPathWarnings && !opts.DeprecatedPathWarningDedup.First(msg) {
-		return
-	}
-	if opts.DeprecatedPathWarningWriter != nil {
-		fmt.Fprintln(opts.DeprecatedPathWarningWriter, msg) //nolint:errcheck // best-effort warning emission
-		return
-	}
-	log.Print(msg)
-}
-
-func discoverFlatFiles(fs fsys.FS, dir string, found map[string]Order, add func(name, source string, data []byte) error, opts ScanOptions) error {
+func discoverFlatFiles(fs fsys.FS, dir string, found map[string]Order, add func(name, source string, data []byte) error, _ ScanOptions) error {
 	entries, err := fs.ReadDir(dir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -80,6 +65,7 @@ func discoverFlatFiles(fs fsys.FS, dir string, found map[string]Order, add func(
 		}
 		return fmt.Errorf("reading order root %s: %w", dir, err)
 	}
+	pickedInfixed := make(map[string]bool)
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -89,24 +75,24 @@ func discoverFlatFiles(fs fsys.FS, dir string, found map[string]Order, add func(
 		if !ok {
 			continue
 		}
-		legacy := fileName == name+LegacyFlatOrderSuffix
+		infixed := fileName == name+LegacyFlatOrderSuffix
 		source := filepath.Join(dir, fileName)
-		if legacy {
-			return fmt.Errorf("unsupported PackV1 order path %s; rename to orders/%s.toml", source, name)
-		}
 		if _, exists := found[name]; exists {
-			continue
+			if infixed || !pickedInfixed[name] {
+				continue
+			}
 		}
 		data, err := fs.ReadFile(source)
 		if err != nil {
 			if !errors.Is(err, os.ErrNotExist) {
-				warnUnreadablePath(opts, "warning: unreadable order path %s: %v", source, err)
+				log.Printf("warning: unreadable order path %s: %v", source, err)
 			}
 			continue
 		}
 		if err := add(name, source, data); err != nil {
 			return err
 		}
+		pickedInfixed[name] = infixed
 	}
 	return nil
 }
@@ -126,16 +112,12 @@ func rejectLegacySubdirectoryOrders(fs fsys.FS, dir, hintFmt string) error {
 		name := entry.Name()
 		source := filepath.Join(dir, name, orderFileName)
 		if _, err := fs.ReadFile(source); err == nil {
-			return fmt.Errorf("unsupported PackV1 order path %s; %s", source, fmt.Sprintf(hintFmt, name))
+			return fmt.Errorf("unsupported PackV1 order path %s; "+hintFmt, source, name)
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("reading legacy order path %s: %w", source, err)
 		}
 	}
 	return nil
-}
-
-func warnUnreadablePath(_ ScanOptions, format string, args ...any) {
-	log.Printf(format, args...)
 }
 
 func legacyOrdersDir(formulaLayer string) string {
