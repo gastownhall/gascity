@@ -965,7 +965,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install mcp_agent_mail
-        run: python -m pip install --require-hashes -r .github/requirements/mcp-agent-mail.txt
+        run: python -m pip install --no-deps --require-hashes -r .github/requirements/mcp-agent-mail.txt
 
       - name: MCP mail conformance test
         run: make test-mcp-mail

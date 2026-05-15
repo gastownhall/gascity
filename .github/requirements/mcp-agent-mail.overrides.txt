@@ -1,0 +1,5 @@
+# Security floor: FastMCP 2.13.0.2 and Authlib 1.5.2 are flagged by the
+# image vulnerability gate. Keep these overrides until mcp-agent-mail's
+# transitive constraints move past the fixed versions.
+fastmcp>=3.2.0
+authlib>=1.6.9
