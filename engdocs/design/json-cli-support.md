@@ -53,6 +53,7 @@ The most important immediate rule is stdout purity: when `--json` is passed, std
 
 - JSON commands should prefer one top-level object, not a bare array. Use collection fields such as `orders`, `sessions`, or `events`, plus `summary`.
 - Include `schema_version` as a string, starting at `"1"`, for new or newly touched JSON surfaces.
+- Any PR that changes an existing JSON output shape must call that out explicitly in the PR description, including the old shape, the new shape, the compatibility risk, and the rationale for changing it now.
 - Warnings should eventually be represented as `warnings: [{code,message,field,path}]` while still emitting important diagnostics to stderr when compatible.
 - Partial/stale/offline data should use explicit booleans and nullable detail fields, for example `available`, `stale`, `source`, `reason`.
 - Timestamps should be RFC3339 strings.
@@ -114,6 +115,33 @@ provided stdout writer. In JSON mode, those helpers need an explicit sink:
 
 This approach keeps existing human output compatible while making `--json`
 strict enough for agents, scripts, tests, and future UI/API consumers.
+
+## Existing JSON Compatibility
+
+Some `gc` commands already expose JSON today. Normalizing those surfaces is
+more risky than adding JSON to a previously human-only command, because
+existing scripts may already depend on the current field names, envelopes,
+arrays, or nullability.
+
+For any PR that alters existing JSON output, reviewers should expect a dedicated
+compatibility note with:
+
+- the command and invocation being changed.
+- whether the command had JSON support before the PR.
+- the old output shape, at the level of envelope/array/object, key fields, and
+  notable nullability.
+- the new output shape.
+- whether the change is additive, normalizing-but-breaking, or deliberately
+  incompatible.
+- why the change is worth making in that PR instead of preserving the old shape
+  or introducing a compatibility window.
+- any consumer-facing mitigation, such as keeping old fields temporarily,
+  adding `schema_version`, or documenting the first standardization wave as the
+  compatibility boundary.
+
+The first standardization wave may still choose to normalize existing JSON
+surfaces when the benefit is high, but that choice must be visible and
+reviewable. Hidden JSON shape changes are not acceptable.
 
 ## Extensibility
 
@@ -249,7 +277,7 @@ Proposed detail shape:
 ## Dispatchable Tasks
 
 1. Normalize existing JSON envelopes for `gc status`, `gc rig list`, and `gc session list`.
-   Acceptance: each emits `schema_version`, retains existing useful fields, and has backward-compatible tests documenting any intentional shape change.
+   Acceptance: each emits `schema_version`, retains existing useful fields, and includes a PR compatibility note documenting any intentional shape change.
 
 2. Add `--json` to `gc sling`.
    Acceptance: emits one object with target, bead id, formula/workflow/molecule refs when created, dispatch success, and routed/queued state.
@@ -277,7 +305,7 @@ Proposed detail shape:
 
 ## Product Decisions Needed
 
-- Are schema changes allowed for existing `--json` commands that currently emit arrays, or should they stay stable until a v2 flag or compatibility window?
+- For existing `--json` commands, when is the first standardization wave allowed to make normalizing-but-breaking schema changes instead of preserving old shapes or adding a compatibility window?
 - When should the follow-up structured JSON error contract land relative to mutation-command JSON summaries?
 - Should `gc trace show --json` and `gc events --json` remain arrays for easy piping, or move to object envelopes in bounded modes?
 - Should mutation commands join the second wave with JSON summaries, or stay human-only until read surfaces are complete?
