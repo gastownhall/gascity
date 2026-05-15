@@ -23,19 +23,27 @@ JSON support exists in parts of the CLI, but it is not yet a consistent product 
 The current gaps fall into a few categories:
 
 - Some commands have no `--json` flag even though they expose state that software needs.
-- Some existing JSON surfaces need an envelope, schema version, or stdout-purity audit.
-- Streaming commands need an explicit JSONL convention distinct from bounded JSON snapshots.
+- Some existing JSON surfaces need an envelope, schema version, record-count
+  contract, or
+  stdout-purity audit.
+- All JSON-mode stdout should be treated as newline-delimited JSON at the
+  transport level. Bounded commands emit one result record by default;
+  streaming commands may emit many records when their schema says so.
 - Mutation commands need structured summaries, but those should follow after the read/inspect conventions are stable.
 - Pack-defined commands need an extension contract rather than assuming `gc` can retrofit arbitrary external command output.
 
-The most important immediate rule is stdout purity: when `--json` is passed, stdout should contain only the intended JSON payload. Diagnostics may continue to use stderr unless and until a separate structured error contract is introduced.
+The most important immediate rule is stdout purity: when `--json` is passed, stdout should contain only the intended JSON payload, including structured JSON error payloads for nonzero exits.
 
 ## Design Goals
 
 - Preserve current human-readable output by default.
 - Make `--json` deterministic enough for agents, scripts, tests, and UI/API integrations.
-- Prefer one top-level JSON object with `schema_version` for newly touched bounded commands.
-- Keep stderr available for diagnostics and unexpected errors.
+- Prefer one top-level JSON object record with `schema_version` for newly
+  touched bounded commands.
+- Make JSONL record count part of the command schema contract.
+- Return structured JSON error payloads for nonzero exits in JSON mode.
+- Keep stderr available for operational diagnostics, but do not make it part of
+  the first command-output schema model.
 - Avoid broad CLI redesign or command-family rewrites.
 - Land work in small PRs with focused tests.
 - Make new built-in commands easy to implement consistently.
@@ -51,7 +59,14 @@ The most important immediate rule is stdout purity: when `--json` is passed, std
 
 ## JSON Output Contract
 
-- JSON commands should prefer one top-level object, not a bare array. Use collection fields such as `orders`, `sessions`, or `events`, plus `summary`.
+- JSON-mode stdout uses JSONL framing at the transport level: one complete JSON
+  value per line.
+- Bounded JSON commands should emit exactly one top-level object record, not a
+  bare array. Use collection fields such as `orders`, `sessions`, or `events`,
+  plus `summary`.
+- Streaming JSON commands may emit zero or more object records.
+- Each command schema should document JSONL record count when it differs from
+  the default of exactly one result record.
 - Include `schema_version` as a string, starting at `"1"`, for new or newly touched JSON surfaces.
 - Any PR that changes an existing JSON output shape must call that out explicitly in the PR description, including the old shape, the new shape, the compatibility risk, and the rationale for changing it now.
 - Warnings should eventually be represented as `warnings: [{code,message,field,path}]` while still emitting important diagnostics to stderr when compatible.
@@ -59,16 +74,20 @@ The most important immediate rule is stdout purity: when `--json` is passed, std
 - Timestamps should be RFC3339 strings.
 - Use consistent field names: `id`, `name`, `qualified_name`, `scoped_name`, `path`, `source`, `ref`, `status`, `state`, `type`, `target`, `created_at`, `updated_at`.
 - `--json` should ignore human formatting knobs such as `--quiet` unless a command documents a machine-readable terse mode separately.
-- Streaming commands should use JSONL for streams and object JSON for bounded snapshots.
+- Streaming commands should use JSONL with an explicit multi-record contract;
+  bounded snapshots should use the default exactly-one stdout record contract.
+- Failed `--json` commands should emit a structured error object that includes the same exit code returned by the process.
 
 ## Stdout And Stderr Contract
 
-`--json` is a stdout contract, not a promise that the process is silent.
+`--json` is a machine-readable IO contract, not a promise that the process is silent.
 
 When `--json` is passed, stdout must contain only the command's intentional
-machine-readable payload:
+machine-readable payload. At the transport level, stdout is JSONL: every
+record is one complete JSON value followed by a newline. The command schema
+defines how many records may appear.
 
-- Bounded commands emit exactly one JSON document to stdout.
+- Bounded commands emit exactly one JSON object record to stdout.
 - Streaming commands that opt into JSON streaming emit JSONL to stdout, one
   complete JSON object per line.
 - Commands that have no data to return should emit a valid JSON object with an
@@ -76,26 +95,249 @@ machine-readable payload:
 - No progress lines, human summaries, debug banners, table headers, or copied
   helper output may be written to stdout in JSON mode.
 
-Stderr remains available for operational diagnostics:
+On failure, `--json` commands should still emit a structured JSON error object
+when the command can do so deliberately:
 
-- Unexpected failures may print human-readable diagnostics to stderr and exit
-  nonzero.
+```json
+{
+  "schema_version": "1",
+  "ok": false,
+  "error": {
+    "code": "config_load_failed",
+    "message": "loading config: city.toml not found",
+    "exit_code": 1
+  }
+}
+```
+
+The process exit code must match `error.exit_code`, so shell scripts can keep
+using ordinary success/failure logic while agents can parse the failure detail.
+Commands should not hide failures by returning `0` just because they emitted a
+well-formed JSON error object.
+
+Stderr remains available for operational diagnostics, but it is not part of
+the first command-output schema model:
+
+- Consumers must not need stderr to understand command success, failure, or
+  result semantics.
 - Debug or trace diagnostics may use stderr when the user has explicitly
   enabled a diagnostic mode.
 - Warnings that matter to machine consumers should also appear in structured
   JSON fields, but compatibility-sensitive human warnings may still be emitted
   to stderr.
-- Stderr is not part of the stable machine-readable payload in the first wave.
+- A later structured-diagnostics design may define JSONL stderr conventions,
+  but command-specific stderr schemas are out of scope for the first schema
+  contract.
 
-This gives agents and scripts a simple rule: parse stdout as JSON, treat the
-exit code as success/failure, and use stderr only as diagnostic text.
+This gives agents and scripts a simple rule: read stdout as JSONL, enforce the
+documented record count, parse the stdout record as the result or structured error
+payload, trust the process exit code for shell control flow, and treat stderr
+as operational diagnostics.
 
-The first-wave implementation should not introduce a global structured JSON
-error contract. Cobra error paths and command-local error handling are
-cross-cutting enough that structured errors should be a follow-up design. Until
-then, failed `--json` commands may produce no JSON payload, write diagnostics to
-stderr, and exit nonzero. Individual commands may emit structured error objects
-only if they can do so without weakening the CLI-wide stdout-purity rule.
+Some Cobra/global error paths are cross-cutting, so the rollout may start with
+command-local structured errors for touched commands and then consolidate the
+helper layer. The target contract is still explicit: if a command accepts
+`--json`, nonzero outcomes should be machine-readable and should carry the
+return code.
+
+## JSONL And Record Count
+
+The product-level `--json` transport should be JSONL, because a single JSON
+object followed by a newline is also a valid one-record JSONL stream. That lets
+bounded and streaming commands share one transport rule without making every
+bounded command behave like a stream.
+
+The important distinction is record count, not whether the bytes are called
+JSON or JSONL.
+
+JSON Schema describes one JSON value. For Gas City JSONL output, each schema
+describes one JSONL record. Gas City adds one optional extension keyword for
+the stream around that record. The common bounded-command case does not need
+the extension:
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schema_version": { "type": "string" }
+  },
+  "required": ["schema_version"]
+}
+```
+
+When `x-gc-jsonl` is absent, the default `gc --json` contract is exactly one
+record. That keeps the common bounded-command case terse. The schema still
+describes the JSON value in that one JSONL record.
+
+Streaming, optional, or unusual record-count contracts opt in with
+`x-gc-jsonl`:
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-gc-jsonl": {
+    "minRecords": 0
+  },
+  "type": "object",
+  "properties": {
+    "event": { "type": "string" }
+  },
+  "required": ["event"]
+}
+```
+
+`x-gc-jsonl` uses array-style count semantics for JSONL records:
+
+- `minRecords` is the minimum number of JSONL records. When omitted, the
+  minimum is `0`.
+- `maxRecords` is the maximum number of JSONL records. When omitted, there is
+  no maximum.
+- `x-gc-jsonl: {}` means zero or more records.
+- `x-gc-jsonl: { "minRecords": 1 }` means one or more records.
+- `x-gc-jsonl: { "minRecords": 0, "maxRecords": 1 }` means zero or one record.
+- `x-gc-jsonl: { "minRecords": 1, "maxRecords": 1 }` means exactly one record,
+  explicitly.
+
+Bounded command results should still be single object records:
+
+- A single object record cleanly represents envelope metadata, schema version,
+  filters, warnings, one or more collections, and summary counts together.
+- It is easier to validate against JSON Schema as one result document.
+- It is easier for agents and UI/API integrations to pass around as one value.
+- It avoids asking consumers to infer which record is metadata, which record is
+  an item, and whether all expected records arrived.
+
+Therefore the convention is: JSONL everywhere as the transport; one object
+record by default for bounded snapshots and command results; multi-record JSONL
+only for streaming data and future explicitly designed diagnostic channels.
+
+## Schema Discovery And Exposure
+
+Machine consumers need a way to discover the output contract without reading Go
+source or reverse-engineering examples. Each JSON-capable command should expose
+its result schema from the command line. Commands may also expose a
+command-specific failure schema when the shared default failure schema is not
+specific enough.
+
+Use JSON Schema 2020-12 for each JSONL record. Gas City should not require a
+system-level schema id. Schema authors may still use JSON Schema's optional
+`$id` when it helps external tooling, but `gc` should not depend on it.
+
+Schema roles:
+
+- `result.schema.json`: stdout record schema for successful exit code `0`.
+- `failure.schema.json`: optional stdout record schema for nonzero exits when
+  the command has meaningful command-specific failure fields.
+
+If `result.schema.json` is absent, the command does not declare JSON support and
+`gc <command> --json` should fail clearly rather than falling back to human
+output. If `failure.schema.json` is absent, nonzero JSON-mode stdout uses the
+shared Gas City default failure schema.
+
+Schema exposure should happen at three levels:
+
+- `gc <command> --help` should say whether `--json` is supported and summarize
+  the output role, for example: `--json emits one result record as JSONL`.
+- `gc <command> --json-schema` should print one JSONL manifest record with
+  the command path, support status, and embedded schemas for available roles.
+- `gc <command> --json-schema=result` or `--json-schema=failure` should print
+  the requested JSON Schema object directly when available.
+- The repository should carry checked-in JSON Schema documents for built-in
+  commands so tests, docs, and future UI integrations can use the same source
+  of truth.
+
+Manifest output should embed available schemas inline and omit unavailable
+roles. For a JSON-capable command, `result` is command-specific and `failure`
+is either command-specific or the shared default:
+
+```json
+{
+  "schema_version": "1",
+  "command": ["status"],
+  "transport": "jsonl",
+  "json_supported": true,
+  "schemas": {
+    "result": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object"
+    },
+    "failure": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object"
+    }
+  }
+}
+```
+
+For a command that does not declare JSON support, `--json-schema` should still
+return a manifest with no embedded schemas rather than failing:
+
+```json
+{
+  "schema_version": "1",
+  "command": ["some", "command"],
+  "transport": "jsonl",
+  "json_supported": false,
+  "schemas": {}
+}
+```
+
+Role-specific schema requests for unavailable schemas should fail clearly using
+the shared failure shape.
+
+The shared default failure schema is intentionally minimal and extensible:
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "ok", "error"],
+  "properties": {
+    "schema_version": { "type": "string" },
+    "ok": { "const": false },
+    "error": {
+      "type": "object",
+      "required": ["code", "message", "exit_code"],
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "exit_code": { "type": "integer" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}
+```
+
+The first implementation wave does not need full JSON Schema validation for
+every command, but it should establish the schema vocabulary and make each new
+JSON command document:
+
+- result record schema.
+- command-specific failure record schema only when it adds useful structure
+  beyond the shared default failure schema.
+- exit-code relationship to `error.exit_code`.
+
+## Built-In Schema Definition Pattern
+
+Built-in commands should define schemas close to their typed output structs, but
+the contract should not be implicit in Go types alone. A small schema registry
+should eventually connect command definitions, docs, and tests.
+
+Target pattern:
+
+- command registers `--json` support with an output contract.
+- command has typed Go structs for its JSON records.
+- command tests assert stdout record count and parse the record into the typed
+  struct.
+- optional schema tests validate emitted examples against checked-in JSON
+  Schema once the schema registry exists.
+- help/docs are generated from the same contract where practical.
+
+This keeps implementation ergonomic while giving external consumers a stable
+place to discover contracts.
 
 ## Handling Incidental Human Output
 
@@ -104,7 +346,7 @@ provided stdout writer. In JSON mode, those helpers need an explicit sink:
 
 - Prefer passing `io.Discard` to human-output paths while collecting typed
   result data separately.
-- Emit the final JSON document once, at the end, using the real stdout writer.
+- Emit the final JSONL record once, at the end, using the real stdout writer.
 - Do not buffer arbitrary human stdout and add it to a JSON field such as
   `stdout` or `messages`. That preserves accidental implementation details and
   makes the JSON contract unstable.
@@ -152,16 +394,24 @@ Recommended built-in command pattern:
 - Add a local `--json` flag for read/inspect commands by default.
 - Route human stdout through a writer that becomes `io.Discard` in JSON mode.
 - Write the final JSON payload through the real stdout writer exactly once.
+- On nonzero outcomes in JSON mode, write a structured JSON error object with
+  `error.exit_code` matching the process exit code.
 - Use a top-level object with `schema_version`.
 - Put meaningful machine data in typed fields, not in copied human prose.
-- Add a stdout-purity test for every command touched: successful `--json` stdout must parse as JSON and must not include human banners, progress lines, summaries, or stderr diagnostics.
-- Keep stderr available for diagnostics until structured JSON errors are standardized.
+- Add a stdout-purity test for every command touched: successful `--json`
+  stdout must parse as JSONL, must satisfy the command's record-count contract,
+  and must not include human banners, progress lines, summaries, or stderr
+  diagnostics.
+- Keep stderr available for operational diagnostics, but do not make it part of
+  the first command-output schema contract.
 
 In a later contract/helper PR, this should become a small shared helper layer so new commands can follow the same shape with very little ceremony:
 
 - `jsonStdout(jsonMode, stdout)` or equivalent, returning `io.Discard` for human-output paths in JSON mode.
 - `writeJSON(stdout, payload)` for final payload emission.
 - `jsonModeWriters(jsonMode, stdout, stderr)` or equivalent, making the stdout/stderr split hard to misuse.
+- `writeJSONError(stdout, code, message, exitCode, details)` or equivalent for
+  consistent nonzero outputs.
 - shared warning/error structs.
 - test helpers that assert JSON-only stdout.
 
@@ -171,32 +421,56 @@ Pack-defined commands can be arbitrary scripts or external programs, so `gc` sho
 
 Proposed pack command contract:
 
-- Pack commands may declare whether they support JSON output.
-- If a pack command declares JSON support, `gc <pack-command> --json` should pass the JSON request through to the command.
-- If a pack command does not declare JSON support, `gc <pack-command> --json` should fail clearly rather than falling back to human output.
-- A JSON-capable pack command owns stdout purity for its command-specific output.
-- `gc` may add wrapper metadata later, but the first contract should avoid surprising transformations of arbitrary pack command stdout.
+- Pack commands may support JSON output by convention.
+- If a pack command has `schemas/result.schema.json`, `gc <pack-command>
+  --json` should pass the JSON request through to the command.
+- If a pack command does not have `schemas/result.schema.json`, `gc
+  <pack-command> --json` should fail clearly rather than falling back to human
+  output.
+- A JSON-capable pack command owns stdout purity for its command-specific
+  output and should provide role schemas by convention.
+- `gc` may validate the transport contract later, but the first contract should
+  avoid surprising transformations of arbitrary pack command stdout.
 
-Possible future metadata shape:
+Pack-defined command schemas should live next to the command implementation
+rather than requiring a TOML file for the common case. Nested command
+directories imply nested CLI commands.
 
-```toml
-[command.capabilities]
-json = true
+Example:
+
+```text
+commands/
+  review/
+    pr/
+      run.sh
+      schemas/
+        result.schema.json
 ```
 
-or:
+The presence of `schemas/result.schema.json` means the command supports
+`--json`. `failure.schema.json` is optional and should be used only when the
+command has meaningful command-specific failure fields beyond the shared
+default failure schema. `command.toml` remains available for exceptions, but it
+should not be required just to hold schema paths or basic descriptor fields.
 
-```toml
-[command.output]
-json = true
-json_schema = "pack.command.v1"
+Built-in commands should use the same role-file convention in a checked-in
+schema tree, for example:
+
+```text
+schemas/
+  status/
+    result.schema.json
+  session/
+    list/
+      result.schema.json
 ```
 
 Open design questions for pack-defined commands:
 
-- Should `gc` reserve `--json` globally for pack commands, or only pass it through when declared?
-- Should `gc` validate pack-command JSON stdout, or trust the command and leave validation to tests?
-- Should pack commands emit their own schema version, or should `gc` eventually wrap them in a common envelope?
+- How much runtime validation should `gc` do for pack-command JSONL record count
+  and stdout purity?
+- Should pack commands emit their own schema version, or should `gc` eventually
+  wrap them in a common envelope?
 
 ## First Batch
 
@@ -214,7 +488,8 @@ These are the minimum useful surfaces for software-initiated Gas City work: veri
 Stage 1: initial software-consumer batch.
 
 - Add or normalize JSON support for `gc status`, `gc session list`, `gc rig list`, and `gc sling`.
-- Add focused tests for parseable JSON and stdout purity.
+- Add focused tests for parseable JSON, stdout purity, and structured JSON error
+  payloads for representative nonzero paths.
 - Suppress incidental human stdout in JSON mode, usually with `io.Discard`,
   while keeping stderr available for diagnostics.
 - Keep all current human output as the default.
@@ -231,7 +506,9 @@ Stage 3: mutation summaries.
 
 Stage 4: pack and extension contract.
 
-- Define pack command metadata for JSON capability.
+- Define pack command schema-file conventions for JSON capability.
+- Define pack command result schemas, optional command-specific failure schemas,
+  and discovery behavior.
 - Decide whether `gc` validates pack-command JSON or only passes through declared support.
 - Add tests for unsupported pack commands invoked with `--json`.
 
@@ -294,22 +571,36 @@ Proposed detail shape:
 6. Add `--json` to `gc config show` and `gc config explain`.
    Acceptance: resolved config/provenance data are machine-readable; warnings are included in JSON and still visible enough for humans.
 
-7. Define structured JSON error follow-up.
-   Acceptance: one follow-up design for command failures, Cobra error paths, exit codes, structured error objects, and how those interact with stderr diagnostics.
+7. Extract shared structured JSON helpers.
+   Acceptance: helper layer covers success payload writes, nonzero JSON error payloads, exit-code mirroring, and structured diagnostics without each command hand-rolling the contract.
 
-8. Audit pack and registry commands after pack surface stabilizes.
+8. Add schema manifests and discovery for built-in JSON commands.
+   Acceptance: first-batch commands provide result schemas, rely on the shared
+   default failure schema unless they need command-specific failure fields,
+   `--json-schema` exposes embedded schemas, and help text mentions JSONL
+   output.
+
+9. Define pack-command JSON capability metadata.
+   Acceptance: pack-defined commands can declare JSON support through adjacent
+   schema files, nested commands infer schema paths from directory structure,
+   and unsupported `--json` behavior is clear without `gc` guessing.
+
+10. Audit pack and registry commands after pack surface stabilizes.
    Acceptance: document which commands exist, which are planned, and which should support JSON in the first pack-focused wave.
 
-9. Design workflow run/status/result JSON from the start.
+11. Design workflow run/status/result JSON from the start.
    Acceptance: proposed command surfaces follow these conventions before implementation.
 
 ## Product Decisions Needed
 
 - For existing `--json` commands, when is the first standardization wave allowed to make normalizing-but-breaking schema changes instead of preserving old shapes or adding a compatibility window?
-- When should the follow-up structured JSON error contract land relative to mutation-command JSON summaries?
-- Should `gc trace show --json` and `gc events --json` remain arrays for easy piping, or move to object envelopes in bounded modes?
+- Which global Cobra/pre-run error paths need centralized handling before we can say every `--json` failure returns a structured JSON error object?
+- Should `gc trace show --json` and `gc events --json` use object envelopes in bounded modes while preserving JSONL for stream/tail/follow modes?
 - Should mutation commands join the second wave with JSON summaries, or stay human-only until read surfaces are complete?
-- For pack-defined commands, should `gc` reserve `--json` globally or only pass it through when a command declares JSON support?
+- Should schema exposure start as command-local `--json-schema` only, or should
+  a broader command catalog/search surface follow later?
+- Should runtime validation of pack-command JSONL record count be opt-in, always-on for
+  declared JSON commands, or test-only at first?
 
 ## Appendix A: Audit Summary
 
