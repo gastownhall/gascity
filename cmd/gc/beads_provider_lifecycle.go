@@ -1609,7 +1609,9 @@ func providerLifecycleProcessEnvForScopeInitWithError(cityPath, scopeRoot, provi
 		return nil, err
 	}
 	cityPath = normalizePathForCompare(cityPath)
-	baseEnv := mergeRuntimeEnv(os.Environ(), cityRuntimeEnvMapForCity(cityPath))
+	overrides := cityRuntimeEnvMapForCity(cityPath)
+	overrides["BEADS_DOLT_AUTO_START"] = "0"
+	baseEnv := mergeRuntimeEnv(os.Environ(), overrides)
 	return providerLifecycleProcessEnvFromBase(cityPath, provider, baseEnv), nil
 }
 

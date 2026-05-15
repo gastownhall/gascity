@@ -2728,7 +2728,7 @@ dolt.port: 4407
 
 	logFile := filepath.Join(t.TempDir(), "env.log")
 	script := filepath.Join(t.TempDir(), "gc-beads-bd")
-	content := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = init ]; then printf '%%s|%%s|%%s|%%s\\n' \"${BEADS_DIR:-}\" \"${GC_DOLT_HOST:-}\" \"${GC_DOLT_PORT:-}\" \"${BEADS_POSTGRES_HOST:-}\" > %q; fi\nexit 0\n", logFile)
+	content := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = init ]; then printf '%%s|%%s|%%s|%%s|%%s\\n' \"${BEADS_DIR:-}\" \"${GC_DOLT_HOST:-}\" \"${GC_DOLT_PORT:-}\" \"${BEADS_POSTGRES_HOST:-}\" \"${BEADS_DOLT_AUTO_START:-}\" > %q; fi\nexit 0\n", logFile)
 	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -2744,8 +2744,8 @@ dolt.port: 4407
 		t.Fatalf("read env log: %v", err)
 	}
 	parts := strings.Split(strings.TrimSpace(string(data)), "|")
-	if len(parts) != 4 {
-		t.Fatalf("env log = %q, want beads_dir|host|port|postgres_host", string(data))
+	if len(parts) != 5 {
+		t.Fatalf("env log = %q, want beads_dir|host|port|postgres_host|auto_start", string(data))
 	}
 	if got, want := parts[0], filepath.Join(rigDir, ".beads"); got != want {
 		t.Fatalf("BEADS_DIR = %q, want %q", got, want)
@@ -2758,6 +2758,9 @@ dolt.port: 4407
 	}
 	if got := parts[3]; got != "" {
 		t.Fatalf("BEADS_POSTGRES_HOST = %q, want empty for independent Dolt rig init", got)
+	}
+	if got := parts[4]; got != "0" {
+		t.Fatalf("BEADS_DOLT_AUTO_START = %q, want 0", got)
 	}
 }
 

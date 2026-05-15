@@ -381,6 +381,15 @@ func syncRigManagedPortArtifact(cityPath, rigPath string, cityState, rigState co
 }
 
 func readManagedRuntimePublishedPort(cityPath string) (string, error) {
+	if cityUsesBdStoreContract(cityPath) {
+		owned, err := managedDoltLifecycleOwned(cityPath)
+		if err != nil {
+			return "", fmt.Errorf("determine managed dolt ownership for published port: %w", err)
+		}
+		if !owned {
+			return "", fmt.Errorf("managed dolt lifecycle is not owned by this city")
+		}
+	}
 	data, err := os.ReadFile(managedDoltStatePath(cityPath))
 	if err != nil {
 		return "", err
