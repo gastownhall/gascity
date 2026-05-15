@@ -232,7 +232,7 @@ func (c *CachingStore) runReconciliation() {
 	c.mu.RUnlock()
 
 	bdStart := time.Now()
-	fresh, err := c.backing.List(ListQuery{AllowScan: true})
+	fresh, err := c.backing.List(ListQuery{AllowScan: true, SkipLabels: true})
 	bdLatency := time.Since(bdStart)
 	if err != nil {
 		c.mu.Lock()
@@ -277,7 +277,7 @@ func (c *CachingStore) runReconciliation() {
 				}
 				continue
 			}
-			if _, keep := c.recentLocalBeadConflictLocked(id, freshBead, now); keep {
+			if _, keep := c.recentLocalBeadConflictLocked(id, freshBead, now, true); keep {
 				if _, ok := c.deps[id]; !ok {
 					nextDepsComplete = false
 				}
@@ -293,7 +293,7 @@ func (c *CachingStore) runReconciliation() {
 					eventType: "bead.created",
 					bead:      cloneBead(freshBead),
 				})
-			case beadChanged(old, freshBead):
+			case beadChanged(old, freshBead, true):
 				updates++
 				notifications = append(notifications, cacheNotification{
 					eventType: "bead.updated",
@@ -379,7 +379,7 @@ func (c *CachingStore) runReconciliation() {
 		if recentLocalMutation(c.localBeadAt[id], now) {
 			c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
 		}
-		if current, keep := c.recentLocalBeadConflictLocked(id, freshBead, now); keep {
+		if current, keep := c.recentLocalBeadConflictLocked(id, freshBead, now, true); keep {
 			beadForCache = current
 			preservedRecentLocal = true
 		}
@@ -395,7 +395,7 @@ func (c *CachingStore) runReconciliation() {
 				eventType: "bead.created",
 				bead:      cloneBead(beadForCache),
 			})
-		case !preservedRecentLocal && beadChanged(old, freshBead):
+		case !preservedRecentLocal && beadChanged(old, freshBead, true):
 			updates++
 			notifications = append(notifications, cacheNotification{
 				eventType: "bead.updated",
