@@ -350,8 +350,19 @@ func TestAdaptiveCadenceLogsOnceOnDemote(t *testing.T) {
 		t.Errorf("demote log emitted %d time(s), want exactly 1; output=%q",
 			count, out)
 	}
-	if !strings.Contains(out, "driver=latency") {
-		t.Errorf("demote log missing driver=latency; output=%q", out)
+	// Scope the driver assertion to the demote line — the promote line
+	// earlier in this test also contains "driver=latency", which would
+	// mask a regression if we asserted against the whole buffer.
+	demoteIdx := strings.Index(out, "cadence demoted medium→small")
+	if demoteIdx < 0 {
+		t.Fatalf("no demote line in output=%q", out)
+	}
+	demoteLine := out[demoteIdx:]
+	if nl := strings.IndexByte(demoteLine, '\n'); nl >= 0 {
+		demoteLine = demoteLine[:nl]
+	}
+	if !strings.Contains(demoteLine, "driver=default") {
+		t.Errorf("demote log missing driver=default; line=%q", demoteLine)
 	}
 }
 

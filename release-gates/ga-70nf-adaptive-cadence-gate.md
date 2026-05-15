@@ -12,11 +12,11 @@
 
 | # | Criterion | Verdict | Evidence |
 |---|-----------|---------|----------|
-| 1 | Latency-driven promotion to MEDIUM cadence | PASS | `recomputeCadenceLocked` flips `latencyDriverActive` when nearest-rank P95 exceeds `cacheLatencyHighWaterMark`; verified by `TestLatencyDriverPromotesAtThreshold`. |
-| 2 | Hysteresis demotion via window-drain | PASS | Window must fully drain to demote (N=`cacheLatencyWindowSize` consecutive low samples); verified by `TestLatencyDriverDoesNotDemoteUntilWindowDrains`. |
-| 3 | Composes with bead-count cadence | PASS | `effectiveCadence` returns the slower of the two drivers; verified by `TestEffectiveCadenceComposesBeadCountAndLatency`. |
-| 4 | LARGE preserved via bead count only | PASS | `beadCountCadence(>=5000)` returns LARGE regardless of latency state; verified by `TestEffectiveCadenceLargePreserved`. |
-| 5 | Single transition log per ↕ change | PASS | `recomputeCadenceLocked` only logs on transition edges; verified by `TestSingleEmitOnLatencyTransition`. |
+| 1 | Latency-driven promotion to MEDIUM cadence | PASS | `recomputeCadenceLocked` flips `latencyDriverActive` when nearest-rank P95 exceeds `cacheLatencyHighWaterMark`; verified by `TestAdaptiveCadencePromotesOnHighLatency`. |
+| 2 | Hysteresis demotion via window-drain | PASS | Window must fully drain to demote (N=`cacheLatencyWindowSize` consecutive low samples); verified by `TestAdaptiveCadenceDemotesAfterHysteresisWindow`. The spike-reset property — one slow scan during the drain re-arms the driver — is verified by `TestAdaptiveCadenceSpikeResetsHysteresisCounter`. |
+| 3 | Composes with bead-count cadence | PASS | `effectiveCadence` returns the slower of the two drivers; verified by `TestAdaptiveCadenceCompositionBeadCountAlone` and `TestAdaptiveCadenceCompositionBoth`. |
+| 4 | LARGE preserved via bead count only | PASS | `beadCountCadence(>=5000)` returns LARGE regardless of latency state; verified by `TestAdaptiveCadencePreservesLargeInterval`. |
+| 5 | Single transition log per ↕ change | PASS | `recomputeCadenceLocked` only logs on transition edges; verified by `TestAdaptiveCadenceLogsOnceOnPromote` and `TestAdaptiveCadenceLogsOnceOnDemote`. |
 | 6 | End-to-end: real reconciler feeds the latency window | PASS | `TestRunReconciliationFeedsLatencyWindow` exercises the full path. |
 | 7 | Race-free | PASS | `go test -race ./internal/beads/` — clean. |
 | 8 | Nearest-rank P95 generalizes beyond N=10 | PASS (after fixup) | Reviewer flagged that the original `sorted[len-1]` was P100 not P95; correct only by coincidence at N=10. Maintainer fixup replaces with `int(math.Ceil(0.95*N))-1`, which equals `len-1` for N=10 (preserves current behavior bit-for-bit) but stays P95 if `cacheLatencyWindowSize` is raised. |
