@@ -45,20 +45,9 @@ func TestReconciler_RollsBackExpiredPendingCreateForConfiguredNamedSession(t *te
 	h.createSessionIntent()
 	h.assertCreatingIntent()
 
-	identity := "chaos-worker"
-	h.env.cfg.NamedSessions = []config.NamedSession{{
-		Name:     identity,
-		Template: h.template,
-	}}
-	if err := h.env.store.SetMetadataBatch(h.sessionID, map[string]string{
-		"alias":                      identity,
-		namedSessionMetadataKey:      "true",
-		namedSessionIdentityMetadata: identity,
-		namedSessionModeMetadata:     "on_demand",
-		"pending_create_started_at":  h.env.clk.Now().Add(-pendingCreateNeverStartedTimeout - time.Minute).UTC().Format(time.RFC3339),
-	}); err != nil {
-		t.Fatalf("mark named pending create stale: %v", err)
-	}
+	markConfiguredNamedPendingCreate(t, h, map[string]string{
+		"pending_create_started_at": h.env.clk.Now().Add(-pendingCreateNeverStartedTimeout - time.Minute).UTC().Format(time.RFC3339),
+	})
 	h.setDesired(false)
 	h.reconcileTick()
 
@@ -75,6 +64,87 @@ func TestReconciler_RollsBackExpiredPendingCreateForConfiguredNamedSession(t *te
 	if got.Metadata["pending_create_claim"] != "" {
 		t.Fatalf("pending_create_claim = %q, want cleared", got.Metadata["pending_create_claim"])
 	}
+	if got.Metadata["pending_create_started_at"] != "" {
+		t.Fatalf("pending_create_started_at = %q, want cleared", got.Metadata["pending_create_started_at"])
+	}
+}
+
+func TestReconciler_DefersStalePendingCreateRollbackWhenProviderAlive(t *testing.T) {
+	h := newSessionChaosHarness(t, 20260515)
+	h.createSessionIntent()
+	h.assertCreatingIntent()
+
+	markConfiguredNamedPendingCreate(t, h, map[string]string{
+		"pending_create_started_at": h.env.clk.Now().Add(-pendingCreateNeverStartedTimeout - time.Minute).UTC().Format(time.RFC3339),
+	})
+	if err := h.env.sp.Start(context.Background(), h.sessionName, runtime.Config{Command: h.command}); err != nil {
+		t.Fatalf("Start(%s): %v", h.sessionName, err)
+	}
+	h.setDesired(false)
+	h.reconcileTickWithoutPostInvariants(false)
+
+	got, err := h.env.store.Get(h.sessionID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", h.sessionID, err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("status = closed, want rollback deferred while provider is live")
+	}
+	if got.Metadata["pending_create_claim"] == "" {
+		t.Fatal("pending_create_claim was cleared, want preserved while provider is live")
+	}
+	if !h.env.sp.IsRunning(h.sessionName) {
+		t.Fatalf("runtime %q stopped, want still running", h.sessionName)
+	}
+}
+
+func TestReconciler_DefersStalePendingCreateRollbackForFreshLease(t *testing.T) {
+	h := newSessionChaosHarness(t, 20260516)
+	h.createSessionIntent()
+	h.assertCreatingIntent()
+
+	markConfiguredNamedPendingCreate(t, h, map[string]string{
+		"pending_create_started_at": h.env.clk.Now().UTC().Format(time.RFC3339),
+	})
+	h.setDesired(false)
+	h.reconcileTick()
+
+	got, err := h.env.store.Get(h.sessionID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", h.sessionID, err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("status = closed, want rollback deferred for fresh pending-create lease")
+	}
+	if got.Metadata["pending_create_claim"] == "" {
+		t.Fatal("pending_create_claim was cleared, want preserved for fresh pending-create lease")
+	}
+}
+
+func TestReconciler_DefersStalePendingCreateRollbackForRateLimit(t *testing.T) {
+	h := newSessionChaosHarness(t, 20260517)
+	h.createSessionIntent()
+	h.assertCreatingIntent()
+
+	stale := h.env.clk.Now().Add(-staleCreatingStateTimeout - time.Minute).UTC().Format(time.RFC3339)
+	markConfiguredNamedPendingCreate(t, h, map[string]string{
+		"last_woke_at":              stale,
+		"pending_create_started_at": stale,
+	})
+	h.env.sp.SetPeekOutput(h.sessionName, "You've hit your limit, Pro plan\n\n/rate-limit-options")
+	h.setDesired(false)
+	h.reconcileTick()
+
+	got, err := h.env.store.Get(h.sessionID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", h.sessionID, err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("status = closed, want rollback deferred for rate-limit screen")
+	}
+	if got.Metadata["sleep_reason"] != "rate_limit" {
+		t.Fatalf("sleep_reason = %q, want rate_limit", got.Metadata["sleep_reason"])
+	}
 }
 
 func TestReconciler_DefersStalePendingCreateRollbackWhenStoreQueryPartial(t *testing.T) {
@@ -82,37 +152,11 @@ func TestReconciler_DefersStalePendingCreateRollbackWhenStoreQueryPartial(t *tes
 	h.createSessionIntent()
 	h.assertCreatingIntent()
 
-	identity := "chaos-worker"
-	h.env.cfg.NamedSessions = []config.NamedSession{{
-		Name:     identity,
-		Template: h.template,
-	}}
-	if err := h.env.store.SetMetadataBatch(h.sessionID, map[string]string{
-		"alias":                      identity,
-		namedSessionMetadataKey:      "true",
-		namedSessionIdentityMetadata: identity,
-		namedSessionModeMetadata:     "on_demand",
-		"pending_create_started_at":  h.env.clk.Now().Add(-pendingCreateNeverStartedTimeout - time.Minute).UTC().Format(time.RFC3339),
-	}); err != nil {
-		t.Fatalf("mark named pending create stale: %v", err)
-	}
+	markConfiguredNamedPendingCreate(t, h, map[string]string{
+		"pending_create_started_at": h.env.clk.Now().Add(-pendingCreateNeverStartedTimeout - time.Minute).UTC().Format(time.RFC3339),
+	})
 	h.setDesired(false)
-
-	sessions, err := loadSessionBeads(h.env.store)
-	if err != nil {
-		t.Fatalf("loadSessionBeads: %v", err)
-	}
-	poolDesired := make(map[string]int)
-	for _, tp := range h.env.desiredState {
-		if tp.TemplateName != "" {
-			poolDesired[tp.TemplateName]++
-		}
-	}
-	reconcileSessionBeads(
-		context.Background(), sessions, h.env.desiredState, configuredSessionNames(h.env.cfg, "", h.env.store),
-		h.env.cfg, h.env.sp, h.env.store, nil, nil, nil, h.env.dt, poolDesired, true, nil, "",
-		nil, h.env.clk, h.env.rec, 0, 0, &h.env.stdout, &h.env.stderr,
-	)
+	h.reconcileTickWithoutPostInvariants(true)
 
 	got, err := h.env.store.Get(h.sessionID)
 	if err != nil {
@@ -123,6 +167,27 @@ func TestReconciler_DefersStalePendingCreateRollbackWhenStoreQueryPartial(t *tes
 	}
 	if got.Metadata["pending_create_claim"] == "" {
 		t.Fatal("pending_create_claim was cleared, want preserved when store query is partial")
+	}
+}
+
+func markConfiguredNamedPendingCreate(t *testing.T, h *sessionChaosHarness, metadata map[string]string) {
+	t.Helper()
+	const identity = "chaos-worker"
+	h.env.cfg.NamedSessions = []config.NamedSession{{
+		Name:     identity,
+		Template: h.template,
+	}}
+	batch := map[string]string{
+		"alias":                      identity,
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: identity,
+		namedSessionModeMetadata:     "on_demand",
+	}
+	for key, value := range metadata {
+		batch[key] = value
+	}
+	if err := h.env.store.SetMetadataBatch(h.sessionID, batch); err != nil {
+		t.Fatalf("mark named pending create: %v", err)
 	}
 }
 
@@ -994,6 +1059,25 @@ func (h *sessionChaosHarness) reconcileTick() {
 	woken := h.env.reconcile(sessions)
 	h.record("reconcile open=%d woken=%d", len(sessions), woken)
 	h.assertPostReconcileInvariants()
+}
+
+func (h *sessionChaosHarness) reconcileTickWithoutPostInvariants(storeQueryPartial bool) {
+	sessions, err := loadSessionBeads(h.env.store)
+	if err != nil {
+		h.failf("loadSessionBeads: %v", err)
+	}
+	poolDesired := make(map[string]int)
+	for _, tp := range h.env.desiredState {
+		if tp.TemplateName != "" {
+			poolDesired[tp.TemplateName]++
+		}
+	}
+	woken := reconcileSessionBeads(
+		context.Background(), sessions, h.env.desiredState, configuredSessionNames(h.env.cfg, "", h.env.store),
+		h.env.cfg, h.env.sp, h.env.store, nil, nil, nil, h.env.dt, poolDesired, storeQueryPartial, nil, "",
+		nil, h.env.clk, h.env.rec, 0, 0, &h.env.stdout, &h.env.stderr,
+	)
+	h.record("reconcile open=%d woken=%d", len(sessions), woken)
 }
 
 func (h *sessionChaosHarness) reconcileTickWithIdle(it idleTracker) {

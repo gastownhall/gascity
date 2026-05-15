@@ -580,7 +580,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// remaining stale beads roll back on subsequent ticks.
 	const maxRollbacksPerTick = 5
 	rollbacksThisTick := 0
-	attemptRollbackPendingCreate := func(session *beads.Bead, templateName, name, action, detail string) {
+	attemptRollbackPendingCreate := func(session *beads.Bead, templateName, name, action, detail string, clearClaim bool) {
 		if rollbacksThisTick >= maxRollbacksPerTick {
 			fmt.Fprintf(stderr, "session reconciler: deferring rollback of %s (%s): rollback budget exhausted this tick\n", name, detail) //nolint:errcheck
 			if trace != nil {
@@ -595,6 +595,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		fmt.Fprintf(stderr, "session reconciler: rolling back pending create %s: %s\n", name, detail) //nolint:errcheck
 		if trace != nil {
 			trace.recordDecision("reconciler.session.pending_create", templateName, name, action, "rollback", nil, nil, "")
+		}
+		if clearClaim {
+			rollbackPendingCreateClearingClaim(session, store, clk.Now().UTC(), stderr)
+			return
 		}
 		rollbackPendingCreate(session, store, clk.Now().UTC(), stderr)
 	}
@@ -629,6 +633,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if err != nil {
 				providerAlive = false
 			}
+			// Run this before configured named-session preservation. A stale
+			// state=creating bead with an expired pending-create lease would
+			// otherwise stay open and keep holding its alias forever.
 			if !storeQueryPartial && !providerAlive && shouldRollbackPendingCreate(session) {
 				var startupTimeout time.Duration
 				if cfg != nil {
@@ -644,7 +651,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					if rateLimitHit || rateLimitErr != nil {
 						continue
 					}
-					attemptRollbackPendingCreate(session, template, name, "pending_create_lease_expired", "lease expired and no live runtime")
+					clearClaim := configuredNamedSessionBeadHasSpec(*session, cfg, cityName)
+					attemptRollbackPendingCreate(session, template, name, "pending_create_lease_expired", "lease expired and no live runtime", clearClaim)
 					continue
 				}
 			}
@@ -886,7 +894,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 		}
 		if alive && shouldRollbackPendingCreate(session) && !runningSessionMatchesPendingCreate(session, name, sp) {
-			attemptRollbackPendingCreate(session, tp.TemplateName, name, "pending_create_rollback", "live runtime belongs to another session")
+			attemptRollbackPendingCreate(session, tp.TemplateName, name, "pending_create_rollback", "live runtime belongs to another session", false)
 			continue
 		}
 		// Desired-branch counterpart to pendingCreateSessionStillLeased: a
@@ -906,7 +914,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				if rateLimitHit || rateLimitErr != nil {
 					continue
 				}
-				attemptRollbackPendingCreate(session, tp.TemplateName, name, "pending_create_lease_expired", "lease expired and no live runtime")
+				attemptRollbackPendingCreate(session, tp.TemplateName, name, "pending_create_lease_expired", "lease expired and no live runtime", false)
 				continue
 			}
 		}
